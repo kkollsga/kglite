@@ -257,3 +257,170 @@ impl<'g> CypherExecutor<'g> {
         Ok(merged)
     }
 }
+
+// `InlineAccumulators` moved here from `fused_match.rs` when that file
+// crossed the 2500-line source-quality ceiling again; `ScanPartial` above
+// is its main holder, and the two are always read together.
+
+/// Running aggregate state for one group of a fused node scan.
+///
+/// Every supported aggregate is folded into the same handful of running values
+/// plus, for `count(DISTINCT …)`, a per-aggregate value set — so one pass over
+/// the scan answers `count` / `sum` / `avg` / `min` / `max` together, without
+/// materialising the group's rows.
+///
+/// Two counts, not one: `count()` counts non-null values, while `sum()` and
+/// `avg()` see only the numeric ones. They diverge on a mixed-type property,
+/// which is what made `avg` over `[10, 20, 'hello']` answer 30/3.
+struct InlineAccumulators {
+    counts: Vec<i64>,
+    /// Per-aggregate count of the values that were actually *numeric* — the
+    /// divisor `avg()` needs, and the emptiness test `sum()` needs. It differs
+    /// from `counts` (all non-null values) exactly when a property holds mixed
+    /// types: `[10, 20, 'hello']` is 3 non-null values but 2 numeric ones, and
+    /// dividing the numeric sum by 3 is the wrong average.
+    numeric_counts: Vec<i64>,
+    /// Whether every numeric value this aggregate saw was an `Int64` — the
+    /// integer-ness probe `sum()` emits with, matching the streaming
+    /// aggregate's `sum_was_int` (`stream::aggregate::AggState`), the path
+    /// these queries take when they do not fuse.
+    ///
+    /// Deriving it from `mins` instead (as this operator used to) reads the
+    /// *smallest* value under the cross-type order — where a string outranks
+    /// every number — so one string cell turned `sum()` over an integer
+    /// property into a float on the fused path only.
+    sum_was_int: Vec<bool>,
+    sums: Vec<f64>,
+    mins: Vec<Option<Value>>,
+    maxs: Vec<Option<Value>>,
+    /// Per-aggregate value set for `count(DISTINCT …)`; `None` for the rest.
+    distinct_sets: Vec<Option<FxHashSet<Value>>>,
+}
+
+impl InlineAccumulators {
+    fn new(agg_is_distinct: &[bool]) -> Self {
+        let width = agg_is_distinct.len();
+        InlineAccumulators {
+            counts: vec![0i64; width],
+            numeric_counts: vec![0i64; width],
+            sum_was_int: vec![true; width],
+            sums: vec![0.0f64; width],
+            mins: vec![None; width],
+            maxs: vec![None; width],
+            distinct_sets: agg_is_distinct
+                .iter()
+                .map(|&distinct| distinct.then(FxHashSet::default))
+                .collect(),
+        }
+    }
+
+    /// Fold a later partition's accumulator for the same group into this one.
+    ///
+    /// The associative combine every aggregate this operator serves admits:
+    /// `count`/`sum` add, `min`/`max` take the extreme under the same
+    /// `total_order` the row path uses, and `count(DISTINCT …)` unions the
+    /// value sets. `avg` is derived from `sums`/`counts` at emission, so it
+    /// merges for free. Nothing here reads row order, which is why the
+    /// partitioned scan returns byte-identical results.
+    fn merge(&mut self, other: InlineAccumulators) {
+        for (ai, count) in other.counts.iter().enumerate() {
+            self.counts[ai] += count;
+            self.numeric_counts[ai] += other.numeric_counts[ai];
+            self.sum_was_int[ai] &= other.sum_was_int[ai];
+            self.sums[ai] += other.sums[ai];
+        }
+        for (ai, min) in other.mins.into_iter().enumerate() {
+            if let Some(val) = min {
+                let replace = match &self.mins[ai] {
+                    None => true,
+                    Some(cur) => {
+                        crate::graph::core::filtering::total_order(&val, cur)
+                            == std::cmp::Ordering::Less
+                    }
+                };
+                if replace {
+                    self.mins[ai] = Some(val);
+                }
+            }
+        }
+        for (ai, max) in other.maxs.into_iter().enumerate() {
+            if let Some(val) = max {
+                let replace = match &self.maxs[ai] {
+                    None => true,
+                    Some(cur) => {
+                        crate::graph::core::filtering::total_order(&val, cur)
+                            == std::cmp::Ordering::Greater
+                    }
+                };
+                if replace {
+                    self.maxs[ai] = Some(val);
+                }
+            }
+        }
+        for (ai, set) in other.distinct_sets.into_iter().enumerate() {
+            if let Some(values) = set {
+                self.distinct_sets[ai]
+                    .get_or_insert_with(FxHashSet::default)
+                    .extend(values);
+            }
+        }
+    }
+
+    /// Fold one row's value for aggregate `ai` into the running state.
+    ///
+    /// `Null` contributes to nothing: it is not counted, not summed, and never
+    /// becomes a `min`/`max` — the same rule the materialized aggregation path
+    /// applies. A non-null value that is not numeric (a string in an otherwise
+    /// numeric property) counts and can win `min`/`max`, but contributes to
+    /// neither `sums` nor `numeric_counts` — `sum`/`avg` see only numbers.
+    ///
+    /// `count(*)` and `count(<bound var>)` arrive as a non-null `Boolean`
+    /// marker, so they count without materialising a node value.
+    fn absorb(&mut self, ai: usize, val: &Value, distinct: bool) {
+        if distinct {
+            // count(DISTINCT …): dedup non-null values in the per-agg set.
+            if !matches!(val, Value::Null) {
+                self.distinct_sets[ai]
+                    .get_or_insert_with(FxHashSet::default)
+                    .insert(val.clone());
+            }
+            return;
+        }
+        if matches!(val, Value::Null) {
+            return;
+        }
+        self.counts[ai] += 1;
+        if let Some(f) = value_to_f64(val) {
+            self.numeric_counts[ai] += 1;
+            self.sums[ai] += f;
+            // UniqueId and Float64 both force a Float64 sum, as they do on the
+            // streaming path.
+            if !matches!(val, Value::Int64(_)) {
+                self.sum_was_int[ai] = false;
+            }
+        }
+        // Phase A.2 / C4 — short-circuit on is_none() guarantees the unwrap
+        // can't fire, but the .expect() makes the invariant explicit if a
+        // future refactor reorders the conditions.
+        if self.mins[ai].is_none()
+            || crate::graph::core::filtering::total_order(
+                val,
+                self.mins[ai]
+                    .as_ref()
+                    .expect("invariant: is_none() short-circuited above"),
+            ) == std::cmp::Ordering::Less
+        {
+            self.mins[ai] = Some(val.clone());
+        }
+        if self.maxs[ai].is_none()
+            || crate::graph::core::filtering::total_order(
+                val,
+                self.maxs[ai]
+                    .as_ref()
+                    .expect("invariant: is_none() short-circuited above"),
+            ) == std::cmp::Ordering::Greater
+        {
+            self.maxs[ai] = Some(val.clone());
+        }
+    }
+}

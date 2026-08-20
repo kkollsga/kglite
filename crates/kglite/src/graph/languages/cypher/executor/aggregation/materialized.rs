@@ -32,6 +32,29 @@ impl GroupExprStrategy {
     }
 }
 
+/// One aggregate the single-pass fused numeric aggregator can service.
+///
+/// Hoisted out of `try_fused_numeric_aggregation` (where it used to be a
+/// block-local item) so the emission step can be a named function and keep
+/// that operator under the source-quality complexity ceiling.
+#[derive(Clone, Copy)]
+enum FusedAggKind {
+    CountStar,
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
+}
+
+/// A classified aggregate item: its output column, its kind, and the argument
+/// expression the per-row pass evaluates.
+struct FusedAggSpec<'a> {
+    col_name: String,
+    kind: FusedAggKind,
+    expr: &'a Expression,
+}
+
 impl<'a> CypherExecutor<'a> {
     /// RETURN with aggregation (grouping + aggregate functions)
     pub(super) fn execute_return_with_aggregation(
@@ -579,32 +602,7 @@ impl<'a> CypherExecutor<'a> {
                     }
                     Ok(max_val.unwrap_or(Value::Null))
                 }
-                "collect" => {
-                    // Phase A.1 / C2 — native `Value::List`. Pre-A.1
-                    // this emitted a JSON-formatted string; the
-                    // `parse_list_value()` helper now handles both
-                    // shapes during the cutover, but new producers
-                    // should emit native lists.
-                    let mut values: Vec<Value> = Vec::new();
-                    let mut seen: FxHashSet<Value> = FxHashSet::default();
-                    for (row_idx, row) in rows.iter().enumerate() {
-                        self.check_interrupt_periodic(row_idx)?;
-                        let val = self.evaluate_expression(&args[0], row)?;
-                        if !matches!(val, Value::Null) {
-                            // Keyed on the `Value`. `format_value_compact`
-                            // renders `Int64(1)` and `String("1")` both as
-                            // `"1"`, so one of the two was dropped from the
-                            // list — in a row whose own `count(DISTINCT …)`,
-                            // which has always keyed on the `Value`, said 2.
-                            if *distinct && !seen.insert(val.clone()) {
-                                continue;
-                            }
-                            self.budget.consume_collection(1, "collect()")?;
-                            values.push(val);
-                        }
-                    }
-                    Ok(Value::List(values))
-                }
+                "collect" => self.eval_collect_aggregate(args, rows, *distinct),
                 "std" | "stdev" => {
                     let values = self.collect_numeric_values(&args[0], rows, *distinct)?;
                     if values.len() < 2 {
@@ -656,45 +654,7 @@ impl<'a> CypherExecutor<'a> {
                 // is deterministic). Empty group → Null.
                 //
                 // 2026-05-25 broad-scan lift, Batch 5.
-                "mode" => {
-                    // Key = canonical string repr of the value (Debug
-                    // distinguishes Int(1) from String("1")); first
-                    // Value seen for that key is the returned winner
-                    // on tie (insertion-order tiebreak).
-                    let mut counts: FxHashMap<String, (Value, u64)> = FxHashMap::default();
-                    // DISTINCT keys on the `Value`, as it does for every other
-                    // aggregate; the Debug repr is only the counting key.
-                    let mut seen_distinct: FxHashSet<Value> = FxHashSet::default();
-                    for (row_idx, row) in rows.iter().enumerate() {
-                        self.check_interrupt_periodic(row_idx)?;
-                        let val = self.evaluate_expression(&args[0], row)?;
-                        if matches!(val, Value::Null) {
-                            continue;
-                        }
-                        if *distinct && !seen_distinct.insert(val.clone()) {
-                            continue;
-                        }
-                        let key = format!("{:?}", val);
-                        let entry = counts.entry(key).or_insert_with(|| (val.clone(), 0));
-                        entry.1 += 1;
-                    }
-                    // Find the key with max count; on tie, the first
-                    // seen wins. HashMap iteration order is non-
-                    // deterministic in Rust, so we sort by (count
-                    // desc, value debug ascending) for stable output.
-                    let winner = counts
-                        .into_values()
-                        .max_by(|a, b| {
-                            a.1.cmp(&b.1).then_with(|| {
-                                // Stable tiebreak: lexicographic on
-                                // the Debug repr (deterministic).
-                                format!("{:?}", b.0).cmp(&format!("{:?}", a.0))
-                            })
-                        })
-                        .map(|(v, _)| v)
-                        .unwrap_or(Value::Null);
-                    Ok(winner)
-                }
+                "mode" => self.eval_mode_aggregate(args, rows, *distinct),
                 "percentile_cont" => {
                     if args.len() != 2 {
                         return Err(
@@ -1199,23 +1159,7 @@ impl<'a> CypherExecutor<'a> {
         group_rows: &[&ResultRow],
     ) -> Result<Option<Vec<(String, Value)>>, String> {
         // Classify each aggregate item
-        #[derive(Clone, Copy)]
-        enum AggKind {
-            CountStar,
-            Count,
-            Sum,
-            Avg,
-            Min,
-            Max,
-        }
-
-        struct AggSpec<'a> {
-            col_name: String,
-            kind: AggKind,
-            expr: &'a Expression,
-        }
-
-        let mut specs: Vec<AggSpec> = Vec::new();
+        let mut specs: Vec<FusedAggSpec> = Vec::new();
 
         for (item_idx, item) in clause.items.iter().enumerate() {
             if group_key_indices.contains(&item_idx) {
@@ -1233,18 +1177,18 @@ impl<'a> CypherExecutor<'a> {
                     let kind = match name.as_str() {
                         "count" => {
                             if args.len() == 1 && matches!(args[0], Expression::Star) {
-                                AggKind::CountStar
+                                FusedAggKind::CountStar
                             } else {
-                                AggKind::Count
+                                FusedAggKind::Count
                             }
                         }
-                        "sum" => AggKind::Sum,
-                        "avg" | "mean" | "average" => AggKind::Avg,
-                        "min" => AggKind::Min,
-                        "max" => AggKind::Max,
+                        "sum" => FusedAggKind::Sum,
+                        "avg" | "mean" | "average" => FusedAggKind::Avg,
+                        "min" => FusedAggKind::Min,
+                        "max" => FusedAggKind::Max,
                         _ => return Ok(None), // collect/std/etc — bail
                     };
-                    specs.push(AggSpec {
+                    specs.push(FusedAggSpec {
                         col_name: return_item_column_name(item),
                         kind,
                         expr: &args[0],
@@ -1275,7 +1219,7 @@ impl<'a> CypherExecutor<'a> {
         let mut spec_expr_idx: Vec<usize> = Vec::with_capacity(n);
 
         for spec in &specs {
-            if matches!(spec.kind, AggKind::CountStar) {
+            if matches!(spec.kind, FusedAggKind::CountStar) {
                 spec_expr_idx.push(usize::MAX); // sentinel — no expression needed
                 continue;
             }
@@ -1304,16 +1248,16 @@ impl<'a> CypherExecutor<'a> {
             // Update all accumulators
             for (si, spec) in specs.iter().enumerate() {
                 match spec.kind {
-                    AggKind::CountStar => {
+                    FusedAggKind::CountStar => {
                         counts[si] += 1;
                     }
-                    AggKind::Count => {
+                    FusedAggKind::Count => {
                         let val = &eval_buf[spec_expr_idx[si]];
                         if !matches!(val, Value::Null) {
                             counts[si] += 1;
                         }
                     }
-                    AggKind::Sum | AggKind::Avg => {
+                    FusedAggKind::Sum | FusedAggKind::Avg => {
                         let val = &eval_buf[spec_expr_idx[si]];
                         if let Some(f) = value_to_f64(val) {
                             sums[si] += f;
@@ -1323,7 +1267,7 @@ impl<'a> CypherExecutor<'a> {
                             }
                         }
                     }
-                    AggKind::Min => {
+                    FusedAggKind::Min => {
                         let val = &eval_buf[spec_expr_idx[si]];
                         if !matches!(val, Value::Null) {
                             mins[si] = Some(match mins[si].take() {
@@ -1340,7 +1284,7 @@ impl<'a> CypherExecutor<'a> {
                             });
                         }
                     }
-                    AggKind::Max => {
+                    FusedAggKind::Max => {
                         let val = &eval_buf[spec_expr_idx[si]];
                         if !matches!(val, Value::Null) {
                             maxs[si] = Some(match maxs[si].take() {
@@ -1361,38 +1305,102 @@ impl<'a> CypherExecutor<'a> {
             }
         }
 
-        // Produce results
-        let mut results = Vec::with_capacity(n);
-        for (si, spec) in specs.iter().enumerate() {
-            let val = match spec.kind {
-                AggKind::CountStar | AggKind::Count => Value::Int64(counts[si]),
-                AggKind::Sum => {
-                    if counts[si] == 0 {
-                        Value::Int64(0)
-                    } else {
-                        // Integer-typed iff every numeric input was an Int64
-                        // and the total is whole — the streaming path's rule.
-                        if sums_were_int[si] && sums[si].fract() == 0.0 {
-                            Value::Int64(sums[si] as i64)
-                        } else {
-                            Value::Float64(sums[si])
-                        }
-                    }
-                }
-                AggKind::Avg => {
-                    if counts[si] == 0 {
-                        Value::Null
-                    } else {
-                        Value::Float64(sums[si] / counts[si] as f64)
-                    }
-                }
-                AggKind::Min => mins[si].take().unwrap_or(Value::Null),
-                AggKind::Max => maxs[si].take().unwrap_or(Value::Null),
-            };
-            results.push((spec.col_name.clone(), val));
-        }
+        Ok(Some(emit_fused_aggregate_results(
+            &specs,
+            &counts,
+            &sums,
+            &sums_were_int,
+            &mut mins,
+            &mut maxs,
+        )))
+    }
 
-        Ok(Some(results))
+    /// Evaluate `collect(expr)` over a materialized group.
+    ///
+    /// Split out of `evaluate_aggregate_with_rows` to keep that dispatcher
+    /// under the source-quality complexity ceiling; the body is that arm
+    /// verbatim.
+    fn eval_collect_aggregate(
+        &self,
+        args: &[Expression],
+        rows: &[&ResultRow],
+        distinct: bool,
+    ) -> Result<Value, String> {
+        // Phase A.1 / C2 — native `Value::List`. Pre-A.1
+        // this emitted a JSON-formatted string; the
+        // `parse_list_value()` helper now handles both
+        // shapes during the cutover, but new producers
+        // should emit native lists.
+        let mut values: Vec<Value> = Vec::new();
+        let mut seen: FxHashSet<Value> = FxHashSet::default();
+        for (row_idx, row) in rows.iter().enumerate() {
+            self.check_interrupt_periodic(row_idx)?;
+            let val = self.evaluate_expression(&args[0], row)?;
+            if !matches!(val, Value::Null) {
+                // Keyed on the `Value`. `format_value_compact`
+                // renders `Int64(1)` and `String("1")` both as
+                // `"1"`, so one of the two was dropped from the
+                // list — in a row whose own `count(DISTINCT …)`,
+                // which has always keyed on the `Value`, said 2.
+                if distinct && !seen.insert(val.clone()) {
+                    continue;
+                }
+                self.budget.consume_collection(1, "collect()")?;
+                values.push(val);
+            }
+        }
+        Ok(Value::List(values))
+    }
+
+    /// Evaluate `mode(expr)` — the most frequent non-null value in a
+    /// materialized group — over that group's rows.
+    ///
+    /// Split out of `evaluate_aggregate_with_rows` to keep that dispatcher
+    /// under the source-quality complexity ceiling; the body is that arm
+    /// verbatim.
+    fn eval_mode_aggregate(
+        &self,
+        args: &[Expression],
+        rows: &[&ResultRow],
+        distinct: bool,
+    ) -> Result<Value, String> {
+        // Key = canonical string repr of the value (Debug
+        // distinguishes Int(1) from String("1")); first
+        // Value seen for that key is the returned winner
+        // on tie (insertion-order tiebreak).
+        let mut counts: FxHashMap<String, (Value, u64)> = FxHashMap::default();
+        // DISTINCT keys on the `Value`, as it does for every other
+        // aggregate; the Debug repr is only the counting key.
+        let mut seen_distinct: FxHashSet<Value> = FxHashSet::default();
+        for (row_idx, row) in rows.iter().enumerate() {
+            self.check_interrupt_periodic(row_idx)?;
+            let val = self.evaluate_expression(&args[0], row)?;
+            if matches!(val, Value::Null) {
+                continue;
+            }
+            if distinct && !seen_distinct.insert(val.clone()) {
+                continue;
+            }
+            let key = format!("{:?}", val);
+            let entry = counts.entry(key).or_insert_with(|| (val.clone(), 0));
+            entry.1 += 1;
+        }
+        // Find the key with max count; on tie, the first
+        // seen wins. HashMap iteration order is non-
+        // deterministic in Rust, so we sort by (count
+        // desc, value debug ascending) for stable output.
+        let winner = counts
+            .into_values()
+            .max_by(|a, b| {
+                a.1.cmp(&b.1).then_with(|| {
+                    // Stable tiebreak: lexicographic on
+                    // the Debug repr (deterministic).
+                    format!("{:?}", b.0).cmp(&format!("{:?}", a.0))
+                })
+            })
+            .map(|(v, _)| v)
+            .unwrap_or(Value::Null);
+        Ok(winner)
     }
 }
 
@@ -1409,4 +1417,51 @@ fn fold_extremum(acc: Option<Value>, val: Value, keep: std::cmp::Ordering) -> Op
             }
         }
     })
+}
+
+/// Turn a fused numeric aggregation's running per-spec state into its output
+/// `(column, value)` pairs.
+///
+/// Split out of `try_fused_numeric_aggregation` to keep that operator under
+/// the source-quality complexity ceiling; the body is that operator's
+/// "produce results" loop verbatim. `mins`/`maxs` are taken by `&mut` because
+/// the winners are moved out rather than cloned.
+fn emit_fused_aggregate_results(
+    specs: &[FusedAggSpec<'_>],
+    counts: &[i64],
+    sums: &[f64],
+    sums_were_int: &[bool],
+    mins: &mut [Option<Value>],
+    maxs: &mut [Option<Value>],
+) -> Vec<(String, Value)> {
+    let mut results = Vec::with_capacity(specs.len());
+    for (si, spec) in specs.iter().enumerate() {
+        let val = match spec.kind {
+            FusedAggKind::CountStar | FusedAggKind::Count => Value::Int64(counts[si]),
+            FusedAggKind::Sum => {
+                if counts[si] == 0 {
+                    Value::Int64(0)
+                } else {
+                    // Integer-typed iff every numeric input was an Int64
+                    // and the total is whole — the streaming path's rule.
+                    if sums_were_int[si] && sums[si].fract() == 0.0 {
+                        Value::Int64(sums[si] as i64)
+                    } else {
+                        Value::Float64(sums[si])
+                    }
+                }
+            }
+            FusedAggKind::Avg => {
+                if counts[si] == 0 {
+                    Value::Null
+                } else {
+                    Value::Float64(sums[si] / counts[si] as f64)
+                }
+            }
+            FusedAggKind::Min => mins[si].take().unwrap_or(Value::Null),
+            FusedAggKind::Max => maxs[si].take().unwrap_or(Value::Null),
+        };
+        results.push((spec.col_name.clone(), val));
+    }
+    results
 }

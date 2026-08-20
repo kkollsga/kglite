@@ -255,47 +255,7 @@ impl<'a> CypherExecutor<'a> {
             // newline, `x` ignore-whitespace, `U` ungreedy). Internally
             // we prepend `(?<flags>)` to the pattern. Equivalent to
             // writing the flags inline in the pattern string.
-            "text_match_regex" => {
-                if args.len() != 2 && args.len() != 3 {
-                    return Err(
-                        "text_match_regex() requires 2 or 3 args: (text, pattern[, flags])".into(),
-                    );
-                }
-                let text = self.evaluate_expression(super::first_arg(name, args)?, row)?;
-                let pattern = self.evaluate_expression(&args[1], row)?;
-                let flags: Option<String> = if args.len() == 3 {
-                    match self.evaluate_expression(&args[2], row)? {
-                        Value::String(s) => Some(s),
-                        Value::Null => None,
-                        _ => return Err("text_match_regex() flags must be a string".into()),
-                    }
-                } else {
-                    None
-                };
-                let (text_str, pattern_str) = match (&text, &pattern) {
-                    (Value::String(t), Value::String(p)) => (t.as_str(), p.as_str()),
-                    (Value::Null, _) | (_, Value::Null) => return Ok(Some(Value::Null)),
-                    _ => {
-                        return Err("text_match_regex() expects (string, string[, string])".into());
-                    }
-                };
-                let effective_pattern = if let Some(f) = &flags {
-                    for c in f.chars() {
-                        if !"imsxU".contains(c) {
-                            return Err(format!(
-                                "text_match_regex() unknown flag '{c}'; valid: i, m, s, x, U"
-                            ));
-                        }
-                    }
-                    format!("(?{f}){pattern_str}")
-                } else {
-                    pattern_str.to_string()
-                };
-                let re = super::regex_cache::get_or_compile(&effective_pattern).map_err(|e| {
-                    super::regex_cache::function_compile_error("text_match_regex", &e)
-                })?;
-                Ok(Value::Boolean(re.is_match(text_str)))
-            }
+            "text_match_regex" => self.eval_text_match_regex(name, args, row),
             // ── String functions ──────────────────────────────────
             "split" => {
                 if args.len() != 2 {
@@ -432,5 +392,55 @@ impl<'a> CypherExecutor<'a> {
             _ => return Ok(None),
         };
         result.map(Some)
+    }
+
+    /// Evaluate the `text_match_regex(text, pattern[, flags])` predicate.
+    ///
+    /// Split out of `eval_string_fn` so the dispatcher stays within the
+    /// source-quality complexity ceiling. The body is that arm verbatim,
+    /// except that its early `Ok(Some(Value::Null))` is spelled `Ok(Value::Null)`
+    /// here — `eval_string_fn` re-wraps every arm's value with `.map(Some)`.
+    fn eval_text_match_regex(
+        &self,
+        name: &str,
+        args: &[Expression],
+        row: &ResultRow,
+    ) -> Result<Value, String> {
+        if args.len() != 2 && args.len() != 3 {
+            return Err("text_match_regex() requires 2 or 3 args: (text, pattern[, flags])".into());
+        }
+        let text = self.evaluate_expression(super::first_arg(name, args)?, row)?;
+        let pattern = self.evaluate_expression(&args[1], row)?;
+        let flags: Option<String> = if args.len() == 3 {
+            match self.evaluate_expression(&args[2], row)? {
+                Value::String(s) => Some(s),
+                Value::Null => None,
+                _ => return Err("text_match_regex() flags must be a string".into()),
+            }
+        } else {
+            None
+        };
+        let (text_str, pattern_str) = match (&text, &pattern) {
+            (Value::String(t), Value::String(p)) => (t.as_str(), p.as_str()),
+            (Value::Null, _) | (_, Value::Null) => return Ok(Value::Null),
+            _ => {
+                return Err("text_match_regex() expects (string, string[, string])".into());
+            }
+        };
+        let effective_pattern = if let Some(f) = &flags {
+            for c in f.chars() {
+                if !"imsxU".contains(c) {
+                    return Err(format!(
+                        "text_match_regex() unknown flag '{c}'; valid: i, m, s, x, U"
+                    ));
+                }
+            }
+            format!("(?{f}){pattern_str}")
+        } else {
+            pattern_str.to_string()
+        };
+        let re = super::regex_cache::get_or_compile(&effective_pattern)
+            .map_err(|e| super::regex_cache::function_compile_error("text_match_regex", &e))?;
+        Ok(Value::Boolean(re.is_match(text_str)))
     }
 }

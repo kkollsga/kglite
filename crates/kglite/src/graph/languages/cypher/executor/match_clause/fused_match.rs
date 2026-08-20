@@ -376,91 +376,12 @@ impl<'a> CypherExecutor<'a> {
             // endpoint or schema metadata proving its primary label for every
             // edge of this type. More complex endpoint/relationship predicates
             // bail to the node-centric counter below.
-            let peer_counts = if !distinct_count
-                && pattern.elements.len() == 3
-                && peer_counts_worthwhile
-                && (self.graph.graph.is_memory() || self.graph.graph.is_mapped())
-            {
-                let edge = match &pattern.elements[1] {
-                    PatternElement::Edge(edge)
-                        if edge.var_length.is_none()
-                            && edge.connection_types.is_none()
-                            && edge.properties.as_ref().is_none_or(|props| props.is_empty())
-                            && edge.edge_filter.is_none() =>
-                    {
-                        Some(edge)
-                    }
-                    _ => None,
-                };
-                let other_elem_idx = if group_elem_idx == 0 { 2 } else { 0 };
-                let other = match &pattern.elements[other_elem_idx] {
-                    PatternElement::Node(node)
-                        if node.extra_labels.is_empty()
-                            && node.properties.as_ref().is_none_or(|props| props.is_empty()) =>
-                    {
-                        Some(node)
-                    }
-                    _ => None,
-                };
-
-                if let (Some(edge), Some(other), Some(conn_type)) =
-                    (edge, other, edge.and_then(|edge| edge.connection_type.as_ref()))
-                {
-                    let group_is_target = matches!(
-                        (group_elem_idx, edge.direction),
-                        (2, EdgeDirection::Outgoing) | (0, EdgeDirection::Incoming)
-                    );
-                    let group_is_source = matches!(
-                        (group_elem_idx, edge.direction),
-                        (0, EdgeDirection::Outgoing) | (2, EdgeDirection::Incoming)
-                    );
-                    let other_type_guaranteed = match other.node_type.as_deref() {
-                        None => true,
-                        Some(expected) => self
-                            .graph
-                            .connection_type_metadata
-                            .get(conn_type)
-                            .is_some_and(|info| {
-                                let endpoint_types = if group_is_target {
-                                    &info.source_types
-                                } else {
-                                    &info.target_types
-                                };
-                                endpoint_types.len() == 1 && endpoint_types.contains(expected)
-                            }),
-                    };
-                    if (group_is_target || group_is_source) && other_type_guaranteed {
-                        let conn_key = InternedKey::from_str(conn_type);
-                        let direction = if group_is_target {
-                            Direction::Outgoing
-                        } else {
-                            Direction::Incoming
-                        };
-                        Some(match self
-                            .graph
-                            .graph
-                            .cached_edge_counts_grouped_by_peer(
-                                conn_key,
-                                direction,
-                                self.deadline,
-                            )?
-                        {
-                            Some(counts) => counts,
-                            None => Arc::new(self.graph.graph.count_edges_grouped_by_peer(
-                                conn_key,
-                                direction,
-                                self.deadline,
-                            )?),
-                        })
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
+            let peer_counts = self.fused_peer_counts(
+                pattern,
+                group_elem_idx,
+                distinct_count,
+                peer_counts_worthwhile,
+            )?;
 
             // A plain typed endpoint already has an exact node list. Reading
             // that list directly avoids allocating one PatternMatch plus a
@@ -1400,72 +1321,8 @@ impl<'a> CypherExecutor<'a> {
             for (ai, &item_idx) in agg_indices.iter().enumerate() {
                 let item = &return_clause.items[item_idx];
                 let key = return_item_column_name(item);
-                let val = match &item.expression {
-                    Expression::FunctionCall {
-                        name,
-                        args,
-                        distinct,
-                    } => {
-                        if *distinct {
-                            // count(DISTINCT …): number of distinct non-null values.
-                            Value::Int64(
-                                acc.distinct_sets[ai]
-                                    .as_ref()
-                                    .map(|s| s.len() as i64)
-                                    .unwrap_or(0),
-                            )
-                        } else {
-                            match name.as_str() {
-                                "count" => Value::Int64(acc.counts[ai]),
-                                "sum" => {
-                                    // Zero *numeric* values sums to Int64(0) —
-                                    // the same answer the materialized path
-                                    // gives when `collect_numeric_values` comes
-                                    // back empty.
-                                    if acc.numeric_counts[ai] == 0 {
-                                        Value::Int64(0)
-                                    } else {
-                                        // Integer-typed iff every numeric
-                                        // input was an `Int64` and the total is
-                                        // whole — the streaming path's rule.
-                                        let is_int =
-                                            acc.sum_was_int[ai] && acc.sums[ai].fract() == 0.0;
-                                        if is_int {
-                                            Value::Int64(acc.sums[ai] as i64)
-                                        } else {
-                                            Value::Float64(acc.sums[ai])
-                                        }
-                                    }
-                                }
-                                "avg" | "mean" | "average" => {
-                                    // Divide by the numeric count, not the
-                                    // non-null count: a single string cell in
-                                    // an otherwise numeric property must not
-                                    // drag the average down (it contributes
-                                    // nothing to `sums`).
-                                    if acc.numeric_counts[ai] == 0 {
-                                        Value::Null
-                                    } else {
-                                        Value::Float64(
-                                            acc.sums[ai] / acc.numeric_counts[ai] as f64,
-                                        )
-                                    }
-                                }
-                                "min" => acc.mins[ai].clone().unwrap_or(Value::Null),
-                                "max" => acc.maxs[ai].clone().unwrap_or(Value::Null),
-                                _ => {
-                                    // Unsupported aggregate — fall back to evaluate
-                                    let mut tmp_row = ResultRow::new();
-                                    tmp_row
-                                        .node_bindings
-                                        .insert(node_var.to_string(), *first_node_idx);
-                                    self.evaluate_expression(&args[0], &tmp_row)?
-                                }
-                            }
-                        }
-                    }
-                    _ => Value::Null,
-                };
+                let val =
+                    self.inline_accumulator_value(item, acc, ai, node_var, *first_node_idx)?;
                 projected.insert(key, val);
             }
 
@@ -1880,71 +1737,17 @@ impl<'a> CypherExecutor<'a> {
             sequential
         };
 
-        // Phase 2.5 — when the planner absorbed a downstream `ORDER BY
-        // <count_alias> {DESC|ASC} LIMIT k`, trim the count vec to the K
-        // winners *before* row construction. Property-evaluation per row
-        // is the tail cost (each `evaluate_expression` does a few mmap
-        // reads); skipping it for non-winners is the whole point of
-        // pushing the top-K hint into the fused stage.
-        let counts: Vec<(NodeIndex, i64)> = if let Some(tk) = top_k {
-            let mut filtered: Vec<(NodeIndex, i64)> =
-                counts.into_iter().filter(|&(_, c)| c > 0).collect();
-            if tk.descending {
-                filtered.sort_unstable_by_key(|a| std::cmp::Reverse(a.1));
-            } else {
-                filtered.sort_unstable_by_key(|a| a.1);
-            }
-            filtered.truncate(tk.limit);
-            filtered
-        } else {
-            counts
-        };
+        // Phase 2.5 — trim to the planner's absorbed top-K, if any.
+        let counts = trim_counts_to_top_k(counts, top_k);
 
         // Phase 3 — sequential: project group keys + counts into result rows.
-        // Row construction uses the executor's expression evaluator which
-        // isn't trivially parallelisable; the per-row work is tiny next to
-        // the count phase, so leaving it sequential is fine.
-        let mut result_rows = Vec::with_capacity(counts.len());
-
-        for (node_idx, match_count) in counts {
-            // Skip nodes with 0 matches (MATCH semantics — no outer join)
-            if match_count == 0 {
-                continue;
-            }
-
-            // Build a temporary row for evaluating group-key expressions
-            let mut tmp_row = ResultRow::new();
-            tmp_row
-                .node_bindings
-                .insert(group_var.to_string(), node_idx);
-
-            let mut projected = Bindings::with_capacity(with_clause.items.len());
-
-            for &idx in &group_key_indices {
-                let item = &with_clause.items[idx];
-                let key = item
-                    .alias
-                    .clone()
-                    .unwrap_or_else(|| format!("{:?}", item.expression));
-                let val = self.evaluate_expression(&item.expression, &tmp_row)?;
-                projected.insert(key, val);
-            }
-
-            for &idx in &count_indices {
-                let item = &with_clause.items[idx];
-                let key = item
-                    .alias
-                    .clone()
-                    .unwrap_or_else(|| format!("{:?}", item.expression));
-                projected.insert(key, Value::Int64(match_count));
-            }
-
-            let mut new_row = ResultRow::from_projected(projected);
-            new_row
-                .node_bindings
-                .insert(group_var.to_string(), node_idx);
-            result_rows.push(new_row);
-        }
+        let mut result_rows = self.project_with_aggregate_rows(
+            counts,
+            with_clause,
+            group_var,
+            &group_key_indices,
+            &count_indices,
+        )?;
 
         // Apply WITH WHERE filter if present
         if let Some(ref where_clause) = with_clause.where_clause {
@@ -2217,168 +2020,253 @@ impl<'a> CypherExecutor<'a> {
 
         Ok(rows)
     }
-}
 
-/// Running aggregate state for one group of a fused node scan.
-///
-/// Every supported aggregate is folded into the same handful of running values
-/// plus, for `count(DISTINCT …)`, a per-aggregate value set — so one pass over
-/// the scan answers `count` / `sum` / `avg` / `min` / `max` together, without
-/// materialising the group's rows.
-///
-/// Two counts, not one: `count()` counts non-null values, while `sum()` and
-/// `avg()` see only the numeric ones. They diverge on a mixed-type property,
-/// which is what made `avg` over `[10, 20, 'hello']` answer 30/3.
-struct InlineAccumulators {
-    counts: Vec<i64>,
-    /// Per-aggregate count of the values that were actually *numeric* — the
-    /// divisor `avg()` needs, and the emptiness test `sum()` needs. It differs
-    /// from `counts` (all non-null values) exactly when a property holds mixed
-    /// types: `[10, 20, 'hello']` is 3 non-null values but 2 numeric ones, and
-    /// dividing the numeric sum by 3 is the wrong average.
-    numeric_counts: Vec<i64>,
-    /// Whether every numeric value this aggregate saw was an `Int64` — the
-    /// integer-ness probe `sum()` emits with, matching the streaming
-    /// aggregate's `sum_was_int` (`stream::aggregate::AggState`), the path
-    /// these queries take when they do not fuse.
+    /// Project a fused `WITH … count(…)` stage's per-group counts into result
+    /// rows.
     ///
-    /// Deriving it from `mins` instead (as this operator used to) reads the
-    /// *smallest* value under the cross-type order — where a string outranks
-    /// every number — so one string cell turned `sum()` over an integer
-    /// property into a float on the fused path only.
-    sum_was_int: Vec<bool>,
-    sums: Vec<f64>,
-    mins: Vec<Option<Value>>,
-    maxs: Vec<Option<Value>>,
-    /// Per-aggregate value set for `count(DISTINCT …)`; `None` for the rest.
-    distinct_sets: Vec<Option<FxHashSet<Value>>>,
-}
+    /// Split out of `execute_fused_match_with_aggregate` to keep that operator
+    /// under the source-quality complexity ceiling; the body is that
+    /// operator's Phase 3 loop verbatim. Row construction uses the executor's
+    /// expression evaluator, which isn't trivially parallelisable; the per-row
+    /// work is tiny next to the count phase, so leaving it sequential is fine.
+    fn project_with_aggregate_rows(
+        &self,
+        counts: Vec<(NodeIndex, i64)>,
+        with_clause: &WithClause,
+        group_var: &str,
+        group_key_indices: &[usize],
+        count_indices: &[usize],
+    ) -> Result<Vec<ResultRow>, String> {
+        let mut result_rows = Vec::with_capacity(counts.len());
 
-impl InlineAccumulators {
-    fn new(agg_is_distinct: &[bool]) -> Self {
-        let width = agg_is_distinct.len();
-        InlineAccumulators {
-            counts: vec![0i64; width],
-            numeric_counts: vec![0i64; width],
-            sum_was_int: vec![true; width],
-            sums: vec![0.0f64; width],
-            mins: vec![None; width],
-            maxs: vec![None; width],
-            distinct_sets: agg_is_distinct
-                .iter()
-                .map(|&distinct| distinct.then(FxHashSet::default))
-                .collect(),
+        for (node_idx, match_count) in counts {
+            // Skip nodes with 0 matches (MATCH semantics — no outer join)
+            if match_count == 0 {
+                continue;
+            }
+
+            // Build a temporary row for evaluating group-key expressions
+            let mut tmp_row = ResultRow::new();
+            tmp_row
+                .node_bindings
+                .insert(group_var.to_string(), node_idx);
+
+            let mut projected = Bindings::with_capacity(with_clause.items.len());
+
+            for &idx in group_key_indices {
+                let item = &with_clause.items[idx];
+                let key = item
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| format!("{:?}", item.expression));
+                let val = self.evaluate_expression(&item.expression, &tmp_row)?;
+                projected.insert(key, val);
+            }
+
+            for &idx in count_indices {
+                let item = &with_clause.items[idx];
+                let key = item
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| format!("{:?}", item.expression));
+                projected.insert(key, Value::Int64(match_count));
+            }
+
+            let mut new_row = ResultRow::from_projected(projected);
+            new_row
+                .node_bindings
+                .insert(group_var.to_string(), node_idx);
+            result_rows.push(new_row);
         }
+
+        Ok(result_rows)
     }
 
-    /// Fold a later partition's accumulator for the same group into this one.
+    /// Emit one aggregate's value for a fused node-scan group from its
+    /// running `InlineAccumulators`.
     ///
-    /// The associative combine every aggregate this operator serves admits:
-    /// `count`/`sum` add, `min`/`max` take the extreme under the same
-    /// `total_order` the row path uses, and `count(DISTINCT …)` unions the
-    /// value sets. `avg` is derived from `sums`/`counts` at emission, so it
-    /// merges for free. Nothing here reads row order, which is why the
-    /// partitioned scan returns byte-identical results.
-    fn merge(&mut self, other: InlineAccumulators) {
-        for (ai, count) in other.counts.iter().enumerate() {
-            self.counts[ai] += count;
-            self.numeric_counts[ai] += other.numeric_counts[ai];
-            self.sum_was_int[ai] &= other.sum_was_int[ai];
-            self.sums[ai] += other.sums[ai];
-        }
-        for (ai, min) in other.mins.into_iter().enumerate() {
-            if let Some(val) = min {
-                let replace = match &self.mins[ai] {
-                    None => true,
-                    Some(cur) => {
-                        crate::graph::core::filtering::total_order(&val, cur)
-                            == std::cmp::Ordering::Less
+    /// Split out of `execute_fused_node_scan_aggregate` to keep that
+    /// operator under the source-quality complexity ceiling; the body is
+    /// that operator's per-aggregate `match` verbatim. `ai` is the
+    /// aggregate's slot in `acc`, and `first_node_idx` the group's
+    /// representative node — bound to `node_var` for the interpreter
+    /// fallback that handles aggregates the accumulators do not model.
+    fn inline_accumulator_value(
+        &self,
+        item: &ReturnItem,
+        acc: &InlineAccumulators,
+        ai: usize,
+        node_var: &str,
+        first_node_idx: NodeIndex,
+    ) -> Result<Value, String> {
+        Ok(match &item.expression {
+            Expression::FunctionCall {
+                name,
+                args,
+                distinct,
+            } => {
+                if *distinct {
+                    // count(DISTINCT …): number of distinct non-null values.
+                    Value::Int64(
+                        acc.distinct_sets[ai]
+                            .as_ref()
+                            .map(|s| s.len() as i64)
+                            .unwrap_or(0),
+                    )
+                } else {
+                    match name.as_str() {
+                        "count" => Value::Int64(acc.counts[ai]),
+                        "sum" => {
+                            // Zero *numeric* values sums to Int64(0) —
+                            // the same answer the materialized path
+                            // gives when `collect_numeric_values` comes
+                            // back empty.
+                            if acc.numeric_counts[ai] == 0 {
+                                Value::Int64(0)
+                            } else {
+                                // Integer-typed iff every numeric
+                                // input was an `Int64` and the total is
+                                // whole — the streaming path's rule.
+                                let is_int =
+                                    acc.sum_was_int[ai] && acc.sums[ai].fract() == 0.0;
+                                if is_int {
+                                    Value::Int64(acc.sums[ai] as i64)
+                                } else {
+                                    Value::Float64(acc.sums[ai])
+                                }
+                            }
+                        }
+                        "avg" | "mean" | "average" => {
+                            // Divide by the numeric count, not the
+                            // non-null count: a single string cell in
+                            // an otherwise numeric property must not
+                            // drag the average down (it contributes
+                            // nothing to `sums`).
+                            if acc.numeric_counts[ai] == 0 {
+                                Value::Null
+                            } else {
+                                Value::Float64(
+                                    acc.sums[ai] / acc.numeric_counts[ai] as f64,
+                                )
+                            }
+                        }
+                        "min" => acc.mins[ai].clone().unwrap_or(Value::Null),
+                        "max" => acc.maxs[ai].clone().unwrap_or(Value::Null),
+                        _ => {
+                            // Unsupported aggregate — fall back to evaluate
+                            let mut tmp_row = ResultRow::new();
+                            tmp_row
+                                .node_bindings
+                                .insert(node_var.to_string(), first_node_idx);
+                            self.evaluate_expression(&args[0], &tmp_row)?
+                        }
                     }
-                };
-                if replace {
-                    self.mins[ai] = Some(val);
                 }
             }
-        }
-        for (ai, max) in other.maxs.into_iter().enumerate() {
-            if let Some(val) = max {
-                let replace = match &self.maxs[ai] {
-                    None => true,
-                    Some(cur) => {
-                        crate::graph::core::filtering::total_order(&val, cur)
-                            == std::cmp::Ordering::Greater
-                    }
-                };
-                if replace {
-                    self.maxs[ai] = Some(val);
-                }
-            }
-        }
-        for (ai, set) in other.distinct_sets.into_iter().enumerate() {
-            if let Some(values) = set {
-                self.distinct_sets[ai]
-                    .get_or_insert_with(FxHashSet::default)
-                    .extend(values);
-            }
-        }
+            _ => Value::Null,
+        })
     }
 
-    /// Fold one row's value for aggregate `ai` into the running state.
+    /// Resolve the peer-count histogram a fused property-grouped
+    /// aggregate can count from, or `None` when the pattern shape does
+    /// not qualify and the node-centric counter must run instead.
     ///
-    /// `Null` contributes to nothing: it is not counted, not summed, and never
-    /// becomes a `min`/`max` — the same rule the materialized aggregation path
-    /// applies. A non-null value that is not numeric (a string in an otherwise
-    /// numeric property) counts and can win `min`/`max`, but contributes to
-    /// neither `sums` nor `numeric_counts` — `sum`/`avg` see only numbers.
-    ///
-    /// `count(*)` and `count(<bound var>)` arrive as a non-null `Boolean`
-    /// marker, so they count without materialising a node value.
-    fn absorb(&mut self, ai: usize, val: &Value, distinct: bool) {
-        if distinct {
-            // count(DISTINCT …): dedup non-null values in the per-agg set.
-            if !matches!(val, Value::Null) {
-                self.distinct_sets[ai]
-                    .get_or_insert_with(FxHashSet::default)
-                    .insert(val.clone());
-            }
-            return;
-        }
-        if matches!(val, Value::Null) {
-            return;
-        }
-        self.counts[ai] += 1;
-        if let Some(f) = value_to_f64(val) {
-            self.numeric_counts[ai] += 1;
-            self.sums[ai] += f;
-            // UniqueId and Float64 both force a Float64 sum, as they do on the
-            // streaming path.
-            if !matches!(val, Value::Int64(_)) {
-                self.sum_was_int[ai] = false;
-            }
-        }
-        // Phase A.2 / C4 — short-circuit on is_none() guarantees the unwrap
-        // can't fire, but the .expect() makes the invariant explicit if a
-        // future refactor reorders the conditions.
-        if self.mins[ai].is_none()
-            || crate::graph::core::filtering::total_order(
-                val,
-                self.mins[ai]
-                    .as_ref()
-                    .expect("invariant: is_none() short-circuited above"),
-            ) == std::cmp::Ordering::Less
+    /// Split out of `execute_fused_match_return_aggregate` to keep that
+    /// operator under the source-quality complexity ceiling; the body is
+    /// that operator's `peer_counts` expression verbatim; the conditions it
+    /// checks are documented at the call site.
+    fn fused_peer_counts(
+        &self,
+        pattern: &crate::graph::core::pattern_matching::Pattern,
+        group_elem_idx: usize,
+        distinct_count: bool,
+        peer_counts_worthwhile: bool,
+    ) -> Result<Option<Arc<HashMap<u32, i64>>>, String> {
+        Ok(if !distinct_count
+            && pattern.elements.len() == 3
+            && peer_counts_worthwhile
+            && (self.graph.graph.is_memory() || self.graph.graph.is_mapped())
         {
-            self.mins[ai] = Some(val.clone());
-        }
-        if self.maxs[ai].is_none()
-            || crate::graph::core::filtering::total_order(
-                val,
-                self.maxs[ai]
-                    .as_ref()
-                    .expect("invariant: is_none() short-circuited above"),
-            ) == std::cmp::Ordering::Greater
-        {
-            self.maxs[ai] = Some(val.clone());
-        }
+            let edge = match &pattern.elements[1] {
+                PatternElement::Edge(edge)
+                    if edge.var_length.is_none()
+                        && edge.connection_types.is_none()
+                        && edge.properties.as_ref().is_none_or(|props| props.is_empty())
+                        && edge.edge_filter.is_none() =>
+                {
+                    Some(edge)
+                }
+                _ => None,
+            };
+            let other_elem_idx = if group_elem_idx == 0 { 2 } else { 0 };
+            let other = match &pattern.elements[other_elem_idx] {
+                PatternElement::Node(node)
+                    if node.extra_labels.is_empty()
+                        && node.properties.as_ref().is_none_or(|props| props.is_empty()) =>
+                {
+                    Some(node)
+                }
+                _ => None,
+            };
+
+            if let (Some(edge), Some(other), Some(conn_type)) =
+                (edge, other, edge.and_then(|edge| edge.connection_type.as_ref()))
+            {
+                let group_is_target = matches!(
+                    (group_elem_idx, edge.direction),
+                    (2, EdgeDirection::Outgoing) | (0, EdgeDirection::Incoming)
+                );
+                let group_is_source = matches!(
+                    (group_elem_idx, edge.direction),
+                    (0, EdgeDirection::Outgoing) | (2, EdgeDirection::Incoming)
+                );
+                let other_type_guaranteed = match other.node_type.as_deref() {
+                    None => true,
+                    Some(expected) => self
+                        .graph
+                        .connection_type_metadata
+                        .get(conn_type)
+                        .is_some_and(|info| {
+                            let endpoint_types = if group_is_target {
+                                &info.source_types
+                            } else {
+                                &info.target_types
+                            };
+                            endpoint_types.len() == 1 && endpoint_types.contains(expected)
+                        }),
+                };
+                if (group_is_target || group_is_source) && other_type_guaranteed {
+                    let conn_key = InternedKey::from_str(conn_type);
+                    let direction = if group_is_target {
+                        Direction::Outgoing
+                    } else {
+                        Direction::Incoming
+                    };
+                    Some(match self
+                        .graph
+                        .graph
+                        .cached_edge_counts_grouped_by_peer(
+                            conn_key,
+                            direction,
+                            self.deadline,
+                        )?
+                    {
+                        Some(counts) => counts,
+                        None => Arc::new(self.graph.graph.count_edges_grouped_by_peer(
+                            conn_key,
+                            direction,
+                            self.deadline,
+                        )?),
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        })
     }
 }
 
@@ -2445,4 +2333,32 @@ fn fused_aggregate_shape<'q>(
         group_key_indices,
         count_indices,
     })
+}
+
+/// Trim a fused aggregate's per-group counts to the planner's absorbed
+/// `ORDER BY <count_alias> {DESC|ASC} LIMIT k`, dropping empty groups.
+///
+/// Split out of `execute_fused_match_with_aggregate` to keep that operator
+/// under the source-quality complexity ceiling; the body is that operator's
+/// Phase 2.5 block verbatim. Trimming happens *before* row construction
+/// because property evaluation per row is the tail cost (each
+/// `evaluate_expression` does a few mmap reads); skipping it for non-winners
+/// is the whole point of pushing the top-K hint into the fused stage.
+fn trim_counts_to_top_k(
+    counts: Vec<(NodeIndex, i64)>,
+    top_k: Option<&AggregateTopK>,
+) -> Vec<(NodeIndex, i64)> {
+    if let Some(tk) = top_k {
+        let mut filtered: Vec<(NodeIndex, i64)> =
+            counts.into_iter().filter(|&(_, c)| c > 0).collect();
+        if tk.descending {
+            filtered.sort_unstable_by_key(|a| std::cmp::Reverse(a.1));
+        } else {
+            filtered.sort_unstable_by_key(|a| a.1);
+        }
+        filtered.truncate(tk.limit);
+        filtered
+    } else {
+        counts
+    }
 }

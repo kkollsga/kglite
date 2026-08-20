@@ -258,8 +258,11 @@ mod tests {
 
     #[test]
     fn compile_error_messages_are_recognised() {
-        let err = Regex::new("[").expect_err("'[' must not compile");
-        let operator = operator_compile_error("[", &err);
+        // Bound, not inlined: `clippy::invalid_regex` rejects a literal bad
+        // pattern at `Regex::new`, and this test needs one.
+        let bad = String::from("[");
+        let err = Regex::new(&bad).expect_err("'[' must not compile");
+        let operator = operator_compile_error(&bad, &err);
         let function = function_compile_error("text_match_regex", &err);
         assert!(operator.starts_with("Invalid regular expression '['"));
         assert!(function.starts_with("text_match_regex() invalid pattern: "));
