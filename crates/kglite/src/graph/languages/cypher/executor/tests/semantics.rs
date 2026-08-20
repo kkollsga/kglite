@@ -396,6 +396,74 @@ fn fused_sum_keeps_the_unfused_paths_numeric_type_on_mixed_columns() {
     }
 }
 
+// ========================================================================
+// Uncompilable regexes on the fused scan
+// ========================================================================
+//
+// The fused scan drops a row whose WHERE predicate cannot be evaluated
+// rather than failing the query — that is how an unbound binding behaves,
+// and it stays. A pattern that does not compile is not that case: it is
+// wrong for every row, and the unfused path has always raised it. Swallowing
+// it answered `WHERE n.v =~ '['` with a silent empty result, and turned a
+// lookaround pattern (valid in Neo4j, unsupported by the `regex` crate) into
+// "no matches" rather than "unsupported".
+
+#[test]
+fn fused_scan_raises_on_a_pattern_that_does_not_compile() {
+    let graph = build_mixed_property_graph(vec![
+        Value::String("Alice".into()),
+        Value::String("Bob".into()),
+    ]);
+    let params = HashMap::new();
+
+    for pattern in ["[", "A(?=l)ice", r"(a)\\1"] {
+        let query = format!("MATCH (n:S) WHERE n.v =~ '{pattern}' RETURN count(*) AS c");
+        let mut optimized = parser::parse_cypher(&query).unwrap();
+        crate::graph::languages::cypher::planner::optimize(&mut optimized, &graph, &params);
+        assert!(
+            optimized
+                .clauses
+                .iter()
+                .any(|c| matches!(c, Clause::FusedNodeScanAggregate { .. })),
+            "non-vacuity: `{query}` did not fuse, so it would not exercise the \
+             fused scan's predicate at all"
+        );
+
+        let err = CypherExecutor::with_params(&graph, &params, None)
+            .execute(&optimized)
+            .expect_err(&format!("`{query}` must not answer with rows"));
+        assert!(
+            err.contains("Invalid regular expression"),
+            "fused scan error for `{pattern}`: {err}"
+        );
+
+        // The unfused path's answer, for the same query.
+        let unoptimized = parser::parse_cypher(&query).unwrap();
+        let unfused_err = CypherExecutor::with_params(&graph, &params, None)
+            .execute(&unoptimized)
+            .expect_err(&format!("`{query}` must not answer with rows unfused"));
+        assert_eq!(err, unfused_err, "fused vs unfused error for `{pattern}`");
+    }
+}
+
+#[test]
+fn fused_scan_still_drops_rows_whose_predicate_cannot_be_evaluated() {
+    // A valid pattern against a non-string cell: the comparison yields
+    // "no match" for that row, never an error, and the scan keeps counting.
+    let graph = build_mixed_property_graph(vec![
+        Value::String("Alice".into()),
+        Value::Int64(7),
+        Value::Null,
+    ]);
+
+    let (fused, materialized) = optimized_and_unoptimized(
+        &graph,
+        "MATCH (n:S) WHERE n.v =~ '^A.*' RETURN count(*) AS c",
+    );
+    assert_eq!(fused[0], Value::Int64(1), "only the string cell matches");
+    assert_eq!(fused, materialized, "fused vs materialized filter");
+}
+
 /// Run `query` unoptimized — what `disable_optimizer=True` does — and return
 /// its one row. Without the fusion pass there is no `FusedNodeScanAggregate`
 /// clause, so an aggregate the MATCH clause's inline accumulator declines

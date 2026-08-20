@@ -489,6 +489,37 @@ impl<'a> CypherExecutor<'a> {
         Ok(self.evaluate_predicate_tristate(pred, row)? == Some(true))
     }
 
+    /// Drop every row of `rows` that `pred` does not keep, with the fused
+    /// paths' error contract applied.
+    ///
+    /// Post-aggregation filters (HAVING, `WITH … WHERE`) have always dropped a
+    /// row whose predicate could not be evaluated — that is how an unbound
+    /// `OPTIONAL MATCH` binding and the aggregate-reference quirks behave, and
+    /// it stays. An uncompilable regex is a different animal: it is wrong for
+    /// every row, and the unfused `WHERE` path raises it, so swallowing it here
+    /// answered an invalid query with a silent empty result.
+    pub(super) fn retain_rows_matching(
+        &self,
+        rows: &mut Vec<ResultRow>,
+        pred: &Predicate,
+    ) -> Result<(), String> {
+        // `retain` cannot return, so the first flagged error is carried out.
+        let mut failure: Option<String> = None;
+        rows.retain(|row| match self.evaluate_predicate(pred, row) {
+            Ok(keep) => keep,
+            Err(e) => {
+                if failure.is_none() && super::regex_cache::is_compile_error(&e) {
+                    failure = Some(e);
+                }
+                false
+            }
+        });
+        match failure {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
     /// `WHERE n:Label` — true iff `variable` is bound to a node carrying
     /// `label` as its primary type OR a secondary label. An unbound binding
     /// (`OPTIONAL MATCH` that did not match) or a non-node binding is false,

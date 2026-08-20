@@ -735,6 +735,29 @@ impl ScanPred<'_> {
         }
     }
 
+    /// Whether a fused scan should keep this row, with the fused paths'
+    /// error contract applied.
+    ///
+    /// A predicate that merely *does not evaluate* for a row — an unbound
+    /// binding, an aggregate reference outside an aggregation — drops the row
+    /// rather than failing the query, which is what these scans have always
+    /// done. An uncompilable regex is not that: it is wrong for every row, it
+    /// can never become right, and the unfused path raises it. Swallowing it
+    /// turned an invalid pattern into a silent empty result.
+    pub(super) fn keeps_row(
+        &self,
+        executor: &CypherExecutor<'_>,
+        runtime: &ScanRuntime<'_>,
+        node: Option<NodeView<'_>>,
+        row: &ResultRow,
+    ) -> Result<bool, String> {
+        match self.eval(executor, runtime, node, row) {
+            Ok(outcome) => Ok(outcome == Some(true)),
+            Err(e) if super::regex_cache::is_compile_error(&e) => Err(e),
+            Err(_) => Ok(false),
+        }
+    }
+
     /// The borrowed string test, with the two non-string outcomes routed back
     /// onto the owned values the interpreter would have compared.
     #[inline]

@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An invalid or unsupported regular expression in a `WHERE` clause silently
+  returned zero rows on the fused execution paths.** The unfused path has
+  always raised `Invalid regular expression '…'`; the fused node-scan
+  aggregate, the fused top-K scan, `WITH … WHERE` and `HAVING` swallowed the
+  compile failure along with the predicate errors they drop by design (a row
+  whose predicate cannot be evaluated does not match), so
+  `MATCH (n:S) WHERE n.name =~ '[' RETURN count(*)` answered `0` while the
+  same filter with `RETURN n.name` raised. Only the compile failure now
+  propagates — an unbound `OPTIONAL MATCH` binding still drops its row. This
+  also turns lookaround and backreference patterns, which are valid in Neo4j
+  but unsupported by the underlying regex engine, from silent empty results
+  into a clean error naming the unsupported feature.
+
 - **`DISTINCT` aggregates could return different answers depending on the
   internal aggregation path.** `sum`, `avg`, `collect` and `mode` each carried
   a private idea of what makes two values distinct, none of which was the one

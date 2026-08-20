@@ -363,7 +363,7 @@ pub(super) fn evaluate_comparison(
                 // the shared `Arc` here was measured to cost more than the
                 // match itself under the parallel runtime.
                 super::regex_cache::with_compiled(pattern, |re| re.is_match(text))
-                    .map_err(|e| format!("Invalid regular expression '{}': {}", pattern, e))
+                    .map_err(|e| super::regex_cache::operator_compile_error(pattern, &e))
             }
             _ => Ok(false),
         },

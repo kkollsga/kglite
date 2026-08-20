@@ -291,8 +291,9 @@ impl<'a> CypherExecutor<'a> {
                 } else {
                     pattern_str.to_string()
                 };
-                let re = super::regex_cache::get_or_compile(&effective_pattern)
-                    .map_err(|e| format!("text_match_regex() invalid pattern: {e}"))?;
+                let re = super::regex_cache::get_or_compile(&effective_pattern).map_err(|e| {
+                    super::regex_cache::function_compile_error("text_match_regex", &e)
+                })?;
                 Ok(Value::Boolean(re.is_match(text_str)))
             }
             // ── String functions ──────────────────────────────────

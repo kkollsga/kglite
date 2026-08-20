@@ -124,11 +124,12 @@ impl<'g> CypherExecutor<'g> {
                 None
             };
 
-            // Check WHERE predicate. Errors are swallowed here (a row whose
-            // predicate cannot be evaluated does not match), matching
-            // `evaluate_predicate(..).unwrap_or(false)`.
+            // Check WHERE predicate. A predicate that cannot be evaluated
+            // does not match (the row is dropped, not raised) — except for an
+            // uncompilable regex, which the unfused path raises. See
+            // `ScanPred::keeps_row`.
             if let Some(pred) = ctx.compiled_where {
-                if !matches!(pred.eval(self, runtime, node, &eval_row), Ok(Some(true))) {
+                if !pred.keeps_row(self, runtime, node, &eval_row)? {
                     continue;
                 }
             }

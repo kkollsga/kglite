@@ -1198,7 +1198,7 @@ impl<'a> CypherExecutor<'a> {
         let mut result_rows = result_rows;
         if let Some(ref having) = return_clause.having {
             augment_rows_with_aggregate_keys(&mut result_rows, &return_clause.items);
-            result_rows.retain(|row| self.evaluate_predicate(having, row).unwrap_or(false));
+            self.retain_rows_matching(&mut result_rows, having)?;
         }
 
         let columns: Vec<String> = return_clause
@@ -1478,7 +1478,7 @@ impl<'a> CypherExecutor<'a> {
         // Handle HAVING
         if let Some(ref having) = return_clause.having {
             augment_rows_with_aggregate_keys(&mut result_rows, &return_clause.items);
-            result_rows.retain(|row| self.evaluate_predicate(having, row).unwrap_or(false));
+            self.retain_rows_matching(&mut result_rows, having)?;
         }
 
         // Handle DISTINCT
@@ -1585,11 +1585,12 @@ impl<'a> CypherExecutor<'a> {
                 None
             };
 
-            // WHERE filter. Errors are swallowed (a row whose predicate cannot
-            // be evaluated does not match), as `evaluate_predicate(..)
-            // .unwrap_or(false)` did.
+            // WHERE filter. A predicate that cannot be evaluated does not
+            // match (the row is dropped, not raised) — except for an
+            // uncompilable regex, which the unfused path raises. See
+            // `ScanPred::keeps_row`.
             if let Some(pred) = &compiled_where {
-                if !matches!(pred.eval(self, &runtime, node, &eval_row), Ok(Some(true))) {
+                if !pred.keeps_row(self, &runtime, node, &eval_row)? {
                     continue;
                 }
             }
@@ -1948,7 +1949,7 @@ impl<'a> CypherExecutor<'a> {
         // Apply WITH WHERE filter if present
         if let Some(ref where_clause) = with_clause.where_clause {
             let folded = self.fold_constants_pred(&where_clause.predicate);
-            result_rows.retain(|row| self.evaluate_predicate(&folded, row).unwrap_or(false));
+            self.retain_rows_matching(&mut result_rows, &folded)?;
         }
 
         Ok(ResultSet {
@@ -2211,7 +2212,7 @@ impl<'a> CypherExecutor<'a> {
         // `count(h) > 5` etc. still work).
         if let Some(ref where_clause) = with_clause.where_clause {
             let folded = self.fold_constants_pred(&where_clause.predicate);
-            rows.retain(|row| self.evaluate_predicate(&folded, row).unwrap_or(false));
+            self.retain_rows_matching(&mut rows, &folded)?;
         }
 
         Ok(rows)
