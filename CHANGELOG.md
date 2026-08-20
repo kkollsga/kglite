@@ -31,6 +31,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Present since 0.7.4 (start-node cap) and 0.6.18 (hop cap), not introduced by
   0.16.1; 0.16.1's lazy seeding made the start-node shape easier to reach.
 
+- **`avg()` over a node property containing non-numeric values divided by the
+  wrong count.** On the fused node-scan aggregation path — `MATCH (n:T) RETURN
+  avg(n.v)`, its grouped form, and the `WITH n` variant — the running numeric
+  sum was divided by the count of every *non-null* value rather than the count
+  of the *numeric* ones. One string cell in an otherwise numeric column skewed
+  the average silently and in every group: `[10, 20, 'hello']` averaged 10.0
+  instead of 15.0, while `sum()` over the same input answered 30. A column with
+  no numeric value at all (the shape a bulk-loaded object column produces,
+  since the loader types a column once and stores mixed values as strings)
+  averaged 0.0 instead of null.
+
+  `avg()` and `sum()` over zero numeric values now answer null and 0, the same
+  as the unfused path, and `sum()`'s Int64-vs-Float64 result type no longer
+  changes when a string cell is present — it was read off the running `min()`,
+  where a string outranks every number. `count()` is unchanged: it still counts
+  every non-null value.
+
 ## [0.16.5] - 2026-08-19
 
 ### Added

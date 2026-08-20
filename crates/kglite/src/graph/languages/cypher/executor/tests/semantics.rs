@@ -268,3 +268,130 @@ fn ordinary_integer_arithmetic_is_unchanged() {
         assert_eq!(one_cell(&graph, query), expected, "for: {query}");
     }
 }
+
+// ========================================================================
+// Fused node-scan aggregates over a mixed-type property
+// ========================================================================
+//
+// Pre-fix, the fused operator's inline accumulator counted every non-null
+// value but summed only the numeric ones, then divided one by the other:
+//
+//   n.v ∈ {10, 20, 'hello'}   MATCH (n:S) RETURN avg(n.v)  -> 10.0  (30/3)
+//
+// `sum(n.v)` on the same input already counted only numerics, so the two
+// disagreed — 30 summed over "3 values". The unfused path (materialized
+// aggregation) answered 15.0 throughout, which is why the differential
+// corpus is the other half of this fix's gate.
+
+/// A graph of `:S` nodes whose `v` property holds `values` positionally.
+fn build_mixed_property_graph(values: Vec<Value>) -> DirGraph {
+    let mut graph = DirGraph::new();
+    for (i, value) in values.into_iter().enumerate() {
+        let node = NodeData::new(
+            Value::UniqueId(i as u32 + 1),
+            Value::String(format!("s{i}")),
+            "S".to_string(),
+            HashMap::from([("v".to_string(), value)]),
+            &mut graph.interner,
+        );
+        let idx = graph.graph.add_node(node);
+        graph
+            .type_indices
+            .entry_or_default("S".to_string())
+            .push(idx);
+    }
+    graph
+}
+
+/// Run `query` twice — through the optimizer (the fused operator) and
+/// unoptimized (the materialized path) — and return both row sets.
+fn optimized_and_unoptimized(graph: &DirGraph, query: &str) -> (Vec<Value>, Vec<Value>) {
+    let params = HashMap::new();
+    let mut optimized = parser::parse_cypher(query).unwrap();
+    crate::graph::languages::cypher::planner::optimize(&mut optimized, graph, &params);
+    assert!(
+        optimized
+            .clauses
+            .iter()
+            .any(|c| matches!(c, Clause::FusedNodeScanAggregate { .. })),
+        "non-vacuity: `{query}` did not fuse, so it would not exercise the \
+         inline accumulator at all"
+    );
+    let unoptimized = parser::parse_cypher(query).unwrap();
+
+    let run = |q: &CypherQuery| -> Vec<Value> {
+        let result = CypherExecutor::with_params(graph, &params, None)
+            .execute(q)
+            .unwrap_or_else(|e| panic!("query failed: {query}\n  error: {e}"));
+        assert_eq!(result.rows.len(), 1, "expected one row from: {query}");
+        (0..result.rows[0].len())
+            .map(|i| result.rows[0][i].clone())
+            .collect()
+    };
+    (run(&optimized), run(&unoptimized))
+}
+
+#[test]
+fn fused_avg_divides_by_the_numeric_count_not_the_non_null_count() {
+    let graph = build_mixed_property_graph(vec![
+        Value::Int64(10),
+        Value::Int64(20),
+        Value::String("hello".to_string()),
+    ]);
+
+    let (fused, materialized) = optimized_and_unoptimized(
+        &graph,
+        "MATCH (n:S) RETURN avg(n.v) AS a, sum(n.v) AS s, count(n.v) AS c",
+    );
+
+    // avg = 30/2, not 30/3 (the pre-fix answer was Float64(10.0)).
+    assert_eq!(fused[0], Value::Float64(15.0), "avg over [10, 20, 'hello']");
+    // sum and count are unchanged: sum sees numbers, count sees non-nulls.
+    assert_eq!(fused[1], Value::Int64(30), "sum over [10, 20, 'hello']");
+    assert_eq!(fused[2], Value::Int64(3), "count over [10, 20, 'hello']");
+    assert_eq!(fused, materialized, "fused vs materialized aggregation");
+}
+
+#[test]
+fn fused_avg_and_sum_over_zero_numeric_values_match_the_unfused_path() {
+    let graph = build_mixed_property_graph(vec![
+        Value::String("a".to_string()),
+        Value::String("b".to_string()),
+    ]);
+
+    let (fused, materialized) =
+        optimized_and_unoptimized(&graph, "MATCH (n:S) RETURN avg(n.v) AS a, sum(n.v) AS s");
+
+    // No numeric input at all: avg is null and sum is 0 — the same answers
+    // `collect_numeric_values` produces when it comes back empty.
+    assert_eq!(fused[0], Value::Null, "avg over ['a', 'b']");
+    assert_eq!(fused[1], Value::Int64(0), "sum over ['a', 'b']");
+    assert_eq!(fused, materialized, "fused vs materialized aggregation");
+}
+
+#[test]
+fn fused_sum_keeps_the_unfused_paths_numeric_type_on_mixed_columns() {
+    // `sum()`'s Int64-vs-Float64 choice is the unfused (streaming) path's
+    // rule: every numeric input must be an Int64 and the total must be whole.
+    // Deriving it from `min()` instead made a single string cell flip the
+    // type, because a string sorts below every number in the cross-type order.
+    for values in [
+        vec![
+            Value::Int64(10),
+            Value::Int64(20),
+            Value::String("x".into()),
+        ],
+        vec![Value::String("x".into()), Value::Int64(10)],
+        vec![Value::Null, Value::Int64(1), Value::Int64(2)],
+        vec![Value::Int64(1), Value::Float64(2.5)],
+        vec![Value::Float64(1.5), Value::Int64(2)],
+        vec![Value::Int64(1), Value::Int64(2)],
+    ] {
+        let graph = build_mixed_property_graph(values.clone());
+        let (fused, materialized) = optimized_and_unoptimized(
+            &graph,
+            "MATCH (n:S) RETURN sum(n.v) AS s, avg(n.v) AS a, count(n.v) AS c",
+        );
+        assert_eq!(fused, materialized, "fused vs materialized over {values:?}");
+    }
+}

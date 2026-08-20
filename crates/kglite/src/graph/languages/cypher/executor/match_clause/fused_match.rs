@@ -1418,13 +1418,18 @@ impl<'a> CypherExecutor<'a> {
                             match name.as_str() {
                                 "count" => Value::Int64(acc.counts[ai]),
                                 "sum" => {
-                                    if acc.counts[ai] == 0 {
+                                    // Zero *numeric* values sums to Int64(0) —
+                                    // the same answer the materialized path
+                                    // gives when `collect_numeric_values` comes
+                                    // back empty.
+                                    if acc.numeric_counts[ai] == 0 {
                                         Value::Int64(0)
                                     } else {
-                                        // Check if input is integer-typed
-                                        let is_int = acc.mins[ai].as_ref().is_some_and(|v| {
-                                            matches!(v, Value::Int64(_) | Value::UniqueId(_))
-                                        });
+                                        // Integer-typed iff every numeric
+                                        // input was an `Int64` and the total is
+                                        // whole — the streaming path's rule.
+                                        let is_int =
+                                            acc.sum_was_int[ai] && acc.sums[ai].fract() == 0.0;
                                         if is_int {
                                             Value::Int64(acc.sums[ai] as i64)
                                         } else {
@@ -1433,10 +1438,17 @@ impl<'a> CypherExecutor<'a> {
                                     }
                                 }
                                 "avg" | "mean" | "average" => {
-                                    if acc.counts[ai] == 0 {
+                                    // Divide by the numeric count, not the
+                                    // non-null count: a single string cell in
+                                    // an otherwise numeric property must not
+                                    // drag the average down (it contributes
+                                    // nothing to `sums`).
+                                    if acc.numeric_counts[ai] == 0 {
                                         Value::Null
                                     } else {
-                                        Value::Float64(acc.sums[ai] / acc.counts[ai] as f64)
+                                        Value::Float64(
+                                            acc.sums[ai] / acc.numeric_counts[ai] as f64,
+                                        )
                                     }
                                 }
                                 "min" => acc.mins[ai].clone().unwrap_or(Value::Null),
@@ -2208,12 +2220,32 @@ impl<'a> CypherExecutor<'a> {
 
 /// Running aggregate state for one group of a fused node scan.
 ///
-/// Every supported aggregate is folded into the same four running values plus,
-/// for `count(DISTINCT …)`, a per-aggregate value set — so one pass over the
-/// scan answers `count` / `sum` / `avg` / `min` / `max` together, without
+/// Every supported aggregate is folded into the same handful of running values
+/// plus, for `count(DISTINCT …)`, a per-aggregate value set — so one pass over
+/// the scan answers `count` / `sum` / `avg` / `min` / `max` together, without
 /// materialising the group's rows.
+///
+/// Two counts, not one: `count()` counts non-null values, while `sum()` and
+/// `avg()` see only the numeric ones. They diverge on a mixed-type property,
+/// which is what made `avg` over `[10, 20, 'hello']` answer 30/3.
 struct InlineAccumulators {
     counts: Vec<i64>,
+    /// Per-aggregate count of the values that were actually *numeric* — the
+    /// divisor `avg()` needs, and the emptiness test `sum()` needs. It differs
+    /// from `counts` (all non-null values) exactly when a property holds mixed
+    /// types: `[10, 20, 'hello']` is 3 non-null values but 2 numeric ones, and
+    /// dividing the numeric sum by 3 is the wrong average.
+    numeric_counts: Vec<i64>,
+    /// Whether every numeric value this aggregate saw was an `Int64` — the
+    /// integer-ness probe `sum()` emits with, matching the streaming
+    /// aggregate's `sum_was_int` (`stream::aggregate::AggState`), the path
+    /// these queries take when they do not fuse.
+    ///
+    /// Deriving it from `mins` instead (as this operator used to) reads the
+    /// *smallest* value under the cross-type order — where a string outranks
+    /// every number — so one string cell turned `sum()` over an integer
+    /// property into a float on the fused path only.
+    sum_was_int: Vec<bool>,
     sums: Vec<f64>,
     mins: Vec<Option<Value>>,
     maxs: Vec<Option<Value>>,
@@ -2226,6 +2258,8 @@ impl InlineAccumulators {
         let width = agg_is_distinct.len();
         InlineAccumulators {
             counts: vec![0i64; width],
+            numeric_counts: vec![0i64; width],
+            sum_was_int: vec![true; width],
             sums: vec![0.0f64; width],
             mins: vec![None; width],
             maxs: vec![None; width],
@@ -2247,6 +2281,8 @@ impl InlineAccumulators {
     fn merge(&mut self, other: InlineAccumulators) {
         for (ai, count) in other.counts.iter().enumerate() {
             self.counts[ai] += count;
+            self.numeric_counts[ai] += other.numeric_counts[ai];
+            self.sum_was_int[ai] &= other.sum_was_int[ai];
             self.sums[ai] += other.sums[ai];
         }
         for (ai, min) in other.mins.into_iter().enumerate() {
@@ -2290,8 +2326,12 @@ impl InlineAccumulators {
     ///
     /// `Null` contributes to nothing: it is not counted, not summed, and never
     /// becomes a `min`/`max` — the same rule the materialized aggregation path
-    /// applies. `count(*)` and `count(<bound var>)` arrive as a non-null
-    /// `Boolean` marker, so they count without materialising a node value.
+    /// applies. A non-null value that is not numeric (a string in an otherwise
+    /// numeric property) counts and can win `min`/`max`, but contributes to
+    /// neither `sums` nor `numeric_counts` — `sum`/`avg` see only numbers.
+    ///
+    /// `count(*)` and `count(<bound var>)` arrive as a non-null `Boolean`
+    /// marker, so they count without materialising a node value.
     fn absorb(&mut self, ai: usize, val: &Value, distinct: bool) {
         if distinct {
             // count(DISTINCT …): dedup non-null values in the per-agg set.
@@ -2307,7 +2347,13 @@ impl InlineAccumulators {
         }
         self.counts[ai] += 1;
         if let Some(f) = value_to_f64(val) {
+            self.numeric_counts[ai] += 1;
             self.sums[ai] += f;
+            // UniqueId and Float64 both force a Float64 sum, as they do on the
+            // streaming path.
+            if !matches!(val, Value::Int64(_)) {
+                self.sum_was_int[ai] = false;
+            }
         }
         // Phase A.2 / C4 — short-circuit on is_none() guarantees the unwrap
         // can't fire, but the .expect() makes the invariant explicit if a

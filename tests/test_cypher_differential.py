@@ -2797,6 +2797,48 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (a:Author) OPTIONAL MATCH (a)-[:WROTE]->(p:Paper) RETURN a.name AS a, p.name AS p ORDER BY a LIMIT 5",
         None,
     ),
+    # ── aggregates over a property holding mixed types ──
+    # The fused node-scan aggregate keeps one running sum and one running
+    # count per group. It summed only the numeric values but counted every
+    # non-null one, then divided them: `[10, 20, 'hello']` averaged to 10.0
+    # instead of 15.0, silently, on every RETURN/WITH/grouped shape. It also
+    # read `sum()`'s Int64-vs-Float64 choice off `min()`, where a string
+    # outranks every number, so the same cell flipped the sum's type. No other
+    # corpus fixture carries a mixed-type numeric column, which is why the
+    # corpus stayed green through both.
+    (
+        "mixed_type_aggregate_scan",
+        "mixed_type_props_graph",
+        "MATCH (n:Sample) RETURN avg(n.v) AS a, sum(n.v) AS s, count(n.v) AS c, min(n.v) AS mn",
+        None,
+    ),
+    (
+        "mixed_type_aggregate_grouped",
+        "mixed_type_props_graph",
+        "MATCH (n:Sample) RETURN n.site AS site, avg(n.v) AS a, sum(n.v) AS s, count(n.v) AS c ORDER BY site",
+        None,
+    ),
+    (
+        "mixed_type_aggregate_with_projection",
+        "mixed_type_props_graph",
+        "MATCH (n:Sample) WITH n RETURN avg(n.v) AS a, sum(n.v) AS s, count(n.v) AS c",
+        None,
+    ),
+    (
+        "mixed_type_aggregate_filtered",
+        "mixed_type_props_graph",
+        "MATCH (n:Sample) WHERE n.w > 0 RETURN avg(n.v) AS a, sum(n.v) AS s",
+        None,
+    ),
+    (
+        # Control: `w` is numeric in every row, so this cell must answer the
+        # same before and after the numeric-count split. It is what says the
+        # entries above are measuring mixed types, not aggregation at large.
+        "mixed_type_aggregate_numeric_control",
+        "mixed_type_props_graph",
+        "MATCH (n:Sample) RETURN n.site AS site, avg(n.w) AS a, sum(n.w) AS s ORDER BY site",
+        None,
+    ),
 ]
 
 
@@ -3026,6 +3068,65 @@ def build_cross_type_id_graph() -> kglite.KnowledgeGraph:
 def cross_type_id_graph() -> kglite.KnowledgeGraph:
     """See :func:`build_cross_type_id_graph`."""
     return build_cross_type_id_graph()
+
+
+def build_mixed_type_props_graph() -> kglite.KnowledgeGraph:
+    """`:Sample` nodes whose `v` property holds numbers *and* strings.
+
+    Built with Cypher `CREATE` rather than `add_nodes`: the bulk loader types a
+    column once, so a pandas object column of mixed values arrives as all
+    strings — the shape that cannot exercise a mixed-type accumulator at all.
+
+    Three sites give three regimes in one fixture:
+
+    * ``north`` — numbers with one string cell (the bug's shape: 3 non-null
+      values, 2 of them numeric).
+    * ``south`` — one number, one string, and one null.
+    * ``east``  — no numeric value at all, so `avg` is null and `sum` is 0.
+
+    `w` is numeric everywhere and is the control column. Kept separate from
+    `small_graph`/`social_graph`, which absolute goldens elsewhere pin, so
+    adding the shape cannot move an existing expectation.
+    """
+    g = kglite.KnowledgeGraph()
+    g.cypher(
+        "CREATE (:Sample {id: 1, name: 'n1', site: 'north', v: 10, w: 1}),"
+        "       (:Sample {id: 2, name: 'n2', site: 'north', v: 20, w: 2}),"
+        "       (:Sample {id: 3, name: 'n3', site: 'north', v: 'hello', w: 3}),"
+        "       (:Sample {id: 4, name: 's1', site: 'south', v: 4, w: 4}),"
+        "       (:Sample {id: 5, name: 's2', site: 'south', v: 'n/a', w: 5}),"
+        "       (:Sample {id: 6, name: 's3', site: 'south', w: 6}),"
+        "       (:Sample {id: 7, name: 'e1', site: 'east', v: 'a', w: 7}),"
+        "       (:Sample {id: 8, name: 'e2', site: 'east', v: 'b', w: 8})"
+    )
+    return g
+
+
+@pytest.fixture
+def mixed_type_props_graph() -> kglite.KnowledgeGraph:
+    """See :func:`build_mixed_type_props_graph`."""
+    return build_mixed_type_props_graph()
+
+
+def test_mixed_type_fixture_really_mixes_types() -> None:
+    """Non-vacuity guard for the `mixed_type_props_graph` corpus entries.
+
+    They compare two plans; if `v` ever came back as a single type (a loader
+    change, a schema coercion), the comparison would still pass while
+    measuring nothing. Assert the stored values directly.
+    """
+    g = build_mixed_type_props_graph()
+    values = [row["v"] for row in g.cypher("MATCH (n:Sample) RETURN n.v AS v ORDER BY n.id").to_list()]
+    assert [type(v).__name__ for v in values] == [
+        "int",
+        "int",
+        "str",
+        "int",
+        "str",
+        "NoneType",
+        "str",
+        "str",
+    ], values
 
 
 @pytest.fixture

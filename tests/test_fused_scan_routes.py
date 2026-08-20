@@ -431,3 +431,155 @@ def test_or_and_xor_kleene_logic_over_a_nullable_column(sparse_graph):
         "MATCH (n:Rec) WHERE NOT (n.email STARTS WITH 'a') RETURN count(*) AS c",
     ):
         assert _rows(sparse_graph, query) == sparse_graph.cypher(query, disable_optimizer=True).to_list(), query
+
+
+# ---------------------------------------------------------------------------
+# Aggregates over a property holding mixed types
+# ---------------------------------------------------------------------------
+#
+# `avg()` is `sum() / count-of-numeric-values`. The fused scan's inline
+# accumulator divided the numeric sum by the count of every *non-null* value
+# instead, so one string cell in an otherwise numeric property dragged every
+# average down — `[10, 20, 'hello']` averaged 10.0 (30/3) rather than 15.0.
+# `sum()` on the same input already counted only numerics, which is what made
+# the two disagree.
+#
+# Absolute goldens, deliberately: the four aggregation paths below must all
+# answer the same, and "same as each other" is not enough — a shared defect
+# would keep the comparison green.
+
+_MIXED_VALUES_QUERY = "avg({x}) AS a, sum({x}) AS s, count({x}) AS c"
+_MIXED_EXPECTED = {"a": 15.0, "s": 30, "c": 3}
+
+
+def _mixed_node_graph() -> KnowledgeGraph:
+    """`:S` nodes whose `v` holds `[10, 20, 'hello']`.
+
+    Written through Cypher `CREATE`: the bulk loader types a column once, so a
+    pandas object column of mixed values arrives as all strings (pinned
+    separately by `test_loader_stringified_column_aggregates_to_null_average`).
+    """
+    graph = KnowledgeGraph()
+    graph.cypher(
+        "CREATE (:S {id: 1, name: 'a', v: 10}),"
+        "       (:S {id: 2, name: 'b', v: 20}),"
+        "       (:S {id: 3, name: 'c', v: 'hello'})"
+    )
+    return graph
+
+
+def _mixed_rel_graph() -> KnowledgeGraph:
+    """Three `:R` edges whose `w` property holds `[10, 20, 'hello']`."""
+    graph = KnowledgeGraph()
+    graph.cypher(
+        "CREATE (:P {id: 1, name: 'a'}), (:P {id: 2, name: 'b'}),"
+        "       (:P {id: 3, name: 'c'}), (:P {id: 4, name: 'd'})"
+    )
+    for target, weight in ((2, "10"), (3, "20"), (4, "'hello'")):
+        graph.cypher(f"MATCH (a:P {{id: 1}}), (b:P {{id: {target}}}) CREATE (a)-[:R {{w: {weight}}}]->(b)")
+    return graph
+
+
+def test_avg_divides_by_the_numeric_count_on_every_aggregation_path():
+    node_graph = _mixed_node_graph()
+    rel_graph = _mixed_rel_graph()
+    cases = (
+        # Fused node-scan aggregate — the path that was wrong.
+        (node_graph, "MATCH (n:S) RETURN " + _MIXED_VALUES_QUERY.format(x="n.v")),
+        # Same shape with the node carried through a WITH.
+        (node_graph, "MATCH (n:S) WITH n RETURN " + _MIXED_VALUES_QUERY.format(x="n.v")),
+        # Projected to a scalar first — the materialized path.
+        (node_graph, "MATCH (n:S) WITH n.v AS x RETURN " + _MIXED_VALUES_QUERY.format(x="x")),
+        # No scan at all.
+        (node_graph, "UNWIND [10, 20, 'hello'] AS x RETURN " + _MIXED_VALUES_QUERY.format(x="x")),
+        # Relationship property.
+        (rel_graph, "MATCH ()-[r:R]->() RETURN " + _MIXED_VALUES_QUERY.format(x="r.w")),
+    )
+    for graph, query in cases:
+        assert _rows(graph, query) == [_MIXED_EXPECTED], query
+        # avg is sum over the numeric count, on the same row it was computed.
+        row = _rows(graph, query)[0]
+        assert row["a"] == row["s"] / 2, query
+        # …and the unoptimized plan agrees, so neither path is alone.
+        assert graph.cypher(query, disable_optimizer=True).to_list() == [_MIXED_EXPECTED], query
+
+
+def test_grouped_avg_divides_each_group_by_its_own_numeric_count():
+    graph = KnowledgeGraph()
+    graph.cypher(
+        "CREATE (:S {id: 1, name: 'a', g: 'x', v: 10}),"
+        "       (:S {id: 2, name: 'b', g: 'x', v: 20}),"
+        "       (:S {id: 3, name: 'c', g: 'x', v: 'hello'}),"
+        "       (:S {id: 4, name: 'd', g: 'y', v: 4}),"
+        "       (:S {id: 5, name: 'e', g: 'y', v: 8})"
+    )
+    query = "MATCH (n:S) RETURN n.g AS g, avg(n.v) AS a, sum(n.v) AS s, count(n.v) AS c ORDER BY g"
+    expected = [
+        {"g": "x", "a": 15.0, "s": 30, "c": 3},
+        # Control group: no string cell, so this one was right all along.
+        {"g": "y", "a": 6.0, "s": 12, "c": 2},
+    ]
+    assert _rows(graph, query) == expected
+    assert graph.cypher(query, disable_optimizer=True).to_list() == expected
+
+
+def test_aggregates_over_zero_numeric_values_are_null_avg_and_zero_sum():
+    """No numeric input at all: `avg` is null (not 0.0) and `sum` is 0."""
+    graph = KnowledgeGraph()
+    graph.cypher("CREATE (:S {id: 1, name: 'a', v: 'x'}), (:S {id: 2, name: 'b', v: 'y'})")
+    expected = [{"a": None, "s": 0, "c": 2}]
+    for query in (
+        "MATCH (n:S) RETURN avg(n.v) AS a, sum(n.v) AS s, count(n.v) AS c",
+        "MATCH (n:S) WITH n.v AS x RETURN avg(x) AS a, sum(x) AS s, count(x) AS c",
+        "UNWIND ['x', 'y'] AS x RETURN avg(x) AS a, sum(x) AS s, count(x) AS c",
+    ):
+        assert _rows(graph, query) == expected, query
+        assert graph.cypher(query, disable_optimizer=True).to_list() == expected, query
+
+
+def test_loader_stringified_column_aggregates_to_null_average():
+    """The loader shape: a pandas object column of `[10, 20, 'N/A']`.
+
+    `add_nodes` types the column once, so all three values are stored as
+    strings — every value non-null, none of them numeric. That made the fused
+    path answer `avg` = 0.0 (a numeric sum of 0 over 3 values) while the
+    unfused path answered null. Both now say null, and `sum` says 0.
+    """
+    graph = KnowledgeGraph()
+    graph.add_nodes(
+        pd.DataFrame({"id": [1, 2, 3], "name": ["a", "b", "c"], "v": [10, 20, "N/A"]}),
+        "L",
+        "id",
+        "name",
+        columns=["v"],
+    )
+    # The stringification itself, pinned: it is why there is no numeric value.
+    assert _rows(graph, "MATCH (n:L) RETURN n.v AS v ORDER BY n.id") == [
+        {"v": "10"},
+        {"v": "20"},
+        {"v": "N/A"},
+    ]
+    query = "MATCH (n:L) RETURN avg(n.v) AS a, sum(n.v) AS s, count(n.v) AS c"
+    expected = [{"a": None, "s": 0, "c": 3}]
+    assert _rows(graph, query) == expected
+    assert graph.cypher(query, disable_optimizer=True).to_list() == expected
+
+
+def test_sum_keeps_its_numeric_type_when_a_string_cell_is_present():
+    """`sum()`'s Int64-vs-Float64 choice must not read `min()`.
+
+    A string outranks every number in the cross-type order, so deriving the
+    integer-ness of the sum from the running minimum turned `sum` over an
+    integer property into a float the moment one string cell appeared — on the
+    fused path only.
+    """
+    graph = _mixed_node_graph()
+    for query, expected in (
+        ("MATCH (n:S) RETURN sum(n.v) AS s", 30),
+        ("MATCH (n:S) RETURN min(n.v) AS m", "hello"),
+        ("MATCH (n:S) RETURN max(n.v) AS m", 20),
+    ):
+        assert _rows(graph, query) == [{query.split(" AS ")[1]: expected}], query
+        assert graph.cypher(query, disable_optimizer=True).to_list() == [{query.split(" AS ")[1]: expected}], query
+    # Int64, not Float64 — `str()` is what the differential corpus compares on.
+    assert isinstance(_scalar(graph, "MATCH (n:S) RETURN sum(n.v) AS s"), int)
