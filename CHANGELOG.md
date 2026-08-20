@@ -48,6 +48,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   where a string outranks every number. `count()` is unchanged: it still counts
   every non-null value.
 
+- **`sum()` could flip between an integer and a float result type for
+  identical data**, depending on which internal aggregation path happened to
+  serve the query. The materialized executor decided the type by probing the
+  *first* row of the group, so a leading non-numeric or null value — which
+  says nothing about the numerics behind it — forced the whole sum to a float:
+  `['x', 10]` summed to `10.0` and `[null, 1, 2]` to `3.0`, while the streaming
+  and fused-scan paths answered `10` and `3` for the same rows. Whether a query
+  saw one or the other depended on the query's shape (a `median` alongside the
+  `sum`, a grouping key, `DISTINCT`, `streaming=False`, `disable_optimizer=True`
+  all route differently).
+
+  All paths now apply the same rule: the result is an integer iff every numeric
+  input was an integer and the total is whole. Floats, and non-`Int64` numeric
+  values generally, still produce a float; non-numeric values and nulls are
+  skipped and no longer influence the type. `avg`, `count`, `min` and `max` are
+  unchanged.
+
 ## [0.16.5] - 2026-08-19
 
 ### Added

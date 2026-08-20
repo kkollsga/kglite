@@ -395,3 +395,99 @@ fn fused_sum_keeps_the_unfused_paths_numeric_type_on_mixed_columns() {
         assert_eq!(fused, materialized, "fused vs materialized over {values:?}");
     }
 }
+
+/// Run `query` unoptimized — what `disable_optimizer=True` does — and return
+/// its one row. Without the fusion pass there is no `FusedNodeScanAggregate`
+/// clause, so an aggregate the MATCH clause's inline accumulator declines
+/// falls through to the materialized executor.
+fn materialized_aggregation_row(graph: &DirGraph, query: &str) -> Vec<Value> {
+    let params = HashMap::new();
+    let parsed = parser::parse_cypher(query).unwrap();
+    let result = CypherExecutor::with_params(graph, &params, None)
+        .execute(&parsed)
+        .unwrap_or_else(|e| panic!("query failed: {query}\n  error: {e}"));
+    assert_eq!(result.rows.len(), 1, "expected one row from: {query}");
+    (0..result.rows[0].len())
+        .map(|i| result.rows[0][i].clone())
+        .collect()
+}
+
+#[test]
+fn materialized_sum_keeps_the_streaming_paths_numeric_type() {
+    // `sum()`'s Int64-vs-Float64 choice is one rule across all three
+    // aggregation paths: integer iff every numeric input was an `Int64` and
+    // the total is whole. The materialized executor instead probed the
+    // group's *first* row, so a leading string or null — which says nothing
+    // about the numerics behind it — flipped the type. Pre-fix, the first two
+    // cases below answered `Float64(10.0)` and `Float64(3.0)` here while the
+    // streaming and fused paths answered `Int64`.
+    //
+    // Two shapes, because the materialized executor decides the type twice.
+    //   * `sum` beside `median`: no grouping key, and `median` is one of the
+    //     aggregates both the streaming recognizer and the fused scan refuse,
+    //     so the whole RETURN falls to `evaluate_aggregate_with_rows`.
+    //   * a literal grouping key: grouping routes through
+    //     `try_fused_numeric_aggregation`, and the literal keeps the MATCH
+    //     clause's inline accumulator from absorbing the scan.
+    for (values, expected) in [
+        (
+            vec![Value::String("x".into()), Value::Int64(10)],
+            Value::Int64(10),
+        ),
+        (
+            vec![Value::Null, Value::Int64(1), Value::Int64(2)],
+            Value::Int64(3),
+        ),
+        (
+            vec![Value::Float64(1.5), Value::Int64(2)],
+            Value::Float64(3.5),
+        ),
+        (
+            vec![Value::Int64(2), Value::Float64(1.5)],
+            Value::Float64(3.5),
+        ),
+        (vec![Value::Int64(1), Value::Int64(2)], Value::Int64(3)),
+        (
+            vec![Value::String("x".into()), Value::String("y".into())],
+            Value::Int64(0),
+        ),
+    ] {
+        let graph = build_mixed_property_graph(values.clone());
+
+        let unkeyed = "MATCH (n:S) RETURN sum(n.v) AS s, median(n.v) AS m";
+        // The streaming recognizer refuses `median`, so this shape cannot
+        // reach `stream::aggregate` either — the materialized executor is the
+        // only thing left that can answer it.
+        assert!(
+            crate::graph::languages::cypher::executor::stream::aggregate::try_compile_specs(
+                match &parser::parse_cypher(unkeyed).unwrap().clauses[1] {
+                    Clause::Return(rc) => rc,
+                    other => panic!("expected a RETURN clause, got {other:?}"),
+                }
+            )
+            .is_err(),
+            "non-vacuity: the streaming path accepted `{unkeyed}`"
+        );
+        assert_eq!(
+            materialized_aggregation_row(&graph, unkeyed)[0],
+            expected,
+            "unkeyed sum over {values:?}"
+        );
+
+        let keyed = "MATCH (n:S) RETURN 1 AS k, sum(n.v) AS s";
+        assert_eq!(
+            materialized_aggregation_row(&graph, keyed)[1],
+            expected,
+            "grouped sum over {values:?}"
+        );
+
+        // DISTINCT bails out of `try_fused_numeric_aggregation` back to
+        // `evaluate_aggregate_with_rows` — the same rule has to hold there.
+        let distinct = "MATCH (n:S) RETURN 1 AS k, sum(DISTINCT n.v) AS s";
+        assert_eq!(
+            materialized_aggregation_row(&graph, distinct)[1],
+            expected,
+            "grouped sum(DISTINCT) over {values:?}"
+        );
+    }
+}

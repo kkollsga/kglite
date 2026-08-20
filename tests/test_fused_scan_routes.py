@@ -583,3 +583,71 @@ def test_sum_keeps_its_numeric_type_when_a_string_cell_is_present():
         assert graph.cypher(query, disable_optimizer=True).to_list() == [{query.split(" AS ")[1]: expected}], query
     # Int64, not Float64 — `str()` is what the differential corpus compares on.
     assert isinstance(_scalar(graph, "MATCH (n:S) RETURN sum(n.v) AS s"), int)
+
+
+# `sum()`'s Int64-vs-Float64 result type is one rule for every internal
+# aggregation path: integer iff every numeric input was an `Int64` and the
+# total is whole. The materialized executor instead probed the *first* row of
+# the group — a leading string or null says nothing about the numerics behind
+# it — so identical data summed to `10` through the streaming and fused-scan
+# paths and `10.0` through the materialized one, and which one a query got
+# depended on whether the streaming aggregate happened to bail.
+#
+# Absolute goldens across all three paths. The route levers, verified against
+# the pre-fix build:
+#   * default kwargs on a bare scan — the fused node-scan aggregate;
+#   * a projected scalar (`WITH n.v AS x`) — the streaming aggregate;
+#   * the same with `streaming=False` — the materialized executor's
+#     `evaluate_aggregate_with_rows`;
+#   * a literal grouping key with the optimizer off — the materialized
+#     executor's `try_fused_numeric_aggregation`;
+#   * `median` alongside `sum` — an aggregate the streaming recognizer and
+#     the fused scan both refuse, so it lands on the materialized executor
+#     whatever else is enabled.
+
+_SUM_TYPE_CASES = (
+    # A leading non-numeric, then an integer: pre-fix Float64(10.0).
+    (["'x'", "10"], 10, int),
+    # A leading null, then integers: pre-fix Float64(3.0).
+    (["null", "1", "2"], 3, int),
+    # A float anywhere makes the sum a float, wherever it sits.
+    (["1.5", "2"], 3.5, float),
+    (["2", "1.5"], 3.5, float),
+    # Controls: all-integer stays integer, no numerics at all sums to 0.
+    (["1", "2"], 3, int),
+    (["'x'", "'y'"], 0, int),
+)
+
+_SUM_TYPE_ROUTES = (
+    ("MATCH (n:S) RETURN sum(n.v) AS s", {}),
+    ("MATCH (n:S) WITH n.v AS x RETURN sum(x) AS s", {}),
+    ("MATCH (n:S) WITH n.v AS x RETURN sum(x) AS s", {"streaming": False}),
+    ("MATCH (n:S) RETURN 1 AS k, sum(n.v) AS s", {"streaming": False, "disable_optimizer": True}),
+    ("MATCH (n:S) RETURN sum(n.v) AS s, median(n.v) AS m", {}),
+    ("MATCH (n:S) RETURN sum(n.v) AS s, median(n.v) AS m", {"streaming": False}),
+)
+
+
+def _sum_type_graph(values: list[str]) -> KnowledgeGraph:
+    """`:S` nodes whose `v` holds `values`; the literal `null` omits `v`."""
+    graph = KnowledgeGraph()
+    parts = []
+    for i, value in enumerate(values, start=1):
+        props = f"id: {i}, name: 's{i}'"
+        if value != "null":
+            props += f", v: {value}"
+        parts.append(f"(:S {{{props}}})")
+    graph.cypher("CREATE " + ", ".join(parts))
+    return graph
+
+
+@pytest.mark.parametrize(("values", "expected", "expected_type"), _SUM_TYPE_CASES)
+def test_sum_result_type_is_the_same_on_every_aggregation_path(values, expected, expected_type):
+    graph = _sum_type_graph(values)
+    for query, kwargs in _SUM_TYPE_ROUTES:
+        row = graph.cypher(query, **kwargs).to_list()[0]
+        label = f"{values} :: {query} {kwargs}"
+        assert row["s"] == expected, label
+        # `bool` is an `int` subclass and `10 == 10.0`, so the type is the
+        # assertion — equality alone cannot see this bug.
+        assert type(row["s"]) is expected_type, label

@@ -147,12 +147,12 @@ impl AggState {
                     self.sum += f;
                     self.count += 1;
                     self.sum_seen_value = true;
-                    // Materialized `evaluate_aggregate_with_rows` for
-                    // `sum` calls `probe_source_type_is_int` which only
-                    // returns true for `Value::Int64(_)` — UniqueId and
-                    // other numeric variants force the result to
-                    // Float64. Match that to keep the streaming result
-                    // shape identical.
+                    // `sum()` is integer-typed only when every numeric
+                    // input was an `Int64` — UniqueId and other numeric
+                    // variants force the result to Float64. The
+                    // materialized (`collect_numeric_values_typed`) and
+                    // fused-scan accumulators apply the identical rule,
+                    // so all three paths agree on the result shape.
                     if !matches!(val, Value::Int64(_)) {
                         self.sum_was_int = false;
                     }

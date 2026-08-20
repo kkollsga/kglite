@@ -530,14 +530,15 @@ impl<'a> CypherExecutor<'a> {
                     }
                 }
                 "sum" => {
-                    let values = self.collect_numeric_values(&args[0], rows, *distinct)?;
+                    let (values, all_int) =
+                        self.collect_numeric_values_typed(&args[0], rows, *distinct)?;
                     if values.is_empty() {
                         Ok(Value::Int64(0))
                     } else {
                         let total: f64 = values.iter().sum();
-                        // Preserve Int64 when all source values are integers
-                        let is_int = self.probe_source_type_is_int(&args[0], rows);
-                        if is_int && total.fract() == 0.0 {
+                        // Integer-typed iff every numeric input was an Int64
+                        // and the total is whole — the streaming path's rule.
+                        if all_int && total.fract() == 0.0 {
                             Ok(Value::Int64(total as i64))
                         } else {
                             Ok(Value::Float64(total))
@@ -1135,7 +1136,29 @@ impl<'a> CypherExecutor<'a> {
         rows: &[&ResultRow],
         distinct: bool,
     ) -> Result<Vec<f64>, String> {
+        Ok(self.collect_numeric_values_typed(expr, rows, distinct)?.0)
+    }
+
+    /// `collect_numeric_values`, plus whether *every* collected value was an
+    /// `Int64`.
+    ///
+    /// That flag is `sum()`'s integer-vs-float decision, and it is the same
+    /// rule the streaming (`stream::aggregate::AggState::sum_was_int`) and
+    /// fused-scan (`match_clause::fused_match`) accumulators apply: integer
+    /// iff no non-`Int64` numeric ever contributed. Non-numeric values and
+    /// nulls are skipped by all three, so they neither add to the sum nor
+    /// change its type. Deliberately *not* a probe of the first row: a
+    /// leading `'x'` or `null` says nothing about the numerics behind it, and
+    /// reading it made the same data sum to `Float64` here and `Int64` on the
+    /// other two paths.
+    pub(super) fn collect_numeric_values_typed(
+        &self,
+        expr: &Expression,
+        rows: &[&ResultRow],
+        distinct: bool,
+    ) -> Result<(Vec<f64>, bool), String> {
         let mut values = Vec::new();
+        let mut all_int = true;
         let mut seen: FxHashSet<u64> = FxHashSet::default();
 
         for (row_idx, row) in rows.iter().enumerate() {
@@ -1148,20 +1171,14 @@ impl<'a> CypherExecutor<'a> {
                         continue;
                     }
                 }
+                if !matches!(val, Value::Int64(_)) {
+                    all_int = false;
+                }
                 values.push(f);
             }
         }
 
-        Ok(values)
-    }
-
-    /// Check if the first evaluated value of an expression is Int64.
-    pub(super) fn probe_source_type_is_int(&self, expr: &Expression, rows: &[&ResultRow]) -> bool {
-        if let Some(row) = rows.first() {
-            matches!(self.evaluate_expression(expr, row), Ok(Value::Int64(_)))
-        } else {
-            false
-        }
+        Ok((values, all_int))
     }
 
     /// Single-pass multi-aggregate: when all aggregates in a group are simple
@@ -1237,6 +1254,10 @@ impl<'a> CypherExecutor<'a> {
         let n = specs.len();
         let mut counts = vec![0i64; n];
         let mut sums = vec![0.0f64; n];
+        // Per-spec: has every numeric that contributed to `sums` been an
+        // `Int64`? `sum()`'s result type, under the same rule the streaming
+        // and fused-scan accumulators use.
+        let mut sums_were_int = vec![true; n];
         let mut mins: Vec<Option<Value>> = vec![None; n];
         let mut maxs: Vec<Option<Value>> = vec![None; n];
 
@@ -1289,6 +1310,9 @@ impl<'a> CypherExecutor<'a> {
                         if let Some(f) = value_to_f64(val) {
                             sums[si] += f;
                             counts[si] += 1;
+                            if !matches!(val, Value::Int64(_)) {
+                                sums_were_int[si] = false;
+                            }
                         }
                     }
                     AggKind::Min => {
@@ -1338,14 +1362,9 @@ impl<'a> CypherExecutor<'a> {
                     if counts[si] == 0 {
                         Value::Int64(0)
                     } else {
-                        // Probe first value to determine if input was integer
-                        let is_int = group_rows.first().is_some_and(|row| {
-                            matches!(
-                                self.evaluate_expression(spec.expr, row),
-                                Ok(Value::Int64(_))
-                            )
-                        });
-                        if is_int && sums[si].fract() == 0.0 {
+                        // Integer-typed iff every numeric input was an Int64
+                        // and the total is whole — the streaming path's rule.
+                        if sums_were_int[si] && sums[si].fract() == 0.0 {
                             Value::Int64(sums[si] as i64)
                         } else {
                             Value::Float64(sums[si])
