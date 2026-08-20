@@ -24,6 +24,30 @@ struct HopPlan<'p> {
     /// Last hop of the pattern: where `max_matches` is exact and where
     /// distinct-target dedup applies.
     is_last_hop: bool,
+    /// How many matches this hop may keep. Exact `max_matches` at the last
+    /// hop; at an intermediate hop an *advisory* overcommit (or `None` on the
+    /// uncapped retry pass) — see [`CapPass`].
+    limit: Option<usize>,
+}
+
+/// Whether an [`PatternExecutor::execute_pass`] applies the advisory
+/// candidate caps.
+///
+/// The caps (100× on start nodes, 50× on intermediate hops) are a
+/// *selectivity heuristic*: they assume roughly one candidate in a hundred
+/// survives the pattern's filters. When that assumption is wrong — an
+/// unlabeled start whose relationship-typed sources enumerate late, a sparse
+/// label, a sparse intermediate hop — enforcing the heuristic as a bound
+/// silently returns zero or partial rows. So they stay for speed, but a pass
+/// that hit one and came back short is re-run [`CapPass::Uncapped`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CapPass {
+    /// First pass: advisory caps on, cap bites recorded.
+    Capped,
+    /// Retry pass: no pre-caps on start nodes or intermediate hops. The exact
+    /// `max_matches` early-exit at the last hop stays — correctness never
+    /// needed the pre-caps, only the final limit.
+    Uncapped,
 }
 
 impl<'a> PatternExecutor<'a> {
@@ -95,6 +119,14 @@ impl<'a> PatternExecutor<'a> {
                         .sources_for_conn_type_bounded(ct, source_cap)
                     {
                         Some(sources) => {
+                            // A read that came back exactly full to the cap may
+                            // have left later sources unseen; the index cannot
+                            // say which. Treat it as a bite — a false positive
+                            // costs at most one retry, and only on a pass that
+                            // already came back short.
+                            if source_cap.is_some_and(|cap| sources.len() >= cap) {
+                                self.note_cap_truncated();
+                            }
                             union.extend(sources.into_iter().map(|s| NodeIndex::new(s as usize)));
                         }
                         None => {
@@ -120,14 +152,41 @@ impl<'a> PatternExecutor<'a> {
         };
         if let Some(cap) = source_cap {
             if initial_nodes.len() > cap {
+                // Only advisory when the pattern has edges — see `execute`,
+                // where a single-node pattern's cap is the exact limit.
+                if has_edges {
+                    self.note_cap_truncated();
+                }
                 initial_nodes.truncate(cap);
             }
         }
         Ok(initial_nodes)
     }
 
-    /// Execute the pattern and return all matches
+    /// Execute the pattern and return all matches.
+    ///
+    /// Runs [`Self::execute_pass`] with the advisory caps on. If that pass hit
+    /// a cap *and* came back short of `max_matches`, the short result is not
+    /// evidence that the pattern has no more rows — the caps are a selectivity
+    /// heuristic, not a bound — so the whole pattern is re-run once with the
+    /// pre-caps off. Re-entering `execute_pass` (rather than resuming the
+    /// capped one) is what keeps the distinct-target dedup, the lazy seeding
+    /// and the per-hop bookkeeping consistent: the retry is an ordinary
+    /// execution that happens to have no pre-caps.
+    ///
+    /// A dense pattern — one where the cap is met by real rows — never reads
+    /// the bit for anything: it returns `max_matches` rows and returns here.
     pub fn execute(&self, pattern: &Pattern) -> Result<Vec<PatternMatch>, String> {
+        self.take_cap_truncated();
+        let matches = self.execute_pass(pattern, CapPass::Capped)?;
+        if self.max_matches.is_some_and(|max| matches.len() < max) && self.take_cap_truncated() {
+            return self.execute_pass(pattern, CapPass::Uncapped);
+        }
+        Ok(matches)
+    }
+
+    /// One execution of `pattern` under the given cap regime.
+    fn execute_pass(&self, pattern: &Pattern, pass: CapPass) -> Result<Vec<PatternMatch>, String> {
         if pattern.elements.is_empty() {
             return Ok(Vec::new());
         }
@@ -153,9 +212,17 @@ impl<'a> PatternExecutor<'a> {
             // construction for millions of nodes. The expansion loop enforces exact
             // max_matches via early-exit. 100x headroom handles sparse match patterns
             // (each source needs only a 1% chance of producing a match to hit the limit).
-            self.max_matches.map(|m| m.saturating_mul(100).max(1000))
+            // The start-node set is relationship-type-blind, so this headroom is a guess
+            // about selectivity, not a bound — a short result under it is retried
+            // uncapped by `execute`.
+            match pass {
+                CapPass::Capped => self.max_matches.map(|m| m.saturating_mul(100).max(1000)),
+                CapPass::Uncapped => None,
+            }
         } else {
-            // Single-node pattern: exact truncation
+            // Single-node pattern: exact truncation — `find_matching_nodes` has
+            // already applied every filter the pattern has, so any
+            // `max_matches` of these rows is a correct answer.
             self.max_matches
         };
         let initial_nodes = self.seed_start_nodes(pattern, first_node, has_edges, source_cap)?;
@@ -230,6 +297,19 @@ impl<'a> PatternExecutor<'a> {
                 track_fixed_trail: edge_pattern.var_length.is_none()
                     && edge_pattern.needs_path_info,
                 is_last_hop,
+                // At the last hop `max_matches` is exact. At an intermediate
+                // hop it is a generous overcommit (50×) that avoids expanding
+                // far more intermediates than needed — advisory, because a
+                // sparse intermediate can push the rows that survive to the
+                // last hop past it. The uncapped retry drops it entirely.
+                limit: if is_last_hop {
+                    self.max_matches
+                } else {
+                    match pass {
+                        CapPass::Capped => self.max_matches.map(|m| m.saturating_mul(50).max(1000)),
+                        CapPass::Uncapped => None,
+                    }
+                },
             };
 
             // Expand each current match.
@@ -258,14 +338,14 @@ impl<'a> PatternExecutor<'a> {
             }
 
             // Apply hop limit truncation (for parallel path which can't early-exit)
-            let truncate_limit = if is_last_hop {
-                self.max_matches
-            } else {
-                self.max_matches.map(|m| m.saturating_mul(50).max(1000))
-            };
-            if let Some(max) = truncate_limit {
-                new_matches.truncate(max);
-                new_indices.truncate(max);
+            if let Some(max) = hop.limit {
+                if new_matches.len() > max {
+                    if !is_last_hop {
+                        self.note_cap_truncated();
+                    }
+                    new_matches.truncate(max);
+                    new_indices.truncate(max);
+                }
             }
 
             // Intermediate dedup: when distinct_target_var is set and this is
@@ -392,15 +472,9 @@ impl<'a> PatternExecutor<'a> {
         let mut new_matches = Vec::new();
         let mut new_indices = Vec::new();
         let mut expand_count: usize = 0;
-        // At the last hop, enforce exact max_matches.
-        // At intermediate hops, use a generous overcommit (50x) to avoid
-        // expanding far more intermediates than needed while ensuring
-        // enough survive to produce max_matches final results.
-        let hop_limit = if hop.is_last_hop {
-            self.max_matches
-        } else {
-            self.max_matches.map(|m| m.saturating_mul(50).max(1000))
-        };
+        // Exact `max_matches` at the last hop, the advisory overcommit at an
+        // intermediate one — computed once for the whole hop in `execute_pass`.
+        let hop_limit = hop.limit;
         for (position, &source_idx) in current_indices.iter().enumerate() {
             if hop_limit.is_some_and(|max| new_matches.len() >= max) {
                 break;
@@ -449,6 +523,19 @@ impl<'a> PatternExecutor<'a> {
                 new_matches.push(self.extend_match(current_match, hop, edge_binding, target_idx));
                 new_indices.push(target_idx);
             }
+        }
+        // An intermediate hop that filled its advisory limit was cut short:
+        // the loop may have stopped before the last source, and
+        // `expand_from_node` itself stops at `remaining` — so a hop that
+        // produced exactly the limit cannot tell "that is all there was" from
+        // "the rest was dropped". Either way the matches that would have
+        // reached the final hop may be in the part never expanded, so the pass
+        // is not authoritative. (A hop that fills the limit *exactly* with
+        // everything there was costs one retry, and only on a pass that came
+        // back short of `max_matches`.) The last hop is exempt: there
+        // `hop.limit` IS `max_matches`, and filling it is the answer.
+        if !hop.is_last_hop && hop_limit.is_some_and(|max| new_matches.len() >= max) {
+            self.note_cap_truncated();
         }
         Ok((new_matches, new_indices))
     }

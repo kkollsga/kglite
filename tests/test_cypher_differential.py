@@ -2722,7 +2722,243 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (v) WHERE elementId(v) = $eid RETURN v.name AS nm",
         {"eid": "999999"},
     ),
+    # ── LIMIT over the pattern executor's candidate caps (2026-08-20) ────
+    #
+    # Pushing a LIMIT into the MATCH caps the candidates the pattern executor
+    # materialises: `max(limit * 100, 1000)` start nodes and `max(limit * 50,
+    # 1000)` intermediates per hop. Both numbers are a *selectivity* guess —
+    # neither knows the relationship type — so a start node (or intermediate)
+    # whose only matching edge sits past the cap used to be dropped and the
+    # query answered with zero rows. The naive plan has no `limit_hint`, so
+    # this corpus is exactly the right instrument; what it lacked was a
+    # fixture big enough to reach the 1 000 floor. `cap_threshold_graph` is.
+    (
+        "limit_unlabeled_start_late_source",
+        "cap_threshold_graph",
+        "MATCH (a)-[:WROTE]->(b) RETURN a.name AS a, b.name AS b LIMIT 1",
+        None,
+    ),
+    (
+        "limit_unlabeled_start_late_source_cliff",
+        "cap_threshold_graph",
+        # `10 * 100` lands exactly on the 1 000 floor, `11 * 100` clears it:
+        # the answer used to change between these two.
+        "MATCH (a)-[:WROTE]->(b) RETURN a.name AS a, b.name AS b LIMIT 10",
+        None,
+    ),
+    (
+        "limit_labeled_sparse_start",
+        "cap_threshold_graph",
+        "MATCH (p:Paper)-[:CITES]->(q:Paper) RETURN p.name AS p, q.name AS q LIMIT 1",
+        None,
+    ),
+    (
+        "limit_undirected_late_source",
+        "cap_threshold_graph",
+        # LIMIT 2 takes both orientations of the single edge, so the entry does
+        # not depend on which one enumerates first.
+        "MATCH (a)-[:WROTE]-(b) RETURN a.name AS a, b.name AS b LIMIT 2",
+        None,
+    ),
+    (
+        "limit_var_length_late_source",
+        "cap_threshold_graph",
+        "MATCH (a)-[:WROTE*1..2]->(b) RETURN a.name AS a, b.name AS b LIMIT 1",
+        None,
+    ),
+    (
+        "limit_alternation_late_source",
+        "cap_threshold_graph",
+        "MATCH (a)-[:WROTE|CITES]->(b) RETURN a.name AS a, b.name AS b LIMIT 2",
+        None,
+    ),
+    (
+        # Two hops: the venue's 1 200 papers overrun the intermediate-hop cap,
+        # and the one paper carrying the second hop is in the overrun.
+        "limit_sparse_intermediate_hop",
+        "cap_threshold_graph",
+        "MATCH (v:Venue)-[:HOSTED]->(p:Paper)-[:REFS]->(q:Paper) RETURN v.name AS v, p.name AS p, q.name AS q LIMIT 1",
+        None,
+    ),
+    (
+        # The retry's worst case: nothing matches, so the uncapped pass runs
+        # and still finds nothing. Pinned so it stays empty rather than
+        # becoming a source of invented rows.
+        "limit_missing_relationship_type",
+        "cap_threshold_graph",
+        "MATCH (a)-[:NOSUCH]->(b) RETURN a.name AS a, b.name AS b LIMIT 1",
+        None,
+    ),
+    (
+        # OPTIONAL MATCH + LIMIT drives off the leading MATCH, so the cap never
+        # decided this one. Pinned to keep it that way.
+        "limit_optional_match_over_cap",
+        "cap_threshold_graph",
+        "MATCH (a:Author) OPTIONAL MATCH (a)-[:WROTE]->(p:Paper) RETURN a.name AS a, p.name AS p ORDER BY a LIMIT 5",
+        None,
+    ),
 ]
+
+
+# Sized to cross the pattern executor's candidate caps, whose smallest form is
+# a flat floor of 1 000 (`max(limit * 100, 1000)` start nodes,
+# `max(limit * 50, 1000)` intermediates). Every other fixture in this file is
+# two or three orders of magnitude below that floor, which is why the corpus —
+# an instrument that would otherwise have caught the bug outright — stayed
+# green through it for eight minor versions.
+_CAP_FILLERS = 1100
+_CAP_PAPERS = 1200
+
+
+def _build_cap_threshold_graph() -> kglite.KnowledgeGraph:
+    """~2 500 nodes over four types, with every edge-carrying source late.
+
+    Insertion order is load-bearing: `Filler` and `Paper` are created first, so
+    the `Author` nodes (the only `WROTE` sources) sit past node 2 300 and an
+    *unlabeled* start scan reaches them only after the start-node cap. The
+    `CITES` source is the last `Paper` created, so a *labeled* start hits the
+    same wall inside the type index. And `venue-1` hosts all 1 200 papers while
+    only `paper-1` carries a `REFS` edge onward — the edge iteration walks a
+    node's edges newest-first, so `paper-1` is the *last* intermediate the
+    first hop yields and the intermediate-hop cap is what drops it.
+    """
+    import pandas as pd
+
+    g = kglite.KnowledgeGraph()
+    g.add_nodes(
+        pd.DataFrame(
+            {
+                "id": [f"f{i}" for i in range(1, _CAP_FILLERS + 1)],
+                "name": [f"filler-{i}" for i in range(1, _CAP_FILLERS + 1)],
+            }
+        ),
+        "Filler",
+        "id",
+        "name",
+    )
+    g.add_nodes(
+        pd.DataFrame(
+            {
+                "id": [f"p{i}" for i in range(1, _CAP_PAPERS + 1)],
+                "name": [f"paper-{i}" for i in range(1, _CAP_PAPERS + 1)],
+                "year": [2000 + (i % 20) for i in range(1, _CAP_PAPERS + 1)],
+            }
+        ),
+        "Paper",
+        "id",
+        "name",
+        columns=["year"],
+    )
+    g.add_nodes(
+        pd.DataFrame({"id": ["v1", "v2", "v3"], "name": ["venue-1", "venue-2", "venue-3"]}),
+        "Venue",
+        "id",
+        "name",
+    )
+    g.add_nodes(
+        pd.DataFrame(
+            {
+                "id": [f"a{i}" for i in range(1, 201)],
+                "name": [f"author-{i}" for i in range(1, 201)],
+            }
+        ),
+        "Author",
+        "id",
+        "name",
+    )
+
+    # venue-1 hosts every paper: 1 200 intermediates at the first hop.
+    g.add_connections(
+        pd.DataFrame({"src": ["v1"] * _CAP_PAPERS, "dst": [f"p{i}" for i in range(1, _CAP_PAPERS + 1)]}),
+        "HOSTED",
+        "Venue",
+        "src",
+        "Paper",
+        "dst",
+    )
+    # The graph's only second hop, hanging off the first-created HOSTED edge.
+    g.add_connections(pd.DataFrame({"src": ["p1"], "dst": ["p6"]}), "REFS", "Paper", "src", "Paper", "dst")
+    # Sole CITES edge, sourced from the LAST paper in the type index.
+    g.add_connections(
+        pd.DataFrame({"src": [f"p{_CAP_PAPERS}"], "dst": ["p5"]}),
+        "CITES",
+        "Paper",
+        "src",
+        "Paper",
+        "dst",
+    )
+    # Sole WROTE edge, sourced from the last node in the graph.
+    g.add_connections(pd.DataFrame({"src": ["a200"], "dst": ["p11"]}), "WROTE", "Author", "src", "Paper", "dst")
+    return g
+
+
+@pytest.fixture
+def cap_threshold_graph() -> kglite.KnowledgeGraph:
+    return _build_cap_threshold_graph()
+
+
+@pytest.mark.differential
+def test_cap_threshold_fixture_crosses_the_candidate_caps() -> None:
+    """Non-vacuity guard for the `cap_threshold_graph` corpus entries.
+
+    Those entries compare two plans; if the fixture ever shrinks back under the
+    1 000-candidate floor they would compare two *uncapped* plans and agree
+    forever. Pin the sizes that make the caps reachable.
+    """
+    g = _build_cap_threshold_graph()
+    assert g.cypher("MATCH (n) RETURN count(n) AS c").to_list()[0]["c"] > 2000
+    assert g.cypher("MATCH (p:Paper) RETURN count(p) AS c").to_list()[0]["c"] > 1000
+    assert g.cypher("MATCH (v:Venue)-[:HOSTED]->(p:Paper) RETURN count(p) AS c").to_list()[0]["c"] > 1000
+
+
+@pytest.mark.differential
+@pytest.mark.parametrize(
+    "query,expected",
+    [
+        (
+            "MATCH (a)-[:WROTE]->(b) RETURN a.name AS a, b.name AS b LIMIT 1",
+            [{"a": "author-200", "b": "paper-11"}],
+        ),
+        (
+            "MATCH (a)-[:WROTE]->(b) RETURN a.name AS a, b.name AS b LIMIT 10",
+            [{"a": "author-200", "b": "paper-11"}],
+        ),
+        (
+            "MATCH (p:Paper)-[:CITES]->(q:Paper) RETURN p.name AS p, q.name AS q LIMIT 1",
+            [{"p": "paper-1200", "q": "paper-5"}],
+        ),
+        (
+            "MATCH (a)-[:WROTE*1..2]->(b) RETURN a.name AS a, b.name AS b LIMIT 1",
+            [{"a": "author-200", "b": "paper-11"}],
+        ),
+        (
+            "MATCH (v:Venue)-[:HOSTED]->(p:Paper)-[:REFS]->(q:Paper) "
+            "RETURN v.name AS v, p.name AS p, q.name AS q LIMIT 1",
+            [{"v": "venue-1", "p": "paper-1", "q": "paper-6"}],
+        ),
+        (
+            "MATCH (a)-[:NOSUCH]->(b) RETURN a.name AS a, b.name AS b LIMIT 1",
+            [],
+        ),
+    ],
+    ids=[
+        "unlabeled_start",
+        "unlabeled_start_at_the_cliff",
+        "labeled_sparse_start",
+        "var_length",
+        "sparse_intermediate_hop",
+        "missing_relationship_type",
+    ],
+)
+def test_limit_returns_the_rows_that_exist(query: str, expected: list[dict]) -> None:
+    """Absolute goldens for the LIMIT-over-cap shapes.
+
+    The differential entries above compare two plans; these pin the *answer*,
+    which is what a user sees. A LIMITed pattern returns the rows the graph
+    has — the candidate caps are an optimization, not a bound on the result.
+    """
+    g = _build_cap_threshold_graph()
+    assert g.cypher(query).to_list() == expected
 
 
 @pytest.fixture

@@ -357,6 +357,15 @@ pub struct PatternExecutor<'a> {
     /// instruction: the candidate scan still applies its own runtime row ×
     /// cost-class gate before it fans out.
     parallel: bool,
+    /// Set by [`PatternExecutor::note_cap_truncated`] whenever one of the
+    /// *advisory* candidate caps under `max_matches` actually discarded
+    /// candidates — see `matcher_expansion.rs`. Those caps are a selectivity
+    /// heuristic, so a short result with this bit set is not evidence that the
+    /// pattern has no more rows: `execute` re-runs the pattern once with the
+    /// pre-caps off. `AtomicBool` rather than `Cell` because the parallel
+    /// expansion path captures `&self` across rayon workers; a `Relaxed` store
+    /// on the (rare) truncation path is not on the hot path.
+    cap_truncated: AtomicBool,
     /// Holds the disk materialization arenas alive for this executor's
     /// lifetime (arena protocol in `storage/disk/graph.rs`, enforced by a
     /// debug assert). Acquired in every constructor so pattern matching is
@@ -386,6 +395,7 @@ impl<'a> PatternExecutor<'a> {
             cancel: None,
             distinct_target_var: None,
             parallel: false,
+            cap_truncated: AtomicBool::new(false),
             _arena_guard: graph.graph.begin_query(),
         }
     }
@@ -406,6 +416,7 @@ impl<'a> PatternExecutor<'a> {
             cancel: None,
             distinct_target_var: None,
             parallel: false,
+            cap_truncated: AtomicBool::new(false),
             _arena_guard: graph.graph.begin_query(),
         }
     }
@@ -426,6 +437,7 @@ impl<'a> PatternExecutor<'a> {
             cancel: None,
             distinct_target_var: None,
             parallel: false,
+            cap_truncated: AtomicBool::new(false),
             _arena_guard: graph.graph.begin_query(),
         }
     }
@@ -468,6 +480,21 @@ impl<'a> PatternExecutor<'a> {
             }
         }
         None
+    }
+
+    /// Record that an advisory candidate cap discarded candidates on this
+    /// pass. See [`PatternExecutor::cap_truncated`].
+    #[inline]
+    fn note_cap_truncated(&self) {
+        self.cap_truncated
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Read and clear the advisory-cap bit.
+    #[inline]
+    fn take_cap_truncated(&self) -> bool {
+        self.cap_truncated
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Set a distinct target variable for deduplication during pattern matching.

@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A `LIMIT`ed relationship pattern could silently return zero or partial
+  rows.** Pushing a `LIMIT` into a `MATCH` caps how many candidates the pattern
+  executor materialises — `max(limit * 100, 1000)` start nodes and
+  `max(limit * 50, 1000)` intermediates per hop. Those numbers are a
+  *selectivity* guess: neither knows which relationship type is being matched,
+  so a start node whose only matching edge sat past the cap was dropped and the
+  query answered with silence rather than with rows. It affected unlabeled
+  starts whose relationship sources enumerate late, sparsely-labeled starts
+  (3 000 `:Symbol` nodes of which 5 carry a `:RARE` edge, `LIMIT 3` → 0 rows),
+  undirected, reversed, variable-length and type-alternation patterns, and
+  multi-hop patterns with a sparse intermediate. The answer could also change
+  with the limit itself, since the cap is arithmetic on it (`LIMIT 10` → 0
+  rows, `LIMIT 11` → rows).
+
+  The caps are now advisory: they still bound the first pass, but a pass that
+  hit one and came back short of the limit is re-run once without them, so the
+  answer is the rows the graph has. A query whose limit is met by real rows —
+  the case the caps exist for — is unaffected and pays nothing.
+
+  Present since 0.7.4 (start-node cap) and 0.6.18 (hop cap), not introduced by
+  0.16.1; 0.16.1's lazy seeding made the start-node shape easier to reach.
+
 ## [0.16.5] - 2026-08-19
 
 ### Added
