@@ -491,3 +491,68 @@ fn materialized_sum_keeps_the_streaming_paths_numeric_type() {
         );
     }
 }
+
+#[test]
+fn materialized_distinct_aggregates_dedup_on_the_value() {
+    // A DISTINCT aggregate dedups on the `Value` — the same key
+    // `RETURN DISTINCT`, `WITH DISTINCT` and `count(DISTINCT …)` use. The
+    // materialized executor had two private keys instead, and both lost data
+    // no other path lost:
+    //
+    //   * the numeric collector keyed on the `f64` **bit pattern**, so
+    //     `Int64(1)` and `Float64(1.0)` were one value here and two
+    //     everywhere else — `sum(DISTINCT …)` over `[1, 1.0, 2]` answered
+    //     `Int64(3)` on this path and `Float64(4.0)` on the streaming one;
+    //   * `collect(DISTINCT …)` keyed on `format_value_compact`, which renders
+    //     `Int64(1)` and `String("1")` both as `"1"` — so the list came back
+    //     one element short of the `count(DISTINCT …)` computed beside it.
+    //
+    // Every query below is refused by the streaming recognizer (`median` and
+    // `collect` are both outside its reach), so nothing but
+    // `evaluate_aggregate_with_rows` can answer them — asserted, not assumed.
+    for (values, query, expected) in [
+        (
+            vec![Value::Int64(1), Value::Float64(1.0), Value::Int64(2)],
+            "MATCH (n:S) RETURN sum(DISTINCT n.v) AS s, median(n.v) AS m",
+            Value::Float64(4.0),
+        ),
+        (
+            vec![Value::Int64(1), Value::Int64(1), Value::Int64(2)],
+            "MATCH (n:S) RETURN sum(DISTINCT n.v) AS s, median(n.v) AS m",
+            Value::Int64(3),
+        ),
+        // `0.0` and `-0.0` are one value under `Value`'s `Eq`/`Hash`; the bit
+        // pattern said two, so this summed to `1.5` over three values.
+        (
+            vec![
+                Value::Float64(0.0),
+                Value::Float64(-0.0),
+                Value::Float64(1.5),
+            ],
+            "MATCH (n:S) RETURN avg(DISTINCT n.v) AS a, median(n.v) AS m",
+            Value::Float64(0.75),
+        ),
+        (
+            vec![Value::Int64(1), Value::String("1".into())],
+            "MATCH (n:S) RETURN collect(DISTINCT n.v) AS l",
+            Value::List(vec![Value::Int64(1), Value::String("1".into())]),
+        ),
+    ] {
+        let graph = build_mixed_property_graph(values.clone());
+        assert!(
+            crate::graph::languages::cypher::executor::stream::aggregate::try_compile_specs(
+                match &parser::parse_cypher(query).unwrap().clauses[1] {
+                    Clause::Return(rc) => rc,
+                    other => panic!("expected a RETURN clause, got {other:?}"),
+                }
+            )
+            .is_err(),
+            "non-vacuity: the streaming path accepted `{query}`"
+        );
+        assert_eq!(
+            materialized_aggregation_row(&graph, query)[0],
+            expected,
+            "distinct aggregate over {values:?}"
+        );
+    }
+}

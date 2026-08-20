@@ -26,8 +26,10 @@ import pytest
 from kglite import KnowledgeGraph
 
 
-def _rows(graph: KnowledgeGraph, query: str, params: dict | None = None) -> list[dict]:
-    return graph.cypher(query, params=params).to_list() if params else graph.cypher(query).to_list()
+def _rows(graph: KnowledgeGraph, query: str, params: dict | None = None, **kwargs) -> list[dict]:
+    if params:
+        return graph.cypher(query, params=params, **kwargs).to_list()
+    return graph.cypher(query, **kwargs).to_list()
 
 
 def _scalar(graph: KnowledgeGraph, query: str):
@@ -651,3 +653,131 @@ def test_sum_result_type_is_the_same_on_every_aggregation_path(values, expected,
         # `bool` is an `int` subclass and `10 == 10.0`, so the type is the
         # assertion — equality alone cannot see this bug.
         assert type(row["s"]) is expected_type, label
+
+
+# A `DISTINCT` aggregate dedups on the **value**, which is the rule
+# `RETURN DISTINCT`, `WITH DISTINCT` and `count(DISTINCT …)` already apply
+# everywhere else in the engine: `1` and `1.0` are two values, `1` and `'1'`
+# are two values, `0.0` and `-0.0` are one. (Cypher's `=` says `1 = 1.0`, but
+# DISTINCT is an equivalence over values, and this engine's `RETURN DISTINCT`
+# over `[1, 1.0]` has always emitted two rows — the aggregates now agree with
+# the clause instead of each holding a private opinion.)
+#
+# Three implementations disagreed, each in its own direction:
+#   * the materialized numeric collector keyed on the `f64` **bit pattern**,
+#     so `sum(DISTINCT …)` over `[1, 1.0, 2]` folded the int and the float
+#     into one value (3) while every other path kept both (4.0) — and it
+#     split `0.0` from `-0.0`, which `count(DISTINCT …)` merges;
+#   * `collect(DISTINCT …)` keyed on `format_value_compact`, whose output for
+#     `Int64(1)` and `String("1")` is the same `"1"` — so one of the two was
+#     silently **dropped from the list**, in a row whose own
+#     `count(DISTINCT …)` said 2;
+#   * the streaming aggregate deduped correctly per surrogate group but
+#     `AggState::merge` added the partial sums while it unioned the value
+#     sets, so any node-property group key — which buckets one surrogate
+#     group per node before re-bucketing — made `sum(DISTINCT …)` count every
+#     row again: `[1, 1, 2]` grouped by `n.g` summed to 4.
+#
+# Absolute goldens across every route that serves a DISTINCT aggregate. The
+# levers are the ones `_SUM_TYPE_ROUTES` documents, plus a node-property group
+# key for the streaming path's re-bucket merge.
+
+_DISTINCT_ROUTES = (
+    ("MATCH (n:S) RETURN {agg} AS r", {}),
+    ("MATCH (n:S) WITH n.v AS x RETURN {agg_x} AS r", {}),
+    ("MATCH (n:S) WITH n.v AS x RETURN {agg_x} AS r", {"streaming": False}),
+    # Node-property group key: one surrogate group per node, then a merge.
+    ("MATCH (n:S) RETURN n.g AS g, {agg} AS r", {}),
+    ("MATCH (n:S) RETURN n.g AS g, {agg} AS r", {"streaming": False, "disable_optimizer": True}),
+    # `median` is refused by both the streaming recognizer and the fused scan.
+    ("MATCH (n:S) RETURN {agg} AS r, median(n.v) AS md", {}),
+    ("UNWIND {lit} AS x RETURN {agg_x} AS r", {}),
+    ("UNWIND {lit} AS x RETURN {agg_x} AS r", {"streaming": False}),
+)
+
+_DISTINCT_CASES = (
+    # An int and a float that compare equal are two distinct values.
+    (
+        ["1", "1.0", "2"],
+        {"count": 3, "sum": 4.0, "avg": 4 / 3, "collect": [1, 1.0, 2], "min": 1, "max": 2},
+    ),
+    # Control: a real duplicate is folded, on every route.
+    (
+        ["1", "1", "2"],
+        {"count": 2, "sum": 3, "avg": 1.5, "collect": [1, 2], "min": 1, "max": 2},
+    ),
+    # `1` and `'1'` share a compact string form and nothing else.
+    (
+        ["1", "'1'"],
+        {"count": 2, "sum": 1, "avg": 1.0, "collect": [1, "1"], "min": "1", "max": 1},
+    ),
+    # `0.0` and `-0.0` are one value — `Value`'s own `Eq`/`Hash` say so.
+    (
+        ["0.0", "-0.0", "1.5"],
+        {"count": 2, "sum": 1.5, "avg": 0.75, "collect": [0.0, 1.5], "min": 0.0, "max": 1.5},
+    ),
+)
+
+
+def _distinct_graph(values: list[str]) -> KnowledgeGraph:
+    """`:S` nodes holding `values` in `v`, all sharing the group key `g`."""
+    graph = KnowledgeGraph()
+    parts = [f"(:S {{id: {i}, name: 's{i}', g: 'x', v: {value}}})" for i, value in enumerate(values, start=1)]
+    graph.cypher("CREATE " + ", ".join(parts))
+    return graph
+
+
+@pytest.mark.parametrize(("values", "expected"), _DISTINCT_CASES)
+def test_distinct_aggregates_dedup_on_the_value_on_every_path(values, expected):
+    graph = _distinct_graph(values)
+    literal = "[" + ", ".join(values) + "]"
+    for name, want in expected.items():
+        for query, kwargs in _DISTINCT_ROUTES:
+            filled = query.format(agg=f"{name}(DISTINCT n.v)", agg_x=f"{name}(DISTINCT x)", lit=literal)
+            rows = graph.cypher(filled, **kwargs).to_list()
+            label = f"{values} :: {filled} {kwargs}"
+            assert len(rows) == 1, label
+            got = rows[0]["r"]
+            if isinstance(want, float):
+                assert got == pytest.approx(want), label
+            else:
+                assert got == want, label
+            # A list that dropped a value is the same length bug as a count
+            # that over-counts; pin the two against each other.
+            if name == "collect":
+                assert len(got) == expected["count"], label
+
+
+def test_distinct_aggregate_agrees_with_return_distinct_over_the_same_values():
+    """The clause and the aggregates answer the same question one way.
+
+    `RETURN DISTINCT x` is the engine's existing, unambiguous statement of
+    what "distinct" means here; every DISTINCT aggregate is measured against
+    it rather than against a private key.
+    """
+    graph = _distinct_graph(["1", "1.0", "2"])
+    for kwargs in ({}, {"streaming": False}, {"disable_optimizer": True}):
+        rows = graph.cypher("MATCH (n:S) RETURN DISTINCT n.v AS v ORDER BY v", **kwargs).to_list()
+        assert [row["v"] for row in rows] == [1, 1.0, 2], kwargs
+        assert _scalar(graph, "MATCH (n:S) RETURN count(DISTINCT n.v) AS c") == len(rows)
+        assert len(_scalar(graph, "MATCH (n:S) RETURN collect(DISTINCT n.v) AS l")) == len(rows)
+        assert _scalar(graph, "MATCH (n:S) RETURN sum(DISTINCT n.v) AS s") == 4.0
+
+
+def test_count_distinct_star_counts_rows_on_every_path():
+    """`count(DISTINCT *)` is a row count, not a count of one marker value.
+
+    The fused node-scan aggregate folds `*` as a constant "row present"
+    marker, and the planner let `count(DISTINCT *)` fuse — so its per-group
+    value set held exactly that marker and the answer was `1` for any number
+    of rows, while the streaming and materialized paths both answered the row
+    count. The planner now keeps it unfused, with `sum/avg/min/max(DISTINCT)`.
+    """
+    graph = _distinct_graph(["1", "1", "2", "5"])
+    graph.cypher("MATCH (n:S {id: 4}) SET n.g = 'y'")
+    for kwargs in ({}, {"streaming": False}, {"disable_optimizer": True}):
+        assert _rows(graph, "MATCH (n:S) RETURN count(DISTINCT *) AS c", **kwargs) == [{"c": 4}], kwargs
+        assert _rows(graph, "MATCH (n:S) RETURN n.g AS g, count(DISTINCT *) AS c ORDER BY g", **kwargs) == [
+            {"g": "x", "c": 3},
+            {"g": "y", "c": 1},
+        ], kwargs

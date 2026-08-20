@@ -695,6 +695,17 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (p:Person) RETURN p.city AS c, count(DISTINCT p.name) AS d",
         None,
     ),
+    # ── fuse_node_scan_aggregate: the DISTINCT aggregates it must NOT fuse ──
+    # `sum/avg(DISTINCT …)` grouped by a node property is the shape whose
+    # surrogate re-bucket merged partial sums into a deduplicated value set;
+    # `count(DISTINCT *)` is a row count the inline accumulator folded to 1.
+    (
+        "sum_distinct_prop_grouped",
+        "social_graph",
+        "MATCH (p:Person) RETURN p.city AS c, sum(DISTINCT p.age) AS s, avg(DISTINCT p.age) AS a",
+        None,
+    ),
+    ("count_distinct_star_rows", "social_graph", "MATCH (p:Person) RETURN count(DISTINCT *) AS n", None),
     # ── fuse_optional_match_aggregate (0.8.31 bug) ──
     (
         "count_optional_edge_var",

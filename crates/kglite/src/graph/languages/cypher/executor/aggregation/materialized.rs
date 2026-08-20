@@ -586,16 +586,18 @@ impl<'a> CypherExecutor<'a> {
                     // shapes during the cutover, but new producers
                     // should emit native lists.
                     let mut values: Vec<Value> = Vec::new();
-                    let mut seen: FxHashSet<String> = FxHashSet::default();
+                    let mut seen: FxHashSet<Value> = FxHashSet::default();
                     for (row_idx, row) in rows.iter().enumerate() {
                         self.check_interrupt_periodic(row_idx)?;
                         let val = self.evaluate_expression(&args[0], row)?;
                         if !matches!(val, Value::Null) {
-                            if *distinct {
-                                let key = format_value_compact(&val);
-                                if !seen.insert(key) {
-                                    continue;
-                                }
+                            // Keyed on the `Value`. `format_value_compact`
+                            // renders `Int64(1)` and `String("1")` both as
+                            // `"1"`, so one of the two was dropped from the
+                            // list — in a row whose own `count(DISTINCT …)`,
+                            // which has always keyed on the `Value`, said 2.
+                            if *distinct && !seen.insert(val.clone()) {
+                                continue;
                             }
                             self.budget.consume_collection(1, "collect()")?;
                             values.push(val);
@@ -660,17 +662,19 @@ impl<'a> CypherExecutor<'a> {
                     // Value seen for that key is the returned winner
                     // on tie (insertion-order tiebreak).
                     let mut counts: FxHashMap<String, (Value, u64)> = FxHashMap::default();
-                    let mut seen_distinct: FxHashSet<String> = FxHashSet::default();
+                    // DISTINCT keys on the `Value`, as it does for every other
+                    // aggregate; the Debug repr is only the counting key.
+                    let mut seen_distinct: FxHashSet<Value> = FxHashSet::default();
                     for (row_idx, row) in rows.iter().enumerate() {
                         self.check_interrupt_periodic(row_idx)?;
                         let val = self.evaluate_expression(&args[0], row)?;
                         if matches!(val, Value::Null) {
                             continue;
                         }
-                        let key = format!("{:?}", val);
-                        if *distinct && !seen_distinct.insert(key.clone()) {
+                        if *distinct && !seen_distinct.insert(val.clone()) {
                             continue;
                         }
+                        let key = format!("{:?}", val);
                         let entry = counts.entry(key).or_insert_with(|| (val.clone(), 0));
                         entry.1 += 1;
                     }
@@ -1159,17 +1163,21 @@ impl<'a> CypherExecutor<'a> {
     ) -> Result<(Vec<f64>, bool), String> {
         let mut values = Vec::new();
         let mut all_int = true;
-        let mut seen: FxHashSet<u64> = FxHashSet::default();
+        let mut seen: FxHashSet<Value> = FxHashSet::default();
 
         for (row_idx, row) in rows.iter().enumerate() {
             self.check_interrupt_periodic(row_idx)?;
             let val = self.evaluate_expression(expr, row)?;
             if let Some(f) = value_to_f64(&val) {
-                if distinct {
-                    let bits = f.to_bits();
-                    if !seen.insert(bits) {
-                        continue;
-                    }
+                // DISTINCT keys on the `Value`, not on the `f64` it coerces
+                // to: `Int64(1)` and `Float64(1.0)` share a bit pattern but
+                // are two values everywhere else in the engine (`RETURN
+                // DISTINCT`, `count(DISTINCT …)`, the streaming aggregate),
+                // and `0.0` / `-0.0` are one value here and two under the
+                // bits. Keying on the bits made the same query answer `3`
+                // through this path and `4.0` through the streaming one.
+                if distinct && !seen.insert(val.clone()) {
+                    continue;
                 }
                 if !matches!(val, Value::Int64(_)) {
                     all_int = false;

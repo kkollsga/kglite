@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`DISTINCT` aggregates could return different answers depending on the
+  internal aggregation path.** `sum`, `avg`, `collect` and `mode` each carried
+  a private idea of what makes two values distinct, none of which was the one
+  `RETURN DISTINCT`, `WITH DISTINCT` and `count(DISTINCT …)` have always used:
+
+  * the materialized executor deduplicated numeric aggregates on the `f64`
+    **bit pattern**, so `sum(DISTINCT …)` over `[1, 1.0, 2]` folded the integer
+    and the float into one value and answered `3` where the streaming path
+    answered `4.0` — and split `0.0` from `-0.0`, which every other DISTINCT
+    in the engine treats as one value;
+  * `collect(DISTINCT …)` deduplicated on the compact *string form*, which is
+    `"1"` for both `1` and `'1'` — so one of the two was **dropped from the
+    list**, in a row whose own `count(DISTINCT …)` counted both;
+  * the streaming aggregate deduplicated correctly per group but merged
+    partial states by adding their sums while unioning their value sets, so
+    grouping by a node property — which buckets one intermediate group per
+    node — made `sum`/`avg(DISTINCT …)` count every row again: `[1, 1, 2]`
+    grouped by a property summed to `4` and ungrouped to `3`;
+  * `count(DISTINCT *)` fused into the node-scan aggregate, whose accumulator
+    folds `*` as a constant row marker, so it answered `1` for any number of
+    rows while the other two paths answered the row count.
+
+  All paths now deduplicate on the value, which is the rule the DISTINCT
+  clauses and `count(DISTINCT …)` already applied — so `1` and `1.0` are two
+  values, `1` and `'1'` are two values, and `0.0` and `-0.0` are one,
+  everywhere. `count(DISTINCT *)` no longer fuses and counts rows on every
+  path.
+
 - **A `LIMIT`ed relationship pattern could silently return zero or partial
   rows.** Pushing a `LIMIT` into a `MATCH` caps how many candidates the pattern
   executor materialises — `max(limit * 100, 1000)` start nodes and

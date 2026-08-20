@@ -1150,13 +1150,28 @@ pub(crate) fn fuse_node_scan_aggregate(query: &mut CypherQuery) {
                     return true; // group key — OK
                 }
                 match &item.expression {
-                    Expression::FunctionCall { name, distinct, .. } => {
+                    Expression::FunctionCall {
+                        name,
+                        args,
+                        distinct,
+                    } => {
                         let n = name.to_lowercase();
                         if *distinct {
-                            // Only count(DISTINCT x) fuses inline (the executor
+                            // Only count(DISTINCT <expr>) fuses inline (the executor
                             // tracks a per-group value set). DISTINCT sum/avg/min/max
                             // still falls back to the generic path.
-                            return n == "count";
+                            //
+                            // `count(DISTINCT *)` is excluded with them: it is a
+                            // row-distinctness count, and the inline accumulator
+                            // folds `*` as a constant "row present" marker — so its
+                            // value set held exactly that one marker and every such
+                            // query fused to `1`, whatever the row count, while the
+                            // streaming and materialized paths both answered the
+                            // number of rows. Same reason the two 3-element passes
+                            // below reject it.
+                            return n == "count"
+                                && !args.is_empty()
+                                && !matches!(args[0], Expression::Star);
                         }
                         matches!(
                             n.as_str(),

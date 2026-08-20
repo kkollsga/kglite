@@ -85,6 +85,43 @@ pub(crate) struct AggSpec {
     arg_is_edge_var: Option<String>,
 }
 
+/// Insertion-ordered value set backing a `DISTINCT` aggregate.
+///
+/// Order is load-bearing. The deduplicated values are folded into the
+/// aggregate at `finalize` time, and folding them in *first-seen* order is
+/// what makes a `sum(DISTINCT …)` over floats associate exactly as the
+/// materialized path's row-order fold does. A bare `FxHashSet` would fold in
+/// hash order, and — because the surrogate re-bucket below merges partial
+/// states — the order would additionally depend on how the grouping happened
+/// to split the rows.
+#[derive(Default)]
+struct DistinctValues {
+    seen: FxHashSet<Value>,
+    order: Vec<Value>,
+}
+
+impl DistinctValues {
+    /// Returns true when `value` had not been seen before.
+    fn insert(&mut self, value: Value) -> bool {
+        if self.seen.insert(value.clone()) {
+            self.order.push(value);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn absorb(&mut self, other: DistinctValues) {
+        for value in other.order {
+            self.insert(value);
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.order.len()
+    }
+}
+
 /// State kept per group per aggregate. The variants stay narrow so the
 /// hot loop branches predictably; complex aggregates are out of scope
 /// for the streaming path.
@@ -98,20 +135,13 @@ struct AggState {
     /// Populated only when the corresponding `AggSpec` has `distinct`.
     distinct_nodes: Option<FxHashSet<usize>>,
     distinct_edges: Option<FxHashSet<usize>>,
-    distinct_values: Option<FxHashSet<Value>>,
+    distinct_values: Option<DistinctValues>,
 }
 
 impl AggState {
-    fn new(spec: &AggSpec) -> Self {
-        let (distinct_nodes, distinct_edges, distinct_values) = if spec.distinct {
-            (
-                Some(FxHashSet::default()),
-                Some(FxHashSet::default()),
-                Some(FxHashSet::default()),
-            )
-        } else {
-            (None, None, None)
-        };
+    /// A state with no DISTINCT sets — also the accumulator `finalize` folds
+    /// a DISTINCT aggregate's deduplicated values through.
+    fn plain() -> Self {
         AggState {
             count: 0,
             sum: 0.0,
@@ -119,10 +149,20 @@ impl AggState {
             sum_seen_value: false,
             min: None,
             max: None,
-            distinct_nodes,
-            distinct_edges,
-            distinct_values,
+            distinct_nodes: None,
+            distinct_edges: None,
+            distinct_values: None,
         }
+    }
+
+    fn new(spec: &AggSpec) -> Self {
+        let mut state = Self::plain();
+        if spec.distinct {
+            state.distinct_nodes = Some(FxHashSet::default());
+            state.distinct_edges = Some(FxHashSet::default());
+            state.distinct_values = Some(DistinctValues::default());
+        }
+        state
     }
 
     /// Apply `value` to this state for `spec`. Caller has already
@@ -205,24 +245,48 @@ impl AggState {
             a.extend(b);
         }
         if let (Some(a), Some(b)) = (self.distinct_values.as_mut(), other.distinct_values) {
-            a.extend(b);
+            a.absorb(b);
         }
     }
 
     /// Produce the final `Value` for this state given its `spec`.
+    ///
+    /// A `DISTINCT` aggregate is computed *here*, from the deduplicated value
+    /// set, and never from a running total. It has to be: the re-bucket pass
+    /// below merges two partial states whenever a node-property group key
+    /// resolves two surrogate groups to the same value, and `merge` unions the
+    /// value sets while adding the sums — so folding each row as it arrived
+    /// made `sum(DISTINCT n.v)` grouped by `n.g` add every row again (`[1, 1,
+    /// 2]` summed to 4), while the same query without a group key answered 3.
     fn finalize(&self, spec: &AggSpec) -> Value {
         match spec.kind {
+            // `count(DISTINCT *)` is row-distinctness, not value-distinctness:
+            // it never populated a set, so it stays on the running count.
             AggKind::CountStar => Value::Int64(self.count),
-            AggKind::Count => {
-                if spec.distinct {
-                    let n = self.distinct_nodes.as_ref().map(|s| s.len()).unwrap_or(0)
-                        + self.distinct_edges.as_ref().map(|s| s.len()).unwrap_or(0)
-                        + self.distinct_values.as_ref().map(|s| s.len()).unwrap_or(0);
-                    Value::Int64(n as i64)
-                } else {
-                    Value::Int64(self.count)
-                }
+            AggKind::Count if spec.distinct => {
+                let n = self.distinct_nodes.as_ref().map(|s| s.len()).unwrap_or(0)
+                    + self.distinct_edges.as_ref().map(|s| s.len()).unwrap_or(0)
+                    + self.distinct_values.as_ref().map(|s| s.len()).unwrap_or(0);
+                Value::Int64(n as i64)
             }
+            AggKind::Sum | AggKind::Avg | AggKind::Min | AggKind::Max if spec.distinct => {
+                let mut folded = AggState::plain();
+                if let Some(values) = &self.distinct_values {
+                    for value in &values.order {
+                        folded.record(Some(value.clone()), spec);
+                    }
+                }
+                folded.finalize_plain(spec.kind)
+            }
+            kind => self.finalize_plain(kind),
+        }
+    }
+
+    /// `finalize` for a state that already holds the running totals — the
+    /// non-DISTINCT case, and the fold of a DISTINCT aggregate's value set.
+    fn finalize_plain(&self, kind: AggKind) -> Value {
+        match kind {
+            AggKind::CountStar | AggKind::Count => Value::Int64(self.count),
             AggKind::Sum => {
                 if !self.sum_seen_value {
                     Value::Int64(0)
@@ -615,11 +679,12 @@ fn update_agg_state(
         if matches!(val, Value::Null) {
             return Ok(());
         }
-        let dv = state.distinct_values.get_or_insert_with(FxHashSet::default);
-        if !dv.insert(val.clone()) {
-            return Ok(());
-        }
-        state.record(Some(val), spec);
+        // Dedup only — `finalize` folds the set. See its doc comment for why
+        // recording here is wrong under the surrogate re-bucket's merge.
+        let dv = state
+            .distinct_values
+            .get_or_insert_with(DistinctValues::default);
+        dv.insert(val);
     } else {
         let val = executor.evaluate_expression(expr, row)?;
         state.record(Some(val), spec);
