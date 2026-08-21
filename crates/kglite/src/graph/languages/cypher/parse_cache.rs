@@ -33,7 +33,12 @@ const CACHE_CAPACITY: usize = 256;
 /// Insertion-ordered list to drive FIFO eviction; we evict whatever was
 /// inserted first when at capacity.
 struct ParseCache {
-    map: HashMap<u64, CypherQuery>,
+    /// The stored query text guards against a u64 hash collision handing a
+    /// DIFFERENT query's AST back as a hit — astronomically unlikely, but a
+    /// silent wrong answer if it ever fired, so the hit path verifies the
+    /// text and treats a mismatch as a miss (the collider simply never
+    /// caches).
+    map: HashMap<u64, (String, CypherQuery)>,
     /// Insertion order — front = oldest. Cap mirrors `map.len()`.
     order: std::collections::VecDeque<u64>,
 }
@@ -76,8 +81,10 @@ pub fn parse_cypher_cached(query: &str) -> Result<CypherQuery, KgError> {
     // Fast path: read lock, hit, clone, done.
     {
         let guard = cache().read().expect("parse_cache RwLock poisoned");
-        if let Some(ast) = guard.map.get(&key) {
-            return Ok(ast.clone());
+        if let Some((text, ast)) = guard.map.get(&key) {
+            if text == query {
+                return Ok(ast.clone());
+            }
         }
     }
 
@@ -96,7 +103,7 @@ pub fn parse_cypher_cached(query: &str) -> Result<CypherQuery, KgError> {
     if !guard.map.contains_key(&key) {
         guard.order.push_back(key);
     }
-    guard.map.insert(key, parsed.clone());
+    guard.map.insert(key, (query.to_owned(), parsed.clone()));
 
     Ok(parsed)
 }

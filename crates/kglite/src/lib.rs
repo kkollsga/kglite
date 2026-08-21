@@ -560,8 +560,18 @@ pub mod api {
         pub use crate::graph::languages::cypher::generate_explain_result;
         pub use crate::graph::languages::cypher::is_mutation_query;
         pub use crate::graph::languages::cypher::parameter_names;
+        /// Parse a Cypher statement into a `CypherQuery`.
+        ///
+        /// This is the **cached** parser (`parse_cache::parse_cypher_cached`),
+        /// the same one `session::execute` uses — a repeated statement is a
+        /// hash lookup plus an AST clone rather than a full re-parse. It used
+        /// to re-export `parser::parse_cypher` directly, so every binding that
+        /// pre-parses to classify a statement (the Python wheel does it on
+        /// `cypher` / `Session.cypher` / `Transaction.cypher` / `frozen`) paid
+        /// a second full parse per call and the cache only ever served the one
+        /// inside `prepare` — measured at 25% of a small parameterised query.
+        pub use crate::graph::languages::cypher::parse_cypher;
         pub use crate::graph::languages::cypher::parse_with_mutation_check;
-        pub use crate::graph::languages::cypher::parser::parse_cypher;
         pub use crate::graph::languages::cypher::planner;
         pub use crate::graph::languages::cypher::planner::mark_lazy_eligibility;
         pub use crate::graph::languages::cypher::planner::schema_check::validate_schema;

@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Every Python query paid a full second parse of its own text.** The public
+  `kglite::api::cypher::parse_cypher` re-export pointed at the raw parser
+  rather than the process-wide parse cache that `session::execute` uses, so the
+  pre-parse each binding runs to classify a statement as read-or-mutation —
+  `KnowledgeGraph.cypher`, `Session.cypher`, `Transaction.cypher`, the frozen
+  view, and the fluent mutation path — re-parsed from scratch on every call
+  while the cache only ever served the parse inside `prepare`. The comment at
+  the Python call site had asserted the opposite ("the parser is cached so this
+  second parse is a cache hit") since the cache landed in 0.9.53. Profiling a
+  repeated parameterised point query attributed **25.5% of the whole call** to
+  that redundant parse. Now a hash lookup plus an AST clone. Measured on macOS
+  arm64 (release, min of 1000-1500 rounds, two agreeing runs, against the
+  published 0.13.2 and 0.16.5 wheels in isolated venvs):
+  `MATCH (n:Item) WHERE n.code = $code RETURN n.bucket, count(*)` on 100k
+  indexed nodes 5.375 → 4.041 µs (−24.8%, and −12.6% against 0.13.2);
+  `MATCH (n:Item {code: $code}) RETURN count(*)` 3.500 → 2.458 µs (−29.8%);
+  the same shape with `ORDER BY ... LIMIT 5` 4.667 → 3.000 µs (−35.7%);
+  `MATCH (a:Broad)-[:LINK]->(b:Anchor {id: $anchor}) WHERE a.code IN $codes`
+  7.084 → 5.333 µs (−24.7%); `RETURN 1` 1.000 → 0.750 µs (−25.0%). Every
+  statement issued through the wheel is affected, parameterised or not — a
+  parameterised query cannot use the *plan* cache, so this was pure repeat
+  work on the hottest small-query path. Bindings that route through
+  `parse_with_mutation_check` (MCP, Bolt, CLI) were already on the cached
+  parser and are unchanged.
+
 - **The unbounded-row safety ceiling did not bound pattern expansion, so a
   runaway variable-length query spent gigabytes before the guard could refuse
   it — and a deep enough one never reached the guard at all.** The ceiling that
