@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A comma-separated MATCH with `RETURN DISTINCT <one variable>` could drop
+  rows.** The DISTINCT pushdown deduplicated the first pattern's matches by the
+  returned variable before the remaining patterns joined, which keeps one
+  arbitrary representative of every other variable — and the join (or the
+  clause's `WHERE`, which is not fused for a multi-pattern MATCH) could reject
+  exactly that representative while the discarded one would have survived.
+  Where `a1` and `a2` both reach `f` but only `a2` has the second pattern's
+  relationship, `MATCH (a)-[:R]->(f), (a)-[:S]->(g) RETURN DISTINCT f.id`
+  answered nothing, while the same query without `DISTINCT` answers one row.
+  The pushdown now requires a single-pattern MATCH.
+
 - **Breaking (semantics fix): a variable-length segment could hide its
   relationships from its own clause's uniqueness check.** When the optimizer
   cleared trail tracking on a `[:T*min..max]` segment, the relationships the
@@ -735,6 +746,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the stored data is clean.
 
 ### Changed
+
+- **Performance: a variable-length expansion feeding a distinct-only consumer
+  no longer materialises duplicate target rows.** A multi-seed reachability
+  query — `MATCH (p:Person)-[:KNOWS*1..3]->(f) WHERE p.id IN $ids RETURN
+  count(DISTINCT f)` — built one row per (seed, target) pair and deduplicated
+  afterwards, so its peak memory followed the *seed count* even though the
+  answer is the union of the reachable sets. The DISTINCT pushdown that already
+  covered `RETURN DISTINCT f.id` now also covers a projection made entirely of
+  multiplicity-invariant aggregates over one variable (`count(DISTINCT f)`,
+  `collect(DISTINCT f.id)`, `min`/`max`), and the pattern matcher may apply it
+  *during* expansion even when a `WHERE` is fused into the same MATCH. Peak
+  memory for the shape above now tracks the distinct target set: doubling the
+  seeds costs 1.4x the peak where it used to cost 2.0x, and the absolute peak
+  fell 6-8x (54.7 MB to 6.6 MB at 50 seeds over a 30 000-node graph, release);
+  the tracked `khop3_in_list_count_distinct` cell is **2.4x** faster. The
+  optimization only ever skips *emitting* a row, never traversing: each seed
+  still runs its own expansion through targets an earlier seed reached, so a
+  seed whose own targets lie past another's is unaffected. A source variable
+  that reaches the projection (`RETURN p.id, count(DISTINCT f)`) keeps the
+  per-source answer, and `count(*)` — where the row count is the answer — is
+  excluded as before.
+
+- **Performance: the variable-length BFS no longer allocates and zeroes a
+  graph-sized visited buffer per row.** It sized the buffer to the whole graph
+  for every source row, so the cost scaled with the node count rather than with
+  the work done: after existence checks learned to stop at the first witness,
+  that buffer was what was left, and a 50-row `EXISTS { (p)-[:KNOWS*1..3]->(:Person) }`
+  measured 31 µs at 10 000 nodes, 37 µs at 40 000 and 89 µs at 160 000 against
+  a flat 16-18 µs fixed-hop control. Rows that may stop early now mark into a
+  small set and only allocate the dense buffer if they keep going, and rows
+  that do sweep their reachable set re-use one buffer across the expansion by
+  bumping a generation stamp instead of re-zeroing it. The same three sizes
+  measure 30.1 / 30.6 / 30.7 µs — flat, and **2.9x** faster at 160 000 nodes.
 
 - **Performance: `EXISTS { … }` and pattern predicates stop at the first witness.** An
   existence check needs one match, but the pattern behind it ran to completion

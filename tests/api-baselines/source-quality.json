@@ -217,14 +217,14 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/match_clause/fused_match.rs",
       "qualified_name": "crate::CypherExecutor<'a>::execute_fused_match_return_aggregate",
-      "lines": 889,
+      "lines": 887,
       "branches": 136,
       "nesting": 7
     },
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/match_clause/fused_match.rs",
       "qualified_name": "crate::CypherExecutor<'a>::execute_fused_match_with_aggregate",
-      "lines": 241,
+      "lines": 240,
       "branches": 30,
       "nesting": 3
     },
@@ -238,8 +238,8 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/match_execution.rs",
       "qualified_name": "crate::CypherExecutor<'a>::execute_match",
-      "lines": 484,
-      "branches": 81,
+      "lines": 395,
+      "branches": 58,
       "nesting": 9
     },
     {
@@ -301,7 +301,7 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/shortest_path.rs",
       "qualified_name": "crate::CypherExecutor<'a>::execute_shortest_path_match",
-      "lines": 245,
+      "lines": 244,
       "branches": 35,
       "nesting": 3
     },

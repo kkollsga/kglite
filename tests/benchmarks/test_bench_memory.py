@@ -236,14 +236,13 @@ def test_bench_save_kgl_spilled_5k(benchmark, graph_5k_spilled, tmp_path):
 #
 # Measured on this shape at 30k nodes, release build, before V4: 25 seeds reach
 # 15 847 nodes for 27.9 MB of peak; 50 seeds reach 19 268 (1.22x) for 54.7 MB
-# (1.96x). Peak tracked the seeds, not the targets.
+# (1.96x). Peak tracked the seeds, not the targets, and this landed `xfail`.
 #
-# It is `xfail` because that is still true today. V4 (DISTINCT pushdown in the
-# UNWIND/subsequent-MATCH branch) and, if it is built, V6 (source-free
-# multi-source frontier) are what make it pass; flip it to a plain test in
-# whichever of those lands the fix. `strict=False` keeps the intermediate
-# state — a partial improvement that lands under the ceiling — from turning
-# red on the phase that has not claimed it yet.
+# V4 made the expansion deduplicate targets globally for a distinct-only
+# consumer, so the pair-shaped rows are never built: the same two sizes on the
+# same fixture now cost 4.6 MB -> 6.6 MB (1.44x) release, 5.2 -> 7.2 MB (1.39x)
+# debug. The law is a plain test from here — a regression back to the row-shaped
+# implementation lands at 1.96x and cannot hide under the 1.8x ceiling.
 
 
 #: 2x the seeds may cost at most this much more peak. The union of reachable
@@ -322,14 +321,6 @@ def _khop_peak_delta_mb(seed_count: int) -> tuple[float, int]:
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="peak-RSS probe uses resource.getrusage (POSIX-only)")
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "V4 target: a multi-seed k-hop still materialises seeds x |reachable| rows, "
-        "so peak RSS scales with the seed count instead of the reachable set. Flip "
-        "this to a plain test in the phase that lands the fix (V4, or V6 if built)."
-    ),
-)
 def test_khop3_peak_memory_scales_with_targets_not_seeds():
     """Doubling the seeds must not double the peak.
 

@@ -475,14 +475,84 @@ pub(super) fn push_limit_into_match(query: &mut CypherQuery, _graph: &DirGraph) 
     }
 }
 
-/// Push DISTINCT hint into MATCH when RETURN DISTINCT references a single node variable.
+/// The single node variable an *aggregate-only* projection reads, when every
+/// item is a multiplicity-invariant aggregate over that one variable.
 ///
-/// When all RETURN DISTINCT expressions depend on a single node variable
-/// (e.g., `RETURN DISTINCT c2.id` or `RETURN DISTINCT c2.id, c2.name`),
-/// the executor can pre-deduplicate pattern matches by that variable's NodeIndex
-/// during the MATCH phase, avoiding creation of duplicate ResultRows.
+/// This is the escape analysis behind the aggregate route of
+/// [`push_distinct_into_match`], and it is a **whitelist on item shape**, not
+/// a variable walk: an item qualifies only as `agg(v)` or `agg(v.prop)` where
+/// `agg` is `min`/`max`/`count(DISTINCT …)`/`collect(DISTINCT …)`. So a
+/// variable "escapes to the consumer" — appears in any projection item, as a
+/// grouping key, an aggregate argument, or anywhere inside an item expression
+/// — iff it is the `v` this returns. `RETURN p.id, count(DISTINCT f)` is
+/// rejected because `p.id` is not an aggregate at all, which is what keeps its
+/// answer per-source; `RETURN count(DISTINCT f) + 1` is rejected because the
+/// item is an addition, not an aggregate call. Anything the whitelist does not
+/// recognise is rejected, so a new `Expression` variant cannot silently smuggle
+/// a second variable past it.
+fn aggregate_only_dedup_var(items: &[ReturnItem]) -> Option<String> {
+    if items.is_empty() {
+        return None;
+    }
+    let mut var: Option<String> = None;
+    for item in items {
+        let Expression::FunctionCall {
+            name,
+            args,
+            distinct,
+        } = &item.expression
+        else {
+            return None;
+        };
+        let nm = name.to_lowercase();
+        let invariant = match nm.as_str() {
+            "min" | "max" => true,
+            "count" | "collect" => *distinct,
+            _ => false,
+        };
+        if !invariant {
+            return None;
+        }
+        let [arg] = args.as_slice() else {
+            return None;
+        };
+        let referenced = match arg {
+            Expression::Variable(v) => v.as_str(),
+            Expression::PropertyAccess { variable, .. } => variable.as_str(),
+            _ => return None,
+        };
+        match &var {
+            None => var = Some(referenced.to_string()),
+            Some(prev) if prev == referenced => {}
+            Some(_) => return None,
+        }
+    }
+    var
+}
+
+/// Push a DISTINCT hint into MATCH when its consumer reads exactly one node
+/// variable and collapses row multiplicity.
 ///
-/// Detects patterns: MATCH → [WHERE] → RETURN DISTINCT
+/// Two routes reach the same hint, which lets the executor deduplicate pattern
+/// matches by that variable's `NodeIndex` **during** expansion instead of
+/// materialising `sources x targets` matches and deduplicating afterwards:
+///
+/// - `RETURN DISTINCT c2.id` / `RETURN DISTINCT c2.id, c2.name` — every item is
+///   a bare variable or property access on one variable.
+/// - `RETURN count(DISTINCT f)` / `RETURN count(DISTINCT f), min(f.age)` — every
+///   item is a multiplicity-invariant aggregate over one variable
+///   ([`aggregate_only_dedup_var`]). Without this route a multi-source k-hop
+///   feeding `count(DISTINCT f)` built one row per (source, target) pair, so its
+///   peak memory followed the source count rather than the reachable set.
+///
+/// Both routes require a **single-pattern** MATCH. With comma patterns the hint
+/// is applied to the first pattern's matches, before the remaining patterns
+/// join: dropping a duplicate keeps one arbitrary representative, and a later
+/// pattern (or the clause's own WHERE, which is not fused for a multi-pattern
+/// MATCH) can reject exactly that representative while the dropped one would
+/// have survived — losing the target entirely.
+///
+/// Detects patterns: MATCH → [WHERE] → RETURN/WITH
 pub(super) fn push_distinct_into_match(query: &mut CypherQuery) {
     // Find MATCH + RETURN DISTINCT (with optional WHERE in between)
     for i in 0..query.clauses.len() {
@@ -508,69 +578,69 @@ pub(super) fn push_distinct_into_match(query: &mut CypherQuery) {
             continue;
         };
 
-        // Check: RETURN must be DISTINCT, no aggregation
-        let distinct_var = if let Clause::Return(r) = &query.clauses[return_idx] {
-            if !r.distinct {
-                continue;
-            }
-            if r.items
-                .iter()
-                .any(|item| super::super::ast::is_aggregate_expression(&item.expression))
-            {
-                continue;
-            }
-            // All return items must reference a single node variable
-            let mut var: Option<&str> = None;
-            let mut all_same = true;
-            for item in &r.items {
-                let v = match &item.expression {
-                    Expression::PropertyAccess { variable, .. } => variable.as_str(),
-                    Expression::Variable(v) => v.as_str(),
-                    _ => {
-                        all_same = false;
-                        break;
-                    }
-                };
-                match var {
-                    None => var = Some(v),
-                    Some(prev) if prev == v => {}
-                    _ => {
-                        all_same = false;
-                        break;
-                    }
-                }
-            }
-            if all_same {
-                var.map(String::from)
-            } else {
-                None
-            }
-        } else {
-            None
+        let Clause::Return(r) = &query.clauses[return_idx] else {
+            continue;
         };
+        let distinct_var = distinct_route_var(r).or_else(|| aggregate_only_dedup_var(&r.items));
 
-        if let Some(dv) = distinct_var {
-            // Verify the variable is a node variable in the MATCH pattern
-            if let Clause::Match(ref mc) = &query.clauses[match_idx] {
-                let is_node_var = mc.patterns.iter().any(|p| {
-                    p.elements.iter().any(|e| {
-                        if let crate::graph::core::pattern_matching::PatternElement::Node(np) = e {
-                            np.variable.as_deref() == Some(dv.as_str())
-                        } else {
-                            false
-                        }
-                    })
-                });
-                if !is_node_var {
-                    continue;
-                }
+        let Some(dv) = distinct_var else {
+            continue;
+        };
+        // Verify the variable is a node variable in the MATCH pattern, and
+        // that the clause has exactly one pattern (see the doc comment: with
+        // comma patterns the hint deduplicates before the join).
+        if let Clause::Match(ref mc) = &query.clauses[match_idx] {
+            if mc.patterns.len() != 1 {
+                continue;
             }
-            // Set the hint
-            if let Clause::Match(ref mut mc) = query.clauses[match_idx] {
-                mc.distinct_node_hint = Some(dv);
+            let is_node_var = mc.patterns.iter().any(|p| {
+                p.elements.iter().any(|e| {
+                    if let crate::graph::core::pattern_matching::PatternElement::Node(np) = e {
+                        np.variable.as_deref() == Some(dv.as_str())
+                    } else {
+                        false
+                    }
+                })
+            });
+            if !is_node_var {
+                continue;
             }
         }
+        // Set the hint
+        if let Clause::Match(ref mut mc) = query.clauses[match_idx] {
+            mc.distinct_node_hint = Some(dv);
+        }
     }
+}
+
+/// The `RETURN DISTINCT <one variable>` route: every item is a bare variable or
+/// a property access, all naming the same variable, and none is an aggregate
+/// (`WITH DISTINCT a, count(b)` groups before it dedups, so `count(b)` moves
+/// with the rows a target-dedup would drop).
+fn distinct_route_var(r: &ReturnClause) -> Option<String> {
+    if !r.distinct {
+        return None;
+    }
+    if r.items
+        .iter()
+        .any(|item| super::super::ast::is_aggregate_expression(&item.expression))
+    {
+        return None;
+    }
+    let mut var: Option<&str> = None;
+    for item in &r.items {
+        let v = match &item.expression {
+            Expression::PropertyAccess { variable, .. } => variable.as_str(),
+            Expression::Variable(v) => v.as_str(),
+            _ => return None,
+        };
+        match var {
+            None => var = Some(v),
+            Some(prev) if prev == v => {}
+            Some(_) => return None,
+        }
+    }
+    var.map(String::from)
 }
 
 // ============================================================================

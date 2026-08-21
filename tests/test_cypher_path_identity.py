@@ -190,3 +190,129 @@ def test_shortest_path_preserves_multi_type_filter():
     ).to_list()
 
     assert rows == [{"tags": ["a", "b"]}]
+
+
+# ── distinct-target pushdown (part-6 phase V4) ───────────────────────────────
+#
+# A variable-length segment feeding a distinct-only consumer deduplicates by
+# target *during* expansion, so a multi-seed k-hop never materialises one row
+# per (source, target) pair. These pin the two things that could go wrong with
+# it: an answer that is still per-source when the source escapes to the
+# consumer, and a target skipped for traversal rather than for emission.
+
+
+def _two_component_graph() -> KnowledgeGraph:
+    """0→1→2→3→0, 4→5→6→4, plus the bridges 1→5 and 2→7, and 7→8→9→7.
+
+    Three overlapping neighbourhoods, so several seeds reach targets each other
+    already reached — the shape a global target dedup can get wrong.
+    """
+    graph = KnowledgeGraph()
+    graph.cypher("CREATE " + ", ".join(f"(:P {{id: {i}}})" for i in range(10)))
+    for source, target in [
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 0),
+        (4, 5),
+        (5, 6),
+        (6, 4),
+        (1, 5),
+        (7, 8),
+        (8, 9),
+        (9, 7),
+        (2, 7),
+    ]:
+        graph.cypher(f"MATCH (a:P {{id: {source}}}), (b:P {{id: {target}}}) CREATE (a)-[:K]->(b)")
+    return graph
+
+
+def test_multi_seed_khop_counts_the_union_of_the_reachable_sets():
+    graph = _two_component_graph()
+
+    # Seed 0 reaches 1,2,5,3,7,6; seed 4 reaches 5,6,4. The union is seven
+    # nodes — not the nine rows a per-source count would add up to.
+    assert graph.cypher(
+        "MATCH (p:P)-[:K*1..3]->(f:P) WHERE p.id IN [0, 4] RETURN count(DISTINCT f) AS c"
+    ).to_list() == [{"c": 7}]
+    assert sorted(
+        row["i"]
+        for row in graph.cypher("MATCH (p:P)-[:K*1..3]->(f:P) WHERE p.id IN [0, 4] RETURN DISTINCT f.id AS i").to_list()
+    ) == [1, 2, 3, 4, 5, 6, 7]
+    # `count(*)` counts paths, so it is NOT dedup-safe and must keep every one.
+    assert graph.cypher("MATCH (p:P)-[:K*1..3]->(f:P) WHERE p.id IN [0, 4] RETURN count(*) AS c").to_list() == [
+        {"c": 9}
+    ]
+
+
+def test_a_source_in_the_projection_keeps_the_count_per_source():
+    """The control for the escape analysis: `p` in the projection forbids it.
+
+    A global target dedup would answer this with one seed's count and an empty
+    group for the other, or with the union split arbitrarily between them.
+    """
+    graph = _two_component_graph()
+
+    rows = graph.cypher(
+        "MATCH (p:P)-[:K*1..3]->(f:P) WHERE p.id IN [0, 4] RETURN p.id AS pid, count(DISTINCT f) AS c ORDER BY pid"
+    ).to_list()
+
+    assert rows == [{"pid": 0, "c": 6}, {"pid": 4, "c": 3}]
+
+
+def test_a_seen_target_is_skipped_for_emission_but_still_traversed():
+    """Seed 1's own targets are only reachable *through* seed 0's.
+
+    Everything seed 1 adds (0, 4, 8) sits one hop past a node seed 0 already
+    reached, so a dedup that pruned the BFS frontier instead of the emitted row
+    would lose all three.
+    """
+    graph = _two_component_graph()
+
+    assert graph.cypher(
+        "MATCH (p:P)-[:K*1..3]->(f:P) WHERE p.id IN [0, 1] RETURN count(DISTINCT f) AS c"
+    ).to_list() == [{"c": 9}]
+    assert graph.cypher(
+        "MATCH (p:P)-[:K*1..3]->(f:P) WHERE p.id IN [0, 1] RETURN p.id AS pid, count(DISTINCT f) AS c ORDER BY pid"
+    ).to_list() == [{"pid": 0, "c": 6}, {"pid": 1, "c": 8}]
+
+
+def test_comma_patterns_do_not_dedup_before_the_join():
+    """Regression: the hint deduplicated the first pattern, then joined.
+
+    `a1` and `a2` both reach `f`, but only `a2` has the `:M` relationship the
+    second pattern needs. Keeping one arbitrary `a` per `f` picked `a1`, the
+    join then rejected it, and `f` was lost: this answered `[]` where the
+    same query without `DISTINCT` answers `[3]`.
+    """
+    graph = KnowledgeGraph()
+    graph.cypher("CREATE " + ", ".join(f"(:P {{id: {i}}})" for i in (1, 2, 3, 4)))
+    for source, target, rel in [(1, 3, "K"), (2, 3, "K"), (2, 4, "M")]:
+        graph.cypher(f"MATCH (a:P {{id: {source}}}), (b:P {{id: {target}}}) CREATE (a)-[:{rel}]->(b)")
+
+    assert graph.cypher("MATCH (a:P)-[:K]->(f:P), (a)-[:M]->(g:P) RETURN DISTINCT f.id AS i").to_list() == [{"i": 3}]
+    assert graph.cypher("MATCH (a:P)-[:K]->(f:P), (a)-[:M]->(g:P) RETURN f.id AS i").to_list() == [{"i": 3}]
+
+
+def test_a_representative_rejected_by_the_fused_where_does_not_lose_its_target():
+    """The retry that makes matcher-level dedup sound.
+
+    `a1` and `a2` both reach `f`, and only `a2` passes the predicate. The
+    matcher deduplicates by `f` and keeps whichever match it saw first — `a1`'s
+    — which the fused WHERE then rejects. Without the pass being redone without
+    the dedup, `f` disappears: this answers `[]` where the same query without
+    `DISTINCT` answers one row. `a.age + 0 > 10` is deliberately not pushable,
+    so the matcher cannot have enforced it already.
+    """
+    graph = KnowledgeGraph()
+    graph.cypher("CREATE (:P {id: 1, age: 1}), (:P {id: 2, age: 100}), (:P {id: 3, age: 0})")
+    for source in (1, 2):
+        graph.cypher(f"MATCH (a:P {{id: {source}}}), (b:P {{id: 3}}) CREATE (a)-[:K]->(b)")
+
+    assert graph.cypher("MATCH (a:P)-[:K]->(f:P) WHERE a.age + 0 > 10 RETURN DISTINCT f.id AS i").to_list() == [
+        {"i": 3}
+    ]
+    assert graph.cypher("MATCH (a:P)-[:K]->(f:P) WHERE a.age + 0 > 10 RETURN count(DISTINCT f) AS c").to_list() == [
+        {"c": 1}
+    ]
+    assert graph.cypher("MATCH (a:P)-[:K]->(f:P) WHERE a.age + 0 > 10 RETURN f.id AS i").to_list() == [{"i": 3}]

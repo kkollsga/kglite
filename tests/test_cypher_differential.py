@@ -1167,6 +1167,60 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (a:N {id: 1})-[:R*2..3]-(b:N) RETURN count(DISTINCT b) AS n",
         None,
     ),
+    # ── distinct-target pushdown (part-6 phase V4) ──
+    (
+        "khop_count_distinct_over_many_seeds",
+        "overlapping_khop_graph",
+        # The consumer reads only `f`, so the expansion deduplicates targets
+        # globally instead of building one row per (seed, target) pair. The
+        # answer is the union of the reachable sets, not their sum.
+        "MATCH (p:N)-[:R*1..3]->(f:N) WHERE p.id IN [0, 4] RETURN count(DISTINCT f) AS n",
+        None,
+    ),
+    (
+        "khop_count_distinct_per_source_when_the_source_escapes",
+        "overlapping_khop_graph",
+        # Control for the escape analysis: `p` in the projection means the
+        # counts stay per-source, which a global target dedup would destroy.
+        "MATCH (p:N)-[:R*1..3]->(f:N) WHERE p.id IN [0, 4] RETURN p.id AS i, count(DISTINCT f) AS n ORDER BY i",
+        None,
+    ),
+    (
+        "khop_seed_reaches_only_through_already_seen_targets",
+        "overlapping_khop_graph",
+        # Everything seed 1 adds sits one hop past a node seed 0 already
+        # reached: a dedup that pruned the frontier rather than the emitted
+        # row would lose all of it.
+        "MATCH (p:N)-[:R*1..3]->(f:N) WHERE p.id IN [0, 1] RETURN count(DISTINCT f) AS n",
+        None,
+    ),
+    (
+        "khop_count_star_is_not_dedup_safe",
+        "overlapping_khop_graph",
+        # The negative control: row count is path count here, so no target
+        # dedup may run at all.
+        "MATCH (p:N)-[:R*1..3]->(f:N) WHERE p.id IN [0, 4] RETURN count(*) AS n",
+        None,
+    ),
+    (
+        "distinct_target_with_a_non_pushable_source_predicate",
+        "unequal_source_graph",
+        # The matcher's per-target dedup keeps one arbitrary source, and this
+        # predicate (arithmetic, so not pushed into the pattern) rejects exactly
+        # that one — the pass has to be redone without the dedup or the target
+        # is lost.
+        "MATCH (a:N)-[:R]->(f:N) WHERE a.id + 0 > 1 RETURN DISTINCT f.id AS i",
+        None,
+    ),
+    (
+        "comma_patterns_distinct_single_variable",
+        "join_then_distinct_graph",
+        # The DISTINCT hint used to deduplicate the first pattern before the
+        # second joined, dropping the one `a` that satisfies both: answered
+        # no rows where the same query without DISTINCT answers one.
+        "MATCH (a:N)-[:R]->(f:N), (a)-[:S]->(g:N) RETURN DISTINCT f.id AS i",
+        None,
+    ),
     (
         "var_length_sibling_edge_shares_the_relationship",
         "two_cycle_graph",
@@ -3426,6 +3480,44 @@ def parallel_edge_cycle_graph() -> kglite.KnowledgeGraph:
     hops over the parallel pair, and in three around the cycle.
     """
     return _edge_graph([1, 2, 3], [(1, 2), (1, 2), (2, 3), (3, 1)])
+
+
+@pytest.fixture
+def overlapping_khop_graph() -> kglite.KnowledgeGraph:
+    """Three short cycles bridged so several seeds reach each other's targets.
+
+    0→1→2→3→0, 4→5→6→4 and 7→8→9→7, plus the bridges 1→5 and 2→7. Seeds 0 and
+    4 overlap on {5, 6}; seed 1 reaches nothing seed 0 has not already passed
+    through, which is what separates "skip the emitted row" from "prune the
+    frontier".
+    """
+    return _edge_graph(
+        list(range(10)),
+        [(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 4), (1, 5), (7, 8), (8, 9), (9, 7), (2, 7)],
+    )
+
+
+@pytest.fixture
+def unequal_source_graph() -> kglite.KnowledgeGraph:
+    """1 → 3 and 2 → 3: one target, two sources that a predicate can separate."""
+    return _edge_graph([1, 2, 3], [(1, 3), (2, 3)])
+
+
+@pytest.fixture
+def join_then_distinct_graph() -> kglite.KnowledgeGraph:
+    """1 →`:R` 3 ← `:R` 2, and 2 →`:S` 4.
+
+    Both 1 and 2 reach 3, but only 2 carries the `:S` relationship the second
+    comma pattern needs — so which representative a per-target dedup keeps
+    decides whether 3 survives the join.
+    """
+    import pandas as pd
+
+    g = kglite.KnowledgeGraph()
+    g.add_nodes(pd.DataFrame({"id": [1, 2, 3, 4], "name": [f"n{i}" for i in (1, 2, 3, 4)]}), "N", "id", "name")
+    g.add_connections(pd.DataFrame({"s": [1, 2], "t": [3, 3]}), "R", "N", "s", "N", "t")
+    g.add_connections(pd.DataFrame({"s": [2], "t": [4]}), "S", "N", "s", "N", "t")
+    return g
 
 
 @pytest.fixture

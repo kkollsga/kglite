@@ -265,6 +265,49 @@ impl<'a> PatternExecutor<'a> {
     }
 
     /// One execution of `pattern` under the given cap regime.
+    /// Build one hop's plan. Internal binding names are invariant for the whole
+    /// hop, so they are formatted once here rather than per matched
+    /// relationship on the expansion hot path.
+    fn plan_hop<'p>(
+        &self,
+        edge_pattern: &'p EdgePattern,
+        node_pattern: &'p NodePattern,
+        element_index: usize,
+        is_last_hop: bool,
+        earlier_relationship_state: bool,
+        pass: CapPass,
+    ) -> HopPlan<'p> {
+        HopPlan {
+            edge: edge_pattern,
+            node: node_pattern,
+            anonymous_path_var: (edge_pattern.variable.is_none()
+                && edge_pattern.needs_path_info
+                && edge_pattern.var_length.is_some())
+            .then(|| format!("__anon_vlpath_{element_index}")),
+            track_fixed_trail: edge_pattern.var_length.is_none() && edge_pattern.needs_path_info,
+            is_last_hop,
+            // At the last hop `max_matches` is exact. At an intermediate hop it
+            // is a generous overcommit (50×) that avoids expanding far more
+            // intermediates than needed — advisory, because a sparse
+            // intermediate can push the rows that survive to the last hop past
+            // it. The uncapped retry drops it entirely.
+            limit: if is_last_hop {
+                self.max_matches
+            } else {
+                match pass {
+                    CapPass::Capped => self.max_matches.map(|m| m.saturating_mul(50).max(1000)),
+                    CapPass::Uncapped => None,
+                }
+            },
+            var_length_cap_safe: edge_pattern.var_length.is_some()
+                && !earlier_relationship_state
+                && !self
+                    .distinct_target_var
+                    .as_deref()
+                    .is_some_and(|dtv| node_pattern.variable.as_deref() == Some(dtv)),
+        }
+    }
+
     fn execute_pass(&self, pattern: &Pattern, pass: CapPass) -> Result<Vec<PatternMatch>, String> {
         if pattern.elements.is_empty() {
             return Ok(Vec::new());
@@ -331,6 +374,11 @@ impl<'a> PatternExecutor<'a> {
         // Track current node indices for each match
         let mut current_indices: Vec<NodeIndex> = initial_nodes;
 
+        // One reusable visited buffer for the whole pass: a variable-length hop
+        // marks it per source row instead of allocating and zeroing a
+        // graph-sized `Vec<bool>` for each one.
+        let mut visited = VisitedStamps::default();
+
         // Pre-allocate dedup set for distinct_target_var optimization
         let mut distinct_seen: HashSet<NodeIndex> = if self.distinct_target_var.is_some() {
             HashSet::with_capacity(current_indices.len())
@@ -373,39 +421,14 @@ impl<'a> PatternExecutor<'a> {
             // Read before this hop folds itself in, below.
             let earlier_relationship_state = relationship_state_recorded;
 
-            // Internal binding names are invariant for the whole hop. Build
-            // them once rather than formatting a fresh String for every
-            // matched relationship on the expansion hot path.
-            let hop = HopPlan {
-                edge: edge_pattern,
-                node: node_pattern,
-                anonymous_path_var: (edge_pattern.variable.is_none()
-                    && edge_pattern.needs_path_info
-                    && edge_pattern.var_length.is_some())
-                .then(|| format!("__anon_vlpath_{i}")),
-                track_fixed_trail: edge_pattern.var_length.is_none()
-                    && edge_pattern.needs_path_info,
+            let hop = self.plan_hop(
+                edge_pattern,
+                node_pattern,
+                i,
                 is_last_hop,
-                // At the last hop `max_matches` is exact. At an intermediate
-                // hop it is a generous overcommit (50×) that avoids expanding
-                // far more intermediates than needed — advisory, because a
-                // sparse intermediate can push the rows that survive to the
-                // last hop past it. The uncapped retry drops it entirely.
-                limit: if is_last_hop {
-                    self.max_matches
-                } else {
-                    match pass {
-                        CapPass::Capped => self.max_matches.map(|m| m.saturating_mul(50).max(1000)),
-                        CapPass::Uncapped => None,
-                    }
-                },
-                var_length_cap_safe: edge_pattern.var_length.is_some()
-                    && !earlier_relationship_state
-                    && !self
-                        .distinct_target_var
-                        .as_deref()
-                        .is_some_and(|dtv| node_pattern.variable.as_deref() == Some(dtv)),
-            };
+                earlier_relationship_state,
+                pass,
+            );
 
             relationship_state_recorded |= hop.track_fixed_trail
                 || hop.edge.variable.is_some()
@@ -427,6 +450,7 @@ impl<'a> PatternExecutor<'a> {
                     &hop,
                     seeds_pending.then_some(first_node),
                     &mut distinct_seen,
+                    &mut visited,
                 )?
             };
 
@@ -483,39 +507,51 @@ impl<'a> PatternExecutor<'a> {
             matches
                 .par_iter()
                 .zip(current_indices.par_iter())
-                .flat_map(|(current_match, &source_idx)| {
-                    // Short-circuit once any thread has detected a timeout/error,
-                    // and independently check the deadline from each thread.
-                    // One expansion dwarfs the probe, so poll on every match.
-                    if interrupt.check_each().is_err() {
-                        return Vec::new();
-                    }
-                    let Some(expansions) = interrupt.capture(self.expand_from_node(
-                        source_idx,
-                        hop.edge,
-                        hop.node,
-                        None,
-                        self.bound_target(hop.node, current_match),
-                    )) else {
-                        return Vec::new();
-                    };
-                    expansions
-                        .into_iter()
-                        .filter_map(|(target_idx, edge_binding)| {
-                            if reuses_bound_relationship(current_match, &edge_binding) {
-                                return None;
-                            }
-                            if !self.target_satisfies_bindings(hop.node, current_match, target_idx)
-                            {
-                                return None;
-                            }
-                            Some((
-                                self.extend_match(current_match, hop, edge_binding, target_idx),
-                                target_idx,
-                            ))
-                        })
-                        .collect::<Vec<_>>()
-                })
+                // `map_init` gives each worker its own reusable visited buffer,
+                // so a variable-length hop's marks cost a stamp bump per row
+                // here too — the sequential path's buffer cannot be shared
+                // across threads.
+                .map_init(
+                    VisitedStamps::default,
+                    |visited, (current_match, &source_idx)| {
+                        // Short-circuit once any thread has detected a timeout/error,
+                        // and independently check the deadline from each thread.
+                        // One expansion dwarfs the probe, so poll on every match.
+                        if interrupt.check_each().is_err() {
+                            return Vec::new();
+                        }
+                        let Some(expansions) = interrupt.capture(self.expand_from_node(
+                            source_idx,
+                            hop.edge,
+                            hop.node,
+                            None,
+                            self.bound_target(hop.node, current_match),
+                            visited,
+                        )) else {
+                            return Vec::new();
+                        };
+                        expansions
+                            .into_iter()
+                            .filter_map(|(target_idx, edge_binding)| {
+                                if reuses_bound_relationship(current_match, &edge_binding) {
+                                    return None;
+                                }
+                                if !self.target_satisfies_bindings(
+                                    hop.node,
+                                    current_match,
+                                    target_idx,
+                                ) {
+                                    return None;
+                                }
+                                Some((
+                                    self.extend_match(current_match, hop, edge_binding, target_idx),
+                                    target_idx,
+                                ))
+                            })
+                            .collect::<Vec<_>>()
+                    },
+                )
+                .flatten()
                 .collect()
         });
         // Propagate any error that occurred during parallel expansion
@@ -552,6 +588,7 @@ impl<'a> PatternExecutor<'a> {
         hop: &HopPlan<'_>,
         lazy_seed: Option<&NodePattern>,
         distinct_seen: &mut HashSet<NodeIndex>,
+        visited: &mut VisitedStamps,
     ) -> Result<(Vec<PatternMatch>, Vec<NodeIndex>), String> {
         let mut new_matches = Vec::new();
         let mut new_indices = Vec::new();
@@ -585,7 +622,7 @@ impl<'a> PatternExecutor<'a> {
                 remaining = None;
             }
             let expansions =
-                self.expand_from_node(source_idx, hop.edge, hop.node, remaining, hint)?;
+                self.expand_from_node(source_idx, hop.edge, hop.node, remaining, hint, visited)?;
             for (target_idx, edge_binding) in expansions {
                 if reuses_bound_relationship(current_match, &edge_binding) {
                     continue;

@@ -263,7 +263,6 @@ impl<'a> CypherExecutor<'a> {
         )
         .set_deadline(self.deadline)
         .set_cancel(self.cancel)
-            .set_parallel(self.parallel)
             .set_parallel(self.parallel);
         let matches = executor.execute(pattern)?;
         self.budget

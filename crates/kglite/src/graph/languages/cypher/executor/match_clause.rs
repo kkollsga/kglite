@@ -18,6 +18,67 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+/// Conservative answer to "can this predicate read `var`?".
+///
+/// Over-approximating by construction: every shape the walk does not recognise
+/// answers `true`. That direction is the safe one for its only caller
+/// ([`CypherExecutor::matcher_distinct_target`]), where a spurious `true`
+/// declines an optimization and a spurious `false` is caught by the retry the
+/// caller documents — so a new `Expression` or `Predicate` variant degrades the
+/// heuristic rather than the answer.
+pub(super) fn predicate_may_read_var(pred: &Predicate, var: &str) -> bool {
+    match pred {
+        Predicate::Comparison { left, right, .. } => {
+            expression_may_read_var(left, var) || expression_may_read_var(right, var)
+        }
+        Predicate::And(a, b) | Predicate::Or(a, b) | Predicate::Xor(a, b) => {
+            predicate_may_read_var(a, var) || predicate_may_read_var(b, var)
+        }
+        Predicate::Not(inner) => predicate_may_read_var(inner, var),
+        Predicate::IsNull(expr) | Predicate::IsNotNull(expr) => expression_may_read_var(expr, var),
+        Predicate::In { expr, list } => {
+            expression_may_read_var(expr, var)
+                || list.iter().any(|e| expression_may_read_var(e, var))
+        }
+        Predicate::InLiteralSet { expr, .. } => expression_may_read_var(expr, var),
+        Predicate::StartsWith { expr, pattern }
+        | Predicate::EndsWith { expr, pattern }
+        | Predicate::Contains { expr, pattern } => {
+            expression_may_read_var(expr, var) || expression_may_read_var(pattern, var)
+        }
+        Predicate::InExpression { expr, list_expr } => {
+            expression_may_read_var(expr, var) || expression_may_read_var(list_expr, var)
+        }
+        Predicate::LabelCheck { variable, .. } => variable == var,
+        // A pattern predicate binds and reads variables from the enclosing
+        // scope; not worth decoding here.
+        Predicate::Exists { .. } => true,
+    }
+}
+
+/// Expression half of [`predicate_may_read_var`], with the same conservative
+/// default.
+fn expression_may_read_var(expr: &Expression, var: &str) -> bool {
+    match expr {
+        Expression::Variable(v) => v == var,
+        Expression::PropertyAccess { variable, .. } => variable == var,
+        Expression::Literal(_) | Expression::Parameter(_) | Expression::Star => false,
+        Expression::FunctionCall { args, .. } | Expression::ListLiteral(args) => {
+            args.iter().any(|a| expression_may_read_var(a, var))
+        }
+        Expression::Add(l, r)
+        | Expression::Subtract(l, r)
+        | Expression::Multiply(l, r)
+        | Expression::Divide(l, r)
+        | Expression::Modulo(l, r)
+        | Expression::Concat(l, r) => {
+            expression_may_read_var(l, var) || expression_may_read_var(r, var)
+        }
+        Expression::Negate(inner) => expression_may_read_var(inner, var),
+        _ => true,
+    }
+}
+
 /// Decode the one pattern shape every endpoint-anchored fast path below
 /// accepts: exactly `Node-Edge-Node`, with a fixed-length edge carrying no
 /// inline property map. Returns `None` for every other shape, which the
@@ -484,7 +545,6 @@ impl<'a> CypherExecutor<'a> {
                 )
                 .set_deadline(self.deadline)
                 .set_cancel(self.cancel)
-                .set_parallel(self.parallel)
                 .set_parallel(self.parallel);
                 let matches = executor.execute(pat)?;
                 self.budget

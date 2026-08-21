@@ -27,6 +27,124 @@ use std::collections::VecDeque;
 /// per-path expansion.
 const CLOSED_TRAIL_PROBE_BUDGET: usize = 20_000;
 
+/// One variable-length segment as both expansions read it: the pattern pair
+/// that defines it plus its resolved hop range. Bundled because the two
+/// entry points take it whole and nothing varies these four independently.
+pub(super) struct VarLengthSegment<'p> {
+    pub edge: &'p EdgePattern,
+    pub node: &'p NodePattern,
+    pub min_hops: usize,
+    pub max_hops: usize,
+}
+
+/// How many nodes a *capped* row may mark before its marks move from a hash set
+/// to the graph-sized dense array.
+///
+/// Only capped rows start sparse at all (see [`VisitedStamps::begin`]), so this
+/// is the backstop for a cap generous enough that the BFS runs on anyway. Small
+/// on purpose: past it the set is pure overhead on top of the array the row
+/// ends up allocating regardless.
+const VISITED_DENSE_PROMOTION: usize = 128;
+
+/// Reusable "already reached" marks for [`PatternExecutor::expand_var_length_fast`].
+///
+/// It replaces a `vec![false; node_bound]` **per source row** — an allocation
+/// plus a zeroing pass whose cost scaled with the *graph* rather than with the
+/// work done. Measured on a 50-row EXISTS witness (part-6 phase V3): 31.5 µs at
+/// 10k nodes, 36.7 µs at 40k, 88.9 µs at 160k, against a flat ~16 µs fixed-hop
+/// control — ~7.4 ns per 1 000 nodes per row, for a BFS that stops at the first
+/// witness and touches a handful of nodes.
+///
+/// Two things fix that, and both are needed. **Lazy sizing:** a row whose caller
+/// capped the result count may stop after a handful of nodes, so it marks into a
+/// hash set and only allocates the dense array if it turns out to keep going.
+/// That is what the EXISTS shape needs, because its pattern predicate builds one
+/// `PatternExecutor` per candidate row, so a per-executor buffer would be
+/// re-allocated just as often as the per-row one was. An *uncapped* row sweeps
+/// its whole reachable set by definition and starts dense, paying nothing for
+/// the choice. **Generation stamps:** once the array exists, the following rows
+/// of the same expansion re-use it by bumping a stamp instead of re-zeroing it.
+/// The stamp is a `u8` rather than a wider counter deliberately — the footprint
+/// then stays exactly the one byte per node the `Vec<bool>` had, and the only
+/// price is re-zeroing once every 255 rows when the generation wraps.
+#[derive(Default)]
+pub(super) struct VisitedStamps {
+    /// Live while `dense` is empty: the nodes this row has marked.
+    sparse: rustc_hash::FxHashSet<usize>,
+    /// Graph-sized marks, allocated on promotion and re-used by later rows.
+    dense: Vec<u8>,
+    /// Never zero: zero is the "no row has marked this node" value `dense` is
+    /// (re)filled with, so a stale mark can never equal a live generation.
+    generation: u8,
+    node_bound: usize,
+}
+
+impl VisitedStamps {
+    /// Start a new row's marks over `node_bound` nodes. O(marks written by the
+    /// previous row) while sparse, O(1) once dense — except on the wrap.
+    ///
+    /// `may_stop_early` is the caller's result cap: without one the row visits
+    /// its entire reachable set, so the dense array is the right shape from the
+    /// first mark and the sparse phase would be pure overhead.
+    fn begin(&mut self, node_bound: usize, may_stop_early: bool) {
+        self.node_bound = node_bound;
+        self.sparse.clear();
+        if self.dense.is_empty() {
+            if !may_stop_early {
+                self.promote();
+            }
+            return;
+        }
+        if self.dense.len() < node_bound {
+            self.dense.resize(node_bound, 0);
+        }
+        self.generation = match self.generation.checked_add(1) {
+            Some(next) => next,
+            None => {
+                self.dense.fill(0);
+                1
+            }
+        };
+    }
+
+    #[inline]
+    fn is_visited(&self, index: usize) -> bool {
+        if self.dense.is_empty() {
+            self.sparse.contains(&index)
+        } else {
+            self.dense.get(index).is_some_and(|m| *m == self.generation)
+        }
+    }
+
+    #[inline]
+    fn visit(&mut self, index: usize) {
+        if !self.dense.is_empty() {
+            if let Some(mark) = self.dense.get_mut(index) {
+                *mark = self.generation;
+            }
+            return;
+        }
+        self.sparse.insert(index);
+        if self.sparse.len() >= VISITED_DENSE_PROMOTION {
+            self.promote();
+        }
+    }
+
+    /// Move this row's marks into the dense array, which every later row of the
+    /// same expansion then re-uses.
+    #[cold]
+    fn promote(&mut self) {
+        self.dense = vec![0u8; self.node_bound.max(self.sparse.len())];
+        self.generation = 1;
+        for &index in &self.sparse {
+            if let Some(mark) = self.dense.get_mut(index) {
+                *mark = 1;
+            }
+        }
+        self.sparse.clear();
+    }
+}
+
 /// What the source node contributes to its *own* variable-length segment.
 ///
 /// Split out of the answer itself so the expensive arm can be deferred: under
@@ -345,12 +463,16 @@ impl<'a> PatternExecutor<'a> {
     fn expand_var_length_fast(
         &self,
         source: NodeIndex,
-        edge_pattern: &EdgePattern,
-        node_pattern: &NodePattern,
-        min_hops: usize,
-        max_hops: usize,
+        segment: &VarLengthSegment<'_>,
         max_results: Option<usize>,
+        visited: &mut VisitedStamps,
     ) -> Result<Option<Vec<(NodeIndex, MatchBinding)>>, String> {
+        let VarLengthSegment {
+            edge: edge_pattern,
+            node: node_pattern,
+            min_hops,
+            max_hops,
+        } = *segment;
         debug_assert!(
             min_hops <= 1,
             "the distance BFS is not trail-equivalent for min_hops >= 2"
@@ -374,10 +496,14 @@ impl<'a> PatternExecutor<'a> {
             return Ok(Some(results));
         }
 
-        // Global visited set — each node is explored at most once.
-        // Vec<bool> is faster than HashSet for dense NodeIndex (no hashing, cache-friendly).
-        let mut visited = vec![false; self.graph.graph.node_bound()];
-        visited[source.index()] = !leave_source_unvisited;
+        // Global visited set — each node is explored at most once. A dense
+        // stamp array beats a HashSet for NodeIndex (no hashing, cache-friendly);
+        // `VisitedStamps` is the caller's, so this row pays for the marks it
+        // writes rather than for the graph's node count.
+        visited.begin(self.graph.graph.node_bound(), max_results.is_some());
+        if !leave_source_unvisited {
+            visited.visit(source.index());
+        }
 
         // Queue: (node, depth) — no path vector needed
         let mut queue: VecDeque<(NodeIndex, usize)> = VecDeque::new();
@@ -433,10 +559,10 @@ impl<'a> PatternExecutor<'a> {
 
                     // Global dedup — skip if already visited at any depth
                     let target_idx = target.index();
-                    if visited[target_idx] {
+                    if visited.is_visited(target_idx) {
                         continue;
                     }
-                    visited[target_idx] = true;
+                    visited.visit(target_idx);
 
                     let new_depth = depth + 1;
 
@@ -499,12 +625,16 @@ impl<'a> PatternExecutor<'a> {
     pub(super) fn expand_var_length(
         &self,
         source: NodeIndex,
-        edge_pattern: &EdgePattern,
-        node_pattern: &NodePattern,
-        min_hops: usize,
-        max_hops: usize,
+        segment: &VarLengthSegment<'_>,
         max_results: Option<usize>,
+        visited: &mut VisitedStamps,
     ) -> Result<Vec<(NodeIndex, MatchBinding)>, String> {
+        let VarLengthSegment {
+            edge: edge_pattern,
+            node: node_pattern,
+            min_hops,
+            max_hops,
+        } = *segment;
         // Fast path: when path info isn't needed, use global-dedup BFS.
         // `min_hops <= 1` is a *correctness* condition, not a heuristic — see
         // `expand_var_length_fast`. The planner's `mark_fast_var_length_paths`
@@ -512,14 +642,9 @@ impl<'a> PatternExecutor<'a> {
         // every other producer of an `EdgePattern`. `Ok(None)` means the fast
         // path could not decide source inclusion within budget.
         if !edge_pattern.needs_path_info && min_hops <= 1 {
-            if let Some(fast) = self.expand_var_length_fast(
-                source,
-                edge_pattern,
-                node_pattern,
-                min_hops,
-                max_hops,
-                max_results,
-            )? {
+            if let Some(fast) =
+                self.expand_var_length_fast(source, segment, max_results, visited)?
+            {
                 return Ok(fast);
             }
         }

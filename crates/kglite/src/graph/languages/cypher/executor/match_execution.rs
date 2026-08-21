@@ -142,6 +142,167 @@ impl<'a> CypherExecutor<'a> {
     }
 
     // ========================================================================
+    // First-pattern row construction
+    // ========================================================================
+
+    /// The variable the *pattern matcher* may deduplicate by while it expands,
+    /// or `None` to leave the dedup to the row loop below.
+    ///
+    /// Deduplicating inside the matcher is what keeps a multi-source expansion's
+    /// match vector proportional to the distinct target set rather than to
+    /// `sources x targets` — the matcher's `distinct_seen` is shared across
+    /// every source row, so a target already emitted is skipped before a
+    /// `PatternMatch` is built for it. (It skips *emission*, never traversal:
+    /// each source still runs its own BFS through nodes an earlier source
+    /// already reached.)
+    ///
+    /// The hazard it trades against is that the matcher keeps one arbitrary
+    /// representative per target, and a fused WHERE may reject exactly that one
+    /// while a suppressed match on the same target would have passed. Two
+    /// things answer it. Here, the *heuristic*: a predicate that can read the
+    /// dedup variable itself is left to the row loop, because such a predicate
+    /// genuinely filters targets and would send every call down the retry path.
+    /// In [`Self::first_pattern_rows`], the *proof*: any row that fails the
+    /// predicate under matcher-level dedup invalidates the pass, which is then
+    /// redone without it. So this function only has to be a good guess —
+    /// [`match_clause::predicate_may_read_var`] answering `true` too often costs
+    /// the optimization, never an answer.
+    fn matcher_distinct_target<'c>(
+        clause: &'c MatchClause,
+        inline_where: Option<&Predicate>,
+    ) -> Option<&'c str> {
+        let hint = clause.distinct_node_hint.as_deref()?;
+        match inline_where {
+            None => Some(hint),
+            Some(pred) if !match_clause::predicate_may_read_var(pred, hint) => Some(hint),
+            Some(_) => None,
+        }
+    }
+
+    /// Execute the clause's first pattern and turn its matches into rows,
+    /// applying the fused WHERE and the `distinct_node_hint` dedup.
+    ///
+    /// `matcher_distinct_target` is the variable [`Self::matcher_distinct_target`]
+    /// licensed the matcher to deduplicate by. Returns `Ok(None)` when that
+    /// license turned out to be wrong — a kept representative failed the fused
+    /// WHERE, so a match this pass never saw might have passed on the same
+    /// target. The caller redoes the pattern with `None`, which cannot fail the
+    /// same way because then every match reaches the predicate.
+    fn first_pattern_rows(
+        &self,
+        clause: &MatchClause,
+        pattern: &Pattern,
+        pattern_limit: Option<usize>,
+        limit_hint: Option<usize>,
+        inline_where: Option<&Predicate>,
+        matcher_distinct_target: Option<String>,
+    ) -> Result<Option<Vec<ResultRow>>, String> {
+        use crate::graph::core::pattern_matching::MatchBinding;
+
+        let matcher_deduped = matcher_distinct_target.is_some();
+        // A slot anchor (`WHERE elementId(v) = …`) seeds the variable as a
+        // pre-binding, turning the leading scan into a point lookup.
+        // Search-space only — the predicate stays.
+        let unbound: Bindings<petgraph::graph::NodeIndex> = Bindings::new();
+        let anchors = match_clause::seed_clause_node_anchors(clause, &unbound);
+        let executor = match anchors.as_ref() {
+            Some(pre_bindings) => PatternExecutor::with_bindings_and_params(
+                self.graph,
+                pattern_limit,
+                pre_bindings,
+                self.params,
+            ),
+            None => {
+                PatternExecutor::new_lightweight_with_params(self.graph, pattern_limit, self.params)
+            }
+        }
+        .set_deadline(self.deadline)
+        .set_cancel(self.cancel)
+        .set_parallel(self.parallel)
+        .set_distinct_target(matcher_distinct_target);
+        let matches = executor.execute(pattern)?;
+        self.budget.check_work(matches.len(), "MATCH expansion")?;
+
+        // Every match becomes a row when nothing can drop one: with no fused
+        // predicate none is filtered, and under matcher-level dedup a filtered
+        // row invalidates the whole pass (below), so the count is exact. Sizing
+        // the vector up front then costs nothing and removes the geometric
+        // growth's last doubling, which holds the old and new buffers at once —
+        // on a 19k-row k-hop that realloc, not the rows, was the peak.
+        let exact_rows = (inline_where.is_none() || matcher_deduped)
+            .then(|| limit_hint.map_or(matches.len(), |l| l.min(matches.len())));
+        let mut rows: Vec<ResultRow> = Vec::with_capacity(exact_rows.unwrap_or(0));
+        // When distinct_node_hint is set, pre-dedup by NodeIndex to avoid
+        // creating ResultRows for matches that would be DISTINCT-removed later.
+        let mut seen: rustc_hash::FxHashSet<petgraph::graph::NodeIndex> =
+            rustc_hash::FxHashSet::with_capacity_and_hasher(
+                if clause.distinct_node_hint.is_some() {
+                    matches.len().min(10000)
+                } else {
+                    0
+                },
+                Default::default(),
+            );
+        for m in matches {
+            // Resolve the dedup variable's node index first so an already-kept
+            // target is skipped before row conversion.
+            let dedup_idx = clause.distinct_node_hint.as_deref().and_then(|dedup_var| {
+                m.bindings
+                    .iter()
+                    .find(|(name, _)| name == dedup_var)
+                    .and_then(|(_, b)| match b {
+                        MatchBinding::Node { index, .. } => Some(*index),
+                        MatchBinding::NodeRef(index) => Some(*index),
+                        _ => None,
+                    })
+            });
+            if let Some(idx) = dedup_idx {
+                if seen.contains(&idx) {
+                    continue;
+                }
+            }
+            let row = self.pattern_match_to_row(m);
+            // Residual WHERE fused into this MATCH: filter BEFORE the dedup
+            // insert so the kept representative is a row that passed the
+            // predicate (filter-then-dedup).
+            if let Some(pred) = inline_where {
+                match self.evaluate_predicate(pred, &row) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        if matcher_deduped {
+                            // The matcher already discarded this target's other
+                            // matches; one of them may have passed. This pass
+                            // cannot answer the clause.
+                            return Ok(None);
+                        }
+                        continue;
+                    }
+                    Err(e) => return Err(e), // Propagate errors (e.g. missing param)
+                }
+            }
+            if let Some(idx) = dedup_idx {
+                seen.insert(idx);
+            }
+            self.budget.reserve_rows(rows.len(), 1, "MATCH")?;
+            rows.push(row);
+            // Stop after limit matching rows (not candidates)
+            if let Some(limit) = limit_hint {
+                if rows.len() >= limit {
+                    break;
+                }
+            }
+        }
+        // Post-match truncation: for edge patterns without inline WHERE,
+        // limit_hint wasn't passed to the PatternExecutor, so truncate here.
+        if inline_where.is_none() {
+            if let Some(limit) = limit_hint {
+                rows.truncate(limit);
+            }
+        }
+        Ok(Some(rows))
+    }
+
+    // ========================================================================
     // MATCH
     // ========================================================================
 
@@ -186,122 +347,35 @@ impl<'a> CypherExecutor<'a> {
 
             for (pi, pattern) in clause.patterns.iter().enumerate() {
                 if pi == 0 {
-                    // First pattern - create initial rows
-                    // limit_hint is safe for edge patterns: PatternExecutor
-                    // only enforces max_matches at the last hop.
-                    // When a residual (non-pushable) WHERE is fused into this
-                    // MATCH, the matcher's per-target dedup must NOT run: it
-                    // keeps one arbitrary representative per distinct target,
-                    // which may fail the predicate while a suppressed match
-                    // with the same target would have passed. Filter first,
-                    // dedup after (in the loop below) instead.
-                    let matcher_distinct_target = if inline_where.is_none() {
-                        clause.distinct_node_hint.clone()
-                    } else {
-                        None
+                    // First pattern — create the initial rows. The matcher may
+                    // be licensed to deduplicate by `distinct_node_hint` during
+                    // expansion (bounding the match vector by the *distinct
+                    // target* count instead of sources x targets); when it is,
+                    // `first_pattern_rows` returns `None` if a kept
+                    // representative turned out to fail the fused WHERE, and the
+                    // uncapped-retry below redoes the pattern without it.
+                    let licensed =
+                        Self::matcher_distinct_target(clause, inline_where).map(str::to_string);
+                    all_rows = match self.first_pattern_rows(
+                        clause,
+                        pattern,
+                        pattern_limit,
+                        limit_hint,
+                        inline_where,
+                        licensed,
+                    )? {
+                        Some(rows) => rows,
+                        None => self
+                            .first_pattern_rows(
+                                clause,
+                                pattern,
+                                pattern_limit,
+                                limit_hint,
+                                inline_where,
+                                None,
+                            )?
+                            .expect("no matcher dedup leaves nothing to invalidate"),
                     };
-                    // A slot anchor (`WHERE elementId(v) = …`) seeds the
-                    // variable as a pre-binding, turning the leading scan into
-                    // a point lookup. Search-space only — the predicate stays.
-                    let unbound: Bindings<petgraph::graph::NodeIndex> = Bindings::new();
-                    let anchors = match_clause::seed_clause_node_anchors(clause, &unbound);
-                    let executor = match anchors.as_ref() {
-                        Some(pre_bindings) => PatternExecutor::with_bindings_and_params(
-                            self.graph,
-                            pattern_limit,
-                            pre_bindings,
-                            self.params,
-                        ),
-                        None => PatternExecutor::new_lightweight_with_params(
-                            self.graph,
-                            pattern_limit,
-                            self.params,
-                        ),
-                    }
-                    .set_deadline(self.deadline)
-                    .set_cancel(self.cancel)
-                    .set_parallel(self.parallel)
-                    .set_distinct_target(matcher_distinct_target);
-                    let matches = executor.execute(pattern)?;
-                    self.budget.check_work(matches.len(), "MATCH expansion")?;
-
-                    // When distinct_node_hint is set, pre-dedup by NodeIndex to avoid
-                    // creating ResultRows for matches that would be DISTINCT-removed later.
-                    if let Some(ref dedup_var) = clause.distinct_node_hint {
-                        use crate::graph::core::pattern_matching::MatchBinding;
-                        let mut seen: rustc_hash::FxHashSet<_> =
-                            rustc_hash::FxHashSet::with_capacity_and_hasher(
-                                matches.len().min(10000),
-                                Default::default(),
-                            );
-                        for m in matches {
-                            // Resolve the dedup variable's node index first so an
-                            // already-kept target is skipped before row conversion.
-                            let dedup_idx = m
-                                .bindings
-                                .iter()
-                                .find(|(name, _)| name == dedup_var)
-                                .and_then(|(_, b)| match b {
-                                    MatchBinding::Node { index, .. } => Some(*index),
-                                    MatchBinding::NodeRef(index) => Some(*index),
-                                    _ => None,
-                                });
-                            if let Some(idx) = dedup_idx {
-                                if seen.contains(&idx) {
-                                    continue;
-                                }
-                            }
-                            let row = self.pattern_match_to_row(m);
-                            // Residual WHERE fused into this MATCH: filter BEFORE
-                            // the dedup insert so the kept representative is a row
-                            // that passed the predicate (filter-then-dedup).
-                            if let Some(pred) = inline_where {
-                                match self.evaluate_predicate(pred, &row) {
-                                    Ok(true) => {}
-                                    Ok(false) => continue,
-                                    Err(e) => return Err(e),
-                                }
-                            }
-                            if let Some(idx) = dedup_idx {
-                                seen.insert(idx);
-                            }
-                            self.budget.reserve_rows(all_rows.len(), 1, "MATCH")?;
-                            all_rows.push(row);
-                            // Stop after limit matching rows (not candidates)
-                            if let Some(limit) = limit_hint {
-                                if all_rows.len() >= limit {
-                                    break;
-                                }
-                            }
-                        }
-                    } else {
-                        for m in matches {
-                            let row = self.pattern_match_to_row(m);
-                            // Inline WHERE: evaluate predicate before collecting
-                            if let Some(pred) = inline_where {
-                                match self.evaluate_predicate(pred, &row) {
-                                    Ok(true) => {}           // Keep row
-                                    Ok(false) => continue,   // Skip non-matching row
-                                    Err(e) => return Err(e), // Propagate errors (e.g., missing param)
-                                }
-                            }
-                            self.budget.reserve_rows(all_rows.len(), 1, "MATCH")?;
-                            all_rows.push(row);
-                            // Stop after limit matching rows (not candidates)
-                            if let Some(limit) = limit_hint {
-                                if all_rows.len() >= limit {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    // Post-match truncation: for edge patterns without inline WHERE,
-                    // limit_hint wasn't passed to the PatternExecutor, so truncate here.
-                    if inline_where.is_none() {
-                        if let Some(limit) = limit_hint {
-                            all_rows.truncate(limit);
-                        }
-                    }
                     // Rows from the first pattern hold exactly that pattern's
                     // bindings, so its consumed edges can be read back off
                     // the rows (named edges + fixed/var-length path hops).
@@ -362,7 +436,6 @@ impl<'a> CypherExecutor<'a> {
                             )
                             .set_deadline(self.deadline)
                             .set_cancel(self.cancel)
-                            .set_parallel(self.parallel)
                             .set_parallel(self.parallel);
                             executor.execute(pat)?
                         };
@@ -535,7 +608,6 @@ impl<'a> CypherExecutor<'a> {
                         )
                         .set_deadline(self.deadline)
                         .set_cancel(self.cancel)
-                        .set_parallel(self.parallel)
                         .set_parallel(self.parallel);
                         let matches = executor.execute(pat)?;
                         self.budget.check_work(matches.len(), "MATCH join")?;

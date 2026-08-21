@@ -67,7 +67,6 @@ impl<'a> CypherExecutor<'a> {
                     )
                     .set_deadline(self.deadline)
                     .set_cancel(self.cancel)
-            .set_parallel(self.parallel)
             .set_parallel(self.parallel);
                     let matches = executor.execute(pattern)?;
 
@@ -190,7 +189,6 @@ impl<'a> CypherExecutor<'a> {
         let executor = PatternExecutor::new_lightweight_with_params(self.graph, None, self.params)
             .set_deadline(self.deadline)
             .set_cancel(self.cancel)
-            .set_parallel(self.parallel)
             .set_parallel(self.parallel);
         let group_matches = executor.execute(&group_only_pattern)?;
         let mut total = 0i64;
@@ -406,7 +404,6 @@ impl<'a> CypherExecutor<'a> {
                     PatternExecutor::new_lightweight_with_params(self.graph, None, self.params)
                         .set_deadline(self.deadline)
                         .set_cancel(self.cancel)
-            .set_parallel(self.parallel)
             .set_parallel(self.parallel);
                 Some(executor.execute(&group_only_pattern)?)
             } else {
@@ -1091,7 +1088,6 @@ impl<'a> CypherExecutor<'a> {
                     PatternExecutor::new_lightweight_with_params(self.graph, None, self.params)
                         .set_deadline(self.deadline)
                         .set_cancel(self.cancel)
-            .set_parallel(self.parallel)
             .set_parallel(self.parallel);
                 let group_matches = executor.execute(&group_only_pattern)?;
                 let mut rows = Vec::with_capacity(group_matches.len());
@@ -1649,7 +1645,6 @@ impl<'a> CypherExecutor<'a> {
         let executor = PatternExecutor::new_lightweight_with_params(self.graph, None, self.params)
             .set_deadline(self.deadline)
             .set_cancel(self.cancel)
-            .set_parallel(self.parallel)
             .set_parallel(self.parallel);
         let count_pattern: &crate::graph::core::pattern_matching::Pattern =
             if let Some(m2) = secondary_match {

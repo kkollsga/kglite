@@ -1651,6 +1651,10 @@ impl<'a> PatternExecutor<'a> {
         // an expand-all-then-filter (O(degree)) into a targeted check. Skipped
         // for variable-length segments (those return via `expand_var_length`).
         target_hint: Option<NodeIndex>,
+        // Reusable visited marks for the fast variable-length BFS, owned by the
+        // hop loop so a per-row buffer allocation+zeroing that scaled with the
+        // graph becomes a stamp bump. Unused by every other expansion shape.
+        visited: &mut VisitedStamps,
     ) -> Result<Vec<(NodeIndex, MatchBinding)>, String> {
         // Early exit: if the specified connection type doesn't exist in the graph, skip all iteration
         if let Some(ref types) = edge_pattern.connection_types {
@@ -1671,11 +1675,14 @@ impl<'a> PatternExecutor<'a> {
         if let Some((min_hops, max_hops)) = edge_pattern.var_length {
             return self.expand_var_length(
                 source,
-                edge_pattern,
-                node_pattern,
-                min_hops,
-                max_hops,
+                &VarLengthSegment {
+                    edge: edge_pattern,
+                    node: node_pattern,
+                    min_hops,
+                    max_hops,
+                },
                 max_results,
+                visited,
             );
         }
 
@@ -1872,6 +1879,8 @@ mod expansion;
 
 #[path = "matcher_var_length.rs"]
 mod var_length;
+
+use var_length::{VarLengthSegment, VisitedStamps};
 
 #[cfg(test)]
 #[path = "matcher_id_lookup_tests.rs"]
