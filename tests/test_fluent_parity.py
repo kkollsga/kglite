@@ -69,6 +69,28 @@ class TestRegexFilter:
         r = graph.select("Person").where({"name": {"=~": "^B.*"}}).titles()
         assert r == ["Bob"]
 
+    # `regex` and `=~` were synonyms until 0.16.6. They are not: `=~` is
+    # Cypher's operator and Cypher's `=~` matches the whole value, while
+    # `regex` keeps the search semantics FLUENT.md documents. The pair below
+    # is the difference, on one pattern.
+    def test_tilde_operator_matches_the_whole_value(self, graph):
+        assert not graph.select("Person").where({"name": {"=~": "e$"}}).titles()
+        assert sorted(graph.select("Person").where({"name": {"=~": ".*e$"}}).titles()) == [
+            "Alice",
+            "Charlie",
+            "Eve",
+        ]
+
+    def test_tilde_operator_anchors_an_alternation_as_a_unit(self, graph):
+        r = graph.select("Person").where({"name": {"=~": "Bob|Eve"}}).titles()
+        assert sorted(r) == ["Bob", "Eve"]
+        # `^Bob|Eve$` would also accept a name merely *starting* with Bob.
+        assert not graph.select("Person").where({"name": {"=~": "Bo"}}).titles()
+
+    def test_tilde_operator_invalid_pattern_quotes_the_users_pattern(self, graph):
+        with pytest.raises(kglite.KgError, match=r"Invalid regex pattern '\[invalid'"):
+            graph.select("Person").where({"name": {"=~": "[invalid"}})
+
 
 # ============================================================================
 # Phase 1b: NOT logic in filter()

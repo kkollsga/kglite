@@ -359,10 +359,14 @@ pub(super) fn evaluate_comparison(
         )),
         ComparisonOp::RegexMatch => match (left, right) {
             (Value::String(text), Value::String(pattern)) => {
+                // Anchored: `=~` is a full-string match (openCypher), not a
+                // search — `'inactive' =~ 'active'` is false. `text_match_regex()`
+                // remains the search function.
+                //
                 // Borrowed, not cloned: this runs once per row, and cloning
                 // the shared `Arc` here was measured to cost more than the
                 // match itself under the parallel runtime.
-                super::regex_cache::with_compiled(pattern, |re| re.is_match(text))
+                super::regex_cache::with_compiled_anchored(pattern, |re| re.is_match(text))
                     .map_err(|e| super::regex_cache::operator_compile_error(pattern, &e))
             }
             _ => Ok(false),

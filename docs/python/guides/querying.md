@@ -11,7 +11,8 @@ graph.select('Product').where({'id': {'in': [101, 103]}})
 graph.select('Product').where({'category': {'is_null': True}})
 
 # Regex matching
-graph.select('Person').where({'name': {'regex': '^A.*'}})   # or {'=~': '^A.*'}
+graph.select('Person').where({'name': {'regex': '^A.*'}})   # searches the value
+graph.select('Person').where({'name': {'=~': 'A.*'}})       # matches the whole value
 graph.select('Person').where({'name': {'regex': '(?i)^alice'}})  # case-insensitive
 
 # Negated conditions

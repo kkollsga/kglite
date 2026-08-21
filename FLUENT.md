@@ -135,7 +135,11 @@ graph.select('Product').where({'price': {'>=': 100, '<=': 500}})
 graph.select('Person').where({'name': {'contains': 'ali'}})
 graph.select('Person').where({'name': {'starts_with': 'A'}})
 graph.select('Person').where({'email': {'ends_with': '@example.com'}})
-graph.select('Person').where({'name': {'regex': '^A.*'}})
+graph.select('Person').where({'name': {'regex': '^A.*'}})       # searches
+graph.select('Person').where({'name': {'=~': '.*son'}})        # whole value
+
+# `regex` searches the value; `=~` matches it in full, like Cypher's `=~`
+# operator — {'role': {'=~': 'admin'}} does not match 'superadmin'.
 
 # Negated variants
 graph.select('Person').where({'status': {'not_in': ['inactive', 'banned']}})

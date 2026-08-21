@@ -1109,6 +1109,44 @@
           ]
         }
       ]
+    },
+    {
+      "id": "operator.regex_match_full_string",
+      "category": "expression",
+      "requirement": "The regex operator succeeds only when the pattern matches the entire subject, so a pattern that merely occurs inside it does not match.",
+      "query": "RETURN 'active' =~ 'active' AS whole, 'inactive' =~ 'active' AS inside, 'activated' =~ 'active' AS prefix",
+      "expected": [
+        {
+          "whole": true,
+          "inside": false,
+          "prefix": false
+        }
+      ]
+    },
+    {
+      "id": "operator.regex_match_alternation",
+      "category": "expression",
+      "requirement": "A top-level alternation is bound as a unit, so each branch must match the whole subject.",
+      "query": "RETURN 'cat' =~ 'cat|dog' AS branch, 'catx' =~ 'cat|dog' AS trailing, 'xdog' =~ 'cat|dog' AS leading",
+      "expected": [
+        {
+          "branch": true,
+          "trailing": false,
+          "leading": false
+        }
+      ]
+    },
+    {
+      "id": "operator.regex_match_inline_flags",
+      "category": "expression",
+      "requirement": "Inline flags apply to the whole pattern: the regex operator is case-sensitive unless (?i) is given.",
+      "query": "RETURN 'ACTIVE' =~ '(?i)active' AS insensitive, 'ACTIVE' =~ 'active' AS sensitive",
+      "expected": [
+        {
+          "insensitive": true,
+          "sensitive": false
+        }
+      ]
     }
   ]
 }

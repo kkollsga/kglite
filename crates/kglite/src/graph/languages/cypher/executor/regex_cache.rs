@@ -129,6 +129,48 @@ pub(super) fn is_compile_error(message: &str) -> bool {
 
 static CACHE: LazyLock<RegexCache> = LazyLock::new(|| RegexCache::new(CACHE_CAPACITY));
 
+// ---------------------------------------------------------------------------
+// Anchoring — the `=~` operator's full-string rule
+// ---------------------------------------------------------------------------
+//
+// openCypher's `=~` succeeds only when the pattern matches the *entire*
+// subject; `text_match_regex()` is this project's documented *search*
+// function and must keep its unanchored behaviour. The two therefore differ
+// in the pattern they compile, not in the cache they use: the anchored form
+// is a distinct pattern string and gets its own entry in [`CACHE`], so the
+// shared cache stays coherent and one caller can never serve the other.
+
+/// Wrap `pattern` so a match must span the whole subject.
+///
+/// The group is non-capturing and encloses the entire pattern, so a top-level
+/// alternation anchors as a unit: `cat|dog` becomes `^(?:cat|dog)$`, never
+/// `^cat|dog$` — which would mean "starts with cat, or ends with dog".
+///
+/// Mirrored deliberately across the crate boundary by the fluent `{'=~': …}`
+/// operator (`kglite-py/src/datatypes/py_in.rs`); the two must build the same
+/// pattern.
+fn anchor(pattern: &str) -> String {
+    format!("^(?:{pattern})$")
+}
+
+/// Compile the anchored form of `pattern`, reporting a failure against the
+/// pattern the *user* wrote.
+///
+/// `regex::Error` embeds the offending source text, and the user never wrote
+/// the `^(?:…)$` wrapper — a bare `[` must not be reported as `^(?:[)$`.
+/// Every pattern the anchored form rejects is rejected bare as well, so the
+/// re-compile below supplies the message; if the wrapper alone is at fault
+/// (reachable only through the compiled-size limit), its own error stands.
+fn compile_anchored(pattern: &str) -> Result<Arc<Regex>, regex::Error> {
+    CACHE.get_or_compile(&anchor(pattern)).map_err(|wrapped| {
+        RegexBuilder::new(pattern)
+            .size_limit(REGEX_SIZE_LIMIT)
+            .build()
+            .err()
+            .unwrap_or(wrapped)
+    })
+}
+
 /// Per-thread front cache in front of [`CACHE`].
 ///
 /// A `=~` predicate resolves its pattern **once per row**, and the shared
@@ -147,17 +189,23 @@ static CACHE: LazyLock<RegexCache> = LazyLock::new(|| RegexCache::new(CACHE_CAPA
 /// like its parent so a stream of unique patterns cannot grow per-thread
 /// memory; the shared cache remains the backing store and the eviction
 /// authority.
+///
+/// Entries are the **anchored** programs, keyed by the pattern the user
+/// wrote — keying by the anchored form would build a string on every row,
+/// which is the allocation this cache exists to avoid. `=~` is the only
+/// per-row caller; an unanchored per-row caller would need its own cache,
+/// not this one.
 const LOCAL_CAPACITY: usize = 8;
 
 thread_local! {
-    static LOCAL: std::cell::RefCell<Vec<(String, Regex)>> =
+    static LOCAL_ANCHORED: std::cell::RefCell<Vec<(String, Regex)>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Populate the per-thread front cache for `pattern` if it is not already
 /// there.
 fn ensure_local(pattern: &str) -> Result<(), regex::Error> {
-    if LOCAL.with(|local| local.borrow().iter().any(|(cached, _)| cached == pattern)) {
+    if LOCAL_ANCHORED.with(|local| local.borrow().iter().any(|(cached, _)| cached == pattern)) {
         return Ok(());
     }
     // Cloned, deliberately: a `Regex` carries an internal pool of scratch
@@ -166,8 +214,8 @@ fn ensure_local(pattern: &str) -> Result<(), regex::Error> {
     // the parallel `=~` scan from a regression into a win — see the module
     // note above. The clone happens once per thread per pattern; the shared
     // cache still does the compiling.
-    let compiled = CACHE.get_or_compile(pattern)?;
-    LOCAL.with(|local| {
+    let compiled = compile_anchored(pattern)?;
+    LOCAL_ANCHORED.with(|local| {
         let mut local = local.borrow_mut();
         if local.len() >= LOCAL_CAPACITY {
             local.remove(0);
@@ -177,8 +225,12 @@ fn ensure_local(pattern: &str) -> Result<(), regex::Error> {
     Ok(())
 }
 
-/// Run `f` against the compiled `pattern`, **borrowing** it from the
-/// per-thread cache.
+/// Run `f` against the compiled **anchored** form of `pattern`, borrowing it
+/// from the per-thread cache.
+///
+/// The subject must match `pattern` in full — this is `=~`'s entry point and
+/// its semantics; see [`anchor`]. Callers that want a search compile through
+/// [`get_or_compile`] instead.
 ///
 /// This is the per-row entry point, and the borrow is the point of it.
 /// [`get_or_compile`] hands back an `Arc`, and cloning one is an atomic
@@ -190,9 +242,12 @@ fn ensure_local(pattern: &str) -> Result<(), regex::Error> {
 /// `f` must not re-enter this module: the thread-local is borrowed across the
 /// call, so a nested lookup would panic. Every caller passes a leaf operation
 /// (`is_match`, `replace_all`), which is why the borrow is safe to hold.
-pub fn with_compiled<R>(pattern: &str, f: impl FnOnce(&Regex) -> R) -> Result<R, regex::Error> {
+pub fn with_compiled_anchored<R>(
+    pattern: &str,
+    f: impl FnOnce(&Regex) -> R,
+) -> Result<R, regex::Error> {
     ensure_local(pattern)?;
-    Ok(LOCAL.with(|local| {
+    Ok(LOCAL_ANCHORED.with(|local| {
         let local = local.borrow();
         let compiled = local
             .iter()
@@ -203,9 +258,9 @@ pub fn with_compiled<R>(pattern: &str, f: impl FnOnce(&Regex) -> R) -> Result<R,
     }))
 }
 
-/// Look up `pattern` in the per-thread front cache, then the process-wide
-/// cache; compile and insert on miss. Prefer [`with_compiled`] on any path
-/// that runs per row — see its note on the shared refcount.
+/// Look up `pattern` verbatim in the process-wide cache; compile and insert
+/// on miss. Unanchored: this is the *search* entry point, used by
+/// `text_match_regex()` and friends.
 pub fn get_or_compile(pattern: &str) -> Result<Arc<Regex>, regex::Error> {
     CACHE.get_or_compile(pattern)
 }
@@ -279,6 +334,46 @@ mod tests {
         ));
         assert!(!is_compile_error("Variable 'x' not bound"));
         assert!(!is_compile_error(""));
+    }
+
+    #[test]
+    fn anchored_matches_the_whole_subject_only() {
+        // The `=~` contract: a pattern that only occurs *inside* the subject
+        // does not match. `'inactive' =~ 'active'` was true before 0.16.6.
+        assert!(with_compiled_anchored("active", |re| re.is_match("active")).unwrap());
+        assert!(!with_compiled_anchored("active", |re| re.is_match("inactive")).unwrap());
+        assert!(!with_compiled_anchored("b", |re| re.is_match("abc")).unwrap());
+        // An explicitly anchored pattern is unaffected by the wrapper.
+        assert!(with_compiled_anchored("^A.*", |re| re.is_match("Alice")).unwrap());
+    }
+
+    #[test]
+    fn anchored_alternation_binds_as_a_unit() {
+        // `^cat|dog$` would mean "starts with cat, or ends with dog"; the
+        // non-capturing group is what makes `^(?:cat|dog)$` correct.
+        assert!(with_compiled_anchored("cat|dog", |re| re.is_match("cat")).unwrap());
+        assert!(with_compiled_anchored("cat|dog", |re| re.is_match("dog")).unwrap());
+        assert!(!with_compiled_anchored("cat|dog", |re| re.is_match("catx")).unwrap());
+        assert!(!with_compiled_anchored("cat|dog", |re| re.is_match("xdog")).unwrap());
+    }
+
+    #[test]
+    fn anchored_keeps_inline_flags() {
+        assert!(with_compiled_anchored("(?i)active", |re| re.is_match("ACTIVE")).unwrap());
+        assert!(!with_compiled_anchored("active", |re| re.is_match("ACTIVE")).unwrap());
+    }
+
+    #[test]
+    fn anchored_compile_error_names_the_users_pattern() {
+        // The wrapper is ours; the error text must not show it.
+        let bad = String::from("[");
+        let err = with_compiled_anchored(&bad, |_| ()).expect_err("'[' must not compile");
+        let message = operator_compile_error(&bad, &err);
+        assert!(
+            message.starts_with("Invalid regular expression '['"),
+            "{message}"
+        );
+        assert!(!message.contains("^(?:"), "{message}");
     }
 
     #[test]

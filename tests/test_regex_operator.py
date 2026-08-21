@@ -18,7 +18,11 @@ class TestRegexBasic:
     """Basic regex =~ operator tests."""
 
     def test_simple_match(self, name_graph):
-        """Simple substring match."""
+        """A search, spelled the way `=~` requires: wildcards on both ends.
+
+        `=~` matches the whole value, so the bare `lic` this test used to pass
+        would select nothing — see TestFullStringMatch.
+        """
         result = name_graph.cypher("""
             MATCH (p:Person)
             WHERE p.name =~ '.*lic.*'
@@ -236,3 +240,89 @@ class TestUnevaluablePredicateStillDropsRows:
             "MATCH (p:Person) WHERE p.title =~ '^[A-C].*' RETURN p.title AS t ORDER BY t LIMIT 3"
         ).to_list()
         assert [r["t"] for r in rows] == ["Alice", "Bob", "Cyd"]
+
+
+# ── `=~` matches the whole value, not a substring ────────────────────────
+#
+# openCypher (and Neo4j, and Kùzu) define `=~` as a full-string match. Until
+# 0.16.6 KGLite's `=~` was a substring *search*: `'inactive' =~ 'active'` was
+# true, and `WHERE n.role =~ 'admin'` also matched 'superadmin'. Both paths —
+# optimized and naive — shared the defect, so the differential corpus could
+# not see it; these are absolute goldens.
+
+FULL_STRING_CASES = [
+    # (id, expression, expected)
+    ("exact", "'active' =~ 'active'", True),
+    ("suffix_only", "'inactive' =~ 'active'", False),
+    ("prefix_only", "'activated' =~ 'active'", False),
+    ("single_char_inside", "'abc' =~ 'b'", False),
+    ("substring_inside", "'Alice' =~ 'li'", False),
+    # The security flavour: a role check must not accept a longer role.
+    ("privilege_suffix", "'superadmin' =~ 'admin'", False),
+    ("case_differs", "'ACTIVE' =~ 'active'", False),
+    # A top-level alternation anchors as a unit — not "starts with cat, or
+    # ends with dog".
+    ("alternation_left", "'cat' =~ 'cat|dog'", True),
+    ("alternation_right", "'dog' =~ 'cat|dog'", True),
+    ("alternation_trailing_text", "'catx' =~ 'cat|dog'", False),
+    ("alternation_leading_text", "'xdog' =~ 'cat|dog'", False),
+    # Explicit anchors keep working; so do inline flags.
+    ("explicit_start_anchor", "'Alice' =~ '^A.*'", True),
+    ("explicit_both_anchors", "'Bob' =~ '^Bob$'", True),
+    ("case_insensitive_flag", "'ACTIVE' =~ '(?i)active'", True),
+    # A search is still expressible — that is what `.*` is for.
+    ("wildcards_around", "'Alice' =~ '.*lic.*'", True),
+    ("empty_pattern_empty_subject", "'' =~ ''", True),
+    ("empty_pattern_nonempty_subject", "'a' =~ ''", False),
+]
+
+
+class TestFullStringMatch:
+    """`=~` succeeds only when the pattern spans the entire subject."""
+
+    @pytest.mark.parametrize(
+        "expression,expected",
+        [(case[1], case[2]) for case in FULL_STRING_CASES],
+        ids=[case[0] for case in FULL_STRING_CASES],
+    )
+    @pytest.mark.parametrize("disable_optimizer", [False, True], ids=["optimized", "naive"])
+    def test_expression(self, expression, expected, disable_optimizer):
+        graph = KnowledgeGraph()
+        rows = graph.cypher(f"RETURN {expression} AS matched", disable_optimizer=disable_optimizer).to_list()
+        assert rows == [{"matched": expected}]
+
+    def test_where_clause_does_not_match_a_substring(self, name_graph):
+        """The WHERE route, on a real scan: 'lic' no longer selects Alice."""
+        assert name_graph.cypher("MATCH (p:Person) WHERE p.name =~ 'lic' RETURN p.name").to_list() == []
+        names = [
+            r["p.name"]
+            for r in name_graph.cypher("MATCH (p:Person) WHERE p.name =~ '.*lic.*' RETURN p.name ORDER BY p.name")
+        ]
+        assert names == ["Alice", "alice"]
+
+    def test_case_expression_route(self, name_graph):
+        rows = name_graph.cypher(
+            "MATCH (p:Person) WHERE p.name = 'Alice' "
+            "RETURN CASE WHEN p.name =~ 'lic' THEN 'search' ELSE 'full' END AS mode"
+        ).to_list()
+        assert rows == [{"mode": "full"}]
+
+    def test_null_subject_still_propagates_null(self):
+        """Unchanged by anchoring: a null left side yields null, not false."""
+        graph = KnowledgeGraph()
+        assert graph.cypher("RETURN null =~ 'a' AS matched").to_list() == [{"matched": None}]
+
+    def test_non_string_subject_is_false(self):
+        """Unchanged by anchoring: a non-string left side does not match."""
+        graph = KnowledgeGraph()
+        assert graph.cypher("RETURN 42 =~ '42' AS matched").to_list() == [{"matched": False}]
+
+    def test_text_match_regex_still_searches(self, name_graph):
+        """The documented search function is deliberately *not* anchored."""
+        names = [
+            r["p.name"]
+            for r in name_graph.cypher(
+                "MATCH (p:Person) WHERE text_match_regex(p.name, 'lic') RETURN p.name ORDER BY p.name"
+            )
+        ]
+        assert names == ["Alice", "alice"]

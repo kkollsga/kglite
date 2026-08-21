@@ -52,21 +52,14 @@ fn parse_operator_condition(op: &str, val: &Bound<'_, PyAny>) -> PyResult<Filter
         "contains" => Ok(FilterCondition::Contains(py_value_to_value(val)?)),
         "starts_with" => Ok(FilterCondition::StartsWith(py_value_to_value(val)?)),
         "ends_with" => Ok(FilterCondition::EndsWith(py_value_to_value(val)?)),
-        "regex" | "=~" => {
-            let pattern = val.extract::<String>().map_err(|_| {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "'regex' operator requires a string pattern",
-                )
-            })?;
-            // Validate the regex at parse time
-            regex::Regex::new(&pattern).map_err(|e| -> PyErr {
-                crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(format!(
-                    "Invalid regex pattern '{}': {}",
-                    pattern, e
-                )))
-            })?;
-            Ok(FilterCondition::Regex(pattern))
-        }
+        // `regex` searches, `=~` matches the whole value. The two used to be
+        // spelled as synonyms; they are not, because `=~` is Cypher's operator
+        // and Cypher's `=~` is a full-string match (openCypher). `regex` keeps
+        // the search semantics FLUENT.md has always documented.
+        "regex" => Ok(FilterCondition::Regex(regex_pattern_arg("regex", val)?)),
+        "=~" => Ok(FilterCondition::Regex(anchor_pattern(&regex_pattern_arg(
+            "=~", val,
+        )?))),
         // Negated operators: not_contains, not_starts_with, not_ends_with, not_in, not_regex
         "not_contains" => Ok(FilterCondition::Not(Box::new(FilterCondition::Contains(
             py_value_to_value(val)?,
@@ -78,29 +71,46 @@ fn parse_operator_condition(op: &str, val: &Bound<'_, PyAny>) -> PyResult<Filter
             py_value_to_value(val)?,
         )))),
         "not_in" => Ok(FilterCondition::Not(Box::new(parse_in_condition(val)?))),
-        "not_regex" => {
-            let pattern = val.extract::<String>().map_err(|_| {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "'not_regex' operator requires a string pattern",
-                )
-            })?;
-            regex::Regex::new(&pattern).map_err(|e| -> PyErr {
-                crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(format!(
-                    "Invalid regex pattern '{}': {}",
-                    pattern, e
-                )))
-            })?;
-            Ok(FilterCondition::Not(Box::new(FilterCondition::Regex(
-                pattern,
-            ))))
-        }
+        "not_regex" => Ok(FilterCondition::Not(Box::new(FilterCondition::Regex(
+            regex_pattern_arg("not_regex", val)?,
+        )))),
         _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
             "Unsupported operator: {}. Supported: ==, !=, >, >=, <, <=, in, between, \
-             is_null, is_not_null, contains, starts_with, ends_with, regex, \
+             is_null, is_not_null, contains, starts_with, ends_with, regex, =~, \
              not_contains, not_starts_with, not_ends_with, not_in, not_regex",
             op
         ))),
     }
+}
+
+/// Extract and compile-check the pattern argument of a regex operator.
+/// `op` names the operator in the type-error message.
+fn regex_pattern_arg(op: &str, val: &Bound<'_, PyAny>) -> PyResult<String> {
+    let pattern = val.extract::<String>().map_err(|_| {
+        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "'{op}' operator requires a string pattern"
+        ))
+    })?;
+    // Validated at parse time, against the pattern as the caller wrote it —
+    // the message quotes it back.
+    regex::Regex::new(&pattern).map_err(|e| -> PyErr {
+        crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(format!(
+            "Invalid regex pattern '{}': {}",
+            pattern, e
+        )))
+    })?;
+    Ok(pattern)
+}
+
+/// Wrap `pattern` so it must match the whole property value.
+///
+/// Mirrors the Cypher `=~` operator's anchoring exactly (`regex_cache::anchor`
+/// in the engine crate); the non-capturing group keeps a top-level alternation
+/// bound as a unit. The engine's helper is not reachable from here — `kglite`
+/// seals its internals behind `api` — so the two sites are kept in step by
+/// this note and by the goldens in `tests/test_fluent_parity.py`.
+fn anchor_pattern(pattern: &str) -> String {
+    format!("^(?:{pattern})$")
 }
 
 fn parse_between_condition(val: &Bound<'_, PyAny>) -> PyResult<FilterCondition> {

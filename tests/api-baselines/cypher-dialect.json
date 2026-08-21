@@ -385,6 +385,17 @@
       "syntax": "transactions",
       "status": "intentional_divergence",
       "note": "Embedded snapshots and optimistic commit checking replace a remote database transaction service."
+    },
+    {
+      "id": "operator.regex_match",
+      "syntax": "value =~ 'pattern'",
+      "status": "covered",
+      "case_ids": [
+        "operator.regex_match_full_string",
+        "operator.regex_match_alternation",
+        "operator.regex_match_inline_flags"
+      ],
+      "note": "Full-string match, as openCypher defines it: the pattern must match the entire value, so 'inactive' =~ 'active' is false. Wrap the pattern with .* to search. The KGLite extension function text_match_regex() is the search form and is deliberately unanchored. Patterns are Rust `regex` crate syntax; lookaround and backreferences raise rather than silently failing to match."
     }
   ],
   "extensions": [

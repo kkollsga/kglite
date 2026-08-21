@@ -121,7 +121,7 @@ pub(super) fn write_topic_where(xml: &mut String) {
     xml.push_str("      <ex desc=\"comparison\">WHERE n.depth &gt; 3000</ex>\n");
     xml.push_str("      <ex desc=\"string contains\">WHERE n.name CONTAINS 'oil'</ex>\n");
     xml.push_str("      <ex desc=\"starts/ends with\">WHERE n.name STARTS WITH '35/'</ex>\n");
-    xml.push_str("      <ex desc=\"regex\">WHERE n.name =~ '35/9-.*'</ex>\n");
+    xml.push_str("      <ex desc=\"regex (whole value)\">WHERE n.name =~ '35/9-.*'</ex>\n");
     xml.push_str("      <ex desc=\"null check\">WHERE n.depth IS NOT NULL</ex>\n");
     xml.push_str("      <ex desc=\"IN list\">WHERE n.status IN ['active', 'planned']</ex>\n");
     xml.push_str("      <ex desc=\"boolean\">WHERE n.depth &gt; 1000 AND n.temp &lt; 100</ex>\n");
@@ -283,7 +283,7 @@ pub(super) fn write_topic_operators(xml: &mut String) {
     xml.push_str("    <group name=\"comparison\" desc=\"Comparison\">= (equal), &lt;&gt; (not equal), &lt;, &gt;, &lt;=, &gt;=, IN (list membership)</group>\n");
     xml.push_str("    <group name=\"logical\" desc=\"Boolean\">AND, OR, NOT, XOR</group>\n");
     xml.push_str("    <group name=\"null\" desc=\"Null checks\">IS NULL, IS NOT NULL</group>\n");
-    xml.push_str("    <group name=\"regex\" desc=\"Regex match\">=~ 'pattern' — Java-style regex, case-sensitive by default. Use (?i) for case-insensitive.</group>\n");
+    xml.push_str("    <group name=\"regex\" desc=\"Regex match\">=~ 'pattern' — matches the WHOLE value (not a substring): 'inactive' =~ 'active' is false. Wrap with .* to search. Case-sensitive by default; use (?i) for case-insensitive.</group>\n");
     xml.push_str("    <group name=\"predicates\" desc=\"String predicates\">CONTAINS, STARTS WITH, ENDS WITH — case-sensitive substring checks.</group>\n");
     xml.push_str("    <examples>\n");
     xml.push_str(
@@ -1396,7 +1396,7 @@ pub(super) fn write_cypher_overview(xml: &mut String) {
     xml.push_str("    <group name=\"comparison\">= &lt;&gt; &lt; &gt; &lt;= &gt;= IN</group>\n");
     xml.push_str("    <group name=\"logical\">AND OR NOT XOR</group>\n");
     xml.push_str("    <group name=\"null\">IS NULL, IS NOT NULL</group>\n");
-    xml.push_str("    <group name=\"regex\">=~ 'pattern'</group>\n");
+    xml.push_str("    <group name=\"regex\">=~ 'pattern' (whole-value match; wrap with .* to search)</group>\n");
     xml.push_str("    <group name=\"predicates\">CONTAINS, STARTS WITH, ENDS WITH</group>\n");
     xml.push_str("  </operators>\n");
 

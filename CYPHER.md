@@ -132,9 +132,13 @@ graph.cypher("MATCH (n:Person) WHERE n.name CONTAINS 'ali' RETURN n.name")
 # IN lists
 graph.cypher("MATCH (n:Person) WHERE n.city IN ['Oslo', 'Bergen'] RETURN n.name")
 
-# Regex matching with =~
-graph.cypher("MATCH (n:Person) WHERE n.name =~ '(?i)^ali.*' RETURN n.name")
-graph.cypher("MATCH (n:Person) WHERE n.email =~ '.*@example\\.com$' RETURN n.name")
+# Regex matching with =~ — the pattern must match the WHOLE value
+graph.cypher("MATCH (n:Person) WHERE n.name =~ '(?i)ali.*' RETURN n.name")
+graph.cypher("MATCH (n:Person) WHERE n.email =~ '.*@example\\.com' RETURN n.name")
+
+# `=~` is not a substring search: 'inactive' =~ 'active' is false.
+# To search, say so with `.*` — or use CONTAINS / text_match_regex().
+graph.cypher("MATCH (n:Person) WHERE n.name =~ '.*ali.*' RETURN n.name")
 ```
 
 ### Generated filters: prefer `IN [...]` over long `OR` chains
@@ -3096,7 +3100,7 @@ below; do not infer absence from this shorter list.
 | **Clauses** | `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`, `ORDER BY`, `SKIP`, `LIMIT`, `UNWIND`, `UNION`/`UNION ALL`, `CALL { ... }` (read subqueries — uncorrelated + correlated), `CREATE`, `SET`, `DELETE`, `DETACH DELETE`, `REMOVE`, `MERGE`, `EXPLAIN`, `PROFILE` |
 | **Schema DDL** | `CREATE INDEX`, `CREATE RANGE INDEX`, `DROP INDEX`, `SHOW INDEXES`, `CREATE CONSTRAINT`, `DROP CONSTRAINT`, `SHOW CONSTRAINTS` — standalone statements; the two `SHOW` forms are reads |
 | **Patterns** | Node `(n:Type)`, relationship `-[:REL]->`, abbreviated `-->` / `--` / `<--`, variable-length `*1..3`, undirected `-[:REL]-`, properties `{key: val, key: $param, key: var}`, `p = shortestPath(...)` |
-| **WHERE** | `=`, `<>`, `<`, `>`, `<=`, `>=`, `=~` (regex), `AND`, `OR`, `NOT`, `IS NULL`, `IS NOT NULL`, `IN [...]`, `CONTAINS`, `STARTS WITH`, `ENDS WITH`, `EXISTS { pattern WHERE ... }`, `EXISTS(( pattern ))`, inline pattern predicates, `any/all/none/single(x IN list WHERE ...)` |
+| **WHERE** | `=`, `<>`, `<`, `>`, `<=`, `>=`, `=~` (regex, full-string), `AND`, `OR`, `NOT`, `IS NULL`, `IS NOT NULL`, `IN [...]`, `CONTAINS`, `STARTS WITH`, `ENDS WITH`, `EXISTS { pattern WHERE ... }`, `EXISTS(( pattern ))`, inline pattern predicates, `any/all/none/single(x IN list WHERE ...)` |
 | **RETURN** | `n.prop`, `r.prop`, `AS` aliases, `DISTINCT`, arithmetic `+`/`-`/`*`/`/`, string concat `\|\|`, map projections `n {.prop}`, map literals `{k: expr}`, list slicing `[i..j]` |
 | **Aggregation** | `count(*)`, `count(expr)`, `sum`, `avg`/`mean`, `min`, `max`, `collect`, `std` |
 | **Expressions** | `CASE WHEN...THEN...ELSE...END`, `$param`, `[x IN list WHERE ... \| expr]`, `any/all/none/single(...)` |
@@ -3112,7 +3116,7 @@ below; do not infer absence from this shorter list.
 | **Scoped algorithms** | `connected_components`, `k_core`/`coreness`, and `clustering_coefficient` accept an optional `{node_type, relationship}` map to run over a subgraph — e.g. `CALL k_core({node_type: 'Person', relationship: ['KNOWS', 'OWNS']})`. Each field is a string or list of strings; omit the map for the whole graph. Computed lazily over the live graph (identical across memory/mapped/disk modes). |
 | **Schema** | `CALL db.labels() YIELD label`, `CALL db.relationshipTypes() YIELD relationshipType`, `CALL db.indexes() YIELD name, type, entityType, labelsOrTypes, properties, state` |
 | **Rule procedures** | `CALL orphan_node/self_loop/missing_required_edge/missing_inbound_edge/duplicate_title/duplicate_id/null_property({type[,edge\|property]}) YIELD node`, `CALL cycle_2step({type, edge}) YIELD node_a, node_b`, `CALL inverse_violation({rel_a, rel_b}) YIELD a, b`, `CALL transitivity_violation({rel}) YIELD a, b, c`, `CALL cardinality_violation({type, edge[, min, max]}) YIELD node, count`, `CALL type_domain_violation/type_range_violation({edge, expected_*}) YIELD source, target`, `CALL parallel_edges({edge}) YIELD a, b, count` |
-| **Operators** | `+`, `-`, `*`, `/`, `\|\|` (string concat), `=~` (regex), `IN`, `STARTS WITH`, `ENDS WITH`, `CONTAINS`, `IS NULL`, `IS NOT NULL` |
+| **Operators** | `+`, `-`, `*`, `/`, `\|\|` (string concat), `=~` (regex, full-string), `IN`, `STARTS WITH`, `ENDS WITH`, `CONTAINS`, `IS NULL`, `IS NOT NULL` |
 
 ## Cypher Dialect Contract
 
@@ -3162,7 +3166,7 @@ claimed openCypher-compatible subset.
 | `IS NULL` / `IS NOT NULL` | Covered | Also works as expressions in RETURN/WITH |
 | `IN [list]` | Covered | Null operands and null-containing no-match lists preserve unknown |
 | `CONTAINS` / `STARTS WITH` / `ENDS WITH` | Covered | |
-| `=~` regex | Covered | Shares a process-wide FIFO cache with `text_match_regex()` (128 entries; 2 MiB compiled-program limit; misses compile outside the lock) |
+| `=~` regex | Covered | Full-string match, per openCypher: the pattern must match the entire value, so `'inactive' =~ 'active'` is false. Wrap with `.*` to search, or use `text_match_regex()`, which is a search by design. Shares a process-wide FIFO cache with `text_match_regex()` (128 entries; 2 MiB compiled-program limit; misses compile outside the lock) |
 | `CASE WHEN...THEN...ELSE...END` | Covered | Simple and generic forms |
 | Parameter references (`$param`) | Covered | In WHERE, pattern properties, and expressions |
 | List comprehensions (`[x IN list WHERE ... \| expr]`) | Covered | |

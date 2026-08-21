@@ -1859,8 +1859,13 @@ class KnowledgeGraph:
         Conditions support exact match, comparison operators
         (``'>'``, ``'<'``, ``'>='``, ``'<='``), ``'in'``, ``'is_null'``,
         ``'is_not_null'``, ``'contains'``, ``'starts_with'``, ``'ends_with'``,
-        ``'regex'`` (or ``'=~'``), and negated variants: ``'not_contains'``,
+        ``'regex'``, ``'=~'``, and negated variants: ``'not_contains'``,
         ``'not_starts_with'``, ``'not_ends_with'``, ``'not_in'``, ``'not_regex'``.
+
+        ``'regex'`` and ``'not_regex'`` *search* the value; ``'=~'`` matches the
+        **whole** value, mirroring Cypher's ``=~`` operator — so
+        ``{'role': {'=~': 'admin'}}`` does not select ``'superadmin'``.
+        Wrap the pattern with ``.*`` to search with ``'=~'``.
 
         Example::
 

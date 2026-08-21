@@ -151,6 +151,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking (semantics fix): Cypher `=~` now matches the whole value instead
+  of searching inside it.** openCypher, Neo4j and Kùzu all define `=~` as a
+  full-string match; KGLite evaluated it as a substring search, so
+  `'inactive' =~ 'active'` was `true`, `'Alice' =~ 'li'` was `true`, and
+  `WHERE n.role =~ 'admin'` also selected `'superadmin'` — a filter written as
+  an exact check silently behaved as a prefix/suffix-tolerant one. The pattern
+  is now anchored (`^(?:…)$`), with the group binding a top-level alternation
+  as a unit, so `'catx' =~ 'cat|dog'` is `false`. Patterns that already carried
+  explicit `^`/`$` anchors, inline flags such as `(?i)`, and character classes
+  are unaffected. **To search, say so:** wrap the pattern with `.*`
+  (`n.name =~ '.*ali.*'`), or use `CONTAINS` / `text_match_regex()`.
+  Compile-failure messages still quote the pattern as you wrote it.
+
+- **Breaking (semantics fix): the fluent `{'=~': …}` operator follows Cypher's
+  `=~` and now matches the whole value.** `{'regex': …}` and `{'not_regex': …}`
+  are unchanged and keep the search semantics `FLUENT.md` documents — the two
+  spellings were synonyms and are not any more, because one of them is a
+  Cypher operator. `text_match_regex()` is likewise untouched: it is the
+  documented search function.
+
 - **Cypher parse errors read as Cypher, not as Rust.** A token in an error
   message is now spelled the way it was written — `MATCH (n) SET 1 = 2` says
   `got 1` instead of `got Some(IntLit(1))`, and a lookahead past the end says
