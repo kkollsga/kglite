@@ -633,3 +633,4 @@ mod row_undo;
 mod schema_shell;
 mod store_clone;
 mod unique_claims;
+mod write_scope;

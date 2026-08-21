@@ -300,7 +300,7 @@
     },
     {
       "name": "cypher_query",
-      "description": "Query, explore, and understand the active knowledge graph with Cypher, and modify it \u2014 reads AND writes (CREATE/SET/DELETE/MERGE) are accepted; this is a write-enabled graph. The primary tool for structural questions: how things relate, where an entity/function/type is defined, what references or calls what, counts, and multi-hop paths (for code graphs: call graphs, definitions, imports \u2014 navigate the codebase structure). Pass write_scope=[...] to restrict mutations to those node types. Mutations are in-memory; call save_graph to persist. Append FORMAT CSV to export results.",
+      "description": "Query, explore, and understand the active knowledge graph with Cypher, and modify it \u2014 reads AND writes (CREATE/SET/DELETE/MERGE) are accepted; this is a write-enabled graph. The primary tool for structural questions: how things relate, where an entity/function/type is defined, what references or calls what, counts, and multi-hop paths (for code graphs: call graphs, definitions, imports \u2014 navigate the codebase structure). Pass write_scope=[...] to restrict mutations to those node types: every node write (CREATE/MERGE/SET/REMOVE/DELETE/DETACH DELETE and node-type DDL) is judged by the node's stored type, and a relationship write (edge CREATE, DELETE r, SET r.p, REMOVE r.p) needs at least one endpoint's type in the list. Mutations are in-memory; call save_graph to persist. Append FORMAT CSV to export results.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -323,7 +323,7 @@
             "type": "string"
           },
           "write_scope": {
-            "description": "Role-scoped write whitelist (write-enabled servers only). When set, a\n`CREATE`/`SET` whose node type is not in this list is rejected \u2014 so an\nagent can plan in its own types (`[\"Plan\",\"Task\"]`) without touching\nresearch-owned ones. Ignored on read-only servers.",
+            "description": "Role-scoped write whitelist (write-enabled servers only) \u2014 so an agent\ncan plan in its own types (`[\"Plan\",\"Task\"]`) without touching\nresearch-owned ones. When set, every **node** write (`CREATE`, `MERGE`,\n`SET`, `REMOVE`, `DELETE`, `DETACH DELETE`, node-type index/constraint\nDDL) is judged by the node's *stored* type \u2014 a pattern label cannot\nwiden the scope \u2014 and a **relationship** write (edge `CREATE`,\n`DELETE r`, `SET r.p`, `REMOVE r.p`) is allowed only when at least one\nendpoint's stored type is in the list. Deleting a node in scope removes\nits relationships whatever they point at. An empty list denies every\nmutation. Ignored on read-only servers.",
             "items": {
               "type": "string"
             },

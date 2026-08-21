@@ -91,11 +91,23 @@ pub struct ExecuteOptions<'a> {
     /// handler flips. Bindings that need this provide a `'static` flag;
     /// the rest pass `None`.
     pub cancel: Option<&'static AtomicBool>,
-    /// Optional role-scoped write whitelist. When `Some`, a Cypher
-    /// `CREATE`/`SET` whose node type is not in the set is rejected (integrity,
-    /// not secrecy — e.g. a coding role may write `Plan`/`Task` but not
-    /// `Algorithm`). `None` = unrestricted (the default; zero hot-path cost).
-    /// Only meaningful on the mutation path (`execute_mut`).
+    /// Optional role-scoped write whitelist (integrity, not secrecy — e.g. a
+    /// coding role may write `Plan`/`Task` but not `Algorithm`). `None` =
+    /// unrestricted (the default; zero hot-path cost); an empty set denies
+    /// every mutation. Only meaningful on the mutation path (`execute_mut`).
+    ///
+    /// When `Some`, a **node** write — `CREATE`, `MERGE`'s create arm, `SET`
+    /// (property, map or label), `REMOVE` (property or label), `DELETE`,
+    /// `DETACH DELETE`, node-type index/constraint DDL — is judged by the
+    /// node's *stored* type, so a pattern label cannot widen the scope. A
+    /// **relationship** write (edge `CREATE`, `DELETE r`, `SET r.p`,
+    /// `REMOVE r.p`) is allowed iff at least one endpoint's stored type is in
+    /// the set; `DETACH DELETE`'s incident-edge collateral is authorized by
+    /// the node delete and not re-checked per far endpoint. Relationship
+    /// *constraint* DDL and `db.cdc.enable`/`db.cdc.disable` are outside the
+    /// perimeter, as are the bulk loaders (this is a per-execution concept).
+    /// The enforcement sites are the `enforce_*_write_scope` family in
+    /// `languages::cypher::executor::write_scope`.
     pub write_scope: Option<&'a HashSet<String>>,
     /// Caller-supplied freshness provenance, stamped alongside `updated_at` on
     /// writes to `auto_timestamp` types: the git SHA the writer is working

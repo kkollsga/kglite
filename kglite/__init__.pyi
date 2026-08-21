@@ -5080,17 +5080,38 @@ class KnowledgeGraph:
                 :func:`kglite.cypher_pass_names()` — typos raise
                 ``ValueError``. Useful for bisecting which pass
                 introduces a divergence.
-            write_scope: Role-scoped write whitelist. When given, a
-                ``CREATE``/``SET``/``MERGE`` that **creates or mutates** a node
-                whose type is not in the list is rejected (integrity, not
-                secrecy — e.g. a coding role may write ``["Plan", "Task"]`` but
-                not research-owned ``Algorithm`` nodes). Creating an *edge*
-                between already-existing (matched) nodes is allowed even when an
-                endpoint's type is out of scope — linking to a node does not
-                mutate it — but *creating* a new out-of-scope endpoint node is
-                still rejected. ``None`` (default) = unrestricted. Applies
-                per-call; also on :meth:`Session.execute` and
-                ``Transaction.cypher``.
+            write_scope: Role-scoped write whitelist (integrity, not
+                secrecy — e.g. a coding role may write ``["Plan", "Task"]``
+                but not research-owned ``Algorithm`` nodes). ``None``
+                (default) = unrestricted; ``[]`` denies every mutation.
+                Applies per-call; also on :meth:`Session.execute` and
+                ``Transaction.cypher``. The perimeter, exactly:
+
+                * **Node writes** — ``CREATE``, ``MERGE``'s create arm,
+                  ``SET n.p``, ``SET n += {...}``, ``SET n:Label``,
+                  ``REMOVE n.p``, ``REMOVE n:Label``, ``DELETE n``,
+                  ``DETACH DELETE n``, and index/constraint DDL for a node
+                  type — are judged by the node's **stored type**, never by
+                  a pattern label, so label smuggling cannot widen the
+                  scope.
+                * **Relationship writes** — ``CREATE (a)-[:R]->(b)``,
+                  ``DELETE r``, ``SET r.p``, ``REMOVE r.p`` — are allowed
+                  iff **at least one endpoint's stored type is in scope**.
+                  Linking a node you own to an already-existing (matched)
+                  out-of-scope node is allowed, since linking does not
+                  mutate it; an edge between two out-of-scope nodes is
+                  refused, and *creating* a new out-of-scope endpoint node
+                  is refused by the node rule.
+                * ``DETACH DELETE`` removes the incident relationships of a
+                  node you are allowed to delete, whatever type the far
+                  endpoint is — that collateral is authorized by the node
+                  delete and not re-checked per endpoint.
+                * **Outside the perimeter**, deliberately: relationship
+                  *constraint* DDL, ``db.cdc.enable``/``db.cdc.disable``,
+                  and the bulk loaders :meth:`add_nodes` /
+                  :meth:`add_connections` — ``write_scope`` is a
+                  per-Cypher-execution concept and does not reach the
+                  Python loader API.
 
         Returns:
             ResultView by default, DataFrame when ``to_df=True``,
@@ -6192,8 +6213,11 @@ class Session:
     ) -> Any:
         """Run a Cypher write against the shared graph, serialized.
 
-        ``write_scope`` (optional) restricts ``CREATE``/``SET`` to the given
-        node-type whitelist — see :meth:`KnowledgeGraph.cypher`.
+        ``write_scope`` (optional) restricts the statement's mutations to the
+        given node-type whitelist: every node write is judged by the node's
+        stored type, and a relationship write needs at least one endpoint's
+        stored type in the list — see :meth:`KnowledgeGraph.cypher` for the
+        exact perimeter.
         ``git_sha`` and ``modified_by`` are stamped on types that opt into
         ``auto_timestamp`` provenance.
 

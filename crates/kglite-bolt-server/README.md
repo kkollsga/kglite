@@ -56,7 +56,7 @@ transaction metadata, at parity with the CLI and MCP surfaces:
 ```python
 with driver.session() as session:
     tx = session.begin_transaction(metadata={
-        "write_scope": ["Plan", "Task"],   # node types CREATE/SET may touch
+        "write_scope": ["Plan", "Task"],   # node types this tx may write
         "git_sha": "0f3a9c1",              # provenance stamped on writes
         "modified_by": "planning-agent",   # actor stamped alongside git_sha
     })
@@ -66,8 +66,11 @@ with driver.session() as session:
 
 Drivers send this under the `tx_metadata` key of BEGIN's `extra`
 dict (auto-commit runs: RUN's `extra`); hand-rolled Bolt clients may
-also place the same keys at the top level of `extra`. A `CREATE`/`SET`
-touching a node type outside `write_scope` fails the query; `git_sha` /
+also place the same keys at the top level of `extra`. A write to a node
+whose *stored* type is outside `write_scope` fails the query — that covers
+`CREATE`, `MERGE`, `SET`, `REMOVE`, `DELETE`, `DETACH DELETE` and node-type
+DDL — as does a relationship write (edge `CREATE`, `DELETE r`, `SET r.p`,
+`REMOVE r.p`) with neither endpoint's type in the list; `git_sha` /
 `modified_by` are stamped on writes to `auto_timestamp` types. All
 three are ignored by reads. Malformed values (non-list `write_scope`,
 non-string `git_sha`) fail the BEGIN/RUN with a client error.

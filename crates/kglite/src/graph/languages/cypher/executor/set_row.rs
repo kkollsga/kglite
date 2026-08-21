@@ -23,7 +23,8 @@ use std::sync::Arc;
 
 use super::columnar_write::{set_via_column_master, ColumnMasterWrite};
 use super::identity_fields::IdentityAliases;
-use super::write::{enforce_write_scope, set_node_property_direct};
+use super::write::set_node_property_direct;
+use super::write_scope::enforce_write_scope;
 use crate::datatypes::values::Value;
 use crate::graph::languages::cypher::result::MutationStats;
 use crate::graph::schema::{DirGraph, InternedKey};

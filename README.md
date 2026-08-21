@@ -153,7 +153,12 @@ parsed codebase.
   **ownership layers** (`define_schema(layer='managed'|'runtime')` +
   `add_nodes(managed_reload=True)` so a rebuild provably can't clobber
   agent-owned nodes), **role-scoped writes**
-  (`cypher(..., write_scope=[...])` rejects out-of-scope CREATE/SET), a
+  (`cypher(..., write_scope=[...])` refuses every node write — CREATE,
+  MERGE, SET, REMOVE, DELETE, DETACH DELETE, index/constraint DDL —
+  whose node's *stored* type is outside the whitelist, and refuses a
+  relationship write unless at least one endpoint's stored type is in
+  it; relationship-constraint DDL, `db.cdc.*` and the bulk loaders
+  `add_nodes`/`add_connections` are outside the perimeter), a
   verbatim **instructions slot** at the top of `describe()`
   (`set_instructions(text)`), **native list properties**, JSON-native
   ingestion (`from_records(spec)`), and a **dependency frontier**

@@ -4,12 +4,15 @@
 //! Its own module because it shares nothing with the node path it used to sit
 //! inside: an edge has no id/type guard to run, no columnar column to route a
 //! value to, and no secondary index to maintain. What it does have is the
-//! declared relationship constraints, gated here — ahead of `edge_weight_mut`,
-//! which publishes an edge-update capture whether or not a property lands, so
-//! a gate placed inside it would log a change the graph refused to make.
+//! role-scoped write whitelist (judged by endpoint type — see
+//! `write_scope::enforce_edge_write_scope`) and the declared relationship
+//! constraints, both gated here — ahead of `edge_weight_mut`, which publishes
+//! an edge-update capture whether or not a property lands, so a gate placed
+//! inside it would log a change the graph refused to make.
 
 use super::super::ast::Expression;
 use super::super::result::ResultRow;
+use super::write_scope::enforce_bound_edge_write_scope as enforce_edge_write_scope;
 use super::CypherExecutor;
 use crate::datatypes::values::Value;
 use crate::graph::languages::cypher::result::MutationStats;
@@ -43,6 +46,10 @@ pub(super) fn set_edge_property(
     let Some(edge_binding) = row.edge_bindings.get(variable) else {
         return Ok(false);
     };
+    // Role-scoped write guard, ahead of everything: a relationship write needs
+    // at least one endpoint's stored type in the whitelist (rule and rationale
+    // on `enforce_edge_write_scope`).
+    enforce_edge_write_scope(graph, edge_binding)?;
     let edge_index = edge_binding.edge_index;
     let value = {
         let executor = CypherExecutor::with_params(graph, params, None);
@@ -119,6 +126,8 @@ pub(super) fn remove_edge_property(
     let Some(edge_binding) = row.edge_bindings.get(variable) else {
         return Ok(false);
     };
+    // Role-scoped write guard — the `SET r.p` rule, applied to the removal.
+    enforce_edge_write_scope(graph, edge_binding)?;
     let edge_index = edge_binding.edge_index;
 
     // Removing a required property leaves it absent, which is what NOT NULL

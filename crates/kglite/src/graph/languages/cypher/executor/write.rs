@@ -12,6 +12,10 @@ use super::identity_fields::{
     CreatedIdentity, IdentityAliases,
 };
 use super::set_row::{apply_node_property_set, NodePropertySet, SetMemos};
+use super::write_scope::{
+    enforce_bound_edge_write_scope, enforce_edge_write_scope, enforce_node_write_scope,
+    enforce_write_scope,
+};
 use super::{clause_display_name, schema_ddl, CypherExecutor};
 use crate::datatypes::values::Value;
 use crate::graph::algorithms::Interrupt;
@@ -715,28 +719,6 @@ fn apply_foreach_body_clause(
 }
 
 /// Execute a CREATE clause, creating nodes and edges in the graph.
-/// Enforce the graph's transient role-scoped write whitelist. When
-/// `active_write_scope` is `Some(set)`, a `CREATE`/`SET`/schema-DDL statement
-/// touching a node type not in `set` is rejected. `None` = unrestricted (the
-/// common case; this is a single `Option` check with no allocation). See
-/// [`crate::graph::DirGraph::active_write_scope`].
-pub(super) fn enforce_write_scope(graph: &DirGraph, node_type: &str) -> Result<(), String> {
-    if let Some(scope) = &graph.active_write_scope {
-        if !scope.contains(node_type) {
-            return Err(format!(
-                "write scope violation: node type '{}' is not in the allowed write set ({})",
-                node_type,
-                {
-                    let mut types: Vec<&str> = scope.iter().map(|s| s.as_str()).collect();
-                    types.sort_unstable();
-                    types.join(", ")
-                }
-            ));
-        }
-    }
-    Ok(())
-}
-
 fn execute_create(
     graph: &mut DirGraph,
     create: &CreateClause,
@@ -860,16 +842,28 @@ fn create_pattern_edges(
                 CreateEdgeDirection::Incoming => (target_idx, source_idx),
             };
 
-            // NOTE: edge creation is deliberately NOT write-scoped by
-            // its endpoint node types. Creating an edge between two
-            // *existing* (MATCH-bound) nodes does not mutate either
-            // node — it's a read of both endpoints — so the central
-            // agent-contract pattern (link a runtime `Task` to a
-            // managed `AlgorithmSpec`) must be allowed under a scope
-            // that excludes the managed type. A *newly created*
-            // endpoint is still caught: its node CREATE goes through
-            // `create_node`, which enforces the scope. (Whitelisting
-            // relationship types is a possible future refinement.)
+            // Edge creation is write-scoped by the ONE-ENDPOINT rule
+            // (`enforce_edge_write_scope`): at least one endpoint's
+            // stored type must be in the whitelist. Creating an edge
+            // between two *existing* (MATCH-bound) nodes does not
+            // mutate either node — it's a read of both endpoints — so
+            // the central agent-contract pattern (link a runtime
+            // `Task` to a managed `AlgorithmSpec`) is still allowed
+            // under a scope that excludes the managed type. What the
+            // rule blocks is the other half: an edge between two nodes
+            // the role owns nothing in (the `FORGED` repro). A *newly
+            // created* endpoint is in scope by construction — its node
+            // CREATE goes through `create_node`, which enforces the
+            // scope. (Whitelisting relationship types themselves is a
+            // possible future refinement.) Gated before anything is
+            // registered or written, so a refusal leaves the schema
+            // exactly as it found it.
+            enforce_edge_write_scope(
+                graph,
+                &edge_pat.connection_type,
+                actual_source,
+                actual_target,
+            )?;
 
             // Endpoint types — needed for both the schema-lock check
             // and the connection-type metadata upsert below.
@@ -1530,28 +1524,7 @@ fn execute_set(
                 }
                 SetItem::Label {
                     variable, label, ..
-                } => {
-                    let Some(&node_idx) = row.node_bindings.get(variable) else {
-                        // Null target (OPTIONAL MATCH miss): no-op for this row.
-                        if is_null_write_target(row, variable) {
-                            continue;
-                        }
-                        return Err(format!(
-                            "Variable '{}' not bound to a node in SET",
-                            variable
-                        ));
-                    };
-                    let key = graph.interner.get_or_intern(label);
-                    if graph.add_node_label(node_idx, key) {
-                        stats.properties_set += 1;
-                        // A label add is a modification — bump `updated_at` if
-                        // the node's type opted in (same post-loop stamp as a
-                        // property SET).
-                        if let Some(nt) = auto_timestamp_type_of(graph, node_idx) {
-                            nodes_to_stamp.insert(node_idx, nt);
-                        }
-                    }
-                }
+                } => set_node_label(graph, row, (variable, label), stats, &mut nodes_to_stamp)?,
             }
         }
     }
@@ -1584,6 +1557,46 @@ fn execute_set(
         }
     }
 
+    Ok(())
+}
+
+/// Apply one `SET n:Label` item to a row.
+///
+/// Its own function because it shares nothing with the property arm it sat
+/// beside: no id/type guard, no columnar routing, no index maintenance, no
+/// constraint plan — a label is a set membership, and the only bookkeeping it
+/// owes is the freshness stamp.
+fn set_node_label(
+    graph: &mut DirGraph,
+    row: &ResultRow,
+    item: (&str, &str),
+    stats: &mut MutationStats,
+    nodes_to_stamp: &mut HashMap<NodeIndex, String>,
+) -> Result<(), String> {
+    let (variable, label) = item;
+    let Some(&node_idx) = row.node_bindings.get(variable) else {
+        // Null target (OPTIONAL MATCH miss): no-op for this row.
+        if is_null_write_target(row, variable) {
+            return Ok(());
+        }
+        return Err(format!(
+            "Variable '{}' not bound to a node in SET",
+            variable
+        ));
+    };
+    // Adding a secondary label is a write to the node, judged by its *stored*
+    // type — the label being added never widens the scope (that is the
+    // label-smuggling defence).
+    enforce_node_write_scope(graph, node_idx)?;
+    let key = graph.interner.get_or_intern(label);
+    if graph.add_node_label(node_idx, key) {
+        stats.properties_set += 1;
+        // A label add is a modification — bump `updated_at` if the node's type
+        // opted in (same post-loop stamp as a property SET).
+        if let Some(nt) = auto_timestamp_type_of(graph, node_idx) {
+            nodes_to_stamp.insert(node_idx, nt);
+        }
+    }
     Ok(())
 }
 
@@ -1674,7 +1687,14 @@ fn execute_delete(
     // when `r` is the only relationship attached to `n`.
     let mut deleted_edges: HashSet<petgraph::graph::EdgeIndex> = HashSet::new();
 
-    // Phase 1: collect all nodes and edges to delete across all rows
+    // Phase 1: collect all nodes and edges to delete across all rows, and
+    // authorize each against the role-scoped write whitelist as it is first
+    // seen. Authorization belongs *here*, not at the commit in Phase 3: a
+    // refusal must return before any storage mutation (the refusal-before-
+    // mutation norm stated at `set_row.rs`'s `enforce_write_scope` call), so a
+    // statement whose 500th row is out of scope does not delete the first 499.
+    // The check is per distinct node/edge, not per row — a `HashSet::insert`
+    // that returns false has already been judged.
     for (row_idx, row) in result_set.rows.iter().enumerate() {
         check_interrupt_periodic(interrupt, row_idx)?;
         for expr in &delete.expressions {
@@ -1684,9 +1704,13 @@ fn execute_delete(
             };
 
             if let Some(&node_idx) = row.node_bindings.get(var_name) {
-                nodes_to_delete.insert(node_idx);
+                if nodes_to_delete.insert(node_idx) {
+                    enforce_node_write_scope(graph, node_idx)?;
+                }
             } else if let Some(edge_binding) = row.edge_bindings.get(var_name) {
-                deleted_edges.insert(edge_binding.edge_index);
+                if deleted_edges.insert(edge_binding.edge_index) {
+                    enforce_bound_edge_write_scope(graph, edge_binding)?;
+                }
             } else {
                 // Not bound to a node/edge. A node VALUE (NodeRef from
                 // WITH / collect) is still deletable; anything else is NULL
@@ -1697,7 +1721,10 @@ fn execute_delete(
                 // when a branch is empty). Skip it.
                 match row.projected.get(var_name) {
                     Some(Value::NodeRef(i)) => {
-                        nodes_to_delete.insert(petgraph::graph::NodeIndex::new(*i as usize));
+                        let node_idx = petgraph::graph::NodeIndex::new(*i as usize);
+                        if nodes_to_delete.insert(node_idx) {
+                            enforce_node_write_scope(graph, node_idx)?;
+                        }
                     }
                     // A materialised node value (`collect(n)` / `RETURN n`) is
                     // deletable too — this is the load-bearing case for
@@ -1709,7 +1736,10 @@ fn execute_delete(
                     // way as `NodeRef`. (Without this arm, DELETE inside FOREACH
                     // over a collected list was a silent no-op.)
                     Some(Value::Node(nv)) => {
-                        nodes_to_delete.insert(petgraph::graph::NodeIndex::new(nv.id as usize));
+                        let node_idx = petgraph::graph::NodeIndex::new(nv.id as usize);
+                        if nodes_to_delete.insert(node_idx) {
+                            enforce_node_write_scope(graph, node_idx)?;
+                        }
                     }
                     _ => {}
                 }
@@ -1779,6 +1809,15 @@ fn execute_delete(
     // and index cleanup. For a plain DELETE, Phase 2 has verified the
     // nodes carry no edges, so none are removed here. Shared with
     // `purge_provisional` via `maintain::detach_delete_nodes`.
+    //
+    // Write scope: the incident edges removed here are **collateral of an
+    // already-authorized node delete** and are deliberately not re-checked per
+    // far endpoint. Re-checking would be both wrong and expensive — wrong
+    // because a node the role may delete cannot be left behind as a dangling
+    // half-edge just because it points at a type the role may not write, and
+    // expensive because it is an O(degree) type resolution per deleted node.
+    // Phase 1 authorized every node in `nodes_to_delete`; that authorization
+    // covers everything attached to them.
     let (nodes_deleted, edges_removed) =
         crate::graph::mutation::maintain::detach_delete_nodes(graph, &nodes_to_delete);
     stats.nodes_deleted += nodes_deleted;
@@ -1835,6 +1874,12 @@ fn execute_remove(
                         .node_view(*node_idx)
                         .map(|n| n.get_node_type_ref(&graph.interner).to_string())
                         .unwrap_or_default();
+
+                    // Role-scoped write guard, on the node's *stored* type —
+                    // stripping a property off a node is a write to it, so it
+                    // is judged exactly as `SET n.p` is. Before every gate and
+                    // every write below, so a refusal leaves storage untouched.
+                    enforce_write_scope(graph, &node_type_str)?;
 
                     let write_field = remove_write_field(graph, &node_type_str, property.as_str())?;
 
@@ -1959,6 +2004,9 @@ fn execute_remove(
                             variable
                         ));
                     };
+                    // A secondary label is node state; removing one is a write
+                    // to the node, judged by its stored type.
+                    enforce_node_write_scope(graph, node_idx)?;
                     let key = graph.interner.get_or_intern(label);
                     if graph.remove_node_label(node_idx, key)? {
                         stats.properties_removed += 1;

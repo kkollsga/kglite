@@ -400,6 +400,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking (semantics fix): `write_scope` now covers every write, not just
+  `CREATE`/`SET`.** The whitelist was enforced on node creation and property
+  assignment only, so a scoped session could still `DELETE` / `DETACH DELETE`
+  a node of any type, `REMOVE` its properties or labels, add a label to it with
+  `SET n:Label`, and create, retype, or delete *any* relationship in the graph
+  — including forging an edge between two nodes it had no standing to touch. An
+  external audit deleted 1100 out-of-scope nodes from a `write_scope=["Plan",
+  "Task"]` session; a role that provably could not write an `Algorithm` node
+  could delete every one. The perimeter is now:
+
+  - **Node writes** — `CREATE`, `MERGE`'s create arm, `SET n.p`, `SET n += {…}`,
+    `SET n:Label`, `REMOVE n.p`, `REMOVE n:Label`, `DELETE`, `DETACH DELETE`,
+    and node-type index/constraint DDL — are judged by the node's **stored
+    type**, never by a pattern label, so no relabelling talks a node into scope.
+  - **Relationship writes** — edge `CREATE`, `DELETE r`, `SET r.p`,
+    `REMOVE r.p` — are allowed when **at least one endpoint's stored type is in
+    scope**. Linking a node you own to a matched out-of-scope node stays allowed
+    (it does not mutate that node — the 0.12.1 fix is unchanged and pinned);
+    an edge between two out-of-scope nodes is refused.
+  - `DETACH DELETE` removes the incident relationships of a node you may
+    delete, whatever the far endpoint's type is — that collateral is authorized
+    by the node delete, not re-checked per endpoint.
+  - A refusal happens **before** the statement mutates anything: an out-of-scope
+    row in a multi-row `DELETE` does not cost the in-scope rows.
+  - `write_scope=[]` now denies every mutation, including relationship writes.
+
+  Outside the perimeter, deliberately and now documented: relationship
+  *constraint* DDL (a scope names node types, and there is no relationship
+  spelling for one to name), `db.cdc.enable`/`db.cdc.disable`, and the bulk
+  loaders `add_nodes`/`add_connections` — `write_scope` is a per-Cypher-execution
+  concept and does not reach the Python loader API. **A caller relying on a
+  scoped session to delete or relink out-of-scope data must widen the scope to
+  list those types.** README, `docs/operators/cli.md` (which over-claimed
+  relationship-type scoping), the `.pyi` prose, the `--write-scope` CLI help and
+  the MCP `cypher_query` tool description all now state the boundary.
+
 - **Breaking (semantics fix): Cypher `=~` now matches the whole value instead
   of searching inside it.** openCypher, Neo4j and Kùzu all define `=~` as a
   full-string match; KGLite evaluated it as a substring search, so

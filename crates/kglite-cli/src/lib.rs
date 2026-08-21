@@ -78,7 +78,9 @@ enum Command {
         /// Persist the graph after a successful statement.
         #[arg(long)]
         save: bool,
-        /// Comma-separated node-type whitelist for CREATE/SET mutations.
+        /// Comma-separated node-type whitelist. Node writes (CREATE, MERGE, SET,
+        /// REMOVE, DELETE, DETACH DELETE, node-type DDL) are judged by the node's
+        /// stored type; a relationship write needs at least one endpoint in the list.
         #[arg(long)]
         write_scope: Option<String>,
         /// Git SHA to stamp on auto_timestamp types.
@@ -150,7 +152,9 @@ enum Command {
         /// Save the graph when the session exits successfully.
         #[arg(long)]
         save_on_exit: bool,
-        /// Comma-separated node-type whitelist for write requests.
+        /// Comma-separated node-type whitelist for write requests. Node writes are
+        /// judged by the node's stored type; a relationship write needs at least one
+        /// endpoint in the list.
         #[arg(long)]
         write_scope: Option<String>,
         /// Git SHA to stamp on auto_timestamp types for write requests.

@@ -70,9 +70,18 @@ kglite write app.kgl "CREATE (:Task {id:'t1', status:'todo'})" \
   --modified-by agent
 ```
 
-`--write-scope` restricts writes to the listed node and relationship
-types. `--git-sha` and `--modified-by` stamp provenance on
-`auto_timestamp` types.
+`--write-scope` restricts a statement's writes to the listed **node
+types**. A node write — `CREATE`, `MERGE`'s create arm, `SET`, `REMOVE`,
+`DELETE`, `DETACH DELETE`, and index/constraint DDL — is judged by the
+node's *stored* type, so a pattern label cannot widen the scope. A
+relationship write (`CREATE (a)-[:R]->(b)`, `DELETE r`, `SET r.p`,
+`REMOVE r.p`) is allowed when **at least one endpoint's** stored type is
+listed: linking to a matched out-of-scope node is permitted, an edge
+between two out-of-scope nodes is not. Relationship types themselves are
+not scoped, and neither is `db.cdc.enable`/`db.cdc.disable`. Deleting a
+node in scope removes its relationships whatever they point at.
+`--git-sha` and `--modified-by` stamp provenance on `auto_timestamp`
+types.
 
 Inspect a dependency frontier:
 

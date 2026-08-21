@@ -993,6 +993,7 @@ pub mod tests;
 pub mod transient_index;
 pub mod where_clause;
 pub mod write;
+pub(crate) mod write_scope;
 
 pub use execution_support::clause_display_name;
 pub use helpers::return_item_column_name;

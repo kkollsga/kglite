@@ -9,9 +9,12 @@ the shapes someone thought to write down.
 
 Two levers force a failure after the first write, both deterministic:
 
-* ``write_scope`` — a role whitelist that rejects a ``CREATE``/``SET`` of a
-  non-whitelisted node type, which can fire between two writes of one
-  statement.
+* ``write_scope`` — a role whitelist that rejects a write to a node whose
+  stored type is not on it (and a relationship write with neither endpoint on
+  it), which can fire between two writes of one statement. The scopes below
+  are chosen to list every type the statement legitimately touches, so the
+  rejection lands on the *trailing* ``CREATE (:Blocked …)`` — the whole point
+  is to fail late, after real writes have happened.
 * an overflowing ``duration({months: 2147483648})`` expression, which fires
   while a later pattern's properties are evaluated.
 """

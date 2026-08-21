@@ -391,7 +391,7 @@ fn execute_create_index(
     let label = node_label(&create.target, "CREATE INDEX")?;
     // Role-scoped write guard: an index is schema state for one node type, so a
     // session restricted to a write whitelist may not index a type outside it.
-    super::write::enforce_write_scope(graph, &label)?;
+    super::write_scope::enforce_write_scope(graph, &label)?;
     if create.has_options {
         return Err(format!(
             "OPTIONS {{ ... }} on CREATE INDEX is not supported: KGLite has no index providers \
@@ -587,7 +587,7 @@ fn execute_drop_index(graph: &mut DirGraph, drop: &DropIndex) -> Result<Mutation
         },
     };
 
-    super::write::enforce_write_scope(graph, &label)?;
+    super::write_scope::enforce_write_scope(graph, &label)?;
 
     // One canonical name can cover several KGLite structures — a single
     // property may carry both a hash equality index and a B-tree range index,
@@ -811,7 +811,7 @@ fn execute_create_constraint(
     // A constraint is schema state for one node type, so a session restricted to
     // a write whitelist may not constrain a type outside it — the same rule
     // index DDL follows.
-    super::write::enforce_write_scope(graph, &label)?;
+    super::write_scope::enforce_write_scope(graph, &label)?;
 
     if create.properties.is_empty() {
         return Err("CREATE CONSTRAINT requires at least one property".to_string());
@@ -1210,7 +1210,7 @@ fn execute_drop_constraint(
     // Write scopes name node types, so they gate the node half only — the same
     // reason declaring a relationship constraint does not consult them.
     if entity == EntityKind::Node {
-        super::write::enforce_write_scope(graph, &label)?;
+        super::write_scope::enforce_write_scope(graph, &label)?;
     }
 
     // Withdraw exactly what the declaration installed, so dropping a NODE KEY

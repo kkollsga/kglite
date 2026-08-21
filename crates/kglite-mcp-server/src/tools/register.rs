@@ -163,9 +163,12 @@ pub fn register(
              write-enabled graph. The primary tool for structural questions: how things \
              relate, where an entity/function/type is defined, what references or calls what, \
              counts, and multi-hop paths (for code graphs: call graphs, definitions, imports — \
-             navigate the codebase structure). Pass write_scope=[...] to restrict mutations to \
-             those node types. Mutations are in-memory; call save_graph to persist. Append \
-             FORMAT CSV to export results."
+             navigate the codebase structure). Pass write_scope=[...] to restrict mutations \
+             to those node types: every node write (CREATE/MERGE/SET/REMOVE/DELETE/DETACH \
+             DELETE and node-type DDL) is judged by the node's stored type, and a \
+             relationship write (edge CREATE, DELETE r, SET r.p, REMOVE r.p) needs at least \
+             one endpoint's type in the list. Mutations are in-memory; call save_graph to \
+             persist. Append FORMAT CSV to export results."
         }
         (true, false) => {
             "Query, explore, and understand the active knowledge graph with Cypher — the \

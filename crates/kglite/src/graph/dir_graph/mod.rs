@@ -423,11 +423,16 @@ pub struct DirGraph {
     /// Unlike read_only, mutations are still allowed — they just must conform.
     #[serde(skip)]
     pub schema_locked: bool,
-    /// Transient, **execution-scoped** write whitelist. When `Some(set)`, a
-    /// Cypher `CREATE`/`SET` whose node type is not in `set` is rejected
-    /// (role-scoped writes — integrity, not secrecy). Set by `execute_mut`
-    /// for the duration of one mutation and cleared immediately after; never
-    /// a persistent graph property and never serialized. `None` = unrestricted
+    /// Transient, **execution-scoped** write whitelist (role-scoped writes —
+    /// integrity, not secrecy). When `Some(set)`, a Cypher **node** write is
+    /// rejected unless the node's *stored* type is in `set`, and a
+    /// **relationship** write is rejected unless at least one endpoint's
+    /// stored type is; the full perimeter is documented on
+    /// [`crate::graph::session::execute::ExecuteOptions::write_scope`] and
+    /// enforced by the `enforce_*_write_scope` family in
+    /// `languages::cypher::executor::write_scope`. Set by `execute_mut` for the
+    /// duration of one mutation and cleared immediately after; never a
+    /// persistent graph property and never serialized. `None` = unrestricted
     /// (the default; zero cost).
     #[serde(skip, default)]
     pub(crate) active_write_scope: Option<std::collections::HashSet<String>>,

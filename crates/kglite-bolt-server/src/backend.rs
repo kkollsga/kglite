@@ -254,8 +254,12 @@ struct TxState {
 /// so that is checked first; the same keys directly at the top level of
 /// `extra` are accepted as a fallback for hand-rolled Bolt clients.
 ///
-/// - `write_scope`: list of strings — node types a `CREATE`/`SET` may
-///   touch; anything else is rejected by the engine.
+/// - `write_scope`: list of strings — the node types this transaction may
+///   write. Every node write (`CREATE`, `MERGE`, `SET`, `REMOVE`, `DELETE`,
+///   `DETACH DELETE`, node-type DDL) is judged by the node's *stored* type,
+///   and a relationship write needs at least one endpoint's type in the list;
+///   anything else is rejected by the engine. Full perimeter on
+///   `kglite::graph::session::execute::ExecuteOptions::write_scope`.
 /// - `git_sha` / `modified_by`: strings — freshness/actor provenance
 ///   stamped on writes to `auto_timestamp` node/edge types.
 #[derive(Clone, Debug, Default)]
