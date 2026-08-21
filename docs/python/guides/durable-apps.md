@@ -35,6 +35,14 @@ truncated, or wrong-format input, and `kglite.FileError` on a missing file — s
 a disposable-cache consumer can branch "corrupt → rebuild from source" vs
 "missing → create new" cleanly, without a broad `except IOError`.
 
+Detection does not rely on the damage happening to be structurally invalid.
+Every section of a `.kgl` — topology, each node type's columns, embeddings,
+time series, secondary labels, vector index — is written with a checksum and
+verified on load, so a bit that flips in storage or transit produces an error
+naming the damaged section rather than a graph that loads with quietly
+different data. Files written by older versions lack the checksums and load
+unchanged; files written by this version load on older versions.
+
 The thread that ties these together is the **remembered path**: `open()` and
 `load()` record where the graph came from, so a later bare `save()` — or the
 context manager's auto-save — writes back without you re-specifying the target.

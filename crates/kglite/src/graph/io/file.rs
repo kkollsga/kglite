@@ -8,7 +8,8 @@
 //   [4]        Codec tag: 2 (Postcard v1)
 //   [5..9]     core_data_version: u32 LE
 //   [9..13]    metadata_length: u32 LE
-//   [13..13+N] JSON metadata (column schemas, section sizes, all config)
+//   [13..13+N] JSON metadata (column schemas, section sizes, section
+//              integrity digests, all config)
 //   [section]  topology.zst — graph structure WITHOUT node properties
 //   [section]  columns_<Type>.zst — one per node type, packed column data
 //   [section]  embeddings.zst (optional)
@@ -83,6 +84,55 @@ const CURRENT_CORE_DATA_VERSION: u32 = 3;
 /// `model_id` + `text_hashes` fields. A file below this with a non-empty
 /// embeddings section can't be read by this binary.
 const EMBED_PROVENANCE_MIN_VERSION: u32 = 3;
+
+// ─── Section integrity ───────────────────────────────────────────────────────
+//
+// Every section in the container is covered twice:
+//
+//  1. Its zstd frame carries an XXH64 content checksum (`include_checksum`),
+//     which the decoder verifies on its own with no cooperation from us. Costs
+//     4 bytes per section and catches damage inside the compressed payload.
+//  2. `FileMetadata::section_digests` records a CRC32 of the *compressed*
+//     bytes, verified in `SectionCursor::take` before a byte reaches zstd.
+//
+// Layer 2 exists because layer 1 only protects what a decoder chooses to
+// decode: a flipped bit that lands where the section *boundaries* are read
+// from, or in a section a reader skips, never reaches an XXH64 check. It also
+// covers files written by a build that had checksums off.
+//
+// Both layers are additive: an older binary ignores the unknown JSON key and
+// zstd frames with a content checksum are ordinary zstd frames, so a file
+// written here still loads on a build that predates this. A file written
+// *before* this carries no digests, and `take` then verifies nothing — exactly
+// its previous behaviour.
+
+/// Canonical `section_digests` key for the topology section.
+const TOPOLOGY_SECTION: &str = "topology";
+/// Canonical `section_digests` key for the embeddings section.
+const EMBEDDINGS_SECTION: &str = "embeddings";
+/// Canonical `section_digests` key for the timeseries section.
+const TIMESERIES_SECTION: &str = "timeseries";
+/// Canonical `section_digests` key for the secondary-label-index section.
+const SECONDARY_LABELS_SECTION: &str = "secondary_labels";
+/// Canonical `section_digests` key for the HNSW vector-index section.
+const VECTOR_INDEX_SECTION: &str = "vector_index";
+
+/// Canonical `section_digests` key for one node type's column section.
+///
+/// Namespaced so a node type literally named `embeddings` cannot collide with
+/// the fixed keys above, and keyed by *type name* rather than by position so a
+/// type appearing, disappearing or sorting differently only moves its own
+/// entry.
+fn column_section_key(type_name: &str) -> String {
+    format!("columns:{type_name}")
+}
+
+/// CRC32 (IEEE) of one section's compressed bytes. Shares the WAL's
+/// table-backed implementation so both integrity checks in this crate agree on
+/// what a digest of the same bytes is.
+fn section_digest(compressed: &[u8]) -> u32 {
+    crate::graph::wal::crc32(compressed)
+}
 
 /// Column-section metadata shared by the current portable format.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -308,6 +358,24 @@ pub(crate) struct FileMetadata {
     /// `.kgl` files default to 0.
     #[serde(default)]
     vector_index_compressed_size: u64,
+    /// CRC32 (IEEE) of each section's **compressed** bytes, keyed by the
+    /// canonical section name — `topology`, `columns:<TypeName>`,
+    /// `embeddings`, `timeseries`, `secondary_labels`, `vector_index` (see
+    /// [`column_section_key`] and the "Section integrity" note above).
+    ///
+    /// Keyed rather than positional so the map survives an optional section
+    /// being absent, a node type being added or removed, and any change in
+    /// write order: the reader looks up the one section it is about to take,
+    /// and a section with no entry is simply not verified.
+    ///
+    /// Additive in both directions. Older files carry no keys, so the load
+    /// path verifies nothing and behaves exactly as it did before the field
+    /// existed; older *binaries* ignore the key, because this metadata has
+    /// never denied unknown fields. `skip_serializing_if` keeps the key out of
+    /// the disk-mode `metadata.json` (whose sections live in separate files
+    /// with their own integrity story), so that file stays byte-identical.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    section_digests: BTreeMap<String, u32>,
     /// Cached edge type counts (connection_type → count).
     /// Persisted from warm cache on save, restored to cache on load.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -379,6 +447,7 @@ impl FileMetadata {
             timeseries_compressed_size: 0,
             secondary_labels_compressed_size: 0,
             vector_index_compressed_size: 0,
+            section_digests: BTreeMap::new(),
             // Persist edge type counts if cache is warm (no O(E) scan if cold)
             edge_type_counts: if graph.has_edge_type_counts_cache() {
                 Some((*graph.get_edge_type_counts()).clone())
@@ -537,9 +606,20 @@ pub fn prepare_save(graph: &mut Arc<DirGraph>) {
     g.populate_index_keys();
 }
 
-/// Compress data using zstd (level 1 — fastest with good ratio).
+/// Compress data using zstd (level 1 — fastest with good ratio), with a
+/// content checksum in the frame.
+///
+/// The checksum is layer 1 of the section-integrity story (see the "Section
+/// integrity" note near the top of this module): zstd appends an XXH64 of the
+/// uncompressed content to the frame, and `zstd::Decoder` verifies it while
+/// decoding with no cooperation from the reader — including the readers in
+/// binaries built before this flag was set, because a frame with a content
+/// checksum is an ordinary zstd frame. It costs 4 bytes per section.
 fn zstd_compress(data: &[u8]) -> io::Result<Vec<u8>> {
-    zstd::encode_all(std::io::Cursor::new(data), 1)
+    let mut encoder = zstd::Encoder::new(Vec::new(), 1)?;
+    encoder.include_checksum(true)?;
+    encoder.write_all(data)?;
+    encoder.finish()
 }
 
 /// Decompress zstd-compressed data.
@@ -753,6 +833,32 @@ pub fn write_kgl(graph: &DirGraph, path: &str) -> io::Result<()> {
     write_kgl_with(graph, path, true)
 }
 
+/// Digest every section that will be written, keyed the way the loader will
+/// look each one up ([`column_section_key`] and the `*_SECTION` constants).
+///
+/// Takes the already-compressed buffers, because the recorded digest covers
+/// the bytes as they sit in the file: the reader can then check a section
+/// before handing it to zstd, rather than after trusting it enough to
+/// decompress it.
+fn build_section_digests(
+    topology: &[u8],
+    column_meta: &[PortableColumnSection],
+    column_data: &[Vec<u8>],
+    optional: [(&str, Option<&[u8]>); 4],
+) -> BTreeMap<String, u32> {
+    let mut digests = BTreeMap::new();
+    digests.insert(TOPOLOGY_SECTION.to_string(), section_digest(topology));
+    for (meta, data) in column_meta.iter().zip(column_data.iter()) {
+        digests.insert(column_section_key(&meta.type_name), section_digest(data));
+    }
+    for (key, data) in optional {
+        if let Some(bytes) = data {
+            digests.insert(key.to_string(), section_digest(bytes));
+        }
+    }
+    digests
+}
+
 /// Serialize the graph's `.kgl` byte stream (header + topology + column /
 /// embedding / timeseries / secondary-label sections) into any writer.
 /// Factored out of the file path so the same bytes back the atomic file
@@ -854,8 +960,24 @@ pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()
         None => None,
     };
 
-    // 5. Build metadata (common fields from graph, then fill in section sizes)
+    // 5. Build metadata (common fields from graph, then fill in section sizes
+    //    and the per-section integrity digests).
+    let section_digests = build_section_digests(
+        &topology_compressed,
+        &column_sections_meta,
+        &column_sections_data,
+        [
+            (EMBEDDINGS_SECTION, embedding_compressed.as_deref()),
+            (TIMESERIES_SECTION, timeseries_compressed.as_deref()),
+            (
+                SECONDARY_LABELS_SECTION,
+                secondary_labels_compressed.as_deref(),
+            ),
+            (VECTOR_INDEX_SECTION, vector_index_compressed.as_deref()),
+        ],
+    );
     let mut metadata = FileMetadata::from_graph(graph);
+    metadata.section_digests = section_digests;
     metadata.topology_compressed_size = topology_compressed.len() as u64;
     metadata.column_sections = column_sections_meta;
     metadata.embeddings_compressed_size = embedding_compressed
@@ -1037,31 +1159,64 @@ pub(crate) fn pre_014_bincode_error(artifact: &str) -> io::Error {
 struct SectionCursor<'a> {
     bytes: &'a [u8],
     offset: usize,
+    /// The writer's per-section CRC32 digests, keyed by canonical section name
+    /// (`FileMetadata::section_digests`). Empty for a file written before that
+    /// field existed — [`Self::take`] then verifies nothing, which is exactly
+    /// how those files loaded before.
+    digests: BTreeMap<String, u32>,
 }
 
 impl<'a> SectionCursor<'a> {
-    fn new(bytes: &'a [u8], offset: usize) -> io::Result<Self> {
+    fn new(bytes: &'a [u8], offset: usize, digests: BTreeMap<String, u32>) -> io::Result<Self> {
         if offset > bytes.len() {
             return Err(invalid_data("section cursor starts past end of file"));
         }
-        Ok(Self { bytes, offset })
+        Ok(Self {
+            bytes,
+            offset,
+            digests,
+        })
     }
 
-    fn take(&mut self, encoded_len: u64, label: &str) -> io::Result<&'a [u8]> {
+    /// Slice the next `encoded_len` bytes and check them against the digest
+    /// recorded for `section`, if the file carries one.
+    ///
+    /// This is *the* integrity gate for the container payload: every section
+    /// is read through here, and the check happens before the bytes reach a
+    /// decoder. `section` is both the digest key and the name errors report,
+    /// so a mismatch tells the operator which part of the file is damaged.
+    fn take(&mut self, encoded_len: u64, section: &str) -> io::Result<&'a [u8]> {
         let len = usize::try_from(encoded_len)
-            .map_err(|_| invalid_data(format!("{label} section size does not fit usize")))?;
+            .map_err(|_| invalid_data(format!("{section} section size does not fit usize")))?;
         let end = self
             .offset
             .checked_add(len)
-            .ok_or_else(|| invalid_data(format!("{label} section offset overflow")))?;
-        let section = self.bytes.get(self.offset..end).ok_or_else(|| {
+            .ok_or_else(|| invalid_data(format!("{section} section offset overflow")))?;
+        let bytes = self.bytes.get(self.offset..end).ok_or_else(|| {
             invalid_data(format!(
-                "file is truncated — {label} section needs {len} bytes at offset {}",
+                "file is truncated — {section} section needs {len} bytes at offset {}",
                 self.offset
             ))
         })?;
+        self.verify(section, bytes)?;
         self.offset = end;
-        Ok(section)
+        Ok(bytes)
+    }
+
+    fn verify(&self, section: &str, bytes: &[u8]) -> io::Result<()> {
+        let Some(&expected) = self.digests.get(section) else {
+            return Ok(());
+        };
+        let actual = section_digest(bytes);
+        if actual != expected {
+            return Err(invalid_data(format!(
+                "the '{section}' section of this .kgl file is corrupt — it does not match the \
+                 CRC32 digest recorded when the file was written (recorded {expected:#010x}, \
+                 computed {actual:#010x}). Restore the file from a backup or rebuild the graph \
+                 from its source."
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -1644,7 +1799,8 @@ fn parse_portable_metadata<'a>(
             "{format_name} metadata declares too many column sections"
         )));
     }
-    Ok((metadata, SectionCursor::new(buf, metadata_end)?))
+    let digests = metadata.section_digests.clone();
+    Ok((metadata, SectionCursor::new(buf, metadata_end, digests)?))
 }
 
 fn decode_portable_topology(
@@ -1652,7 +1808,7 @@ fn decode_portable_topology(
     sections: &mut SectionCursor<'_>,
     metadata: FileMetadata,
 ) -> io::Result<(DirGraph, PortableSectionPlan)> {
-    let topology_compressed = sections.take(metadata.topology_compressed_size, "topology")?;
+    let topology_compressed = sections.take(metadata.topology_compressed_size, TOPOLOGY_SECTION)?;
     let topology_raw = zstd_decompress(topology_compressed)?;
     let mut interner = StringInterner::new();
     let graph: crate::graph::schema::GraphBackend = {
@@ -1695,7 +1851,7 @@ fn load_portable_column_section(
 ) -> io::Result<()> {
     let compressed = sections.take(
         section_meta.compressed_size,
-        &format!("column section {section_index}"),
+        &column_section_key(&section_meta.type_name),
     )?;
     let packed = zstd_decompress(compressed)?;
     let expected_rows = dir_graph
@@ -1796,7 +1952,7 @@ fn load_portable_optional_sections(
         if core_version < EMBED_PROVENANCE_MIN_VERSION {
             return Err(io::Error::other(EMBED_FORMAT_BREAK_MSG));
         }
-        let compressed = sections.take(plan.embeddings, "embeddings")?;
+        let compressed = sections.take(plan.embeddings, EMBEDDINGS_SECTION)?;
         let raw = zstd_decompress(compressed)?;
         let mut embeddings: HashMap<(String, String), EmbeddingStore> =
             codec_deser(codec, &raw, raw.capacity() as u64)?;
@@ -1804,20 +1960,25 @@ fn load_portable_optional_sections(
         dir_graph.embeddings = embeddings;
     }
     if plan.timeseries > 0 {
-        let compressed = sections.take(plan.timeseries, "timeseries")?;
+        let compressed = sections.take(plan.timeseries, TIMESERIES_SECTION)?;
         let raw = zstd_decompress(compressed)?;
         dir_graph.timeseries_store = codec_deser(codec, &raw, raw.capacity() as u64)?;
     }
     if plan.secondary_labels > 0 {
-        let compressed = sections.take(plan.secondary_labels, "secondary labels")?;
+        let compressed = sections.take(plan.secondary_labels, SECONDARY_LABELS_SECTION)?;
         let raw = zstd_decompress(compressed)?;
         decode_secondary_label_index(&raw, dir_graph)?;
     }
     if plan.vector_index > 0 {
-        if let Ok(compressed) = sections.take(plan.vector_index, "vector index") {
-            if let Ok(raw) = zstd_decompress(compressed) {
-                decode_vector_indexes(&raw, dir_graph);
-            }
+        // Framing failures propagate — a section that is truncated or fails
+        // its digest means the *file* is damaged, and skipping it would leave
+        // the reader with no signal that anything was wrong. The payload
+        // itself stays optional: it is self-describing and rebuildable, so an
+        // index this build does not recognise is still skipped silently (see
+        // `decode_vector_indexes`).
+        let compressed = sections.take(plan.vector_index, VECTOR_INDEX_SECTION)?;
+        if let Ok(raw) = zstd_decompress(compressed) {
+            decode_vector_indexes(&raw, dir_graph);
         }
     }
     Ok(())

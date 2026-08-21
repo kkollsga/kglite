@@ -1494,3 +1494,168 @@ mod rel_constraint_roundtrip_tests {
         );
     }
 }
+
+/// **Section integrity.** Every `.kgl` section carries a CRC32 digest in the
+/// metadata and a zstd content checksum in its own frame, so a corrupted
+/// payload is refused by name instead of decoding into a different graph.
+///
+/// Before these landed, a single flipped bit in a column section loaded
+/// clean and silently renamed a thousand nodes — `load()` reported success.
+#[cfg(test)]
+mod section_integrity_tests {
+    use super::*;
+    use crate::datatypes::{DataFrame, Value};
+    use crate::graph::dir_graph::DirGraph;
+    use crate::graph::storage::GraphRead;
+
+    /// A two-type graph, so the digest map holds more than one column section.
+    fn fixture_bytes() -> Vec<u8> {
+        let mut graph = DirGraph::new();
+        for (type_name, count) in [("Doc", 40i64), ("Author", 12i64)] {
+            let rows: Vec<Vec<Value>> = (1..=count)
+                .map(|i| {
+                    vec![
+                        Value::Int64(i),
+                        Value::String(format!("{type_name}-{i:03}")),
+                    ]
+                })
+                .collect();
+            let frame =
+                DataFrame::from_cypher_rows(vec!["id".to_string(), "title".to_string()], rows)
+                    .unwrap();
+            crate::graph::mutation::maintain::add_nodes(
+                &mut graph,
+                frame,
+                type_name.to_string(),
+                "id".to_string(),
+                Some("title".to_string()),
+                None,
+            )
+            .unwrap();
+        }
+        let mut arc = Arc::new(graph);
+        prepare_save(&mut arc);
+        Arc::make_mut(&mut arc).enable_columnar();
+        let mut buf = Vec::new();
+        write_kgl_to(&arc, &mut buf).unwrap();
+        buf
+    }
+
+    fn metadata_len(bytes: &[u8]) -> usize {
+        u32::from_le_bytes(bytes[9..13].try_into().unwrap()) as usize
+    }
+
+    fn section_start(bytes: &[u8]) -> usize {
+        13 + metadata_len(bytes)
+    }
+
+    fn parsed_metadata(bytes: &[u8]) -> serde_json::Value {
+        let end = section_start(bytes);
+        serde_json::from_slice(&bytes[13..end]).unwrap()
+    }
+
+    /// Rewrite the container with `section_digests` removed — the shape of a
+    /// `.kgl` written before the field existed.
+    fn without_section_digests(bytes: &[u8]) -> Vec<u8> {
+        let mut metadata = parsed_metadata(bytes);
+        assert!(
+            metadata
+                .as_object_mut()
+                .unwrap()
+                .remove("section_digests")
+                .is_some(),
+            "fixture should carry section digests"
+        );
+        let json = serde_json::to_vec(&metadata).unwrap();
+        let mut out = Vec::with_capacity(bytes.len());
+        out.extend_from_slice(&bytes[..9]);
+        out.extend_from_slice(&(json.len() as u32).to_le_bytes());
+        out.extend_from_slice(&json);
+        out.extend_from_slice(&bytes[section_start(bytes)..]);
+        out
+    }
+
+    /// `DirGraph` is not `Debug`, so `unwrap_err` is unavailable; a damaged
+    /// buffer that loads is a test failure worth naming anyway.
+    fn expect_load_error(bytes: &[u8]) -> io::Error {
+        match load_kgl_bytes(bytes) {
+            Ok(_) => panic!("a corrupted .kgl loaded successfully"),
+            Err(error) => error,
+        }
+    }
+
+    fn flip_bit_at(bytes: &[u8], offset: usize) -> Vec<u8> {
+        let mut out = bytes.to_vec();
+        out[offset] ^= 0b0001_0000;
+        out
+    }
+
+    #[test]
+    fn every_section_is_digested_under_its_canonical_key() {
+        let bytes = fixture_bytes();
+        let digests = parsed_metadata(&bytes)["section_digests"].clone();
+        let map = digests.as_object().expect("section_digests object");
+        assert!(map.contains_key("topology"), "digests: {map:?}");
+        assert!(map.contains_key("columns:Doc"), "digests: {map:?}");
+        assert!(map.contains_key("columns:Author"), "digests: {map:?}");
+        // Optional sections are absent from this fixture, so they are absent
+        // from the map — keys are per-section, not positional.
+        assert_eq!(map.len(), 3, "digests: {map:?}");
+    }
+
+    #[test]
+    fn corrupt_topology_section_names_topology() {
+        let bytes = fixture_bytes();
+        let offset = section_start(&bytes) + 4;
+        let error = expect_load_error(&flip_bit_at(&bytes, offset));
+        let message = error.to_string();
+        assert!(message.contains("'topology'"), "message: {message}");
+        assert!(message.contains("corrupt"), "message: {message}");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn corrupt_column_section_names_the_node_type() {
+        let bytes = fixture_bytes();
+        let metadata = parsed_metadata(&bytes);
+        let topology_size = metadata["topology_compressed_size"].as_u64().unwrap() as usize;
+        let first = &metadata["column_sections"][0];
+        // Sections are written in sorted type order; the first is Author.
+        let type_name = first["type_name"].as_str().unwrap().to_string();
+        let offset = section_start(&bytes) + topology_size + 4;
+
+        let error = expect_load_error(&flip_bit_at(&bytes, offset));
+        let message = error.to_string();
+        assert!(
+            message.contains(&format!("'columns:{type_name}'")),
+            "message: {message}"
+        );
+    }
+
+    #[test]
+    fn a_file_written_without_digests_still_loads() {
+        let bytes = fixture_bytes();
+        let legacy = without_section_digests(&bytes);
+        let graph = load_kgl_bytes(&legacy).expect("digest-less file must still load");
+        assert_eq!(graph.graph.node_count(), 52);
+    }
+
+    /// The second layer, measured on its own: with the digests stripped, the
+    /// zstd frame's own content checksum still refuses the damaged payload.
+    /// This is what protects a file written here when it is read by a build
+    /// that knows nothing about `section_digests`.
+    #[test]
+    fn zstd_frame_checksum_catches_corruption_without_digests() {
+        let bytes = without_section_digests(&fixture_bytes());
+        let offset = section_start(&bytes) + 20;
+        let error = expect_load_error(&flip_bit_at(&bytes, offset));
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn intact_file_roundtrips_with_digests_verified() {
+        let bytes = fixture_bytes();
+        let graph = load_kgl_bytes(&bytes).unwrap();
+        assert_eq!(graph.graph.node_count(), 52);
+    }
+}

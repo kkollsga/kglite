@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A corrupted `.kgl` file could load silently, with different data.** Nothing
+  but Postcard's structural decode stood between a damaged payload and a graph
+  the caller then trusted: over a third of single-bit corruptions loaded
+  *successfully and wrong* (34.7% and 38.3% on two independent sweeps) — one
+  flipped bit renamed 1135 nodes and `load()` reported success, contradicting
+  the documented promise that a corrupt file raises a typed `FileFormatError`. Every section of the container
+  — topology, each node type's columns, embeddings, timeseries, secondary
+  labels, vector index — now carries two independent integrity checks: a CRC32
+  digest of its compressed bytes recorded in the file's metadata and verified
+  before the bytes reach a decoder, and a zstd frame content checksum the
+  decoder verifies on its own. A damaged section raises `FileFormatError`
+  naming the section rather than loading. Single-bit corruption of the section
+  payload now either loads byte-identical content or raises — never a
+  successful load of different data.
+
+  Both layers are additive and neither is a format bump: a `.kgl` written by an
+  older build carries no digests and loads exactly as before, and a file
+  written by this version loads on older binaries (verified against the
+  published 0.16.5 wheel in both directions). Disk-mode graph directories are
+  unaffected; their sidecars have their own integrity handling.
+
 - **`CREATE` stored null-valued relationship properties; node `CREATE` did not.**
   `CREATE (a)-[:E {x: null, y: 1}]->(b)` left `x` on the edge, so `keys(r)`
   reported a property that the identical literal on a node —
