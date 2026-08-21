@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.6] - 2026-08-22
+
 ### Fixed
 
 - **Every Python query paid a full second parse of its own text.** The public

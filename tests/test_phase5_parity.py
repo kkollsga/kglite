@@ -98,7 +98,7 @@ def test_graph_copy_cow_correctness_mapped():
 #: (run on each platform; the script writes whichever entry matches the
 #: current host).
 BINARY_SIZE_BASELINES = {
-    "darwin": 20_811_728,  # 0.16.5 darwin baseline
+    "darwin": 20_944_128,  # 0.16.6 darwin baseline
     "linux": 28_810_000,  # estimate: the post-code_tree Linux estimate (30.2 MB)
     # scaled by the same −4.6% the macOS loader removal measured. Both
     # removals deliberately recaptured DOWNWARD so the +10% budget guards
@@ -347,6 +347,9 @@ def test_binary_size_regression():
       (before-image capture, selectors, epoch handoff), and the PropMap
       property container with its serde impl.
 
+
+      - 0.16.6:       20,944,128 bytes (≈20.0 MB). Two response programs: .kgl section digests + zstd checksums, the bidirectional BFS engine + shortest-path family filters/direction/single-source, var-length trail-soundness gate + lowering pass + expansion budget, write_scope full-verb coverage, MCP operator scope + isError adoption (mcp-methods 0.4.6), diagnostics-to-every-surface plumbing.
+
     Raising the baseline is a deliberate act — every bump should
     be accompanied by an updated growth note above. For a precise
     drilldown, run `cargo bloat --release --crates --filter kglite`.
@@ -378,7 +381,7 @@ def test_binary_size_regression():
     gate = int(baseline * 1.10)
     assert size <= gate, (
         f"{bin_path.name} = {size:,} bytes > gate {gate:,} "
-        f"(+10% over 0.16.5 {platform_key} baseline {baseline:,}). "
+        f"(+10% over 0.16.6 {platform_key} baseline {baseline:,}). "
         "Investigate what grew before raising the gate — see the "
         "growth note in this test's docstring for the breakdown shape."
     )
