@@ -798,6 +798,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`enable_disk_mode()` streams edge properties into the on-disk store
+  instead of cloning them onto the heap.** The conversion copied every
+  property-bearing edge's properties into the disk backend's heap mutation
+  overlay — around 175 bytes per edge of pure duplication, since the in-memory
+  graph it copies from is dropped as soon as the conversion returns, and the
+  dominant term in what the call added to a converting process. The properties
+  are now written into the columnar blob beside the CSR as the edges are
+  walked, one edge's encoded bytes at a time, and the resulting graph maps that
+  blob the way a reopened directory does: `graph_info()['edge_property_overlay_rows']`
+  reads `0` immediately after the conversion, and the conversion's memory
+  overhead is the CSR structures alone (~32 bytes per edge). The bytes written
+  are the same format a `save()` writes, so reads after the conversion, after a
+  save, and after a reopen all answer identically, and a `SET` on a converted
+  graph's relationship takes the overlay on top of the mapped base as usual.
+
 - **Behaviour change for programmatic MCP clients: a tool call that fails now
   reports `isError: true`.** Cypher syntax and execution errors, an unknown
   procedure, the read-only refusal, a write-scope refusal (the agent's own

@@ -34,7 +34,8 @@ use crate::graph::storage::mapped::mmap_vec::{MmapBytes, MmapOrVec};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io;
-use std::path::Path;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Filename constants for the columnar base. Both live under the graph's
@@ -117,6 +118,14 @@ fn decode_props(
     )
 }
 
+/// `path` with a `.tmp` suffix — the staging name used when a save has to
+/// replace files this store is currently mapping.
+fn staged_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".tmp");
+    PathBuf::from(name)
+}
+
 /// Encode `(InternedKey, Value)` pairs directly into the provided heap
 /// buffer. Avoids the per-edge `Vec<u8>` allocation that dominated
 /// save-path cost during PR2 phase-2 benchmarking. The interner is not
@@ -146,14 +155,6 @@ impl EdgePropertyStore {
     /// Empty store — no base, empty overlay. Used by fresh in-memory builds.
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Construct from a pre-populated HashMap.
-    pub fn from_overlay(map: HashMap<u32, Vec<(InternedKey, Value)>>) -> Self {
-        Self {
-            base: None,
-            overlay: map.into_iter().map(|(k, v)| (k, Some(v))).collect(),
-        }
     }
 
     /// Lookup an edge's current properties.
@@ -275,14 +276,19 @@ impl EdgePropertyStore {
         let offsets_path = target_dir.join(OFFSETS_FILE);
         let heap_path = target_dir.join(HEAP_FILE);
 
-        // Release any existing mmap over these exact paths before we
-        // overwrite them — memmap2 docs are explicit that overlapping
-        // writes to a mapped file are UB.
-        if let Some(base) = self.base.as_ref() {
-            if base.offsets.file_path() == Some(&offsets_path) {
-                self.base = None;
-            }
-        }
+        // Is this store's own columnar base the thing we are about to
+        // overwrite? Then the new files are staged beside the old ones and
+        // swapped in at the end: the sweep below reads *through* the base, and
+        // overwriting a mapped file in place is UB per memmap2's docs.
+        //
+        // Releasing the mapping up front — what this used to do — satisfied
+        // the UB rule by throwing the data away: every edge whose properties
+        // lived only in the base then swept as absent, and the save wrote an
+        // empty store over a full one. Unreachable from `DirGraph::save_disk`,
+        // which always writes a fresh generation stage, but `save_to_dir` and
+        // `seal_to_new_segment` both target the live data dir directly.
+        let writing_in_place =
+            self.base.as_ref().and_then(|b| b.offsets.file_path()) == Some(offsets_path.as_path());
 
         // 0.8.12 phase-1 fast path: skip the O(upper_bound) sweep when
         // no edge has any properties. The pre-phase-1 loop ran 6.7M
@@ -293,6 +299,13 @@ impl EdgePropertyStore {
         // `get(edge_idx)` on the reloaded store returns `None`, which
         // is exactly what the full-sweep path produced anyway.
         if self.is_empty() {
+            // A base mapping these paths contributes nothing readable here
+            // (`is_empty` already proved it holds no edges), so releasing it
+            // before the truncating write loses no data and keeps the write
+            // off a live mapping.
+            if writing_in_place {
+                self.base = None;
+            }
             std::fs::write(&offsets_path, b"")?;
             std::fs::write(&heap_path, b"")?;
             let legacy = target_dir.join(LEGACY_FILE);
@@ -322,8 +335,21 @@ impl EdgePropertyStore {
         }
         offsets.push(heap.len() as u64);
 
-        MmapOrVec::from_vec(offsets).save_to_file(&offsets_path)?;
-        std::fs::write(&heap_path, &heap)?;
+        let (offsets_out, heap_out) = if writing_in_place {
+            (staged_path(&offsets_path), staged_path(&heap_path))
+        } else {
+            (offsets_path.clone(), heap_path.clone())
+        };
+        MmapOrVec::from_vec(offsets).save_to_file(&offsets_out)?;
+        std::fs::write(&heap_out, &heap)?;
+        if writing_in_place {
+            // Release the mapping only now that everything it held has been
+            // written elsewhere. POSIX keeps the mapping valid across the
+            // rename; Windows refuses to replace a file with an open handle.
+            self.base = None;
+            std::fs::rename(&offsets_out, &offsets_path)?;
+            std::fs::rename(&heap_out, &heap_path)?;
+        }
 
         // Remove the legacy file if it's lingering from a format=0 load.
         let legacy = target_dir.join(LEGACY_FILE);
@@ -353,6 +379,21 @@ impl EdgePropertyStore {
                 "edge-property store",
             ));
         }
+        if format_version > 2 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unsupported edge property format {format_version}"),
+            ));
+        }
+        Self::open_base(dir, meta)
+    }
+
+    /// Map an already-validated format-2 columnar base out of `dir`.
+    ///
+    /// Split out of [`Self::load_from`] so the streaming writer can hand back
+    /// a live store without inventing a `StringInterner` the read path never
+    /// consults.
+    fn open_base(dir: &Path, meta: EdgePropertyStoreMeta) -> io::Result<Self> {
         let offsets_path = dir.join(OFFSETS_FILE);
         let heap_path = dir.join(HEAP_FILE);
         if !offsets_path.exists() {
@@ -370,28 +411,20 @@ impl EdgePropertyStore {
         }
         let offsets = MmapOrVec::<u64>::load_mapped(&offsets_path, meta.offsets_len)?;
         let heap = MmapBytes::load_mapped(&heap_path, meta.heap_len)?;
-        let codec = match format_version {
-            2 => crate::serde_codec::CodecVersion::PostcardV1,
-            other => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("unsupported edge property format {other}"),
-                ));
-            }
-        };
         Ok(Self {
             base: Some(Arc::new(ColumnarBase {
                 offsets,
                 heap,
-                codec,
+                codec: crate::serde_codec::CodecVersion::PostcardV1,
             })),
             overlay: HashMap::new(),
         })
     }
 
     /// Compute the on-disk metadata for this store — call after `save_to`
-    /// to get the values that belong in `DiskGraphMeta`. The returned
-    /// counts reflect what `save_to` just wrote, not the in-memory state.
+    /// or [`EdgePropertyWriter::finish`] to get the values that belong in
+    /// `DiskGraphMeta`. The returned counts reflect what was just written,
+    /// not the in-memory state.
     pub fn meta_for(dir: &Path) -> EdgePropertyStoreMeta {
         let offsets = dir.join(OFFSETS_FILE);
         let heap = dir.join(HEAP_FILE);
@@ -403,6 +436,123 @@ impl EdgePropertyStore {
                 .map(|m| m.len() as usize)
                 .unwrap_or(0),
         }
+    }
+}
+
+/// Streaming builder for a columnar base, written one edge at a time.
+///
+/// [`EdgePropertyStore::save_to`] persists the *merged* state, which means
+/// everything it writes has to be reachable through `get()` first — a bulk
+/// materializer would have to assemble the whole `HashMap` overlay before it
+/// could save, which is ~175 B per property-bearing edge of heap holding data
+/// that is about to be written and never read from the heap again. That was
+/// the dominant term in `enable_disk_mode()`'s memory growth.
+///
+/// This writer appends straight into `edge_prop_offsets.bin` /
+/// `edge_prop_heap.bin` in ascending `edge_idx` order, so the live heap is one
+/// edge's encoded blob. The bytes it emits are byte-identical to `save_to`'s
+/// (same sparsity encoding, same `encode_props_into` framing, same
+/// `edge_properties_format = 2`), and [`Self::finish`] hands back a store
+/// mapping what it wrote — the same end state a reload reaches.
+pub struct EdgePropertyWriter {
+    dir: PathBuf,
+    offsets: io::BufWriter<std::fs::File>,
+    heap: io::BufWriter<std::fs::File>,
+    /// Number of slots whose offset has been written — i.e. the next
+    /// `edge_idx` this writer expects.
+    slots: u32,
+    heap_len: u64,
+    scratch: Vec<u8>,
+    wrote_any: bool,
+}
+
+impl EdgePropertyWriter {
+    /// Open a writer over `dir`, truncating any existing columnar files.
+    ///
+    /// `dir` must be the directory the resulting graph will treat as its data
+    /// dir (`seg_000/`), so the blob lands beside the CSR arrays that index
+    /// into it and `DiskGraphMeta` describes both from one place.
+    pub fn create(dir: &Path) -> io::Result<Self> {
+        Ok(Self {
+            dir: dir.to_path_buf(),
+            offsets: io::BufWriter::new(std::fs::File::create(dir.join(OFFSETS_FILE))?),
+            heap: io::BufWriter::with_capacity(
+                1 << 16,
+                std::fs::File::create(dir.join(HEAP_FILE))?,
+            ),
+            slots: 0,
+            heap_len: 0,
+            scratch: Vec::new(),
+            wrote_any: false,
+        })
+    }
+
+    /// Record `edge_idx`'s properties. Edges must arrive in ascending
+    /// `edge_idx` order; every index skipped gets the zero-length slot that
+    /// encodes "no properties", exactly as `save_to`'s sweep would write it.
+    ///
+    /// Empty `props` are ignored rather than stored, matching
+    /// [`EdgePropertyStore::insert`]'s normalisation.
+    pub fn push(&mut self, edge_idx: u32, props: &[(InternedKey, Value)]) -> io::Result<()> {
+        debug_assert!(
+            edge_idx >= self.slots,
+            "EdgePropertyWriter requires ascending edge_idx: {edge_idx} after {}",
+            self.slots
+        );
+        if props.is_empty() {
+            return Ok(());
+        }
+        self.pad_to(edge_idx)?;
+        self.offsets.write_all(&self.heap_len.to_ne_bytes())?;
+        self.scratch.clear();
+        encode_props_into(props, &mut self.scratch)?;
+        self.heap.write_all(&self.scratch)?;
+        self.heap_len += self.scratch.len() as u64;
+        self.slots += 1;
+        self.wrote_any = true;
+        Ok(())
+    }
+
+    /// Emit empty slots until `slots == edge_idx`.
+    fn pad_to(&mut self, edge_idx: u32) -> io::Result<()> {
+        while self.slots < edge_idx {
+            self.offsets.write_all(&self.heap_len.to_ne_bytes())?;
+            self.slots += 1;
+        }
+        Ok(())
+    }
+
+    /// Close the files and map them back as a read-only base.
+    ///
+    /// `upper_bound` is exclusive and matches `save_to`'s: `(upper_bound + 1)`
+    /// offsets are written, the last being the total heap length. When no edge
+    /// carried properties the two files are emitted zero-length and the store
+    /// comes back with no base at all — the same representation
+    /// `save_to`'s empty fast path produces, and the one `load_from`
+    /// recognises via `offsets_len == 0`.
+    pub fn finish(mut self, upper_bound: u32) -> io::Result<EdgePropertyStore> {
+        debug_assert!(
+            upper_bound >= self.slots,
+            "upper_bound {upper_bound} is below the {} slots already written",
+            self.slots
+        );
+        if !self.wrote_any {
+            drop(self.offsets);
+            drop(self.heap);
+            std::fs::write(self.dir.join(OFFSETS_FILE), b"")?;
+            std::fs::write(self.dir.join(HEAP_FILE), b"")?;
+            return Ok(EdgePropertyStore::new());
+        }
+        self.pad_to(upper_bound)?;
+        self.offsets.write_all(&self.heap_len.to_ne_bytes())?;
+        // `into_inner` flushes; the files are then closed by dropping them.
+        // No fsync — `save_to` does not fsync either, and the durability
+        // boundary for a disk graph is the generation publish, not this write.
+        drop(self.offsets.into_inner().map_err(|e| e.into_error())?);
+        drop(self.heap.into_inner().map_err(|e| e.into_error())?);
+
+        let meta = EdgePropertyStore::meta_for(&self.dir);
+        EdgePropertyStore::open_base(&self.dir, meta)
     }
 }
 
@@ -555,6 +705,127 @@ mod tests {
         assert!(error
             .to_string()
             .contains("unsupported edge property format"));
+    }
+
+    #[test]
+    fn writer_streams_the_same_bytes_save_to_would_have_written() {
+        // The streaming path is only safe if it is byte-identical to the
+        // sweep it replaces — the loader reads both through the same
+        // `edge_properties_format = 2` framing.
+        let streamed = TempDir::new().unwrap();
+        let swept = TempDir::new().unwrap();
+        let mut interner = StringInterner::new();
+
+        let p0 = vec![
+            (k("name", &mut interner), Value::String("alpha".into())),
+            (k("rank", &mut interner), Value::Int64(7)),
+        ];
+        let p3 = vec![(k("weight", &mut interner), Value::Float64(3.14))];
+
+        let mut writer = EdgePropertyWriter::create(streamed.path()).unwrap();
+        writer.push(0, &p0).unwrap();
+        writer.push(1, &[]).unwrap(); // empty props are not stored
+        writer.push(3, &p3).unwrap();
+        let store = writer.finish(6).unwrap();
+
+        let mut reference = EdgePropertyStore::new();
+        reference.insert(0, p0.clone());
+        reference.insert(3, p3.clone());
+        reference.save_to(swept.path(), 6).unwrap();
+
+        for name in [OFFSETS_FILE, HEAP_FILE] {
+            assert_eq!(
+                std::fs::read(streamed.path().join(name)).unwrap(),
+                std::fs::read(swept.path().join(name)).unwrap(),
+                "{name} diverges from the sweep's bytes"
+            );
+        }
+
+        // And the returned store already maps what it wrote — no reload,
+        // and nothing left on the heap.
+        assert_eq!(store.overlay_len(), 0);
+        assert_eq!(store.get(0).unwrap().as_ref(), p0.as_slice());
+        assert!(store.get(1).is_none());
+        assert!(store.get(2).is_none());
+        assert_eq!(store.get(3).unwrap().as_ref(), p3.as_slice());
+        assert!(store.get(5).is_none());
+        assert!(!store.is_empty());
+        assert_eq!(store.upper_bound(), 6);
+    }
+
+    #[test]
+    fn writer_with_no_properties_emits_the_empty_representation() {
+        let tmp = TempDir::new().unwrap();
+        let mut writer = EdgePropertyWriter::create(tmp.path()).unwrap();
+        writer.push(0, &[]).unwrap();
+        let store = writer.finish(1_000).unwrap();
+
+        assert!(store.is_empty());
+        assert!(store.get(0).is_none());
+        let meta = EdgePropertyStore::meta_for(tmp.path());
+        assert_eq!(meta.offsets_len, 0, "no sweep-sized all-zero offsets file");
+        assert_eq!(meta.heap_len, 0);
+    }
+
+    #[test]
+    fn writer_output_takes_overlay_writes_on_top() {
+        // A converted graph is mutated after conversion (`SET r.p`): the new
+        // value has to land in the overlay and win over the streamed base.
+        let tmp = TempDir::new().unwrap();
+        let mut interner = StringInterner::new();
+        let key = k("weight", &mut interner);
+
+        let mut writer = EdgePropertyWriter::create(tmp.path()).unwrap();
+        writer.push(1, &[(key, Value::Int64(1))]).unwrap();
+        let mut store = writer.finish(3).unwrap();
+
+        store.insert(1, vec![(key, Value::Int64(42))]);
+        assert_eq!(store.get(1).unwrap().as_ref()[0].1, Value::Int64(42));
+        store.insert(2, vec![(key, Value::Int64(7))]);
+        assert_eq!(store.get(2).unwrap().as_ref()[0].1, Value::Int64(7));
+
+        // A save merges base and overlay; the base survives being read from
+        // while its own files are replaced.
+        store.save_to(tmp.path(), 3).unwrap();
+        let meta = EdgePropertyStore::meta_for(tmp.path());
+        let reloaded = EdgePropertyStore::load_from(tmp.path(), 2, meta, &mut interner).unwrap();
+        assert_eq!(reloaded.get(1).unwrap().as_ref()[0].1, Value::Int64(42));
+        assert_eq!(reloaded.get(2).unwrap().as_ref()[0].1, Value::Int64(7));
+    }
+
+    #[test]
+    fn save_to_over_its_own_mapped_base_keeps_the_base_rows() {
+        // `save_to` writes the *merged* state, which it reads through
+        // `self.base`. Releasing that mapping before the sweep — to avoid
+        // writing into a mapped file — silently wrote an empty store over a
+        // full one whenever the target was the base's own directory
+        // (`save_to_dir` / `seal_to_new_segment` both do exactly that).
+        let tmp = TempDir::new().unwrap();
+        let mut interner = StringInterner::new();
+        let based = vec![(k("a", &mut interner), Value::Int64(1))];
+        let added = vec![(k("b", &mut interner), Value::Int64(2))];
+
+        let mut store = EdgePropertyStore::new();
+        store.insert(0, based.clone());
+        store.save_to(tmp.path(), 2).unwrap();
+        let meta = EdgePropertyStore::meta_for(tmp.path());
+        let mut store = EdgePropertyStore::load_from(tmp.path(), 2, meta, &mut interner).unwrap();
+        store.insert(1, added.clone());
+
+        store.save_to(tmp.path(), 2).unwrap();
+
+        let meta = EdgePropertyStore::meta_for(tmp.path());
+        let reloaded = EdgePropertyStore::load_from(tmp.path(), 2, meta, &mut interner).unwrap();
+        assert_eq!(
+            reloaded.get(0).map(|c| c.into_owned()),
+            Some(based),
+            "the base's own row was dropped by an in-place save"
+        );
+        assert_eq!(reloaded.get(1).map(|c| c.into_owned()), Some(added));
+        assert!(
+            !tmp.path().join(format!("{OFFSETS_FILE}.tmp")).exists(),
+            "staging file left behind"
+        );
     }
 
     #[test]

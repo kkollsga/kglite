@@ -1524,3 +1524,117 @@ fn compact_rewrite_after_seal_cleans_stale_segs_and_persists_heap_arrays() {
     assert_eq!(reloaded.node_count, 8, "all 8 nodes must survive");
     assert_eq!(reloaded.edge_count, 3, "3 T-edges must survive");
 }
+
+// ---------- enable_disk_mode's conversion (E2) ----------
+
+#[test]
+fn conversion_streams_edge_properties_into_the_mapped_base() {
+    // `from_stable_digraph` is what `enable_disk_mode()` runs. It used to
+    // clone every property-bearing edge's `Vec<(InternedKey, Value)>` into a
+    // heap overlay — ~175 B/edge of pure duplication, since the petgraph it
+    // copies from is dropped moments later. The blob is now written as the
+    // edges are walked, and the store comes back mapping it.
+    let tmp = TempDir::new().unwrap();
+    let mut interner = StringInterner::new();
+    let mut source: petgraph::stable_graph::StableDiGraph<NodeData, EdgeData> =
+        petgraph::stable_graph::StableDiGraph::new();
+    let nodes: Vec<NodeIndex> = (0..4)
+        .map(|i| source.add_node(seal_test_node(&mut interner, i, "Item")))
+        .collect();
+    let links = interner.get_or_intern("LINKS");
+    let weight = interner.get_or_intern("weight");
+    let note = interner.get_or_intern("note");
+    // Edge 1 has no properties: the sparsity encoding and the trailing pad
+    // are both exercised.
+    source.add_edge(
+        nodes[0],
+        nodes[1],
+        EdgeData {
+            connection_type: links,
+            properties: vec![
+                (weight, Value::Float64(2.5)),
+                (note, Value::String("first".to_string())),
+            ],
+        },
+    );
+    source.add_edge(nodes[1], nodes[2], seal_test_edge(&mut interner, "LINKS"));
+    source.add_edge(
+        nodes[2],
+        nodes[3],
+        EdgeData {
+            connection_type: links,
+            properties: vec![(weight, Value::Float64(-0.75))],
+        },
+    );
+
+    let mut dg = super::DiskGraph::from_stable_digraph(&mut source, tmp.path()).unwrap();
+
+    assert_eq!(
+        dg.edge_property_overlay_len(),
+        0,
+        "the conversion must not leave edge properties on the heap"
+    );
+    let seg = tmp.path().join(segment_subdir(0));
+    let offsets =
+        std::fs::metadata(seg.join(crate::graph::storage::disk::edge_properties::OFFSETS_FILE))
+            .unwrap();
+    assert_eq!(
+        offsets.len(),
+        4 * std::mem::size_of::<u64>() as u64,
+        "one offset per edge plus the trailing total"
+    );
+    assert!(
+        std::fs::metadata(seg.join(crate::graph::storage::disk::edge_properties::HEAP_FILE))
+            .unwrap()
+            .len()
+            > 0
+    );
+
+    assert_eq!(
+        dg.edge_properties_at(0).unwrap().as_ref(),
+        &[
+            (weight, Value::Float64(2.5)),
+            (note, Value::String("first".to_string())),
+        ]
+    );
+    assert!(dg.edge_properties_at(1).is_none());
+    assert_eq!(
+        dg.edge_properties_at(2).unwrap().as_ref(),
+        &[(weight, Value::Float64(-0.75))]
+    );
+    assert!(dg.edge_properties_at(3).is_none());
+
+    // A write after the conversion takes the store's normal overlay path and
+    // wins over the streamed base.
+    dg.edge_properties
+        .insert(0, vec![(weight, Value::Float64(9.0))]);
+    assert_eq!(
+        dg.edge_properties_at(0).unwrap().as_ref(),
+        &[(weight, Value::Float64(9.0))]
+    );
+    assert_eq!(dg.edge_property_overlay_len(), 1);
+}
+
+#[test]
+fn conversion_without_edge_properties_writes_no_blob() {
+    let tmp = TempDir::new().unwrap();
+    let mut interner = StringInterner::new();
+    let mut source: petgraph::stable_graph::StableDiGraph<NodeData, EdgeData> =
+        petgraph::stable_graph::StableDiGraph::new();
+    let a = source.add_node(seal_test_node(&mut interner, 0, "Item"));
+    let b = source.add_node(seal_test_node(&mut interner, 1, "Item"));
+    source.add_edge(a, b, seal_test_edge(&mut interner, "LINKS"));
+
+    let dg = super::DiskGraph::from_stable_digraph(&mut source, tmp.path()).unwrap();
+
+    let seg = tmp.path().join(segment_subdir(0));
+    assert_eq!(
+        std::fs::metadata(seg.join(crate::graph::storage::disk::edge_properties::OFFSETS_FILE))
+            .unwrap()
+            .len(),
+        0,
+        "a property-less graph writes the zero-length representation"
+    );
+    assert_eq!(dg.edge_property_overlay_len(), 0);
+    assert!(dg.edge_properties_at(0).is_none());
+}

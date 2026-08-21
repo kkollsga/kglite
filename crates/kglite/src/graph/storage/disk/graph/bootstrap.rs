@@ -282,7 +282,14 @@ impl DiskGraph {
         let mut in_edges = MmapOrVec::mapped(&data_dir.join("in_edges.bin"), edge_count)?;
         let mut edge_endpoints_vec =
             MmapOrVec::mapped(&data_dir.join("edge_endpoints.bin"), edge_count)?;
-        let mut edge_properties: HashMap<u32, Vec<(InternedKey, Value)>> = HashMap::new();
+        // Edge properties stream straight into the columnar blob beside the
+        // CSR arrays instead of being cloned into a heap overlay. The clone
+        // was ~175 B per property-bearing edge — the dominant term in what
+        // `enable_disk_mode()` added to a converting process's memory, and
+        // pure duplication: the petgraph it copies from is dropped as soon as
+        // the caller installs the disk backend.
+        let mut edge_property_writer =
+            super::edge_properties::EdgePropertyWriter::create(data_dir)?;
 
         // Initialize edge arrays with enough space
         for _ in 0..edge_count {
@@ -326,12 +333,17 @@ impl DiskGraph {
                 },
             );
 
-            if !edge.weight().properties.is_empty() {
-                edge_properties.insert(edge_idx, edge.weight().properties.clone());
-            }
+            // `edge_idx` is this loop's own counter, so the writer sees the
+            // strictly ascending order it requires; edges with no properties
+            // are skipped by the writer and become empty slots.
+            edge_property_writer.push(edge_idx, &edge.weight().properties)?;
 
             edge_idx += 1;
         }
+
+        // Maps the blob just written; `edge_idx` is the exclusive upper bound
+        // on assigned indices, the same value `next_edge_idx` takes below.
+        let edge_properties = edge_property_writer.finish(edge_idx)?;
 
         Ok(DiskGraph {
             node_slots,
@@ -350,7 +362,7 @@ impl DiskGraph {
             removed_edges: HashSet::new(),
             edge_count,
             next_edge_idx: edge_idx,
-            edge_properties: EdgePropertyStore::from_overlay(edge_properties),
+            edge_properties,
             edge_mut_cache: HashMap::new(),
             node_mut_cache: HashMap::new(),
             pending_edges: UnsafeCell::new(MmapOrVec::new()),
