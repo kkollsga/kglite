@@ -3267,7 +3267,8 @@ class KnowledgeGraph:
         **Node types** (``types`` parameter):
 
         - ``describe()`` — Inventory overview with compact type descriptors
-          and connections with edge property names. Adapts to graph scale:
+          and connections carrying typed edge properties
+          (``properties="since:Int64"``). Adapts to graph scale:
           small graphs get full inline detail, extreme-scale graphs get
           a statistical summary with search hints.
         - ``describe(types=['Field', 'Well'])`` — Focused detail for
@@ -3275,7 +3276,9 @@ class KnowledgeGraph:
           type carries a schema-adapted ``<example>`` query anchored on its
           real identifier property (its id alias, else ``id``) with a
           concrete sampled value, so an agent copies a query that matches
-          that type's key shape.
+          that type's key shape. A property present on only some of the
+          type's nodes carries ``coverage="51%"``; a fully populated one
+          carries no coverage attribute at all.
 
         **Type search** (``type_search`` parameter):
 
@@ -3288,7 +3291,8 @@ class KnowledgeGraph:
         **Connections** (``connections`` parameter):
 
         - ``describe(connections=True)`` — All connection types with count,
-          source/target node types, and property names.
+          source/target node types, and typed property names
+          (``name:Type``).
         - ``describe(connections=['BELONGS_TO'])`` — Deep-dive with per-pair
           counts, property stats with sample values, and sample edges.
           Use this to discover what data edges carry.

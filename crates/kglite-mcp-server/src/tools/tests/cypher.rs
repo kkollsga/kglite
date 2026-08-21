@@ -471,3 +471,106 @@ fn the_args_structs_accept_an_optional_params_object() {
         Some(&["Vessel".to_string()][..])
     );
 }
+
+// ------------------------------------------------------- inline FORMAT CSV cap
+
+/// The measured defect: `FORMAT CSV` had no inline cap at all, so one call
+/// could return the whole result set — 283,686 chars (~71k tokens) on the
+/// eval's 5,420-node graph — on a tool that recommended `FORMAT CSV` for
+/// exactly that case.
+#[test]
+fn an_oversized_inline_csv_is_capped_and_says_so() {
+    let state = state_with_active(fresh_active());
+    let total = INLINE_CSV_ROW_LIMIT + 47;
+    let body = state.run_cypher_template(
+        &format!("UNWIND range(1, {total}) AS n RETURN n FORMAT CSV"),
+        &serde_json::Map::new(),
+        None,
+    );
+
+    let (csv, notice) = body
+        .split_once("\nFORMAT CSV truncated:")
+        .unwrap_or_else(|| panic!("no truncation notice in:\n{body}"));
+    assert_eq!(
+        count_csv_rows(csv),
+        INLINE_CSV_ROW_LIMIT,
+        "capped body must carry exactly the limit's worth of data rows"
+    );
+    assert!(
+        csv.starts_with("n\n1\n"),
+        "header + first rows kept: {csv:?}"
+    );
+    assert!(
+        csv.contains(&format!("\n{INLINE_CSV_ROW_LIMIT}\n")),
+        "the last kept row is row {INLINE_CSV_ROW_LIMIT}"
+    );
+    assert!(
+        !csv.contains(&format!("\n{}\n", INLINE_CSV_ROW_LIMIT + 1)),
+        "row past the cap leaked into the body"
+    );
+
+    // The notice has to carry the true total and the escape hatch, or an
+    // agent re-runs the same query hoping for more.
+    assert!(
+        notice.contains(&format!("first {INLINE_CSV_ROW_LIMIT} of {total} row(s)")),
+        "{notice}"
+    );
+    assert!(notice.contains("bytes in full"), "{notice}");
+    assert!(notice.contains("extensions.csv_http_server"), "{notice}");
+}
+
+/// The cap is a ceiling, not a reformat: a result that fits is byte-identical
+/// to what the uncapped path produced, notice included by its absence.
+#[test]
+fn a_csv_within_the_cap_is_untouched() {
+    let state = state_with_active(fresh_active());
+    let body = state.run_cypher_template(
+        &format!("UNWIND range(1, {INLINE_CSV_ROW_LIMIT}) AS n RETURN n FORMAT CSV"),
+        &serde_json::Map::new(),
+        None,
+    );
+    assert!(!body.contains("FORMAT CSV truncated"), "{body}");
+    assert_eq!(count_csv_rows(&body), INLINE_CSV_ROW_LIMIT);
+}
+
+/// The second uncapped path: when `csv_http` is configured but its write
+/// FAILS, the renderer falls back to the inline body. That fallback used to
+/// hand back the raw blob — the failure mode turned the opt-in escape hatch
+/// into the very payload it exists to avoid.
+#[test]
+fn the_csv_http_write_failure_fallback_is_capped_too() {
+    let file = tempfile::NamedTempFile::new().expect("temp file");
+    // A directory path *under a regular file* — `create_dir_all` cannot make
+    // it, so `write_csv` returns Err on every call.
+    let cfg = crate::csv_http::CsvHttpConfig {
+        port: 0,
+        dir: file.path().join("unmakeable"),
+        cors_origin: None,
+    };
+    let state = state_with_active(fresh_active());
+    let total = INLINE_CSV_ROW_LIMIT + 5;
+    let body = state.run_cypher_template(
+        &format!("UNWIND range(1, {total}) AS n RETURN n FORMAT CSV"),
+        &serde_json::Map::new(),
+        Some(&cfg),
+    );
+    assert!(
+        !body.contains("Fetch with: curl"),
+        "write should have failed: {body}"
+    );
+    assert!(body.contains("FORMAT CSV truncated:"), "{body}");
+    assert!(
+        body.contains(&format!("first {INLINE_CSV_ROW_LIMIT} of {total} row(s)")),
+        "{body}"
+    );
+}
+
+/// The inline cap and the structured recipe route quote the same number, so
+/// an agent that learns one route's budget has learned the other's.
+#[test]
+fn the_inline_csv_cap_tracks_the_recipe_row_limit() {
+    assert_eq!(
+        INLINE_CSV_ROW_LIMIT,
+        crate::recipe_queries::RECIPE_RESULT_ROW_LIMIT
+    );
+}

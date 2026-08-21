@@ -452,6 +452,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   skipped and no longer influence the type. `avg`, `count`, `min` and `max` are
   unchanged.
 
+- **`FORMAT CSV` over MCP was uncapped, and is now capped at 200 rows.** The
+  inline preview has always shown at most 15 rows, but the `FORMAT CSV` branch
+  returned the entire result set as text — an external eval measured 283,686
+  characters (~71k tokens) from a single `cypher_query` call on a 5,420-node
+  graph, on a tool whose own description recommended `FORMAT CSV` for large
+  results. The inline CSV body now carries the header plus the first 200 rows
+  (the same number the structured recipe route uses) followed by a notice
+  naming the true row count, the full byte size, and the
+  `extensions.csv_http_server` escape hatch that returns the complete file as a
+  fetch URL. The same cap applies when a configured `csv_http_server` *fails*
+  to write and the renderer falls back to inline — previously the failure
+  handed back the very payload the extension exists to avoid. `csv_http_server`
+  remains opt-in: it binds a port and writes files, so no query can enable it.
+  The three `cypher_query` tool descriptions and the bundled `cypher_query`
+  skill now state the cap instead of recommending `FORMAT CSV` for "large" or
+  "full" results.
+
+- **`describe()` over MCP never truncated long sample values.** The MCP
+  `graph_overview` route passed `sample_truncate=None` — "emit every sampled
+  value at full length" — while Python's `describe()` has defaulted to 40
+  characters since it shipped, so the surface with the tightest token budget
+  had the weakest cap and one long text property could dominate an entire
+  overview. It now passes 40, matching every other surface.
+
 ### Added
 
 - **The MCP `cypher_query` tools accept a `params` argument.** There was no way
@@ -524,6 +548,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the stored data is clean.
 
 ### Changed
+
+- **`describe()` spends fewer tokens saying the same things, and says two it
+  never said.** Five changes to the shared introspection output, so every
+  surface gets them:
+  - Sampled values are deduplicated **after** truncation. Distinct long strings
+    that clip to the same 37-character prefix were all emitted, so a `vals=`
+    could be N copies of one display string.
+  - The inventory tier's `<connections>` map is capped at 50 connection types
+    (highest edge count first) with a `<more count=… hint=…/>` marker, matching
+    the Extreme tier and the type listing beside it. It was the only unbounded
+    listing left in the document and drove the measured worst case.
+  - A property carries `coverage="51%"` when it is present on only some of its
+    type's nodes, and nothing at all when it is present on all of them —
+    `unique=` counts distinct values and never said how many nodes had one.
+  - Connection properties render as `name:Type` (`properties="since:Int64"`)
+    rather than bare names, from metadata already in memory. An untyped
+    `since` could be an integer year or an ISO date string, and an agent that
+    cannot tell avoids the property.
+  - The `<cypher hint=…>` states that the standard openCypher surface is
+    supported and that the items it lists are KGLite *extensions* on top. It
+    previously listed only the extensions, which reads as "this is a partial
+    dialect".
+
+- **The bundled `cypher_query` MCP skill no longer ships code-graph
+  methodology.** It opened with the four-step code-graph workflow and "Never
+  `grep` for a definition, caller, or call site" — roughly 1.5k tokens of
+  instruction about navigating a codebase, delivered verbatim to shipping,
+  legal and maritime graphs, where none of it applies. That content already
+  lives in the `code_graph_analysis` skill, which gates on the graph actually
+  containing `Function`/`Class` node types. The generic skill keeps the Cypher
+  workflow guidance that applies to any graph, and now documents the `params`
+  argument (it still said `$name` parameters "aren't currently exposed") and
+  the `FORMAT CSV` row cap.
 
 - **`managed_reload` and the runtime `cypher` docstrings no longer overstate
   what they do.** README described `define_schema(layer=...)` +

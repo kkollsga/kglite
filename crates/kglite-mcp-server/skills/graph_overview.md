@@ -59,7 +59,8 @@ The key columns to read carefully:
 - **`count`** on `<type>` — how many nodes of this label exist. Sets your scale expectations for queries.
 - **`vals="a|b|c"`** on `<prop>` — every distinct value when cardinality is low (≤15). Lets you write `WHERE n.kind IN ['class', 'protocol']` correctly the first time.
 - **`sample="..."`** on `<prop>` (since 0.9.30) — one example value when cardinality is too high to enumerate. Tells you what the property *looks like* without guessing.
-- **`<connections>`** — which edge types exist and what they connect. Don't guess; the agent often invents edge names that don't exist.
+- **`coverage="51%"`** on `<prop>` — the property is present on only that share of the type's nodes. **Absent means fully populated**, so any aggregate over it covers every node; when it is present, an `avg`/`count` covers only the covered fraction and a `WHERE n.p IS NOT NULL` may be what you want.
+- **`<connections>`** — which edge types exist and what they connect, with edge properties typed as `name:Type` (`properties="since:Int64"`) so you can compare against the right literal. Don't guess; the agent often invents edge names that don't exist. A `<more count=…/>` inside it means the map was capped — drill in with `graph_overview(connections=True)`.
 
 ## Drill-down patterns
 

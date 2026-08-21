@@ -1280,3 +1280,163 @@ class TestInstructionsSlot:
         g.set_instructions("use a < b & c > d")
         d = g.describe()
         assert "&lt;" in d and "&amp;" in d and "&gt;" in d
+
+
+# ── describe() token budget (D4p) ──────────────────────────────────────────
+
+
+@pytest.fixture
+def shared_prefix_graph():
+    """One type whose long values are distinct but share a 60-char prefix.
+
+    Every value truncates to the same display string, which is what made the
+    pre-fix ``vals=`` a list of N identical entries.
+    """
+    prefix = "A shared opening clause that runs well past forty characters "
+    g = KnowledgeGraph()
+    g.add_nodes(
+        pd.DataFrame(
+            {
+                "nid": list(range(6)),
+                "name": [f"doc{i}" for i in range(6)],
+                "summary": [f"{prefix}and then diverges at word {i}" for i in range(6)],
+            }
+        ),
+        "Doc",
+        "nid",
+        "name",
+    )
+    return g
+
+
+@pytest.fixture
+def many_connection_types_graph():
+    """A Medium-tier graph (20 node types) wired by 60 connection types."""
+    g = KnowledgeGraph()
+    for i in range(20):
+        g.add_nodes(
+            pd.DataFrame({"nid": [0, 1, 2], "name": [f"n{i}a", f"n{i}b", f"n{i}c"]}),
+            f"Type{i:02d}",
+            "nid",
+            "name",
+        )
+    edges = pd.DataFrame({"from_id": [0], "to_id": [1]})
+    for i in range(60):
+        g.add_connections(edges, f"REL_{i:02d}", "Type00", "from_id", "Type01", "to_id")
+    return g
+
+
+class TestDescribeTokenBudget:
+    """describe() is the highest-volume agent surface; each of these was a
+    measured way it spent budget without buying the reader anything."""
+
+    def test_vals_dedups_after_truncation(self, shared_prefix_graph):
+        """Distinct values that clip to the same display string collapse to one."""
+        root = ET.fromstring(shared_prefix_graph.describe(sample_truncate=40))
+        prop = root.find(".//type[@name='Doc']/properties/prop[@name='summary']")
+        assert prop is not None, "summary property missing from describe()"
+        vals = prop.attrib["vals"].split("|")
+        assert len(vals) == len(set(vals)), f"duplicate truncated values: {vals}"
+        assert len(vals) == 1, f"all six share a 40-char prefix; got {vals}"
+
+    def test_vals_keeps_distinct_values_when_untruncated(self, shared_prefix_graph):
+        """The dedup is on the *display* form — full-length values stay distinct."""
+        root = ET.fromstring(shared_prefix_graph.describe(sample_truncate=None))
+        prop = root.find(".//type[@name='Doc']/properties/prop[@name='summary']")
+        vals = prop.attrib["vals"].split("|")
+        assert len(vals) == 6, f"nothing to dedup at full length; got {vals}"
+
+    def test_edge_connection_property_vals_dedup(self):
+        """The connection-detail track's `vals=` shares the same rule."""
+        prefix = "A shared edge annotation running well past forty characters "
+        g = KnowledgeGraph()
+        g.add_nodes(pd.DataFrame({"nid": [0, 1], "name": ["a", "b"]}), "Item", "nid", "name")
+        g.add_connections(
+            pd.DataFrame(
+                {
+                    "from_id": [0, 0, 0],
+                    "to_id": [1, 1, 1],
+                    "note": [f"{prefix}diverging at {i}" for i in range(3)],
+                }
+            ),
+            "LINKS",
+            "Item",
+            "from_id",
+            "Item",
+            "to_id",
+            columns=["note"],
+        )
+        desc = g.describe(connections=["LINKS"], sample_truncate=40)
+        vals_attrs = [chunk.split('"')[1] for chunk in desc.split("vals=")[1:]]
+        for vals in vals_attrs:
+            parts = vals.split("|")
+            assert len(parts) == len(set(parts)), f"duplicate truncated edge values: {parts}"
+
+    def test_connection_map_caps_and_marks_the_remainder(self, many_connection_types_graph):
+        """Every other listing in describe() was capped; the map was not."""
+        root = ET.fromstring(many_connection_types_graph.describe())
+        conns = root.find("connections")
+        assert conns.attrib["total"] == "60"
+        assert conns.attrib["shown"] == "50"
+        assert len(conns.findall("conn")) == 50
+        more = conns.find("more")
+        assert more is not None and more.attrib["count"] == "10"
+        assert "graph_overview(connections=True)" in more.attrib["hint"]
+
+    def test_connection_map_under_the_cap_has_no_marker(self, social_graph):
+        root = ET.fromstring(social_graph.describe())
+        conns = root.find("connections")
+        assert conns.find("more") is None
+        assert "total" not in conns.attrib and "shown" not in conns.attrib
+
+    def test_capped_connection_map_keeps_the_busiest_types(self, many_connection_types_graph):
+        """A cap that dropped the heaviest edge types would misdescribe the graph."""
+        g = many_connection_types_graph
+        # Distinct endpoint pairs — a repeated (src, dst) collapses to one edge.
+        edges = pd.DataFrame({"from_id": [0, 1, 2], "to_id": [1, 2, 0]})
+        g.add_connections(edges, "REL_59", "Type00", "from_id", "Type01", "to_id")
+        root = ET.fromstring(g.describe())
+        shown = {c.attrib["type"] for c in root.findall("connections/conn")}
+        assert "REL_59" in shown, "the highest-count connection type was culled"
+
+    def test_sparse_property_carries_a_coverage_percentage(self, social_graph):
+        """`unique=` counts values, never how many nodes carry one."""
+        root = ET.fromstring(social_graph.describe())
+        email = root.find(".//type[@name='Person']/properties/prop[@name='email']")
+        assert email is not None
+        # email is None on the odd-numbered half of 20 people.
+        assert email.attrib["coverage"] == "50%"
+
+    def test_fully_populated_property_omits_coverage(self, social_graph):
+        """Silence is the signal: the attribute appearing at all means sparse."""
+        root = ET.fromstring(social_graph.describe())
+        city = root.find(".//type[@name='Person']/properties/prop[@name='city']")
+        assert city is not None
+        assert "coverage" not in city.attrib
+
+    def test_connection_properties_are_typed(self, social_graph):
+        """`OPERATED_BY.since` unqualified could be an int year or an ISO string."""
+        root = ET.fromstring(social_graph.describe())
+        knows = root.find("connections/conn[@type='KNOWS']")
+        assert "since:Int64" in knows.attrib["properties"]
+        works_at = root.find("connections/conn[@type='WORKS_AT']")
+        assert "start_year:Int64" in works_at.attrib["properties"]
+
+    def test_connections_overview_properties_are_typed(self, social_graph):
+        """The standalone connections track renders the same typed shape."""
+        root = ET.fromstring(social_graph.describe(connections=True))
+        knows = root.find("conn[@type='KNOWS']")
+        assert "since:Int64" in knows.attrib["properties"]
+
+    def test_cypher_hint_states_opencypher_is_supported(self, social_graph):
+        """A hint listing only extensions read as 'this is a partial dialect'."""
+        root = ET.fromstring(social_graph.describe())
+        hint = root.find("extensions/cypher").attrib["hint"]
+        assert "openCypher" in hint
+        assert "EXTENSIONS" in hint or "extensions" in hint
+
+    def test_extreme_tier_cypher_hint_states_opencypher_is_supported(self, extreme_graph):
+        """The short-form hint is the only Cypher guidance the Extreme tier gives."""
+        root = ET.fromstring(extreme_graph.describe())
+        hint = root.find("extensions/cypher").attrib["hint"]
+        assert "openCypher" in hint

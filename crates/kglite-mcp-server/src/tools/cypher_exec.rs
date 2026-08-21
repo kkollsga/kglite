@@ -134,7 +134,7 @@ pub(crate) fn execute_cypher_inner(
 
 /// Run a Cypher query against the given KnowledgeGraph snapshot. Picks
 /// between read and write paths based on `is_mutation_query`; on success
-/// returns the rendered tool body (CSV when `FORMAT CSV` is in the
+/// returns the rendered tool body (capped CSV when `FORMAT CSV` is in the
 /// query, inline 15-row preview otherwise).
 pub(crate) fn run_cypher_inner(
     kg: &KnowledgeGraph,
@@ -176,10 +176,11 @@ pub(crate) fn cypher_warning_block(result: &cypher::CypherResult) -> String {
     out
 }
 
-/// Render a `CypherResult` for the MCP text surface: CSV (inline or via the
-/// csv_http server) or a 15-row inline preview, followed by the engine's
-/// warning block when the query earned one. Shared by the read path and
-/// the write path so both format results identically.
+/// Render a `CypherResult` for the MCP text surface: CSV (via the csv_http
+/// server, or inline capped at [`INLINE_CSV_ROW_LIMIT`] rows) or a 15-row
+/// inline preview, followed by the engine's warning block when the query
+/// earned one. Shared by the read path and the write path so both format
+/// results identically.
 pub(crate) fn render_cypher_output(
     result: &cypher::CypherResult,
     output_csv: bool,
@@ -217,15 +218,61 @@ fn render_cypher_body(
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "csv_http write_csv failed; falling back to inline");
-                    Ok(csv)
+                    Ok(cap_inline_csv(&csv))
                 }
             }
         } else {
-            Ok(csv)
+            Ok(cap_inline_csv(&csv))
         }
     } else {
         Ok(format_cypher_inline(result))
     }
+}
+
+/// Maximum data rows an inline `FORMAT CSV` body may carry over MCP.
+///
+/// Deliberately the same number as the structured recipe route's cap, and
+/// written as an alias of it so the two can never drift: an agent that learns
+/// "200 rows is what one MCP call returns" from one route must not be taught
+/// a different number by the other.
+pub(crate) const INLINE_CSV_ROW_LIMIT: usize = crate::recipe_queries::RECIPE_RESULT_ROW_LIMIT;
+
+/// Trim an inline CSV body to [`INLINE_CSV_ROW_LIMIT`] data rows, appending a
+/// notice that names the true row count, the full byte size, and the escape
+/// hatch that returns the complete file.
+///
+/// The uncapped path was the single largest response this server could
+/// produce: an external eval measured 283,686 characters (~71k tokens) from
+/// one `FORMAT CSV` call on a 5,420-node graph, on a tool whose own
+/// description recommended `FORMAT CSV` for large results. The inline
+/// 15-row preview has always been capped; the CSV branch never was, so the
+/// budget-safe formatting an agent thought it was choosing did the opposite.
+///
+/// The notice, not a silent trim, is the point: an agent that cannot see the
+/// total re-runs the same query hoping for more, and one that cannot see the
+/// escape hatch has no way to obtain the rest. `csv_http_server` stays
+/// opt-in — it binds a port and writes files, which no query should be able
+/// to turn on — so the notice names it as an operator action.
+pub(crate) fn cap_inline_csv(csv: &str) -> String {
+    let total_rows = count_csv_rows(csv);
+    if total_rows <= INLINE_CSV_ROW_LIMIT {
+        return csv.to_string();
+    }
+    // Header plus the first N data rows, re-joined with the newline
+    // terminator `lines()` strips.
+    let mut out = String::with_capacity(csv.len().min(64 * 1024));
+    for line in csv.lines().take(INLINE_CSV_ROW_LIMIT + 1) {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str(&format!(
+        "\nFORMAT CSV truncated: showing the first {INLINE_CSV_ROW_LIMIT} of {total_rows} row(s) \
+         ({} bytes in full). Narrow the query (WHERE / LIMIT / SKIP / aggregate) to fit, or ask \
+         the operator to enable extensions.csv_http_server in the server manifest, which returns \
+         the complete CSV as a fetch URL instead of inline text.\n",
+        csv.len()
+    ));
+    out
 }
 
 /// Render a CypherResult as an inline 15-row preview (header + repr per

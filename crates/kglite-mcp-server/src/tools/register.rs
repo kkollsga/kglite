@@ -200,7 +200,8 @@ pub fn register(
              one endpoint's type in the list. Pass params={...} to bind $placeholders — both \
              `{prop: $p}` inside a pattern and `WHERE x.prop = $p` read from it, and a \
              $name with no value is an error rather than an empty result. Mutations are in-memory; call \
-             save_graph to persist. Append FORMAT CSV to export results."
+             save_graph to persist. Returns up to 15 rows inline; append FORMAT CSV for a CSV body \
+             capped at 200 rows with a notice naming the true total — narrow the query to fit."
         }
         (true, false) => {
             "Query, explore, and understand the active knowledge graph with Cypher — the \
@@ -210,8 +211,8 @@ pub fn register(
              codebase structure). Pass params={...} to bind $placeholders — both \
              `{prop: $p}` inside a pattern and `WHERE x.prop = $p` read from it, and a \
              $name with no value is an error rather than an empty result. Returns up to 15 rows inline; append FORMAT \
-             CSV to export results — large CSVs are written to the csv_http_server directory \
-             and returned as a fetch URL."
+             CSV for a CSV body — this server has csv_http_server enabled, so the full result is \
+             written to its directory and returned as a fetch URL."
         }
         (false, false) => {
             "Query, explore, and understand the active knowledge graph with Cypher — the \
@@ -221,7 +222,9 @@ pub fn register(
              codebase structure). Pass params={...} to bind $placeholders — both \
              `{prop: $p}` inside a pattern and `WHERE x.prop = $p` read from it, and a \
              $name with no value is an error rather than an empty result. Returns up to 15 rows inline; append FORMAT \
-             CSV to export full results to a CSV string."
+             CSV for a CSV body capped at 200 rows, with a notice naming the true total — narrow \
+             the query to fit, or ask the operator to enable extensions.csv_http_server for a \
+             fetch URL carrying the complete result."
         }
     };
     // An operator pin is part of the contract the agent plans against, so it

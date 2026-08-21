@@ -534,6 +534,36 @@ class TestGraphMode:
         finally:
             client.shutdown()
 
+    def test_cypher_query_format_csv_is_capped_with_a_notice(self, graph_fixture: Path):
+        """`FORMAT CSV` over MCP was the largest response this server could
+        produce — an external eval measured ~71k tokens from one call — on a
+        tool that recommended it for exactly that case."""
+        client = _spawn(["--graph", str(graph_fixture)])
+        try:
+            r = client.call_tool("cypher_query", {"query": "UNWIND range(1, 640) AS n RETURN n FORMAT CSV"})
+            text = _text_content(r)
+            body, _, notice = text.partition("\nFORMAT CSV truncated:")
+            assert notice, f"no truncation notice: {text[-400:]}"
+            # Header + exactly 200 data rows.
+            rows = [line for line in body.splitlines() if line]
+            assert rows[0] == "n"
+            assert len(rows) == 201, f"expected header + 200 rows, got {len(rows)}"
+            assert rows[-1] == "200"
+            # The notice must name the true total and the escape hatch, or the
+            # agent re-runs the same query hoping for more.
+            assert "first 200 of 640 row(s)" in notice
+            assert "extensions.csv_http_server" in notice
+        finally:
+            client.shutdown()
+
+    def test_cypher_query_format_csv_under_the_cap_has_no_notice(self, graph_fixture: Path):
+        client = _spawn(["--graph", str(graph_fixture)])
+        try:
+            r = client.call_tool("cypher_query", {"query": "UNWIND range(1, 12) AS n RETURN n FORMAT CSV"})
+            assert "FORMAT CSV truncated" not in _text_content(r)
+        finally:
+            client.shutdown()
+
     def test_graph_overview_inventory(self, graph_fixture: Path):
         client = _spawn(["--graph", str(graph_fixture)])
         try:
@@ -541,6 +571,29 @@ class TestGraphMode:
             text = _text_content(r)
             # describe() returns XML — at minimum it should reference our type.
             assert "Person" in text
+        finally:
+            client.shutdown()
+
+    def test_graph_overview_truncates_long_sample_values(self, tmp_path: Path):
+        """MCP passed `sample_truncate=None` — no truncation at all — while
+        Python's `describe()` has clipped at 40 chars since it shipped. The
+        surface with the tightest token budget had the weakest cap."""
+        long_value = "L" * 300
+        fixture = tmp_path / "long.kgl"
+        g = kglite.KnowledgeGraph()
+        g.add_nodes(
+            pd.DataFrame({"id": [1, 2], "title": ["A", "B"], "blob": [long_value, long_value + "z"]}),
+            "Doc",
+            "id",
+            "title",
+        )
+        g.save(str(fixture))
+
+        client = _spawn(["--graph", str(fixture)])
+        try:
+            text = _text_content(client.call_tool("graph_overview"))
+            assert long_value not in text, "a 300-char property value reached the agent unclipped"
+            assert "L" * 37 + "..." in text, f"expected a 40-char clipped sample in:\n{text}"
         finally:
             client.shutdown()
 

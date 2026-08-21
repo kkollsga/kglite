@@ -391,3 +391,46 @@ mod recipe_skill_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod bundled_skill_body_tests {
+    /// The generic `cypher_query` skill ships to every deployment — shipping,
+    /// legal, maritime — with no `applies_when` gate, because Cypher applies
+    /// to any graph. Code-graph *methodology* does not: it opened with the
+    /// four-step code-graph workflow and "Never `grep` for a definition",
+    /// ~1.5k tokens of instruction about a codebase, delivered verbatim to a
+    /// graph of vessels. That content already lives in `code_graph_analysis`,
+    /// which gates on `graph_has_node_type: [Function, Class]` and reaches
+    /// the readers it is for.
+    #[test]
+    fn the_generic_cypher_skill_carries_no_code_graph_preamble() {
+        let body = include_str!("../skills/cypher_query.md");
+        for marker in [
+            "Never `grep`",
+            "Code-graph workflow",
+            "read_code_source(qualified_name=…)",
+        ] {
+            assert!(
+                !body.contains(marker),
+                "cypher_query.md still carries code-graph methodology: {marker:?}"
+            );
+        }
+        // The gated skill is where it belongs, and still has it.
+        let gated = include_str!("../skills/code_graph_analysis.md");
+        assert!(gated.contains("Never `grep`"));
+        assert!(gated.contains("Code-graph workflow"));
+    }
+
+    /// Two things the skill previously got wrong about its own tool: it said
+    /// `$name` parameters "aren't currently exposed" (they are, via `params`),
+    /// and it presented `FORMAT CSV` as the way to get a large result out
+    /// while the inline body is capped at 200 rows.
+    #[test]
+    fn the_generic_cypher_skill_states_the_current_tool_contract() {
+        let body = include_str!("../skills/cypher_query.md");
+        assert!(!body.contains("aren't currently exposed"));
+        assert!(body.contains("params="));
+        assert!(body.contains("200 data rows"));
+        assert!(body.contains("openCypher"));
+    }
+}

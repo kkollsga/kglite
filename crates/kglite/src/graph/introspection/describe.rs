@@ -97,6 +97,42 @@ fn write_graph_instructions(xml: &mut String, graph: &DirGraph) {
     }
 }
 
+/// Maximum `<conn>` lines the inventory-tier `<connections>` map emits.
+///
+/// The endpoint lists inside each line were already capped at 10 types, and
+/// the Extreme tier caps the map itself at 50, but the Large/Small tiers
+/// emitted one line per connection type without limit — which is what made a
+/// mid-size graph's overview the measured 4k-token worst case. 50 matches the
+/// Extreme tier's number so the two tiers agree on what "the map" means.
+const MAX_CONNECTION_MAP_TYPES: usize = 50;
+
+/// Render a connection type's `properties=` attribute as `name:Type` pairs.
+///
+/// The names alone left an agent unable to tell `OPERATED_BY.since` from an
+/// int year or an ISO string, so it avoided the property rather than risk a
+/// wrong comparison. The types are already in `connection_type_metadata` —
+/// the same map `property_names` was derived from — so this costs a lookup,
+/// not a scan. A name whose type is unknown (endpoint types recovered from a
+/// scan rather than metadata) still renders bare.
+fn connection_props_attr(graph: &DirGraph, ct: &ConnectionTypeStats) -> String {
+    if ct.property_names.is_empty() {
+        return String::new();
+    }
+    let types = graph
+        .connection_type_metadata
+        .get(&ct.connection_type)
+        .map(|info| &info.property_types);
+    let rendered: Vec<String> = ct
+        .property_names
+        .iter()
+        .map(|name| match types.and_then(|t| t.get(name)) {
+            Some(type_name) => format!("{name}:{type_name}"),
+            None => name.clone(),
+        })
+        .collect();
+    format!(" properties=\"{}\"", xml_escape(&rendered.join(",")))
+}
+
 /// Write the `<connections>` element from global edge stats.
 /// When `parent_types` is non-empty, filter out connections where ALL source types
 /// are supporting children of the target type (the implicit OF_* pattern).
@@ -129,7 +165,24 @@ fn write_connection_map(xml: &mut String, graph: &DirGraph, conn_stats: &[Connec
     if filtered.is_empty() {
         xml.push_str("  <connections/>\n");
     } else {
-        xml.push_str("  <connections>\n");
+        // Over the cap, the map is the graph's *shape* summary, so the
+        // connection types that carry the most edges are the ones worth the
+        // budget — same ordering rule the Extreme tier applies.
+        let mut filtered = filtered;
+        let hidden = filtered.len().saturating_sub(MAX_CONNECTION_MAP_TYPES);
+        if hidden > 0 {
+            filtered.sort_by_key(|ct| std::cmp::Reverse(ct.count));
+            filtered.truncate(MAX_CONNECTION_MAP_TYPES);
+        }
+        if hidden > 0 {
+            xml.push_str(&format!(
+                "  <connections total=\"{}\" shown=\"{}\">\n",
+                hidden + MAX_CONNECTION_MAP_TYPES,
+                MAX_CONNECTION_MAP_TYPES
+            ));
+        } else {
+            xml.push_str("  <connections>\n");
+        }
         for ct in &filtered {
             // When tiers are active, filter supporting types from source/target lists
             let sources: Vec<&str> = if has_tiers {
@@ -169,14 +222,7 @@ fn write_connection_map(xml: &mut String, graph: &DirGraph, conn_stats: &[Connec
                 } else {
                     String::new()
                 };
-            let props_attr = if ct.property_names.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    " properties=\"{}\"",
-                    xml_escape(&ct.property_names.join(","))
-                )
-            };
+            let props_attr = connection_props_attr(graph, ct);
             let from_str = if sources.len() > 10 {
                 format!("{},... ({} total)", sources[..10].join(","), sources.len())
             } else {
@@ -195,6 +241,12 @@ fn write_connection_map(xml: &mut String, graph: &DirGraph, conn_stats: &[Connec
                 to_str,
                 props_attr,
                 temporal_attr,
+            ));
+        }
+        if hidden > 0 {
+            xml.push_str(&format!(
+                "    <more count=\"{}\" hint=\"graph_overview(connections=True) for every connection type\"/>\n",
+                hidden
             ));
         }
         xml.push_str("  </connections>\n");
@@ -415,14 +467,7 @@ fn write_connections_overview(xml: &mut String, graph: &DirGraph) {
     // with thousands of source/target types (e.g. P31 in wikidata)
     let max_endpoint_types = 10;
     for ct in &conn_stats {
-        let props_attr = if ct.property_names.is_empty() {
-            String::new()
-        } else {
-            format!(
-                " properties=\"{}\"",
-                xml_escape(&ct.property_names.join(","))
-            )
-        };
+        let props_attr = connection_props_attr(graph, ct);
 
         let from_str = if ct.source_types.len() > max_endpoint_types {
             format!(
@@ -661,7 +706,7 @@ fn write_extensions(xml: &mut String, graph: &DirGraph) {
     }
     xml.push_str("    <algorithms hint=\"CALL proc() YIELD node, col — score (pagerank/betweenness/degree/closeness), community (louvain/leiden/label_propagation), component (connected_components), coreness (k_core), coefficient (clustering_coefficient), cluster (cluster), dependency_count (ready_set — nodes whose outgoing-E dependencies all satisfy a `done` predicate). Algorithms take optional {node_type, relationship} scoping.\"/>\n");
     xml.push_str("    <rules hint=\"CALL proc(...) YIELD ... — structural validators. Unary: orphan_node, self_loop, missing_required_edge, missing_inbound_edge, duplicate_title, duplicate_id, null_property. Pair: cycle_2step, inverse_violation, parallel_edges. Schema: type_domain_violation, type_range_violation. Cardinality: cardinality_violation. Triple: transitivity_violation. Projection: outline({root, edge}) YIELD node, depth, parent_id (BFS tree; render via kglite.outline). Compose with WHERE/RETURN/aggregation as normal Cypher rows.\"/>\n");
-    xml.push_str("    <cypher hint=\"Tested Cypher subset with documented KGLite extensions: ||, =~, coalesce(), CALL kglite.cluster/kglite.pagerank/kglite.louvain/..., distance(), contains(). graph_overview(cypher=True) for reference, graph_overview(cypher=['topic']) for detailed docs.\"/>\n");
+    xml.push_str("    <cypher hint=\"Standard openCypher is supported — MATCH/OPTIONAL MATCH/WHERE/WITH/UNWIND/RETURN, ORDER BY/SKIP/LIMIT, DISTINCT, variable-length paths, and the usual aggregates (count/sum/avg/min/max/collect) all work; write ordinary Cypher, not a dialect. The items listed here are KGLite EXTENSIONS on top of it: ||, =~, coalesce(), CALL kglite.cluster/kglite.pagerank/kglite.louvain/..., distance(), contains(). graph_overview(cypher=True) for reference, graph_overview(cypher=['topic']) for detailed docs.\"/>\n");
     xml.push_str("    <fluent_api hint=\"Method-chaining API: select/where/traverse/collect. graph_overview(fluent=True) for reference, graph_overview(fluent=['topic']) for detailed docs.\"/>\n");
     if graph.graph.edge_count() > 0 {
         xml.push_str("    <connections hint=\"graph_overview(connections=True) for all connection types, graph_overview(connections=['TYPE']) for deep-dive with properties and samples.\"/>\n");
@@ -784,11 +829,52 @@ fn cypher_literal(v: &Value) -> String {
 /// function should carry: this is a self-contained rendering step needing only
 /// the property's stats plus the graph's index/constraint state, and every new
 /// annotation grew the caller.
+/// Render a value list for a `vals=` attribute: truncate first, then drop the
+/// duplicates truncation just created, order preserved.
+///
+/// Distinct long strings that share a prefix all clip to the same 37 chars, so
+/// a `vals=` could read `"Long shared prefix a...|Long shared prefix a...|…"` —
+/// N copies of one string, spending the budget to say nothing. Deduping
+/// *before* truncation would not help: the values genuinely are distinct, and
+/// it is the display form that collides.
+fn truncated_value_displays(values: &[Value], truncate_at: Option<usize>) -> Vec<String> {
+    let mut seen: HashSet<String> = HashSet::new();
+    values
+        .iter()
+        .map(|v| value_display_compact(v, truncate_at))
+        .filter(|display| seen.insert(display.clone()))
+        .collect()
+}
+
+/// Percentage of a type's nodes on which a property is non-null, as a
+/// `coverage="51%"` attribute — emitted only when the property is *not*
+/// present on every node.
+///
+/// A blind agent reading `avg=…` over a 2200-node type could not tell whether
+/// the average was over 2200 rows or 1100: `unique=` counts distinct values,
+/// never how many nodes carry one. Full-coverage properties are the common
+/// case and say nothing an agent needs, so they stay silent and the attribute
+/// itself becomes the signal that a property is sparse.
+fn coverage_attr(non_null: usize, type_count: usize) -> String {
+    if type_count == 0 || non_null >= type_count {
+        return String::new();
+    }
+    // Floored, so a property missing from even one node can never round up to
+    // a `100%` that would read as "always present".
+    let percent = non_null * 100 / type_count;
+    if percent == 0 {
+        " coverage=\"<1%\"".to_string()
+    } else {
+        format!(" coverage=\"{percent}%\"")
+    }
+}
+
 fn property_attrs(
     graph: &DirGraph,
     node_type: &str,
     prop: &PropertyStatInfo,
     prop_truncate: Option<usize>,
+    type_count: usize,
 ) -> String {
     let unique_str = if prop.approx {
         format!("{}+", prop.unique)
@@ -804,6 +890,7 @@ fn property_attrs(
     if prop.approx {
         attrs.push_str(" approx=\"true\"");
     }
+    attrs.push_str(&coverage_attr(prop.non_null, type_count));
     if graph.has_any_index(node_type, &prop.property_name) {
         // All string indexes are sorted-array layouts and
         // support both equality and prefix (STARTS WITH)
@@ -834,10 +921,7 @@ fn property_attrs(
     }
     if let Some(ref vals) = prop.values {
         if !vals.is_empty() {
-            let val_strs: Vec<String> = vals
-                .iter()
-                .map(|v| value_display_compact(v, prop_truncate))
-                .collect();
+            let val_strs = truncated_value_displays(vals, prop_truncate);
             attrs.push_str(&format!(" vals=\"{}\"", xml_escape(&val_strs.join("|"))));
         }
     } else if let Some(ref s) = prop.sample {
@@ -968,7 +1052,7 @@ fn write_type_detail(
                 // When stats are approximate (sampled or the distinct set hit
                 // its cap), `unique` is a lower bound — render `N+` and flag
                 // `approx="true"` so any listed `vals` reads as non-exhaustive.
-                let attrs = property_attrs(graph, node_type, prop, prop_truncate);
+                let attrs = property_attrs(graph, node_type, prop, prop_truncate, count);
                 xml.push_str(&format!("{}    <prop {}/>\n", indent, attrs));
             }
             xml.push_str(&format!("{}  </properties>\n", indent));
@@ -1452,7 +1536,7 @@ fn build_extreme_inventory(graph: &DirGraph) -> String {
     xml.push_str("  <extensions>\n");
     xml.push_str("    <algorithms hint=\"CALL proc() YIELD node, col — score (pagerank/betweenness/degree/closeness), community (louvain/leiden/label_propagation), component (connected_components), coreness (k_core), coefficient (clustering_coefficient), cluster (cluster), dependency_count (ready_set — nodes whose outgoing-E dependencies all satisfy a `done` predicate). Algorithms take optional {node_type, relationship} scoping.\"/>\n");
     xml.push_str("    <rules hint=\"CALL proc(...) YIELD ... — structural validators. Unary: orphan_node, self_loop, missing_required_edge, missing_inbound_edge, duplicate_title, duplicate_id, null_property. Pair: cycle_2step, inverse_violation, parallel_edges. Schema: type_domain_violation, type_range_violation. Cardinality: cardinality_violation. Triple: transitivity_violation. Projection: outline({root, edge}) YIELD node, depth, parent_id (BFS tree; render via kglite.outline).\"/>\n");
-    xml.push_str("    <cypher hint=\"Tested Cypher subset with documented KGLite extensions. graph_overview(cypher=True) for reference, graph_overview(cypher=['topic']) for detailed docs.\"/>\n");
+    xml.push_str("    <cypher hint=\"Standard openCypher is supported — MATCH/WHERE/WITH/RETURN, ORDER BY/SKIP/LIMIT, variable-length paths and the usual aggregates all work; write ordinary Cypher, not a dialect. KGLite adds documented extensions on top. graph_overview(cypher=True) for reference, graph_overview(cypher=['topic']) for detailed docs.\"/>\n");
     xml.push_str("    <fluent_api hint=\"Method-chaining API: select/where/traverse/collect. graph_overview(fluent=True) for reference.\"/>\n");
     xml.push_str("    <bug_report hint=\"bug_report(query, result, expected, description) — file a Cypher bug report.\"/>\n");
     xml.push_str("    <indexing hint=\"Properties annotated indexed='eq' are O(log N) via MATCH (n:T {prop: value}); indexed='eq,prefix' also accelerate WHERE n.prop STARTS WITH 'x'. Prefer anchored queries over unanchored scans; the default Cypher deadline is 3 minutes (override per-call with timeout_ms or globally with set_default_timeout).\"/>\n");
@@ -2099,10 +2183,7 @@ fn write_connection_property(
     let vals_attr = if unique > 0 && unique <= max_prop_values {
         let mut vals: Vec<Value> = stats.value_set.into_iter().collect();
         vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let vals_str: Vec<String> = vals
-            .iter()
-            .map(|v| value_display_compact(v, truncate_at))
-            .collect();
+        let vals_str = truncated_value_displays(&vals, truncate_at);
         format!(" vals=\"{}\"", xml_escape(&vals_str.join("|")))
     } else if unique > 0 {
         // 0.9.30: when cardinality exceeds max_prop_values we

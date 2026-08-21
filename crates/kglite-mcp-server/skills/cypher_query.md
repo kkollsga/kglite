@@ -11,57 +11,57 @@ references_arguments:
 auto_inject_hint: true
 ---
 
-> **Code-graph workflow — do these in order:** **1** `graph_overview` (map the schema) · **2** `cypher_query` (structure: defs, callers, members, types, counts, paths) · **3** `grep` (literal text ONLY — log strings, comments, config keys) · **4** `read_source` / `read_code_source(qualified_name=…)` (read bodies, cite lines).
->
-> **Never `grep` for a definition, caller, or call site — that is a `cypher_query` question.** The graph already resolved the cross-file relationships grep can't see.
-
 # `cypher_query` methodology
 
 ## Overview
 
 `cypher_query` runs a Cypher query against the active graph and returns up to 15 rows inline (append `FORMAT CSV` for larger result sets — see below). It is the **structural read tool** — use it when the question can be expressed as labels, properties, and relationships. Always call `graph_overview` first if you don't yet know the schema; the saved round trip in the next query is worth more than the cost of one schema scan.
 
+Standard openCypher works — `MATCH` / `OPTIONAL MATCH` / `WHERE` / `WITH` / `UNWIND` / `RETURN`, `ORDER BY` / `SKIP` / `LIMIT`, `DISTINCT`, variable-length paths, and the usual aggregates (`count`, `sum`, `avg`, `min`, `max`, `collect`). Write ordinary Cypher; what `graph_overview` lists under `<extensions>` are KGLite additions on top, not a substitute dialect.
+
 ## Quick Reference
 
 | Task | Pattern |
 |---|---|
-| Find nodes by label + predicate | `MATCH (n:Function) WHERE n.module STARTS WITH 'foo' RETURN n.name LIMIT 10` |
-| Count by label | `MATCH (n:Function) RETURN count(n) AS n` |
-| Traverse a relationship | `MATCH (a:Function)-[:CALLS]->(b:Function) WHERE a.name = 'parse' RETURN b.name` |
-| Multi-hop with variable length | `MATCH (a)-[:CALLS*1..3]->(b) WHERE a.id = ... RETURN b.id` |
-| Aggregate by group | `MATCH (n:Function) RETURN n.module AS module, count(n) AS funcs ORDER BY funcs DESC LIMIT 20` |
-| Large CSV export | append `FORMAT CSV` — returns a localhost URL the agent fetches (when `csv_http_server` is enabled in the manifest) |
+| Find nodes by label + predicate | `MATCH (n:Vessel) WHERE n.flag STARTS WITH 'NO' RETURN n.title LIMIT 10` |
+| Count by label | `MATCH (n:Vessel) RETURN count(n) AS n` |
+| Traverse a relationship | `MATCH (a:Vessel)-[:VISITED]->(b:Port) WHERE a.title = 'Nordkapp' RETURN b.title` |
+| Multi-hop with variable length | `MATCH (a)-[:VISITED*1..3]->(b) WHERE a.id = ... RETURN b.id` |
+| Bind a value instead of inlining it | `params={"flag": "NO"}` with `MATCH (n:Vessel {flag: $flag}) RETURN n.title` |
+| Aggregate by group | `MATCH (n:Vessel) RETURN n.flag AS flag, count(n) AS ships ORDER BY ships DESC LIMIT 20` |
+| Larger result set | append `FORMAT CSV` — a CSV body capped at 200 rows (or a fetch URL when the operator enabled `csv_http_server`) |
 
 ## Returning rows, not whole nodes
 
 The 15-row inline cap applies to rows, not properties — but a single `RETURN n` row carries every property on the node, which inflates fast. Two anti-patterns to avoid:
 
 ```cypher
-MATCH (n:Function) RETURN n LIMIT 5            -- 5 rows, but each row is a 20-property blob
-MATCH (n:Function) RETURN n.name, n.module     -- 5 rows, 2 columns each — far smaller
+MATCH (n:Vessel) RETURN n LIMIT 5              -- 5 rows, but each row is a 20-property blob
+MATCH (n:Vessel) RETURN n.title, n.flag        -- 5 rows, 2 columns each — far smaller
 ```
 
 The agent's context budget appreciates the second form. Reach for the first only when you genuinely need the whole node and have narrowed via `WHERE` to a single match.
 
-## `FORMAT CSV` for large result sets
+## `FORMAT CSV` for larger result sets
 
-If the inline 15-row cap is going to truncate, append `FORMAT CSV` to the query. With `extensions.csv_http_server: true` set in the manifest, the result is written to a temp file and returned as a `http://127.0.0.1:<port>/<hash>.csv` URL the agent can fetch via standard HTTP. Without `csv_http_server` configured, the CSV body is inlined (which works for thousands of rows; painful for millions).
+If the inline 15-row cap is going to truncate, append `FORMAT CSV` to the query.
+
+**`FORMAT CSV` is not uncapped.** The inline CSV body carries at most **200 data rows**; past that it is trimmed and a trailing notice names the true row count and the full byte size. It is a wider window, not an export. When the operator has set `extensions.csv_http_server: true` in the manifest, the complete result is instead written to a temp file and returned as a `http://127.0.0.1:<port>/<hash>.csv` URL to fetch over HTTP — that, and only that, is the full-export path, and it is an operator setting no query can turn on.
 
 Use FORMAT CSV when:
 
-- The result set is genuinely large (>15 rows of structured data the agent needs to scan).
-- You're exporting for downstream analysis (the URL is reachable from the agent's tool-use context).
+- The result set is moderately large (15–200 rows of structured data to scan).
+- The server returns a fetch URL and you're exporting for downstream analysis.
 
 Don't use FORMAT CSV when:
 
 - You expect <15 rows. The inline preview is faster.
-- You want to drill into specific entities — paginate by adding `LIMIT` + `SKIP` or narrow the `WHERE` instead.
+- You want the whole of a large result. Aggregate it in the query, or paginate with `LIMIT` + `SKIP`; re-running the same query cannot widen the cap.
+- You want to drill into specific entities — narrow the `WHERE` instead.
 
-## Property shape across types
+## Property shape
 
-In code graphs, every entity carries a `module` property (the dotted module path of its file). This is uniform across `File`, `Module`, `Function`, `Class`, `Constant`, `Enum`, `Interface`, `Trait`, `Protocol`, `Struct` (since 0.9.30). So `WHERE n.module STARTS WITH 'foo.bar'` works against any node label without branching.
-
-When in doubt about a property's name or value shape, look at `graph_overview`'s `<prop sample="..." />` output (since 0.9.30) — every property carries one example value the agent can pattern-match on.
+When in doubt about a property's name or value shape, look at `graph_overview`'s `<prop sample="..." />` output — every property carries one example value to pattern-match on, and a `coverage="…%"` attribute appears when the property is missing from some nodes of its type.
 
 ## Common Pitfalls
 
@@ -71,23 +71,22 @@ When in doubt about a property's name or value shape, look at `graph_overview`'s
 
 ❌ Re-querying with slightly different shapes when the first query returned 0 rows — usually means the property name is wrong (look at the schema, sample values are right there) or the label is wrong.
 
-❌ Querying for entities by `name` when `id` (the qualified_name) is more specific. `MATCH (f:Function {name: "init"})` matches every `init` across every module; `MATCH (f:Function {id: "foo.bar.init"})` matches one.
+❌ Matching on a display name when the type's identifier is more specific. `MATCH (n:Vessel {title: "Nordkapp"})` matches every vessel sharing that name; matching on the type's `id` (see `graph_overview`'s `id_alias=`) matches one.
 
 ✅ `graph_overview` first if you don't know the schema. The cost is one round trip; the value is correctly-shaped Cypher on the second attempt.
 
-✅ Return specific properties (`RETURN n.name, n.module`) not whole nodes. Smaller context, faster cognition.
+✅ Return specific properties (`RETURN n.title, n.flag`) not whole nodes. Smaller context, faster cognition.
 
 ✅ Use `LIMIT` aggressively while exploring. Drop or raise it once you know the result shape.
 
 ## When `cypher_query` is the wrong tool
 
 - **Don't know what types exist?** Call `graph_overview` first — same server, different surface. Cypher against unknown schema is shadow-boxing.
-- **Want to read a function's source code?** `read_code_source(qualified_name=...)` collapses cypher-then-read into one call when you know the symbol; `read_source(file_path=...)` is the right shape for whole files.
-- **Question is textual, not structural?** `grep` is the regex sweep across source roots. Cypher can find a function by name but not by "the string 'TODO' appears nearby."
-- **Browsing a directory tree?** `list_source` returns a tree; Cypher doesn't.
+- **Question is textual, not structural?** `grep` is the regex sweep across the server's source roots, when it has any. Cypher can find an entity by property but not by "the string 'TODO' appears nearby."
+- **Reading a file, or browsing a directory tree?** `read_source` / `list_source`, when the server registers them; Cypher answers about the graph, not the filesystem.
 
 ## Format quirks
 
 - Single-line queries are easiest to read; multi-line is fine when the WHERE/RETURN combination gets long.
-- Parameters via `$name` aren't currently exposed through the MCP tool — inline values directly for now.
+- Bind values with the `params` argument rather than inlining them: `params={"flag": "NO"}` fills `$flag` in both an inline property map (`MATCH (n:Vessel {flag: $flag})`) and a `WHERE` clause. A `$name` the query uses but `params` omits is an error, never an empty result.
 - `RETURN n, m AS alias` works; aliasing improves readability when joining tables in the head of your reasoning.

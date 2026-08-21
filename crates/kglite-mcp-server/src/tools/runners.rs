@@ -168,7 +168,14 @@ pub(crate) fn run_overview(graph: &ActiveGraph, args: &OverviewArgs) -> String {
         &fluent,
         None,
         None,
-        None,
+        // `sample_truncate`. `None` means "emit every sampled value at full
+        // length", which this surface — the one with the tightest token
+        // budget and the least ability to scroll past a wall of text — was
+        // passing while Python's `describe()` has defaulted to 40 chars
+        // since it shipped. A single long text property (a description, a
+        // file blob) could dominate the whole overview. 40 matches the
+        // Python default so the same graph reads the same way everywhere.
+        Some(40),
     ) {
         // Prepend a server-level identity header so the active root + build
         // time are the first thing an agent reads — staleness after a root
