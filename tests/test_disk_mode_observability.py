@@ -17,7 +17,20 @@ what is pinned here is the graph's observable *shape*:
 That last one was misread as a disk-mode regression fingerprint by an
 external evaluation; the meaning is pinned below so a future reader can see
 which knob it tracks.
+
+The pathless ``enable_disk_mode()`` calls below deliberately keep using the
+no-argument form: it is the scratch conversion (temp directory, removed when
+the graph drops), and since E3 it warns about exactly that. The warning is
+expected here, not incidental — ``TestPathlessConversionWarns`` pins it, and
+``TestEnableDiskModeAtPath`` covers the ``path=`` form that publishes instead.
 """
+
+import json
+import subprocess
+import sys
+import tempfile
+import textwrap
+import warnings
 
 import pandas as pd
 import pytest
@@ -290,3 +303,208 @@ class TestConvertedEdgePropertiesReadBack:
         assert graph.cypher("MATCH (:Item {nid: 11999})-[r:LINKS]->() RETURN r.note AS note").to_list() == [
             {"note": "edge-11999"}
         ]
+
+
+class TestPathlessConversionWarns:
+    """The scratch conversion says where it put the data, and how to choose.
+
+    Before E3 it silently materialized the CSR under the system temp directory:
+    a conversion bigger than a small (or RAM-backed) ``/tmp`` failed there with
+    nothing naming the location, and a caller who assumed the conversion had
+    persisted something found nothing after the process exited. The form is
+    kept — a throwaway conversion is a real use — but it is no longer silent.
+    """
+
+    def test_it_names_the_location_and_the_remedy(self, frame):
+        graph = _fill(kglite.KnowledgeGraph(), frame)
+
+        with pytest.warns(UserWarning, match="enable_disk_mode\\(path=") as record:
+            graph.enable_disk_mode()
+
+        message = str(record[0].message)
+        assert "do not survive" in message, message
+        assert tempfile.gettempdir().rstrip("/") in message, ("the warning must name the location", message)
+        assert graph.graph_info()["storage_mode"] == "disk", "the conversion still happens"
+
+    def test_the_path_form_does_not_warn(self, frame, tmp_path):
+        """Nothing to warn about: the caller chose the location."""
+        graph = _fill(kglite.KnowledgeGraph(), frame)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            graph.enable_disk_mode(str(tmp_path / "quiet.kgl"))
+
+
+class TestEnableDiskModeAtPath:
+    """``enable_disk_mode(path=...)`` converts *and publishes* in one call.
+
+    The end state is the one a fresh ``kglite.open(path)`` reads — mapped
+    edges, no overlay — which is where the documented small resident footprint
+    actually lives. Pinned as state, never as RSS (module docstring).
+    """
+
+    def test_the_live_handle_lands_in_the_published_state(self, frame, tmp_path):
+        target = tmp_path / "published.kgl"
+        graph = _fill(kglite.KnowledgeGraph(), frame)
+
+        graph.enable_disk_mode(str(target))
+
+        info = graph.graph_info()
+        assert info["storage_mode"] == "disk"
+        assert info["edges_mapped"] is True
+        assert info["edge_property_overlay_rows"] == 0
+        assert info["edge_count"] == EDGES
+        assert graph.cypher("MATCH (:Item {nid: 3})-[r:LINKS]->() RETURN r.note AS note").to_list() == [
+            {"note": "edge-3"}
+        ]
+
+    def test_the_directory_is_a_published_generation(self, frame, tmp_path):
+        target = tmp_path / "generation.kgl"
+        graph = _fill(kglite.KnowledgeGraph(), frame)
+
+        graph.enable_disk_mode(str(target))
+
+        assert (target / "CURRENT").is_file(), "no publish happened"
+        generations = sorted(child.name for child in (target / "generations").iterdir())
+        assert [name for name in generations if name.startswith("gen_")], generations
+        # The conversion's scratch lives *inside* the destination (never the
+        # system temp directory) and is removed once the publish has rebased
+        # every mapping onto the generation.
+        leftovers = [child.name for child in target.iterdir() if child.name.startswith(".converting-")]
+        assert leftovers == [], f"conversion scratch survived the publish: {leftovers}"
+
+    def test_a_fresh_process_reopens_it(self, frame, tmp_path):
+        target = tmp_path / "reopened.kgl"
+        graph = _fill(kglite.KnowledgeGraph(), frame)
+        graph.enable_disk_mode(str(target))
+        del graph
+
+        script = textwrap.dedent(
+            f"""
+            import json
+            import kglite
+
+            graph = kglite.open({str(target)!r})
+            info = graph.graph_info()
+            rows = graph.cypher(
+                "MATCH (:Item {{nid: 3}})-[r:LINKS]->() RETURN r.note AS note, r.weight AS weight"
+            ).to_list()
+            fields = ("storage_mode", "edges_mapped", "node_count", "edge_count")
+            print(json.dumps({{"info": {{k: info[k] for k in fields}}, "rows": rows}}))
+            """
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True, timeout=90, check=False
+        )
+        assert completed.returncode == 0, completed.stderr
+        payload = json.loads(completed.stdout.strip().splitlines()[-1])
+        assert payload["info"] == {
+            "storage_mode": "disk",
+            "edges_mapped": True,
+            "node_count": NODES,
+            "edge_count": EDGES,
+        }
+        assert payload["rows"] == [{"note": "edge-3", "weight": 3.0}]
+
+    def test_a_later_bare_save_goes_to_the_directory(self, frame, tmp_path):
+        target = tmp_path / "home.kgl"
+        graph = _fill(kglite.KnowledgeGraph(), frame)
+        graph.enable_disk_mode(str(target))
+
+        # `value` rather than `name`: a SET of the *title* field (or of a
+        # brand-new key) after a disk graph's first publish is lost on reopen —
+        # a pre-existing disk-mode defect, unrelated to the conversion, pinned
+        # as a strict xfail in tests/test_disk_mutation_roundtrip.py
+        # (test_disk_set_after_first_publish_*). Using an ordinary existing
+        # property keeps this test measuring what it is about: where the save
+        # went.
+        graph.cypher("MATCH (n:Item {nid: 5}) SET n.value = 99.5")
+        graph.save()  # no argument: the directory is this graph's home now
+
+        reopened = kglite.open(str(target))
+        assert reopened.cypher("MATCH (n:Item {nid: 5}) RETURN n.value AS value").to_list() == [{"value": 99.5}]
+
+    def test_it_rebinds_a_graph_that_already_had_a_source_path(self, frame, tmp_path):
+        """Same 'save as' rule ``save(path)`` follows: the new target wins.
+
+        There is no separate ``save_as`` here — an explicit path *is* the
+        rebind — so a converted graph's later bare ``save()`` writes to the
+        directory, and the file it came from is left exactly as it was.
+        """
+        origin = tmp_path / "origin.kgl"
+        _fill(kglite.KnowledgeGraph(), frame).save(str(origin))
+        before = origin.stat().st_mtime_ns
+
+        # `durable=False`: a write-ahead log has no place in a disk directory,
+        # so a durable handle refuses the conversion outright (pinned by
+        # ``test_a_durable_graph_refuses_the_conversion``). This is the
+        # write-back entry point without one.
+        graph = kglite.open(str(origin), durable=False)
+        target = tmp_path / "converted-dir.kgl"
+        graph.enable_disk_mode(str(target))
+        # An ordinary existing property, for the reason given in
+        # test_a_later_bare_save_goes_to_the_directory.
+        graph.cypher("MATCH (n:Item {nid: 5}) SET n.value = -1.0")
+        graph.save()
+
+        assert origin.is_file() and origin.stat().st_mtime_ns == before, "the origin file was rewritten"
+        # Read the origin with ``load`` rather than ``open``: rebinding the save
+        # target does not hand back the writer lease the ``open`` above still
+        # holds on the file — exactly as ``save(other_path)`` leaves it held.
+        assert kglite.load(str(origin)).cypher("MATCH (n:Item {nid: 5}) RETURN n.value AS value").to_list() == [
+            {"value": 5.0}
+        ]
+        assert kglite.open(str(target)).cypher("MATCH (n:Item {nid: 5}) RETURN n.value AS value").to_list() == [
+            {"value": -1.0}
+        ]
+
+    def test_the_conversion_survives_a_write_and_a_second_publish(self, frame, tmp_path):
+        """The published generation is immutable; a second save makes a new one."""
+        target = tmp_path / "twice.kgl"
+        graph = _fill(kglite.KnowledgeGraph(), frame)
+        graph.enable_disk_mode(str(target))
+
+        graph.cypher("MATCH (:Item {nid: 7})-[r:LINKS]->() SET r.note = 'rewritten'")
+        assert graph.graph_info()["edge_property_overlay_rows"] == 1
+        graph.save()
+
+        info = graph.graph_info()
+        assert info["edges_mapped"] is True
+        assert info["edge_property_overlay_rows"] == 0
+        generations = sorted(
+            child.name for child in (target / "generations").iterdir() if child.name.startswith("gen_")
+        )
+        assert len(generations) >= 2, generations
+        assert kglite.open(str(target)).cypher(
+            "MATCH (:Item {nid: 7})-[r:LINKS]->() RETURN r.note AS note"
+        ).to_list() == [{"note": "rewritten"}]
+
+
+class TestConversionRefusals:
+    def test_a_durable_graph_refuses_the_conversion(self, frame, tmp_path):
+        """Disk mode keeps no logical log, so a WAL-backed handle cannot convert.
+
+        Core refuses it (the backend is a recording wrapper it must not unwrap),
+        and the refusal is stated in the caller's vocabulary: ``kglite.open()``
+        attaches a log by default, so this is the shape a user actually meets.
+        """
+        path = str(tmp_path / "durable.kgl")
+        _fill(kglite.KnowledgeGraph(), frame).save(path)
+        graph = kglite.open(path)  # durable by default
+
+        for argument in ((), (str(tmp_path / "converted"),)):
+            with pytest.raises(ValueError, match="durable=False"):
+                graph.enable_disk_mode(*argument)
+
+    def test_an_already_converted_graph_refuses_and_names_save(self, frame, tmp_path):
+        """Nothing left to convert — and the refusal is not an I/O error."""
+        graph = _fill(kglite.KnowledgeGraph(), frame)
+        graph.enable_disk_mode(str(tmp_path / "once.kgl"))
+
+        for argument in ((), (str(tmp_path / "twice.kgl"),)):
+            with pytest.raises(ValueError, match="already disk-backed"):
+                graph.enable_disk_mode(*argument)
+
+        # The operation it names does work.
+        graph.save(str(tmp_path / "twice.kgl"))
+        assert kglite.open(str(tmp_path / "twice.kgl")).graph_info()["node_count"] == NODES

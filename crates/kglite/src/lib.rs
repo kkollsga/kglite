@@ -410,9 +410,14 @@ pub mod api {
         /// the path was touched — a write-ahead sidecar beside the target
         /// holds commits this checkpoint would strand. Bindings map that to
         /// their own class for a bad request, not to an I/O failure.
+        ///
+        /// `materialize_disk_graph` is the convert-and-publish composite behind
+        /// `enable_disk_mode(path=...)`: it runs the same guard, converts the
+        /// graph to disk storage *inside* the destination, and publishes it, so
+        /// the live handle ends on the generation a fresh open would read.
         pub use crate::graph::io::file::{
-            load_file, load_kgl_bytes, prepare_save, save_graph, save_graph_with, write_kgl,
-            write_kgl_to, write_kgl_with, SaveError,
+            load_file, load_kgl_bytes, materialize_disk_graph, prepare_save, save_graph,
+            save_graph_with, write_kgl, write_kgl_to, write_kgl_with, SaveError,
         };
         pub use crate::graph::io::ntriples::{
             load_ntriples, Cancelled, NTriplesConfig, ProgressEvent, ProgressSink, ProgressValue,

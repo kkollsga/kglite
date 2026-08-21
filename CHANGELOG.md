@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`enable_disk_mode()` without a path wrote the converted structures to the
+  system temp directory silently.** The CSR and the edge-property blob went to
+  a scratch directory under `std::env::temp_dir()` that nothing named and that
+  is deleted when the graph drops — so a caller who assumed the conversion had
+  persisted something found nothing afterwards, and a conversion larger than a
+  small (or RAM-backed) `/tmp` failed there rather than on the filesystem the
+  data was on, with no hint of where the bytes had gone. The pathless form is
+  kept — a throwaway, process-scoped conversion is a real use — but it now
+  emits a `UserWarning` naming the location, saying the data does not survive
+  the process, and pointing at `enable_disk_mode(path=...)`, which converts
+  into the directory you name and publishes it.
+
+- **`enable_disk_mode()`'s refusals were classified and worded as something
+  else.** A durable graph cannot convert (disk mode keeps no logical log, and
+  the conversion must not unwrap the capture layer) but said so as
+  "enable_disk_mode not supported while wrapped in RecordingGraph" — naming a
+  type no caller can see, for the shape every `kglite.open(path)` user meets,
+  since a log is attached by default. Converting an already-disk graph reported
+  "Already in disk mode" as a *file I/O* error. Both are now `ValueError`s
+  stating the condition and the way forward: `durable=False` /
+  `kglite.load(path)` (or `KnowledgeGraph(storage="disk", path=...)`) for the
+  first, `save(path)` for the second.
+
 - **`enable_disk_mode()`'s documented memory claim described an outcome it
   cannot produce.** The docstring promised the call "reduces memory usage to
   ~10% of the in-memory graph"; the mechanism that once did that (an
@@ -686,6 +709,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so the shapes it speeds up keep their speed.
 
 ### Added
+
+- **`enable_disk_mode(path=...)` converts *and* publishes the disk directory in
+  one step.** The conversion now writes its CSR and edge properties inside the
+  directory you name and runs the publish tail, so the live handle ends in the
+  published, mapped, overlay-free state — the same state a fresh
+  `kglite.open(path)` reads, which is where the documented ~10% footprint
+  actually lives. `path` also becomes the graph's save target, exactly as
+  `save(path)` sets it: a later bare `save()` publishes a new generation into
+  the same directory. Nothing transits the system temp directory on the way,
+  so a graph too large for `/tmp` (or one whose `/tmp` is RAM-backed) converts
+  where you pointed it, and the conversion's scratch is removed as soon as the
+  publish has rebased every mapping — peak disk is one copy plus the staged
+  generation rather than two. `save_subset()`'s directory-format branch (the
+  >1M-node path) routes through the same call and stops staging through
+  `/tmp` too.
 
 - **`graph_info()` reports the edges' storage shape: `edges_mapped` and
   `edge_property_overlay_rows`.** Disk mode had no honest reading. The nearest

@@ -3694,12 +3694,19 @@ class KnowledgeGraph:
     # Storage Mode & Memory
     # ====================================================================
 
-    def enable_disk_mode(self) -> None:
+    def enable_disk_mode(self, path: str | None = None) -> None:
         """Materialize the in-memory graph as a disk-backed one.
 
         Builds CSR (Compressed Sparse Row) edge arrays in files and switches
         the graph onto the disk backend. Nodes stay in memory (~40 bytes
         each); edges are read through the mapping.
+
+        With ``path``, the conversion writes into that directory and publishes
+        it: the live handle ends on the published generation (mapped edges, no
+        mutation overlay) — the same state a fresh ``kglite.open(path)``
+        reads — and ``path`` becomes this graph's save target, so a later bare
+        :meth:`save` writes back to it. Nothing transits the system temp
+        directory on the way, so a conversion larger than ``/tmp`` still runs.
 
         .. warning::
 
@@ -3710,16 +3717,25 @@ class KnowledgeGraph:
            replaces are freed, but the allocator keeps the pages; call
            :func:`kglite.trim_memory` afterwards to return them to the OS.
 
-        **Where the small footprint actually comes from** is the saved
-        directory, reopened in a fresh process. Save after converting, then
-        open that directory somewhere else: the reopened graph starts at
-        roughly a tenth of the in-memory graph's resident size (measured
-        56 MB against 492 MB on the same graph), because its edges are paged
-        in on demand instead of built.
+        **Where the small footprint actually comes from** is that directory,
+        reopened in a fresh process: the reopened graph starts at roughly a
+        tenth of the in-memory graph's resident size (measured 56 MB against
+        492 MB on the same graph), because its edges are paged in on demand
+        instead of built.
 
         To run at that footprint from the start — never paying the in-memory
         peak at all — build into disk storage directly with
         ``KnowledgeGraph(storage="disk", path="graph.kgl")``.
+
+        .. warning::
+
+           **Called without a path**, the conversion materializes the edge
+           structures into a scratch directory under the system temp location
+           and deletes them when the graph is dropped. Nothing persists, and
+           on a machine whose temp directory is small or RAM-backed the whole
+           edge structure is written somewhere you did not choose — which is
+           why that form emits a :class:`UserWarning` naming the location.
+           Keep it only for a throwaway, process-scoped conversion.
 
         :meth:`graph_info` reports the result: ``storage_mode`` becomes
         ``"disk"`` and ``edges_mapped`` becomes ``True``.
@@ -3730,10 +3746,20 @@ class KnowledgeGraph:
         All query methods (Cypher, fluent API, algorithms) work identically
         afterwards.
 
+        Args:
+            path: Directory to materialize the graph into and publish it at.
+                Omit for a scratch conversion that persists nothing.
+
+        Raises:
+            ValueError: The directory cannot be written back to — a
+                write-ahead sidecar beside it holds commits this publish would
+                strand, or this handle is a view derived from a durable graph.
+            FileIoError: The conversion or the publish failed on the
+                filesystem.
+
         Example::
 
-            graph.enable_disk_mode()
-            graph.save("graph.kgl")
+            graph.enable_disk_mode("graph.kgl")   # convert *and* publish
             kglite.trim_memory()      # hand the freed pages back to the OS
 
             # ...in a fresh process, at ~10% of the in-memory footprint:

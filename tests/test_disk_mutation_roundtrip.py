@@ -1107,3 +1107,42 @@ def test_disk_path_survives_sigkill_before_the_first_save(tmp_path):
     reopened.save(str(graph_dir))
     del reopened
     assert kglite.load(str(graph_dir)).cypher("MATCH (n:Doc) RETURN n.title AS t").scalar() == "after"
+
+
+@pytest.mark.parametrize(
+    "statement,probe,expected",
+    [
+        ("SET n.title = 'renamed'", "n.title", "renamed"),
+        ("SET n.brand_new = 'xyz'", "n.brand_new", "xyz"),
+    ],
+    ids=["title", "new-key"],
+)
+@pytest.mark.xfail(
+    strict=True,
+    reason="Pre-existing disk-mode defect, found while landing enable_disk_mode(path=...) "
+    "(E3, 2026-08-21) and NOT caused by it: after a disk graph's FIRST publish, a SET of "
+    "the title field or of a brand-new property key is lost on reopen — silently, and the "
+    "new key reads back as '' rather than null. An ordinary property that already has a "
+    "column persists, and memory/mapped modes are unaffected, so the loss is in the "
+    "second-generation column write (write_unified_column_file / write_column_sidecars) "
+    "or its loader, not in the SET. The existing green tests above all SET *before* the "
+    "first save, which is why the class was invisible. Flip this xfail with the fix.",
+)
+def test_disk_set_after_first_publish_survives_the_second_save(tmp_path, statement, probe, expected):
+    graph_path = str(tmp_path / "second_publish")
+    kg = KnowledgeGraph(storage="disk", path=graph_path)
+    kg.add_nodes(
+        pd.DataFrame([{"id": f"P_{i}", "title": f"P{i}", "age": 20 + i} for i in range(5)]),
+        "Person",
+        "id",
+        "title",
+    )
+    kg.save(graph_path)
+
+    kg.cypher(f"MATCH (n:Person {{id: 'P_2'}}) {statement}", timeout_ms=10_000)
+    assert _rows(kg.cypher(f"MATCH (n:Person {{id: 'P_2'}}) RETURN {probe} AS v"))[0]["v"] == expected
+    kg.save()
+    del kg
+
+    reloaded = kglite.load(graph_path)
+    assert _rows(reloaded.cypher(f"MATCH (n:Person {{id: 'P_2'}}) RETURN {probe} AS v"))[0]["v"] == expected

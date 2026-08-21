@@ -144,20 +144,23 @@ pages rather than returning them — so resident memory after the call is
 **higher**, not lower, and stays higher for the lifetime of the process. Call
 `kglite.trim_memory()` afterwards to hand the freed pages back to the OS.
 
-The small footprint is a property of the **saved directory reopened
-elsewhere**. Convert, save, and open that directory in a fresh process and it
+The small footprint is a property of the **published directory reopened
+elsewhere**. Pass the directory to `enable_disk_mode()` and it converts into
+that directory and publishes it in one step; open it in a fresh process and it
 starts at roughly a tenth of the in-memory graph's resident size (measured
 56 MB against 492 MB on the same graph), because its edges are paged in on
 demand instead of built:
 
 ```python
-graph.enable_disk_mode()
-graph.save("graph.kgl")
+graph.enable_disk_mode("graph.kgl")   # converts *and* publishes the directory
 kglite.trim_memory()          # give the conversion's freed pages back
 
 # ...in a fresh process, at ~10% of the in-memory footprint:
 graph = kglite.open("graph.kgl")
 ```
+
+`path` also becomes the graph's save target, exactly as `save(path)` would set
+it: a later bare `save()` publishes a new generation into the same directory.
 
 If you never want to pay the in-memory peak at all, do not convert — build
 into disk storage from the start with
@@ -171,13 +174,15 @@ rather than a failed conversion. `edge_property_overlay_rows` reports how many
 edges still hold their properties on the heap rather than in the mapped base;
 a `save()` drains it to zero.
 
-One thing to know about where the files land: `enable_disk_mode()` currently
-builds its CSR into a temporary directory under the system temp dir, which it
-cleans up when the graph drops. On a machine whose `/tmp` is small or on a
-different (slower) device than your data, convert a large graph with that in
-mind — point `TMPDIR` somewhere with room, or build with
-`KnowledgeGraph(storage="disk", path=...)`, which writes to the path you name
-from the first byte.
+Where the files land follows the argument. With `path`, the CSR is built
+inside that directory and never transits the system temp dir, so a conversion
+too large for `/tmp` — or one that would cross to a slower device — runs where
+you pointed it. **Without** `path`, the CSR goes to a scratch directory under
+the system temp dir that is deleted when the graph drops: nothing persists, the
+filesystem is chosen for you, and the call warns saying so. Keep the pathless
+form for throwaway conversions; use `path` for anything you intend to keep, or
+build with `KnowledgeGraph(storage="disk", path=...)` to write to the path you
+name from the first byte and never pay the in-memory peak.
 
 **Statement rollback is cheap in memory and mapped mode, expensive on disk.**
 One mutating Cypher statement is atomic: if it fails partway through, the graph

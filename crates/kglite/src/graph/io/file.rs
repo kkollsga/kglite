@@ -1246,6 +1246,28 @@ pub fn save_graph_with(
     save_inmemory_with(graph, path, fsync).map_err(|e| SaveError::Io(e.to_string()))
 }
 
+/// Convert an in-memory (or mapped) graph to disk-backed storage **and publish
+/// it at `path`** — the one-call form of `enable_disk_mode()` + `save(path)`,
+/// and the only route that keeps the conversion's scratch files off the system
+/// temp directory (`DirGraph::enable_disk_mode_at` materializes inside `path`).
+///
+/// The live handle is left on the published generation, so the graph is in the
+/// same shape a fresh `kglite.open(path)` reads: edges mapped, no mutation
+/// overlay, and `save()` writing back to this directory. Bindings surface it as
+/// `enable_disk_mode(path=...)`; it lives here so the *guard* and the dispatch
+/// stay the same ones every other save runs — the write-ahead rule applies to a
+/// materialize exactly as it does to a checkpoint, and refusing before the
+/// conversion means a refusal leaves the graph untouched.
+pub fn materialize_disk_graph(graph: &mut Arc<DirGraph>, path: &str) -> Result<(), SaveError> {
+    save_guard::ensure_target_recovered(graph, path)?;
+    // `make_dir_graph_mut` (not the lineage-preserving variant `save_graph_with`
+    // uses) because this *is* a mutation of the graph's storage: cached plans
+    // and result views keyed on the version must see it, exactly as they do for
+    // the pathless conversion.
+    let dir = crate::graph::handle::make_dir_graph_mut(graph);
+    dir.enable_disk_mode_at(path).map_err(SaveError::Io)
+}
+
 // ─── Load ────────────────────────────────────────────────────────────────────
 
 /// Minimum file size to use mmap for the initial file read.

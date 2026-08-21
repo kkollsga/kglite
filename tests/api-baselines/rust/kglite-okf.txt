@@ -1261,6 +1261,7 @@ pub fn kglite::api::fluent::PatternExecutor<'a>::new_lightweight_with_params(gra
 pub fn kglite::api::fluent::PatternExecutor<'a>::node_matches_properties_pub(&self, idx: petgraph::graph_impl::NodeIndex, props: &std::collections::hash::map::HashMap<alloc::string::String, kglite::graph::core::pattern_matching::pattern::PropertyMatcher>) -> bool
 pub fn kglite::api::fluent::PatternExecutor<'a>::set_cancel(self, cancel: core::option::Option<&'static core::sync::atomic::AtomicBool>) -> Self
 pub fn kglite::api::fluent::PatternExecutor<'a>::set_deadline(self, deadline: core::option::Option<std::time::Instant>) -> Self
+pub fn kglite::api::fluent::PatternExecutor<'a>::set_distinct_prior(self, prior: core::option::Option<&'a std::collections::hash::set::HashSet<petgraph::graph_impl::NodeIndex>>) -> Self
 pub fn kglite::api::fluent::PatternExecutor<'a>::set_distinct_target(self, var: core::option::Option<alloc::string::String>) -> Self
 pub fn kglite::api::fluent::PatternExecutor<'a>::set_parallel(self, parallel: bool) -> Self
 pub fn kglite::api::fluent::PatternExecutor<'a>::with_bindings_and_params(graph: &'a kglite::api::DirGraph, max_matches: core::option::Option<usize>, pre_bindings: &'a kglite::graph::languages::cypher::result::Bindings<petgraph::graph_impl::NodeIndex>, params: &'a std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>) -> Self
@@ -1526,6 +1527,7 @@ pub fn kglite::api::io::import_embeddings_from_file(graph: &mut kglite::api::Dir
 pub fn kglite::api::io::load_file(path: &str) -> core::io::error::Result<alloc::sync::Arc<kglite::api::DirGraph>>
 pub fn kglite::api::io::load_kgl_bytes(data: &[u8]) -> core::io::error::Result<alloc::sync::Arc<kglite::api::DirGraph>>
 pub fn kglite::api::io::load_ntriples(graph: &mut kglite::api::DirGraph, path: &str, config: &kglite::api::io::NTriplesConfig) -> core::result::Result<kglite::graph::io::ntriples::NTriplesStats, alloc::string::String>
+pub fn kglite::api::io::materialize_disk_graph(graph: &mut alloc::sync::Arc<kglite::api::DirGraph>, path: &str) -> core::result::Result<(), kglite::api::io::SaveError>
 pub fn kglite::api::io::open_or_create_graph(path: &std::path::Path, create_mode: core::option::Option<kglite::api::storage::StorageMode>) -> core::io::error::Result<kglite::api::io::OpenGraphResult>
 pub fn kglite::api::io::open_or_create_graph_in_mode(path: &std::path::Path, requested: core::option::Option<kglite::api::storage::StorageMode>, attaching_log: kglite::api::durable::DurabilityLevel) -> core::io::error::Result<kglite::api::io::OpenGraphResult>
 pub fn kglite::api::io::pass_a_scan(source: &kglite::api::storage::DiskGraph, spec: &kglite::api::io::SubsetSpec) -> kglite::graph::mutation::subgraph_streaming::PassAResult
@@ -1860,10 +1862,12 @@ pub fn kglite::api::storage::DiskGraph::column_stores_iter(&self) -> impl core::
 pub fn kglite::api::storage::DiskGraph::compact(&mut self) -> core::io::error::Result<usize>
 pub fn kglite::api::storage::DiskGraph::count_edges_filtered(&self, node: petgraph::graph_impl::NodeIndex, dir: petgraph::Direction, conn_type: core::option::Option<u64>, other_node_type: core::option::Option<kglite::api::InternedKey>, deadline: core::option::Option<std::time::Instant>) -> core::result::Result<usize, alloc::string::String>
 pub fn kglite::api::storage::DiskGraph::count_edges_grouped_by_peer(&self, conn_type: u64, dir: petgraph::Direction, deadline: core::option::Option<std::time::Instant>) -> core::result::Result<std::collections::hash::map::HashMap<u32, i64>, alloc::string::String>
+pub fn kglite::api::storage::DiskGraph::csr_is_mapped(&self) -> bool
 pub fn kglite::api::storage::DiskGraph::edge_count(&self) -> usize
 pub fn kglite::api::storage::DiskGraph::edge_endpoints_fn(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<(petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex)>
 pub fn kglite::api::storage::DiskGraph::edge_indices_iter(&self) -> kglite::graph::core::iterators::DiskEdgeIndices<'_>
 pub fn kglite::api::storage::DiskGraph::edge_properties_at(&self, edge_idx: u32) -> core::option::Option<alloc::borrow::Cow<'_, [(kglite::api::InternedKey, kglite::datatypes::values::Value)]>>
+pub fn kglite::api::storage::DiskGraph::edge_property_overlay_len(&self) -> usize
 pub fn kglite::api::storage::DiskGraph::edge_references_iter(&self) -> kglite::graph::core::iterators::DiskEdgeReferences<'_>
 pub fn kglite::api::storage::DiskGraph::edge_weight(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&kglite::api::EdgeData>
 pub fn kglite::api::storage::DiskGraph::edge_weight_mut(&mut self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&mut kglite::api::EdgeData>

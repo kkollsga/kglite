@@ -42,7 +42,7 @@ use std::sync::Arc;
 /// stopped raising bare `OSError`, and the reason it is worth taking is that
 /// the previous class was unclassifiable: nothing distinguished "the disk is
 /// full" from any other `OSError` the call stack could raise.
-fn file_io_err(error: std::io::Error) -> PyErr {
+pub(crate) fn file_io_err(error: std::io::Error) -> PyErr {
     crate::error_py::kg_to_pyerr(crate::error::KgError::FileIo(error))
 }
 

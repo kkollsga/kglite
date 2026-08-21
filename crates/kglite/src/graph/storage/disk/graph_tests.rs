@@ -1638,3 +1638,83 @@ fn conversion_without_edge_properties_writes_no_blob() {
     assert_eq!(dg.edge_property_overlay_len(), 0);
     assert!(dg.edge_properties_at(0).is_none());
 }
+
+// ---------- enable_disk_mode's published form (E3) ----------
+
+/// `enable_disk_mode_at` must leave the same end state the two-call
+/// `enable_disk_mode()` + `save_disk(dir)` sequence does — a published
+/// generation the live handle maps — while keeping the conversion's scratch
+/// inside the destination and removing it once the publish has rebased.
+///
+/// The path-form's reason to exist is that scratch placement: the pathless
+/// conversion materializes the whole CSR under the system temp directory, so a
+/// graph too large for `/tmp` (or a RAM-backed `tmpfs`) failed there rather
+/// than on the filesystem the caller pointed at.
+#[test]
+fn enable_disk_mode_at_publishes_and_leaves_no_scratch_behind() {
+    let root = TempDir::new().unwrap();
+    let root_path = root.path().to_str().unwrap();
+
+    let mut graph = DirGraph::new();
+    add_docs(&mut graph, &[1, 2, 3]);
+    graph.enable_disk_mode_at(root_path).unwrap();
+
+    assert!(
+        root.path().join("CURRENT").is_file(),
+        "no generation was published"
+    );
+    let stray: Vec<String> = std::fs::read_dir(root.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(".converting-"))
+        .collect();
+    assert!(
+        stray.is_empty(),
+        "conversion scratch survived the publish: {stray:?}"
+    );
+
+    let disk = match &mut graph.graph {
+        GraphBackend::Disk(disk) => disk,
+        _ => panic!("expected disk backend"),
+    };
+    let data_dir = disk.data_dir.clone();
+    assert!(
+        data_dir.starts_with(root.path()),
+        "the live handle must write inside the destination, not {}",
+        data_dir.display()
+    );
+    let outside: Vec<_> = disk
+        .mapped_file_paths()
+        .into_iter()
+        .filter(|path| !path.starts_with(&data_dir))
+        .collect();
+    assert!(
+        outside.is_empty(),
+        "writer still maps files outside the published generation: {outside:?}"
+    );
+
+    let reader = crate::graph::io::file::load_file(root_path).unwrap();
+    assert_eq!(reader.graph.node_count(), 3);
+}
+
+/// A failed publish leaves the graph converted onto scratch that drop still
+/// owns — the same guarantee the pathless form gives.
+#[test]
+fn a_failed_publish_registers_its_scratch_for_cleanup() {
+    let root = TempDir::new().unwrap();
+    // A file where the destination directory must be: `GenerationTxn::begin`
+    // cannot create `generations/` under it, so the publish fails after the
+    // conversion has already run.
+    let target = root.path().join("occupied");
+    std::fs::write(&target, b"not a directory").unwrap();
+
+    let mut graph = DirGraph::new();
+    add_docs(&mut graph, &[1, 2]);
+    assert!(graph.enable_disk_mode_at(target.to_str().unwrap()).is_err());
+
+    let registered = graph.temp_dirs.lock().unwrap().clone();
+    assert!(
+        registered.iter().any(|dir| dir.starts_with(&target)),
+        "the conversion scratch must stay registered for drop-time cleanup: {registered:?}"
+    );
+}

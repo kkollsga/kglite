@@ -658,7 +658,7 @@
         },
         "enable_disk_mode": {
           "kind": "method",
-          "signature": "(self, /)"
+          "signature": "(self, /, path=None)"
         },
         "exists": {
           "kind": "method",

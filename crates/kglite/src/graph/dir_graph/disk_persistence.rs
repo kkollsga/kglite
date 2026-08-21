@@ -6,6 +6,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static DISK_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+/// A unique scratch-directory name for a disk conversion: `prefix` + pid +
+/// wall-clock nanos + a process-local sequence, so two conversions in the same
+/// process (and in the same nanosecond) cannot collide.
+fn scratch_dir_name(prefix: &str) -> String {
+    let sequence = DISK_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!(
+        "{prefix}{}_{:x}_{sequence:x}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    )
+}
+
 fn write_compressed_disk_serde<T: serde::Serialize + ?Sized>(
     dir: &std::path::Path,
     filename: &str,
@@ -74,25 +89,78 @@ fn copy_row(
 }
 
 impl DirGraph {
-    /// Convert the graph to disk-backed storage mode.
+    /// Convert the graph to disk-backed storage mode, materializing the CSR
+    /// into a **scratch directory under the system temp location**.
+    ///
     /// Enables columnar storage first, then builds CSR edge arrays on disk.
     /// Nodes stay in memory (~40 bytes each), edges are mmap'd.
+    ///
+    /// The scratch directory is process-scoped: it is removed when this graph
+    /// drops, so nothing here survives the process. A caller that wants the
+    /// converted graph to *land* somewhere — on a chosen filesystem, in the
+    /// published directory layout a later `kglite.open(dir)` reads — calls
+    /// [`Self::enable_disk_mode_at`] instead, which materializes inside the
+    /// destination and publishes it. Bindings surface that as
+    /// `enable_disk_mode(path=...)`.
     pub fn enable_disk_mode(&mut self) -> Result<(), String> {
+        let scratch = std::env::temp_dir().join(scratch_dir_name("kglite_disk_"));
+        self.convert_to_disk_in(scratch)
+    }
+
+    /// Convert to disk-backed storage **and publish the result at `path`**,
+    /// leaving the live handle on the published, mapped generation — the same
+    /// end state `kglite.open(path)` reaches in a fresh process, and the state
+    /// the directory's small resident footprint belongs to.
+    ///
+    /// Two things distinguish this from `enable_disk_mode()` +
+    /// [`Self::save_disk`], and both are the reason it exists as one call:
+    ///
+    /// * the CSR is materialized **inside `path`**, not in the system temp
+    ///   directory, so a conversion of a graph too large for `/tmp` (or for a
+    ///   RAM-backed `tmpfs`) writes where the caller pointed it; and
+    /// * the scratch directory is removed as soon as the publish rebases every
+    ///   mapping onto the new generation, instead of lingering until drop —
+    ///   so peak disk is one copy plus the staged generation, not two.
+    ///
+    /// A failed publish leaves the graph converted onto its scratch directory,
+    /// which is registered for cleanup at drop exactly like the pathless form.
+    pub(crate) fn enable_disk_mode_at(&mut self, path: &str) -> Result<(), String> {
+        // Dot-prefixed and inside the destination, matching `MutationWorkspace`
+        // (`.working-…`) and the generation stages (`.stage-…`): a graph
+        // directory's own scratch is hidden, named by pid, and swept by the
+        // same drop-time cleanup.
+        let scratch = std::path::PathBuf::from(path).join(scratch_dir_name(".converting-"));
+        self.convert_to_disk_in(scratch.clone())?;
+        self.save_disk(path)?;
+        // `finish_generation` re-mapped every array onto the published
+        // generation (pinned by `save_rebases_every_mapping_onto_the_published_
+        // generation`), so nothing reads through the scratch any more. Best
+        // effort: if the removal fails the registration stays and drop retries.
+        if std::fs::remove_dir_all(&scratch).is_ok() {
+            if let Ok(mut dirs) = self.temp_dirs.lock() {
+                dirs.retain(|dir| dir != &scratch);
+            }
+        }
+        Ok(())
+    }
+
+    /// The conversion itself: columnar nodes, CSR + edge properties built into
+    /// `data_dir`, backend switched to [`GraphBackend::Disk`]. Shared by both
+    /// entry points above, which differ only in where `data_dir` lives and what
+    /// happens to it afterwards.
+    fn convert_to_disk_in(&mut self, data_dir: std::path::PathBuf) -> Result<(), String> {
         // Ensure columnar storage for compact node representation
         if self.column_store_count() == 0 {
             self.enable_columnar();
         }
 
-        // Create a temp directory for CSR files
-        let sequence = DISK_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let data_dir = std::env::temp_dir().join(format!(
-            "kglite_disk_{}_{:x}_{sequence:x}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
+        // Registered before the build, not after: `from_stable_digraph` creates
+        // the directory as its first act and can fail with files already in it
+        // (ENOSPC on a large conversion is the realistic case), and a failure
+        // that never registered the path leaked it for the life of the process.
+        if let Ok(mut dirs) = self.temp_dirs.lock() {
+            dirs.push(data_dir.clone());
+        }
 
         // The heap backend owns the stores; the new `DiskGraph` must inherit
         // them, or every columnar property read returns Null after the switch.
@@ -131,11 +199,6 @@ impl DirGraph {
             }
         }
         .map_err(|e| format!("Failed to create DiskGraph: {}", e))?;
-
-        // Register temp dir for cleanup
-        if let Ok(mut dirs) = self.temp_dirs.lock() {
-            dirs.push(data_dir);
-        }
 
         self.graph = GraphBackend::Disk(Box::new(disk_graph));
         for (type_key, store) in carried_stores {

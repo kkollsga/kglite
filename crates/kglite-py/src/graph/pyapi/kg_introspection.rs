@@ -7,12 +7,14 @@
 
 use crate::datatypes::values::Value;
 use crate::datatypes::{py_in, py_out};
+use crate::graph::pyapi::kg_core::file_io_err;
 use crate::graph::{
     compare_inner, extract_cypher_param, extract_detail_param, extract_fluent_param, get_graph_mut,
     parse_method_param, KnowledgeGraph, TemporalContext,
 };
 use kglite_core::api::fluent::StatResult;
 use kglite_core::api::introspection;
+use kglite_core::api::io;
 use kglite_core::api::mutation::{OperationReport, OperationReports};
 use kglite_core::api::{CowSelection, PlanStep};
 use pyo3::prelude::*;
@@ -83,6 +85,15 @@ impl KnowledgeGraph {
     /// the graph onto the disk backend. Nodes stay in memory (~40 bytes each);
     /// edges are read through the mapping.
     ///
+    /// Args:
+    ///     path: Directory to materialize the graph into and publish it at.
+    ///         The conversion writes there (never through the system temp
+    ///         directory), the directory is left in the published, mapped
+    ///         state a fresh `kglite.open(path)` reads, and this graph's
+    ///         save target becomes `path` — a later bare `save()` writes
+    ///         back to it, exactly as `save(path)` rebinds it.
+    ///         Omit it only for a throwaway conversion (see below).
+    ///
     /// **This does not shrink the process.** It is a conversion, and the
     /// conversion itself adds the on-disk edge structures on top of what is
     /// already resident — expect resident memory to go *up*, not down, for
@@ -90,16 +101,22 @@ impl KnowledgeGraph {
     /// freed, but the allocator keeps the pages; call
     /// `kglite.trim_memory()` afterwards to return them to the OS.
     ///
-    /// **Where the small footprint actually comes from** is the saved
-    /// directory, reopened in a fresh process: `graph.save("g.kgl")` after
-    /// this call, then `kglite.open("g.kgl")` elsewhere, starts at roughly a
-    /// tenth of the in-memory graph's resident size (measured 56 MB vs
-    /// 492 MB on the same graph) because the edges are paged in on demand
-    /// instead of built.
+    /// **Where the small footprint actually comes from** is the directory,
+    /// reopened in a fresh process: `graph.enable_disk_mode("g.kgl")`, then
+    /// `kglite.open("g.kgl")` elsewhere, starts at roughly a tenth of the
+    /// in-memory graph's resident size (measured 56 MB vs 492 MB on the same
+    /// graph) because the edges are paged in on demand instead of built.
     ///
     /// To run at that footprint from the start — never paying the in-memory
     /// peak at all — build into disk storage directly:
     /// `KnowledgeGraph(storage="disk", path="g.kgl")`.
+    ///
+    /// **Without `path`** the CSR is materialized into a scratch directory in
+    /// the system temp location and deleted when the graph is dropped: a
+    /// process-scoped conversion that persists nothing and, on a machine whose
+    /// temp directory is small or RAM-backed, writes the whole edge structure
+    /// somewhere the caller did not choose. That form warns for exactly that
+    /// reason; pass `path` to convert where you mean to.
     ///
     /// `graph_info()` reports the result: `storage_mode` becomes `'disk'` and
     /// `edges_mapped` becomes True. (`columnar_is_mapped` is about property-
@@ -108,11 +125,81 @@ impl KnowledgeGraph {
     ///
     /// All query methods (Cypher, fluent API, algorithms) work identically
     /// afterwards.
-    fn enable_disk_mode(&mut self) -> PyResult<()> {
-        let graph = get_graph_mut(&mut self.inner);
-        graph
-            .enable_disk_mode()
-            .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)
+    #[pyo3(signature = (path=None))]
+    fn enable_disk_mode(&mut self, py: Python<'_>, path: Option<&str>) -> PyResult<()> {
+        // Already converted: the second call cannot "convert" anything, and its
+        // core message ("Already in disk mode") arrived through the save
+        // dispatch as a *file I/O* error, which it is not. Name the state and
+        // the operation the caller actually wants.
+        if kglite_core::api::storage::live_storage_mode(&self.inner)
+            == kglite_core::api::storage::StorageMode::Disk
+        {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "this graph is already disk-backed — there is nothing to convert. Use \
+                 save(path) to publish it into another directory, or save() to publish a new \
+                 generation into the one it already has.",
+            ));
+        }
+        // A durable graph's backend is a `RecordingGraph` wrapper, and the
+        // conversion cannot unwrap one without silently dropping the capture
+        // layer — core refuses it. Say so here in the caller's vocabulary
+        // (`kglite.open()` attaches a log by default, so this is the shape a
+        // user actually meets) instead of surfacing the internal wrapper name.
+        // This also subsumes the diverged-log check `save()` runs: a diverged
+        // log implies a durable owner, which is already refused here.
+        if self.lifecycle.durable.is_some() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "a durable graph cannot be converted to disk mode: disk mode keeps no \
+                 write-ahead log, so the conversion would drop the capture layer along with \
+                 anything it has buffered. Open the graph with durable=False (or \
+                 kglite.load(path)) and convert that handle, or build into disk storage \
+                 directly with KnowledgeGraph(storage='disk', path=...).",
+            ));
+        }
+        let Some(path) = path else {
+            // Naming the directory is the whole point of the warning: the
+            // pathless conversion is legitimate (scratch that dies with the
+            // process) but it silently picks the filesystem, and a conversion
+            // larger than a small or RAM-backed `/tmp` failed with no hint of
+            // where the bytes had gone.
+            let message = format!(
+                "enable_disk_mode() without a path materializes the edge structures into a \
+                 scratch directory under {} and deletes them when this graph is dropped — they \
+                 do not survive the process, a reboot, or a temp-directory sweep, and a graph \
+                 larger than that filesystem will fail there rather than where you meant to \
+                 write. Pass a directory — enable_disk_mode(path='graph.kgl') — to convert into \
+                 it and publish it, so kglite.open('graph.kgl') reopens it later.",
+                std::env::temp_dir().display()
+            );
+            let message = std::ffi::CString::new(message).unwrap_or_default();
+            PyErr::warn(
+                py,
+                py.get_type::<pyo3::exceptions::PyUserWarning>().as_any(),
+                message.as_c_str(),
+                1,
+            )?;
+            let graph = get_graph_mut(&mut self.inner);
+            return graph
+                .enable_disk_mode()
+                .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>);
+        };
+        // The path form publishes, so it takes the guard `save()` takes for a
+        // handle *derived* from a durable graph (the durable owner itself is
+        // already refused above): such a handle holds a fork no log describes,
+        // and publishing it is the same hazard as saving it.
+        self.check_durable_owner()?;
+        let inner = &mut self.inner;
+        py.detach(move || io::materialize_disk_graph(inner, path))
+            .map_err(|error| match error {
+                io::SaveError::Refused(message) => {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>(message)
+                }
+                io::SaveError::Io(message) => file_io_err(std::io::Error::other(message)),
+            })?;
+        // Same "save as" rebinding `save(path)` does: the directory is now this
+        // graph's home, so a later bare `save()` writes back to it.
+        self.lifecycle.source_path = Some(std::path::PathBuf::from(path));
+        Ok(())
     }
 
     /// Move mmap-backed property columns back to heap memory.

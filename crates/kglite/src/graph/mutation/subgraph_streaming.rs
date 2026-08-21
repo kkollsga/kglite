@@ -469,10 +469,11 @@ pub fn save_subset(
         crate::graph::io::file::write_kgl(&arc, path_str)
             .map_err(|e| format!("save_subset: write_kgl failed: {}", e))
     } else {
-        // Directory format — large subgraphs. enable_disk_mode builds CSR
-        // files in a temp dir; save_disk renames them into `path_str`.
-        extracted.enable_disk_mode()?;
-        extracted.save_disk(path_str)
+        // Directory format — large subgraphs. `enable_disk_mode_at` builds the
+        // CSR inside `path_str` itself and publishes it there, so a subset far
+        // too large for the single-file format never transits the system temp
+        // directory on its way to the destination the caller chose.
+        extracted.enable_disk_mode_at(path_str)
     }
 }
 
