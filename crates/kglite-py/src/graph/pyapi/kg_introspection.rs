@@ -387,7 +387,7 @@ impl KnowledgeGraph {
     /// property types.
     ///
     /// Returns:
-    ///     Self for method chaining.
+    ///     This same graph (not a copy), so the call can be chained.
     ///
     /// Example::
     ///
@@ -395,20 +395,18 @@ impl KnowledgeGraph {
     /// graph.lock_schema()
     /// graph.cypher("CREATE (p:Typo {name: 'x'})")  # raises RuntimeError
     /// ```
-    fn lock_schema(&mut self) -> Self {
-        let graph = get_graph_mut(&mut self.inner);
-        graph.schema_locked = true;
-        self.clone()
+    fn lock_schema(mut slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
+        get_graph_mut(&mut slf.inner).schema_locked = true;
+        slf
     }
 
     /// Unlock the schema: allow any Cypher mutations without schema validation.
     ///
     /// Returns:
-    ///     Self for method chaining.
-    fn unlock_schema(&mut self) -> Self {
-        let graph = get_graph_mut(&mut self.inner);
-        graph.schema_locked = false;
-        self.clone()
+    ///     This same graph (not a copy), so the call can be chained.
+    fn unlock_schema(mut slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
+        get_graph_mut(&mut slf.inner).schema_locked = false;
+        slf
     }
 
     /// Whether the schema is currently locked.
@@ -438,7 +436,7 @@ impl KnowledgeGraph {
     ///     version: The revision number. `0` marks the graph unversioned.
     ///
     /// Returns:
-    ///     Self for method chaining.
+    ///     This same graph (not a copy), so the call can be chained.
     ///
     /// Example::
     ///
@@ -447,9 +445,9 @@ impl KnowledgeGraph {
     /// graph.set_schema_version(1).save("graph.kgl")
     /// ```
     #[pyo3(signature = (version))]
-    fn set_schema_version(&mut self, version: u32) -> Self {
-        get_graph_mut(&mut self.inner).user_schema_version = version;
-        self.clone()
+    fn set_schema_version(mut slf: PyRefMut<'_, Self>, version: u32) -> PyRefMut<'_, Self> {
+        get_graph_mut(&mut slf.inner).user_schema_version = version;
+        slf
     }
 
     /// Returns a dict of {node_type: count} using the type index (O(type_count)).
@@ -558,7 +556,7 @@ impl KnowledgeGraph {
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (property, group_by_parent=None, level_index=None, indices=None, store_as=None, max_length=None, keep_selection=None))]
     fn unique_values(
-        &mut self,
+        mut slf: PyRefMut<'_, Self>,
         property: String,
         group_by_parent: Option<bool>,
         level_index: Option<usize>,
@@ -567,9 +565,10 @@ impl KnowledgeGraph {
         max_length: Option<usize>,
         keep_selection: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
         let values = kglite_core::api::fluent::get_unique_values(
-            &self.inner,
-            &self.cursor.selection,
+            &slf.inner,
+            &slf.cursor.selection,
             &property,
             level_index,
             group_by_parent.unwrap_or(true),
@@ -580,7 +579,7 @@ impl KnowledgeGraph {
             let nodes =
                 kglite_core::api::fluent::format_unique_values_for_storage(&values, max_length);
 
-            let graph = get_graph_mut(&mut self.inner);
+            let graph = get_graph_mut(&mut slf.inner);
 
             kglite_core::api::mutation::update_node_properties(graph, &nodes, target_property)
                 .map_err(|e: String| -> PyErr {
@@ -588,12 +587,23 @@ impl KnowledgeGraph {
                 })?;
 
             if !keep_selection.unwrap_or(false) {
-                self.cursor.selection.clear();
+                slf.cursor.selection.clear();
             }
 
-            Python::attach(|py| Ok(Py::new(py, self.clone())?.into_any()))
+            // `store_as` writes node properties, which the write-ahead log can
+            // express — so it has to reach the log like every other logged
+            // mutation. It never did: the property landed in memory, the frame
+            // was never appended, and a crash before the next checkpoint lost
+            // it while every other write around it survived.
+            slf.commit_wal()?;
+
+            // The same handle back, not a copy of it: a copy would share the
+            // storage but not the write-ahead log, so `g = g.unique_values(...,
+            // store_as=...)` on a durable graph used to hand back a handle
+            // whose every later write was unlogged.
+            Ok(slf.into_pyobject(py)?.into_any().unbind())
         } else {
-            Python::attach(|py| py_out::level_unique_values_to_pydict(py, &values))
+            py_out::level_unique_values_to_pydict(py, &values)
         }
     }
 
@@ -994,7 +1004,7 @@ impl KnowledgeGraph {
             embedder: self.embedder.as_ref().map(Arc::clone),
             default_timeout_ms: self.default_timeout_ms,
             default_max_rows: self.default_max_rows,
-            lifecycle: crate::graph::GraphLifecycle::detached(),
+            lifecycle: crate::graph::GraphLifecycle::detached_from(&self.lifecycle),
         };
 
         // Store the report in the new graph
@@ -1074,7 +1084,7 @@ impl KnowledgeGraph {
             embedder: self.embedder.as_ref().map(Arc::clone),
             default_timeout_ms: self.default_timeout_ms,
             default_max_rows: self.default_max_rows,
-            lifecycle: crate::graph::GraphLifecycle::detached(),
+            lifecycle: crate::graph::GraphLifecycle::detached_from(&self.lifecycle),
         };
 
         // Record plan step
@@ -1184,6 +1194,11 @@ impl KnowledgeGraph {
                     crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
                 })?;
 
+        // The `store_as` write is node properties, which the write-ahead log
+        // can express — so it has to reach the log like every other logged
+        // mutation. It never did.
+        self.commit_wal()?;
+
         let mut new_kg = KnowledgeGraph {
             inner: self.inner.clone(),
             cursor: crate::graph::CursorState {
@@ -1199,7 +1214,7 @@ impl KnowledgeGraph {
             embedder: self.embedder.as_ref().map(Arc::clone),
             default_timeout_ms: self.default_timeout_ms,
             default_max_rows: self.default_max_rows,
-            lifecycle: crate::graph::GraphLifecycle::detached(),
+            lifecycle: crate::graph::GraphLifecycle::detached_from(&self.lifecycle),
         };
 
         // Store the report
@@ -1287,6 +1302,9 @@ impl KnowledgeGraph {
 
             match process_result {
                 Ok(kglite_core::api::fluent::EvaluationResult::Stored(report)) => {
+                    // Same as `collect_children`: the stored calculation is a
+                    // node-property write and belongs in the log.
+                    self.commit_wal()?;
                     let mut new_kg = KnowledgeGraph {
                         inner: self.inner.clone(),
                         cursor: crate::graph::CursorState {
@@ -1302,7 +1320,7 @@ impl KnowledgeGraph {
                         embedder: self.embedder.as_ref().map(Arc::clone),
                         default_timeout_ms: self.default_timeout_ms,
                         default_max_rows: self.default_max_rows,
-                        lifecycle: crate::graph::GraphLifecycle::detached(),
+                        lifecycle: crate::graph::GraphLifecycle::detached_from(&self.lifecycle),
                     };
 
                     // Store the calculation report
@@ -1464,6 +1482,10 @@ impl KnowledgeGraph {
                 Err(e) => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(e)),
             };
 
+            // Same as `collect_children`: the stored count is a node-property
+            // write and belongs in the log.
+            self.commit_wal()?;
+
             let mut new_kg = KnowledgeGraph {
                 inner: self.inner.clone(),
                 cursor: crate::graph::CursorState {
@@ -1479,7 +1501,7 @@ impl KnowledgeGraph {
                 embedder: self.embedder.as_ref().map(Arc::clone),
                 default_timeout_ms: self.default_timeout_ms,
                 default_max_rows: self.default_max_rows,
-                lifecycle: crate::graph::GraphLifecycle::detached(),
+                lifecycle: crate::graph::GraphLifecycle::detached_from(&self.lifecycle),
             };
 
             // Add the report

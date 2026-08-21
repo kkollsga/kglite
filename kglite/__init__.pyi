@@ -917,6 +917,22 @@ def open(
         ``Session`` also refuses write queries on a durable graph, because its
         writes land on a working copy that neither the log nor ``save()`` can
         reach — use ``cypher()`` or ``begin()``.
+
+    Note:
+        **The log belongs to the handle this function returns.** Fluent methods
+        (``select``, ``where``, ``traverse``, ``expand``, the set operations,
+        ``date``) return a *derived* graph that shares the storage but cannot
+        share the log, and forks away from the original on its first write. On a
+        durable graph, writing through such a handle — including ``save()`` and
+        ``sync()`` on it — raises ``ValueError`` rather than silently reaching
+        neither the log nor the original. That fences off the selection-based
+        fluent mutations (``add_properties``, ``create_connections``,
+        ``calculate(store_as=...)``, ``count(store_as=...)``,
+        ``collect_children(store_as=...)``, ``unique_values(store_as=...)``,
+        ``set_property``), because a selection is itself a derived handle;
+        ``cypher()`` expresses all of them and every statement it runs is
+        logged. ``copy()`` and ``to_subgraph()`` build independent graphs rather
+        than views, so they are unaffected and write freely.
     """
     ...
 
@@ -2088,6 +2104,13 @@ class KnowledgeGraph:
         Returns:
             Dict with ``graph`` (updated KnowledgeGraph), ``nodes_updated`` (int),
             and ``report_index`` (int).
+
+        Note:
+            Not available on a graph opened with ``durable=``. The write happens
+            on the derived handle a selection produced, which shares the storage
+            but not the write-ahead log, so it is refused rather than left
+            unlogged — use :meth:`cypher`, which expresses the same write and is
+            logged. See :func:`kglite.open`.
         """
         ...
 
@@ -2543,7 +2566,7 @@ class KnowledgeGraph:
         valid.
 
         Returns:
-            Self for method chaining.
+            This same graph (not a copy), so the call can be chained.
 
         Example::
 
@@ -2562,7 +2585,7 @@ class KnowledgeGraph:
         """Unlock the schema: allow any Cypher mutations without validation.
 
         Returns:
-            Self for method chaining.
+            This same graph (not a copy), so the call can be chained.
         """
         ...
 
@@ -2596,7 +2619,7 @@ class KnowledgeGraph:
             version: The revision number. ``0`` marks the graph unversioned.
 
         Returns:
-            Self for method chaining.
+            This same graph (not a copy), so the call can be chained.
 
         Example::
 
@@ -2754,7 +2777,16 @@ class KnowledgeGraph:
             keep_selection: Preserve selection after store. Default ``False``.
 
         Returns:
-            Dict of unique values per parent, or a KnowledgeGraph if ``store_as`` is set.
+            Dict of unique values per parent, or — when ``store_as`` is set —
+            this same graph (not a copy), so the call can be chained.
+
+        Note:
+            ``store_as`` writes node properties, so on a graph opened with
+            ``durable=`` it must be reached through the handle
+            :func:`kglite.open` returned. A selection is itself a derived
+            handle, so the whole ``select(...).unique_values(store_as=...)``
+            shape is refused there; use :meth:`cypher` instead, which expresses
+            the same write and is logged.
         """
         ...
 
@@ -2940,6 +2972,13 @@ class KnowledgeGraph:
                 .traverse('REL_BC') \\
                 .create_connections('A_TO_C',
                     properties={'B': ['score']})
+
+        Note:
+            Not available on a graph opened with ``durable=``. The write happens
+            on the derived handle a selection produced, which shares the storage
+            but not the write-ahead log, so it is refused rather than left
+            unlogged — use :meth:`cypher`, which expresses the same write and is
+            logged. See :func:`kglite.open`.
         """
         ...
 
@@ -2994,6 +3033,13 @@ class KnowledgeGraph:
                     'dist_to_center': Spatial.distance(),
                     'parent_area': Spatial.area(),
                 }})
+
+        Note:
+            Not available on a graph opened with ``durable=``. The write happens
+            on the derived handle a selection produced, which shares the storage
+            but not the write-ahead log, so it is refused rather than left
+            unlogged — use :meth:`cypher`, which expresses the same write and is
+            logged. See :func:`kglite.open`.
         """
         ...
 
@@ -3021,6 +3067,13 @@ class KnowledgeGraph:
         Returns:
             Dict of ``{parent_title: 'val1, val2, ...'}`` or a KnowledgeGraph
             if ``store_as`` is set.
+
+        Note:
+            Not available on a graph opened with ``durable=``. ``store_as=`` writes, and the write happens
+            on the derived handle a selection produced, which shares the storage
+            but not the write-ahead log, so it is refused rather than left
+            unlogged — use :meth:`cypher`, which expresses the same write and is
+            logged. See :func:`kglite.open`.
         """
         ...
 
@@ -3068,6 +3121,12 @@ class KnowledgeGraph:
 
         Returns:
             Computation results, or a KnowledgeGraph if ``store_as`` is set.
+
+        Note:
+            ``store_as=`` writes, and the write happens on the derived handle a
+            selection produced, which shares the storage but not the write-ahead
+            log — so it is refused on a graph opened with ``durable=`` rather
+            than left unlogged. Use :meth:`cypher` there; see :func:`kglite.open`.
         """
         ...
 
@@ -3091,6 +3150,12 @@ class KnowledgeGraph:
 
         Returns:
             An integer count, grouped counts, or a KnowledgeGraph if ``store_as`` is set.
+
+        Note:
+            ``store_as=`` writes, and the write happens on the derived handle a
+            selection produced, which shares the storage but not the write-ahead
+            log — so it is refused on a graph opened with ``durable=`` rather
+            than left unlogged. Use :meth:`cypher` there; see :func:`kglite.open`.
         """
         ...
 
@@ -4025,6 +4090,8 @@ class KnowledgeGraph:
         """Remove the schema definition from the graph, and with it every
         constraint the schema declared.
 
+        Returns this same graph (not a copy), so the call can be chained.
+
         The unique indexes a ``primary_key``/``unique`` declaration installed are
         withdrawn too — enforcement never outlives the declaration that
         explains it. Constraints declared through Cypher DDL
@@ -4046,7 +4113,7 @@ class KnowledgeGraph:
                 sets the single graph-level slot.
 
         Returns:
-            Self (chainable).
+            This same graph (not a copy), so the call can be chained.
         """
         ...
 

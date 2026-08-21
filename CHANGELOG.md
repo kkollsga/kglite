@@ -64,6 +64,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default) are unaffected, and the engine's `Session` already had both
   properties.
 
+- **Chaining a configuration call dropped the write-ahead log, silently.**
+  `set_instructions`, `define_schema`, `clear_schema`, `lock_schema`,
+  `unlock_schema`, `set_schema_version` and `unique_values(store_as=…)` returned
+  a *copy* of the graph purely so the call could be chained. The copy kept the
+  save path but could not keep the log (an OS file handle is not shareable), so
+  the documented `g = g.set_instructions(…)` form handed back a handle whose
+  every later write was applied to a graph the log did not describe and no
+  checkpoint would hold: no frame appended, the write absent from the original
+  handle, and absent again after a crash and reopen — an acknowledged commit,
+  gone. These calls now return the same graph object, so there is no second
+  handle to lose the log in.
+
+- **Writing through a fluent view of a durable graph reached neither the log
+  nor the graph.** Fluent methods (`select`, `where`, `traverse`, `expand`, the
+  set operations, `date`) return a derived handle that must share the storage
+  and cannot share the log; on the first write it also forks away from the
+  original. A write taken there was therefore lost twice over, in silence. Such
+  a handle now refuses every logged write, `save()` and `sync()`, naming the
+  handle that owns the log and `cypher()` as the route that expresses the same
+  writes and is logged. This fences the selection-based fluent mutations
+  (`add_properties`, `create_connections`, `set_property`, and the `store_as=`
+  forms of `calculate` / `count` / `collect_children` / `unique_values`) off
+  durable graphs, since a selection is itself a derived handle. `copy()` and
+  `to_subgraph()` build independent graphs rather than views and are
+  unaffected; graphs opened without a log are unchanged.
+
+- **Four fluent `store_as=` writes never reached the write-ahead log or the
+  change stream.** `unique_values`, `collect_children`, `calculate` and `count`
+  write node properties when given `store_as=`, but none of them closed the
+  commit boundary afterwards: on a durable graph the property landed in memory
+  and no frame was appended, and on a CDC-enabled graph no event was published.
+  All four now commit like every other logged mutation.
+
 - **`kglite.load()` and `kglite.open_session()` served stale data in silence.**
   Both read the `.kgl` checkpoint alone, so on a path whose write-ahead sidecar
   holds newer commits — a durable writer that crashed, or one still running —

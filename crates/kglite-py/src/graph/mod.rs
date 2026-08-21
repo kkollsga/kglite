@@ -220,6 +220,21 @@ pub(crate) struct GraphLifecycle {
     /// handle isn't shareable). When `Some`, the backend is wrapped in
     /// `GraphBackend::Recording` so mutations are captured for the WAL.
     pub(crate) durable: Option<DurableState>,
+    /// Set on every handle **derived from** a durable graph — a fluent
+    /// selection view, a set operation, a spatial filter, any `self.clone()`.
+    ///
+    /// Such a handle inherits the graph but not the log (see [`DurableState`]:
+    /// the `File` handle is not shareable), and `Arc::make_mut` forks its
+    /// `DirGraph` away from the original on the first write. A write through it
+    /// therefore lands on a graph no log describes and no checkpoint will ever
+    /// hold — silently, because nothing about the handle looked different. This
+    /// flag is what makes it look different: every logged-class write, `save()`
+    /// and `sync()` refuse on a handle carrying it (see [`WAL_ORPHAN_MSG`]).
+    ///
+    /// Inherited transitively, so a view of a view is still fenced, and
+    /// deliberately *not* set by `copy()` / `to_subgraph()` / `from_blueprint`,
+    /// which build an independent graph rather than a view of this one.
+    pub(crate) orphaned_from_durable: bool,
     /// Cross-process single-writer guard for `source_path`, held for as long
     /// as this graph can still write back to it. `Some` only on a graph from
     /// `kglite.open(path)` (the write-back entry point); `None` for
@@ -240,8 +255,29 @@ impl GraphLifecycle {
         GraphLifecycle {
             source_path: None,
             durable: None,
+            orphaned_from_durable: false,
             writer_lease: None,
         }
+    }
+
+    /// A detached lifecycle for a handle that shares `parent`'s `DirGraph`.
+    ///
+    /// Same as [`detached`](Self::detached) except that it carries the
+    /// durability lineage forward, so a handle spun off a durable graph is
+    /// fenced rather than silently unlogged. Use this — not `detached()` —
+    /// whenever the new handle's `inner` is a clone of an existing handle's.
+    pub(crate) fn detached_from(parent: &GraphLifecycle) -> Self {
+        GraphLifecycle {
+            source_path: None,
+            durable: None,
+            orphaned_from_durable: parent.in_durable_lineage(),
+            writer_lease: None,
+        }
+    }
+
+    /// Whether this handle either owns a write-ahead log or descends from one.
+    pub(crate) fn in_durable_lineage(&self) -> bool {
+        self.durable.is_some() || self.orphaned_from_durable
     }
 }
 
@@ -292,6 +328,27 @@ pub(crate) const WAL_DIVERGED_MSG: &str = "\
     durable='full'/'normal')) to get a graph built from the checkpoint plus the frames \
     that did reach the log — the failed statement, and anything written after it, will \
     not be there.";
+
+/// Message every write refused for being taken through a *derived* handle of a
+/// durable graph answers with.
+///
+/// The sibling of [`WAL_DIVERGED_MSG`] for the other way a write can end up
+/// outside the log: not a log that refused the append, but a handle that never
+/// had one. Fluent methods return a new `KnowledgeGraph` sharing the storage,
+/// and that handle cannot carry the log — so its writes fork the graph away
+/// from the original *and* reach no log, which used to be entirely silent and
+/// cost the writes at the next crash.
+pub(crate) const WAL_ORPHAN_MSG: &str = "\
+    this handle was derived from a durable graph (a fluent method such as select() / where() / \
+    traverse(), a set operation, or another call that returns a new graph), so it shares the \
+    data but not the write-ahead log — the log belongs to the handle kglite.open() returned. \
+    A write taken here reaches no log and, because the two handles fork on the first write, \
+    does not reach the original graph either, so it is refused rather than lost at the next \
+    crash. On a durable graph, write through the handle kglite.open() gave you: g.cypher(...) \
+    expresses everything the mutating fluent methods do (SET / CREATE / MERGE / DELETE) and \
+    every statement it runs is logged. If you meant to build a separate graph instead, detach \
+    the view first with copy() or to_subgraph() — those are independent graphs, not views, and \
+    write freely.";
 
 /// [`WAL_DIVERGED_MSG`] as the `io::Error` `flush_wal` speaks.
 pub(crate) fn wal_diverged_io_error() -> std::io::Error {
@@ -426,6 +483,14 @@ impl KnowledgeGraph {
     /// are checkpoint-only by construction and calling this would be a no-op.
     #[inline]
     pub(crate) fn commit_wal(&mut self) -> PyResult<()> {
+        // Every logged-class write funnels through here, which makes it the one
+        // place that can tell a write on the log's owner from a write on a
+        // handle that merely descends from it. The mutation has already been
+        // applied to this handle's (already forked) `DirGraph` when we get
+        // here, but that graph is exactly the one the caller is about to
+        // discard — the error propagates out of the fluent method, so the
+        // derived handle is never returned.
+        self.check_durable_owner()?;
         self.flush_wal()
             .map_err(|e| crate::error_py::kg_to_pyerr(crate::error::KgError::FileIo(e)))
     }
@@ -526,6 +591,20 @@ impl KnowledgeGraph {
         }
     }
 
+    /// Refuse an operation that would write through a handle *derived* from a
+    /// durable graph — the [`WAL_ORPHAN_MSG`] fence.
+    ///
+    /// Called by `commit_wal` (so it covers every logged-class mutation) and by
+    /// `save()` / `sync()`, which reach the disk without going through it.
+    pub(crate) fn check_durable_owner(&self) -> PyResult<()> {
+        if self.lifecycle.orphaned_from_durable {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                WAL_ORPHAN_MSG,
+            ));
+        }
+        Ok(())
+    }
+
     /// Refuse an operation that would write this graph back after a failed
     /// append — the `PyResult` half of the [`WAL_DIVERGED_MSG`] latch, for
     /// `save()` and `sync()`.
@@ -560,9 +639,13 @@ impl Clone for KnowledgeGraph {
             // the durable session (the WAL File handle isn't shareable) nor the
             // writer lease — write ownership stays with the graph that opened
             // the path, so a clone can never release it early on drop.
+            // ...and the derived handle is *marked* as coming from a durable
+            // graph, so the writes it cannot log are refused rather than
+            // silently dropped. See `orphaned_from_durable`.
             lifecycle: GraphLifecycle {
                 source_path: self.lifecycle.source_path.clone(),
                 durable: None,
+                orphaned_from_durable: self.lifecycle.in_durable_lineage(),
                 writer_lease: None,
             },
         }

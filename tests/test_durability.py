@@ -1660,3 +1660,240 @@ def test_the_hooks_refuse_a_graph_with_no_log(tmp_path):
         kglite._fail_wal_append(g, True)
     with pytest.raises(ValueError):
         kglite._wal_next_lsn(g)
+
+
+# ---------------------------------------------------------------------------
+# handles derived from a durable graph
+# ---------------------------------------------------------------------------
+#
+# A ``KnowledgeGraph`` handle owns the write-ahead log; a handle derived from it
+# cannot (the log is an OS ``File`` handle, not shareable state). Two families of
+# method used to hand back such a handle silently:
+#
+# - configuration mutations (``set_instructions``, ``define_schema``,
+#   ``clear_schema``, ``lock_schema``, ``set_schema_version``) returned a *copy*
+#   of the graph purely so the call could be chained. They now return the same
+#   object, so there is no derived handle to lose the log in the first place.
+# - fluent methods (``select``/``where``/``traverse``/set operations/…) return a
+#   genuinely derived view, and must. Writing through one forks the graph away
+#   from the original *and* reaches no log, so it is refused rather than lost.
+#
+# The measured failure before the fix: ``g2 = g.set_instructions("hi")`` on a
+# durable graph, then ``g2.cypher("CREATE …")`` — no frame appended, the node
+# absent from ``g``, and absent again after a reopen. An acknowledged commit,
+# gone.
+
+
+#: Every configuration method that returns the graph for chaining.
+CHAINING_CONFIG_CALLS = [
+    pytest.param(lambda g: g.set_instructions("hi"), id="set_instructions"),
+    pytest.param(lambda g: g.define_schema({"nodes": {"Row": {"required": ["id"]}}}), id="define_schema"),
+    pytest.param(lambda g: g.clear_schema(), id="clear_schema"),
+    pytest.param(lambda g: g.lock_schema(), id="lock_schema"),
+    pytest.param(lambda g: g.unlock_schema(), id="unlock_schema"),
+    pytest.param(lambda g: g.set_schema_version(3), id="set_schema_version"),
+]
+
+
+@pytest.mark.parametrize("call", CHAINING_CONFIG_CALLS)
+def test_a_config_call_returns_the_same_handle(tmp_path, call):
+    """The fix at its root: these are graph mutations, not views, so the
+    returned handle is the graph itself and keeps the log with it."""
+    path = tmp_path / "cfg.kgl"
+    g = _open(path, "memory", durable="full")
+    g.cypher("CREATE (:Row {id: 1})")
+    assert call(g) is g
+
+
+@pytest.mark.parametrize("call", CHAINING_CONFIG_CALLS)
+def test_writes_survive_a_rebind_through_a_config_call(tmp_path, call):
+    """The repro. ``g = g.set_instructions(...)`` is the documented chaining
+    form; every later write through the rebound handle must still be logged.
+
+    Before the fix the rebound handle carried ``durable=None`` with
+    ``source_path`` intact, so the write below was applied to a forked graph,
+    appended no frame, and was simply absent on reopen.
+    """
+    path = tmp_path / "rebind.kgl"
+    g = _open(path, "memory", durable="full")
+    g.cypher("CREATE (:Row {id: 1})")
+
+    g = call(g)  # the rebind that used to drop the log
+    g.cypher("CREATE (:Row {id: 2})")
+    del g  # crash-equivalent for the log: no save(), no close()
+
+    assert _rows(kglite.open(str(path), durable="full")) == [1, 2]
+
+
+def test_a_config_call_does_not_fork_the_graph(tmp_path):
+    """The other half of the same defect: the returned copy forked on its first
+    write, so the *original* handle did not see it either — the two handles
+    disagreed about the graph's contents with nothing to signal it."""
+    path = tmp_path / "fork.kgl"
+    g = _open(path, "memory", durable="full")
+    g2 = g.set_instructions("hi")
+    g2.cypher("CREATE (:Row {id: 1})")
+    assert _rows(g) == [1]
+
+
+def test_sync_still_works_through_a_rebound_config_call(tmp_path):
+    """``sync()`` is the durability barrier a ``normal`` graph relies on; a
+    rebound handle used to raise "this graph has no write-ahead log"."""
+    path = tmp_path / "syncable.kgl"
+    g = _open(path, "memory", durable="normal")
+    g = g.set_instructions("hi")
+    g.cypher("CREATE (:Row {id: 1})")
+    g.sync()
+    del g
+    assert _rows(kglite.open(str(path), durable="normal")) == [1]
+
+
+#: Fluent methods that hand back a derived view of the same storage.
+DERIVING_CALLS = [
+    pytest.param(lambda g: g.select("Row"), id="select"),
+    pytest.param(lambda g: getattr(g.select("Row"), "where")({"id": 1}), id="where"),
+    pytest.param(lambda g: g.select("Row").sort("id"), id="sort"),
+    pytest.param(lambda g: g.select("Row").expand(hops=1), id="expand"),
+    pytest.param(lambda g: g.select("Row").union(g.select("Row")), id="union"),
+    pytest.param(lambda g: g.date("2020-01-01"), id="date"),
+]
+
+
+@pytest.mark.parametrize("call", DERIVING_CALLS)
+def test_a_derived_view_refuses_a_logged_write(tmp_path, call):
+    """A view shares the storage but cannot share the log. A write through it
+    would fork the graph away from the original *and* reach no log, so it is
+    refused — loudly, naming the handle that does own the log."""
+    path = tmp_path / "view.kgl"
+    g = _open(path, "memory", durable="full")
+    g.cypher("CREATE (:Row {id: 1})")
+
+    view = call(g)
+    with pytest.raises(ValueError, match="derived from a durable graph"):
+        view.cypher("CREATE (:Row {id: 2})")
+
+    # ...and the refusal is total: neither route back to disk is open either.
+    with pytest.raises(ValueError, match="derived from a durable graph"):
+        view.save()
+    with pytest.raises(ValueError, match="derived from a durable graph"):
+        view.sync()
+
+    # The owner is untouched and still writes normally.
+    g.cypher("CREATE (:Row {id: 3})")
+    del view, g
+    assert _rows(kglite.open(str(path), durable="full")) == [1, 3]
+
+
+def test_the_fence_is_inherited_by_a_view_of_a_view(tmp_path):
+    """One level of derivation is not the interesting case — a fluent chain is
+    many, and every link must stay fenced."""
+    path = tmp_path / "chain.kgl"
+    g = _open(path, "memory", durable="full")
+    g.cypher("CREATE (:Row {id: 1})")
+    deep = getattr(g.select("Row"), "where")({"id": 1}).sort("id").limit(10)
+    with pytest.raises(ValueError, match="derived from a durable graph"):
+        deep.cypher("CREATE (:Row {id: 2})")
+
+
+#: Fluent mutations — the ones that write through the derived handle a chain
+#: produced. Each one used to apply to a fork nobody kept and log nothing.
+FLUENT_MUTATIONS = [
+    pytest.param(lambda g: g.select("Row").unique_values("id", store_as="ids"), id="unique_values_store_as"),
+    pytest.param(lambda g: g.select("Row").add_properties({"Row": ["id"]}), id="add_properties"),
+    pytest.param(lambda g: g.select("Row").count(store_as="n"), id="count_store_as"),
+    pytest.param(lambda g: g.select("Row").calculate("id * 2", store_as="double"), id="calculate_store_as"),
+]
+
+
+@pytest.mark.parametrize("call", FLUENT_MUTATIONS)
+def test_a_fluent_mutation_at_the_end_of_a_chain_is_refused(tmp_path, call):
+    """The pattern the docstrings advertise — ``g = g.select(...).add_properties(...)``
+    — is exactly the one that used to leave ``g`` permanently unlogged. Every
+    selection-based mutation is refused on a durable graph, because there is no
+    way to reach one except through a derived handle; the message names
+    ``cypher()``, which expresses the same writes and is logged.
+    """
+    path = tmp_path / "chainmut.kgl"
+    g = _open(path, "memory", durable="full")
+    g.cypher("CREATE (:Row {id: 1})")
+    with pytest.raises(ValueError, match="derived from a durable graph"):
+        call(g)
+    # Nothing reached the graph, and the route the message names does work.
+    g.cypher("MATCH (r:Row) SET r.ids = toString(r.id)")
+    del g
+    reopened = kglite.open(str(path), durable="full")
+    assert reopened.cypher("MATCH (r:Row) RETURN r.ids AS v").to_dicts() == [{"v": "1"}]
+
+
+def test_a_fluent_mutation_still_returns_the_same_handle(tmp_path):
+    """``unique_values(store_as=...)`` handed back a *copy* of the receiver for
+    chaining. Off a durable graph that copy is harmless, but it is still the
+    anti-pattern the fix removes — and on a CDC graph the write it performed was
+    never published either, for the same missing commit boundary."""
+    g = kglite.KnowledgeGraph()
+    g.cypher("CREATE (:Row {id: 1})")
+    sel = g.select("Row")
+    assert sel.unique_values("id", store_as="ids") is sel
+
+
+def test_a_detached_copy_of_a_durable_graph_writes_freely(tmp_path):
+    """``copy()`` / ``to_subgraph()`` build an independent graph rather than a
+    view of this one, so the fence must not follow them — otherwise the message's
+    own advice would be unusable."""
+    path = tmp_path / "detach.kgl"
+    g = _open(path, "memory", durable="full")
+    g.cypher("CREATE (:Row {id: 1})")
+
+    c = g.copy()
+    c.cypher("CREATE (:Row {id: 2})")
+    assert _rows(c) == [1, 2]
+    c.save(str(tmp_path / "copy.kgl"))
+
+    sub = g.select("Row").to_subgraph()
+    sub.cypher("CREATE (:Row {id: 9})")
+    assert _rows(sub) == [1, 9]
+
+    # ...and none of it reached the durable graph or its log.
+    assert _rows(g) == [1]
+
+
+def test_a_non_durable_graph_keeps_its_fluent_write_path(tmp_path):
+    """The fence is durability-scoped: an ordinary in-memory graph has no log to
+    diverge from, and its fluent mutations must keep working exactly as before."""
+    g = kglite.KnowledgeGraph()
+    g.cypher("CREATE (:Row {id: 1})")
+    view = g.select("Row")
+    view.cypher("CREATE (:Row {id: 2})")
+    assert _rows(view) == [1, 2]
+    g.select("Row").unique_values("id", store_as="ids")
+    g.select("Row").count(store_as="n")
+
+
+def test_a_view_of_a_poisoned_graph_is_refused_too(tmp_path):
+    """B2's divergence latch and this fence are the two halves of one rule —
+    a graph whose log refused an append must not be writable through *any*
+    handle, including one derived after the fact."""
+    path = tmp_path / "poison.kgl"
+    g = _open(path, "memory", durable="full")
+    g.cypher("CREATE (:Row {id: 0})")
+    kglite._fail_wal_append(g, True)
+    with pytest.raises(kglite.FileIoError):
+        g.cypher("CREATE (:Row {id: 1})")
+
+    view = g.select("Row")
+    with pytest.raises(ValueError, match="derived from a durable graph"):
+        view.cypher("CREATE (:Row {id: 2})")
+    with pytest.raises(ValueError, match="derived from a durable graph"):
+        view.save()
+
+
+def test_update_through_a_selection_is_refused(tmp_path):
+    """``update()`` is the remaining selection-based write, and it reaches the
+    graph through the same derived handle everything else in ``FLUENT_MUTATIONS``
+    does."""
+    path = tmp_path / "update.kgl"
+    g = _open(path, "memory", durable="full")
+    g.cypher("CREATE (:Row {id: 1})")
+    with pytest.raises(ValueError, match="derived from a durable graph"):
+        g.select("Row").update({"tag": "x"})
+    assert g.cypher("MATCH (r:Row) RETURN r.tag AS t").to_dicts() == [{"t": None}]

@@ -574,6 +574,15 @@ impl KnowledgeGraph {
         // serializes whatever is in memory, and cannot tell the acknowledged
         // writes from the one that was not. Refuse before anything is touched.
         self.check_wal_not_diverged()?;
+        // A handle derived from a durable graph inherits `source_path` but not
+        // the log, so a bare `save()` here would write *its* fork over the
+        // durable file without stamping the checkpoint LSN or truncating the
+        // log — leaving frames the owner still holds to replay over a
+        // checkpoint that never contained them. Refuse the whole call rather
+        // than only the same-path case: a derived handle serializes the entire
+        // shared graph anyway, so `copy()`/`to_subgraph()` is the honest route
+        // to a separate file and the message names it.
+        self.check_durable_owner()?;
         // Durable (WAL) graphs: `save()` is the checkpoint that TRUNCATES
         // the fsync'd WAL below. Honouring `fsync=False` here would pair a
         // maybe-not-on-disk checkpoint with a destroyed log — a crash then
@@ -710,6 +719,10 @@ impl KnowledgeGraph {
     fn sync(&mut self, py: Python<'_>) -> PyResult<()> {
         use kglite_core::api::durable::DurabilityLevel;
 
+        // Ordered before the no-log message below: a derived handle also has
+        // no log, but "reopen with durable=" is the wrong advice for it — the
+        // log exists, it just belongs to another handle.
+        self.check_durable_owner()?;
         if self.lifecycle.durable.is_none() {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "sync() needs a graph opened with a write-ahead log. This graph \
@@ -1169,14 +1182,14 @@ impl KnowledgeGraph {
     ///         names each one that stops being enforced.
     ///
     /// Returns:
-    ///     Self with schema defined
+    ///     This same graph (not a copy), so the call can be chained.
     #[pyo3(signature = (schema_dict, *, replace = false))]
-    fn define_schema(
-        &mut self,
-        py: Python<'_>,
+    fn define_schema<'py>(
+        mut slf: PyRefMut<'py, Self>,
         schema_dict: &Bound<'_, PyDict>,
         replace: bool,
-    ) -> PyResult<Self> {
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let py = slf.py();
         // The schema grammar lives in core (`kglite::api::schema_from_value`),
         // not here: the C ABI's `kglite_define_schema` parses the same dialect
         // through the same function, and a published C signature can never
@@ -1191,7 +1204,7 @@ impl KnowledgeGraph {
         // name, so say which enforcement is going away. The default merge cannot
         // reach an unnamed type, and so has nothing to warn about.
         let mode = if replace {
-            warn_about_constraints_dropped_by_replace(py, &self.inner, &schema)?;
+            warn_about_constraints_dropped_by_replace(py, &slf.inner, &schema)?;
             SchemaInstall::Replace
         } else {
             SchemaInstall::Merge
@@ -1200,11 +1213,11 @@ impl KnowledgeGraph {
         // Installing the schema installs the UNIQUE constraints it declares, so
         // it fails when existing data already violates one — nothing is changed
         // in that case, so the caller can fix the data and retry.
-        get_graph_mut(&mut self.inner)
+        get_graph_mut(&mut slf.inner)
             .set_schema(schema, mode)
             .map_err(crate::error_py::kg_to_pyerr)?;
 
-        Ok(self.clone())
+        Ok(slf)
     }
 
     /// Validate the graph against the defined schema
@@ -1316,17 +1329,25 @@ impl KnowledgeGraph {
         self.inner.get_schema().is_some()
     }
 
-    /// Clear the schema definition from the graph
-    fn clear_schema(&mut self) -> PyResult<Self> {
-        get_graph_mut(&mut self.inner).clear_schema();
-        Ok(self.clone())
+    /// Clear the schema definition from the graph.
+    ///
+    /// Returns this same graph (not a copy), so the call can be chained.
+    fn clear_schema(mut slf: PyRefMut<'_, Self>) -> PyResult<PyRefMut<'_, Self>> {
+        get_graph_mut(&mut slf.inner).clear_schema();
+        Ok(slf)
     }
 
     /// Set free-text instructions rendered verbatim at the top of describe().
+    ///
+    /// Returns this same graph (not a copy), so the call can be chained.
     #[pyo3(signature = (text, *, channel=None))]
-    fn set_instructions(&mut self, text: &str, channel: Option<&str>) -> PyResult<Self> {
-        get_graph_mut(&mut self.inner).set_instructions(text, channel);
-        Ok(self.clone())
+    fn set_instructions<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        text: &str,
+        channel: Option<&str>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        get_graph_mut(&mut slf.inner).set_instructions(text, channel);
+        Ok(slf)
     }
 
     /// Get the current schema definition as a dictionary
