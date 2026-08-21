@@ -1472,6 +1472,7 @@ class KnowledgeGraph:
         managed_reload: bool = False,
         git_sha: Optional[str] = None,
         modified_by: Optional[str] = None,
+        on_invalid: Literal["warn", "error", "skip"] = "warn",
     ) -> dict[str, Any]:
         """Add nodes from a DataFrame.
 
@@ -1487,7 +1488,11 @@ class KnowledgeGraph:
         Args:
             data: DataFrame containing node data.
             node_type: Label for this set of nodes (e.g. ``'Person'``).
-            unique_id_field: Column used as unique identifier.
+            unique_id_field: Column used as unique identifier. Text ids are
+                stored as strings and integer ids as a compact 32-bit key; an
+                integer column holding any value outside ``0..2**32-1``
+                (negatives, snowflake ids, hashes) is stored as a full 64-bit
+                key instead, so no row is dropped for being out of range.
             node_title_field: Column used as display title. Defaults to ``unique_id_field``.
             columns: Whitelist of columns to include. ``None`` = all.
             conflict_handling: ``'update'`` (default), ``'replace'``, ``'skip'``,
@@ -1554,6 +1559,21 @@ class KnowledgeGraph:
                 For per-row labels, call :meth:`add_label` after.
             git_sha: Commit SHA stamped on opted-in ``auto_timestamp`` types.
             modified_by: Actor id stamped on opted-in ``auto_timestamp`` types.
+            on_invalid: What to do about input rows this call cannot use —
+                a row whose ID is null, or holds a value the declared ID type
+                cannot store.
+
+                - ``'warn'`` (default) — load the usable rows, count the rest
+                  in the report, and emit a ``UserWarning``.
+                - ``'error'`` — refuse the whole call. Raises
+                  :class:`ArgumentError` naming how many rows are unusable, the
+                  first offending row's position and what it holds. Nothing is
+                  written, so the graph is exactly as it was.
+                - ``'skip'`` — as ``'warn'``, without the warning. The counts
+                  stay in the returned report.
+
+                ``'error'`` also refuses an object-dtype column that would be
+                stringified wholesale (see ``column_types``).
 
         Returns:
             Operation report dict with keys ``nodes_created``,
@@ -1588,6 +1608,7 @@ class KnowledgeGraph:
         extra_properties: Optional[dict[str, Any]] = None,
         git_sha: Optional[str] = None,
         modified_by: Optional[str] = None,
+        on_invalid: Literal["warn", "error", "skip"] = "warn",
     ) -> dict[str, Any]:
         """Add connections (edges) between existing nodes.
 
@@ -1647,6 +1668,14 @@ class KnowledgeGraph:
                 ``auto_timestamp=True``.
             modified_by: Actor id stamped when the edge type has
                 ``auto_timestamp=True``.
+            on_invalid: What to do about rows whose source or target ID is
+                null. ``'warn'`` (default) skips them, counts them in the
+                report and emits a ``UserWarning``; ``'error'`` refuses the
+                whole call with :class:`ArgumentError`, naming the count, the
+                first offending row and the value it holds, before anything is
+                written; ``'skip'`` is ``'warn'`` without the warning. A row
+                whose endpoint is *missing* rather than null is vivified as a
+                stub node, not skipped, and is unaffected by this setting.
 
         Returns:
             Operation report dict with ``connections_created``, ``connections_skipped``, etc.
@@ -1671,6 +1700,7 @@ class KnowledgeGraph:
         extra_properties: Optional[dict[str, Any]] = None,
         git_sha: Optional[str] = None,
         modified_by: Optional[str] = None,
+        on_invalid: Literal["warn", "error", "skip"] = "warn",
     ) -> dict[str, Any]:
         """Replace a node's outgoing edges of a given type, then add new ones — an atomic edge upsert.
 
@@ -1715,6 +1745,14 @@ class KnowledgeGraph:
                 ``auto_timestamp=True``.
             modified_by: Actor id stamped when the edge type has
                 ``auto_timestamp=True``.
+            on_invalid: What to do about rows whose source or target ID is
+                null. ``'warn'`` (default) skips them, counts them in the
+                report and emits a ``UserWarning``; ``'error'`` refuses the
+                whole call with :class:`ArgumentError`, naming the count, the
+                first offending row and the value it holds, before anything is
+                written; ``'skip'`` is ``'warn'`` without the warning. A row
+                whose endpoint is *missing* rather than null is vivified as a
+                stub node, not skipped, and is unaffected by this setting.
 
         Returns:
             Operation report dict with ``connections_created``, ``connections_skipped``, etc.
@@ -4084,6 +4122,35 @@ class KnowledgeGraph:
 
     def has_schema(self) -> bool:
         """Check if a schema has been defined."""
+        ...
+
+    def verify_unique_constraints(self) -> list[dict[str, Any]]:
+        """Re-scan stored data and report every unique-constraint violation
+        currently present.
+
+        The on-demand counterpart of the rebuild ``load()`` runs. Enforcement
+        covers the Cypher write path and the bulk loaders, but **not** the RDF /
+        N-Triples loaders or the embedding-carry path — a graph filled through
+        those can hold duplicates a declared ``UNIQUE`` (or ``primary_key``)
+        constraint forbids. This is the audit for that case::
+
+            graph.define_schema({"nodes": {"Entity": {"unique": ["isbn"]}}})
+            graph.load_ntriples("catalogue.nt")     # bypasses enforcement
+            for bad in graph.verify_unique_constraints():
+                print(bad["node_type"], bad["properties"], bad["duplicate_tuples"])
+
+        Returns:
+            One dict per *violated constraint* (not per duplicate node), empty
+            when the data is clean::
+
+                [{"constraint": "UNIQUE", "node_type": "Person",
+                  "properties": ["email"], "duplicate_tuples": 2,
+                  "sample": ["a@b.c"], "message": "..."}]
+
+            ``duplicate_tuples`` counts distinct colliding value tuples;
+            ``sample`` is one of them, positional against ``properties``.
+            Constraints whose data is clean are not listed.
+        """
         ...
 
     def clear_schema(self) -> KnowledgeGraph:

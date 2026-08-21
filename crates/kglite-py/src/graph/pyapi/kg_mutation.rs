@@ -5,6 +5,7 @@
 //! blocks at class-registration time, so the split is purely structural —
 //! no runtime impact.
 
+use crate::datatypes::on_invalid::{self, OnInvalid};
 use crate::datatypes::py_in;
 use crate::datatypes::values::{DataFrame, Value};
 use crate::graph::languages::cypher;
@@ -140,6 +141,7 @@ fn build_connection_df_from_pandas(
     columns: Option<&Bound<'_, PyList>>,
     skip_columns: Option<&Bound<'_, PyList>>,
     column_types: Option<&Bound<'_, PyDict>>,
+    on_invalid: OnInvalid,
 ) -> PyResult<(DataFrame, Option<kglite_core::api::TemporalConfig>)> {
     let df_cols = data.getattr("columns")?;
     let all_columns: Vec<String> = df_cols.extract()?;
@@ -184,13 +186,71 @@ fn build_connection_df_from_pandas(
     };
     let effective_types = cleaned_types.as_ref().map(|d| d.bind(py).clone());
 
-    let df_result = py_in::pandas_to_dataframe(
+    let df_result = py_in::pandas_to_dataframe_with_options(
         data,
         &[source_id_field.to_string(), target_id_field.to_string()],
         &column_list,
         effective_types.as_ref(),
+        false,
+        on_invalid,
     )?;
     Ok((df_result, temporal_cfg))
+}
+
+/// Run a read-only connection `query` against `graph` and turn its result rows
+/// into the columnar frame the edge loader takes, stamping `extra_properties`
+/// onto every row as constant columns.
+///
+/// The query-mode counterpart of [`build_connection_df_from_pandas`]: both end
+/// at one [`DataFrame`], which is where the two paths converge.
+fn build_connection_df_from_query(
+    graph: &Arc<DirGraph>,
+    query_str: &str,
+    extra_properties: Option<&Bound<'_, PyDict>>,
+) -> PyResult<DataFrame> {
+    let mut parsed = parse_read_only_connection_query(query_str)?;
+    let empty_params = HashMap::new();
+    // Run the same planner optimizations as g.cypher() — otherwise pushdowns
+    // (including correlated-equality) don't fire here.
+    cypher::optimize(&mut parsed, graph, &empty_params);
+    let cypher_result = {
+        let executor = cypher::CypherExecutor::with_params(graph, &empty_params, None);
+        executor.execute(&parsed)
+    }
+    .map_err(|e| {
+        crate::error_py::kg_to_pyerr(crate::error::KgError::CypherExecution {
+            message: format!("Cypher execution error in connection query: {}", e),
+            position: None,
+        })
+    })?;
+
+    // Resolve NodeRef values to actual IDs/titles
+    let mut rows = cypher_result.rows;
+    resolve_noderefs(&graph.graph, &mut rows);
+
+    let mut df_result =
+        DataFrame::from_cypher_rows(cypher_result.columns, rows).map_err(|e| -> PyErr {
+            crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(format!(
+                "Failed to convert query results to DataFrame: {}",
+                e
+            )))
+        })?;
+
+    if let Some(props_dict) = extra_properties {
+        for (key, val) in props_dict.iter() {
+            let col_name: String = key.extract()?;
+            let value = py_in::py_value_to_value(&val)?;
+            df_result
+                .add_constant_column(col_name.clone(), value)
+                .map_err(|e| -> PyErr {
+                    crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(format!(
+                        "Failed to add extra_property '{}': {}",
+                        col_name, e
+                    )))
+                })?;
+        }
+    }
+    Ok(df_result)
 }
 
 fn validate_connection_input_mode(
@@ -287,9 +347,9 @@ fn write_connections(
     extra_properties: Option<&Bound<'_, PyDict>>,
     git_sha: Option<String>,
     modified_by: Option<String>,
+    on_invalid: &str,
 ) -> PyResult<Py<PyAny>> {
-    use crate::datatypes::values::DataFrame as KgDataFrame;
-
+    let on_invalid = OnInvalid::parse(on_invalid)?;
     let has_data = data.as_ref().map(|d| !d.is_none()).unwrap_or(false);
     validate_connection_input_mode(
         has_data,
@@ -302,53 +362,18 @@ fn write_connections(
 
     // ── Query path: run Cypher, convert to internal DataFrame ──
     if let Some(query_str) = query {
-        let mut parsed = parse_read_only_connection_query(&query_str)?;
-
-        // Execute read-only: clone Arc, execute without holding mutable borrow
+        // Execute read-only against a cloned Arc, so no mutable borrow is held
+        // while the query runs.
         let inner_clone = kg.inner.clone();
-        let empty_params = HashMap::new();
-        // Run the same planner optimizations as g.cypher() — otherwise
-        // pushdowns (including correlated-equality) don't fire here.
-        cypher::optimize(&mut parsed, &inner_clone, &empty_params);
-        let cypher_result = {
-            let executor = cypher::CypherExecutor::with_params(&inner_clone, &empty_params, None);
-            executor.execute(&parsed)
-        }
-        .map_err(|e| {
-            crate::error_py::kg_to_pyerr(crate::error::KgError::CypherExecution {
-                message: format!("Cypher execution error in connection query: {}", e),
-                position: None,
-            })
-        })?;
+        let df_result = build_connection_df_from_query(&inner_clone, &query_str, extra_properties)?;
 
-        // Resolve NodeRef values to actual IDs/titles
-        let mut rows = cypher_result.rows;
-        resolve_noderefs(&inner_clone.graph, &mut rows);
-
-        // Convert row-oriented Cypher result to columnar DataFrame
-        let mut df_result =
-            KgDataFrame::from_cypher_rows(cypher_result.columns, rows).map_err(|e| -> PyErr {
-                crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(format!(
-                    "Failed to convert query results to DataFrame: {}",
-                    e
-                )))
-            })?;
-
-        // Apply extra_properties as constant columns
-        if let Some(props_dict) = extra_properties {
-            for (key, val) in props_dict.iter() {
-                let col_name: String = key.extract()?;
-                let value = py_in::py_value_to_value(&val)?;
-                df_result
-                    .add_constant_column(col_name.clone(), value)
-                    .map_err(|e| -> PyErr {
-                        crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(format!(
-                            "Failed to add extra_property '{}': {}",
-                            col_name, e
-                        )))
-                    })?;
-            }
-        }
+        refuse_unusable_rows_if_asked(
+            on_invalid,
+            "add_connections",
+            &df_result,
+            &[&source_id_field, &target_id_field],
+            None,
+        )?;
 
         let mut names = vec![
             connection_type.as_str(),
@@ -399,7 +424,7 @@ fn write_connections(
         })?;
 
         kg.cursor.selection.clear();
-        return finish_connection_write(kg, &result, &connection_type);
+        return finish_connection_write(kg, &result, &connection_type, on_invalid);
     }
 
     // ── Data path: pandas DataFrame logic ──
@@ -414,6 +439,14 @@ fn write_connections(
         columns,
         skip_columns,
         column_types,
+        on_invalid,
+    )?;
+    refuse_unusable_rows_if_asked(
+        on_invalid,
+        "add_connections",
+        &df_result,
+        &[&source_id_field, &target_id_field],
+        Some(data),
     )?;
 
     let mut names = vec![
@@ -477,7 +510,7 @@ fn write_connections(
         .ensure_disk_edges_built()
         .map_err(pyo3::exceptions::PyOSError::new_err)?;
 
-    finish_connection_write(kg, &result, &connection_type)
+    finish_connection_write(kg, &result, &connection_type, on_invalid)
 }
 
 /// Shared tail of both `write_connections` paths: make the edges durable, file
@@ -490,10 +523,41 @@ fn finish_connection_write(
     kg: &mut KnowledgeGraph,
     result: &kglite_core::api::mutation::ConnectionOperationReport,
     connection_type: &str,
+    on_invalid: OnInvalid,
 ) -> PyResult<Py<PyAny>> {
     kg.commit_wal()?;
     kg.add_report(OperationReport::ConnectionOperation(result.clone()));
-    KnowledgeGraph::connection_report_to_py(result, connection_type)
+    KnowledgeGraph::connection_report_to_py(result, connection_type, on_invalid)
+}
+
+/// Refuse a loader call whose input carries rows no id can be read from, when
+/// `on_invalid` asked for a refusal.
+///
+/// Runs on the *converted* frame and before any mutation, so the refusal is
+/// total: an `on_invalid="error"` load either happens or leaves the graph
+/// exactly as it was — unlike the tolerated modes, where the usable rows land
+/// and the rest are counted. `raw_frame` is the caller's own DataFrame, read
+/// only to quote the offending cell as they wrote it.
+fn refuse_unusable_rows_if_asked(
+    on_invalid: OnInvalid,
+    loader: &str,
+    df: &DataFrame,
+    id_columns: &[&str],
+    raw_frame: Option<&Bound<'_, PyAny>>,
+) -> PyResult<()> {
+    if !on_invalid.raises() {
+        return Ok(());
+    }
+    let Some(bad) = on_invalid::scan_unusable_rows(df, id_columns) else {
+        return Ok(());
+    };
+    let raw = on_invalid::raw_cell_repr(raw_frame, &bad.first_column, bad.first_row);
+    Err(on_invalid::unusable_rows_err(
+        loader,
+        df.row_count(),
+        &bad,
+        &raw,
+    ))
 }
 
 fn parse_inline_config<'py>(
@@ -580,14 +644,15 @@ struct ConvertedFrame {
 }
 
 fn convert_dataframe<'py>(
-    py: Python<'py>,
     data: &Bound<'py, PyAny>,
     unique_id_field: &str,
     column_list: &[String],
     ts_config: Option<&InlineTimeseriesConfig>,
     column_types: Option<&Bound<'py, PyDict>>,
     nullable_int_downcast: bool,
+    on_invalid: OnInvalid,
 ) -> PyResult<ConvertedFrame> {
+    let py = data.py();
     let (spatial_cfg, cleaned_after_spatial) = match column_types {
         Some(type_dict) => {
             let (cfg, cleaned) = parse_spatial_column_types(py, type_dict)?;
@@ -623,6 +688,17 @@ fn convert_dataframe<'py>(
         column_list,
         effective_types.as_ref(),
         nullable_int_downcast,
+        on_invalid,
+    )?;
+
+    // `data_for_nodes`, not `data`: when a timeseries config deduplicates the
+    // input, that is the frame the converted rows line up with positionally.
+    refuse_unusable_rows_if_asked(
+        on_invalid,
+        "add_nodes",
+        &df,
+        &[unique_id_field],
+        Some(&data_for_nodes),
     )?;
 
     Ok(ConvertedFrame {
@@ -917,9 +993,12 @@ fn apply_timeseries<'py>(
     Ok(())
 }
 
+/// Marshal an `add_nodes` report, warning about skipped rows unless
+/// `on_invalid` asked for silence. The counts are in the dict either way.
 fn build_node_report_dict<'py>(
     py: Python<'py>,
     result: &NodeOperationReport,
+    on_invalid: OnInvalid,
 ) -> PyResult<Py<PyAny>> {
     let report_dict = PyDict::new(py);
     report_dict.set_item("operation", &result.operation_type)?;
@@ -939,7 +1018,7 @@ fn build_node_report_dict<'py>(
     // errors. Silent skips on bulk loads were a recurring footgun —
     // surface them at warn level so the user sees them without needing
     // to inspect last_report().
-    if has_errors {
+    if has_errors && on_invalid.warns() {
         let total = result.nodes_created + result.nodes_updated + result.nodes_skipped;
         let detail = if result.errors.is_empty() {
             String::new()
@@ -1070,7 +1149,7 @@ impl KnowledgeGraph {
     /// Returns:
     ///     dict with 'nodes_created', 'nodes_updated', 'nodes_skipped',
     ///     'processing_time_ms', 'has_errors', and optionally 'errors'.
-    #[pyo3(signature = (data, node_type, unique_id_field, node_title_field=None, columns=None, conflict_handling=None, skip_columns=None, column_types=None, timeseries=None, nullable_int_downcast=false, labels=None, managed_reload=false, git_sha=None, modified_by=None))]
+    #[pyo3(signature = (data, node_type, unique_id_field, node_title_field=None, columns=None, conflict_handling=None, skip_columns=None, column_types=None, timeseries=None, nullable_int_downcast=false, labels=None, managed_reload=false, git_sha=None, modified_by=None, on_invalid="warn"))]
     #[allow(clippy::too_many_arguments)]
     fn add_nodes(
         &mut self,
@@ -1088,8 +1167,10 @@ impl KnowledgeGraph {
         managed_reload: bool,
         git_sha: Option<String>,
         modified_by: Option<String>,
+        on_invalid: &str,
     ) -> PyResult<Py<PyAny>> {
         let py = data.py();
+        let on_invalid = OnInvalid::parse(on_invalid)?;
         // Managed-reload guard: a managed reload (research rebuilding from
         // source) must never write a `runtime`-layer type (agent-owned). Skip
         // it as a no-op + report, so disjoint ownership is enforced, not
@@ -1118,13 +1199,13 @@ impl KnowledgeGraph {
         let embedding_data =
             extract_embedding_pairs(data, &unique_id_field, &parsed.embedding_columns)?;
         let converted = convert_dataframe(
-            py,
             data,
             &unique_id_field,
             &parsed.column_list,
             parsed.ts_config.as_ref(),
             column_types,
             nullable_int_downcast,
+            on_invalid,
         )?;
 
         let mut names = vec![node_type.as_str()];
@@ -1167,7 +1248,7 @@ impl KnowledgeGraph {
         self.commit_wal()?;
         self.add_report(OperationReport::NodeOperation(result.clone()));
 
-        Python::attach(|py| build_node_report_dict(py, &result))
+        Python::attach(|py| build_node_report_dict(py, &result, on_invalid))
     }
 
     /// Merge another KnowledgeGraph into this one, in place.
@@ -1331,7 +1412,7 @@ impl KnowledgeGraph {
     /// Returns:
     ///     dict with 'connections_created', 'connections_skipped',
     ///     'processing_time_ms', 'has_errors', and optionally 'errors'.
-    #[pyo3(signature = (data, connection_type, source_type, source_id_field, target_type, target_id_field, source_title_field=None, target_title_field=None, columns=None, skip_columns=None, conflict_handling=None, column_types=None, query=None, extra_properties=None, git_sha=None, modified_by=None))]
+    #[pyo3(signature = (data, connection_type, source_type, source_id_field, target_type, target_id_field, source_title_field=None, target_title_field=None, columns=None, skip_columns=None, conflict_handling=None, column_types=None, query=None, extra_properties=None, git_sha=None, modified_by=None, on_invalid="warn"))]
     #[allow(clippy::too_many_arguments)]
     fn add_connections(
         &mut self,
@@ -1352,6 +1433,7 @@ impl KnowledgeGraph {
         extra_properties: Option<&Bound<'_, PyDict>>,
         git_sha: Option<String>,
         modified_by: Option<String>,
+        on_invalid: &str,
     ) -> PyResult<Py<PyAny>> {
         write_connections(
             py,
@@ -1373,6 +1455,7 @@ impl KnowledgeGraph {
             extra_properties,
             git_sha,
             modified_by,
+            on_invalid,
         )
     }
 
@@ -1421,7 +1504,7 @@ impl KnowledgeGraph {
     /// Returns:
     ///     dict with 'connections_created', 'connections_skipped',
     ///     'processing_time_ms', 'has_errors', and optionally 'errors'.
-    #[pyo3(signature = (data, connection_type, source_type, source_id_field, target_type, target_id_field, source_title_field=None, target_title_field=None, columns=None, skip_columns=None, conflict_handling=None, column_types=None, query=None, extra_properties=None, git_sha=None, modified_by=None))]
+    #[pyo3(signature = (data, connection_type, source_type, source_id_field, target_type, target_id_field, source_title_field=None, target_title_field=None, columns=None, skip_columns=None, conflict_handling=None, column_types=None, query=None, extra_properties=None, git_sha=None, modified_by=None, on_invalid="warn"))]
     #[allow(clippy::too_many_arguments)]
     fn replace_connections(
         &mut self,
@@ -1442,6 +1525,7 @@ impl KnowledgeGraph {
         extra_properties: Option<&Bound<'_, PyDict>>,
         git_sha: Option<String>,
         modified_by: Option<String>,
+        on_invalid: &str,
     ) -> PyResult<Py<PyAny>> {
         write_connections(
             py,
@@ -1463,6 +1547,7 @@ impl KnowledgeGraph {
             extra_properties,
             git_sha,
             modified_by,
+            on_invalid,
         )
     }
 

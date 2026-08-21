@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The bulk loader silently dropped every integer id outside the `u32`
+  range.** `add_nodes` auto-detects an integer `unique_id_field` as the compact
+  32-bit key type, so a negative id, a snowflake id, a hash, or anything from
+  `2**32` up parsed to nothing and its row was dropped — a short load reported
+  only as a `UserWarning` and a `nodes_skipped` count, and the advice in the
+  skip message (`column_types={'id': 'string'}`) silently changed the key type
+  to text rather than fixing the range. An integer id column that does not fit
+  `u32` is now stored as a full 64-bit key, which indexes, matches, saves and
+  loads exactly as before — `column_types={'id': 'int64'}` was always the
+  working shape and is now what the default does. Auto-minted ids stay 32-bit
+  and ignore out-of-range values, so the two id spaces cannot collide. The skip
+  message that remains no longer recommends a type change that loses the ids.
+
+- **An object-dtype column stringified without a word.** The typed columnar
+  store has no heterogeneous variant, so `[10, 20, 'N/A']` was stored as
+  `['10', '20', 'N/A']` and every later comparison, sort and aggregate on that
+  column silently became a text one. The coercion is unchanged — it is the
+  design — but the loader now warns, naming the column, what pandas inferred it
+  to hold, the first row that gets rewritten, and the `column_types=` override
+  that picks a real type. A column that already holds only text is unaffected.
+
 - **A crash between a `storage="disk"` `open()` and the first `save()` left a
   directory every later `open()` refused.** Disk-mode creation materialised the
   path — the writer lock and `seg_000/*.bin` — but published no generation until
@@ -313,6 +334,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   skipped and no longer influence the type. `avg`, `count`, `min` and `max` are
   unchanged.
 
+### Added
+
+- **`on_invalid={'warn','error','skip'}` on `add_nodes` and
+  `add_connections`.** Bulk loading has always tolerated input it cannot use —
+  a row whose id is null or unrepresentable, an edge row with a null endpoint —
+  by skipping the row, counting it, and warning. That is the right default for
+  exploration and the wrong one for a pipeline, where a silently short load
+  surfaces as a data bug much later. `on_invalid='error'` refuses the whole
+  call *before* it writes anything, naming how many rows are unusable, which
+  row is first and what it holds; `on_invalid='skip'` does today's work without
+  the warning, keeping the counts in the returned report. The default stays
+  `'warn'`, so existing callers see no change. `'error'` also refuses an
+  object-dtype column that would be stringified wholesale.
+
+- **`verify_unique_constraints()` is bound to Python.** The audit
+  `docs/python/guides/primary-store.md` has always pointed at for graphs filled
+  through a path that bypasses enforcement (the RDF / N-Triples loaders, the
+  embedding-carry path) existed only in the engine. It returns one dict per
+  violated constraint — `constraint`, `node_type`, `properties`,
+  `duplicate_tuples`, a `sample` tuple and a message — and an empty list when
+  the stored data is clean.
+
 ### Changed
 
 - **Breaking (semantics fix): Cypher `=~` now matches the whole value instead
@@ -334,6 +377,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spellings were synonyms and are not any more, because one of them is a
   Cypher operator. `text_match_regex()` is likewise untouched: it is the
   documented search function.
+
+- **`define_schema` rejects keys it does not understand.** An unrecognised key
+  inside a node or connection declaration used to be dropped in silence, so
+  `{'uniqe': [['email']]}` installed a schema that reported success and enforced
+  no uniqueness at all. Unknown keys now raise, naming the near miss where there
+  is one (`Did you mean 'unique'?`) and the accepted set otherwise. The same
+  check catches a forgotten `'nodes'` wrapper — `define_schema({'Task': {...}})`
+  previously installed a completely empty schema without complaint — and points
+  at the wrapper by name. Valid schemas parse exactly as before, and an absent
+  or non-map `nodes` / `connections` section stays the no-op it has always been.
 
 - **Cypher parse errors read as Cypher, not as Rust.** A token in an error
   message is now spelled the way it was written — `MATCH (n) SET 1 = 2` says

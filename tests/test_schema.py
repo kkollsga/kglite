@@ -447,3 +447,79 @@ class TestSchemaDialectIsShared:
         # And the key it names actually works.
         graph.define_schema({"nodes": {"Person": {"types": {"age": "integer"}}}})
         assert [e["error_type"] for e in graph.validate_schema()] == ["type_mismatch"]
+
+
+class TestDefineSchemaRejectsUnknownKeys:
+    """A schema is a promise about integrity, so a key the parser cannot place
+    is never a harmless extra: it reads as a declaration the caller believes
+    they made and the graph does not enforce."""
+
+    def test_a_typo_in_a_node_declaration_is_refused_with_the_near_miss(self):
+        graph = KnowledgeGraph()
+        with pytest.raises(Exception) as excinfo:
+            graph.define_schema({"nodes": {"Task": {"required": ["id"], "uniqe": [["name"]]}}})
+        message = str(excinfo.value)
+        assert "'uniqe'" in message, message
+        assert "Did you mean 'unique'?" in message, message
+        # Refused outright: no half-installed schema.
+        assert graph.schema_definition() is None or graph.schema_definition()["nodes"] == {}
+
+    def test_a_typo_in_a_connection_declaration_is_refused(self):
+        graph = KnowledgeGraph()
+        with pytest.raises(Exception, match="cardinality"):
+            graph.define_schema({"connections": {"R": {"source": "A", "target": "B", "cardinaliy": "one-to-one"}}})
+
+    def test_an_unrecognisable_key_lists_the_accepted_ones(self):
+        graph = KnowledgeGraph()
+        with pytest.raises(Exception) as excinfo:
+            graph.define_schema({"nodes": {"Task": {"indexes": ["name"]}}})
+        message = str(excinfo.value)
+        assert "node type 'Task'" in message, message
+        assert "'primary_key'" in message, message
+
+    def test_a_missing_nodes_wrapper_names_the_wrapper(self):
+        # This used to be accepted in silence and install an *empty* schema, so
+        # every constraint the caller wrote was dropped without a word.
+        graph = KnowledgeGraph()
+        with pytest.raises(Exception) as excinfo:
+            graph.define_schema({"Task": {"required": ["id"], "unique": [["name"]]}})
+        message = str(excinfo.value)
+        assert "'nodes' wrapper" in message, message
+        assert "'Task'" in message, message
+        assert graph.schema_definition() is None
+
+    def test_a_misspelled_wrapper_suggests_the_real_one(self):
+        graph = KnowledgeGraph()
+        with pytest.raises(Exception, match="Did you mean 'nodes'"):
+            graph.define_schema({"node": {"Task": {"required": ["id"]}}})
+
+    def test_every_documented_key_still_parses(self):
+        graph = KnowledgeGraph()
+        graph.define_schema(
+            {
+                "nodes": {
+                    "Person": {
+                        "required": ["id", "name"],
+                        "optional": ["email"],
+                        "types": {"id": "integer"},
+                        "primary_key": "id",
+                        "unique": [["email"]],
+                        "layer": "managed",
+                        "auto_timestamp": True,
+                    }
+                },
+                "connections": {
+                    "KNOWS": {
+                        "source": "Person",
+                        "target": "Person",
+                        "cardinality": "many-to-many",
+                        "required_properties": ["since"],
+                        "property_types": {"since": "integer"},
+                        "auto_timestamp": False,
+                    }
+                },
+            }
+        )
+        definition = graph.schema_definition()
+        assert "Person" in definition["nodes"]
+        assert "KNOWS" in definition["connections"]

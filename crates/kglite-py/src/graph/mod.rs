@@ -686,9 +686,15 @@ impl KnowledgeGraph {
 
     /// Convert a ConnectionOperationReport to a Python dict and emit a warning
     /// if any rows were skipped.
+    ///
+    /// `on_invalid` decides only whether the *skip* warning is emitted: the
+    /// counts stay in the returned dict either way, and the vivification notice
+    /// below is not a skip report — a stub node is created, not dropped — so it
+    /// is never silenced.
     pub(crate) fn connection_report_to_py(
         result: &kglite_core::api::mutation::ConnectionOperationReport,
         connection_type: &str,
+        on_invalid: crate::datatypes::on_invalid::OnInvalid,
     ) -> PyResult<Py<PyAny>> {
         Python::attach(|py| {
             let report_dict = PyDict::new(py);
@@ -708,7 +714,7 @@ impl KnowledgeGraph {
 
             // Emit a warning whenever the report flags skips or errors —
             // silent skips on bulk edge loads were a recurring footgun.
-            if has_errors {
+            if has_errors && on_invalid.warns() {
                 let total = result.connections_created + result.connections_skipped;
                 let detail = if result.errors.is_empty() {
                     String::new()

@@ -1,4 +1,5 @@
 // src/datatypes/py_in.rs
+use super::on_invalid::{self, OnInvalid};
 use super::type_conversions::{to_bool, to_datetime, to_f64, to_i64, to_timestamp, to_u32};
 use super::values::{ColumnData, ColumnType, DataFrame, FilterCondition, Value};
 use pyo3::prelude::*;
@@ -375,7 +376,14 @@ pub fn pandas_to_dataframe(
     column_names: &[String],
     column_types: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<DataFrame> {
-    pandas_to_dataframe_with_options(df, unique_id_fields, column_names, column_types, false)
+    pandas_to_dataframe_with_options(
+        df,
+        unique_id_fields,
+        column_names,
+        column_types,
+        false,
+        OnInvalid::Warn,
+    )
 }
 
 /// Same as [`pandas_to_dataframe`] but with extra knobs.
@@ -386,12 +394,17 @@ pub fn pandas_to_dataframe(
 /// integer columns to float64 when nulls are present, which then
 /// surfaces in queries as `"2.0"` instead of `2`. Off by default — opt
 /// in via `add_nodes(nullable_int_downcast=True)`.
+///
+/// `on_invalid`: what to do about a column whose values cannot be stored as
+/// given — today, an object column that is about to be stringified. See
+/// [`super::on_invalid`].
 pub fn pandas_to_dataframe_with_options(
     df: &Bound<'_, PyAny>,
     unique_id_fields: &[String],
     column_names: &[String],
     column_types: Option<&Bound<'_, PyDict>>,
     nullable_int_downcast: bool,
+    on_invalid: OnInvalid,
 ) -> PyResult<DataFrame> {
     // Reset index to ensure contiguous positional access.
     // Handles filtered/deduped DataFrames with non-contiguous indexes.
@@ -449,27 +462,16 @@ pub fn pandas_to_dataframe_with_options(
                         }
                     }
                 } else if unique_id_fields.contains(col_name) {
-                    // Auto-detect: string/object columns keep String type rather than
-                    // forcing UniqueId (which silently drops non-numeric string IDs)
-                    let detected = determine_column_type(&series, col_name)?;
-                    match detected {
-                        ColumnType::String => ColumnType::String,
-                        _ => ColumnType::UniqueId,
-                    }
+                    unique_id_column_type(&series, col_name, on_invalid)?
                 } else {
                     // Fall back to auto-detection if not in custom mapping
-                    determine_column_type(&series, col_name)?
+                    determine_column_type(&series, col_name, on_invalid)?
                 }
             } else if unique_id_fields.contains(col_name) {
-                // Auto-detect: string/object columns keep String type
-                let detected = determine_column_type(&series, col_name)?;
-                match detected {
-                    ColumnType::String => ColumnType::String,
-                    _ => ColumnType::UniqueId,
-                }
+                unique_id_column_type(&series, col_name, on_invalid)?
             } else {
                 // No custom mapping provided, use auto-detection
-                determine_column_type(&series, col_name)?
+                determine_column_type(&series, col_name, on_invalid)?
             };
 
             let data = convert_pandas_series(&series, col_type.clone())?;
@@ -520,8 +522,118 @@ fn try_downcast_float_to_int(col_type: ColumnType, data: ColumnData) -> (ColumnT
     (ColumnType::Int64, ColumnData::Int64(int_values))
 }
 
+/// The stored type a declared unique-id column gets when nothing overrides it.
+///
+/// Two coercions away from plain auto-detection, both there to stop a key
+/// silently disappearing:
+///
+/// - a String/object column stays `String`, because `UniqueId` would drop every
+///   non-numeric key;
+/// - an integer column whose values do **not** all fit `u32` stays `Int64`.
+///   `UniqueId` is a compact `u32`, so `to_u32` returned `None` for every
+///   negative or `>= 2^32` id and the loader dropped the row with nothing but a
+///   `UserWarning` — a silent short load on exactly the id shapes (snowflake
+///   ids, hashes, negative sentinels) a caller is least likely to have made up.
+///   `Int64` ids index, match, save and load like any other key
+///   (`column_types={'id': 'int64'}` has always worked end to end); they only
+///   give up the compact representation, which is the right trade against
+///   losing the row. Auto-minted ids stay `u32` and `DirGraph::observe_explicit_id`
+///   ignores out-of-range values, so the two id spaces cannot collide.
+fn unique_id_column_type(
+    series: &Bound<'_, PyAny>,
+    col_name: &str,
+    on_invalid: OnInvalid,
+) -> PyResult<ColumnType> {
+    match determine_column_type(series, col_name, on_invalid)? {
+        ColumnType::String => Ok(ColumnType::String),
+        ColumnType::Int64 if !int_series_fits_u32(series) => Ok(ColumnType::Int64),
+        _ => Ok(ColumnType::UniqueId),
+    }
+}
+
+/// Whether every value of an integer-typed series lies in `0..=u32::MAX`.
+///
+/// Asked of the column's own `min()`/`max()`, so it costs one vectorised pass
+/// rather than a per-cell round trip, and an aggregate that is null (an
+/// all-null nullable-int column) or unreadable answers "fits" — there is no
+/// out-of-range value to preserve in either case.
+fn int_series_fits_u32(series: &Bound<'_, PyAny>) -> bool {
+    for aggregate in ["min", "max"] {
+        let Ok(value) = series.call_method0(aggregate) else {
+            return true;
+        };
+        if let Some(bound) = to_i64(&value) {
+            if bound < 0 || bound > u32::MAX as i64 {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// `pandas.api.types.infer_dtype` results that mean "this object column is
+/// already text", i.e. stringifying it changes nothing.
+const TEXT_INFERENCES: &[&str] = &["string", "unicode", "empty"];
+
+/// Say so when an object column is about to be stringified wholesale.
+///
+/// The typed columnar store has no heterogeneous variant, so `[10, 20, 'N/A']`
+/// is stored as `['10', '20', 'N/A']` — every later comparison, sort and
+/// aggregation on that column is a *text* one. The coercion itself is the
+/// design; doing it without a word was the defect: the caller has no way to
+/// see it short of reading a value back and checking its type.
+fn warn_object_stringification(
+    series: &Bound<'_, PyAny>,
+    col_name: &str,
+    inferred: &str,
+    on_invalid: OnInvalid,
+) -> PyResult<()> {
+    if TEXT_INFERENCES.contains(&inferred) {
+        return Ok(());
+    }
+    let offender = match first_non_text_cell(series) {
+        Some((row, value)) => format!(" (row {row} holds {value})"),
+        None => String::new(),
+    };
+    on_invalid::report(
+        series.py(),
+        on_invalid,
+        format!(
+            "Column '{col_name}' has object dtype holding {inferred} values{offender}: the \
+             columnar store has no mixed-type column, so every value is stored as text and \
+             comparisons, ordering and aggregates over it become text operations. Give the \
+             column a real dtype (astype('int64'), pd.to_datetime, …) or name one with \
+             column_types={{'{col_name}': …}} — 'string' if text is what you want."
+        ),
+    )
+}
+
+/// The first cell of an object column that is not already a `str`, as
+/// `(row index, repr)`. `None` when every non-null cell is text.
+fn first_non_text_cell(series: &Bound<'_, PyAny>) -> Option<(usize, String)> {
+    let items = series.call_method0("tolist").ok()?;
+    let items = items.cast::<PyList>().ok()?;
+    for (row, item) in items.iter().enumerate() {
+        if item.is_none() || item.cast::<pyo3::types::PyString>().is_ok() {
+            continue;
+        }
+        // NaN is pandas' null in an object column, not a value the caller wrote.
+        if let Ok(float) = item.extract::<f64>() {
+            if float.is_nan() {
+                continue;
+            }
+        }
+        return Some((row, item.repr().ok()?.to_string()));
+    }
+    None
+}
+
 // Helper function to determine column type from pandas series
-fn determine_column_type(series: &Bound<'_, PyAny>, col_name: &str) -> PyResult<ColumnType> {
+fn determine_column_type(
+    series: &Bound<'_, PyAny>,
+    col_name: &str,
+    on_invalid: OnInvalid,
+) -> PyResult<ColumnType> {
     let dtype = series.getattr("dtype").map_err(|_| {
         PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
             "Could not determine type for column '{}'. The data may not be a valid pandas Series. \
@@ -558,6 +670,7 @@ fn determine_column_type(series: &Bound<'_, PyAny>, col_name: &str) -> PyResult<
             if inferred == "boolean" {
                 return Ok(ColumnType::Boolean);
             }
+            warn_object_stringification(series, col_name, &inferred, on_invalid)?;
             Ok(ColumnType::String)
         }
         "string" | "str" | "string[python]" | "string[pyarrow]" => {

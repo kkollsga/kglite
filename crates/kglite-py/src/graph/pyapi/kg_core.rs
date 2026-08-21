@@ -1324,6 +1324,58 @@ impl KnowledgeGraph {
         Ok(result.into())
     }
 
+    /// Re-scan stored data and report every unique-constraint violation
+    /// currently present.
+    ///
+    /// The on-demand counterpart of the rebuild `load()` runs. Enforcement
+    /// covers the Cypher write path and the bulk loaders, but **not** the RDF /
+    /// N-Triples loaders or the embedding-carry path, so a graph filled
+    /// through those can hold duplicates a declared `UNIQUE` (or
+    /// `primary_key`) constraint forbids. This is the audit for that case.
+    ///
+    /// Returns:
+    ///     A list with one dict per *violated constraint* (not per duplicate
+    ///     node) — empty when the data is clean::
+    ///
+    ///         [{"constraint": "UNIQUE", "node_type": "Person",
+    ///           "properties": ["email"], "duplicate_tuples": 2,
+    ///           "sample": ["a@b.c"], "message": "..."}]
+    ///
+    ///     ``duplicate_tuples`` counts distinct colliding value tuples;
+    ///     ``sample`` is one of them, positional against ``properties``.
+    fn verify_unique_constraints(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        // The scan is `&mut` in core because it rebuilds each index to count
+        // collisions — an audit, not a read — so it takes the same mutable
+        // handle every writer does.
+        let violations = get_graph_mut(&mut self.inner).verify_unique_constraints();
+        let result = PyList::empty(py);
+        for violation in violations {
+            let entry = PyDict::new(py);
+            entry.set_item("constraint", violation.kind.keyword())?;
+            entry.set_item("node_type", &violation.node_type)?;
+            entry.set_item("properties", violation.properties.clone())?;
+            let sample = PyList::empty(py);
+            for value in violation.sample_values() {
+                sample.append(py_out::value_to_py(py, value)?)?;
+            }
+            entry.set_item("sample", sample)?;
+            let duplicate_tuples = violation.duplicate_tuple_count();
+            entry.set_item("duplicate_tuples", duplicate_tuples)?;
+            entry.set_item(
+                "message",
+                audit_message(
+                    violation.kind.keyword(),
+                    &violation.node_type,
+                    &violation.properties,
+                    duplicate_tuples.unwrap_or(0),
+                    violation.sample_values(),
+                ),
+            )?;
+            result.append(entry)?;
+        }
+        Ok(result.into())
+    }
+
     /// Check if a schema has been defined for this graph
     fn has_schema(&self) -> bool {
         self.inner.get_schema().is_some()
@@ -1984,6 +2036,46 @@ impl KnowledgeGraph {
 /// expands to all registered pass names; `disabled_passes` adds named
 /// passes on top, validated against the registry so typos surface as a
 /// `ValueError` instead of a silent no-op.
+/// One line describing a unique-constraint violation found by *auditing* stored
+/// data: which constraint, on what, how badly, and one value to go looking for.
+///
+/// Written here rather than taken from the violation's own `Display`, which is
+/// worded for a declaration that cannot be installed ("deduplicate the node type
+/// before declaring the constraint") — the opposite situation, where the
+/// constraint does not exist yet. In an audit it is already declared and the
+/// data drifted under it, so that advice would send the reader to the wrong fix.
+fn audit_message(
+    constraint: &str,
+    node_type: &str,
+    properties: &[String],
+    duplicate_tuples: usize,
+    sample: &[crate::datatypes::values::Value],
+) -> String {
+    let target = match properties {
+        [single] => format!("{node_type}.{single}"),
+        many => format!("{node_type}.({})", many.join(", ")),
+    };
+    let noun = if properties.len() > 1 {
+        "value tuple"
+    } else {
+        "value"
+    };
+    let plural = if duplicate_tuples == 1 { "" } else { "s" };
+    let rendered: Vec<String> = sample
+        .iter()
+        .map(kglite_core::api::fluent::format_value_compact)
+        .collect();
+    let example = if rendered.is_empty() {
+        String::new()
+    } else {
+        format!(" (for example {})", rendered.join(", "))
+    };
+    format!(
+        "{constraint} constraint on {target} is violated by {duplicate_tuples} \
+         duplicate {noun}{plural}{example}."
+    )
+}
+
 /// Warn, naming every constraint a `replace=True` install stops enforcing.
 ///
 /// Replacement is the one mode that reaches types the caller never mentioned,

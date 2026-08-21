@@ -11,6 +11,7 @@ pub mod values {
     pub use kglite_core::datatypes::values::*;
 }
 
+pub mod on_invalid;
 pub mod py_in;
 pub mod py_out;
 pub mod type_conversions;

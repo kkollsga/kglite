@@ -1213,8 +1213,8 @@ pub(super) fn write_fluent_topic_loading(xml: &mut String) {
         "    <desc>Load nodes and connections from DataFrames or blueprint files.</desc>\n",
     );
     xml.push_str("    <methods>\n");
-    xml.push_str("      <m sig=\"add_nodes(df, type, id_field, title_field, columns=None, column_types=None, conflict_handling='skip', timeseries=None, git_sha=None, modified_by=None)\">Load nodes. conflict_handling: 'update'|'replace'|'skip'|'preserve'|'sum'. Provenance is stamped on auto_timestamp types.</m>\n");
-    xml.push_str("      <m sig=\"add_connections(data, conn_type, source_type, source_id_field, target_type, target_id_field, columns=None, skip_columns=None, conflict_handling='update', query=None, extra_properties=None, git_sha=None, modified_by=None)\">Load edges from DataFrame or a read query. Provenance is stamped on auto_timestamp edge types.</m>\n");
+    xml.push_str("      <m sig=\"add_nodes(df, type, id_field, title_field, columns=None, column_types=None, conflict_handling='skip', timeseries=None, git_sha=None, modified_by=None, on_invalid='warn')\">Load nodes. conflict_handling: 'update'|'replace'|'skip'|'preserve'|'sum'. on_invalid: 'warn' (default, skip unusable rows and warn), 'error' (refuse the whole call, nothing written), 'skip' (silent). Provenance is stamped on auto_timestamp types.</m>\n");
+    xml.push_str("      <m sig=\"add_connections(data, conn_type, source_type, source_id_field, target_type, target_id_field, columns=None, skip_columns=None, conflict_handling='update', query=None, extra_properties=None, git_sha=None, modified_by=None, on_invalid='warn')\">Load edges from DataFrame or a read query. on_invalid controls rows with a null endpoint id, as in add_nodes. Provenance is stamped on auto_timestamp edge types.</m>\n");
     xml.push_str("      <m sig=\"replace_connections(data, conn_type, source_type, source_id_field, target_type, target_id_field, ...)\">Atomic edge upsert: prune each source node's existing conn_type edges, then add the input's. Same args as add_connections; use to re-sync a derived edge set idempotently.</m>\n");
     xml.push_str("      <m sig=\"add_nodes_bulk(specs, git_sha=None, modified_by=None)\">Bulk load multiple node types with optional provenance.</m>\n");
     xml.push_str(
@@ -1327,7 +1327,8 @@ pub(super) fn write_fluent_topic_schema(xml: &mut String) {
     xml.push_str(
         "      <m sig=\"describe(types=['...'])\">AI-optimised XML for specific types.</m>\n",
     );
-    xml.push_str("      <m sig=\"define_schema(schema_dict, replace=False)\">Enforce schema constraints. Merges per node/connection type: a type the call names takes the new declaration, a type it omits keeps its own. replace=True makes the incoming schema the whole schema, withdrawing constraints on every type it omits.</m>\n");
+    xml.push_str("      <m sig=\"define_schema(schema_dict, replace=False)\">Enforce schema constraints. Merges per node/connection type: a type the call names takes the new declaration, a type it omits keeps its own. replace=True makes the incoming schema the whole schema, withdrawing constraints on every type it omits. Unknown keys are rejected, so a typo'd declaration cannot pass for a constraint.</m>\n");
+    xml.push_str("      <m sig=\"verify_unique_constraints()\">Re-scan stored data for UNIQUE / primary_key violations and return one dict per violated constraint. The audit for paths that bypass enforcement (RDF / N-Triples loaders, embedding carry).</m>\n");
     xml.push_str("    </methods>\n");
     xml.push_str("    <examples>\n");
     xml.push_str("      <ex desc=\"full schema\">graph.schema()</ex>\n");

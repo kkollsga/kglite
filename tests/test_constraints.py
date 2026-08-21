@@ -516,3 +516,65 @@ def test_a_refused_bulk_load_records_no_observed_metadata(mode, tmp_path):
         kg.add_nodes(pd.DataFrame({"id": [3], "email": ["c@b.c"], "age": [61]}), "Person", "id")
     mismatches = [w for w in caught if "Type mismatch" in str(w.message)]
     assert not mismatches, [str(w.message) for w in mismatches]
+
+
+# ---------------------------------------------------------------------------
+# verify_unique_constraints(): the audit for the paths that bypass enforcement
+# ---------------------------------------------------------------------------
+
+
+def _duplicate_via_ntriples(tmp_path):
+    """A graph whose declared UNIQUE constraint is violated by data that never
+    passed through enforcement.
+
+    The N-Triples loader is one of the two documented bypasses
+    (`docs/python/guides/primary-store.md`), and it is the reachable one from
+    Python — the constraint is declared on an empty graph (so the declaration
+    installs cleanly) and the duplicates arrive afterwards, behind its back.
+    """
+    path = tmp_path / "dup.nt"
+    path.write_text(
+        '<http://www.wikidata.org/entity/Q1> <http://schema.org/description> "dup"@en .\n'
+        '<http://www.wikidata.org/entity/Q2> <http://schema.org/description> "dup"@en .\n',
+        encoding="utf-8",
+    )
+    kg = KnowledgeGraph()
+    kg.define_schema({"nodes": {"Entity": {"unique": ["description"]}}})
+    kg.load_ntriples(str(path), languages=["en"])
+    return kg
+
+
+def test_verify_unique_constraints_is_empty_on_clean_data():
+    kg = KnowledgeGraph()
+    kg.define_schema({"nodes": {"Person": {"unique": [["email"]]}}})
+    kg.add_nodes(pd.DataFrame({"id": [1, 2], "email": ["a@b.c", "b@b.c"]}), "Person", "id")
+    assert kg.verify_unique_constraints() == []
+
+
+def test_verify_unique_constraints_reports_a_bypassed_duplicate(tmp_path):
+    kg = _duplicate_via_ntriples(tmp_path)
+
+    # The data really is there and really is duplicated — otherwise the audit
+    # below would be asserting nothing.
+    rows = kg.cypher("MATCH (n:Entity) RETURN n.description AS d").to_df()
+    assert rows["d"].tolist() == ["dup", "dup"]
+
+    violations = kg.verify_unique_constraints()
+    assert len(violations) == 1
+    found = violations[0]
+    assert found["constraint"] == "UNIQUE"
+    assert found["node_type"] == "Entity"
+    assert found["properties"] == ["description"]
+    assert found["duplicate_tuples"] == 1
+    assert found["sample"] == ["dup"]
+    # The message is an *audit* message: the constraint already exists, so it
+    # must not advise declaring it.
+    assert "violated" in found["message"], found["message"]
+    assert "before declaring" not in found["message"], found["message"]
+
+
+def test_verify_unique_constraints_goes_quiet_once_the_data_is_fixed(tmp_path):
+    kg = _duplicate_via_ntriples(tmp_path)
+    assert kg.verify_unique_constraints()
+    kg.cypher("MATCH (n:Entity) WHERE n.id = 2 DETACH DELETE n")
+    assert kg.verify_unique_constraints() == []

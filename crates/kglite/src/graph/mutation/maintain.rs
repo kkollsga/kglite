@@ -294,9 +294,12 @@ fn describe_skipped_rows(
     }
     if skipped_parse_fail > 0 {
         errors.push(format!(
-            "Skipped {skipped_parse_fail} rows: could not parse ID field \
-             '{unique_id_field}'. If IDs are strings, pass \
-             column_types={{'{unique_id_field}': 'string'}}"
+            "Skipped {skipped_parse_fail} rows: no usable value in ID field \
+             '{unique_id_field}' — the cell was empty, or held something the column's \
+             stored key type cannot represent. If the ids are integers, pass \
+             column_types={{'{unique_id_field}': 'int64'}}; if they are text, pass \
+             column_types={{'{unique_id_field}': 'string'}}. Both change the stored key \
+             type, so name the one the ids actually are"
         ));
     }
 }

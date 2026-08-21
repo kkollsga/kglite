@@ -409,7 +409,7 @@
         },
         "add_connections": {
           "kind": "method",
-          "signature": "(self, /, data, connection_type, source_type, source_id_field, target_type, target_id_field, source_title_field=None, target_title_field=None, columns=None, skip_columns=None, conflict_handling=None, column_types=None, query=None, extra_properties=None, git_sha=None, modified_by=None)"
+          "signature": "(self, /, data, connection_type, source_type, source_id_field, target_type, target_id_field, source_title_field=None, target_title_field=None, columns=None, skip_columns=None, conflict_handling=None, column_types=None, query=None, extra_properties=None, git_sha=None, modified_by=None, on_invalid='warn')"
         },
         "add_connections_bulk": {
           "kind": "method",
@@ -433,7 +433,7 @@
         },
         "add_nodes": {
           "kind": "method",
-          "signature": "(self, /, data, node_type, unique_id_field, node_title_field=None, columns=None, conflict_handling=None, skip_columns=None, column_types=None, timeseries=None, nullable_int_downcast=False, labels=None, managed_reload=False, git_sha=None, modified_by=None)"
+          "signature": "(self, /, data, node_type, unique_id_field, node_title_field=None, columns=None, conflict_handling=None, skip_columns=None, column_types=None, timeseries=None, nullable_int_downcast=False, labels=None, managed_reload=False, git_sha=None, modified_by=None, on_invalid='warn')"
         },
         "add_nodes_bulk": {
           "kind": "method",
@@ -889,7 +889,7 @@
         },
         "replace_connections": {
           "kind": "method",
-          "signature": "(self, /, data, connection_type, source_type, source_id_field, target_type, target_id_field, source_title_field=None, target_title_field=None, columns=None, skip_columns=None, conflict_handling=None, column_types=None, query=None, extra_properties=None, git_sha=None, modified_by=None)"
+          "signature": "(self, /, data, connection_type, source_type, source_id_field, target_type, target_id_field, source_title_field=None, target_title_field=None, columns=None, skip_columns=None, conflict_handling=None, column_types=None, query=None, extra_properties=None, git_sha=None, modified_by=None, on_invalid='warn')"
         },
         "report_history": {
           "kind": "method",
@@ -1142,6 +1142,10 @@
         "vector_search": {
           "kind": "method",
           "signature": "(self, /, text_column, query_vector, top_k=10, metric=None, to_df=False, returning=None, exact=False)"
+        },
+        "verify_unique_constraints": {
+          "kind": "method",
+          "signature": "(self, /)"
         },
         "where": {
           "kind": "method",

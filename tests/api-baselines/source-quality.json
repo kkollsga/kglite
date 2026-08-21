@@ -68,13 +68,6 @@
       "nesting": 4
     },
     {
-      "path": "crates/kglite-py/src/graph/pyapi/kg_mutation.rs",
-      "qualified_name": "crate::write_connections",
-      "lines": 212,
-      "branches": 17,
-      "nesting": 4
-    },
-    {
       "path": "crates/kglite-py/src/graph/pyapi/vector.rs",
       "qualified_name": "crate::KnowledgeGraph::embed_texts",
       "lines": 218,

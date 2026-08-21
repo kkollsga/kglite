@@ -421,6 +421,35 @@ impl ConstraintViolation {
         }
     }
 
+    /// How many distinct tuples collide, when this violation came from
+    /// *auditing* stored data rather than from rejecting a write.
+    ///
+    /// `None` for every write-time failure: a rejected write is about the one
+    /// tuple it tried to occupy, so reporting "1 duplicate tuple" there would
+    /// invite a reader to compare it against an audit's count, which counts a
+    /// different thing. Exists so a binding can marshal an audit result without
+    /// naming [`ConstraintFailure`], which is engine-internal.
+    pub fn duplicate_tuple_count(&self) -> Option<usize> {
+        match &self.failure {
+            ConstraintFailure::Preexisting {
+                duplicate_tuples, ..
+            } => Some(*duplicate_tuples),
+            _ => None,
+        }
+    }
+
+    /// One offending value tuple, positional against [`Self::properties`].
+    ///
+    /// Empty for the failures that carry no values (a missing required
+    /// property names the property, not a value).
+    pub fn sample_values(&self) -> &[Value] {
+        match &self.failure {
+            ConstraintFailure::Duplicate { values } => values,
+            ConstraintFailure::Preexisting { sample, .. } => sample,
+            _ => &[],
+        }
+    }
+
     /// Whether this reports a failed *declaration* rather than a failed write.
     /// The two carry different Neo4j status codes.
     pub fn is_declaration_failure(&self) -> bool {

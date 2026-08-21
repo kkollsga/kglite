@@ -3,6 +3,7 @@
 import pandas as pd
 import pytest
 
+import kglite
 from kglite import KnowledgeGraph
 
 
@@ -494,3 +495,54 @@ class TestConnectionListColumnRegression:
         result = graph.cypher("MATCH (a:Person)-[r:KNOWS]->(:Person) RETURN a.id AS s, r.tags AS tags ORDER BY s")
         assert result[0]["tags"] is None
         assert result[1]["tags"] == ["x", "y"]
+
+
+class TestOnInvalidConnections:
+    """A row whose endpoint id is *null* is a genuine skip (a row whose
+    endpoint is merely missing is vivified as a stub instead, and stays
+    unaffected by this setting)."""
+
+    def _graph(self):
+        graph = KnowledgeGraph()
+        graph.add_nodes(pd.DataFrame({"id": [1, 2], "n": ["a", "b"]}), "P", "id", "n")
+        return graph
+
+    def _edges(self):
+        return pd.DataFrame({"s": [1, None], "t": [2, 2]})
+
+    def test_default_warns_and_loads_the_rest(self, recwarn):
+        graph = self._graph()
+        report = graph.add_connections(self._edges(), "K", "P", "s", "P", "t")
+        assert (report["connections_created"], report["connections_skipped"]) == (1, 1)
+        assert any("skipped" in str(w.message) for w in recwarn)
+
+    def test_error_refuses_before_writing_anything(self):
+        graph = self._graph()
+        with pytest.raises(kglite.ArgumentError) as excinfo:
+            graph.add_connections(self._edges(), "K", "P", "s", "P", "t", on_invalid="error")
+        message = str(excinfo.value)
+        assert "1 of 2 rows" in message, message
+        assert "row 1" in message, message
+        assert "'s'" in message, message
+        assert graph.cypher("MATCH ()-[r:K]->() RETURN count(r) AS c")[0]["c"] == 0
+
+    def test_skip_is_silent_but_still_reports(self, recwarn):
+        graph = self._graph()
+        report = graph.add_connections(self._edges(), "K", "P", "s", "P", "t", on_invalid="skip")
+        assert (report["connections_created"], report["connections_skipped"]) == (1, 1)
+        assert report["has_errors"] is True
+        assert [str(w.message) for w in recwarn] == []
+
+    def test_error_also_covers_a_null_target(self):
+        graph = self._graph()
+        edges = pd.DataFrame({"s": [1, 2], "t": [2, None]})
+        with pytest.raises(kglite.ArgumentError, match="'t'"):
+            graph.add_connections(edges, "K", "P", "s", "P", "t", on_invalid="error")
+
+    def test_clean_input_is_unaffected_by_any_policy(self, recwarn):
+        edges = pd.DataFrame({"s": [1], "t": [2]})
+        for policy in ("warn", "error", "skip"):
+            graph = self._graph()
+            report = graph.add_connections(edges, "K", "P", "s", "P", "t", on_invalid=policy)
+            assert report["connections_created"] == 1
+        assert [str(w.message) for w in recwarn] == []

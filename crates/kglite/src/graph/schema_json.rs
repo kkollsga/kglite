@@ -46,6 +46,14 @@
 //! non-map — `nodes` / `connections` is a no-op rather than an error, which is
 //! the long-standing behaviour of the hand-written Python walk this was lifted
 //! from and is what makes `{"connections": {...}}` alone legal.
+//!
+//! Every key that *is* present, at every level, must be one the grammar knows.
+//! A schema is a promise about integrity, so a key the parser cannot place is
+//! never a harmless extra: `{"uniqe": [["email"]]}` reads as a declared UNIQUE
+//! constraint and enforces nothing, and `{"Task": {...}}` — the `"nodes"`
+//! wrapper forgotten — parsed to a completely empty schema. Both were accepted
+//! in silence until 0.16.6; both are refused now, with the near-miss named
+//! where one is close enough to guess.
 
 use super::schema::{ConnectionSchemaDefinition, NodeSchemaDefinition, SchemaDefinition};
 use crate::datatypes::values::Value;
@@ -164,10 +172,122 @@ pub fn schema_from_value(value: &Value) -> ParseResult<SchemaDefinition> {
             value.type_name()
         ))
     })?;
+    reject_unknown_keys(doc, TOP_LEVEL_KEYS, &TopLevel)?;
     let mut schema = SchemaDefinition::new();
     parse_node_schemas(doc, &mut schema)?;
     parse_connection_schemas(doc, &mut schema)?;
     Ok(schema)
+}
+
+/// The only keys a schema document may carry at its top level.
+const TOP_LEVEL_KEYS: &[&str] = &["nodes", "connections"];
+
+/// The keys one node type's declaration may carry.
+const NODE_DECLARATION_KEYS: &[&str] = &[
+    "required",
+    "optional",
+    "types",
+    "primary_key",
+    "unique",
+    "layer",
+    "auto_timestamp",
+];
+
+/// The keys one connection type's declaration may carry.
+const CONNECTION_DECLARATION_KEYS: &[&str] = &[
+    "source",
+    "target",
+    "cardinality",
+    "required_properties",
+    "property_types",
+    "auto_timestamp",
+];
+
+/// Where an unknown key was found, which decides how the refusal reads.
+trait UnknownKeyContext {
+    /// The message for a key with no close match among the accepted ones.
+    fn message(&self, key: &str, value: &Value, accepted: &[&str]) -> String;
+}
+
+/// Unknown key at the document's top level.
+///
+/// The overwhelmingly common cause is a forgotten `"nodes"` wrapper — the key
+/// is a *node type name* and its value is that type's declaration — so a map
+/// value gets the wrapper hint rather than a bare "unknown key", which would
+/// name the user's own type as the mistake.
+struct TopLevel;
+
+impl UnknownKeyContext for TopLevel {
+    fn message(&self, key: &str, value: &Value, accepted: &[&str]) -> String {
+        if as_map(value).is_some() {
+            return format!(
+                "Schema key '{key}' is not a top-level schema key. Node types go inside a \
+                 'nodes' wrapper: define_schema({{'nodes': {{'{key}': {{...}}}}}}). Top-level \
+                 keys are {}.",
+                quoted_list(accepted)
+            );
+        }
+        format!(
+            "Unknown top-level schema key '{key}'. Expected {}.",
+            quoted_list(accepted)
+        )
+    }
+}
+
+/// Unknown key inside one node or connection type's declaration.
+struct Declaration<'a> {
+    /// "node type" / "connection type".
+    what: &'a str,
+    /// The type whose declaration carries the key.
+    owner: &'a str,
+}
+
+impl UnknownKeyContext for Declaration<'_> {
+    fn message(&self, key: &str, _value: &Value, accepted: &[&str]) -> String {
+        format!(
+            "Unknown key '{key}' in the declaration for {} '{}'. Accepted keys are {}.",
+            self.what,
+            self.owner,
+            quoted_list(accepted)
+        )
+    }
+}
+
+/// `'a', 'b' and 'c'`, for listing the accepted keys in a refusal.
+fn quoted_list(keys: &[&str]) -> String {
+    let quoted: Vec<String> = keys.iter().map(|k| format!("'{k}'")).collect();
+    match quoted.split_last() {
+        None => String::new(),
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// Refuse the first key of `map` that `accepted` does not contain.
+///
+/// A near-miss is named — `'uniqe'` against `'unique'` is a declared constraint
+/// the caller believes they have and does not — using the same
+/// [`did_you_mean`](crate::graph::mutation::validation::did_you_mean) the rest
+/// of the engine's typo guards use, so the suggestion bar ("genuinely close, or
+/// silent") is one rule, not two.
+fn reject_unknown_keys(
+    map: &crate::datatypes::PropMap,
+    accepted: &[&str],
+    context: &dyn UnknownKeyContext,
+) -> ParseResult<()> {
+    for (key, value) in map {
+        if accepted.contains(&key) {
+            continue;
+        }
+        let suggestion = crate::graph::mutation::validation::did_you_mean(key, accepted);
+        if !suggestion.is_empty() {
+            return Err(key_error(format!(
+                "Unknown schema key '{key}'.{suggestion}"
+            )));
+        }
+        return Err(key_error(context.message(key, value, accepted)));
+    }
+    Ok(())
 }
 
 /// [`schema_from_value`] over a JSON document — the C ABI's entry point.
@@ -199,6 +319,15 @@ fn parse_node_schemas(
                 "Schema for node type '{node_type}' must be a dictionary"
             ))
         })?;
+
+        reject_unknown_keys(
+            node_schema_map,
+            NODE_DECLARATION_KEYS,
+            &Declaration {
+                what: "node type",
+                owner: node_type,
+            },
+        )?;
 
         let mut node_schema = NodeSchemaDefinition::default();
         if let Some(required) = node_schema_map.get("required") {
@@ -240,6 +369,15 @@ fn parse_connection_schemas(
                 "Schema for connection type '{conn_type}' must be a dictionary"
             ))
         })?;
+
+        reject_unknown_keys(
+            conn_map,
+            CONNECTION_DECLARATION_KEYS,
+            &Declaration {
+                what: "connection type",
+                owner: conn_type,
+            },
+        )?;
 
         let mut conn_schema = ConnectionSchemaDefinition {
             source_type: required_endpoint(conn_map, conn_type, "source")?,
@@ -622,6 +760,80 @@ mod tests {
         assert_eq!(
             via_json.node_schemas["P"].primary_key,
             via_value.node_schemas["P"].primary_key
+        );
+    }
+
+    /// A key the grammar cannot place is a *silent* constraint loss: the schema
+    /// installs, reports success, and enforces nothing the misspelled key named.
+    #[test]
+    fn a_misspelled_declaration_key_is_refused_with_the_near_miss_named() {
+        let e = err(r#"{"nodes": {"Task": {"uniqe": [["name"]]}}}"#);
+        assert_eq!(e.kind, SchemaParseErrorKind::Key);
+        assert!(e.message.contains("'uniqe'"), "{}", e.message);
+        assert!(
+            e.message.contains("Did you mean 'unique'?"),
+            "{}",
+            e.message
+        );
+
+        // Connection declarations get the same treatment.
+        let e =
+            err(r#"{"connections": {"R": {"source": "A", "target": "B", "cardinaliy": "1-1"}}}"#);
+        assert_eq!(e.kind, SchemaParseErrorKind::Key);
+        assert!(
+            e.message.contains("Did you mean 'cardinality'?"),
+            "{}",
+            e.message
+        );
+    }
+
+    /// A declaration key with no near miss still names the accepted set rather
+    /// than being dropped.
+    #[test]
+    fn an_unrecognisable_declaration_key_lists_what_is_accepted() {
+        let e = err(r#"{"nodes": {"Task": {"indexes": ["name"]}}}"#);
+        assert_eq!(e.kind, SchemaParseErrorKind::Key);
+        assert!(
+            e.message.contains("node type 'Task'") && e.message.contains("'primary_key'"),
+            "{}",
+            e.message
+        );
+    }
+
+    /// The forgotten `"nodes"` wrapper: every declaration used to be dropped and
+    /// an empty schema installed, so a caller who wrote real constraints got
+    /// none and no complaint.
+    #[test]
+    fn a_missing_nodes_wrapper_is_refused_with_the_wrapper_named() {
+        let e = err(r#"{"Task": {"required": ["id"], "unique": [["name"]]}}"#);
+        assert_eq!(e.kind, SchemaParseErrorKind::Key);
+        assert!(e.message.contains("'nodes' wrapper"), "{}", e.message);
+        assert!(e.message.contains("'Task'"), "{}", e.message);
+    }
+
+    /// A near-miss on the wrapper itself is a typo, not a forgotten wrapper —
+    /// the suggestion is more useful than the wrapper lecture.
+    #[test]
+    fn a_misspelled_top_level_key_suggests_the_real_one() {
+        let e = err(r#"{"node": {"Task": {"required": ["id"]}}}"#);
+        assert!(e.message.contains("Did you mean 'nodes'?"), "{}", e.message);
+    }
+
+    /// A top-level key whose value is not a declaration map cannot be a
+    /// forgotten wrapper, so it reads as what it is.
+    #[test]
+    fn an_unknown_scalar_top_level_key_is_reported_plainly() {
+        let e = err(r#"{"version": 2}"#);
+        assert_eq!(e.kind, SchemaParseErrorKind::Key);
+        assert!(
+            e.message.contains("Unknown top-level schema key"),
+            "{}",
+            e.message
+        );
+        assert!(
+            e.message.contains("'nodes' and 'connections'"),
+            "{}",
+            e.message
         );
     }
 }
