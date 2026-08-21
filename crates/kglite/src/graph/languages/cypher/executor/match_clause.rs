@@ -552,16 +552,13 @@ impl<'a> CypherExecutor<'a> {
                 let base = seeded.as_ref().unwrap_or(&cur.node_bindings);
                 let anchored = seed_clause_node_anchors(clause, base);
                 let pre_bindings = anchored.as_ref().unwrap_or(base);
-                let executor = PatternExecutor::with_bindings_and_params(
-                    self.graph,
-                    self.budget_probe_limit(None),
-                    pre_bindings,
-                    self.params,
-                )
-                .set_deadline(self.deadline)
-                .set_cancel(self.cancel)
-                .set_parallel(self.parallel);
-                let matches = executor.execute(pat)?;
+                let matches = self
+                    .materializing_executor(
+                        self.budget_probe_limit(None),
+                        pre_bindings,
+                        "OPTIONAL MATCH expansion",
+                    )
+                    .execute(pat)?;
                 self.budget
                     .check_work(matches.len(), "OPTIONAL MATCH expansion")?;
                 for m in &matches {

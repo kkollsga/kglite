@@ -6,6 +6,7 @@
 
 use crate::datatypes::values::Value;
 use crate::graph::core::filtering::{compare_values, str_values_equal, values_equal};
+use crate::graph::languages::cypher::executor::budget::MatchCeiling;
 use crate::graph::languages::cypher::result::Bindings;
 use crate::graph::schema::{DirGraph, InternedKey, NodeData};
 use crate::graph::storage::column_store::ColumnStore;
@@ -402,6 +403,18 @@ pub struct PatternExecutor<'a> {
     /// expansion path captures `&self` across rayon workers; a `Relaxed` store
     /// on the (rare) truncation path is not on the hot path.
     cap_truncated: AtomicBool,
+    /// The absolute ceiling this execution's in-flight match buffers are held
+    /// to, set by a caller that **retains** the matches — see
+    /// [`MatchCeiling`] for the per-call-site classification. `None` (the
+    /// default) leaves the expansion unbounded, which is correct for a caller
+    /// that only counts or scans.
+    ///
+    /// Distinct from `max_matches`, and deliberately so: `max_matches` is a
+    /// *limit* the matcher may satisfy by stopping early, and setting one
+    /// changes the plan (lazy seeding, no parallel hop expansion). This is a
+    /// *ceiling* the matcher may only satisfy by erroring, so it changes
+    /// nothing about how the pattern is executed.
+    match_ceiling: Option<MatchCeiling>,
     /// Holds the disk materialization arenas alive for this executor's
     /// lifetime (arena protocol in `storage/disk/graph.rs`, enforced by a
     /// debug assert). Acquired in every constructor so pattern matching is
@@ -433,6 +446,7 @@ impl<'a> PatternExecutor<'a> {
             distinct_prior: None,
             parallel: false,
             cap_truncated: AtomicBool::new(false),
+            match_ceiling: None,
             _arena_guard: graph.graph.begin_query(),
         }
     }
@@ -455,6 +469,7 @@ impl<'a> PatternExecutor<'a> {
             distinct_prior: None,
             parallel: false,
             cap_truncated: AtomicBool::new(false),
+            match_ceiling: None,
             _arena_guard: graph.graph.begin_query(),
         }
     }
@@ -477,6 +492,7 @@ impl<'a> PatternExecutor<'a> {
             distinct_prior: None,
             parallel: false,
             cap_truncated: AtomicBool::new(false),
+            match_ceiling: None,
             _arena_guard: graph.graph.begin_query(),
         }
     }
@@ -550,6 +566,25 @@ impl<'a> PatternExecutor<'a> {
     pub fn set_distinct_prior(mut self, prior: Option<&'a HashSet<NodeIndex>>) -> Self {
         self.distinct_prior = prior;
         self
+    }
+
+    /// Hold this execution's in-flight match buffers to an absolute ceiling.
+    /// Set by callers that retain the matches; see [`MatchCeiling`].
+    pub fn set_match_ceiling(mut self, ceiling: Option<MatchCeiling>) -> Self {
+        self.match_ceiling = ceiling;
+        self
+    }
+
+    /// Fail if `held` matches in one buffer would breach the ceiling.
+    ///
+    /// Called from the expansion loops, so the common case is one `Option`
+    /// test and one comparison; the message is built behind `#[cold]`.
+    #[inline]
+    fn check_match_ceiling(&self, held: usize) -> Result<(), String> {
+        match self.match_ceiling {
+            Some(ceiling) => ceiling.check(held),
+            None => Ok(()),
+        }
     }
 
     /// Public wrapper for find_matching_nodes (used by Cypher executor for shortestPath)
@@ -1922,5 +1957,9 @@ mod id_lookup_tests;
 #[cfg(test)]
 #[path = "matcher_limit_seed_tests.rs"]
 mod limit_seed_tests;
+
+#[cfg(test)]
+#[path = "matcher_ceiling_tests.rs"]
+mod ceiling_tests;
 
 // ============================================================================

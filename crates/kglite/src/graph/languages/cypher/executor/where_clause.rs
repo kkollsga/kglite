@@ -5,7 +5,7 @@ use super::*;
 use crate::datatypes::values::Value;
 use crate::graph::algorithms::vector as vs;
 use crate::graph::core::membership::{self, MembershipSet};
-use crate::graph::core::pattern_matching::{MatchBinding, PatternExecutor, PatternMatch};
+use crate::graph::core::pattern_matching::{MatchBinding, PatternMatch};
 use crate::graph::storage::GraphRead;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -162,16 +162,17 @@ impl<'a> CypherExecutor<'a> {
             } else {
                 pattern
             };
-            let executor = PatternExecutor::with_bindings_and_params(
-                self.graph,
-                witness_cap,
-                &row.node_bindings,
-                self.params,
-            )
-            .set_deadline(self.deadline)
-            .set_cancel(self.cancel)
-            .set_parallel(self.parallel);
-            let matches = executor.execute(pat)?;
+            // `exists_witness_cap` bounds the common single-pattern shape at
+            // one witness, but returns `None` for a multi-pattern subquery or
+            // one carrying a WHERE — exactly the shapes whose expansion can
+            // run away, so the ceiling is what covers those.
+            let matches = self
+                .materializing_executor(
+                    witness_cap,
+                    &row.node_bindings,
+                    "EXISTS subquery expansion",
+                )
+                .execute(pat)?;
 
             let mut next_rows: Vec<ResultRow> = Vec::new();
             let mut next_sets: Vec<Vec<petgraph::graph::EdgeIndex>> = Vec::new();

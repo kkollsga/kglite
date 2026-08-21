@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The unbounded-row safety ceiling did not bound pattern expansion, so a
+  runaway variable-length query spent gigabytes before the guard could refuse
+  it — and a deep enough one never reached the guard at all.** The ceiling that
+  applies when no `max_rows` is set was enforced by a single check on the
+  *finished* match vector, which meant the producer ran unchecked: measured on
+  a 10 000-node scale-free graph with 50 seeds, `MATCH (p)-[:KNOWS*1..4]-(f)
+  RETURN count(*)` errored only after 26.9 s and 9.5 GB, and `*1..5` was still
+  climbing when a 300 s deadline cut it off. The expansion loops now test their
+  in-flight buffers against the same ceiling and raise the same quantified
+  error: the two queries above now stop at 16.0 s / 7.9 GB and 8.2 s / 4.2 GB,
+  and every deeper `k` — which previously had no terminating answer at all —
+  errors in about the same time. The message names which expansion overflowed,
+  so `MATCH`, `OPTIONAL MATCH`, `EXISTS { ... }` and `COUNT { ... }` are told
+  apart. An explicit `max_rows` is unaffected: it already bounds the producer,
+  and it remains the way to choose a larger ceiling.
+
+- **`COUNT { ... }` held every match it counted, without a bound.** Counting is
+  not streaming here — the subquery materializes the whole match vector and
+  then counts it — so the same `*1..12` pattern that overflows a `MATCH`
+  overflowed a `COUNT` too, at 26.4 million matches and 10.6 GB before the
+  post-hoc check fired. It is now charged as it expands. The ceiling refuses no
+  answer that was previously reachable: the count itself was already checked
+  against the same 10 000 000 rows, so a larger result was an error before this
+  change as well.
+
+- **The fused `OPTIONAL MATCH ... count()` plan ignored the row ceiling
+  entirely.** Fusing the count away removed the row materialization but not the
+  match materialization, and no guard replaced the one the unfused plan gets
+  per row — so the fused plan *returned* a 26 394 496-row answer, holding
+  ~10 GB for 64 s, where the same query with the optimiser off is refused. Both
+  plans now agree, which is the invariant the budget suite already asserts for
+  every other clause.
+
+- **An unanchored `shortestPath` sized its work-list at
+  `sources x targets` before checking anything.** Two 10 000-node labels asked
+  for a 100 000 000-entry allocation up front — gigabytes, or an abort — with
+  no row check in between. The pair set is the materialized row set, so it is
+  now charged as one.
+
 - **`shortest_path_length(weight_property=...)` silently ignored the filters it
   appeared to accept, and three members of the family could not express a
   type-restricted traversal at all.** The weighted branch built a default

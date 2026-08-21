@@ -231,6 +231,7 @@ impl<'a> CypherExecutor<'a> {
         .set_deadline(self.deadline)
         .set_cancel(self.cancel)
         .set_parallel(self.parallel)
+        .set_match_ceiling(self.budget.match_ceiling("MATCH expansion"))
         .set_distinct_target(matcher_distinct_target);
         let matches = executor.execute(pattern)?;
         self.budget.check_work(matches.len(), "MATCH expansion")?;
@@ -434,16 +435,12 @@ impl<'a> CypherExecutor<'a> {
                             let base = seeded.as_ref().unwrap_or(&existing_row.node_bindings);
                             let anchored = match_clause::seed_clause_node_anchors(clause, base);
                             let pre_bindings = anchored.as_ref().unwrap_or(base);
-                            let executor = PatternExecutor::with_bindings_and_params(
-                                self.graph,
+                            self.materializing_executor(
                                 self.budget_probe_limit(remaining),
                                 pre_bindings,
-                                self.params,
+                                "MATCH join",
                             )
-                            .set_deadline(self.deadline)
-                            .set_cancel(self.cancel)
-                            .set_parallel(self.parallel);
-                            executor.execute(pat)?
+                            .execute(pat)?
                         };
                         self.budget.check_work(matches.len(), "MATCH join")?;
                         // Collect compatible matches (with their clause-local
@@ -864,18 +861,10 @@ impl<'a> CypherExecutor<'a> {
         // Block-scoped: the PatternExecutor holds the disk arena guard (drop
         // glue), so its borrow of `seen` must end before the caller extends it.
         let run = |distinct: Option<&str>| -> Result<Vec<_>, String> {
-            let executor = PatternExecutor::with_bindings_and_params(
-                self.graph,
-                exec_limit,
-                pre_bindings,
-                self.params,
-            )
-            .set_deadline(self.deadline)
-            .set_cancel(self.cancel)
-            .set_parallel(self.parallel)
-            .set_distinct_target(distinct.map(str::to_string))
-            .set_distinct_prior(distinct.map(|_| seen));
-            executor.execute(pat)
+            self.materializing_executor(exec_limit, pre_bindings, "MATCH join")
+                .set_distinct_target(distinct.map(str::to_string))
+                .set_distinct_prior(distinct.map(|_| seen))
+                .execute(pat)
         };
         let matches = run(dedup_var)?;
         if dedup_var.is_some() && matches.iter().any(|m| !self.bindings_compatible(cur, m)) {

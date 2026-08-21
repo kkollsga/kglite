@@ -679,6 +679,11 @@ impl<'a> PatternExecutor<'a> {
                         return Err("Query timed out".to_string());
                     }
                 }
+                // The frontier is the other buffer this loop holds, and it
+                // grows even where the node pattern rejects every target (so
+                // `results` stays small). Each entry owns its trail, so it is
+                // the more expensive of the two per element.
+                self.check_match_ceiling(queue.len())?;
             }
             if depth >= max_hops {
                 continue;
@@ -760,6 +765,15 @@ impl<'a> PatternExecutor<'a> {
                     if cap_reached(results.len(), max_results) {
                         return Ok(results);
                     }
+                    // Trail expansion is combinatorial in the hop count, and
+                    // `max_results` is `None` on every path whose post-filters
+                    // could reject a row — so without this the only bound on
+                    // `results` is the number of trails the pattern admits.
+                    // Tested per push: it is one comparison against a
+                    // register-resident `Option<usize>`, and the alternative
+                    // (a stride) lets a single high-degree pop overshoot by
+                    // its whole fan-out.
+                    self.check_match_ceiling(results.len())?;
                 }
 
                 // Continue exploring if we haven't reached max depth

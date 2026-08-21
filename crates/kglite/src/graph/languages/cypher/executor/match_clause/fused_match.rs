@@ -59,16 +59,18 @@ impl<'a> CypherExecutor<'a> {
                     match_count += fast_count;
                 } else {
                     // Fall back to full PatternExecutor
-                    let executor = PatternExecutor::with_bindings_and_params(
-                        self.graph,
-                        None,
-                        &row.node_bindings,
-                        self.params,
-                    )
-                    .set_deadline(self.deadline)
-                    .set_cancel(self.cancel)
-            .set_parallel(self.parallel);
-                    let matches = executor.execute(pattern)?;
+                    // Fusing the count away does not stop the expansion
+                    // from materializing: this branch holds the whole match
+                    // vector for one driving row before counting it, and
+                    // unlike the group-key scans below it is reachable with a
+                    // variable-length edge.
+                    let matches = self
+                        .materializing_executor(
+                            None,
+                            &row.node_bindings,
+                            "OPTIONAL MATCH count expansion",
+                        )
+                        .execute(pattern)?;
 
                     for m in &matches {
                         if self.bindings_compatible(row, m) {

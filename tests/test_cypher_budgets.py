@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 import kglite
+from tests.conftest import build_social_graph
 
 
 def graph_with_types() -> kglite.KnowledgeGraph:
@@ -274,3 +275,100 @@ def test_oversized_range_still_reports_its_own_byte_ceiling() -> None:
     graph = kglite.KnowledgeGraph()
     with pytest.raises(kglite.CypherExecutionError, match="256 MiB"):
         graph.cypher("RETURN range(0, 100000000) AS r")
+
+
+# ---------------------------------------------------------------------------
+# The backstop reaches the *producer*, not only the finished row set.
+#
+# Until it did, `MAX_UNBOUNDED_ROWS` was enforced by one post-hoc check on the
+# match vector a MATCH had already built. A variable-length expansion therefore
+# spent the memory before the guard could refuse it: measured on a 10k-node
+# scale-free graph with 50 seeds, `*1..4` errored after 26.9 s and 9.5 GB, and
+# `*1..5` never errored at all — it was still climbing when the 300 s deadline
+# cut it off. The ceiling below bounds the buffers *while* they fill.
+# ---------------------------------------------------------------------------
+
+#: One start node, deep enough that the trail count runs away. `count(*)` is a
+#: per-path consumer, so the planner cannot mark the segment dedup-safe and the
+#: expansion enumerates trails rather than reachable nodes.
+RUNAWAY_VAR_LENGTH = "MATCH (p:Person {{name: 'Person_1'}})-[:KNOWS*1..12]-(f) {tail}"
+
+
+def test_var_length_under_the_ceiling_is_unaffected(social_graph) -> None:
+    """The ceiling must be invisible to every query that stays below it."""
+    assert social_graph.cypher("MATCH (p:Person)-[:KNOWS*1..5]-(f) RETURN count(*) AS n").to_list() == [{"n": 58856}]
+    # The same expansion through the two other call sites that hold the whole
+    # match vector: a COUNT subquery, and the fused OPTIONAL MATCH count.
+    assert social_graph.cypher("RETURN COUNT { (p:Person)-[:KNOWS*1..5]-(f) } AS n").to_list() == [{"n": 58856}]
+    assert social_graph.cypher(
+        "MATCH (p:Person {name: 'Person_1'}) OPTIONAL MATCH (p)-[:KNOWS*1..5]-(f) RETURN count(f) AS n"
+    ).to_list() == [{"n": 1295}]
+
+
+def test_explicit_max_rows_still_governs_a_var_length_expansion(social_graph) -> None:
+    """An explicit max_rows keeps its own message and its own number.
+
+    It replaces the backstop rather than stacking with it: the producer is
+    capped at `max_rows + 1` by the ordinary probe limit, so the expansion
+    stops there and the existing check reports it.
+    """
+    with pytest.raises(kglite.CypherExecutionError, match="max_rows limit of 10"):
+        social_graph.cypher("MATCH (p:Person)-[:KNOWS*1..5]-(f) RETURN f.name AS name", max_rows=10)
+
+
+@pytest.mark.stress
+def test_runaway_var_length_match_errors_promptly() -> None:
+    """Opt-in: reaching the ceiling costs ~6 s and ~6 GB of debug-build RSS.
+
+    That is the ceiling working as specified — 10M held matches is what it
+    permits — and it is why this is `-m stress` rather than a default test.
+    What it pins is that the error *arrives*: before this check the same query
+    had no terminating answer at all.
+    """
+    graph = build_social_graph()
+    start = time.perf_counter()
+    with pytest.raises(kglite.CypherExecutionError) as excinfo:
+        graph.cypher(RUNAWAY_VAR_LENGTH.format(tail="RETURN count(*) AS n"))
+    elapsed = time.perf_counter() - start
+
+    message = str(excinfo.value)
+    assert "MATCH expansion" in message, message
+    assert str(BACKSTOP_ROWS) in message, message
+    assert "max_rows" in message, message
+    assert elapsed < 120.0, f"backstop took {elapsed:.1f}s — the producer is not bounded"
+
+
+@pytest.mark.stress
+@pytest.mark.parametrize(
+    ("query", "operator"),
+    [
+        (
+            "RETURN COUNT { (p:Person {name: 'Person_1'})-[:KNOWS*1..12]-(f) } AS n",
+            "COUNT subquery pattern",
+        ),
+        (
+            "MATCH (p:Person {name: 'Person_1'}) "
+            "OPTIONAL MATCH (p)-[:KNOWS*1..12]-(f) RETURN p.name AS name, count(f) AS n",
+            "OPTIONAL MATCH count expansion",
+        ),
+    ],
+)
+def test_counting_consumers_reach_the_ceiling_under_their_own_name(query: str, operator: str) -> None:
+    """A consumer that only counts still *holds* every match while it counts.
+
+    `COUNT { … }` builds the whole match vector before it counts anything, and
+    so does the fused `OPTIONAL MATCH … count()` per-row expansion, so both are
+    charged. Neither refuses an answer it could otherwise have returned: the
+    count each produces is itself charged as a materialized row set against the
+    same ceiling, so a result past 10M was already an error.
+    """
+    graph = build_social_graph()
+    start = time.perf_counter()
+    with pytest.raises(kglite.CypherExecutionError) as excinfo:
+        graph.cypher(query)
+    elapsed = time.perf_counter() - start
+
+    message = str(excinfo.value)
+    assert operator in message, message
+    assert str(BACKSTOP_ROWS) in message, message
+    assert elapsed < 120.0, f"backstop took {elapsed:.1f}s — the producer is not bounded"

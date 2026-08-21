@@ -59,6 +59,63 @@ enum Charge {
     Work,
 }
 
+/// The absolute ceiling one pattern execution's *in-flight* match buffers are
+/// held to, and the operator name its error reports.
+///
+/// [`MAX_UNBOUNDED_ROWS`] bounds the rows a query keeps. Until this existed it
+/// did not bound the buffer those rows are built *from*: a MATCH charged the
+/// producer once, after the fact, with [`ExecutionBudget::check_work`], so a
+/// variable-length expansion could materialize gigabytes of `PatternMatch`
+/// before any check ran -- and a deep enough one never reached the check at all.
+///
+/// A caller hands one down only when it **retains** the matches. The
+/// classification is by bytes at rest, not by what the matches are eventually
+/// used for: a `Vec<PatternMatch>` held across a call is memory whether it
+/// becomes result rows, a `COUNT`, or a group-key set.
+///
+/// | call site | what it holds | ceiling |
+/// |---|---|---|
+/// | `first_pattern_rows`, the comma-pattern join, `driving_row_matches` | one row per compatible match | yes |
+/// | `OPTIONAL MATCH`, `EXISTS { ... }` | one row per compatible match | yes |
+/// | `COUNT { ... }` (`execute_count_pattern`) | the whole match vector, then counts it | yes |
+/// | the fused `OPTIONAL MATCH ... count()` per-row expansion | the whole match vector, then counts it | yes |
+/// | fused-aggregate group-key scans (`execute_fused_*_aggregate`) | one match per group node or edge | **no** -- the fusion pass rejects variable-length edges, so the count is bounded by the graph's node/edge count, the same graph-sized quantity [`Charge::Work`] is exempt for |
+/// | `find_matching_nodes_pub` (shortestPath endpoints, fused scans, property probes) | node indices, no expansion | **no** -- a node scan, bounded by the node count |
+///
+/// The matcher's own scans are exempt for the reason in the last two rows:
+/// start-node seeding and the distance-BFS fast path both dedup by node, so
+/// both are bounded by the graph the caller already holds. Only the
+/// hop-expansion and per-path (trail) loops are combinatorial, and those are
+/// what this ceiling covers.
+#[derive(Clone, Copy, Debug)]
+pub struct MatchCeiling {
+    max: usize,
+    operator: &'static str,
+}
+
+impl MatchCeiling {
+    #[inline]
+    pub fn new(max: usize, operator: &'static str) -> Self {
+        Self { max, operator }
+    }
+
+    /// `Ok(())` while `held` fits under the ceiling; the quantified backstop
+    /// error otherwise. Called from the expansion hot loops, so the message is
+    /// built on a `#[cold]` path.
+    #[inline]
+    pub fn check(&self, held: usize) -> Result<(), String> {
+        if held <= self.max {
+            return Ok(());
+        }
+        Err(self.exceeded(held))
+    }
+
+    #[cold]
+    fn exceeded(&self, held: usize) -> String {
+        ExecutionBudget::backstop_message(held, "rows", self.operator, self.max)
+    }
+}
+
 impl ExecutionBudget {
     #[inline]
     pub fn new(max_rows: Option<usize>) -> Self {
@@ -73,6 +130,23 @@ impl ExecutionBudget {
     #[inline]
     pub fn max_rows(&self) -> Option<usize> {
         self.inner.max_rows
+    }
+
+    /// The in-flight ceiling a *materializing* caller holds a pattern
+    /// execution to, or `None` when this budget needs none.
+    ///
+    /// An explicit `max_rows` returns `None` on purpose: it already bounds the
+    /// producer through [`super::CypherExecutor::budget_probe_limit`], which
+    /// caps `max_matches` at `max_rows + 1` and lets the matcher stop exactly
+    /// where truncation is sound. Re-imposing `max_rows` here would instead
+    /// *reject* the intermediate hops' deliberate 50x overcommit, turning a
+    /// legal multi-hop query with a small `max_rows` into an error.
+    #[inline]
+    pub fn match_ceiling(&self, operator: &'static str) -> Option<MatchCeiling> {
+        self.inner
+            .max_rows
+            .is_none()
+            .then(|| MatchCeiling::new(MAX_UNBOUNDED_ROWS, operator))
     }
 
     /// Validate a completed or pre-sized row collection.
@@ -143,13 +217,25 @@ impl ExecutionBudget {
         if charge == Charge::Work || actual <= MAX_UNBOUNDED_ROWS {
             return Ok(());
         }
-        Err(format!(
+        Err(Self::backstop_message(
+            actual,
+            unit,
+            operator,
+            MAX_UNBOUNDED_ROWS,
+        ))
+    }
+
+    /// The one wording every ceiling breach reports, wherever it is detected —
+    /// a completed row set, an accumulated collection, or (via
+    /// [`MatchCeiling`]) a producer still filling its buffer.
+    fn backstop_message(actual: usize, unit: &str, operator: &str, ceiling: usize) -> String {
+        format!(
             "Query materialized {actual} {unit} while executing {operator}, exceeding the \
-             safety ceiling of {MAX_UNBOUNDED_ROWS} {unit} that applies when no max_rows \
+             safety ceiling of {ceiling} {unit} that applies when no max_rows \
              is set. Add a LIMIT clause, or set an explicit max_rows (per query: \
              max_rows=…; per graph or session: set_default_max_rows(…)) to choose your \
              own ceiling."
-        ))
+        )
     }
 
     fn consume(

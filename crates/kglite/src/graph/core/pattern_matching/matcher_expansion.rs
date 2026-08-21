@@ -9,6 +9,22 @@
 use super::*;
 use crate::graph::parallel::{self, ParallelInterrupt};
 
+/// How many matches one parallel job may hold unreported before it publishes
+/// them to the shared ceiling counter.
+///
+/// Set from measurement, not taste. Publishing on every source row cost
+/// **+78% to +84%** on `two_edge_relationship_text_filter` across two agreeing
+/// release runs — that cell's rows are short (~11 ns each) and an
+/// eight-thread-contended `fetch_add` is comparable to the row itself. At 256
+/// the same cell measures +1.5-1.7%, which is inside the capture's own noise.
+///
+/// The number that matters at the other end is how much a job can hold back:
+/// rayon splits this region finely (measured ~7 rows per `map_init` call on a
+/// 9 000-row hop), so a job only publishes when its rows are *wide*. That is
+/// the shape a memory ceiling is for; a narrow hop is bounded at the hop
+/// boundary instead — see [`PatternExecutor::expand_hop_parallel`].
+const CEILING_PUBLISH_STRIDE: usize = 256;
+
 /// Whether one node variable is written more than once in `pattern`
 /// (`(a)-[]->(b)-[]->(a)`). Such a pattern constrains a later hop against an
 /// earlier binding, so partial matches on the same node are not
@@ -503,6 +519,20 @@ impl<'a> PatternExecutor<'a> {
         hop: &HopPlan<'_>,
     ) -> Result<(Vec<PatternMatch>, Vec<NodeIndex>), String> {
         let interrupt = ParallelInterrupt::new(|| self.interrupt_reason());
+        // Matches emitted by every job so far. The sequential path reads
+        // `new_matches.len()` directly; here the buffer is spread across
+        // workers until `collect`, so the ceiling needs a shared count —
+        // published in blocks of `CEILING_PUBLISH_STRIDE`, never per row, for
+        // the cost recorded on that constant.
+        //
+        // What that buys, precisely: a job whose rows are wide enough to fill
+        // a block stops the region *while it is filling*, which is the
+        // runaway this ceiling exists for. A job that ends below a block keeps
+        // its remainder, so a hop made of many narrow rows is bounded at the
+        // hop boundary instead, by the `results.len()` check after the region.
+        // Both are error paths, never truncation, so neither can turn a
+        // too-large answer into a wrong one.
+        let produced = std::sync::atomic::AtomicUsize::new(0);
         let results: Vec<(PatternMatch, NodeIndex)> = parallel::install(|| {
             matches
                 .par_iter()
@@ -510,10 +540,11 @@ impl<'a> PatternExecutor<'a> {
                 // `map_init` gives each worker its own reusable visited buffer,
                 // so a variable-length hop's marks cost a stamp bump per row
                 // here too — the sequential path's buffer cannot be shared
-                // across threads.
+                // across threads. It carries the unpublished match count for
+                // the same reason: both are per-worker state.
                 .map_init(
-                    VisitedStamps::default,
-                    |visited, (current_match, &source_idx)| {
+                    || (VisitedStamps::default(), 0usize),
+                    |(visited, unpublished), (current_match, &source_idx)| {
                         // Short-circuit once any thread has detected a timeout/error,
                         // and independently check the deadline from each thread.
                         // One expansion dwarfs the probe, so poll on every match.
@@ -530,7 +561,7 @@ impl<'a> PatternExecutor<'a> {
                         )) else {
                             return Vec::new();
                         };
-                        expansions
+                        let kept: Vec<_> = expansions
                             .into_iter()
                             .filter_map(|(target_idx, edge_binding)| {
                                 if reuses_bound_relationship(current_match, &edge_binding) {
@@ -548,7 +579,18 @@ impl<'a> PatternExecutor<'a> {
                                     target_idx,
                                 ))
                             })
-                            .collect::<Vec<_>>()
+                            .collect();
+                        *unpublished += kept.len();
+                        if *unpublished >= CEILING_PUBLISH_STRIDE {
+                            let held = produced
+                                .fetch_add(*unpublished, std::sync::atomic::Ordering::Relaxed)
+                                + *unpublished;
+                            *unpublished = 0;
+                            if interrupt.capture(self.check_match_ceiling(held)).is_none() {
+                                return Vec::new();
+                            }
+                        }
+                        kept
                     },
                 )
                 .flatten()
@@ -556,6 +598,9 @@ impl<'a> PatternExecutor<'a> {
         });
         // Propagate any error that occurred during parallel expansion
         interrupt.finish()?;
+        // The workers' unpublished remainders never reached the counter, so
+        // the authoritative total is the collected buffer itself.
+        self.check_match_ceiling(results.len())?;
         // Apply distinct-target dedup for parallel results (the sequential
         // path does this inline, but the parallel path can't without
         // synchronization).
@@ -632,6 +677,11 @@ impl<'a> PatternExecutor<'a> {
                     if let Some(msg) = self.interrupt_reason() {
                         return Err(msg);
                     }
+                    // Same stride as the interrupt poll, and for the same
+                    // reason: `new_matches` is this hop's held buffer, and
+                    // `expand_count` only ever runs ahead of it, so the
+                    // ceiling is tested at least once per 1024 pushes.
+                    self.check_match_ceiling(new_matches.len())?;
                 }
                 if hop_limit.is_some_and(|max| new_matches.len() >= max) {
                     break;
@@ -671,6 +721,7 @@ impl<'a> PatternExecutor<'a> {
         if !hop.is_last_hop && hop_limit.is_some_and(|max| new_matches.len() >= max) {
             self.note_cap_truncated();
         }
+        self.check_match_ceiling(new_matches.len())?;
         Ok((new_matches, new_indices))
     }
 

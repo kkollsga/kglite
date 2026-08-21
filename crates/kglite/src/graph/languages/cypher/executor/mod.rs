@@ -232,6 +232,34 @@ impl<'a> CypherExecutor<'a> {
         }
     }
 
+    /// A pattern executor configured the way every *materializing* MATCH call
+    /// site configures one: this query's deadline, cancel flag and parallel
+    /// permission, plus the in-flight ceiling for `operator`.
+    ///
+    /// The ceiling is the part that must not be forgotten — a call site that
+    /// retains the matches and does not set one leaves the expansion
+    /// unbounded, which is the defect this centralisation exists to make hard
+    /// to reintroduce. See [`budget::MatchCeiling`] for which call sites
+    /// qualify and which are deliberately exempt.
+    #[inline]
+    pub(super) fn materializing_executor<'p>(
+        &'p self,
+        max_matches: Option<usize>,
+        pre_bindings: &'p Bindings<petgraph::graph::NodeIndex>,
+        operator: &'static str,
+    ) -> PatternExecutor<'p> {
+        PatternExecutor::with_bindings_and_params(
+            self.graph,
+            max_matches,
+            pre_bindings,
+            self.params,
+        )
+        .set_deadline(self.deadline)
+        .set_cancel(self.cancel)
+        .set_parallel(self.parallel)
+        .set_match_ceiling(self.budget.match_ceiling(operator))
+    }
+
     /// Enable or disable the streaming-pipeline path. Default is
     /// `true`; the Python boundary exposes this as the
     /// `kg.cypher(streaming=…)` kwarg.

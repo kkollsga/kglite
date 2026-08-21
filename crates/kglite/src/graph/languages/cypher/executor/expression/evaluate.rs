@@ -246,8 +246,6 @@ impl<'a> CypherExecutor<'a> {
         pattern: &crate::graph::core::pattern_matching::Pattern,
         row: &ResultRow,
     ) -> Result<Vec<crate::graph::core::pattern_matching::PatternMatch>, String> {
-        use crate::graph::core::pattern_matching::PatternExecutor;
-
         let resolved;
         let pattern = if Self::pattern_has_vars(pattern) {
             resolved = self.resolve_pattern_vars(pattern, row);
@@ -255,16 +253,17 @@ impl<'a> CypherExecutor<'a> {
         } else {
             pattern
         };
-        let executor = PatternExecutor::with_bindings_and_params(
-            self.graph,
-            self.budget_probe_limit(None),
-            &row.node_bindings,
-            self.params,
-        )
-        .set_deadline(self.deadline)
-        .set_cancel(self.cancel)
-            .set_parallel(self.parallel);
-        let matches = executor.execute(pattern)?;
+        // A `COUNT { ... }` holds its whole match vector before it counts
+        // anything, so it is memory exactly like a row set — and the count it
+        // produces is already charged as `Charge::Materialized` by the caller,
+        // so the ceiling refuses nothing this expression could have returned.
+        let matches = self
+            .materializing_executor(
+                self.budget_probe_limit(None),
+                &row.node_bindings,
+                "COUNT subquery pattern",
+            )
+            .execute(pattern)?;
         self.budget
             .check_work(matches.len(), "COUNT subquery pattern")?;
         Ok(matches)

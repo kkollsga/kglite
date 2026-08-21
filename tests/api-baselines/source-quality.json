@@ -238,7 +238,7 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/match_execution.rs",
       "qualified_name": "crate::CypherExecutor<'a>::execute_match",
-      "lines": 255,
+      "lines": 251,
       "branches": 34,
       "nesting": 7
     },
@@ -297,13 +297,6 @@
       "lines": 304,
       "branches": 90,
       "nesting": 4
-    },
-    {
-      "path": "crates/kglite/src/graph/languages/cypher/executor/shortest_path.rs",
-      "qualified_name": "crate::CypherExecutor<'a>::execute_shortest_path_match",
-      "lines": 244,
-      "branches": 35,
-      "nesting": 3
     },
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/where_clause.rs",

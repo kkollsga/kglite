@@ -7,7 +7,7 @@
 //! between two anchor points rather than the usual pattern-walk).
 
 use super::*;
-use crate::graph::core::pattern_matching::{PathHop, PatternExecutor};
+use crate::graph::core::pattern_matching::{NodePattern, PathHop, PatternExecutor};
 use crate::graph::schema::{DirGraph, InternedKey};
 use crate::graph::storage::GraphRead;
 use petgraph::graph::NodeIndex;
@@ -92,7 +92,101 @@ fn exact_shortest_hops(
     paths
 }
 
+/// One endpoint pair a `shortestPath` clause searches, with the input row it
+/// came from when a prior MATCH supplied one.
+type EndpointPair<'r> = (NodeIndex, NodeIndex, Option<&'r ResultRow>);
+
 impl<'a> CypherExecutor<'a> {
+    /// The `(source, target, prior_row)` work-list one `shortestPath` clause
+    /// searches over.
+    ///
+    /// Two shapes, and the difference between them is four orders of
+    /// magnitude. When a prior MATCH already bound both endpoints (the
+    /// canonical `MATCH (a {id: X}), (b {id: Y}) MATCH p =
+    /// shortestPath((a)-[*]-(b))`) each input row contributes exactly one
+    /// pair. With no prior bindings the endpoints are resolved by pattern and
+    /// crossed, which is the case the row check below governs.
+    fn shortest_path_endpoint_pairs<'r>(
+        &self,
+        source_pattern: &NodePattern,
+        target_pattern: &NodePattern,
+        existing: &'r ResultSet,
+    ) -> Result<Vec<EndpointPair<'r>>, String> {
+        // Build the (source_idx, target_idx, prior_row) work-list.
+        //
+        // Phase A.3 / 0.9.53 fix: when the source or target variable is
+        // already bound from a prior MATCH clause (the canonical Neo4j
+        // pattern is `MATCH (a {id: X}), (b {id: Y}) MATCH p =
+        // shortestPath((a)-[*]-(b))`), we MUST use the bound NodeIndex
+        // and skip re-resolution. Pre-fix, this branch called
+        // `find_matching_nodes_pub` on the bare-variable patterns,
+        // which (correctly) returned ALL nodes in the graph — turning a
+        // single BFS into a 500K × 500K cartesian-product runaway on
+        // realistic agent workloads.
+        //
+        // Fast path: every input row contributes exactly one (src, tgt)
+        // pair (or zero, if a variable isn't bound and the pattern is
+        // bare). Slow path (no prior rows): fall back to full pattern
+        // resolution + cartesian product, matching pre-fix behaviour
+        // for bare-pattern shortestPath callers.
+        let src_var = source_pattern.variable.as_deref();
+        let tgt_var = target_pattern.variable.as_deref();
+
+        let pairs: Vec<EndpointPair<'r>> = if !existing.rows.is_empty()
+            && src_var
+                .map(|v| existing.rows[0].node_bindings.contains_key(v))
+                .unwrap_or(false)
+            && tgt_var
+                .map(|v| existing.rows[0].node_bindings.contains_key(v))
+                .unwrap_or(false)
+        {
+            // Fast path — both endpoints pre-bound. One pair per input row.
+            let mut out = Vec::with_capacity(existing.rows.len());
+            for row in &existing.rows {
+                let src = match src_var.and_then(|v| row.node_bindings.get(v)) {
+                    Some(&idx) => idx,
+                    None => continue,
+                };
+                let tgt = match tgt_var.and_then(|v| row.node_bindings.get(v)) {
+                    Some(&idx) => idx,
+                    None => continue,
+                };
+                out.push((src, tgt, Some(row)));
+            }
+            out
+        } else {
+            // Slow path — no prior bindings; resolve patterns + cartesian product.
+            let executor =
+                PatternExecutor::new_lightweight_with_params(self.graph, None, self.params)
+                    .set_deadline(self.deadline)
+                    .set_cancel(self.cancel)
+                    .set_parallel(self.parallel);
+            let source_nodes = executor.find_matching_nodes_pub(source_pattern)?;
+            let target_nodes = executor.find_matching_nodes_pub(target_pattern)?;
+            // Both endpoint scans are node-bounded, but their product is not:
+            // an unanchored `shortestPath((a:X)-[*]-(b:Y))` over two 10k-node
+            // labels asks for 100M pairs here, and `with_capacity` turns that
+            // into a multi-gigabyte allocation (or an abort) before the first
+            // search runs. The pair set IS the materialized row set, so the
+            // ordinary row check governs it.
+            let pairs = source_nodes
+                .len()
+                .checked_mul(target_nodes.len())
+                .ok_or_else(|| {
+                    "Query row count overflow while executing shortestPath".to_string()
+                })?;
+            self.budget.check_rows(pairs, "shortestPath")?;
+            let mut out = Vec::with_capacity(pairs);
+            for &s in &source_nodes {
+                for &t in &target_nodes {
+                    out.push((s, t, None));
+                }
+            }
+            out
+        };
+        Ok(pairs)
+    }
+
     /// Execute a shortestPath MATCH: find shortest path between anchored endpoints
     pub(super) fn execute_shortest_path_match(
         &self,
@@ -139,65 +233,7 @@ impl<'a> CypherExecutor<'a> {
 
         let connection_types: Option<&[String]> = connection_types_vec.as_deref();
 
-        // Build the (source_idx, target_idx, prior_row) work-list.
-        //
-        // Phase A.3 / 0.9.53 fix: when the source or target variable is
-        // already bound from a prior MATCH clause (the canonical Neo4j
-        // pattern is `MATCH (a {id: X}), (b {id: Y}) MATCH p =
-        // shortestPath((a)-[*]-(b))`), we MUST use the bound NodeIndex
-        // and skip re-resolution. Pre-fix, this branch called
-        // `find_matching_nodes_pub` on the bare-variable patterns,
-        // which (correctly) returned ALL nodes in the graph — turning a
-        // single BFS into a 500K × 500K cartesian-product runaway on
-        // realistic agent workloads.
-        //
-        // Fast path: every input row contributes exactly one (src, tgt)
-        // pair (or zero, if a variable isn't bound and the pattern is
-        // bare). Slow path (no prior rows): fall back to full pattern
-        // resolution + cartesian product, matching pre-fix behaviour
-        // for bare-pattern shortestPath callers.
-        let src_var = source_pattern.variable.as_deref();
-        let tgt_var = target_pattern.variable.as_deref();
-
-        let pairs: Vec<(NodeIndex, NodeIndex, Option<&ResultRow>)> = if !existing.rows.is_empty()
-            && src_var
-                .map(|v| existing.rows[0].node_bindings.contains_key(v))
-                .unwrap_or(false)
-            && tgt_var
-                .map(|v| existing.rows[0].node_bindings.contains_key(v))
-                .unwrap_or(false)
-        {
-            // Fast path — both endpoints pre-bound. One pair per input row.
-            let mut out = Vec::with_capacity(existing.rows.len());
-            for row in &existing.rows {
-                let src = match src_var.and_then(|v| row.node_bindings.get(v)) {
-                    Some(&idx) => idx,
-                    None => continue,
-                };
-                let tgt = match tgt_var.and_then(|v| row.node_bindings.get(v)) {
-                    Some(&idx) => idx,
-                    None => continue,
-                };
-                out.push((src, tgt, Some(row)));
-            }
-            out
-        } else {
-            // Slow path — no prior bindings; resolve patterns + cartesian product.
-            let executor =
-                PatternExecutor::new_lightweight_with_params(self.graph, None, self.params)
-                    .set_deadline(self.deadline)
-                    .set_cancel(self.cancel)
-                    .set_parallel(self.parallel);
-            let source_nodes = executor.find_matching_nodes_pub(source_pattern)?;
-            let target_nodes = executor.find_matching_nodes_pub(target_pattern)?;
-            let mut out = Vec::with_capacity(source_nodes.len() * target_nodes.len());
-            for &s in &source_nodes {
-                for &t in &target_nodes {
-                    out.push((s, t, None));
-                }
-            }
-            out
-        };
+        let pairs = self.shortest_path_endpoint_pairs(source_pattern, target_pattern, &existing)?;
 
         let mut all_rows = Vec::new();
 
