@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`describe()`'s algorithm topics advertised signatures that do not exist.**
+  The fluent API reference an agent reads offered `shortest_path(...,
+  connection_type=None, directed=True)` — both keywords raise `TypeError`, and
+  the advertised `directed=True` default is the opposite of the real
+  (undirected) behaviour — plus a `shortest_path_length(...,
+  connection_type='ROAD')` example that cannot run, and singular
+  `connection_type=` on `pagerank` / `betweenness_centrality` /
+  `louvain_communities` / `connected_components`, which take
+  `connection_types` (plural, a list). The same drift ran through the rest of
+  the fluent reference: `statistics(properties=...)`, `update(...,
+  conflict_handling=...)`, `valid_at(from_col=...)`, `degrees(connection_type=)`,
+  a `vector()` method that does not exist (it is `vector_search()`), a
+  `set_spatial()` example passing three positional arguments to a method that
+  takes one, and a `within_bounds()` signature listing its bounds in the wrong
+  order. Every advertised signature and example now matches the installed API,
+  the shortest-path family's undirected semantics are stated explicitly (with
+  Cypher's `shortestPath()` named as the directed route), and
+  `tests/test_introspection_signature_truth.py` checks each one against
+  `inspect.signature` so a future description cannot drift from the code.
+  `docs/python/guides/graph-algorithms.md` claimed all path methods accept
+  `connection_types` / `via_types` / `timeout_ms`; it now carries the
+  per-method table `kglite/__init__.pyi` already documented —
+  `shortest_path_length`, `shortest_path_lengths_batch` and `are_connected`
+  take none of them.
+
 - **Breaking (semantics fix): the optimized variable-length path returned
   distance reachability instead of Cypher's trail reachability.** The planner
   marked a `[:T*min..max]` segment for a set-based BFS whenever the query's

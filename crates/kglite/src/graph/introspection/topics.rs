@@ -773,43 +773,45 @@ pub(super) fn write_fluent_overview(xml: &mut String) {
 
     // Selection & filtering
     xml.push_str("  <group name=\"selection\">\n");
-    xml.push_str("    <method sig=\"select(type, sort=None, limit=None, include_secondary=False)\">Select all nodes of a type. include_secondary=True also selects nodes carrying type as a secondary label. Returns lazy selection.</method>\n");
+    xml.push_str("    <method sig=\"select(node_type, sort=None, limit=None, temporal=None, include_secondary=False)\">Select all nodes of a type. include_secondary=True also selects nodes carrying type as a secondary label. Returns lazy selection.</method>\n");
     xml.push_str("    <method sig=\"where({prop: value})\">Filter by property: exact, comparison (&gt;,&lt;,&gt;=,&lt;=), string (contains, starts_with, ends_with, regex), in, is_null, is_not_null, negated variants.</method>\n");
     xml.push_str(
         "    <method sig=\"where_any([{...}, {...}])\">OR logic across condition sets.</method>\n",
     );
-    xml.push_str("    <method sig=\"where_connected(conn_type, direction='any')\">Keep nodes that have a specific connection.</method>\n");
+    xml.push_str("    <method sig=\"where_connected(connection_type, direction=None)\">Keep nodes that have a specific connection. direction: 'outgoing', 'incoming', or 'any' (the default).</method>\n");
     xml.push_str("    <method sig=\"where_orphans(include_orphans=True)\">Filter by connectivity: orphans only or connected only.</method>\n");
-    xml.push_str("    <method sig=\"sort(prop, ascending=True)\">Sort selection. Multi-col: sort([('a', True), ('b', False)]).</method>\n");
-    xml.push_str("    <method sig=\"limit(n)\">Limit to first n results.</method>\n");
-    xml.push_str("    <method sig=\"offset(n)\">Skip first n results (for pagination).</method>\n");
+    xml.push_str("    <method sig=\"sort(sort, ascending=None)\">Sort selection; `sort` is a property name or [('a', True), ('b', False)]. ascending applies to the string form (default True).</method>\n");
+    xml.push_str("    <method sig=\"limit(max_per_group)\">Keep at most this many nodes per parent group.</method>\n");
+    xml.push_str("    <method sig=\"offset(n)\">Skip the first n nodes per parent group (pagination).</method>\n");
     xml.push_str("    <method sig=\"expand(hops=1)\">BFS expansion — include all nodes within n hops.</method>\n");
     xml.push_str("  </group>\n");
 
     // Traversal
     xml.push_str("  <group name=\"traversal\">\n");
-    xml.push_str("    <method sig=\"traverse(conn_type, direction=None, target_type=None, where=None, where_connection=None, sort=None, limit=None)\">Follow graph edges. Returns target nodes as new selection level.</method>\n");
+    xml.push_str("    <method sig=\"traverse(connection_type, direction=None, target_type=None, where=None, where_connection=None, sort_target=None, limit=None)\">Follow graph edges. Returns target nodes as new selection level.</method>\n");
     xml.push_str("    <method sig=\"compare(target_type, method, filter=None, sort=None, limit=None)\">Spatial, semantic, or clustering comparison against a target type.</method>\n");
     xml.push_str("    <method sig=\"add_properties({Type: [props]})\">Enrich leaf nodes with properties from ancestor levels (copy, rename, aggregate, spatial).</method>\n");
-    xml.push_str("    <method sig=\"create_connections(conn_type)\">Materialise direct edges from traversal chain.</method>\n");
+    xml.push_str("    <method sig=\"create_connections(connection_type)\">Materialise direct edges from traversal chain.</method>\n");
     xml.push_str("  </group>\n");
 
     // Spatial
     xml.push_str("  <group name=\"spatial\">\n");
-    xml.push_str("    <method sig=\"set_spatial(type, lat_field, lon_field, geometry_field=None)\">Declare spatial fields for a node type.</method>\n");
-    xml.push_str("    <method sig=\"near_point(lat, lon, max_distance_deg)\">Filter by distance in degrees (fast, approximate).</method>\n");
-    xml.push_str("    <method sig=\"near_point_m(lat, lon, max_distance_m)\">Filter by geodesic distance in meters (WGS84).</method>\n");
-    xml.push_str("    <method sig=\"within_bounds(min_lat, min_lon, max_lat, max_lon)\">Bounding-box filter.</method>\n");
+    xml.push_str("    <method sig=\"set_spatial(node_type, *, location=None, geometry=None, points=None, shapes=None)\">Declare spatial fields for a node type. Keyword-only after node_type: location is a (lat_field, lon_field) tuple, geometry a WKT field name, points/shapes are named-variant maps.</method>\n");
+    xml.push_str("    <method sig=\"near_point(center_lat, center_lon, max_distance)\">Filter by distance in degrees (fast, approximate).</method>\n");
+    xml.push_str("    <method sig=\"near_point_m(center_lat, center_lon, max_distance_m)\">Filter by geodesic distance in meters (WGS84).</method>\n");
+    xml.push_str("    <method sig=\"within_bounds(min_lat, max_lat, min_lon, max_lon)\">Bounding-box filter.</method>\n");
     xml.push_str("    <method sig=\"contains_point(lat, lon)\">Point-in-polygon test (requires WKT geometry).</method>\n");
-    xml.push_str("    <method sig=\"intersects_geometry(wkt)\">Geometry overlap test.</method>\n");
+    xml.push_str(
+        "    <method sig=\"intersects_geometry(query_wkt)\">Geometry overlap test.</method>\n",
+    );
     xml.push_str("    <method sig=\"bounds()\">Geographic bounding box of selection.</method>\n");
     xml.push_str("    <method sig=\"centroid()\">Average lat/lon of selection.</method>\n");
     xml.push_str("  </group>\n");
 
     // Temporal
     xml.push_str("  <group name=\"temporal\">\n");
-    xml.push_str("    <method sig=\"valid_at(date, from_col='valid_from', to_col='valid_to')\">Point-in-time filter: keep nodes valid at a specific date.</method>\n");
-    xml.push_str("    <method sig=\"valid_during(start, end, from_col='valid_from', to_col='valid_to')\">Range overlap filter: keep nodes valid during a period.</method>\n");
+    xml.push_str("    <method sig=\"valid_at(date, date_from_field=None, date_to_field=None)\">Point-in-time filter: keep nodes valid at a specific date.</method>\n");
+    xml.push_str("    <method sig=\"valid_during(start_date, end_date, date_from_field=None, date_to_field=None)\">Range overlap filter: keep nodes valid during a period.</method>\n");
     xml.push_str("  </group>\n");
 
     // Retrieval
@@ -823,68 +825,68 @@ pub(super) fn write_fluent_overview(xml: &mut String) {
     xml.push_str(
         "    <method sig=\"ids()\">Lightweight retrieval: id + type + title only.</method>\n",
     );
-    xml.push_str("    <method sig=\"node(type, id)\">O(1) lookup by type + id. Returns dict or None.</method>\n");
+    xml.push_str("    <method sig=\"node(node_type, node_id)\">O(1) lookup by type + id. Returns dict or None.</method>\n");
     xml.push_str("    <method sig=\"count(group_by=None)\">Count nodes, optionally grouped by property.</method>\n");
     xml.push_str("    <method sig=\"len()\">O(1) count of selected nodes.</method>\n");
     xml.push_str("    <method sig=\"sample(n)\">Random sample as ResultView.</method>\n");
     xml.push_str("    <method sig=\"titles()\">Title-only retrieval.</method>\n");
-    xml.push_str("    <method sig=\"get_properties(props)\">Specific properties as list of tuples.</method>\n");
+    xml.push_str("    <method sig=\"get_properties(properties)\">Specific properties as list of tuples.</method>\n");
     xml.push_str("  </group>\n");
 
     // Statistics
     xml.push_str("  <group name=\"statistics\">\n");
-    xml.push_str("    <method sig=\"statistics(properties=None, group_by=None)\">Descriptive stats: count, mean, std, min, max, sum.</method>\n");
+    xml.push_str("    <method sig=\"statistics(property, group_by=None)\">Descriptive stats: count, mean, std, min, max, sum.</method>\n");
     xml.push_str("    <method sig=\"calculate(expression, store_as=None)\">Math expressions on properties. store_as saves result as new property.</method>\n");
     xml.push_str("    <method sig=\"unique_values(property, store_as=None)\">Distinct values for a property.</method>\n");
     xml.push_str(
-        "    <method sig=\"degrees(connection_type=None)\">Node degree counts.</method>\n",
+        "    <method sig=\"degrees()\">Node degree counts (whole graph; no per-connection-type filter today).</method>\n",
     );
     xml.push_str("  </group>\n");
 
     // Graph algorithms
     xml.push_str("  <group name=\"algorithms\">\n");
-    xml.push_str("    <method sig=\"shortest_path(source_type, source_id, target_type, target_id, connection_type=None, directed=True)\">Full path with node details.</method>\n");
-    xml.push_str("    <method sig=\"shortest_path_length(...)\">Hop count only.</method>\n");
-    xml.push_str("    <method sig=\"all_paths(source_type, source_id, target_type, target_id, max_hops=5)\">Enumerate all paths.</method>\n");
-    xml.push_str("    <method sig=\"pagerank(damping_factor=0.85, connection_type=None)\">PageRank centrality.</method>\n");
-    xml.push_str("    <method sig=\"betweenness_centrality(connection_type=None)\">Betweenness centrality.</method>\n");
-    xml.push_str("    <method sig=\"louvain_communities(resolution=1.0, connection_type=None)\">Community detection (Louvain).</method>\n");
-    xml.push_str("    <method sig=\"connected_components(mode='weak', connection_type=None)\">Connected component analysis.</method>\n");
+    xml.push_str("    <method sig=\"shortest_path(source_type, source_id, target_type, target_id, connection_types=None, via_types=None, weight_property=None, timeout_ms=None)\">Full path with node details. Undirected: edge direction is ignored (use Cypher shortestPath((a)-[:R*]-&gt;(b)) for a directed search).</method>\n");
+    xml.push_str("    <method sig=\"shortest_path_length(source_type, source_id, target_type, target_id, weight_property=None)\">Hop count only. Undirected; takes no connection_types / via_types / timeout_ms.</method>\n");
+    xml.push_str("    <method sig=\"all_paths(source_type, source_id, target_type, target_id, max_hops=None, max_results=None, connection_types=None, via_types=None, timeout_ms=None)\">Enumerate all paths (max_hops defaults to 5). Undirected.</method>\n");
+    xml.push_str("    <method sig=\"pagerank(damping_factor=None, connection_types=None, top_k=None, as_dict=None, to_df=None)\">PageRank centrality (damping_factor defaults to 0.85).</method>\n");
+    xml.push_str("    <method sig=\"betweenness_centrality(normalized=None, sample_size=None, connection_types=None, top_k=None)\">Betweenness centrality.</method>\n");
+    xml.push_str("    <method sig=\"louvain_communities(weight_property=None, resolution=None, connection_types=None)\">Community detection (Louvain; resolution defaults to 1.0).</method>\n");
+    xml.push_str("    <method sig=\"connected_components(weak=None, titles_only=None)\">Connected component analysis (weak defaults to True).</method>\n");
     xml.push_str("  </group>\n");
 
     // Vector search
     xml.push_str("  <group name=\"vectors\">\n");
-    xml.push_str("    <method sig=\"set_embedder(model_name_or_callable)\">Register embedding model for text search.</method>\n");
-    xml.push_str("    <method sig=\"embed_texts(type, column)\">Compute and store embeddings for a text column.</method>\n");
-    xml.push_str("    <method sig=\"search_text(query, type, column=None, top_k=10, min_score=None)\">Semantic text search (auto-embeds query).</method>\n");
-    xml.push_str("    <method sig=\"vector(vector, type, column=None, top_k=10, min_score=None)\">Search with pre-computed query vector.</method>\n");
+    xml.push_str("    <method sig=\"set_embedder(model)\">Register embedding model for text search.</method>\n");
+    xml.push_str("    <method sig=\"embed_texts(node_type, text_column)\">Compute and store embeddings for a text column.</method>\n");
+    xml.push_str("    <method sig=\"search_text(text_column, query, top_k=10, metric=None, returning=None, exact=False)\">Semantic text search (auto-embeds query). Note the argument order: column first, then the query string.</method>\n");
+    xml.push_str("    <method sig=\"vector_search(text_column, query_vector, top_k=10, metric=None, returning=None, exact=False)\">Search with a pre-computed query vector.</method>\n");
     xml.push_str("  </group>\n");
 
     // Timeseries
     xml.push_str("  <group name=\"timeseries\">\n");
-    xml.push_str("    <method sig=\"set_timeseries(type, resolution, channels, units=None)\">Declare timeseries schema for a node type.</method>\n");
-    xml.push_str("    <method sig=\"add_timeseries(df, type, fk_field, time_key, channels)\">Bulk load timeseries data from DataFrame.</method>\n");
-    xml.push_str("    <method sig=\"timeseries(type, id, channel=None)\">Retrieve timeseries for a node (all channels or specific).</method>\n");
+    xml.push_str("    <method sig=\"set_timeseries(node_type, *, resolution, channels=None, units=None, bin_type=None)\">Declare timeseries schema for a node type (everything after node_type is keyword-only).</method>\n");
+    xml.push_str("    <method sig=\"add_timeseries(node_type, *, data, fk, time_key, channels, resolution=None, units=None)\">Bulk load timeseries data from a DataFrame (keyword-only after node_type).</method>\n");
+    xml.push_str("    <method sig=\"timeseries(node_id, channel=None, start=None, end=None)\">Retrieve timeseries for one node id (all channels, or one).</method>\n");
     xml.push_str("  </group>\n");
 
     // Mutation
     xml.push_str("  <group name=\"mutation\">\n");
-    xml.push_str("    <method sig=\"update({prop: value}, conflict_handling='update')\">Batch property update on selected nodes.</method>\n");
+    xml.push_str("    <method sig=\"update(properties, keep_selection=None)\">Batch property update on selected nodes; properties is a {prop: value} dict.</method>\n");
     xml.push_str("  </group>\n");
 
     // Data loading
     xml.push_str("  <group name=\"loading\">\n");
-    xml.push_str("    <method sig=\"add_nodes(df, type, id_field, title_field, columns=None, column_types=None, timeseries=None, git_sha=None, modified_by=None)\">Load nodes from DataFrame with optional write provenance.</method>\n");
-    xml.push_str("    <method sig=\"add_connections(df, conn_type, source_type, source_id, target_type, target_id)\">Load edges from DataFrame.</method>\n");
+    xml.push_str("    <method sig=\"add_nodes(data, node_type, unique_id_field, node_title_field=None, columns=None, column_types=None, timeseries=None, git_sha=None, modified_by=None)\">Load nodes from DataFrame with optional write provenance.</method>\n");
+    xml.push_str("    <method sig=\"add_connections(data, connection_type, source_type, source_id_field, target_type, target_id_field)\">Load edges from DataFrame.</method>\n");
     xml.push_str("    <method sig=\"extend(other, conflict_handling='update')\">Merge another in-memory KnowledgeGraph into this one in place (node identity (type,id); unions secondary labels; dedups edges on (type,src,tgt)). Returns a report dict.</method>\n");
-    xml.push_str("    <method sig=\"kglite.from_blueprint(path, verbose=False)\">Build graph from JSON blueprint + CSVs.</method>\n");
+    xml.push_str("    <method sig=\"kglite.from_blueprint(blueprint_path, verbose=False)\">Build graph from JSON blueprint + CSVs.</method>\n");
     xml.push_str("    <method sig=\"kglite.from_records(spec, on_missing_endpoint='vivify')\">Build graph from inline JSON records; endpoint policy: vivify, drop, or atomic error.</method>\n");
     xml.push_str("  </group>\n");
 
     // Export & persistence
     xml.push_str("  <group name=\"export\">\n");
     xml.push_str("    <method sig=\"export(path, format='graphml')\">Export as GraphML, GEXF, JSON (D3), or CSV.</method>\n");
-    xml.push_str("    <method sig=\"export_csv(directory)\">CSV tree + blueprint.json (round-trips with from_blueprint).</method>\n");
+    xml.push_str("    <method sig=\"export_csv(path)\">CSV tree + blueprint.json (round-trips with from_blueprint).</method>\n");
     xml.push_str("    <method sig=\"save(path)\">Binary .kgl v6 file (columnar, supports larger-than-RAM loading).</method>\n");
     xml.push_str("    <method sig=\"kglite.load(path)\">Restore from .kgl file.</method>\n");
     xml.push_str("  </group>\n");
@@ -898,9 +900,9 @@ pub(super) fn write_fluent_overview(xml: &mut String) {
 
     // Indexes
     xml.push_str("  <group name=\"indexes\">\n");
-    xml.push_str("    <method sig=\"create_index(type, property)\">Equality index for fast lookup.</method>\n");
-    xml.push_str("    <method sig=\"create_range_index(type, property)\">B-tree for range queries.</method>\n");
-    xml.push_str("    <method sig=\"create_composite_index(type, [prop1, prop2])\">Multi-column index.</method>\n");
+    xml.push_str("    <method sig=\"create_index(node_type, property)\">Equality index for fast lookup.</method>\n");
+    xml.push_str("    <method sig=\"create_range_index(node_type, property)\">B-tree for range queries.</method>\n");
+    xml.push_str("    <method sig=\"create_composite_index(node_type, [prop1, prop2])\">Multi-column index.</method>\n");
     xml.push_str("  </group>\n");
 
     // Transactions
@@ -962,15 +964,15 @@ pub(super) fn write_fluent_topic_selection(xml: &mut String) {
     xml.push_str("  <selection>\n");
     xml.push_str("    <desc>Select and filter nodes using method chaining. All filter methods return a new lazy selection.</desc>\n");
     xml.push_str("    <methods>\n");
-    xml.push_str("      <m sig=\"select(type, sort=None, limit=None, include_secondary=False)\">Start a selection on a node type. include_secondary=True also includes nodes carrying type as a secondary label.</m>\n");
+    xml.push_str("      <m sig=\"select(node_type, sort=None, limit=None, temporal=None, include_secondary=False)\">Start a selection on a node type. include_secondary=True also includes nodes carrying type as a secondary label.</m>\n");
     xml.push_str("      <m sig=\"where({prop: value})\">Exact match, comparison (&gt;, &lt;, &gt;=, &lt;=), string predicates (contains, starts_with, ends_with, regex), in-list, null checks, negated variants (not_in, not_contains).</m>\n");
     xml.push_str("      <m sig=\"where_any([{...}, {...}])\">OR logic: keep nodes matching any condition set.</m>\n");
-    xml.push_str("      <m sig=\"where_connected(conn_type, direction='any')\">Keep only nodes that have a specific connection.</m>\n");
+    xml.push_str("      <m sig=\"where_connected(connection_type, direction=None)\">Keep only nodes that have a specific connection. direction: 'outgoing', 'incoming', or 'any' (the default).</m>\n");
     xml.push_str(
         "      <m sig=\"where_orphans(include_orphans=True)\">Filter by connectivity.</m>\n",
     );
-    xml.push_str("      <m sig=\"sort(prop, ascending=True)\">Sort by property. Multi-col: sort([('a', True), ('b', False)]).</m>\n");
-    xml.push_str("      <m sig=\"limit(n) / offset(n)\">Pagination.</m>\n");
+    xml.push_str("      <m sig=\"sort(sort, ascending=None)\">Sort by property name, or by [('a', True), ('b', False)]. ascending applies to the string form (default True).</m>\n");
+    xml.push_str("      <m sig=\"limit(max_per_group) / offset(n)\">Pagination (both are per parent group).</m>\n");
     xml.push_str("    </methods>\n");
     xml.push_str("    <examples>\n");
     xml.push_str(
@@ -993,9 +995,9 @@ pub(super) fn write_fluent_topic_traversal(xml: &mut String) {
     xml.push_str("  <traversal>\n");
     xml.push_str("    <desc>Follow graph edges to navigate the graph. traverse() adds target nodes as a new hierarchy level. For spatial/semantic/clustering operations, use compare() instead.</desc>\n");
     xml.push_str("    <methods>\n");
-    xml.push_str("      <m sig=\"traverse(conn_type, direction=None, target_type=None, where=None, where_connection=None, sort=None, limit=None)\">Follow edges. direction: 'outgoing', 'incoming', or None (both).</m>\n");
+    xml.push_str("      <m sig=\"traverse(connection_type, direction=None, target_type=None, where=None, where_connection=None, sort_target=None, limit=None)\">Follow edges. direction: 'outgoing', 'incoming', or None (both).</m>\n");
     xml.push_str("      <m sig=\"add_properties({Type: [props]})\">Enrich leaf nodes with properties from ancestor levels. Supports copy, rename, Agg helpers (count, sum, mean, min, max, std, collect), and Spatial helpers (distance, area, perimeter, centroid_lat, centroid_lon).</m>\n");
-    xml.push_str("      <m sig=\"create_connections(conn_type)\">Materialise direct edges from a traversal chain.</m>\n");
+    xml.push_str("      <m sig=\"create_connections(connection_type)\">Materialise direct edges from a traversal chain.</m>\n");
     xml.push_str("    </methods>\n");
     xml.push_str("    <examples>\n");
     xml.push_str("      <ex desc=\"basic outgoing\">graph.select('Person').traverse('WORKS_AT').collect()</ex>\n");
@@ -1029,22 +1031,22 @@ pub(super) fn write_fluent_topic_spatial(xml: &mut String) {
     xml.push_str("  <spatial>\n");
     xml.push_str("    <desc>Spatial filtering and aggregation. Requires set_spatial() or column_types during add_nodes().</desc>\n");
     xml.push_str("    <methods>\n");
-    xml.push_str("      <m sig=\"set_spatial(type, lat_field, lon_field, geometry_field=None)\">Declare spatial fields for a node type.</m>\n");
-    xml.push_str("      <m sig=\"near_point(lat, lon, max_distance_deg)\">Filter by distance in degrees (fast, approximate). ~111km per degree at equator.</m>\n");
-    xml.push_str("      <m sig=\"near_point_m(lat, lon, max_distance_m)\">Geodesic distance filter in meters (WGS84, Vincenty).</m>\n");
-    xml.push_str("      <m sig=\"within_bounds(min_lat, min_lon, max_lat, max_lon)\">Bounding-box filter.</m>\n");
+    xml.push_str("      <m sig=\"set_spatial(node_type, *, location=None, geometry=None, points=None, shapes=None)\">Declare spatial fields for a node type. Keyword-only after node_type: location is a (lat_field, lon_field) tuple, geometry a WKT field name, points/shapes are named-variant maps.</m>\n");
+    xml.push_str("      <m sig=\"near_point(center_lat, center_lon, max_distance)\">Filter by distance in degrees (fast, approximate). ~111km per degree at equator.</m>\n");
+    xml.push_str("      <m sig=\"near_point_m(center_lat, center_lon, max_distance_m)\">Geodesic distance filter in meters (WGS84, Vincenty).</m>\n");
+    xml.push_str("      <m sig=\"within_bounds(min_lat, max_lat, min_lon, max_lon)\">Bounding-box filter.</m>\n");
     xml.push_str("      <m sig=\"contains_point(lat, lon)\">Point-in-polygon test (requires WKT geometry).</m>\n");
-    xml.push_str("      <m sig=\"intersects_geometry(wkt)\">Geometry overlap test.</m>\n");
+    xml.push_str("      <m sig=\"intersects_geometry(query_wkt)\">Geometry overlap test.</m>\n");
     xml.push_str("      <m sig=\"bounds()\">Bounding box of current selection: {min_lat, min_lon, max_lat, max_lon}.</m>\n");
     xml.push_str("      <m sig=\"centroid()\">Average lat/lon: {lat, lon}.</m>\n");
     xml.push_str("    </methods>\n");
     xml.push_str("    <examples>\n");
     xml.push_str(
-        "      <ex desc=\"setup\">graph.set_spatial('City', 'latitude', 'longitude')</ex>\n",
+        "      <ex desc=\"setup\">graph.set_spatial('City', location=('latitude', 'longitude'))</ex>\n",
     );
     xml.push_str("      <ex desc=\"near point (degrees)\">graph.select('City').near_point(59.91, 10.75, 0.5)</ex>\n");
     xml.push_str("      <ex desc=\"near point (meters)\">graph.select('City').near_point_m(59.91, 10.75, 50000)</ex>\n");
-    xml.push_str("      <ex desc=\"bounding box\">graph.select('Field').within_bounds(55.0, 0.0, 65.0, 15.0)</ex>\n");
+    xml.push_str("      <ex desc=\"bounding box\">graph.select('Field').within_bounds(55.0, 65.0, 0.0, 15.0)</ex>\n");
     xml.push_str("      <ex desc=\"point in polygon\">graph.select('Block').contains_point(60.5, 4.2)</ex>\n");
     xml.push_str("    </examples>\n");
     xml.push_str("  </spatial>\n");
@@ -1054,15 +1056,15 @@ pub(super) fn write_fluent_topic_temporal(xml: &mut String) {
     xml.push_str("  <temporal>\n");
     xml.push_str("    <desc>Temporal validity filtering. Nodes must have valid_from / valid_to (or custom-named) date properties.</desc>\n");
     xml.push_str("    <methods>\n");
-    xml.push_str("      <m sig=\"valid_at(date, from_col='valid_from', to_col='valid_to')\">Keep nodes valid at a specific date. date can be 'YYYY-MM-DD' string or datetime.</m>\n");
-    xml.push_str("      <m sig=\"valid_during(start, end, from_col='valid_from', to_col='valid_to')\">Keep nodes whose validity overlaps a date range.</m>\n");
+    xml.push_str("      <m sig=\"valid_at(date, date_from_field=None, date_to_field=None)\">Keep nodes valid at a specific date. date can be 'YYYY-MM-DD' string or datetime.</m>\n");
+    xml.push_str("      <m sig=\"valid_during(start_date, end_date, date_from_field=None, date_to_field=None)\">Keep nodes whose validity overlaps a date range.</m>\n");
     xml.push_str("    </methods>\n");
     xml.push_str("    <examples>\n");
     xml.push_str(
         "      <ex desc=\"point in time\">graph.select('Licence').valid_at('2020-06-15')</ex>\n",
     );
     xml.push_str("      <ex desc=\"range overlap\">graph.select('Licence').valid_during('2020-01-01', '2020-12-31')</ex>\n");
-    xml.push_str("      <ex desc=\"custom columns\">graph.select('Contract').valid_at('2023-01-01', from_col='start_date', to_col='end_date')</ex>\n");
+    xml.push_str("      <ex desc=\"custom columns\">graph.select('Contract').valid_at('2023-01-01', date_from_field='start_date', date_to_field='end_date')</ex>\n");
     xml.push_str("    </examples>\n");
     xml.push_str("  </temporal>\n");
 }
@@ -1077,7 +1079,7 @@ pub(super) fn write_fluent_topic_retrieval(xml: &mut String) {
     xml.push_str("      <m sig=\"to_gdf()\">GeoDataFrame with geometry column (requires spatial config).</m>\n");
     xml.push_str("      <m sig=\"ids()\">Lightweight: id + type + title only.</m>\n");
     xml.push_str(
-        "      <m sig=\"node(type, id)\">O(1) single-node lookup. Returns dict or None.</m>\n",
+        "      <m sig=\"node(node_type, node_id)\">O(1) single-node lookup. Returns dict or None.</m>\n",
     );
     xml.push_str(
         "      <m sig=\"count(group_by=None)\">Count, optionally grouped by property.</m>\n",
@@ -1085,7 +1087,9 @@ pub(super) fn write_fluent_topic_retrieval(xml: &mut String) {
     xml.push_str("      <m sig=\"len()\">O(1) selection size.</m>\n");
     xml.push_str("      <m sig=\"sample(n)\">Random n nodes as ResultView.</m>\n");
     xml.push_str("      <m sig=\"titles()\">Title-only list.</m>\n");
-    xml.push_str("      <m sig=\"get_properties(props)\">Specific properties as tuples.</m>\n");
+    xml.push_str(
+        "      <m sig=\"get_properties(properties)\">Specific properties as tuples.</m>\n",
+    );
     xml.push_str("    </methods>\n");
     xml.push_str("    <examples>\n");
     xml.push_str("      <ex desc=\"collect all\">results = graph.select('Person').where({'city': 'Oslo'}).collect()</ex>\n");
@@ -1104,16 +1108,18 @@ pub(super) fn write_fluent_topic_statistics(xml: &mut String) {
     xml.push_str("  <statistics>\n");
     xml.push_str("    <desc>Descriptive statistics, calculations, and aggregations on selected nodes.</desc>\n");
     xml.push_str("    <methods>\n");
-    xml.push_str("      <m sig=\"statistics(properties=None, group_by=None)\">Count, mean, std, min, max, sum for numeric properties.</m>\n");
+    xml.push_str("      <m sig=\"statistics(property, group_by=None)\">Count, mean, std, min, max, sum for numeric properties.</m>\n");
     xml.push_str("      <m sig=\"calculate(expression, store_as=None)\">Math expression on properties. store_as persists result.</m>\n");
     xml.push_str("      <m sig=\"unique_values(property, store_as=None)\">Distinct values for a property.</m>\n");
     xml.push_str(
-        "      <m sig=\"degrees(connection_type=None)\">In/out/total degree counts per node.</m>\n",
+        "      <m sig=\"degrees()\">In/out/total degree counts per node (whole graph; no per-connection-type filter today).</m>\n",
     );
     xml.push_str("    </methods>\n");
     xml.push_str("    <examples>\n");
-    xml.push_str("      <ex desc=\"basic stats\">graph.select('Product').statistics(['price', 'quantity'])</ex>\n");
-    xml.push_str("      <ex desc=\"grouped stats\">graph.select('Product').statistics(['price'], group_by='category')</ex>\n");
+    xml.push_str(
+        "      <ex desc=\"basic stats\">graph.select('Product').statistics('price')</ex>\n",
+    );
+    xml.push_str("      <ex desc=\"grouped stats\">graph.select('Product').statistics('price', group_by='category')</ex>\n");
     xml.push_str("      <ex desc=\"calculate\">graph.select('Product').calculate('price * quantity', store_as='revenue')</ex>\n");
     xml.push_str("      <ex desc=\"unique\">graph.select('Person').unique_values('city')</ex>\n");
     xml.push_str("    </examples>\n");
@@ -1122,28 +1128,29 @@ pub(super) fn write_fluent_topic_statistics(xml: &mut String) {
 
 pub(super) fn write_fluent_topic_algorithms(xml: &mut String) {
     xml.push_str("  <algorithms>\n");
-    xml.push_str("    <desc>Graph algorithms: paths, centrality, community detection.</desc>\n");
+    xml.push_str("    <desc>Graph algorithms: paths, centrality, community detection. Every path method is undirected — edges are traversed both ways and there is no directed argument; use Cypher shortestPath() with an arrow pattern for a directed search.</desc>\n");
     xml.push_str("    <methods>\n");
-    xml.push_str("      <m sig=\"shortest_path(src_type, src_id, tgt_type, tgt_id, connection_type=None, directed=True)\">Full path with node details.</m>\n");
-    xml.push_str("      <m sig=\"shortest_path_length(src_type, src_id, tgt_type, tgt_id, ...)\">Hop count only (integer).</m>\n");
-    xml.push_str("      <m sig=\"shortest_path_ids(src_type, src_id, tgt_type, tgt_id, ...)\">Path as list of (type, id) tuples.</m>\n");
-    xml.push_str("      <m sig=\"all_paths(src_type, src_id, tgt_type, tgt_id, max_hops=5)\">All paths up to max_hops.</m>\n");
-    xml.push_str("      <m sig=\"pagerank(damping_factor=0.85, connection_type=None)\">PageRank centrality → ResultView.</m>\n");
-    xml.push_str("      <m sig=\"betweenness_centrality(connection_type=None)\">Betweenness centrality → ResultView.</m>\n");
-    xml.push_str("      <m sig=\"degree_centrality(connection_type=None, normalized=True)\">Degree centrality → dict.</m>\n");
-    xml.push_str("      <m sig=\"closeness_centrality(connection_type=None)\">Closeness centrality → ResultView.</m>\n");
-    xml.push_str("      <m sig=\"louvain_communities(resolution=1.0, connection_type=None)\">Community detection → ResultView.</m>\n");
-    xml.push_str("      <m sig=\"label_propagation(max_iterations=100)\">Label propagation communities → ResultView.</m>\n");
-    xml.push_str("      <m sig=\"connected_components(mode='weak', connection_type=None)\">Component analysis → ResultView.</m>\n");
+    xml.push_str("      <m sig=\"shortest_path(source_type, source_id, target_type, target_id, connection_types=None, via_types=None, weight_property=None, timeout_ms=None)\">Full path with node details. connection_types restricts edge types, via_types restricts intermediate node types, weight_property switches BFS to Dijkstra.</m>\n");
+    xml.push_str("      <m sig=\"shortest_path_length(source_type, source_id, target_type, target_id, weight_property=None)\">Hop count only (integer; float when weighted). No connection_types / via_types / timeout_ms — use shortest_path() or shortest_path_ids() when you need filters.</m>\n");
+    xml.push_str("      <m sig=\"shortest_path_ids(source_type, source_id, target_type, target_id, connection_types=None, via_types=None, timeout_ms=None)\">Path as a list of node ids.</m>\n");
+    xml.push_str("      <m sig=\"all_paths(source_type, source_id, target_type, target_id, max_hops=None, max_results=None, connection_types=None, via_types=None, timeout_ms=None)\">All paths up to max_hops (default 5); max_results caps the count.</m>\n");
+    xml.push_str("      <m sig=\"pagerank(damping_factor=None, max_iterations=None, connection_types=None, top_k=None, as_dict=None, to_df=None)\">PageRank centrality → ResultView (damping_factor defaults to 0.85).</m>\n");
+    xml.push_str("      <m sig=\"betweenness_centrality(normalized=None, sample_size=None, connection_types=None, top_k=None, as_dict=None, to_df=None)\">Betweenness centrality → ResultView.</m>\n");
+    xml.push_str("      <m sig=\"degree_centrality(normalized=None, connection_types=None, top_k=None, as_dict=None, to_df=None)\">Degree centrality → ResultView (as_dict=True for a dict).</m>\n");
+    xml.push_str("      <m sig=\"closeness_centrality(normalized=None, sample_size=None, connection_types=None, top_k=None, as_dict=None, to_df=None)\">Closeness centrality → ResultView.</m>\n");
+    xml.push_str("      <m sig=\"louvain_communities(weight_property=None, resolution=None, connection_types=None, timeout_ms=None)\">Community detection → dict with communities, modularity, num_communities (resolution defaults to 1.0).</m>\n");
+    xml.push_str("      <m sig=\"label_propagation(max_iterations=None, connection_types=None, timeout_ms=None)\">Label propagation communities → dict (max_iterations defaults to 100).</m>\n");
+    xml.push_str("      <m sig=\"connected_components(weak=None, titles_only=None)\">Component analysis → list of components (weak defaults to True).</m>\n");
     xml.push_str("    </methods>\n");
     xml.push_str("    <examples>\n");
     xml.push_str(
         "      <ex desc=\"shortest path\">graph.shortest_path('Person', 1, 'Person', 42)</ex>\n",
     );
-    xml.push_str("      <ex desc=\"path length\">graph.shortest_path_length('City', 'Oslo', 'City', 'Bergen', connection_type='ROAD')</ex>\n");
-    xml.push_str("      <ex desc=\"pagerank\">graph.pagerank(connection_type='CITES')</ex>\n");
+    xml.push_str("      <ex desc=\"path length\">graph.shortest_path_length('City', 'Oslo', 'City', 'Bergen')</ex>\n");
+    xml.push_str("      <ex desc=\"filtered path\">graph.shortest_path('City', 'Oslo', 'City', 'Bergen', connection_types=['ROAD'])</ex>\n");
+    xml.push_str("      <ex desc=\"pagerank\">graph.pagerank(connection_types=['CITES'])</ex>\n");
     xml.push_str("      <ex desc=\"communities\">graph.louvain_communities(resolution=1.5)</ex>\n");
-    xml.push_str("      <ex desc=\"components\">graph.connected_components(mode='weak')</ex>\n");
+    xml.push_str("      <ex desc=\"components\">graph.connected_components(weak=True)</ex>\n");
     xml.push_str("    </examples>\n");
     xml.push_str("  </algorithms>\n");
 }
@@ -1152,13 +1159,13 @@ pub(super) fn write_fluent_topic_vectors(xml: &mut String) {
     xml.push_str("  <vectors>\n");
     xml.push_str("    <desc>Embedding storage and semantic search. Requires set_embedder() or pre-computed vectors.</desc>\n");
     xml.push_str("    <methods>\n");
-    xml.push_str("      <m sig=\"set_embedder(model_name_or_callable)\">Register embedding model (sentence-transformers name or callable).</m>\n");
-    xml.push_str("      <m sig=\"embed_texts(type, column)\">Compute and store embeddings for a text column.</m>\n");
-    xml.push_str("      <m sig=\"set_embeddings(type, column, embeddings_dict, metric=None)\">Provide pre-computed embeddings {id: vector} — replaces the store. `column` names the source text column, which must exist on the type.</m>\n");
-    xml.push_str("      <m sig=\"add_embeddings(type, column, embeddings_dict, metric=None)\">Same, upserting into the existing store so batches coexist. Call save() to persist either.</m>\n");
-    xml.push_str("      <m sig=\"search_text(query, type, column=None, top_k=10, min_score=None)\">Semantic search — auto-embeds query string.</m>\n");
-    xml.push_str("      <m sig=\"vector(vector, type, column=None, top_k=10, min_score=None)\">Search with explicit query vector.</m>\n");
-    xml.push_str("      <m sig=\"build_vector_index(type, column, m=16, ef_search=64, metric=None)\">Build an HNSW index so search scales on large stores (opt-in; auto-used; exact=True bypasses). Dropped when vectors change.</m>\n");
+    xml.push_str("      <m sig=\"set_embedder(model)\">Register embedding model (sentence-transformers name or callable).</m>\n");
+    xml.push_str("      <m sig=\"embed_texts(node_type, text_column)\">Compute and store embeddings for a text column.</m>\n");
+    xml.push_str("      <m sig=\"set_embeddings(node_type, text_column, embeddings, metric=None)\">Provide pre-computed embeddings {id: vector} — replaces the store. text_column names the source text column, which must exist on the type.</m>\n");
+    xml.push_str("      <m sig=\"add_embeddings(node_type, text_column, embeddings, metric=None)\">Same, upserting into the existing store so batches coexist. Call save() to persist either.</m>\n");
+    xml.push_str("      <m sig=\"search_text(text_column, query, top_k=10, metric=None, returning=None, exact=False)\">Semantic search — auto-embeds the query string. Column first, then the query.</m>\n");
+    xml.push_str("      <m sig=\"vector_search(text_column, query_vector, top_k=10, metric=None, returning=None, exact=False)\">Search with an explicit query vector.</m>\n");
+    xml.push_str("      <m sig=\"build_vector_index(node_type, text_column, m=None, ef_construction=None, ef_search=None, metric=None)\">Build an HNSW index so search scales on large stores (opt-in; auto-used; exact=True bypasses). Dropped when vectors change.</m>\n");
     xml.push_str("    </methods>\n");
     xml.push_str("    <examples>\n");
     xml.push_str("      <ex desc=\"setup\">graph.set_embedder('all-MiniLM-L6-v2')</ex>\n");
@@ -1166,9 +1173,9 @@ pub(super) fn write_fluent_topic_vectors(xml: &mut String) {
     xml.push_str(
         "      <ex desc=\"index large store\">graph.build_vector_index('Paper', 'abstract')</ex>\n",
     );
-    xml.push_str("      <ex desc=\"text search\">graph.search_text('machine learning for graphs', 'Paper', top_k=5)</ex>\n");
+    xml.push_str("      <ex desc=\"text search\">graph.search_text('abstract', 'machine learning for graphs', top_k=5)</ex>\n");
     xml.push_str(
-        "      <ex desc=\"min score\">graph.search_text('NLP', 'Paper', min_score=0.7)</ex>\n",
+        "      <ex desc=\"exact search\">graph.search_text('abstract', 'NLP', top_k=5, exact=True)</ex>\n",
     );
     xml.push_str("    </examples>\n");
     xml.push_str("  </vectors>\n");
@@ -1178,17 +1185,15 @@ pub(super) fn write_fluent_topic_timeseries(xml: &mut String) {
     xml.push_str("  <timeseries>\n");
     xml.push_str("    <desc>Time-indexed data per node. Declare schema, bulk-load from DataFrame, retrieve per node.</desc>\n");
     xml.push_str("    <methods>\n");
-    xml.push_str("      <m sig=\"set_timeseries(type, resolution, channels, units=None)\">Declare timeseries schema. resolution: 'day'|'month'|'year'.</m>\n");
-    xml.push_str("      <m sig=\"add_timeseries(df, type, fk_field, time_key, channels)\">Bulk load from DataFrame with foreign key to nodes.</m>\n");
-    xml.push_str("      <m sig=\"timeseries(type, id, channel=None)\">Retrieve all channels or a specific channel for one node.</m>\n");
-    xml.push_str("      <m sig=\"timeseries_config(type)\">Query timeseries metadata (resolution, channels, units).</m>\n");
+    xml.push_str("      <m sig=\"set_timeseries(node_type, *, resolution, channels=None, units=None, bin_type=None)\">Declare timeseries schema (keyword-only after node_type). resolution: 'day'|'month'|'year'.</m>\n");
+    xml.push_str("      <m sig=\"add_timeseries(node_type, *, data, fk, time_key, channels, resolution=None, units=None)\">Bulk load from a DataFrame; fk names the column holding the node id (keyword-only after node_type).</m>\n");
+    xml.push_str("      <m sig=\"timeseries(node_id, channel=None, start=None, end=None)\">Retrieve all channels or a specific channel for one node id.</m>\n");
+    xml.push_str("      <m sig=\"timeseries_config(node_type=None)\">Query timeseries metadata (resolution, channels, units).</m>\n");
     xml.push_str("    </methods>\n");
     xml.push_str("    <examples>\n");
     xml.push_str("      <ex desc=\"schema\">graph.set_timeseries('Field', resolution='month', channels=['oil', 'gas'], units={'oil': 'MSm3'})</ex>\n");
-    xml.push_str("      <ex desc=\"bulk load\">graph.add_timeseries(prod_df, 'Field', fk_field='field_id', time_key='date', channels=['oil', 'gas'])</ex>\n");
-    xml.push_str(
-        "      <ex desc=\"retrieve\">ts = graph.timeseries('Field', 123, channel='oil')</ex>\n",
-    );
+    xml.push_str("      <ex desc=\"bulk load\">graph.add_timeseries('Field', data=prod_df, fk='field_id', time_key=['date'], channels=['oil', 'gas'])</ex>\n");
+    xml.push_str("      <ex desc=\"retrieve\">ts = graph.timeseries(123, channel='oil')</ex>\n");
     xml.push_str("      <ex desc=\"inline loading\">graph.add_nodes(df, 'Prod', 'id', 'name', timeseries={'time': 'date', 'channels': ['oil', 'gas']})</ex>\n");
     xml.push_str("    </examples>\n");
     xml.push_str("  </timeseries>\n");
@@ -1198,11 +1203,11 @@ pub(super) fn write_fluent_topic_mutation(xml: &mut String) {
     xml.push_str("  <mutation>\n");
     xml.push_str("    <desc>Update properties on selected nodes.</desc>\n");
     xml.push_str("    <methods>\n");
-    xml.push_str("      <m sig=\"update({prop: value}, conflict_handling='update')\">Batch property update. conflict_handling: 'update'|'preserve'|'replace'.</m>\n");
+    xml.push_str("      <m sig=\"update(properties, keep_selection=None)\">Batch property update; properties is a {prop: value} dict. Existing values are overwritten — there is no conflict_handling here (that argument belongs to add_nodes()).</m>\n");
     xml.push_str("    </methods>\n");
     xml.push_str("    <examples>\n");
     xml.push_str("      <ex desc=\"set property\">graph.select('Person').where({'city': 'Oslo'}).update({'country': 'Norway'})</ex>\n");
-    xml.push_str("      <ex desc=\"preserve existing\">graph.select('Person').update({'status': 'active'}, conflict_handling='preserve')</ex>\n");
+    xml.push_str("      <ex desc=\"keep the selection\">graph.select('Person').update({'status': 'active'}, keep_selection=True)</ex>\n");
     xml.push_str("    </examples>\n");
     xml.push_str("  </mutation>\n");
 }
@@ -1213,14 +1218,14 @@ pub(super) fn write_fluent_topic_loading(xml: &mut String) {
         "    <desc>Load nodes and connections from DataFrames or blueprint files.</desc>\n",
     );
     xml.push_str("    <methods>\n");
-    xml.push_str("      <m sig=\"add_nodes(df, type, id_field, title_field, columns=None, column_types=None, conflict_handling='skip', timeseries=None, git_sha=None, modified_by=None, on_invalid='warn')\">Load nodes. conflict_handling: 'update'|'replace'|'skip'|'preserve'|'sum'. on_invalid: 'warn' (default, skip unusable rows and warn), 'error' (refuse the whole call, nothing written), 'skip' (silent). Provenance is stamped on auto_timestamp types.</m>\n");
-    xml.push_str("      <m sig=\"add_connections(data, conn_type, source_type, source_id_field, target_type, target_id_field, columns=None, skip_columns=None, conflict_handling='update', query=None, extra_properties=None, git_sha=None, modified_by=None, on_invalid='warn')\">Load edges from DataFrame or a read query. on_invalid controls rows with a null endpoint id, as in add_nodes. Provenance is stamped on auto_timestamp edge types.</m>\n");
-    xml.push_str("      <m sig=\"replace_connections(data, conn_type, source_type, source_id_field, target_type, target_id_field, ...)\">Atomic edge upsert: prune each source node's existing conn_type edges, then add the input's. Same args as add_connections; use to re-sync a derived edge set idempotently.</m>\n");
-    xml.push_str("      <m sig=\"add_nodes_bulk(specs, git_sha=None, modified_by=None)\">Bulk load multiple node types with optional provenance.</m>\n");
+    xml.push_str("      <m sig=\"add_nodes(data, node_type, unique_id_field, node_title_field=None, columns=None, conflict_handling=None, column_types=None, timeseries=None, labels=None, git_sha=None, modified_by=None, on_invalid='warn')\">Load nodes. conflict_handling: 'update'|'replace'|'skip'|'preserve'|'sum'. on_invalid: 'warn' (default, skip unusable rows and warn), 'error' (refuse the whole call, nothing written), 'skip' (silent). Provenance is stamped on auto_timestamp types.</m>\n");
+    xml.push_str("      <m sig=\"add_connections(data, connection_type, source_type, source_id_field, target_type, target_id_field, columns=None, skip_columns=None, conflict_handling=None, query=None, extra_properties=None, git_sha=None, modified_by=None, on_invalid='warn')\">Load edges from DataFrame or a read query. on_invalid controls rows with a null endpoint id, as in add_nodes. Provenance is stamped on auto_timestamp edge types.</m>\n");
+    xml.push_str("      <m sig=\"replace_connections(data, connection_type, source_type, source_id_field, target_type, target_id_field, ...)\">Atomic edge upsert: prune each source node's existing connection_type edges, then add the input's. Same args as add_connections; use to re-sync a derived edge set idempotently.</m>\n");
+    xml.push_str("      <m sig=\"add_nodes_bulk(nodes, git_sha=None, modified_by=None)\">Bulk load multiple node types with optional provenance.</m>\n");
     xml.push_str(
-        "      <m sig=\"add_connections_bulk(specs, git_sha=None, modified_by=None)\">Bulk load multiple connection types with optional provenance.</m>\n",
+        "      <m sig=\"add_connections_bulk(connections, git_sha=None, modified_by=None)\">Bulk load multiple connection types with optional provenance.</m>\n",
     );
-    xml.push_str("      <m sig=\"kglite.from_blueprint(path, verbose=False)\">Build graph from JSON blueprint + CSVs.</m>\n");
+    xml.push_str("      <m sig=\"kglite.from_blueprint(blueprint_path, verbose=False)\">Build graph from JSON blueprint + CSVs.</m>\n");
     xml.push_str("      <m sig=\"kglite.from_records(spec, on_missing_endpoint='vivify')\">Build from inline JSON records. Missing endpoints: 'vivify'|'drop'|'error' (atomic).</m>\n");
     xml.push_str("    </methods>\n");
     xml.push_str("    <examples>\n");
@@ -1243,7 +1248,7 @@ pub(super) fn write_fluent_topic_export(xml: &mut String) {
     xml.push_str(
         "      <m sig=\"export_string(format='json')\">Export to string (no file); 'csv' is file-only.</m>\n",
     );
-    xml.push_str("      <m sig=\"export_csv(directory)\">CSV directory tree + blueprint.json (round-trips with from_blueprint).</m>\n");
+    xml.push_str("      <m sig=\"export_csv(path)\">CSV directory tree + blueprint.json (round-trips with from_blueprint).</m>\n");
     xml.push_str("      <m sig=\"save(path)\">Binary .kgl v6 file (columnar, supports larger-than-RAM loading).</m>\n");
     xml.push_str("      <m sig=\"kglite.load(path)\">Restore from .kgl file.</m>\n");
     xml.push_str("    </methods>\n");
@@ -1263,13 +1268,13 @@ pub(super) fn write_fluent_topic_indexes(xml: &mut String) {
     xml.push_str("  <indexes>\n");
     xml.push_str("    <desc>Create property indexes for faster lookups. Type indices are automatic.</desc>\n");
     xml.push_str("    <methods>\n");
-    xml.push_str("      <m sig=\"create_index(type, property)\">Equality index: fast exact-match lookup.</m>\n");
-    xml.push_str("      <m sig=\"create_range_index(type, property)\">B-tree index: fast range queries (&gt;, &lt;, &gt;=, &lt;=).</m>\n");
-    xml.push_str("      <m sig=\"create_composite_index(type, [prop1, prop2, ...])\">Multi-property index.</m>\n");
-    xml.push_str("      <m sig=\"drop_index(type, property) / drop_range_index / drop_composite_index\">Remove indexes.</m>\n");
+    xml.push_str("      <m sig=\"create_index(node_type, property)\">Equality index: fast exact-match lookup.</m>\n");
+    xml.push_str("      <m sig=\"create_range_index(node_type, property)\">B-tree index: fast range queries (&gt;, &lt;, &gt;=, &lt;=).</m>\n");
+    xml.push_str("      <m sig=\"create_composite_index(node_type, [prop1, prop2, ...])\">Multi-property index.</m>\n");
+    xml.push_str("      <m sig=\"drop_index(node_type, property) / drop_range_index / drop_composite_index\">Remove indexes.</m>\n");
     xml.push_str("      <m sig=\"list_indexes() / list_composite_indexes()\">Enumerate existing indexes.</m>\n");
     xml.push_str(
-        "      <m sig=\"index_stats(type, property)\">Index metadata and hit count.</m>\n",
+        "      <m sig=\"index_stats(node_type, property)\">Index metadata and hit count.</m>\n",
     );
     xml.push_str("    </methods>\n");
     xml.push_str("    <examples>\n");
@@ -1320,7 +1325,7 @@ pub(super) fn write_fluent_topic_schema(xml: &mut String) {
     xml.push_str("    <methods>\n");
     xml.push_str("      <m sig=\"schema()\">Full schema dict: node types, connections, indexes, counts.</m>\n");
     xml.push_str("      <m sig=\"schema_text()\">Human-readable schema summary.</m>\n");
-    xml.push_str("      <m sig=\"properties(type)\">Per-property statistics: type, non_null, unique, samples.</m>\n");
+    xml.push_str("      <m sig=\"properties(node_type)\">Per-property statistics: type, non_null, unique, samples.</m>\n");
     xml.push_str(
         "      <m sig=\"connection_types()\">All connection types with counts and endpoints.</m>\n",
     );

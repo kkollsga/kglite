@@ -19,7 +19,28 @@ graph.shortest_path_ids(...)       # → list[id] | None (node IDs along path)
 graph.shortest_path_indices(...)   # → list[int] | None (raw graph indices, fastest)
 ```
 
-All path methods support `connection_types`, `via_types`, and `timeout_ms` for filtering and safety.
+**Which options each method takes.** The filter arguments are not uniform across
+the family — passing one to a method that doesn't take it raises `TypeError`:
+
+| Method | `connection_types` / `via_types` / `timeout_ms` | `weight_property` |
+| --- | --- | --- |
+| `shortest_path` | yes | yes |
+| `shortest_path_ids` | yes | no |
+| `shortest_path_indices` | yes | no |
+| `all_paths` | yes | no |
+| `shortest_path_length` | **no** | yes |
+| `shortest_path_lengths_batch` | **no** | no |
+| `are_connected` | **no** | no |
+
+When you need a filtered distance, call `shortest_path(...)` with the filters
+and read `result['length']`.
+
+**These methods are undirected.** Every member of the fluent shortest-path
+family traverses edges in both directions, whatever direction they were
+created in — there is no `directed` argument. For a direction-sensitive
+search, use Cypher's `shortestPath()`, which honours the arrow in the pattern
+(`(a)-[:KNOWS*..10]->(b)` is directed, `(a)-[:KNOWS*..10]-(b)` is not); see
+the `shortestPath()` section of `CYPHER.md`.
 
 ### Weighted shortest path
 
