@@ -135,6 +135,60 @@ fn filtered_neighbors_outgoing(
     }
 }
 
+/// Get directed (incoming only) neighbors filtered by edge connection type —
+/// the twin of [`filtered_neighbors_outgoing`], walking the graph backwards.
+/// `edges_directed(_, Incoming)` is O(degree) in every storage backend (the
+/// in-memory petgraph keeps both adjacency chains; mapped/disk CSR carries a
+/// reverse index), so an incoming expansion costs what an outgoing one does.
+fn filtered_neighbors_incoming(
+    graph: &DirGraph,
+    node: NodeIndex,
+    connection_types: Option<&[InternedKey]>,
+) -> Vec<NodeIndex> {
+    use petgraph::Direction;
+    let g = &graph.graph;
+    match connection_types {
+        None => g.neighbors_directed(node, Direction::Incoming).collect(),
+        Some(types) => g
+            .edges_directed(node, Direction::Incoming)
+            .filter(|e| types.iter().any(|t| *t == e.connection_type()))
+            .map(|e| e.source())
+            .collect(),
+    }
+}
+
+/// Which way a path finder is allowed to walk each edge.
+///
+/// Default is [`EdgeDir::Any`] — every path finder in this module has always
+/// been undirected and stays that way unless a caller asks otherwise.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum EdgeDir {
+    /// Traverse edges in both directions (the historical behaviour).
+    #[default]
+    Any,
+    /// Follow outgoing edges only (source → target).
+    Outgoing,
+    /// Follow incoming edges only (target → source).
+    Incoming,
+}
+
+/// Neighbour expansion for one BFS/DFS step, honouring both the direction and
+/// the connection-type filter. The single dispatch point for the three
+/// `filtered_neighbors_*` helpers.
+#[inline]
+fn filtered_neighbors(
+    graph: &DirGraph,
+    node: NodeIndex,
+    direction: EdgeDir,
+    connection_types: Option<&[InternedKey]>,
+) -> Vec<NodeIndex> {
+    match direction {
+        EdgeDir::Any => filtered_neighbors_undirected(graph, node, connection_types),
+        EdgeDir::Outgoing => filtered_neighbors_outgoing(graph, node, connection_types),
+        EdgeDir::Incoming => filtered_neighbors_incoming(graph, node, connection_types),
+    }
+}
+
 /// Check if a node passes the via_types filter.
 /// Source and target should be excluded from this check by the caller.
 fn node_passes_via_filter(
@@ -183,7 +237,14 @@ pub struct PathOptions<'a> {
     /// Only traverse edges of these connection types (`None` = all edges).
     pub connection_types: Option<&'a [String]>,
     /// Only route through nodes of these types (`None` = any node).
+    ///
+    /// This — not the endpoint node types the bindings take, which are only an
+    /// **id namespace** for the lookup — is what restricts which node types a
+    /// path may pass through.
     pub via_types: Option<&'a [String]>,
+    /// Which way edges may be walked ([`EdgeDir::Any`] = undirected, the
+    /// default and the historical behaviour of every finder here).
+    pub direction: EdgeDir,
     /// Deadline + cooperative-cancellation bundle.
     pub interrupt: Interrupt,
 }
@@ -197,6 +258,11 @@ impl<'a> PathOptions<'a> {
     /// Restrict routing to the given intermediate node types.
     pub fn with_via_types(mut self, via_types: &'a [String]) -> Self {
         self.via_types = Some(via_types);
+        self
+    }
+    /// Walk edges in one direction only (default: both).
+    pub fn with_direction(mut self, direction: EdgeDir) -> Self {
+        self.direction = direction;
         self
     }
     /// Set the deadline + cancellation bundle.
@@ -221,6 +287,8 @@ pub struct AllPathsOptions<'a> {
     pub connection_types: Option<&'a [String]>,
     /// Only route through nodes of these types (`None` = any node).
     pub via_types: Option<&'a [String]>,
+    /// Which way edges may be walked ([`EdgeDir::Any`] = undirected, default).
+    pub direction: EdgeDir,
     /// Deadline + cooperative-cancellation bundle.
     pub interrupt: Interrupt,
 }
@@ -232,6 +300,7 @@ impl Default for AllPathsOptions<'_> {
             max_results: None,
             connection_types: None,
             via_types: None,
+            direction: EdgeDir::Any,
             interrupt: Interrupt::default(),
         }
     }
@@ -258,6 +327,11 @@ impl<'a> AllPathsOptions<'a> {
         self.via_types = Some(via_types);
         self
     }
+    /// Walk edges in one direction only (default: both).
+    pub fn with_direction(mut self, direction: EdgeDir) -> Self {
+        self.direction = direction;
+        self
+    }
     /// Set the deadline + cancellation bundle.
     pub fn with_interrupt(mut self, interrupt: Interrupt) -> Self {
         self.interrupt = interrupt;
@@ -265,13 +339,16 @@ impl<'a> AllPathsOptions<'a> {
     }
 }
 
-/// Find the shortest path between two nodes using undirected BFS.
-/// This treats the graph as undirected, finding connections in either direction.
+/// Find the shortest path between two nodes using BFS.
+/// By default (`PathOptions::direction == EdgeDir::Any`) the graph is treated
+/// as undirected, finding connections in either direction; set
+/// [`PathOptions::direction`] to follow outgoing or incoming edges only.
 /// Returns None if no path exists.
 ///
 /// # Arguments
 /// * `connection_types` - Only traverse edges of these types (None = all)
 /// * `via_types` - Only traverse through nodes of these types (None = all)
+/// * `direction` - Which way edges may be walked (default: both)
 pub fn shortest_path(
     graph: &DirGraph,
     source: NodeIndex,
@@ -282,6 +359,7 @@ pub fn shortest_path(
     let PathOptions {
         connection_types,
         via_types,
+        direction,
         interrupt: deadline,
     } = *options;
     // Arena guard: disk-backed node/edge reads materialize into the query
@@ -297,6 +375,7 @@ pub fn shortest_path(
         target,
         interned.as_deref(),
         &via_set,
+        direction,
         deadline,
     )?;
     let cost = path.len().saturating_sub(1);
@@ -460,16 +539,68 @@ fn all_shortest_paths_impl(
 /// Find the shortest path LENGTH between two nodes using undirected BFS.
 /// Only returns the hop count, avoiding parent tracking and path reconstruction.
 /// Uses level-by-level BFS to avoid per-node distance tracking.
+///
+/// Unfiltered and undirected. [`shortest_path_cost_with`] is the same search
+/// with a [`PathOptions`] — connection/via-type filters, direction, deadline.
 pub fn shortest_path_cost(graph: &DirGraph, source: NodeIndex, target: NodeIndex) -> Option<usize> {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
-                                                  // Arena guard: disk-backed node/edge reads materialize into the query
-                                                  // arena, which must run under a DiskQueryGuard (arena protocol in
-                                                  // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
+    shortest_path_cost_with(graph, source, target, &PathOptions::default())
+}
+
+/// [`shortest_path_cost`] honouring a [`PathOptions`]: connection-type and
+/// via-type filters, [`EdgeDir`], and the deadline. Answers the same question
+/// [`shortest_path`] does, without reconstructing the path.
+///
+/// Note that the `source`/`target` node *types* a binding resolves its ids
+/// through are an id namespace only — they never restrict which node types the
+/// walk may pass through. That is `via_types`.
+pub fn shortest_path_cost_with(
+    graph: &DirGraph,
+    source: NodeIndex,
+    target: NodeIndex,
+    options: &PathOptions,
+) -> Option<usize> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena, which must run under a DiskQueryGuard (arena protocol in
+    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
     let _arena_guard = graph.graph.begin_query();
     if source == target {
         return Some(0);
     }
+    let PathOptions {
+        connection_types,
+        via_types,
+        direction,
+        interrupt: deadline,
+    } = *options;
 
+    if connection_types.is_none() && via_types.is_none() && direction == EdgeDir::Any {
+        return unfiltered_cost_bfs(graph, source, target, deadline);
+    }
+
+    let via_set: Option<HashSet<&str>> =
+        via_types.map(|vt| vt.iter().map(|s| s.as_str()).collect());
+    let interned = intern_connection_types(connection_types);
+    filtered_cost_bfs(
+        graph,
+        source,
+        target,
+        interned.as_deref(),
+        &via_set,
+        direction,
+        deadline,
+    )
+}
+
+/// The unfiltered, undirected hop-count BFS — a flat `Vec<bool>` visited set
+/// and petgraph's own neighbour iterator, with no per-node allocation. Kept
+/// separate from [`filtered_cost_bfs`] because this is the hot default and
+/// pays nothing for the filter machinery it doesn't use.
+fn unfiltered_cost_bfs(
+    graph: &DirGraph,
+    source: NodeIndex,
+    target: NodeIndex,
+    deadline: Interrupt,
+) -> Option<usize> {
     let node_bound = graph.graph.node_bound();
     let mut visited: Vec<bool> = vec![false; node_bound];
 
@@ -480,12 +611,17 @@ pub fn shortest_path_cost(graph: &DirGraph, source: NodeIndex, target: NodeIndex
     let mut next_level: Vec<usize> = Vec::new();
     visited[source.index()] = true;
     let mut depth: usize = 0;
+    let mut visit_count = 0u32;
 
     while !current_level.is_empty() {
         depth += 1;
         next_level.clear();
 
         for &current_idx in &current_level {
+            visit_count += 1;
+            if visit_count.is_multiple_of(1000) && deadline.exceeded() {
+                return None;
+            }
             let current = NodeIndex::new(current_idx);
 
             for neighbor in {
@@ -509,46 +645,143 @@ pub fn shortest_path_cost(graph: &DirGraph, source: NodeIndex, target: NodeIndex
     None
 }
 
+/// The hop-count BFS with connection-type / via-type / direction filters —
+/// the same expansion [`reconstruct_path_bfs`] walks, minus parent tracking.
+fn filtered_cost_bfs(
+    graph: &DirGraph,
+    source: NodeIndex,
+    target: NodeIndex,
+    connection_types: Option<&[InternedKey]>,
+    via_types: &Option<HashSet<&str>>,
+    direction: EdgeDir,
+    deadline: Interrupt,
+) -> Option<usize> {
+    let node_bound = graph.graph.node_bound();
+    let mut visited: Vec<bool> = vec![false; node_bound];
+    let target_idx = target.index();
+
+    let mut current_level: Vec<usize> = vec![source.index()];
+    let mut next_level: Vec<usize> = Vec::new();
+    visited[source.index()] = true;
+    let mut depth: usize = 0;
+    let mut visit_count = 0u32;
+
+    while !current_level.is_empty() {
+        depth += 1;
+        next_level.clear();
+
+        for &current_idx in &current_level {
+            visit_count += 1;
+            if visit_count.is_multiple_of(1000) && deadline.exceeded() {
+                return None;
+            }
+            let current = NodeIndex::new(current_idx);
+            for neighbor in filtered_neighbors(graph, current, direction, connection_types) {
+                let neighbor_idx = neighbor.index();
+                if visited[neighbor_idx] {
+                    continue;
+                }
+                if neighbor_idx == target_idx {
+                    return Some(depth);
+                }
+                // via_types gates intermediate nodes only; the endpoints are
+                // exempt (the target is answered above, the source is seeded).
+                if !node_passes_via_filter(graph, neighbor, via_types) {
+                    continue;
+                }
+                visited[neighbor_idx] = true;
+                next_level.push(neighbor_idx);
+            }
+        }
+
+        std::mem::swap(&mut current_level, &mut next_level);
+    }
+
+    None
+}
+
 /// Batch shortest path cost — reuses visited Vec and adjacency list across multiple pairs.
 /// Much faster than calling shortest_path_cost N times for large graphs.
+///
+/// Unfiltered and undirected; [`shortest_path_cost_batch_with`] takes the
+/// filters and direction.
 pub fn shortest_path_cost_batch(
     graph: &DirGraph,
     pairs: &[(NodeIndex, NodeIndex)],
 ) -> Vec<Option<usize>> {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
-                                                  // Arena guard: disk-backed node/edge reads materialize into the query
-                                                  // arena, which must run under a DiskQueryGuard (arena protocol in
-                                                  // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
+    shortest_path_cost_batch_with(graph, pairs, &PathOptions::default())
+}
+
+/// [`shortest_path_cost_batch`] honouring a [`PathOptions`].
+///
+/// The adjacency is built once over the restricted universe: `via_types` picks
+/// the vertices, `connection_types` picks the edges, and `direction` decides
+/// whether each edge contributes one link or two. The query endpoints are
+/// added to that universe even when `via_types` excludes their type, and are
+/// then barred from serving as an intermediate hop — the same "endpoints are
+/// exempt from `via_types`, the middle is not" rule the single-pair members
+/// follow, so the whole family answers one question.
+///
+/// A pair whose endpoint has no surviving edge answers `None` — the same "no
+/// path" a disconnected pair gets. It is never an error.
+///
+/// Returns every pair's answer in input order. On deadline expiry the pairs
+/// not yet answered come back as `None`.
+pub fn shortest_path_cost_batch_with(
+    graph: &DirGraph,
+    pairs: &[(NodeIndex, NodeIndex)],
+    options: &PathOptions,
+) -> Vec<Option<usize>> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena, which must run under a DiskQueryGuard (arena protocol in
+    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
     let _arena_guard = graph.graph.begin_query();
-    let node_bound = graph.graph.node_bound();
+    let PathOptions {
+        connection_types,
+        via_types,
+        direction,
+        interrupt: deadline,
+    } = *options;
 
-    // Pre-build undirected adjacency list ONCE for all queries
-    let nodes: Vec<NodeIndex> = {
-        let g = &graph.graph;
-        g.node_indices().collect()
-    };
-    let n = nodes.len();
-    let mut node_to_idx = vec![usize::MAX; node_bound];
-    for (i, &node) in nodes.iter().enumerate() {
-        node_to_idx[node.index()] = i;
+    let interned = intern_connection_types(connection_types);
+
+    // Vertex universe: whatever `via_types` admits, plus the query endpoints
+    // (which may be of an excluded type — `via_types` gates the middle of a
+    // path, not its ends). `via_ok` remembers which is which.
+    let mut nodes = scoped_universe(graph, via_types, interned.as_deref());
+    let bound = graph.graph.node_bound();
+    let mut in_universe = vec![false; bound];
+    for &node in &nodes {
+        in_universe[node.index()] = true;
     }
-
-    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for edge in {
-        let g = &graph.graph;
-        g.edge_references()
-    } {
-        let src_i = node_to_idx[edge.source().index()];
-        let tgt_i = node_to_idx[edge.target().index()];
-        if src_i != usize::MAX && tgt_i != usize::MAX {
-            adj[src_i].push(tgt_i);
-            adj[tgt_i].push(src_i);
+    // `via_types == None` means "any node may be an intermediate"; otherwise
+    // only the nodes the scope admitted may be, and the endpoints appended
+    // below may not.
+    let via_unrestricted = via_types.is_none();
+    let via_ok_by_node = in_universe.clone();
+    for &(source, target) in pairs {
+        for endpoint in [source, target] {
+            if endpoint.index() < bound && !in_universe[endpoint.index()] {
+                in_universe[endpoint.index()] = true;
+                nodes.push(endpoint);
+            }
         }
     }
-    // Dedup undirected adjacency (handles bidirectional edges A→B + B→A)
-    for neighbors in &mut adj {
-        neighbors.sort_unstable();
-        neighbors.dedup();
+
+    let Ok((nodes, adj)) =
+        build_scoped_adjacency_over(graph, nodes, interned.as_deref(), direction, deadline)
+    else {
+        // A timed-out adjacency build answers every pair `None` rather than
+        // erroring: this API's contract is "a distance or no distance".
+        return vec![None; pairs.len()];
+    };
+
+    let n = nodes.len();
+    let mut node_to_idx = vec![u32::MAX; bound];
+    let mut via_ok = vec![true; n];
+    for (i, &node) in nodes.iter().enumerate() {
+        node_to_idx[node.index()] = i as u32;
+        via_ok[i] = via_unrestricted || via_ok_by_node[node.index()];
     }
 
     // Reusable visited array — cleared between queries
@@ -563,17 +796,21 @@ pub fn shortest_path_cost_batch(
             results.push(Some(0));
             continue;
         }
-
-        let src_i = node_to_idx[source.index()];
-        let tgt_i = node_to_idx[target.index()];
-        if src_i == usize::MAX || tgt_i == usize::MAX {
+        if deadline.exceeded() {
             results.push(None);
             continue;
         }
 
-        // Clear visited (only reset nodes we actually touched)
-        // Use a generation counter instead of clearing — much faster
-        // But for simplicity, track touched nodes
+        let src_i = node_to_idx[source.index()];
+        let tgt_i = node_to_idx[target.index()];
+        if src_i == u32::MAX || tgt_i == u32::MAX {
+            results.push(None);
+            continue;
+        }
+        let (src_i, tgt_i) = (src_i as usize, tgt_i as usize);
+
+        // Reset only the nodes this query touched (much faster than clearing
+        // the whole array between pairs).
         let mut touched: Vec<usize> = Vec::new();
 
         current_level.clear();
@@ -588,16 +825,21 @@ pub fn shortest_path_cost_batch(
             next_level.clear();
 
             for &current_idx in &current_level {
-                for &neighbor_idx in &adj[current_idx] {
-                    if !visited[neighbor_idx] {
-                        if neighbor_idx == tgt_i {
-                            found = true;
-                            break 'bfs;
-                        }
-                        visited[neighbor_idx] = true;
-                        touched.push(neighbor_idx);
-                        next_level.push(neighbor_idx);
+                for &neighbor in &adj[current_idx] {
+                    let neighbor_idx = neighbor as usize;
+                    if visited[neighbor_idx] {
+                        continue;
                     }
+                    if neighbor_idx == tgt_i {
+                        found = true;
+                        break 'bfs;
+                    }
+                    if !via_ok[neighbor_idx] {
+                        continue;
+                    }
+                    visited[neighbor_idx] = true;
+                    touched.push(neighbor_idx);
+                    next_level.push(neighbor_idx);
                 }
             }
 
@@ -606,7 +848,6 @@ pub fn shortest_path_cost_batch(
 
         results.push(if found { Some(depth) } else { None });
 
-        // Reset only touched nodes (much faster than clearing entire array)
         for &idx in &touched {
             visited[idx] = false;
         }
@@ -636,6 +877,7 @@ fn reconstruct_path_bfs(
     target: NodeIndex,
     connection_types: Option<&[InternedKey]>,
     via_types: &Option<HashSet<&str>>,
+    direction: EdgeDir,
     deadline: Interrupt,
 ) -> Option<Vec<NodeIndex>> {
     use std::collections::{HashMap, VecDeque};
@@ -666,8 +908,8 @@ fn reconstruct_path_bfs(
 
         let current = NodeIndex::new(current_idx);
 
-        // Check all neighbors (both directions for undirected path finding)
-        let neighbors = filtered_neighbors_undirected(graph, current, connection_types);
+        // Check all neighbors (both directions when direction is Any)
+        let neighbors = filtered_neighbors(graph, current, direction, connection_types);
         for neighbor in neighbors {
             let neighbor_idx = neighbor.index();
 
@@ -700,8 +942,10 @@ fn reconstruct_path_bfs(
     None // No path found
 }
 
-/// Directed BFS shortest path — only follows outgoing edges.
-/// Used by Cypher shortestPath() which respects edge direction.
+/// Directed BFS shortest path — only follows outgoing edges. A thin
+/// delegate over [`shortest_path`] with [`EdgeDir::Outgoing`]; kept as a
+/// named entry point because the Cypher `shortestPath()` executor dispatches
+/// on its own `EdgeDirection` and reads better naming the directed case.
 ///
 /// # Arguments
 /// * `connection_types` - Only traverse edges of these types (None = all)
@@ -712,88 +956,12 @@ pub fn shortest_path_directed(
     target: NodeIndex,
     options: &PathOptions,
 ) -> Option<PathResult> {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
-    let PathOptions {
-        connection_types,
-        via_types,
-        interrupt: deadline,
-    } = *options;
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena, which must run under a DiskQueryGuard (arena protocol in
-    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
-    use std::collections::VecDeque;
-
-    if source == target {
-        return Some(PathResult {
-            path: vec![source],
-            cost: 0,
-        });
-    }
-
-    let via_set: Option<HashSet<&str>> =
-        via_types.map(|vt| vt.iter().map(|s| s.as_str()).collect());
-    let interned = intern_connection_types(connection_types);
-
-    let node_bound = graph.graph.node_bound();
-    let mut visited: Vec<bool> = vec![false; node_bound];
-    let mut parent: Vec<u32> = vec![u32::MAX; node_bound];
-    let mut queue = VecDeque::with_capacity(node_bound / 4);
-
-    let source_idx = source.index();
-    let target_idx = target.index();
-
-    queue.push_back(source_idx);
-    visited[source_idx] = true;
-
-    let mut visit_count = 0u32;
-
-    while let Some(current_idx) = queue.pop_front() {
-        // Periodic timeout check
-        visit_count += 1;
-        if visit_count.is_multiple_of(1000) && deadline.exceeded() {
-            {
-                return None;
-            }
-        }
-
-        let current = NodeIndex::new(current_idx);
-
-        // Only follow outgoing edges
-        let neighbors = filtered_neighbors_outgoing(graph, current, interned.as_deref());
-        for neighbor in neighbors {
-            let neighbor_idx = neighbor.index();
-
-            if !visited[neighbor_idx] {
-                // Apply via_types filter (skip if not target and doesn't match)
-                if neighbor_idx != target_idx && !node_passes_via_filter(graph, neighbor, &via_set)
-                {
-                    continue;
-                }
-
-                visited[neighbor_idx] = true;
-                parent[neighbor_idx] = current_idx as u32;
-                queue.push_back(neighbor_idx);
-
-                if neighbor_idx == target_idx {
-                    let mut path = Vec::with_capacity(16);
-                    let mut node_idx = target_idx;
-
-                    while node_idx != source_idx {
-                        path.push(NodeIndex::new(node_idx));
-                        node_idx = parent[node_idx] as usize;
-                    }
-                    path.push(source);
-                    path.reverse();
-
-                    let cost = path.len().saturating_sub(1);
-                    return Some(PathResult { path, cost });
-                }
-            }
-        }
-    }
-
-    None
+    shortest_path(
+        graph,
+        source,
+        target,
+        &options.clone().with_direction(EdgeDir::Outgoing),
+    )
 }
 
 /// Find all paths between two nodes up to a maximum number of hops.
@@ -815,6 +983,7 @@ pub fn all_paths(
         max_results,
         connection_types,
         via_types,
+        direction,
         interrupt: deadline,
     } = *options;
     // Arena guard: disk-backed node/edge reads materialize into the query
@@ -840,6 +1009,7 @@ pub fn all_paths(
         max_results,
         interned.as_deref(),
         &via_set,
+        direction,
         deadline,
     );
 
@@ -858,6 +1028,7 @@ fn find_all_paths_recursive(
     max_results: Option<usize>,
     connection_types: Option<&[InternedKey]>,
     via_types: &Option<HashSet<&str>>,
+    direction: EdgeDir,
     deadline: Interrupt,
 ) {
     // Early termination when result limit is hit
@@ -883,8 +1054,9 @@ fn find_all_paths_recursive(
         return;
     }
 
-    // Explore all neighbors (undirected), filtered by connection type
-    let neighbors = filtered_neighbors_undirected(graph, current, connection_types);
+    // Explore all neighbors (both ways when direction is Any), filtered by
+    // connection type
+    let neighbors = filtered_neighbors(graph, current, direction, connection_types);
     for neighbor in neighbors {
         // Check limit before exploring deeper
         if let Some(max) = max_results {
@@ -913,6 +1085,7 @@ fn find_all_paths_recursive(
                 max_results,
                 connection_types,
                 via_types,
+                direction,
                 deadline,
             );
 
@@ -1172,14 +1345,38 @@ fn build_scoped_undirected_adjacency(
     rel_types: Option<&[InternedKey]>,
     deadline: Interrupt,
 ) -> Result<(Vec<NodeIndex>, Vec<Vec<u32>>), String> {
+    let nodes = scoped_universe(graph, node_types, rel_types);
+    build_scoped_adjacency_over(graph, nodes, rel_types, EdgeDir::Any, deadline)
+}
+
+/// The adjacency build behind [`build_scoped_undirected_adjacency`], over an
+/// explicit vertex universe and with a direction — the *directed sibling* the
+/// batch shortest-path API needs, generalised rather than duplicated.
+///
+/// `direction` decides how many links each surviving edge contributes:
+/// [`EdgeDir::Any`] adds both `s → t` and `t → s`, [`EdgeDir::Outgoing`] only
+/// `s → t`, [`EdgeDir::Incoming`] only `t → s`. Edges whose endpoints are not
+/// both in `nodes` are dropped, as are self-loops. Neighbour lists come back
+/// sorted and de-duplicated in compact indices (`0..nodes.len()`).
+///
+/// Taking the universe as a parameter is what lets the batch API add its query
+/// endpoints to a `via_types`-restricted universe: an endpoint is allowed to
+/// *be* a path end without being allowed as an intermediate hop (the caller
+/// enforces the second half with its own via mask), which is exactly the
+/// single-pair members' rule.
+fn build_scoped_adjacency_over(
+    graph: &DirGraph,
+    nodes: Vec<NodeIndex>,
+    rel_types: Option<&[InternedKey]>,
+    direction: EdgeDir,
+    deadline: Interrupt,
+) -> Result<(Vec<NodeIndex>, Vec<Vec<u32>>), String> {
     let edge_matches = |key: InternedKey| -> bool {
         match rel_types {
             Some(keys) => keys.contains(&key),
             None => true,
         }
     };
-
-    let nodes: Vec<NodeIndex> = scoped_universe(graph, node_types, rel_types);
 
     let n = nodes.len();
     let bound = graph.graph.node_bound();
@@ -1208,8 +1405,14 @@ fn build_scoped_undirected_adjacency(
         if s == u32::MAX || t == u32::MAX || s == t {
             continue;
         }
-        adj[s as usize].push(t);
-        adj[t as usize].push(s);
+        match direction {
+            EdgeDir::Any => {
+                adj[s as usize].push(t);
+                adj[t as usize].push(s);
+            }
+            EdgeDir::Outgoing => adj[s as usize].push(t),
+            EdgeDir::Incoming => adj[t as usize].push(s),
+        }
     }
     for list in adj.iter_mut() {
         list.sort_unstable();
@@ -1719,10 +1922,23 @@ pub fn get_path_connections(graph: &DirGraph, path: &[NodeIndex]) -> Vec<Option<
     connections
 }
 
-/// Check if two nodes are connected (directly or indirectly)
+/// Check if two nodes are connected (directly or indirectly), undirected and
+/// unfiltered. [`are_connected_with`] takes the filters and direction.
 pub fn are_connected(graph: &DirGraph, source: NodeIndex, target: NodeIndex) -> bool {
+    are_connected_with(graph, source, target, &PathOptions::default())
+}
+
+/// [`are_connected`] honouring a [`PathOptions`] — "is there a path at all",
+/// asking exactly the question [`shortest_path_cost_with`] asks and skipping
+/// the path reconstruction the answer does not need.
+pub fn are_connected_with(
+    graph: &DirGraph,
+    source: NodeIndex,
+    target: NodeIndex,
+    options: &PathOptions,
+) -> bool {
     let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
-    shortest_path(graph, source, target, &PathOptions::default()).is_some()
+    shortest_path_cost_with(graph, source, target, options).is_some()
 }
 
 /// Calculate the degree (number of connections) for a node
@@ -1780,6 +1996,7 @@ pub fn shortest_path_weighted(
     let PathOptions {
         connection_types,
         via_types,
+        direction,
         interrupt: deadline,
     } = *options;
     // Arena guard: disk-backed node/edge reads materialize into the query
@@ -1856,24 +2073,40 @@ pub fn shortest_path_weighted(
         }
 
         let current = NodeIndex::new(current_idx);
-        for edge in graph
-            .graph
-            .edges_directed(current, petgraph::Direction::Outgoing)
-            .chain(
-                graph
-                    .graph
-                    .edges_directed(current, petgraph::Direction::Incoming),
-            )
+        // Direction is the same neighbour-set swap the unweighted finders do:
+        // Any relaxes both incident chains, Outgoing/Incoming just one. No
+        // allocation and no separate Dijkstra — so `direction` is honoured
+        // with `weight_property`, never silently ignored.
+        let out_edges = matches!(direction, EdgeDir::Any | EdgeDir::Outgoing).then(|| {
+            graph
+                .graph
+                .edges_directed(current, petgraph::Direction::Outgoing)
+        });
+        let in_edges = matches!(direction, EdgeDir::Any | EdgeDir::Incoming).then(|| {
+            graph
+                .graph
+                .edges_directed(current, petgraph::Direction::Incoming)
+        });
+        for edge in out_edges
+            .into_iter()
+            .flatten()
+            .chain(in_edges.into_iter().flatten())
         {
             if let Some(types) = conn_filter {
                 if !types.iter().any(|t| *t == edge.connection_type()) {
                     continue;
                 }
             }
-            let neighbor = if edge.source() == current {
-                edge.target()
-            } else {
-                edge.source()
+            let neighbor = match direction {
+                EdgeDir::Outgoing => edge.target(),
+                EdgeDir::Incoming => edge.source(),
+                EdgeDir::Any => {
+                    if edge.source() == current {
+                        edge.target()
+                    } else {
+                        edge.source()
+                    }
+                }
             };
             let n_idx = neighbor.index();
             if n_idx != target.index() && !node_passes_via_filter(graph, neighbor, &via_set) {

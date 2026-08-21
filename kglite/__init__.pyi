@@ -4376,23 +4376,34 @@ class KnowledgeGraph:
         via_types: Optional[list[str]] = None,
         weight_property: Optional[str] = None,
         timeout_ms: Optional[int] = None,
+        direction: Optional[str] = None,
     ) -> Optional[dict[str, Any]]:
         """Find the shortest path between two nodes.
 
+        Undirected by default; pass ``direction`` for a one-way search.
+
         Args:
-            source_type: Source node type.
+            source_type: Source node type. An **ID namespace** — it says
+                which type to look ``source_id`` up in, never which node types
+                the path may pass through (use ``via_types`` for that).
             source_id: Source node ID.
-            target_type: Target node type.
+            target_type: Target node type. An **ID namespace**, as above.
             target_id: Target node ID.
             connection_types: Only traverse edges of these types. Default all.
-            via_types: Only traverse through nodes of these types. Default all.
+            via_types: Only traverse through nodes of these types (the
+                endpoints are exempt). Default all.
             weight_property: Edge property to use as cost. When set, the
                 search uses Dijkstra and minimises total weight; when
                 ``None``, BFS minimises hop count. Edges missing the
                 property fall back to weight 1.0 (matches Louvain's
                 weighted-adjacency convention). Negative weights cause
-                the path to be reported as missing.
+                the path to be reported as missing. Honours
+                ``connection_types`` / ``via_types`` / ``direction``.
             timeout_ms: Abort after this many milliseconds and return ``None``.
+            direction: ``'outgoing'`` / ``'out'`` follows edges forwards,
+                ``'incoming'`` / ``'in'`` follows them backwards,
+                ``'any'`` / ``'both'`` / ``None`` (default) ignores edge
+                direction. Anything else raises.
 
         Returns:
             Dict with ``path`` (list of node info dicts), ``connections``
@@ -4410,15 +4421,34 @@ class KnowledgeGraph:
         target_type: str,
         target_id: Any,
         weight_property: Optional[str] = None,
+        connection_types: Optional[list[str]] = None,
+        via_types: Optional[list[str]] = None,
+        direction: Optional[str] = None,
+        timeout_ms: Optional[int] = None,
     ) -> Optional[Union[int, float]]:
         """Get just the cost of the shortest path.
 
-        Faster than :meth:`shortest_path` when you only need the distance.
-        Does not support ``connection_types`` or ``via_types`` filtering.
+        Faster than :meth:`shortest_path` when you only need the distance,
+        and asks exactly the same question — same filters, same direction.
 
         Args:
+            source_type: Source node type. An **ID namespace** — it says
+                which type to look ``source_id`` up in, never which node types
+                the path may pass through (use ``via_types`` for that).
+            source_id: Source node ID.
+            target_type: Target node type. An **ID namespace**, as above.
+            target_id: Target node ID.
             weight_property: When set, uses Dijkstra and returns total
                 weight (float). When ``None``, BFS returns hop count (int).
+                Honours the filters and ``direction`` either way.
+            connection_types: Only traverse edges of these types. Default all.
+            via_types: Only traverse through nodes of these types (the
+                endpoints are exempt). Default all.
+            direction: ``'outgoing'`` / ``'out'`` follows edges forwards,
+                ``'incoming'`` / ``'in'`` follows them backwards,
+                ``'any'`` / ``'both'`` / ``None`` (default) ignores edge
+                direction. Anything else raises.
+            timeout_ms: Abort after this many milliseconds and return ``None``.
 
         Returns:
             Hop count (int) or total weight (float), or ``None`` if no
@@ -4430,10 +4460,33 @@ class KnowledgeGraph:
         self,
         node_type: str,
         pairs: list[tuple[Any, Any]],
+        connection_types: Optional[list[str]] = None,
+        via_types: Optional[list[str]] = None,
+        direction: Optional[str] = None,
+        timeout_ms: Optional[int] = None,
     ) -> list[int | None]:
         """Return shortest-path lengths for ID pairs of one node type.
 
         Results preserve input order; unreachable pairs produce ``None``.
+        Builds the adjacency once for the whole batch, so this is much
+        cheaper than a loop over :meth:`shortest_path_length`.
+
+        Args:
+            node_type: The type both ids of every pair are looked up in. An
+                **ID namespace** — it does not restrict which node types a
+                path may pass through (use ``via_types`` for that; without
+                it a ``Person``-to-``Person`` distance can be answered
+                through a ``City``).
+            pairs: ``(source_id, target_id)`` tuples.
+            connection_types: Only traverse edges of these types. Default all.
+            via_types: Only traverse through nodes of these types (the pair
+                endpoints are exempt). Default all.
+            direction: ``'outgoing'`` / ``'out'`` follows edges forwards,
+                ``'incoming'`` / ``'in'`` follows them backwards,
+                ``'any'`` / ``'both'`` / ``None`` (default) ignores edge
+                direction. Anything else raises.
+            timeout_ms: Abort after this many milliseconds; pairs not yet
+                answered come back as ``None``.
         """
         ...
 
@@ -4446,13 +4499,25 @@ class KnowledgeGraph:
         connection_types: Optional[list[str]] = None,
         via_types: Optional[list[str]] = None,
         timeout_ms: Optional[int] = None,
+        direction: Optional[str] = None,
     ) -> Optional[list[Any]]:
         """Get node IDs along the shortest path.
 
         Args:
+            source_type: Source node type. An **ID namespace** — it says
+                which type to look ``source_id`` up in, never which node types
+                the path may pass through (use ``via_types`` for that).
+            source_id: Source node ID.
+            target_type: Target node type. An **ID namespace**, as above.
+            target_id: Target node ID.
             connection_types: Only traverse edges of these types. Default all.
-            via_types: Only traverse through nodes of these types. Default all.
+            via_types: Only traverse through nodes of these types (the
+                endpoints are exempt). Default all.
             timeout_ms: Abort after this many milliseconds and return ``None``.
+            direction: ``'outgoing'`` / ``'out'`` follows edges forwards,
+                ``'incoming'`` / ``'in'`` follows them backwards,
+                ``'any'`` / ``'both'`` / ``None`` (default) ignores edge
+                direction. Anything else raises.
 
         Returns:
             List of node IDs, or ``None`` if no path exists or timeout is reached.
@@ -4468,15 +4533,27 @@ class KnowledgeGraph:
         connection_types: Optional[list[str]] = None,
         via_types: Optional[list[str]] = None,
         timeout_ms: Optional[int] = None,
+        direction: Optional[str] = None,
     ) -> Optional[list[int]]:
         """Get raw graph indices along the shortest path.
 
         Fastest path query — no node data lookup.
 
         Args:
+            source_type: Source node type. An **ID namespace** — it says
+                which type to look ``source_id`` up in, never which node types
+                the path may pass through (use ``via_types`` for that).
+            source_id: Source node ID.
+            target_type: Target node type. An **ID namespace**, as above.
+            target_id: Target node ID.
             connection_types: Only traverse edges of these types. Default all.
-            via_types: Only traverse through nodes of these types. Default all.
+            via_types: Only traverse through nodes of these types (the
+                endpoints are exempt). Default all.
             timeout_ms: Abort after this many milliseconds and return ``None``.
+            direction: ``'outgoing'`` / ``'out'`` follows edges forwards,
+                ``'incoming'`` / ``'in'`` follows them backwards,
+                ``'any'`` / ``'both'`` / ``None`` (default) ignores edge
+                direction. Anything else raises.
 
         Returns:
             List of integer indices, or ``None`` if no path exists or timeout is reached.
@@ -4494,21 +4571,29 @@ class KnowledgeGraph:
         connection_types: Optional[list[str]] = None,
         via_types: Optional[list[str]] = None,
         timeout_ms: Optional[int] = None,
+        direction: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         """Find all paths between two nodes.
 
         Args:
-            source_type: Source node type.
+            source_type: Source node type. An **ID namespace** — it says
+                which type to look ``source_id`` up in, never which node types
+                the path may pass through (use ``via_types`` for that).
             source_id: Source node ID.
-            target_type: Target node type.
+            target_type: Target node type. An **ID namespace**, as above.
             target_id: Target node ID.
             max_hops: Maximum path length. Default ``5``.
             max_results: Stop after finding this many paths. Default unlimited.
                 Use to prevent OOM on dense graphs.
             connection_types: Only traverse edges of these types. Default all.
-            via_types: Only traverse through nodes of these types. Default all.
+            via_types: Only traverse through nodes of these types (the
+                endpoints are exempt). Default all.
             timeout_ms: Stop searching after this many milliseconds; paths
                 found before the deadline are returned.
+            direction: ``'outgoing'`` / ``'out'`` follows edges forwards,
+                ``'incoming'`` / ``'in'`` follows them backwards,
+                ``'any'`` / ``'both'`` / ``None`` (default) ignores edge
+                direction. Anything else raises.
 
         Returns:
             List of path dicts, each with ``path``, ``connections``, ``length``.
@@ -4536,8 +4621,32 @@ class KnowledgeGraph:
         source_id: Any,
         target_type: str,
         target_id: Any,
+        connection_types: Optional[list[str]] = None,
+        via_types: Optional[list[str]] = None,
+        direction: Optional[str] = None,
+        timeout_ms: Optional[int] = None,
     ) -> bool:
-        """Check if two nodes are connected (directly or indirectly)."""
+        """Check if two nodes are connected (directly or indirectly).
+
+        ``True`` exactly when :meth:`shortest_path_length` with the same
+        arguments returns a distance.
+
+        Args:
+            source_type: Source node type. An **ID namespace** — it says
+                which type to look ``source_id`` up in, never which node types
+                the path may pass through (use ``via_types`` for that).
+            source_id: Source node ID.
+            target_type: Target node type. An **ID namespace**, as above.
+            target_id: Target node ID.
+            connection_types: Only traverse edges of these types. Default all.
+            via_types: Only traverse through nodes of these types (the
+                endpoints are exempt). Default all.
+            direction: ``'outgoing'`` / ``'out'`` follows edges forwards,
+                ``'incoming'`` / ``'in'`` follows them backwards,
+                ``'any'`` / ``'both'`` / ``None`` (default) ignores edge
+                direction. Anything else raises.
+            timeout_ms: Abort after this many milliseconds and return ``False``.
+        """
         ...
 
     def degrees(self) -> dict[str, int]:

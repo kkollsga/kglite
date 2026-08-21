@@ -247,10 +247,10 @@ impl<'a> CypherExecutor<'a> {
                         .collect(),
                     }
                 } else {
+                    // Direction comes from the dispatch below, not from here.
                     let path_opts = ga::PathOptions {
                         connection_types,
-                        via_types: None,
-                        interrupt: self.interrupt(),
+                        ..ga::PathOptions::default().with_interrupt(self.interrupt())
                     };
                     let single = match edge_direction {
                         EdgeDirection::Both => {

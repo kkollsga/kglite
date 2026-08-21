@@ -10,18 +10,45 @@ use crate::graph::{
     centrality_results_to_dataframe, centrality_results_to_py_dict, community_results_to_py,
     KnowledgeGraph,
 };
-use kglite_core::api::algorithms::{Interrupt, PathOptions};
+use kglite_core::api::algorithms::{EdgeDir, Interrupt, PathOptions};
 use kglite_core::api::PlanStep;
 
+/// Parse the `direction=` kwarg the shortest-path family shares with
+/// `where_connected()` / `traverse()`. `None` keeps the family's undirected
+/// default; anything unrecognised is an error, never a silent fallback.
+fn parse_direction(direction: Option<&str>) -> PyResult<EdgeDir> {
+    match direction.unwrap_or("any") {
+        "outgoing" | "out" => Ok(EdgeDir::Outgoing),
+        "incoming" | "in" => Ok(EdgeDir::Incoming),
+        "any" | "both" => Ok(EdgeDir::Any),
+        other => Err(crate::error_py::kg_to_pyerr(
+            crate::error::KgError::Argument(format!(
+                "Invalid direction '{}'. Use 'outgoing', 'incoming', or 'any'",
+                other
+            )),
+        )),
+    }
+}
+
+/// Build an [`Interrupt`] from the wheel's `timeout_ms` kwarg.
+fn deadline_from(timeout_ms: Option<u64>) -> Interrupt {
+    Interrupt::from_deadline(
+        timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms)),
+    )
+}
+
 /// Assemble a [`PathOptions`] from the wheel's optional connection/via-type
-/// args, keeping the Python kwarg surface identical while the core takes an
-/// options struct.
+/// and direction args, keeping the Python kwarg surface identical while the
+/// core takes an options struct.
 fn path_options<'a>(
     connection_types: Option<&'a [String]>,
     via_types: Option<&'a [String]>,
+    direction: EdgeDir,
     interrupt: Interrupt,
 ) -> PathOptions<'a> {
-    let mut opts = PathOptions::default().with_interrupt(interrupt);
+    let mut opts = PathOptions::default()
+        .with_direction(direction)
+        .with_interrupt(interrupt);
     if let Some(ct) = connection_types {
         opts = opts.with_connection_types(ct);
     }
@@ -51,7 +78,11 @@ impl KnowledgeGraph {
     ///         - 'connections': List of connection types between nodes
     ///         - 'length': Number of hops in the path
     ///     Returns None if no path exists.
-    #[pyo3(signature = (source_type, source_id, target_type, target_id, connection_types=None, via_types=None, weight_property=None, timeout_ms=None))]
+    ///
+    /// `source_type` / `target_type` are an ID NAMESPACE — they say where to
+    /// look the ids up, never which node types the path may pass through.
+    /// Use `via_types` for that, and `direction` for edge orientation.
+    #[pyo3(signature = (source_type, source_id, target_type, target_id, connection_types=None, via_types=None, weight_property=None, timeout_ms=None, direction=None))]
     #[allow(clippy::too_many_arguments)]
     fn shortest_path(
         &self,
@@ -64,7 +95,9 @@ impl KnowledgeGraph {
         via_types: Option<Vec<String>>,
         weight_property: Option<String>,
         timeout_ms: Option<u64>,
+        direction: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
+        let edge_dir = parse_direction(direction)?;
         // Look up source node
         let source_lookup =
             kglite_core::api::storage::TypeLookup::new(&self.inner.graph, source_type.to_string())
@@ -101,8 +134,12 @@ impl KnowledgeGraph {
 
         // Find shortest path — Dijkstra when weight_property is set,
         // BFS otherwise.
-        let deadline = kglite_core::api::algorithms::Interrupt::from_deadline(
-            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms)),
+        let deadline = deadline_from(timeout_ms);
+        let opts = path_options(
+            connection_types.as_deref(),
+            via_types.as_deref(),
+            edge_dir,
+            deadline,
         );
 
         if let Some(prop) = weight_property {
@@ -111,7 +148,7 @@ impl KnowledgeGraph {
                 source_idx,
                 target_idx,
                 &prop,
-                &path_options(connection_types.as_deref(), via_types.as_deref(), deadline),
+                &opts,
             );
             return Ok(match result {
                 Some(wp) => {
@@ -147,12 +184,8 @@ impl KnowledgeGraph {
             });
         }
 
-        let result = kglite_core::api::algorithms::shortest_path(
-            &self.inner,
-            source_idx,
-            target_idx,
-            &path_options(connection_types.as_deref(), via_types.as_deref(), deadline),
-        );
+        let result =
+            kglite_core::api::algorithms::shortest_path(&self.inner, source_idx, target_idx, &opts);
 
         match result {
             Some(path_result) => {
@@ -208,7 +241,12 @@ impl KnowledgeGraph {
     /// Returns:
     ///     Hop count (int) when ``weight_property`` is None; total weight
     ///     (float) otherwise. ``None`` if no path exists.
-    #[pyo3(signature = (source_type, source_id, target_type, target_id, weight_property=None))]
+    ///
+    /// `source_type` / `target_type` are an ID NAMESPACE — they say where to
+    /// look the ids up, never which node types the path may pass through.
+    /// Use `via_types` for that, and `direction` for edge orientation.
+    #[pyo3(signature = (source_type, source_id, target_type, target_id, weight_property=None, connection_types=None, via_types=None, direction=None, timeout_ms=None))]
+    #[allow(clippy::too_many_arguments)]
     fn shortest_path_length(
         &self,
         py: Python<'_>,
@@ -217,7 +255,12 @@ impl KnowledgeGraph {
         target_type: &str,
         target_id: &Bound<'_, PyAny>,
         weight_property: Option<String>,
+        connection_types: Option<Vec<String>>,
+        via_types: Option<Vec<String>>,
+        direction: Option<&str>,
+        timeout_ms: Option<u64>,
     ) -> PyResult<Py<PyAny>> {
+        let edge_dir = parse_direction(direction)?;
         // Use O(1) direct lookup from id_indices (populated during add_nodes)
         let source_value = py_in::py_value_to_value(source_id)?;
         let source_idx = self
@@ -241,6 +284,16 @@ impl KnowledgeGraph {
                 )))
             })?;
 
+        // The filters reach BOTH branches: the weighted branch used to build
+        // a default PathOptions here and silently discard every filter it
+        // appeared to accept.
+        let opts = path_options(
+            connection_types.as_deref(),
+            via_types.as_deref(),
+            edge_dir,
+            deadline_from(timeout_ms),
+        );
+
         if let Some(prop) = weight_property {
             return Ok(
                 match kglite_core::api::algorithms::shortest_path_cost_weighted(
@@ -248,7 +301,7 @@ impl KnowledgeGraph {
                     source_idx,
                     target_idx,
                     &prop,
-                    &PathOptions::default(),
+                    &opts,
                 ) {
                     Some(w) => w.into_pyobject(py)?.unbind().into_any(),
                     None => py.None(),
@@ -258,10 +311,11 @@ impl KnowledgeGraph {
 
         // Find shortest path cost only (no path reconstruction — faster)
         Ok(
-            match kglite_core::api::algorithms::shortest_path_cost(
+            match kglite_core::api::algorithms::shortest_path_cost_with(
                 &self.inner,
                 source_idx,
                 target_idx,
+                &opts,
             ) {
                 Some(c) => c.into_pyobject(py)?.unbind().into_any(),
                 None => py.None(),
@@ -276,17 +330,25 @@ impl KnowledgeGraph {
     /// 2. Reuses the visited-tracking allocation between queries
     ///
     /// Args:
-    ///     node_type: The node type for all source/target nodes
+    ///     node_type: The node type for all source/target nodes — an ID
+    ///         NAMESPACE, not a traversal restriction. Use via_types to
+    ///         restrict which node types a path may pass through.
     ///     pairs: List of (source_id, target_id) tuples
     ///
     /// Returns:
     ///     List of distances (None where no path exists), same order as input pairs.
+    #[pyo3(signature = (node_type, pairs, connection_types=None, via_types=None, direction=None, timeout_ms=None))]
     fn shortest_path_lengths_batch(
         &self,
         py: Python<'_>,
         node_type: &str,
         pairs: Vec<(Bound<'_, PyAny>, Bound<'_, PyAny>)>,
+        connection_types: Option<Vec<String>>,
+        via_types: Option<Vec<String>>,
+        direction: Option<&str>,
+        timeout_ms: Option<u64>,
     ) -> PyResult<Py<PyAny>> {
+        let edge_dir = parse_direction(direction)?;
         // Resolve all node indices up front
         let mut index_pairs = Vec::with_capacity(pairs.len());
         for (src_py, tgt_py) in &pairs {
@@ -315,8 +377,16 @@ impl KnowledgeGraph {
             index_pairs.push((src_idx, tgt_idx));
         }
 
-        let results =
-            kglite_core::api::algorithms::shortest_path_cost_batch(&self.inner, &index_pairs);
+        let results = kglite_core::api::algorithms::shortest_path_cost_batch_with(
+            &self.inner,
+            &index_pairs,
+            &path_options(
+                connection_types.as_deref(),
+                via_types.as_deref(),
+                edge_dir,
+                deadline_from(timeout_ms),
+            ),
+        );
 
         let result_list = PyList::empty(py);
         for result in results {
@@ -343,7 +413,10 @@ impl KnowledgeGraph {
     ///
     /// Returns:
     ///     A list of node IDs along the path, or None if no path exists.
-    #[pyo3(signature = (source_type, source_id, target_type, target_id, connection_types=None, via_types=None, timeout_ms=None))]
+    ///
+    /// `source_type` / `target_type` are an ID NAMESPACE — use `via_types` to
+    /// restrict the node types a path may pass through.
+    #[pyo3(signature = (source_type, source_id, target_type, target_id, connection_types=None, via_types=None, timeout_ms=None, direction=None))]
     #[allow(clippy::too_many_arguments)]
     fn shortest_path_ids(
         &self,
@@ -355,7 +428,9 @@ impl KnowledgeGraph {
         connection_types: Option<Vec<String>>,
         via_types: Option<Vec<String>>,
         timeout_ms: Option<u64>,
+        direction: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
+        let edge_dir = parse_direction(direction)?;
         let _arena_guard = self.inner.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
                                                          // Use O(1) direct lookup from id_indices (populated during add_nodes)
         let source_value = py_in::py_value_to_value(source_id)?;
@@ -381,14 +456,16 @@ impl KnowledgeGraph {
             })?;
 
         // Find shortest path
-        let deadline = kglite_core::api::algorithms::Interrupt::from_deadline(
-            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms)),
-        );
         match kglite_core::api::algorithms::shortest_path(
             &self.inner,
             source_idx,
             target_idx,
-            &path_options(connection_types.as_deref(), via_types.as_deref(), deadline),
+            &path_options(
+                connection_types.as_deref(),
+                via_types.as_deref(),
+                edge_dir,
+                deadline_from(timeout_ms),
+            ),
         ) {
             Some(path_result) => {
                 // Extract just the IDs - no PyDict creation per node
@@ -422,7 +499,10 @@ impl KnowledgeGraph {
     ///
     /// Returns:
     ///     A list of integer node indices along the path, or None if no path exists.
-    #[pyo3(signature = (source_type, source_id, target_type, target_id, connection_types=None, via_types=None, timeout_ms=None))]
+    ///
+    /// `source_type` / `target_type` are an ID NAMESPACE — use `via_types` to
+    /// restrict the node types a path may pass through.
+    #[pyo3(signature = (source_type, source_id, target_type, target_id, connection_types=None, via_types=None, timeout_ms=None, direction=None))]
     #[allow(clippy::too_many_arguments)]
     fn shortest_path_indices(
         &self,
@@ -434,7 +514,9 @@ impl KnowledgeGraph {
         connection_types: Option<Vec<String>>,
         via_types: Option<Vec<String>>,
         timeout_ms: Option<u64>,
+        direction: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
+        let edge_dir = parse_direction(direction)?;
         // Use O(1) direct lookup from id_indices (populated during add_nodes)
         let source_value = py_in::py_value_to_value(source_id)?;
         let source_idx = self
@@ -458,16 +540,17 @@ impl KnowledgeGraph {
                 )))
             })?;
 
-        let deadline = kglite_core::api::algorithms::Interrupt::from_deadline(
-            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms)),
-        );
-
         // Find shortest path and return raw indices
         match kglite_core::api::algorithms::shortest_path(
             &self.inner,
             source_idx,
             target_idx,
-            &path_options(connection_types.as_deref(), via_types.as_deref(), deadline),
+            &path_options(
+                connection_types.as_deref(),
+                via_types.as_deref(),
+                edge_dir,
+                deadline_from(timeout_ms),
+            ),
         ) {
             Some(path_result) => {
                 let indices: Vec<usize> = path_result.path.iter().map(|idx| idx.index()).collect();
@@ -490,7 +573,10 @@ impl KnowledgeGraph {
     ///
     /// Returns:
     ///     A list of path dictionaries, each with 'path', 'connections', and 'length'
-    #[pyo3(signature = (source_type, source_id, target_type, target_id, max_hops=None, max_results=None, connection_types=None, via_types=None, timeout_ms=None))]
+    ///
+    /// `source_type` / `target_type` are an ID NAMESPACE — use `via_types` to
+    /// restrict the node types a path may pass through.
+    #[pyo3(signature = (source_type, source_id, target_type, target_id, max_hops=None, max_results=None, connection_types=None, via_types=None, timeout_ms=None, direction=None))]
     #[allow(clippy::too_many_arguments)]
     fn all_paths(
         &self,
@@ -504,7 +590,9 @@ impl KnowledgeGraph {
         connection_types: Option<Vec<String>>,
         via_types: Option<Vec<String>>,
         timeout_ms: Option<u64>,
+        direction: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
+        let edge_dir = parse_direction(direction)?;
         let max_hops = max_hops.unwrap_or(5);
 
         // Look up source node
@@ -541,14 +629,11 @@ impl KnowledgeGraph {
             )))
         })?;
 
-        let deadline = kglite_core::api::algorithms::Interrupt::from_deadline(
-            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms)),
-        );
-
         // Find all paths
         let mut all_paths_opts = kglite_core::api::algorithms::AllPathsOptions::default()
             .with_max_hops(max_hops)
-            .with_interrupt(deadline);
+            .with_direction(edge_dir)
+            .with_interrupt(deadline_from(timeout_ms));
         if let Some(mr) = max_results {
             all_paths_opts = all_paths_opts.with_max_results(mr);
         }
@@ -691,13 +776,20 @@ impl KnowledgeGraph {
     ///
     /// Returns:
     ///     True if the nodes are connected, False otherwise
+    #[pyo3(signature = (source_type, source_id, target_type, target_id, connection_types=None, via_types=None, direction=None, timeout_ms=None))]
+    #[allow(clippy::too_many_arguments)]
     fn are_connected(
         &self,
         source_type: &str,
         source_id: &Bound<'_, PyAny>,
         target_type: &str,
         target_id: &Bound<'_, PyAny>,
+        connection_types: Option<Vec<String>>,
+        via_types: Option<Vec<String>>,
+        direction: Option<&str>,
+        timeout_ms: Option<u64>,
     ) -> PyResult<bool> {
+        let edge_dir = parse_direction(direction)?;
         // Look up source node
         let source_lookup =
             kglite_core::api::storage::TypeLookup::new(&self.inner.graph, source_type.to_string())
@@ -732,10 +824,16 @@ impl KnowledgeGraph {
             )))
         })?;
 
-        Ok(kglite_core::api::algorithms::are_connected(
+        Ok(kglite_core::api::algorithms::are_connected_with(
             &self.inner,
             source_idx,
             target_idx,
+            &path_options(
+                connection_types.as_deref(),
+                via_types.as_deref(),
+                edge_dir,
+                deadline_from(timeout_ms),
+            ),
         ))
     }
 

@@ -953,6 +953,15 @@ path = graph.shortest_path('Person', 'alice', 'Person', 'dave',
     via_types=['Person'],
     timeout_ms=5000)
 
+# Undirected by default; pass direction for a one-way search.
+# 'outgoing'/'out', 'incoming'/'in', 'any'/'both' (default).
+path = graph.shortest_path('Person', 'alice', 'Person', 'dave',
+    direction='outgoing')
+
+# The source/target TYPE arguments are an id namespace, not a traversal
+# restriction: 'Person' says where to look 'alice' up, and the path may still
+# route through a City. Use via_types when you mean "through people only".
+
 # Just the hop count (faster)
 dist = graph.shortest_path_length('Person', 'alice', 'Person', 'dave')
 
@@ -965,6 +974,10 @@ indices = graph.shortest_path_indices('Person', 'alice', 'Person', 'dave')
 # All paths up to max hops
 paths = graph.all_paths('Person', 'alice', 'Person', 'dave',
     max_hops=5, max_results=100, timeout_ms=10000)
+
+# Many distances at once (one shared adjacency), same filters as the rest
+dists = graph.shortest_path_lengths_batch('Person', [('alice', 'dave')],
+    connection_types=['KNOWS'], direction='outgoing')
 
 # Weighted shortest path (Dijkstra) — pass weight_property to minimise
 # total edge weight rather than hop count. Edges missing the property
@@ -980,8 +993,10 @@ graph.shortest_path_length('Stop', 'A', 'Stop', 'Z', weight_property='cost')  # 
 ### Connectivity
 
 ```python
-# Boolean connectivity check
+# Boolean connectivity check — same filters/direction as shortest_path_length()
 connected = graph.are_connected('Person', 'alice', 'Person', 'dave')
+connected = graph.are_connected('Person', 'alice', 'Person', 'dave',
+    connection_types=['KNOWS'], via_types=['Person'])
 
 # Connected components
 components = graph.connected_components(weak=True)   # weakly connected (default)

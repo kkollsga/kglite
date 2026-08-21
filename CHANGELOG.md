@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`shortest_path_length(weight_property=...)` silently ignored the filters it
+  appeared to accept, and three members of the family could not express a
+  type-restricted traversal at all.** The weighted branch built a default
+  options struct and dropped `connection_types` / `via_types` on the floor, so
+  a call that named a filter got an unfiltered answer with no error and no
+  warning. `shortest_path_lengths_batch` and `are_connected` took no filters at
+  all, which meant a `Person`-to-`Person` question was routinely answered
+  through a `City` — the batch API's only spelling of "distance" was "distance
+  through anything". All of them now take, and honour, the same arguments.
+  The `source_type` / `target_type` / `node_type` arguments remain what they
+  have always been — an **ID namespace**, saying which type to look the
+  endpoint id up in and never restricting the traversal — and the stubs,
+  guide and `describe()` now say so everywhere rather than leaving it to be
+  discovered.
+
 - **On a disk-mode graph, saving silently dropped every string `SET` whose new
   value was a different byte length from the old one.** After a reload the
   property read back as its pre-`SET` string, or as an empty string (not null)
@@ -723,6 +738,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so the shapes it speeds up keep their speed.
 
 ### Added
+
+- **The whole Python shortest-path family takes the same traversal controls.**
+  `shortest_path`, `shortest_path_ids`, `shortest_path_indices`,
+  `shortest_path_length`, `shortest_path_lengths_batch`, `are_connected` and
+  `all_paths` all now accept `direction=` (`'outgoing'` / `'out'`,
+  `'incoming'` / `'in'`, `'any'` / `'both'` / `None` — the same vocabulary
+  `traverse()` and `where_connected()` use, defaulting to today's undirected
+  search), and the four that were missing them gained
+  `connection_types` / `via_types` / `timeout_ms`. Every default is unchanged,
+  so existing calls answer exactly what they answered before. A new scoped
+  adjacency serves the batch API, which keeps building its adjacency once for
+  the whole batch while honouring the filters. An unrecognised `direction`
+  raises rather than falling back to the default.
 
 - **`enable_disk_mode(path=...)` converts *and* publishes the disk directory in
   one step.** The conversion now writes its CSR and edge properties inside the

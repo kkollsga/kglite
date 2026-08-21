@@ -845,9 +845,11 @@ pub(super) fn write_fluent_overview(xml: &mut String) {
 
     // Graph algorithms
     xml.push_str("  <group name=\"algorithms\">\n");
-    xml.push_str("    <method sig=\"shortest_path(source_type, source_id, target_type, target_id, connection_types=None, via_types=None, weight_property=None, timeout_ms=None)\">Full path with node details. Undirected: edge direction is ignored (use Cypher shortestPath((a)-[:R*]-&gt;(b)) for a directed search).</method>\n");
-    xml.push_str("    <method sig=\"shortest_path_length(source_type, source_id, target_type, target_id, weight_property=None)\">Hop count only. Undirected; takes no connection_types / via_types / timeout_ms.</method>\n");
-    xml.push_str("    <method sig=\"all_paths(source_type, source_id, target_type, target_id, max_hops=None, max_results=None, connection_types=None, via_types=None, timeout_ms=None)\">Enumerate all paths (max_hops defaults to 5). Undirected.</method>\n");
+    xml.push_str("    <method sig=\"shortest_path(source_type, source_id, target_type, target_id, connection_types=None, via_types=None, weight_property=None, timeout_ms=None, direction=None)\">Full path with node details. source_type/target_type are an ID NAMESPACE, not a traversal restriction — use via_types for that.</method>\n");
+    xml.push_str("    <method sig=\"shortest_path_length(source_type, source_id, target_type, target_id, weight_property=None, connection_types=None, via_types=None, direction=None, timeout_ms=None)\">Hop count only; same filters and direction as shortest_path().</method>\n");
+    xml.push_str("    <method sig=\"shortest_path_lengths_batch(node_type, pairs, connection_types=None, via_types=None, direction=None, timeout_ms=None)\">Many distances at once (one shared adjacency). node_type is an ID NAMESPACE for both ids of every pair.</method>\n");
+    xml.push_str("    <method sig=\"are_connected(source_type, source_id, target_type, target_id, connection_types=None, via_types=None, direction=None, timeout_ms=None)\">Boolean reachability — true exactly when shortest_path_length() returns a distance.</method>\n");
+    xml.push_str("    <method sig=\"all_paths(source_type, source_id, target_type, target_id, max_hops=None, max_results=None, connection_types=None, via_types=None, timeout_ms=None, direction=None)\">Enumerate all paths (max_hops defaults to 5).</method>\n");
     xml.push_str("    <method sig=\"pagerank(damping_factor=None, connection_types=None, top_k=None, as_dict=None, to_df=None)\">PageRank centrality (damping_factor defaults to 0.85).</method>\n");
     xml.push_str("    <method sig=\"betweenness_centrality(normalized=None, sample_size=None, connection_types=None, top_k=None)\">Betweenness centrality.</method>\n");
     xml.push_str("    <method sig=\"louvain_communities(weight_property=None, resolution=None, connection_types=None)\">Community detection (Louvain; resolution defaults to 1.0).</method>\n");
@@ -1128,12 +1130,15 @@ pub(super) fn write_fluent_topic_statistics(xml: &mut String) {
 
 pub(super) fn write_fluent_topic_algorithms(xml: &mut String) {
     xml.push_str("  <algorithms>\n");
-    xml.push_str("    <desc>Graph algorithms: paths, centrality, community detection. Every path method is undirected — edges are traversed both ways and there is no directed argument; use Cypher shortestPath() with an arrow pattern for a directed search.</desc>\n");
+    xml.push_str("    <desc>Graph algorithms: paths, centrality, community detection. Every path method is undirected BY DEFAULT — pass direction='outgoing'|'incoming'|'any' for a one-way search. The source_type/target_type arguments are an ID NAMESPACE (which type to look the id up in), never a traversal restriction: use via_types to limit which node types a path may pass through, connection_types to limit edge types.</desc>\n");
     xml.push_str("    <methods>\n");
-    xml.push_str("      <m sig=\"shortest_path(source_type, source_id, target_type, target_id, connection_types=None, via_types=None, weight_property=None, timeout_ms=None)\">Full path with node details. connection_types restricts edge types, via_types restricts intermediate node types, weight_property switches BFS to Dijkstra.</m>\n");
-    xml.push_str("      <m sig=\"shortest_path_length(source_type, source_id, target_type, target_id, weight_property=None)\">Hop count only (integer; float when weighted). No connection_types / via_types / timeout_ms — use shortest_path() or shortest_path_ids() when you need filters.</m>\n");
-    xml.push_str("      <m sig=\"shortest_path_ids(source_type, source_id, target_type, target_id, connection_types=None, via_types=None, timeout_ms=None)\">Path as a list of node ids.</m>\n");
-    xml.push_str("      <m sig=\"all_paths(source_type, source_id, target_type, target_id, max_hops=None, max_results=None, connection_types=None, via_types=None, timeout_ms=None)\">All paths up to max_hops (default 5); max_results caps the count.</m>\n");
+    xml.push_str("      <m sig=\"shortest_path(source_type, source_id, target_type, target_id, connection_types=None, via_types=None, weight_property=None, timeout_ms=None, direction=None)\">Full path with node details. connection_types restricts edge types, via_types restricts intermediate node types, direction restricts edge orientation, weight_property switches BFS to Dijkstra (and honours all three).</m>\n");
+    xml.push_str("      <m sig=\"shortest_path_length(source_type, source_id, target_type, target_id, weight_property=None, connection_types=None, via_types=None, direction=None, timeout_ms=None)\">Hop count only (integer; float when weighted). Same filters and direction as shortest_path().</m>\n");
+    xml.push_str("      <m sig=\"shortest_path_ids(source_type, source_id, target_type, target_id, connection_types=None, via_types=None, timeout_ms=None, direction=None)\">Path as a list of node ids.</m>\n");
+    xml.push_str("      <m sig=\"shortest_path_indices(source_type, source_id, target_type, target_id, connection_types=None, via_types=None, timeout_ms=None, direction=None)\">Path as raw graph indices (fastest — no node lookup).</m>\n");
+    xml.push_str("      <m sig=\"shortest_path_lengths_batch(node_type, pairs, connection_types=None, via_types=None, direction=None, timeout_ms=None)\">Distances for many (source_id, target_id) pairs at once; one shared adjacency.</m>\n");
+    xml.push_str("      <m sig=\"are_connected(source_type, source_id, target_type, target_id, connection_types=None, via_types=None, direction=None, timeout_ms=None)\">Boolean reachability under the same filters.</m>\n");
+    xml.push_str("      <m sig=\"all_paths(source_type, source_id, target_type, target_id, max_hops=None, max_results=None, connection_types=None, via_types=None, timeout_ms=None, direction=None)\">All paths up to max_hops (default 5); max_results caps the count.</m>\n");
     xml.push_str("      <m sig=\"pagerank(damping_factor=None, max_iterations=None, connection_types=None, top_k=None, as_dict=None, to_df=None)\">PageRank centrality → ResultView (damping_factor defaults to 0.85).</m>\n");
     xml.push_str("      <m sig=\"betweenness_centrality(normalized=None, sample_size=None, connection_types=None, top_k=None, as_dict=None, to_df=None)\">Betweenness centrality → ResultView.</m>\n");
     xml.push_str("      <m sig=\"degree_centrality(normalized=None, connection_types=None, top_k=None, as_dict=None, to_df=None)\">Degree centrality → ResultView (as_dict=True for a dict).</m>\n");
@@ -1148,6 +1153,8 @@ pub(super) fn write_fluent_topic_algorithms(xml: &mut String) {
     );
     xml.push_str("      <ex desc=\"path length\">graph.shortest_path_length('City', 'Oslo', 'City', 'Bergen')</ex>\n");
     xml.push_str("      <ex desc=\"filtered path\">graph.shortest_path('City', 'Oslo', 'City', 'Bergen', connection_types=['ROAD'])</ex>\n");
+    xml.push_str("      <ex desc=\"directed hop count\">graph.shortest_path_length('Person', 1, 'Person', 42, direction='outgoing')</ex>\n");
+    xml.push_str("      <ex desc=\"person-to-person only\">graph.shortest_path_lengths_batch('Person', [(1, 2)], via_types=['Person'])</ex>\n");
     xml.push_str("      <ex desc=\"pagerank\">graph.pagerank(connection_types=['CITES'])</ex>\n");
     xml.push_str("      <ex desc=\"communities\">graph.louvain_communities(resolution=1.5)</ex>\n");
     xml.push_str("      <ex desc=\"components\">graph.connected_components(weak=True)</ex>\n");

@@ -242,12 +242,12 @@ def test_advertised_examples_use_real_arguments(describe_output):
     assert not failures, "describe() examples pass arguments that do not exist:\n" + "\n".join(failures)
 
 
-def test_shortest_path_family_is_undirected():
-    """The advertised 'undirected' semantics are the real ones.
+def test_shortest_path_family_is_undirected_by_default():
+    """The advertised 'undirected by default' semantics are the real ones.
 
     describe() and the graph-algorithms guide both state that the fluent
-    shortest-path family ignores edge direction (Cypher's ``shortestPath`` is
-    the directed route).  If that ever changes, the docs saying so become the
+    shortest-path family ignores edge direction unless ``direction=`` says
+    otherwise.  If that default ever changes, the docs saying so become the
     fiction this module exists to prevent.
     """
     pd = pytest.importorskip("pandas")
@@ -263,23 +263,34 @@ def test_shortest_path_family_is_undirected():
     assert graph.shortest_path_lengths_batch("City", [(3, 1)]) == [2]
 
 
-def test_filter_only_methods_reject_advertised_filters():
-    """The methods documented as filter-less really are.
+def test_every_family_member_takes_the_advertised_filters():
+    """describe() advertises the same filters on all seven members — really.
 
     ``shortest_path_length`` / ``shortest_path_lengths_batch`` /
-    ``are_connected`` take no ``connection_types`` / ``via_types`` /
-    ``timeout_ms`` today; ``kglite/__init__.pyi`` says so and describe() and
-    the guide now match it.  This pins the gap so a doc claiming otherwise
-    fails here rather than in an agent's session.
+    ``are_connected`` gained ``connection_types`` / ``via_types`` /
+    ``direction`` / ``timeout_ms`` in 0.16.6; before that the docs describing
+    them as filter-less were the truth and this test pinned the gap.  It now
+    pins the opposite: the arguments exist *and* change the answer, so a stub
+    or describe() string that advertises them cannot be fiction again.
     """
     pd = pytest.importorskip("pandas")
     graph = kglite.KnowledgeGraph()
-    graph.add_nodes(pd.DataFrame({"id": [1, 2], "name": ["A", "B"]}), "City", "id", "name")
+    graph.add_nodes(pd.DataFrame({"id": [1, 2, 3], "name": ["A", "B", "C"]}), "City", "id", "name")
+    graph.add_nodes(pd.DataFrame({"id": [10], "name": ["Hub"]}), "Port", "id", "name")
     graph.add_connections(pd.DataFrame({"s": [1], "t": [2]}), "ROAD", "City", "s", "City", "t")
+    # City 1 and City 3 meet only at the Port, and only by FERRY.
+    graph.add_connections(pd.DataFrame({"s": [1, 3], "t": [10, 10]}), "FERRY", "City", "s", "Port", "t")
 
-    with pytest.raises(TypeError):
-        graph.shortest_path_length("City", 1, "City", 2, connection_types=["ROAD"])
-    with pytest.raises(TypeError):
-        graph.shortest_path_lengths_batch("City", [(1, 2)], connection_types=["ROAD"])
-    with pytest.raises(TypeError):
-        graph.are_connected("City", 1, "City", 2, connection_types=["ROAD"])
+    for call in (
+        lambda **kw: graph.shortest_path_length("City", 1, "City", 3, **kw),
+        lambda **kw: graph.shortest_path_lengths_batch("City", [(1, 3)], **kw)[0],
+        lambda **kw: 2 if graph.are_connected("City", 1, "City", 3, **kw) else None,
+    ):
+        assert call() == 2, "the Port route exists by default"
+        assert call(connection_types=["ROAD"]) is None, "connection_types ignored"
+        assert call(via_types=["City"]) is None, "via_types ignored"
+        assert call(direction="incoming") is None, "direction ignored"
+        assert call(timeout_ms=5000) == 2, "timeout_ms rejected"
+
+    with pytest.raises(Exception, match="Invalid direction"):
+        graph.shortest_path_length("City", 1, "City", 3, direction="sideways")

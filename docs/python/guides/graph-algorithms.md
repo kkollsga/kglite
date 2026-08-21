@@ -19,32 +19,61 @@ graph.shortest_path_ids(...)       # → list[id] | None (node IDs along path)
 graph.shortest_path_indices(...)   # → list[int] | None (raw graph indices, fastest)
 ```
 
-**Which options each method takes.** The filter arguments are not uniform across
-the family — passing one to a method that doesn't take it raises `TypeError`:
+**Which options each method takes.** Every member of the family now accepts
+the same traversal controls, so all seven answer the same question:
 
-| Method | `connection_types` / `via_types` / `timeout_ms` | `weight_property` |
+| Method | `connection_types` / `via_types` / `direction` / `timeout_ms` | `weight_property` |
 | --- | --- | --- |
 | `shortest_path` | yes | yes |
 | `shortest_path_ids` | yes | no |
 | `shortest_path_indices` | yes | no |
+| `shortest_path_length` | yes | yes |
+| `shortest_path_lengths_batch` | yes | no |
+| `are_connected` | yes | no |
 | `all_paths` | yes | no |
-| `shortest_path_length` | **no** | yes |
-| `shortest_path_lengths_batch` | **no** | no |
-| `are_connected` | **no** | no |
 
-When you need a filtered distance, call `shortest_path(...)` with the filters
-and read `result['length']`.
+**`source_type` / `target_type` / `node_type` are an ID namespace.** They say
+which type to look the endpoint id up in — they never restrict which node
+types the path may pass through. So this:
 
-**These methods are undirected.** Every member of the fluent shortest-path
-family traverses edges in both directions, whatever direction they were
-created in — there is no `directed` argument. For a direction-sensitive
-search, use Cypher's `shortestPath()`, which honours the arrow in the pattern
-(`(a)-[:KNOWS*..10]->(b)` is directed, `(a)-[:KNOWS*..10]-(b)` is not); see
-the `shortestPath()` section of `CYPHER.md`.
+```python
+graph.shortest_path_length("Person", 3, "Person", 4)
+```
+
+happily answers `2` through a `City` node, because two people who live in the
+same city are two hops apart. If you meant "how far apart through *people*",
+say so:
+
+```python
+graph.shortest_path_length("Person", 3, "Person", 4, via_types=["Person"])
+# → None
+graph.shortest_path_length("Person", 3, "Person", 4, connection_types=["KNOWS"])
+# → None
+```
+
+`via_types` restricts the *intermediate* nodes only — the two endpoints are
+always allowed, whatever their type.
+
+**These methods are undirected by default.** Edges are traversed both ways
+whatever direction they were created in, unless you pass `direction`:
+
+```python
+graph.shortest_path_length("Person", 1, "Person", 4)                        # 2 (either way)
+graph.shortest_path_length("Person", 1, "Person", 4, direction="outgoing")  # 3 (forwards only)
+graph.shortest_path_length("Person", 1, "Person", 4, direction="incoming")  # None
+```
+
+`direction` accepts `'outgoing'` / `'out'`, `'incoming'` / `'in'`, and
+`'any'` / `'both'` / `None` (the default). Anything else raises — it is never
+silently ignored. This is the same vocabulary `traverse()` and
+`where_connected()` use. Cypher's `shortestPath()` expresses the same thing
+with the arrow in the pattern (`(a)-[:KNOWS*..10]->(b)` is directed,
+`(a)-[:KNOWS*..10]-(b)` is not); see the `shortestPath()` section of
+`CYPHER.md`.
 
 ### Weighted shortest path
 
-Pass `weight_property` to switch from BFS (hop count) to Dijkstra (sum of edge weights). Edges missing the property default to weight 1.0; negative weights cause the path to be reported as missing.
+Pass `weight_property` to switch from BFS (hop count) to Dijkstra (sum of edge weights). Edges missing the property default to weight 1.0; negative weights cause the path to be reported as missing. The weighted search honours `connection_types`, `via_types` and `direction` exactly as the unweighted one does.
 
 ```python
 # Cheapest path by edge.cost
@@ -58,12 +87,23 @@ result = graph.shortest_path(
 graph.shortest_path_length("Stop", "A", "Stop", "Z", weight_property="cost")  # → 4.7
 ```
 
-Batch variant for computing many distances at once:
+Batch variant for computing many distances at once — it builds the adjacency
+once for the whole batch, so it is far cheaper than a loop:
 
 ```python
 distances = graph.shortest_path_lengths_batch('Person', [(1, 5), (2, 8), (3, 10)])
 # → [2, None, 5]  (None where no path exists, same order as input)
+
+# Same filters as the rest of the family
+graph.shortest_path_lengths_batch(
+    'Person', [(1, 5), (2, 8)],
+    connection_types=['KNOWS'], direction='outgoing',
+)
 ```
+
+A pair whose endpoint the filters exclude entirely (a person with no `KNOWS`
+edge, under `connection_types=['KNOWS']`) answers `None` — the same "no path"
+a disconnected pair gets, never an error.
 
 ## All Paths
 
@@ -85,6 +125,10 @@ print(f"Found {len(components)} connected components")
 print(f"Largest component: {len(components[0])} nodes")
 
 graph.are_connected(source_type='Person', source_id=1, target_type='Person', target_id=100)
+
+# True exactly when shortest_path_length() with the same arguments returns a
+# distance — so it takes the same filters and direction.
+graph.are_connected('Person', 1, 'Person', 100, connection_types=['KNOWS'])
 ```
 
 ## Cypher procedures: scoped subgraph algorithms

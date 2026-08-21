@@ -1073,3 +1073,392 @@ fn test_leiden_empty_and_isolated() {
     assert_eq!(r.num_communities, 0);
     assert!(r.levels.is_empty());
 }
+
+// ============================================================================
+// EdgeDir: direction-aware expansion, the directed scoped adjacency, and the
+// batch API's restricted-universe contract (S2).
+// ============================================================================
+
+/// Mirrors `tests/test_shortest_path_python_parity.py`'s fixture:
+///
+/// ```text
+/// P0 -KNOWS-> P1 <-KNOWS- P3        P2 -LIVES_IN-> C(4) <-LIVES_IN- P3
+/// P1 -KNOWS-> P4 -KNOWS-> P3
+/// ```
+///
+/// So P0→P3 is 2 hops undirected (through the *backwards* KNOWS P3→P1) but 3
+/// hops following outgoing edges, and P2→P3 exists only through the City.
+fn build_direction_fixture() -> (DirGraph, Vec<petgraph::graph::NodeIndex>) {
+    let mut graph = DirGraph::new();
+    let mut idx = Vec::new();
+    for i in 0..5 {
+        let node = NodeData::new(
+            Value::Int64(i),
+            Value::String(format!("P{}", i)),
+            "Person".to_string(),
+            HashMap::new(),
+            &mut graph.interner,
+        );
+        let n = graph.graph.add_node(node);
+        graph
+            .type_indices
+            .entry_or_default("Person".to_string())
+            .push(n);
+        idx.push(n);
+    }
+    let city = NodeData::new(
+        Value::Int64(10),
+        Value::String("Oslo".to_string()),
+        "City".to_string(),
+        HashMap::new(),
+        &mut graph.interner,
+    );
+    let city_idx = graph.graph.add_node(city);
+    graph
+        .type_indices
+        .entry_or_default("City".to_string())
+        .push(city_idx);
+    idx.push(city_idx);
+
+    for (from, to) in [(0usize, 1usize), (3, 1), (1, 4), (4, 3)] {
+        let edge = EdgeData::new("KNOWS".to_string(), HashMap::new(), &mut graph.interner);
+        graph.graph.add_edge(idx[from], idx[to], edge);
+    }
+    for person in [2usize, 3] {
+        let edge = EdgeData::new("LIVES_IN".to_string(), HashMap::new(), &mut graph.interner);
+        graph.graph.add_edge(idx[person], city_idx, edge);
+    }
+    (graph, idx)
+}
+
+#[test]
+fn test_edge_dir_default_is_undirected() {
+    assert_eq!(EdgeDir::default(), EdgeDir::Any);
+    assert_eq!(PathOptions::default().direction, EdgeDir::Any);
+    assert_eq!(AllPathsOptions::default().direction, EdgeDir::Any);
+}
+
+#[test]
+fn test_shortest_path_direction_changes_the_answer() {
+    let (graph, idx) = build_direction_fixture();
+    let undirected = shortest_path(&graph, idx[0], idx[3], &PathOptions::default()).unwrap();
+    assert_eq!(undirected.cost, 2);
+    assert_eq!(undirected.path, vec![idx[0], idx[1], idx[3]]);
+
+    let outgoing = shortest_path(
+        &graph,
+        idx[0],
+        idx[3],
+        &PathOptions::default().with_direction(EdgeDir::Outgoing),
+    )
+    .unwrap();
+    assert_eq!(outgoing.cost, 3);
+    assert_eq!(outgoing.path, vec![idx[0], idx[1], idx[4], idx[3]]);
+
+    // Nothing points at P0, so an incoming-only walk leaves it immediately.
+    assert!(shortest_path(
+        &graph,
+        idx[0],
+        idx[3],
+        &PathOptions::default().with_direction(EdgeDir::Incoming),
+    )
+    .is_none());
+}
+
+#[test]
+fn test_incoming_expansion_is_the_mirror_of_outgoing() {
+    let (graph, idx) = build_direction_fixture();
+    let out = shortest_path(
+        &graph,
+        idx[0],
+        idx[3],
+        &PathOptions::default().with_direction(EdgeDir::Outgoing),
+    )
+    .unwrap();
+    let inc = shortest_path(
+        &graph,
+        idx[3],
+        idx[0],
+        &PathOptions::default().with_direction(EdgeDir::Incoming),
+    )
+    .unwrap();
+    let mut reversed = inc.path.clone();
+    reversed.reverse();
+    assert_eq!(reversed, out.path);
+    assert_eq!(inc.cost, out.cost);
+}
+
+#[test]
+fn test_shortest_path_directed_delegates_to_outgoing() {
+    let (graph, idx) = build_direction_fixture();
+    let via_delegate = shortest_path_directed(&graph, idx[0], idx[3], &PathOptions::default());
+    let via_option = shortest_path(
+        &graph,
+        idx[0],
+        idx[3],
+        &PathOptions::default().with_direction(EdgeDir::Outgoing),
+    );
+    assert_eq!(
+        via_delegate.map(|r| r.path),
+        via_option.map(|r| r.path),
+        "shortest_path_directed must be shortest_path(EdgeDir::Outgoing)"
+    );
+}
+
+#[test]
+fn test_cost_with_matches_path_with_across_the_matrix() {
+    let (graph, idx) = build_direction_fixture();
+    let knows = vec!["KNOWS".to_string()];
+    for direction in [EdgeDir::Any, EdgeDir::Outgoing, EdgeDir::Incoming] {
+        for conn in [None, Some(&knows[..])] {
+            for (s, t) in [(0usize, 3usize), (3, 0), (2, 3), (0, 2)] {
+                let mut opts = PathOptions::default().with_direction(direction);
+                if let Some(c) = conn {
+                    opts = opts.with_connection_types(c);
+                }
+                let by_path = shortest_path(&graph, idx[s], idx[t], &opts).map(|r| r.cost);
+                let by_cost = shortest_path_cost_with(&graph, idx[s], idx[t], &opts);
+                let by_batch = shortest_path_cost_batch_with(&graph, &[(idx[s], idx[t])], &opts)[0];
+                let connected = are_connected_with(&graph, idx[s], idx[t], &opts);
+                assert_eq!(by_path, by_cost, "{:?} {:?} {}->{}", direction, conn, s, t);
+                assert_eq!(by_path, by_batch, "{:?} {:?} {}->{}", direction, conn, s, t);
+                assert_eq!(
+                    by_path.is_some(),
+                    connected,
+                    "{:?} {:?} {}->{}",
+                    direction,
+                    conn,
+                    s,
+                    t
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn test_cost_with_defaults_match_the_sealed_fns() {
+    let (graph, idx) = build_direction_fixture();
+    for (s, t) in [(0usize, 3usize), (2, 3), (0, 0), (0, 2)] {
+        assert_eq!(
+            shortest_path_cost(&graph, idx[s], idx[t]),
+            shortest_path_cost_with(&graph, idx[s], idx[t], &PathOptions::default())
+        );
+    }
+    let pairs: Vec<_> = [(0usize, 3usize), (2, 3), (0, 0)]
+        .iter()
+        .map(|&(s, t)| (idx[s], idx[t]))
+        .collect();
+    assert_eq!(
+        shortest_path_cost_batch(&graph, &pairs),
+        shortest_path_cost_batch_with(&graph, &pairs, &PathOptions::default())
+    );
+}
+
+#[test]
+fn test_batch_honours_connection_types() {
+    let (graph, idx) = build_direction_fixture();
+    let knows = vec!["KNOWS".to_string()];
+    // P2 reaches P3 only through the City.
+    assert_eq!(
+        shortest_path_cost_batch(&graph, &[(idx[2], idx[3])]),
+        vec![Some(2)]
+    );
+    assert_eq!(
+        shortest_path_cost_batch_with(
+            &graph,
+            &[(idx[2], idx[3])],
+            &PathOptions::default().with_connection_types(&knows),
+        ),
+        vec![None]
+    );
+}
+
+#[test]
+fn test_batch_endpoint_outside_restricted_universe_answers_none() {
+    let (graph, idx) = build_direction_fixture();
+    let knows = vec!["KNOWS".to_string()];
+    let opts = PathOptions::default().with_connection_types(&knows);
+    // P2 has no KNOWS edge at all — it is not in the KNOWS universe. The pair
+    // answers None; the pairs beside it in the same call still answer.
+    assert_eq!(
+        shortest_path_cost_batch_with(
+            &graph,
+            &[(idx[2], idx[0]), (idx[0], idx[1]), (idx[2], idx[2])],
+            &opts,
+        ),
+        vec![None, Some(1), Some(0)]
+    );
+}
+
+#[test]
+fn test_batch_via_types_exempts_the_endpoints_only() {
+    let (graph, idx) = build_direction_fixture();
+    let persons = vec!["Person".to_string()];
+    let opts = PathOptions::default().with_via_types(&persons);
+    // P2→P3 needs the City as an *intermediate*: blocked.
+    assert_eq!(
+        shortest_path_cost_batch_with(&graph, &[(idx[2], idx[3])], &opts),
+        vec![None]
+    );
+    // ...but the City may still be an endpoint.
+    assert_eq!(
+        shortest_path_cost_batch_with(&graph, &[(idx[2], idx[5])], &opts),
+        vec![Some(1)]
+    );
+    // ...and that agrees with the single-pair member.
+    assert_eq!(
+        shortest_path_cost_with(&graph, idx[2], idx[5], &opts),
+        Some(1)
+    );
+}
+
+#[test]
+fn test_batch_direction() {
+    let (graph, idx) = build_direction_fixture();
+    let pairs = [(idx[0], idx[3])];
+    assert_eq!(
+        shortest_path_cost_batch_with(&graph, &pairs, &PathOptions::default()),
+        vec![Some(2)]
+    );
+    assert_eq!(
+        shortest_path_cost_batch_with(
+            &graph,
+            &pairs,
+            &PathOptions::default().with_direction(EdgeDir::Outgoing)
+        ),
+        vec![Some(3)]
+    );
+    assert_eq!(
+        shortest_path_cost_batch_with(
+            &graph,
+            &pairs,
+            &PathOptions::default().with_direction(EdgeDir::Incoming)
+        ),
+        vec![None]
+    );
+}
+
+#[test]
+fn test_scoped_directed_adjacency_orients_each_edge_once() {
+    let (graph, idx) = build_direction_fixture();
+    let nodes: Vec<_> = idx.clone();
+    let (out_nodes, out_adj) = build_scoped_adjacency_over(
+        &graph,
+        nodes.clone(),
+        None,
+        EdgeDir::Outgoing,
+        Interrupt::default(),
+    )
+    .unwrap();
+    let (_, in_adj) = build_scoped_adjacency_over(
+        &graph,
+        nodes.clone(),
+        None,
+        EdgeDir::Incoming,
+        Interrupt::default(),
+    )
+    .unwrap();
+    let (_, any_adj) =
+        build_scoped_adjacency_over(&graph, nodes, None, EdgeDir::Any, Interrupt::default())
+            .unwrap();
+    assert_eq!(out_nodes.len(), idx.len());
+
+    // P0 has one outgoing KNOWS and nothing incoming.
+    assert_eq!(out_adj[0], vec![1u32]);
+    assert!(in_adj[0].is_empty());
+    assert_eq!(any_adj[0], vec![1u32]);
+
+    // Incoming is the transpose of outgoing, and Any is their union.
+    for (u, outs) in out_adj.iter().enumerate() {
+        for &v in outs {
+            assert!(
+                in_adj[v as usize].contains(&(u as u32)),
+                "{}→{} missing from the incoming transpose",
+                u,
+                v
+            );
+        }
+    }
+    for (u, links) in any_adj.iter().enumerate() {
+        for &v in links {
+            assert!(
+                out_adj[u].contains(&v) || in_adj[u].contains(&v),
+                "Any link {}→{} appears in neither directed build",
+                u,
+                v
+            );
+        }
+    }
+}
+
+#[test]
+fn test_weighted_honours_direction_and_filters() {
+    let (graph, idx) = build_direction_fixture();
+    let knows = vec!["KNOWS".to_string()];
+    // Every edge weighs 1.0 (no weight property present), so the weighted
+    // answer must track the hop count exactly — including under direction.
+    for direction in [EdgeDir::Any, EdgeDir::Outgoing, EdgeDir::Incoming] {
+        for conn in [None, Some(&knows[..])] {
+            let mut opts = PathOptions::default().with_direction(direction);
+            if let Some(c) = conn {
+                opts = opts.with_connection_types(c);
+            }
+            let hops = shortest_path_cost_with(&graph, idx[0], idx[3], &opts);
+            let weight = shortest_path_cost_weighted(&graph, idx[0], idx[3], "missing", &opts);
+            assert_eq!(
+                hops.map(|h| h as f64),
+                weight,
+                "{:?} {:?}: weighted diverged from unweighted on unit weights",
+                direction,
+                conn
+            );
+        }
+    }
+}
+
+#[test]
+fn test_weighted_via_types_no_longer_silently_dropped() {
+    let (graph, idx) = build_direction_fixture();
+    let persons = vec!["Person".to_string()];
+    // P2→P3 routes only through the City; via_types=['Person'] must kill it.
+    assert_eq!(
+        shortest_path_cost_weighted(&graph, idx[2], idx[3], "missing", &PathOptions::default()),
+        Some(2.0)
+    );
+    assert_eq!(
+        shortest_path_cost_weighted(
+            &graph,
+            idx[2],
+            idx[3],
+            "missing",
+            &PathOptions::default().with_via_types(&persons),
+        ),
+        None
+    );
+}
+
+#[test]
+fn test_all_paths_direction() {
+    let (graph, idx) = build_direction_fixture();
+    let undirected = all_paths(
+        &graph,
+        idx[0],
+        idx[3],
+        &AllPathsOptions::default().with_max_hops(5),
+    );
+    let mut lens: Vec<usize> = undirected.iter().map(|p| p.len() - 1).collect();
+    lens.sort_unstable();
+    assert_eq!(lens, vec![2, 3]);
+
+    let directed = all_paths(
+        &graph,
+        idx[0],
+        idx[3],
+        &AllPathsOptions::default()
+            .with_max_hops(5)
+            .with_direction(EdgeDir::Outgoing),
+    );
+    let lens: Vec<usize> = directed.iter().map(|p| p.len() - 1).collect();
+    assert_eq!(lens, vec![3]);
+}

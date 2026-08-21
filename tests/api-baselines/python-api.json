@@ -454,11 +454,11 @@
         },
         "all_paths": {
           "kind": "method",
-          "signature": "(self, /, source_type, source_id, target_type, target_id, max_hops=None, max_results=None, connection_types=None, via_types=None, timeout_ms=None)"
+          "signature": "(self, /, source_type, source_id, target_type, target_id, max_hops=None, max_results=None, connection_types=None, via_types=None, timeout_ms=None, direction=None)"
         },
         "are_connected": {
           "kind": "method",
-          "signature": "(self, /, source_type, source_id, target_type, target_id)"
+          "signature": "(self, /, source_type, source_id, target_type, target_id, connection_types=None, via_types=None, direction=None, timeout_ms=None)"
         },
         "begin": {
           "kind": "method",
@@ -1006,23 +1006,23 @@
         },
         "shortest_path": {
           "kind": "method",
-          "signature": "(self, /, source_type, source_id, target_type, target_id, connection_types=None, via_types=None, weight_property=None, timeout_ms=None)"
+          "signature": "(self, /, source_type, source_id, target_type, target_id, connection_types=None, via_types=None, weight_property=None, timeout_ms=None, direction=None)"
         },
         "shortest_path_ids": {
           "kind": "method",
-          "signature": "(self, /, source_type, source_id, target_type, target_id, connection_types=None, via_types=None, timeout_ms=None)"
+          "signature": "(self, /, source_type, source_id, target_type, target_id, connection_types=None, via_types=None, timeout_ms=None, direction=None)"
         },
         "shortest_path_indices": {
           "kind": "method",
-          "signature": "(self, /, source_type, source_id, target_type, target_id, connection_types=None, via_types=None, timeout_ms=None)"
+          "signature": "(self, /, source_type, source_id, target_type, target_id, connection_types=None, via_types=None, timeout_ms=None, direction=None)"
         },
         "shortest_path_length": {
           "kind": "method",
-          "signature": "(self, /, source_type, source_id, target_type, target_id, weight_property=None)"
+          "signature": "(self, /, source_type, source_id, target_type, target_id, weight_property=None, connection_types=None, via_types=None, direction=None, timeout_ms=None)"
         },
         "shortest_path_lengths_batch": {
           "kind": "method",
-          "signature": "(self, /, node_type, pairs)"
+          "signature": "(self, /, node_type, pairs, connection_types=None, via_types=None, direction=None, timeout_ms=None)"
         },
         "show": {
           "kind": "method",
