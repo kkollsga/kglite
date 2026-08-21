@@ -2332,19 +2332,41 @@ Keys:
 - `timed_out` — `False` on every successful result. A fired deadline raises
   `CypherTimeoutError`, so no partial `ResultView` is returned.
 - `timeout_ms` — the deadline that was in effect, or `None` when no deadline applied.
-- `warnings` — non-fatal advisories about the query, empty for a clean one. A
-  `MATCH` against an unknown label or relationship type is legal Cypher that
-  returns zero rows, so it is a warning and not an error — with a "did you
-  mean?" hint, since it is almost always a typo. Populated on reads,
-  mutations, `EXPLAIN`, and session/transaction queries alike, and mirrored to
-  stderr for interactive users.
+- `warnings` — non-fatal advisories about the query, empty for a clean one.
+  Each is legal Cypher that quietly returns nothing useful, so it is a warning
+  and not an error — with a "did you mean?" hint where one is genuinely close.
+  Four families:
+  - a `MATCH` against an unknown node label or relationship type (zero rows);
+  - a `WHERE` on a property no node of that type has (null comparison, so
+    every row is filtered out);
+  - a `RETURN` / `WITH` / `ORDER BY` reading such a property (a silently
+    all-null column — the sibling `n.name` still resolves, so the rows read as
+    half-correct);
+  - a relationship pattern pointing the wrong way, when every edge of that
+    type runs the other way (zero rows).
+
+  Populated on reads, mutations, `EXPLAIN`, and session/transaction queries
+  alike, and mirrored to stderr for interactive users.
 
 ```python
 result = graph.cypher("MATCH (n:Persn) RETURN n")   # typo
 result.diagnostics["warnings"]
 # ["MATCH references unknown node label 'Persn' — the graph has no such
 #   type, so this pattern returns no rows. Did you mean 'Person'?"]
+
+graph.cypher("MATCH (p:Port)-[:ARRIVES_AT]->(v:Voyage) RETURN p").diagnostics["warnings"]
+# ["MATCH traverses 'ARRIVES_AT' as Port → Voyage, but every 'ARRIVES_AT'
+#   relationship runs Voyage → Port — this pattern matches no edges.
+#   Reverse the arrow?"]
+
+graph.cypher("MATCH (v:Vessel) RETURN v.imo").diagnostics["warnings"]
+# ["RETURN projects property 'imo' which no Vessel node has — every value
+#   will be null."]
 ```
+
+A *sparse* property never warns: `node_type_metadata` records a property as
+soon as one node carries it, so only a genuinely absent one — a typo, or a
+field that belongs to a different type — trips these.
 
 `timeout_ms` resolution: explicit `cypher(..., timeout_ms=N)` >
 `kg.set_default_timeout(ms)` > the Python default of 180,000 ms. Pass

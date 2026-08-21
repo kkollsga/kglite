@@ -376,14 +376,14 @@
       "nesting": 10
     },
     {
-      "path": "crates/kglite/src/graph/languages/cypher/planner/schema_check.rs",
+      "path": "crates/kglite/src/graph/languages/cypher/planner/schema_check/mod.rs",
       "qualified_name": "crate::validate_expression_scope",
       "lines": 155,
       "branches": 54,
       "nesting": 4
     },
     {
-      "path": "crates/kglite/src/graph/languages/cypher/planner/schema_check.rs",
+      "path": "crates/kglite/src/graph/languages/cypher/planner/schema_check/mod.rs",
       "qualified_name": "crate::validate_scope",
       "lines": 133,
       "branches": 56,

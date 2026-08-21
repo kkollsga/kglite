@@ -325,6 +325,31 @@ def graph_fixture(tmp_path: Path) -> Path:
     return fixture
 
 
+def _build_directed_fixture_graph(path: Path) -> None:
+    """Two types wired one way only, so a reversed arrow is expressible.
+
+    The Person/KNOWS fixture above cannot show the eval's §3b defect: with the
+    same type at both ends of the relationship, no orientation is wrong.
+    """
+    g = kglite.KnowledgeGraph()
+    g.add_nodes(pd.DataFrame({"id": [1, 2], "title": ["Bergen", "Oslo"]}), "Port", "id", "title")
+    g.add_nodes(
+        pd.DataFrame({"id": [10, 11], "title": ["V-1", "V-2"], "imo_number": ["9123456", "9234567"]}),
+        "Voyage",
+        "id",
+        "title",
+    )
+    g.add_connections(pd.DataFrame({"src": [10, 11], "dst": [1, 2]}), "ARRIVES_AT", "Voyage", "src", "Port", "dst")
+    g.save(str(path))
+
+
+@pytest.fixture
+def directed_graph_fixture(tmp_path: Path) -> Path:
+    fixture = tmp_path / "directed.kgl"
+    _build_directed_fixture_graph(fixture)
+    return fixture
+
+
 class TestGraphMode:
     """`--graph X.kgl` registers kglite tools + auto-binds the .kgl's parent
     directory as a source root, so source tools are also live."""
@@ -412,6 +437,36 @@ class TestGraphMode:
         try:
             r = client.call_tool("cypher_query", {"query": "MATCH (p:Person) RETURN count(p) AS n"})
             assert "warnings:" not in _text_content(r)
+        finally:
+            client.shutdown()
+
+    def test_cypher_query_reversed_arrow_reports_the_direction_warning(self, directed_graph_fixture: Path):
+        """The eval's zeros table, over the wire: `(p:Port)-[:ARRIVES_AT]->(v:Voyage)`
+        counts 0 with no error, and the agent had nothing to correct against."""
+        client = _spawn(["--graph", str(directed_graph_fixture)])
+        try:
+            r = client.call_tool(
+                "cypher_query",
+                {"query": "MATCH (p:Port)-[:ARRIVES_AT]->(v:Voyage) RETURN count(*) AS n"},
+            )
+            text = _text_content(r)
+            assert "warnings:" in text
+            assert "'ARRIVES_AT'" in text
+            assert "Voyage \u2192 Port" in text
+            assert "Reverse the arrow?" in text
+        finally:
+            client.shutdown()
+
+    def test_cypher_query_absent_projection_reports_the_null_column_warning(self, directed_graph_fixture: Path):
+        client = _spawn(["--graph", str(directed_graph_fixture)])
+        try:
+            r = client.call_tool("cypher_query", {"query": "MATCH (v:Voyage) RETURN v.imo, v.imo_numbr"})
+            text = _text_content(r)
+            assert "warnings:" in text
+            assert "RETURN projects property 'imo'" in text
+            # `imo` is 7 edits from `imo_number` so the measured suggestion rule
+            # stays silent on it; a real typo of the same property gets the hint.
+            assert "Did you mean 'imo_number'?" in text
         finally:
             client.shutdown()
 

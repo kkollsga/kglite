@@ -123,3 +123,86 @@ def test_procedure_scope_warning_reaches_diagnostics(capfd):
     diag = g.cypher("CALL pagerank({relationship: 'KNOWZ'}) YIELD node RETURN count(*) AS c").diagnostics
     capfd.readouterr()
     assert any("unknown relationship type 'KNOWZ'" in w for w in diag["warnings"]), diag
+
+
+# --- projection + direction warnings (eval 2026-08-20 §3a / §3b) ---
+
+
+def _maritime() -> kglite.KnowledgeGraph:
+    """The eval's shape: voyages arriving at ports, vessels whose IMO lives
+    under `imo_number`, and a `flag` set on exactly one vessel."""
+    g = kglite.KnowledgeGraph()
+    g.add_nodes(pd.DataFrame({"pid": [1, 2], "name": ["Bergen", "Oslo"]}), "Port", "pid", "name")
+    g.add_nodes(pd.DataFrame({"vid": [10, 11], "name": ["V-1", "V-2"]}), "Voyage", "vid", "name")
+    g.add_nodes(
+        pd.DataFrame(
+            {
+                "sid": [100, 101, 102],
+                "name": ["Nordic", "Baltic", "Arctic"],
+                "imo_number": ["9123456", "9234567", "9345678"],
+                "flag": ["NO", None, None],
+            }
+        ),
+        "Vessel",
+        "sid",
+        "name",
+    )
+    g.add_connections(pd.DataFrame({"s": [10, 11], "d": [1, 2]}), "ARRIVES_AT", "Voyage", "s", "Port", "d")
+    return g
+
+
+def test_projection_of_absent_property_warns(capfd):
+    """The eval's `RETURN v.imo`: three rows of nulls, and before this the only
+    signal was that the column was empty."""
+    g = _maritime()
+    result = g.cypher("MATCH (v:Vessel) RETURN v.name, v.imo")
+    assert [row["v.imo"] for row in result.to_list()] == [None, None, None]
+    warnings = result.diagnostics["warnings"]
+    assert any("RETURN projects property 'imo'" in w and "no Vessel node has" in w for w in warnings), warnings
+    assert "warning: RETURN projects property 'imo'" in capfd.readouterr().err
+    # `imo` is not a typo for `imo_number` by the measured suggestion rule
+    # (7 edits), and the rule's whole point is "genuinely close, or silent".
+    # A real typo does get the hint.
+    typo = g.cypher("MATCH (v:Vessel) RETURN v.imo_numbr").diagnostics["warnings"]
+    assert any("Did you mean 'imo_number'?" in w for w in typo), typo
+    capfd.readouterr()
+
+
+def test_sparse_property_does_not_warn():
+    """`flag` is set on one vessel of three — sparse, not absent. The metadata
+    records it, so the projection is silent (this is the false-positive guard
+    that lets the warning be trusted)."""
+    g = _maritime()
+    diag = g.cypher("MATCH (v:Vessel) RETURN v.flag").diagnostics
+    assert diag["warnings"] == []
+
+
+def test_reversed_relationship_direction_warns(capfd):
+    """The eval's zeros table, verbatim: `(p:Port)-[:ARRIVES_AT]->(v:Voyage)`
+    counts 0 because every ARRIVES_AT edge runs Voyage→Port."""
+    g = _maritime()
+    result = g.cypher("MATCH (p:Port)-[:ARRIVES_AT]->(v:Voyage) RETURN count(*) AS n")
+    assert result.to_list()[0]["n"] == 0
+    warnings = result.diagnostics["warnings"]
+    assert any("'ARRIVES_AT'" in w and "Voyage → Port" in w and "matches no edges" in w for w in warnings), warnings
+    assert "Reverse the arrow?" in capfd.readouterr().err
+
+
+def test_correct_relationship_direction_does_not_warn():
+    g = _maritime()
+    result = g.cypher("MATCH (v:Voyage)-[:ARRIVES_AT]->(p:Port) RETURN count(*) AS n")
+    assert result.to_list()[0]["n"] == 2
+    assert result.diagnostics["warnings"] == []
+
+
+def test_new_warnings_survive_the_plan_cache():
+    """Same cache-hit contract D1p established, for the two new families."""
+    g = _maritime()
+    for query in (
+        "MATCH (v:Vessel) RETURN v.imo",
+        "MATCH (p:Port)-[:ARRIVES_AT]->(v:Voyage) RETURN count(*) AS n",
+    ):
+        first = g.cypher(query).diagnostics["warnings"]
+        second = g.cypher(query).diagnostics["warnings"]
+        assert first, query
+        assert first == second, query

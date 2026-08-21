@@ -423,6 +423,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The engine now warns about the two silent-empty-result mistakes it could
+  already see.** Both are legal Cypher that returns nothing useful without
+  raising, and both were previously invisible at every layer. A *projection*
+  that reads a property no node of the matched type has — `RETURN v.imo` on a
+  `Vessel` whose column is `imo_number` — is now reported, with a "did you
+  mean?" hint; the all-null column was the worse half of the pair, because the
+  sibling `v.name` title-aliases to a real value and the rows read as
+  half-correct rather than empty. `WITH` and `ORDER BY` projections are covered
+  on the same terms (the existing `WHERE` warning is unchanged). A
+  *relationship pattern pointing the wrong way* —
+  `(p:Port)-[:ARRIVES_AT]->(v:Voyage)` when every `ARRIVES_AT` edge runs
+  Voyage→Port — is now reported naming both orientations. The direction check
+  is deliberately one-sided: it fires only when the connection metadata shows
+  the pattern's orientation has no support *and* the opposite one does, so
+  undirected patterns, variable-length expansions, unlabelled endpoints,
+  relationship types observed in both orientations, and alternations with one
+  live branch all stay silent. A sparse property never warns — the metadata
+  records a property as soon as one node carries it — and neither does a
+  property the same statement is in the act of writing. Both ride the existing
+  `QueryDiagnostics.warnings` channel, so they reach `ResultView.diagnostics`,
+  the MCP `warnings:` block, Bolt, the CLI and stderr with no per-surface work.
+
 - **The MCP server accepts an operator-pinned write scope.** `write_scope` on
   the `cypher_query` tool is chosen by the *agent*, so on its own it is role
   hygiene rather than access control — an agent that wanted a wider perimeter

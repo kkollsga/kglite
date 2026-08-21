@@ -37,7 +37,7 @@
 //! The open-schema default is untouched — schemalessness is the product,
 //! and the check is gated entirely on `graph.schema_locked`.
 //!
-//! Deliberately *ignores entirely*:
+//! Deliberately *never rejects* (they are warned about instead, below):
 //! - Property references in WHERE / RETURN expressions (virtual columns,
 //!   timeseries sub-nodes, aliases can be legitimate `n.prop` accesses
 //!   not present in `node_type_metadata`).
@@ -47,24 +47,38 @@
 //!
 //! ## Non-fatal "did you mean?" warnings
 //!
-//! [`collect_unknown_pattern_warnings`] flags
-//! MATCH patterns that reference an unknown node label or relationship type —
-//! the most common "why is my query empty?" typo — with an edit-distance hint,
-//! *without* rejecting (the zero-row existence-check idiom stays valid). A
-//! warning may only claim the pattern returns no rows when that is true: an
-//! unknown branch of a relationship alternation (`-[:UNKNOWN|KNOWS]->`) is
-//! worded per-branch, because the pattern still matches through its siblings.
-//! The
-//! wrapper emits to stderr (kglite's existing `warning:` convention); routing
-//! the same messages into `QueryDiagnostics` so MCP/agent callers see them
-//! structurally is the natural next step.
+//! [`collect_unknown_pattern_warnings`] gathers the four families of
+//! silently-empty-or-null query, all with an edit-distance hint where one
+//! applies and none of them rejecting (every shape below is legal Cypher):
+//!
+//! 1. **Unknown node label / relationship type** in a MATCH — the most common
+//!    "why is my query empty?" typo. A warning may only claim the pattern
+//!    returns no rows when that is true: an unknown branch of a relationship
+//!    alternation (`-[:UNKNOWN|KNOWS]->`) is worded per-branch, because the
+//!    pattern still matches through its siblings.
+//! 2. **Absent property in a `WHERE`** — `null <op> x` is false, so the
+//!    predicate filters out every row.
+//! 3. **Absent property in a `RETURN` / `WITH` / `ORDER BY`** — a silently
+//!    all-null column, worse than an empty result because a sibling
+//!    `n.name` title-aliases to a real value and the rows read as
+//!    half-correct. See [`warnings::AbsentSite`].
+//! 4. **A relationship pattern pointing the wrong way** — every edge of the
+//!    type runs the other way, so the pattern matches nothing. See
+//!    [`warnings::reversed_direction_warnings`] for the conservatism rules.
+//!
+//! Warnings travel structurally on `QueryDiagnostics::warnings` (every
+//! programmatic surface, MCP included) and to stderr via
+//! [`warnings::emit_query_warnings`] (kglite's `warning:` convention, for interactive
+//! users) — one computation, two consumers.
 //!
 //! Both surfaces — the fatal check and these warnings — reach patterns through
 //! the single traversal in [`walk_query_patterns`], so a typo warns wherever a
 //! read pattern can appear (`CALL {}` bodies, `WHERE EXISTS {}`, `UNION`
-//! branches) rather than only at the top level. The one exception is
-//! [`absent_property_warnings`], which needs a var → label map and so stays
-//! top-level-only for want of a scope model.
+//! branches) rather than only at the top level. The exception is the var →
+//! label map ([`warnings::match_var_labels`]), which families 2-4 consult and which is
+//! built from top-level MATCH patterns only, for want of a scope model: a var
+//! rebound by a projection (`WITH n AS m`) is simply absent from it, so those
+//! checks stay silent about `m` rather than guessing.
 //!
 //! ## Pipeline placement
 //!
@@ -82,6 +96,11 @@ use crate::graph::mutation::validation::did_you_mean;
 use crate::graph::schema::{DirGraph, InternedKey};
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
+
+mod warnings;
+
+pub use warnings::collect_unknown_pattern_warnings;
+pub(crate) use warnings::emit_query_warnings;
 
 /// Built-in fields valid on any node type — mirrors BUILTIN_FIELDS in
 /// `mutation/validation.rs`. Listed explicitly so it's obvious what's
@@ -759,308 +778,6 @@ fn validate_expression_scope(
     }
 }
 
-/// Best-effort, NON-FATAL warnings for `WHERE var.prop …` where `prop` exists
-/// on **no** node of `var`'s label — so `null <op> x` is false and the
-/// predicate silently filters out every row (operator feedback A1b 2026-06-17).
-/// A warning, not an error: a legitimately-sparse property is still in the
-/// type's metadata (set on ≥1 node), so only a *genuinely-absent* property
-/// trips this — no false positive on nullable columns.
-fn absent_property_warnings(query: &CypherQuery, graph: &DirGraph) -> Vec<String> {
-    if graph.node_type_metadata.is_empty() {
-        return Vec::new();
-    }
-    // var → single known node label, from MATCH/OPTIONAL MATCH node patterns.
-    // Multi-label / unknown-label vars are dropped (can't reason precisely).
-    let mut var_label: HashMap<&str, &str> = HashMap::new();
-    for clause in &query.clauses {
-        if let Clause::Match(m) | Clause::OptionalMatch(m) = clause {
-            for pattern in &m.patterns {
-                for el in &pattern.elements {
-                    if let PatternElement::Node(np) = el {
-                        if let (Some(var), Some(label)) =
-                            (np.variable.as_deref(), np.node_type.as_deref())
-                        {
-                            if np.extra_labels.is_empty()
-                                && graph.node_type_metadata.contains_key(label)
-                            {
-                                var_label.insert(var, label);
-                            } else {
-                                var_label.remove(var);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    if var_label.is_empty() {
-        return Vec::new();
-    }
-
-    let mut seen: HashSet<(&str, &str)> = HashSet::new();
-    let mut out = Vec::new();
-    for clause in &query.clauses {
-        let pred = match clause {
-            Clause::Where(w) => Some(&w.predicate),
-            Clause::With(w) => w.where_clause.as_ref().map(|wc| &wc.predicate),
-            Clause::Match(m) | Clause::OptionalMatch(m) => {
-                m.where_clause.as_ref().map(|wc| &wc.predicate)
-            }
-            _ => None,
-        };
-        if let Some(p) = pred {
-            warn_absent_in_predicate(p, &var_label, graph, &mut seen, &mut out);
-        }
-    }
-    out
-}
-
-/// True when `prop` is neither a built-in field nor in `node_type`'s declared
-/// metadata (and the type *has* declared metadata — empty ⇒ skip, as
-/// [`validate_property`] does, to avoid false positives on under-declared graphs).
-fn property_absent(graph: &DirGraph, node_type: &str, prop: &str) -> bool {
-    if BUILTIN_FIELDS.contains(&prop) {
-        return false;
-    }
-    match graph.node_type_metadata.get(node_type) {
-        Some(tp) => !tp.is_empty() && !tp.contains_key(prop),
-        None => false,
-    }
-}
-
-fn warn_absent_in_predicate<'q>(
-    pred: &'q Predicate,
-    var_label: &HashMap<&'q str, &'q str>,
-    graph: &DirGraph,
-    seen: &mut HashSet<(&'q str, &'q str)>,
-    out: &mut Vec<String>,
-) {
-    match pred {
-        Predicate::And(a, b) | Predicate::Or(a, b) | Predicate::Xor(a, b) => {
-            warn_absent_in_predicate(a, var_label, graph, seen, out);
-            warn_absent_in_predicate(b, var_label, graph, seen, out);
-        }
-        Predicate::Not(p) => warn_absent_in_predicate(p, var_label, graph, seen, out),
-        Predicate::Comparison { left, right, .. } => {
-            warn_absent_in_expr(left, var_label, graph, seen, out);
-            warn_absent_in_expr(right, var_label, graph, seen, out);
-        }
-        Predicate::In { expr, .. }
-        | Predicate::InLiteralSet { expr, .. }
-        | Predicate::InExpression { expr, .. }
-        | Predicate::StartsWith { expr, .. }
-        | Predicate::EndsWith { expr, .. }
-        | Predicate::Contains { expr, .. }
-        | Predicate::IsNull(expr)
-        | Predicate::IsNotNull(expr) => {
-            warn_absent_in_expr(expr, var_label, graph, seen, out);
-        }
-        _ => {}
-    }
-}
-
-fn warn_absent_in_expr<'q>(
-    expr: &'q Expression,
-    var_label: &HashMap<&'q str, &'q str>,
-    graph: &DirGraph,
-    seen: &mut HashSet<(&'q str, &'q str)>,
-    out: &mut Vec<String>,
-) {
-    match expr {
-        Expression::PropertyAccess { variable, property } => {
-            if let Some(&label) = var_label.get(variable.as_str()) {
-                if property_absent(graph, label, property)
-                    && seen.insert((variable.as_str(), property.as_str()))
-                {
-                    let candidates: Vec<&str> = graph
-                        .node_type_metadata
-                        .get(label)
-                        .map(|m| m.keys().map(|s| s.as_str()).collect())
-                        .unwrap_or_default();
-                    out.push(format!(
-                        "WHERE references property '{property}' which no {label} node has — the \
-                         comparison is null (always false), so this filters out every row.{}",
-                        did_you_mean(property, &candidates)
-                    ));
-                }
-            }
-        }
-        Expression::Add(a, b)
-        | Expression::Subtract(a, b)
-        | Expression::Multiply(a, b)
-        | Expression::Divide(a, b)
-        | Expression::Modulo(a, b)
-        | Expression::Concat(a, b) => {
-            warn_absent_in_expr(a, var_label, graph, seen, out);
-            warn_absent_in_expr(b, var_label, graph, seen, out);
-        }
-        Expression::Negate(e) => warn_absent_in_expr(e, var_label, graph, seen, out),
-        Expression::FunctionCall { args, .. } => {
-            for a in args {
-                warn_absent_in_expr(a, var_label, graph, seen, out);
-            }
-        }
-        Expression::ListLiteral(items) => {
-            for it in items {
-                warn_absent_in_expr(it, var_label, graph, seen, out);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Non-fatal counterpart to [`validate_schema`]: collect "did you mean?"
-/// warnings for MATCH patterns that reference a node label or relationship
-/// type the graph has never seen (a zero-row existence check is legal Cypher,
-/// so this is *not* an error), plus the absent-property warnings from
-/// [`absent_property_warnings`]. Pure (no I/O), so directly testable;
-/// [`emit_query_warnings`] is the stderr side of the same computation.
-pub fn collect_unknown_pattern_warnings(query: &CypherQuery, graph: &DirGraph) -> Vec<String> {
-    let have_node_schema =
-        !graph.node_type_metadata.is_empty() || graph.type_indices.keys().next().is_some();
-    let have_edge_schema = !graph.connection_type_metadata.is_empty();
-    if !have_node_schema && !have_edge_schema {
-        return Vec::new();
-    }
-
-    // Walk every read pattern — top-level MATCH / OPTIONAL MATCH *and* the
-    // ones nested in `CALL {}`, `WHERE EXISTS {}` and `UNION` branches (see
-    // [`walk_query_patterns`]) — checking each label/relationship against the
-    // schema directly. The all-valid path (the overwhelming common case)
-    // allocates nothing: only confirmed-unknown, not-yet-seen names are
-    // recorded, and the candidate lists for "did you mean?" are built lazily
-    // only if there's at least one unknown.
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut unknown_labels: Vec<String> = Vec::new();
-    // `(unknown type, the branches of its alternation that ARE known)`. The
-    // surviving branches decide the wording: a relationship alternation
-    // (`-[:A|B]->`) matches through *any* branch, so one unknown branch only
-    // means "returns no rows" when every branch is unknown.
-    let mut unknown_rels: Vec<(String, Vec<String>)> = Vec::new();
-
-    for_each_query_pattern(query, &mut |site| {
-        // Write patterns are deliberately skipped: on an open schema
-        // `CREATE (n:NewType)` is how a type comes into existence.
-        let PatternSite::Read(pattern) = site else {
-            return;
-        };
-        for element in &pattern.elements {
-            match element {
-                PatternElement::Node(np) if have_node_schema => {
-                    for label in np.node_type.iter().chain(np.extra_labels.iter()) {
-                        // A label is known if it's a declared primary
-                        // type OR a secondary label applied via
-                        // add_label (`MATCH (n:Reviewer)` is valid even
-                        // though `Reviewer` is no node's primary type).
-                        let known = graph.node_type_metadata.contains_key(label)
-                            || graph.type_indices.contains_key(label)
-                            || graph
-                                .secondary_label_index
-                                .contains_key(&InternedKey::from_str(label));
-                        if !known && seen.insert(format!("L:{label}")) {
-                            unknown_labels.push(label.clone());
-                        }
-                    }
-                }
-                PatternElement::Edge(ep) if have_edge_schema => {
-                    // Both fields, because a single type lands in
-                    // `connection_type` and an alternation in
-                    // `connection_types`.
-                    let branches = || {
-                        ep.connection_type
-                            .iter()
-                            .chain(ep.connection_types.iter().flatten())
-                    };
-                    let known = |rel: &String| graph.connection_type_metadata.contains_key(rel);
-                    // All-valid stays allocation-free: the surviving-branch
-                    // list is only built once an unknown is confirmed.
-                    if branches().all(known) {
-                        continue;
-                    }
-                    let surviving: Vec<String> = branches().filter(|r| known(r)).cloned().collect();
-                    for rel in branches().filter(|r| !known(r)) {
-                        if seen.insert(format!("R:{rel}")) {
-                            unknown_rels.push((rel.clone(), surviving.clone()));
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-    });
-
-    // Seed with the absent-property warnings (A1b) so they're emitted alongside
-    // the unknown-label/rel ones even when the labels/rels are all valid.
-    let mut out: Vec<String> = absent_property_warnings(query, graph);
-    if unknown_labels.is_empty() && unknown_rels.is_empty() {
-        return out;
-    }
-
-    out.reserve(unknown_labels.len() + unknown_rels.len());
-    if !unknown_labels.is_empty() {
-        let candidates: Vec<&str> = graph
-            .node_type_metadata
-            .keys()
-            .map(|s| s.as_str())
-            .chain(graph.type_indices.keys())
-            .collect();
-        for label in &unknown_labels {
-            out.push(format!(
-                "MATCH references unknown node label '{label}' — the graph has no such type, \
-                 so this pattern returns no rows.{}",
-                did_you_mean(label, &candidates)
-            ));
-        }
-    }
-    if !unknown_rels.is_empty() {
-        let candidates: Vec<&str> = graph
-            .connection_type_metadata
-            .keys()
-            .map(|s| s.as_str())
-            .collect();
-        for (rel, surviving) in &unknown_rels {
-            let hint = did_you_mean(rel, &candidates);
-            out.push(if surviving.is_empty() {
-                format!(
-                    "MATCH references unknown relationship type '{rel}' — the graph has no such \
-                     edge type, so this pattern returns no rows.{hint}"
-                )
-            } else {
-                // The pattern is an alternation with a live branch, so the
-                // no-rows claim would be false about the query's result.
-                let named = surviving
-                    .iter()
-                    .map(|s| format!("'{s}'"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!(
-                    "MATCH references unknown relationship type '{rel}' — the graph has no such \
-                     edge type, so that branch matches no edges; the pattern can still return \
-                     rows via {named}.{hint}"
-                )
-            });
-        }
-    }
-    out
-}
-
-/// Emit already-collected query warnings to stderr, matching kglite's
-/// `warning:`-prefixed convention for non-fatal query/load issues.
-///
-/// The one emitter, for the one computation: `session::execute` collects the
-/// warnings once, hands them to [`QueryDiagnostics::warnings`] for every
-/// programmatic surface, and passes the same slice through here for the
-/// interactive one (CLI/REPL users read stderr). Anything that computes a
-/// query warning of its own — `executor::call_clause`'s procedure-scope
-/// checks — emits through here too, so the prefix never drifts.
-///
-/// [`QueryDiagnostics::warnings`]: crate::graph::languages::cypher::result::QueryDiagnostics::warnings
-pub(crate) fn emit_query_warnings(warnings: &[String]) {
-    for msg in warnings {
-        eprintln!("warning: {msg}");
-    }
-}
-
 fn validate_query(query: &CypherQuery, graph: &DirGraph) -> Result<(), SchemaError> {
     walk_query_patterns(query, &mut |site| match site {
         PatternSite::Read(pattern) => validate_pattern(pattern, graph),
@@ -1372,7 +1089,7 @@ mod tests {
     use super::*;
     use crate::graph::languages::cypher::parser::parse_cypher;
 
-    fn graph_with_schema() -> DirGraph {
+    pub(super) fn graph_with_schema() -> DirGraph {
         let mut g = DirGraph::new();
         let mut person_props = HashMap::new();
         person_props.insert("age".to_string(), "int".to_string());
@@ -1753,50 +1470,6 @@ mod tests {
         .unwrap();
         let err = validate_schema(&q, &g).unwrap_err();
         assert_eq!(err.kind, SchemaErrorKind::UnknownProperty);
-    }
-
-    // ── A1b: WHERE-clause absent-property warnings (non-fatal) ──────────────
-
-    #[test]
-    fn warns_on_where_property_absent_from_label() {
-        let g = graph_with_schema();
-        // `is_external` is not a Person property → the comparison is always
-        // null/false and filters everything; warn (non-fatal) + did-you-mean.
-        let q = parse_cypher("MATCH (p:Person) WHERE p.is_external = false RETURN p").unwrap();
-        let w = collect_unknown_pattern_warnings(&q, &g);
-        assert_eq!(w.len(), 1, "{w:?}");
-        assert!(
-            w[0].contains("is_external") && w[0].contains("Person"),
-            "{}",
-            w[0]
-        );
-        // A near-miss still gets a suggestion.
-        let q2 = parse_cypher("MATCH (p:Person) WHERE p.agee = 1 RETURN p").unwrap();
-        let w2 = collect_unknown_pattern_warnings(&q2, &g);
-        assert!(
-            w2.iter().any(|m| m.contains("Did you mean 'age'")),
-            "{w2:?}"
-        );
-    }
-
-    #[test]
-    fn no_warning_on_present_or_builtin_property() {
-        let g = graph_with_schema();
-        // Declared property → no warning.
-        let q = parse_cypher("MATCH (p:Person) WHERE p.age = 30 RETURN p").unwrap();
-        assert!(collect_unknown_pattern_warnings(&q, &g).is_empty());
-        // Built-in field → no warning.
-        let q2 = parse_cypher("MATCH (p:Person) WHERE p.id = 1 RETURN p").unwrap();
-        assert!(collect_unknown_pattern_warnings(&q2, &g).is_empty());
-    }
-
-    #[test]
-    fn no_warning_on_untyped_var() {
-        let g = graph_with_schema();
-        // No label on the var → can't reason about its properties → no warning
-        // (avoids false positives on dynamically-typed graphs).
-        let q = parse_cypher("MATCH (n) WHERE n.whatever = 1 RETURN n").unwrap();
-        assert!(collect_unknown_pattern_warnings(&q, &g).is_empty());
     }
 
     // ── Locked-schema label rejection ────────────────────────────────────

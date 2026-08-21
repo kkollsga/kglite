@@ -488,12 +488,17 @@ class ResultView:
           or ``None`` when no deadline applied (memory graphs by default,
           or any call with ``timeout_ms=0``).
         - ``warnings`` (list[str]): non-fatal advisory warnings about the
-          query — e.g. a ``MATCH`` against an unknown node label or
-          relationship type (almost always a typo), with a "did you mean?"
-          hint. Also carries execution-time advisories, e.g. a procedure
-          scoped to a relationship type the graph does not have. Empty for a
-          clean query. The same signal interactive users see on stderr,
-          exposed here for programmatic / agent callers.
+          query — the shapes that silently return nothing useful instead of
+          raising: a ``MATCH`` against an unknown node label or relationship
+          type, a property read in ``WHERE`` / ``RETURN`` / ``WITH`` /
+          ``ORDER BY`` that no node of that type has (an all-null column, or
+          a filter that drops every row), and a relationship pattern whose
+          direction matches no edges while the reverse direction has them.
+          Carries a "did you mean?" hint where one is genuinely close, and
+          execution-time advisories too, e.g. a procedure scoped to a
+          relationship type the graph does not have. Empty for a clean query.
+          The same signal interactive users see on stderr, exposed here for
+          programmatic / agent callers.
 
         Use this to tune ``timeout_ms`` or move toward anchored queries
         when your query repeatedly approaches the deadline, and surface

@@ -86,12 +86,14 @@ r.diagnostics
 # {'elapsed_ms': 1, 'timed_out': False, 'timeout_ms': 180000, 'warnings': []}
 ```
 
-The `warnings` list surfaces non-fatal advisories — most importantly a
-`MATCH` against an unknown label or relationship type, which silently returns
-zero rows. The same "did you mean?" hint interactive users see on stderr is
-exposed here for programmatic / agent callers, on every kind of query
-(a mutation's `MATCH` can be typo'd too) and on repeat runs of a query the
-plan cache is serving:
+The `warnings` list surfaces non-fatal advisories — the query shapes that
+return nothing useful without raising: a `MATCH` against an unknown label or
+relationship type, a property reference (in `WHERE`, `RETURN`, `WITH` or
+`ORDER BY`) that no node of that type carries, and a relationship pattern
+pointing the wrong way down a one-directional edge type. The same "did you
+mean?" hint interactive users see on stderr is exposed here for programmatic /
+agent callers, on every kind of query (a mutation's `MATCH` can be typo'd too)
+and on repeat runs of a query the plan cache is serving:
 
 ```python
 r = graph.cypher("MATCH (n:Persn) RETURN n")   # typo
