@@ -647,6 +647,23 @@ mod atomic_save_tests {
         temp
     }
 
+    /// A "crashed writer's" temp on every platform: on Unix the dead pid
+    /// alone marks it stale; on non-Unix `process_is_alive` is `None` and
+    /// the 24 h age fallback owns the call, so the file is also backdated.
+    fn plant_stale_temp(graph_path: &std::path::Path, pid: u32, nonce: u64) -> std::path::PathBuf {
+        let temp = plant_temp(graph_path, pid, nonce);
+        if !cfg!(unix) {
+            let old = std::time::SystemTime::now() - std::time::Duration::from_secs(48 * 3600);
+            let f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&temp)
+                .unwrap();
+            f.set_times(std::fs::FileTimes::new().set_modified(old))
+                .unwrap();
+        }
+        temp
+    }
+
     /// The bug: 22 of 30 `SIGKILL`s mid-save left a full-size copy of the
     /// graph beside it, and nothing ever deleted one. A crash-looping writer
     /// fills the volume.
@@ -655,7 +672,7 @@ mod atomic_save_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("g.kgl");
         write_kgl(&tiny_graph(3), path.to_str().unwrap()).unwrap();
-        let stale = plant_temp(&path, dead_pid(), 0);
+        let stale = plant_stale_temp(&path, dead_pid(), 0);
 
         assert_eq!(reap_stale_save_temps(&path), 1);
         assert!(!stale.exists(), "a dead writer's temp must be deleted");
@@ -684,8 +701,8 @@ mod atomic_save_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("g.kgl");
         let dead = dead_pid();
-        let other_graph = plant_temp(&dir.path().join("other.kgl"), dead, 0);
-        let mine = plant_temp(&path, dead, 0);
+        let other_graph = plant_stale_temp(&dir.path().join("other.kgl"), dead, 0);
+        let mine = plant_stale_temp(&path, dead, 0);
         // Same prefix, not the `<pid>.<nonce>` shape: a user's own file.
         let lookalike = dir.path().join("g.kgl.tmp.notes");
         std::fs::write(&lookalike, b"keep me").unwrap();
@@ -704,7 +721,7 @@ mod atomic_save_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("g.kgl");
         write_kgl(&tiny_graph(2), path.to_str().unwrap()).unwrap();
-        let stale = plant_temp(&path, dead_pid(), 3);
+        let stale = plant_stale_temp(&path, dead_pid(), 3);
 
         let lease = GraphWriterLease::acquire(&path, std::time::Duration::ZERO).unwrap();
         assert!(!stale.exists(), "open() must reap what a crashed save left");
