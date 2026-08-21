@@ -21,11 +21,7 @@ impl GraphState {
         args: &serde_json::Map<String, serde_json::Value>,
         csv_http: Option<&crate::csv_http::CsvHttpConfig>,
     ) -> String {
-        let mut params = HashMap::new();
-        for (k, v) in args {
-            params.insert(k.clone(), json_to_value(v));
-        }
-        match self.execute_cypher_read(template, params) {
+        match self.execute_cypher_read(template, params_from_json(Some(args))) {
             Ok(outcome) => render_cypher_output(
                 &outcome.result,
                 outcome.output_format == cypher::OutputFormat::Csv,
@@ -88,6 +84,25 @@ impl GraphState {
 /// which any REST/gRPC binding can call directly.
 pub(crate) fn json_to_value(v: &serde_json::Value) -> Value {
     kglite::api::param::json_value_to_kglite_value(v)
+}
+
+/// Build the engine's parameter map from a tool call's JSON object.
+///
+/// One conversion for both parameter sources: the manifest template route,
+/// which has bound `$name` placeholders since it shipped, and the
+/// `cypher_query` tools' `params` argument, which until now had none — so
+/// `$param` was unbindable over MCP by construction while `describe()`'s own
+/// examples taught the inline-map form that needs it. `None` is the
+/// no-parameters call and yields an empty map.
+pub(crate) fn params_from_json(
+    args: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> HashMap<String, Value> {
+    args.map(|args| {
+        args.iter()
+            .map(|(k, v)| (k.clone(), json_to_value(v)))
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 /// Execute read-only Cypher without choosing a presentation format.

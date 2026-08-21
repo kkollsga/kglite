@@ -2,10 +2,18 @@
   "graph_readonly": [
     {
       "name": "cypher_query",
-      "description": "Query, explore, and understand the active knowledge graph with Cypher \u2014 the primary tool for structural questions: how things relate, where an entity/function/type is defined, what references or calls what, counts, and multi-hop paths (for code graphs: call graphs, definitions, imports \u2014 navigate the codebase structure). Returns up to 15 rows inline; append FORMAT CSV to export full results to a CSV string.",
+      "description": "Query, explore, and understand the active knowledge graph with Cypher \u2014 the primary tool for structural questions: how things relate, where an entity/function/type is defined, what references or calls what, counts, and multi-hop paths (for code graphs: call graphs, definitions, imports \u2014 navigate the codebase structure). Pass params={...} to bind $placeholders \u2014 both `{prop: $p}` inside a pattern and `WHERE x.prop = $p` read from it, and a $name with no value is an error rather than an empty result. Returns up to 15 rows inline; append FORMAT CSV to export full results to a CSV string.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "params": {
+            "additionalProperties": true,
+            "description": "Values for the `$name` placeholders in `query`, as a JSON object \u2014\n`{\"flag\": \"NO\", \"min\": 3}`. Both spellings bind from here: the inline\nproperty map (`MATCH (v:Vessel {flag: $flag})`) and the `WHERE` clause\n(`WHERE v.flag = $flag`). A parameter named in the query but absent\nhere is an error, never an empty result. Accepts strings, numbers,\nbooleans, null, and arrays/objects of those; a value is bound as data,\nso it can never be read as Cypher syntax.",
+            "type": [
+              "object",
+              "null"
+            ]
+          },
           "query": {
             "description": "Cypher query string. Append `FORMAT CSV` for CSV-encoded output.",
             "type": "string"
@@ -300,7 +308,7 @@
     },
     {
       "name": "cypher_query",
-      "description": "Query, explore, and understand the active knowledge graph with Cypher, and modify it \u2014 reads AND writes (CREATE/SET/DELETE/MERGE) are accepted; this is a write-enabled graph. The primary tool for structural questions: how things relate, where an entity/function/type is defined, what references or calls what, counts, and multi-hop paths (for code graphs: call graphs, definitions, imports \u2014 navigate the codebase structure). Pass write_scope=[...] to restrict mutations to those node types: every node write (CREATE/MERGE/SET/REMOVE/DELETE/DETACH DELETE and node-type DDL) is judged by the node's stored type, and a relationship write (edge CREATE, DELETE r, SET r.p, REMOVE r.p) needs at least one endpoint's type in the list. Mutations are in-memory; call save_graph to persist. Append FORMAT CSV to export results.",
+      "description": "Query, explore, and understand the active knowledge graph with Cypher, and modify it \u2014 reads AND writes (CREATE/SET/DELETE/MERGE) are accepted; this is a write-enabled graph. The primary tool for structural questions: how things relate, where an entity/function/type is defined, what references or calls what, counts, and multi-hop paths (for code graphs: call graphs, definitions, imports \u2014 navigate the codebase structure). Pass write_scope=[...] to restrict mutations to those node types: every node write (CREATE/MERGE/SET/REMOVE/DELETE/DETACH DELETE and node-type DDL) is judged by the node's stored type, and a relationship write (edge CREATE, DELETE r, SET r.p, REMOVE r.p) needs at least one endpoint's type in the list. Pass params={...} to bind $placeholders \u2014 both `{prop: $p}` inside a pattern and `WHERE x.prop = $p` read from it, and a $name with no value is an error rather than an empty result. Mutations are in-memory; call save_graph to persist. Append FORMAT CSV to export results.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -315,6 +323,14 @@
             "description": "Optional actor id stamped alongside `git_sha` (e.g. the agent/session\nname). Same gating as `git_sha`.",
             "type": [
               "string",
+              "null"
+            ]
+          },
+          "params": {
+            "additionalProperties": true,
+            "description": "Values for the `$name` placeholders in `query`, as a JSON object \u2014\n`{\"flag\": \"NO\", \"min\": 3}`. Both spellings bind from here: the inline\nproperty map (`MATCH (v:Vessel {flag: $flag})`) and the `WHERE` clause\n(`WHERE v.flag = $flag`). A parameter named in the query but absent\nhere is an error, never an empty result. Accepts strings, numbers,\nbooleans, null, and arrays/objects of those; a value is bound as data,\nso it can never be read as Cypher syntax.",
+            "type": [
+              "object",
               "null"
             ]
           },
@@ -768,7 +784,7 @@
     },
     {
       "name": "cypher_query",
-      "description": "Query, explore, and understand the active knowledge graph with Cypher, and modify it \u2014 reads AND writes (CREATE/SET/DELETE/MERGE) are accepted; this is a write-enabled graph. The primary tool for structural questions: how things relate, where an entity/function/type is defined, what references or calls what, counts, and multi-hop paths (for code graphs: call graphs, definitions, imports \u2014 navigate the codebase structure). Pass write_scope=[...] to restrict mutations to those node types: every node write (CREATE/MERGE/SET/REMOVE/DELETE/DETACH DELETE and node-type DDL) is judged by the node's stored type, and a relationship write (edge CREATE, DELETE r, SET r.p, REMOVE r.p) needs at least one endpoint's type in the list. Mutations are in-memory; call save_graph to persist. Append FORMAT CSV to export results. This server's operator has pinned write_scope to [Person, City]: a write_scope you pass is intersected with it and can only narrow it, omitting write_scope leaves the pinned scope in force, and a write with nothing left in scope is refused.",
+      "description": "Query, explore, and understand the active knowledge graph with Cypher, and modify it \u2014 reads AND writes (CREATE/SET/DELETE/MERGE) are accepted; this is a write-enabled graph. The primary tool for structural questions: how things relate, where an entity/function/type is defined, what references or calls what, counts, and multi-hop paths (for code graphs: call graphs, definitions, imports \u2014 navigate the codebase structure). Pass write_scope=[...] to restrict mutations to those node types: every node write (CREATE/MERGE/SET/REMOVE/DELETE/DETACH DELETE and node-type DDL) is judged by the node's stored type, and a relationship write (edge CREATE, DELETE r, SET r.p, REMOVE r.p) needs at least one endpoint's type in the list. Pass params={...} to bind $placeholders \u2014 both `{prop: $p}` inside a pattern and `WHERE x.prop = $p` read from it, and a $name with no value is an error rather than an empty result. Mutations are in-memory; call save_graph to persist. Append FORMAT CSV to export results. This server's operator has pinned write_scope to [Person, City]: a write_scope you pass is intersected with it and can only narrow it, omitting write_scope leaves the pinned scope in force, and a write with nothing left in scope is refused.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -783,6 +799,14 @@
             "description": "Optional actor id stamped alongside `git_sha` (e.g. the agent/session\nname). Same gating as `git_sha`.",
             "type": [
               "string",
+              "null"
+            ]
+          },
+          "params": {
+            "additionalProperties": true,
+            "description": "Values for the `$name` placeholders in `query`, as a JSON object \u2014\n`{\"flag\": \"NO\", \"min\": 3}`. Both spellings bind from here: the inline\nproperty map (`MATCH (v:Vessel {flag: $flag})`) and the `WHERE` clause\n(`WHERE v.flag = $flag`). A parameter named in the query but absent\nhere is an error, never an empty result. Accepts strings, numbers,\nbooleans, null, and arrays/objects of those; a value is bound as data,\nso it can never be read as Cypher syntax.",
+            "type": [
+              "object",
               "null"
             ]
           },
@@ -1197,10 +1221,18 @@
   "local_workspace": [
     {
       "name": "cypher_query",
-      "description": "Query, explore, and understand the active knowledge graph with Cypher \u2014 the primary tool for structural questions: how things relate, where an entity/function/type is defined, what references or calls what, counts, and multi-hop paths (for code graphs: call graphs, definitions, imports \u2014 navigate the codebase structure). Returns up to 15 rows inline; append FORMAT CSV to export full results to a CSV string.",
+      "description": "Query, explore, and understand the active knowledge graph with Cypher \u2014 the primary tool for structural questions: how things relate, where an entity/function/type is defined, what references or calls what, counts, and multi-hop paths (for code graphs: call graphs, definitions, imports \u2014 navigate the codebase structure). Pass params={...} to bind $placeholders \u2014 both `{prop: $p}` inside a pattern and `WHERE x.prop = $p` read from it, and a $name with no value is an error rather than an empty result. Returns up to 15 rows inline; append FORMAT CSV to export full results to a CSV string.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "params": {
+            "additionalProperties": true,
+            "description": "Values for the `$name` placeholders in `query`, as a JSON object \u2014\n`{\"flag\": \"NO\", \"min\": 3}`. Both spellings bind from here: the inline\nproperty map (`MATCH (v:Vessel {flag: $flag})`) and the `WHERE` clause\n(`WHERE v.flag = $flag`). A parameter named in the query but absent\nhere is an error, never an empty result. Accepts strings, numbers,\nbooleans, null, and arrays/objects of those; a value is bound as data,\nso it can never be read as Cypher syntax.",
+            "type": [
+              "object",
+              "null"
+            ]
+          },
           "query": {
             "description": "Cypher query string. Append `FORMAT CSV` for CSV-encoded output.",
             "type": "string"
@@ -1597,10 +1629,18 @@
   "manifest_tool": [
     {
       "name": "cypher_query",
-      "description": "Query, explore, and understand the active knowledge graph with Cypher \u2014 the primary tool for structural questions: how things relate, where an entity/function/type is defined, what references or calls what, counts, and multi-hop paths (for code graphs: call graphs, definitions, imports \u2014 navigate the codebase structure). Returns up to 15 rows inline; append FORMAT CSV to export full results to a CSV string.",
+      "description": "Query, explore, and understand the active knowledge graph with Cypher \u2014 the primary tool for structural questions: how things relate, where an entity/function/type is defined, what references or calls what, counts, and multi-hop paths (for code graphs: call graphs, definitions, imports \u2014 navigate the codebase structure). Pass params={...} to bind $placeholders \u2014 both `{prop: $p}` inside a pattern and `WHERE x.prop = $p` read from it, and a $name with no value is an error rather than an empty result. Returns up to 15 rows inline; append FORMAT CSV to export full results to a CSV string.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "params": {
+            "additionalProperties": true,
+            "description": "Values for the `$name` placeholders in `query`, as a JSON object \u2014\n`{\"flag\": \"NO\", \"min\": 3}`. Both spellings bind from here: the inline\nproperty map (`MATCH (v:Vessel {flag: $flag})`) and the `WHERE` clause\n(`WHERE v.flag = $flag`). A parameter named in the query but absent\nhere is an error, never an empty result. Accepts strings, numbers,\nbooleans, null, and arrays/objects of those; a value is bound as data,\nso it can never be read as Cypher syntax.",
+            "type": [
+              "object",
+              "null"
+            ]
+          },
           "query": {
             "description": "Cypher query string. Append `FORMAT CSV` for CSV-encoded output.",
             "type": "string"

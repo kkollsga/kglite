@@ -1230,6 +1230,10 @@ df = graph.cypher(
 )
 ```
 
+A `$name` the query references and `params` does not supply is an error —
+`Missing parameter: $name` — wherever it is written, the inline property map
+included. It is never read as "matches nothing".
+
 ### Dynamic labels and relationship types
 
 A parameter can also supply a **label or relationship type**, in both the bare

@@ -432,6 +432,47 @@ class TestGraphMode:
         finally:
             client.shutdown()
 
+    def test_cypher_query_binds_the_params_argument(self, graph_fixture: Path):
+        """`params` did not exist on the tool, so `$name` was unbindable over
+        MCP by construction — while describe()'s own examples teach the inline
+        `{prop: $p}` spelling. Both spellings bind from the same argument."""
+        client = _spawn(["--graph", str(graph_fixture)])
+        try:
+            inline = client.call_tool(
+                "cypher_query",
+                {
+                    "query": "MATCH (p:Person {city: $city}) RETURN p.title AS who ORDER BY who",
+                    "params": {"city": "Oslo"},
+                },
+            )
+            assert "Alice" in _text_content(inline) and "Carol" in _text_content(inline)
+            assert "2 row(s)" in _text_content(inline)
+
+            where = client.call_tool(
+                "cypher_query",
+                {
+                    "query": "MATCH (p:Person) WHERE p.city = $city RETURN p.title AS who ORDER BY who",
+                    "params": {"city": "Oslo"},
+                },
+            )
+            assert _text_content(where) == _text_content(inline)
+        finally:
+            client.shutdown()
+
+    def test_cypher_query_unbound_param_is_an_error_not_an_empty_result(self, graph_fixture: Path):
+        """The eval's finding, over the wire: the inline-map spelling used to
+        answer "No results." — the agent concluded the city had no people."""
+        client = _spawn(["--graph", str(graph_fixture)])
+        try:
+            r = client.call_tool("cypher_query", {"query": "MATCH (p:Person {city: $city}) RETURN p.title AS who"})
+            assert "Missing parameter: $city" in _text_content(r)
+            # Twice in a row: the plan cache must not serve the second call a
+            # silently-empty answer.
+            again = client.call_tool("cypher_query", {"query": "MATCH (p:Person {city: $city}) RETURN p.title AS who"})
+            assert "Missing parameter: $city" in _text_content(again)
+        finally:
+            client.shutdown()
+
     def test_cypher_query_clean_has_no_warnings_block(self, graph_fixture: Path):
         client = _spawn(["--graph", str(graph_fixture)])
         try:
@@ -582,6 +623,27 @@ class TestWritableMode:
             )
             r = client.call_tool("cypher_query", {"query": "MATCH (t:Task) RETURN count(t) AS n"})
             assert "1" in _text_content(r)
+        finally:
+            client.shutdown()
+
+    def test_write_tool_binds_params_on_reads_and_mutations(self, graph_fixture: Path):
+        """The write path built its own empty parameter map and ignored the
+        caller's, so a parameterised mutation was unreachable too."""
+        client = _spawn(["--graph", str(graph_fixture), "--writable"])
+        try:
+            client.call_tool(
+                "cypher_query",
+                {
+                    "query": "CREATE (:Task {id: $id, status: $status})",
+                    "params": {"id": "t9", "status": "todo"},
+                    "write_scope": ["Task"],
+                },
+            )
+            r = client.call_tool(
+                "cypher_query",
+                {"query": "MATCH (t:Task {id: $id}) RETURN t.status AS status", "params": {"id": "t9"}},
+            )
+            assert "todo" in _text_content(r)
         finally:
             client.shutdown()
 

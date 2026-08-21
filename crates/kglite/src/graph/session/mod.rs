@@ -56,6 +56,8 @@ pub use self::transaction::{CommitOutcome, Session, Transaction};
 pub(crate) mod durable;
 pub(crate) mod execute;
 #[cfg(test)]
+mod param_presence_tests;
+#[cfg(test)]
 mod plan_cache_cost_tests;
 #[cfg(test)]
 mod query_warnings_tests;

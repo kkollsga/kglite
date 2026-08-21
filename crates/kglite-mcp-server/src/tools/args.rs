@@ -7,12 +7,30 @@ use serde::{Deserialize, Serialize};
 pub(crate) struct ReadCypherArgs {
     /// Cypher query string. Append `FORMAT CSV` for CSV-encoded output.
     pub query: String,
+    /// Values for the `$name` placeholders in `query`, as a JSON object —
+    /// `{"flag": "NO", "min": 3}`. Both spellings bind from here: the inline
+    /// property map (`MATCH (v:Vessel {flag: $flag})`) and the `WHERE` clause
+    /// (`WHERE v.flag = $flag`). A parameter named in the query but absent
+    /// here is an error, never an empty result. Accepts strings, numbers,
+    /// booleans, null, and arrays/objects of those; a value is bound as data,
+    /// so it can never be read as Cypher syntax.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub params: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
 pub(crate) struct CypherArgs {
     /// Cypher query string. Append `FORMAT CSV` for CSV-encoded output.
     pub query: String,
+    /// Values for the `$name` placeholders in `query`, as a JSON object —
+    /// `{"flag": "NO", "min": 3}`. Both spellings bind from here: the inline
+    /// property map (`MATCH (v:Vessel {flag: $flag})`) and the `WHERE` clause
+    /// (`WHERE v.flag = $flag`). A parameter named in the query but absent
+    /// here is an error, never an empty result. Accepts strings, numbers,
+    /// booleans, null, and arrays/objects of those; a value is bound as data,
+    /// so it can never be read as Cypher syntax.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub params: Option<serde_json::Map<String, serde_json::Value>>,
     /// Role-scoped write whitelist (write-enabled servers only) — so an agent
     /// can plan in its own types (`["Plan","Task"]`) without touching
     /// research-owned ones. When set, every **node** write (`CREATE`, `MERGE`,

@@ -613,6 +613,49 @@ class TestParameters:
         )
         assert rows[0]["category"] == "person"
 
+    def test_parameter_in_inline_property_map(self, cypher_graph):
+        rows = cypher_graph.cypher(
+            "MATCH (n:Person {city: $city}) RETURN n.name AS name ORDER BY n.name", params={"city": "Bergen"}
+        )
+        assert [r["name"] for r in rows] == ["Bob", "Diana"]
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "MATCH (n:Person {city: $missing}) RETURN n.name",
+            "MATCH (n:Person) OPTIONAL MATCH (m:Person {city: $missing}) RETURN n.name, m.name",
+            "MATCH (a:Person)-[:KNOWS {since: $missing}]->(b) RETURN a.name",
+            "MATCH (a:Person) WHERE EXISTS { MATCH (a)-[:KNOWS]->(:Person {city: $missing}) } RETURN a.name",
+            "MATCH (a:Person) RETURN COUNT { (a)-[:KNOWS]->(:Person {city: $missing}) } AS n",
+            "CREATE (n:Person {city: $missing})",
+            "MERGE (n:Person {city: $missing})",
+        ],
+    )
+    def test_unbound_parameter_in_a_property_map_is_an_error(self, cypher_graph, query):
+        """It used to match nothing and return an empty result, so a caller
+        read "no Bergen people" off their own unbound parameter — while the
+        same parameter in a WHERE raised. Both raise now.
+
+        Golden rather than a differential-corpus entry: the corpus compares
+        *rows* between the optimised and unoptimised paths, and both paths
+        agreed on the wrong answer here, so it could never have caught this
+        and cannot express "both must raise" now that they do."""
+        with pytest.raises(kglite.KgError, match=r"Missing parameter: \$missing"):
+            cypher_graph.cypher(query)
+
+    def test_unbound_parameter_in_a_property_map_raises_on_every_call(self, cypher_graph):
+        """The plan cache: an unparameterised-looking call (`params` empty) is
+        cacheable, so a cached entry would let the *second* run skip the check
+        and go quiet again."""
+        query = "MATCH (n:Person {city: $missing}) RETURN n.name"
+        for _ in range(3):
+            with pytest.raises(kglite.KgError, match=r"Missing parameter: \$missing"):
+                cypher_graph.cypher(query)
+        # ...and the same text with the parameter supplied still works, so the
+        # check has not poisoned anything for later calls.
+        rows = cypher_graph.cypher(query, params={"missing": "Bergen"})
+        assert len(rows) == 2
+
 
 class TestExistingFeatures:
     """Tests for already-implemented features to ensure coverage."""

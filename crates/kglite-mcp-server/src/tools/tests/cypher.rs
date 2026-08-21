@@ -336,3 +336,138 @@ fn a_no_op_write_ack_carries_the_warning() {
     assert!(body.starts_with("OK (no changes)"), "{body}");
     assert!(body.contains("unknown node label 'vessel'"), "{body}");
 }
+
+// ------------------------------------------------------------- params argument
+
+fn json_params(pairs: &[(&str, serde_json::Value)]) -> serde_json::Map<String, serde_json::Value> {
+    pairs
+        .iter()
+        .map(|(k, v)| ((*k).to_string(), v.clone()))
+        .collect()
+}
+
+/// `params` was absent from both `cypher_query` arg structs, so `$name` was
+/// unbindable over MCP by construction — while `describe()`'s own examples
+/// teach the inline-map spelling that needs it. Both spellings bind now.
+#[test]
+fn the_read_tool_binds_its_params_argument() {
+    let active = active_with_vessel();
+    let params = params_from_json(Some(&json_params(&[("id", serde_json::json!(1))])));
+    let body = run_cypher_tool(
+        &active,
+        "MATCH (v:Vessel {id: $id}) RETURN v.id AS id",
+        params,
+        None,
+        None,
+    );
+    assert!(body.contains("1 row"), "{body}");
+
+    let params = params_from_json(Some(&json_params(&[("id", serde_json::json!(1))])));
+    let body = run_cypher_tool(
+        &active,
+        "MATCH (v:Vessel) WHERE v.id = $id RETURN v.id AS id",
+        params,
+        None,
+        None,
+    );
+    assert!(body.contains("1 row"), "{body}");
+}
+
+/// The write tool's read branch and its mutation branch both bind — the
+/// mutation branch built its own empty map and ignored the caller's.
+#[test]
+fn the_write_tool_binds_its_params_argument_on_both_branches() {
+    let mut active = active_with_vessel();
+    let authz = WriteAuthz {
+        operator_scope: None,
+        agent_scope: None,
+        git_sha: None,
+        modified_by: None,
+    };
+    let read = run_cypher_write(
+        &mut active,
+        "MATCH (v:Vessel {id: $id}) RETURN v.id AS id",
+        params_from_json(Some(&json_params(&[("id", serde_json::json!(1))]))),
+        authz,
+        None,
+        None,
+    )
+    .expect("read branch");
+    assert!(read.contains("1 row"), "{read}");
+
+    let written = run_cypher_write(
+        &mut active,
+        "MATCH (v:Vessel {id: $id}) SET v.flag = $flag",
+        params_from_json(Some(&json_params(&[
+            ("id", serde_json::json!(1)),
+            ("flag", serde_json::json!("NO")),
+        ]))),
+        authz,
+        None,
+        None,
+    )
+    .expect("write branch");
+    assert!(written.starts_with("OK: 1 property"), "{written}");
+}
+
+/// An unbound `$name` reaches the agent as the engine's error, not as an
+/// empty result — the inline-map spelling included, which is the one that
+/// used to match nothing silently.
+#[test]
+fn an_unbound_param_reaches_the_tool_response_as_an_error() {
+    let active = active_with_vessel();
+    for query in [
+        "MATCH (v:Vessel {id: $id}) RETURN v.id AS id",
+        "MATCH (v:Vessel) WHERE v.id = $id RETURN v.id AS id",
+    ] {
+        let body = run_cypher_tool(&active, query, Default::default(), None, None);
+        assert!(body.contains("Missing parameter: $id"), "{query}: {body}");
+    }
+}
+
+/// The conversion is the manifest template route's, reused — JSON scalars,
+/// null and containers all reach the engine as parameter values.
+#[test]
+fn params_from_json_converts_the_json_value_types() {
+    let converted = params_from_json(Some(&json_params(&[
+        ("s", serde_json::json!("NO")),
+        ("i", serde_json::json!(3)),
+        ("f", serde_json::json!(1.5)),
+        ("b", serde_json::json!(true)),
+        ("n", serde_json::json!(null)),
+        ("l", serde_json::json!([1, 2])),
+    ])));
+    assert_eq!(converted.len(), 6);
+    assert!(matches!(converted["s"], Value::String(_)));
+    assert!(matches!(converted["i"], Value::Int64(3)));
+    assert!(matches!(converted["b"], Value::Boolean(true)));
+    assert!(matches!(converted["n"], Value::Null));
+    assert!(params_from_json(None).is_empty());
+}
+
+/// The arguments deserialize from the wire shape a client actually sends:
+/// `params` absent is the no-parameters call, not a schema error.
+#[test]
+fn the_args_structs_accept_an_optional_params_object() {
+    let bare: ReadCypherArgs =
+        serde_json::from_value(serde_json::json!({"query": "MATCH (n) RETURN n"})).expect("bare");
+    assert!(bare.params.is_none());
+
+    let with: ReadCypherArgs = serde_json::from_value(
+        serde_json::json!({"query": "MATCH (n {id: $id}) RETURN n", "params": {"id": 1}}),
+    )
+    .expect("with params");
+    assert_eq!(with.params.expect("params")["id"], serde_json::json!(1));
+
+    let write: CypherArgs = serde_json::from_value(serde_json::json!({
+        "query": "MATCH (n {id: $id}) SET n.x = 1",
+        "params": {"id": 1},
+        "write_scope": ["Vessel"]
+    }))
+    .expect("write args");
+    assert_eq!(write.params.expect("params")["id"], serde_json::json!(1));
+    assert_eq!(
+        write.write_scope.as_deref(),
+        Some(&["Vessel".to_string()][..])
+    );
+}

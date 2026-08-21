@@ -47,10 +47,11 @@ pub(crate) fn wipe_temp_dir(dir: &std::path::Path) {
 pub(crate) fn run_cypher_tool(
     graph: &ActiveGraph,
     query: &str,
+    params: HashMap<String, kglite::api::Value>,
     value_codecs: Option<&[ValueCodec]>,
     csv_http: Option<&crate::csv_http::CsvHttpConfig>,
 ) -> String {
-    match run_cypher_inner(&graph.kg, query, HashMap::new(), value_codecs, csv_http) {
+    match run_cypher_inner(&graph.kg, query, params, value_codecs, csv_http) {
         // Compact identity footer so a query result self-identifies its
         // graph (agents often go straight to cypher_query without a prior
         // graph_overview, where a stale active root would otherwise hide).
@@ -69,6 +70,7 @@ pub(crate) fn run_cypher_tool(
 pub(crate) fn run_cypher_write(
     active: &mut ActiveGraph,
     query: &str,
+    params: HashMap<String, kglite::api::Value>,
     authz: WriteAuthz<'_>,
     value_codecs: Option<&[ValueCodec]>,
     csv_http: Option<&crate::csv_http::CsvHttpConfig>,
@@ -78,10 +80,9 @@ pub(crate) fn run_cypher_write(
     if !is_mutation {
         // Read on a writable server — same path as the read-only tool. An
         // operator pin restricts *writes*, so it never touches this branch.
-        return run_cypher_inner(&active.kg, query, HashMap::new(), value_codecs, csv_http);
+        return run_cypher_inner(&active.kg, query, params, value_codecs, csv_http);
     }
     let output_csv = pre_parsed.output_format == kglite::api::cypher::OutputFormat::Csv;
-    let params = std::collections::HashMap::new();
     // Refusal before any mutation runs: an empty effective scope is answered
     // here, naming the operator pin, rather than handed to the engine as an
     // empty set that would refuse the first node it happened to reach.

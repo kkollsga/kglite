@@ -654,6 +654,18 @@ fn prepare(
             // Stored post lazy-marking for this `lazy_eligible` — a hit is a
             // pure Arc clone, no parse / validate / optimize / mutation.
             //
+            // A hit also skips `dynamic_labels::resolve`, which is where an
+            // unbound `$parameter` — a label position or an inline
+            // property-map value — is rejected. That is sound rather than a
+            // hole: an entry only exists because some earlier call reached
+            // the end of this function with `params` empty, and that call ran
+            // the pass against the same empty map, which binds nothing. So a
+            // cached plan provably contains no parameter reference at all, and
+            // a hit is only consulted when `params` is empty. A statement that
+            // *does* reference one errors above the insert and leaves nothing
+            // behind, so its second call misses and raises again. Pinned by
+            // `session::param_presence_tests`.
+            //
             // The warnings come out of the entry rather than being recomputed:
             // recomputing needs the parsed AST, and not skipping the parse is
             // exactly what this early return exists to avoid. Their validity
@@ -676,7 +688,10 @@ fn prepare(
     // the caller's parameters FIRST, so validation, optimization and execution
     // all see an ordinary literal label. The parser cannot do this — parsed
     // ASTs are cached by query text and re-run with different parameters — so
-    // it leaves a marker for this pass. See `cypher::dynamic_labels`.
+    // it leaves a marker for this pass. The same pass rejects an inline
+    // property map whose value names a parameter the caller did not bind
+    // (`MATCH (v {flag: $flag})`), which the matcher's `bool`-returning filter
+    // could only answer as "no match". See `cypher::dynamic_labels`.
     cypher::dynamic_labels::resolve(&mut parsed, opts.params)?;
 
     // value_codecs: decode operator-declared literals bound to a codec'd

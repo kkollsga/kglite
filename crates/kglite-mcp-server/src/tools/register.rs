@@ -197,25 +197,31 @@ pub fn register(
              to those node types: every node write (CREATE/MERGE/SET/REMOVE/DELETE/DETACH \
              DELETE and node-type DDL) is judged by the node's stored type, and a \
              relationship write (edge CREATE, DELETE r, SET r.p, REMOVE r.p) needs at least \
-             one endpoint's type in the list. Mutations are in-memory; call save_graph to \
-             persist. Append FORMAT CSV to export results."
+             one endpoint's type in the list. Pass params={...} to bind $placeholders — both \
+             `{prop: $p}` inside a pattern and `WHERE x.prop = $p` read from it, and a \
+             $name with no value is an error rather than an empty result. Mutations are in-memory; call \
+             save_graph to persist. Append FORMAT CSV to export results."
         }
         (true, false) => {
             "Query, explore, and understand the active knowledge graph with Cypher — the \
              primary tool for structural questions: how things relate, where an \
              entity/function/type is defined, what references or calls what, counts, and \
              multi-hop paths (for code graphs: call graphs, definitions, imports — navigate the \
-             codebase structure). Returns up to 15 rows inline; append FORMAT CSV to export \
-             results — large CSVs are written to the csv_http_server directory and returned as \
-             a fetch URL."
+             codebase structure). Pass params={...} to bind $placeholders — both \
+             `{prop: $p}` inside a pattern and `WHERE x.prop = $p` read from it, and a \
+             $name with no value is an error rather than an empty result. Returns up to 15 rows inline; append FORMAT \
+             CSV to export results — large CSVs are written to the csv_http_server directory \
+             and returned as a fetch URL."
         }
         (false, false) => {
             "Query, explore, and understand the active knowledge graph with Cypher — the \
              primary tool for structural questions: how things relate, where an \
              entity/function/type is defined, what references or calls what, counts, and \
              multi-hop paths (for code graphs: call graphs, definitions, imports — navigate the \
-             codebase structure). Returns up to 15 rows inline; append FORMAT CSV to export \
-             full results to a CSV string."
+             codebase structure). Pass params={...} to bind $placeholders — both \
+             `{prop: $p}` inside a pattern and `WHERE x.prop = $p` read from it, and a \
+             $name with no value is an error rather than an empty result. Returns up to 15 rows inline; append FORMAT \
+             CSV to export full results to a CSV string."
         }
     };
     // An operator pin is part of the contract the agent plans against, so it
@@ -238,9 +244,10 @@ pub fn register(
                 git_sha: git_sha.as_deref(),
                 modified_by: modified_by.as_deref(),
             };
+            let params = params_from_json(args.params.as_ref());
             let body = s
                 .with_active_mut(|active| {
-                    run_cypher_write(active, &args.query, authz, codecs, csv.as_deref())
+                    run_cypher_write(active, &args.query, params, authz, codecs, csv.as_deref())
                         .unwrap_or_else(|e| cypher_tool_error(&e))
                 })
                 .unwrap_or_else(|| NO_GRAPH.to_string());
@@ -251,7 +258,9 @@ pub fn register(
             let csv = csv.clone();
             s.ensure_graph_fresh();
             let codecs = s.value_codecs();
-            let body = s.with_active(|g| run_cypher_tool(g, &args.query, codecs, csv.as_deref()));
+            let params = params_from_json(args.params.as_ref());
+            let body =
+                s.with_active(|g| run_cypher_tool(g, &args.query, params, codecs, csv.as_deref()));
             s.with_rebuild_warning(body)
         });
     }

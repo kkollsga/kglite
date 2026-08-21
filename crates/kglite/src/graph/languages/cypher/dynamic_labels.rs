@@ -1,7 +1,10 @@
-//! Bind label / relationship-type positions written as parameters.
+//! Bind label / relationship-type positions written as parameters, and check
+//! that a pattern's inline property-map parameters are bound at all.
 //!
 //! `MATCH (n:$label)`, `MATCH (n:$(label))`, `-[:$type]->`, `CREATE (n:$label)`,
-//! `SET n:$label`, `REMOVE n:$label`, `WHERE n:$label`.
+//! `SET n:$label`, `REMOVE n:$label`, `WHERE n:$label` — plus the presence
+//! check on `MATCH (n {prop: $value})`, described under "The second
+//! responsibility" below.
 //!
 //! ## Why this is a resolution pass and not a planner/executor feature
 //!
@@ -23,6 +26,31 @@
 //! runs per execution with the caller's parameters in hand, writes the bound
 //! name into the string slot and clears the marker.
 //!
+//! ## The second responsibility: inline property-map parameters
+//!
+//! `MATCH (v:Vessel {flag: $flag})` with `$flag` unbound used to return an
+//! empty result and no error. An inline map value parses to
+//! [`crate::graph::core::pattern_matching::PropertyMatcher::EqualsParam`],
+//! probed per candidate by `matcher::value_matches`, whose return type is
+//! `bool`: there is no error channel on that path, and it is the hot
+//! per-candidate filter (the column-major scan calls it too), so there should
+//! not be one. An absent parameter therefore read as "no candidate equals it".
+//! The *identical* predicate written `WHERE v.flag = $flag` raised `Missing
+//! parameter: $flag`, because expression evaluation does have an error
+//! channel — so one mistake produced two answers depending on spelling, and
+//! the silent one is the spelling `describe()`'s own examples teach.
+//!
+//! This pass is where that is caught, for the same reason the label binding
+//! is: a parameter's value is fixed for the whole statement, so presence is
+//! knowable once, before planning, off a walk that already visits every
+//! pattern. The message is byte-identical to the `WHERE` one — one mistake,
+//! one message — and only *presence* is checked; the matcher still does the
+//! comparing, and a parameter bound to null is bound.
+//!
+//! Write patterns (`CREATE` / `MERGE`) are deliberately not covered: they
+//! carry [`Expression`] values, not `PropertyMatcher`, and the evaluator
+//! already raises `Missing parameter: $x` for them.
+//!
 //! ## The property this buys callers
 //!
 //! A parameter value becomes a *name*, never grammar. It is written into an
@@ -36,6 +64,17 @@
 //! `params.is_empty()`), and the parse cache stores the *pre*-resolution AST
 //! and hands out clones, so a resolved label can never be served to a later
 //! call with different parameters.
+//!
+//! The presence check inherits that argument, which is what lets it run *after*
+//! the plan-cache lookup instead of before it (running it before would force
+//! the parse the cache exists to skip). An entry is only ever inserted by a
+//! call whose `params` were empty and which reached the end of `prepare`; this
+//! pass runs before that point and rejects *every* parameter reference when
+//! `params` is empty, since an empty map binds nothing. So no cached entry can
+//! contain an unbound reference, and a hit — which is only consulted when
+//! `params` is empty — cannot be hiding one. A second call of the same
+//! unbound text finds no entry (the first errored before insertion) and raises
+//! again; `session::param_presence_tests` pins that from the cache counters.
 
 // Every function below is one step of the same walk and returns
 // `Result<(), KgError>`; KgError carries structured query context, so it trips
@@ -49,7 +88,7 @@ use std::collections::HashMap;
 use super::ast::*;
 use crate::datatypes::values::Value;
 use crate::error::KgError;
-use crate::graph::core::pattern_matching::{ParamLabel, Pattern, PatternElement};
+use crate::graph::core::pattern_matching::{ParamLabel, Pattern, PatternElement, PropertyMatcher};
 
 /// Bind every parameterised label / relationship type in `query` against
 /// `params`. Idempotent: a query with no parameterised names is walked and
@@ -58,6 +97,10 @@ use crate::graph::core::pattern_matching::{ParamLabel, Pattern, PatternElement};
 /// Errors when a referenced parameter is missing or is not a string — a
 /// dynamic label has no sensible fallback, and silently matching nothing would
 /// hide the caller's bug behind an empty result.
+///
+/// Also errors when a read pattern's inline property map references a
+/// parameter that `params` does not bind (`MATCH (v {flag: $flag})`), for the
+/// same reason — see the module docs.
 pub fn resolve(query: &mut CypherQuery, params: &HashMap<String, Value>) -> Result<(), KgError> {
     resolve_clauses(&mut query.clauses, params)
 }
@@ -178,40 +221,78 @@ fn resolve_clauses(clauses: &mut [Clause], params: &HashMap<String, Value>) -> R
     Ok(())
 }
 
+/// Reject an inline property map whose value references an unbound parameter.
+///
+/// Presence only: the value's type is the matcher's business, and a parameter
+/// bound to `Value::Null` is bound. The happy path allocates nothing — the
+/// sorted list exists only to make the reported name deterministic when a map
+/// is missing more than one, since `properties` is a `HashMap`.
+fn check_property_params(
+    properties: Option<&HashMap<String, PropertyMatcher>>,
+    params: &HashMap<String, Value>,
+) -> Result<(), KgError> {
+    let Some(properties) = properties else {
+        return Ok(());
+    };
+    fn missing<'m>(
+        matcher: &'m PropertyMatcher,
+        params: &HashMap<String, Value>,
+    ) -> Option<&'m str> {
+        match matcher {
+            PropertyMatcher::EqualsParam(name) if !params.contains_key(name.as_str()) => {
+                Some(name.as_str())
+            }
+            _ => None,
+        }
+    }
+    if !properties.values().any(|m| missing(m, params).is_some()) {
+        return Ok(());
+    }
+    let mut names: Vec<&str> = properties
+        .values()
+        .filter_map(|m| missing(m, params))
+        .collect();
+    names.sort_unstable();
+    // Same wording as the expression evaluator's, so `{flag: $flag}` and
+    // `WHERE v.flag = $flag` answer one mistake with one message. Only the
+    // first is named, as the evaluator does — fixing it surfaces the next.
+    Err(execution_error(format!("Missing parameter: ${}", names[0])))
+}
+
 fn resolve_pattern(pattern: &mut Pattern, params: &HashMap<String, Value>) -> Result<(), KgError> {
     for element in &mut pattern.elements {
         match element {
             PatternElement::Node(node) => {
-                if node.label_params.is_empty() {
-                    continue;
-                }
-                let mut markers = std::mem::take(&mut node.label_params);
-                apply(&mut markers, params, |slot, name| match slot {
-                    0 => node.node_type = Some(name.to_string()),
-                    n => {
-                        if let Some(extra) = node.extra_labels.get_mut(n - 1) {
-                            *extra = name.to_string();
+                if !node.label_params.is_empty() {
+                    let mut markers = std::mem::take(&mut node.label_params);
+                    apply(&mut markers, params, |slot, name| match slot {
+                        0 => node.node_type = Some(name.to_string()),
+                        n => {
+                            if let Some(extra) = node.extra_labels.get_mut(n - 1) {
+                                *extra = name.to_string();
+                            }
                         }
-                    }
-                })?;
+                    })?;
+                }
+                check_property_params(node.properties.as_ref(), params)?;
             }
             PatternElement::Edge(edge) => {
-                if edge.type_params.is_empty() {
-                    continue;
-                }
-                let mut markers = std::mem::take(&mut edge.type_params);
-                apply(&mut markers, params, |slot, name| {
-                    if let Some(types) = &mut edge.connection_types {
-                        if let Some(ty) = types.get_mut(slot) {
-                            *ty = name.to_string();
+                if !edge.type_params.is_empty() {
+                    let mut markers = std::mem::take(&mut edge.type_params);
+                    apply(&mut markers, params, |slot, name| {
+                        if let Some(types) = &mut edge.connection_types {
+                            if let Some(ty) = types.get_mut(slot) {
+                                *ty = name.to_string();
+                            }
                         }
-                    }
-                    // `connection_type` holds the first branch even when an
-                    // alternation is present, so slot 0 writes both.
-                    if slot == 0 {
-                        edge.connection_type = Some(name.to_string());
-                    }
-                })?;
+                        // `connection_type` holds the first branch even when an
+                        // alternation is present, so slot 0 writes both.
+                        if slot == 0 {
+                            edge.connection_type = Some(name.to_string());
+                        }
+                    })?;
+                }
+                check_property_params(edge.properties.as_ref(), params)?;
             }
         }
     }
@@ -574,5 +655,81 @@ mod tests {
                 "{query} left an unresolved name position: {rendered}"
             );
         }
+    }
+
+    // ------------------------------------------- inline-map value parameters
+
+    /// `MATCH (v:Vessel {flag: $flag})` with `$flag` unbound used to return an
+    /// empty result: the matcher's `value_matches` is a `bool`, so an absent
+    /// parameter read as "no candidate equals it". The identical predicate in
+    /// a `WHERE` raised. Both spellings now raise the same message.
+    #[test]
+    fn a_missing_inline_map_parameter_is_an_error() {
+        let mut query = parse("MATCH (v:Vessel {flag: $flag}) RETURN v");
+        let err = resolve(&mut query, &HashMap::new()).unwrap_err();
+        assert!(
+            err.to_string().contains("Missing parameter: $flag"),
+            "{err}"
+        );
+    }
+
+    /// The check reaches every place a *read* pattern can be written — the
+    /// same nesting forms `resolution_reaches_every_name_position` walks for
+    /// labels, because it is the same walk.
+    #[test]
+    fn the_inline_map_check_reaches_every_pattern_position() {
+        for query in [
+            "MATCH (v {flag: $flag}) RETURN v",
+            "OPTIONAL MATCH (v {flag: $flag}) RETURN v",
+            "MATCH (a)-[:R {since: $flag}]->(b) RETURN a",
+            "MATCH (a) WHERE EXISTS { MATCH (a)-[:R]->(:T {flag: $flag}) } RETURN a",
+            "MATCH (a) RETURN COUNT { (a)-[:R]->(:T {flag: $flag}) } AS n",
+            "CALL { MATCH (v {flag: $flag}) RETURN v } RETURN v",
+            "MATCH (v {flag: $flag}) RETURN v UNION MATCH (v {flag: $flag}) RETURN v",
+            "MATCH (a) WHERE a.x = 1 WITH a WHERE EXISTS { MATCH (a)-[:R]->(:T {flag: $flag}) } RETURN a",
+        ] {
+            let mut parsed = parse(query);
+            let err = resolve(&mut parsed, &HashMap::new())
+                .expect_err(query)
+                .to_string();
+            assert!(err.contains("Missing parameter: $flag"), "{query}: {err}");
+        }
+    }
+
+    /// A bound parameter is left exactly as it was: presence is all this pass
+    /// checks, the matcher still does the comparing.
+    #[test]
+    fn a_bound_inline_map_parameter_passes_through() {
+        let mut query = parse("MATCH (v:Vessel {flag: $flag}) RETURN v");
+        resolve(&mut query, &params(&[("flag", Value::String("NO".into()))])).expect("bound");
+        // A parameter bound to null is *bound*: `{flag: $flag}` with a null
+        // value is a legitimate (if empty) query, not a caller mistake.
+        let mut query = parse("MATCH (v:Vessel {flag: $flag}) RETURN v");
+        resolve(&mut query, &params(&[("flag", Value::Null)])).expect("null is bound");
+    }
+
+    /// Write patterns (`CREATE` / `MERGE`) carry `Expression` values, not
+    /// `PropertyMatcher`, and already raise from expression evaluation — this
+    /// pins that they still do rather than being newly double-checked here.
+    #[test]
+    fn write_pattern_property_parameters_are_left_to_the_evaluator() {
+        for query in ["CREATE (n:T {flag: $flag})", "MERGE (n:T {flag: $flag})"] {
+            let mut parsed = parse(query);
+            resolve(&mut parsed, &HashMap::new())
+                .unwrap_or_else(|e| panic!("{query} must not be rejected by this pass: {e}"));
+        }
+    }
+
+    /// Both checks live in one walk, so their order is fixed rather than
+    /// incidental: the label bind runs first, because an unbound label makes
+    /// the whole pattern meaningless.
+    #[test]
+    fn an_unbound_label_is_reported_before_an_unbound_map_parameter() {
+        let mut query = parse("MATCH (v:$label {flag: $flag}) RETURN v");
+        let err = resolve(&mut query, &HashMap::new()).unwrap_err();
+        assert!(
+            err.to_string().contains("$label"),
+            "the label pass must win: {err}"
+        );
     }
 }

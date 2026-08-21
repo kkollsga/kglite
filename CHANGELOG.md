@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An unbound `$parameter` inside an inline property map matched nothing
+  instead of raising.** `MATCH (v:Vessel {flag: $flag})` with no `flag` in
+  `params` returned an empty result and no error, so a caller read "this graph
+  has no NO-flagged vessels" off their own missing binding — while the exact
+  same predicate written `WHERE v.flag = $flag` raised
+  `Missing parameter: $flag`. The inline map is the spelling `describe()`'s own
+  examples teach, and the matcher that evaluates it answers `bool`, so an
+  absent parameter could only read as "no candidate equals it". Presence is now
+  checked once before planning, alongside the dynamic-label binding, for every
+  read pattern — `MATCH`, `OPTIONAL MATCH`, `EXISTS {}`, `COUNT {}`, `CALL {}`
+  and `UNION` branches — and raises the same message the `WHERE` spelling
+  always did. `CREATE` / `MERGE` property maps already raised from expression
+  evaluation and are unchanged. **Including on plan-cache hits:** a query
+  carrying `$flag` with no `params` looks parameterless to the cache, so the
+  check runs on a path that leaves nothing cached and the second run of the
+  same text raises just like the first.
+
 - **Query warnings never reached the surfaces that needed them most.** The
   engine has always detected an unknown node label, relationship type or
   property in a `MATCH` and computed a "did you mean?" hint — and then wrote it
@@ -422,6 +439,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged.
 
 ### Added
+
+- **The MCP `cypher_query` tools accept a `params` argument.** There was no way
+  to bind a `$placeholder` over MCP at all: the tool took only `query`, so
+  every parameterised example in `describe()` — including the inline
+  `{prop: $p}` form — was unusable on the surface agents actually query, and
+  the workaround was to splice values into the query text. `params` takes a
+  JSON object and binds both spellings, on the read-only tool and the
+  write-enabled one (whose mutation path also ignored parameters), reusing the
+  same conversion the manifest-declared Cypher tools have always used. Values
+  are bound as data and can never be read as Cypher syntax.
 
 - **The engine now warns about the two silent-empty-result mistakes it could
   already see.** Both are legal Cypher that returns nothing useful without

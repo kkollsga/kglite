@@ -184,5 +184,5 @@ fn write_pinned(
         git_sha: None,
         modified_by: None,
     };
-    run_cypher_write(active, q, authz, None, None)
+    run_cypher_write(active, q, Default::default(), authz, None, None)
 }
