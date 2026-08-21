@@ -27,14 +27,45 @@ use crate::graph::core::pattern_matching::{EdgePattern, NodePattern, Pattern, Pa
 
 /// Largest number of relationship elements a lowered pattern may contain.
 ///
-/// `*8..8` becomes an eight-hop pattern, which the join-order and expansion
-/// machinery handles the same way it handles a hand-written eight-hop
-/// pattern. Beyond that the expanded IR stops paying for itself: the pattern
-/// is quadratic to reorder, every pass walks it, and a segment that deep is
-/// far more likely to be an unbounded exploration written with a big `k` than
-/// a shape anyone wants materialised hop by hop. Above the ceiling the
-/// segment stays variable-length — slower, never wrong.
-const MAX_LOWERED_PATTERN_HOPS: usize = 8;
+/// **Two, because that is where the win is** (measured 2026-08-21, phase V8,
+/// release build, three fixtures — a 20k sparse chain, an 8k heterogeneous
+/// typed graph, and the 10k scale-free social graph; A/B via
+/// `disabled_passes=["lower_fixed_var_length_hops"]`, answers asserted equal
+/// on every pair).
+///
+/// The lowered form's advantage is reaching machinery that bails on
+/// `var_length.is_some()`, and the large piece of that machinery is
+/// the `fusion::aggregate` fused counter — which accepts a pattern of
+/// **3 or 5 elements**, i.e. exactly one or two hops. Inside that window the
+/// pass is worth 3.4x to 17x (`count(*)`: chain 0.29x/0.22x, typed
+/// 0.26x/0.18x, social 0.09x/0.06x at k=1/k=2). Outside it the lowered
+/// pattern reaches only the general fixed-hop matcher, and that is a loss on
+/// every shape measured, growing with depth:
+///
+/// | shape (`count(*)` unless noted) | k=3 | k=5 | k=8 |
+/// |---|---|---|---|
+/// | chain, unanchored | 1.98x | 2.54x | 3.05x |
+/// | chain, undirected, 50 seeds | 1.13x | 1.32x | 1.42x |
+/// | typed, heterogeneous end node | 1.16x | 1.43x | 1.73x |
+/// | typed, relationship property filter | 1.08x | 1.08x | 1.16x |
+/// | chain, `RETURN z.name` | 1.05x | 1.17x | 1.40x |
+/// | social, 50 seeds, `count(DISTINCT)` | 0.71x | **3.83x** | — |
+///
+/// Memory moves the same way and harder: `*k..k` `count(DISTINCT)` over the
+/// social fixture peaked at 823 MB lowered against 97 MB unlowered at k=4,
+/// and **10.5 GB against 1.16 GB** at k=5 — the fixed matcher materializes a
+/// `PatternMatch` per trail where the variable-length expansion emits
+/// `(target, binding)` pairs the distinct hint can fold as they arrive.
+///
+/// The one k>=3 win in the set (social k=3 `count(DISTINCT)`, 0.71x) is not
+/// worth the 3.83x two hops later, so the ceiling sits at the mechanism
+/// boundary rather than at a curve-fit. Above it the segment stays
+/// variable-length — which is now the *faster* path as well as a correct one.
+///
+/// The budget is per **pattern**, not per segment, for the same reason: the
+/// fused counter counts the whole element list, so `*2..2` next to a plain
+/// hop is a three-hop pattern and reaches nothing the star spelling does not.
+const MAX_LOWERED_PATTERN_HOPS: usize = 2;
 
 /// Rewrite every eligible `*k..k` segment in the query's MATCH patterns.
 pub(super) fn lower_fixed_var_length_hops(query: &mut CypherQuery) {
@@ -223,7 +254,7 @@ mod tests {
 
     #[test]
     fn lowered_hops_keep_trail_tracking_and_drop_the_stale_type_hint() {
-        let (pattern, _) = lowered("(a:N)-[:R*3..3]->(b:N)");
+        let (pattern, _) = lowered("(a:N)-[:R*2..2]->(b:N)");
         for element in &pattern.elements {
             if let PatternElement::Edge(edge) = element {
                 assert!(edge.needs_path_info, "lowered hop lost its trail");
@@ -273,44 +304,54 @@ mod tests {
     }
 
     #[test]
-    fn the_hop_ceiling_is_eight() {
-        let (eight, changed) = lowered("(a:N)-[:R*8..8]->(b:N)");
+    fn the_hop_ceiling_is_two() {
+        // Two hops is the fused counter's window, and the only depth at which
+        // lowering measured faster than leaving the star alone.
+        let (two, changed) = lowered("(a:N)-[:R*2..2]->(b:N)");
         assert!(changed);
-        assert_eq!(hops(&eight).len(), 8);
+        assert_eq!(hops(&two).len(), 2);
 
-        let (nine, changed) = lowered("(a:N)-[:R*9..9]->(b:N)");
+        let (three, changed) = lowered("(a:N)-[:R*3..3]->(b:N)");
         assert!(!changed);
         assert_eq!(
-            hops(&nine),
-            vec![(Some("R".to_string()), Some((9, 9)), EdgeDirection::Outgoing)]
+            hops(&three),
+            vec![(Some("R".to_string()), Some((3, 3)), EdgeDirection::Outgoing)]
         );
     }
 
     #[test]
     fn the_ceiling_counts_the_whole_pattern_not_one_segment() {
-        // 4 + 4 fits; 4 + 5 does not, and the whole pattern then stays as written.
-        let (fits, changed) = lowered("(a:N)-[:A*4..4]->(b:N)-[:B*4..4]->(c:N)");
+        // 1 + 1 fits; 1 + 2 does not, and the whole pattern then stays as written.
+        let (fits, changed) = lowered("(a:N)-[:A*1..1]->(b:N)-[:B*1..1]->(c:N)");
         assert!(changed);
-        assert_eq!(hops(&fits).len(), 8);
+        assert_eq!(hops(&fits).len(), 2);
 
-        let (over, changed) = lowered("(a:N)-[:A*4..4]->(b:N)-[:B*5..5]->(c:N)");
+        let (over, changed) = lowered("(a:N)-[:A*1..1]->(b:N)-[:B*2..2]->(c:N)");
         assert!(!changed);
         assert_eq!(hops(&over).len(), 2);
 
-        // Fixed hops already in the pattern count against the same budget.
-        let (mixed, changed) = lowered("(a:N)-[:A]->(b:N)-[:B*2..2]->(c:N)");
+        // Fixed hops already in the pattern count against the same budget, so
+        // a two-hop segment beside a plain hop is a three-hop pattern and
+        // stays as written.
+        let (mixed, changed) = lowered("(a:N)-[:A]->(b:N)-[:B*1..1]->(c:N)");
         assert!(changed);
-        assert_eq!(hops(&mixed).len(), 3);
+        assert_eq!(hops(&mixed).len(), 2);
+
+        let (mixed_over, changed) = lowered("(a:N)-[:A]->(b:N)-[:B*2..2]->(c:N)");
+        assert!(!changed);
+        assert_eq!(hops(&mixed_over).len(), 2);
     }
 
     #[test]
     fn a_non_lowerable_segment_does_not_block_its_neighbour() {
-        let (pattern, changed) = lowered("(a:N)-[:A*2..2]->(b:N)-[:B*1..3]->(c:N)");
+        // The range segment counts as one hop against the pattern budget, so
+        // a `*1..1` beside it still fits under the ceiling and is lowered
+        // while its neighbour stays as written.
+        let (pattern, changed) = lowered("(a:N)-[:A*1..1]->(b:N)-[:B*1..3]->(c:N)");
         assert!(changed);
         assert_eq!(
             hops(&pattern),
             vec![
-                (Some("A".to_string()), None, EdgeDirection::Outgoing),
                 (Some("A".to_string()), None, EdgeDirection::Outgoing),
                 (Some("B".to_string()), Some((1, 3)), EdgeDirection::Outgoing),
             ]

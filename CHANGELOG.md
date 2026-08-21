@@ -1059,8 +1059,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that bookkeeping off requires pairwise-*disjoint* hop types, which `k`
   copies of one element can never be. It declines a genuine range, `*0..0`, a
   bound relationship variable (which binds the relationship *list*), a path
-  assignment, and any pattern that would exceed eight hops after lowering.
-  Like every registered pass it can be switched off with
+  assignment, and **any pattern that would exceed two hops after lowering**.
+  That ceiling is where the win is and where it stops: the machinery a lowered
+  pattern unlocks that the star spelling cannot reach is the fused `count`
+  operator, which takes a one- or two-hop pattern, and inside that window the
+  rewrite is worth 3.4x-17x across a sparse chain, a heterogeneous typed graph
+  and a scale-free social graph. A deeper lowered pattern reaches only the
+  general fixed-hop matcher, which measured *slower* than leaving the star
+  alone on every shape tried — 1.98x/2.54x/3.05x at three/five/eight hops on a
+  20k sparse chain, 3.83x on a 50-seed `count(DISTINCT)` at `*5..5` over a 10k
+  social graph — and far heavier: that last shape peaks at **10.5 GB lowered
+  against 1.16 GB** left as written, because the fixed matcher materializes a
+  match per trail where the variable-length expansion emits pairs the distinct
+  hint folds as they arrive. Answers are identical either way; only the plan
+  differs. Like every registered pass it can be switched off with
   `disabled_passes=['lower_fixed_var_length_hops']`.
 
 - **`describe()` spends fewer tokens saying the same things, and says two it

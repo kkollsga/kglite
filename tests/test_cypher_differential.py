@@ -1374,11 +1374,15 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         None,
     ),
     (
-        "lower_three_hop_closed_trail",
+        "three_hop_closed_trail_past_the_lowering_ceiling",
         "directed_triangle_graph",
-        # Three hops around the cycle land back on the source: the lowered
-        # form must allow the repeated *node* while still refusing a repeated
-        # relationship.
+        # Three hops around the cycle land back on the source: the answer must
+        # allow the repeated *node* while still refusing a repeated
+        # relationship. Kept after V8 narrowed the lowering ceiling to two
+        # hops — this shape is now served by the variable-length expansion
+        # rather than by lowered fixed hops, and the closed-trail answer has
+        # to be the same either way. `lower_two_hop_anchored` above is what
+        # exercises the pass itself.
         "MATCH (a:N {id: 1})-[:R*3..3]->(b:N) RETURN b.id AS i",
         None,
     ),
@@ -3772,11 +3776,17 @@ LOWERED_SHAPES = [
     "MATCH (a:N)-[:R*2..2]->(b:N) RETURN count(*) AS n",
     "MATCH (a:N {id: 1})-[:R*2..2]-(b:N) RETURN b.id AS i",
     "MATCH (a:N {id: 1})-[:R*1..1]->(b:N) RETURN b.id AS i",
-    "MATCH (a:N {id: 1})-[:R*3..3]->(b:N) RETURN b.id AS i",
     "MATCH (a:N) OPTIONAL MATCH (a)-[:R*2..2]->(b:N) RETURN a.id AS i, b.id AS j",
 ]
 
 UNLOWERED_SHAPES = [
+    # Past the two-hop ceiling. The lowered form reaches only the general
+    # fixed-hop matcher there, which V8 measured slower than the star spelling
+    # on every fixture (1.05x-3.83x) and up to 9x heavier in peak memory.
+    "MATCH (a:N {id: 1})-[:R*3..3]->(b:N) RETURN b.id AS i",
+    # A two-hop segment beside a plain hop is a three-hop pattern: the budget
+    # is per pattern, because the fused counter reads the whole element list.
+    "MATCH (a:N {id: 1})-[:R]->(x:N)-[:R*2..2]->(b:N) RETURN b.id AS i",
     # A genuine range has no fixed spelling.
     "MATCH (a:N {id: 1})-[:R*2..3]->(b:N) RETURN b.id AS i",
     "MATCH (a:N {id: 1})-[:R*1..3]->(b:N) RETURN b.id AS i",
@@ -3804,25 +3814,36 @@ def test_the_lowering_declines_outside_its_window(directed_triangle_graph, query
 
 
 def test_the_lowering_ceiling_is_observable_from_outside(long_chain_graph) -> None:
-    """Eight hops lower, nine do not — and both answer the same set either way."""
-    at_ceiling = "MATCH (a:N {id: 0})-[:R*8..8]->(b:N) RETURN b.id AS i"
-    past_ceiling = "MATCH (a:N {id: 0})-[:R*9..9]->(b:N) RETURN b.id AS i"
+    """Two hops lower, three do not — and both answer the same set either way.
+
+    The ceiling is two because that is the fused counter's pattern window and
+    the only depth at which V8 measured lowering faster than leaving the star
+    alone; past it the lowered form was 1.05x-3.83x slower and up to 9x
+    heavier in peak memory. The answers are what must not move.
+    """
+    at_ceiling = "MATCH (a:N {id: 0})-[:R*2..2]->(b:N) RETURN b.id AS i"
+    past_ceiling = "MATCH (a:N {id: 0})-[:R*3..3]->(b:N) RETURN b.id AS i"
 
     assert LOWERING_PASS in _applied_passes(long_chain_graph, at_ceiling)
     assert LOWERING_PASS not in _applied_passes(long_chain_graph, past_ceiling)
-    assert long_chain_graph.cypher(at_ceiling).to_list() == [{"i": 8}]
-    assert long_chain_graph.cypher(past_ceiling).to_list() == [{"i": 9}]
+    assert long_chain_graph.cypher(at_ceiling).to_list() == [{"i": 2}]
+    assert long_chain_graph.cypher(past_ceiling).to_list() == [{"i": 3}]
+    # Non-vacuity: the deep spelling still answers, so "not lowered" is a plan
+    # difference and not a query that quietly returns nothing.
+    deep = "MATCH (a:N {id: 0})-[:R*9..9]->(b:N) RETURN b.id AS i"
+    assert LOWERING_PASS not in _applied_passes(long_chain_graph, deep)
+    assert long_chain_graph.cypher(deep).to_list() == [{"i": 9}]
 
 
 def test_the_lowering_ceiling_counts_the_whole_pattern(long_chain_graph) -> None:
-    """Two segments share one budget: 4+4 lowers, 4+5 leaves both alone."""
-    fits = "MATCH (a:N {id: 0})-[:R*4..4]->(b:N)-[:R*4..4]->(c:N) RETURN c.id AS i"
-    over = "MATCH (a:N {id: 0})-[:R*4..4]->(b:N)-[:R*5..5]->(c:N) RETURN c.id AS i"
+    """Two segments share one budget: 1+1 lowers, 1+2 leaves both alone."""
+    fits = "MATCH (a:N {id: 0})-[:R*1..1]->(b:N)-[:R*1..1]->(c:N) RETURN c.id AS i"
+    over = "MATCH (a:N {id: 0})-[:R*1..1]->(b:N)-[:R*2..2]->(c:N) RETURN c.id AS i"
 
     assert LOWERING_PASS in _applied_passes(long_chain_graph, fits)
     assert LOWERING_PASS not in _applied_passes(long_chain_graph, over)
-    assert long_chain_graph.cypher(fits).to_list() == [{"i": 8}]
-    assert long_chain_graph.cypher(over).to_list() == [{"i": 9}]
+    assert long_chain_graph.cypher(fits).to_list() == [{"i": 2}]
+    assert long_chain_graph.cypher(over).to_list() == [{"i": 3}]
 
 
 def test_anonymous_intermediates_are_only_deduped_when_partials_are_interchangeable(

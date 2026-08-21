@@ -826,6 +826,34 @@ def test_bench_exists_var_length_witness(benchmark, khop_social_graph):
 
 
 @pytest.mark.benchmark
+def test_bench_var_length_1_8_count_distinct(benchmark, khop_social_graph):
+    """50-seed **eight**-hop reach, counted distinct — the depth cell (V8).
+
+    The `khop3_*` pair measures traversal at a depth where the frontier is
+    still growing (7 690 of 10 000 nodes at three hops). This cell measures it
+    past saturation: at eight hops every seed's own BFS has covered the whole
+    component, so the cost is the flat plateau of the distance BFS rather than
+    a point on its climb. V8's scaling study measured the plateau starting at
+    k=7 and holding to k=12 within 2.5%, which is the semantic floor for a
+    per-source BFS — so a future change that reintroduces per-level work would
+    show up here as a climb, and nowhere else in this file.
+
+    Deliberately the `count(DISTINCT)` consumer: it is the dedup-safe shape
+    that V0's proof licenses onto the fast path, so this cell also guards that
+    the licence still applies at depth.
+    """
+
+    def query_and_consume():
+        return khop_social_graph.cypher(
+            "MATCH (p:Person)-[:KNOWS*1..8]->(f:Person) WHERE p.id IN $ids RETURN count(DISTINCT f) AS reached",
+            params={"ids": KHOP_SEED_IDS},
+        ).to_list()
+
+    result = benchmark(query_and_consume)
+    assert result[0]["reached"] > 1_000
+
+
+@pytest.mark.benchmark
 def test_bench_exists_fixed_hop(benchmark, khop_social_graph):
     """Single-hop EXISTS control for `exists_var_length_witness`.
 
@@ -879,6 +907,33 @@ def test_khop3_spellings_agree(khop_social_graph):
     # Not a tautology: a shared bug returning 0 everywhere would satisfy the
     # equality above. The seeds reach most of a 10k graph at three hops.
     assert single[0]["reached"] > 5_000
+
+
+def test_var_length_1_8_reach_contains_the_1_3_reach(khop_social_graph):
+    """Eight-hop reach is a superset of three-hop reach, and strictly bigger.
+
+    The companion for `var_length_1_8_count_distinct`. `*1..k` reachability is
+    monotone in `k` by construction — every `*1..3` trail is a `*1..8` trail —
+    so an eight-hop answer below the three-hop one is a bug, not a slower
+    query. The second assertion is what makes this non-vacuous: on this fixture
+    the two numbers genuinely differ (7 690 against the full 10 000), so a
+    change that collapsed the depth cell into a three-hop query would be caught
+    here rather than showing up only as a suspiciously fast benchmark.
+    """
+    params = {"ids": KHOP_SEED_IDS}
+    deep = khop_social_graph.cypher(
+        "MATCH (p:Person)-[:KNOWS*1..8]->(f:Person) WHERE p.id IN $ids RETURN count(DISTINCT f) AS reached",
+        params=params,
+    ).to_list()[0]["reached"]
+    shallow = khop_social_graph.cypher(
+        "MATCH (p:Person)-[:KNOWS*1..3]->(f:Person) WHERE p.id IN $ids RETURN count(DISTINCT f) AS reached",
+        params=params,
+    ).to_list()[0]["reached"]
+
+    assert deep >= shallow
+    assert deep > shallow, (
+        f"the depth cell must not be measuring the same reachable set as the three-hop cells (both {deep})"
+    )
 
 
 def test_var_length_2_2_matches_fixed_two_hop(two_hop_social_graph):
