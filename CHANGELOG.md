@@ -28,6 +28,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with no intervening `save()`, retires the create-time pointer as the last step
   of publishing itself, so the build is what a reload sees.
 
+- **`load_ntriples` into a disk graph holding a published generation corrupted
+  that generation in place.** A disk graph commits by publishing an immutable
+  generation, and `save()` leaves the handle writing *inside* that snapshot —
+  so a build run afterwards (or on a graph opened from a saved directory)
+  rewrote the published generation instead of producing a new one: the
+  rebuild's `interner.json` landed beside the snapshot's own `interner.bin.zst`,
+  which shadows it, and the reload failed with
+  `invalid type_indices.bin: directory contains an unresolved type key`. The
+  snapshot was already overwritten by then, so nothing recovered the directory.
+  The build now stages in a mutation workspace and is published as a new
+  generation, leaving previously published snapshots byte-for-byte intact. The
+  same staging fixes a build that followed any other mutation, which finalised
+  into the workspace and vanished with it — `load_ntriples` reported success
+  and the reload returned the pre-build graph. A build on a freshly created
+  directory still finalises in place, so the documented
+  reload-without-`save()` contract is unchanged.
+
+- **An explicit `save()` after an ntriples disk build dropped every property
+  column.** The build's stores are mmap-backed, which the unified column writer
+  cannot plan, so the save rewrote each type as a `columns.zst` sidecar. The
+  sidecar carried the data, but the reload rebuilds `type_schemas` from
+  `node_type_metadata` — which this build path never writes — and the packed
+  loader skipped every column whose name the schema did not know. The graph
+  reloaded with its nodes, ids and titles intact and every property `null`. A
+  packed column store is self-describing, so a column the caller's schema does
+  not name now extends that schema rather than being discarded.
+
 - **`DISTINCT` used as a bare variable name inside an aggregate panicked the
   engine.** This dialect leaves `DISTINCT` and `COUNT` unreserved in name
   position, so `MATCH (DISTINCT:Person)` binds a variable — but the aggregate

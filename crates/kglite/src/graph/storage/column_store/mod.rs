@@ -1932,6 +1932,9 @@ impl ColumnStore {
         let mut store = ColumnStore::new(Arc::clone(&schema), type_meta, interner);
         store.row_count = row_count;
         store.tombstones = vec![false; row_count as usize];
+        // Set on the first packed column the caller's schema does not name;
+        // see the growth branch below.
+        let mut grown: Option<TypeSchema> = None;
 
         let mut cursor = std::io::Cursor::new(packed);
 
@@ -2030,20 +2033,41 @@ impl ColumnStore {
                 continue;
             }
 
-            // Find the slot for this column
+            // Find the slot for this column, growing the schema for a column
+            // the caller's schema does not name.
+            //
+            // The packed payload is self-describing — name and type tag per
+            // column — so a name the schema has no slot for is a column this
+            // store is the only record of, not a stale one. Skipping it
+            // discarded it silently: a disk graph's `type_schemas` is rebuilt
+            // from `node_type_metadata`, which a `load_ntriples` build never
+            // writes, so every property column of an RDF-built graph vanished
+            // the first time a `save()` rewrote its store as a `columns.zst`
+            // sidecar. Growth only ever appends, so every slot the caller's
+            // schema already handed out still names the same column.
             let ik = InternedKey::from_str(&col_name);
-            let slot = match schema.slot(ik) {
-                Some(s) => s as usize,
-                None => continue, // schema doesn't have this column, skip
-            };
-
-            // Build the TypedColumn from the data blob
             let col =
                 Self::unpack_column(&type_tag, data_blob, row_count, temp_dir, &col_name, codec)?;
-
-            if slot < store.columns.len() {
-                store.columns[slot] = Arc::new(col);
+            match schema.slot(ik) {
+                Some(slot) => {
+                    let slot = slot as usize;
+                    if slot < store.columns.len() {
+                        store.columns[slot] = Arc::new(col);
+                    }
+                }
+                None => {
+                    let slot = grown.get_or_insert_with(|| (*schema).clone()).add_key(ik) as usize;
+                    if slot == store.columns.len() {
+                        store.columns.push(Arc::new(col));
+                    } else if slot < store.columns.len() {
+                        store.columns[slot] = Arc::new(col);
+                    }
+                }
             }
+        }
+
+        if let Some(grown) = grown {
+            store.schema = Arc::new(grown);
         }
 
         Ok(store)

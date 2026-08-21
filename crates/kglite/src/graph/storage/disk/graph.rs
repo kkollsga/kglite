@@ -2180,11 +2180,57 @@ impl DiskGraph {
         self.independent_root = Some(root);
     }
 
-    pub(crate) fn prepare_independent_bulk_load(&mut self) -> std::io::Result<()> {
-        if self.independent_root.is_some() {
+    /// Whether a bulk build may write straight into this graph's own
+    /// directory — true only while `data_dir` is a segment of the graph root
+    /// itself (`root/seg_000`, or the root for the pre-segment layout).
+    ///
+    /// A handle that has published a generation — an explicit `save()`, or a
+    /// graph opened from a saved directory — has `data_dir` *inside that
+    /// immutable snapshot* instead, and so does a detached copy, whose base
+    /// snapshot belongs to the graph it was copied from.
+    fn builds_in_its_own_directory(&self) -> bool {
+        self.data_dir == self.logical_root
+            || self.data_dir.parent() == Some(self.logical_root.as_path())
+    }
+
+    /// Stage a bulk build in a mutation workspace unless it can safely write
+    /// where it lies.
+    ///
+    /// A build writes straight into [`Self::active_write_dir`]. For a freshly
+    /// created directory that is the graph's own segment — fine, and the
+    /// reason a fresh disk build is reloadable with no `save()`. For a handle
+    /// sitting on a *published generation* it is a snapshot readers can
+    /// already see: the rebuild's sidecars land beside the snapshot's own, the
+    /// snapshot's `interner.bin.zst` shadows the rebuilt `interner.json`, and
+    /// the reload fails outright with an unresolved type key. Published
+    /// generations are immutable, so the build stages into a workspace and
+    /// `finalize_disk_graph` publishes it as a new generation instead.
+    pub(crate) fn prepare_bulk_load_workspace(&mut self) -> std::io::Result<()> {
+        if !self.builds_in_its_own_directory() {
             self.prepare_mutation()?;
         }
         Ok(())
+    }
+
+    /// The graph root a finished bulk build must be published into as a new
+    /// generation, or `None` when it may be published where it lies.
+    ///
+    /// A build that ran in a mutation workspace is not reachable from the
+    /// graph root at all — the workspace is removed when the handle drops — so
+    /// leaving it there loses the entire build silently. Republishing it as a
+    /// generation is the only way it survives, and it is what any other write
+    /// staged in a workspace does at `save()`.
+    ///
+    /// A detached copy is the exception: its workspace *is* its graph
+    /// directory (a private root under the temp dir), it has no generations,
+    /// and its own `save()` to a real path is the publication.
+    pub(crate) fn bulk_build_generation_root(&self) -> Option<&Path> {
+        if self.independent_root.is_some() {
+            return None;
+        }
+        self.mutation_workspace
+            .as_ref()
+            .map(|_| self.logical_root.as_path())
     }
 
     #[cfg(test)]

@@ -250,3 +250,124 @@ class TestDiskBuildReloadWithoutSave:
         hop = reloaded.cypher("MATCH (a:Entity {title: 'Entity 1'})-[r]->(b) RETURN b.title AS t").to_list()
         assert hop == [{"t": "Entity 0"}]
         assert reloaded.cypher("MATCH ()-[r]->() RETURN count(r) AS c").to_list() == [{"c": entities - 1}]
+
+
+class TestDiskBuildOverAPublishedGeneration:
+    """A build that lands on a handle holding a published generation must not
+    rewrite that generation.
+
+    A disk graph commits by publishing an immutable generation; `save()` then
+    leaves the handle writing *inside* that snapshot. The build wrote there in
+    place — the rebuild's `interner.json` beside the snapshot's own
+    `interner.bin.zst`, which shadows it — and the reload died with
+    "directory contains an unresolved type key". Nothing recovered the
+    directory; the published generation was already overwritten.
+    """
+
+    @staticmethod
+    def _write_nt(path, n):
+        with open(path, "w", encoding="utf-8") as f:
+            for i in range(n):
+                f.write(
+                    f"<http://www.wikidata.org/entity/Q{i}> "
+                    f'<http://www.w3.org/2000/01/rdf-schema#label> "Entity {i}"@en .\n'
+                )
+                f.write(f'<http://www.wikidata.org/entity/Q{i}> <http://schema.org/description> "desc {i}"@en .\n')
+                if i > 0:
+                    f.write(
+                        f"<http://www.wikidata.org/entity/Q{i}> "
+                        f"<http://www.wikidata.org/prop/direct/P17> "
+                        f"<http://www.wikidata.org/entity/Q{i - 1}> .\n"
+                    )
+
+    @staticmethod
+    def _digest(directory):
+        """(relative path, size, sha256) of every file under `directory`."""
+        import hashlib
+        import os
+
+        out = []
+        for root, _dirs, files in os.walk(directory):
+            for name in files:
+                full = os.path.join(root, name)
+                data = open(full, "rb").read()
+                out.append(
+                    (
+                        os.path.relpath(full, directory),
+                        len(data),
+                        hashlib.sha256(data).hexdigest(),
+                    )
+                )
+        return sorted(out)
+
+    @staticmethod
+    def _published_generation(graph_dir):
+        import os
+
+        current = os.path.join(graph_dir, "CURRENT")
+        assert os.path.isfile(current), "save() must publish a generation"
+        name = open(current, encoding="utf-8").read().strip()
+        return os.path.join(graph_dir, "generations", name)
+
+    def test_build_after_save_reloads_and_leaves_the_old_generation_intact(self, tmp_path):
+        import kglite
+
+        nt_path = tmp_path / "build.nt"
+        self._write_nt(nt_path, 300)
+        graph_dir = tmp_path / "disk_after_save"
+
+        g = kglite.open(str(graph_dir), storage="disk")
+        g.save(str(graph_dir))
+        published = self._published_generation(graph_dir)
+        before = self._digest(published)
+
+        g.load_ntriples(str(nt_path), languages=["en"])
+        del g
+
+        assert self._digest(published) == before, "a published generation is immutable"
+
+        reloaded = kglite.open(str(graph_dir))
+        assert reloaded.cypher("MATCH (n:Entity) RETURN count(n) AS c").to_list() == [{"c": 300}]
+        assert reloaded.cypher("MATCH (n:Entity) WHERE n.title = 'Entity 7' RETURN n.description AS d").to_list() == [
+            {"d": "desc 7"}
+        ]
+
+    def test_build_on_a_reopened_graph_reloads(self, tmp_path):
+        import kglite
+
+        nt_path = tmp_path / "build.nt"
+        self._write_nt(nt_path, 300)
+        graph_dir = tmp_path / "disk_reopened"
+
+        seed = kglite.open(str(graph_dir), storage="disk")
+        seed.save(str(graph_dir))
+        del seed
+
+        g = kglite.open(str(graph_dir))
+        g.load_ntriples(str(nt_path), languages=["en"])
+        del g
+
+        reloaded = kglite.open(str(graph_dir))
+        assert reloaded.cypher("MATCH (n:Entity) RETURN count(n) AS c").to_list() == [{"c": 300}]
+
+    def test_save_after_a_build_keeps_its_property_columns(self, tmp_path):
+        """An explicit `save()` of a freshly built graph rewrites its
+        mmap-backed stores as `columns.zst` sidecars. The reload rebuilds
+        `type_schemas` from `node_type_metadata`, which this build path never
+        writes — so every column the sidecar named used to be dropped, and the
+        graph came back with its nodes and titles but every property null."""
+        import kglite
+
+        nt_path = tmp_path / "build.nt"
+        self._write_nt(nt_path, 50)
+        graph_dir = tmp_path / "disk_saved_build"
+
+        g = kglite.open(str(graph_dir), storage="disk")
+        g.load_ntriples(str(nt_path), languages=["en"])
+        g.save(str(graph_dir))
+        del g
+
+        reloaded = kglite.open(str(graph_dir))
+        assert reloaded.cypher("MATCH (n:Entity) WHERE n.title = 'Entity 7' RETURN n.description AS d").to_list() == [
+            {"d": "desc 7"}
+        ]

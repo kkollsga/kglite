@@ -103,6 +103,21 @@ pub(super) fn load_column_sidecars(
 
     for r in results {
         let (type_name, store) = r?;
+        // A sidecar may name columns the rebuilt `type_schemas` entry does not
+        // (a `load_ntriples` build persists no `node_type_metadata`, so its
+        // types rebuild with an empty schema). `load_packed_with_codec` grows
+        // the store's own schema to cover them; publish that schema as the
+        // type's, or the graph keeps a narrower one than the store it just
+        // installed.
+        if graph
+            .type_schemas
+            .get(&type_name)
+            .is_none_or(|schema| schema.len() != store.schema().len())
+        {
+            graph
+                .type_schemas_mut()
+                .insert(type_name.clone(), Arc::clone(store.schema()));
+        }
         graph.install_column_store(&type_name, Arc::new(store));
     }
     Ok(())
