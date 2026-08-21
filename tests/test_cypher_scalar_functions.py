@@ -27,9 +27,18 @@ SCALAR_CASES: list[tuple[str, str, object]] = [
     ("str_upper", "RETURN toUpper('ab') AS x", "AB"),
     ("str_lower", "RETURN toLower('AB') AS x", "ab"),
     ("str_tostring", "RETURN toString(42) AS x", "42"),
+    # null in, null out — NOT the four-character string 'null'.
+    ("str_tostring_null", "RETURN toString(null) AS x", None),
+    ("str_tostring_null_coalesce", "RETURN coalesce(toString(null),'D') AS x", "D"),
     ("str_substring", "RETURN substring('hello',1,3) AS x", "ell"),
     ("str_replace", "RETURN replace('abcabc','a','X') AS x", "XbcXbc"),
     ("str_split", "RETURN split('a,b,c',',') AS x", ["a", "b", "c"]),
+    ("str_split_two", "RETURN split('a,b',',') AS x", ["a", "b"]),
+    # Empty delimiter → characters. Rust's str::split would add phantom
+    # leading/trailing empties (['', 'a', '']); see test_split_empty_delimiter.
+    ("str_split_empty_delim_one", "RETURN split('a','') AS x", ["a"]),
+    ("str_split_empty_delim", "RETURN split('abc','') AS x", ["a", "b", "c"]),
+    ("str_split_empty_subject", "RETURN split('',',') AS x", [""]),
     ("str_trim", "RETURN trim('  hi  ') AS x", "hi"),
     ("str_ltrim", "RETURN ltrim('  hi') AS x", "hi"),
     ("str_rtrim", "RETURN rtrim('hi  ') AS x", "hi"),
@@ -54,6 +63,25 @@ SCALAR_CASES: list[tuple[str, str, object]] = [
     ("num_atan2", "RETURN round(atan2(1.0,1.0),5) AS x", 0.7854),
     # ── collection ──
     ("col_size", "RETURN size(['a','b','c']) AS x", 3),
+    # size()/length() on a string count CHARACTERS, not UTF-8 bytes:
+    # 'ø' is 2 bytes, each CJK char 3, the emoji 4.
+    ("col_size_str_ascii", "RETURN size('hello') AS x", 5),
+    ("col_size_str_nordic", "RETURN size('Tromsø') AS x", 6),
+    ("col_size_str_cjk", "RETURN size('日本語') AS x", 3),
+    ("col_size_str_emoji", "RETURN size('héllo🎉') AS x", 6),
+    ("col_length_str_nordic", "RETURN length('Tromsø') AS x", 6),
+    ("col_length_str_cjk", "RETURN length('日本語') AS x", 3),
+    # The point of counting characters: size() composes with the
+    # char-indexed substring()/left()/right().
+    ("col_size_substring", "RETURN substring('Tromsø', size('Tromsø')-1) AS x", "ø"),
+    ("col_size_left", "RETURN left('Tromsø', size('Tromsø')) AS x", "Tromsø"),
+    ("col_size_right", "RETURN right('Tromsø', size('Tromsø')-5) AS x", "ø"),
+    # Deliberate and parked: a string that looks like a JSON list still
+    # reports its ELEMENT count, because the whole legacy collect-as-JSON
+    # family (UNWIND, indexing, head/last/reverse, IN) coerces the same
+    # shape. Pinned so it is not "fixed" piecemeal.
+    ("col_size_bracketed_string", "RETURN size('[1,2,3]') AS x", 3),
+    ("col_length_bracketed_string", "RETURN length('[1,2,3]') AS x", 3),
     ("col_head", "RETURN head([10,20]) AS x", 10),
     ("col_last", "RETURN last([10,20]) AS x", 20),
     ("col_range", "RETURN range(1,5) AS x", [1, 2, 3, 4, 5]),
@@ -137,3 +165,61 @@ def test_reverse_list() -> None:
     assert kg.cypher("RETURN reverse('[1, 2, 3]') AS x").to_list()[0]["x"] == [3, 2, 1]
     # A plain (non-bracketed) string still reverses characters.
     assert kg.cypher("RETURN reverse('abc') AS x").to_list()[0]["x"] == "cba"
+
+
+def test_split_empty_delimiter_yields_characters() -> None:
+    """split() with an empty delimiter splits into characters.
+
+    The implementation used Rust's ``str::split``, which yields a phantom
+    leading and trailing empty element for an empty pattern —
+    ``split('a','')`` returned ``['', 'a', '']``. That is an artefact of the
+    Rust API, not a Cypher answer. Neo4j's manual does not specify the
+    empty-delimiter case, so kglite pins the per-character reading (the one
+    JavaScript's ``String.split('')`` also gives) and documents it as a
+    dialect note in CYPHER.md.
+    """
+    kg = kglite.KnowledgeGraph()
+    assert kg.cypher("RETURN split('a','') AS x").to_list()[0]["x"] == ["a"]
+    assert kg.cypher("RETURN split('abc','') AS x").to_list()[0]["x"] == ["a", "b", "c"]
+    # Characters, not bytes — the same rule as size().
+    assert kg.cypher("RETURN split('Tromsø','') AS x").to_list()[0]["x"] == list("Tromsø")
+    # An empty original stays [''] whatever the delimiter.
+    assert kg.cypher("RETURN split('','') AS x").to_list()[0]["x"] == [""]
+    assert kg.cypher("RETURN split('',',') AS x").to_list()[0]["x"] == [""]
+    # The result is a native list, so list ops compose.
+    assert kg.cypher("RETURN size(split('abc','')) AS x").to_list()[0]["x"] == 3
+    assert kg.cypher("RETURN head(split('abc','')) AS x").to_list()[0]["x"] == "a"
+
+
+def test_tostring_null_is_null() -> None:
+    """toString(null) is null, not the string 'null'.
+
+    The old formatting made an absent value indistinguishable from a present
+    one, and — worse — it survived coalesce(), which is the very call that
+    exists to substitute a default for a missing value.
+    """
+    kg = kglite.KnowledgeGraph()
+    kg.cypher("CREATE (n:Item {name:'a'})")
+    assert kg.cypher("RETURN toString(null) AS x").to_list()[0]["x"] is None
+    assert kg.cypher("MATCH (n:Item) RETURN toString(n.absent) AS x").to_list()[0]["x"] is None
+    assert kg.cypher("RETURN toString(null) IS NULL AS x").to_list()[0]["x"] is True
+    assert kg.cypher("RETURN coalesce(toString(null),'D') AS x").to_list()[0]["x"] == "D"
+    # Non-null arguments still stringify.
+    assert kg.cypher("RETURN toString(42) AS x").to_list()[0]["x"] == "42"
+    assert kg.cypher("RETURN toString(true) AS x").to_list()[0]["x"] == "true"
+
+
+def test_size_counts_characters_not_bytes() -> None:
+    """size()/length() on a string count characters.
+
+    Byte counting disagreed with substring()/left()/right(), which have
+    always been char-indexed — so ``substring(s, size(s)-1)`` returned an
+    empty string for any non-ASCII ``s`` instead of its last character.
+    """
+    kg = kglite.KnowledgeGraph()
+    for text in ("Tromsø", "日本語", "héllo🎉", "abc", ""):
+        assert kg.cypher("RETURN size($t) AS x", params={"t": text}).to_list()[0]["x"] == len(text)
+        assert kg.cypher("RETURN length($t) AS x", params={"t": text}).to_list()[0]["x"] == len(text)
+    # Composition with the char-indexed string functions.
+    assert kg.cypher("RETURN substring('Tromsø', size('Tromsø')-1) AS x").to_list()[0]["x"] == "ø"
+    assert kg.cypher("RETURN left('日本語', size('日本語')) AS x").to_list()[0]["x"] == "日本語"

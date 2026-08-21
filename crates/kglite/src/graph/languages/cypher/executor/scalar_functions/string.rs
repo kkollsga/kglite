@@ -4,6 +4,7 @@
 //! one of this category's functions so the dispatcher tries the next.
 use super::super::helpers::*;
 use super::super::*;
+use super::shared::*;
 use crate::datatypes::values::Value;
 
 impl<'a> CypherExecutor<'a> {
@@ -28,10 +29,9 @@ impl<'a> CypherExecutor<'a> {
                     _ => Ok(Value::Null),
                 }
             }
-            "tostring" => {
-                let val = self.evaluate_expression(super::first_arg(name, args)?, row)?;
-                Ok(Value::String(format_value_compact(&val)))
-            }
+            "tostring" => Ok(to_string_or_null(
+                self.evaluate_expression(super::first_arg(name, args)?, row)?,
+            )),
             "text_edit_distance" => {
                 if args.len() != 2 {
                     return Err("text_edit_distance() requires 2 arguments".into());
@@ -269,11 +269,7 @@ impl<'a> CypherExecutor<'a> {
                         // Return a native Value::List (Cypher semantics),
                         // consistent with range()/labels()/keys(). Downstream
                         // list ops (head/last/size/index/reverse) all accept it.
-                        let parts: Vec<Value> = s
-                            .split(delim.as_str())
-                            .map(|p| Value::String(p.to_string()))
-                            .collect();
-                        Ok(Value::List(parts))
+                        Ok(Value::List(split_string(s, delim)))
                     }
                     _ => Ok(Value::Null),
                 }

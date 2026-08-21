@@ -1,9 +1,18 @@
 //! Cypher parser: expressions (arithmetic, function calls, CASE, list operations).
 
 use super::super::ast::*;
-use super::super::tokenizer::CypherToken;
-use super::CypherParser;
+use super::super::tokenizer::{describe_token_opt, CypherToken};
+use super::{describe_with_hint, CypherParser};
 use crate::datatypes::values::Value;
+
+/// The `parse_primary_expression_inner` fallback error. A free function so
+/// the match arm that raises it stays one line.
+fn unexpected_in_expression(token: &CypherToken) -> String {
+    format!(
+        "Unexpected token in expression: {}",
+        describe_with_hint(token)
+    )
+}
 
 impl CypherParser {
     pub(super) fn parse_expression_with_predicates(&mut self) -> Result<Expression, String> {
@@ -634,7 +643,7 @@ impl CypherParser {
                 Ok(Expression::PredicateExpr(Box::new(pred)))
             }
 
-            Some(t) => Err(format!("Unexpected token in expression: {:?}", t)),
+            Some(t) => Err(unexpected_in_expression(&t)),
             None => Err("Unexpected end of query in expression".to_string()),
         }
     }
@@ -963,8 +972,8 @@ impl CypherParser {
             Some(CypherToken::Identifier(name)) => name,
             other => {
                 return Err(format!(
-                    "Expected variable name in list predicate, got {:?}",
-                    other
+                    "Expected variable name in list predicate, got {}",
+                    describe_token_opt(other.as_ref())
                 ))
             }
         };
@@ -996,8 +1005,8 @@ impl CypherParser {
             Some(CypherToken::Identifier(name)) => name,
             other => {
                 return Err(format!(
-                    "Expected accumulator name after reduce(, got {:?}",
-                    other
+                    "Expected accumulator name after reduce(, got {}",
+                    describe_token_opt(other.as_ref())
                 ))
             }
         };
@@ -1011,8 +1020,8 @@ impl CypherParser {
             Some(CypherToken::Identifier(name)) => name,
             other => {
                 return Err(format!(
-                    "Expected iteration variable in reduce(), got {:?}",
-                    other
+                    "Expected iteration variable in reduce(), got {}",
+                    describe_token_opt(other.as_ref())
                 ))
             }
         };

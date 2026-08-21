@@ -1028,6 +1028,87 @@
           "propertyType": "INTEGER"
         }
       ]
+    },
+    {
+      "id": "function.size_counts_characters",
+      "category": "function",
+      "requirement": "size() on a string counts characters, not UTF-8 bytes, so it agrees with the character-indexed substring().",
+      "query": "RETURN size('Tromsø') AS chars, substring('Tromsø', size('Tromsø') - 1) AS last",
+      "expected": [
+        {
+          "chars": 6,
+          "last": "ø"
+        }
+      ]
+    },
+    {
+      "id": "function.length_counts_characters",
+      "category": "function",
+      "requirement": "length() on a string counts characters, matching size().",
+      "query": "RETURN length('日本語') AS value",
+      "expected": [
+        {
+          "value": 3
+        }
+      ]
+    },
+    {
+      "id": "function.to_string_value",
+      "category": "function",
+      "requirement": "toString() renders a non-null value as its string form.",
+      "query": "RETURN toString(42) AS value",
+      "expected": [
+        {
+          "value": "42"
+        }
+      ]
+    },
+    {
+      "id": "function.to_string_null",
+      "category": "null",
+      "requirement": "toString(null) is null, not the string 'null', so coalesce() can still supply a default.",
+      "query": "RETURN toString(null) IS NULL AS is_null, coalesce(toString(null), 'default') AS value",
+      "expected": [
+        {
+          "is_null": true,
+          "value": "default"
+        }
+      ]
+    },
+    {
+      "id": "function.split_delimiter",
+      "category": "list",
+      "requirement": "split() divides a string on each occurrence of the delimiter.",
+      "query": "RETURN split('a,b', ',') AS value",
+      "expected": [
+        {
+          "value": [
+            "a",
+            "b"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "function.split_empty_delimiter",
+      "category": "list",
+      "requirement": "split() with an empty delimiter yields the string's characters; an empty subject yields a single empty string for any delimiter.",
+      "query": "RETURN split('abc', '') AS chars, split('a', '') AS one, split('', ',') AS empty",
+      "expected": [
+        {
+          "chars": [
+            "a",
+            "b",
+            "c"
+          ],
+          "one": [
+            "a"
+          ],
+          "empty": [
+            ""
+          ]
+        }
+      ]
     }
   ]
 }

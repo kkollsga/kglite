@@ -1,5 +1,65 @@
 //! Shared constants and free helpers for the scalar-function modules.
+use super::super::helpers::{format_value_compact, parse_list_value};
 use crate::datatypes::values::Value;
+
+/// Length of a string argument to `size()` / `length()`.
+///
+/// Strings are measured in **characters**, not UTF-8 bytes, so the answer
+/// agrees with the char-indexed `substring()` / `left()` / `right()`:
+/// `size('Tromsø')` is 6, and `substring('Tromsø', size('Tromsø') - 1)` is
+/// `'ø'`. Counting bytes made the two families disagree on every
+/// non-ASCII string.
+///
+/// The bracketed-string branch is **deliberate**, not an oversight, and is
+/// parked pending a coordinated cutover: a string that looks like a JSON
+/// list reports its element count, because the whole legacy
+/// collect-as-JSON family (`UNWIND`, indexing, `head`/`last`/`reverse`,
+/// `IN`) coerces the same shape. Dropping it here alone would make the
+/// surface less consistent, not more.
+pub(super) fn string_scalar_length(s: String) -> i64 {
+    if s.starts_with('[') && s.ends_with(']') {
+        parse_list_value(&Value::String(s)).len() as i64
+    } else {
+        s.chars().count() as i64
+    }
+}
+
+/// `toString(value)` — the compact string form, with **null in, null out**.
+///
+/// Formatting a null produced the *string* `'null'`, which made an absent
+/// value indistinguishable from a present one and, being non-null, survived
+/// `coalesce(toString(x), 'default')` — the very call that exists to supply
+/// a default for a missing value.
+pub(super) fn to_string_or_null(value: Value) -> Value {
+    match value {
+        Value::Null => Value::Null,
+        other => Value::String(format_value_compact(&other)),
+    }
+}
+
+/// `split(original, delimiter)` — the element list, as native `Value`s.
+///
+/// An **empty delimiter** splits into characters. Rust's `str::split`
+/// yields a phantom leading and trailing empty element for that case
+/// (`split('a', '')` → `['', 'a', '']`), which is an artefact of the Rust
+/// API rather than a Cypher answer. Neo4j's behaviour for an empty
+/// delimiter is not specified in its manual, so kglite pins the
+/// per-character reading — the same one JavaScript's `String.split('')`
+/// gives — and documents it as a dialect note in `CYPHER.md`.
+///
+/// An empty *original* stays `['']` whatever the delimiter, matching the
+/// non-empty-delimiter case (`split('', ',')` → `['']`).
+pub(super) fn split_string(s: &str, delim: &str) -> Vec<Value> {
+    if s.is_empty() {
+        return vec![Value::String(String::new())];
+    }
+    if delim.is_empty() {
+        return s.chars().map(|c| Value::String(c.to_string())).collect();
+    }
+    s.split(delim)
+        .map(|p| Value::String(p.to_string()))
+        .collect()
+}
 
 /// Shared error suffix when a spatial function arg can't be resolved to a
 /// geometry or point. Names the conventional property names that the

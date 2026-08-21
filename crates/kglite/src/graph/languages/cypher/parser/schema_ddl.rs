@@ -27,7 +27,7 @@
 use crate::graph::constraints::EntityKind;
 
 use super::super::ast::*;
-use super::super::tokenizer::CypherToken;
+use super::super::tokenizer::{describe_token_opt, CypherToken};
 use super::{soft_word_eq, CypherParser};
 
 /// Index-type words that may precede `INDEX` in `CREATE <TYPE> INDEX`.
@@ -681,8 +681,8 @@ impl CypherParser {
                 Ok(upper)
             }
             _ => Err(format!(
-                "Expected INDEXES or CONSTRAINTS after SHOW, got {:?}",
-                self.peek()
+                "Expected INDEXES or CONSTRAINTS after SHOW, got {}",
+                describe_token_opt(self.peek())
             )),
         }
     }

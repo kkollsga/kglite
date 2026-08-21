@@ -111,6 +111,14 @@ pub enum CypherToken {
     StringLit(String),
     IntLit(i64),
     FloatLit(f64),
+
+    /// `/*` — the opening of a block comment, which this dialect does not
+    /// implement. Emitted as a marker rather than raised as a tokenizer
+    /// error so `parse_cypher` can report it through the ordinary
+    /// position machinery (tokenizer errors carry no line/col); the
+    /// parser never sees it, because `parse_cypher` rejects the token
+    /// stream first.
+    BlockCommentOpen,
 }
 
 // ============================================================================
@@ -214,11 +222,9 @@ pub fn tokenize_cypher_with_positions(input: &str) -> Result<TokenizedCypher, St
             continue;
         }
 
-        // Single-line comments: // to end of line
-        if ch == '/' && i + 1 < len && chars[i + 1] == '/' {
-            while i < len && chars[i] != '\n' {
-                i += 1;
-            }
+        // Comments — `//` skipped, `/*` marked. See `take_comment`.
+        if let Some(next) = take_comment(&chars, i, start, &mut tokens) {
+            i = next;
             continue;
         }
 
@@ -773,6 +779,105 @@ pub fn keyword_name_token(token: &CypherToken) -> Option<&'static str> {
         _ => return None,
     };
     Some(name)
+}
+
+/// Handle a comment opener at `i`, reporting the index to resume from.
+///
+/// A `//` line comment is skipped to end of line. A `/*` block comment is
+/// **not** this dialect's syntax; rather than failing here — a tokenizer
+/// error carries no line/col, so the caller could not draw a caret — the
+/// opener is marked with [`CypherToken::BlockCommentOpen`] and
+/// `parse_cypher` rejects the stream by name, with a position. Returns
+/// `None` when `i` is not a comment opener.
+fn take_comment(
+    chars: &[char],
+    i: usize,
+    start: usize,
+    tokens: &mut Vec<(CypherToken, usize)>,
+) -> Option<usize> {
+    if chars[i] != '/' {
+        return None;
+    }
+    match chars.get(i + 1) {
+        Some('/') => {
+            let mut end = i;
+            while end < chars.len() && chars[end] != '\n' {
+                end += 1;
+            }
+            Some(end)
+        }
+        Some('*') => {
+            tokens.push((CypherToken::BlockCommentOpen, start));
+            Some(i + 2)
+        }
+        _ => None,
+    }
+}
+
+/// Render a token the way the user wrote it, for error messages.
+///
+/// Parser errors used to interpolate `{:?}`, which leaked Rust shapes into
+/// user-facing output — `Expected variable name in SET, got Some(IntLit(1))`
+/// for `SET 1 = 2`. Literals and identifiers render as their source text,
+/// symbols as the character they are, and keywords as the canonical
+/// uppercase word.
+pub fn describe_token(token: &CypherToken) -> String {
+    match token {
+        CypherToken::Identifier(name) => name.clone(),
+        CypherToken::StringLit(s) => format!("'{s}'"),
+        CypherToken::IntLit(n) => n.to_string(),
+        CypherToken::FloatLit(f) => f.to_string(),
+        CypherToken::Parameter(name) => format!("${name}"),
+        other => match token_symbol(other) {
+            Some(symbol) => symbol.to_string(),
+            None => token_to_keyword_name(other)
+                .map(|word| word.to_uppercase())
+                .unwrap_or_else(|| format!("{other:?}")),
+        },
+    }
+}
+
+/// [`describe_token`] for a lookahead that may have run off the end.
+pub fn describe_token_opt(token: Option<&CypherToken>) -> String {
+    match token {
+        Some(token) => describe_token(token),
+        None => "end of input".to_string(),
+    }
+}
+
+/// The source spelling of a punctuation/operator token. `None` for
+/// keywords, literals and identifiers, which [`describe_token`] renders
+/// from their own payload.
+fn token_symbol(token: &CypherToken) -> Option<&'static str> {
+    Some(match token {
+        CypherToken::LParen => "(",
+        CypherToken::RParen => ")",
+        CypherToken::LBracket => "[",
+        CypherToken::RBracket => "]",
+        CypherToken::LBrace => "{",
+        CypherToken::RBrace => "}",
+        CypherToken::Colon => ":",
+        CypherToken::Comma => ",",
+        CypherToken::Dot => ".",
+        CypherToken::Semicolon => ";",
+        CypherToken::Dash => "-",
+        CypherToken::GreaterThan => ">",
+        CypherToken::LessThan => "<",
+        CypherToken::Star => "*",
+        CypherToken::DotDot => "..",
+        CypherToken::Equals => "=",
+        CypherToken::NotEquals => "<>",
+        CypherToken::LessThanEquals => "<=",
+        CypherToken::GreaterThanEquals => ">=",
+        CypherToken::RegexMatch => "=~",
+        CypherToken::Plus => "+",
+        CypherToken::Slash => "/",
+        CypherToken::Percent => "%",
+        CypherToken::Pipe => "|",
+        CypherToken::DoublePipe => "||",
+        CypherToken::BlockCommentOpen => "/*",
+        _ => return None,
+    })
 }
 
 /// Canonical UPPERCASE word for one of the three **value-literal** keywords —

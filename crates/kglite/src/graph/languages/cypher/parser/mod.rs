@@ -15,7 +15,8 @@
 
 use super::ast::*;
 use super::tokenizer::{
-    keyword_name_token, reserved_literal_name_token, token_to_keyword_name, CypherToken,
+    describe_token, describe_token_opt, keyword_name_token, reserved_literal_name_token,
+    token_to_keyword_name, CypherToken,
 };
 #[cfg(test)]
 use crate::datatypes::values::Value;
@@ -279,8 +280,8 @@ impl CypherParser {
             Ok(())
         } else {
             Err(format!(
-                "Expected {word} in {context}, got {:?}",
-                self.peek()
+                "Expected {word} in {context}, got {}",
+                describe_token_opt(self.peek())
             ))
         }
     }
@@ -299,7 +300,12 @@ impl CypherParser {
                         .map(str::to_string)
                         .unwrap_or(canonical)
                 })
-                .ok_or_else(|| format!("Expected alias name after AS, got {:?}", token)),
+                .ok_or_else(|| {
+                    format!(
+                        "Expected alias name after AS, got {}",
+                        describe_token(token)
+                    )
+                }),
             None => Err("Expected alias name after AS".to_string()),
         }
     }
@@ -331,7 +337,7 @@ impl CypherParser {
                         .map(str::to_string)
                         .unwrap_or_else(|| canonical.to_string())
                 })
-                .ok_or_else(|| format!("Expected {}, got {:?}", context, token)),
+                .ok_or_else(|| format!("Expected {}, got {}", context, describe_with_hint(token))),
             None => Err(format!("Expected {}", context)),
         }
     }
@@ -506,8 +512,8 @@ impl CypherParser {
                 Ok(OutputFormat::Csv)
             }
             other => Err(format!(
-                "Expected format name after FORMAT (supported: CSV), got {:?}",
-                other
+                "Expected format name after FORMAT (supported: CSV), got {}",
+                describe_token_opt(other)
             )),
         }
     }
@@ -622,7 +628,10 @@ impl CypherParser {
                     return Ok((clauses, self.parse_format_tail(end_at_rbrace)?))
                 }
                 Some(t) => {
-                    return Err(format!("Unexpected token at start of clause: {:?}", t));
+                    return Err(format!(
+                        "Unexpected token at start of clause: {}",
+                        describe_token(t)
+                    ));
                 }
                 None => break,
             }
@@ -631,6 +640,36 @@ impl CypherParser {
         Ok((clauses, OutputFormat::Default))
     }
 }
+
+/// The offending token as the user wrote it, plus — when it is a reserved
+/// keyword in a **name** position — the escape hatch it needs.
+///
+/// Backticks make any word usable as a variable, label, relationship type or
+/// property key (`` MATCH (`match`) ``). Without the hint the error states
+/// the rule and hides the one-character fix. Non-keyword tokens get no
+/// suffix, so the hint never fires on `n.1` or `SET 1 = 2`.
+pub(super) fn describe_with_hint(token: &CypherToken) -> String {
+    match token_to_keyword_name(token) {
+        Some(word) => format!(
+            "{} — a reserved keyword; backtick it (`{word}`) to use it as a name",
+            describe_token(token)
+        ),
+        None => describe_token(token),
+    }
+}
+
+/// [`describe_with_hint`] for a lookahead that may have run off the end.
+pub(super) fn describe_with_hint_opt(token: Option<&CypherToken>) -> String {
+    match token {
+        Some(token) => describe_with_hint(token),
+        None => describe_token_opt(None),
+    }
+}
+
+/// Message for a `/* ... */` block comment. Block comments are not part of
+/// this dialect; `//` line comments are.
+const BLOCK_COMMENT_UNSUPPORTED: &str =
+    "Block comments (/* ... */) are not supported; use a // line comment instead";
 
 /// Case-insensitive comparison of an identifier lexeme against a canonical
 /// soft keyword. Shared by the `schema_ddl` and `load_csv` clause parsers.
@@ -684,6 +723,22 @@ pub fn parse_cypher(input: &str) -> Result<CypherQuery, KgError> {
         })?;
     let keyword_lexemes = positioned.keyword_lexemes;
     let (tokens, positions): (Vec<_>, Vec<_>) = positioned.tokens.into_iter().unzip();
+    // Block comments are unimplemented. The tokenizer marks `/*` with a
+    // pseudo-token instead of failing, so the rejection can go through the
+    // position machinery below — a tokenizer error would carry no line/col
+    // and no caret, and the parser would otherwise report the raw `/` as
+    // `Unexpected token at start of clause`.
+    if let Some(index) = tokens
+        .iter()
+        .position(|token| matches!(token, CypherToken::BlockCommentOpen))
+    {
+        let (line, col) = char_offset_to_line_col(input, positions[index]);
+        return Err(KgError::CypherSyntax {
+            message: format_parse_error_message(input, BLOCK_COMMENT_UNSUPPORTED, line, col),
+            line: Some(line),
+            col: Some(col),
+        });
+    }
     let mut parser = CypherParser::with_keyword_lexemes(tokens, keyword_lexemes);
     match parser.parse_query() {
         Ok(q) => Ok(q),

@@ -289,6 +289,58 @@ fn test_size_on_list() {
     assert_eq!(result.rows[0].first(), Some(&Value::Int64(0)));
 }
 
+/// size()/length() count **characters**, not UTF-8 bytes. The ASCII-only
+/// assertions above could not tell the two apart, and the byte reading
+/// disagreed with the char-indexed substring()/left()/right().
+#[test]
+fn size_and_length_count_characters_not_utf8_bytes() {
+    let graph = DirGraph::new();
+    let no_params = HashMap::new();
+    let executor = CypherExecutor::with_params(&graph, &no_params, None);
+
+    let eval = |query: &str| {
+        let q = parser::parse_cypher(query).unwrap();
+        executor.execute(&q).unwrap().rows[0].first().cloned()
+    };
+
+    // 'ø' is 2 UTF-8 bytes, each CJK char is 3, the emoji is 4.
+    assert_eq!(eval("RETURN size('Tromsø')"), Some(Value::Int64(6)));
+    assert_eq!(eval("RETURN length('Tromsø')"), Some(Value::Int64(6)));
+    assert_eq!(eval("RETURN size('日本語')"), Some(Value::Int64(3)));
+    assert_eq!(eval("RETURN length('日本語')"), Some(Value::Int64(3)));
+    // One emoji is one char here: 🎉 is a single scalar value.
+    assert_eq!(eval("RETURN size('héllo🎉')"), Some(Value::Int64(6)));
+
+    // The point of the fix: size() now composes with the char-indexed
+    // substring(), which byte counting made land mid-character.
+    assert_eq!(
+        eval("RETURN substring('Tromsø', size('Tromsø') - 1)"),
+        Some(Value::String("ø".to_string()))
+    );
+}
+
+/// A string that *looks* like a JSON list keeps reporting its element
+/// count. Deliberate and parked — the whole legacy collect-as-JSON family
+/// coerces the same shape, so changing size() alone would make the surface
+/// less consistent. Pinned so the behaviour is not "fixed" piecemeal.
+#[test]
+fn size_of_a_bracketed_string_is_still_its_element_count() {
+    let graph = DirGraph::new();
+    let no_params = HashMap::new();
+    let executor = CypherExecutor::with_params(&graph, &no_params, None);
+
+    let q = parser::parse_cypher("RETURN size('[1,2,3]')").unwrap();
+    assert_eq!(
+        executor.execute(&q).unwrap().rows[0].first(),
+        Some(&Value::Int64(3))
+    );
+    let q = parser::parse_cypher("RETURN length('[1,2,3]')").unwrap();
+    assert_eq!(
+        executor.execute(&q).unwrap().rows[0].first(),
+        Some(&Value::Int64(3))
+    );
+}
+
 #[test]
 fn test_length_on_list() {
     let graph = DirGraph::new();

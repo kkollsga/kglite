@@ -2,7 +2,7 @@
 
 use super::super::ast::*;
 use super::super::tokenizer::{keyword_name_token, reserved_literal_name_token, CypherToken};
-use super::CypherParser;
+use super::{describe_with_hint, describe_with_hint_opt, CypherParser};
 
 impl CypherParser {
     // ========================================================================
@@ -106,7 +106,10 @@ impl CypherParser {
     pub(super) fn consume_identifier(&mut self) -> Result<String, String> {
         match self.advance() {
             Some(CypherToken::Identifier(s)) => Ok(s.clone()),
-            other => Err(format!("Expected identifier, got {:?}", other)),
+            other => Err(format!(
+                "Expected identifier, got {}",
+                describe_with_hint_opt(other)
+            )),
         }
     }
 
@@ -356,7 +359,10 @@ impl CypherParser {
                     parts.push(backtick_quote(name));
                 }
                 _ => {
-                    return Err(format!("Unexpected token in EXISTS pattern: {:?}", token));
+                    return Err(format!(
+                        "Unexpected token in EXISTS pattern: {}",
+                        describe_with_hint(&token)
+                    ));
                 }
             }
             prev = Some(token);
@@ -496,7 +502,10 @@ impl CypherParser {
                     parts.push(backtick_quote(name));
                 }
                 _ => {
-                    return Err(format!("Unexpected token in MATCH pattern: {:?}", token));
+                    return Err(format!(
+                        "Unexpected token in MATCH pattern: {}",
+                        describe_with_hint(&token)
+                    ));
                 }
             }
             prev = Some(token);

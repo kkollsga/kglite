@@ -110,3 +110,68 @@ def test_caret_or_column_for_typo_extra_paren():
 # variable-length paths, quantified relationships — already parse
 # without error). The hook returns None for everything today; new
 # §X work can plug in detection there as features land.
+
+
+# ---------------------------------------------------------------------------
+# The message body itself — no Rust shapes, and the escape hatch is named.
+# ---------------------------------------------------------------------------
+
+
+def test_parse_error_names_the_token_the_way_the_user_wrote_it():
+    """`SET 1 = 2` used to report `got Some(IntLit(1))`.
+
+    `Option` and enum-variant spellings are Rust internals; a user reading
+    the message has no way to map `IntLit(1)` back to what they typed.
+    """
+    g = kglite.KnowledgeGraph()
+    msg = _try_cypher_capture_error(g, "MATCH (n) SET 1 = 2")
+    assert "Expected variable name in SET, got 1" in msg, msg
+    assert "Some(" not in msg and "IntLit" not in msg, msg
+
+    msg = _try_cypher_capture_error(g, "MATCH (n) SET")
+    assert "got end of input" in msg, msg
+
+
+def test_reserved_keyword_in_a_name_position_points_at_backticks():
+    """Backticks make a reserved word usable as a name; the error says so.
+
+    `MATCH (match:P)` reported only `Unexpected token in MATCH pattern:
+    Match`, which states the rule and hides the one-character fix.
+    """
+    g = kglite.KnowledgeGraph()
+    for query in (
+        "MATCH (match:P) RETURN match",
+        "MATCH (n) RETURN n.match",
+        "CREATE (n:P {match: 1})",
+    ):
+        msg = _try_cypher_capture_error(g, query)
+        assert "reserved keyword" in msg and "backtick" in msg, f"{query}: {msg}"
+
+    # The hint is not sprayed onto errors it does not apply to...
+    assert "backtick" not in _try_cypher_capture_error(g, "MATCH (n) SET 1 = 2")
+    # ...and the fix it advertises works.
+    list(g.cypher("MATCH (`match`:P) RETURN `match`"))
+    list(g.cypher("MATCH (n) RETURN n.`match`"))
+
+
+def test_block_comment_is_rejected_by_name():
+    """`/* ... */` is not supported; the message says so and points at `//`.
+
+    It used to tokenize as a division sign, so the user saw
+    `Unexpected token at start of clause: Slash`.
+    """
+    g = kglite.KnowledgeGraph()
+    for query in (
+        "/* hi */ RETURN 1 AS a",
+        "RETURN 1 AS a /* hi */",
+        "RETURN /* hi */ 1 AS a",
+    ):
+        msg = _try_cypher_capture_error(g, query)
+        assert "Block comments" in msg, f"{query}: {msg}"
+        assert "//" in msg, f"{query}: {msg}"
+        assert "^" in msg and "col" in msg.lower(), f"{query}: {msg}"
+
+    # Line comments, `/*` inside a string, and division are unaffected.
+    assert list(g.cypher("// leading\nRETURN 1 AS a"))[0]["a"] == 1
+    assert list(g.cypher("RETURN '/*' AS a"))[0]["a"] == "/*"
+    assert list(g.cypher("RETURN 6 / 2 AS a"))[0]["a"] == 3

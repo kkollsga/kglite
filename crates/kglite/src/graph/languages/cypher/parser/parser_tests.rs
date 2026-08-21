@@ -893,4 +893,98 @@ mod tests {
             );
         }
     }
+
+    // ========================================================================
+    // Error-message rendering
+    // ========================================================================
+
+    /// Parse errors name the offending token the way the user wrote it.
+    /// They used to interpolate `{:?}`, so `SET 1 = 2` reported
+    /// `got Some(IntLit(1))` — Rust's `Option` and enum shapes leaking into
+    /// a user-facing message.
+    #[test]
+    fn parse_errors_render_tokens_without_the_rust_debug_wrapper() {
+        for (query, fragment) in [
+            (
+                "MATCH (n) SET 1 = 2",
+                "Expected variable name in SET, got 1",
+            ),
+            (
+                "MATCH (n) DELETE 1",
+                "Expected variable name in DELETE, got 1",
+            ),
+            (
+                "MATCH (n) REMOVE 1",
+                "Expected variable name in REMOVE, got 1",
+            ),
+            (
+                "MATCH (n) SET 'x' = 2",
+                "Expected variable name in SET, got 'x'",
+            ),
+            ("MATCH (n) SET = 2", "Expected variable name in SET, got ="),
+            (
+                "MATCH (n) SET",
+                "Expected variable name in SET, got end of input",
+            ),
+        ] {
+            let err = parse_cypher(query).unwrap_err().to_string();
+            assert!(err.contains(fragment), "{query}: unexpected error {err}");
+            assert!(
+                !err.contains("Some(") && !err.contains("IntLit"),
+                "{query}: Rust Debug shape leaked into {err}"
+            );
+        }
+    }
+
+    /// A reserved keyword in a name position points at the escape hatch —
+    /// backticks — instead of only stating the rule.
+    #[test]
+    fn reserved_keyword_in_a_name_position_suggests_backticks() {
+        for query in [
+            "MATCH (match:P) RETURN match",
+            "MATCH (n) RETURN n.match",
+            "CREATE (n:P {match: 1})",
+            "MATCH (n) SET n.where = 1",
+        ] {
+            let err = parse_cypher(query).unwrap_err().to_string();
+            assert!(
+                err.contains("reserved keyword") && err.contains("backtick"),
+                "{query}: no backtick hint in {err}"
+            );
+        }
+        // The hint never fires on a token that is not a keyword.
+        let err = parse_cypher("MATCH (n) SET 1 = 2").unwrap_err().to_string();
+        assert!(!err.contains("backtick"), "spurious backtick hint: {err}");
+        // And the escape hatch it advertises actually works.
+        parse_cypher("MATCH (`match`:P) RETURN `match`").unwrap();
+        parse_cypher("MATCH (n) RETURN n.`match`").unwrap();
+    }
+
+    /// `/* ... */` is not this dialect's comment syntax. It used to
+    /// tokenize as a division sign and surface as
+    /// `Unexpected token at start of clause: Slash`.
+    #[test]
+    fn block_comments_are_rejected_by_name_with_a_position() {
+        for query in [
+            "/* hi */ RETURN 1 AS a",
+            "RETURN 1 AS a /* hi */",
+            "RETURN /* hi */ 1 AS a",
+            "MATCH (n)\n/* hi */\nRETURN n",
+            "RETURN 1 /* unterminated",
+        ] {
+            let err = parse_cypher(query).unwrap_err().to_string();
+            assert!(
+                err.contains("Block comments") && err.contains("//"),
+                "{query}: unexpected error {err}"
+            );
+            assert!(err.contains("^"), "{query}: no caret in {err}");
+        }
+        // Line comments still work, and a `/*` inside a string literal or a
+        // line comment is not a block comment.
+        parse_cypher("// leading comment\nRETURN 1 AS a").unwrap();
+        parse_cypher("RETURN '/*' AS a").unwrap();
+        parse_cypher("RETURN 1 AS a // trailing /*").unwrap();
+        // Division is untouched.
+        parse_cypher("RETURN 6 / 2 AS a").unwrap();
+    }
 }

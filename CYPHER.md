@@ -436,10 +436,10 @@ graph.cypher("""
 |----------|-------------|
 | `toUpper(expr)` | Convert to uppercase |
 | `toLower(expr)` | Convert to lowercase |
-| `toString(expr)` | Convert to string |
+| `toString(expr)` | Convert to string; `toString(null)` is `null` |
 | `toInteger(expr)` | Convert to integer |
 | `toFloat(expr)` | Convert to float |
-| `size(expr)` | Length of string or list |
+| `size(expr)` | Element count of a list, or **character** count of a string (not UTF-8 bytes) |
 | `type(r)` | Relationship type |
 | `id(n)` | Node ID |
 | `labels(n)` | Node labels as a list, primary type first |
@@ -454,10 +454,10 @@ graph.cypher("""
 | `coalesce(a, b, ...)` | First non-null argument |
 | `range(start, end [, step])` | Generate a checked inclusive integer list; default step = 1. Cardinality, `max_rows`, and a 256 MiB materialization ceiling are validated before allocation |
 | `head(list)` / `last(list)` | First / last element of a list (returns `null` on empty) |
-| `length(p)` | Path hop count |
+| `length(p)` | Path hop count; on a string or list, same as `size()` |
 | `nodes(p)` | Nodes in a path |
 | `relationships(p)` | Relationships in a path |
-| `split(str, delim)` | Split string into list |
+| `split(str, delim)` | Split string into list; an empty `delim` splits into characters |
 | `replace(str, search, repl)` | Replace all occurrences |
 | `substring(str, start [, len])` | Extract substring |
 | `left(str, n)` / `right(str, n)` | First/last n characters |
@@ -906,7 +906,7 @@ RETURN degrees(pi())             // → 180.0
 
 | Function | Description |
 |----------|-------------|
-| `split(str, delim)` | Split string into list |
+| `split(str, delim)` | Split string into list; an empty `delim` splits into characters |
 | `replace(str, search, repl)` | Replace all occurrences of `search` with `repl` |
 | `substring(str, start [, len])` | Extract substring (0-indexed) |
 | `left(str, n)` | First `n` characters |
@@ -917,8 +917,18 @@ RETURN degrees(pi())             // → 180.0
 
 > **Auto-coercion:** String functions accept non-string values (DateTime, numbers, booleans) and auto-convert them to strings. For example, `substring(date('2020-06-15'), 0, 4)` returns `"2020"`.
 
+> **Characters, not bytes.** Every string function here is indexed by
+> character, and so are `size()` / `length()` — `size('Tromsø')` is `6`, so
+> `substring('Tromsø', size('Tromsø') - 1)` is `'ø'`.
+
+> **Divergence — `split` with an empty delimiter.** openCypher does not define
+> this case. KGLite splits into characters: `split('abc', '')` is
+> `['a', 'b', 'c']`. An empty *original* stays `['']` for any delimiter, so
+> `split('', '')` and `split('', ',')` both return `['']`.
+
 ```python
 graph.cypher("RETURN split('a,b,c', ',') AS parts")         # ["a", "b", "c"]
+graph.cypher("RETURN split('abc', '') AS chars")            # ["a", "b", "c"]
 graph.cypher("RETURN replace('hello world', 'world', 'cypher') AS s")  # "hello cypher"
 graph.cypher("RETURN substring('hello', 1, 3) AS s")        # "ell"
 graph.cypher("RETURN left('hello', 2) AS l, right('hello', 2) AS r")  # "he", "lo"
@@ -3174,7 +3184,7 @@ claimed openCypher-compatible subset.
 | `std` | Extension | Standard deviation helper |
 | `toUpper`, `toLower`, `toString` | Covered | |
 | `toInteger`, `toFloat` | Covered | |
-| `size`, `length` | Covered | Strings, lists, and paths |
+| `size`, `length` | Covered | Strings (in characters, not bytes), lists, and paths |
 | `type(r)` | Covered | Returns relationship type |
 | `id(entity)` | Covered | KGLite logical node identity and stable relationship identity |
 | `labels(n)` | Intentional divergence | Primary type first, then secondary labels |
@@ -3184,7 +3194,7 @@ claimed openCypher-compatible subset.
 | `range(start, end [, step])` | Covered | Inclusive integer range |
 | `round(x [, precision])` | Covered | |
 | `nodes(p)`, `relationships(p)` | Covered | Exact node order, relationship identity, properties, and traversal direction are preserved for parallel and incoming paths |
-| String functions | Covered | `split`, `replace`, `substring`, `left`, `right`, `trim`, `ltrim`, `rtrim`, `reverse` |
+| String functions | Covered | `split`, `replace`, `substring`, `left`, `right`, `trim`, `ltrim`, `rtrim`, `reverse`. All are character-indexed; `split` with an empty delimiter is a documented divergence (see String Functions) |
 | Math functions | Covered | `abs`, `ceil`, `floor`, `sqrt`, `sign`, `log`/`ln`, `log10`, `exp`, `pow`, `pi`, `rand`, `randomUUID` |
 | Trig functions | Covered | `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2(y,x)`, `cot`, `haversin`, `degrees`, `radians` |
 | Spatial functions | Extension | KGLite's pragmatic `point`, geometry, containment, and distance model |

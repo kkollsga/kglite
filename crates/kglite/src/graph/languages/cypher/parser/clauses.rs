@@ -4,8 +4,8 @@
 //! CREATE, SET, DELETE, REMOVE, MERGE, CALL.
 
 use super::super::ast::*;
-use super::super::tokenizer::CypherToken;
-use super::CypherParser;
+use super::super::tokenizer::{describe_token_opt, CypherToken};
+use super::{describe_with_hint_opt, CypherParser};
 use crate::graph::core::pattern_matching::ParamLabel;
 
 impl CypherParser {
@@ -469,7 +469,10 @@ impl CypherParser {
                     name
                 }
                 other => {
-                    return Err(format!("Expected variable name in SET, got {:?}", other));
+                    return Err(format!(
+                        "Expected variable name in SET, got {}",
+                        describe_with_hint_opt(other.as_ref())
+                    ));
                 }
             };
 
@@ -554,7 +557,10 @@ impl CypherParser {
                     Expression::Variable(name)
                 }
                 other => {
-                    return Err(format!("Expected variable name in DELETE, got {:?}", other));
+                    return Err(format!(
+                        "Expected variable name in DELETE, got {}",
+                        describe_with_hint_opt(other.as_ref())
+                    ));
                 }
             };
             expressions.push(expr);
@@ -587,7 +593,10 @@ impl CypherParser {
                     name
                 }
                 other => {
-                    return Err(format!("Expected variable name in REMOVE, got {:?}", other));
+                    return Err(format!(
+                        "Expected variable name in REMOVE, got {}",
+                        describe_with_hint_opt(other.as_ref())
+                    ));
                 }
             };
 
@@ -655,8 +664,8 @@ impl CypherParser {
                 }
                 other => {
                     return Err(format!(
-                        "Expected CREATE or MATCH after ON in MERGE, got {:?}",
-                        other
+                        "Expected CREATE or MATCH after ON in MERGE, got {}",
+                        describe_token_opt(other)
                     ));
                 }
             }
@@ -698,8 +707,8 @@ impl CypherParser {
                 other => {
                     return Err(format!(
                         "FOREACH body may only contain CREATE / SET / DELETE / REMOVE / \
-                         MERGE / FOREACH, got {:?}",
-                        other
+                         MERGE / FOREACH, got {}",
+                        describe_token_opt(other)
                     ));
                 }
             };
@@ -738,8 +747,8 @@ impl CypherParser {
             other => {
                 return Err(format!(
                     "Expected procedure name after CALL (e.g. `pagerank`, `db.labels`), \
-                     got {:?}",
-                    other
+                     got {}",
+                    describe_token_opt(other.as_ref())
                 ));
             }
         };
@@ -753,8 +762,8 @@ impl CypherParser {
                 }
                 other => {
                     return Err(format!(
-                        "Expected identifier after `.` in procedure name, got {:?}",
-                        other
+                        "Expected identifier after `.` in procedure name, got {}",
+                        describe_token_opt(other.as_ref())
                     ));
                 }
             }
@@ -879,7 +888,10 @@ impl CypherParser {
                     n
                 }
                 other => {
-                    return Err(format!("Expected column name in YIELD, got {:?}", other));
+                    return Err(format!(
+                        "Expected column name in YIELD, got {}",
+                        describe_with_hint_opt(other.as_ref())
+                    ));
                 }
             };
 

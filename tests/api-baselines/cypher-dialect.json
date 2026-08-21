@@ -335,6 +335,36 @@
       "note": "Returns KGLite logical node identity or stable relationship identity."
     },
     {
+      "id": "function.string_length",
+      "syntax": "size(string) / length(string)",
+      "status": "covered",
+      "case_ids": [
+        "function.size_counts_characters",
+        "function.length_counts_characters"
+      ],
+      "note": "Strings are measured in characters, not UTF-8 bytes, so size() composes with the character-indexed substring()/left()/right(). A string whose text looks like a JSON list still reports its element count, matching the rest of KGLite's legacy collect-as-JSON coercion (UNWIND, indexing, head/last/reverse, IN)."
+    },
+    {
+      "id": "function.to_string",
+      "syntax": "toString(value)",
+      "status": "covered",
+      "case_ids": [
+        "function.to_string_value",
+        "function.to_string_null"
+      ],
+      "note": "Null propagates: toString(null) is null, not the string 'null'."
+    },
+    {
+      "id": "function.split",
+      "syntax": "split(original, delimiter)",
+      "status": "intentional_divergence",
+      "case_ids": [
+        "function.split_delimiter",
+        "function.split_empty_delimiter"
+      ],
+      "note": "Ordinary delimiters behave as expected. openCypher does not define the empty-delimiter case; KGLite pins it to the string's characters, and an empty original to a single empty string."
+    },
+    {
       "id": "pattern.var_length_default_cap",
       "syntax": "-[*]-> / -[*N..]->",
       "status": "intentional_divergence",

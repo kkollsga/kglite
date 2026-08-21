@@ -4,6 +4,7 @@
 //! one of this category's functions so the dispatcher tries the next.
 use super::super::helpers::*;
 use super::super::*;
+use super::shared::*;
 use crate::datatypes::values::Value;
 
 impl<'a> CypherExecutor<'a> {
@@ -17,19 +18,13 @@ impl<'a> CypherExecutor<'a> {
             "size" => {
                 // Phase A.1 / C2 — native Value::List fast path;
                 // string fallback stays for legacy collect-as-JSON
-                // and parameter-passed lists.
+                // and parameter-passed lists. Plain strings count
+                // characters — see `string_scalar_length`.
                 let val = self.evaluate_expression(super::first_arg(name, args)?, row)?;
                 match val {
                     Value::List(items) => Ok(Value::Int64(items.len() as i64)),
                     Value::Map(m) => Ok(Value::Int64(m.len() as i64)),
-                    Value::String(s) => {
-                        if s.starts_with('[') && s.ends_with(']') {
-                            let items = parse_list_value(&Value::String(s));
-                            Ok(Value::Int64(items.len() as i64))
-                        } else {
-                            Ok(Value::Int64(s.len() as i64))
-                        }
-                    }
+                    Value::String(s) => Ok(Value::Int64(string_scalar_length(s))),
                     _ => Ok(Value::Null),
                 }
             }
@@ -46,14 +41,7 @@ impl<'a> CypherExecutor<'a> {
                     Value::List(items) => Ok(Value::Int64(items.len() as i64)),
                     Value::Map(m) => Ok(Value::Int64(m.len() as i64)),
                     Value::Path(p) => Ok(Value::Int64(p.rels.len() as i64)),
-                    Value::String(s) => {
-                        if s.starts_with('[') && s.ends_with(']') {
-                            let items = parse_list_value(&Value::String(s));
-                            Ok(Value::Int64(items.len() as i64))
-                        } else {
-                            Ok(Value::Int64(s.len() as i64))
-                        }
-                    }
+                    Value::String(s) => Ok(Value::Int64(string_scalar_length(s))),
                     _ => Ok(Value::Null),
                 }
             }

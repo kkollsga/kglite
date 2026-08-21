@@ -298,3 +298,58 @@ fn test_pagerank_connection_types_list_syntax() {
         "Scores should be non-uniform when filtering by connection type"
     );
 }
+
+/// `toString(null)` is null, not the four-character string `'null'`.
+/// The old formatting made a missing value indistinguishable from a
+/// present one and survived `coalesce()`, which is exactly the call that
+/// exists to supply a default.
+#[test]
+fn tostring_of_null_is_null() {
+    assert_eq!(eval_string_fn("RETURN toString(null)"), Value::Null);
+    assert_eq!(
+        eval_string_fn("MATCH (n:Item) RETURN toString(n.missing_property)"),
+        Value::Null
+    );
+    assert_eq!(
+        eval_string_fn("RETURN coalesce(toString(null), 'D')"),
+        Value::String("D".to_string())
+    );
+    // Non-null arguments are untouched.
+    assert_eq!(
+        eval_string_fn("RETURN toString(42)"),
+        Value::String("42".to_string())
+    );
+}
+
+/// `split()` with an **empty delimiter** splits into characters. Rust's
+/// `str::split` produced a phantom leading and trailing empty element
+/// (`split('a', '')` → `['', 'a', '']`), which is an artefact of the Rust
+/// API, not a Cypher answer. Neo4j does not specify the empty-delimiter
+/// case, so the per-character reading is a documented kglite dialect
+/// choice (CYPHER.md).
+#[test]
+fn split_on_an_empty_delimiter_yields_characters() {
+    let strings = |query: &str| match eval_string_fn(query) {
+        Value::List(items) => items
+            .into_iter()
+            .map(|item| match item {
+                Value::String(s) => s,
+                other => panic!("expected string element, got {other:?}"),
+            })
+            .collect::<Vec<_>>(),
+        other => panic!("expected a list, got {other:?}"),
+    };
+
+    assert_eq!(strings("RETURN split('a', '')"), vec!["a"]);
+    assert_eq!(strings("RETURN split('abc', '')"), vec!["a", "b", "c"]);
+    // Characters, not bytes — same rule as size().
+    assert_eq!(
+        strings("RETURN split('Tromsø', '')"),
+        ["T", "r", "o", "m", "s", "ø"]
+    );
+    // An empty original stays [''] whatever the delimiter.
+    assert_eq!(strings("RETURN split('', '')"), vec![""]);
+    assert_eq!(strings("RETURN split('', ',')"), vec![""]);
+    // Non-empty delimiters are unchanged.
+    assert_eq!(strings("RETURN split('a,b', ',')"), vec!["a", "b"]);
+}

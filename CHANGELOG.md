@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`size()` and `length()` on a string counted UTF-8 bytes, not characters.**
+  `size('Tromsø')` answered `7` and `size('日本語')` answered `9`, which
+  disagreed with `substring()`, `left()` and `right()` — those have always been
+  character-indexed — so the idiomatic `substring(s, size(s) - 1)` returned an
+  empty string for any non-ASCII `s` instead of its last character. Both
+  functions now count characters on every path. A string whose *text* looks
+  like a JSON list (`'[1,2,3]'`) still reports its element count, unchanged:
+  that coercion is shared with `UNWIND`, list indexing, `head`/`last`/`reverse`
+  and `IN`, and is deliberately left for a single coordinated change.
+
+- **`toString(null)` returned the four-character string `'null'`.** An absent
+  value became indistinguishable from a present one, and — because the result
+  was a non-null string — it survived `coalesce(toString(x), 'default')`, the
+  very call that exists to substitute a default for a missing value.
+  `toString(null)` is now `null`; non-null arguments are unchanged.
+
+- **`split()` with an empty delimiter returned phantom empty elements.**
+  `split('a', '')` answered `['', 'a', '']` and `split('abc', '')` answered
+  `['', 'a', 'b', 'c', '']` — an artefact of the underlying Rust `str::split`
+  rather than a Cypher answer. An empty delimiter now splits into characters
+  (`split('abc', '')` → `['a', 'b', 'c']`), and an empty original stays `['']`
+  for any delimiter. openCypher does not define the empty-delimiter case, so
+  this is recorded as a documented dialect divergence in `CYPHER.md`.
+
 - **A query that set no `max_rows` could materialize an unbounded intermediate
   row set and get the host process killed.** `max_rows` is opt-in and unset by
   default on every surface, which left every cardinality guard in the executor
@@ -124,6 +148,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   values generally, still produce a float; non-numeric values and nulls are
   skipped and no longer influence the type. `avg`, `count`, `min` and `max` are
   unchanged.
+
+### Changed
+
+- **Cypher parse errors read as Cypher, not as Rust.** A token in an error
+  message is now spelled the way it was written — `MATCH (n) SET 1 = 2` says
+  `got 1` instead of `got Some(IntLit(1))`, and a lookahead past the end says
+  `got end of input`. A reserved keyword used as a name names the escape
+  hatch (``got MATCH — a reserved keyword; backtick it (`match`) to use it
+  as a name``), and `/* ... */` is reported as an unsupported block comment
+  pointing at `//` instead of surfacing as `Unexpected token at start of
+  clause: Slash`. Block comments remain unimplemented.
 
 ## [0.16.5] - 2026-08-19
 

@@ -273,8 +273,8 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/scalar_functions/collection.rs",
       "qualified_name": "crate::CypherExecutor<'a>::eval_collection_fn",
-      "lines": 179,
-      "branches": 66,
+      "lines": 170,
+      "branches": 64,
       "nesting": 4
     },
     {
@@ -301,7 +301,7 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/scalar_functions/string.rs",
       "qualified_name": "crate::CypherExecutor<'a>::eval_string_fn",
-      "lines": 386,
+      "lines": 381,
       "branches": 157,
       "nesting": 7
     },
@@ -427,8 +427,8 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/tokenizer.rs",
       "qualified_name": "crate::tokenize_cypher_with_positions",
-      "lines": 350,
-      "branches": 70,
+      "lines": 348,
+      "branches": 69,
       "nesting": 6
     },
     {
