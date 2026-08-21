@@ -76,6 +76,203 @@ impl<'a> CypherExecutor<'a> {
         true
     }
 
+    /// `EXISTS { … }` — whether the subquery has at least one match, scoped to
+    /// this row's bindings.
+    ///
+    /// The single evaluation site for every spelling EXISTS has: a bare
+    /// pattern predicate, `NOT EXISTS` (the `Not` wrapper inverts what this
+    /// returns), a projected `RETURN EXISTS {…}`, and `CASE WHEN EXISTS`.
+    fn evaluate_exists_subquery(
+        &self,
+        patterns: &[crate::graph::core::pattern_matching::Pattern],
+        pattern_groups: &[usize],
+        where_clause: &Option<Box<Predicate>>,
+        row: &ResultRow,
+    ) -> Result<Option<bool>, String> {
+        // Fast path: single 3-element pattern with one bound node
+        // — check edge existence directly without PatternExecutor
+        if let Some(result) = self.try_fast_exists_check(patterns, where_clause, row) {
+            return result.map(Some);
+        }
+
+        // Slow path: full pattern execution for complex EXISTS.
+        //
+        // Multi-pattern subqueries (`EXISTS { MATCH ... MATCH ... [WHERE ...] }`)
+        // share variables across patterns, so we accumulate bindings
+        // progressively. Each pattern intersects with the running
+        // `combined_rows` set; a pattern that produces zero compatible
+        // matches short-circuits the whole subquery to false.
+        //
+        // The WHERE predicate is evaluated *once*, against the fully
+        // merged bindings, after all patterns have matched. Evaluating
+        // it per-pattern (the previous behaviour) breaks subqueries
+        // where the predicate references a variable bound in a later
+        // MATCH — `prod` in `MATCH ... MATCH (prod) WHERE prod.price > X`
+        // wouldn't be in scope when the first MATCH's results were
+        // checked.
+        // Relationship uniqueness (the openCypher trail rule) applies
+        // across the subquery's comma patterns exactly as across the
+        // comma patterns of one MATCH: two different pattern edges may
+        // not bind the same relationship. It does NOT apply across the
+        // multi-clause subquery form's separate MATCHes
+        // (`EXISTS { MATCH … MATCH … }`) — those are distinct clause
+        // scopes (`pattern_groups`), and edges may repeat across them
+        // exactly as across top-level MATCH clauses. Only enforced
+        // when some group carries two or more edge patterns — the
+        // common single-pattern EXISTS pays nothing.
+        let enforce_rel_uniqueness =
+            match_clause::grouped_patterns_need_rel_uniqueness(patterns, pattern_groups);
+        // One witness decides EXISTS — and decides NOT EXISTS just as
+        // well, since zero witnesses is the same answer capped or not.
+        // The cap is exact, so `PatternExecutor::execute`'s uncapped
+        // retry still fires when its advisory pre-caps bit and the
+        // pass came back empty: a witness that only exists past the
+        // candidate cap is found on the retry, not missed.
+        let witness_cap = Self::exists_witness_cap(patterns, where_clause, row);
+        let mut combined_rows: Vec<ResultRow> = vec![row.clone()];
+        // Parallel to `combined_rows` when enforcing: the edge indices
+        // each row consumed within the CURRENT clause group (clause-
+        // local — outer MATCH edges may legitimately reappear here,
+        // and the sets reset at every group boundary).
+        let mut clause_edge_sets: Vec<Vec<petgraph::graph::EdgeIndex>> = if enforce_rel_uniqueness {
+            vec![Vec::new()]
+        } else {
+            Vec::new()
+        };
+        let mut prev_group: Option<usize> = None;
+        for (pi, pattern) in patterns.iter().enumerate() {
+            if combined_rows.is_empty() {
+                return Ok(Some(false));
+            }
+            // New clause group (a MATCH separator): edges bound by
+            // earlier groups no longer constrain — reset each row's
+            // clause-local edge set.
+            let group = pattern_groups.get(pi).copied().unwrap_or(0);
+            if enforce_rel_uniqueness && prev_group.is_some_and(|g| g != group) {
+                for set in &mut clause_edge_sets {
+                    set.clear();
+                }
+            }
+            prev_group = Some(group);
+            // Resolve EqualsVar references against current row
+            let resolved;
+            let pat = if Self::pattern_has_vars(pattern) {
+                resolved = self.resolve_pattern_vars(pattern, row);
+                &resolved
+            } else {
+                pattern
+            };
+            let executor = PatternExecutor::with_bindings_and_params(
+                self.graph,
+                witness_cap,
+                &row.node_bindings,
+                self.params,
+            )
+            .set_deadline(self.deadline)
+            .set_cancel(self.cancel)
+            .set_parallel(self.parallel);
+            let matches = executor.execute(pat)?;
+
+            let mut next_rows: Vec<ResultRow> = Vec::new();
+            let mut next_sets: Vec<Vec<petgraph::graph::EdgeIndex>> = Vec::new();
+            for (ci, current) in combined_rows.iter().enumerate() {
+                for m in &matches {
+                    if !self.bindings_compatible(current, m) {
+                        continue;
+                    }
+                    if enforce_rel_uniqueness {
+                        let mut m_edges = Vec::new();
+                        match_clause::match_edge_indices(m, &mut m_edges);
+                        if m_edges.iter().any(|e| clause_edge_sets[ci].contains(e)) {
+                            continue; // trail rule: edge re-use across patterns
+                        }
+                        let mut next = clause_edge_sets[ci].clone();
+                        next.extend(m_edges);
+                        next_sets.push(next);
+                    }
+                    let mut merged = current.clone();
+                    self.merge_match_into_row(&mut merged, m);
+                    next_rows.push(merged);
+                }
+            }
+            combined_rows = next_rows;
+            if enforce_rel_uniqueness {
+                clause_edge_sets = next_sets;
+            }
+        }
+
+        if combined_rows.is_empty() {
+            return Ok(Some(false));
+        }
+        if let Some(ref where_pred) = where_clause {
+            Ok(Some(combined_rows.iter().any(|r| {
+                // EXISTS treats a NULL inner predicate as "no match"
+                // — same as `false` — to keep with Cypher's "exists
+                // a row that satisfies" semantics. Strict tristate
+                // is preserved at the outer boundary, not here.
+                matches!(
+                    self.evaluate_predicate_tristate(where_pred, r),
+                    Ok(Some(true))
+                )
+            })))
+        } else {
+            Ok(Some(true))
+        }
+    }
+
+    /// How many matches an `EXISTS { … }` subquery needs from one of its
+    /// patterns: `Some(1)` when the first match the executor returns settles
+    /// the predicate, `None` when it might not.
+    ///
+    /// Three things can make a returned match *not* an answer, and each one
+    /// makes the cap unsound because the arm would read "no witness" from a
+    /// truncated run:
+    ///
+    /// 1. **More than one pattern.** The arm joins the patterns; a match of
+    ///    the first may be incompatible with every match of the second.
+    /// 2. **An inner `WHERE`.** It is applied after the join, so the first
+    ///    witness may fail it while a later one passes.
+    /// 3. **A binding the executor does not enforce.** Node variables in
+    ///    `row.node_bindings` are pushed down as pre-bindings, so every match
+    ///    already agrees with them. Values carried only in `row.projected`
+    ///    (`UNWIND collect(n) AS n`, a folded `WITH n`) and relationship
+    ///    variables bound on the row are not: `bindings_compatible` rejects
+    ///    those afterwards, which a cap of one has no second candidate to
+    ///    survive. Same three guards `try_fast_exists_check` applies.
+    pub(super) fn exists_witness_cap(
+        patterns: &[crate::graph::core::pattern_matching::Pattern],
+        where_clause: &Option<Box<Predicate>>,
+        row: &ResultRow,
+    ) -> Option<usize> {
+        use crate::graph::core::pattern_matching::PatternElement;
+
+        if patterns.len() != 1 || where_clause.is_some() {
+            return None;
+        }
+        for element in &patterns[0].elements {
+            match element {
+                PatternElement::Node(np) => {
+                    if let Some(var) = np.variable.as_deref() {
+                        if !row.node_bindings.contains_key(var) && row.projected.contains_key(var) {
+                            return None;
+                        }
+                    }
+                }
+                PatternElement::Edge(ep) => {
+                    if let Some(var) = ep.variable.as_deref() {
+                        if row.edge_bindings.contains_key(var)
+                            || row.projected.contains_key(var)
+                            || row.node_bindings.contains_key(var)
+                        {
+                            return None;
+                        }
+                    }
+                }
+            }
+        }
+        Some(1)
+    }
+
     // ========================================================================
     // WHERE
     // ========================================================================
@@ -706,132 +903,7 @@ impl<'a> CypherExecutor<'a> {
                 patterns,
                 pattern_groups,
                 where_clause,
-            } => {
-                // Fast path: single 3-element pattern with one bound node
-                // — check edge existence directly without PatternExecutor
-                if let Some(result) = self.try_fast_exists_check(patterns, where_clause, row) {
-                    return result.map(Some);
-                }
-
-                // Slow path: full pattern execution for complex EXISTS.
-                //
-                // Multi-pattern subqueries (`EXISTS { MATCH ... MATCH ... [WHERE ...] }`)
-                // share variables across patterns, so we accumulate bindings
-                // progressively. Each pattern intersects with the running
-                // `combined_rows` set; a pattern that produces zero compatible
-                // matches short-circuits the whole subquery to false.
-                //
-                // The WHERE predicate is evaluated *once*, against the fully
-                // merged bindings, after all patterns have matched. Evaluating
-                // it per-pattern (the previous behaviour) breaks subqueries
-                // where the predicate references a variable bound in a later
-                // MATCH — `prod` in `MATCH ... MATCH (prod) WHERE prod.price > X`
-                // wouldn't be in scope when the first MATCH's results were
-                // checked.
-                // Relationship uniqueness (the openCypher trail rule) applies
-                // across the subquery's comma patterns exactly as across the
-                // comma patterns of one MATCH: two different pattern edges may
-                // not bind the same relationship. It does NOT apply across the
-                // multi-clause subquery form's separate MATCHes
-                // (`EXISTS { MATCH … MATCH … }`) — those are distinct clause
-                // scopes (`pattern_groups`), and edges may repeat across them
-                // exactly as across top-level MATCH clauses. Only enforced
-                // when some group carries two or more edge patterns — the
-                // common single-pattern EXISTS pays nothing.
-                let enforce_rel_uniqueness =
-                    match_clause::grouped_patterns_need_rel_uniqueness(patterns, pattern_groups);
-                let mut combined_rows: Vec<ResultRow> = vec![row.clone()];
-                // Parallel to `combined_rows` when enforcing: the edge indices
-                // each row consumed within the CURRENT clause group (clause-
-                // local — outer MATCH edges may legitimately reappear here,
-                // and the sets reset at every group boundary).
-                let mut clause_edge_sets: Vec<Vec<petgraph::graph::EdgeIndex>> =
-                    if enforce_rel_uniqueness {
-                        vec![Vec::new()]
-                    } else {
-                        Vec::new()
-                    };
-                let mut prev_group: Option<usize> = None;
-                for (pi, pattern) in patterns.iter().enumerate() {
-                    if combined_rows.is_empty() {
-                        return Ok(Some(false));
-                    }
-                    // New clause group (a MATCH separator): edges bound by
-                    // earlier groups no longer constrain — reset each row's
-                    // clause-local edge set.
-                    let group = pattern_groups.get(pi).copied().unwrap_or(0);
-                    if enforce_rel_uniqueness && prev_group.is_some_and(|g| g != group) {
-                        for set in &mut clause_edge_sets {
-                            set.clear();
-                        }
-                    }
-                    prev_group = Some(group);
-                    // Resolve EqualsVar references against current row
-                    let resolved;
-                    let pat = if Self::pattern_has_vars(pattern) {
-                        resolved = self.resolve_pattern_vars(pattern, row);
-                        &resolved
-                    } else {
-                        pattern
-                    };
-                    let executor = PatternExecutor::with_bindings_and_params(
-                        self.graph,
-                        None,
-                        &row.node_bindings,
-                        self.params,
-                    )
-                    .set_deadline(self.deadline)
-                    .set_cancel(self.cancel)
-                    .set_parallel(self.parallel)
-                    .set_parallel(self.parallel);
-                    let matches = executor.execute(pat)?;
-
-                    let mut next_rows: Vec<ResultRow> = Vec::new();
-                    let mut next_sets: Vec<Vec<petgraph::graph::EdgeIndex>> = Vec::new();
-                    for (ci, current) in combined_rows.iter().enumerate() {
-                        for m in &matches {
-                            if !self.bindings_compatible(current, m) {
-                                continue;
-                            }
-                            if enforce_rel_uniqueness {
-                                let mut m_edges = Vec::new();
-                                match_clause::match_edge_indices(m, &mut m_edges);
-                                if m_edges.iter().any(|e| clause_edge_sets[ci].contains(e)) {
-                                    continue; // trail rule: edge re-use across patterns
-                                }
-                                let mut next = clause_edge_sets[ci].clone();
-                                next.extend(m_edges);
-                                next_sets.push(next);
-                            }
-                            let mut merged = current.clone();
-                            self.merge_match_into_row(&mut merged, m);
-                            next_rows.push(merged);
-                        }
-                    }
-                    combined_rows = next_rows;
-                    if enforce_rel_uniqueness {
-                        clause_edge_sets = next_sets;
-                    }
-                }
-
-                if combined_rows.is_empty() {
-                    return Ok(Some(false));
-                }
-                if let Some(ref where_pred) = where_clause {
-                    Ok(Some(combined_rows.iter().any(|r| {
-                        // EXISTS treats a NULL inner predicate as "no match"
-                        // — same as `false` — to keep with Cypher's "exists
-                        // a row that satisfies" semantics. Strict tristate
-                        // is preserved at the outer boundary, not here.
-                        matches!(
-                            self.evaluate_predicate_tristate(where_pred, r),
-                            Ok(Some(true))
-                        )
-                    })))
-                } else {
-                    Ok(Some(true))
-                }
-            }
+            } => self.evaluate_exists_subquery(patterns, pattern_groups, where_clause, row),
             Predicate::InExpression { expr, list_expr } => {
                 // Same Kleene rules as Predicate::In; the LHS and the list are
                 // both arbitrary expressions, so NULL can come from either.

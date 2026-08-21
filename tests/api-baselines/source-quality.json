@@ -118,13 +118,6 @@
     },
     {
       "path": "crates/kglite/src/graph/core/pattern_matching/matcher.rs",
-      "qualified_name": "crate::PatternExecutor<'a>::expand_from_node",
-      "lines": 226,
-      "branches": 41,
-      "nesting": 5
-    },
-    {
-      "path": "crates/kglite/src/graph/core/pattern_matching/matcher.rs",
       "qualified_name": "crate::PatternExecutor<'a>::find_matching_nodes",
       "lines": 207,
       "branches": 42,
@@ -315,9 +308,9 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/where_clause.rs",
       "qualified_name": "crate::CypherExecutor<'a>::evaluate_predicate_tristate",
-      "lines": 312,
-      "branches": 84,
-      "nesting": 6
+      "lines": 187,
+      "branches": 68,
+      "nesting": 3
     },
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/where_clause.rs",

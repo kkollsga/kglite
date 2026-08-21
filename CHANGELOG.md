@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Breaking (semantics fix): a variable-length segment could hide its
+  relationships from its own clause's uniqueness check.** When the optimizer
+  cleared trail tracking on a `[:T*min..max]` segment, the relationships the
+  segment walked became invisible to openCypher's rule that one relationship
+  occurs at most once per clause — so a sibling edge in the same clause was
+  free to re-bind one of them. On two nodes joined in both directions,
+  `MATCH (a {id: 1})-[:R*1..2]->(x)-[:R]->(c) RETURN DISTINCT c.id` answered
+  `[1, 2]` where trail semantics give `[1]`. The optimization now applies only
+  when no sibling edge in the clause can bind a relationship the segment binds
+  — either it is the clause's only edge, or every edge is typed and this one's
+  types are disjoint from all the others'.
+
 - **`describe()`'s algorithm topics advertised signatures that do not exist.**
   The fluent API reference an agent reads offered `shortest_path(...,
   connection_type=None, directed=True)` — both keywords raise `TypeError`, and
@@ -723,6 +735,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the stored data is clean.
 
 ### Changed
+
+- **Performance: `EXISTS { … }` and pattern predicates stop at the first witness.** An
+  existence check needs one match, but the pattern behind it ran to completion
+  for every candidate row — on a 10 000-node social graph the tracked
+  `EXISTS { (p)-[:KNOWS*1..3]->(:Person) }` cell measured 466x its fixed-hop
+  control. The evaluator now caps the subquery at one match wherever the first
+  match settles the answer (a single pattern with no inner `WHERE`, and no
+  binding the pattern executor cannot enforce itself), and a variable-length
+  segment inside an existence check with a minimum hop count of at most 1 uses
+  the set-based expansion, which stops as soon as it has the witness. `NOT
+  EXISTS` gets the same cap — one witness decides it either way — and a witness
+  that only exists past the executor's candidate pre-caps is still found, by
+  the same uncapped retry that guards every other capped pattern. `COUNT { … }`
+  is deliberately untouched: it needs the count, not a witness.
 
 - **A fixed-length variable-hop pattern (`*k..k`) is now planned as `k`
   explicit hops.** `-[:R*2..2]->` and `-[:R]->()-[:R]->` ask the same question,

@@ -92,6 +92,21 @@ struct HopPlan<'p> {
     /// hop; at an intermediate hop an *advisory* overcommit (or `None` on the
     /// uncapped retry pass) — see [`CapPass`].
     limit: Option<usize>,
+    /// Whether this hop may hand its remaining budget down into a
+    /// variable-length expansion so the BFS stops at the first rows it needs.
+    ///
+    /// The expansion is upstream of three filters this loop applies —
+    /// [`reuses_bound_relationship`], [`PatternExecutor::target_satisfies_bindings`]
+    /// and the distinct-target dedup — so truncating it is only sound when
+    /// none of them can reject a row. If one could, a cap of *n* would return
+    /// *n* rows that all get dropped and the hop would answer "no more rows"
+    /// when more existed. False for every hop where that is possible, which
+    /// restores the pre-cap behaviour (the expansion runs to completion and
+    /// this loop truncates).
+    ///
+    /// Two of the three are decided per hop and live here; the third
+    /// (`bound_target`) is per match and is checked at the call site.
+    var_length_cap_safe: bool,
 }
 
 /// Whether an [`PatternExecutor::execute_pass`] applies the advisory
@@ -353,6 +368,11 @@ impl<'a> PatternExecutor<'a> {
                 _ => return Err("Expected node pattern after edge. Complete the pattern with a node: ()-[:EDGE]->(node)".to_string()),
             };
 
+            // Whether any EARLIER hop recorded relationship identity: only
+            // then can `reuses_bound_relationship` reject a row of this hop.
+            // Read before this hop folds itself in, below.
+            let earlier_relationship_state = relationship_state_recorded;
+
             // Internal binding names are invariant for the whole hop. Build
             // them once rather than formatting a fresh String for every
             // matched relationship on the expansion hot path.
@@ -379,6 +399,12 @@ impl<'a> PatternExecutor<'a> {
                         CapPass::Uncapped => None,
                     }
                 },
+                var_length_cap_safe: edge_pattern.var_length.is_some()
+                    && !earlier_relationship_state
+                    && !self
+                        .distinct_target_var
+                        .as_deref()
+                        .is_some_and(|dtv| node_pattern.variable.as_deref() == Some(dtv)),
             };
 
             relationship_state_recorded |= hop.track_fixed_trail
@@ -548,8 +574,16 @@ impl<'a> PatternExecutor<'a> {
                 // Stopping here is what the `zip` this replaced did.
                 break;
             };
-            let remaining = hop_limit.map(|max| max.saturating_sub(new_matches.len()));
+            let mut remaining = hop_limit.map(|max| max.saturating_sub(new_matches.len()));
             let hint = self.bound_target(hop.node, current_match);
+            // A variable-length expansion is capped only where every row it
+            // returns is one this loop keeps — see `HopPlan::var_length_cap_safe`
+            // for the two hop-level conditions; `hint` is the third: a bound
+            // target variable means `target_satisfies_bindings` rejects every
+            // peer but one, so a truncated expansion could return only peers.
+            if hop.edge.var_length.is_some() && !(hop.var_length_cap_safe && hint.is_none()) {
+                remaining = None;
+            }
             let expansions =
                 self.expand_from_node(source_idx, hop.edge, hop.node, remaining, hint)?;
             for (target_idx, edge_binding) in expansions {

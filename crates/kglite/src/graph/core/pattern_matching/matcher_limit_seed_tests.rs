@@ -338,3 +338,79 @@ fn a_missing_relationship_type_stays_empty_under_a_cap() {
     )
     .is_empty());
 }
+
+// ──────────────────── variable-length expansion caps ─────────────────
+//
+// A variable-length segment used to run to completion and hand the whole
+// reachable set back for the caller to truncate; it now receives the hop's
+// remaining budget and stops when it is filled. That is only sound where every
+// row it returns survives the filters the expansion loop applies *after* it —
+// see `HopPlan::var_length_cap_safe`. These pin both halves.
+
+/// `a -> b -> c -> a`, plus two leaves hanging off `a`, so a capped expansion
+/// from `a` meets a non-answer first.
+fn cyclic_chain() -> DirGraph {
+    let mut graph = DirGraph::new();
+    run(
+        &mut graph,
+        "CREATE (a:P {id: 1, name: 'a'}), (b:P {id: 2, name: 'b'}),
+                (c:P {id: 3, name: 'c'}), (d:P {id: 4, name: 'd'}),
+                (e:P {id: 5, name: 'e'})
+         CREATE (a)-[:R]->(b), (b)-[:R]->(c), (c)-[:R]->(a),
+                (a)-[:R]->(d), (d)-[:R]->(e)",
+    );
+    graph
+}
+
+#[test]
+fn a_capped_var_length_expansion_returns_a_prefix_of_the_uncapped_answer() {
+    let graph = cyclic_chain();
+    let uncapped = names(&graph, "(a:P {name: 'a'})-[:R*1..2]->(b:P)", None);
+    assert_eq!(
+        uncapped
+            .iter()
+            .map(|(_, target)| target.as_str())
+            .collect::<Vec<_>>(),
+        vec!["d", "b", "e", "c"],
+        "everything within two hops of 'a'"
+    );
+
+    for cap in 1..=uncapped.len() {
+        assert_eq!(
+            names(&graph, "(a:P {name: 'a'})-[:R*1..2]->(b:P)", Some(cap)),
+            uncapped[..cap].to_vec(),
+            "cap {cap}"
+        );
+    }
+    assert_eq!(
+        names(&graph, "(a:P {name: 'a'})-[:R*1..2]->(b:P)", Some(99)),
+        uncapped
+    );
+}
+
+#[test]
+fn a_var_length_hop_onto_a_bound_variable_is_never_capped() {
+    // `(a)-[:R*1..3]->(a)` accepts exactly one of the expansion's targets —
+    // the source itself. Handing the hop's budget of one down to the BFS
+    // would return the first *peer* instead, the loop would reject it, and
+    // the closed walk would be reported as absent: three rows become none.
+    let graph = cyclic_chain();
+    let closed = rows(&graph, "(a:P)-[:R*1..3]->(a)", None, &["a"]);
+    assert_eq!(
+        closed
+            .iter()
+            .flatten()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["a", "b", "c"],
+        "the three nodes on the cycle"
+    );
+    assert_eq!(
+        rows(&graph, "(a:P)-[:R*1..3]->(a)", Some(1), &["a"]),
+        closed[..1].to_vec()
+    );
+    assert_eq!(
+        rows(&graph, "(a:P)-[:R*1..3]->(a)", Some(3), &["a"]),
+        closed
+    );
+}

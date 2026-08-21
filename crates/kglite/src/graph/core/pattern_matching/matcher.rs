@@ -1576,6 +1576,68 @@ impl<'a> PatternExecutor<'a> {
         })
     }
 
+    /// Whether [`Self::expand_disk_peers`] can answer this hop.
+    ///
+    /// The sweep skips `EdgeData` materialization entirely, which on a disk
+    /// graph is the difference between reading `edge_endpoints.bin` (13 GB on
+    /// Wikidata) and not. It can only do that when nothing downstream needs
+    /// the relationship: no named variable, no property filter, no trail, and
+    /// a single connection type the CSR can pre-filter on. The `is_disk()`
+    /// gate keeps memory/mapped on the ordinary path, where materialization is
+    /// already free via petgraph.
+    fn disk_peer_sweep_applies(&self, edge_pattern: &EdgePattern) -> bool {
+        edge_pattern.variable.is_none()
+            && edge_pattern.properties.is_none()
+            && !edge_pattern.needs_path_info
+            && edge_pattern.connection_types.is_none()
+            && self.graph.graph.is_disk()
+    }
+
+    /// One hop over the disk CSR's peer list, without materialising an edge.
+    fn expand_disk_peers(
+        &self,
+        source: NodeIndex,
+        edge_pattern: &EdgePattern,
+        node_pattern: &NodePattern,
+        max_results: Option<usize>,
+        target_hint: Option<NodeIndex>,
+    ) -> Vec<(NodeIndex, MatchBinding)> {
+        let conn_u64 = edge_pattern
+            .connection_type
+            .as_ref()
+            .map(|ct| InternedKey::from_str(ct).as_u64());
+        let directions: &[Direction] = match edge_pattern.direction {
+            EdgeDirection::Outgoing => &[Direction::Outgoing],
+            EdgeDirection::Incoming => &[Direction::Incoming],
+            EdgeDirection::Both => &[Direction::Outgoing, Direction::Incoming],
+        };
+        let mut results = Vec::new();
+        for &dir in directions {
+            for (peer_idx, _edge_idx) in self.graph.graph.iter_peers_filtered(source, dir, conn_u64)
+            {
+                if max_results.is_some_and(|max| results.len() >= max) {
+                    break;
+                }
+                if target_hint.is_some_and(|hint| peer_idx != hint) {
+                    continue;
+                }
+                if !edge_pattern.skip_target_type_check
+                    && !self.node_matches_pattern_labels(peer_idx, node_pattern)
+                {
+                    continue;
+                }
+                if let Some(ref props) = node_pattern.properties {
+                    if !self.node_matches_properties(peer_idx, props) {
+                        continue;
+                    }
+                }
+                // Placeholder binding — the caller won't use it (no variable).
+                results.push((peer_idx, MatchBinding::NodeRef(peer_idx)));
+            }
+        }
+        results
+    }
+
     fn expand_from_node(
         &self,
         source: NodeIndex,
@@ -1602,62 +1664,29 @@ impl<'a> PatternExecutor<'a> {
             }
         }
 
-        // Check for variable-length path
+        // Check for variable-length path. `max_results` reaches the expansion
+        // here: the caller only passes one when every row it returns survives
+        // the post-expansion filters (`HopPlan::var_length_cap_safe`), so the
+        // BFS may stop the moment it is filled.
         if let Some((min_hops, max_hops)) = edge_pattern.var_length {
-            return self.expand_var_length(source, edge_pattern, node_pattern, min_hops, max_hops);
+            return self.expand_var_length(
+                source,
+                edge_pattern,
+                node_pattern,
+                min_hops,
+                max_hops,
+                max_results,
+            );
         }
 
-        // Lightweight fast path: when the edge has no named variable and no property
-        // filters, skip EdgeData materialization entirely. For disk graphs this avoids
-        // reading edge_endpoints.bin (13 GB on Wikidata), cutting I/O in half.
-        // Only for single connection type (not multi-type) and directed edges.
-        // The `is_disk()` gate avoids the redundant work on memory/mapped, where
-        // EdgeData materialization is already free via petgraph. The trait's
-        // `iter_peers_filtered` dispatches to the disk CSR fast-path.
-        if edge_pattern.variable.is_none()
-            && edge_pattern.properties.is_none()
-            && !edge_pattern.needs_path_info
-            && edge_pattern.connection_types.is_none()
-            && self.graph.graph.is_disk()
-        {
-            let conn_u64 = edge_pattern
-                .connection_type
-                .as_ref()
-                .map(|ct| InternedKey::from_str(ct).as_u64());
-            let directions: &[Direction] = match edge_pattern.direction {
-                EdgeDirection::Outgoing => &[Direction::Outgoing],
-                EdgeDirection::Incoming => &[Direction::Incoming],
-                EdgeDirection::Both => &[Direction::Outgoing, Direction::Incoming],
-            };
-            let mut results = Vec::new();
-            for &dir in directions {
-                for (peer_idx, _edge_idx) in
-                    self.graph.graph.iter_peers_filtered(source, dir, conn_u64)
-                {
-                    if max_results.is_some_and(|max| results.len() >= max) {
-                        break;
-                    }
-                    if target_hint.is_some_and(|h| peer_idx != h) {
-                        continue;
-                    }
-                    // Check target node labels (primary + secondary)
-                    if !edge_pattern.skip_target_type_check
-                        && !self.node_matches_pattern_labels(peer_idx, node_pattern)
-                    {
-                        continue;
-                    }
-                    // Check target node properties
-                    if let Some(ref props) = node_pattern.properties {
-                        if !self.node_matches_properties(peer_idx, props) {
-                            continue;
-                        }
-                    }
-                    // Placeholder binding — caller won't use it (variable is None)
-                    let binding = MatchBinding::NodeRef(peer_idx);
-                    results.push((peer_idx, binding));
-                }
-            }
-            return Ok(results);
+        if self.disk_peer_sweep_applies(edge_pattern) {
+            return Ok(self.expand_disk_peers(
+                source,
+                edge_pattern,
+                node_pattern,
+                max_results,
+                target_hint,
+            ));
         }
 
         let mut results = Vec::new();

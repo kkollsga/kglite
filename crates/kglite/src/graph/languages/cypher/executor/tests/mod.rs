@@ -4,6 +4,7 @@
 //! source-quality ceiling. Shared helpers and the imports every submodule
 //! needs live here; each submodule pulls them in with `use super::*`.
 //!
+//! - [`exists_witness`] — which `EXISTS { … }` subqueries may stop at one match
 //! - [`expressions`] — comparison, arithmetic, coercion, CASE, parameters
 //! - [`mutations`] — CREATE / SET / DELETE / REMOVE / MERGE and index upkeep
 //! - [`identifiers`] — quoted-identifier escaping (the injection class)
@@ -26,6 +27,7 @@ use crate::graph::storage::GraphWrite;
 // the `super::super::parser` the flat file used before the split.
 use crate::graph::languages::cypher::parser;
 
+mod exists_witness;
 mod expressions;
 mod identifiers;
 mod lists;

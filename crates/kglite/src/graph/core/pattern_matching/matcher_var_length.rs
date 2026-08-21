@@ -27,6 +27,27 @@ use std::collections::VecDeque;
 /// per-path expansion.
 const CLOSED_TRAIL_PROBE_BUDGET: usize = 20_000;
 
+/// What the source node contributes to its *own* variable-length segment.
+///
+/// Split out of the answer itself so the expensive arm can be deferred: under
+/// a `max_results` cap a witness found by the BFS answers the segment, and the
+/// probe below never has to run.
+enum SourceRole {
+    /// The source is not a legal target of its own segment.
+    Absent,
+    /// `min_hops == 0`: the zero-length row, and nothing else.
+    ZeroHop(MatchBinding),
+    /// Directed `min_hops == 1`: leaving the source unvisited lets the
+    /// ordinary BFS rediscover it at its shortest closed walk, which in a
+    /// directed graph is a simple cycle and therefore a trail.
+    Rediscover,
+    /// Undirected `min_hops == 1`: only [`PatternExecutor::source_closed_trail`]
+    /// can answer, and it costs up to [`CLOSED_TRAIL_PROBE_BUDGET`] edge
+    /// examinations — so it runs last, and only when the rows already found
+    /// have not satisfied the caller's cap.
+    Probe,
+}
+
 /// Outcome of the bounded closed-trail probe.
 enum ClosedTrail {
     /// A closed trail of this many hops leaves and returns to the source.
@@ -80,6 +101,12 @@ impl ConnFilter {
             (None, None) => true,
         }
     }
+}
+
+/// Whether a caller-authorised exact cap has been filled.
+#[inline]
+fn cap_reached(found: usize, max_results: Option<usize>) -> bool {
+    max_results.is_some_and(|max| found >= max)
 }
 
 /// The graph directions one hop of this segment walks.
@@ -219,8 +246,7 @@ impl<'a> PatternExecutor<'a> {
         Ok(ClosedTrail::Absent)
     }
 
-    /// The rows the source node contributes to its own segment, plus whether
-    /// the distance BFS must leave it unvisited to find one of them.
+    /// What the source node contributes to its own segment.
     ///
     /// Cypher's trail semantics make the source a legal target of its own
     /// segment whenever a closed trail of length in `[max(min_hops, 1),
@@ -237,42 +263,30 @@ impl<'a> PatternExecutor<'a> {
     /// An **undirected** segment's shortest closed walk is the degenerate
     /// there-and-back over one relationship, which the trail rule forbids, so
     /// the BFS would answer 2 for every source with a neighbour. That case
-    /// runs the explicit trail probe. `Ok(None)` = the probe ran out of
-    /// budget and the caller must use the exact per-path expansion.
-    fn var_length_source_results(
+    /// needs the explicit trail probe, which the caller runs only if it still
+    /// needs the row.
+    fn var_length_source_role(
         &self,
         source: NodeIndex,
         edge_pattern: &EdgePattern,
         node_pattern: &NodePattern,
         min_hops: usize,
         max_hops: usize,
-        conn: &ConnFilter,
-        directions: &[Direction],
-    ) -> Result<Option<(Vec<(NodeIndex, MatchBinding)>, bool)>, String> {
-        let mut results = Vec::new();
-
-        if min_hops == 0 && self.matches_var_length_target_strictly(source, node_pattern) {
-            results.push((source, self.zero_length_binding(source, 0)));
-            return Ok(Some((results, false)));
+    ) -> SourceRole {
+        if min_hops == 0 {
+            return if self.matches_var_length_target_strictly(source, node_pattern) {
+                SourceRole::ZeroHop(self.zero_length_binding(source, 0))
+            } else {
+                SourceRole::Absent
+            };
         }
-        if min_hops == 0
-            || max_hops == 0
-            || !self.matches_var_length_target(source, edge_pattern, node_pattern)
-        {
-            return Ok(Some((results, false)));
+        if max_hops == 0 || !self.matches_var_length_target(source, edge_pattern, node_pattern) {
+            return SourceRole::Absent;
         }
-
         if !matches!(edge_pattern.direction, EdgeDirection::Both) {
-            // Directed: the BFS finds it itself once the source is unvisited.
-            return Ok(Some((results, true)));
-        }
-        match self.source_closed_trail(source, edge_pattern, max_hops, conn, directions)? {
-            ClosedTrail::Found(hops) => {
-                results.push((source, self.zero_length_binding(source, hops)));
-                Ok(Some((results, false)))
-            }
-            ClosedTrail::Absent => Ok(Some((results, false))),
-            ClosedTrail::Undecided => Ok(None),
+            SourceRole::Rediscover
+        } else {
+            SourceRole::Probe
         }
     }
 
@@ -319,6 +333,12 @@ impl<'a> PatternExecutor<'a> {
     ///   peers and distance-reachable to neither. Those stay on the per-path
     ///   expansion; [`Self::expand_var_length`] enforces it.
     ///
+    /// `max_results` is an **exact** cap the caller has authorised: it returns
+    /// as soon as that many rows exist, and the deferred source probe below is
+    /// then skipped entirely — a witness already answers the segment. Only
+    /// callers whose post-filters accept every row this returns may pass one
+    /// (see `HopPlan::var_length_cap_safe`).
+    ///
     /// Returns `Ok(None)` when source inclusion could not be decided within
     /// budget — the caller must then answer the whole segment with the exact
     /// per-path expansion.
@@ -329,6 +349,7 @@ impl<'a> PatternExecutor<'a> {
         node_pattern: &NodePattern,
         min_hops: usize,
         max_hops: usize,
+        max_results: Option<usize>,
     ) -> Result<Option<Vec<(NodeIndex, MatchBinding)>>, String> {
         debug_assert!(
             min_hops <= 1,
@@ -338,18 +359,20 @@ impl<'a> PatternExecutor<'a> {
         let directions = segment_directions(edge_pattern);
         let conn = ConnFilter::new(edge_pattern);
 
-        let Some((mut results, leave_source_unvisited)) = self.var_length_source_results(
-            source,
-            edge_pattern,
-            node_pattern,
-            min_hops,
-            max_hops,
-            &conn,
-            directions,
-        )?
-        else {
-            return Ok(None);
-        };
+        let role =
+            self.var_length_source_role(source, edge_pattern, node_pattern, min_hops, max_hops);
+        let mut results: Vec<(NodeIndex, MatchBinding)> = Vec::new();
+        let mut leave_source_unvisited = false;
+        let mut probe_pending = false;
+        match role {
+            SourceRole::ZeroHop(binding) => results.push((source, binding)),
+            SourceRole::Rediscover => leave_source_unvisited = true,
+            SourceRole::Probe => probe_pending = true,
+            SourceRole::Absent => {}
+        }
+        if cap_reached(results.len(), max_results) {
+            return Ok(Some(results));
+        }
 
         // Global visited set — each node is explored at most once.
         // Vec<bool> is faster than HashSet for dense NodeIndex (no hashing, cache-friendly).
@@ -430,6 +453,12 @@ impl<'a> PatternExecutor<'a> {
                                 path: Vec::new(),
                             },
                         ));
+                        if cap_reached(results.len(), max_results) {
+                            // The caller asked for this many rows and no more,
+                            // so the deferred source probe is moot: whatever it
+                            // would have added, these rows already answer.
+                            return Ok(Some(results));
+                        }
                     }
 
                     // Continue exploring if we haven't reached max depth. The
@@ -443,11 +472,30 @@ impl<'a> PatternExecutor<'a> {
             }
         }
 
+        // Deferred: the undirected closed-trail probe. Reached only when the
+        // BFS did not already satisfy the caller's cap, so an existence check
+        // with a witness never pays for it. `insert(0, …)` keeps the source
+        // row where the eager version put it — first.
+        if probe_pending {
+            match self.source_closed_trail(source, edge_pattern, max_hops, &conn, directions)? {
+                ClosedTrail::Found(hops) => {
+                    results.insert(0, (source, self.zero_length_binding(source, hops)));
+                }
+                ClosedTrail::Absent => {}
+                ClosedTrail::Undecided => return Ok(None),
+            }
+        }
+
         Ok(Some(results))
     }
 
     /// Expand via variable-length path (BFS within hop range)
     /// Optimized: Only clones paths when branching (multiple valid targets from same node)
+    ///
+    /// `max_results` is an exact cap: expansion stops as soon as that many
+    /// rows exist. A `min_hops >= 2` segment cannot use the set-based path at
+    /// all, but it can still stop at the first complete trail — which is all
+    /// an existence check needs.
     pub(super) fn expand_var_length(
         &self,
         source: NodeIndex,
@@ -455,6 +503,7 @@ impl<'a> PatternExecutor<'a> {
         node_pattern: &NodePattern,
         min_hops: usize,
         max_hops: usize,
+        max_results: Option<usize>,
     ) -> Result<Vec<(NodeIndex, MatchBinding)>, String> {
         // Fast path: when path info isn't needed, use global-dedup BFS.
         // `min_hops <= 1` is a *correctness* condition, not a heuristic — see
@@ -463,9 +512,14 @@ impl<'a> PatternExecutor<'a> {
         // every other producer of an `EdgePattern`. `Ok(None)` means the fast
         // path could not decide source inclusion within budget.
         if !edge_pattern.needs_path_info && min_hops <= 1 {
-            if let Some(fast) =
-                self.expand_var_length_fast(source, edge_pattern, node_pattern, min_hops, max_hops)?
-            {
+            if let Some(fast) = self.expand_var_length_fast(
+                source,
+                edge_pattern,
+                node_pattern,
+                min_hops,
+                max_hops,
+                max_results,
+            )? {
                 return Ok(fast);
             }
         }
@@ -486,6 +540,9 @@ impl<'a> PatternExecutor<'a> {
         // (matching "zero hops" means the source IS the target).
         if min_hops == 0 && self.matches_var_length_target_strictly(source, node_pattern) {
             results.push((source, self.zero_length_binding(source, 0)));
+            if cap_reached(results.len(), max_results) {
+                return Ok(results);
+            }
         }
 
         let mut vlp_count: usize = 0;
@@ -575,6 +632,9 @@ impl<'a> PatternExecutor<'a> {
                             path: path_for_binding,
                         },
                     ));
+                    if cap_reached(results.len(), max_results) {
+                        return Ok(results);
+                    }
                 }
 
                 // Continue exploring if we haven't reached max depth

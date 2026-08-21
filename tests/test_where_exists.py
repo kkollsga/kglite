@@ -656,3 +656,124 @@ def test_exists_pattern_accepts_parameter(social_graph):
     ).to_list()
     assert param == literal
     assert [r["name"] for r in param] == ["Alice"]
+
+
+# ---------------------------------------------------------------------------
+# The witness cap
+# ---------------------------------------------------------------------------
+#
+# An existence check needs ONE match, so the pattern predicate hands the
+# executor `max_matches = 1`. The differential corpus cannot see this: the cap
+# is not a planner pass, so both of its legs run with it. These are absolute
+# goldens — the answer, not an agreement between two paths.
+
+
+def _ring(size: int, extra_edges: list[tuple[int, int]] | None = None) -> KnowledgeGraph:
+    """`size` `:N` nodes on a directed ring, plus any extra relationships."""
+    import pandas as pd
+
+    graph = KnowledgeGraph()
+    graph.add_nodes(pd.DataFrame({"id": list(range(size))}), "N", "id")
+    edges = [(i, (i + 1) % size) for i in range(size)] + list(extra_edges or [])
+    graph.add_connections(
+        pd.DataFrame({"s": [e[0] for e in edges], "t": [e[1] for e in edges]}),
+        "R",
+        "N",
+        "s",
+        "N",
+        "t",
+    )
+    return graph
+
+
+class TestExistsWitnessCap:
+    def test_a_witness_past_the_candidate_cap_is_still_found(self):
+        """The cap induces the executor's advisory 1000-source pre-cap, and a
+        pattern whose only witness sits behind it comes back empty on the
+        capped pass. The uncapped retry is what makes the answer right — with
+        the retry disabled this query answers 0 instead of 1."""
+        import pandas as pd
+
+        graph = KnowledgeGraph()
+        graph.add_nodes(pd.DataFrame({"id": list(range(1, 5001))}), "Person", "id")
+        graph.add_nodes(pd.DataFrame({"id": [1]}), "Target", "id")
+        graph.cypher("MATCH (p:Person {id: 5000}), (t:Target) CREATE (p)-[:R]->(t)")
+
+        assert graph.cypher(
+            "MATCH (t:Target) WHERE EXISTS { (p:Person)-[:R*1..2]->(t) } RETURN count(t) AS c"
+        ).to_list() == [{"c": 1}]
+        assert graph.cypher(
+            "MATCH (t:Target) WHERE NOT EXISTS { (p:Person)-[:R*1..2]->(t) } RETURN count(t) AS c"
+        ).to_list() == [{"c": 0}]
+
+    def test_not_exists_is_true_only_after_the_full_search(self):
+        graph = _ring(6)
+        # No `:S` relationship exists at all, so every node qualifies.
+        assert [
+            row["i"]
+            for row in graph.cypher("MATCH (n:N) WHERE NOT EXISTS { (n)-[:S*1..3]->(:N) } RETURN n.id AS i ORDER BY i")
+        ] == [0, 1, 2, 3, 4, 5]
+        # ... and with one witness each, none does.
+        assert graph.cypher("MATCH (n:N) WHERE NOT EXISTS { (n)-[:R*1..3]->(:N) } RETURN count(n) AS c").to_list() == [
+            {"c": 0}
+        ]
+
+    def test_min_two_hops_answers_trail_reachability_under_the_cap(self):
+        """`min >= 2` stays on the per-path expansion — the cap only stops it
+        at the first complete trail. On a triangle every node is trail-
+        reachable to both peers at exactly two hops."""
+        graph = _ring(3)
+        assert [
+            row["i"]
+            for row in graph.cypher("MATCH (n:N) WHERE EXISTS { (n)-[:R*2..2]-(:N) } RETURN n.id AS i ORDER BY i")
+        ] == [0, 1, 2]
+
+    def test_a_bound_relationship_variable_still_pins_the_subquery(self):
+        """`r` is bound by the outer MATCH, so the subquery may only match
+        that one relationship — a cap of one would answer from whichever
+        relationship the expansion reached first."""
+        graph = _ring(4, extra_edges=[(0, 2)])
+        rows = graph.cypher(
+            "MATCH (a:N {id: 0})-[r:R]->(b:N) WHERE EXISTS { (a)-[r]->(x:N) } RETURN b.id AS i ORDER BY i"
+        ).to_list()
+        # Node 0 has two outgoing relationships, so a cap of one would answer
+        # both rows from whichever the expansion reached first and drop the
+        # other.
+        assert rows == [{"i": 1}, {"i": 2}]
+
+    def test_optional_match_with_where_exists_null_extends(self):
+        """The OPTIONAL MATCH row survives with NULLs when its predicate finds
+        no witness; the cap must not turn a found witness into a miss."""
+        graph = _ring(3, extra_edges=[])
+        rows = graph.cypher(
+            "MATCH (n:N) OPTIONAL MATCH (n)-[:R]->(m:N) "
+            "WHERE EXISTS { (m)-[:R*1..2]->(:N {id: 0}) } "
+            "RETURN n.id AS i, m.id AS j ORDER BY i"
+        ).to_list()
+        # 0→1 (1 reaches 0 in two hops), 1→2 (2 reaches 0 in one), 2→0
+        # (0 reaches 0 only over a three-hop closed trail, outside *1..2).
+        assert rows == [{"i": 0, "j": 1}, {"i": 1, "j": 2}, {"i": 2, "j": None}]
+
+    def test_several_predicates_are_capped_independently(self):
+        graph = _ring(4)
+        rows = graph.cypher(
+            "MATCH (n:N) WHERE EXISTS { (n)-[:R*1..2]->(:N {id: 0}) } "
+            "AND NOT EXISTS { (n)-[:R*1..1]->(:N {id: 0}) } "
+            "RETURN n.id AS i ORDER BY i"
+        ).to_list()
+        # 2 reaches 0 in two hops but not one; 3 reaches it in one.
+        assert rows == [{"i": 2}]
+
+    def test_exists_in_projection_and_case_position(self):
+        graph = _ring(3)
+        rows = graph.cypher(
+            "MATCH (n:N) RETURN n.id AS i, "
+            "EXISTS { (n)-[:R*1..1]->(:N {id: 0}) } AS direct, "
+            "CASE WHEN EXISTS { (n)-[:R*1..2]->(:N {id: 0}) } THEN 'y' ELSE 'n' END AS near "
+            "ORDER BY i"
+        ).to_list()
+        assert rows == [
+            {"i": 0, "direct": False, "near": "n"},
+            {"i": 1, "direct": False, "near": "y"},
+            {"i": 2, "direct": True, "near": "y"},
+        ]

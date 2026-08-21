@@ -1167,6 +1167,89 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (a:N {id: 1})-[:R*2..3]-(b:N) RETURN count(DISTINCT b) AS n",
         None,
     ),
+    (
+        "var_length_sibling_edge_shares_the_relationship",
+        "two_cycle_graph",
+        # A marked segment records no trail, so the clause's relationship
+        # uniqueness check cannot see the relationships it walked and a
+        # sibling edge is free to re-bind one. On 1 ⇄ 2 the segment reaches 1
+        # again over both relationships, and the last hop then re-took the one
+        # the segment had already used: [1, 2] where trail semantics give [1].
+        "MATCH (a:N {id: 1})-[:R*1..2]->(x:N)-[:R]->(c:N) RETURN DISTINCT c.id AS i ORDER BY i",
+        None,
+    ),
+    (
+        "var_length_sibling_edge_with_a_disjoint_type",
+        "hub_return_graph",
+        # The control for the gate above: no relationship can be both `:A` and
+        # `:B`, so the segment keeps its mark and stays on the fast path.
+        "MATCH (a:N {id: 1})-[:A*1..1]->(x:N)-[:B]->(c:N) RETURN DISTINCT c.id AS i ORDER BY i",
+        None,
+    ),
+    # ── mark_fast_var_length_paths inside EXISTS { … } ──
+    # An existence check consumes one boolean, so it is the strongest possible
+    # dedup-safe consumer — but the correctness gates that are about the BFS
+    # itself (`min <= 1`, no relationship variable) still apply, and so does
+    # the witness cap the evaluator now passes down. Every entry below is a
+    # cyclic graph, where distance and trail reachability come apart.
+    (
+        "exists_var_length_min_one",
+        "directed_triangle_graph",
+        "MATCH (n:N) WHERE EXISTS { (n)-[:R*1..2]->(:N) } RETURN n.id AS i ORDER BY i",
+        None,
+    ),
+    (
+        "exists_var_length_min_two",
+        "directed_triangle_graph",
+        # `min >= 2` never takes the set-based path; the witness cap still
+        # stops the per-path expansion at the first complete trail.
+        "MATCH (n:N) WHERE EXISTS { (n)-[:R*2..3]->(:N) } RETURN n.id AS i ORDER BY i",
+        None,
+    ),
+    (
+        "exists_var_length_undirected",
+        "parallel_edge_cycle_graph",
+        "MATCH (n:N) WHERE EXISTS { (n)-[:R*1..3]-(:N {id: 1}) } RETURN n.id AS i ORDER BY i",
+        None,
+    ),
+    (
+        "not_exists_var_length_witness_absent",
+        "directed_triangle_graph",
+        # Zero witnesses after the full search — the answer NOT EXISTS needs
+        # the cap's uncapped retry to still be able to reach.
+        "MATCH (n:N) WHERE NOT EXISTS { (n)-[:R*1..3]->(:N {id: 99}) } RETURN n.id AS i ORDER BY i",
+        None,
+    ),
+    (
+        "exists_var_length_in_projection",
+        "directed_triangle_graph",
+        "MATCH (n:N) RETURN n.id AS i, EXISTS { (n)-[:R*1..2]->(:N {id: 1}) } AS reaches ORDER BY i",
+        None,
+    ),
+    (
+        "exists_var_length_with_inner_where",
+        "directed_triangle_graph",
+        # An inner WHERE forbids the witness cap: the first match may fail it
+        # while a later one passes.
+        "MATCH (n:N) WHERE EXISTS { (n)-[:R*1..2]->(m:N) WHERE m.id = 1 } RETURN n.id AS i ORDER BY i",
+        None,
+    ),
+    (
+        "exists_var_length_two_predicates",
+        "directed_triangle_graph",
+        # Each EXISTS is capped independently.
+        "MATCH (n:N) WHERE EXISTS { (n)-[:R*1..2]->(:N {id: 1}) } "
+        "AND NOT EXISTS { (n)-[:R*1..1]->(:N {id: 3}) } RETURN n.id AS i ORDER BY i",
+        None,
+    ),
+    (
+        "count_var_length_subquery_keeps_its_trails",
+        "directed_triangle_graph",
+        # `count { … }` counts rows, so nothing about it is dedup-safe and its
+        # segment must NOT be marked — the control for the EXISTS entries.
+        "MATCH (n:N) RETURN n.id AS i, COUNT { (n)-[:R*1..2]->(:N) } AS c ORDER BY i",
+        None,
+    ),
     # ── lower_fixed_var_length_hops ──
     # `*k..k` asks a fixed-length question with a variable-length spelling.
     # The pass rewrites it into k explicit hops so the fixed-pattern machinery
@@ -3343,6 +3426,18 @@ def parallel_edge_cycle_graph() -> kglite.KnowledgeGraph:
     hops over the parallel pair, and in three around the cycle.
     """
     return _edge_graph([1, 2, 3], [(1, 2), (1, 2), (2, 3), (3, 1)])
+
+
+@pytest.fixture
+def two_cycle_graph() -> kglite.KnowledgeGraph:
+    """1 → 2 and 2 → 1 — two relationships, one in each direction.
+
+    The smallest graph on which a variable-length segment and a sibling edge
+    of the same clause can want the same relationship: the segment reaches 1
+    again in two hops, and the hop after it can only leave 1 over the
+    relationship the segment already consumed.
+    """
+    return _edge_graph([1, 2], [(1, 2), (2, 1)])
 
 
 @pytest.fixture
