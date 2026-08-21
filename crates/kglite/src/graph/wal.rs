@@ -432,7 +432,29 @@ pub fn read_header(r: &mut impl Read) -> io::Result<u8> {
 /// is printed to stderr — the frames before it are still returned, so
 /// the contract (recover everything up to the first bad frame) is
 /// unchanged; the failure is just no longer silent.
-pub fn read_frames(mut r: impl Read, stream_len: u64) -> io::Result<Vec<WalFrame>> {
+///
+/// The warning distinguishes the two shapes, because they call for opposite
+/// responses (see [`recovery_diagnostic`]): a torn tail is the expected
+/// aftermath of a crash mid-commit and costs nothing, while intact frames
+/// found *after* the stop point mean the file was damaged in its middle and
+/// committed work is being discarded.
+pub fn read_frames(r: impl Read, stream_len: u64) -> io::Result<Vec<WalFrame>> {
+    let (frames, diagnostic) = read_frames_diagnosed(r, stream_len)?;
+    if let Some(message) = diagnostic {
+        eprintln!("{message}");
+    }
+    Ok(frames)
+}
+
+/// [`read_frames`], handing back the stderr line instead of printing it.
+///
+/// The wording is the whole point of the diagnostic, and a test cannot capture
+/// this process's stderr — so the one place that decides *which* wording a
+/// given file earns is reachable from a test, rather than re-derived by one.
+fn read_frames_diagnosed(
+    mut r: impl Read,
+    stream_len: u64,
+) -> io::Result<(Vec<WalFrame>, Option<String>)> {
     let version = read_header(&mut r)?;
     let codec = wal_codec(version)?;
 
@@ -440,62 +462,163 @@ pub fn read_frames(mut r: impl Read, stream_len: u64) -> io::Result<Vec<WalFrame
     let mut consumed: u64 = header_len;
     let mut frames = Vec::new();
     let stopped_at = loop {
-        let frame_start = consumed;
-        let mut len_buf = [0u8; 4];
-        if read_exact_opt(&mut r, &mut len_buf)?.is_none() {
-            // Clean EOF or torn length prefix. Only warn for a torn
-            // (partial) prefix; a clean EOF is the normal end.
-            break (frame_start != stream_len).then_some(frame_start);
-        }
-        let mut crc_buf = [0u8; 4];
-        if read_exact_opt(&mut r, &mut crc_buf)?.is_none() {
-            break Some(frame_start); // torn: length present, crc missing
-        }
-        consumed += 8;
-        let len = u32::from_le_bytes(len_buf) as u64;
-        let expected_crc = u32::from_le_bytes(crc_buf);
-
-        if len == 0 {
-            // A run of zero bytes — the shape an OS crash leaves when a
-            // file's length was extended but its data block never reached
-            // the platter, which `DurabilityLevel::Normal` makes reachable.
-            // `crc32(b"") == 0`, so a zero prefix would otherwise pass the
-            // CRC check as a "valid" empty frame and reach the decoder.
-            // `append_frame` can never emit one (the smallest real payload
-            // is a two-byte Postcard `lsn` + `ops` pair), so treat it as the
-            // torn tail it is — by intent, rather than relying on the
-            // decoder to reject it.
-            break Some(frame_start);
-        }
-        if len > stream_len.saturating_sub(consumed) {
-            // Declared length exceeds the bytes that exist — torn or
-            // corrupt prefix. Stop WITHOUT allocating `len` bytes.
-            break Some(frame_start);
-        }
-        let mut payload = vec![0u8; len as usize];
-        if read_exact_opt(&mut r, &mut payload)?.is_none() {
-            break Some(frame_start); // torn: payload short
-        }
-        consumed += len;
-        if crc32(&payload) != expected_crc {
-            break Some(frame_start); // corrupt/torn payload — stop here
-        }
-        let limits = crate::serde_codec::DecodeLimits::new(MAX_WAL_FRAME_BYTES, len);
-        match crate::serde_codec::decode_exact_with::<WalFrame>(codec, &payload, len, limits) {
-            Ok(frame) => frames.push(frame),
-            Err(_) => break Some(frame_start), // unparseable — treat as torn
+        match read_frame_step(&mut r, stream_len, consumed, codec)? {
+            FrameStep::Frame(frame, frame_len) => {
+                frames.push(frame);
+                consumed += frame_len;
+            }
+            // A clean EOF is the normal end and says nothing.
+            FrameStep::Eof => break None,
+            FrameStep::Torn => break Some((consumed, None)),
+            // The length prefix survived, so the next frame boundary is
+            // known and the bytes past this frame can be probed.
+            FrameStep::Corrupt(frame_len) => break Some((consumed, Some(consumed + frame_len))),
         }
     };
-    if let Some(offset) = stopped_at {
-        eprintln!(
+    let diagnostic = stopped_at.map(|(offset, resume)| {
+        let trailing = resume.map_or(0, |next| {
+            count_intact_frames(&mut r, stream_len, next, codec)
+        });
+        recovery_diagnostic(offset, stream_len, frames.len(), trailing)
+    });
+    Ok((frames, diagnostic))
+}
+
+/// What the bytes at one position in the frame walk turned out to be.
+///
+/// Split out of [`read_frames`] so the *probe* below walks frames by exactly
+/// the same rules recovery does — a probe with its own parser would answer a
+/// question about a format it only approximates.
+enum FrameStep {
+    /// A complete frame: CRC matched and the payload decoded. Carries the
+    /// frame and its total on-disk length (header + payload).
+    Frame(WalFrame, u64),
+    /// The stream ended exactly on a frame boundary — the normal end.
+    Eof,
+    /// The framing itself is unusable from here: a partial header, a
+    /// zero-filled hole, a declared length past the end of the file, or a
+    /// short payload. There is no trustworthy next-frame boundary, so nothing
+    /// beyond this point can be probed.
+    Torn,
+    /// The frame's header was intact but its *contents* were not (CRC
+    /// mismatch or an undecodable payload). Carries the frame's total on-disk
+    /// length, which locates the following frame.
+    Corrupt(u64),
+}
+
+/// Read one frame's worth of bytes at `frame_start`, classifying what is there.
+fn read_frame_step(
+    r: &mut impl Read,
+    stream_len: u64,
+    frame_start: u64,
+    codec: crate::serde_codec::CodecVersion,
+) -> io::Result<FrameStep> {
+    let mut len_buf = [0u8; 4];
+    if read_exact_opt(r, &mut len_buf)?.is_none() {
+        // Clean EOF or torn length prefix. Only the partial prefix is a
+        // failure; landing exactly on the end of the file is the normal end.
+        return Ok(if frame_start == stream_len {
+            FrameStep::Eof
+        } else {
+            FrameStep::Torn
+        });
+    }
+    let mut crc_buf = [0u8; 4];
+    if read_exact_opt(r, &mut crc_buf)?.is_none() {
+        return Ok(FrameStep::Torn); // torn: length present, crc missing
+    }
+    let after_header = frame_start + 8;
+    let len = u32::from_le_bytes(len_buf) as u64;
+    let expected_crc = u32::from_le_bytes(crc_buf);
+
+    if len == 0 {
+        // A run of zero bytes — the shape an OS crash leaves when a
+        // file's length was extended but its data block never reached
+        // the platter, which `DurabilityLevel::Normal` makes reachable.
+        // `crc32(b"") == 0`, so a zero prefix would otherwise pass the
+        // CRC check as a "valid" empty frame and reach the decoder.
+        // `append_frame` can never emit one (the smallest real payload
+        // is a two-byte Postcard `lsn` + `ops` pair), so treat it as the
+        // torn tail it is — by intent, rather than relying on the
+        // decoder to reject it. Deliberately `Torn` and not `Corrupt`: a
+        // hole says nothing about where the next frame starts, so the bytes
+        // after it must not be probed as if they were one.
+        return Ok(FrameStep::Torn);
+    }
+    if len > stream_len.saturating_sub(after_header) {
+        // Declared length exceeds the bytes that exist — torn or
+        // corrupt prefix. Stop WITHOUT allocating `len` bytes.
+        return Ok(FrameStep::Torn);
+    }
+    let mut payload = vec![0u8; len as usize];
+    if read_exact_opt(r, &mut payload)?.is_none() {
+        return Ok(FrameStep::Torn); // torn: payload short
+    }
+    let frame_len = 8 + len;
+    if crc32(&payload) != expected_crc {
+        return Ok(FrameStep::Corrupt(frame_len));
+    }
+    let limits = crate::serde_codec::DecodeLimits::new(MAX_WAL_FRAME_BYTES, len);
+    match crate::serde_codec::decode_exact_with::<WalFrame>(codec, &payload, len, limits) {
+        Ok(frame) => Ok(FrameStep::Frame(frame, frame_len)),
+        Err(_) => Ok(FrameStep::Corrupt(frame_len)),
+    }
+}
+
+/// How many complete frames sit after a corrupt one, purely to tell the
+/// operator which failure they have.
+///
+/// **Diagnostic only — the frames are still discarded.** A frame's meaning
+/// depends on every frame before it having been applied, so recovery cannot
+/// resume past a gap; what it *can* do is stop calling the result a crash
+/// tail when the file plainly continues. Any I/O failure while probing ends
+/// the count, because a diagnostic must never turn into a second failure.
+fn count_intact_frames(
+    r: &mut impl Read,
+    stream_len: u64,
+    mut consumed: u64,
+    codec: crate::serde_codec::CodecVersion,
+) -> usize {
+    let mut count = 0;
+    while let Ok(FrameStep::Frame(_, frame_len)) = read_frame_step(r, stream_len, consumed, codec) {
+        count += 1;
+        consumed += frame_len;
+    }
+    count
+}
+
+/// The stderr line [`read_frames`] prints when recovery stopped early.
+///
+/// Two failures wear the same stop: a **torn tail**, which is what a crash
+/// mid-commit leaves and costs nothing, and **mid-file damage**, where frames
+/// the writer completed sit after the bad one and are being thrown away. The
+/// original wording asserted the first unconditionally, so the expensive case
+/// was reported as routine — "expected after a crash mid-commit" printed over
+/// silently discarded committed work. `trailing` (frames that still decode
+/// after the corrupt one) is what separates them.
+///
+/// A pure function so the wording is testable: nothing else in this module can
+/// capture the process's stderr.
+fn recovery_diagnostic(offset: u64, stream_len: u64, recovered: usize, trailing: usize) -> String {
+    if trailing == 0 {
+        return format!(
             "[kglite] WAL recovery stopped at a torn/corrupt frame at byte offset {offset} \
-             (of {stream_len}); recovered {} intact frame(s) before it. This is expected \
+             (of {stream_len}); recovered {recovered} intact frame(s) before it. This is expected \
              after a crash mid-commit; the torn tail is discarded and will be truncated at \
-             the next checkpoint.",
-            frames.len()
+             the next checkpoint."
         );
     }
-    Ok(frames)
+    let discarded = stream_len.saturating_sub(offset);
+    format!(
+        "[kglite] WAL recovery stopped at a corrupt frame at byte offset {offset} \
+         (of {stream_len}); recovered {recovered} intact frame(s) before it. At least \
+         {trailing} later frame(s) still decode cleanly, and all {discarded} byte(s) from \
+         the stop point to the end of the file are discarded: a frame's effect depends on \
+         every frame before it, so the log cannot be trusted past the corruption. This looks \
+         like mid-file damage rather than a crash tail — committed work is being dropped. \
+         Check the storage this log lives on, and treat the last checkpoint plus the \
+         {recovered} recovered frame(s) as the surviving state."
+    )
 }
 
 /// Codec for a WAL header version, or an error naming what this build can
@@ -1378,6 +1501,125 @@ mod tests {
 
         let got = read_frames_all(bytes).unwrap();
         assert_eq!(got.iter().map(|f| f.lsn).collect::<Vec<_>>(), [1, 2]);
+    }
+
+    /// Byte offset of the `n`-th frame (0-based) in a buffer written by
+    /// [`write_wal`], derived by re-serializing rather than by arithmetic on
+    /// assumed field widths.
+    fn frame_offset(frames: &[WalFrame], n: usize) -> usize {
+        write_wal(&frames[..n]).len()
+    }
+
+    /// Corrupting a byte in the *middle* of a log is not a crash tail, and the
+    /// operator must not be told it is. The frames after the damage decode
+    /// perfectly and are still discarded — that is committed work being
+    /// dropped, and the previous wording ("expected after a crash mid-commit")
+    /// filed it as routine.
+    #[test]
+    fn mid_stream_corruption_is_reported_as_mid_file_damage() {
+        let frames = vec![frame(1), frame(2), frame(3), frame(4)];
+        let mut bytes = write_wal(&frames);
+        let stop = frame_offset(&frames, 1);
+        // Flip a payload byte of frame 2: its length prefix survives, so
+        // frames 3 and 4 are still where the framing says they are.
+        bytes[stop + 8] ^= 0xFF;
+
+        let stream_len = bytes.len() as u64;
+        let (got, message) = read_frames_diagnosed(Cursor::new(bytes), stream_len).unwrap();
+        assert_eq!(
+            got.iter().map(|f| f.lsn).collect::<Vec<_>>(),
+            [1],
+            "recovery still stops at the first bad frame"
+        );
+
+        // The count in the message is the one the reader actually found:
+        // frames 3 and 4 are past the damage.
+        let message = message.expect("an early stop must produce a diagnostic");
+        assert!(
+            message.contains(&format!("byte offset {stop} ")),
+            "{message}"
+        );
+        assert!(message.contains("mid-file damage"), "{message}");
+        assert!(message.contains("At least 2 later frame(s)"), "{message}");
+        assert!(
+            message.contains(&format!("{} byte(s)", stream_len - stop as u64)),
+            "the discarded byte count must be reported: {message}"
+        );
+        assert!(
+            !message.contains("expected after a crash mid-commit"),
+            "mid-file damage must not be filed as a routine crash tail: {message}"
+        );
+    }
+
+    /// The probe that produces that count walks the file by the same rules
+    /// recovery does, so it is asserted against the file rather than against
+    /// the number the test wanted.
+    #[test]
+    fn trailing_frames_after_a_corrupt_one_are_counted() {
+        let frames = vec![frame(1), frame(2), frame(3), frame(4)];
+        let mut bytes = write_wal(&frames);
+        let stop = frame_offset(&frames, 1);
+        bytes[stop + 8] ^= 0xFF;
+        let stream_len = bytes.len() as u64;
+        let corrupt_frame_len = (frame_offset(&frames, 2) - stop) as u64;
+
+        let mut r = Cursor::new(bytes);
+        // Skip the header and the one good frame, then the corrupt frame.
+        let mut skip = vec![0u8; frame_offset(&frames, 2)];
+        std::io::Read::read_exact(&mut r, &mut skip).unwrap();
+        let after_corrupt = stop as u64 + corrupt_frame_len;
+        assert_eq!(
+            count_intact_frames(
+                &mut r,
+                stream_len,
+                after_corrupt,
+                crate::serde_codec::CodecVersion::PostcardV1
+            ),
+            2
+        );
+    }
+
+    /// A genuine torn tail keeps the original wording — it is the common,
+    /// harmless case, and reclassifying it would cost the operator the signal
+    /// the new wording exists to give.
+    #[test]
+    fn a_torn_tail_keeps_the_crash_wording() {
+        let frames = vec![frame(1), frame(2)];
+        let mut bytes = write_wal(&frames);
+        bytes.truncate(bytes.len() - 5);
+        let stream_len = bytes.len() as u64;
+        let (got, message) = read_frames_diagnosed(Cursor::new(bytes), stream_len).unwrap();
+        assert_eq!(got, vec![frames[0].clone()]);
+
+        let message = message.expect("a torn tail must still produce a diagnostic");
+        assert!(
+            message.contains("expected after a crash mid-commit"),
+            "{message}"
+        );
+        assert!(message.contains("the torn tail is discarded"), "{message}");
+        assert!(!message.contains("mid-file damage"), "{message}");
+    }
+
+    /// A zero-filled hole is reported as a tail even though a valid frame
+    /// follows it, and that is deliberate: the hole gives no next-frame
+    /// boundary, so the bytes after it are not frames this reader can claim to
+    /// have found. Pins the `Torn`/`Corrupt` split against a "helpful" probe
+    /// that guesses past a gap.
+    #[test]
+    fn a_hole_is_never_probed_past() {
+        let mut bytes = write_wal(&[frame(1)]);
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        append_frame(&mut bytes, &frame(2)).unwrap();
+        let stream_len = bytes.len() as u64;
+
+        let (got, message) = read_frames_diagnosed(Cursor::new(bytes), stream_len).unwrap();
+        assert_eq!(got.iter().map(|f| f.lsn).collect::<Vec<_>>(), [1]);
+        let message = message.expect("a hole must still produce a diagnostic");
+        assert!(
+            !message.contains("mid-file damage"),
+            "a hole gives no frame boundary, so nothing past it may be claimed: {message}"
+        );
     }
 
     /// A whole page of zeros — the realistic shape of the hazard above.

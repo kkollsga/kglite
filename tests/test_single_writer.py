@@ -161,6 +161,77 @@ def test_blocked_open_names_the_holding_process(tmp_path):
         _reap(child)
 
 
+def test_contention_advice_is_only_given_for_contention(tmp_path):
+    """The lease-contention advice must be gated on there *being* contention.
+
+    ``open()`` used to append "use kglite.load(path)" to every failure the
+    lease acquisition could produce, including the ones that are not about a
+    lease at all: a full disk or a read-only directory came back telling the
+    operator to route around a writer that does not exist — and ``load()``
+    fails the same way, so the advice sends them in a circle. Measured against
+    an unwritable directory, which fails to *create* the lock file exactly as
+    a full volume does.
+    """
+    if os.geteuid() == 0:
+        pytest.skip("root ignores directory permissions")
+    locked_dir = tmp_path / "readonly"
+    locked_dir.mkdir()
+    db = str(locked_dir / "app.kgl")
+    os.chmod(locked_dir, 0o500)
+    try:
+        with pytest.raises(kglite.FileIoError) as caught:
+            kglite.open(db)
+        message = str(caught.value)
+        assert "kglite.load(path)" not in message, message
+        assert "open for writing by" not in message, message
+    finally:
+        os.chmod(locked_dir, 0o700)
+
+
+def test_contention_still_gets_the_advice(tmp_path):
+    """The other half: a real second writer keeps the way out. Paired with the
+    test above so neither can be satisfied by deleting the advice."""
+    db = str(tmp_path / "app.kgl")
+    _seed(db)
+    child, _ = _spawn_holder(str(tmp_path), db)
+    try:
+        with pytest.raises(Exception) as caught:
+            kglite.open(db)
+        assert "kglite.load(path)" in str(caught.value), str(caught.value)
+    finally:
+        _reap(child)
+
+
+def test_open_reaps_a_crashed_writers_save_temp(tmp_path):
+    """A ``SIGKILL`` mid-``save()`` leaves a full-size ``g.kgl.tmp.<pid>.<n>``
+    beside the graph, and nothing ever deleted one — a crash-looping writer
+    fills the volume with copies of its own graph. Taking the writer lease now
+    reaps the temps whose owning process is gone, and only those.
+    """
+    db = tmp_path / "app.kgl"
+    _seed(str(db))
+
+    # A pid that is provably gone: spawn, wait, reuse.
+    dead = subprocess.Popen([sys.executable, "-c", ""])
+    dead.wait()
+    stale = tmp_path / f"app.kgl.tmp.{dead.pid}.0"
+    stale.write_bytes(b"a half-written graph")
+    # A live process's temp, and a file that merely shares the prefix.
+    live = tmp_path / f"app.kgl.tmp.{os.getpid()}.1"
+    live.write_bytes(b"an in-flight save")
+    lookalike = tmp_path / "app.kgl.tmp.notes"
+    lookalike.write_bytes(b"not a temp")
+
+    g = kglite.open(str(db))
+    try:
+        assert not stale.exists(), "a dead writer's save temp must be reaped"
+        assert live.exists(), "a live writer's save temp must never be touched"
+        assert lookalike.exists(), "a prefix match is not a save temp"
+        assert db.exists(), "the graph itself is never touched"
+    finally:
+        g.close()
+
+
 def test_reader_is_never_blocked_by_a_writer(tmp_path):
     """``load()`` takes no lease.
 

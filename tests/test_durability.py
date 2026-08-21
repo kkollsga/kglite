@@ -1897,3 +1897,56 @@ def test_update_through_a_selection_is_refused(tmp_path):
     with pytest.raises(ValueError, match="derived from a durable graph"):
         g.select("Row").update({"tag": "x"})
     assert g.cypher("MATCH (r:Row) RETURN r.tag AS t").to_dicts() == [{"t": None}]
+
+
+# ── a failed write is a typed failure, not a bare OSError ────────────
+#
+# The taxonomy is the contract `docs/python/error-handling.md` states and
+# `.code` makes machine-readable, and the write path was outside it: every
+# I/O failure in `save()`, `sync()` and `to_bytes()` was raised as `PyIOError`
+# — the *builtin* `OSError` — so a full disk was indistinguishable from any
+# unrelated OS error the call stack could produce and carried no `.code`.
+#
+# A read-only directory is the portable stand-in for ENOSPC: it fails the same
+# `File::create` on the save temp, on the same code path, without needing a
+# full volume.
+
+
+def _readonly_dir(tmp_path, name: str):
+    d = tmp_path / name
+    d.mkdir()
+    os.chmod(d, 0o500)
+    return d
+
+
+def test_a_failed_save_raises_the_documented_typed_error(tmp_path):
+    if os.geteuid() == 0:
+        pytest.skip("root ignores directory permissions")
+    d = _readonly_dir(tmp_path, "readonly")
+    g = kglite.KnowledgeGraph()
+    g.cypher("CREATE (:Row {id: 1})")
+    try:
+        with pytest.raises(kglite.FileIoError) as caught:
+            g.save(str(d / "app.kgl"))
+    finally:
+        os.chmod(d, 0o700)
+    assert isinstance(caught.value, kglite.KgError)
+    assert caught.value.code == "FileIo", caught.value.code
+
+
+def test_a_failed_durable_save_raises_the_same_typed_error(tmp_path):
+    """The durable path is a different function with its own error mapping —
+    the checkpoint prologue, the write, and the log truncation each convert
+    separately, so the graph that carries a log is asserted too."""
+    if os.geteuid() == 0:
+        pytest.skip("root ignores directory permissions")
+    live = tmp_path / "live.kgl"
+    g = _open(live, "memory", durable="full")
+    g.cypher("CREATE (:Row {id: 1})")
+    d = _readonly_dir(tmp_path, "readonly")
+    try:
+        with pytest.raises(kglite.FileIoError):
+            g.save(str(d / "app.kgl"))
+    finally:
+        os.chmod(d, 0o700)
+        g.close()

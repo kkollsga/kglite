@@ -111,6 +111,15 @@ impl GraphWriterLease {
             match file.try_lock_exclusive() {
                 Ok(()) => {
                     publish_owner_record(&writer_owner_path(graph_path));
+                    // Taking write ownership is the one moment that is both
+                    // rare enough to afford a directory scan and safe enough
+                    // to act on what it finds: a save that died mid-write
+                    // leaves a full-size `<name>.tmp.<pid>.<n>` beside the
+                    // graph, and nothing else in the lifecycle ever looks for
+                    // one. The reaper still proves each owner is gone before
+                    // unlinking, because `lock=False` writers and unrelated
+                    // processes are not covered by this lease.
+                    crate::graph::io::file::reap_stale_save_temps(graph_path);
                     return Ok(Self { file });
                 }
                 Err(error) if is_lock_contended(&error) => {

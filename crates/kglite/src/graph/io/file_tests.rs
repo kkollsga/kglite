@@ -625,6 +625,92 @@ mod atomic_save_tests {
         assert_eq!(entries, vec!["g.kgl".to_string()], "temp file must be gone");
     }
 
+    /// A pid that is provably gone: spawn a process, wait for it, and reuse
+    /// its id. `wait` reaps the zombie, so `kill(pid, 0)` answers `ESRCH`.
+    fn dead_pid() -> u32 {
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn /usr/bin/true");
+        let pid = child.id();
+        child.wait().expect("reap the child");
+        pid
+    }
+
+    /// Write a save temp of `graph_path` owned by `pid`, and return its path.
+    fn plant_temp(graph_path: &std::path::Path, pid: u32, nonce: u64) -> std::path::PathBuf {
+        let name = format!(
+            "{}.tmp.{pid}.{nonce}",
+            graph_path.file_name().unwrap().to_string_lossy()
+        );
+        let temp = graph_path.parent().unwrap().join(name);
+        std::fs::write(&temp, b"pretend this is a 4 GB graph").unwrap();
+        temp
+    }
+
+    /// The bug: 22 of 30 `SIGKILL`s mid-save left a full-size copy of the
+    /// graph beside it, and nothing ever deleted one. A crash-looping writer
+    /// fills the volume.
+    #[test]
+    fn stale_temp_of_a_dead_process_is_reaped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("g.kgl");
+        write_kgl(&tiny_graph(3), path.to_str().unwrap()).unwrap();
+        let stale = plant_temp(&path, dead_pid(), 0);
+
+        assert_eq!(reap_stale_save_temps(&path), 1);
+        assert!(!stale.exists(), "a dead writer's temp must be deleted");
+        assert!(path.exists(), "the graph itself is never touched");
+    }
+
+    /// The half that must never regress: another process's *live* save is a
+    /// file being written right now, and deleting it would turn a leak into
+    /// data loss. This process's own pid stands in for it — a concurrent save
+    /// on another thread is exactly that case.
+    #[test]
+    fn a_live_writers_temp_is_never_reaped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("g.kgl");
+        let mine = plant_temp(&path, std::process::id(), 7);
+
+        assert_eq!(reap_stale_save_temps(&path), 0);
+        assert!(mine.exists(), "a live process's temp must survive");
+    }
+
+    /// The reaper is scoped to one graph and one filename shape. A temp
+    /// belonging to a *different* graph in the same directory, and any file
+    /// that merely starts with the prefix, are somebody else's.
+    #[test]
+    fn reaping_is_scoped_to_this_graph_and_this_name_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("g.kgl");
+        let dead = dead_pid();
+        let other_graph = plant_temp(&dir.path().join("other.kgl"), dead, 0);
+        let mine = plant_temp(&path, dead, 0);
+        // Same prefix, not the `<pid>.<nonce>` shape: a user's own file.
+        let lookalike = dir.path().join("g.kgl.tmp.notes");
+        std::fs::write(&lookalike, b"keep me").unwrap();
+
+        assert_eq!(reap_stale_save_temps(&path), 1);
+        assert!(!mine.exists());
+        assert!(other_graph.exists(), "another graph's temp is not ours");
+        assert!(lookalike.exists(), "a prefix match is not a temp");
+    }
+
+    /// Taking the writer lease is where the reap happens, so the fix reaches
+    /// every binding through one seam rather than each `open()` remembering.
+    #[test]
+    fn acquiring_the_writer_lease_reaps() {
+        use crate::graph::io::open::GraphWriterLease;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("g.kgl");
+        write_kgl(&tiny_graph(2), path.to_str().unwrap()).unwrap();
+        let stale = plant_temp(&path, dead_pid(), 3);
+
+        let lease = GraphWriterLease::acquire(&path, std::time::Duration::ZERO).unwrap();
+        assert!(!stale.exists(), "open() must reap what a crashed save left");
+        drop(lease);
+    }
+
     #[test]
     fn failed_save_to_bad_dir_leaves_dest_untouched() {
         // Write a good file first, then attempt a save into a path whose

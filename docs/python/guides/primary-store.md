@@ -98,10 +98,14 @@ mode wherever the storage mode supports it — the default in-memory backend and
 sidecar and `fsync`s it before the call returns; on open, the engine loads the
 `.kgl` checkpoint and replays every frame newer than it. A frame carries a
 CRC32, and a crash mid-append leaves a torn trailing frame that replay discards
-rather than half-applying. Every way of changing a graph is logged, not only
-Cypher — `add_nodes`, `add_connections`, label changes, and committed
-transactions included. `save()` is separately atomic and `fsync`ed, so a reader
-never observes a torn file.
+rather than half-applying. Recovery says which of the two it found: a torn tail
+is reported as the ordinary aftermath of a crash, while a corrupt frame with
+intact frames *after* it is named as mid-file damage and reports how much
+committed work is being discarded — the log cannot be trusted past corruption,
+so that is a storage problem to investigate rather than a routine restart. Every
+way of changing a graph is logged, not only Cypher — `add_nodes`,
+`add_connections`, label changes, and committed transactions included. `save()`
+is separately atomic and `fsync`ed, so a reader never observes a torn file.
 
 `storage="disk"` is the exception, and not because it was overlooked: a disk
 graph commits by publishing an immutable generation, so a logical write-ahead
@@ -133,11 +137,21 @@ Three consequences worth internalising before you rely on this:
   exception inside the block does not discard them — they are recovered on the
   next `open()`. What the clean or failed exit controls is whether a *checkpoint*
   is written. Use `begin()` when you want discard-on-error.
-- **`Session` refuses write queries on a durable graph.** Its writes land on a
-  working copy that neither the log nor `save()` can reach, so rather than
-  silently losing them it raises. Use `cypher()` or `begin()`. Because durable is
-  now the default, code that used `Session.execute()` for writes against an
-  `open()`ed graph has to change — or pass `durable=False`.
+- **No handle derived from a durable graph may write.** `Session.execute()`, and
+  equally a selection or view (`g.select(...).update(...)`, `view.cypher("CREATE
+  …")`, `view.save()`), land on a working copy that neither the log nor `save()`
+  can reach, so rather than silently losing the write they raise —
+  `kglite.ArgumentError` from `Session`, `ValueError` from a derived handle. Use
+  `cypher()` or `begin()` on the graph itself. Because durable is now the
+  default, code that used `Session.execute()` for writes against an `open()`ed
+  graph has to change — or pass `durable=False`.
+- **A refused log append poisons the handle.** If the log cannot take a frame —
+  a full disk is the case this was measured on — the statement raises
+  `kglite.FileIoError`, and every later write, `save()` and `sync()` on that
+  handle is refused with the same class, because the graph in memory now
+  contains a statement the caller was told did not happen and `save()` would
+  commit it. The message names the exit: reopen the path. The failed statement
+  is not in the recovered graph.
 
 Two smaller sharp edges: `save(fsync=False)` is ignored on a durable graph and
 warns, because the checkpoint truncates the log and so must itself reach disk;
@@ -177,7 +191,9 @@ instead of colliding. {doc}`/concepts/concurrency` is the full model, and worth
 reading before you rely on any of it.
 
 **Failures are typed.** Errors arrive as a `KgError` hierarchy with stable
-codes, not as strings to match on — see {doc}`/python/error-handling`.
+codes, not as strings to match on — see {doc}`/python/error-handling`. That
+includes the write path: a `save()`, `sync()` or `to_bytes()` that fails on I/O
+raises `kglite.FileIoError` (`.code == "FileIo"`), not a bare `OSError`.
 
 **Integrity constraints are enforced on every write path.** Declared through
 `define_schema`, and checked on Cypher `CREATE` / `MERGE` / `SET` / `REMOVE` and
@@ -206,16 +222,36 @@ and NULL is exempt throughout — a node sits outside a uniqueness constraint
 unless every property in the tuple is present and non-null, so many nodes may
 share "no email" while `email` is `UNIQUE`.
 
-Two gaps to know, because both are the kind that look like guarantees until they
-are not. **A large bulk load is not all-or-nothing.** `add_nodes` gates each row
-before queueing it, so a violation aborts the call — but rows are flushed to the
-graph in chunks of 1000, so on an input larger than that, chunks already flushed
-stay written. Detection is unaffected; the atomicity is what is chunk-bounded.
-Treat a failed large load as needing cleanup, not as a no-op. **And two write
-paths bypass enforcement entirely:** the RDF and N-Triples loaders, and the
-embedding-carry path. A graph filled through those can hold data that violates a
-declared constraint; `verify_unique_constraints()` exists to audit exactly that
-case.
+**`types` is the one part of `define_schema` that is *not* enforced at write
+time.** `required`, `unique` and `primary_key` reject the offending write; a
+`types` declaration is advisory — it is checked by `validate_schema()`, which
+you call when you want the audit, and reports every row that disagrees
+(`error_type: "type_mismatch"`). Nothing rejects
+`CREATE (:Item {age: "not a number"})` on a type whose schema says `age` is
+`int`. If you want a property type enforced on the way in, declare it as a
+constraint instead — `CREATE CONSTRAINT FOR (n:Item) REQUIRE n.age IS :: INTEGER`
+raises `ConstraintViolationError` on the write, on every write path, for the
+property types KGLite can check. `lock_schema()` is the third option: it rejects
+a write whose value disagrees with the property type the node type has actually
+recorded.
+
+**A large bulk load *is* all-or-nothing for everything the loader can refuse.**
+`add_nodes` and `add_connections` decide every refusal in a single pass before
+the first row is written: the constraint gate checks the whole input up front,
+and `on_invalid="error"` scans it for rows with an unusable id in the same way.
+Both raise with nothing written, at any input size. Rows are still flushed to the
+graph in chunks of 1000, but that is a memory bound rather than an atomicity
+boundary — the flush loop has no failure path of its own, so no error these
+loaders raise can leave half a load behind. What chunking does still bound is a
+call that never returns: a process killed mid-load leaves the chunks folded in so
+far in memory. On a durable graph that costs nothing, because the load reaches
+the log as one frame at the end — a crash mid-load recovers to the pre-load
+state.
+
+**Two write paths bypass enforcement entirely:** the RDF and N-Triples loaders,
+and the embedding-carry path. A graph filled through those can hold data that
+violates a declared constraint; `verify_unique_constraints()` exists to audit
+exactly that case.
 
 One thing about the error surface is worth knowing before you write `except`
 clauses. A violation raises `ConstraintViolationError` and a declaration that
@@ -243,13 +279,47 @@ offending value, and is worth logging; the type and code are the contract.
 | | Default | To change |
 |---|---|---|
 | Crash safety | **On** (`"full"` — survives power loss) for in-memory and `mapped`; `disk` opens non-durable | `durable="normal"` to keep the log without the per-commit barrier, `durable="off"` to opt out entirely |
-| Schema | No schema; any property on any node | `define_schema(...)` |
+| Schema | No schema, but a node type's property set is fixed by its first write (below) | `define_schema(...)` |
 | UNIQUE / NOT NULL / node key | Permissive — a type declaring none keeps the old behaviour | `unique` / `required` / `primary_key` in `define_schema` |
 | Freshness stamps | Off, so writes stay deterministic | `auto_timestamp: True` per type |
 
 All of the constraint machinery is opt-in, and older graphs load unchanged.
 {doc}`durable-apps` covers the `open()` lifecycle and the per-commit `fsync`
 cost in more detail.
+
+**"No schema" does not mean "any property".** The first write to a node type
+establishes that type's property set, and a later `CREATE` naming a property
+outside it is refused:
+
+```python
+graph.cypher("CREATE (:Item {sku: 'A1'})")
+graph.cypher("CREATE (:Item {sku: 'A2', colour: 'red'})")
+# kglite.SchemaError: Schema error: Unknown property 'colour' on Item.
+#   Valid properties: sku
+```
+
+This is a **typo guard, not a schema**: `CREATE (:Item {sk: 'A3'})` is far more
+often a misspelling than a new field, and silently storing it produces a graph
+where half the rows answer a query and half do not. It fires whether or not
+`lock_schema()` was called, so `schema_locked` being `False` is not a reason to
+expect otherwise.
+
+Four things widen the set, and any of them is the way to add a property
+deliberately:
+
+- **`SET`** — `MATCH (i:Item) SET i.colour = 'red'` is never refused, and the
+  property is part of the type afterwards. This is the shortest route when you
+  are adding a field to existing data.
+- **`define_schema`** — a property named in `required`, `optional`, `types`,
+  `unique` or `primary_key` is accepted by `CREATE` immediately, before any node
+  carries it. Declare the shape up front and the guard never gets in the way.
+- **A bulk load** — `add_nodes` with a new column widens the type, so a loader
+  that is the source of truth for the schema does not need a declaration.
+- **A fresh node type** — the set is per type, so `:ItemV2` starts over.
+
+The guard covers the node-creating patterns — `CREATE` and `MERGE`'s match/create
+pattern. Relationship properties are not guarded at all, and neither is a `SET`
+clause attached to a `MERGE`.
 
 ## What KGLite does not do
 
@@ -270,6 +340,13 @@ lock, so a writer killed with `SIGKILL` releases it immediately — the leftover
 acquisition time, used to name a holder) are records, not the lock itself, and
 deleting them achieves nothing. `open(..., lock=False)` opts out for callers
 that coordinate writers some other way.
+
+Taking the lease is also when `open()` cleans up after a writer that died
+mid-`save()`. A save writes a sibling `<name>.tmp.<pid>.<n>` and renames it into
+place, so a process killed part-way through leaves a full-size copy of the graph
+behind — a crash-looping writer used to fill the volume with them. `open()` now
+deletes the ones whose owning process is gone, and only those: a temp belonging
+to a running process is never touched, so a concurrent save is safe.
 
 There is still no shared live multi-process transaction handle and no
 replication protocol. Disk mode publishes immutable generations behind the same

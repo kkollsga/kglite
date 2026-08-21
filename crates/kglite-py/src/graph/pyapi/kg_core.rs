@@ -24,6 +24,28 @@ use pyo3::types::{PyBytes, PyDict, PyList};
 use pyo3::{Bound, IntoPyObjectExt};
 use std::sync::Arc;
 
+/// The one conversion every write-path I/O failure on this class takes:
+/// `kglite.FileIoError`, carrying the stable `"FileIo"` `.code`.
+///
+/// `PyIOError` is an alias for the *builtin* `OSError`, so raising it directly
+/// — which `save()`, `sync()` and `to_bytes()` all used to do — put the whole
+/// write path outside the documented `kglite.*` taxonomy: a full disk or a
+/// read-only directory came back as a bare `OSError`, indistinguishable from
+/// any unrelated OS failure and carrying no `.code`. Routing through
+/// [`crate::error_py::kg_to_pyerr`] is what the load path already does, so the
+/// two halves of the file lifecycle now classify a write fault and a read
+/// fault the same way.
+///
+/// `kglite.FileIoError` descends from `kglite.KgError`, **not** from
+/// `OSError`, so this is a deliberate break for a caller that wrapped
+/// `save()` in `except OSError` — the same break `load()` took when it
+/// stopped raising bare `OSError`, and the reason it is worth taking is that
+/// the previous class was unclassifiable: nothing distinguished "the disk is
+/// full" from any other `OSError` the call stack could raise.
+fn file_io_err(error: std::io::Error) -> PyErr {
+    crate::error_py::kg_to_pyerr(crate::error::KgError::FileIo(error))
+}
+
 /// Adapter: routes pure-Rust [`ProgressEvent`]s into a Python callable.
 /// Errors raised by the callback are swallowed — a broken UI must not
 /// kill a multi-hour build. Lives in the pyapi layer so the loader
@@ -645,7 +667,7 @@ impl KnowledgeGraph {
                 next_lsn,
                 get_graph_mut(&mut self.inner),
             )
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+            .map_err(file_io_err)?;
         }
 
         // Mode-aware durable save lives in core (`save_graph_with`): disk dir
@@ -668,7 +690,7 @@ impl KnowledgeGraph {
                 io::SaveError::Refused(message) => {
                     PyErr::new::<pyo3::exceptions::PyValueError, _>(message)
                 }
-                io::SaveError::Io(message) => PyErr::new::<pyo3::exceptions::PyIOError, _>(message),
+                io::SaveError::Io(message) => file_io_err(std::io::Error::other(message)),
             })?;
 
         // Checkpoint step 4 (`kglite::api::durable::checkpoint_epilogue`): the
@@ -688,7 +710,7 @@ impl KnowledgeGraph {
                 &mut ds.wal,
                 Arc::make_mut(&mut self.inner),
             )
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+            .map_err(file_io_err)?;
         }
         Ok(())
     }
@@ -748,8 +770,7 @@ impl KnowledgeGraph {
         if ds.level == DurabilityLevel::Full {
             return Ok(());
         }
-        py.detach(|| ds.wal.sync())
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))
+        py.detach(|| ds.wal.sync()).map_err(file_io_err)
     }
 
     /// Serialize the in-memory graph to a `.kgl` byte buffer (the same
@@ -786,7 +807,7 @@ impl KnowledgeGraph {
                 io::write_kgl_to(&inner, &mut buf)?;
                 Ok(buf)
             })
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))?;
+            .map_err(file_io_err)?;
         Ok(PyBytes::new(py, &bytes).unbind())
     }
 

@@ -3793,6 +3793,15 @@ class KnowledgeGraph:
                 flush happens anyway): the save is the checkpoint that truncates
                 the fsync'd write-ahead log, so skipping the flush could lose
                 both the checkpoint and the log on a crash.
+
+        Raises:
+            kglite.FileIoError: The write itself failed — a full disk, a
+                read-only directory, a failing device. Carries
+                ``.code == "FileIo"``. Not a bare ``OSError``: the write path
+                classifies the same way the load path does.
+            ValueError: The call was refused before the path was touched — no
+                remembered path, or a write-ahead sidecar that runs ahead of
+                the target (above).
         """
         ...
 
@@ -3825,6 +3834,11 @@ class KnowledgeGraph:
 
         Unlike :meth:`save`, this writes **no checkpoint** and does not
         truncate the log — it only makes the existing log durable.
+
+        Raises:
+            kglite.FileIoError: The barrier itself failed. Carries
+                ``.code == "FileIo"``.
+            ValueError: This graph has no log to flush (above).
         """
         ...
 

@@ -443,21 +443,41 @@ fn open(
     let writer_lease = if lock {
         Some(
             py.detach(|| {
-                kglite_core::api::io::GraphWriterLease::acquire(
+                // `acquire_ex`, not `acquire`: the structured refusal is what
+                // separates "someone else holds this path" from "the lock file
+                // could not be created at all". `acquire` flattens both into
+                // one `io::Error`, and the advice appended below was therefore
+                // appended to *every* failure — a full disk or a read-only
+                // directory came back telling the caller to use
+                // `kglite.load(path)` instead, which fails the same way and
+                // sends them hunting for a writer that does not exist.
+                kglite_core::api::io::GraphWriterLease::acquire_ex(
                     std::path::Path::new(&path),
                     std::time::Duration::ZERO,
                 )
             })
-            .map_err(|e| {
+            .map_err(|refusal| {
+                // `holder` is `Some` only on a contention refusal (`acquire_ex`
+                // fills it from the owner record after the lock was found
+                // taken), so it is the classification itself rather than a
+                // proxy for one.
+                let contended = refusal.holder.is_some();
+                let error = refusal.error;
+                if !contended {
+                    // A genuine I/O failure: the engine's message already says
+                    // what went wrong with which path, and there is no second
+                    // process to route around.
+                    return crate::error_py::kg_to_pyerr(crate::error::KgError::FileIo(error));
+                }
                 // The engine's message is binding-neutral by design, so the
                 // Python-specific way out is appended here rather than baked
                 // into core. Most callers who hit this wanted to *read* a
                 // graph someone else is writing, and naming the call that
                 // does that turns a refusal into an answer.
                 crate::error_py::kg_to_pyerr(crate::error::KgError::FileIo(std::io::Error::new(
-                    e.kind(),
+                    error.kind(),
                     format!(
-                        "{e} To read this graph while another process writes it, use \
+                        "{error} To read this graph while another process writes it, use \
                          kglite.load(path) or kglite.open_session(path), which take no \
                          lease. Pass kglite.open(..., lock=False) only if you are \
                          coordinating writers yourself.",

@@ -152,6 +152,14 @@ Load failures are classifiable: a missing engine-managed path raises
 `FileError`; malformed, truncated, or unsupported saved data raises
 `FileFormatError`; other I/O failures raise `FileIoError`.
 
+The write half classifies the same way: a `save()`, `sync()` or `to_bytes()`
+that fails on I/O — a full disk, a read-only directory, a failing device —
+raises `FileIoError` too, so `except kglite.KgError` covers both directions of
+the file lifecycle. A `save()` *refused* before it touched the path (no
+remembered path, or a write-ahead sidecar running ahead of the target) is a
+`ValueError` instead: nothing was written, and the fix is a different argument
+rather than a different disk.
+
 ```python
 try:
     graph = kglite.load("cache.kgl")

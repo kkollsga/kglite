@@ -9,6 +9,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`save()` and `sync()` reported a failed write as a bare `OSError`.** The
+  typed-error taxonomy is what lets an application tell a full disk from a bad
+  argument, and the whole write path sat outside it: every I/O failure in
+  `save()`, `sync()` and `to_bytes()` — including the checkpoint's log flush and
+  log truncation — raised the builtin `OSError`, indistinguishable from any
+  unrelated OS error the call stack could produce and carrying no `.code`. They
+  now raise `kglite.FileIoError` with `.code == "FileIo"`, the same class
+  `load()` already used for the same fault. **Breaking for a caller that wrapped
+  `save()` in `except OSError`** — `kglite.FileIoError` descends from
+  `kglite.KgError`, not from `OSError`; catch `kglite.KgError` (or
+  `kglite.FileIoError`) instead. A save *refused* before it touched the path is
+  still a `ValueError`.
+
+- **An out-of-space `open()` claimed the graph was locked by another process.**
+  The advice that names the read-only route out (`use kglite.load(path)…`) was
+  appended to every failure the writer-lease acquisition could produce, not only
+  to contention — so a full disk or an unwritable directory sent the operator
+  hunting for a writer that does not exist, down a route that fails the same
+  way. The advice is now gated on an actual contention refusal; any other I/O
+  failure surfaces as the plain typed error.
+
+- **A save killed part-way through leaked a full-size copy of the graph,
+  forever.** `save()` writes a sibling `<name>.tmp.<pid>.<n>` and renames it
+  into place, and removed it on every error path it could see — but not on the
+  one that matters: a fault-injection run left a full-size temp behind on 22 of
+  30 `SIGKILL`s mid-save, and nothing ever deleted one, so a crash-looping
+  writer filled the volume with copies of its own graph. Taking the writer lease
+  (`kglite.open`, and the CLI/MCP/Bolt servers through the same seam) now reaps
+  the temps for that graph whose owning process is gone. A temp belonging to a
+  running process is never touched, and a file that merely shares the prefix is
+  not a temp — the reaper's default is always to keep.
+
+- **A WAL corrupted in its middle was reported as a routine crash tail.**
+  Recovery correctly stops at the first bad frame and discards everything after
+  it, but the stderr diagnostic asserted the harmless reading unconditionally
+  ("expected after a crash mid-commit"), so committed work being thrown away
+  because a *middle* frame was damaged read as a normal restart. The diagnostic
+  now distinguishes the two: when frames after the corrupt one still decode, it
+  says so, reports how many and how many bytes are discarded, and names it as
+  mid-file damage rather than a crash tail. A genuine torn tail keeps the
+  original wording.
+
 - **The bulk loader silently dropped every integer id outside the `u32`
   range.** `add_nodes` auto-detects an integer `unique_id_field` as the compact
   32-bit key type, so a negative id, a snowflake id, a hash, or anything from
@@ -396,6 +438,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as a name``), and `/* ... */` is reported as an unsupported block comment
   pointing at `//` instead of surfacing as `Unexpected token at start of
   clause: Slash`. Block comments remain unimplemented.
+
+- **`primary-store.md` states the schema and bulk-load rules the code actually
+  enforces.** Three claims were wrong or missing. `define_schema`'s `types:` map
+  is *advisory* — it is checked by `validate_schema()`, not at write time; the
+  page now says so and points at `CREATE CONSTRAINT … IS :: TYPE`, which **is**
+  enforced on every write path, and at `lock_schema()`. The defaults table said
+  "No schema; any property on any node" while a node type's property set is in
+  fact fixed by its first write (the deliberate `CREATE` typo guard, which fires
+  whether or not `schema_locked` is set); the page now states the rule and the
+  four ways to widen the set — `SET`, `define_schema`, a bulk load with a new
+  column, or a fresh node type. And the "chunks already flushed stay written"
+  caveat on large bulk loads is retired: every refusal `add_nodes` /
+  `add_connections` can raise is now decided in one pass before the first row is
+  written, so a rejected load writes nothing at any input size, and the 1000-row
+  chunking is a memory bound rather than an atomicity boundary.
 
 ## [0.16.5] - 2026-08-19
 
