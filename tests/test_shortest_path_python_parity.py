@@ -398,3 +398,220 @@ class TestTimeoutArgumentExists:
     )
     def test_timeout_ms_accepted(self, path_graph, call):
         call(path_graph)
+
+
+# ---------------------------------------------------------------------------
+# One source, many targets (S3)
+# ---------------------------------------------------------------------------
+#
+# The unreachable-representation contract, which is the whole reason this API
+# has two shapes:
+#
+#   * target_ids given  -> an entry per REQUESTED id, None where unreachable.
+#   * discovery mode    -> only what was reached; ABSENT means unreachable.
+#
+# Everything below is asserted against N single-pair ``shortest_path_length``
+# calls on the same fixture, so the one-to-many member cannot drift from the
+# pair member it exists to batch.
+
+PEOPLE = [1, 2, 3, 4, 5, 6]
+
+FROM_MATRIX = [
+    (source, rel, direction)
+    for source in [1, 3, 4, 6]
+    for rel in [None, "KNOWS"]
+    for direction in ["any", "outgoing", "incoming"]
+]
+
+
+def _from_id(cell) -> str:
+    source, rel, direction = cell
+    return f"from{source}-{rel or 'anyrel'}-{direction}"
+
+
+def _kwargs(rel, direction, **extra):
+    kwargs = {"direction": direction, **extra}
+    if rel:
+        kwargs["connection_types"] = [rel]
+    return kwargs
+
+
+class TestLengthsFromEqualsNSinglePairCalls:
+    """The equality that defines the method: it is N pair calls, batched."""
+
+    @pytest.mark.parametrize("cell", FROM_MATRIX, ids=_from_id)
+    def test_discovery_mode_omits_unreachable(self, path_graph, cell):
+        source, rel, direction = cell
+        kwargs = _kwargs(rel, direction)
+        got = path_graph.shortest_path_lengths_from("Person", source, "Person", **kwargs)
+        expected = {
+            target: path_graph.shortest_path_length("Person", source, "Person", target, **kwargs) for target in PEOPLE
+        }
+        # Absent == unreachable: the dict is the reachable half of `expected`.
+        assert got == {k: v for k, v in expected.items() if v is not None}
+        assert None not in got.values()
+
+    @pytest.mark.parametrize("cell", FROM_MATRIX, ids=_from_id)
+    def test_target_ids_mode_includes_none_for_unreachable(self, path_graph, cell):
+        source, rel, direction = cell
+        kwargs = _kwargs(rel, direction)
+        got = path_graph.shortest_path_lengths_from("Person", source, "Person", PEOPLE, **kwargs)
+        expected = {
+            target: path_graph.shortest_path_length("Person", source, "Person", target, **kwargs) for target in PEOPLE
+        }
+        assert got == expected
+        # Every requested id got an answer, even the unreachable ones.
+        assert set(got) == set(PEOPLE)
+
+    @pytest.mark.parametrize("cell", FROM_MATRIX, ids=_from_id)
+    def test_via_types_matches_the_pair_member(self, path_graph, cell):
+        source, rel, direction = cell
+        kwargs = _kwargs(rel, direction, via_types=["Person"])
+        got = path_graph.shortest_path_lengths_from("Person", source, "Person", PEOPLE, **kwargs)
+        assert got == {
+            target: path_graph.shortest_path_length("Person", source, "Person", target, **kwargs) for target in PEOPLE
+        }
+
+    @pytest.mark.parametrize("max_hops", [0, 1, 2, 3, 4, 10])
+    def test_max_hops_truncates_rather_than_changing_the_answer(self, path_graph, max_hops):
+        unbounded = path_graph.shortest_path_lengths_from("Person", 1, "Person")
+        capped = path_graph.shortest_path_lengths_from("Person", 1, "Person", max_hops=max_hops)
+        assert capped == {k: v for k, v in unbounded.items() if v <= max_hops}
+        for target, hops in capped.items():
+            assert hops == path_graph.shortest_path_length("Person", 1, "Person", target)
+
+    def test_target_ids_beyond_max_hops_answer_none_not_absent(self, path_graph):
+        """The bound is on the search; a requested id still gets an answer."""
+        assert path_graph.shortest_path_lengths_from("Person", 1, "Person", [1, 2, 4], max_hops=1) == {
+            1: 0,
+            2: 1,
+            4: None,
+        }
+
+
+class TestLengthsFromExactValues:
+    def test_discovery_across_every_type(self, path_graph):
+        # No target_type: every reached node, whatever its type. Oslo (10) is
+        # 3 hops out, Carol (3) 4, and the Frank/Bergen component never appears.
+        assert path_graph.shortest_path_lengths_from("Person", 1, max_hops=10) == {
+            1: 0,
+            2: 1,
+            4: 2,
+            5: 2,
+            10: 3,
+            3: 4,
+        }
+
+    def test_target_type_filters_the_result_not_the_walk(self, path_graph):
+        """Carol is only reachable *through* the City — and still shows up."""
+        people = path_graph.shortest_path_lengths_from("Person", 1, "Person")
+        assert people == {1: 0, 2: 1, 4: 2, 5: 2, 3: 4}
+        # Same walk, City-shaped answer.
+        assert path_graph.shortest_path_lengths_from("Person", 1, "City") == {10: 3}
+        # via_types is what restricts the walk: block the City and Carol dies,
+        # while the City itself is still reported (a path end, not a hop).
+        assert path_graph.shortest_path_lengths_from("Person", 1, max_hops=10, via_types=["Person"]) == {
+            1: 0,
+            2: 1,
+            4: 2,
+            5: 2,
+            10: 3,
+        }
+
+    def test_source_is_present_at_zero(self, path_graph):
+        assert path_graph.shortest_path_lengths_from("Person", 1, "Person")[1] == 0
+        assert path_graph.shortest_path_lengths_from("Person", 1, "Person", [1]) == {1: 0}
+        assert path_graph.shortest_path_lengths_from("Person", 1, max_hops=0) == {1: 0}
+        # ...unless it is out of the result's scope.
+        assert 1 not in path_graph.shortest_path_lengths_from("Person", 1, "City")
+
+    def test_direction(self, path_graph):
+        assert path_graph.shortest_path_lengths_from("Person", 1, "Person", direction="outgoing") == {
+            1: 0,
+            2: 1,
+            5: 2,
+            4: 3,
+        }
+        # Nothing points at Alice.
+        assert path_graph.shortest_path_lengths_from("Person", 1, "Person", direction="incoming") == {1: 0}
+
+    def test_connection_types(self, path_graph):
+        assert path_graph.shortest_path_lengths_from("Person", 1, "Person", connection_types=["KNOWS"]) == {
+            1: 0,
+            2: 1,
+            4: 2,
+            5: 2,
+        }
+
+    def test_isolated_component(self, path_graph):
+        assert path_graph.shortest_path_lengths_from("Person", 6, "Person") == {6: 0}
+        assert path_graph.shortest_path_lengths_from("Person", 6, "Person", PEOPLE) == {
+            1: None,
+            2: None,
+            3: None,
+            4: None,
+            5: None,
+            6: 0,
+        }
+
+    def test_target_ids_namespace_defaults_to_source_type(self, path_graph):
+        assert path_graph.shortest_path_lengths_from("Person", 1, target_ids=[4, 6]) == {4: 2, 6: None}
+        # ...and target_type names it explicitly.
+        assert path_graph.shortest_path_lengths_from("Person", 1, "City", [10, 11]) == {10: 3, 11: None}
+
+    def test_key_order_is_the_request_order_then_distance_order(self, path_graph):
+        assert list(path_graph.shortest_path_lengths_from("Person", 1, "Person", [5, 1, 6, 2])) == [5, 1, 6, 2]
+        hops = list(path_graph.shortest_path_lengths_from("Person", 1, "Person").values())
+        assert hops == sorted(hops)
+
+
+class TestLengthsFromRejections:
+    def test_unbounded_one_to_all_is_refused_by_name(self, path_graph):
+        with pytest.raises(Exception) as exc:
+            path_graph.shortest_path_lengths_from("Person", 1)
+        message = str(exc.value)
+        for bound in ("target_ids", "target_type", "max_hops"):
+            assert bound in message, f"the refusal must name {bound}: {message}"
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"target_type": "Person"},
+            {"target_ids": [2]},
+            {"max_hops": 2},
+        ],
+    )
+    def test_any_one_bound_is_enough(self, path_graph, kwargs):
+        path_graph.shortest_path_lengths_from("Person", 1, **kwargs)
+
+    def test_unknown_source_id(self, path_graph):
+        with pytest.raises(Exception, match="Source node with id"):
+            path_graph.shortest_path_lengths_from("Person", 999, "Person")
+
+    def test_unknown_target_id(self, path_graph):
+        with pytest.raises(Exception, match="Target node with id"):
+            path_graph.shortest_path_lengths_from("Person", 1, "Person", [2, 999])
+
+    def test_unknown_target_type(self, path_graph):
+        with pytest.raises(Exception, match="Unknown target_type"):
+            path_graph.shortest_path_lengths_from("Person", 1, "Perosn")
+
+    def test_bad_direction(self, path_graph):
+        with pytest.raises(Exception, match="Invalid direction"):
+            path_graph.shortest_path_lengths_from("Person", 1, "Person", direction="sideways")
+
+    def test_timeout_ms_accepted(self, path_graph):
+        path_graph.shortest_path_lengths_from("Person", 1, "Person", timeout_ms=5000)
+
+    def test_colliding_ids_across_types_raise_rather_than_collapse(self):
+        """Ids are unique per type, not across types."""
+        g = KnowledgeGraph()
+        g.add_nodes(pd.DataFrame({"id": [1], "name": ["A"]}), "Person", "id", "name")
+        g.add_nodes(pd.DataFrame({"id": [1], "name": ["Oslo"]}), "City", "id", "name")
+        g.add_connections(pd.DataFrame({"s": [1], "t": [1]}), "LIVES_IN", "Person", "s", "City", "t")
+        # Person 1 and City 1 both reached, both keyed `1`.
+        with pytest.raises(Exception, match="sharing id"):
+            g.shortest_path_lengths_from("Person", 1, max_hops=3)
+        # Naming the namespace resolves it.
+        assert g.shortest_path_lengths_from("Person", 1, "City", max_hops=3) == {1: 1}
+        assert g.shortest_path_lengths_from("Person", 1, "Person", max_hops=3) == {1: 0}

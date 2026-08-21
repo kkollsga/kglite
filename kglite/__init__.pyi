@@ -4490,6 +4490,89 @@ class KnowledgeGraph:
         """
         ...
 
+    def shortest_path_lengths_from(
+        self,
+        source_type: str,
+        source_id: Any,
+        target_type: Optional[str] = None,
+        target_ids: Optional[list[Any]] = None,
+        *,
+        connection_types: Optional[list[str]] = None,
+        via_types: Optional[list[str]] = None,
+        direction: Optional[str] = None,
+        max_hops: Optional[int] = None,
+        timeout_ms: Optional[int] = None,
+    ) -> dict[Any, Optional[int]]:
+        """Hop distances from ONE source to many targets, in a single BFS.
+
+        The one-to-many member of the shortest-path family: what N
+        :meth:`shortest_path_length` calls answer one pair at a time, this
+        answers in one traversal.
+
+        At least one of ``target_ids``, ``target_type`` or ``max_hops`` is
+        **required** — an unbounded one-to-all walk would materialise a dict
+        with one entry per reachable node, so it is refused by name.
+
+        Args:
+            source_type: Source node type. An **ID namespace** — it says which
+                type to look ``source_id`` up in, never which node types the
+                walk may pass through (use ``via_types`` for that).
+            source_id: Source node ID.
+            target_type: Restricts the **result** to nodes of this type, and is
+                the ID namespace ``target_ids`` are looked up in (defaulting to
+                ``source_type``). It does **not** restrict the traversal: the
+                walk may still route through any node type unless ``via_types``
+                says otherwise. Without it, results span every node type — and
+                because ids are unique per type but not across types, a reached
+                pair of different types sharing one id raises rather than
+                silently collapsing into one dict key.
+            target_ids: Answer for exactly these ids (see Returns).
+            connection_types: Only traverse edges of these types. Default all.
+            via_types: Only route **through** nodes of these types. A node the
+                filter excludes is still reported with its own distance — it
+                can be a path end, like the exempt endpoints of the pair
+                members — but nothing is reached *through* it.
+            direction: ``'outgoing'`` / ``'out'`` follows edges forwards,
+                ``'incoming'`` / ``'in'`` follows them backwards,
+                ``'any'`` / ``'both'`` / ``None`` (default) ignores edge
+                direction. Anything else raises.
+            max_hops: Stop the search after this many hops. ``0`` returns only
+                the source.
+            timeout_ms: Abort after this many milliseconds — and **raise**
+                (see below), unlike the pair members, which return ``None``.
+
+        Returns:
+            ``{node id: hop count}``, in two deliberately different shapes:
+
+            * **With** ``target_ids``: one entry per *requested* id, in the
+                order given, and an unreachable target maps to ``None``. You
+                asked about it, so you get an answer for it.
+            * **Without** ``target_ids`` (discovery mode): only the nodes
+                actually reached, in non-decreasing distance order. **Absent
+                means unreachable** (or beyond ``max_hops``); there are no
+                ``None`` values, because enumerating every unreached node is
+                the footgun this mode exists to avoid.
+
+            The source itself is present at distance ``0`` whenever it is in
+            scope.
+
+        Raises:
+            ArgumentError: when none of ``target_ids`` / ``target_type`` /
+                ``max_hops`` is given; when an id or ``target_type`` does not
+                exist; when two reached nodes of different types share an id;
+                or when ``timeout_ms`` expires — a partial map silently
+                missing its far half is a wrong answer, not a missing one.
+
+        Example:
+            >>> # Every Person within 3 hops of Alice.
+            >>> graph.shortest_path_lengths_from('Person', 'alice', 'Person', max_hops=3)
+            {'alice': 0, 'bob': 1, 'carol': 2}
+            >>> # An answer for each of these three, None where unreachable.
+            >>> graph.shortest_path_lengths_from('Person', 'alice', target_ids=['bob', 'zoe'])
+            {'bob': 1, 'zoe': None}
+        """
+        ...
+
     def shortest_path_ids(
         self,
         source_type: str,

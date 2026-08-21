@@ -19,8 +19,8 @@ graph.shortest_path_ids(...)       # → list[id] | None (node IDs along path)
 graph.shortest_path_indices(...)   # → list[int] | None (raw graph indices, fastest)
 ```
 
-**Which options each method takes.** Every member of the family now accepts
-the same traversal controls, so all seven answer the same question:
+**Which options each method takes.** Every member of the family accepts the
+same traversal controls, so they all answer the same question:
 
 | Method | `connection_types` / `via_types` / `direction` / `timeout_ms` | `weight_property` |
 | --- | --- | --- |
@@ -29,6 +29,7 @@ the same traversal controls, so all seven answer the same question:
 | `shortest_path_indices` | yes | no |
 | `shortest_path_length` | yes | yes |
 | `shortest_path_lengths_batch` | yes | no |
+| `shortest_path_lengths_from` | yes | no |
 | `are_connected` | yes | no |
 | `all_paths` | yes | no |
 
@@ -104,6 +105,47 @@ graph.shortest_path_lengths_batch(
 A pair whose endpoint the filters exclude entirely (a person with no `KNOWS`
 edge, under `connection_types=['KNOWS']`) answers `None` — the same "no path"
 a disconnected pair gets, never an error.
+
+### One source, many targets
+
+`shortest_path_lengths_from()` walks outward from a single source once and
+returns `{node id: hop count}` — the one-to-many shape, where the batch is the
+many-to-many one:
+
+```python
+# Every Person within 3 hops of Alice.
+graph.shortest_path_lengths_from('Person', 1, 'Person', max_hops=3)
+# → {1: 0, 2: 1, 5: 2, 4: 2}
+
+# An answer for exactly these ids, None where unreachable.
+graph.shortest_path_lengths_from('Person', 1, target_ids=[4, 6])
+# → {4: 2, 6: None}
+```
+
+The two shapes are deliberately different, and the difference is the whole
+contract:
+
+* **With `target_ids`** you get one entry per *requested* id, in the order you
+  gave them, and an unreachable target maps to `None`. You asked about it, so
+  you get an answer for it.
+* **Without `target_ids`** (discovery mode) you get only the nodes actually
+  reached. **Absent means unreachable** — or beyond `max_hops`. There are no
+  `None` values, because listing every unreached node in the graph is exactly
+  the footgun this mode exists to avoid.
+
+For the same reason, at least one of `target_ids`, `target_type` or `max_hops`
+is required; an unbounded one-to-all walk is refused with a message naming the
+three bounds.
+
+`target_type` filters the **result** (and is the id namespace `target_ids` are
+looked up in). It does not restrict the walk — `via_types` does that, and a
+node `via_types` excludes is still reported with its own distance while
+nothing is reached *through* it, exactly as the pair members exempt their
+endpoints.
+
+Unlike the pair members, a `timeout_ms` expiry **raises** here rather than
+answering `None`: a dict silently missing its far half is a wrong answer, not
+a missing one.
 
 ## All Paths
 

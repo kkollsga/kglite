@@ -979,6 +979,13 @@ paths = graph.all_paths('Person', 'alice', 'Person', 'dave',
 dists = graph.shortest_path_lengths_batch('Person', [('alice', 'dave')],
     connection_types=['KNOWS'], direction='outgoing')
 
+# One source to many targets in a single BFS -> {id: hops}. Bound it with
+# target_ids, target_type or max_hops; an unbounded one-to-all is refused.
+near = graph.shortest_path_lengths_from('Person', 'alice', 'Person', max_hops=3)
+# With explicit target_ids you get an answer per requested id (None where
+# unreachable); in discovery mode an absent id simply means unreachable.
+answers = graph.shortest_path_lengths_from('Person', 'alice', target_ids=['dave', 'zoe'])
+
 # Weighted shortest path (Dijkstra) — pass weight_property to minimise
 # total edge weight rather than hop count. Edges missing the property
 # default to 1.0; negative weights cause the path to be reported as

@@ -752,6 +752,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the whole batch while honouring the filters. An unrecognised `direction`
   raises rather than falling back to the default.
 
+- **`shortest_path_lengths_from()` — one-to-many BFS distances**, with the
+  family's filters and direction. One walk outward from a single source
+  returns `{node id: hop count}`; previously N `shortest_path_length()` calls
+  were the only route to the same answer. It must be bounded by `target_ids`,
+  `target_type` or `max_hops` — an unbounded one-to-all is refused with a
+  message naming the three — and the two answer shapes differ deliberately:
+  with explicit `target_ids` you get one entry per *requested* id, `None` where
+  unreachable; in discovery mode you get only what was reached, where an
+  **absent id means unreachable**. `target_type` filters the result and names
+  the id space; `via_types` is what restricts the walk. A `timeout_ms` expiry
+  raises here rather than answering `None`, because a dict silently missing its
+  far half is a wrong answer rather than a missing one.
+
 - **`enable_disk_mode(path=...)` converts *and* publishes the disk directory in
   one step.** The conversion now writes its CSR and edge properties inside the
   directory you name and runs the publish tail, so the live handle ends in the

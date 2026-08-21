@@ -1208,7 +1208,7 @@ fn test_shortest_path_directed_delegates_to_outgoing() {
 #[test]
 fn test_cost_with_matches_path_with_across_the_matrix() {
     let (graph, idx) = build_direction_fixture();
-    let knows = vec!["KNOWS".to_string()];
+    let knows = ["KNOWS".to_string()];
     for direction in [EdgeDir::Any, EdgeDir::Outgoing, EdgeDir::Incoming] {
         for conn in [None, Some(&knows[..])] {
             for (s, t) in [(0usize, 3usize), (3, 0), (2, 3), (0, 2)] {
@@ -1395,7 +1395,7 @@ fn test_scoped_directed_adjacency_orients_each_edge_once() {
 #[test]
 fn test_weighted_honours_direction_and_filters() {
     let (graph, idx) = build_direction_fixture();
-    let knows = vec!["KNOWS".to_string()];
+    let knows = ["KNOWS".to_string()];
     // Every edge weighs 1.0 (no weight property present), so the weighted
     // answer must track the hop count exactly — including under direction.
     for direction in [EdgeDir::Any, EdgeDir::Outgoing, EdgeDir::Incoming] {
@@ -1461,4 +1461,275 @@ fn test_all_paths_direction() {
     );
     let lens: Vec<usize> = directed.iter().map(|p| p.len() - 1).collect();
     assert_eq!(lens, vec![3]);
+}
+
+// ============================================================================
+// shortest_path_costs_from: the one-to-many member (S3).
+// ============================================================================
+
+/// `(node index position, hops)` pairs, sorted, for stable comparison.
+fn costs_by_position(
+    idx: &[petgraph::graph::NodeIndex],
+    costs: &[(petgraph::graph::NodeIndex, usize)],
+) -> Vec<(usize, usize)> {
+    let mut out: Vec<(usize, usize)> = costs
+        .iter()
+        .map(|&(node, d)| (idx.iter().position(|&n| n == node).unwrap(), d))
+        .collect();
+    out.sort_unstable();
+    out
+}
+
+#[test]
+fn test_costs_from_matches_the_pair_finder_on_every_node() {
+    // The whole point of the API: one BFS answering what N
+    // `shortest_path_cost_with` calls answer one pair at a time.
+    let (graph, idx) = build_direction_fixture();
+    let knows = vec!["KNOWS".to_string()];
+    let persons = vec!["Person".to_string()];
+
+    for direction in [EdgeDir::Any, EdgeDir::Outgoing, EdgeDir::Incoming] {
+        for filter in 0..3 {
+            let mut opts = PathOptions::default().with_direction(direction);
+            match filter {
+                1 => opts = opts.with_connection_types(&knows),
+                2 => opts = opts.with_via_types(&persons),
+                _ => {}
+            }
+            for &source in &idx {
+                let costs = shortest_path_costs_from(&graph, source, &opts, None).unwrap();
+                let map: HashMap<_, _> = costs.iter().copied().collect();
+                for &target in &idx {
+                    assert_eq!(
+                        map.get(&target).copied(),
+                        shortest_path_cost_with(&graph, source, target, &opts),
+                        "{:?} filter {} {:?} -> {:?}",
+                        direction,
+                        filter,
+                        source,
+                        target
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn test_costs_from_reports_the_source_at_zero_and_omits_unreachable() {
+    let (graph, idx) = build_direction_fixture();
+    let costs = shortest_path_costs_from(&graph, idx[0], &PathOptions::default(), None).unwrap();
+    assert_eq!(
+        costs_by_position(&idx, &costs),
+        vec![(0, 0), (1, 1), (2, 4), (3, 2), (4, 2), (5, 3)]
+    );
+    // Distances come back non-decreasing, source first.
+    assert_eq!(costs[0], (idx[0], 0));
+    assert!(costs.windows(2).all(|w| w[0].1 <= w[1].1));
+
+    // Nothing points at P0, so an incoming-only walk reaches only itself.
+    let inbound = shortest_path_costs_from(
+        &graph,
+        idx[0],
+        &PathOptions::default().with_direction(EdgeDir::Incoming),
+        None,
+    )
+    .unwrap();
+    assert_eq!(inbound, vec![(idx[0], 0)]);
+}
+
+#[test]
+fn test_costs_from_direction_changes_the_answer() {
+    let (graph, idx) = build_direction_fixture();
+    let outgoing = shortest_path_costs_from(
+        &graph,
+        idx[0],
+        &PathOptions::default().with_direction(EdgeDir::Outgoing),
+        None,
+    )
+    .unwrap();
+    // Following arrows: P0->P1->P4->P3->City; P2 is unreachable (its only edge
+    // points *into* the City).
+    assert_eq!(
+        costs_by_position(&idx, &outgoing),
+        vec![(0, 0), (1, 1), (3, 3), (4, 2), (5, 4)]
+    );
+}
+
+#[test]
+fn test_costs_from_max_hops_boundary() {
+    let (graph, idx) = build_direction_fixture();
+    let opts = PathOptions::default();
+
+    // Some(0) is the degenerate bound: the source and nothing else.
+    assert_eq!(
+        shortest_path_costs_from(&graph, idx[0], &opts, Some(0)).unwrap(),
+        vec![(idx[0], 0)]
+    );
+    assert_eq!(
+        costs_by_position(
+            &idx,
+            &shortest_path_costs_from(&graph, idx[0], &opts, Some(1)).unwrap()
+        ),
+        vec![(0, 0), (1, 1)]
+    );
+    assert_eq!(
+        costs_by_position(
+            &idx,
+            &shortest_path_costs_from(&graph, idx[0], &opts, Some(2)).unwrap()
+        ),
+        vec![(0, 0), (1, 1), (3, 2), (4, 2)]
+    );
+    // The eccentricity of P0 is 4, so any cap at or above it is unbounded.
+    let unbounded = shortest_path_costs_from(&graph, idx[0], &opts, None).unwrap();
+    for cap in [4usize, 5, 100] {
+        assert_eq!(
+            costs_by_position(
+                &idx,
+                &shortest_path_costs_from(&graph, idx[0], &opts, Some(cap)).unwrap()
+            ),
+            costs_by_position(&idx, &unbounded),
+            "cap {cap}"
+        );
+    }
+    // Every cap truncates the *unbounded* answer rather than changing it.
+    for cap in 0..=5usize {
+        let capped = shortest_path_costs_from(&graph, idx[0], &opts, Some(cap)).unwrap();
+        let expected: Vec<_> = unbounded
+            .iter()
+            .copied()
+            .filter(|&(_, d)| d <= cap)
+            .collect();
+        assert_eq!(
+            costs_by_position(&idx, &capped),
+            costs_by_position(&idx, &expected),
+            "cap {cap}"
+        );
+    }
+}
+
+#[test]
+fn test_costs_from_via_types_gates_the_middle_not_the_ends() {
+    let (graph, idx) = build_direction_fixture();
+    let persons = vec!["Person".to_string()];
+    let costs = shortest_path_costs_from(
+        &graph,
+        idx[0],
+        &PathOptions::default().with_via_types(&persons),
+        None,
+    )
+    .unwrap();
+    // The City is still *reported* (it is a path end, and ends are exempt),
+    // but it is never expanded — so P2, which is only reachable through it,
+    // drops out. This is exactly what the pair finder answers per target.
+    assert_eq!(
+        costs_by_position(&idx, &costs),
+        vec![(0, 0), (1, 1), (3, 2), (4, 2), (5, 3)]
+    );
+}
+
+#[test]
+fn test_costs_from_connection_types_filter() {
+    let (graph, idx) = build_direction_fixture();
+    let knows = vec!["KNOWS".to_string()];
+    let costs = shortest_path_costs_from(
+        &graph,
+        idx[0],
+        &PathOptions::default().with_connection_types(&knows),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        costs_by_position(&idx, &costs),
+        vec![(0, 0), (1, 1), (3, 2), (4, 2)]
+    );
+}
+
+#[test]
+fn test_costs_from_source_outside_the_graph_is_empty_not_a_panic() {
+    let (graph, _idx) = build_direction_fixture();
+    let outside = petgraph::graph::NodeIndex::new(9_999);
+    assert_eq!(
+        shortest_path_costs_from(&graph, outside, &PathOptions::default(), None).unwrap(),
+        vec![]
+    );
+    // Same on the filtered path, which takes a different expansion.
+    let knows = vec!["KNOWS".to_string()];
+    assert_eq!(
+        shortest_path_costs_from(
+            &graph,
+            outside,
+            &PathOptions::default().with_connection_types(&knows),
+            Some(3)
+        )
+        .unwrap(),
+        vec![]
+    );
+}
+
+#[test]
+fn test_costs_from_isolated_source_and_empty_graph() {
+    let graph = DirGraph::new();
+    assert_eq!(
+        shortest_path_costs_from(
+            &graph,
+            petgraph::graph::NodeIndex::new(0),
+            &PathOptions::default(),
+            None
+        )
+        .unwrap(),
+        vec![]
+    );
+
+    let (graph, idx) = build_disconnected_graph();
+    // build_disconnected_graph: 0-1 and 2-3, nothing between.
+    let costs = shortest_path_costs_from(&graph, idx[0], &PathOptions::default(), None).unwrap();
+    assert_eq!(costs_by_position(&idx, &costs), vec![(0, 0), (1, 1)]);
+}
+
+#[test]
+fn test_costs_from_expired_deadline_errors_rather_than_truncating() {
+    let (graph, idx) = build_direction_fixture();
+    let expired = Interrupt::from_deadline(Some(
+        std::time::Instant::now() - std::time::Duration::from_secs(1),
+    ));
+    // A partial map that silently drops its far half is a wrong answer, so
+    // this member errors where the pair finders answer `None`.
+    let mut sources = Vec::new();
+    for &source in &idx {
+        sources.push(shortest_path_costs_from(
+            &graph,
+            source,
+            &PathOptions::default().with_interrupt(expired),
+            None,
+        ));
+    }
+    // The graph is tiny (under the 1024-pop check interval), so the searches
+    // may complete; what must never happen is a *silently truncated* Ok.
+    for (source, result) in idx.iter().zip(&sources) {
+        match result {
+            Err(msg) => assert!(msg.contains("timed out"), "unexpected error: {msg}"),
+            Ok(costs) => assert_eq!(
+                costs.len(),
+                shortest_path_costs_from(&graph, *source, &PathOptions::default(), None)
+                    .unwrap()
+                    .len()
+            ),
+        }
+    }
+}
+
+#[test]
+fn test_eccentricity_agrees_with_costs_from() {
+    // The lift: eccentricity is the max distance of the same single-source
+    // search, over its own scoped (undirected, unfiltered) subgraph.
+    let (graph, idx) = build_direction_fixture();
+    let eccs = eccentricity_scoped(&graph, None, None, Interrupt::default()).unwrap();
+    let by_node: HashMap<_, _> = eccs.iter().copied().collect();
+    for &source in &idx {
+        let costs =
+            shortest_path_costs_from(&graph, source, &PathOptions::default(), None).unwrap();
+        let furthest = costs.iter().map(|&(_, d)| d).max().unwrap_or(0) as i64;
+        assert_eq!(by_node[&source], furthest, "{:?}", source);
+    }
 }

@@ -45,7 +45,11 @@
       "classification": "boundary"
     },
     {
-      "identity": "crates/kglite-py/src/graph/pyapi/algorithms.rs::fn:all_paths:fn all_paths( &self, py: Python<'_>, source_type: &str, source_id: &Bound<'_, PyAny>, target_type: &str, target_id: &Bound<'_, PyAny>, max_hops: Option<usize>, max_results: Option<usize>, connection_types: Option<Vec<String>>, via_types: Option<Vec<String>>, timeout_ms: Option<u64>, ) -> PyResult<Py::clippy::too_many_arguments",
+      "identity": "crates/kglite-py/src/graph/pyapi/algorithms.rs::fn:all_paths:fn all_paths( &self, py: Python<'_>, source_type: &str, source_id: &Bound<'_, PyAny>, target_type: &str, target_id: &Bound<'_, PyAny>, max_hops: Option<usize>, max_results: Option<usize>, connection_types: Option<Vec<String>>, via_types: Option<Vec<String>>, timeout_ms: Option<u64>, direction: Optio::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/graph/pyapi/algorithms.rs::fn:are_connected:fn are_connected( &self, source_type: &str, source_id: &Bound<'_, PyAny>, target_type: &str, target_id: &Bound<'_, PyAny>, connection_types: Option<Vec<String>>, via_types: Option<Vec<String>>, direction: Option<&str>, timeout_ms: Option<u64>, ) -> PyResult<bool>::clippy::too_many_arguments",
       "classification": "boundary"
     },
     {
@@ -65,15 +69,27 @@
       "classification": "boundary"
     },
     {
-      "identity": "crates/kglite-py/src/graph/pyapi/algorithms.rs::fn:shortest_path:fn shortest_path( &self, py: Python<'_>, source_type: &str, source_id: &Bound<'_, PyAny>, target_type: &str, target_id: &Bound<'_, PyAny>, connection_types: Option<Vec<String>>, via_types: Option<Vec<String>>, weight_property: Option<String>, timeout_ms: Option<u64>, ) -> PyResult<Py<PyAny>>::clippy::too_many_arguments",
+      "identity": "crates/kglite-py/src/graph/pyapi/algorithms.rs::fn:shortest_path:fn shortest_path( &self, py: Python<'_>, source_type: &str, source_id: &Bound<'_, PyAny>, target_type: &str, target_id: &Bound<'_, PyAny>, connection_types: Option<Vec<String>>, via_types: Option<Vec<String>>, weight_property: Option<String>, timeout_ms: Option<u64>, direction: Option<&str>, ) -> Py::clippy::too_many_arguments",
       "classification": "boundary"
     },
     {
-      "identity": "crates/kglite-py/src/graph/pyapi/algorithms.rs::fn:shortest_path_ids:fn shortest_path_ids( &self, py: Python<'_>, source_type: &str, source_id: &Bound<'_, PyAny>, target_type: &str, target_id: &Bound<'_, PyAny>, connection_types: Option<Vec<String>>, via_types: Option<Vec<String>>, timeout_ms: Option<u64>, ) -> PyResult<Py<PyAny>>::clippy::too_many_arguments",
+      "identity": "crates/kglite-py/src/graph/pyapi/algorithms.rs::fn:shortest_path_ids:fn shortest_path_ids( &self, py: Python<'_>, source_type: &str, source_id: &Bound<'_, PyAny>, target_type: &str, target_id: &Bound<'_, PyAny>, connection_types: Option<Vec<String>>, via_types: Option<Vec<String>>, timeout_ms: Option<u64>, direction: Option<&str>, ) -> PyResult<Py<PyAny>>::clippy::too_many_arguments",
       "classification": "boundary"
     },
     {
-      "identity": "crates/kglite-py/src/graph/pyapi/algorithms.rs::fn:shortest_path_indices:fn shortest_path_indices( &self, py: Python<'_>, source_type: &str, source_id: &Bound<'_, PyAny>, target_type: &str, target_id: &Bound<'_, PyAny>, connection_types: Option<Vec<String>>, via_types: Option<Vec<String>>, timeout_ms: Option<u64>, ) -> PyResult<Py<PyAny>>::clippy::too_many_arguments",
+      "identity": "crates/kglite-py/src/graph/pyapi/algorithms.rs::fn:shortest_path_indices:fn shortest_path_indices( &self, py: Python<'_>, source_type: &str, source_id: &Bound<'_, PyAny>, target_type: &str, target_id: &Bound<'_, PyAny>, connection_types: Option<Vec<String>>, via_types: Option<Vec<String>>, timeout_ms: Option<u64>, direction: Option<&str>, ) -> PyResult<Py<PyAny>>::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/graph/pyapi/algorithms.rs::fn:shortest_path_length:fn shortest_path_length( &self, py: Python<'_>, source_type: &str, source_id: &Bound<'_, PyAny>, target_type: &str, target_id: &Bound<'_, PyAny>, weight_property: Option<String>, connection_types: Option<Vec<String>>, via_types: Option<Vec<String>>, direction: Option<&str>, timeout_ms: Option<u64>, ::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/graph/pyapi/algorithms.rs::fn:shortest_path_lengths_batch:fn shortest_path_lengths_batch( &self, py: Python<'_>, node_type: &str, pairs: Vec<(Bound<'_, PyAny>, Bound<'_, PyAny>)>, connection_types: Option<Vec<String>>, via_types: Option<Vec<String>>, direction: Option<&str>, timeout_ms: Option<u64>, ) -> PyResult<Py<PyAny>>::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/graph/pyapi/algorithms.rs::fn:shortest_path_lengths_from:fn shortest_path_lengths_from( &self, py: Python<'_>, source_type: &str, source_id: &Bound<'_, PyAny>, target_type: Option<&str>, target_ids: Option<Vec<Bound<'_, PyAny>>>, connection_types: Option<Vec<String>>, via_types: Option<Vec<String>>, direction: Option<&str>, max_hops: Option<usize>, timeou::clippy::too_many_arguments",
       "classification": "boundary"
     },
     {

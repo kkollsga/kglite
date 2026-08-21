@@ -8,7 +8,7 @@ use crate::graph::storage::GraphRead;
 use petgraph::algo::kosaraju_scc;
 use petgraph::graph::NodeIndex;
 use petgraph::Direction;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 // Centrality algorithms moved to the sibling `centrality` module to keep this
 // file under the god-file ceiling. Re-exported so existing
@@ -854,6 +854,197 @@ pub fn shortest_path_cost_batch_with(
     }
 
     results
+}
+
+/// Reusable scratch for a *generation-stamped* single-source BFS over a fixed
+/// vertex space (`0..n`).
+///
+/// The generation counter is what makes the all-pairs eccentricity loop cheap:
+/// bumping `generation` invalidates every `seen` entry in O(1), so n
+/// back-to-back searches never pay an O(n) reset each. A caller that runs a
+/// single search (`shortest_path_costs_from`) simply allocates one and drops it.
+struct BfsScratch {
+    /// Per-vertex "reached in generation g" marker; `0` is never a live
+    /// generation, so a freshly allocated buffer starts fully unvisited.
+    seen: Vec<u32>,
+    /// Hop distance from the current source, valid only where
+    /// `seen[v] == generation`.
+    dist: Vec<u32>,
+    queue: VecDeque<u32>,
+    generation: u32,
+}
+
+impl BfsScratch {
+    fn new(n: usize) -> Self {
+        Self {
+            seen: vec![0u32; n],
+            dist: vec![0u32; n],
+            queue: VecDeque::with_capacity(64),
+            generation: 0,
+        }
+    }
+}
+
+/// One single-source breadth-first search, abstracted over how neighbours are
+/// produced and what is done with each node reached. The shared engine behind
+/// [`shortest_path_costs_from`] (which expands over the live graph, honouring
+/// [`PathOptions`]) and [`eccentricity_scoped`] (which expands over a compact
+/// scoped adjacency it built once for all its sources).
+///
+/// * `expand(u, sink)` feeds every neighbour of `u` to `sink`; duplicates are
+///   harmless (the `seen` stamp filters them).
+/// * `visit(v, dist)` is called exactly once per vertex the search reaches,
+///   in non-decreasing distance order, **including `start` at distance 0**.
+///   Returning `false` reports the vertex but stops the search expanding
+///   *through* it — that is how `via_types` gates the middle of a path while
+///   leaving its ends exempt, exactly as the pair finders do.
+/// * `max_hops` stops the search after that many levels (`Some(0)` visits only
+///   `start`).
+///
+/// Returns `Err(algorithm_timeout_err())` when `deadline` expires mid-search.
+fn single_source_bfs(
+    scratch: &mut BfsScratch,
+    start: u32,
+    max_hops: Option<usize>,
+    deadline: Interrupt,
+    mut expand: impl FnMut(u32, &mut dyn FnMut(u32)),
+    mut visit: impl FnMut(u32, u32) -> bool,
+) -> Result<(), String> {
+    scratch.generation += 1;
+    let generation = scratch.generation;
+    let start_idx = start as usize;
+    scratch.seen[start_idx] = generation;
+    scratch.dist[start_idx] = 0;
+    scratch.queue.clear();
+    if visit(start, 0) {
+        scratch.queue.push_back(start);
+    }
+
+    let mut popped = 0u32;
+    while let Some(u) = scratch.queue.pop_front() {
+        popped = popped.wrapping_add(1);
+        if popped.is_multiple_of(1024) && deadline.exceeded() {
+            return Err(algorithm_timeout_err());
+        }
+        let du = scratch.dist[u as usize];
+        if max_hops.is_some_and(|cap| du as usize >= cap) {
+            // FIFO order means every remaining entry is at least this deep.
+            break;
+        }
+        let BfsScratch {
+            seen, dist, queue, ..
+        } = &mut *scratch;
+        expand(u, &mut |w| {
+            let wi = w as usize;
+            if seen[wi] != generation {
+                seen[wi] = generation;
+                dist[wi] = du + 1;
+                if visit(w, du + 1) {
+                    queue.push_back(w);
+                }
+            }
+        });
+    }
+    Ok(())
+}
+
+/// Hop distance from **one** source to every node it can reach — the
+/// one-to-many member of the shortest-path family, answering in a single BFS
+/// what N [`shortest_path_cost_with`] calls would answer one pair at a time.
+///
+/// Returns `(node, hops)` in non-decreasing distance order, `source` itself
+/// first at distance `0`. Unreachable nodes are simply absent. `max_hops`
+/// bounds the search (`Some(0)` returns only the source); `None` walks the
+/// whole reachable component, so a caller exposing this to users should bound
+/// it.
+///
+/// The [`PathOptions`] knobs mean exactly what they mean everywhere else in
+/// the family: `connection_types` limits which edge types may be walked,
+/// `direction` limits their orientation, and `via_types` limits which node
+/// types a path may pass **through**. A node whose type `via_types` excludes
+/// is still *reported* (with its distance) but is never expanded — the same
+/// "endpoints are exempt from `via_types`, the middle is not" rule the pair
+/// finders follow, generalised to a search where every reached node is a
+/// potential endpoint.
+///
+/// Unlike the pair finders (which answer `None` on a deadline, indistinguishable
+/// from "no path"), this returns `Err(algorithm_timeout_err())`: a partial map
+/// silently missing its far half is a wrong answer, not a missing one.
+pub fn shortest_path_costs_from(
+    graph: &DirGraph,
+    source: NodeIndex,
+    options: &PathOptions,
+    max_hops: Option<usize>,
+) -> Result<Vec<(NodeIndex, usize)>, String> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena, which must run under a DiskQueryGuard (arena protocol in
+    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
+    let bound = graph.graph.node_bound();
+    if source.index() >= bound {
+        return Ok(Vec::new());
+    }
+    let PathOptions {
+        connection_types,
+        via_types,
+        direction,
+        interrupt: deadline,
+    } = *options;
+
+    let mut out: Vec<(NodeIndex, usize)> = Vec::new();
+    let mut scratch = BfsScratch::new(bound);
+    let start = source.index() as u32;
+
+    if connection_types.is_none() && via_types.is_none() && direction == EdgeDir::Any {
+        // The hot default: petgraph's own neighbour iterator, no per-node
+        // allocation and no filter machinery (the split `unfiltered_cost_bfs`
+        // makes for the pair query).
+        single_source_bfs(
+            &mut scratch,
+            start,
+            max_hops,
+            deadline,
+            |u, sink| {
+                let g = &graph.graph;
+                for neighbor in g.neighbors_undirected(NodeIndex::new(u as usize)) {
+                    sink(neighbor.index() as u32);
+                }
+            },
+            |v, d| {
+                out.push((NodeIndex::new(v as usize), d as usize));
+                true
+            },
+        )?;
+    } else {
+        let via_set: Option<HashSet<&str>> =
+            via_types.map(|vt| vt.iter().map(|s| s.as_str()).collect());
+        let interned = intern_connection_types(connection_types);
+        single_source_bfs(
+            &mut scratch,
+            start,
+            max_hops,
+            deadline,
+            |u, sink| {
+                for neighbor in filtered_neighbors(
+                    graph,
+                    NodeIndex::new(u as usize),
+                    direction,
+                    interned.as_deref(),
+                ) {
+                    sink(neighbor.index() as u32);
+                }
+            },
+            |v, d| {
+                let node = NodeIndex::new(v as usize);
+                out.push((node, d as usize));
+                // The source is always expandable; every other node must pass
+                // `via_types` to serve as an intermediate hop.
+                d == 0 || node_passes_via_filter(graph, node, &via_set)
+            },
+        )?;
+    }
+
+    Ok(out)
 }
 
 /// Reconstruct path using BFS.
@@ -1787,7 +1978,6 @@ pub fn eccentricity_scoped(
                                                   // arena, which must run under a DiskQueryGuard (arena protocol in
                                                   // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
     let _arena_guard = graph.graph.begin_query();
-    use std::collections::VecDeque;
     let (nodes, adj) = build_scoped_undirected_adjacency(graph, node_types, rel_types, deadline)?;
     let n = nodes.len();
     if n > MAX_ECCENTRICITY_NODES {
@@ -1798,32 +1988,31 @@ pub fn eccentricity_scoped(
         ));
     }
     let mut out = Vec::with_capacity(n);
-    // Generation-stamped visited markers avoid an O(n) reset per source.
-    let mut seen = vec![0u32; n];
-    let mut dist = vec![0u32; n];
-    let mut queue: VecDeque<u32> = VecDeque::with_capacity(64);
-    let mut generation = 0u32;
+    // One scratch for all n searches: the generation stamp is what keeps the
+    // per-source cost O(V+E) instead of O(n) reset + O(V+E).
+    let mut scratch = BfsScratch::new(n);
     for (s, &node) in nodes.iter().enumerate() {
         if s & 0x3FF == 0 && deadline.exceeded() {
             return Err(algorithm_timeout_err());
         }
-        generation += 1;
-        seen[s] = generation;
-        dist[s] = 0;
-        queue.clear();
-        queue.push_back(s as u32);
+        // The eccentricity of `node` is the greatest distance the search
+        // reaches; an isolated node never leaves distance 0.
         let mut ecc = 0u32;
-        while let Some(u) = queue.pop_front() {
-            let du = dist[u as usize];
-            for &w in &adj[u as usize] {
-                if seen[w as usize] != generation {
-                    seen[w as usize] = generation;
-                    dist[w as usize] = du + 1;
-                    ecc = ecc.max(du + 1);
-                    queue.push_back(w);
+        single_source_bfs(
+            &mut scratch,
+            s as u32,
+            None,
+            deadline,
+            |u, sink| {
+                for &w in &adj[u as usize] {
+                    sink(w);
                 }
-            }
-        }
+            },
+            |_v, d| {
+                ecc = ecc.max(d);
+                true
+            },
+        )?;
         out.push((node, ecc as i64));
     }
     Ok(out)

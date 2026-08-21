@@ -1024,6 +1024,10 @@
           "kind": "method",
           "signature": "(self, /, node_type, pairs, connection_types=None, via_types=None, direction=None, timeout_ms=None)"
         },
+        "shortest_path_lengths_from": {
+          "kind": "method",
+          "signature": "(self, /, source_type, source_id, target_type=None, target_ids=None, *, connection_types=None, via_types=None, direction=None, max_hops=None, timeout_ms=None)"
+        },
         "show": {
           "kind": "method",
           "signature": "(self, /, columns=None, limit=200)"

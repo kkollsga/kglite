@@ -555,8 +555,10 @@ mod tests {
     /// starts at `offsets[i - 1]`.
     fn decode(data: &[u8], offsets: &[u8], nulls: &[u8]) -> Vec<Option<String>> {
         let ends: Vec<u64> = offsets
-            .chunks_exact(8)
-            .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|c| u64::from_le_bytes(*c))
             .collect();
         assert_eq!(ends.len(), nulls.len(), "one end offset per row");
         let mut out = Vec::with_capacity(nulls.len());

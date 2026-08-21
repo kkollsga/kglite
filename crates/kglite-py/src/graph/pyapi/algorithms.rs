@@ -338,6 +338,7 @@ impl KnowledgeGraph {
     /// Returns:
     ///     List of distances (None where no path exists), same order as input pairs.
     #[pyo3(signature = (node_type, pairs, connection_types=None, via_types=None, direction=None, timeout_ms=None))]
+    #[allow(clippy::too_many_arguments)]
     fn shortest_path_lengths_batch(
         &self,
         py: Python<'_>,
@@ -397,6 +398,180 @@ impl KnowledgeGraph {
         }
 
         Ok(result_list.into())
+    }
+
+    /// Hop distances from ONE source to many targets, in a single BFS.
+    ///
+    /// The one-to-many member of the shortest-path family: what N
+    /// ``shortest_path_length()`` calls answer one pair at a time, this
+    /// answers in one traversal.
+    ///
+    /// Args:
+    ///     source_type: The node type to look ``source_id`` up in
+    ///     source_id: The unique ID of the source node
+    ///     target_type: Restricts the RESULT to nodes of this type, and is the
+    ///         ID namespace ``target_ids`` are looked up in (default: the
+    ///         source's own type for ``target_ids``, every type otherwise).
+    ///         It does NOT restrict the traversal — use ``via_types`` for that.
+    ///     target_ids: Only these ids, each with an answer (see Returns)
+    ///     max_hops: Stop the search after this many hops
+    ///
+    /// Returns:
+    ///     dict mapping node id -> hop count, with two deliberately different
+    ///     shapes for the two ways of asking:
+    ///
+    ///     * With ``target_ids``: one entry per REQUESTED id, in the order
+    ///       given, and an unreachable target maps to ``None`` — you asked
+    ///       about it, so you get an answer for it.
+    ///     * Without ``target_ids`` (discovery mode): only the nodes actually
+    ///       reached, in non-decreasing distance order. **Absent means
+    ///       unreachable** (or beyond ``max_hops``); there are no ``None``
+    ///       values, because listing every unreached node in the graph is the
+    ///       footgun this mode exists to avoid.
+    ///
+    ///     The source itself is always at distance ``0`` when it is in scope.
+    ///
+    /// Raises:
+    ///     kglite.ArgumentError: if none of ``target_ids`` / ``target_type`` /
+    ///         ``max_hops`` is given (an unbounded one-to-all walk), if an id
+    ///         does not exist, or if the deadline expires — a partial map
+    ///         silently missing its far half is a wrong answer, so this member
+    ///         raises where the pair members return ``None``.
+    ///
+    /// Example:
+    ///     ```python
+    ///     # Every Person within 3 hops of Alice.
+    ///     graph.shortest_path_lengths_from('Person', 'alice', 'Person', max_hops=3)
+    ///     # An answer for each of these three, None where unreachable.
+    ///     graph.shortest_path_lengths_from('Person', 'alice', target_ids=[2, 7, 9])
+    ///     ```
+    #[pyo3(signature = (source_type, source_id, target_type=None, target_ids=None, *, connection_types=None, via_types=None, direction=None, max_hops=None, timeout_ms=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn shortest_path_lengths_from(
+        &self,
+        py: Python<'_>,
+        source_type: &str,
+        source_id: &Bound<'_, PyAny>,
+        target_type: Option<&str>,
+        target_ids: Option<Vec<Bound<'_, PyAny>>>,
+        connection_types: Option<Vec<String>>,
+        via_types: Option<Vec<String>>,
+        direction: Option<&str>,
+        max_hops: Option<usize>,
+        timeout_ms: Option<u64>,
+    ) -> PyResult<Py<PyAny>> {
+        // Footgun guard: a bare one-to-all on a large graph materialises a
+        // Python dict with one entry per reachable node. Refuse it by name.
+        if target_ids.is_none() && target_type.is_none() && max_hops.is_none() {
+            return Err(crate::error_py::kg_to_pyerr(
+                crate::error::KgError::Argument(
+                    "shortest_path_lengths_from() will not walk to every node in the graph. \
+                     Bound it with one of: target_ids=[...] (an answer per requested id), \
+                     target_type='T' (only reached nodes of that type), or max_hops=N \
+                     (only nodes within N hops)."
+                        .to_string(),
+                ),
+            ));
+        }
+        let edge_dir = parse_direction(direction)?;
+        let _arena_guard = self.inner.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
+
+        let source_value = py_in::py_value_to_value(source_id)?;
+        let source_idx = self
+            .inner
+            .lookup_by_id_normalized(source_type, &source_value)
+            .ok_or_else(|| -> PyErr {
+                crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(format!(
+                    "Source node with id {:?} not found in type '{}'",
+                    source_value, source_type
+                )))
+            })?;
+
+        // A `target_type` that names nothing would silently answer `{}`, which
+        // reads as "nothing is reachable" rather than "you typed the type wrong".
+        if let Some(wanted) = target_type {
+            if !self.inner.type_indices.contains_key(wanted) {
+                return Err(crate::error_py::kg_to_pyerr(
+                    crate::error::KgError::Argument(format!(
+                        "Unknown target_type '{}'. It is an ID NAMESPACE and result filter, \
+                         not a traversal restriction — use via_types for that.",
+                        wanted
+                    )),
+                ));
+            }
+        }
+
+        let costs = kglite_core::api::algorithms::shortest_path_costs_from(
+            &self.inner,
+            source_idx,
+            &path_options(
+                connection_types.as_deref(),
+                via_types.as_deref(),
+                edge_dir,
+                deadline_from(timeout_ms),
+            ),
+            max_hops,
+        )
+        .map_err(|e: String| crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e)))?;
+
+        let result = PyDict::new(py);
+        match target_ids {
+            // Explicit targets: an answer per requested id, `None` when the
+            // search never reached it.
+            Some(ids) => {
+                let namespace = target_type.unwrap_or(source_type);
+                let reached: std::collections::HashMap<_, _> = costs.into_iter().collect();
+                for id_obj in &ids {
+                    let target_value = py_in::py_value_to_value(id_obj)?;
+                    let target_idx = self
+                        .inner
+                        .lookup_by_id_normalized(namespace, &target_value)
+                        .ok_or_else(|| -> PyErr {
+                            crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(format!(
+                                "Target node with id {:?} not found in type '{}'",
+                                target_value, namespace
+                            )))
+                        })?;
+                    match reached.get(&target_idx) {
+                        Some(&hops) => result.set_item(id_obj, hops)?,
+                        None => result.set_item(id_obj, py.None())?,
+                    }
+                }
+            }
+            // Discovery mode: only what was reached, absent = unreachable.
+            None => {
+                for (node_idx, hops) in costs {
+                    let Some(node) = self.inner.node_view(node_idx) else {
+                        continue;
+                    };
+                    if let Some(wanted) = target_type {
+                        if node.node_type_str(&self.inner.interner) != wanted {
+                            continue;
+                        }
+                    }
+                    let Some(node_id) = node.get_field_ref("id") else {
+                        continue;
+                    };
+                    let key = py_out::value_to_py(py, &node_id)?;
+                    // Ids are unique per type, not across types: without a
+                    // `target_type` two reached nodes can collide on one dict
+                    // key. Say so rather than silently dropping one.
+                    if target_type.is_none() && result.contains(&key)? {
+                        return Err(crate::error_py::kg_to_pyerr(
+                            crate::error::KgError::Argument(format!(
+                                "shortest_path_lengths_from() reached two nodes of different \
+                                 types sharing id {:?}; ids are unique per type, so pass \
+                                 target_type= to pick one id namespace.",
+                                node_id
+                            )),
+                        ));
+                    }
+                    result.set_item(key, hops)?;
+                }
+            }
+        }
+
+        Ok(result.into())
     }
 
     /// Get just the node IDs along the shortest path between two nodes.
