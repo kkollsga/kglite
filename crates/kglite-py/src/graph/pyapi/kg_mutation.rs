@@ -131,6 +131,8 @@ fn collect_bulk_connection_names(
 /// `replace_connections`). Returns the columnar DataFrame plus any
 /// temporal-edge config auto-detected from `validFrom`/`validTo` column
 /// types — the caller merges that into `graph.temporal_edge_configs`.
+// Mirrors add_connections' keyword surface one-to-one; a params struct would
+// just re-spell the pyo3 signature.
 #[allow(clippy::too_many_arguments)]
 fn build_connection_df_from_pandas(
     data: &Bound<'_, PyAny>,
@@ -1045,6 +1047,38 @@ fn build_node_report_dict<'py>(
     Ok(report_dict.into())
 }
 
+/// The report a managed reload gets back when it addresses a `runtime`-layer
+/// type: the write is skipped, and this says so.
+///
+/// It carries the **full** `add_nodes` report shape — `operation`,
+/// `timestamp`, the three counts, `processing_time_ms`, `has_errors` — plus
+/// the two skip-specific keys. Shipping a differently-shaped dict from one
+/// arm of the same method made every caller that reads `report["has_errors"]`
+/// (the documented way to check a load) raise `KeyError` on exactly the path
+/// where the caller most needs a readable answer.
+///
+/// `has_errors` is `False`: the skip is the contract working, not a failure.
+/// `nodes_skipped` stays 0 because it counts *rows* rejected within a
+/// performed load; nothing here was loaded at all, and `skipped_runtime_layer`
+/// is the key that says so.
+fn skipped_runtime_layer_report(py: Python<'_>, node_type: &str) -> PyResult<Py<PyAny>> {
+    let report = PyDict::new(py);
+    report.set_item("operation", "add_nodes")?;
+    report.set_item("timestamp", chrono::Utc::now().to_rfc3339())?;
+    report.set_item("nodes_created", 0)?;
+    report.set_item("nodes_updated", 0)?;
+    report.set_item("nodes_skipped", 0)?;
+    report.set_item("processing_time_ms", 0.0)?;
+    report.set_item("has_errors", false)?;
+    report.set_item("skipped_runtime_layer", true)?;
+    report.set_item("node_type", node_type)?;
+    report.set_item(
+        "message",
+        format!("'{node_type}' is a runtime-owned type — skipped in managed reload"),
+    )?;
+    Ok(report.into_any().unbind())
+}
+
 /// Build the report dict returned by `extend`. Mirrors the
 /// `build_node_report_dict` style (snake_case count keys + `has_errors`
 /// + optional `errors`) so users see a familiar shape.
@@ -1176,16 +1210,7 @@ impl KnowledgeGraph {
         // it as a no-op + report, so disjoint ownership is enforced, not
         // trusted. Undeclared / `managed` types proceed normally.
         if managed_reload && self.inner.layer_for(&node_type) == Some("runtime") {
-            let report = PyDict::new(py);
-            report.set_item("nodes_created", 0)?;
-            report.set_item("nodes_updated", 0)?;
-            report.set_item("skipped_runtime_layer", true)?;
-            report.set_item("node_type", &node_type)?;
-            report.set_item(
-                "message",
-                format!("'{node_type}' is a runtime-owned type — skipped in managed reload"),
-            )?;
-            return Ok(report.into_any().unbind());
+            return skipped_runtime_layer_report(py, &node_type);
         }
         let parsed = parse_inline_config(
             data,

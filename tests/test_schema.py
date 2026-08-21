@@ -195,6 +195,33 @@ class TestManagedReloadGuard:
         # The agent's live field is untouched.
         assert g.cypher("MATCH (t:Task {id: 1}) RETURN t.status AS s").to_dicts()[0]["s"] == "in_progress"
 
+    def test_skip_report_carries_the_normal_report_shape(self):
+        """A skip is still an `add_nodes` report.
+
+        The skip arm used to return a differently-shaped dict, so every caller
+        that checks a load the documented way — `report["has_errors"]` — hit a
+        `KeyError` on exactly the path that most needs a readable answer.
+        """
+        g = KnowledgeGraph()
+        g.define_schema({"nodes": {"Task": {"layer": "runtime"}}})
+        skipped = g.add_nodes(
+            pd.DataFrame({"id": [1], "status": ["RESET"]}),
+            "Task",
+            "id",
+            managed_reload=True,
+        )
+        written = g.add_nodes(pd.DataFrame({"id": [2], "status": ["x"]}), "Task", "id")
+        # Every key of a performed load is present on a skipped one.
+        assert set(written).issubset(set(skipped)), f"skip report is missing {set(written) - set(skipped)}"
+        assert skipped["has_errors"] is False, "a skip is the contract working, not a failure"
+        assert skipped["operation"] == "add_nodes"
+        assert skipped["nodes_created"] == 0
+        assert skipped["nodes_updated"] == 0
+        assert skipped["nodes_skipped"] == 0
+        assert skipped["skipped_runtime_layer"] is True
+        assert skipped["node_type"] == "Task"
+        assert "runtime-owned" in skipped["message"]
+
     def test_managed_type_writes_in_managed_reload(self):
         g = KnowledgeGraph()
         g.define_schema({"nodes": {"Spec": {"layer": "managed"}}})

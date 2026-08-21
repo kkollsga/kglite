@@ -151,8 +151,14 @@ parsed codebase.
   that batch-rebuilds specs and *coding* agents that plan and mutate
   status live). The primitives that make this safe are first-class:
   **ownership layers** (`define_schema(layer='managed'|'runtime')` +
-  `add_nodes(managed_reload=True)` so a rebuild provably can't clobber
-  agent-owned nodes), **role-scoped writes**
+  `add_nodes(managed_reload=True)`, which makes the *rebuilding* side
+  declare itself: an `add_nodes` call that passes `managed_reload=True`
+  skips any type declared `layer='runtime'` and reports the skip.
+  Nothing stops a runtime writer from deleting managed nodes, an
+  `add_nodes` call that omits the flag writes runtime types normally,
+  and `add_connections` is not covered at all — the layer is a guard
+  the batch writer opts into, not an enforced perimeter), **role-scoped
+  writes**
   (`cypher(..., write_scope=[...])` refuses every node write — CREATE,
   MERGE, SET, REMOVE, DELETE, DETACH DELETE, index/constraint DDL —
   whose node's *stored* type is outside the whitelist, and refuses a

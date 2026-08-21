@@ -47,6 +47,41 @@ cypher_query({ "query": "CREATE (:Task {id:'t1', status:'todo'})",
                "write_scope": ["Plan","Task","Decision","Question","Artifact"] })
 ```
 
+Every **node** write (`CREATE`, `MERGE`, `SET`, `REMOVE`, `DELETE`,
+`DETACH DELETE`, node-type index/constraint DDL) is judged by the node's
+*stored* type — a pattern label cannot widen the scope — and a **relationship**
+write (edge `CREATE`, `DELETE r`, `SET r.p`, `REMOVE r.p`) needs at least one
+endpoint's stored type in the list.
+
+**Operator-pinned write scope.** The `write_scope` above is the *agent's* own
+choice, so on its own it is role hygiene rather than access control. Pin the
+ceiling from outside the agent's reach with `--write-scope`, or
+`extensions.write_scope` in the manifest:
+
+```bash
+kglite-mcp-server --graph contract.kgl --writable --write-scope Plan,Task
+```
+
+```yaml
+extensions:
+  write_scope: [Plan, Task]
+```
+
+The pin **always applies**: an agent that omits `write_scope` gets the pinned
+scope (never unrestricted), an agent that supplies one gets the **intersection**
+of the two, and a write with nothing left in scope is refused with a message
+naming the server's scope. Setting both the flag and the manifest key
+intersects them too, and the effective scope is logged at boot. A malformed
+`extensions.write_scope` (anything but a list of strings) fails the boot rather
+than being ignored — an allowlist that silently fails open is worse than no
+allowlist. An empty list is honoured literally: a write-enabled server that
+permits no writes.
+
+Outside the perimeter, deliberately: relationship *constraint* DDL,
+`db.cdc.*`, and graph-lifecycle tools (`load_graph` / `create_graph` /
+`save_graph_as`), which replace or persist the whole graph rather than writing
+nodes in it.
+
 **Multiple agents, one graph.** Run **one** server process and point all
 agents at it — writes serialize through the active graph's lock, so concurrent
 agents can't lose each other's work. (Don't run several processes over the

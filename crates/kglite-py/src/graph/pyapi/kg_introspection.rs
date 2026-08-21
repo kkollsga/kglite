@@ -553,6 +553,8 @@ impl KnowledgeGraph {
         Python::attach(|py| py_out::level_values_to_pydict(py, &values, flatten_single_parent))
     }
 
+    // Keyword-rich Python surface: each arg is an optional pyo3 kwarg; splitting
+    // into a params struct would not change the Python call shape.
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (property, group_by_parent=None, level_index=None, indices=None, store_as=None, max_length=None, keep_selection=None))]
     fn unique_values(

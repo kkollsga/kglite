@@ -105,6 +105,80 @@ fn boot_tools_allow(
     Ok(Some(names))
 }
 
+/// `extensions.write_scope: [NodeType, ...]` — the operator-pinned write scope.
+///
+/// Absent key = no pin = the agent's own `write_scope` argument decides (which
+/// may be nothing at all). Present, it is the ceiling the agent can only narrow:
+/// see [`resolve_write_scope`] for how the two combine. An explicit empty list
+/// is honoured literally — a write-enabled server that permits no writes —
+/// because reading `[]` as "no pin" would widen a perimeter the operator asked
+/// to close.
+///
+/// A non-list value, or a non-string element, is a boot error rather than a
+/// dropped key, for the same reason `tools_allow` fails that way: an allowlist
+/// that silently fails open is worse than no allowlist.
+fn boot_manifest_write_scope(
+    manifest: Option<&mcp_methods::server::Manifest>,
+) -> Result<Option<Vec<String>>> {
+    let Some(raw) = manifest.and_then(|m| m.extensions.get("write_scope")) else {
+        return Ok(None);
+    };
+    let items = raw
+        .as_array()
+        .context("extensions.write_scope must be a list of node types")?;
+    let mut names = Vec::with_capacity(items.len());
+    for item in items {
+        let name = item.as_str().with_context(|| {
+            format!("extensions.write_scope entries must be node types (strings); found {item}")
+        })?;
+        names.push(name.to_owned());
+    }
+    Ok(Some(names))
+}
+
+/// Resolve the operator-pinned write scope from the manifest key and the
+/// `--write-scope` flag.
+///
+/// Both set is not an error: the two are **intersected**, the same rule the
+/// agent's own scope obeys, so neither surface can widen what the other
+/// pinned. That choice is the safer of the two candidates (the alternative was
+/// refusing the ambiguity at boot, which would only push the operator into
+/// deleting one of them), and it is logged so the effective scope is visible in
+/// the boot output rather than inferred.
+fn boot_write_scope(
+    manifest: Option<&mcp_methods::server::Manifest>,
+    cli: &Cli,
+) -> Result<Option<Vec<String>>> {
+    let from_manifest = boot_manifest_write_scope(manifest)?;
+    let from_flag = cli.write_scope.as_deref().map(parse_write_scope_flag);
+    let resolved = match (from_manifest, from_flag) {
+        (None, None) => None,
+        (Some(only), None) | (None, Some(only)) => Some(only),
+        (Some(m), Some(f)) => {
+            let both: Vec<String> = f.iter().filter(|t| m.contains(t)).cloned().collect();
+            tracing::info!(
+                manifest = m.join(","),
+                flag = f.join(","),
+                effective = both.join(","),
+                "write_scope pinned by both --write-scope and extensions.write_scope; \
+                 the effective scope is their intersection"
+            );
+            Some(both)
+        }
+    };
+    // `cli.writable`, not `graph_writes_enabled`: a manifest that only enables
+    // `builtins.save_graph` registers `save_graph` but still serves the
+    // read-only `cypher_query`, so the pin has nothing to apply to there
+    // either.
+    if resolved.is_some() && !cli.writable {
+        tracing::warn!(
+            "--write-scope / extensions.write_scope is set on a server whose cypher_query is \
+             read-only; every mutation is refused already. Add --writable to serve scoped writes."
+        );
+    }
+    Ok(resolved)
+}
+
 /// Directory the manifest was loaded from — the base both `csv_http_server`
 /// (resolving `dir:`) and `temp_cleanup` (finding the directory to wipe)
 /// resolve against. Falls back to cwd when there's no manifest.
@@ -179,10 +253,12 @@ fn boot_builtins(
     cli: &Cli,
     csv_http_cfg: Option<&csv_http::CsvHttpConfig>,
     manifest_base: &Path,
+    write_scope: Option<Vec<String>>,
 ) -> tools::Builtins {
     tools::Builtins {
         save_graph: graph_writes_enabled(manifest, cli),
         writable: cli.writable,
+        write_scope,
         temp_cleanup_on_overview: manifest
             .map(|m| {
                 matches!(
@@ -313,6 +389,7 @@ pub(crate) async fn run_async(
     // rather than surfacing as a watcher that quietly never fires.
     let graph_watch = boot_graph_watch(manifest.as_ref())?;
     let tools_allow = boot_tools_allow(manifest.as_ref())?;
+    let write_scope = boot_write_scope(manifest.as_ref(), &cli)?;
 
     // Manifest `workspace.kind: local` wins over CLI flags — promote before
     // mode-specific binding so the rest of boot sees `Mode::LocalWorkspace`.
@@ -381,6 +458,7 @@ pub(crate) async fn run_async(
         &cli,
         csv_http_cfg.as_ref(),
         &manifest_base,
+        write_scope,
     );
     let csv_http_arc = csv_http_cfg.map(Arc::new);
 
@@ -620,6 +698,97 @@ mod boot_manifest_tests {
             .expect_err("a non-string element must fail boot")
             .to_string();
         assert!(error.contains("must be tool names"), "{error}");
+    }
+
+    /// The operator pin's boot parse, key by key. Same chain and same
+    /// fail-closed reasoning as `tools_allow`: an allowlist that silently
+    /// fails open is worse than no allowlist.
+    #[test]
+    fn write_scope_reads_the_flag_the_manifest_and_their_intersection() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bare_cli = Cli::parse_from(["kglite-mcp-server", "--graph", "g.kgl", "--writable"]);
+        assert!(
+            boot_write_scope(None, &bare_cli)
+                .expect("no pin parses")
+                .is_none(),
+            "no flag and no manifest must leave writes unpinned"
+        );
+
+        let flag = Cli::parse_from([
+            "kglite-mcp-server",
+            "--graph",
+            "g.kgl",
+            "--writable",
+            "--write-scope",
+            "Plan,Task",
+        ]);
+        assert_eq!(
+            boot_write_scope(None, &flag).expect("flag parses"),
+            Some(vec!["Plan".to_string(), "Task".to_string()])
+        );
+
+        let listed = manifest_with(
+            tmp.path(),
+            "name: listed\nextensions:\n  write_scope:\n    - Plan\n    - Task\n",
+        );
+        assert_eq!(
+            boot_write_scope(Some(&listed), &bare_cli).expect("list parses"),
+            Some(vec!["Plan".to_string(), "Task".to_string()]),
+            "extensions.write_scope must reach the tool wiring; if this fails the key is \
+             parsed and then dropped"
+        );
+
+        // Both surfaces set: neither can widen the other.
+        let narrower = Cli::parse_from([
+            "kglite-mcp-server",
+            "--graph",
+            "g.kgl",
+            "--writable",
+            "--write-scope",
+            "Task,Algorithm",
+        ]);
+        assert_eq!(
+            boot_write_scope(Some(&listed), &narrower).expect("both parse"),
+            Some(vec!["Task".to_string()]),
+            "flag + manifest is their intersection, not either one alone"
+        );
+
+        let empty = manifest_with(tmp.path(), "name: empty\nextensions:\n  write_scope: []\n");
+        assert_eq!(
+            boot_write_scope(Some(&empty), &bare_cli).expect("empty list parses"),
+            Some(Vec::new()),
+            "an explicit empty list pins 'no writes' — it is not 'no pin'"
+        );
+    }
+
+    #[test]
+    fn a_malformed_write_scope_fails_boot() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cli = Cli::parse_from(["kglite-mcp-server", "--graph", "g.kgl", "--writable"]);
+
+        let scalar = manifest_with(
+            tmp.path(),
+            "name: scalar\nextensions:\n  write_scope: Task\n",
+        );
+        let error = boot_write_scope(Some(&scalar), &cli)
+            .expect_err("a scalar must fail boot, not be ignored")
+            .to_string();
+        assert!(error.contains("must be a list"), "{error}");
+
+        let null = manifest_with(tmp.path(), "name: null\nextensions:\n  write_scope:\n");
+        assert!(
+            boot_write_scope(Some(&null), &cli).is_err(),
+            "an empty (null) value is a typo, not an empty list"
+        );
+
+        let mistyped = manifest_with(
+            tmp.path(),
+            "name: mistyped\nextensions:\n  write_scope:\n    - Task\n    - 7\n",
+        );
+        let error = boot_write_scope(Some(&mistyped), &cli)
+            .expect_err("a non-string element must fail boot")
+            .to_string();
+        assert!(error.contains("must be node types"), "{error}");
     }
 
     #[test]

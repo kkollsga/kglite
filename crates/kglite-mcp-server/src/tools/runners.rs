@@ -62,29 +62,30 @@ pub(crate) fn run_cypher_tool(
 /// Write-enabled Cypher path (only reachable when the server is `--writable`).
 /// A read query delegates to the read path; a mutation routes through
 /// `execute_mut` against a `&mut DirGraph` obtained under the active graph's
-/// write-lock, with an optional role-scoped `write_scope`. Mutations land on
-/// the live active graph (in-memory) so subsequent queries observe them;
-/// persistence is the separate `save_graph` step.
-#[allow(clippy::too_many_arguments)]
+/// write-lock, under the write scope [`resolve_write_scope`] settles between
+/// the operator's boot-time pin and the agent's per-call argument. Mutations
+/// land on the live active graph (in-memory) so subsequent queries observe
+/// them; persistence is the separate `save_graph` step.
 pub(crate) fn run_cypher_write(
     active: &mut ActiveGraph,
     query: &str,
-    write_scope: Option<&[String]>,
-    git_sha: Option<&str>,
-    modified_by: Option<&str>,
+    authz: WriteAuthz<'_>,
     value_codecs: Option<&[ValueCodec]>,
     csv_http: Option<&crate::csv_http::CsvHttpConfig>,
 ) -> Result<String, String> {
     let (pre_parsed, is_mutation) =
         kglite::api::cypher::parse_with_mutation_check(query).map_err(|e| e.to_string())?;
     if !is_mutation {
-        // Read on a writable server — same path as the read-only tool.
+        // Read on a writable server — same path as the read-only tool. An
+        // operator pin restricts *writes*, so it never touches this branch.
         return run_cypher_inner(&active.kg, query, HashMap::new(), value_codecs, csv_http);
     }
     let output_csv = pre_parsed.output_format == kglite::api::cypher::OutputFormat::Csv;
     let params = std::collections::HashMap::new();
-    let scope: Option<std::collections::HashSet<String>> =
-        write_scope.map(|v| v.iter().cloned().collect());
+    // Refusal before any mutation runs: an empty effective scope is answered
+    // here, naming the operator pin, rather than handed to the engine as an
+    // empty set that would refuse the first node it happened to reach.
+    let scope = resolve_write_scope(authz.operator_scope, authz.agent_scope)?;
     // Snapshot the embedder Arc before the mutable borrow of `kg`.
     let embedder = active.kg.embedder().cloned();
     let dir = kglite::api::make_dir_graph_mut(active.kg.dir_mut());
@@ -92,8 +93,8 @@ pub(crate) fn run_cypher_write(
     opts.embedder = embedder;
     opts.value_codecs = value_codecs;
     opts.write_scope = scope.as_ref();
-    opts.git_sha = git_sha;
-    opts.modified_by = modified_by;
+    opts.git_sha = authz.git_sha;
+    opts.modified_by = authz.modified_by;
     // `KgError`'s Display already prefixes `Cypher execution error: …` — pass it
     // through verbatim rather than re-prefixing (which produced the triple wrap).
     let outcome =

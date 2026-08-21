@@ -493,6 +493,129 @@ fn write_scope_blocks_out_of_scope_create() {
     );
 }
 
+// ── operator-pinned write scope ─────────────────────────────────────────────
+//
+// The agent's `write_scope` argument is role hygiene (it picked it); the
+// operator's `--write-scope` / `extensions.write_scope` pin is access control
+// (the agent cannot reach it). These pin the four combinations at the same
+// seam the `cypher_query` route calls.
+
+fn scope(names: &[&str]) -> Vec<String> {
+    names.iter().map(|s| (*s).to_string()).collect()
+}
+
+#[test]
+fn operator_scope_refuses_an_out_of_scope_agent_write() {
+    let mut a = fresh_active();
+    let pin = scope(&["Plan", "Task"]);
+    // In-scope for both parties: allowed.
+    write_pinned(&mut a, "CREATE (:Task {id:'t1'})", Some(&pin), Some(&pin)).unwrap();
+    // The agent asks for a type the operator never pinned.
+    let agent = scope(&["Algorithm"]);
+    let err = write_pinned(
+        &mut a,
+        "CREATE (:Algorithm {id:'a1'})",
+        Some(&pin),
+        Some(&agent),
+    )
+    .unwrap_err();
+    assert!(
+        err.starts_with("no writes permitted under this server's write scope"),
+        "the refusal must name the server's scope: {err}"
+    );
+    assert!(err.contains("[Plan, Task]"), "{err}");
+    assert!(
+        write(&mut a, "MATCH (n:Algorithm) RETURN count(n) AS c", None)
+            .unwrap()
+            .contains('0'),
+        "the refused CREATE must not have landed"
+    );
+}
+
+#[test]
+fn operator_scope_applies_when_the_agent_omits_its_own() {
+    // The fail-open this pin exists to close: before it, an agent that simply
+    // left `write_scope` out wrote anything the server could write.
+    let mut a = fresh_active();
+    let pin = scope(&["Plan", "Task"]);
+    write_pinned(&mut a, "CREATE (:Task {id:'t1'})", Some(&pin), None).unwrap();
+    let err = write_pinned(&mut a, "CREATE (:Algorithm {id:'a1'})", Some(&pin), None).unwrap_err();
+    assert!(
+        err.contains("write scope"),
+        "an omitted agent scope must not fall back to unrestricted: {err}"
+    );
+    assert!(
+        write(&mut a, "MATCH (n:Algorithm) RETURN count(n) AS c", None)
+            .unwrap()
+            .contains('0'),
+        "the refused CREATE must not have landed"
+    );
+}
+
+#[test]
+fn operator_and_agent_scopes_intersect() {
+    let mut a = fresh_active();
+    let pin = scope(&["Plan", "Task"]);
+    let agent = scope(&["Task", "Algorithm"]);
+    // In both lists: allowed.
+    write_pinned(&mut a, "CREATE (:Task {id:'t1'})", Some(&pin), Some(&agent)).unwrap();
+    // In the pin but not the agent's list: the agent narrowed itself out.
+    let err =
+        write_pinned(&mut a, "CREATE (:Plan {id:'p1'})", Some(&pin), Some(&agent)).unwrap_err();
+    assert!(err.contains("write scope"), "{err}");
+    // In the agent's list but not the pin: the agent cannot widen.
+    let err = write_pinned(
+        &mut a,
+        "CREATE (:Algorithm {id:'a1'})",
+        Some(&pin),
+        Some(&agent),
+    )
+    .unwrap_err();
+    assert!(err.contains("write scope"), "{err}");
+}
+
+#[test]
+fn an_empty_intersection_refuses_before_the_mutation_runs() {
+    let mut a = fresh_active();
+    write(&mut a, "CREATE (:Task {id:'t1'})", None).unwrap();
+    let pin = scope(&["Plan"]);
+    let agent = scope(&["Algorithm"]);
+    let err = write_pinned(
+        &mut a,
+        "MATCH (t:Task {id:'t1'}) DETACH DELETE t",
+        Some(&pin),
+        Some(&agent),
+    )
+    .unwrap_err();
+    assert_eq!(
+        err,
+        "no writes permitted under this server's write scope [Plan]: the requested write_scope \
+         [Algorithm] shares no node type with it",
+        "the refusal text is the agent's only view of the server's pin"
+    );
+    assert!(
+        write(&mut a, "MATCH (t:Task) RETURN count(t) AS c", None)
+            .unwrap()
+            .contains('1'),
+        "refusal must precede the mutation"
+    );
+}
+
+#[test]
+fn an_operator_pin_leaves_reads_alone() {
+    let mut a = fresh_active();
+    write(&mut a, "CREATE (:Task {id:'t1'})", None).unwrap();
+    let pin = scope(&["Plan"]);
+    let out = write_pinned(
+        &mut a,
+        "MATCH (t:Task) RETURN count(t) AS c",
+        Some(&pin),
+        None,
+    )
+    .expect("a pin restricts writes, not reads");
+    assert!(out.contains('1'), "{out}");
+}
+
 #[test]
 fn new_edge_type_via_write_path_registers() {
     // The 0.12.2 edge-persistence fix in action through the MCP write path:

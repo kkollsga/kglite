@@ -3,6 +3,7 @@
 //! Split out when `loader.rs` reached the source-quality file-line ceiling;
 //! same `#[path]` convention as `storage/disk/graph_tests.rs`.
 
+// Fixture literals like 3.14 are RDF test payloads, not stand-ins for PI.
 #![allow(clippy::approx_constant)]
 
 use super::super::parser::{XSD_BOOLEAN, XSD_DECIMAL, XSD_DOUBLE};

@@ -119,6 +119,43 @@ the flag to serve whatever mode the graph recorded.
 Keep read-only mode for untrusted agents and scope filesystem access with
 manifest `source_root`/`source_roots`.
 
+### Pinning the write scope
+
+`cypher_query`'s `write_scope` argument is set by the agent, so by itself it is
+role hygiene rather than access control. The operator's counterpart is
+`--write-scope` (comma-separated) or `extensions.write_scope`:
+
+```bash
+kglite-mcp-server --graph /data/work.kgl --writable --write-scope Plan,Task
+```
+
+```yaml
+extensions:
+  write_scope: [Plan, Task]
+```
+
+The pin is a ceiling, and it never falls open:
+
+- the agent omits `write_scope` → the pinned scope applies (not unrestricted);
+- the agent supplies one → the two are **intersected**, so it can narrow but
+  never widen;
+- nothing left in scope → the write is refused, with a message naming the
+  server's scope so the agent can tell a policy refusal from a typo;
+- flag *and* manifest key set → those two are intersected as well, and the
+  effective scope is logged at boot.
+
+A malformed `extensions.write_scope` — anything but a list of strings — fails
+the boot rather than being dropped, on the same reasoning as
+`extensions.tools_allow`. An explicit `[]` is honoured literally: a
+write-enabled server that permits no writes.
+
+The scope covers node writes (by the node's **stored** type, so a pattern label
+cannot widen it) and relationship writes (at least one endpoint's stored type in
+scope). Outside it, deliberately: relationship *constraint* DDL, `db.cdc.*`, and
+the graph-lifecycle tools, which replace or persist the whole graph rather than
+writing nodes in it — an agent that must not swap the served graph should not
+have `load_graph`/`create_graph`/`save_graph_as` in `extensions.tools_allow`.
+
 ## Code intelligence
 
 The generic KGLite server serves and queries code graphs but does not build

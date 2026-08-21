@@ -22,6 +22,7 @@ mod runners;
 mod state;
 mod state_workspace;
 mod workspace_api;
+mod write_authz;
 
 #[cfg(test)]
 mod tests;
@@ -36,6 +37,7 @@ pub(crate) use register::*;
 pub(crate) use runners::*;
 pub(crate) use state::*;
 pub use workspace_api::*;
+pub(crate) use write_authz::*;
 
 pub(crate) const NO_GRAPH: &str =
     "No active graph. Pass --graph X.kgl, or activate one via repo_management('org/repo').";

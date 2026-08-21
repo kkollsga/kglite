@@ -21,6 +21,13 @@ pub struct Builtins {
     /// `save_graph_as`) are registered. Off by default — read-only is the safe
     /// default for code-review / analysis deployments.
     pub writable: bool,
+    /// Operator-pinned `write_scope` (CLI `--write-scope` /
+    /// `extensions.write_scope`, intersected in `server_run::boot_write_scope`).
+    /// `None` = the operator pinned nothing and the agent's own `write_scope`
+    /// argument is the whole story. `Some(..)` is the ceiling the agent can
+    /// only narrow — including when it supplies no scope at all. See
+    /// [`resolve_write_scope`].
+    pub write_scope: Option<Vec<String>>,
     pub temp_cleanup_on_overview: bool,
     /// Directory wiped by `temp_cleanup: on_overview`. Resolved against
     /// the manifest's parent in `main.rs` — when csv_http_server is
@@ -141,6 +148,28 @@ pub fn register_graph_mode_tools(server: &mut McpServer, state: GraphState) {
     );
 }
 
+/// Extend the write-enabled `cypher_query` description with the operator's
+/// pinned write scope, naming the types so an agent can plan inside the
+/// ceiling instead of discovering it one refusal at a time.
+///
+/// The framework's `register_typed_tool` takes a `&'static str`, and this
+/// string is only knowable at boot. Leaking it is exact rather than merely
+/// convenient: there is one per process, built once, and it must live as long
+/// as the router that holds it — which is the whole process.
+fn pinned_cypher_description(base: &str, pin: &[String]) -> &'static str {
+    let scope = if pin.is_empty() {
+        "an empty list — this server permits NO writes at all".to_string()
+    } else {
+        format!("[{}]", pin.join(", "))
+    };
+    format!(
+        "{base} This server's operator has pinned write_scope to {scope}: a write_scope you \
+         pass is intersected with it and can only narrow it, omitting write_scope leaves the \
+         pinned scope in force, and a write with nothing left in scope is refused."
+    )
+    .leak()
+}
+
 pub fn register(
     server: &mut McpServer,
     state: GraphState,
@@ -151,6 +180,7 @@ pub fn register(
     let s = state.clone();
     let csv = csv_http.clone();
     let writable = builtins.writable;
+    let operator_scope = builtins.write_scope.clone();
     // Descriptions lead with the code-exploration vocabulary agents actually
     // search for (explore, understand, "how does", call graph, "where defined",
     // structure, navigate) so lazy-tool-discovery clients (Codex / code_mode)
@@ -188,6 +218,12 @@ pub fn register(
              full results to a CSV string."
         }
     };
+    // An operator pin is part of the contract the agent plans against, so it
+    // is stated in the description rather than left to surface as a refusal.
+    let cypher_desc = match operator_scope.as_deref() {
+        Some(pin) => pinned_cypher_description(cypher_desc, pin),
+        None => cypher_desc,
+    };
     if writable {
         server.register_typed_tool::<CypherArgs, _>("cypher_query", cypher_desc, move |args| {
             let csv = csv.clone();
@@ -196,18 +232,16 @@ pub fn register(
             let scope = args.write_scope.clone();
             let git_sha = args.git_sha.clone();
             let modified_by = args.modified_by.clone();
+            let authz = WriteAuthz {
+                operator_scope: operator_scope.as_deref(),
+                agent_scope: scope.as_deref(),
+                git_sha: git_sha.as_deref(),
+                modified_by: modified_by.as_deref(),
+            };
             let body = s
                 .with_active_mut(|active| {
-                    run_cypher_write(
-                        active,
-                        &args.query,
-                        scope.as_deref(),
-                        git_sha.as_deref(),
-                        modified_by.as_deref(),
-                        codecs,
-                        csv.as_deref(),
-                    )
-                    .unwrap_or_else(|e| cypher_tool_error(&e))
+                    run_cypher_write(active, &args.query, authz, codecs, csv.as_deref())
+                        .unwrap_or_else(|e| cypher_tool_error(&e))
                 })
                 .unwrap_or_else(|| NO_GRAPH.to_string());
             s.with_rebuild_warning(body)

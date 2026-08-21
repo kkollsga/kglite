@@ -320,17 +320,32 @@ impl Session {
 
     /// Run a Cypher **write** against the shared graph, serialized.
     ///
-    /// Mutations (`CREATE` / `SET` / `DELETE` / `REMOVE` / `MERGE`) take the
-    /// Session's writer lock for the duration of the mutation,
-    /// so concurrent `execute()` calls run one at a time and each sees the
-    /// prior writer's committed changes — no lost updates. The commit is an
-    /// Readers already holding snapshots keep seeing the pre-write graph. A
-    /// reader arriving during a unique-owner write may briefly wait for the
-    /// core graph mutex.
+    /// Mutations (`CREATE` / `MERGE` / `SET` / `REMOVE` / `DELETE` /
+    /// `DETACH DELETE` / `FOREACH`, and schema DDL) take the Session's writer
+    /// lock for the duration of the mutation, so concurrent `execute()` calls
+    /// run one at a time and each sees the prior writer's committed changes —
+    /// no lost updates. Readers already holding snapshots keep seeing the
+    /// pre-write graph. A reader arriving during a unique-owner write may
+    /// briefly wait for the core graph mutex.
     ///
     /// A read-only query passed to `execute()` is fast-pathed to the read
     /// path (no working-copy materialisation), so it is always safe to route
     /// mixed traffic through `execute()`.
+    ///
+    /// Args:
+    ///     query: A Cypher query string (read or write).
+    ///     to_df: If True, return a pandas DataFrame.
+    ///     params: Optional dict of query parameters.
+    ///     timeout_ms: Per-call deadline in milliseconds.
+    ///     max_rows: Cap on intermediate result rows.
+    ///     write_scope: Role-scoped write whitelist restricting this
+    ///         statement's mutations — every node write is judged by the
+    ///         node's *stored* type (a pattern label cannot widen it), and a
+    ///         relationship write needs at least one endpoint's stored type in
+    ///         the list. `None` (default) = unrestricted; `[]` denies every
+    ///         mutation. See `KnowledgeGraph.cypher` for the exact perimeter.
+    ///     git_sha, modified_by: Freshness provenance stamped alongside
+    ///         `updated_at` on types that declare `auto_timestamp`.
     ///
     /// Returns the query result (rows for `... RETURN`, otherwise mutation
     /// stats), same shape as `KnowledgeGraph.cypher`.

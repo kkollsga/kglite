@@ -57,6 +57,18 @@ pub(crate) struct Cli {
     #[arg(long)]
     pub(crate) writable: bool,
 
+    /// Operator-pinned write scope: a comma-separated node-type list
+    /// (`--write-scope Plan,Task`) the agent's writes may never widen. When
+    /// set, an agent that omits `write_scope` gets *this* scope rather than
+    /// unrestricted writes, and an agent that supplies one gets the
+    /// **intersection** of the two. An empty intersection — or an explicitly
+    /// empty pin — refuses every mutation. Combines with
+    /// `extensions.write_scope:` in the manifest by intersection. Only
+    /// meaningful with `--writable`; a read-only server refuses every mutation
+    /// already.
+    #[arg(long = "write-scope")]
+    pub(crate) write_scope: Option<String>,
+
     /// Run a configuration self-test instead of serving: re-spawn this binary
     /// with the same flags, drive a live MCP handshake (initialize →
     /// tools/list → activate → cypher_query), and print green/red per
@@ -221,6 +233,21 @@ pub(crate) fn promote_local_workspace(mode: Mode, manifest: Option<&Manifest>) -
     })
 }
 
+/// Split the comma-separated `--write-scope` value into node types.
+///
+/// Whitespace around a name is dropped and empty segments are ignored, so
+/// `"Plan, Task,"` is `["Plan", "Task"]`. `--write-scope ""` therefore yields
+/// an **empty** list, which is a deliberate fail-closed configuration ("this
+/// server permits no writes") rather than an absent pin — the absent pin is
+/// the flag not being passed at all.
+pub(crate) fn parse_write_scope_flag(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 /// The directory to start the `.env` walk-up from, per mode (the mode's own
 /// directory for source-aware modes, cwd for bare).
 pub(crate) fn resolve_env_start_dir(mode: &Mode) -> PathBuf {
@@ -238,7 +265,7 @@ pub(crate) fn resolve_env_start_dir(mode: &Mode) -> PathBuf {
 
 #[cfg(test)]
 mod cli_contract_tests {
-    use super::Cli;
+    use super::{parse_write_scope_flag, Cli};
     use clap::Parser;
 
     #[test]
@@ -246,5 +273,36 @@ mod cli_contract_tests {
         let error = Cli::try_parse_from(["kglite-mcp-server", "--trust-tools"])
             .expect_err("removed no-op flag must not parse");
         assert!(error.to_string().contains("--trust-tools"));
+    }
+
+    #[test]
+    fn write_scope_flag_parses_a_comma_separated_list() {
+        let cli = Cli::parse_from([
+            "kglite-mcp-server",
+            "--graph",
+            "g.kgl",
+            "--writable",
+            "--write-scope",
+            "Plan,Task",
+        ]);
+        assert_eq!(cli.write_scope.as_deref(), Some("Plan,Task"));
+        assert_eq!(
+            parse_write_scope_flag(cli.write_scope.as_deref().unwrap()),
+            vec!["Plan".to_string(), "Task".to_string()]
+        );
+        // Absent flag = no operator pin at all (distinct from an empty pin).
+        let bare = Cli::parse_from(["kglite-mcp-server", "--graph", "g.kgl"]);
+        assert!(bare.write_scope.is_none());
+    }
+
+    #[test]
+    fn write_scope_flag_trims_and_drops_empty_segments() {
+        assert_eq!(
+            parse_write_scope_flag(" Plan , Task ,"),
+            vec!["Plan".to_string(), "Task".to_string()]
+        );
+        // Explicitly empty: a fail-closed pin, not an absent one.
+        assert!(parse_write_scope_flag("").is_empty());
+        assert!(parse_write_scope_flag(" , ").is_empty());
     }
 }

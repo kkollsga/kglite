@@ -195,9 +195,15 @@ graph.add_nodes(specs, node_type="AlgorithmSpec",
                 managed_reload=True)
 ```
 
-Combined with `'update'`'s partial-write guarantee, this gives you a two-writer
-contract enforced by the engine instead of by convention. The agent-facing side
-of it is in {doc}`ai-agents`.
+The returned report carries the usual keys plus `skipped_runtime_layer=True`,
+`node_type` and `message`, so a rebuild can log what it declined to touch.
+
+Note what the layer is: a lane the *batch writer* opts into, not a perimeter
+the engine enforces. An `add_nodes` call that omits `managed_reload` writes a
+`runtime` type normally, nothing gates the live writer out of `managed` types,
+and `add_connections` is not covered at all. When the goal is to *refuse*
+out-of-role writes, `write_scope` on the Cypher path is the mechanism that does
+it — the agent-facing side of that is in {doc}`ai-agents`.
 
 ## Choosing a storage mode
 

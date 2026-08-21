@@ -115,12 +115,148 @@ fn algo_allowed_keys(proc: &str) -> Option<Vec<&'static str>> {
     Some(keys)
 }
 
+/// Procedures whose answer **inverts** when the `relationship:` scope names a
+/// type the graph does not have.
+///
+/// `ready_set` asks "which nodes have all their dependencies satisfied?" and
+/// answers it with `deps.iter().all(|d| done.contains(d))`
+/// (`graph_algorithms::ready_set_scoped`). A relationship type that matches no
+/// edges makes every node's dependency list empty, that quantifier vacuously
+/// true, and the frontier "everything" — the maximally permissive answer to a
+/// question asked precisely to find out what may safely start. A typo'd type
+/// therefore does not narrow the result, it *widens* it, silently, in the
+/// direction that causes work to be dispatched.
+///
+/// An audit of every other procedure that takes `relationship:` (2026-08-21)
+/// found no second instance: the centrality and community algorithms, the
+/// components / k_core / clustering / triangle / eccentricity / diameter
+/// family all degrade toward zero (uniform scores, singleton components,
+/// coefficient 0.0, no triangles) on an edgeless subgraph — visibly wrong
+/// rather than confidently permissive. `ready_set_scoped` holds the only
+/// `.all()` over a neighbour set in `graph_algorithms.rs`. Those get the
+/// warning; these two get a refusal.
+const FAIL_OPEN_ON_EMPTY_REL_SCOPE: &[&str] = &["ready_set", "dependency_frontier"];
+
+/// Check the `relationship:` / `node_type:` scoping values against the graph's
+/// schema, returning the non-fatal warnings to emit (or the error that stops
+/// the call).
+///
+/// `InternedKey::from_str` interns whatever string it is handed, so an unknown
+/// relationship type used to reach the algorithms as a perfectly well-formed
+/// key that simply matched no edge — no error, no warning, no rows missing,
+/// just a quietly different question answered. This is the check MATCH has had
+/// since the unknown-label warnings landed, applied to the procedure surface.
+///
+/// Fatal when the procedure is one of [`FAIL_OPEN_ON_EMPTY_REL_SCOPE`], or
+/// when the schema is locked (a locked schema means the type set is final, so
+/// a name outside it is a typo by declaration — the same reasoning
+/// `schema_check::validate_label` applies to node labels on the read path).
+/// Non-fatal everywhere else: an empty scoped subgraph is a legal thing to ask
+/// about, and `CALL pagerank({relationship: 'X'})` on a graph that has no `X`
+/// yet is not automatically a mistake.
+fn validate_scope_names(
+    proc: &str,
+    params: &HashMap<String, Value>,
+    graph: &crate::graph::DirGraph,
+) -> Result<Vec<String>, String> {
+    if algo_allowed_keys(proc).is_none() {
+        return Ok(Vec::new());
+    }
+    let mut warnings = Vec::new();
+
+    // Relationship types. Gated on the graph *having* edge-type metadata: a
+    // graph with no edges at all cannot tell a typo from a not-yet-created
+    // type, and refusing there would break building a graph up incrementally.
+    if !graph.connection_type_metadata.is_empty() {
+        let unknown: Vec<String> = string_list_param(params, "relationship")
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| !graph.connection_type_metadata.contains_key(r))
+            .collect();
+        if !unknown.is_empty() {
+            let mut valid: Vec<&str> = graph
+                .connection_type_metadata
+                .keys()
+                .map(String::as_str)
+                .collect();
+            valid.sort_unstable();
+            let fatal = FAIL_OPEN_ON_EMPTY_REL_SCOPE.contains(&proc) || graph.schema_locked;
+            for rel in &unknown {
+                let hint = crate::graph::mutation::validation::did_you_mean(rel, &valid);
+                if fatal {
+                    return Err(format!(
+                        "CALL {proc}(): unknown relationship type '{rel}'.{hint}\n  \
+                         Valid types: {}\n  A relationship type that matches no edges would \
+                         report every node as ready (an empty dependency list satisfies the \
+                         'all dependencies done' test vacuously), so this is refused rather \
+                         than answered.",
+                        valid.join(", ")
+                    ));
+                }
+                warnings.push(format!(
+                    "CALL {proc}() references unknown relationship type '{rel}' — the graph has \
+                     no such edge type, so the scoped subgraph has no edges of it.{hint}"
+                ));
+            }
+        }
+    }
+
+    // Node types. These already fail *closed* — an unknown type contributes no
+    // candidates, so the procedure returns no rows — but the silence is the
+    // same, and the check is the same lookup.
+    let have_node_schema =
+        !graph.node_type_metadata.is_empty() || graph.type_indices.keys().next().is_some();
+    if have_node_schema {
+        let unknown: Vec<String> = string_list_param(params, "node_type")
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|t| {
+                !graph.node_type_metadata.contains_key(t)
+                    && !graph.type_indices.contains_key(t.as_str())
+            })
+            .collect();
+        if !unknown.is_empty() {
+            let mut valid: Vec<&str> = graph
+                .node_type_metadata
+                .keys()
+                .map(String::as_str)
+                .chain(graph.type_indices.keys())
+                .collect();
+            valid.sort_unstable();
+            valid.dedup();
+            for ty in &unknown {
+                let hint = crate::graph::mutation::validation::did_you_mean(ty, &valid);
+                if graph.schema_locked {
+                    return Err(format!(
+                        "CALL {proc}(): unknown node type '{ty}'.{hint}\n  Valid types: {}",
+                        valid.join(", ")
+                    ));
+                }
+                warnings.push(format!(
+                    "CALL {proc}() references unknown node type '{ty}' — the graph has no such \
+                     type, so it contributes no nodes.{hint}"
+                ));
+            }
+        }
+    }
+    Ok(warnings)
+}
+
 /// Alias scoping keys (so `relationship`/`connection_types` are interchangeable
-/// and `node_types` is accepted as `node_type`), then reject any remaining
-/// unknown config key for the graph-algorithm procedures.
+/// and `node_types` is accepted as `node_type`), reject any remaining unknown
+/// config key for the graph-algorithm procedures, and check the scoping
+/// *values* against the schema — a key spelled right and pointing at a type
+/// that does not exist was the remaining silent no-op.
+///
+/// The value check's warnings are emitted here, to stderr, matching
+/// `schema_check::warn_unknown_pattern_refs` (the one convention kglite has
+/// for a non-fatal query warning; `QueryDiagnostics.warnings` will carry them
+/// to the MCP/Bolt surfaces once it is populated). [`validate_scope_names`] is
+/// the pure, directly-testable half.
 fn normalize_and_validate_algo_params(
     proc: &str,
     params: &mut HashMap<String, Value>,
+    graph: &crate::graph::DirGraph,
 ) -> Result<(), String> {
     let Some(allowed) = algo_allowed_keys(proc) else {
         return Ok(());
@@ -144,6 +280,9 @@ fn normalize_and_validate_algo_params(
             let hint = crate::graph::mutation::validation::did_you_mean(key, &allowed);
             return Err(format!("CALL {proc}(): unknown config key '{key}'.{hint}"));
         }
+    }
+    for warning in validate_scope_names(proc, params, graph)? {
+        eprintln!("warning: {warning}");
     }
     Ok(())
 }
@@ -384,7 +523,7 @@ impl<'a> CypherExecutor<'a> {
         // across procedures, and reject genuinely-unknown config keys with a
         // did-you-mean — so a typo or a wrong-procedure key surfaces an error
         // instead of silently no-op'ing (operator feedback A2 / A2b 2026-06-17).
-        normalize_and_validate_algo_params(proc_name.as_str(), &mut params)?;
+        normalize_and_validate_algo_params(proc_name.as_str(), &mut params, self.graph)?;
 
         // Optional subgraph scope for the centrality / community procedures:
         // `{node_type: '...', where: 'n.<prop> ...'}` restricts the algorithm
@@ -1688,4 +1827,133 @@ pub(super) fn compute_property_stats(
         }
     }
     Ok((value_count, null_count, seen.len() as i64))
+}
+
+#[cfg(test)]
+mod scope_name_tests {
+    use super::*;
+    use crate::graph::DirGraph;
+
+    /// Two node types, two edge types, open schema.
+    fn graph_with_schema() -> DirGraph {
+        let mut g = DirGraph::new();
+        g.upsert_node_type_metadata("Task", HashMap::new());
+        g.upsert_node_type_metadata("Spec", HashMap::new());
+        g.upsert_connection_type_metadata("DEPENDS_ON", "Task", "Task", HashMap::new());
+        g.upsert_connection_type_metadata("IMPLEMENTS", "Task", "Spec", HashMap::new());
+        g
+    }
+
+    fn params(pairs: &[(&str, &str)]) -> HashMap<String, Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), Value::String((*v).to_string())))
+            .collect()
+    }
+
+    #[test]
+    fn ready_set_refuses_an_unknown_relationship_type() {
+        let g = graph_with_schema();
+        let error =
+            validate_scope_names("ready_set", &params(&[("relationship", "DEPENDS_O")]), &g)
+                .expect_err("a bogus dependency edge must not report every node ready");
+        assert!(
+            error.contains("unknown relationship type 'DEPENDS_O'"),
+            "{error}"
+        );
+        assert!(
+            error.contains("Did you mean 'DEPENDS_ON'"),
+            "a one-character typo must get the suggestion: {error}"
+        );
+        assert!(
+            error.contains("DEPENDS_ON, IMPLEMENTS"),
+            "the valid set is what makes the error actionable: {error}"
+        );
+        // The alias `dependency_frontier` is the same procedure.
+        assert!(
+            validate_scope_names(
+                "dependency_frontier",
+                &params(&[("relationship", "NOPE")]),
+                &g
+            )
+            .is_err(),
+            "both spellings of the fail-open procedure must refuse"
+        );
+    }
+
+    #[test]
+    fn other_procedures_warn_instead_of_failing() {
+        let g = graph_with_schema();
+        for proc in [
+            "pagerank",
+            "connected_components",
+            "k_core",
+            "triangle_count",
+        ] {
+            let warnings = validate_scope_names(proc, &params(&[("relationship", "NOPE")]), &g)
+                .unwrap_or_else(|e| panic!("{proc} must warn, not refuse: {e}"));
+            assert_eq!(warnings.len(), 1, "{proc}: {warnings:?}");
+            assert!(
+                warnings[0].contains("unknown relationship type 'NOPE'"),
+                "{warnings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_known_relationship_type_is_silent() {
+        let g = graph_with_schema();
+        for proc in ["ready_set", "pagerank"] {
+            assert!(
+                validate_scope_names(proc, &params(&[("relationship", "DEPENDS_ON")]), &g)
+                    .expect("a known type must pass")
+                    .is_empty(),
+                "{proc} warned about a type the graph has"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_node_type_warns_and_a_locked_schema_refuses() {
+        let mut g = graph_with_schema();
+        let p = params(&[("node_type", "Tsk")]);
+        let warnings = validate_scope_names("pagerank", &p, &g).expect("open schema warns");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("Did you mean 'Task'"), "{warnings:?}");
+
+        g.schema_locked = true;
+        let error = validate_scope_names("pagerank", &p, &g)
+            .expect_err("a locked schema declares its type set final");
+        assert!(error.contains("unknown node type 'Tsk'"), "{error}");
+        // A locked schema promotes the relationship warning too.
+        assert!(
+            validate_scope_names("pagerank", &params(&[("relationship", "NOPE")]), &g).is_err(),
+            "a locked schema refuses an unknown relationship type on every procedure"
+        );
+    }
+
+    #[test]
+    fn a_graph_without_edge_metadata_is_not_second_guessed() {
+        // Nothing to compare against: an empty graph cannot tell a typo from a
+        // type that has not been created yet, and refusing there would break
+        // building a graph up incrementally.
+        let empty = DirGraph::new();
+        assert!(
+            validate_scope_names("ready_set", &params(&[("relationship", "ANY")]), &empty)
+                .expect("an edgeless graph must not refuse")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn non_algorithm_procedures_are_untouched() {
+        let g = graph_with_schema();
+        // Rule/analysis/db procedures do not read the scoping keys at all, so
+        // they keep their pre-existing pass-through behaviour.
+        assert!(
+            validate_scope_names("orphan_node", &params(&[("relationship", "NOPE")]), &g)
+                .expect("no validation for non-algorithm procedures")
+                .is_empty()
+        );
+    }
 }

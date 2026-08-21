@@ -323,7 +323,475 @@
             "type": "string"
           },
           "write_scope": {
-            "description": "Role-scoped write whitelist (write-enabled servers only) \u2014 so an agent\ncan plan in its own types (`[\"Plan\",\"Task\"]`) without touching\nresearch-owned ones. When set, every **node** write (`CREATE`, `MERGE`,\n`SET`, `REMOVE`, `DELETE`, `DETACH DELETE`, node-type index/constraint\nDDL) is judged by the node's *stored* type \u2014 a pattern label cannot\nwiden the scope \u2014 and a **relationship** write (edge `CREATE`,\n`DELETE r`, `SET r.p`, `REMOVE r.p`) is allowed only when at least one\nendpoint's stored type is in the list. Deleting a node in scope removes\nits relationships whatever they point at. An empty list denies every\nmutation. Ignored on read-only servers.",
+            "description": "Role-scoped write whitelist (write-enabled servers only) \u2014 so an agent\ncan plan in its own types (`[\"Plan\",\"Task\"]`) without touching\nresearch-owned ones. When set, every **node** write (`CREATE`, `MERGE`,\n`SET`, `REMOVE`, `DELETE`, `DETACH DELETE`, node-type index/constraint\nDDL) is judged by the node's *stored* type \u2014 a pattern label cannot\nwiden the scope \u2014 and a **relationship** write (edge `CREATE`,\n`DELETE r`, `SET r.p`, `REMOVE r.p`) is allowed only when at least one\nendpoint's stored type is in the list. Deleting a node in scope removes\nits relationships whatever they point at. An empty list denies every\nmutation. Ignored on read-only servers. When the server's operator has\npinned a write scope (`--write-scope` / `extensions.write_scope`), this\nlist is **intersected** with it: it can narrow the pinned scope, never\nwiden it, and omitting it leaves the pinned scope in force.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "title": "CypherArgs",
+        "type": "object"
+      }
+    },
+    {
+      "name": "explore",
+      "description": "One-call codebase exploration. Lexically ranks Function / Class / Interface nodes against `query`, takes the top entries, 2-hop traverses CALLS / USES_TYPE / HAS_METHOD / DEFINES / REFERENCES_FN, and returns a markdown report with entry points, a relationship map, and grouped source slices. Designed to replace chains of grep + read calls when answering 'how does X work' over a code graph.",
+      "inputSchema": {
+        "properties": {
+          "include_source": {
+            "description": "Whether to include grouped source slices for the entry points. Default true.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "max_depth": {
+            "description": "Hops for the neighborhood traversal. Default 2.",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_entities": {
+            "description": "Top N entry points after lexical ranking. Default 10.",
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "query": {
+            "description": "Free-text topic. Matched against Function/Class names, signatures, and docstrings \u2014 exact name matches rank highest. Pass a symbol or a short phrase, not a sentence.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "graph_overview",
+      "description": "Inspect and explore the active graph's schema \u2014 start here to understand a codebase or dataset: node types, properties, connections, sample values, and a per-type example query (anchored on each type's real identifier property). With no args returns the inventory; pass types=[...] / connections=true|[...] / cypher=true|[...] for drill-down.",
+      "inputSchema": {
+        "$defs": {
+          "DetailSelection": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "connections": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/DetailSelection"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`true` for all connection types; or `[\"CALLS\"]` for a deep-dive."
+          },
+          "cypher": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/DetailSelection"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`true` for the Cypher language reference; or `[\"MATCH\",\"WHERE\"]`."
+          },
+          "types": {
+            "description": "Drill into specific node types (e.g. `[\"Person\", \"Document\"]`).",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "title": "OverviewArgs",
+        "type": "object"
+      }
+    },
+    {
+      "name": "grep",
+      "description": "Search source files using ripgrep. `pattern` is a regex (Rust syntax). `glob` filters file paths (e.g. \"*.py\"). `context` adds N surrounding lines per match. Set `case_insensitive=true` for case-insensitive matching. `max_results` caps total matches (default 50).",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "case_insensitive": {
+            "default": false,
+            "description": "Case-insensitive matching.",
+            "type": "boolean"
+          },
+          "context": {
+            "default": 0,
+            "description": "Lines of context around each match (default 0).",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "glob": {
+            "description": "File-name glob (e.g. ``\"*.py\"``). Defaults to all files.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "max_results": {
+            "description": "Cap the number of matches (default 50; pass null/None for unlimited).",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "pattern": {
+            "description": "Regex pattern (Rust regex syntax).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "list_source",
+      "description": "List directory contents under the configured source root. `path` is resolved against the first source root (\".\" lists the root itself). `depth` controls recursion (1 = flat ls, 2+ = tree). `glob` filters entry names. `dirs_only=true` shows only directories.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "depth": {
+            "default": 1,
+            "description": "Recursion depth (1 = flat ls; 2+ = tree).",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "dirs_only": {
+            "default": false,
+            "description": "Show only directories.",
+            "type": "boolean"
+          },
+          "glob": {
+            "description": "Glob filter for entry names.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "default": ".",
+            "description": "Subdirectory relative to the source root (default ``\".\"``).",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "load_graph",
+      "description": "Load a .kgl file as the new active graph (replaces the current one \u2014 save_graph first to keep unsaved changes). Write-enabled servers only.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "path": {
+            "description": "Path to a `.kgl` file (or disk-graph directory) to load as the new\nactive graph, replacing the current one. Unsaved in-memory changes to\nthe previous graph are discarded \u2014 call `save_graph` first to keep them.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "title": "LoadGraphArgs",
+        "type": "object"
+      }
+    },
+    {
+      "name": "ping",
+      "description": "Liveness probe \u2014 returns 'pong' (or echoes `message` if supplied). Use to confirm the server framework is wired correctly before relying on graph- or source-aware tools.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "message": {
+            "description": "Optional message to echo back. Defaults to \"pong\".",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "read_code_source",
+      "description": "Read source code by fully-qualified entity name. Resolves the name through the active graph's `graph.source()` (which uses the code-graph node attributes), then reads the corresponding file slice from the configured source root(s). Equivalent to cypher \u2192 graph.source \u2192 read_source in a single MCP call. Same line-range / grep / max_chars filters as `read_source`.",
+      "inputSchema": {
+        "properties": {
+          "end_line": {
+            "description": "Override the entity's end line (1-indexed, inclusive). Defaults to the entity's defined end.",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "grep": {
+            "description": "Regex pattern to filter lines. Returns matching lines plus context.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "grep_context": {
+            "description": "Lines of context around each grep match (default 2).",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_chars": {
+            "description": "Cap output size in characters.",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "node_type": {
+            "description": "Optional node-type hint when the qualified name is ambiguous (e.g. 'Function', 'Struct').",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "qualified_name": {
+            "description": "Fully-qualified entity name to resolve (e.g. 'mypkg.parser.parse_file', 'KnowledgeGraph::cypher').",
+            "type": "string"
+          },
+          "start_line": {
+            "description": "Override the entity's start line (1-indexed). Defaults to the entity's defined start.",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "qualified_name"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "read_source",
+      "description": "Read a file from the configured source root(s). Pass `start_line`/`end_line` to slice, `grep` to filter to matching lines, `max_chars` to cap output. Pass `rev` (a tag, branch, or commit SHA) to read the file's content at that git revision via `git show` instead of the working tree \u2014 useful for comparing a file across releases (requires a git repo source root). Path traversal attempts are rejected. Available only when source roots are configured.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "end_line": {
+            "description": "End line (1-indexed, inclusive). Defaults to end-of-file.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "file_path": {
+            "description": "File path relative to the configured source root(s).",
+            "type": "string"
+          },
+          "grep": {
+            "description": "Regex pattern to filter lines. Returns matching lines plus context.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "grep_context": {
+            "description": "Lines of context around each grep match (default 2).",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_chars": {
+            "description": "Cap output size in characters.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_matches": {
+            "description": "Cap the number of matches returned.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "rev": {
+            "description": "Read the file at this git revision (tag, branch, or commit SHA)\nvia `git show` instead of the working tree. Requires the active\nsource root to be a git repository. All other options\n(`start_line`/`grep`/`max_chars`/\u2026) apply to the historical\ncontent unchanged.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "start_line": {
+            "description": "Start line (1-indexed). Defaults to start-of-file.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "file_path"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "reload_graph",
+      "description": "Re-read the served graph file from disk, replacing the in-memory graph \u2014 use this when the file has been rebuilt by another process and queries are returning stale results. Takes no arguments; the path is the one this server was started on. On a write-enabled server any unsaved in-memory changes are discarded (call save_graph first to keep them). If the re-read fails, the current graph stays active and the error is returned.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "ReloadGraphArgs",
+        "type": "object"
+      }
+    },
+    {
+      "name": "save_graph",
+      "description": "Persist the active graph to its source .kgl file (single-graph mode only).",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "SaveGraphArgs",
+        "type": "object"
+      }
+    },
+    {
+      "name": "save_graph_as",
+      "description": "Save the active graph to an explicit path and rebind the save target there. Write-enabled servers only.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "path": {
+            "description": "Path to save the active graph to; also becomes the new `save_graph`\ntarget.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "title": "SaveGraphAsArgs",
+        "type": "object"
+      }
+    }
+  ],
+  "graph_writable_scoped": [
+    {
+      "name": "create_graph",
+      "description": "Create a fresh, empty graph bound to a path (its save_graph target) and make it active. storage = memory (default) | mapped | disk. Write-enabled servers only.",
+      "inputSchema": {
+        "$defs": {
+          "StorageArg": {
+            "enum": [
+              "memory",
+              "mapped",
+              "disk"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "path": {
+            "description": "Path the new empty graph is bound to (its `save_graph` target).",
+            "type": "string"
+          },
+          "storage": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/StorageArg"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Storage mode: `memory` (default), `mapped`, or `disk`."
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "title": "CreateGraphArgs",
+        "type": "object"
+      }
+    },
+    {
+      "name": "cypher_query",
+      "description": "Query, explore, and understand the active knowledge graph with Cypher, and modify it \u2014 reads AND writes (CREATE/SET/DELETE/MERGE) are accepted; this is a write-enabled graph. The primary tool for structural questions: how things relate, where an entity/function/type is defined, what references or calls what, counts, and multi-hop paths (for code graphs: call graphs, definitions, imports \u2014 navigate the codebase structure). Pass write_scope=[...] to restrict mutations to those node types: every node write (CREATE/MERGE/SET/REMOVE/DELETE/DETACH DELETE and node-type DDL) is judged by the node's stored type, and a relationship write (edge CREATE, DELETE r, SET r.p, REMOVE r.p) needs at least one endpoint's type in the list. Mutations are in-memory; call save_graph to persist. Append FORMAT CSV to export results. This server's operator has pinned write_scope to [Person, City]: a write_scope you pass is intersected with it and can only narrow it, omitting write_scope leaves the pinned scope in force, and a write with nothing left in scope is refused.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "git_sha": {
+            "description": "Freshness provenance for this write (write-enabled servers only): the git\ncommit SHA the agent is working against, stamped as `updated_at`'s\ncompanion on writes to `auto_timestamp` node/edge types \u2014 so a node can\nrecord \"describes the code as of sha X\". Optional; ignored on reads.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "modified_by": {
+            "description": "Optional actor id stamped alongside `git_sha` (e.g. the agent/session\nname). Same gating as `git_sha`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "query": {
+            "description": "Cypher query string. Append `FORMAT CSV` for CSV-encoded output.",
+            "type": "string"
+          },
+          "write_scope": {
+            "description": "Role-scoped write whitelist (write-enabled servers only) \u2014 so an agent\ncan plan in its own types (`[\"Plan\",\"Task\"]`) without touching\nresearch-owned ones. When set, every **node** write (`CREATE`, `MERGE`,\n`SET`, `REMOVE`, `DELETE`, `DETACH DELETE`, node-type index/constraint\nDDL) is judged by the node's *stored* type \u2014 a pattern label cannot\nwiden the scope \u2014 and a **relationship** write (edge `CREATE`,\n`DELETE r`, `SET r.p`, `REMOVE r.p`) is allowed only when at least one\nendpoint's stored type is in the list. Deleting a node in scope removes\nits relationships whatever they point at. An empty list denies every\nmutation. Ignored on read-only servers. When the server's operator has\npinned a write scope (`--write-scope` / `extensions.write_scope`), this\nlist is **intersected** with it: it can narrow the pinned scope, never\nwiden it, and omitting it leaves the pinned scope in force.",
             "items": {
               "type": "string"
             },

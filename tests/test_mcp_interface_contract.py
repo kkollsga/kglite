@@ -69,6 +69,10 @@ def capture_mcp_contract(base: Path) -> dict[str, list[dict]]:
     return {
         "graph_readonly": _capture(["--graph", str(graph)]),
         "graph_writable": _capture(["--graph", str(graph), "--writable"]),
+        # An operator-pinned write scope names its types in the cypher_query
+        # description — an agent plans inside the ceiling instead of finding it
+        # one refusal at a time, so the pinned wording is part of the contract.
+        "graph_writable_scoped": _capture(["--graph", str(graph), "--writable", "--write-scope", "Person,City"]),
         "local_workspace": _capture(["--mcp-config", str(local_manifest)]),
         "manifest_tool": _capture(["--graph", str(graph), "--mcp-config", str(custom_manifest)]),
     }
@@ -83,6 +87,16 @@ def test_mcp_tools_list_matches_reviewed_mode_schemas(mcp_contract):
     expected = json.loads(BASELINE.read_text(encoding="utf-8"))
     assert mcp_contract == expected, (
         "MCP tool names/descriptions/input schemas drifted; review and refresh mcp-tools.json"
+    )
+
+
+def test_operator_pinned_write_scope_is_stated_in_the_tool_description(mcp_contract):
+    """The pin is access control the agent cannot read off its own arguments."""
+    pinned = next(tool for tool in mcp_contract["graph_writable_scoped"] if tool["name"] == "cypher_query")
+    unpinned = next(tool for tool in mcp_contract["graph_writable"] if tool["name"] == "cypher_query")
+    assert "pinned write_scope to [Person, City]" in pinned["description"]
+    assert "pinned" not in unpinned["description"], (
+        "an unpinned server must not advertise a ceiling it does not enforce"
     )
 
 

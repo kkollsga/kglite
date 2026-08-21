@@ -72,18 +72,6 @@ pub struct Transaction {
 
 #[pymethods]
 impl Transaction {
-    /// Execute a Cypher query within this transaction.
-    ///
-    /// Mutations are applied to the transaction's working copy, not the original graph.
-    /// Read queries also operate on the working copy (seeing uncommitted changes).
-    ///
-    /// Args:
-    ///     query: A Cypher query string.
-    ///     params: Optional dict of query parameters.
-    ///     to_df: If True, return a pandas DataFrame instead of list of dicts.
-    ///
-    /// Returns:
-    ///     Query results (same format as KnowledgeGraph.cypher).
     /// Whether this is a read-only transaction.
     #[getter]
     fn is_read_only(&self) -> bool {
@@ -92,6 +80,31 @@ impl Transaction {
             .is_some_and(CoreTransaction::is_read_only)
     }
 
+    /// Execute a Cypher query — read **or write** — within this transaction.
+    ///
+    /// Mutations (CREATE, MERGE, SET, REMOVE, DELETE, DETACH DELETE, FOREACH,
+    /// and schema DDL) are applied to the transaction's working copy, not the
+    /// original graph, and become visible to other readers only at `commit()`;
+    /// `rollback()` discards them. Read queries also operate on the working
+    /// copy (seeing uncommitted changes).
+    ///
+    /// Args:
+    ///     query: A Cypher query string.
+    ///     params: Optional dict of query parameters.
+    ///     to_df: If True, return a pandas DataFrame instead of list of dicts.
+    ///     timeout_ms: Per-call deadline in milliseconds.
+    ///     max_rows: Cap on intermediate result rows.
+    ///     write_scope: Role-scoped write whitelist — every node write is
+    ///         judged by the node's *stored* type (a pattern label cannot
+    ///         widen it), and a relationship write needs at least one
+    ///         endpoint's stored type in the list. `None` (default) =
+    ///         unrestricted; `[]` denies every mutation. See
+    ///         `KnowledgeGraph.cypher` for the exact perimeter.
+    ///     git_sha, modified_by: Freshness provenance stamped alongside
+    ///         `updated_at` on types that declare `auto_timestamp`.
+    ///
+    /// Returns:
+    ///     Query results (same format as KnowledgeGraph.cypher).
     // Python boundary mirrors the public query option surface.
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (query, params=None, to_df=false, timeout_ms=None, max_rows=None, write_scope=None, git_sha=None, modified_by=None))]

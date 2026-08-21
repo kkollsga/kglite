@@ -41,10 +41,6 @@
       "classification": "test"
     },
     {
-      "identity": "crates/kglite-mcp-server/src/tools/runners.rs::fn:run_cypher_write:pub(crate) fn run_cypher_write( active: &mut ActiveGraph, query: &str, write_scope: Option<&[String]>, git_sha: Option<&str>, modified_by: Option<&str>, value_codecs: Option<&[ValueCodec]>, csv_http: Option<&crate::csv_http::CsvHttpConfig>, ) -> Result<String, String>::clippy::too_many_arguments",
-      "classification": "boundary"
-    },
-    {
       "identity": "crates/kglite-py/src/graph/mod.rs::fn:compare_inner:pub(crate) fn compare_inner( inner: &Arc<DirGraph>, selection: &mut CowSelection, target_type: Option<&str>, config: &kglite_core::api::fluent::MethodConfig, conditions: Option<&HashMap<String, FilterCondition>>, sort_fields: Option<&Vec<(String, bool)>>, limit: Option<usize>, estimated: usize, ) ->::clippy::too_many_arguments",
       "classification": "boundary"
     },
@@ -121,7 +117,7 @@
       "classification": "boundary"
     },
     {
-      "identity": "crates/kglite-py/src/graph/pyapi/kg_introspection.rs::fn:unique_values:fn unique_values( &mut self, property: String, group_by_parent: Option<bool>, level_index: Option<usize>, indices: Option<Vec<usize>>, store_as: Option<&str>, max_length: Option<usize>, keep_selection: Option<bool>, ) -> PyResult<Py<PyAny>>::clippy::too_many_arguments",
+      "identity": "crates/kglite-py/src/graph/pyapi/kg_introspection.rs::fn:unique_values:fn unique_values( mut slf: PyRefMut<'_, Self>, property: String, group_by_parent: Option<bool>, level_index: Option<usize>, indices: Option<Vec<usize>>, store_as: Option<&str>, max_length: Option<usize>, keep_selection: Option<bool>, ) -> PyResult<Py<PyAny>>::clippy::too_many_arguments",
       "classification": "boundary"
     },
     {
@@ -133,7 +129,7 @@
       "classification": "boundary"
     },
     {
-      "identity": "crates/kglite-py/src/graph/pyapi/kg_mutation.rs::fn:build_connection_df_from_pandas:fn build_connection_df_from_pandas( data: &Bound<'_, PyAny>, source_id_field: &str, target_id_field: &str, source_title_field: Option<&str>, target_title_field: Option<&str>, columns: Option<&Bound<'_, PyList>>, skip_columns: Option<&Bound<'_, PyList>>, column_types: Option<&Bound<'_, PyDict>>, ) ->::clippy::too_many_arguments",
+      "identity": "crates/kglite-py/src/graph/pyapi/kg_mutation.rs::fn:build_connection_df_from_pandas:fn build_connection_df_from_pandas( data: &Bound<'_, PyAny>, source_id_field: &str, target_id_field: &str, source_title_field: Option<&str>, target_title_field: Option<&str>, columns: Option<&Bound<'_, PyList>>, skip_columns: Option<&Bound<'_, PyList>>, column_types: Option<&Bound<'_, PyDict>>, on_i::clippy::too_many_arguments",
       "classification": "boundary"
     },
     {
@@ -317,7 +313,7 @@
       "classification": "transitional"
     },
     {
-      "identity": "crates/kglite/src/graph/io/ntriples/loader.rs::fn:test_parse_entity_triple:fn test_parse_entity_triple()::clippy::approx_constant",
+      "identity": "crates/kglite/src/graph/io/ntriples/loader_tests.rs::module::clippy::approx_constant",
       "classification": "test"
     },
     {

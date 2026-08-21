@@ -1579,9 +1579,12 @@ pub struct NodeSchemaDefinition {
     /// Ownership layer for the two-writer contract: `"managed"` (rebuilt from
     /// source by a batch writer) or `"runtime"` (owned/mutated live by another
     /// writer, e.g. an agent). A **managed reload** (`add_nodes(...,
-    /// managed_reload=True)`) refuses to write a `runtime` type, turning a
-    /// "research never touches agent-owned nodes" convention into an enforced
-    /// guarantee. `None` = unlayered (no restriction). Additive serde field.
+    /// managed_reload=True)`) skips a `runtime` type instead of writing it.
+    /// That is a lane the batch writer opts into, not an enforced perimeter:
+    /// an `add_nodes` call without the flag writes a `runtime` type normally,
+    /// nothing gates a runtime writer out of `managed` types, and
+    /// `add_connections` is not covered. `None` = unlayered (no restriction).
+    /// Additive serde field.
     #[serde(default)]
     pub layer: Option<String>,
     /// Opt-in freshness provenance: when `Some(true)`, every write to a node of

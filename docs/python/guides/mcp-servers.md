@@ -92,8 +92,30 @@ kglite-mcp-server --graph /data/new.kgl --storage memory --writable
 Writable mode registers mutation-capable `cypher_query` plus `load_graph`,
 `create_graph`, and `save_graph_as`; persistence to the active target is also
 available. `--storage` is a creation choice, not a silent conversion of an
-existing graph. Keep the default read-only mode for untrusted clients, and use
-`write_scope`/schema controls when writes should be type-scoped.
+existing graph. Keep the default read-only mode for untrusted clients.
+
+When writes should be type-scoped, note who is doing the scoping. The
+`write_scope` argument on `cypher_query` is the *agent's* own declaration —
+useful role hygiene, but the agent can always widen it. To pin a ceiling the
+agent cannot reach, pass `--write-scope` (comma-separated) or set
+`extensions.write_scope` in the manifest:
+
+```bash
+kglite-mcp-server --graph /data/work.kgl --writable --write-scope Plan,Task
+```
+
+```yaml
+extensions:
+  write_scope: [Plan, Task]
+```
+
+The pin applies whether or not the agent supplies its own scope: an omitted
+`write_scope` leaves the pin in force (it never falls back to unrestricted),
+and a supplied one is **intersected** with it. A write with nothing left in
+scope is refused with a message naming the server's scope. Flag and manifest
+key are intersected with each other as well, and the effective scope is logged
+at boot; a malformed `extensions.write_scope` fails the boot rather than being
+silently ignored.
 
 ### 3. Register with Claude Desktop
 

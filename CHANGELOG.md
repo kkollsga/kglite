@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`CALL ready_set(...)` with an unknown relationship type reported every node
+  as ready.** The procedure answers "are all of this node's dependencies done?"
+  with a universal quantifier over its outgoing edges of the given type, and a
+  type the graph does not have makes every dependency list empty, every
+  quantifier vacuously true, and the frontier *everything* — a typo widened the
+  answer instead of narrowing it, in the one direction that causes work to be
+  dispatched. `ready_set` / `dependency_frontier` now refuse an unknown
+  relationship type with a did-you-mean and the valid set. Every other
+  procedure that takes `relationship:` degrades toward an empty answer instead
+  (uniform scores, singleton components, coefficient 0.0), so those warn and
+  return unchanged results; an unknown `node_type:` warns everywhere, and a
+  locked schema promotes both warnings to errors.
+
+- **`add_nodes(managed_reload=True)`'s skip report had a different shape from
+  every other report.** When the call declined to write a `runtime`-layer type
+  it returned a dict carrying only `nodes_created`, `nodes_updated`,
+  `skipped_runtime_layer`, `node_type` and `message` — so a caller checking the
+  load the documented way, `report["has_errors"]`, raised `KeyError` on exactly
+  the path where it most needed a readable answer. The skip report now carries
+  the full `add_nodes` shape (`operation`, `timestamp`, the three counts,
+  `processing_time_ms`, `has_errors=False`) plus the skip keys.
+
+- **`Transaction.cypher`'s docstring was attached to `is_read_only`.** A
+  misplaced doc comment left `Transaction.cypher.__doc__` empty at runtime and
+  gave the `is_read_only` property the query method's prose.
+
 - **`save()` and `sync()` reported a failed write as a bare `OSError`.** The
   typed-error taxonomy is what lets an application tell a full disk from a bad
   argument, and the whole write path sat outside it: every I/O failure in
@@ -378,6 +404,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The MCP server accepts an operator-pinned write scope.** `write_scope` on
+  the `cypher_query` tool is chosen by the *agent*, so on its own it is role
+  hygiene rather than access control — an agent that wanted a wider perimeter
+  simply asked for one, or omitted the argument and got no perimeter at all.
+  `kglite-mcp-server --write-scope Plan,Task` and the manifest key
+  `extensions.write_scope: [Plan, Task]` pin a ceiling outside the agent's
+  reach. The pin never falls open: an agent that omits `write_scope` gets the
+  pinned scope rather than unrestricted writes, an agent that supplies one gets
+  the **intersection** of the two, and a write with nothing left in scope is
+  refused with a message naming the server's scope. Flag and manifest key are
+  intersected with each other, with the effective scope logged at boot; a
+  malformed `extensions.write_scope` fails the boot rather than being dropped
+  (an allowlist that silently fails open is worse than no allowlist), and an
+  explicit `[]` is honoured literally. A pinned server states its scope in the
+  `cypher_query` tool description, so an agent can plan inside the ceiling
+  instead of discovering it one refusal at a time.
+
 - **`on_invalid={'warn','error','skip'}` on `add_nodes` and
   `add_connections`.** Bulk loading has always tolerated input it cannot use —
   a row whose id is null or unrepresentable, an edge row with a null endpoint —
@@ -399,6 +442,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the stored data is clean.
 
 ### Changed
+
+- **`managed_reload` and the runtime `cypher` docstrings no longer overstate
+  what they do.** README described `define_schema(layer=...)` +
+  `add_nodes(managed_reload=True)` as making a rebuild "provably" unable to
+  clobber agent-owned nodes. What the code does is skip a `runtime`-layer type
+  when the *rebuilding* side passes the flag: an `add_nodes` call that omits it
+  writes the type normally, nothing gates a live writer out of `managed` types,
+  and `add_connections` is not covered at all. README, the `.pyi`, the schema
+  docs and the derived-index guide now say that, and point at `write_scope` as
+  the mechanism that actually refuses an out-of-role write. Separately, the
+  runtime (`help()`) docstrings for `KnowledgeGraph.cypher`,
+  `Transaction.cypher` and `Session.execute` documented a read-only API — no
+  mutation clauses, no `write_scope` — while the accurate prose lived only in
+  the `.pyi`, invisible to an agent introspecting the API at runtime. All three
+  now describe the write surface.
 
 - **Breaking (semantics fix): `write_scope` now covers every write, not just
   `CREATE`/`SET`.** The whitelist was enforced on node creation and property

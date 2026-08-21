@@ -164,6 +164,25 @@ fn tmp_kgl(tag: &str) -> std::path::PathBuf {
     p
 }
 
+/// Write through the tool seam with only the agent's own `write_scope` —
+/// no operator pin, the shape every pre-0.16.6 call had.
 fn write(active: &mut ActiveGraph, q: &str, scope: Option<&[String]>) -> Result<String, String> {
-    run_cypher_write(active, q, scope, None, None, None, None)
+    write_pinned(active, q, None, scope)
+}
+
+/// Write with both scopes explicit: the operator's boot-time pin and the
+/// agent's per-call argument.
+fn write_pinned(
+    active: &mut ActiveGraph,
+    q: &str,
+    operator: Option<&[String]>,
+    agent: Option<&[String]>,
+) -> Result<String, String> {
+    let authz = WriteAuthz {
+        operator_scope: operator,
+        agent_scope: agent,
+        git_sha: None,
+        modified_by: None,
+    };
+    run_cypher_write(active, q, authz, None, None)
 }

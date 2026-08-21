@@ -97,3 +97,30 @@ def test_version_contract_is_semver_shape():
 
     assert isinstance(kglite.__version__, str)
     assert re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", kglite.__version__)
+
+
+def test_write_capable_methods_document_writes_at_runtime():
+    """`help()` is how an agent discovers this API — and it reads the pyo3
+    docstring, not the ``.pyi``.
+
+    All three of these accept mutations and a ``write_scope``, and all three
+    described a read-only API at runtime: an agent introspecting
+    ``graph.cypher`` had no way to learn that it could write at all, let alone
+    that its writes could be role-scoped. Kept in sync by hand — the assertion
+    is the reminder.
+    """
+    import kglite
+
+    methods = {
+        "KnowledgeGraph.cypher": kglite.KnowledgeGraph.cypher,
+        "Transaction.cypher": kglite.Transaction.cypher,
+        "Session.execute": kglite.Session.execute,
+    }
+    for name, method in methods.items():
+        doc = method.__doc__ or ""
+        assert "write_scope" in doc, f"{name}.__doc__ does not document write_scope"
+        assert "DETACH DELETE" in doc, f"{name}.__doc__ does not document the mutation clauses"
+        assert "stored" in doc, (
+            f"{name}.__doc__ omits the stored-type rule — the property that makes write_scope "
+            "resistant to label smuggling"
+        )

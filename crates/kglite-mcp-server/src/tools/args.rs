@@ -22,7 +22,10 @@ pub(crate) struct CypherArgs {
     /// `DELETE r`, `SET r.p`, `REMOVE r.p`) is allowed only when at least one
     /// endpoint's stored type is in the list. Deleting a node in scope removes
     /// its relationships whatever they point at. An empty list denies every
-    /// mutation. Ignored on read-only servers.
+    /// mutation. Ignored on read-only servers. When the server's operator has
+    /// pinned a write scope (`--write-scope` / `extensions.write_scope`), this
+    /// list is **intersected** with it: it can narrow the pinned scope, never
+    /// widen it, and omitting it leaves the pinned scope in force.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub write_scope: Option<Vec<String>>,
     /// Freshness provenance for this write (write-enabled servers only): the git

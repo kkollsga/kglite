@@ -1535,10 +1535,21 @@ class KnowledgeGraph:
             managed_reload: When ``True``, this call is part of a *managed
                 reload* (a batch writer rebuilding from source). If ``node_type``
                 declares ``layer='runtime'`` in the schema (an agent-owned type),
-                the write is **skipped** as a no-op and reported — so a research
-                rebuild can never clobber agent-owned nodes. Undeclared or
-                ``layer='managed'`` types are written normally. Pairs with the
-                ``layer`` declaration in ``define_schema`` and ``conflict_handling``.
+                the write is **skipped** as a no-op and the returned report
+                carries the normal shape plus ``skipped_runtime_layer=True``,
+                ``node_type`` and ``message``. Undeclared or ``layer='managed'``
+                types are written normally. Pairs with the ``layer`` declaration
+                in :meth:`define_schema` and ``conflict_handling``.
+
+                **What this does and does not guarantee.** It is a guard the
+                *rebuilding* side opts into, not an enforced perimeter: an
+                ``add_nodes`` call that omits ``managed_reload`` writes a
+                ``runtime`` type normally, nothing stops a runtime writer
+                (Cypher, or another loader call) from mutating or deleting
+                ``managed`` nodes, and :meth:`add_connections` is not covered
+                at all. Use ``write_scope`` on the Cypher path when the goal
+                is to *refuse* out-of-role writes rather than to keep a
+                well-behaved rebuild in its lane.
             timeseries: Inline timeseries configuration dict with keys:
 
                 - ``time`` (required): column name containing date strings
@@ -4095,9 +4106,10 @@ class KnowledgeGraph:
                 A node entry may also set ``layer`` to ``'managed'`` (rebuilt
                 from source by a batch writer) or ``'runtime'`` (owned/mutated
                 live by another writer, e.g. an agent). With layers declared, an
-                ``add_nodes(..., managed_reload=True)`` call refuses to write a
-                ``runtime`` type — enforcing disjoint ownership in a two-writer
-                contract graph::
+                ``add_nodes(..., managed_reload=True)`` call skips a
+                ``runtime`` type instead of writing it — a *declared* lane for
+                a well-behaved batch writer, not an enforced perimeter (the
+                caveats are on :meth:`add_nodes`'s ``managed_reload``)::
 
                     g.define_schema({"nodes": {
                         "AlgorithmSpec": {"layer": "managed"},

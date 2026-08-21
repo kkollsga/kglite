@@ -1564,11 +1564,18 @@ impl KnowledgeGraph {
         py_out::pattern_matches_to_pylist(py, &matches, &self.inner)
     }
 
-    /// Execute a Cypher query against the graph.
+    /// Execute a Cypher query — read **or write** — against the graph.
     ///
-    /// Supports MATCH, WHERE, RETURN, ORDER BY, LIMIT, SKIP, WITH,
+    /// Reads: MATCH, WHERE, RETURN, ORDER BY, LIMIT, SKIP, WITH,
     /// OPTIONAL MATCH, UNWIND, UNION, and aggregation functions
     /// (count, sum, avg, min, max, collect, std).
+    ///
+    /// Writes: CREATE, MERGE, SET, REMOVE, DELETE, DETACH DELETE, FOREACH,
+    /// and schema DDL (CREATE/DROP INDEX, CREATE/DROP CONSTRAINT). Mutation
+    /// statistics land on `graph.last_mutation_stats`. A direct mutation call
+    /// executes **in place**: if a later clause, timeout, or row-budget check
+    /// fails, earlier mutations may remain visible — use `session()` or
+    /// `begin()` when failure must roll back.
     ///
     /// The MATCH clause uses the same pattern syntax as match_pattern().
     /// WHERE supports AND/OR/NOT, comparisons (=, <>, <, <=, >, >=),
@@ -1584,6 +1591,23 @@ impl KnowledgeGraph {
     ///         deadline entirely for this call.
     ///     max_rows: Cap on intermediate result rows; queries producing
     ///         more return an error. Defaults to `set_default_max_rows()`.
+    ///     write_scope: Role-scoped write whitelist (integrity, not secrecy)
+    ///         — e.g. a coding role may write ["Plan", "Task"] but not
+    ///         research-owned "Algorithm" nodes. `None` (default) =
+    ///         unrestricted; `[]` denies every mutation. Every **node** write
+    ///         (CREATE, MERGE's create arm, SET n.p, SET n += {...},
+    ///         SET n:Label, REMOVE n.p, REMOVE n:Label, DELETE n,
+    ///         DETACH DELETE n, and node-type index/constraint DDL) is judged
+    ///         by the node's *stored* type, never a pattern label, so label
+    ///         smuggling cannot widen the scope. A **relationship** write
+    ///         (CREATE (a)-[:R]->(b), DELETE r, SET r.p, REMOVE r.p) is
+    ///         allowed iff at least one endpoint's stored type is in scope;
+    ///         DETACH DELETE's incident-edge collateral is authorized by the
+    ///         node delete. Outside the perimeter, deliberately: relationship
+    ///         *constraint* DDL, db.cdc.enable/disable, and the bulk loaders
+    ///         add_nodes/add_connections.
+    ///     git_sha, modified_by: Freshness provenance stamped alongside
+    ///         `updated_at` on types that declare `auto_timestamp`.
     ///
     /// Returns:
     ///     A dict with 'columns' (list of column names) and 'rows'
