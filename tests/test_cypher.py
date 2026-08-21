@@ -657,6 +657,110 @@ class TestParameters:
         assert len(rows) == 2
 
 
+# Each entry names the execution path a WHERE predicate is evaluated on. The
+# same matrix `tests/test_regex_operator.py` uses for uncompilable patterns:
+# the two classes are wrong for every row for the same reason, and the fused
+# filters recognise them through one helper.
+FUSED_PARAM_SHAPES = [
+    # Unfused reference — this one has always raised.
+    ("plain_rows", "MATCH (p:Person) WHERE p.city = $missing RETURN p.name"),
+    # FusedNodeScanAggregate — the shape the eval hit: a zero count read as
+    # "the graph has none of those", off the caller's own unbound parameter.
+    ("fused_scan_aggregate", "MATCH (p:Person) WHERE p.city = $missing RETURN count(*) AS c"),
+    ("fused_scan_group", "MATCH (p:Person) WHERE p.city = $missing RETURN p.city AS t, count(*) AS c"),
+    # FusedNodeScanTopK.
+    ("fused_scan_top_k", "MATCH (p:Person) WHERE p.city = $missing RETURN p.name AS t ORDER BY t LIMIT 3"),
+    # WITH … WHERE over a fused match+aggregate.
+    (
+        "fused_with_aggregate",
+        "MATCH (n:Person)-[:KNOWS]->(m) WITH n, count(m) AS c WHERE n.city = $missing RETURN n.name AS t, c",
+    ),
+    # HAVING over the same.
+    (
+        "fused_having",
+        "MATCH (n:Person)-[:KNOWS]->(m) RETURN n.name AS t, count(m) AS c HAVING t = $missing",
+    ),
+]
+
+
+class TestUnboundParameterInWhereRaisesEverywhere:
+    """An unbound `$parameter` in a WHERE raises on every path.
+
+    `MATCH (v:Vessel) WHERE v.flag = $flag RETURN count(v)` answered `0` and no
+    error while the same predicate projected as a row raised — so the fused
+    aggregate paths turned a caller's unbound parameter into a confident "the
+    graph has none of those". The parameter is missing for every row and no row
+    can supply it, exactly like an uncompilable regex, and the fused filters
+    now propagate both.
+
+    Absolute goldens rather than differential-corpus entries: the corpus
+    compares *rows* between the optimised and naive runs, so a query that must
+    raise on both sides cannot be expressed there.
+    """
+
+    @pytest.mark.parametrize("shape,query", FUSED_PARAM_SHAPES, ids=[s[0] for s in FUSED_PARAM_SHAPES])
+    @pytest.mark.parametrize("disable_optimizer", [False, True], ids=["optimized", "naive"])
+    def test_raises(self, cypher_graph, shape, query, disable_optimizer):
+        with pytest.raises(kglite.KgError, match=r"Missing parameter: \$missing"):
+            cypher_graph.cypher(query, disable_optimizer=disable_optimizer)
+
+    @pytest.mark.parametrize("shape,query", FUSED_PARAM_SHAPES, ids=[s[0] for s in FUSED_PARAM_SHAPES])
+    def test_a_bound_parameter_still_answers(self, cypher_graph, shape, query):
+        """The golden the error must not have cost."""
+        bound = query.replace("$missing", "$bound")
+        rows = cypher_graph.cypher(bound, params={"bound": "Bergen"}).to_list()
+        if shape == "fused_scan_aggregate":
+            assert rows[0]["c"] == 2, rows
+        elif shape in ("plain_rows", "fused_scan_top_k"):
+            assert len(rows) == 2, rows
+        else:
+            # The remaining shapes group or filter post-aggregation; what
+            # matters is that they answer at all, with only Bergen rows.
+            assert all(v != "Oslo" for row in rows for v in row.values()), rows
+
+    def test_the_two_spellings_of_one_predicate_agree(self, cypher_graph):
+        """`{city: $missing}` and `WHERE p.city = $missing` are one mistake.
+
+        D3p made the inline map raise; on an aggregate projection the WHERE
+        spelling stayed quiet, which left the inline map the *stricter* of the
+        two. They report the same thing now."""
+        query = "MATCH (p:Person{inline}) {where}RETURN count(p) AS c"
+        errors = []
+        for inline, where in ((" {city: $missing}", ""), ("", "WHERE p.city = $missing ")):
+            with pytest.raises(kglite.KgError) as excinfo:
+                cypher_graph.cypher(query.format(inline=inline, where=where))
+            errors.append(str(excinfo.value))
+        assert errors[0] == errors[1], errors
+
+
+class TestUnevaluablePredicateStillDropsRowsWithParams:
+    """The swallow the fused paths keep, re-pinned beside the new propagation.
+
+    Only the two "wrong for every row" classes propagate. A predicate that
+    merely cannot be evaluated for a row — an `OPTIONAL MATCH` binding that
+    never matched — still drops the row, including when a *bound* parameter is
+    what it is compared against.
+    """
+
+    def test_optional_match_unbound_binding_with_a_bound_parameter(self, cypher_graph):
+        rows = cypher_graph.cypher(
+            "MATCH (p:Person) OPTIONAL MATCH (p)-[:KNOWS]->(m) "
+            "WITH p, m WHERE m.city = $city RETURN p.name AS t ORDER BY t",
+            params={"city": "Bergen"},
+        ).to_list()
+        # Alice→Bob and Charlie→Diana; Eve has no outgoing KNOWS at all, and
+        # her unbound `m` drops rather than raising.
+        assert [r["t"] for r in rows] == ["Alice", "Charlie"]
+
+    def test_optional_match_unbound_binding_with_aggregate_and_parameter(self, cypher_graph):
+        rows = cypher_graph.cypher(
+            "MATCH (p:Person) OPTIONAL MATCH (p)-[:KNOWS]->(m) "
+            "WITH p, count(m) AS c WHERE c = $zero RETURN p.name AS t ORDER BY t",
+            params={"zero": 0},
+        ).to_list()
+        assert [r["t"] for r in rows] == ["Eve"]
+
+
 class TestExistingFeatures:
     """Tests for already-implemented features to ensure coverage."""
 

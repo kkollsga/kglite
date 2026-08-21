@@ -87,27 +87,30 @@ fn an_unbound_inline_map_parameter_raises() {
 /// The two spellings of one predicate now answer identically — that agreement
 /// is the fix, not the error text on its own.
 ///
-/// The projection is a bare property rather than `count(v)` on purpose: the
-/// fused scan-aggregate path still swallows *every* non-regex evaluation
-/// error from a `WHERE` (its `unwrap_or(false)` is what OPTIONAL MATCH's
-/// unbound bindings rely on), so `WHERE v.flag = $flag RETURN count(v)` keeps
-/// returning a zero count. That is a separate defect in the fused filter, not
-/// this pass — and note the direction it now leaves things in: the inline map
-/// is the *stricter* of the two spellings for an aggregate projection.
+/// Both projections are asserted. The aggregate one is the case this pass did
+/// *not* settle: the fused scan-aggregate path swallowed every non-regex
+/// evaluation error from a `WHERE` (its `unwrap_or(false)` is what OPTIONAL
+/// MATCH's unbound bindings rely on), so `WHERE v.flag = $flag RETURN
+/// count(v)` answered zero while the inline map raised — the inline map was
+/// briefly the *stricter* of the two spellings. The fused filters now
+/// recognise the missing-parameter class alongside the regex-compile one, so
+/// the four combinations agree; see `executor::helpers::is_user_input_error`.
 #[test]
 fn the_inline_map_and_where_spellings_report_the_same_thing() {
     let graph = fleet();
-    let inline = read_err(
-        &graph,
-        "MATCH (v:Vessel {flag: $flag}) RETURN v.id AS id",
-        &empty_params(),
-    );
-    let where_clause = read_err(
-        &graph,
-        "MATCH (v:Vessel) WHERE v.flag = $flag RETURN v.id AS id",
-        &empty_params(),
-    );
-    assert_eq!(inline, where_clause);
+    for projection in ["RETURN v.id AS id", "RETURN count(v) AS c"] {
+        let inline = read_err(
+            &graph,
+            &format!("MATCH (v:Vessel {{flag: $flag}}) {projection}"),
+            &empty_params(),
+        );
+        let where_clause = read_err(
+            &graph,
+            &format!("MATCH (v:Vessel) WHERE v.flag = $flag {projection}"),
+            &empty_params(),
+        );
+        assert_eq!(inline, where_clause, "{projection}");
+    }
 }
 
 /// The golden the error must not have cost: a *bound* parameter still matches

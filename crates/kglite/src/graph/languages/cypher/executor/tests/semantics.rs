@@ -446,6 +446,70 @@ fn fused_scan_raises_on_a_pattern_that_does_not_compile() {
     }
 }
 
+// ========================================================================
+// Unbound `$parameter`s on the fused scan
+// ========================================================================
+//
+// Same shape as the uncompilable regex above, one class wider. A parameter
+// the caller never bound is missing for every row and no row can supply it,
+// and the unfused path has always raised it — but the fused scan swallowed it
+// with the "this predicate does not evaluate for this row" errors it drops by
+// design, so `WHERE v.flag = $flag RETURN count(v)` answered `0` and no error.
+// A zero count is the worst possible answer here: the caller reads it as "the
+// graph has none of those" off their own mistake.
+
+#[test]
+fn fused_scan_raises_on_an_unbound_parameter() {
+    let graph = build_mixed_property_graph(vec![
+        Value::String("Alice".into()),
+        Value::String("Bob".into()),
+    ]);
+    let params = HashMap::new();
+
+    let query = "MATCH (n:S) WHERE n.v = $missing RETURN count(*) AS c";
+    let mut optimized = parser::parse_cypher(query).unwrap();
+    crate::graph::languages::cypher::planner::optimize(&mut optimized, &graph, &params);
+    assert!(
+        optimized
+            .clauses
+            .iter()
+            .any(|c| matches!(c, Clause::FusedNodeScanAggregate { .. })),
+        "non-vacuity: `{query}` did not fuse, so it would not exercise the \
+         fused scan's predicate at all"
+    );
+
+    let err = CypherExecutor::with_params(&graph, &params, None)
+        .execute(&optimized)
+        .expect_err("an unbound parameter must not answer with a count");
+    assert!(err.contains("Missing parameter: $missing"), "fused: {err}");
+
+    // The unfused path's answer, for the same query.
+    let unoptimized = parser::parse_cypher(query).unwrap();
+    let unfused_err = CypherExecutor::with_params(&graph, &params, None)
+        .execute(&unoptimized)
+        .expect_err("an unbound parameter must not answer with a count unfused");
+    assert_eq!(err, unfused_err, "fused vs unfused error for `{query}`");
+}
+
+#[test]
+fn fused_scan_still_counts_with_the_parameter_bound() {
+    // The golden the error must not have cost.
+    let graph = build_mixed_property_graph(vec![
+        Value::String("Alice".into()),
+        Value::String("Bob".into()),
+        Value::String("Alice".into()),
+    ]);
+    let params = HashMap::from([("bound".to_string(), Value::String("Alice".into()))]);
+
+    let query = "MATCH (n:S) WHERE n.v = $bound RETURN count(*) AS c";
+    let mut optimized = parser::parse_cypher(query).unwrap();
+    crate::graph::languages::cypher::planner::optimize(&mut optimized, &graph, &params);
+    let result = CypherExecutor::with_params(&graph, &params, None)
+        .execute(&optimized)
+        .expect("a bound parameter still answers");
+    assert_eq!(result.rows[0][0], Value::Int64(2));
+}
+
 #[test]
 fn fused_scan_still_drops_rows_whose_predicate_cannot_be_evaluated() {
     // A valid pattern against a non-string cell: the comparison yields

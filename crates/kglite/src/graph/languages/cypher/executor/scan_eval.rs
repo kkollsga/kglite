@@ -741,9 +741,11 @@ impl ScanPred<'_> {
     /// A predicate that merely *does not evaluate* for a row — an unbound
     /// binding, an aggregate reference outside an aggregation — drops the row
     /// rather than failing the query, which is what these scans have always
-    /// done. An uncompilable regex is not that: it is wrong for every row, it
-    /// can never become right, and the unfused path raises it. Swallowing it
-    /// turned an invalid pattern into a silent empty result.
+    /// done. An uncompilable regex and an unbound `$parameter` are not that:
+    /// they are wrong for every row, they can never become right, and the
+    /// unfused path raises both. Swallowing them turned an invalid pattern
+    /// into a silent empty result and an unbound parameter into a zero count.
+    /// See [`super::helpers::is_user_input_error`].
     pub(super) fn keeps_row(
         &self,
         executor: &CypherExecutor<'_>,
@@ -753,7 +755,7 @@ impl ScanPred<'_> {
     ) -> Result<bool, String> {
         match self.eval(executor, runtime, node, row) {
             Ok(outcome) => Ok(outcome == Some(true)),
-            Err(e) if super::regex_cache::is_compile_error(&e) => Err(e),
+            Err(e) if super::helpers::is_user_input_error(&e) => Err(e),
             Err(_) => Ok(false),
         }
     }

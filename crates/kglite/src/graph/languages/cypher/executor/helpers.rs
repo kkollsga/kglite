@@ -20,6 +20,31 @@ pub use super::super::ast::is_aggregate_expression;
 
 // is_aggregate_expression and is_window_expression are re-exported above.
 
+/// True when an evaluation error reports a mistake in the *query or its
+/// parameters* rather than something about the row being tested.
+///
+/// The fused execution paths — the scan-aggregate, the top-K scan, `HAVING`,
+/// and `WITH … WHERE` — drop a row whose predicate cannot be evaluated instead
+/// of failing the query. That swallow is load-bearing: an unbound
+/// `OPTIONAL MATCH` binding and an aggregate reference outside an aggregation
+/// both surface as evaluation errors, and both must keep meaning "this row
+/// does not match".
+///
+/// Two classes are not that. An uncompilable regex and an unbound
+/// `$parameter` are wrong for *every* row, no row can make them right, and the
+/// unfused path raises both — so swallowing them answered an invalid query
+/// with a silent empty result (or, worse, a zero count). They propagate; every
+/// other message keeps the historical behaviour byte-for-byte.
+///
+/// Each class is recognised beside where it is minted
+/// ([`super::regex_cache::is_compile_error`],
+/// [`super::expression::is_missing_parameter_error`]); this is the one place
+/// the fused filters ask about all of them.
+pub(super) fn is_user_input_error(message: &str) -> bool {
+    super::regex_cache::is_compile_error(message)
+        || super::expression::is_missing_parameter_error(message)
+}
+
 /// Variables a grouped aggregation still pins down on its output rows.
 ///
 /// Every non-aggregate projection item is a grouping key, so any variable it
@@ -1556,3 +1581,44 @@ pub(super) fn yield_alias(yield_items: &[YieldItem], expected: &str) -> Option<S
 #[cfg(test)]
 #[path = "node_record_golden_tests.rs"]
 mod node_record_golden_tests;
+
+#[cfg(test)]
+mod user_input_error_tests {
+    use super::is_user_input_error;
+    use crate::graph::languages::cypher::executor::expression::missing_parameter_error;
+    use crate::graph::languages::cypher::executor::regex_cache::{
+        function_compile_error, operator_compile_error,
+    };
+
+    #[test]
+    fn both_propagating_classes_are_recognised() {
+        // Bound, not inlined: `clippy::invalid_regex` rejects a literal bad
+        // pattern at `Regex::new`, and this test needs one.
+        let bad = String::from("[");
+        let err = regex::Regex::new(&bad).expect_err("'[' must not compile");
+        assert!(is_user_input_error(&operator_compile_error("[", &err)));
+        assert!(is_user_input_error(&function_compile_error(
+            "text_match_regex",
+            &err
+        )));
+        assert!(is_user_input_error(&missing_parameter_error("flag")));
+        // `dynamic_labels` suffixes the same mint for pattern positions.
+        assert!(is_user_input_error(&format!(
+            "{} (used as a label or relationship type)",
+            missing_parameter_error("label")
+        )));
+    }
+
+    #[test]
+    fn the_swallowed_classes_are_not_recognised() {
+        // The messages the fused paths must keep dropping rows for.
+        for message in [
+            "Cannot evaluate aggregate function in this context",
+            "Variable 'x' not bound",
+            "Unknown function: nope",
+            "",
+        ] {
+            assert!(!is_user_input_error(message), "{message}");
+        }
+    }
+}

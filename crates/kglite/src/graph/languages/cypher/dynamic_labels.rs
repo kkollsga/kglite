@@ -86,6 +86,7 @@
 use std::collections::HashMap;
 
 use super::ast::*;
+use super::executor::expression::missing_parameter_error;
 use crate::datatypes::values::Value;
 use crate::error::KgError;
 use crate::graph::core::pattern_matching::{ParamLabel, Pattern, PatternElement, PropertyMatcher};
@@ -115,7 +116,8 @@ fn bind<'a>(params: &'a HashMap<String, Value>, param: &str) -> Result<&'a str, 
             other.type_name()
         ))),
         None => Err(execution_error(format!(
-            "Missing parameter: ${param} (used as a label or relationship type)"
+            "{} (used as a label or relationship type)",
+            missing_parameter_error(param)
         ))),
     }
 }
@@ -253,10 +255,12 @@ fn check_property_params(
         .filter_map(|m| missing(m, params))
         .collect();
     names.sort_unstable();
-    // Same wording as the expression evaluator's, so `{flag: $flag}` and
-    // `WHERE v.flag = $flag` answer one mistake with one message. Only the
-    // first is named, as the evaluator does — fixing it surfaces the next.
-    Err(execution_error(format!("Missing parameter: ${}", names[0])))
+    // The evaluator's own message, so `{flag: $flag}` and `WHERE v.flag =
+    // $flag` answer one mistake with one message — and so the fused paths'
+    // recogniser, which sits beside that mint, cannot drift away from this
+    // spelling. Only the first is named, as the evaluator does — fixing it
+    // surfaces the next.
+    Err(execution_error(missing_parameter_error(names[0])))
 }
 
 fn resolve_pattern(pattern: &mut Pattern, params: &HashMap<String, Value>) -> Result<(), KgError> {

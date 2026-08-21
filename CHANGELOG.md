@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An unbound `$parameter` in a `WHERE` clause raised on projection shapes but
+  silently returned zero on fused aggregate shapes.**
+  `MATCH (v:Vessel) WHERE v.flag = $flag RETURN count(v)` with no `flag` in
+  `params` answered `0` and no error, while the same predicate projected as a
+  row raised `Missing parameter: $flag` — so an aggregate turned the caller's
+  own missing binding into a confident "the graph has none of those". The fused
+  execution paths (scan-aggregate, top-K, `HAVING`, `WITH … WHERE`) drop a row
+  whose predicate cannot be evaluated instead of failing the query, which is
+  what an unbound `OPTIONAL MATCH` binding relies on, and the missing-parameter
+  error was being swallowed along with it. It now propagates from every fused
+  path exactly as the regex-compile class already does; both are recognised
+  beside where they are minted, and every other evaluation error keeps the
+  deliberate swallow byte-for-byte.
+
 - **An unbound `$parameter` inside an inline property map matched nothing
   instead of raising.** `MATCH (v:Vessel {flag: $flag})` with no `flag` in
   `params` returned an empty result and no error, so a caller read "this graph

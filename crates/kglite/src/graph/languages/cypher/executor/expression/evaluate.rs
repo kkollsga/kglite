@@ -1,3 +1,42 @@
+// ---------------------------------------------------------------------------
+// The unbound-`$parameter` message, and recognising one again
+// ---------------------------------------------------------------------------
+//
+// A `$parameter` the caller never bound is a mistake in the *call*, not a
+// property of the row being tested: it is wrong for every row and no row can
+// make it right. The unfused `WHERE` path has always raised it, and
+// `cypher::dynamic_labels` raises the same wording for the pattern positions
+// an expression never reaches. The fused paths deliberately swallow predicate
+// errors — a predicate that merely does not evaluate for a row (an unbound
+// `OPTIONAL MATCH` binding, an aggregate reference in `HAVING`) drops the row
+// rather than failing the query — so they need to tell this class apart from
+// that one before swallowing. See `helpers::is_user_input_error`.
+//
+// The message is built here and recognised here, over one shared constant, so
+// the recogniser cannot drift away from the wording it recognises.
+
+/// Opening words of the unbound-`$parameter` message. Pinned by
+/// `graph::session::param_presence_tests`, `tests/test_cypher.py` and the MCP
+/// cypher-tool tests.
+pub(crate) const MISSING_PARAMETER_PREFIX: &str = "Missing parameter: $";
+
+/// Message for a `$parameter` reference that `params` does not bind.
+/// `name` is the bare parameter name, without the `$`.
+pub(crate) fn missing_parameter_error(name: &str) -> String {
+    format!("{MISSING_PARAMETER_PREFIX}{name}")
+}
+
+/// True when `message` reports a `$parameter` the caller did not bind — i.e.
+/// the message above, or `dynamic_labels`' suffixed variant of it.
+///
+/// The fused execution paths consult this (through
+/// [`super::helpers::is_user_input_error`]) before swallowing a predicate
+/// error: a flagged message propagates, matching the unfused path, while
+/// anything else keeps the historical "this row does not match" behaviour.
+pub(crate) fn is_missing_parameter_error(message: &str) -> bool {
+    message.starts_with(MISSING_PARAMETER_PREFIX)
+}
+
 #[derive(Clone, Copy)]
 enum BinaryExpression {
     Add,
@@ -65,7 +104,7 @@ impl<'a> CypherExecutor<'a> {
                 .params
                 .get(name)
                 .cloned()
-                .ok_or_else(|| format!("Missing parameter: ${}", name)),
+                .ok_or_else(|| missing_parameter_error(name)),
             Expression::ListComprehension {
                 variable,
                 list_expr,
