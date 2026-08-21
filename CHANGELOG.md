@@ -300,7 +300,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   older build carries no digests and loads exactly as before, and a file
   written by this version loads on older binaries (verified against the
   published 0.16.5 wheel in both directions). Disk-mode graph directories are
-  unaffected; their sidecars have their own integrity handling.
+  unaffected; their sidecars have their own integrity handling. Measured cost
+  (release profile, min across three agreeing runs): ~+11-15% on the tracked
+  save cell — the linear CRC pass over compressed bytes — inside the 20%
+  gate; loads and every query cell are unmoved.
 
 - **A write that failed mid-append was committed by a later `save()`.** On a
   durable graph, a statement whose write-ahead frame could not be written (a
