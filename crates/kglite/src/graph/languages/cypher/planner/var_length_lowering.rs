@@ -176,7 +176,10 @@ mod tests {
     use crate::graph::core::pattern_matching::{parse_pattern, EdgeDirection};
 
     /// `(type spelling, var_length, direction)` per relationship element.
-    fn hops(pattern: &Pattern) -> Vec<(Option<String>, Option<(usize, usize)>, EdgeDirection)> {
+    /// (connection type, var-length bounds, direction) per edge in the pattern.
+    type HopShape = (Option<String>, Option<(usize, usize)>, EdgeDirection);
+
+    fn hops(pattern: &Pattern) -> Vec<HopShape> {
         pattern
             .elements
             .iter()
