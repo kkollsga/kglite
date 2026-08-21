@@ -665,6 +665,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`kglite.trim_memory()` returns allocator-retained memory to the OS.** The
+  Rust side allocates through mimalloc, which keeps a finished workload's pages
+  for the next one rather than handing them back — the reuse that makes a
+  repeated large query cost no page faults is also why a process that once
+  peaked at several GB keeps reporting that peak after the graphs and result
+  sets are gone. Dropping them frees nothing to the operating system on its own:
+  measured on a 400k-node ingest, the footprint stayed at 406 MB across the drop
+  and fell to 15 MB on the first `trim_memory()`. It is opt-in and never called
+  internally, because forcing a collect at a seam like `save()` or graph drop
+  would spend that reuse on every call; a host that knows its peak is over
+  spends the milliseconds itself. Safe to call at any time, releases the GIL
+  while it runs, and shrinks nothing still referenced — drop the graph or result
+  view first. On macOS the reclaim leaves the pages counted in `rss` (`ps`,
+  `psutil`) and shows up in the process footprint instead; on Linux RSS drops
+  immediately.
+
 - **`EXPLAIN` emits an `Expand` row for each variable-length pattern edge.**
   The plan is clause-granular and a variable-length edge sits *inside* a
   `MATCH`, so `MATCH (a:Person)-[:KNOWS*2..3]->(b:Person)` and the fixed-length

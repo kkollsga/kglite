@@ -32,6 +32,7 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use pyo3::prelude::*;
+mod allocator;
 mod datatypes;
 mod error_py;
 mod graph;
@@ -817,6 +818,7 @@ fn kglite(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(from_blueprint_rust, m)?)?;
     m.add_function(wrap_pyfunction!(from_records_rust, m)?)?;
     m.add_function(wrap_pyfunction!(cypher_pass_names, m)?)?;
+    m.add_function(wrap_pyfunction!(allocator::trim_memory, m)?)?;
     m.add_function(wrap_pyfunction!(_backend_is_forked, m)?)?;
     m.add_function(wrap_pyfunction!(_fail_wal_append, m)?)?;
     m.add_function(wrap_pyfunction!(_wal_next_lsn, m)?)?;

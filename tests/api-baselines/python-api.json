@@ -13,6 +13,7 @@
     "open_session",
     "from_bytes",
     "cypher_pass_names",
+    "trim_memory",
     "from_blueprint",
     "from_records",
     "graphgen",
@@ -1522,6 +1523,10 @@
     "to_neo4j": {
       "kind": "function",
       "signature": "(graph: 'KnowledgeGraph', uri: str, **kwargs) -> dict"
+    },
+    "trim_memory": {
+      "kind": "function",
+      "signature": "()"
     }
   },
   "schema_version": 1

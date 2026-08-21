@@ -42,6 +42,7 @@ from .kglite import (  # explicit re-exports — names listed in __all__ below
     load_rdf,
     open,
     open_session,
+    trim_memory,
 )
 from .retry import retry_on_conflict
 
@@ -548,6 +549,7 @@ __all__ = [
     "open_session",
     "from_bytes",
     "cypher_pass_names",
+    "trim_memory",
     "from_blueprint",
     "from_records",
     "graphgen",

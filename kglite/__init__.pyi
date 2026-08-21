@@ -973,6 +973,53 @@ def cypher_pass_names() -> list[str]:
     """
     ...
 
+def trim_memory() -> None:
+    """Return allocator-retained memory to the operating system.
+
+    KGLite's Rust side allocates through mimalloc, which keeps a finished
+    workload's pages instead of handing them back — that reuse is why a second
+    large query costs no page faults, and it is also why a process that once
+    peaked at several GB keeps reporting that peak long after the graphs and
+    result sets are gone. This is the lever that gives those pages back. It is
+    opt-in on purpose: a forced collect at an internal seam (after ``save()``,
+    on graph drop) would spend the reuse on every call, so KGLite never calls
+    it for you.
+
+    Call it when a peak is over and the process will stay alive: after a large
+    ingest or a query that materialised millions of rows, before a long idle
+    period, or between the stages of a long-running server. It costs
+    milliseconds proportional to how much is being released, and releases the
+    GIL while it runs, so other threads keep going.
+
+    What it can do: release the pages behind everything already freed. What it
+    cannot do: shrink anything still referenced — an open ``KnowledgeGraph``, a
+    lazy ``ResultView``, a ``freeze()`` — so drop those *first*; it is the drop
+    that frees the memory and this that returns it. Calling it on a process
+    with nothing to release is harmless and fast.
+
+    **Reading the result on macOS.** The reclaim uses ``MADV_FREE_REUSABLE``,
+    which hands the pages back immediately but leaves them counted in
+    ``resident_size`` until the kernel needs them elsewhere — so ``ps``,
+    ``psutil``'s ``rss`` and ``resource.getrusage`` can all stay flat while the
+    memory has in fact been returned. The number that moves is the process
+    *footprint*: Activity Monitor's "Memory" column, or ``ri_phys_footprint``
+    from ``proc_pid_rusage``. On Linux the reclaim is ``MADV_DONTNEED`` and
+    ordinary RSS drops straight away.
+
+    Called from a thread other than the main one it still collects, but skips
+    the pass that reclaims segments abandoned by exited threads; prefer the
+    main thread when both are available.
+
+    Example::
+
+        g = kglite.load("big.kgl")
+        rows = g.cypher("MATCH (n) RETURN n").to_list()
+        ...
+        del rows, g            # free it first
+        kglite.trim_memory()   # then give the pages back
+    """
+    ...
+
 def _backend_is_forked(graph: "KnowledgeGraph") -> bool:
     """Whether ``graph``'s storage backend is a copy-on-write overlay right now.
 
