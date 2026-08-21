@@ -930,6 +930,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The parallel runtime, trail semantics, and what depth costs are documented
+  where a user looks for them.** `parallel=True` shipped in 0.16.4 with a
+  reference section and a stub docstring, and nowhere in the Python guides — so
+  the single largest lever on an analytical scan (5-6x on scan-dominated
+  shapes) was invisible to anyone not reading `CYPHER.md` end to end. The
+  Cypher guide now carries it with the measured table, the runtime gates
+  (20,000 candidate rows compiled / 5,000 interpreted), and the scope that is
+  easy to trip over: per query rather than per graph, `KnowledgeGraph.cypher()`
+  only, ignored by disk-mode and spatially-configured graphs. Alongside it, a
+  new "How deep traversal behaves" section states what a deep variable-length
+  pattern costs — reachability shapes flatten once the frontier saturates,
+  `EXISTS` is depth-independent, `shortestPath` is sub-linear in distance, and
+  `count(*)` or a minimum hop count of 2 is path enumeration that grows with
+  branching to the power of the depth. `CYPHER.md` gains the trail rule itself
+  (no relationship twice per clause, and what that means for a node being its
+  own endpoint), which was previously stated only as a row in the dialect
+  table. The public benchmark report's claim that results are "digest-checked
+  equal across engines" is corrected to what the harness actually reports: the
+  k-hop topics diverge by under 1% because engines disagree on whether a path
+  may return to its own seed.
+
 - **A `WHERE` whose every conjunct was pushed into the pattern is no longer
   re-evaluated per row by the fused node-scan operators that already apply it.**
   Predicate pushdown copies `WHERE n.age > 30` into the pattern as a property

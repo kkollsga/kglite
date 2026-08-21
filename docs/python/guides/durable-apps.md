@@ -223,6 +223,21 @@ an explicit `save()`, not a logged write (see the Limitations below). Choosing
 `disk` because a graph got big means giving up per-commit crash safety you
 did not have to give up.
 
+**If cold-open latency is what hurts, the storage mode is the lever — not the
+log.** Reopening a `.kgl` decodes its whole payload before the first query
+answers, and that cost scales with the file. It is one serialized payload
+rather than an addressable layout, so there is nothing to defer; and a `mapped`
+`.kgl` is read back by deserializing into a memory backend and then swapping it
+onto the mapped one, which is why a mapped reopen costs what a memory reopen
+costs. `storage="disk"` is the only mode that changes that shape: a disk
+directory is already in its query-ready layout, so opening it maps files
+instead of decoding a payload — measured **6.5x faster to reopen at ~400k
+edges**, and an external evaluation measured ~28x at 10.5M, so treat the small
+number as the floor rather than the rate. The price is the one above: no
+per-commit WAL, durability is your `save()` calls. Keeping the log and
+checkpointing regularly bounds *replay*, which is a different cost from
+decoding the checkpoint — see [Cost and tuning](#cost-and-tuning).
+
 ## Serving concurrent reads
 
 A `KnowledgeGraph` is single-owner — don't share one instance across threads

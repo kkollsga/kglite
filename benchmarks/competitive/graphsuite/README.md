@@ -56,13 +56,16 @@ is shared by every backend so all of them run the *same* queries.
   count) next to its timing; these line up across backends, so a
   comparison reflects equal work. K-hop groups count *distinct nodes
   reachable within k hops* from the seed set — these agree to <1% across
-  engines; the only delta is walk-vs-trail handling of paths that briefly
-  return to a seed (kuzu/duckdb/fluent allow it, the trail engines don't),
-  which shifts a handful of seed nodes in or out of the count. We keep
-  each engine's idiomatic form rather than bolting on a `NOT IN $seeds`
-  filter, because that filter would distort the *timing* (it hits the
-  same `IN $list` planner cost noted below) far more than the <1% count
-  nuance it would erase.
+  engines; the only delta is how each engine treats a path that returns to
+  its own seed. A walk-semantics engine (kuzu/duckdb/fluent) may step back
+  along the edge it arrived on, so every seed with a neighbour re-enters the
+  count at two hops. A trail engine (kglite's Cypher path, neo4j) may not
+  reuse a relationship, so a seed re-enters only when the return goes round
+  a cycle on different edges — which shifts a handful of seed nodes in or
+  out of the count. We keep each engine's idiomatic form rather than
+  bolting on a `NOT IN $seeds` filter, because that filter would distort
+  the *timing* (it hits the same `IN $list` planner cost noted below) far
+  more than the <1% count nuance it would erase.
 - **Idiomatic per backend.** Cypher engines use variable-length patterns
   and `shortestPath`; the algorithm libraries use BFS / `descendants` /
   `connected_components`; SQL uses recursive CTEs and joins. Each backend

@@ -336,8 +336,12 @@ def render(signature: str | None = None) -> str:
         "> Every engine runs the **same** queries on the **same** data — including "
         "the variable-length `[:KNOWS*1..3]` traversal. A large traversal number "
         "(e.g. Kùzu's) is that engine's own planning of that identical query on a "
-        "dense, hub-heavy `KNOWS` subgraph, not a handicap we imposed; results are "
-        "digest-checked equal across engines. Run it yourself (below)."
+        "dense, hub-heavy `KNOWS` subgraph, not a handicap we imposed. Every "
+        "topic's result set is digest-compared across engines; the one recorded "
+        "divergence is under 1% on the k-hop topics, where engines disagree about "
+        "whether a path may return to its own seed (walk vs trail semantics) — "
+        "see the fairness notes in `benchmarks/competitive/graphsuite/README.md`. "
+        "Run it yourself (below)."
     )
     out.append("")
 

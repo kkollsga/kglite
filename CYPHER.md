@@ -1452,6 +1452,45 @@ manifest). An explicit lower bound above 10 (`*11..`) raises the ceiling to
 that bound, and a range whose minimum exceeds its maximum (`*5..2`) is a
 parse error. Spell out `*1..N` when you need more than 10 hops.
 
+### Trail semantics
+
+A variable-length segment walks **trails**: no relationship may be used twice
+within one `MATCH` clause, and that rule spans the whole clause — a sibling
+edge in the same clause cannot re-bind a relationship the segment already
+walked. This is openCypher's rule, and it is what makes an unbounded-looking
+pattern terminate on a cyclic graph.
+
+Two consequences worth knowing:
+
+- **A node can be its own endpoint.** On a triangle `a-b-c-a`,
+  `MATCH (a {id: 1})-[:KNOWS*1..3]-(b) RETURN DISTINCT b.id` returns `1, 2, 3`
+  — the closed trail `a→b→c→a` uses three distinct relationships, so `a` is
+  legitimately reachable from itself. It is *not* returned at `*1..2`, because
+  stepping back along the edge you arrived on would reuse that relationship.
+- **A trail is not a walk.** Engines that answer these patterns with a
+  distance-style BFS (and SQL recursive CTEs written the obvious way) compute
+  a different relation, so a cross-engine comparison of a variable-length
+  query can disagree by a few nodes without either side being broken.
+
+### What depth costs
+
+Reachability shapes — `count(DISTINCT …)`, `RETURN DISTINCT`, `EXISTS { … }`
+over a segment whose minimum is 0 or 1 — run one breadth-first pass over the
+reachable subgraph, so their cost flattens as soon as the frontier saturates
+and `EXISTS` is depth-independent (it stops at the first witness). `count(*)`,
+and every shape whose minimum hop count is 2 or more, are per-*path* by the
+trail rule above, and grow with branching to the power of the depth. The
+guide's [How deep traversal behaves](https://kglite.readthedocs.io/en/latest/python/guides/cypher.html#how-deep-traversal-behaves)
+section carries the measured curves.
+
+When a pattern does explode, the **10,000,000-row backstop that applies when
+no `max_rows` is set** is charged against the expansion as it runs, not only
+against the finished result, so an open-ended traversal is refused while it
+expands rather than after it has exhausted memory. The error names which
+expansion overflowed — the `MATCH` itself, a comma-pattern join, an
+`OPTIONAL MATCH`, an `EXISTS { … }` or a `COUNT { … }` subquery — and both
+ways to raise the ceiling.
+
 ## WHERE EXISTS
 
 Check for subpattern existence. Brace `{ }`, parenthesis `(( ))`, and inline pattern syntax are all supported:
@@ -2452,7 +2491,19 @@ Scope:
 - **Servers** — the Bolt and MCP servers never enable it. A server's cores
   belong to its concurrent clients; turning it on there would trade
   across-query throughput for one query's latency.
+- **Surfaces** — the keyword lives on `KnowledgeGraph.cypher()`;
+  `Session.cypher()`, `Transaction.cypher()` and `FrozenGraph.cypher()` run
+  sequentially. There is no graph-wide default to set.
 - **CLI** — `kglite query <graph> "<cypher>" --parallel`.
+- **Pool width** — one shared worker pool, sized from the machine's available
+  parallelism and built lazily on the first fan-out. `KGLITE_QUERY_THREADS=N`
+  pins it; anything that does not parse to a positive integer is ignored.
+
+The runtime gates are measured crossovers, not guesses: a scan or aggregate
+region fans out at **20,000 candidate rows** when every per-row predicate
+compiles and at **5,000** when one routes through the interpreter, and the
+projection-shaped regions at 4,096 rows. The count is the real candidate
+count, never a planner estimate.
 
 Measured on a 1M-node / 11M-edge synthetic graph on a 10-core Apple Silicon
 machine (4 performance + 6 efficiency cores), release build, minimum of two

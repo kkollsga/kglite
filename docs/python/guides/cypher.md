@@ -74,9 +74,68 @@ graph.cypher(
 ## Tuning and diagnostics
 
 Every query carries lightweight diagnostics, and you can profile,
-explain, bound, and even disable individual optimizer passes. This is the
-machinery agents lean on to run untrusted queries safely and to explain why
-a query returned what it did.
+explain, bound, hand one heavy query the whole machine, and even disable
+individual optimizer passes. This is the machinery agents lean on to run
+untrusted queries safely and to explain why a query returned what it did.
+
+### Running one heavy query in parallel
+
+An analytical query whose cost is *scanning* a large graph can use every core.
+It is opt-in per call, because sequential is the right default for the common
+case — many small queries, or many concurrent clients, where a fan-out costs
+more than it saves:
+
+```python
+graph.cypher(
+    "MATCH (p:Person) WHERE p.score > 0.5 RETURN p.city AS city, count(*) AS n",
+    parallel=True,
+)
+```
+
+`parallel=True` is a **hint, not an instruction**, and never a semantic change:
+values, row order and group order are identical either way, so adding it cannot
+break a caller that depends on the output.
+
+**Reach for it on a scan, a filter, or an aggregate over a large graph.**
+Measured release-mode on a 1M-node / 11M-edge graph, 10-core Apple Silicon
+(4 performance + 6 efficiency cores), minimum of two agreeing runs:
+
+| Query shape | Sequential | Parallel | |
+|---|---|---|---|
+| Scan + filter + `count(*)` | 34 ms | 6.5 ms | 5.2x |
+| Scan + filter + grouped aggregate | 68 ms | 13 ms | 5.2x |
+| Regex (`=~`) predicate | 41 ms | 6.9 ms | 6.0x |
+| Grouped aggregation, 800k groups | 480 ms | 440 ms | 1.1x |
+| Scan + filter + 792k-row projection | 132 ms | 122 ms | 1.1x |
+
+The shape of that table *is* the guidance: **scanning parallelises, building
+result rows does not.** Returning a million rows to Python is bound by the
+allocator rather than by arithmetic, so the flag buys almost nothing there.
+The "Parallel runtime" section of the
+[full Cypher reference](../../reference/cypher-reference.md) lists operator by
+operator what fans out and what deliberately stays sequential.
+
+**A small query stays sequential however it is flagged.** Each operator gates
+on the *real* candidate count, not a planner estimate: 20,000 rows for a
+predicate the engine compiles, 5,000 when a per-row expression routes through
+the interpreter. Both are measured crossovers, so there is no threshold to tune
+and no penalty for flagging a query that turns out to be small.
+
+Scope — worth knowing before you go looking for a win that is not there:
+
+- **Per query, not per graph.** There is no `set_default_parallel()`; pass the
+  keyword at the call sites you profiled. The CLI spells it
+  `kglite query <graph> "<cypher>" --parallel`.
+- **`KnowledgeGraph.cypher()` only.** `Session.cypher()`,
+  `Transaction.cypher()` and `FrozenGraph.cypher()` execute sequentially, and
+  so do the Bolt and MCP servers — deliberately, because a server's cores
+  belong to its concurrent clients.
+- **Memory and mapped graphs fan out; `storage="disk"` graphs and graphs with
+  a spatial configuration ignore the flag** and run sequentially rather than
+  refusing it, so portable code needs no branch.
+- The worker pool is sized from the machine's available parallelism. Set
+  `KGLITE_QUERY_THREADS=N` to pin it — useful when the process shares a box
+  with something else that wants the cores.
 
 ### Diagnostics (timing, timeouts, warnings)
 
@@ -148,6 +207,15 @@ above 10M lifts the backstop as well as lowering it — or add a `LIMIT`. Work
 whose memory cost is O(1) is exempt: a `count(*)` over a 100M-node mapped graph
 charges 100M *work units* and allocates nothing, so it keeps answering.
 
+The backstop is charged **as a clause builds its rows**, not only against the
+finished set, so a pattern that expands explosively is refused while it expands
+rather than after it has exhausted memory. The message names which expansion
+overflowed — the `MATCH` itself, a comma-pattern join, an `OPTIONAL MATCH`, an
+`EXISTS { … }` or a `COUNT { … }` subquery — so a runaway inside a subquery is
+not reported as the outer clause's fault.
+[How deep traversal behaves](#how-deep-traversal-behaves) is the shape this
+matters most for.
+
 ### Interrupting a query (Ctrl-C)
 
 A long-running **read** can be interrupted with `Ctrl-C` — it raises
@@ -198,6 +266,70 @@ graph.cypher(query, disabled_passes=['fold_or_to_in'])
 
 Comparing a query with and without a pass is the supported way to confirm a
 planner bug before filing it.
+
+## How deep traversal behaves
+
+`-[:KNOWS*1..8]-` is an easy thing to write and a hard thing to predict, so
+here is what the depth actually costs. The short version: **what bounds a deep
+traversal is the question you asked, not the engine** — the reachability
+questions stop growing with depth, and the path-*counting* ones cannot,
+because counting paths is exponential by definition.
+
+**Reachability is flat once the frontier saturates.** `count(DISTINCT b)`,
+`RETURN DISTINCT b`, and `EXISTS { … }` over `(a)-[:R*1..k]-(b)` run a
+per-source breadth-first search whose total work is one pass over the
+reachable subgraph — a node is visited once, however many paths reach it. Once
+every seed has exhausted its own component, raising `k` costs nothing.
+Measured release-mode on a 10,000-node scale-free graph (~40,000 `KNOWS`
+edges), 50 seed nodes, Apple M4:
+
+| `k` | `count(DISTINCT b)` | distinct nodes reached |
+|---|---|---|
+| 3 | 1.9 ms | 7,690 |
+| 5 | 16.1 ms | 10,000 (all of them) |
+| 7 | 28.5 ms | 10,000 |
+| 12 | 29.0 ms | 10,000 |
+
+On a sparse 20,000-node chain, where nothing saturates within 12 hops, the
+same shape is linear in the set it reaches: 0.167 µs per reached node.
+
+**`EXISTS` is depth-independent** — 27.5–28.2 µs across `k = 1..12` on both of
+those graphs — because the search stops at the first witness. Use it whenever
+the question is *whether* something is reachable rather than what is.
+
+**Point-to-point `shortestPath()` grows sub-linearly in distance**: on that
+chain, 0.28 µs per pair at 2 hops against 0.81 µs at 12 — a 2.9x spread over a
+6x increase in distance, because the search runs from both ends at once.
+
+**Counting paths is a different question, and it is exponential.** `count(*)`
+over a variable-length pattern counts *paths*, not nodes, and so does every
+shape with a minimum hop count of 2 or more — openCypher's trail rule (no
+relationship twice in one path) makes those genuinely per-path, and no index
+removes work that the answer's own size demands. The same 10,000-node graph
+above:
+
+| Shape | Cost |
+|---|---|
+| `*1..4`, `count(DISTINCT b)` | 6.8 ms |
+| `*2..4`, `count(DISTINCT b)` | 82 ms (968,336 paths enumerated) |
+| `*2..5`, `count(DISTINCT b)` | 1.2 s |
+
+If what you want is reachability, say so — `DISTINCT`, `EXISTS`, or a `LIMIT`
+— and the BFS above is what runs. If you genuinely want the paths, expect the
+cost to grow with branching to the power of the depth; kglite enumerates at
+roughly 11.8M paths per second, and that rate is the whole budget you have.
+
+Two limits are worth stating plainly rather than discovering:
+
+- **An unbounded `*` means `*1..10` here.** `*` and `*N..` cap the upper bound
+  at 10 hops as a runaway guard — a deliberate divergence from openCypher.
+  Spell out `*1..20` when you mean deeper.
+- **The 10,000,000-row backstop applies to the expansion itself.** A pattern
+  that explodes is refused while it expands, not after it has finished
+  materializing, so the error arrives in seconds instead of after the process
+  has run out of memory. It is still seconds and gigabytes — reaching ten
+  million held matches is not free — so for an open-ended shape set your own
+  `max_rows` rather than relying on the backstop to be comfortable.
 
 ## Semantic Search in Cypher
 
