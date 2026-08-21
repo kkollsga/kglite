@@ -891,6 +891,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A `WHERE` whose every conjunct was pushed into the pattern is no longer
+  re-evaluated per row by the fused node-scan operators that already apply it.**
+  Predicate pushdown copies `WHERE n.age > 30` into the pattern as a property
+  matcher and used to keep the `WHERE` clause as well, so `FusedNodeScanAggregate`
+  and `FusedNodeScanTopK` — whose candidates come from the pattern matcher —
+  tested every surviving node a second time against the same predicate. Measured
+  as the dominant cost of a low-selectivity filter + aggregate: disabling
+  pushdown outright was *faster* than keeping it, because the pattern pre-filter
+  saved nothing downstream while the `WHERE` re-ran regardless. The clause is now
+  dropped by the fusion pass — after every earlier pass has chosen its operator,
+  so the plan cannot be rerouted — and only when replaying the extraction against
+  a property-free copy of the pattern reproduces the matchers already on it, term
+  for term. A partially-pushed predicate, a text matcher (`STARTS WITH` and
+  friends are candidate pre-filters, not equivalents of their predicate), a
+  correlated term, and every operator outside the node-scan family keep the
+  clause exactly as before. `EXPLAIN` now marks a surviving predicate with a
+  `+filter` suffix on those two operators, so a plan reader can tell the two
+  cases apart. Measured on a 400k-node in-memory scan (release, min of two
+  runs, unchanged-path control cells drifting −2.4%/−3.2% over the same
+  interval): grouped aggregate under a 90%-selectivity filter 31.0 ms →
+  19.6 ms (−37%), bare count 15.9 ms → 8.4 ms (−47%), and a 0.1%-selectivity
+  filter unchanged at 3.4 ms.
+
 - **Single-pair shortest-path queries now search from both ends at once
   (bidirectional BFS), an order of magnitude faster on large graphs.**
   `shortest_path()`, `shortest_path_ids()`, `shortest_path_indices()`,

@@ -700,15 +700,15 @@ fn pass_fuse_match_with_aggregate_top_k(query: &mut CypherQuery, _ctx: &PassCtx)
 /// **Pass:** `fuse_node_scan_aggregate` — Untyped `MATCH (n) RETURN
 /// <agg>` → specialized scan-only aggregate that walks the node store
 /// once without producing intermediate row tuples.
-fn pass_fuse_node_scan_aggregate(query: &mut CypherQuery, _ctx: &PassCtx) {
-    fuse_node_scan_aggregate(query)
+fn pass_fuse_node_scan_aggregate(query: &mut CypherQuery, ctx: &PassCtx) {
+    fuse_node_scan_aggregate(query, ctx.params)
 }
 
 /// **Pass:** `fuse_node_scan_top_k` — `MATCH (n:Type) RETURN n LIMIT k`
 /// → specialized scan that returns the first k nodes of the type
 /// without going through the pattern executor.
-fn pass_fuse_node_scan_top_k(query: &mut CypherQuery, _ctx: &PassCtx) {
-    fuse_node_scan_top_k(query)
+fn pass_fuse_node_scan_top_k(query: &mut CypherQuery, ctx: &PassCtx) {
+    fuse_node_scan_top_k(query, ctx.params)
 }
 
 /// **Pass:** `fuse_vector_score_order_limit` — `MATCH ...

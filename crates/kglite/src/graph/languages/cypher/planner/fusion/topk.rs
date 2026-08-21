@@ -3,6 +3,7 @@
 //!
 //! Split out of the former monolithic `fusion.rs` (0.10.10).
 
+use super::super::index_selection::where_subsumed_by_pattern;
 use super::*;
 use crate::datatypes::values::Value;
 use crate::graph::languages::cypher::ast::*;
@@ -76,7 +77,10 @@ pub(crate) fn resolve_fused_sort_keys(
 /// aggregate, or a function call (those need an evaluation context this scan
 /// does not build); a sort key reads a RETURN alias it is not equal to (see
 /// [`resolve_fused_sort_keys`]); LIMIT is not a positive integer literal.
-pub(crate) fn fuse_node_scan_top_k(query: &mut CypherQuery) {
+pub(crate) fn fuse_node_scan_top_k(
+    query: &mut CypherQuery,
+    params: &std::collections::HashMap<String, Value>,
+) {
     use crate::graph::languages::cypher::ast::is_aggregate_expression;
 
     // Need at least MATCH + RETURN + ORDER BY + LIMIT (4 clauses)
@@ -189,11 +193,23 @@ pub(crate) fn fuse_node_scan_top_k(query: &mut CypherQuery) {
         } else {
             unreachable!()
         };
+        // Same rule as `fuse_node_scan_aggregate`: this operator's candidates
+        // come from `find_matching_nodes`, which applies the pattern's property
+        // matchers, so a WHERE the pattern already carries verbatim would be a
+        // second evaluation of the same test on every scanned node. Dropped
+        // only when the replay proves it identical, and only here — after every
+        // earlier pass has chosen its operator against the clause list that
+        // still had the WHERE in it.
         let where_predicate = if let Some(wi) = where_idx {
-            if let Clause::Where(w) = query.clauses.remove(wi) {
-                Some(w.predicate)
-            } else {
-                None
+            let subsumed = match (&query.clauses[match_idx], &query.clauses[wi]) {
+                (Clause::Match(mc), Clause::Where(w)) => {
+                    where_subsumed_by_pattern(&w.predicate, &mc.patterns, params)
+                }
+                _ => false,
+            };
+            match query.clauses.remove(wi) {
+                Clause::Where(w) => (!subsumed).then_some(w.predicate),
+                _ => None,
             }
         } else {
             None

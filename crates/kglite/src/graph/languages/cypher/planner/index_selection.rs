@@ -1175,3 +1175,361 @@ pub(super) fn apply_nodeprop_to_patterns(
     }
     false
 }
+
+// ============================================================================
+// Subsumption — is a surviving WHERE already enforced by the pattern?
+// ============================================================================
+
+/// True when every conjunct of `pred` is *already* enforced, identically, by
+/// node property matchers on `patterns`.
+///
+/// `push_where_into_match` deliberately leaves a fully-pushed WHERE in place as
+/// a safety net, because most consumers of the rewritten clause list either
+/// ignore pattern properties or change *which* fusion fires once the WHERE
+/// disappears. That net costs a second evaluation of every predicate for every
+/// surviving row — measured as the dominant cost of a low-selectivity filter +
+/// aggregate. This answers the question a consumer needs before dropping it:
+/// "would re-running the extraction against a property-free copy of this
+/// pattern reproduce, term for term, the matchers the pattern already carries,
+/// with nothing left over?" Only a caller that provably applies those matchers
+/// (the fused node-scan operators, via `find_matching_nodes`) may act on a
+/// `true`; everyone else keeps the net.
+///
+/// Conservative by construction — any shape the extractor cannot fully consume,
+/// any term that resolves against a row binding (`EqualsVar` /
+/// `EqualsNodeProp`), and any text matcher (an early candidate filter, not an
+/// equivalent of its predicate) answers `false`.
+pub(super) fn where_subsumed_by_pattern(
+    pred: &Predicate,
+    patterns: &[crate::graph::core::pattern_matching::Pattern],
+    params: &HashMap<String, Value>,
+) -> bool {
+    let match_vars = collect_pattern_variables(patterns);
+    let empty = HashSet::new();
+    let PushableResult {
+        pushable,
+        pushable_in,
+        pushable_cmp,
+        pushable_var,
+        pushable_nodeprop,
+        pushable_text,
+        remaining,
+    } = extract_pushable_equalities(pred, &match_vars, &empty, &empty, params, HashSet::new());
+
+    // Anything the extractor could not consume is still doing work.
+    if remaining.is_some() {
+        return false;
+    }
+    // Deferred matchers resolve against bindings a fused scan does not build,
+    // and a text matcher is a candidate pre-filter whose predicate still has to
+    // run. `extract_from_predicate` never consumes a text predicate, so the
+    // last check is belt-and-braces.
+    if !pushable_var.is_empty() || !pushable_nodeprop.is_empty() || !pushable_text.is_empty() {
+        return false;
+    }
+
+    // Replay the push against a property-free copy and compare. Going through
+    // `apply_pushables` rather than re-deriving the expected matcher by hand is
+    // what makes the two agree about range folding, application order, and the
+    // "no home for this term" bail.
+    let mut probe: Vec<crate::graph::core::pattern_matching::Pattern> = patterns.to_vec();
+    for pattern in probe.iter_mut() {
+        for element in &mut pattern.elements {
+            if let PatternElement::Node(np) = element {
+                np.properties = None;
+            }
+        }
+    }
+    if !apply_pushables(
+        &mut probe,
+        pushable,
+        pushable_in,
+        pushable_cmp,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    ) {
+        return false;
+    }
+
+    // Every matcher the replay produced must sit on the real pattern unchanged.
+    // Extra properties there are inline filters from the query text — they
+    // constrain the scan further and are applied by the same matcher run, so
+    // they are not this predicate's business.
+    for (probe_pattern, real_pattern) in probe.iter().zip(patterns) {
+        for (probe_element, real_element) in
+            probe_pattern.elements.iter().zip(&real_pattern.elements)
+        {
+            let (PatternElement::Node(probe_np), PatternElement::Node(real_np)) =
+                (probe_element, real_element)
+            else {
+                continue;
+            };
+            let Some(replayed) = &probe_np.properties else {
+                continue;
+            };
+            for (key, matcher) in replayed {
+                match real_np.properties.as_ref().and_then(|p| p.get(key)) {
+                    Some(present) if matchers_equivalent(present, matcher) => {}
+                    _ => return false,
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Structural equality for the matcher kinds a pushdown replay can produce.
+/// Deliberately a local function rather than a `PartialEq` derive on
+/// `PropertyMatcher`: only these kinds are ever compared here, and a derived
+/// impl would invite equality tests on the deferred kinds, whose sameness is a
+/// question about *bindings* rather than about the matcher.
+fn matchers_equivalent(a: &PropertyMatcher, b: &PropertyMatcher) -> bool {
+    match (a, b) {
+        (PropertyMatcher::Equals(x), PropertyMatcher::Equals(y)) => x == y,
+        (PropertyMatcher::In(x), PropertyMatcher::In(y)) => **x == **y,
+        (PropertyMatcher::GreaterThan(x), PropertyMatcher::GreaterThan(y))
+        | (PropertyMatcher::GreaterOrEqual(x), PropertyMatcher::GreaterOrEqual(y))
+        | (PropertyMatcher::LessThan(x), PropertyMatcher::LessThan(y))
+        | (PropertyMatcher::LessOrEqual(x), PropertyMatcher::LessOrEqual(y)) => x == y,
+        (
+            PropertyMatcher::Range {
+                lower: al,
+                lower_inclusive: ali,
+                upper: au,
+                upper_inclusive: aui,
+            },
+            PropertyMatcher::Range {
+                lower: bl,
+                lower_inclusive: bli,
+                upper: bu,
+                upper_inclusive: bui,
+            },
+        ) => al == bl && ali == bli && au == bu && aui == bui,
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod subsumption_tests {
+    //! Plan-shape goldens for the safety-net WHERE drop.
+    //!
+    //! The drop is a pure-performance rewrite: no answer changes, so no
+    //! result-value test can see it and a measurement is too noisy to gate on.
+    //! What *is* observable is the plan — whether the fused node-scan operator
+    //! carries a `where_predicate` it would re-evaluate per row. Each case below
+    //! pins that field for one shape, and the ABSENT/PRESENT split is the whole
+    //! contract: absent exactly when the pattern provably enforces the
+    //! predicate, present everywhere else.
+    //!
+    //! Forcing `where_subsumed_by_pattern` to `true` turns the PRESENT cases
+    //! into wrong answers (the regex conjunct, the text predicate and the
+    //! collided inline property all stop being applied), which is the
+    //! mutate-to-red these goldens exist to catch.
+
+    use super::super::optimize;
+    use crate::graph::languages::cypher::ast::Clause;
+    use crate::graph::languages::cypher::parser::parse_cypher;
+    use crate::graph::schema::DirGraph;
+    use std::collections::HashMap;
+
+    /// The `where_predicate` of whichever fused node-scan clause the plan ends
+    /// up with. `None` for "fused, no surviving filter"; the outer `Option`
+    /// distinguishes "did not fuse at all", which every PRESENT case that is
+    /// about routing rather than subsumption needs to tell apart.
+    fn fused_filter(query: &str) -> Option<bool> {
+        let mut parsed = parse_cypher(query).unwrap();
+        let graph = DirGraph::new();
+        optimize(&mut parsed, &graph, &HashMap::new());
+        parsed.clauses.iter().find_map(|clause| match clause {
+            Clause::FusedNodeScanAggregate {
+                where_predicate, ..
+            }
+            | Clause::FusedNodeScanTopK {
+                where_predicate, ..
+            } => Some(where_predicate.is_some()),
+            _ => None,
+        })
+    }
+
+    /// Whether a standalone `WHERE` clause survived anywhere in the plan —
+    /// the safety net for the shapes that never reach a fused node scan.
+    fn has_where_clause(query: &str) -> bool {
+        let mut parsed = parse_cypher(query).unwrap();
+        let graph = DirGraph::new();
+        optimize(&mut parsed, &graph, &HashMap::new());
+        parsed
+            .clauses
+            .iter()
+            .any(|clause| matches!(clause, Clause::Where(_)))
+    }
+
+    // ── ABSENT: the pattern already enforces every conjunct ──────────────
+
+    #[test]
+    fn equality_only_where_is_dropped_by_the_scan_aggregate() {
+        assert_eq!(
+            fused_filter("MATCH (n:Person) WHERE n.city = 'Oslo' RETURN n.dept, count(n)"),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn comparison_where_is_dropped_by_the_scan_aggregate() {
+        assert_eq!(
+            fused_filter("MATCH (n:Person) WHERE n.age > 30 RETURN n.city, count(n)"),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn merged_range_where_is_dropped() {
+        // Two conjuncts fold into one `Range` matcher; the replay has to
+        // reproduce that fold to recognise the pattern as equivalent.
+        assert_eq!(
+            fused_filter(
+                "MATCH (n:Person) WHERE n.year >= 2015 AND n.year <= 2022 \
+                 RETURN n.city, count(n)"
+            ),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn literal_in_list_where_is_dropped() {
+        assert_eq!(
+            fused_filter("MATCH (n:Person) WHERE n.city IN ['Oslo', 'Bergen'] RETURN count(n)"),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn inline_property_alongside_a_pushed_one_still_drops_the_where() {
+        // `{city: 'Oslo'}` is the query text's own filter, not this WHERE's
+        // business: an extra matcher on the pattern must not block the drop.
+        assert_eq!(
+            fused_filter(
+                "MATCH (n:Person {city: 'Oslo'}) WHERE n.age > 30 RETURN n.dept, count(n)"
+            ),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn top_k_scan_drops_a_fully_pushed_where() {
+        assert_eq!(
+            fused_filter("MATCH (n:Person) WHERE n.age > 30 RETURN n.name ORDER BY n.age LIMIT 5"),
+            Some(false)
+        );
+    }
+
+    // ── PRESENT: the net stays ──────────────────────────────────────────
+
+    #[test]
+    fn partially_pushed_where_keeps_the_whole_predicate() {
+        // The regex conjunct is not pushable, so nothing may be dropped —
+        // `push_where_into_match` leaves the *entire* original predicate.
+        assert_eq!(
+            fused_filter(
+                "MATCH (n:Person) WHERE n.age > 30 AND n.name =~ '.*a.*' \
+                 RETURN n.city, count(n)"
+            ),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn text_matcher_keeps_its_predicate() {
+        // A `STARTS WITH` matcher is an early candidate filter, not an
+        // equivalent of its predicate — the extractor never consumes one.
+        assert_eq!(
+            fused_filter("MATCH (n:Person) WHERE n.name STARTS WITH 'A' RETURN n.city, count(n)"),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn where_colliding_with_an_inline_property_keeps_its_predicate() {
+        // `{age: 30}` occupies the slot, so `n.age > 5` was never pushed and is
+        // the only thing enforcing it.
+        assert_eq!(
+            fused_filter("MATCH (n:Person {age: 30}) WHERE n.age > 5 RETURN n.city, count(n)"),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn top_k_scan_keeps_a_partially_pushed_where() {
+        assert_eq!(
+            fused_filter(
+                "MATCH (n:Person) WHERE n.age > 30 AND n.name =~ '.*a.*' \
+                 RETURN n.name ORDER BY n.age LIMIT 5"
+            ),
+            Some(true)
+        );
+    }
+
+    // ── PRESENT: operators outside the covered family ───────────────────
+
+    #[test]
+    fn edge_pattern_aggregate_keeps_its_where_clause() {
+        // Not a node scan — and the drop must not happen upstream in the
+        // pushdown pass, where it would change `(Match, Where, Return)` into
+        // the `(Match, Return)` adjacency a *different* fusion keys off.
+        assert!(has_where_clause(
+            "MATCH (a:Person)-[e:KNOWS]->(b:Person) WHERE a.city = 'Oslo' \
+             RETURN b.name, count(e)"
+        ));
+    }
+
+    #[test]
+    fn optional_match_keeps_its_scoped_where() {
+        let query = "MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b:Person) \
+                     WHERE b.age > 30 RETURN a.name, count(b)";
+        let mut parsed = parse_cypher(query).unwrap();
+        let graph = DirGraph::new();
+        optimize(&mut parsed, &graph, &HashMap::new());
+        let scoped_where_survives = parsed
+            .clauses
+            .iter()
+            .any(|clause| matches!(clause, Clause::OptionalMatch(m) if m.where_clause.is_some()));
+        assert!(scoped_where_survives);
+    }
+
+    #[test]
+    fn non_first_match_is_not_a_fused_node_scan() {
+        // A correlated conjunct pushes as `EqualsNodeProp`, which resolves
+        // against a row binding — never subsumable, and never fused here.
+        assert_eq!(
+            fused_filter(
+                "MATCH (a:Person) MATCH (b:Person) WHERE b.city = a.city \
+                 RETURN b.dept, count(b)"
+            ),
+            None
+        );
+    }
+
+    // ── the subsumption predicate itself ────────────────────────────────
+
+    #[test]
+    fn correlated_and_text_terms_are_never_subsumed() {
+        use crate::graph::languages::cypher::ast::Clause as C;
+
+        for query in [
+            "MATCH (n:Person) WHERE n.name CONTAINS 'a' RETURN n",
+            "MATCH (n:Person) WHERE n.age > 30 AND n.rank < n.score RETURN n",
+        ] {
+            let mut parsed = parse_cypher(query).unwrap();
+            let graph = DirGraph::new();
+            let params = HashMap::new();
+            optimize(&mut parsed, &graph, &params);
+            let (C::Match(m), C::Where(w)) = (&parsed.clauses[0], &parsed.clauses[1]) else {
+                panic!("expected MATCH + WHERE for `{query}`");
+            };
+            assert!(
+                !super::where_subsumed_by_pattern(&w.predicate, &m.patterns, &params),
+                "`{query}` must not be reported as subsumed"
+            );
+        }
+    }
+}

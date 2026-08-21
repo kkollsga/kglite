@@ -3,6 +3,7 @@
 //!
 //! Split out of the former monolithic `fusion.rs` (0.10.10).
 
+use super::super::index_selection::where_subsumed_by_pattern;
 use super::*;
 use crate::datatypes::values::Value;
 use crate::graph::core::pattern_matching::PatternElement;
@@ -1089,7 +1090,10 @@ fn where_is_id_anchorable(pred: &Predicate) -> bool {
     }
 }
 
-pub(crate) fn fuse_node_scan_aggregate(query: &mut CypherQuery) {
+pub(crate) fn fuse_node_scan_aggregate(
+    query: &mut CypherQuery,
+    params: &std::collections::HashMap<String, Value>,
+) {
     use crate::graph::languages::cypher::ast::is_aggregate_expression;
 
     let mut i = 0;
@@ -1208,13 +1212,29 @@ pub(crate) fn fuse_node_scan_aggregate(query: &mut CypherQuery) {
             }
         }
 
-        // All checks passed — fuse
+        // All checks passed — fuse.
+        //
+        // The safety-net WHERE that `push_where_into_match` leaves behind is
+        // dropped when this operator already enforces it: candidates come from
+        // `find_matching_nodes`, which applies the pattern's property matchers,
+        // so re-testing every surviving node against the same predicate is
+        // duplicate work on every row of the scan. Doing it here, rather than
+        // in the pushdown pass, is what keeps it safe — by this point every
+        // earlier fusion has already made its decision against the clause list
+        // *with* the WHERE in it, so removing it cannot reroute the query to a
+        // different operator. Anything the replay cannot prove identical keeps
+        // the net.
         let where_predicate = if let Some(wi) = where_idx {
-            if let Clause::Where(w) = query.clauses.remove(wi) {
-                // return_idx shifted by 1 after remove
-                Some(w.predicate)
-            } else {
-                None
+            let subsumed = match (&query.clauses[match_idx], &query.clauses[wi]) {
+                (Clause::Match(mc), Clause::Where(w)) => {
+                    where_subsumed_by_pattern(&w.predicate, &mc.patterns, params)
+                }
+                _ => false,
+            };
+            // return_idx shifted by 1 after remove
+            match query.clauses.remove(wi) {
+                Clause::Where(w) => (!subsumed).then_some(w.predicate),
+                _ => None,
             }
         } else {
             None

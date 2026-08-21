@@ -245,12 +245,36 @@ pub fn clause_display_name(clause: &Clause) -> String {
                 .map_or_else(|| "*".to_string(), |types| types.join("|"));
             format!("FusedCountAnchoredEdges (anchor#{anchor_idx} {arrow} :{t})")
         }
-        Clause::FusedNodeScanAggregate { .. } => "FusedNodeScanAggregate".into(),
-        Clause::FusedNodeScanTopK { limit, .. } => format!("FusedNodeScanTopK (k={limit})"),
+        Clause::FusedNodeScanAggregate {
+            where_predicate, ..
+        } => format!("FusedNodeScanAggregate{}", filter_suffix(where_predicate)),
+        Clause::FusedNodeScanTopK {
+            limit,
+            where_predicate,
+            ..
+        } => format!(
+            "FusedNodeScanTopK (k={limit}){}",
+            filter_suffix(where_predicate)
+        ),
         Clause::SpatialJoin {
             container_type,
             probe_type,
             ..
         } => format!("SpatialJoin :{container_type} ⊇ :{probe_type}"),
+    }
+}
+
+/// `" +filter"` when a fused node scan still carries a per-row predicate.
+///
+/// Predicate pushdown copies a `WHERE` conjunct into the pattern as a property
+/// matcher, and the fusion pass drops the clause when the pattern provably
+/// enforces it — so the suffix is the visible difference between "the scan
+/// filters once" and "the scan filters, then filters the survivors again", and
+/// the only place a plan reader can tell the two apart.
+fn filter_suffix(where_predicate: &Option<super::super::ast::Predicate>) -> &'static str {
+    if where_predicate.is_some() {
+        " +filter"
+    } else {
+        ""
     }
 }

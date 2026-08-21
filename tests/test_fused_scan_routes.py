@@ -781,3 +781,79 @@ def test_count_distinct_star_counts_rows_on_every_path():
             {"g": "x", "c": 3},
             {"g": "y", "c": 1},
         ], kwargs
+
+
+# ---------------------------------------------------------------------------
+# The dropped safety-net WHERE
+# ---------------------------------------------------------------------------
+#
+# `push_where_into_match` pushes WHERE conjuncts into the pattern as property
+# matchers and used to keep the WHERE clause as well, so the fused scan tested
+# every surviving node twice. The fusion passes now drop that clause when the
+# pattern provably carries the same test — visible in EXPLAIN as the absence of
+# the `+filter` suffix. These pin the split: dropped only where the pattern is
+# equivalent, and every remaining conjunct still applied where it is not.
+
+
+def _fused_op(graph: KnowledgeGraph, query: str) -> str:
+    ops = [
+        row["operation"]
+        for row in graph.cypher(f"EXPLAIN {query}").to_list()
+        if row["operation"].startswith("FusedNodeScan")
+    ]
+    assert len(ops) == 1, f"expected one fused node-scan operator for `{query}`, got {ops}"
+    return ops[0]
+
+
+def test_fully_pushed_where_leaves_no_per_row_filter(sparse_graph):
+    query = "MATCH (n:Rec) WHERE n.score > 5 RETURN count(*) AS c"
+    assert _fused_op(sparse_graph, query) == "FusedNodeScanAggregate"
+    assert _scalar(sparse_graph, query) == 2
+
+    top_k = "MATCH (n:Rec) WHERE n.score > 5 RETURN n.id AS i ORDER BY n.score LIMIT 5"
+    assert _fused_op(sparse_graph, top_k) == "FusedNodeScanTopK (k=5)"
+    assert _rows(sparse_graph, top_k) == [{"i": "a"}, {"i": "c"}]
+
+
+def test_dropped_where_keeps_null_rows_out_of_a_one_sided_comparison(sparse_graph):
+    """A NULL property must not satisfy `<`.
+
+    `compare_values` orders NULL below every value — its ORDER BY duty — so the
+    property matcher answered `score < 20` with `true` for the two NULL rows and
+    only the safety-net WHERE removed them again. With the net gone the matcher
+    has to apply Cypher's three-valued rule itself.
+    """
+    for query, expected in [
+        ("MATCH (n:Rec) WHERE n.score < 20 RETURN count(*) AS c", 1),
+        ("MATCH (n:Rec) WHERE n.score <= 10 RETURN count(*) AS c", 1),
+        ("MATCH (n:Rec) WHERE n.score > 5 RETURN count(*) AS c", 2),
+        ("MATCH (n:Rec) WHERE n.score IN [10, 30] RETURN count(*) AS c", 2),
+        ("MATCH (n:Rec) WHERE n.email < 'zz' RETURN count(*) AS c", 2),
+    ]:
+        assert _scalar(sparse_graph, query) == expected, query
+        naive = sparse_graph.cypher(query, disable_optimizer=True).scalar()
+        assert naive == expected, f"{query} diverged from the unoptimised path"
+
+
+def test_partially_pushed_where_still_applies_its_unpushable_conjunct(sparse_graph):
+    """`score > 5` pushes; the regex does not — so the whole predicate stays."""
+    query = "MATCH (n:Rec) WHERE n.score > 5 AND n.name =~ 'A' RETURN count(*) AS c"
+    assert _fused_op(sparse_graph, query) == "FusedNodeScanAggregate +filter"
+    assert _scalar(sparse_graph, query) == 1
+
+
+def test_text_predicate_keeps_its_filter(sparse_graph):
+    """A `STARTS WITH` matcher is a candidate pre-filter, not an equivalent of
+    its predicate, so the predicate has to survive."""
+    query = "MATCH (n:Rec) WHERE n.email STARTS WITH 'a' RETURN count(*) AS c"
+    assert _fused_op(sparse_graph, query) == "FusedNodeScanAggregate +filter"
+    assert _scalar(sparse_graph, query) == 1
+
+
+def test_where_colliding_with_an_inline_property_keeps_its_filter(sparse_graph):
+    """`{score: 10}` occupies the slot, so `n.score > 5` was never pushed and
+    the WHERE is the only thing enforcing it."""
+    query = "MATCH (n:Rec {score: 10}) WHERE n.score > 5 RETURN count(*) AS c"
+    assert _fused_op(sparse_graph, query) == "FusedNodeScanAggregate +filter"
+    assert _scalar(sparse_graph, query) == 1
+    assert _scalar(sparse_graph, "MATCH (n:Rec {score: 10}) WHERE n.score > 50 RETURN count(*) AS c") == 0

@@ -268,6 +268,19 @@ pub(super) fn value_matches(
     value: &Value,
     matcher: &PropertyMatcher,
 ) -> bool {
+    // Cypher three-valued logic, as `WHERE` applies it in
+    // `executor::helpers::evaluate_comparison`: a comparison with a NULL
+    // operand is NULL, and a NULL row is filtered out. `values_equal` already
+    // encodes that for equality, but the ordering matchers reach
+    // `compare_values`, which sorts NULL *below* every value (its ORDER BY
+    // duty) and so answered `x < 5` with `true` for a NULL `x`; `In` likewise
+    // matched a NULL element in the set. The planner now drops a `WHERE` these
+    // matchers provably enforce (`where_subsumed_by_pattern`), so the two
+    // evaluators disagreeing here would be a wrong answer rather than a
+    // redundant filter.
+    if matches!(value, Value::Null) {
+        return false;
+    }
     match matcher {
         PropertyMatcher::Equals(expected) => values_equal(value, expected),
         PropertyMatcher::EqualsParam(name) => params
