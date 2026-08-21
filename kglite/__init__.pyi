@@ -4411,6 +4411,11 @@ class KnowledgeGraph:
             ``weight_property`` is set, also includes ``weight`` (sum
             of edge weights). ``None`` if no path exists or timeout is
             reached.
+
+        Note:
+            When several paths tie for shortest, which one is returned is
+            unspecified and may change between releases. Use Cypher's
+            ``allShortestPaths(...)`` to get all of them.
         """
         ...
 
@@ -4604,6 +4609,11 @@ class KnowledgeGraph:
 
         Returns:
             List of node IDs, or ``None`` if no path exists or timeout is reached.
+
+        Note:
+            When several paths tie for shortest, which one is returned is
+            unspecified and may change between releases. Use Cypher's
+            ``allShortestPaths(...)`` to get all of them.
         """
         ...
 
@@ -4640,6 +4650,11 @@ class KnowledgeGraph:
 
         Returns:
             List of integer indices, or ``None`` if no path exists or timeout is reached.
+
+        Note:
+            When several paths tie for shortest, which one is returned is
+            unspecified and may change between releases. Use Cypher's
+            ``allShortestPaths(...)`` to get all of them.
         """
         ...
 

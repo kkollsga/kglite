@@ -1733,3 +1733,472 @@ fn test_eccentricity_agrees_with_costs_from() {
         assert_eq!(by_node[&source], furthest, "{:?}", source);
     }
 }
+
+// ========================================================================
+// S4: the bidirectional (meet-in-the-middle) pair finder.
+//
+// `shortest_path` / `shortest_path_directed` / `shortest_path_cost{,_with}`
+// no longer run the one-sided BFS that used to live in `reconstruct_path_bfs`.
+// That loop survives here as `one_sided_reference` — the oracle the randomized
+// cross-check measures the new engine against.
+//
+// The cross-check asserts LENGTH equality and path VALIDITY, never sequence
+// equality: when several shortest paths tie, meeting in the middle picks a
+// different one from the one-sided scan, and both answers are correct.
+// ========================================================================
+
+/// The deleted one-sided BFS, behaviour-for-behaviour: a parent map doubling
+/// as the visited set, `via_types` gating everything but the endpoints, and
+/// the first touch of the target winning.
+fn one_sided_reference(
+    graph: &DirGraph,
+    source: petgraph::graph::NodeIndex,
+    target: petgraph::graph::NodeIndex,
+    options: &PathOptions,
+) -> Option<Vec<petgraph::graph::NodeIndex>> {
+    use std::collections::VecDeque;
+
+    if source == target {
+        return Some(vec![source]);
+    }
+    let via_set: Option<HashSet<&str>> = options
+        .via_types
+        .map(|vt| vt.iter().map(|s| s.as_str()).collect());
+    let interned = intern_connection_types(options.connection_types);
+    let connection_types = interned.as_deref();
+
+    let mut parent: HashMap<usize, u32> = HashMap::new();
+    let mut queue: VecDeque<usize> = VecDeque::new();
+    let source_idx = source.index();
+    let target_idx = target.index();
+    parent.insert(source_idx, source_idx as u32);
+    queue.push_back(source_idx);
+
+    while let Some(current_idx) = queue.pop_front() {
+        let current = petgraph::graph::NodeIndex::new(current_idx);
+        for neighbor in filtered_neighbors(graph, current, options.direction, connection_types) {
+            let neighbor_idx = neighbor.index();
+            if parent.contains_key(&neighbor_idx) {
+                continue;
+            }
+            if neighbor_idx != target_idx && !node_passes_via_filter(graph, neighbor, &via_set) {
+                continue;
+            }
+            parent.insert(neighbor_idx, current_idx as u32);
+            if neighbor_idx == target_idx {
+                let mut path = Vec::new();
+                let mut node_idx = target_idx;
+                while node_idx != source_idx {
+                    path.push(petgraph::graph::NodeIndex::new(node_idx));
+                    node_idx = parent[&node_idx] as usize;
+                }
+                path.push(source);
+                path.reverse();
+                return Some(path);
+            }
+            queue.push_back(neighbor_idx);
+        }
+    }
+    None
+}
+
+/// Is there an edge `from -> to` the query is allowed to walk? Written against
+/// the raw edge lists and the interner rather than the production neighbour
+/// helpers, so the validity check cannot be satisfied by the same bug that
+/// produced the path.
+fn admissible_edge(
+    graph: &DirGraph,
+    from: petgraph::graph::NodeIndex,
+    to: petgraph::graph::NodeIndex,
+    options: &PathOptions,
+) -> bool {
+    let type_ok = |key: InternedKey| match options.connection_types {
+        None => true,
+        Some(types) => types.iter().any(|t| t == graph.interner.resolve(key)),
+    };
+    let forward = graph
+        .graph
+        .edges_directed(from, petgraph::Direction::Outgoing)
+        .any(|e| e.target() == to && type_ok(e.connection_type()));
+    let backward = graph
+        .graph
+        .edges_directed(from, petgraph::Direction::Incoming)
+        .any(|e| e.source() == to && type_ok(e.connection_type()));
+    match options.direction {
+        EdgeDir::Any => forward || backward,
+        EdgeDir::Outgoing => forward,
+        EdgeDir::Incoming => backward,
+    }
+}
+
+/// A returned path must genuinely be a path: right endpoints, no revisits,
+/// every consecutive pair joined by an edge the filters admit, and every
+/// *intermediate* node admitted by `via_types` (the ends are exempt).
+fn assert_valid_path(
+    graph: &DirGraph,
+    path: &[petgraph::graph::NodeIndex],
+    source: petgraph::graph::NodeIndex,
+    target: petgraph::graph::NodeIndex,
+    options: &PathOptions,
+    ctx: &str,
+) {
+    assert_eq!(path.first().copied(), Some(source), "{ctx}: bad start");
+    assert_eq!(path.last().copied(), Some(target), "{ctx}: bad end");
+    let unique: HashSet<_> = path.iter().copied().collect();
+    assert_eq!(unique.len(), path.len(), "{ctx}: revisits a node: {path:?}");
+    for window in path.windows(2) {
+        assert!(
+            admissible_edge(graph, window[0], window[1], options),
+            "{ctx}: no admissible edge {:?} -> {:?} in {path:?}",
+            window[0],
+            window[1]
+        );
+    }
+    if let Some(via) = options.via_types {
+        if path.len() > 2 {
+            for &node in &path[1..path.len() - 1] {
+                let view = graph.graph.node_view(node).expect("node exists");
+                let node_type = view.node_type_str(&graph.interner);
+                assert!(
+                    via.iter().any(|v| v == node_type),
+                    "{ctx}: intermediate {node:?} is {node_type}, not in {via:?}"
+                );
+            }
+        }
+    }
+}
+
+/// The termination rule [`bidirectional_bfs`] deliberately does **not** use:
+/// expand *both* frontiers one level per round, then compare the visited sets
+/// and report `forward_level + backward_level`. It is the textbook shape of
+/// the bidirectional off-by-one — correct on even-length shortest paths, one
+/// hop too long on odd-length ones, because the meeting happens on the middle
+/// *edge* and the round-robin counter cannot express a half-round.
+fn naive_round_robin_length(
+    graph: &DirGraph,
+    source: petgraph::graph::NodeIndex,
+    target: petgraph::graph::NodeIndex,
+) -> Option<usize> {
+    if source == target {
+        return Some(0);
+    }
+    let mut seen_f: HashSet<petgraph::graph::NodeIndex> = HashSet::from([source]);
+    let mut seen_b: HashSet<petgraph::graph::NodeIndex> = HashSet::from([target]);
+    let mut frontier_f = vec![source];
+    let mut frontier_b = vec![target];
+    let mut levels = 0usize;
+
+    while !frontier_f.is_empty() && !frontier_b.is_empty() {
+        for (frontier, seen) in [
+            (&mut frontier_f, &mut seen_f),
+            (&mut frontier_b, &mut seen_b),
+        ] {
+            let mut next = Vec::new();
+            for &u in frontier.iter() {
+                for w in filtered_neighbors(graph, u, EdgeDir::Any, None) {
+                    if seen.insert(w) {
+                        next.push(w);
+                    }
+                }
+            }
+            *frontier = next;
+        }
+        levels += 2;
+        if seen_f.intersection(&seen_b).next().is_some() {
+            return Some(levels);
+        }
+    }
+    None
+}
+
+/// A bare line of `hops + 1` nodes: 0 - 1 - ... - hops, all `NEXT` edges
+/// pointing forward, all nodes of type `Line`.
+fn build_line_graph(hops: usize) -> (DirGraph, Vec<petgraph::graph::NodeIndex>) {
+    let mut graph = DirGraph::new();
+    let mut indices = Vec::new();
+    for i in 0..=hops {
+        let node = NodeData::new(
+            Value::Int64(i as i64),
+            Value::String(format!("L{i}")),
+            "Line".to_string(),
+            HashMap::new(),
+            &mut graph.interner,
+        );
+        let idx = graph.graph.add_node(node);
+        graph
+            .type_indices
+            .entry_or_default("Line".to_string())
+            .push(idx);
+        indices.push(idx);
+    }
+    for i in 0..hops {
+        let edge = EdgeData::new("NEXT".to_string(), HashMap::new(), &mut graph.interner);
+        graph.graph.add_edge(indices[i], indices[i + 1], edge);
+    }
+    (graph, indices)
+}
+
+#[test]
+fn test_edge_dir_reversed_is_an_involution() {
+    for dir in [EdgeDir::Any, EdgeDir::Outgoing, EdgeDir::Incoming] {
+        assert_eq!(dir.reversed().reversed(), dir);
+    }
+    assert_eq!(EdgeDir::Any.reversed(), EdgeDir::Any);
+    assert_eq!(EdgeDir::Outgoing.reversed(), EdgeDir::Incoming);
+    assert_eq!(EdgeDir::Incoming.reversed(), EdgeDir::Outgoing);
+}
+
+#[test]
+fn test_bidirectional_beats_the_naive_level_counter_off_by_one() {
+    // The adversarial case for the level-synchronised termination rule: an
+    // ODD-length shortest path, where the two half-searches meet on the
+    // middle EDGE rather than on a shared middle node. The round-robin
+    // implementation must overshoot by exactly one hop; ours must not.
+    for hops in [3usize, 5, 7] {
+        let (graph, idx) = build_line_graph(hops);
+        let (source, target) = (idx[0], idx[hops]);
+
+        assert_eq!(
+            naive_round_robin_length(&graph, source, target),
+            Some(hops + 1),
+            "the trap must be real: round-robin termination should overshoot \
+             a {hops}-hop path by one"
+        );
+        assert_eq!(
+            shortest_path_cost(&graph, source, target),
+            Some(hops),
+            "{hops}-hop line: bidirectional must not inherit the overshoot"
+        );
+        let result = shortest_path(&graph, source, target, &PathOptions::default())
+            .expect("the line is connected");
+        assert_eq!(result.cost, hops);
+        assert_eq!(result.path.len(), hops + 1);
+        assert_valid_path(
+            &graph,
+            &result.path,
+            source,
+            target,
+            &PathOptions::default(),
+            &format!("odd line {hops}"),
+        );
+        // The line has exactly one path, so here the sequence IS pinnable.
+        assert_eq!(result.path, idx);
+    }
+
+    // Non-vacuity of the trap's shape: the naive rule is right on EVEN
+    // lengths, so the test above is detecting the odd/even asymmetry, not a
+    // reference implementation that is simply broken everywhere.
+    for hops in [2usize, 4, 6] {
+        let (graph, idx) = build_line_graph(hops);
+        assert_eq!(
+            naive_round_robin_length(&graph, idx[0], idx[hops]),
+            Some(hops),
+            "round-robin termination is correct on even lengths"
+        );
+        assert_eq!(shortest_path_cost(&graph, idx[0], idx[hops]), Some(hops));
+    }
+}
+
+/// Deterministic xorshift64*. The cross-check must reproduce exactly from its
+/// seed when it fails, so: no thread RNG, no external dependency.
+struct Rng(u64);
+
+impl Rng {
+    fn next_u64(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.0 = x;
+        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+
+    fn below(&mut self, n: usize) -> usize {
+        (self.next_u64() % n as u64) as usize
+    }
+}
+
+/// Random G(n, m): `n` nodes split over two node types, `m` directed edges
+/// split over two relationship types. Self-loops are rejected; parallel edges
+/// and a→b/b→a pairs are kept, because they are exactly the shapes whose
+/// duplicate neighbour entries the allocation-free expansion no longer
+/// deduplicates.
+fn build_random_graph(
+    rng: &mut Rng,
+    n: usize,
+    m: usize,
+) -> (DirGraph, Vec<petgraph::graph::NodeIndex>) {
+    let mut graph = DirGraph::new();
+    let mut indices = Vec::with_capacity(n);
+    for i in 0..n {
+        let node_type = if rng.below(2) == 0 { "T0" } else { "T1" };
+        let node = NodeData::new(
+            Value::Int64(i as i64),
+            Value::String(format!("N{i}")),
+            node_type.to_string(),
+            HashMap::new(),
+            &mut graph.interner,
+        );
+        let idx = graph.graph.add_node(node);
+        graph
+            .type_indices
+            .entry_or_default(node_type.to_string())
+            .push(idx);
+        indices.push(idx);
+    }
+    for _ in 0..m {
+        let a = rng.below(n);
+        let b = rng.below(n);
+        if a == b {
+            continue;
+        }
+        let rel = if rng.below(2) == 0 { "R0" } else { "R1" };
+        let edge = EdgeData::new(rel.to_string(), HashMap::new(), &mut graph.interner);
+        graph.graph.add_edge(indices[a], indices[b], edge);
+    }
+    (graph, indices)
+}
+
+#[test]
+fn test_bidirectional_matches_one_sided_on_random_graphs() {
+    let rel_r0 = vec!["R0".to_string()];
+    let via_t0 = vec!["T0".to_string()];
+    let configs: Vec<(&str, PathOptions)> = vec![
+        ("default", PathOptions::default()),
+        (
+            "outgoing",
+            PathOptions::default().with_direction(EdgeDir::Outgoing),
+        ),
+        (
+            "incoming",
+            PathOptions::default().with_direction(EdgeDir::Incoming),
+        ),
+        (
+            "rel=R0",
+            PathOptions::default().with_connection_types(&rel_r0),
+        ),
+        ("via=T0", PathOptions::default().with_via_types(&via_t0)),
+        (
+            "rel=R0+outgoing",
+            PathOptions::default()
+                .with_connection_types(&rel_r0)
+                .with_direction(EdgeDir::Outgoing),
+        ),
+        (
+            "via=T0+incoming",
+            PathOptions::default()
+                .with_via_types(&via_t0)
+                .with_direction(EdgeDir::Incoming),
+        ),
+        (
+            "rel=R0+via=T0",
+            PathOptions::default()
+                .with_connection_types(&rel_r0)
+                .with_via_types(&via_t0),
+        ),
+    ];
+
+    let mut checks = 0usize;
+    let mut reachable = 0usize;
+    let mut deepest = 0usize;
+    for seed in 1..=10u64 {
+        let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+        // A spread of densities: sparse graphs exercise the "one frontier runs
+        // dry" exit, dense ones the tie-breaking between equal-length paths.
+        let (n, m) = match seed % 4 {
+            0 => (20, 24),
+            1 => (12, 30),
+            2 => (30, 31), // very sparse: long paths, and frontiers that run dry
+            _ => (14, 16),
+        };
+        let (graph, idx) = build_random_graph(&mut rng, n, m);
+
+        for (label, options) in &configs {
+            for &source in &idx {
+                for &target in &idx {
+                    let ctx = format!("seed {seed} [{label}] {source:?}->{target:?}");
+                    let expected = one_sided_reference(&graph, source, target, options);
+                    let got = shortest_path(&graph, source, target, options);
+                    checks += 1;
+
+                    match (&expected, &got) {
+                        (None, None) => {}
+                        (Some(want), Some(result)) => {
+                            reachable += 1;
+                            deepest = deepest.max(result.cost);
+                            assert_eq!(
+                                result.path.len(),
+                                want.len(),
+                                "{ctx}: length disagreement, one-sided {want:?} vs \
+                                 bidirectional {:?}",
+                                result.path
+                            );
+                            assert_eq!(result.cost, want.len() - 1, "{ctx}: cost/path mismatch");
+                            assert_valid_path(&graph, &result.path, source, target, options, &ctx);
+                            assert_eq!(
+                                shortest_path_cost_with(&graph, source, target, options),
+                                Some(result.cost),
+                                "{ctx}: the length-only member disagrees with the path"
+                            );
+                            assert!(
+                                are_connected_with(&graph, source, target, options),
+                                "{ctx}: are_connected_with denies a path it returned"
+                            );
+                        }
+                        _ => panic!(
+                            "{ctx}: reachability disagreement — one-sided {expected:?}, \
+                             bidirectional {got:?}"
+                        ),
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        checks > 10_000,
+        "cross-check corpus shrank to {checks} cases"
+    );
+    assert!(
+        reachable > checks / 10,
+        "only {reachable}/{checks} pairs were connected — the fixtures went \
+         too sparse to exercise the meeting rule"
+    );
+    // Both odd and even path lengths, deep enough that the two frontiers
+    // actually take several rounds to meet. A corpus of 1- and 2-hop pairs
+    // would never exercise the termination rule at all.
+    assert!(
+        deepest >= 5,
+        "deepest shortest path in the corpus was {deepest} hops — too shallow \
+         to exercise multi-round meeting"
+    );
+}
+
+#[test]
+fn test_bidirectional_directed_agrees_with_the_transpose_query() {
+    // The backward frontier must expand the REVERSE of the query direction.
+    // If it did not, an outgoing query would search out of the target and
+    // silently answer the wrong question — which on a symmetric fixture is
+    // invisible, so the fixture is deliberately asymmetric.
+    let mut rng = Rng(0xC0FF_EE12_3456_789A);
+    let (graph, idx) = build_random_graph(&mut rng, 16, 22);
+    for &source in &idx {
+        for &target in &idx {
+            let out = shortest_path_cost_with(
+                &graph,
+                source,
+                target,
+                &PathOptions::default().with_direction(EdgeDir::Outgoing),
+            );
+            let inn = shortest_path_cost_with(
+                &graph,
+                target,
+                source,
+                &PathOptions::default().with_direction(EdgeDir::Incoming),
+            );
+            assert_eq!(
+                out, inn,
+                "{source:?}->{target:?} outgoing vs transposed incoming"
+            );
+        }
+    }
+}

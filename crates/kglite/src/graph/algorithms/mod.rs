@@ -5,6 +5,7 @@
 //! this pattern?"; algorithms here answer "what does the graph look
 //! like structurally?".
 
+pub mod bidirectional;
 pub mod centrality;
 pub mod clustering;
 pub mod community;

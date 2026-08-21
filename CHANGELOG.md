@@ -891,6 +891,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Single-pair shortest-path queries now search from both ends at once
+  (bidirectional BFS), an order of magnitude faster on large graphs.**
+  `shortest_path()`, `shortest_path_ids()`, `shortest_path_indices()`,
+  `shortest_path_length()`, `are_connected()` and Cypher's `shortestPath(...)`
+  used to grow a single frontier out of the source until it swallowed the
+  target, exploring everything within the full path radius. They now grow one
+  frontier from each endpoint and stitch the halves where the two meet, which
+  touches a small fraction of the same graph: a 5-hop answer costs two 2-3 hop
+  searches instead of one 5-hop search. Filters, direction and timeouts are
+  unchanged — the backward frontier walks the reverse of the requested
+  direction, and `via_types` gates both halves identically, with the endpoints
+  exempt as before. The **weighted** finders (`weight_property=...`, Dijkstra)
+  and `allShortestPaths(...)` are unchanged and remain one-sided.
+
+  Where several shortest paths tie, the family has never promised *which* one
+  it returns, and meeting in the middle makes a different arbitrary choice than
+  the old scan did. Hop counts, reachability and `allShortestPaths(...)` are
+  unaffected; code that pinned one particular equal-length node sequence may
+  see a different one.
+
+- **Path-returning shortest-path calls no longer pay a per-node sort that made
+  them several times slower than the length-only call.** On the default (unfiltered)
+  traversal every visited node's neighbours were collected into a `Vec`, sorted
+  and deduplicated before the search looked at them — work a breadth-first
+  search discards for free against its own visited set. `shortest_path_ids()`
+  measured 8x `shortest_path_length()` on the same pair on the fixture that
+  found it, and 3-4x on a 114k-node / 904k-edge generated graph. It is now the
+  cheaper of the two. The
+  search paths now iterate the graph's neighbours directly; the deduplicating
+  collector remains where duplicates actually cost something (`all_paths()`
+  and `allShortestPaths(...)`).
+
 - **`enable_disk_mode()` streams edge properties into the on-disk store
   instead of cloning them onto the heap.** The conversion copied every
   property-bearing edge's properties into the disk backend's heap mutation

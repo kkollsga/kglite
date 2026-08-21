@@ -17,6 +17,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 pub use super::centrality::*;
 // Community detection lives in a sibling module, but the historical
 // `graph_algorithms::*` paths remain the public compatibility surface.
+use super::bidirectional::bidirectional_bfs;
 pub use super::community::*;
 use super::community::{scoped_universe, DedupNeighborSource};
 
@@ -172,6 +173,23 @@ pub enum EdgeDir {
     Incoming,
 }
 
+impl EdgeDir {
+    /// The direction a search walking *backwards* from the target must use to
+    /// retrace the edges a forward search walks. `Any` is its own reverse.
+    ///
+    /// This is what makes [`bidirectional_bfs`] correct on a directed query:
+    /// the backward frontier must expand the transpose, or it would search for
+    /// paths *out of* the target instead of *into* it.
+    #[inline]
+    fn reversed(self) -> Self {
+        match self {
+            EdgeDir::Any => EdgeDir::Any,
+            EdgeDir::Outgoing => EdgeDir::Incoming,
+            EdgeDir::Incoming => EdgeDir::Outgoing,
+        }
+    }
+}
+
 /// Neighbour expansion for one BFS/DFS step, honouring both the direction and
 /// the connection-type filter. The single dispatch point for the three
 /// `filtered_neighbors_*` helpers.
@@ -186,6 +204,57 @@ fn filtered_neighbors(
         EdgeDir::Any => filtered_neighbors_undirected(graph, node, connection_types),
         EdgeDir::Outgoing => filtered_neighbors_outgoing(graph, node, connection_types),
         EdgeDir::Incoming => filtered_neighbors_incoming(graph, node, connection_types),
+    }
+}
+
+/// Feed every neighbour of `node` to `sink`, honouring direction and the
+/// connection-type filter — the allocation-free expansion the *search* engines
+/// use, as opposed to [`filtered_neighbors`], which materialises a deduplicated
+/// `Vec` for the DFS enumerators that need one.
+///
+/// The unfiltered arms hand petgraph's own iterator straight to the sink: no
+/// `Vec`, no sort, no dedup. That matters because those three cost more than
+/// the traversal itself on the default (unfiltered) path — a path-returning
+/// call was ~8× slower than the length-only call purely from this per-node
+/// allocate/sort/dedup, even though a BFS discards duplicates for free against
+/// its own visited set.
+///
+/// Duplicates therefore reach `sink`: `neighbors_undirected` yields one entry
+/// per incident edge, so a parallel edge or an a→b/b→a pair repeats. Every
+/// caller here is a BFS whose seen-check already rejects them. The
+/// deduplicating [`filtered_neighbors_undirected`] stays in place for
+/// [`all_paths`] and [`all_shortest_paths_impl`], where a repeat is not free
+/// (wasted DFS branches, and duplicated predecessor-DAG entries respectively).
+#[inline]
+fn expand_neighbors_into(
+    graph: &DirGraph,
+    node: NodeIndex,
+    direction: EdgeDir,
+    connection_types: Option<&[InternedKey]>,
+    sink: &mut dyn FnMut(u32),
+) {
+    let g = &graph.graph;
+    match (connection_types, direction) {
+        (None, EdgeDir::Any) => {
+            for neighbor in g.neighbors_undirected(node) {
+                sink(neighbor.index() as u32);
+            }
+        }
+        (None, EdgeDir::Outgoing) => {
+            for neighbor in g.neighbors_directed(node, Direction::Outgoing) {
+                sink(neighbor.index() as u32);
+            }
+        }
+        (None, EdgeDir::Incoming) => {
+            for neighbor in g.neighbors_directed(node, Direction::Incoming) {
+                sink(neighbor.index() as u32);
+            }
+        }
+        (Some(_), _) => {
+            for neighbor in filtered_neighbors(graph, node, direction, connection_types) {
+                sink(neighbor.index() as u32);
+            }
+        }
     }
 }
 
@@ -339,11 +408,16 @@ impl<'a> AllPathsOptions<'a> {
     }
 }
 
-/// Find the shortest path between two nodes using BFS.
+/// Find the shortest path between two nodes, by [`bidirectional_bfs`].
 /// By default (`PathOptions::direction == EdgeDir::Any`) the graph is treated
 /// as undirected, finding connections in either direction; set
 /// [`PathOptions::direction`] to follow outgoing or incoming edges only.
 /// Returns None if no path exists.
+///
+/// Where several shortest paths tie, *which* one is returned is unspecified —
+/// it always was, and meeting in the middle makes a different arbitrary
+/// choice than a one-sided scan. Callers needing all of them want
+/// [`all_shortest_paths`].
 ///
 /// # Arguments
 /// * `connection_types` - Only traverse edges of these types (None = all)
@@ -355,21 +429,20 @@ pub fn shortest_path(
     target: NodeIndex,
     options: &PathOptions,
 ) -> Option<PathResult> {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena, which must run under a DiskQueryGuard (arena protocol in
+    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     let PathOptions {
         connection_types,
         via_types,
         direction,
         interrupt: deadline,
     } = *options;
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena, which must run under a DiskQueryGuard (arena protocol in
-    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     let via_set: Option<HashSet<&str>> =
         via_types.map(|vt| vt.iter().map(|s| s.as_str()).collect());
     let interned = intern_connection_types(connection_types);
-    let path = reconstruct_path_bfs(
+    let path = bidirectional_path(
         graph,
         source,
         target,
@@ -396,10 +469,9 @@ pub fn all_shortest_paths(
     deadline: Interrupt,
     max_paths: usize,
 ) -> Vec<PathResult> {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
-                                                  // Arena guard: disk-backed node/edge reads materialize into the query
-                                                  // arena, which must run under a DiskQueryGuard (arena protocol in
-                                                  // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena, which must run under a DiskQueryGuard (arena protocol in
+    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
     let _arena_guard = graph.graph.begin_query();
     all_shortest_paths_impl(
         graph,
@@ -422,10 +494,9 @@ pub fn all_shortest_paths_directed(
     deadline: Interrupt,
     max_paths: usize,
 ) -> Vec<PathResult> {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
-                                                  // Arena guard: disk-backed node/edge reads materialize into the query
-                                                  // arena, which must run under a DiskQueryGuard (arena protocol in
-                                                  // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena, which must run under a DiskQueryGuard (arena protocol in
+    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
     let _arena_guard = graph.graph.begin_query();
     all_shortest_paths_impl(
         graph,
@@ -536,9 +607,8 @@ fn all_shortest_paths_impl(
     results
 }
 
-/// Find the shortest path LENGTH between two nodes using undirected BFS.
-/// Only returns the hop count, avoiding parent tracking and path reconstruction.
-/// Uses level-by-level BFS to avoid per-node distance tracking.
+/// Find the shortest path LENGTH between two nodes — the hop count of the
+/// path [`shortest_path`] would return, from the same [`bidirectional_bfs`].
 ///
 /// Unfiltered and undirected. [`shortest_path_cost_with`] is the same search
 /// with a [`PathOptions`] — connection/via-type filters, direction, deadline.
@@ -573,14 +643,16 @@ pub fn shortest_path_cost_with(
         interrupt: deadline,
     } = *options;
 
-    if connection_types.is_none() && via_types.is_none() && direction == EdgeDir::Any {
-        return unfiltered_cost_bfs(graph, source, target, deadline);
-    }
-
     let via_set: Option<HashSet<&str>> =
         via_types.map(|vt| vt.iter().map(|s| s.as_str()).collect());
     let interned = intern_connection_types(connection_types);
-    filtered_cost_bfs(
+    // The same meet-in-the-middle search [`shortest_path`] runs, with the
+    // reconstructed sequence discarded. Reconstruction is O(hops) against a
+    // search that is exponentially cheaper than the one-sided scan this used
+    // to run, so keeping a second hop-count-only BFS alive to save it would
+    // trade a large win for a negligible one — and a second copy of the
+    // termination rule to get wrong.
+    bidirectional_path(
         graph,
         source,
         target,
@@ -589,115 +661,7 @@ pub fn shortest_path_cost_with(
         direction,
         deadline,
     )
-}
-
-/// The unfiltered, undirected hop-count BFS — a flat `Vec<bool>` visited set
-/// and petgraph's own neighbour iterator, with no per-node allocation. Kept
-/// separate from [`filtered_cost_bfs`] because this is the hot default and
-/// pays nothing for the filter machinery it doesn't use.
-fn unfiltered_cost_bfs(
-    graph: &DirGraph,
-    source: NodeIndex,
-    target: NodeIndex,
-    deadline: Interrupt,
-) -> Option<usize> {
-    let node_bound = graph.graph.node_bound();
-    let mut visited: Vec<bool> = vec![false; node_bound];
-
-    let target_idx = target.index();
-
-    // Level-by-level BFS using two alternating vectors (avoids VecDeque overhead)
-    let mut current_level: Vec<usize> = vec![source.index()];
-    let mut next_level: Vec<usize> = Vec::new();
-    visited[source.index()] = true;
-    let mut depth: usize = 0;
-    let mut visit_count = 0u32;
-
-    while !current_level.is_empty() {
-        depth += 1;
-        next_level.clear();
-
-        for &current_idx in &current_level {
-            visit_count += 1;
-            if visit_count.is_multiple_of(1000) && deadline.exceeded() {
-                return None;
-            }
-            let current = NodeIndex::new(current_idx);
-
-            for neighbor in {
-                let g = &graph.graph;
-                g.neighbors_undirected(current)
-            } {
-                let neighbor_idx = neighbor.index();
-                if !visited[neighbor_idx] {
-                    if neighbor_idx == target_idx {
-                        return Some(depth);
-                    }
-                    visited[neighbor_idx] = true;
-                    next_level.push(neighbor_idx);
-                }
-            }
-        }
-
-        std::mem::swap(&mut current_level, &mut next_level);
-    }
-
-    None
-}
-
-/// The hop-count BFS with connection-type / via-type / direction filters —
-/// the same expansion [`reconstruct_path_bfs`] walks, minus parent tracking.
-fn filtered_cost_bfs(
-    graph: &DirGraph,
-    source: NodeIndex,
-    target: NodeIndex,
-    connection_types: Option<&[InternedKey]>,
-    via_types: &Option<HashSet<&str>>,
-    direction: EdgeDir,
-    deadline: Interrupt,
-) -> Option<usize> {
-    let node_bound = graph.graph.node_bound();
-    let mut visited: Vec<bool> = vec![false; node_bound];
-    let target_idx = target.index();
-
-    let mut current_level: Vec<usize> = vec![source.index()];
-    let mut next_level: Vec<usize> = Vec::new();
-    visited[source.index()] = true;
-    let mut depth: usize = 0;
-    let mut visit_count = 0u32;
-
-    while !current_level.is_empty() {
-        depth += 1;
-        next_level.clear();
-
-        for &current_idx in &current_level {
-            visit_count += 1;
-            if visit_count.is_multiple_of(1000) && deadline.exceeded() {
-                return None;
-            }
-            let current = NodeIndex::new(current_idx);
-            for neighbor in filtered_neighbors(graph, current, direction, connection_types) {
-                let neighbor_idx = neighbor.index();
-                if visited[neighbor_idx] {
-                    continue;
-                }
-                if neighbor_idx == target_idx {
-                    return Some(depth);
-                }
-                // via_types gates intermediate nodes only; the endpoints are
-                // exempt (the target is answered above, the source is seeded).
-                if !node_passes_via_filter(graph, neighbor, via_types) {
-                    continue;
-                }
-                visited[neighbor_idx] = true;
-                next_level.push(neighbor_idx);
-            }
-        }
-
-        std::mem::swap(&mut current_level, &mut next_level);
-    }
-
-    None
+    .map(|path| path.len().saturating_sub(1))
 }
 
 /// Batch shortest path cost — reuses visited Vec and adjacency list across multiple pairs.
@@ -995,74 +959,42 @@ pub fn shortest_path_costs_from(
     let mut scratch = BfsScratch::new(bound);
     let start = source.index() as u32;
 
-    if connection_types.is_none() && via_types.is_none() && direction == EdgeDir::Any {
-        // The hot default: petgraph's own neighbour iterator, no per-node
-        // allocation and no filter machinery (the split `unfiltered_cost_bfs`
-        // makes for the pair query).
-        single_source_bfs(
-            &mut scratch,
-            start,
-            max_hops,
-            deadline,
-            |u, sink| {
-                let g = &graph.graph;
-                for neighbor in g.neighbors_undirected(NodeIndex::new(u as usize)) {
-                    sink(neighbor.index() as u32);
-                }
-            },
-            |v, d| {
-                out.push((NodeIndex::new(v as usize), d as usize));
-                true
-            },
-        )?;
-    } else {
-        let via_set: Option<HashSet<&str>> =
-            via_types.map(|vt| vt.iter().map(|s| s.as_str()).collect());
-        let interned = intern_connection_types(connection_types);
-        single_source_bfs(
-            &mut scratch,
-            start,
-            max_hops,
-            deadline,
-            |u, sink| {
-                for neighbor in filtered_neighbors(
-                    graph,
-                    NodeIndex::new(u as usize),
-                    direction,
-                    interned.as_deref(),
-                ) {
-                    sink(neighbor.index() as u32);
-                }
-            },
-            |v, d| {
-                let node = NodeIndex::new(v as usize);
-                out.push((node, d as usize));
-                // The source is always expandable; every other node must pass
-                // `via_types` to serve as an intermediate hop.
-                d == 0 || node_passes_via_filter(graph, node, &via_set)
-            },
-        )?;
-    }
-
+    let via_set: Option<HashSet<&str>> =
+        via_types.map(|vt| vt.iter().map(|s| s.as_str()).collect());
+    let interned = intern_connection_types(connection_types);
+    single_source_bfs(
+        &mut scratch,
+        start,
+        max_hops,
+        deadline,
+        |u, sink| {
+            expand_neighbors_into(
+                graph,
+                NodeIndex::new(u as usize),
+                direction,
+                interned.as_deref(),
+                sink,
+            )
+        },
+        |v, d| {
+            let node = NodeIndex::new(v as usize);
+            out.push((node, d as usize));
+            // The source is always expandable; every other node must pass
+            // `via_types` to serve as an intermediate hop. An absent filter
+            // waves everything through, so the unfiltered search pays only
+            // this discriminant check.
+            d == 0 || node_passes_via_filter(graph, node, &via_set)
+        },
+    )?;
     Ok(out)
 }
 
-/// Reconstruct path using BFS.
-///
-/// Phase A.3 / 0.9.53 perf fix: switched from `Vec<bool> + Vec<u32>` of
-/// `node_bound` capacity to `HashMap` for parent tracking. The old
-/// implementation allocated 500 KB (Vec<bool>) + 2 MB (Vec<u32>) per
-/// call on a 500 K-node graph regardless of actual BFS scope. For a
-/// shallow lookup that visits ~16 nodes the per-call alloc + init
-/// (~30 ms) dominated the operation; this fix moved d=1 shortestPath
-/// latency from 37 µs → 4 µs on a 500K-node fixture.
-///
-/// The HashMap also doubles as the visited set: presence ⇔ visited.
-/// Deep BFS does pay slightly more per-node (~100 ns hash insert vs
-/// ~5 ns array write), but the per-call alloc savings dominate for
-/// any realistic graph + traversal shape; deep paths on small graphs
-/// stay fast because the HashMap doesn't preallocate `node_bound`.
-fn reconstruct_path_bfs(
+/// [`bidirectional_bfs`] driven over the live graph — the single search behind
+/// [`shortest_path`], [`shortest_path_directed`] and
+/// [`shortest_path_cost_with`]. The backward frontier walks
+/// [`EdgeDir::reversed`], so a directed query still asks "which paths lead
+/// *into* the target".
+fn bidirectional_path(
     graph: &DirGraph,
     source: NodeIndex,
     target: NodeIndex,
@@ -1071,66 +1003,38 @@ fn reconstruct_path_bfs(
     direction: EdgeDir,
     deadline: Interrupt,
 ) -> Option<Vec<NodeIndex>> {
-    use std::collections::{HashMap, VecDeque};
-
-    if source == target {
-        return Some(vec![source]);
-    }
-
-    let mut parent: HashMap<usize, u32> = HashMap::with_capacity(64);
-    let mut queue: VecDeque<usize> = VecDeque::with_capacity(64);
-
-    let source_idx = source.index();
-    let target_idx = target.index();
-
-    parent.insert(source_idx, source_idx as u32);
-    queue.push_back(source_idx);
-
-    let mut visit_count = 0u32;
-
-    while let Some(current_idx) = queue.pop_front() {
-        // Periodic timeout check (every 1000 nodes)
-        visit_count += 1;
-        if visit_count.is_multiple_of(1000) && deadline.exceeded() {
-            {
-                return None;
-            }
-        }
-
-        let current = NodeIndex::new(current_idx);
-
-        // Check all neighbors (both directions when direction is Any)
-        let neighbors = filtered_neighbors(graph, current, direction, connection_types);
-        for neighbor in neighbors {
-            let neighbor_idx = neighbor.index();
-
-            if parent.contains_key(&neighbor_idx) {
-                continue;
-            }
-            // Apply via_types filter (skip if not target and doesn't match)
-            if neighbor_idx != target_idx && !node_passes_via_filter(graph, neighbor, via_types) {
-                continue;
-            }
-
-            parent.insert(neighbor_idx, current_idx as u32);
-            if neighbor_idx == target_idx {
-                // Found target - reconstruct path
-                let mut path = Vec::with_capacity(16);
-                let mut node_idx = target_idx;
-
-                while node_idx != source_idx {
-                    path.push(NodeIndex::new(node_idx));
-                    node_idx = parent[&node_idx] as usize;
-                }
-                path.push(source);
-                path.reverse();
-                return Some(path);
-            }
-            queue.push_back(neighbor_idx);
-        }
-    }
-
-    None // No path found
+    let source_id = u32::try_from(source.index()).ok()?;
+    let target_id = u32::try_from(target.index()).ok()?;
+    let backward = direction.reversed();
+    let path = bidirectional_bfs(
+        source_id,
+        target_id,
+        |u, sink| {
+            expand_neighbors_into(
+                graph,
+                NodeIndex::new(u as usize),
+                direction,
+                connection_types,
+                sink,
+            )
+        },
+        |u, sink| {
+            expand_neighbors_into(
+                graph,
+                NodeIndex::new(u as usize),
+                backward,
+                connection_types,
+                sink,
+            )
+        },
+        |w| node_passes_via_filter(graph, NodeIndex::new(w as usize), via_types),
+        deadline,
+    )?;
+    Some(
+        path.into_iter()
+            .map(|idx| NodeIndex::new(idx as usize))
+            .collect(),
+    )
 }
 
 /// Directed BFS shortest path — only follows outgoing edges. A thin
@@ -1168,7 +1072,10 @@ pub fn all_paths(
     target: NodeIndex,
     options: &AllPathsOptions,
 ) -> Vec<Vec<NodeIndex>> {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena, which must run under a DiskQueryGuard (arena protocol in
+    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     let AllPathsOptions {
         max_hops,
         max_results,
@@ -1177,10 +1084,6 @@ pub fn all_paths(
         direction,
         interrupt: deadline,
     } = *options;
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena, which must run under a DiskQueryGuard (arena protocol in
-    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     let via_set: Option<HashSet<&str>> =
         via_types.map(|vt| vt.iter().map(|s| s.as_str()).collect());
     let interned = intern_connection_types(connection_types);
@@ -1289,10 +1192,9 @@ fn find_all_paths_recursive(
 /// Find all strongly connected components in the graph.
 /// Returns a vector of components, each component is a vector of node indices.
 pub fn connected_components(graph: &DirGraph) -> Vec<Vec<NodeIndex>> {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
-                                                  // Arena guard: disk-backed node/edge reads materialize into the query
-                                                  // arena, which must run under a DiskQueryGuard (arena protocol in
-                                                  // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena, which must run under a DiskQueryGuard (arena protocol in
+    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
     let _arena_guard = graph.graph.begin_query();
     // A forked backend has no single `StableDiGraph` to hand petgraph — its
     // nodes are base⊕overlay — so it takes the same generic `GraphRead`
@@ -1366,10 +1268,9 @@ pub fn weakly_connected_components(
     graph: &DirGraph,
     deadline: Interrupt,
 ) -> Result<Vec<Vec<NodeIndex>>, String> {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
-                                                  // Arena guard: disk-backed node/edge reads materialize into the query
-                                                  // arena, which must run under a DiskQueryGuard (arena protocol in
-                                                  // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena, which must run under a DiskQueryGuard (arena protocol in
+    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
     let _arena_guard = graph.graph.begin_query();
     weakly_connected_components_scoped(graph, None, None, deadline)
 }
@@ -1396,10 +1297,9 @@ pub fn weakly_connected_components_scoped(
     rel_types: Option<&[InternedKey]>,
     deadline: Interrupt,
 ) -> Result<Vec<Vec<NodeIndex>>, String> {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
-                                                  // Arena guard: disk-backed node/edge reads materialize into the query
-                                                  // arena, which must run under a DiskQueryGuard (arena protocol in
-                                                  // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena, which must run under a DiskQueryGuard (arena protocol in
+    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
     let _arena_guard = graph.graph.begin_query();
     let edge_matches = |key: InternedKey| -> bool {
         match rel_types {
@@ -1623,10 +1523,9 @@ pub fn coreness_scoped(
     rel_types: Option<&[InternedKey]>,
     deadline: Interrupt,
 ) -> Result<Vec<(NodeIndex, i64)>, String> {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
-                                                  // Arena guard: disk-backed node/edge reads materialize into the query
-                                                  // arena, which must run under a DiskQueryGuard (arena protocol in
-                                                  // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena, which must run under a DiskQueryGuard (arena protocol in
+    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
     let _arena_guard = graph.graph.begin_query();
     // Disk/mapped: stream the scoped neighbours (bounded memory) instead of
     // materialising the whole adjacency. In-memory keeps the materialised path.
@@ -1820,10 +1719,9 @@ pub fn ready_set_scoped(
     done: &HashSet<NodeIndex>,
     deadline: Interrupt,
 ) -> Result<Vec<(NodeIndex, i64)>, String> {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
-                                                  // Arena guard: disk-backed node/edge reads materialize into the query
-                                                  // arena, which must run under a DiskQueryGuard (arena protocol in
-                                                  // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena, which must run under a DiskQueryGuard (arena protocol in
+    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
     let _arena_guard = graph.graph.begin_query();
     // Candidate nodes to emit: union of the requested types, or every node.
     let candidates: Vec<NodeIndex> = match node_types {
@@ -1865,10 +1763,9 @@ pub fn clustering_coefficient_scoped(
     rel_types: Option<&[InternedKey]>,
     deadline: Interrupt,
 ) -> Result<Vec<(NodeIndex, f64)>, String> {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
-                                                  // Arena guard: disk-backed node/edge reads materialize into the query
-                                                  // arena, which must run under a DiskQueryGuard (arena protocol in
-                                                  // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena, which must run under a DiskQueryGuard (arena protocol in
+    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
     let _arena_guard = graph.graph.begin_query();
     let (nodes, adj) = build_scoped_undirected_adjacency(graph, node_types, rel_types, deadline)?;
     let n = nodes.len();
@@ -1919,10 +1816,9 @@ pub fn triangle_count_scoped(
     rel_types: Option<&[InternedKey]>,
     deadline: Interrupt,
 ) -> Result<(u64, f64), String> {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
-                                                  // Arena guard: disk-backed node/edge reads materialize into the query
-                                                  // arena, which must run under a DiskQueryGuard (arena protocol in
-                                                  // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena, which must run under a DiskQueryGuard (arena protocol in
+    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
     let _arena_guard = graph.graph.begin_query();
     let (nodes, adj) = build_scoped_undirected_adjacency(graph, node_types, rel_types, deadline)?;
     let n = nodes.len();
@@ -1973,10 +1869,9 @@ pub fn eccentricity_scoped(
     rel_types: Option<&[InternedKey]>,
     deadline: Interrupt,
 ) -> Result<Vec<(NodeIndex, i64)>, String> {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
-                                                  // Arena guard: disk-backed node/edge reads materialize into the query
-                                                  // arena, which must run under a DiskQueryGuard (arena protocol in
-                                                  // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena, which must run under a DiskQueryGuard (arena protocol in
+    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
     let _arena_guard = graph.graph.begin_query();
     let (nodes, adj) = build_scoped_undirected_adjacency(graph, node_types, rel_types, deadline)?;
     let n = nodes.len();
@@ -2028,10 +1923,9 @@ pub fn diameter_scoped(
     rel_types: Option<&[InternedKey]>,
     deadline: Interrupt,
 ) -> Result<i64, String> {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
-                                                  // Arena guard: disk-backed node/edge reads materialize into the query
-                                                  // arena, which must run under a DiskQueryGuard (arena protocol in
-                                                  // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena, which must run under a DiskQueryGuard (arena protocol in
+    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
     let _arena_guard = graph.graph.begin_query();
     let eccs = eccentricity_scoped(graph, node_types, rel_types, deadline)?;
     Ok(eccs.iter().map(|(_, e)| *e).max().unwrap_or(0))
@@ -2059,10 +1953,9 @@ fn intersection_count_gt(a: &[u32], b: &[u32], gt: u32) -> u64 {
 
 /// Get node info for building Python-friendly path output
 pub fn get_node_info(graph: &DirGraph, node_idx: NodeIndex) -> Option<PathNodeInfo> {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
-                                                  // Arena guard: disk-backed node/edge reads materialize into the query
-                                                  // arena, which must run under a DiskQueryGuard (arena protocol in
-                                                  // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena, which must run under a DiskQueryGuard (arena protocol in
+    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
     let _arena_guard = graph.graph.begin_query();
     let node = graph.node_view(node_idx)?;
     let node_title = node.title();
@@ -2079,10 +1972,9 @@ pub fn get_node_info(graph: &DirGraph, node_idx: NodeIndex) -> Option<PathNodeIn
 
 /// Get information about what connection types link nodes in a path
 pub fn get_path_connections(graph: &DirGraph, path: &[NodeIndex]) -> Vec<Option<String>> {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
-                                                  // Arena guard: disk-backed node/edge reads materialize into the query
-                                                  // arena, which must run under a DiskQueryGuard (arena protocol in
-                                                  // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena, which must run under a DiskQueryGuard (arena protocol in
+    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
     let _arena_guard = graph.graph.begin_query();
     // Pre-allocate with exact size (one connection per edge = path.len() - 1)
     let mut connections = Vec::with_capacity(path.len().saturating_sub(1));
@@ -2181,17 +2073,16 @@ pub fn shortest_path_weighted(
     weight_property: &str,
     options: &PathOptions,
 ) -> Option<WeightedPathResult> {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena, which must run under a DiskQueryGuard (arena protocol in
+    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     let PathOptions {
         connection_types,
         via_types,
         direction,
         interrupt: deadline,
     } = *options;
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena, which must run under a DiskQueryGuard (arena protocol in
-    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     use std::cmp::Ordering;
     use std::collections::BinaryHeap;
 
@@ -2326,10 +2217,9 @@ pub fn shortest_path_cost_weighted(
     weight_property: &str,
     options: &PathOptions,
 ) -> Option<f64> {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
-                                                  // Arena guard: disk-backed node/edge reads materialize into the query
-                                                  // arena, which must run under a DiskQueryGuard (arena protocol in
-                                                  // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena, which must run under a DiskQueryGuard (arena protocol in
+    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
     let _arena_guard = graph.graph.begin_query();
     shortest_path_weighted(graph, source, target, weight_property, options).map(|r| r.weight)
 }
