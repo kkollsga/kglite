@@ -468,8 +468,14 @@ fn write_with_no_return_acknowledges_stats() {
             env!("CARGO_PKG_VERSION")
         )
     );
-    // A read that matches nothing still says "No results" (distinct signal).
+    // A read that matches nothing still says "No results" (distinct signal) —
+    // and, since `Nope` is a type this graph has never had, says why.
     let out = write(&mut a, "MATCH (x:Nope) RETURN x", None).unwrap();
+    assert!(out.starts_with("No results.\n"), "{out}");
+    assert!(out.contains("unknown node label 'Nope'"), "{out}");
+    // A read that matches nothing against a type that DOES exist gets the
+    // bare signal — the warning block is earned, not decoration.
+    let out = write(&mut a, "MATCH (t:Task {id:'absent'}) RETURN t", None).unwrap();
     assert_eq!(out, "No results.");
 }
 

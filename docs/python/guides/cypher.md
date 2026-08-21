@@ -73,7 +73,7 @@ graph.cypher(
 
 ## Tuning and diagnostics
 
-Every read query carries lightweight diagnostics, and you can profile,
+Every query carries lightweight diagnostics, and you can profile,
 explain, bound, and even disable individual optimizer passes. This is the
 machinery agents lean on to run untrusted queries safely and to explain why
 a query returned what it did.
@@ -89,7 +89,9 @@ r.diagnostics
 The `warnings` list surfaces non-fatal advisories — most importantly a
 `MATCH` against an unknown label or relationship type, which silently returns
 zero rows. The same "did you mean?" hint interactive users see on stderr is
-exposed here for programmatic / agent callers:
+exposed here for programmatic / agent callers, on every kind of query
+(a mutation's `MATCH` can be typo'd too) and on repeat runs of a query the
+plan cache is serving:
 
 ```python
 r = graph.cypher("MATCH (n:Persn) RETURN n")   # typo

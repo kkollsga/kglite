@@ -40,6 +40,18 @@
 //! *lookup* is not skipped (classification does not exist yet at that point in
 //! `prepare`; see the comment there), it is simply a guaranteed miss.
 //!
+//! ## What a hit carries besides the plan
+//!
+//! The non-fatal schema warnings (`schema_check::collect_unknown_pattern_warnings`
+//! — unknown label / relationship type, with a "did you mean?") ride on the
+//! entry. They are a pure function of `(query, graph schema)`, and the key
+//! already pins the graph state, so a hit hands back exactly what a miss would
+//! have computed. Re-deriving them at lookup time is not an option: it needs
+//! the parsed AST, and skipping the parse is the whole point of this cache.
+//! Not carrying them at all is worse — the *second* run of a typo'd query
+//! would silently lose its warning, which is the shape this cache had before
+//! `QueryDiagnostics.warnings` was populated.
+//!
 //! Only **param-less, codec-free, no-disabled-passes, non-`text_score`**
 //! queries are cached (see `session::execute::prepare`): with those excluded,
 //! the optimized plan is a pure function of `(query, graph state)`, and
@@ -64,10 +76,19 @@ pub(crate) const CACHE_CAPACITY: usize = 512;
 /// variant. See the module docs for `graph_id` / `version`.
 type PlanKey = (u64, u64, bool, u64);
 
+/// What a lookup hands back: the ready-to-execute plan plus the schema
+/// warnings computed for it (see the module docs). Both are behind `Arc`, so a
+/// hit is two refcount bumps and no clone of either payload.
+#[derive(Clone)]
+pub struct CachedPlan {
+    pub plan: Arc<CypherQuery>,
+    pub warnings: Arc<[String]>,
+}
+
 struct PlanCache {
     /// Plans are stored behind `Arc` so a cache hit is a refcount bump, not a
     /// deep AST clone — execute borrows the plan read-only, so sharing is safe.
-    map: HashMap<PlanKey, Arc<CypherQuery>>,
+    map: HashMap<PlanKey, CachedPlan>,
     /// Insertion order — front = oldest, for FIFO eviction at capacity.
     order: VecDeque<PlanKey>,
 }
@@ -97,18 +118,26 @@ fn hash_query(query: &str) -> u64 {
 /// Look up a cached, ready-to-execute plan for `query` against the graph
 /// identified by `(graph_id, version)` at the given `lazy_eligible` mode.
 /// Returns an `Arc` clone on hit (no AST copy), `None` on miss.
-pub fn get(graph_id: u64, version: u64, lazy: bool, query: &str) -> Option<Arc<CypherQuery>> {
+pub fn get(graph_id: u64, version: u64, lazy: bool, query: &str) -> Option<CachedPlan> {
     let key = (graph_id, version, lazy, hash_query(query));
     let guard = cache().read().expect("plan_cache RwLock poisoned");
-    let hit = guard.map.get(&key).map(Arc::clone);
+    let hit = guard.map.get(&key).cloned();
     #[cfg(test)]
     instrumentation::record_lookup(hit.is_some());
     hit
 }
 
-/// Cache `plan` (the optimized AST, already lazy-marked for `lazy`) for `query`
-/// against `(graph_id, version)`. FIFO-evicts the oldest entry at capacity.
-pub fn insert(graph_id: u64, version: u64, lazy: bool, query: &str, plan: Arc<CypherQuery>) {
+/// Cache `plan` (the optimized AST, already lazy-marked for `lazy`) plus the
+/// schema `warnings` computed for it, for `query` against `(graph_id,
+/// version)`. FIFO-evicts the oldest entry at capacity.
+pub fn insert(
+    graph_id: u64,
+    version: u64,
+    lazy: bool,
+    query: &str,
+    plan: Arc<CypherQuery>,
+    warnings: Arc<[String]>,
+) {
     let key = (graph_id, version, lazy, hash_query(query));
     let mut guard = cache().write().expect("plan_cache RwLock poisoned");
     if guard.map.contains_key(&key) {
@@ -122,7 +151,7 @@ pub fn insert(graph_id: u64, version: u64, lazy: bool, query: &str, plan: Arc<Cy
         }
     }
     guard.order.push_back(key);
-    guard.map.insert(key, plan);
+    guard.map.insert(key, CachedPlan { plan, warnings });
     #[cfg(test)]
     instrumentation::record_insertion();
 }
@@ -302,14 +331,30 @@ mod tests {
         Arc::new(parse_cypher(q).expect("parse"))
     }
 
+    fn no_warnings() -> Arc<[String]> {
+        Vec::new().into()
+    }
+
     #[test]
     fn miss_then_hit_same_key() {
         let _g = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         clear_for_tests();
         let q = "MATCH (n:T) RETURN n";
         assert!(get(1, 0, false, q).is_none(), "cold miss");
-        insert(1, 0, false, q, plan(q));
-        assert!(get(1, 0, false, q).is_some(), "warm hit");
+        insert(
+            1,
+            0,
+            false,
+            q,
+            plan(q),
+            vec!["typo'd label".to_string()].into(),
+        );
+        let hit = get(1, 0, false, q).expect("warm hit");
+        assert_eq!(
+            &*hit.warnings,
+            ["typo'd label".to_string()],
+            "a hit carries the warnings its miss computed"
+        );
     }
 
     #[test]
@@ -317,7 +362,7 @@ mod tests {
         let _g = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         clear_for_tests();
         let q = "MATCH (n:T) RETURN n";
-        insert(7, 3, false, q, plan(q));
+        insert(7, 3, false, q, plan(q), no_warnings());
         // Same query, different version / graph / lazy-mode → must miss.
         assert!(get(7, 4, false, q).is_none(), "version change invalidates");
         assert!(
@@ -339,6 +384,7 @@ mod tests {
                 false,
                 "MATCH (n:T) RETURN n",
                 plan("MATCH (n:T) RETURN n"),
+                no_warnings(),
             );
         }
         assert_eq!(entry_count_for_tests(), CACHE_CAPACITY);

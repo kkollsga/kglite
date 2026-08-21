@@ -2323,7 +2323,7 @@ Every `cypher()` call attaches lightweight execution diagnostics to the returned
 ```python
 result = graph.cypher("MATCH (n:Country {label: 'Norway'}) RETURN n.nid")
 print(result.diagnostics)
-# {'elapsed_ms': 3, 'timed_out': False, 'timeout_ms': 180000}
+# {'elapsed_ms': 3, 'timed_out': False, 'timeout_ms': 180000, 'warnings': []}
 ```
 
 Keys:
@@ -2332,6 +2332,19 @@ Keys:
 - `timed_out` — `False` on every successful result. A fired deadline raises
   `CypherTimeoutError`, so no partial `ResultView` is returned.
 - `timeout_ms` — the deadline that was in effect, or `None` when no deadline applied.
+- `warnings` — non-fatal advisories about the query, empty for a clean one. A
+  `MATCH` against an unknown label or relationship type is legal Cypher that
+  returns zero rows, so it is a warning and not an error — with a "did you
+  mean?" hint, since it is almost always a typo. Populated on reads,
+  mutations, `EXPLAIN`, and session/transaction queries alike, and mirrored to
+  stderr for interactive users.
+
+```python
+result = graph.cypher("MATCH (n:Persn) RETURN n")   # typo
+result.diagnostics["warnings"]
+# ["MATCH references unknown node label 'Persn' — the graph has no such
+#   type, so this pattern returns no rows. Did you mean 'Person'?"]
+```
 
 `timeout_ms` resolution: explicit `cypher(..., timeout_ms=N)` >
 `kg.set_default_timeout(ms)` > the Python default of 180,000 ms. Pass

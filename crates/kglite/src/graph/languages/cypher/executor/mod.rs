@@ -33,7 +33,7 @@ use crate::graph::storage::GraphRead;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Mutex, OnceLock, RwLock};
 use std::time::Instant;
 
 #[cfg(test)]
@@ -125,6 +125,17 @@ pub struct CypherExecutor<'a> {
     /// grants filesystem access explicitly, so a remote Bolt client never
     /// inherits one by omission. See `executor/load_csv.rs`.
     pub(super) csv_import: load_csv::CsvImportPolicy,
+    /// Non-fatal warnings raised during *execution*, as opposed to the schema
+    /// warnings `session::execute::prepare` computes before it: the procedure
+    /// scoping checks (`CALL pagerank({relationship: 'TYPO'})`) can only run
+    /// once the CALL's arguments have been evaluated. [`Self::execute`] drains
+    /// them onto `CypherResult.diagnostics`, where the session layer merges
+    /// them with the schema ones and every surface reads them.
+    ///
+    /// `Mutex` because execution holds `&self` (and shares it across rayon
+    /// regions). Contention is nil: a warning is pushed at most once per CALL
+    /// clause, never per row.
+    runtime_warnings: Mutex<Vec<String>>,
     /// Holds the disk materialization arenas alive for this executor's
     /// lifetime (arena protocol in `storage/disk/graph.rs`, enforced by a
     /// debug assert). Acquired in the constructor so EVERY read this
@@ -154,6 +165,7 @@ impl<'a> CypherExecutor<'a> {
             streaming: true,
             parallel: false,
             csv_import: load_csv::CsvImportPolicy::Denied,
+            runtime_warnings: Mutex::new(Vec::new()),
             _arena_guard: graph.graph.begin_query(),
         }
     }
@@ -339,7 +351,77 @@ impl<'a> CypherExecutor<'a> {
         if query.profile {
             result.profile = Some(profile_stats);
         }
+        // Hand the execution-time warnings (procedure scoping) out on the
+        // result; `session::execute` merges the schema warnings in front of
+        // them and fills the timing fields.
+        let warnings = self.take_runtime_warnings();
+        if !warnings.is_empty() {
+            result
+                .diagnostics
+                .get_or_insert_with(QueryDiagnostics::default)
+                .warnings
+                .extend(warnings);
+        }
         Ok(result)
+    }
+
+    /// Record a non-fatal execution-time warning, and echo it to stderr for
+    /// interactive users (the same one-computation/two-consumers split
+    /// `session::execute::prepare` applies to the schema warnings).
+    ///
+    /// Repeats are dropped: a correlated `CALL {}` body re-executes its CALL
+    /// clause once per outer row, and the same mis-spelled relationship type
+    /// is one fact about the query however many rows re-discover it.
+    pub(super) fn warn(&self, message: String) {
+        let mut warnings = self
+            .runtime_warnings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if warnings.contains(&message) {
+            return;
+        }
+        super::emit_query_warnings(std::slice::from_ref(&message));
+        warnings.push(message);
+    }
+
+    /// Move a nested executor's warnings onto this one. A `CALL {}` body runs
+    /// on its own executor, so without this its procedure warnings would be
+    /// dropped when that executor is.
+    pub(super) fn absorb_warnings(&self, nested: &CypherExecutor<'_>) {
+        for warning in nested.take_runtime_warnings() {
+            self.warn_absorbed(warning);
+        }
+    }
+
+    /// Absorb one already-emitted warning: recorded (de-duplicated) but not
+    /// re-printed — stderr saw it when the nested executor raised it.
+    fn warn_absorbed(&self, message: String) {
+        let mut warnings = self
+            .runtime_warnings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !warnings.contains(&message) {
+            warnings.push(message);
+        }
+    }
+
+    /// Absorb the warnings a nested [`Self::execute`] parked on its result.
+    pub(super) fn absorb_diagnostics(&self, nested: &CypherResult) {
+        let Some(diagnostics) = nested.diagnostics.as_ref() else {
+            return;
+        };
+        for warning in &diagnostics.warnings {
+            self.warn_absorbed(warning.clone());
+        }
+    }
+
+    fn take_runtime_warnings(&self) -> Vec<String> {
+        std::mem::take(
+            &mut *self
+                .runtime_warnings
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
     }
 
     /// Drive a read-only `LOAD CSV` pipeline: strip the leading clause, then

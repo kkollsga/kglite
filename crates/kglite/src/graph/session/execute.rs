@@ -285,7 +285,13 @@ pub fn execute_read(
     query: &str,
     opts: &ExecuteOptions<'_>,
 ) -> Result<ExecuteOutcome, KgError> {
-    let (parsed, params, encode_plan) = prepare(graph, query, opts)?;
+    let started = Instant::now();
+    let PreparedQuery {
+        plan: parsed,
+        params,
+        encode_plan,
+        warnings,
+    } = prepare(graph, query, opts)?;
     let is_mutation = cypher::is_mutation_query(&parsed);
     // Attribute the plan-cache events `prepare` just caused, now that the
     // statement kind is known. Test-only; see `plan_cache::instrumentation`.
@@ -294,7 +300,8 @@ pub fn execute_read(
 
     // EXPLAIN: render plan rows, skip execution.
     if parsed.explain {
-        let result = cypher::generate_explain_result(&parsed, graph);
+        let mut result = cypher::generate_explain_result(&parsed, graph);
+        attach_diagnostics(&mut result, &warnings, started, opts);
         return Ok(ExecuteOutcome {
             result,
             is_mutation,
@@ -324,6 +331,7 @@ pub fn execute_read(
     // streaming path) materialize later and aren't covered — the configured
     // consumer (mcp-server) runs eager.
     cypher::value_codec::apply_encode(&mut result, &encode_plan);
+    attach_diagnostics(&mut result, &warnings, started, opts);
 
     Ok(ExecuteOutcome {
         result,
@@ -392,7 +400,13 @@ pub fn execute_mut(
     query: &str,
     opts: &ExecuteOptions<'_>,
 ) -> Result<ExecuteOutcome, KgError> {
-    let (parsed, params, encode_plan) = prepare(graph, query, opts)?;
+    let started = Instant::now();
+    let PreparedQuery {
+        plan: parsed,
+        params,
+        encode_plan,
+        warnings,
+    } = prepare(graph, query, opts)?;
     let is_mutation = cypher::is_mutation_query(&parsed);
     // See the identical call in `execute_read`. Test-only.
     #[cfg(test)]
@@ -402,7 +416,8 @@ pub fn execute_mut(
     // disk promotion, or an atomic rollback checkpoint so inspecting a write
     // plan remains a read-only, O(plan) operation.
     if parsed.explain {
-        let result = cypher::generate_explain_result(&parsed, graph);
+        let mut result = cypher::generate_explain_result(&parsed, graph);
+        attach_diagnostics(&mut result, &warnings, started, opts);
         return Ok(ExecuteOutcome {
             result,
             is_mutation,
@@ -507,6 +522,7 @@ pub fn execute_mut(
     // Encode codec'd-property result columns (e.g. `CREATE (...) RETURN n.id`
     // reads back `'Q42'`). Eager path only; see execute_read.
     cypher::value_codec::apply_encode(&mut result, &encode_plan);
+    attach_diagnostics(&mut result, &warnings, started, opts);
 
     Ok(ExecuteOutcome {
         result,
@@ -597,13 +613,20 @@ fn collect_clause_names<'a>(clauses: &'a [Clause], out: &mut Vec<&'a str>) {
 /// re-acquire the GIL briefly to invoke Python; if you forget to
 /// release first, it deadlocks.
 /// Output of [`prepare`]: the parsed+optimized query, the (possibly
-/// embedding-augmented) param map, and the column-indexed value-codec encode
-/// plan (empty when no codecs apply).
-type PreparedQuery = (
-    Arc<CypherQuery>,
-    HashMap<String, Value>,
-    Vec<Option<ValueCodec>>,
-);
+/// embedding-augmented) param map, the column-indexed value-codec encode plan
+/// (empty when no codecs apply), and the non-fatal schema warnings this
+/// statement earned.
+struct PreparedQuery {
+    plan: Arc<CypherQuery>,
+    params: HashMap<String, Value>,
+    encode_plan: Vec<Option<ValueCodec>>,
+    /// Unknown-label / unknown-relationship-type / absent-property warnings,
+    /// computed **once** here and then used twice: emitted to stderr for
+    /// interactive users, and attached to `QueryDiagnostics.warnings` for every
+    /// programmatic surface. Behind an `Arc` because the plan cache stores them
+    /// alongside the plan — see the note at the cache lookup below.
+    warnings: Arc<[String]>,
+}
 
 // KgError carries query context; boxing it would only burden an error path.
 #[allow(clippy::result_large_err)]
@@ -625,12 +648,25 @@ fn prepare(
         && opts.disabled_passes.is_none_or(|s| s.is_empty())
         && opts.value_codecs.is_none_or(|c| c.is_empty());
     if cacheable {
-        if let Some(plan) =
+        if let Some(cached) =
             cypher::plan_cache::get(graph.graph_id(), graph.version(), opts.lazy_eligible, query)
         {
             // Stored post lazy-marking for this `lazy_eligible` — a hit is a
             // pure Arc clone, no parse / validate / optimize / mutation.
-            return Ok((plan, HashMap::new(), Vec::new()));
+            //
+            // The warnings come out of the entry rather than being recomputed:
+            // recomputing needs the parsed AST, and not skipping the parse is
+            // exactly what this early return exists to avoid. Their validity
+            // is the cache's own soundness argument — they are a pure function
+            // of `(query, graph schema)` and the key pins the graph state.
+            // Stderr repeats them per call, as it did when every call parsed.
+            cypher::emit_query_warnings(&cached.warnings);
+            return Ok(PreparedQuery {
+                plan: cached.plan,
+                params: HashMap::new(),
+                encode_plan: Vec::new(),
+                warnings: cached.warnings,
+            });
         }
     }
 
@@ -658,9 +694,13 @@ fn prepare(
     // (`{ttle: 'Alice'}`) get caught with a "did you mean?" hint.
     cypher::validate_schema(&parsed, graph).map_err(KgError::from)?;
 
-    // Non-fatal: warn (stderr) when a MATCH references an unknown node label
-    // or relationship type — the most common "why is my query empty?" typo.
-    cypher::warn_unknown_pattern_refs(&parsed, graph);
+    // Non-fatal: a MATCH that references an unknown node label or relationship
+    // type — the most common "why is my query empty?" typo. Computed once and
+    // consumed twice: stderr now (interactive users), and
+    // `QueryDiagnostics.warnings` at the end of execute (every programmatic
+    // surface, including the MCP server, which is where an agent reads them).
+    let warnings: Arc<[String]> = cypher::collect_unknown_pattern_warnings(&parsed, graph).into();
+    cypher::emit_query_warnings(&warnings);
 
     // text_score() rewrite. Scans for `text_score(...)` calls in the
     // AST and rewrites them to `vector_score(...)`, collecting the
@@ -733,10 +773,47 @@ fn prepare(
             opts.lazy_eligible,
             query,
             plan.clone(),
+            Arc::clone(&warnings),
         );
     }
 
-    Ok((plan, params.into_owned(), encode_plan))
+    Ok(PreparedQuery {
+        plan,
+        params: params.into_owned(),
+        encode_plan,
+        warnings,
+    })
+}
+
+/// Attach `QueryDiagnostics` to a finished result — the single place every
+/// execution path (read, mutation, EXPLAIN) leaves them.
+///
+/// `prepare_warnings` are the schema warnings from [`prepare`]; the executor
+/// may already have parked runtime ones (procedure scoping) on the result's
+/// diagnostics, and those keep their place after the schema ones, which
+/// explain an empty result before any runtime advisory does.
+///
+/// `timeout_ms` is derived from the deadline that was actually in force. A
+/// binding that knows the configured figure (the wheel reports the caller's
+/// `timeout_ms`, including its `Some(0)` = "disabled" escape hatch) overwrites
+/// it; core can only see the instant.
+fn attach_diagnostics(
+    result: &mut CypherResult,
+    prepare_warnings: &[String],
+    started: Instant,
+    opts: &ExecuteOptions<'_>,
+) {
+    let mut diagnostics = result.diagnostics.take().unwrap_or_default();
+    if !prepare_warnings.is_empty() {
+        let mut merged = prepare_warnings.to_vec();
+        merged.append(&mut diagnostics.warnings);
+        diagnostics.warnings = merged;
+    }
+    diagnostics.elapsed_ms = started.elapsed().as_millis() as u64;
+    diagnostics.timeout_ms = opts
+        .deadline
+        .map(|deadline| deadline.saturating_duration_since(started).as_millis() as u64);
+    result.diagnostics = Some(diagnostics);
 }
 
 /// Run the embedder on collected texts; inject the JSON-encoded

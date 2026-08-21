@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Query warnings never reached the surfaces that needed them most.** The
+  engine has always detected an unknown node label, relationship type or
+  property in a `MATCH` and computed a "did you mean?" hint — and then wrote it
+  to **stderr only**. `ResultView.diagnostics` was never populated by the
+  engine (the wheel re-derived the warnings on its own read path; every other
+  binding got an empty list), and the MCP server — the surface agents actually
+  query — showed nothing at all, so a typo'd label returned a confident
+  "No results." The engine now populates `QueryDiagnostics.warnings` for every
+  execution: reads, mutations, EXPLAIN, session and transaction queries, and
+  **on plan-cache hits**, where the warnings ride on the cached entry rather
+  than being lost to the early return. The MCP server appends a trailing
+  `warnings:` block to `cypher_query` responses (direct tool, manifest
+  templates, and the no-rows write acknowledgement alike), execution-time
+  procedure-scope advisories join the same field, and `graph_overview`'s
+  unknown-type error now suggests a near-miss type name. One computation,
+  every surface; the wheel's duplicate derivation is gone. `ResultView.diagnostics`
+  is consequently a dict rather than `None` on mutation, EXPLAIN and
+  transaction results.
+
 - **`CALL ready_set(...)` with an unknown relationship type reported every node
   as ready.** The procedure answers "are all of this node's dependencies done?"
   with a universal quantifier over its outgoing edges of the given type, and a

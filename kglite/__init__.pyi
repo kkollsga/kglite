@@ -470,8 +470,13 @@ class ResultView:
 
     @property
     def diagnostics(self) -> Optional[dict[str, Any]]:
-        """Lightweight execution diagnostics for this query, or ``None``
-        for mutation paths / EXPLAIN / transactions.
+        """Lightweight execution diagnostics for this query.
+
+        Populated by the engine for every execution — reads, mutations,
+        EXPLAIN, session and transaction queries alike — so a typo'd label
+        in ``MATCH (n:typo) SET ...`` is as visible as one in a read.
+        ``None`` only for views that did not come from a query (``head()`` /
+        ``tail()`` slices, DataFrame round-trips).
 
         Returned dict keys:
 
@@ -485,8 +490,10 @@ class ResultView:
         - ``warnings`` (list[str]): non-fatal advisory warnings about the
           query — e.g. a ``MATCH`` against an unknown node label or
           relationship type (almost always a typo), with a "did you mean?"
-          hint. Empty for a clean query. The same signal interactive users
-          see on stderr, exposed here for programmatic / agent callers.
+          hint. Also carries execution-time advisories, e.g. a procedure
+          scoped to a relationship type the graph does not have. Empty for a
+          clean query. The same signal interactive users see on stderr,
+          exposed here for programmatic / agent callers.
 
         Use this to tune ``timeout_ms`` or move toward anchored queries
         when your query repeatedly approaches the deadline, and surface

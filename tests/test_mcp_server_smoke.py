@@ -393,6 +393,37 @@ class TestGraphMode:
         finally:
             client.shutdown()
 
+    def test_cypher_query_typo_reports_the_engine_warning(self, graph_fixture: Path):
+        """The engine has always diagnosed `MATCH (p:person)` on a graph of
+        `Person`s; before D1p the diagnosis went to the server's stderr and the
+        agent read a confident "No results." """
+        client = _spawn(["--graph", str(graph_fixture)])
+        try:
+            r = client.call_tool("cypher_query", {"query": "MATCH (p:person) RETURN count(p) AS n"})
+            text = _text_content(r)
+            assert "warnings:" in text
+            assert "unknown node label 'person'" in text
+            assert "Did you mean 'Person'?" in text
+        finally:
+            client.shutdown()
+
+    def test_cypher_query_clean_has_no_warnings_block(self, graph_fixture: Path):
+        client = _spawn(["--graph", str(graph_fixture)])
+        try:
+            r = client.call_tool("cypher_query", {"query": "MATCH (p:Person) RETURN count(p) AS n"})
+            assert "warnings:" not in _text_content(r)
+        finally:
+            client.shutdown()
+
+    def test_graph_overview_unknown_type_suggests_a_near_miss(self, graph_fixture: Path):
+        client = _spawn(["--graph", str(graph_fixture)])
+        try:
+            r = client.call_tool("graph_overview", {"types": ["person"]})
+            text = _text_content(r)
+            assert "Did you mean 'Person'?" in text
+        finally:
+            client.shutdown()
+
     def test_cypher_query_format_csv(self, graph_fixture: Path):
         client = _spawn(["--graph", str(graph_fixture)])
         try:

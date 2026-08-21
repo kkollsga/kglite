@@ -263,3 +263,76 @@ fn cdc_is_off_until_enabled_on_the_write_tool() {
         "unexpected error: {error}"
     );
 }
+
+/// An `ActiveGraph` holding one `Vessel` and one `OPERATED_BY` edge, so a
+/// case-typo query has something to be suggested.
+fn active_with_vessel() -> ActiveGraph {
+    let mut active = fresh_active();
+    let params = HashMap::new();
+    let opts = kglite::api::session::ExecuteOptions::eager(&params);
+    kglite::api::session::execute_mut(
+        kglite::api::make_dir_graph_mut(active.kg.dir_mut()),
+        "CREATE (:Vessel {id: 1})-[:OPERATED_BY]->(:Operator {id: 2})",
+        &opts,
+    )
+    .expect("seed");
+    active
+}
+
+/// The finding this phase answers: the engine diagnosed the typo, and the MCP
+/// response — the only thing an agent ever sees — said "No results."
+#[test]
+fn a_typod_label_reaches_the_tool_response() {
+    let state = state_with_active(active_with_vessel());
+    let body = state.run_cypher_template(
+        "MATCH (v:vessel) RETURN count(v) AS c",
+        &serde_json::Map::new(),
+        None,
+    );
+    assert!(body.contains("warnings:"), "{body}");
+    assert!(body.contains("unknown node label 'vessel'"), "{body}");
+    assert!(body.contains("Did you mean 'Vessel'?"), "{body}");
+}
+
+/// A clean query gets no block at all — the footer must not become noise every
+/// response carries.
+#[test]
+fn a_clean_query_gets_no_warning_block() {
+    let state = state_with_active(active_with_vessel());
+    let body = state.run_cypher_template(
+        "MATCH (v:Vessel) RETURN count(v) AS c",
+        &serde_json::Map::new(),
+        None,
+    );
+    assert!(!body.contains("warnings:"), "{body}");
+}
+
+/// The block rides on the shared render seam, so a `FORMAT CSV` response
+/// carries it too — the same place the identity footer already lands.
+#[test]
+fn the_warning_block_survives_csv_rendering() {
+    let state = state_with_active(active_with_vessel());
+    let body = state.run_cypher_template(
+        "MATCH (v:vessel) RETURN v.id AS id FORMAT CSV",
+        &serde_json::Map::new(),
+        None,
+    );
+    assert!(body.contains("unknown node label 'vessel'"), "{body}");
+}
+
+/// A write whose MATCH names nothing reports `OK (no changes)` — the most
+/// misleading answer the write tool can give. It takes the ack path, not the
+/// row-rendering path, so the block is appended there too.
+#[test]
+fn a_no_op_write_ack_carries_the_warning() {
+    let mut active = active_with_vessel();
+    let body = write_pinned(
+        &mut active,
+        "MATCH (v:vessel) SET v.flag = true",
+        None,
+        None,
+    )
+    .expect("write runs");
+    assert!(body.starts_with("OK (no changes)"), "{body}");
+    assert!(body.contains("unknown node label 'vessel'"), "{body}");
+}

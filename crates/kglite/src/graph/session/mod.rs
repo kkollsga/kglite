@@ -57,6 +57,8 @@ pub(crate) mod durable;
 pub(crate) mod execute;
 #[cfg(test)]
 mod plan_cache_cost_tests;
+#[cfg(test)]
+mod query_warnings_tests;
 pub(crate) mod transaction;
 
 use crate::datatypes::Value;

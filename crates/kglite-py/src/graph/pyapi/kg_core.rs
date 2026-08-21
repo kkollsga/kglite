@@ -1790,7 +1790,7 @@ impl KnowledgeGraph {
             let this = slf.try_borrow().map_err(|_| concurrent_access_pyerr())?;
             this.embedder.clone()
         };
-        let result = {
+        let mut result = {
             let opts = kglite_core::api::session::ExecuteOptions {
                 params: &param_map,
                 deadline,
@@ -1847,15 +1847,15 @@ impl KnowledgeGraph {
             Some(0) | None => None,
             other => other,
         };
-        let diagnostics = cypher::QueryDiagnostics {
-            elapsed_ms,
-            timed_out: false,
-            timeout_ms: reported_timeout_ms,
-            // Surface schema "did you mean?" warnings structurally so agent /
-            // programmatic callers (who can't see the stderr emission) get the
-            // signal too — e.g. a typo'd label that returned zero rows.
-            warnings: cypher::collect_unknown_pattern_warnings(&pre_parsed, &inner),
-        };
+        // The engine populates diagnostics (including the schema "did you
+        // mean?" warnings, on plan-cache hits too) — this boundary only
+        // refines the two fields core cannot know: the wall-clock span the
+        // wheel actually measured, and the caller's configured timeout with
+        // its `Some(0)` escape hatch. The wheel used to re-derive the warnings
+        // here from its own pre-parsed AST; that duplicate is gone.
+        let mut diagnostics = result.diagnostics.take().unwrap_or_default();
+        diagnostics.elapsed_ms = elapsed_ms;
+        diagnostics.timeout_ms = reported_timeout_ms;
         {
             let columns = result.columns;
             let stats = result.stats;

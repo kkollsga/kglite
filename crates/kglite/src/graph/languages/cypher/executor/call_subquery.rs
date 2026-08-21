@@ -125,6 +125,9 @@ impl<'a> CypherExecutor<'a> {
         // Run the body once for the first outer row to learn the subquery's
         // RETURN columns, then check those columns for an outer-scope
         // collision (§1.2 rule 4) — including a re-returned imported name.
+        // The sub-executor's warnings are drained onto this one once the loop
+        // is done (see `absorb_warnings`) — a per-row body raises the same
+        // warning on every row, and `warn` de-duplicates it there.
         let mut combined_rows: Vec<ResultRow> = Vec::new();
         let mut sub_columns: Option<Vec<String>> = None;
 
@@ -193,6 +196,8 @@ impl<'a> CypherExecutor<'a> {
             splice_subquery_columns(&mut row, &body_result.rows[s - 1], cols);
             combined_rows.push(row);
         }
+
+        self.absorb_warnings(&sub);
 
         // Carry outer columns forward + append the subquery's RETURN
         // columns so a later RETURN can reference them. When every outer
@@ -313,6 +318,9 @@ impl<'a> CypherExecutor<'a> {
             .with_cancel(self.cancel)
             .with_budget(self.budget.clone());
         let sub_result = sub.execute(body)?;
+        // A procedure warning raised inside the body belongs to the query the
+        // caller ran, not to the executor that happens to have run the body.
+        self.absorb_diagnostics(&sub_result);
 
         // The body must terminate in RETURN (parser-enforced, §1.4), so a
         // lazy descriptor is never produced here — the body is not lazy-

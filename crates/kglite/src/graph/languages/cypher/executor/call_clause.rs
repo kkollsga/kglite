@@ -248,18 +248,18 @@ fn validate_scope_names(
 /// *values* against the schema — a key spelled right and pointing at a type
 /// that does not exist was the remaining silent no-op.
 ///
-/// The value check's warnings are emitted here, to stderr, matching
-/// `schema_check::warn_unknown_pattern_refs` (the one convention kglite has
-/// for a non-fatal query warning; `QueryDiagnostics.warnings` will carry them
-/// to the MCP/Bolt surfaces once it is populated). [`validate_scope_names`] is
-/// the pure, directly-testable half.
+/// The value check's warnings are returned to the caller, which records them
+/// on the executor: they leave through `QueryDiagnostics.warnings` (so the MCP
+/// and Bolt surfaces see them) and through stderr (so interactive users do),
+/// from the one computation. [`validate_scope_names`] is the pure,
+/// directly-testable half.
 fn normalize_and_validate_algo_params(
     proc: &str,
     params: &mut HashMap<String, Value>,
     graph: &crate::graph::DirGraph,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
     let Some(allowed) = algo_allowed_keys(proc) else {
-        return Ok(());
+        return Ok(Vec::new());
     };
     // Copy a present key onto its absent twin so every procedure finds the key
     // name it reads (centrality/community read `connection_types`; components/
@@ -281,13 +281,25 @@ fn normalize_and_validate_algo_params(
             return Err(format!("CALL {proc}(): unknown config key '{key}'.{hint}"));
         }
     }
-    for warning in validate_scope_names(proc, params, graph)? {
-        eprintln!("warning: {warning}");
-    }
-    Ok(())
+    validate_scope_names(proc, params, graph)
 }
 
 impl<'a> CypherExecutor<'a> {
+    /// [`normalize_and_validate_algo_params`] against this executor's graph,
+    /// with the non-fatal half recorded on the query: the scope warnings reach
+    /// `QueryDiagnostics.warnings` (and stderr) rather than being returned to
+    /// a caller that would have to know to look at them.
+    fn validate_algo_params(
+        &self,
+        proc: &str,
+        params: &mut HashMap<String, Value>,
+    ) -> Result<(), String> {
+        for warning in normalize_and_validate_algo_params(proc, params, self.graph)? {
+            self.warn(warning);
+        }
+        Ok(())
+    }
+
     /// Build an optional subgraph scope from the `{node_type, where}` procedure
     /// params (centrality / community algorithms). Returns `None` when neither
     /// is present — the whole-graph fast path. Otherwise the candidate universe
@@ -523,7 +535,7 @@ impl<'a> CypherExecutor<'a> {
         // across procedures, and reject genuinely-unknown config keys with a
         // did-you-mean — so a typo or a wrong-procedure key surfaces an error
         // instead of silently no-op'ing (operator feedback A2 / A2b 2026-06-17).
-        normalize_and_validate_algo_params(proc_name.as_str(), &mut params, self.graph)?;
+        self.validate_algo_params(proc_name.as_str(), &mut params)?;
 
         // Optional subgraph scope for the centrality / community procedures:
         // `{node_type: '...', where: 'n.<prop> ...'}` restricts the algorithm

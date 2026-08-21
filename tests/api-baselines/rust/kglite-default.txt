@@ -637,7 +637,6 @@ impl core::fmt::Display for kglite::api::cypher::planner::schema_check::SchemaEr
 pub fn kglite::api::cypher::planner::schema_check::SchemaError::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn kglite::api::cypher::planner::schema_check::collect_unknown_pattern_warnings(query: &kglite::api::cypher::CypherQuery, graph: &kglite::api::DirGraph) -> alloc::vec::Vec<alloc::string::String>
 pub fn kglite::api::cypher::planner::schema_check::validate_schema(query: &kglite::api::cypher::CypherQuery, graph: &kglite::api::DirGraph) -> core::result::Result<(), kglite::api::cypher::planner::schema_check::SchemaError>
-pub fn kglite::api::cypher::planner::schema_check::warn_unknown_pattern_refs(query: &kglite::api::cypher::CypherQuery, graph: &kglite::api::DirGraph)
 pub mod kglite::api::cypher::planner::simplification
 pub struct kglite::api::cypher::planner::simplification::TextScoreRewrite
 pub kglite::api::cypher::planner::simplification::TextScoreRewrite::texts_to_embed: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>

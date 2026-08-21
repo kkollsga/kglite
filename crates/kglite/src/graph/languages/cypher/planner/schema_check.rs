@@ -47,7 +47,7 @@
 //!
 //! ## Non-fatal "did you mean?" warnings
 //!
-//! [`collect_unknown_pattern_warnings`] / [`warn_unknown_pattern_refs`] flag
+//! [`collect_unknown_pattern_warnings`] flags
 //! MATCH patterns that reference an unknown node label or relationship type —
 //! the most common "why is my query empty?" typo — with an edit-distance hint,
 //! *without* rejecting (the zero-row existence-check idiom stays valid). A
@@ -914,7 +914,7 @@ fn warn_absent_in_expr<'q>(
 /// type the graph has never seen (a zero-row existence check is legal Cypher,
 /// so this is *not* an error), plus the absent-property warnings from
 /// [`absent_property_warnings`]. Pure (no I/O), so directly testable;
-/// [`warn_unknown_pattern_refs`] is the stderr-emitting wrapper.
+/// [`emit_query_warnings`] is the stderr side of the same computation.
 pub fn collect_unknown_pattern_warnings(query: &CypherQuery, graph: &DirGraph) -> Vec<String> {
     let have_node_schema =
         !graph.node_type_metadata.is_empty() || graph.type_indices.keys().next().is_some();
@@ -1044,11 +1044,19 @@ pub fn collect_unknown_pattern_warnings(query: &CypherQuery, graph: &DirGraph) -
     out
 }
 
-/// Emit [`collect_unknown_pattern_warnings`] to stderr (matching kglite's
-/// existing `warning:`-prefixed convention for non-fatal query/load issues).
-/// Called from the shared execute path so every binding gets the signal.
-pub fn warn_unknown_pattern_refs(query: &CypherQuery, graph: &DirGraph) {
-    for msg in collect_unknown_pattern_warnings(query, graph) {
+/// Emit already-collected query warnings to stderr, matching kglite's
+/// `warning:`-prefixed convention for non-fatal query/load issues.
+///
+/// The one emitter, for the one computation: `session::execute` collects the
+/// warnings once, hands them to [`QueryDiagnostics::warnings`] for every
+/// programmatic surface, and passes the same slice through here for the
+/// interactive one (CLI/REPL users read stderr). Anything that computes a
+/// query warning of its own — `executor::call_clause`'s procedure-scope
+/// checks — emits through here too, so the prefix never drifts.
+///
+/// [`QueryDiagnostics::warnings`]: crate::graph::languages::cypher::result::QueryDiagnostics::warnings
+pub(crate) fn emit_query_warnings(warnings: &[String]) {
+    for msg in warnings {
         eprintln!("warning: {msg}");
     }
 }

@@ -137,10 +137,44 @@ pub(crate) fn run_cypher_inner(
     )
 }
 
+/// The engine's non-fatal query warnings, rendered as a trailing block, or
+/// the empty string for a clean query.
+///
+/// This is the whole point of D1p: the engine has always known that
+/// `MATCH (v:vessel)` on a graph of `Vessel`s returns nothing because of a
+/// typo, and said so — on **stderr**, which no MCP client ever sees. An agent
+/// got a confident "No results." and, measured against a 15-query
+/// self-correction harness, scored zero on every silently-wrong query. The
+/// block is appended by [`render_cypher_output`], the one seam every Cypher
+/// tool response (direct tool, manifest template, write ack) passes through.
+pub(crate) fn cypher_warning_block(result: &cypher::CypherResult) -> String {
+    let warnings = match result.diagnostics.as_ref() {
+        Some(diagnostics) if !diagnostics.warnings.is_empty() => &diagnostics.warnings,
+        _ => return String::new(),
+    };
+    let mut out = String::from("\nwarnings:\n");
+    for warning in warnings {
+        out.push_str("  - ");
+        out.push_str(warning);
+        out.push('\n');
+    }
+    out
+}
+
 /// Render a `CypherResult` for the MCP text surface: CSV (inline or via the
-/// csv_http server) or a 15-row inline preview. Shared by the read path and
+/// csv_http server) or a 15-row inline preview, followed by the engine's
+/// warning block when the query earned one. Shared by the read path and
 /// the write path so both format results identically.
 pub(crate) fn render_cypher_output(
+    result: &cypher::CypherResult,
+    output_csv: bool,
+    csv_http: Option<&crate::csv_http::CsvHttpConfig>,
+) -> Result<String, String> {
+    render_cypher_body(result, output_csv, csv_http)
+        .map(|body| format!("{body}{}", cypher_warning_block(result)))
+}
+
+fn render_cypher_body(
     result: &cypher::CypherResult,
     output_csv: bool,
     csv_http: Option<&crate::csv_http::CsvHttpConfig>,

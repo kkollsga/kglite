@@ -112,7 +112,15 @@ pub(crate) fn run_cypher_write(
     // successful write apart from a no-op match. (A mutation that does RETURN
     // falls through to the normal row rendering.)
     if !output_csv && outcome.result.rows.is_empty() {
-        return Ok(format_mutation_ack(&outcome.result));
+        // The ack skips `render_cypher_output`, so it appends the warning
+        // block itself — a write whose MATCH names a type that does not exist
+        // reports "OK (no changes)", which is the single most misleading
+        // response the write tool can give without it.
+        return Ok(format!(
+            "{}{}",
+            format_mutation_ack(&outcome.result),
+            cypher_warning_block(&outcome.result)
+        ));
     }
     render_cypher_output(&outcome.result, output_csv, csv_http)
 }

@@ -1544,21 +1544,31 @@ fn build_focused_detail(
     // Validate all types exist
     for t in types {
         if !graph.type_indices.contains_key(t) {
-            // Bounded error message: list types only for small graphs, suggest search for large
-            let total = graph.type_indices.len();
+            // Bounded error message: list types only for small graphs, suggest
+            // search for large. Either way it leads with a "did you mean?" —
+            // on a large graph the type list is withheld, so a near-miss
+            // (`vessel` for `Vessel`) would otherwise leave the caller with
+            // nothing but an instruction to go searching for a name they
+            // already have almost right.
+            let mut names: Vec<&str> = graph.type_indices.keys().collect();
+            names.sort_unstable();
+            let hint = crate::graph::mutation::validation::did_you_mean(t, &names);
+            let total = names.len();
             if total > 100 {
                 return Err(format!(
-                    "Node type '{}' not found. {} types in graph — use graph_overview(type_search='{}') to search.",
+                    "Node type '{}' not found.{} {} types in graph — use graph_overview(type_search='{}') to search.",
                     t,
+                    hint,
                     total,
                     t.to_lowercase()
                 ));
             }
-            return Err(format!("Node type '{}' not found. Available: {}", t, {
-                let mut names: Vec<&str> = graph.type_indices.keys().collect();
-                names.sort();
+            return Err(format!(
+                "Node type '{}' not found.{} Available: {}",
+                t,
+                hint,
                 names.join(", ")
-            }));
+            ));
         }
     }
 
@@ -2319,5 +2329,42 @@ mod mcp_quickstart_tests {
                 "retired contract returned: {retired:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod focused_detail_error_tests {
+    use super::*;
+    use crate::graph::session::{execute_mut, ExecuteOptions};
+    use std::collections::HashMap;
+
+    fn vessel_graph() -> DirGraph {
+        let params = HashMap::new();
+        let opts = ExecuteOptions::eager(&params);
+        let mut graph = DirGraph::new();
+        execute_mut(&mut graph, "CREATE (:Vessel {id: 1})", &opts).expect("seed");
+        graph
+    }
+
+    /// `graph_overview(types=['vessel'])` on a graph of `Vessel`s named the
+    /// available types and left the reader to spot the case difference. It is
+    /// the same near-miss the MATCH warnings hint at, so it gets the same hint.
+    #[test]
+    fn a_near_miss_type_name_is_suggested() {
+        let graph = vessel_graph();
+        let error = build_focused_detail(&graph, &["vessel".to_string()], None)
+            .expect_err("unknown type must error");
+        assert!(error.contains("Did you mean 'Vessel'?"), "{error}");
+        assert!(error.contains("Available: Vessel"), "{error}");
+    }
+
+    /// A name nothing is close to gets the list and no invented suggestion —
+    /// `did_you_mean`'s bar is "genuinely close, or silent".
+    #[test]
+    fn a_far_type_name_gets_no_invented_suggestion() {
+        let graph = vessel_graph();
+        let error = build_focused_detail(&graph, &["Xyzzy".to_string()], None)
+            .expect_err("unknown type must error");
+        assert!(!error.contains("Did you mean"), "{error}");
     }
 }
