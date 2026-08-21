@@ -472,86 +472,24 @@ impl<'a> CypherExecutor<'a> {
         rows: &[&ResultRow],
     ) -> Result<Value, String> {
         match expr {
+            // Every arm below reads `args[0]`. The parser rejects a
+            // zero-argument aggregate call, so this is only reachable from an
+            // internally misconstructed AST — where a blind index would abort
+            // the whole host process, an embedded engine's worst failure mode.
+            // Deliberately not a `debug_assert!`: an assertion here would
+            // restore exactly the abort this guard exists to remove, in the
+            // profile the suite runs under.
+            Expression::FunctionCall { name, args, .. }
+                if args.is_empty() && is_aggregate_function_name(name.as_str()) =>
+            {
+                Err(format!("{}() requires an argument", name))
+            }
             Expression::FunctionCall {
                 name,
                 args,
                 distinct,
             } => match name.as_str() {
-                "count" => {
-                    if args.len() == 1 && matches!(args[0], Expression::Star) {
-                        Ok(Value::Int64(rows.len() as i64))
-                    } else if *distinct {
-                        // For DISTINCT on a node/edge variable, key on the
-                        // binding index directly — typed sets avoid the
-                        // per-row `format!("n:{}", ...)` allocation the
-                        // previous implementation used. For other expression
-                        // forms, key on the Value itself.
-                        let var_name = match &args[0] {
-                            Expression::Variable(v) => Some(v.as_str()),
-                            _ => None,
-                        };
-                        let mut count = 0i64;
-                        let mut seen_nodes: FxHashSet<usize> = FxHashSet::default();
-                        let mut seen_edges: FxHashSet<usize> = FxHashSet::default();
-                        let mut seen_values: FxHashSet<Value> = FxHashSet::default();
-                        for (row_idx, row) in rows.iter().enumerate() {
-                            self.check_interrupt_periodic(row_idx)?;
-                            let val = self.evaluate_expression(&args[0], row)?;
-                            if matches!(val, Value::Null) {
-                                continue;
-                            }
-                            if let Some(vn) = var_name {
-                                if let Some(&idx) = row.node_bindings.get(vn) {
-                                    if seen_nodes.insert(idx.index()) {
-                                        count += 1;
-                                    }
-                                    continue;
-                                }
-                                if let Some(eb) = row.edge_bindings.get(vn) {
-                                    if seen_edges.insert(eb.edge_index.index()) {
-                                        count += 1;
-                                    }
-                                    continue;
-                                }
-                            }
-                            if seen_values.insert(val) {
-                                count += 1;
-                            }
-                        }
-                        Ok(Value::Int64(count))
-                    } else {
-                        let mut count = 0i64;
-                        if let Expression::Variable(v) = &args[0] {
-                            // count(node/edge var): count rows where the binding is
-                            // present — without materializing the full node/edge
-                            // Value (every property cloned) per row, which dominates
-                            // deep-path counts like `… RETURN count(n5)`.
-                            for (row_idx, row) in rows.iter().enumerate() {
-                                self.check_interrupt_periodic(row_idx)?;
-                                if row.node_bindings.get(v).is_some()
-                                    || row.edge_bindings.get(v).is_some()
-                                {
-                                    count += 1;
-                                } else if !matches!(
-                                    self.evaluate_expression(&args[0], row)?,
-                                    Value::Null
-                                ) {
-                                    // projected scalar (WITH … AS v) — value check
-                                    count += 1;
-                                }
-                            }
-                        } else {
-                            for (row_idx, row) in rows.iter().enumerate() {
-                                self.check_interrupt_periodic(row_idx)?;
-                                let val = self.evaluate_expression(&args[0], row)?;
-                                if !matches!(val, Value::Null) {
-                                    count += 1;
-                                }
-                            }
-                        }
-                        Ok(Value::Int64(count))
-                    }
-                }
+                "count" => self.eval_count_aggregate(args, rows, *distinct),
                 "sum" => {
                     let (values, all_int) =
                         self.collect_numeric_values_typed(&args[0], rows, *distinct)?;
@@ -1174,6 +1112,11 @@ impl<'a> CypherExecutor<'a> {
                     if *distinct {
                         return Ok(None); // DISTINCT needs dedup — bail
                     }
+                    if args.is_empty() {
+                        // `expr: &args[0]` below. The parser rejects a
+                        // zero-argument aggregate, so bail rather than index.
+                        return Ok(None);
+                    }
                     let kind = match name.as_str() {
                         "count" => {
                             if args.len() == 1 && matches!(args[0], Expression::Star) {
@@ -1313,6 +1256,93 @@ impl<'a> CypherExecutor<'a> {
             &mut mins,
             &mut maxs,
         )))
+    }
+
+    /// Evaluate `count(...)` over a materialized group's rows.
+    ///
+    /// Split out of `evaluate_aggregate_with_rows` to keep that dispatcher
+    /// under the source-quality complexity ceiling, as `collect` and `mode`
+    /// already were; the body is that arm verbatim. `args` is non-empty — the
+    /// dispatcher rejects an argument-less aggregate before reaching here.
+    fn eval_count_aggregate(
+        &self,
+        args: &[Expression],
+        rows: &[&ResultRow],
+        distinct: bool,
+    ) -> Result<Value, String> {
+        if args.len() == 1 && matches!(args[0], Expression::Star) {
+            Ok(Value::Int64(rows.len() as i64))
+        } else if distinct {
+            // For DISTINCT on a node/edge variable, key on the
+            // binding index directly — typed sets avoid the
+            // per-row `format!("n:{}", ...)` allocation the
+            // previous implementation used. For other expression
+            // forms, key on the Value itself.
+            let var_name = match &args[0] {
+                Expression::Variable(v) => Some(v.as_str()),
+                _ => None,
+            };
+            let mut count = 0i64;
+            let mut seen_nodes: FxHashSet<usize> = FxHashSet::default();
+            let mut seen_edges: FxHashSet<usize> = FxHashSet::default();
+            let mut seen_values: FxHashSet<Value> = FxHashSet::default();
+            for (row_idx, row) in rows.iter().enumerate() {
+                self.check_interrupt_periodic(row_idx)?;
+                let val = self.evaluate_expression(&args[0], row)?;
+                if matches!(val, Value::Null) {
+                    continue;
+                }
+                if let Some(vn) = var_name {
+                    if let Some(&idx) = row.node_bindings.get(vn) {
+                        if seen_nodes.insert(idx.index()) {
+                            count += 1;
+                        }
+                        continue;
+                    }
+                    if let Some(eb) = row.edge_bindings.get(vn) {
+                        if seen_edges.insert(eb.edge_index.index()) {
+                            count += 1;
+                        }
+                        continue;
+                    }
+                }
+                if seen_values.insert(val) {
+                    count += 1;
+                }
+            }
+            Ok(Value::Int64(count))
+        } else {
+            let mut count = 0i64;
+            if let Expression::Variable(v) = &args[0] {
+                // count(node/edge var): count rows where the binding is
+                // present — without materializing the full node/edge
+                // Value (every property cloned) per row, which dominates
+                // deep-path counts like `… RETURN count(n5)`.
+                for (row_idx, row) in rows.iter().enumerate() {
+                    self.check_interrupt_periodic(row_idx)?;
+                    if row.node_bindings.get(v).is_some()
+                        || row.edge_bindings.get(v).is_some()
+                    {
+                        count += 1;
+                    } else if !matches!(
+                        self.evaluate_expression(&args[0], row)?,
+                        Value::Null
+                    ) {
+                        // projected scalar (WITH … AS v) — value check
+                        count += 1;
+                    }
+                }
+            } else {
+                for (row_idx, row) in rows.iter().enumerate() {
+                    self.check_interrupt_periodic(row_idx)?;
+                    let val = self.evaluate_expression(&args[0], row)?;
+                    if !matches!(val, Value::Null) {
+                        count += 1;
+                    }
+                }
+            }
+            Ok(Value::Int64(count))
+        }
     }
 
     /// Evaluate `collect(expr)` over a materialized group.

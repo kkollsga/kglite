@@ -536,3 +536,126 @@ fn a_reserved_literal_name_and_value_coexist_in_one_subquery_pattern() {
     );
     assert_eq!(result.rows[0][0], Value::Int64(1));
 }
+
+// ========================================================================
+// DISTINCT and COUNT as bare names — the Java identifier-policy matrix,
+// engine-side
+// ========================================================================
+
+/// `kglite-java`'s `IdentifierPolicyTest.unreservedWordsStayBare` probes
+/// `DISTINCT` and `COUNT` bare in the label *and* the variable position:
+///
+/// ```text
+/// MATCH (n:DISTINCT) RETURN count(n) AS c
+/// MATCH (DISTINCT:Person) RETURN count(DISTINCT) AS c
+/// ```
+///
+/// The second shape parsed the `DISTINCT` inside `count(` as the dedup flag,
+/// leaving the call with **zero arguments**; the count arm then indexed
+/// `args[0]` and aborted the process. `count(DISTINCT)` is a read of the
+/// variable the pattern just bound, so DISTINCT is the flag only when an
+/// argument follows it.
+#[test]
+fn distinct_is_a_variable_when_nothing_follows_it_inside_a_call() {
+    let mut graph = DirGraph::new();
+    run_semantics_query(&mut graph, "CREATE (:Person {id: 1, title: 'Ada'})");
+
+    // The exact Java probe. Pre-fix: index out of bounds, len 0, index 0.
+    let result = run_semantics_query(
+        &mut graph,
+        "MATCH (DISTINCT:Person) RETURN count(DISTINCT) AS c",
+    );
+    assert_eq!(result.rows[0][0], Value::Int64(1));
+
+    // ...and it means the same as counting any other bound node variable.
+    let plain = run_semantics_query(&mut graph, "MATCH (n:Person) RETURN count(n) AS c");
+    assert_eq!(plain.rows[0][0], result.rows[0][0]);
+
+    // The flag still applies when it has an argument to apply to — here, to
+    // the variable of the same name.
+    let result = run_semantics_query(
+        &mut graph,
+        "MATCH (DISTINCT:Person) RETURN count(DISTINCT DISTINCT) AS c",
+    );
+    assert_eq!(result.rows[0][0], Value::Int64(1));
+
+    // Two Persons, one shared title: the flag deduplicates, the name does not.
+    run_semantics_query(&mut graph, "CREATE (:Person {id: 2, title: 'Ada'})");
+    let deduped = run_semantics_query(
+        &mut graph,
+        "MATCH (n:Person) RETURN count(DISTINCT n.title) AS c",
+    );
+    assert_eq!(deduped.rows[0][0], Value::Int64(1));
+    let counted = run_semantics_query(
+        &mut graph,
+        "MATCH (DISTINCT:Person) RETURN count(DISTINCT) AS c",
+    );
+    assert_eq!(counted.rows[0][0], Value::Int64(2));
+}
+
+/// The rest of the Java matrix for the two words, in both name positions.
+#[test]
+fn distinct_and_count_are_bare_names_in_every_probed_position() {
+    let mut graph = DirGraph::new();
+    run_semantics_query(&mut graph, "CREATE (:Person {id: 1})");
+    run_semantics_query(&mut graph, "CREATE (:DISTINCT {id: 2})");
+    run_semantics_query(&mut graph, "CREATE (:COUNT {id: 3})");
+
+    for (query, expected) in [
+        ("MATCH (n:DISTINCT) RETURN count(n) AS c", 1),
+        ("MATCH (n:COUNT) RETURN count(n) AS c", 1),
+        ("MATCH (DISTINCT:Person) RETURN count(DISTINCT) AS c", 1),
+        ("MATCH (COUNT:Person) RETURN count(COUNT) AS c", 1),
+        // The backtick escape stays available for both.
+        ("MATCH (`DISTINCT`:Person) RETURN count(`DISTINCT`) AS c", 1),
+        ("MATCH (`COUNT`:Person) RETURN count(`COUNT`) AS c", 1),
+    ] {
+        let result = run_semantics_query(&mut graph, query);
+        assert_eq!(result.rows[0][0], Value::Int64(expected), "{query}");
+    }
+}
+
+/// The count arm's guard, reached the only way it can be — an aggregate AST
+/// built with no arguments, which the parser now refuses to produce. Before
+/// the guard this indexed `args[0]` and aborted the host process.
+#[test]
+fn an_argument_less_aggregate_errors_instead_of_indexing_empty_arguments() {
+    let graph = build_test_graph();
+    let no_params = HashMap::new();
+    let executor = CypherExecutor::with_params(&graph, &no_params, None);
+    let rows = projected_rows("x", 3);
+
+    for name in ["count", "sum", "avg", "min", "max", "collect", "median"] {
+        for distinct in [false, true] {
+            let expr = Expression::FunctionCall {
+                name: name.to_string(),
+                args: vec![],
+                distinct,
+            };
+            let err = executor
+                .evaluate_aggregate(&expr, &rows)
+                .expect_err("{name}(): expected a clean error, not a value");
+            assert!(
+                err.contains("requires an argument"),
+                "{name}(distinct={distinct}): unexpected error {err}"
+            );
+        }
+    }
+}
+
+/// ...and the parser is what keeps that guard unreachable from a query.
+#[test]
+fn a_zero_argument_aggregate_never_reaches_the_executor() {
+    for query in [
+        "MATCH (n:Person) RETURN count() AS c",
+        "MATCH (n:Person) RETURN collect() AS c",
+        "MATCH (n:Person) RETURN min() AS c",
+        "RETURN count()",
+    ] {
+        let err = parser::parse_cypher(query).unwrap_err().to_string();
+        assert!(
+            err.contains("requires an argument"),
+            "{query}: unexpected error {err}"
+        );
+    }
+}

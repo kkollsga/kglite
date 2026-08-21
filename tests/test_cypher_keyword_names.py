@@ -218,3 +218,68 @@ def test_value_literal_words_are_not_bare_variables_in_either_parser():
     # Backticked, it is an ordinary variable in both.
     g.cypher("CREATE (`true`:Thing {id: 1})")
     assert g.cypher("MATCH (`true`:Thing) RETURN `true`.id AS id").scalar() == 1
+
+
+class TestDistinctAsABareVariable:
+    """`DISTINCT` bound as a pattern variable and read back inside an aggregate.
+
+    ``kglite-java``'s ``IdentifierPolicyTest`` probes the engine rather than
+    copying a word list from prose, and it lists DISTINCT among the words legal
+    bare in *every* position. The variable half of that probe —
+
+        MATCH (DISTINCT:Person) RETURN count(DISTINCT) AS c
+
+    — read the ``DISTINCT`` inside ``count(`` as the dedup flag, leaving the
+    call with zero arguments; the count arm then indexed ``args[0]`` and
+    aborted the host process. DISTINCT is the flag only when an argument
+    follows it.
+    """
+
+    def test_terminal_distinct_inside_an_aggregate_is_the_variable(self):
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:Person {id: 1})")
+        # The exact Java probe. Pre-fix: PanicException, index out of bounds.
+        assert g.cypher("MATCH (DISTINCT:Person) RETURN count(DISTINCT) AS c").scalar() == 1
+        # ...meaning the same as counting any other bound node variable.
+        assert g.cypher("MATCH (n:Person) RETURN count(n) AS c").scalar() == 1
+
+    def test_distinct_distinct_is_the_flag_applied_to_the_variable(self):
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:Person {id: 1})")
+        assert g.cypher("MATCH (DISTINCT:Person) RETURN count(DISTINCT DISTINCT) AS c").scalar() == 1
+
+    def test_the_flag_still_deduplicates_and_the_name_still_does_not(self):
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:Person {id: 1, title: 'Ada'})")
+        g.cypher("CREATE (:Person {id: 2, title: 'Ada'})")
+        # Unchanged: the flag over a property deduplicates.
+        assert g.cypher("MATCH (n:Person) RETURN count(DISTINCT n.title) AS c").scalar() == 1
+        assert g.cypher("MATCH (n:Person) RETURN count(DISTINCT *) AS c").scalar() == 2
+        assert g.cypher("MATCH (n:Person) RETURN count(*) AS c").scalar() == 2
+        # The variable of the same name counts its bound rows.
+        assert g.cypher("MATCH (DISTINCT:Person) RETURN count(DISTINCT) AS c").scalar() == 2
+
+    @pytest.mark.parametrize("word", ["DISTINCT", "COUNT"])
+    def test_the_java_policy_matrix_for_both_words(self, word):
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:Person {id: 1})")
+        g.cypher(f"CREATE (:{word} {{id: 2}})")
+        assert g.cypher(f"MATCH (n:{word}) RETURN count(n) AS c").scalar() == 1
+        assert g.cypher(f"MATCH ({word}:Person) RETURN count({word}) AS c").scalar() == 1
+        # The backtick escape stays available.
+        assert g.cypher(f"MATCH (`{word}`:Person) RETURN count(`{word}`) AS c").scalar() == 1
+
+    @pytest.mark.parametrize("name", ["count", "sum", "avg", "min", "max", "collect", "median"])
+    def test_a_zero_argument_aggregate_is_a_syntax_error(self, name):
+        """The shape that reached the blind ``args[0]``.
+
+        Before the fix it did not merely panic in one place: ``count()``
+        answered the row count, ``min()`` answered ``True`` and ``collect()``
+        and bare ``RETURN count()`` aborted the process.
+        """
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:Person {id: 1})")
+        with pytest.raises(Exception, match="requires an argument"):
+            g.cypher(f"MATCH (n:Person) RETURN {name}() AS c")
+        with pytest.raises(Exception, match="requires an argument"):
+            g.cypher(f"RETURN {name}()")

@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`DISTINCT` used as a bare variable name inside an aggregate panicked the
+  engine.** This dialect leaves `DISTINCT` and `COUNT` unreserved in name
+  position, so `MATCH (DISTINCT:Person)` binds a variable — but the aggregate
+  that read it back, `count(DISTINCT)`, lexed the word as the dedup *flag* and
+  left the call with zero arguments. Once the DISTINCT-dedup fix stopped the
+  fused path from absorbing that shape, it reached a `count` arm that indexed
+  `args[0]` blind and aborted the host process. Inside a call, `DISTINCT` is
+  now the flag only when an argument follows it: `count(DISTINCT)` is a read of
+  the variable, `count(DISTINCT x)` is the flag, and `count(DISTINCT DISTINCT)`
+  is the flag applied to that variable. `count(DISTINCT x)`, `count(DISTINCT *)`
+  and `count(*)` are unchanged.
+
+  The same argument-less shape reached other aggregates by a shorter route —
+  writing the call with no arguments at all. `count()` answered the row count,
+  `min()` answered `true`, and `collect()` and a bare `RETURN count()` aborted
+  the process. A zero-argument aggregate is now a syntax error naming the
+  function (`count()` points at `count(*)`), and every aggregate evaluation arm
+  errors cleanly rather than indexing empty arguments.
+
 - **A corrupted `.kgl` file could load silently, with different data.** Nothing
   but Postcard's structural decode stood between a damaged payload and a graph
   the caller then trusted: over a third of single-bit corruptions loaded

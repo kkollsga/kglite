@@ -648,6 +648,39 @@ impl CypherParser {
         }
     }
 
+    /// Is the `DISTINCT` at the cursor a *name* rather than a call's dedup
+    /// flag? Only meaningful inside an argument list: it is a name exactly
+    /// when the argument list ends (or the argument ends) right after it —
+    /// `count(DISTINCT)`, `f(a, DISTINCT)`. Anything else following it is the
+    /// argument the flag applies to.
+    ///
+    /// Caller must have already established that the cursor is on
+    /// [`CypherToken::Distinct`].
+    fn distinct_token_is_name(&self) -> bool {
+        matches!(
+            self.peek_at(1),
+            Some(CypherToken::RParen) | Some(CypherToken::Comma) | None
+        )
+    }
+
+    /// Parse one call argument, admitting a terminal bare `DISTINCT` as the
+    /// variable of that name (see [`Self::distinct_token_is_name`]). The
+    /// variable keeps its verbatim source spelling, the same rule
+    /// [`CypherParser::expect_name`] and the pattern re-serializer apply, so
+    /// `MATCH (distinct:Person) RETURN count(distinct)` binds and reads one
+    /// name rather than two.
+    fn parse_call_argument(&mut self) -> Result<Expression, String> {
+        if self.check(&CypherToken::Distinct) && self.distinct_token_is_name() {
+            self.advance();
+            let name = self
+                .keyword_lexeme_at(self.pos - 1)
+                .map(str::to_string)
+                .unwrap_or_else(|| "DISTINCT".to_string());
+            return Ok(Expression::Variable(name));
+        }
+        self.parse_expression()
+    }
+
     /// Parse function call: name(args...)
     pub(super) fn parse_function_call(&mut self, name: String) -> Result<Expression, String> {
         // Normalize function name to lowercase once at parse time so downstream
@@ -690,8 +723,14 @@ impl CypherParser {
             });
         }
 
-        // Check for DISTINCT
-        let distinct = if self.check(&CypherToken::Distinct) {
+        // Check for DISTINCT — but only where it can be the dedup *flag*.
+        // DISTINCT is soft-reserved in this dialect (`keyword_name_token`), so
+        // `MATCH (DISTINCT:Person)` binds a variable of that name and
+        // `count(DISTINCT)` has to be able to read it back. The rule is
+        // positional: DISTINCT is the flag iff an argument follows it, so
+        // `count(DISTINCT)` is the variable, `count(DISTINCT x)` is the flag,
+        // and `count(DISTINCT DISTINCT)` is the flag applied to the variable.
+        let distinct = if self.check(&CypherToken::Distinct) && !self.distinct_token_is_name() {
             self.advance();
             true
         } else {
@@ -701,14 +740,31 @@ impl CypherParser {
         let mut args = Vec::new();
 
         if !self.check(&CypherToken::RParen) {
-            args.push(self.parse_expression()?);
+            args.push(self.parse_call_argument()?);
             while self.check(&CypherToken::Comma) {
                 self.advance();
-                args.push(self.parse_expression()?);
+                args.push(self.parse_call_argument()?);
             }
         }
 
         self.expect(&CypherToken::RParen)?;
+
+        // A zero-argument aggregate is a syntax error, not an implicit
+        // `count(*)`. Every downstream evaluator — materialized, streaming and
+        // fused — reads the argument, and before this check `count()` answered
+        // the row count, `min()` answered `true` and `collect()` aborted the
+        // process on an out-of-bounds index.
+        if args.is_empty() && is_aggregate_function_name(&name) {
+            return Err(format!(
+                "{}() requires an argument{}",
+                name,
+                if name == "count" {
+                    " — use count(*) to count rows"
+                } else {
+                    ""
+                }
+            ));
+        }
 
         // Check for window function: func() OVER (PARTITION BY ... ORDER BY ...)
         if self.check(&CypherToken::Over) {

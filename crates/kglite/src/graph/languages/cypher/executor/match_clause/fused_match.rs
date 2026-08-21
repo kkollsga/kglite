@@ -2152,8 +2152,12 @@ impl<'a> CypherExecutor<'a> {
                         }
                         "min" => acc.mins[ai].clone().unwrap_or(Value::Null),
                         "max" => acc.maxs[ai].clone().unwrap_or(Value::Null),
+                        // Unsupported aggregate — fall back to evaluate. An
+                        // argument-less call cannot reach here (the parser
+                        // rejects zero-argument aggregates) and indexing blind
+                        // would abort the host process, so it yields Null.
+                        _ if args.is_empty() => Value::Null,
                         _ => {
-                            // Unsupported aggregate — fall back to evaluate
                             let mut tmp_row = ResultRow::new();
                             tmp_row
                                 .node_bindings

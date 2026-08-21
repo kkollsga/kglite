@@ -988,3 +988,118 @@ mod tests {
         parse_cypher("RETURN 6 / 2 AS a").unwrap();
     }
 }
+
+/// `DISTINCT` is soft-reserved in this dialect — `MATCH (DISTINCT:Person)`
+/// binds a variable of that name — so an aggregate has to be able to read it
+/// back. Inside a call, DISTINCT is the dedup *flag* iff an argument follows
+/// it; terminal, it is the variable.
+#[cfg(test)]
+mod distinct_as_a_name {
+    use super::super::super::ast::{Clause, Expression};
+    use super::super::parse_cypher;
+
+    fn return_call(query: &str) -> (bool, Vec<Expression>) {
+        let parsed = parse_cypher(query).unwrap_or_else(|e| panic!("{query}: {e}"));
+        let clause = parsed
+            .clauses
+            .iter()
+            .find_map(|c| match c {
+                Clause::Return(r) => Some(r),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{query}: no RETURN clause"));
+        match &clause.items[0].expression {
+            Expression::FunctionCall { args, distinct, .. } => (*distinct, args.clone()),
+            other => panic!("{query}: not a function call: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn terminal_distinct_is_a_variable_reference_not_the_flag() {
+        let (distinct, args) = return_call("MATCH (DISTINCT:Person) RETURN count(DISTINCT) AS c");
+        assert!(
+            !distinct,
+            "DISTINCT before `)` is the argument, not the flag"
+        );
+        assert_eq!(args.len(), 1);
+        assert!(matches!(&args[0], Expression::Variable(v) if v == "DISTINCT"));
+    }
+
+    #[test]
+    fn distinct_followed_by_an_argument_stays_the_flag() {
+        let (distinct, args) = return_call("MATCH (n:Person) RETURN count(DISTINCT n.city) AS c");
+        assert!(distinct);
+        assert_eq!(args.len(), 1);
+        assert!(matches!(&args[0], Expression::PropertyAccess { .. }));
+
+        // `count(DISTINCT *)` — the flag plus the star, unchanged.
+        let (distinct, args) = return_call("MATCH (n:Person) RETURN count(DISTINCT *) AS c");
+        assert!(distinct);
+        assert!(matches!(&args[0], Expression::Star));
+    }
+
+    #[test]
+    fn distinct_distinct_is_the_flag_applied_to_the_variable() {
+        let (distinct, args) =
+            return_call("MATCH (DISTINCT:Person) RETURN count(DISTINCT DISTINCT) AS c");
+        assert!(distinct, "the leading DISTINCT is the flag");
+        assert_eq!(args.len(), 1);
+        assert!(matches!(&args[0], Expression::Variable(v) if v == "DISTINCT"));
+    }
+
+    #[test]
+    fn a_terminal_distinct_is_a_variable_in_any_call_position() {
+        // Non-aggregate calls never had a flag to confuse it with.
+        let (distinct, args) = return_call("MATCH (DISTINCT:Person) RETURN size(DISTINCT) AS c");
+        assert!(!distinct);
+        assert!(matches!(&args[0], Expression::Variable(v) if v == "DISTINCT"));
+
+        // ...and in a trailing argument, after a comma.
+        let (_, args) =
+            return_call("MATCH (DISTINCT:Person) RETURN coalesce(DISTINCT, DISTINCT) AS c");
+        assert_eq!(args.len(), 2);
+        assert!(matches!(&args[0], Expression::Variable(v) if v == "DISTINCT"));
+        assert!(matches!(&args[1], Expression::Variable(v) if v == "DISTINCT"));
+
+        // Only the *terminal* position is a name: `DISTINCT.title` stays a
+        // syntax error, as it was before — the expression parser has no
+        // primary for the keyword, and widening that is a separate change.
+        assert!(parse_cypher("MATCH (DISTINCT:Person) RETURN DISTINCT.title AS c").is_err());
+    }
+
+    #[test]
+    fn the_variable_keeps_its_verbatim_spelling() {
+        let (_, args) = return_call("MATCH (distinct:Person) RETURN count(distinct) AS c");
+        assert!(
+            matches!(&args[0], Expression::Variable(v) if v == "distinct"),
+            "the pattern binds the verbatim lexeme, so the read must match it: {args:?}"
+        );
+    }
+
+    /// A zero-argument aggregate used to reach evaluators that index
+    /// `args[0]`: `collect()` and `RETURN count()` aborted the process,
+    /// `count()` answered the row count and `min()` answered `true`.
+    #[test]
+    fn a_zero_argument_aggregate_is_a_syntax_error() {
+        for name in [
+            "count", "sum", "avg", "min", "max", "collect", "median", "mode", "stdev",
+        ] {
+            let query = format!("MATCH (n:Person) RETURN {name}() AS c");
+            let err = parse_cypher(&query).unwrap_err().to_string();
+            assert!(
+                err.contains("requires an argument"),
+                "{query}: unexpected error {err}"
+            );
+        }
+        assert!(
+            parse_cypher("RETURN count()")
+                .unwrap_err()
+                .to_string()
+                .contains("count(*)"),
+            "count() should point at count(*)"
+        );
+        // Zero-argument *scalar* functions are untouched.
+        parse_cypher("RETURN rand() AS r").unwrap();
+        parse_cypher("RETURN timestamp() AS t").unwrap();
+    }
+}
