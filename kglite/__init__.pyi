@@ -5718,6 +5718,11 @@ class KnowledgeGraph:
         Searches for nodes most similar to the query vector among the currently
         selected nodes. Results are ordered by similarity (most similar first).
 
+        With no selection active the whole graph is searched — the same
+        never-selected rule :meth:`get_nodes` follows. A selection a query
+        *emptied* (a filter that matched nothing) returns ``[]``, because that
+        empty result is the answer to a question you asked.
+
         Args:
             text_column: Source text column name (e.g. ``'summary'``).
             query_vector: The query embedding vector.
@@ -5767,7 +5772,12 @@ class KnowledgeGraph:
         """List all embedding stores in the graph.
 
         Returns:
-            List of dicts with ``node_type``, ``text_column``, ``dimension``, ``count``.
+            List of dicts with ``node_type``, ``text_column``, ``store_name``,
+            ``dimension``, ``count`` and ``metric``. ``text_column`` is the
+            source column this API takes (``'summary'``); ``store_name`` is the
+            store the column is held in (``'summary_emb'``) — the spelling
+            Cypher's ``vector_score()`` takes. ``metric`` is the store's own
+            metric, or ``'cosine'`` when it recorded none.
         """
         ...
 
@@ -5948,6 +5958,10 @@ class KnowledgeGraph:
     def embeddings(self, text_column: str) -> dict[Any, list[float]]:
         """Retrieve embeddings for nodes in the current selection.
 
+        With no selection active this covers the whole graph (the same
+        never-selected rule :meth:`get_nodes` follows); a selection a query
+        emptied returns ``{}``.
+
         Args:
             text_column: Source text column name (e.g. 'summary').
 
@@ -6055,7 +6069,8 @@ class KnowledgeGraph:
         """Search embeddings using a text query.
 
         Uses the model registered via ``set_embedder()`` to embed the query,
-        then performs vector search within the current selection.  Refer to
+        then performs vector search within the current selection — or the whole
+        graph when no selection is active (see :meth:`vector_search`). Refer to
         the text column name (e.g. ``"summary"``); the graph resolves it to
         ``"summary_emb"`` internally.
 

@@ -203,6 +203,10 @@ class TestListRemoveEmbeddings:
         assert info["text_column"] == "summary"
         assert info["dimension"] == 3
         assert info["count"] == 5
+        # The store name is what Cypher's vector_score() takes; reporting it
+        # here is the only place the two spellings are shown side by side.
+        assert info["store_name"] == "summary_emb"
+        assert info["metric"] == "cosine"
 
     def test_remove_embeddings(self, graph_with_embeddings):
         graph = graph_with_embeddings
@@ -356,6 +360,115 @@ class TestVectorSearch:
         graph = kglite.KnowledgeGraph()
         results = graph.vector_search("text", [1.0, 0.0, 0.0], top_k=3)
         assert results == []
+
+
+# ── never-selected fallback (whole graph) ─────────────────────────────────
+
+
+class TestNeverSelectedSearchesWholeGraph:
+    """A selection that was never narrowed means "the whole graph" — the same
+    rule ``get_nodes()`` applies. A filter that matched zero rows is a real
+    empty result and stays empty."""
+
+    def test_vector_search_without_selection_searches_whole_graph(self, graph_with_embeddings):
+        graph = graph_with_embeddings
+        results = graph.vector_search("summary", [1.0, 0.0, 0.0], top_k=3)
+        assert [r["id"] for r in results] == [
+            r["id"] for r in graph.select("Article").vector_search("summary", [1.0, 0.0, 0.0], top_k=3)
+        ]
+        assert results[0]["id"] == 1
+
+    def test_vector_search_after_zero_match_filter_stays_empty(self, graph_with_embeddings):
+        graph = graph_with_embeddings
+        selected = graph.select("Article").where({"category": "nonexistent"})
+        assert selected.vector_search("summary", [1.0, 0.0, 0.0], top_k=3) == []
+
+    def test_search_text_without_selection_searches_whole_graph(self):
+        graph = kglite.KnowledgeGraph()
+        df = pd.DataFrame(
+            {
+                "id": [1, 2, 3],
+                "title": ["Alpha", "Beta", "Gamma"],
+                "summary": ["artificial intelligence", "football game", "machine learning"],
+            }
+        )
+        graph.add_nodes(df, "Article", "id", "title")
+        graph.set_embedder(MockEmbedder(dimension=8))
+        graph.embed_texts("Article", "summary", show_progress=False)
+
+        results = graph.search_text("summary", "artificial intelligence", top_k=2)
+        assert len(results) == 2
+        assert results[0]["id"] == 1
+
+    def test_search_text_after_zero_match_filter_stays_empty(self):
+        graph = kglite.KnowledgeGraph()
+        df = pd.DataFrame({"id": [1, 2], "title": ["A", "B"], "summary": ["a text", "b text"]})
+        graph.add_nodes(df, "Article", "id", "title")
+        graph.set_embedder(MockEmbedder(dimension=8))
+        graph.embed_texts("Article", "summary", show_progress=False)
+
+        selected = graph.select("Article").where({"title": "nope"})
+        assert selected.search_text("summary", "a text", top_k=2) == []
+
+    def test_embeddings_without_selection_returns_whole_graph(self, graph_with_embeddings):
+        graph = graph_with_embeddings
+        vectors = graph.embeddings("summary")
+        assert set(vectors) == {1, 2, 3, 4, 5}
+        assert vectors == graph.embeddings("Article", "summary")
+
+    def test_embeddings_after_zero_match_filter_stays_empty(self, graph_with_embeddings):
+        graph = graph_with_embeddings
+        selected = graph.select("Article").where({"category": "nonexistent"})
+        assert selected.embeddings("summary") == {}
+
+    def test_whole_graph_excludes_a_deleted_node(self):
+        """The fallback resolves *live* nodes, so a delete that hasn't been
+        vacuumed can't rank (the selected path's rule, unchanged)."""
+        graph = kglite.KnowledgeGraph()
+        graph.add_nodes(
+            pd.DataFrame({"id": [1, 2], "title": ["A", "B"], "summary": ["a", "b"]}),
+            "Article",
+            "id",
+            "title",
+        )
+        graph.set_embeddings("Article", "summary", {1: [1.0, 0.0], 2: [0.9, 0.1]})
+        graph.cypher("MATCH (a:Article) WHERE a.id = 1 DETACH DELETE a")
+
+        results = graph.vector_search("summary", [1.0, 0.0], top_k=5)
+        assert [r["id"] for r in results] == [2]
+
+    def test_whole_graph_spans_types_sharing_a_dimension(self):
+        graph = kglite.KnowledgeGraph()
+        for node_type, ident in (("Article", "a"), ("Note", "n")):
+            graph.add_nodes(
+                pd.DataFrame({"id": [ident], "title": [node_type], "summary": [node_type]}),
+                node_type,
+                "id",
+                "title",
+            )
+        graph.set_embeddings("Article", "summary", {"a": [1.0, 0.0]})
+        graph.set_embeddings("Note", "summary", {"n": [0.9, 0.1]})
+
+        results = graph.vector_search("summary", [1.0, 0.0], top_k=5)
+        assert {r["id"] for r in results} == {"a", "n"}
+        assert results[0]["id"] == "a"
+
+    def test_whole_graph_dimension_mismatch_errors(self):
+        graph = kglite.KnowledgeGraph()
+        for node_type, ident in (("Article", "a"), ("Note", "n")):
+            graph.add_nodes(
+                pd.DataFrame({"id": [ident], "title": [node_type], "summary": [node_type]}),
+                node_type,
+                "id",
+                "title",
+            )
+        graph.set_embeddings("Article", "summary", {"a": [1.0, 0.0]})
+        graph.set_embeddings("Note", "summary", {"n": [0.0, 1.0, 0.0]})
+
+        with pytest.raises(
+            ValueError, match=r"dimension 2 does not match embedding dimension 3 for 'Note.summary_emb'"
+        ):
+            graph.vector_search("summary", [1.0, 0.0], top_k=5)
 
 
 # ── Embeddings invisible to node API ──────────────────────────────────────
@@ -539,8 +652,23 @@ class TestCypherVectorScore:
 
     def test_vector_score_missing_embedding(self, graph_with_embeddings):
         graph = graph_with_embeddings
-        with pytest.raises(kglite.KgError, match="no embedding"):
+        with pytest.raises(kglite.KgError, match="no embedding") as excinfo:
             graph.cypher("MATCH (n:Article) RETURN vector_score(n, 'nonexistent_emb', [1.0, 0.0, 0.0]) AS score")
+        # Nothing to suggest: there is no 'nonexistent_emb_emb' store either.
+        assert "did you mean" not in str(excinfo.value).lower()
+
+    def test_vector_score_text_column_suggests_store_name(self, graph_with_embeddings):
+        """Passing the *text* column ('summary') names a store that doesn't
+        exist; the error has to name the store ('summary_emb') and the
+        text-column-taking alternative, or the caller is stuck between two
+        surfaces that each reject what the other wants."""
+        graph = graph_with_embeddings
+        with pytest.raises(kglite.KgError) as excinfo:
+            graph.cypher("MATCH (n:Article) RETURN vector_score(n, 'summary', [1.0, 0.0, 0.0]) AS score")
+        message = str(excinfo.value)
+        assert "no embedding 'summary' found for node type 'Article'" in message
+        assert "summary_emb" in message
+        assert "text_score(n, 'summary'" in message
 
     def test_vector_score_dimension_mismatch(self, graph_with_embeddings):
         graph = graph_with_embeddings

@@ -148,7 +148,7 @@ impl KnowledgeGraph {
         let _arena_guard = self.inner.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
         let top_k = top_k.unwrap_or(10);
         let exact = exact.unwrap_or(false);
-        let embedding_property = format!("{}_emb", text_column);
+        let embedding_property = kglite_core::api::embeddings::store_name(text_column);
         // Projection set: None = include everything (default). Some = include
         // only these fields; `id` and `score` are always kept (identity + rank).
         let keep: Option<std::collections::HashSet<String>> =
@@ -256,7 +256,7 @@ impl KnowledgeGraph {
     /// `embed_texts`/`add_embeddings` (which reject a mismatch). `text_column`
     /// is the source column name (stored as ``{text_column}_emb``).
     fn embedding_dim(&self, node_type: &str, text_column: &str) -> Option<usize> {
-        let key = (node_type.to_string(), format!("{text_column}_emb"));
+        let key = kglite_core::api::embeddings::store_key(node_type, text_column);
         self.inner.embeddings.get(&key).map(|s| s.dimension)
     }
 
@@ -275,7 +275,7 @@ impl KnowledgeGraph {
         node_type: &str,
         text_column: &str,
     ) -> PyResult<Py<PyAny>> {
-        let key = (node_type.to_string(), format!("{text_column}_emb"));
+        let key = kglite_core::api::embeddings::store_key(node_type, text_column);
         match self.inner.embeddings.get(&key) {
             None => Ok(py.None()),
             Some(store) => {
@@ -334,13 +334,17 @@ impl KnowledgeGraph {
     /// List all embedding stores in the graph.
     ///
     /// Returns:
-    ///     List of dicts with 'node_type', 'text_column', 'dimension', 'count', 'metric'.
+    ///     List of dicts with 'node_type', 'text_column', 'store_name',
+    ///     'dimension', 'count', 'metric'. ``text_column`` is what this API
+    ///     takes ('summary'); ``store_name`` is what Cypher's ``vector_score``
+    ///     takes ('summary_emb').
     fn list_embeddings(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let py_list = PyList::empty(py);
         for info in kglite_core::api::embeddings::list_embeddings(&self.inner) {
             let dict = PyDict::new(py);
             dict.set_item("node_type", info.node_type)?;
             dict.set_item("text_column", info.text_column)?;
+            dict.set_item("store_name", info.store_name)?;
             dict.set_item("dimension", info.dimension)?;
             dict.set_item("count", info.count)?;
             dict.set_item("metric", info.metric)?;
@@ -498,7 +502,10 @@ impl KnowledgeGraph {
             let dict = PyDict::new(py);
             dict.set_item("node_type", &type_name)?;
             dict.set_item("text_column", &text_column)?;
-            dict.set_item("embedding_key", format!("{}_emb", text_column))?;
+            dict.set_item(
+                "embedding_key",
+                kglite_core::api::embeddings::store_name(&text_column),
+            )?;
             dict.set_item("nodes_with_property", stats.nodes_with_property)?;
             let nodes_embedded = stats.store.map(|s| s.len()).unwrap_or(0);
             dict.set_item("nodes_embedded", nodes_embedded)?;
@@ -559,7 +566,7 @@ impl KnowledgeGraph {
     ///     text_column: Source column name (e.g. 'summary')
     fn remove_embeddings(&mut self, node_type: &str, text_column: &str) -> PyResult<()> {
         let g = get_graph_mut(&mut self.inner);
-        let key = (node_type.to_string(), format!("{}_emb", text_column));
+        let key = kglite_core::api::embeddings::store_key(node_type, text_column);
         g.embeddings.remove(&key);
         Ok(())
     }
@@ -708,7 +715,7 @@ impl KnowledgeGraph {
 
         // Two-arg form: embeddings(node_type, text_column)
         if let Some(col) = text_column {
-            let key = (node_type_or_text_column.to_string(), format!("{}_emb", col));
+            let key = kglite_core::api::embeddings::store_key(node_type_or_text_column, col);
             let store = match self.inner.embeddings.get(&key) {
                 Some(s) => s,
                 None => return result.into_py_any(py),
@@ -727,20 +734,22 @@ impl KnowledgeGraph {
             return result.into_py_any(py);
         }
 
-        // One-arg form: embeddings(text_column) — selection-based
+        // One-arg form: embeddings(text_column) — selection-based. A selection
+        // that was never narrowed means the whole graph (the never-selected
+        // rule get_nodes() applies); one a query emptied stays empty.
         let col = node_type_or_text_column;
 
-        let level_count = self.cursor.selection.get_level_count();
-        if level_count == 0 {
-            return result.into_py_any(py);
-        }
-
-        let nodes: Vec<NodeIndex> = self
-            .cursor
-            .selection
-            .get_level(level_count - 1)
-            .map(|l| l.get_all_nodes())
-            .unwrap_or_default();
+        let selection = &self.cursor.selection;
+        let level = selection
+            .get_level(selection.get_level_count().saturating_sub(1))
+            .filter(|level| level.node_count() > 0);
+        let nodes: Vec<NodeIndex> = match level {
+            Some(level) => level.get_all_nodes(),
+            None if selection.never_selected() => {
+                GraphRead::node_indices(&self.inner.graph).collect()
+            }
+            None => Vec::new(),
+        };
 
         for node_idx in &nodes {
             let node = match self.inner.graph.node_view(*node_idx) {
@@ -748,9 +757,9 @@ impl KnowledgeGraph {
                 None => continue,
             };
 
-            let key = (
-                node.node_type_str(&self.inner.interner).to_string(),
-                format!("{}_emb", col),
+            let key = kglite_core::api::embeddings::store_key(
+                node.node_type_str(&self.inner.interner),
+                col,
             );
             let store = match self.inner.embeddings.get(&key) {
                 Some(s) => s,
@@ -790,7 +799,7 @@ impl KnowledgeGraph {
             None => return Ok(py.None()),
         };
 
-        let key = (node_type.to_string(), format!("{}_emb", text_column));
+        let key = kglite_core::api::embeddings::store_key(node_type, text_column);
         let store = match self.inner.embeddings.get(&key) {
             Some(s) => s,
             None => return Ok(py.None()),
@@ -877,7 +886,7 @@ impl KnowledgeGraph {
     ) -> PyResult<Py<PyAny>> {
         let _arena_guard = self.inner.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
         let model = self.get_embedder_or_error()?;
-        let embedding_property = format!("{}_emb", text_column);
+        let embedding_property = kglite_core::api::embeddings::store_name(text_column);
         let batch_size = batch_size.unwrap_or(256);
         let mode = match mode.unwrap_or("missing") {
             "missing" => "missing",
@@ -1220,7 +1229,7 @@ impl KnowledgeGraph {
     /// dropped.
     #[pyo3(signature = (node_type, text_column))]
     fn drop_vector_index(&mut self, node_type: &str, text_column: &str) -> PyResult<bool> {
-        let key = (node_type.to_string(), format!("{}_emb", text_column));
+        let key = kglite_core::api::embeddings::store_key(node_type, text_column);
         let g = get_graph_mut(&mut self.inner);
         match g.embeddings.get_mut(&key) {
             Some(store) => {
@@ -1235,7 +1244,7 @@ impl KnowledgeGraph {
     /// Whether an HNSW index is currently built over an embedding store.
     #[pyo3(signature = (node_type, text_column))]
     fn has_vector_index(&self, node_type: &str, text_column: &str) -> PyResult<bool> {
-        let key = (node_type.to_string(), format!("{}_emb", text_column));
+        let key = kglite_core::api::embeddings::store_key(node_type, text_column);
         Ok(self
             .inner
             .embeddings

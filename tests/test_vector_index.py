@@ -264,6 +264,22 @@ class TestAutoUseAndRecall:
         recall = len(truth.intersection(approx)) / 10.0
         assert recall >= 0.8
 
+    def test_never_selected_whole_graph_rides_the_index(self):
+        # A never-narrowed selection resolves to the whole graph, which for a
+        # single embedded type is the whole store — so the index fast path is
+        # still eligible (the candidate-resolution half is pinned by
+        # `never_selected_candidates_are_the_whole_graph_in_index_order` in the
+        # engine's vector tests; this pins the end-to-end result).
+        g, emb = _build_graph(n=2000, d=48)
+        q = emb[7]
+        g.build_vector_index("Doc", "summary")
+        selected = _ids(g.select("Doc").vector_search("summary", q, top_k=10))
+        unselected = _ids(g.vector_search("summary", q, top_k=10))
+        assert unselected == selected
+        exact = set(_ids(g.select("Doc").vector_search("summary", q, top_k=10, exact=True)))
+        recall = len(exact.intersection(unselected)) / 10.0
+        assert recall >= 0.8
+
 
 class TestIndexRoundTrip:
     def test_index_persists_across_save_load(self):

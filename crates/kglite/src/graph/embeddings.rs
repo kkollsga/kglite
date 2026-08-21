@@ -74,6 +74,11 @@ pub struct EmbeddingStoreInfo {
     /// suffix stripped, so it names what the caller passed to
     /// [`set_embeddings`], never the store.
     pub text_column: String,
+    /// The store's own name (`"{text_column}_emb"`) — what Cypher's
+    /// `vector_score` takes. Reported alongside `text_column` because the two
+    /// surfaces name the same store differently, and a listing that showed
+    /// only one spelling left the other undiscoverable.
+    pub store_name: String,
     /// The store's vector dimension.
     pub dimension: usize,
     /// Vectors currently in the store.
@@ -83,11 +88,19 @@ pub struct EmbeddingStoreInfo {
     pub metric: String,
 }
 
-/// The store key for a source column: `(node_type, "{text_column}_emb")`.
+/// The store name for a source column: `"{text_column}_emb"`.
 ///
-/// The one place the `_emb` suffix is derived on the write path.
+/// The one place the `_emb` suffix is minted. Every caller that needs the
+/// store's name — a store key, a Cypher rewrite, an error's did-you-mean —
+/// goes through here rather than spelling the suffix again, so the convention
+/// has a single definition to change.
+pub fn store_name(text_column: &str) -> String {
+    format!("{}_emb", text_column)
+}
+
+/// The store key for a source column: `(node_type, "{text_column}_emb")`.
 pub fn store_key(node_type: &str, text_column: &str) -> (String, String) {
-    (node_type.to_string(), format!("{}_emb", text_column))
+    (node_type.to_string(), store_name(text_column))
 }
 
 /// List every embedding store on the graph — a read-only projection, one
@@ -102,12 +115,10 @@ pub fn list_embeddings(graph: &DirGraph) -> Vec<EmbeddingStoreInfo> {
     graph
         .embeddings
         .iter()
-        .map(|((node_type, store_name), store)| EmbeddingStoreInfo {
+        .map(|((node_type, name), store)| EmbeddingStoreInfo {
             node_type: node_type.clone(),
-            text_column: store_name
-                .strip_suffix("_emb")
-                .unwrap_or(store_name)
-                .to_string(),
+            text_column: name.strip_suffix("_emb").unwrap_or(name).to_string(),
+            store_name: name.clone(),
             dimension: store.dimension,
             count: store.len(),
             metric: store.metric.as_deref().unwrap_or("cosine").to_string(),

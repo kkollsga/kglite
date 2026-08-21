@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`vector_search()`, `search_text()` and `embeddings()` returned `[]` when no
+  selection was active.** With embeddings stored and no `select()` in front of
+  it, `g.vector_search('summary', q)` answered "nothing is similar" to a
+  question it had never been asked, and `search_text()` did it after loading the
+  embedder and paying for the query embedding. All three now search the whole
+  graph when the selection was *never narrowed* — the same never-selected rule
+  `get_nodes()` has always followed, now written once as
+  `CurrentSelection::never_selected()` and shared by both. A selection a query
+  *emptied* (a filter that matched nothing) still returns nothing, because that
+  is the answer to a question the caller did ask. A whole-graph search over a
+  single embedded type still rides the HNSW index; one spanning types whose
+  stores disagree on dimension raises instead of silently ranking part of the
+  graph.
+
+- **The embedding store name was undiscoverable from either surface that
+  needed it.** Cypher's `vector_score()` takes the store name (`'summary_emb'`)
+  and its error for anything else was a dead end (`no embedding 'summary'
+  found for node type 'Article'`), while the Python API takes the source column
+  (`'summary'`) and rejects the store name — each surface pushing the caller at
+  what the other refuses. `vector_score()` now names the store that does exist
+  and points at `text_score(n, 'summary', …)`, which takes the column;
+  `list_embeddings()` reports a `store_name` beside `text_column`, so the two
+  spellings are visible in one place. Unknown columns with no matching store
+  keep the plain message. The `.pyi` also documents the `metric` key
+  `list_embeddings()` has always returned.
+
 - **An unbound `$parameter` in a `WHERE` clause raised on projection shapes but
   silently returned zero on fused aggregate shapes.**
   `MATCH (v:Vessel) WHERE v.flag = $flag RETURN count(v)` with no `flag` in

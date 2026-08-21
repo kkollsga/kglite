@@ -760,6 +760,30 @@ impl CurrentSelection {
         self.levels.last().map(|l| l.node_count()).unwrap_or(0)
     }
 
+    /// Whether this selection was *never narrowed*: the current level holds no
+    /// nodes **and** no query operation was ever recorded.
+    ///
+    /// This is the discriminator between the two ways a selection can hold zero
+    /// nodes, and they mean opposite things:
+    ///
+    /// - never selected (`true`) — the caller has not asked for anything yet,
+    ///   so "everything" is the honest answer. `get_nodes()` returns the whole
+    ///   graph on it, and so do `vector_search` / `search_text` / `embeddings`.
+    /// - a query that matched nothing (`false`) — an empty result the caller
+    ///   asked for, which must stay empty.
+    ///
+    /// Node-count alone cannot tell them apart, and reading a virgin selection
+    /// as "matched nothing" is what made vector search answer `[]` to a
+    /// question it had never been asked.
+    pub fn never_selected(&self) -> bool {
+        let level_is_empty = self
+            .levels
+            .last()
+            .map(|level| level.node_count() == 0)
+            .unwrap_or(true);
+        level_is_empty && self.execution_plan.is_empty()
+    }
+
     /// Returns true if any filtering/selection operation has been applied to the current level.
     /// Used to distinguish "no filter applied" (pristine state) from "filter returned 0 results".
     pub fn has_active_selection(&self) -> bool {

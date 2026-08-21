@@ -776,10 +776,12 @@ fn store_extracted_embeddings(
         if dimension == 0 {
             continue;
         }
+        // add_nodes() accepts a column already named `<col>_emb` as well as the
+        // bare source column, so the suffix is only minted when it is missing.
         let store_key = if emb_col.ends_with("_emb") {
             emb_col.clone()
         } else {
-            format!("{}_emb", emb_col)
+            kglite_core::api::embeddings::store_name(emb_col)
         };
         let mut store = kglite_core::api::storage::EmbeddingStore::new(dimension);
         store.data.reserve(pairs.len() * dimension);

@@ -1142,6 +1142,7 @@ pub kglite::api::embeddings::EmbeddingStoreInfo::count: usize
 pub kglite::api::embeddings::EmbeddingStoreInfo::dimension: usize
 pub kglite::api::embeddings::EmbeddingStoreInfo::metric: alloc::string::String
 pub kglite::api::embeddings::EmbeddingStoreInfo::node_type: alloc::string::String
+pub kglite::api::embeddings::EmbeddingStoreInfo::store_name: alloc::string::String
 pub kglite::api::embeddings::EmbeddingStoreInfo::text_column: alloc::string::String
 impl core::clone::Clone for kglite::api::embeddings::EmbeddingStoreInfo
 pub fn kglite::api::embeddings::EmbeddingStoreInfo::clone(&self) -> kglite::api::embeddings::EmbeddingStoreInfo
@@ -1168,6 +1169,7 @@ pub fn kglite::api::embeddings::build_vector_index(graph: &mut kglite::api::DirG
 pub fn kglite::api::embeddings::list_embeddings(graph: &kglite::api::DirGraph) -> alloc::vec::Vec<kglite::api::embeddings::EmbeddingStoreInfo>
 pub fn kglite::api::embeddings::set_embeddings<I, V>(graph: &mut kglite::api::DirGraph, node_type: &str, text_column: &str, metric: core::option::Option<&str>, entries: I) -> core::result::Result<kglite::api::embeddings::EmbeddingIngestReport, alloc::string::String> where I: core::iter::traits::collect::IntoIterator<Item = (kglite::datatypes::values::Value, V)>, V: core::convert::AsRef<[f32]>
 pub fn kglite::api::embeddings::store_key(node_type: &str, text_column: &str) -> (alloc::string::String, alloc::string::String)
+pub fn kglite::api::embeddings::store_name(text_column: &str) -> alloc::string::String
 pub mod kglite::api::fluent
 pub enum kglite::api::fluent::EvaluationResult
 pub kglite::api::fluent::EvaluationResult::Computed(alloc::vec::Vec<kglite::api::fluent::StatResult>)
@@ -2488,6 +2490,7 @@ pub fn kglite::api::CurrentSelection::get_level(&self, index: usize) -> core::op
 pub fn kglite::api::CurrentSelection::get_level_count(&self) -> usize
 pub fn kglite::api::CurrentSelection::get_level_mut(&mut self, index: usize) -> core::option::Option<&mut kglite::api::SelectionLevel>
 pub fn kglite::api::CurrentSelection::has_active_selection(&self) -> bool
+pub fn kglite::api::CurrentSelection::never_selected(&self) -> bool
 pub fn kglite::api::CurrentSelection::new() -> Self
 pub fn kglite::api::CurrentSelection::remap_indices(&mut self, remap: &kglite::api::NodeRemap)
 impl core::clone::Clone for kglite::api::CurrentSelection

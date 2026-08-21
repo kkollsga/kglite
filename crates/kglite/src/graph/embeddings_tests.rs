@@ -364,8 +364,10 @@ fn list_embeddings_projects_source_column_and_defaults_metric() {
         listing,
         vec![EmbeddingStoreInfo {
             node_type: "Doc".to_string(),
-            // the source column, not the "summary_emb" store name
+            // both spellings: the source column this API takes, and the store
+            // name Cypher's vector_score takes
             text_column: "summary".to_string(),
+            store_name: "summary_emb".to_string(),
             dimension: 2,
             count: 2,
             metric: "dot_product".to_string(),

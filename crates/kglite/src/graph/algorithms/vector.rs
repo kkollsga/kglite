@@ -152,11 +152,53 @@ fn resolve_metric_from_nodes(
     parse_stored_metric(metrics.into_iter().next().unwrap_or("cosine"))
 }
 
+/// The candidate nodes a search runs over, for a given selection.
+///
+/// A selection that was narrowed contributes its current level. A selection
+/// that was **never** narrowed ([`CurrentSelection::never_selected`]) means
+/// "the whole graph" — the same rule `get_nodes()` applies — so a caller who
+/// never selected gets a search instead of a silent `[]`. A selection a query
+/// emptied is a real empty result and returns an empty slice.
+///
+/// Whole-graph candidates come back in node-index order, which is the order an
+/// embedding store's slots are filled in for a freshly embedded type — so a
+/// whole-graph search over a single embedded type still satisfies the
+/// `ordered_whole_store` coverage proof and rides the HNSW fast path.
+fn selection_candidates<'a>(
+    graph: &DirGraph,
+    selection: &'a CurrentSelection,
+) -> Cow<'a, [NodeIndex]> {
+    let level = selection
+        .get_level(selection.get_level_count().saturating_sub(1))
+        .filter(|level| level.node_count() > 0);
+
+    match level {
+        // A normal select/filter/set-operation level has one group. Borrow its
+        // contiguous node slice directly so the common vector-search path does
+        // not clone O(N) candidates before inspecting them; multi-parent
+        // traversal levels retain the established flattened owned shape.
+        Some(level) => {
+            let mut groups = level.iter_groups();
+            match (groups.next(), groups.next()) {
+                (Some((_, nodes)), None) => Cow::Borrowed(nodes.as_slice()),
+                _ => Cow::Owned(level.get_all_nodes()),
+            }
+        }
+        None if selection.never_selected() => {
+            Cow::Owned(GraphRead::node_indices(&graph.graph).collect())
+        }
+        None => Cow::Owned(Vec::new()),
+    }
+}
+
 /// Perform vector search over the current selection.
 ///
 /// Gets candidate nodes from the selection's current level, computes similarity
 /// for each candidate that has an embedding, and returns top-k results sorted
 /// by score (descending for cosine/dot, ascending for euclidean).
+///
+/// A selection that was never narrowed searches the whole graph (see
+/// [`selection_candidates`]); one that a query emptied returns no results.
 ///
 /// When `exact` is false and the store carries an HNSW index whose metric
 /// supports it (cosine/dot/euclidean) and the selection covers enough of the
@@ -171,7 +213,6 @@ pub fn vector_search(
     query_vector: &[f32],
     options: &VectorSearchOptions,
 ) -> Result<Vec<VectorSearchResult>, String> {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
     let VectorSearchOptions {
         top_k,
         metric,
@@ -182,31 +223,14 @@ pub fn vector_search(
     // arena, which must run under a DiskQueryGuard (arena protocol in
     // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
     let _arena_guard = graph.graph.begin_query();
-    let level_count = selection.get_level_count();
-    if level_count == 0 {
+    if top_k == 0 {
         return Ok(Vec::new());
     }
 
-    let level = match selection.get_level(level_count - 1) {
-        Some(level) => level,
-        None => return Ok(Vec::new()),
-    };
-    if level.node_count() == 0 || top_k == 0 {
+    let candidates = selection_candidates(graph, selection);
+    let Some(&first_candidate) = candidates.first() else {
         return Ok(Vec::new());
-    }
-
-    // A normal select/filter/set-operation level has one group. Borrow its
-    // contiguous node slice directly so the common vector-search path does not
-    // clone O(N) candidates before inspecting them; multi-parent traversal
-    // levels retain the established flattened owned shape.
-    let candidates: Cow<'_, [NodeIndex]> = {
-        let mut groups = level.iter_groups();
-        match (groups.next(), groups.next()) {
-            (Some((_, nodes)), None) => Cow::Borrowed(nodes.as_slice()),
-            _ => Cow::Owned(level.get_all_nodes()),
-        }
     };
-    let first_candidate = candidates[0];
     let first_type = GraphRead::node_type_of(&graph.graph, first_candidate);
     let tentative_single_type = first_type.and_then(|node_type| {
         let node_type = graph.interner.resolve(node_type);
@@ -854,6 +878,113 @@ mod tests {
             .expect("initial selection level")
             .add_selection(None, nodes);
         selection
+    }
+
+    /// A selection a query *emptied*: zero nodes, but a recorded plan step —
+    /// the shape a filter that matched nothing leaves behind.
+    fn emptied_by_query() -> CurrentSelection {
+        let mut selection = selection_of(Vec::new());
+        selection.add_plan_step(crate::graph::schema::PlanStep::new(
+            "FILTER",
+            Some("Doc"),
+            0,
+        ));
+        selection
+    }
+
+    /// Two docs of one type, both embedded, plus an untyped-store node type so
+    /// the multi-store paths have something to skip.
+    fn two_doc_graph() -> (DirGraph, Vec<NodeIndex>) {
+        let mut graph = DirGraph::new();
+        let mut docs = Vec::new();
+        let mut store = EmbeddingStore::with_metric(2, "cosine");
+        for id in 0..2 {
+            let node = NodeData::new(
+                Value::Int64(id as i64),
+                Value::String(format!("Doc {id}")),
+                "Doc".to_string(),
+                HashMap::new(),
+                &mut graph.interner,
+            );
+            let idx = GraphWrite::add_node(&mut graph.graph, node);
+            graph
+                .type_indices
+                .entry_or_default("Doc".to_string())
+                .push(idx);
+            store.set_embedding(idx.index(), &[1.0 - id as f32, id as f32]);
+            docs.push(idx);
+        }
+        graph
+            .embeddings
+            .insert(("Doc".to_string(), "summary_emb".to_string()), store);
+        (graph, docs)
+    }
+
+    #[test]
+    fn never_selected_candidates_are_the_whole_graph_in_index_order() {
+        let (graph, docs) = two_doc_graph();
+        let virgin = CurrentSelection::new();
+        assert!(virgin.never_selected());
+        assert_eq!(
+            selection_candidates(&graph, &virgin).as_ref(),
+            docs.as_slice(),
+            "a never-narrowed selection resolves to every node, in index order \
+             (which is what keeps the HNSW whole-store coverage proof valid)"
+        );
+
+        // A query that matched nothing is a real empty result, not "everything".
+        let emptied = emptied_by_query();
+        assert!(!emptied.never_selected());
+        assert!(selection_candidates(&graph, &emptied).is_empty());
+
+        // An explicit selection is unchanged.
+        assert_eq!(
+            selection_candidates(&graph, &selection_of(docs.clone())).as_ref(),
+            docs.as_slice()
+        );
+    }
+
+    #[test]
+    fn never_selected_search_covers_the_graph_and_an_emptied_query_stays_empty() {
+        let (graph, docs) = two_doc_graph();
+        let options = VectorSearchOptions::default()
+            .with_top_k(2)
+            .with_metric(DistanceMetric::Cosine);
+
+        let whole = vector_search(
+            &graph,
+            &CurrentSelection::new(),
+            "summary_emb",
+            &[1.0, 0.0],
+            &options,
+        )
+        .expect("never-selected search");
+        assert_eq!(
+            whole.iter().map(|r| r.node_idx).collect::<Vec<_>>(),
+            vec![docs[0], docs[1]]
+        );
+
+        let emptied = vector_search(
+            &graph,
+            &emptied_by_query(),
+            "summary_emb",
+            &[1.0, 0.0],
+            &options,
+        )
+        .expect("emptied search");
+        assert!(emptied.is_empty());
+
+        // An empty graph has nothing to search either way.
+        let empty_graph = DirGraph::new();
+        assert!(vector_search(
+            &empty_graph,
+            &CurrentSelection::new(),
+            "summary_emb",
+            &[1.0, 0.0],
+            &options,
+        )
+        .expect("empty-graph search")
+        .is_empty());
     }
 
     #[test]

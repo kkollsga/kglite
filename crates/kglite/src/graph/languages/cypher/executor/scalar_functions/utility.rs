@@ -88,10 +88,7 @@ impl<'a> CypherExecutor<'a> {
                 let store = match self.graph.embedding_store(node_type, &c.prop_name) {
                     Some(s) => s,
                     None => {
-                        return Err(format!(
-                            "vector_score(): no embedding '{}' found for node type '{}'",
-                            c.prop_name, node_type
-                        ))
+                        return Err(missing_embedding_error(self.graph, node_type, &c.prop_name))
                     }
                 };
 
@@ -316,5 +313,27 @@ impl<'a> CypherExecutor<'a> {
             _ => return Ok(None),
         };
         result.map(Some)
+    }
+}
+
+/// The error for `vector_score(n, '<name>', …)` when no store of that name
+/// exists on the node's type.
+///
+/// `vector_score` is named in *store* terms (`'summary_emb'`) while every other
+/// surface — `set_embeddings`, `text_score`, the Python API — is named in
+/// *source column* terms (`'summary'`). A caller who reaches for the column
+/// name here gets an error naming a store that does exist under the spelling
+/// they didn't use, so the message hands them both ways out. When the name is
+/// genuinely unknown there is nothing to suggest and the plain message stands.
+fn missing_embedding_error(graph: &DirGraph, node_type: &str, prop_name: &str) -> String {
+    let base =
+        format!("vector_score(): no embedding '{prop_name}' found for node type '{node_type}'");
+    let suffixed = crate::graph::embeddings::store_name(prop_name);
+    match graph.embedding_store(node_type, &suffixed) {
+        Some(_) => format!(
+            "{base}. Did you mean '{suffixed}'? vector_score() takes the embedding \
+             store name; text_score(n, '{prop_name}', <query text>) takes the text column."
+        ),
+        None => base,
     }
 }

@@ -301,7 +301,7 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/scalar_functions/utility.rs",
       "qualified_name": "crate::CypherExecutor<'a>::eval_utility_fn",
-      "lines": 307,
+      "lines": 304,
       "branches": 90,
       "nesting": 4
     },

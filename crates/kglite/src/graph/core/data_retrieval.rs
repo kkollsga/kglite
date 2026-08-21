@@ -94,25 +94,11 @@ pub fn get_nodes(
         return Vec::new();
     }
 
-    // Check if selection is effectively empty (no nodes selected)
-    // Note: CurrentSelection always has at least one level, so we check if the level is empty
-    let selection_is_empty = if selection.get_level_count() > 0 {
-        let level_idx = selection.get_level_count().saturating_sub(1);
-        selection
-            .get_level(level_idx)
-            .map(|l| l.node_count() == 0)
-            .unwrap_or(true)
-    } else {
-        true
-    };
-
-    // Check if any query operations have been applied (type_filter, filter, traverse, etc.)
-    let has_query_operations = !selection.get_execution_plan().is_empty();
-
-    // If selection is empty AND no query operations were applied, return all regular nodes.
-    // If selection is empty BUT query operations were applied (e.g., filter matched 0 nodes),
-    // return empty to respect the query result.
-    if selection_is_empty && !has_query_operations {
+    // A selection that was never narrowed means "the whole graph"; one that a
+    // query emptied means "nothing matched" and stays empty. The two are told
+    // apart in exactly one place — `CurrentSelection::never_selected` — which
+    // vector search shares (`algorithms::vector`).
+    if selection.never_selected() {
         let mut all_nodes = Vec::new();
         for node_idx in GraphRead::node_indices(&graph.graph) {
             if let Some(node) = graph.node_view(node_idx) {

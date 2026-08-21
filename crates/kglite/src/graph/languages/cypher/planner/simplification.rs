@@ -787,7 +787,9 @@ impl TextScoreCollector {
         let query_text = text_score_query_arg(&args[2], params)?;
 
         *name = "vector_score".to_string();
-        args[1] = Expression::Literal(Value::String(format!("{}_emb", col_name)));
+        args[1] = Expression::Literal(Value::String(crate::graph::embeddings::store_name(
+            &col_name,
+        )));
 
         if let Some(query_text) = query_text {
             args[2] = Expression::Parameter(self.param_for_text(query_text));
