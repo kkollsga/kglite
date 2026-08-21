@@ -70,8 +70,7 @@ pub(super) fn set_edge_property(
         // the map form follows. Counted as a property *set*, matching what the
         // node path reports for the identical statement; `REMOVE r.p` is the
         // spelling that counts a removal.
-        let write_null = matches!(value, Value::Null);
-        if write_null {
+        if matches!(value, Value::Null) {
             edge_props.retain(|(ek, _)| *ek != key);
         } else if let Some((_, existing)) = edge_props.iter_mut().find(|(ek, _)| *ek == key) {
             *existing = value;

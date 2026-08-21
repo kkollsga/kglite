@@ -219,6 +219,63 @@ fn test_set_and_remove_relationship_property() {
     );
 }
 
+/// A null-valued relationship property is not written — the node rule
+/// (`CREATE (:N {x: null})` leaves `x` absent), applied to the key/value
+/// vector an edge stores. The connection-type metadata must not learn a
+/// `"Null"`-typed property from it either: that entry is what `schema_text()`
+/// and `connection_types()` then advertise for the life of the graph.
+#[test]
+fn test_null_relationship_property_is_never_written_or_registered() {
+    use crate::graph::storage::GraphRead;
+    let mut graph = DirGraph::new();
+    let q = parser::parse_cypher(
+        "CREATE (a:Person {id: 1})-[:KNOWS {since: null, weight: 2}]->(b:Person {id: 2})",
+    )
+    .unwrap();
+    execute_mutable(
+        &mut graph,
+        &q,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
+
+    let edge_idx = petgraph::graph::EdgeIndex::new(0);
+    let edge = GraphRead::edge_weight(&graph.graph, edge_idx).unwrap();
+    assert_eq!(edge.get_property("since"), None);
+    assert_eq!(edge.get_property("weight"), Some(&Value::Int64(2)));
+
+    let info = graph.connection_type_metadata.get("KNOWS").unwrap();
+    assert_eq!(info.property_types.get("since"), None);
+    assert_eq!(
+        info.property_types.get("weight").map(String::as_str),
+        Some("Int64")
+    );
+    assert!(
+        !info.property_types.values().any(|t| t == "Null"),
+        "connection-type metadata carries a phantom Null property: {:?}",
+        info.property_types
+    );
+
+    // SET to null removes rather than storing a null, and still reports the
+    // write as a property set — the node path's answer for the same statement.
+    let q2 = parser::parse_cypher("MATCH ()-[r:KNOWS]->() SET r.weight = null").unwrap();
+    let result = execute_mutable(
+        &mut graph,
+        &q2,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
+    assert_eq!(result.stats.unwrap().properties_set, 1);
+    assert_eq!(
+        GraphRead::edge_weight(&graph.graph, edge_idx)
+            .unwrap()
+            .get_property("weight"),
+        None
+    );
+}
+
 #[test]
 fn test_create_path() {
     let mut graph = DirGraph::new();

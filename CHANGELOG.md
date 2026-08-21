@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`CREATE` stored null-valued relationship properties; node `CREATE` did not.**
+  `CREATE (a)-[:E {x: null, y: 1}]->(b)` left `x` on the edge, so `keys(r)`
+  reported a property that the identical literal on a node —
+  `CREATE (:N {x: null, y: 1})` — never creates. The same null also registered
+  a phantom `"Null"`-typed `x` in the connection type's schema metadata, which
+  `schema_text()`, `connection_types()` and `describe()` then advertised for
+  the life of the graph. A relationship property that evaluates to null is now
+  simply not written, on every route that reaches it (`CREATE`, `FOREACH …
+  CREATE`, `MERGE`'s create branch). Relationship constraints are unaffected:
+  a `NOT NULL` declaration already refused a null value and still does.
+
+- **`SET r.p = null` and `SET r += {p: null}` left the property present with a
+  null value**, while the node spellings of both removed it. openCypher treats
+  a null assignment as a removal, so the two entity kinds now agree: the key is
+  gone from `keys(r)` and `properties(r)`, and the write still reports as a
+  property set (`REMOVE r.p` remains the spelling that reports a removal).
+
 - **`size()` and `length()` on a string counted UTF-8 bytes, not characters.**
   `size('Tromsø')` answered `7` and `size('日本語')` answered `9`, which
   disagreed with `substring()`, `left()` and `right()` — those have always been

@@ -516,3 +516,107 @@ class TestTextPredicatesIntegration:
         )
         # Alice Smith and Alice  Smith normalize to the same string
         assert any(r["d"] == 0 for r in rows)
+
+
+# ── null-valued property writes: node/relationship parity ───
+
+
+class TestNullPropertyWriteParity:
+    """A null-valued property is *not stored*, on nodes and relationships alike.
+
+    The node side has always behaved this way (the columnar store skips null
+    cells, so `keys(n)` never reports one). The relationship side stored the
+    key with a null value, so the same literal produced a different
+    `keys()`/`properties()` shape depending on which entity it was written to —
+    and, on CREATE, taught the connection-type schema a phantom `Null`-typed
+    property.
+    """
+
+    @staticmethod
+    def _pair():
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:N {id: 1, x: null, y: 1})")
+        g.cypher("CREATE (a:N {id: 2})-[:E {x: null, y: 1}]->(b:N {id: 3})")
+        node_keys = g.cypher("MATCH (n:N {id: 1}) RETURN keys(n) AS k").to_list()[0]["k"]
+        rel = g.cypher("MATCH ()-[r:E]->() RETURN keys(r) AS k, properties(r) AS p").to_list()[0]
+        return g, node_keys, rel
+
+    def test_create_drops_null_on_both_entities(self):
+        _, node_keys, rel = self._pair()
+        assert "x" not in node_keys, f"node CREATE stored a null property: {sorted(node_keys)}"
+        assert "y" in node_keys
+        assert "x" not in rel["k"], f"rel CREATE stored a null property: {sorted(rel['k'])}"
+        assert "y" in rel["k"]
+        assert "x" not in rel["p"]
+        assert rel["p"]["y"] == 1
+
+    def test_create_null_does_not_register_null_typed_schema_property(self):
+        g, _, _ = self._pair()
+        schema = g.schema_text()
+        assert "Null" not in schema, f"a null edge property leaked into the schema:\n{schema}"
+        assert "y: Int64" in schema
+        conn = g.cypher("MATCH ()-[r:E]->() RETURN keys(r) AS k").to_list()[0]["k"]
+        assert "x" not in conn
+
+    def test_foreach_create_edge_drops_null(self):
+        g = KnowledgeGraph()
+        g.cypher("CREATE (a:N {id: 1}), (b:N {id: 2})")
+        g.cypher("MATCH (a:N {id: 1}), (b:N {id: 2}) FOREACH (i IN [1] | CREATE (a)-[:F {x: null, y: i}]->(b))")
+        keys = g.cypher("MATCH ()-[r:F]->() RETURN keys(r) AS k").to_list()[0]["k"]
+        assert "x" not in keys, f"FOREACH CREATE stored a null edge property: {sorted(keys)}"
+        assert "y" in keys
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "MERGE (n:N {id: 1, x: null})",
+            "MATCH (a:N {id: 1}), (b:N {id: 2}) MERGE (a)-[:E {x: null}]->(b)",
+        ],
+    )
+    def test_merge_refuses_null_property_on_both_entities(self, query):
+        """MERGE cannot key on a null, and says so for nodes and edges alike."""
+        g = KnowledgeGraph()
+        g.cypher("CREATE (a:N {id: 1}), (b:N {id: 2})")
+        with pytest.raises(kglite.CypherExecutionError, match="null for property 'x'"):
+            g.cypher(query)
+
+    def test_set_property_to_null_removes_on_both_entities(self):
+        g = KnowledgeGraph()
+        g.cypher("CREATE (a:N {id: 1, p: 1})-[:E {p: 1, q: 2}]->(b:N {id: 2})")
+        g.cypher("MATCH (n:N {id: 1}) SET n.p = null")
+        g.cypher("MATCH ()-[r:E]->() SET r.p = null")
+        node_keys = g.cypher("MATCH (n:N {id: 1}) RETURN keys(n) AS k").to_list()[0]["k"]
+        rel = g.cypher("MATCH ()-[r:E]->() RETURN keys(r) AS k, properties(r) AS p").to_list()[0]
+        assert "p" not in node_keys
+        assert "p" not in rel["k"], f"SET r.p = null left the key behind: {sorted(rel['k'])}"
+        assert "p" not in rel["p"]
+        assert rel["p"]["q"] == 2
+
+    def test_set_map_append_with_null_value_removes_key_on_both_entities(self):
+        """openCypher: `+=` with a null value removes the key. Node and rel agree."""
+        g = KnowledgeGraph()
+        g.cypher("CREATE (a:N {id: 1, p: 1})-[:E {p: 1}]->(b:N {id: 2})")
+        g.cypher("MATCH (n:N {id: 1}) SET n += {p: null, w: 5}")
+        g.cypher("MATCH ()-[r:E]->() SET r += {p: null, w: 5}")
+        node_keys = g.cypher("MATCH (n:N {id: 1}) RETURN keys(n) AS k").to_list()[0]["k"]
+        rel_keys = g.cypher("MATCH ()-[r:E]->() RETURN keys(r) AS k").to_list()[0]["k"]
+        assert "p" not in node_keys and "w" in node_keys
+        assert "p" not in rel_keys, f"SET r += {{p: null}} left the key behind: {sorted(rel_keys)}"
+        assert "w" in rel_keys
+
+    def test_bulk_add_connections_drops_null_cells(self):
+        """The loader route already skips null cells — pinned against regression."""
+        g = KnowledgeGraph()
+        g.add_nodes(pd.DataFrame({"id": [1, 2]}), "N", "id")
+        g.add_connections(
+            pd.DataFrame([{"src": 1, "tgt": 2, "x": None, "y": 5}]),
+            "E",
+            "N",
+            "src",
+            "N",
+            "tgt",
+        )
+        keys = g.cypher("MATCH ()-[r:E]->() RETURN keys(r) AS k").to_list()[0]["k"]
+        assert "x" not in keys
+        assert "y" in keys
+        assert "Null" not in g.schema_text()
