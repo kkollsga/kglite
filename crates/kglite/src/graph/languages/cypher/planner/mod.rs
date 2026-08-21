@@ -25,6 +25,7 @@ mod node_anchor;
 pub mod rel_predicate_pushdown;
 pub mod schema_check;
 pub mod simplification;
+mod var_length_lowering;
 
 use annotations::{
     pass_mark_disjoint_fixed_trails, pass_mark_fast_var_length_paths,
@@ -44,6 +45,8 @@ use join_order::{
 };
 use node_anchor::anchor_element_id;
 use rel_predicate_pushdown::extract_pushable_rel_predicates_with_params;
+use var_length_lowering::lower_fixed_var_length_hops;
+
 use simplification::{
     desugar_multi_match_return_aggregate, fold_or_to_in, fold_pass_through_with,
     narrow_unwind_source, push_distinct_into_match, push_limit_into_aggregate,
@@ -100,6 +103,7 @@ type PassFn = fn(&mut CypherQuery, &PassCtx);
 /// | `fuse_node_scan_aggregate` / `fuse_node_scan_top_k` | safe-by-shape | Match `Match → [Where] → Return [→ OrderBy → Limit]` adjacency. |
 /// | `fuse_vector_score_order_limit` / `fuse_order_by_top_k` | safe-by-shape | Match `(Return, OrderBy, Limit)` adjacency; a CallSubquery breaks it. |
 /// | `reorder_predicates_by_cost` | safe-by-shape | Reorders predicates WITHIN one WHERE (standalone or clause-owned). |
+/// | `lower_fixed_var_length_hops` | safe-by-shape | Rewrites the element list of a MATCH's own pattern; never moves or spans clauses. A CallSubquery is not a MATCH, so it enters no window; the body is reached only through `optimize_nested_queries`, which runs the whole pipeline on it. |
 /// | `mark_disjoint_fixed_trails` / `mark_fast_var_length_paths` / `mark_skip_target_type_check` | safe-by-shape | Mark flags on edge elements WITHIN MATCH clauses; CallSubquery hits `_ => continue`. The downstream-dedup-safety scan stops at the first Return/With, which a CallSubquery is not. |
 ///
 /// When in doubt the rule is: correctness beats optimization — a pass
@@ -108,6 +112,13 @@ type PassFn = fn(&mut CypherQuery, &PassCtx);
 /// except the two flagged above.
 pub const PASSES: &[(&str, PassFn)] = &[
     ("optimize_nested_queries", pass_optimize_nested_queries),
+    // `*k..k` → k explicit hops. Runs FIRST among the structural rewrites:
+    // every pass below bails on `var_length.is_some()`, so a segment lowered
+    // any later would inherit none of them.
+    (
+        "lower_fixed_var_length_hops",
+        pass_lower_fixed_var_length_hops,
+    ),
     // count(bound node/edge var) → count(*): runs early so the rewritten
     // count(*) reaches the count-fusion + light-row MATCH paths.
     (
@@ -297,6 +308,34 @@ pub fn optimize_with_disabled(
 // sub-module, add a wrapper here with a doc-comment in the standard
 // shape, register it in `PASSES`, add at least one query to
 // `tests/test_cypher_differential.py::DIFFERENTIAL_QUERIES`.
+
+/// **Pass:** `lower_fixed_var_length_hops` — **Precondition:** a
+/// `MATCH` / `OPTIONAL MATCH` with no path assignment. **Pattern
+/// matched:** a relationship element whose `var_length` is `(k, k)`,
+/// `1 <= k <= 8`. **Rewrite:** `k` copies of that element with
+/// `var_length` cleared, separated by anonymous unlabelled nodes; type
+/// alternations, inline relationship properties and direction are
+/// replicated onto every copy, which is what variable-length semantics
+/// already demand of each relationship in the segment. **Why:** every
+/// pass below — relationship pushdown, start-node selection, the fusion
+/// family, `mark_disjoint_fixed_trails`, `mark_skip_target_type_check` —
+/// declines a variable-length element, so the star spelling of a
+/// fixed-length question paid for none of them (measured 20x on an
+/// unanchored two-hop count).
+///
+/// **Why-bail:** `min != max`; `k == 0` (the zero-length identity is not
+/// a hop); `k` or the pattern's post-lowering hop count above the
+/// module's ceiling; a bound relationship variable (`r` binds the
+/// *list*); a path assignment anywhere in the clause; a pre-existing
+/// `edge_filter` or unresolved `-[:$type]->` slot (neither can be set at
+/// this point in `PASSES` — they are "the pipeline moved" guards).
+///
+/// The trail-semantics argument, and why the disjoint-types opt-out
+/// cannot fire on a lowered segment, are in `var_length_lowering`'s
+/// module docs.
+fn pass_lower_fixed_var_length_hops(query: &mut CypherQuery, _ctx: &PassCtx) {
+    lower_fixed_var_length_hops(query)
+}
 
 /// **Pass:** `optimize_nested_queries` — Recurse the optimizer into
 /// every nested query: UNION right-arms and `CALL { }` subquery bodies.

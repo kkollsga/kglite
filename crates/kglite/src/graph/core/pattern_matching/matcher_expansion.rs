@@ -9,6 +9,70 @@
 use super::*;
 use crate::graph::parallel::{self, ParallelInterrupt};
 
+/// Whether one node variable is written more than once in `pattern`
+/// (`(a)-[]->(b)-[]->(a)`). Such a pattern constrains a later hop against an
+/// earlier binding, so partial matches on the same node are not
+/// interchangeable and must not be deduplicated by node index.
+fn repeats_a_node_variable(pattern: &Pattern) -> bool {
+    let mut seen: Vec<&str> = Vec::new();
+    for element in &pattern.elements {
+        let PatternElement::Node(node) = element else {
+            continue;
+        };
+        let Some(var) = node.variable.as_deref() else {
+            continue;
+        };
+        if seen.contains(&var) {
+            return true;
+        }
+        seen.push(var);
+    }
+    false
+}
+
+/// Collapse the partial matches of one intermediate hop to one per node, when
+/// `collapsible` says the caller proved they are interchangeable. Returns them
+/// unchanged otherwise.
+///
+/// The optimization exists because `distinct_target_var` (the planner's
+/// `distinct_node_hint`) means only the last hop's target reaches the answer,
+/// so carrying N partials through an anonymous intermediate is wasted work.
+/// It is only legal while nothing downstream can tell two partials apart, and
+/// two things can:
+///
+/// - **The relationships they already consumed.** Cypher paths are trails, so
+///   a later hop consults them (`reuses_bound_relationship`) and two partials
+///   on the same node continue *differently*. Keeping one silently deletes
+///   the other's continuations: on a ring with stride-7 chords,
+///   `(a {id: 0})-[:R]-()-[:R]-()-[:R]-(b) RETURN DISTINCT b.id` lost node 7,
+///   whose only three-hop trail runs through an intermediate the dedup had
+///   already claimed for a route that had consumed the last relationship.
+///   `mark_disjoint_fixed_trails` is what usually clears this: pairwise-
+///   disjoint hop types record no trail at all.
+/// - **A node variable the pattern binds twice** (`(a)-[]->()-[]->(a)`).
+///   `target_satisfies_bindings` compares a later hop's target against the
+///   earlier binding, which differs per partial — `(a:N)-[:A]->()-[:B]->(a)
+///   RETURN DISTINCT a.id` returned 1 of 3 rows.
+fn dedup_interchangeable_partials(
+    matches: Vec<PatternMatch>,
+    indices: Vec<NodeIndex>,
+    collapsible: bool,
+) -> (Vec<PatternMatch>, Vec<NodeIndex>) {
+    if !collapsible {
+        return (matches, indices);
+    }
+    let mut seen = HashSet::with_capacity(indices.len());
+    let mut kept_matches = Vec::with_capacity(indices.len());
+    let mut kept_indices = Vec::with_capacity(indices.len());
+    for (partial, index) in matches.into_iter().zip(indices) {
+        if seen.insert(index) {
+            kept_matches.push(partial);
+            kept_indices.push(index);
+        }
+    }
+    (kept_matches, kept_indices)
+}
+
 /// Everything about one expansion hop that is invariant across the matches
 /// being expanded. Built once per hop by [`PatternExecutor::execute`] — the
 /// internal binding name in particular must not be formatted afresh for every
@@ -259,6 +323,11 @@ impl<'a> PatternExecutor<'a> {
             HashSet::new()
         };
 
+        // The two ways a later hop can tell two partial matches apart — see
+        // `dedup_interchangeable_partials`, which refuses to collapse them.
+        let repeats_a_node_variable = repeats_a_node_variable(pattern);
+        let mut relationship_state_recorded = false;
+
         // Process edge-node pairs
         let mut i = 1;
         while i < pattern.elements.len() {
@@ -312,6 +381,10 @@ impl<'a> PatternExecutor<'a> {
                 },
             };
 
+            relationship_state_recorded |= hop.track_fixed_trail
+                || hop.edge.variable.is_some()
+                || hop.anonymous_path_var.is_some();
+
             // Expand each current match.
             // `!seeds_pending` is implied by `max_matches.is_none()` — it is
             // named because the parallel branch zips `matches` against
@@ -348,28 +421,13 @@ impl<'a> PatternExecutor<'a> {
                 }
             }
 
-            // Intermediate dedup: when distinct_target_var is set and this is
-            // NOT the final hop and the current node is anonymous (no variable),
-            // deduplicate by NodeIndex to reduce work at subsequent hops.
-            if self.distinct_target_var.is_some()
+            let collapsible = self.distinct_target_var.is_some()
+                && !relationship_state_recorded
+                && !repeats_a_node_variable
                 && i + 1 < pattern.elements.len()
-                && node_pattern.variable.is_none()
-            {
-                let mut seen_idx = HashSet::with_capacity(new_indices.len());
-                let mut deduped_matches = Vec::with_capacity(new_indices.len());
-                let mut deduped_indices = Vec::with_capacity(new_indices.len());
-                for (m, idx) in new_matches.into_iter().zip(new_indices) {
-                    if seen_idx.insert(idx) {
-                        deduped_matches.push(m);
-                        deduped_indices.push(idx);
-                    }
-                }
-                matches = deduped_matches;
-                current_indices = deduped_indices;
-            } else {
-                matches = new_matches;
-                current_indices = new_indices;
-            }
+                && node_pattern.variable.is_none();
+            (matches, current_indices) =
+                dedup_interchangeable_partials(new_matches, new_indices, collapsible);
             // Every later hop reads real matches, not start-node seeds.
             seeds_pending = false;
             i += 1;
@@ -611,5 +669,35 @@ impl<'a> PatternExecutor<'a> {
             pm.bindings.push((var.clone(), self.node_to_binding(idx)));
         }
         pm
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::repeats_a_node_variable;
+    use crate::graph::core::pattern_matching::parse_pattern;
+
+    #[test]
+    fn a_node_variable_written_twice_is_reported() {
+        for text in [
+            "(a)-[:A]->(b)-[:B]->(a)",
+            "(a)-[:A]->()-[:B]->(a)",
+            "(a:N)-[:A]->(a)",
+        ] {
+            let pattern = parse_pattern(text).unwrap_or_else(|e| panic!("{text}: {e}"));
+            assert!(repeats_a_node_variable(&pattern), "{text}");
+        }
+    }
+
+    #[test]
+    fn distinct_and_anonymous_variables_are_not_repeats() {
+        for text in [
+            "(a)-[:A]->(b)-[:B]->(c)",
+            "(a)-[:A]->()-[:B]->(b)",
+            "()-[:A]->()-[:B]->()",
+        ] {
+            let pattern = parse_pattern(text).unwrap_or_else(|e| panic!("{text}: {e}"));
+            assert!(!repeats_a_node_variable(&pattern), "{text}");
+        }
     }
 }

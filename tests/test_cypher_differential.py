@@ -1167,6 +1167,156 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (a:N {id: 1})-[:R*2..3]-(b:N) RETURN count(DISTINCT b) AS n",
         None,
     ),
+    # ── lower_fixed_var_length_hops ──
+    # `*k..k` asks a fixed-length question with a variable-length spelling.
+    # The pass rewrites it into k explicit hops so the fixed-pattern machinery
+    # (start-node selection, relationship pushdown, the fusion family, the
+    # trail and target-type annotations) applies. The naive leg keeps the star
+    # spelling, so every entry below is a lowered-vs-variable comparison.
+    (
+        "lower_two_hop_unanchored_count",
+        "var_length_diamond_graph",
+        # The shape V2 was measured on: no anchor, so the star spelling could
+        # not pick a start node and expanded from every `:N`.
+        "MATCH (a:N)-[:R*2..2]->(b:N) RETURN count(*) AS n",
+        None,
+    ),
+    (
+        "lower_two_hop_anchored",
+        "directed_triangle_graph",
+        "MATCH (a:N {id: 1})-[:R*2..2]->(b:N) RETURN DISTINCT b.id AS i",
+        None,
+    ),
+    (
+        "lower_three_hop_closed_trail",
+        "directed_triangle_graph",
+        # Three hops around the cycle land back on the source: the lowered
+        # form must allow the repeated *node* while still refusing a repeated
+        # relationship.
+        "MATCH (a:N {id: 1})-[:R*3..3]->(b:N) RETURN b.id AS i",
+        None,
+    ),
+    (
+        "lower_two_hop_undirected_cannot_reverse",
+        "var_length_diamond_graph",
+        # Node 1 has exactly one relationship. Undirected two hops must leave
+        # over 1->2 and continue to 3 or 4 — never walk back over 1->2, which
+        # would put 1 in its own answer.
+        "MATCH (a:N {id: 1})-[:R*2..2]-(b:N) RETURN DISTINCT b.id AS i",
+        None,
+    ),
+    (
+        "lower_two_hop_undirected_parallel_relationships",
+        "parallel_edge_cycle_graph",
+        # ...and the converse: two distinct relationships between 1 and 2 DO
+        # make a closed trail of length 2, so 1 is one of its own answers here.
+        # A lowering that deduped by node would drop it; one that ignored
+        # relationship identity entirely would report it on the graph above.
+        "MATCH (a:N {id: 1})-[:R*2..2]-(b:N) RETURN b.id AS i",
+        None,
+    ),
+    (
+        "lower_two_hop_edge_property_filter",
+        "social_graph",
+        # An inline relationship property is replicated onto every lowered
+        # hop, because variable-length semantics require every relationship in
+        # the segment to satisfy it.
+        "MATCH (a:Person)-[:KNOWS*2..2 {since: 2016}]->(b:Person) RETURN count(*) AS n",
+        None,
+    ),
+    (
+        "lower_two_hop_type_alternation",
+        "social_graph",
+        # Each hop independently accepts any of the alternation's types — the
+        # same reading the variable-length expansion takes — so the whole
+        # alternation is copied onto each hop rather than split across them.
+        "MATCH (a:Person)-[:KNOWS|WORKS_AT*2..2]->(b) RETURN count(*) AS n",
+        None,
+    ),
+    (
+        "lower_optional_match_two_hop",
+        "var_length_diamond_graph",
+        # Null-extension is per row and per pattern, and the lowered pattern
+        # binds exactly the same variables (the intermediates are anonymous),
+        # so an `a` with no two-hop target keeps its null `j`.
+        "MATCH (a:N) OPTIONAL MATCH (a)-[:R*2..2]->(c:N) RETURN a.id AS i, c.id AS j",
+        None,
+    ),
+    (
+        "lower_hop_ceiling_at_eight",
+        "long_chain_graph",
+        "MATCH (a:N {id: 0})-[:R*8..8]->(b:N) RETURN b.id AS i",
+        None,
+    ),
+    (
+        "lower_hop_ceiling_declines_nine",
+        "long_chain_graph",
+        # One hop past the ceiling: the segment stays variable-length, and
+        # must still answer what it answered before.
+        "MATCH (a:N {id: 0})-[:R*9..9]->(b:N) RETURN b.id AS i",
+        None,
+    ),
+    (
+        "lower_declines_bound_relationship_variable",
+        "directed_triangle_graph",
+        # `r` binds the segment's relationship LIST; individual hop bindings
+        # cannot reconstruct it, so the star spelling stays.
+        "MATCH (a:N {id: 1})-[r:R*2..2]->(b:N) RETURN size(r) AS hops, b.id AS i",
+        None,
+    ),
+    (
+        "lower_declines_path_assignment",
+        "directed_triangle_graph",
+        "MATCH p = (a:N {id: 1})-[:R*2..2]->(b:N) RETURN [n IN nodes(p) | n.id] AS ids",
+        None,
+    ),
+    # ── intermediate-dedup soundness (matcher, not a pass) ──
+    # `push_distinct_into_match` lets the matcher drop partial matches that
+    # share an anonymous intermediate node. Two of them are not
+    # interchangeable when a later hop can tell them apart, and both ways it
+    # can were shipping wrong answers. The `*k..k` lowering makes anonymous
+    # intermediates common, which is how they surfaced.
+    (
+        "distinct_over_anonymous_intermediates_keeps_every_trail",
+        "square_cycle_graph",
+        # Undirected three hops from 1 reach 2 and 4. The dedup kept only 4:
+        # its surviving partial had already consumed the relationship that the
+        # last hop to 2 needed.
+        "MATCH (a:N {id: 1})-[:R]-()-[:R]-()-[:R]-(b:N) RETURN DISTINCT b.id AS i",
+        None,
+    ),
+    (
+        "distinct_over_anonymous_intermediates_var_length_spelling",
+        "square_cycle_graph",
+        # The same claim through the lowering, which is what put a three-hop
+        # anonymous-intermediate pattern in front of the matcher.
+        "MATCH (a:N {id: 1})-[:R*3..3]-(b:N) RETURN DISTINCT b.id AS i",
+        None,
+    ),
+    (
+        "distinct_over_anonymous_intermediate_with_a_repeated_variable",
+        "hub_return_graph",
+        # Disjoint hop types record no trail, so the trail guard does not
+        # apply — but `(a)` is bound twice, and the dedup kept one `a` for the
+        # hub, returning 1 of the 3 rows.
+        "MATCH (a:N)-[:A]->()-[:B]->(a) RETURN DISTINCT a.id AS i",
+        None,
+    ),
+    (
+        "distinct_over_anonymous_intermediate_stays_deduped_when_it_is_safe",
+        "hub_return_graph",
+        # Positive control: distinct end variable, no repeat, disjoint types —
+        # the dedup is legal here and must still fire.
+        "MATCH (a:N)-[:A]->()-[:B]->(b:N) RETURN DISTINCT b.id AS i",
+        None,
+    ),
+    (
+        "lower_second_clause_after_with",
+        "var_length_diamond_graph",
+        # Two lowered segments in one query, the second seeded from the first.
+        "MATCH (a:N {id: 1})-[:R*1..1]->(b:N) WITH DISTINCT b MATCH (b)-[:R*2..2]->(c:N) RETURN c.id AS i",
+        None,
+    ),
     # ── UNION (optimize_nested_queries) ──
     (
         "union_simple",
@@ -3195,6 +3345,52 @@ def parallel_edge_cycle_graph() -> kglite.KnowledgeGraph:
     return _edge_graph([1, 2, 3], [(1, 2), (1, 2), (2, 3), (3, 1)])
 
 
+@pytest.fixture
+def square_cycle_graph() -> kglite.KnowledgeGraph:
+    """1 → 2 → 3 → 4 → 1.
+
+    The smallest graph on which the matcher's intermediate dedup was
+    observably wrong: undirected three hops from 1 reach both 2 and 4, but 2
+    only over a trail whose intermediate the dedup had already claimed for a
+    route that had consumed the relationship the last hop needed.
+    """
+    return _edge_graph([1, 2, 3, 4], [(1, 2), (2, 3), (3, 4), (4, 1)])
+
+
+@pytest.fixture
+def hub_return_graph() -> kglite.KnowledgeGraph:
+    """1, 2, 3 each reach hub 10 over `:A`, and the hub reaches each back over `:B`.
+
+    The relationship types are pairwise disjoint, so no trail is tracked — the
+    other way two partial matches on one anonymous intermediate stop being
+    interchangeable is a repeated node variable, which this fixture's
+    `(a)-[:A]->()-[:B]->(a)` shape supplies.
+    """
+    import pandas as pd
+
+    g = kglite.KnowledgeGraph()
+    g.add_nodes(
+        pd.DataFrame({"id": [1, 2, 3, 10], "name": [f"n{i}" for i in (1, 2, 3, 10)]}),
+        "N",
+        "id",
+        "name",
+    )
+    g.add_connections(pd.DataFrame({"s": [1, 2, 3], "t": [10, 10, 10]}), "A", "N", "s", "N", "t")
+    g.add_connections(pd.DataFrame({"s": [10, 10, 10], "t": [1, 2, 3]}), "B", "N", "s", "N", "t")
+    return g
+
+
+@pytest.fixture
+def long_chain_graph() -> kglite.KnowledgeGraph:
+    """0 → 1 → ... → 11, a single directed chain.
+
+    Long enough to answer both sides of the `*k..k` lowering ceiling: `*8..8`
+    lowers to eight hops, `*9..9` is one past it and stays variable-length.
+    Both have exactly one answer, so a bail cannot hide behind an empty set.
+    """
+    return _edge_graph(list(range(12)), [(i, i + 1) for i in range(11)])
+
+
 VAR_LENGTH_HOP_SPECS = ["*0..2", "*1..2", "*1..3", "*2..2", "*2..3", "*3..3"]
 
 
@@ -3276,15 +3472,39 @@ def _cap_biting_var_length_graph(tail_from: int) -> kglite.KnowledgeGraph:
 
 @pytest.mark.parametrize("tail_from", [0, 600, 1199])
 @pytest.mark.parametrize(
-    "query",
+    "query,kwargs",
     [
-        "MATCH (a:Src)-[:R*1..1]->(b:Mid)-[:T]->(c:Tail) RETURN c.name AS n LIMIT 5",
-        "MATCH (a:Src)-[:R*1..1]->(b:Mid)-[:T]->(c:Tail) RETURN DISTINCT c.name AS n LIMIT 5",
-        "MATCH (a:Src)-[:R]->(b:Mid)-[:T]->(c:Tail) RETURN c.name AS n LIMIT 5",
+        # `disabled_passes` keeps the star spelling variable-length: without it
+        # `lower_fixed_var_length_hops` rewrites `*1..1` to a plain hop and
+        # these two cases become copies of the fixed control, silently
+        # retiring the coverage this test exists for.
+        (
+            "MATCH (a:Src)-[:R*1..1]->(b:Mid)-[:T]->(c:Tail) RETURN c.name AS n LIMIT 5",
+            {"disabled_passes": ["lower_fixed_var_length_hops"]},
+        ),
+        (
+            "MATCH (a:Src)-[:R*1..1]->(b:Mid)-[:T]->(c:Tail) RETURN DISTINCT c.name AS n LIMIT 5",
+            {"disabled_passes": ["lower_fixed_var_length_hops"]},
+        ),
+        (
+            "MATCH (a:Src)-[:R*1..2]->(b:Mid)-[:T]->(c:Tail) RETURN c.name AS n LIMIT 5",
+            {},
+        ),
+        (
+            "MATCH (a:Src)-[:R*1..1]->(b:Mid)-[:T]->(c:Tail) RETURN c.name AS n LIMIT 5",
+            {},
+        ),
+        ("MATCH (a:Src)-[:R]->(b:Mid)-[:T]->(c:Tail) RETURN c.name AS n LIMIT 5", {}),
     ],
-    ids=["var_length", "var_length_distinct", "fixed_control"],
+    ids=[
+        "var_length",
+        "var_length_distinct",
+        "var_length_range",
+        "var_length_lowered",
+        "fixed_control",
+    ],
 )
-def test_var_length_under_limit_returns_the_row_that_exists(tail_from: int, query: str) -> None:
+def test_var_length_under_limit_returns_the_row_that_exists(tail_from: int, query: str, kwargs: dict) -> None:
     """A variable-length hop is NOT exempt from advisory-cap accounting.
 
     The intermediate hop's advisory cap (50x `max_matches`, floor 1 000) sits
@@ -3297,7 +3517,123 @@ def test_var_length_under_limit_returns_the_row_that_exists(tail_from: int, quer
     never pre-cap — returns `[]` here for `tail_from=0`.
     """
     g = _cap_biting_var_length_graph(tail_from)
-    assert g.cypher(query).to_list() == [{"n": "tail"}]
+    assert g.cypher(query, **kwargs).to_list() == [{"n": "tail"}]
+
+
+def _applied_passes(graph: kglite.KnowledgeGraph, query: str, **kwargs) -> set[str]:
+    """The optimizer passes that changed the plan for `query`."""
+    return {
+        row["operation"].removeprefix("OptimizerPass ")
+        for row in graph.cypher(f"EXPLAIN {query}", **kwargs).to_list()
+        if str(row["operation"]).startswith("OptimizerPass ")
+    }
+
+
+LOWERING_PASS = "lower_fixed_var_length_hops"
+
+LOWERED_SHAPES = [
+    "MATCH (a:N {id: 1})-[:R*2..2]->(b:N) RETURN b.id AS i",
+    "MATCH (a:N)-[:R*2..2]->(b:N) RETURN count(*) AS n",
+    "MATCH (a:N {id: 1})-[:R*2..2]-(b:N) RETURN b.id AS i",
+    "MATCH (a:N {id: 1})-[:R*1..1]->(b:N) RETURN b.id AS i",
+    "MATCH (a:N {id: 1})-[:R*3..3]->(b:N) RETURN b.id AS i",
+    "MATCH (a:N) OPTIONAL MATCH (a)-[:R*2..2]->(b:N) RETURN a.id AS i, b.id AS j",
+]
+
+UNLOWERED_SHAPES = [
+    # A genuine range has no fixed spelling.
+    "MATCH (a:N {id: 1})-[:R*2..3]->(b:N) RETURN b.id AS i",
+    "MATCH (a:N {id: 1})-[:R*1..3]->(b:N) RETURN b.id AS i",
+    "MATCH (a:N {id: 1})-[:R*]->(b:N) RETURN b.id AS i",
+    # `r` binds the relationship LIST.
+    "MATCH (a:N {id: 1})-[r:R*2..2]->(b:N) RETURN size(r) AS hops",
+    # The path variable consumes the segment's relationship sequence.
+    "MATCH p = (a:N {id: 1})-[:R*2..2]->(b:N) RETURN length(p) AS l",
+    # Zero-length identity: no hop expresses it.
+    "MATCH (a:N {id: 1})-[:R*0..0]->(b:N) RETURN b.id AS i",
+]
+
+
+@pytest.mark.parametrize("query", LOWERED_SHAPES)
+def test_fixed_length_var_hops_are_lowered(directed_triangle_graph, query: str) -> None:
+    """The pass fires for every `*k..k` spelling inside its window."""
+    assert LOWERING_PASS in _applied_passes(directed_triangle_graph, query)
+
+
+@pytest.mark.parametrize("query", UNLOWERED_SHAPES)
+def test_the_lowering_declines_outside_its_window(directed_triangle_graph, query: str) -> None:
+    """...and declines outside it. Without this the corpus above could pass
+    for the boring reason that the pass stopped firing at all."""
+    assert LOWERING_PASS not in _applied_passes(directed_triangle_graph, query)
+
+
+def test_the_lowering_ceiling_is_observable_from_outside(long_chain_graph) -> None:
+    """Eight hops lower, nine do not — and both answer the same set either way."""
+    at_ceiling = "MATCH (a:N {id: 0})-[:R*8..8]->(b:N) RETURN b.id AS i"
+    past_ceiling = "MATCH (a:N {id: 0})-[:R*9..9]->(b:N) RETURN b.id AS i"
+
+    assert LOWERING_PASS in _applied_passes(long_chain_graph, at_ceiling)
+    assert LOWERING_PASS not in _applied_passes(long_chain_graph, past_ceiling)
+    assert long_chain_graph.cypher(at_ceiling).to_list() == [{"i": 8}]
+    assert long_chain_graph.cypher(past_ceiling).to_list() == [{"i": 9}]
+
+
+def test_the_lowering_ceiling_counts_the_whole_pattern(long_chain_graph) -> None:
+    """Two segments share one budget: 4+4 lowers, 4+5 leaves both alone."""
+    fits = "MATCH (a:N {id: 0})-[:R*4..4]->(b:N)-[:R*4..4]->(c:N) RETURN c.id AS i"
+    over = "MATCH (a:N {id: 0})-[:R*4..4]->(b:N)-[:R*5..5]->(c:N) RETURN c.id AS i"
+
+    assert LOWERING_PASS in _applied_passes(long_chain_graph, fits)
+    assert LOWERING_PASS not in _applied_passes(long_chain_graph, over)
+    assert long_chain_graph.cypher(fits).to_list() == [{"i": 8}]
+    assert long_chain_graph.cypher(over).to_list() == [{"i": 9}]
+
+
+def test_anonymous_intermediates_are_only_deduped_when_partials_are_interchangeable(
+    square_cycle_graph, hub_return_graph
+) -> None:
+    """Absolute goldens for the matcher's intermediate dedup.
+
+    `push_distinct_into_match` licenses the matcher to keep one partial match
+    per anonymous intermediate node. That is only sound while nothing
+    downstream can tell two partials apart, and two things can: the
+    relationships they already consumed (Cypher paths are trails), and a node
+    variable the pattern binds a second time. Both shipped as silent
+    under-returns, and the differential leg alone would not pin the numbers.
+    """
+    three_hops = "MATCH (a:N {id: 1})-[:R]-()-[:R]-()-[:R]-(b:N) RETURN DISTINCT b.id AS i"
+    lowered = "MATCH (a:N {id: 1})-[:R*3..3]-(b:N) RETURN DISTINCT b.id AS i"
+    for query in (three_hops, lowered):
+        rows = square_cycle_graph.cypher(query).to_list()
+        assert sorted(row["i"] for row in rows) == [2, 4], query
+
+    repeated = "MATCH (a:N)-[:A]->()-[:B]->(a) RETURN DISTINCT a.id AS i"
+    rows = hub_return_graph.cypher(repeated).to_list()
+    assert sorted(row["i"] for row in rows) == [1, 2, 3]
+
+    # The legal case still answers what it always did.
+    safe = "MATCH (a:N)-[:A]->()-[:B]->(b:N) RETURN DISTINCT b.id AS i"
+    assert sorted(row["i"] for row in hub_return_graph.cypher(safe).to_list()) == [1, 2, 3]
+
+
+def test_lowered_hops_keep_relationship_uniqueness_on_a_same_type_cycle(
+    directed_triangle_graph,
+) -> None:
+    """The disjoint-types opt-out is type-based, so it can never fire on a
+    lowered same-type segment — which is what keeps the rewrite a trail.
+
+    Both claims are asserted from outside: the answer itself, and that the
+    pass which would remove the trail bookkeeping declined.
+    """
+    undirected = "MATCH (a:N {id: 1})-[:R*2..2]-(b:N) RETURN DISTINCT b.id AS i"
+    applied = _applied_passes(directed_triangle_graph, undirected)
+    assert LOWERING_PASS in applied
+    assert "mark_disjoint_fixed_trails" not in applied
+
+    # 1-2-3 forwards and 1-3-2 backwards: both peers, and NOT 1 itself, which
+    # would require reversing over the relationship just used.
+    rows = directed_triangle_graph.cypher(undirected).to_list()
+    assert sorted(row["i"] for row in rows) == [2, 3]
 
 
 @pytest.fixture
@@ -3771,6 +4107,7 @@ KNOWN_DIVERGENT: list[tuple[str, str, str, str]] = [
 # coverage: a gate regression that silently stops firing fails CI.
 PASS_TRIGGER_CASES: dict[str, tuple[str, str]] = {
     "optimize_nested_queries": ("differential", "call_uncorrelated_body_fusion_then_limit"),
+    "lower_fixed_var_length_hops": ("differential", "lower_two_hop_unanchored_count"),
     "rewrite_count_bound_var_to_star": ("differential", "count_all_typed"),
     "push_where_into_match.1": ("differential", "where_eq"),
     "anchor_element_id": ("differential", "element_id_anchor_param"),
@@ -3818,6 +4155,10 @@ PASS_SECONDARY_TRIGGER_CASES: dict[str, str] = {
     # fired for the literal and silently declined the parameter. One pass maps
     # to exactly one secondary case here, and `.1` had none.
     "push_where_into_match.1": "id_function_param",
+    # A different arm of the same pass: the undirected spelling on a cyclic
+    # graph, where relationship uniqueness across the lowered hops is what
+    # keeps the answer right.
+    "lower_fixed_var_length_hops": "lower_two_hop_undirected_parallel_relationships",
     "fold_or_to_in": "or_chain_reversed_literals",
     "push_where_into_match.2": "or_chain_reversed_literals",
     "desugar_multi_match_return_aggregate": "multi_match_two_property_group",

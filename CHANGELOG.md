@@ -624,6 +624,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   request shape — as a normal `ok:true` response, and the unknown-op error
   lists the valid ops and points at `help`.
 
+- **`RETURN DISTINCT` over a pattern with anonymous intermediate nodes dropped
+  reachable answers.** When the projection deduplicates on one node variable
+  the planner tells the matcher so, and the matcher was collapsing the partial
+  matches of each unnamed intermediate hop to one per node. Two partial matches
+  standing on the same node are not interchangeable, though, and they can
+  differ in two ways that a later hop reads. First, the relationships they have
+  already consumed: Cypher paths are trails, so the survivor may be blocked
+  where the discarded one was not — on a four-node cycle,
+  `MATCH (a {id: 1})-[:R]-()-[:R]-()-[:R]-(b) RETURN DISTINCT b.id` answered
+  `[4]` where both `2` and `4` are reachable. Second, a node variable the
+  pattern binds a second time: `MATCH (a:N)-[:A]->()-[:B]->(a) RETURN DISTINCT
+  a.id` returned 1 of its 3 rows, because only one `a` survived the hub. The
+  collapse now happens only when neither applies — which is the case the
+  optimization was written for (pairwise-disjoint hop types record no trail),
+  so the shapes it speeds up keep their speed.
+
 ### Added
 
 - **`EXPLAIN` emits an `Expand` row for each variable-length pattern edge.**
@@ -707,6 +723,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the stored data is clean.
 
 ### Changed
+
+- **A fixed-length variable-hop pattern (`*k..k`) is now planned as `k`
+  explicit hops.** `-[:R*2..2]->` and `-[:R]->()-[:R]->` ask the same question,
+  but only the second spelling reached the fixed-pattern machinery: start-node
+  selection, relationship-predicate pushdown, the fusion family and the trail
+  and target-type annotations all decline a variable-length element, so the
+  star spelling of a fixed-length question paid for none of them. A new
+  optimizer pass (`lower_fixed_var_length_hops`) rewrites the segment into `k`
+  copies separated by anonymous intermediate nodes, replicating the type
+  alternation, inline relationship properties and direction onto each hop —
+  measured **20x** on the tracked unanchored two-hop count (release build,
+  `min`); anchored spellings were already at parity and are unchanged. The
+  rewrite preserves trail semantics: the fixed-hop matcher already enforces
+  relationship uniqueness across hops, and the one annotation that switches
+  that bookkeeping off requires pairwise-*disjoint* hop types, which `k`
+  copies of one element can never be. It declines a genuine range, `*0..0`, a
+  bound relationship variable (which binds the relationship *list*), a path
+  assignment, and any pattern that would exceed eight hops after lowering.
+  Like every registered pass it can be switched off with
+  `disabled_passes=['lower_fixed_var_length_hops']`.
 
 - **`describe()` spends fewer tokens saying the same things, and says two it
   never said.** Five changes to the shared introspection output, so every

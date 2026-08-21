@@ -187,7 +187,7 @@ fn mark_disjoint_fixed_trails(query: &mut CypherQuery) {
 
 /// True when every edge is fixed-length, typed, and accepts no type accepted
 /// by any other edge in the same pattern.
-fn fixed_edge_types_are_pairwise_disjoint(
+pub(super) fn fixed_edge_types_are_pairwise_disjoint(
     pattern: &crate::graph::core::pattern_matching::Pattern,
 ) -> bool {
     let mut seen = HashSet::new();
