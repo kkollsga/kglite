@@ -114,6 +114,11 @@ binary over `kglite::api::*` — no Python, no server.
 A Cypher statement runs when terminated by `;`, so it can span multiple lines;
 dot-commands run on Enter. Tab completes dot-commands and the graph's labels.
 
+Piped input (`kglite app.kgl < script.cypher`) additionally runs a balanced
+trailing statement at end of input and before a dot-command line, so a script
+whose last statement has no `;` still runs; an unbalanced tail is reported on
+stderr with a non-zero exit. Table cells are width-capped only on a terminal.
+
 ## Commands
 
 Non-interactive commands:
@@ -123,7 +128,7 @@ Non-interactive commands:
 - `write --write-scope A,B --git-sha <sha> --modified-by <actor>` — restrict writes and stamp provenance on `auto_timestamp` types
 - `ready-set <graph.kgl> --done <predicate> [--relationship DEPENDS_ON] [--node-type T]` — print `CALL ready_set(...)`
 - `describe <graph.kgl> [--types T] [--cypher] [--connections]` — print the XML `describe()` document for agents
-- `session <graph.kgl>` — process JSONL requests against one in-memory graph (`query`, `write`, `describe`, `save`, `exit`)
+- `session <graph.kgl>` — process JSONL requests against one in-memory graph (`query`, `write`, `describe`, `save`, `help`, `exit`); `{"op":"help"}` returns the op table
 - `export-text <graph.kgl>` — print the deterministic text projection used by git textconv
 - `diff <a.kgl> <b.kgl>` — compare two graph text projections
 

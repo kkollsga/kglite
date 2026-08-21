@@ -38,6 +38,18 @@ def _run(script: str) -> str:
     return proc.stdout + proc.stderr
 
 
+def _run_proc(script: str) -> subprocess.CompletedProcess[str]:
+    """Feed `script` to the shell on stdin, return the full process (exit code
+    and streams kept apart — the piped-shell contract is about both)."""
+    return subprocess.run(
+        [str(BINARY)],
+        input=script,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
 def _run_args(*args: str) -> str:
     """Run the binary as a non-interactive subcommand, return stdout."""
     proc = subprocess.run([str(BINARY), *args], capture_output=True, text=True, timeout=30)
@@ -475,3 +487,151 @@ def test_cdc_is_off_until_enabled():
     reporting an empty stream."""
     out = _run("CREATE (:Person {id: 1});\nCALL db.cdc.query();\n.quit\n")
     assert "not enabled on this graph" in out
+
+
+# --- piped (non-interactive) shell ---------------------------------------
+#
+# stdin is not a terminal here, which is the whole point: rustyline's non-TTY
+# fallback accumulated continuation lines into a buffer it discarded at EOF, so
+# a script whose last statement lacked `;` ran nothing and exited 0. The shell
+# reads stdin itself in that case (`repl::run_piped`), sharing the prompt's
+# termination rule via `helper::is_terminated`.
+#
+# The terminal path cannot be exercised from pytest (no portable pty here);
+# it is covered by the Rust unit tests over the shared rule in `helper.rs`.
+
+
+def test_piped_final_statement_without_semicolon_runs():
+    """The eval repro: a final statement with no `;`, then `.quit`.
+
+    Before the fix this printed nothing at all and exited 0 — the query and
+    the `.quit` both vanished into rustyline's discarded buffer.
+    """
+    proc = _run_proc("CREATE (:Person {name: 'Alice'});\nMATCH (p:Person) RETURN p.name AS name\n.quit\n")
+    assert proc.returncode == 0, proc.stderr
+    assert "Alice" in proc.stdout, proc.stdout
+    assert "(1 row)" in proc.stdout, proc.stdout
+
+
+def test_piped_statement_without_semicolon_at_eof_runs():
+    """No `.quit` either — end of input terminates a balanced statement."""
+    proc = _run_proc("RETURN 1 AS one\n")
+    assert proc.returncode == 0, proc.stderr
+    assert "(1 row)" in proc.stdout, proc.stdout
+
+
+def test_piped_trailing_semicolon_behaviour_is_unchanged():
+    proc = _run_proc("RETURN 1 AS one;\n.quit\n")
+    assert proc.returncode == 0, proc.stderr
+    assert "(1 row)" in proc.stdout, proc.stdout
+
+
+def test_piped_multiline_statement_without_semicolon_runs_once():
+    """Continuation lines still accumulate; EOF closes the statement."""
+    proc = _run_proc("MATCH (n)\nRETURN count(n)\nAS c\n")
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.count("(1 row)") == 1, proc.stdout
+
+
+def test_piped_unterminated_tail_warns_and_exits_nonzero():
+    """An unclosed quote is a truncated script, not a statement: nothing runs
+    for it, the tail is named on stderr, and the exit code is non-zero."""
+    proc = _run_proc("RETURN 1 AS one;\nRETURN 'oops\n")
+    assert proc.returncode != 0
+    assert "unterminated" in proc.stderr, proc.stderr
+    assert "RETURN 'oops" in proc.stderr, proc.stderr
+    # The complete statement before it still ran.
+    assert "(1 row)" in proc.stdout, proc.stdout
+
+
+def test_piped_unclosed_bracket_is_not_executed():
+    proc = _run_proc("MATCH (n RETURN n\n")
+    assert proc.returncode != 0
+    assert "unterminated" in proc.stderr, proc.stderr
+
+
+def test_piped_empty_stdin_is_a_clean_exit():
+    proc = _run_proc("")
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stderr == "", proc.stderr
+
+
+def test_piped_blank_lines_are_ignored():
+    proc = _run_proc("\n\n   \nRETURN 1 AS one;\n\n")
+    assert proc.returncode == 0, proc.stderr
+    assert "(1 row)" in proc.stdout, proc.stdout
+
+
+def test_piped_dot_command_after_unterminated_statement_still_runs():
+    """`.schema` is a shell command, never Cypher: it flushes the balanced
+    statement waiting for its `;` instead of being swallowed by it."""
+    proc = _run_proc("CREATE (:Person {name: 'A'});\nMATCH (p:Person) RETURN p.name AS name\n.schema\n.quit\n")
+    assert proc.returncode == 0, proc.stderr
+    assert "A" in proc.stdout
+    assert "Person" in proc.stdout, proc.stdout
+
+
+def test_piped_table_output_is_not_width_truncated():
+    """Piped table output is data, not a screen: no `…`, values in full.
+
+    `.schema`'s property list is the eval's repro — it lost its tail to the
+    60-char cell cap even though nothing was reading a terminal.
+    """
+    long_value = "x" * 100
+    proc = _run_proc(
+        f"CREATE (:Person {{name: '{long_value}', city: 'Oslo', country: 'NO', team: 'Core'}});\n"
+        "MATCH (p:Person) RETURN p.name AS name;\n"
+        ".schema\n"
+        ".quit\n"
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert long_value in proc.stdout, proc.stdout
+    assert "\u2026" not in proc.stdout, proc.stdout
+    # The schema row keeps every property name, including the last one.
+    assert "country" in proc.stdout, proc.stdout
+
+
+def _session(graph_path, *requests: dict) -> list[dict]:
+    """Drive `kglite session` with JSONL requests, return parsed responses."""
+    import json
+
+    payload = "".join(json.dumps(r) + "\n" for r in requests)
+    proc = subprocess.run(
+        [str(BINARY), "session", str(graph_path), "--format", "json"],
+        input=payload,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return [json.loads(line) for line in proc.stdout.splitlines()]
+
+
+def test_session_help_op_lists_the_protocol(tmp_path):
+    """`{"op":"help"}` — the op set is discoverable from inside the protocol."""
+    import kglite
+
+    p = tmp_path / "help.kgl"
+    kglite.KnowledgeGraph().save(str(p))
+    responses = _session(p, {"id": "h1", "op": "help"}, {"op": "exit"})
+    help_response = responses[0]
+    assert help_response["ok"] is True
+    assert help_response["op"] == "help"
+    assert help_response["id"] == "h1"
+    listed = {entry["op"] for entry in help_response["ops"]}
+    assert listed == {"query", "write", "describe", "save", "help", "exit"}
+    assert all(entry["description"] for entry in help_response["ops"])
+    assert "id" in help_response["protocol"]
+
+
+def test_session_unknown_op_names_the_valid_ops(tmp_path):
+    import kglite
+
+    p = tmp_path / "unknown-op.kgl"
+    kglite.KnowledgeGraph().save(str(p))
+    responses = _session(p, {"id": "bad", "op": "delete"}, {"op": "exit"})
+    error = responses[0]
+    assert error["ok"] is False
+    assert error["id"] == "bad"
+    for op in ("query", "write", "describe", "save", "help", "exit", "quit"):
+        assert op in error["error"], error["error"]

@@ -443,7 +443,11 @@ fn run_query(path: &Path, query: &str, mode: Mode, parallel: bool) -> Result<()>
     };
     let outcome = exec::execute_readonly(&graph, query, &params, &options)
         .with_context(|| "Cypher execution failed")?;
-    exec::write_stdout(&exec::render_outcome(mode, &outcome))?;
+    exec::write_stdout(&exec::render_outcome(
+        mode,
+        &outcome,
+        format::stdout_cell_cap(),
+    ))?;
     Ok(())
 }
 
@@ -477,7 +481,11 @@ fn run_write(
         let p = path.to_string_lossy().to_string();
         save_graph(&mut graph, &p).map_err(|e| anyhow::anyhow!("failed to save {p}: {e}"))?;
     }
-    exec::write_stdout(&exec::render_outcome(mode, &outcome))?;
+    exec::write_stdout(&exec::render_outcome(
+        mode,
+        &outcome,
+        format::stdout_cell_cap(),
+    ))?;
     Ok(())
 }
 
@@ -626,12 +634,16 @@ fn handle_session_line(
         "describe" => session_describe(graph, &request),
         "save" => save_loaded_graph(graph, path, source_identity, lease_held)
             .map(|()| serde_json::json!({"ok": true, "op": "save"})),
+        "help" => Ok(session_help()),
         "exit" | "quit" => {
             let mut value = serde_json::json!({"ok": true, "op": op});
             insert_request_id(&mut value, request_id);
             return SessionAction::Exit(value);
         }
-        other => Err(anyhow::anyhow!("unknown op {other:?}")),
+        other => Err(anyhow::anyhow!(
+            "unknown op {other:?}; valid ops: {} — send {{\"op\":\"help\"}} for details",
+            session_op_names()
+        )),
     };
     SessionAction::Continue(match result {
         Ok(mut value) => {
@@ -646,6 +658,59 @@ fn handle_session_line(
             insert_request_id(&mut value, request_id);
             value
         }
+    })
+}
+
+/// The JSONL session protocol's op table: name + a one-line description of the
+/// request shape. Served by `{"op":"help"}` and named in the unknown-op error,
+/// so the protocol is discoverable from inside the protocol — an agent driving
+/// the session over a pipe has no other way to learn it.
+const SESSION_OPS: &[(&str, &str)] = &[
+    (
+        "query",
+        "run a read-only Cypher query — {\"op\":\"query\",\"query\":\"MATCH …\",\"format\":\"json|table|csv\"}",
+    ),
+    (
+        "write",
+        "run a write Cypher statement — {\"op\":\"write\",\"query\":\"CREATE …\"} \
+         (optional: \"write_scope\":[\"Type\"], \"git_sha\", \"modified_by\")",
+    ),
+    (
+        "describe",
+        "describe the graph for agents — {\"op\":\"describe\"} \
+         (optional: \"types\", \"type_search\", \"connections\", \"cypher\", \"fluent\", \"max_pairs\")",
+    ),
+    (
+        "save",
+        "save the loaded graph back to its file — {\"op\":\"save\"}",
+    ),
+    ("help", "list these ops — {\"op\":\"help\"}"),
+    (
+        "exit",
+        "end the session (alias: \"quit\") — {\"op\":\"exit\"}",
+    ),
+];
+
+/// Comma-separated op names for the unknown-op error, `quit` included because
+/// it is accepted even though `exit` is the documented spelling.
+fn session_op_names() -> String {
+    let mut names: Vec<&str> = SESSION_OPS.iter().map(|(name, _)| *name).collect();
+    names.push("quit");
+    names.join(", ")
+}
+
+/// `{"op":"help"}` — the op table as a normal `ok:true` response.
+fn session_help() -> serde_json::Value {
+    let ops: Vec<serde_json::Value> = SESSION_OPS
+        .iter()
+        .map(|(name, description)| serde_json::json!({"op": name, "description": description}))
+        .collect();
+    serde_json::json!({
+        "ok": true,
+        "protocol": "one JSON request object per line on stdin, one JSON response per line on stdout; \
+                     every response echoes \"op\" and, when the request carried one, its \"id\". \
+                     A response is {\"ok\":true, …} or {\"ok\":false,\"error\":\"…\"}.",
+        "ops": ops,
     })
 }
 
@@ -746,7 +811,9 @@ fn session_outcome_response(
     } else {
         serde_json::json!({
             "ok": true,
-            "output": exec::render_outcome(mode, outcome),
+            // The session speaks a machine protocol: a rendered table here is
+            // still data a caller parses, so it is never width-truncated.
+            "output": exec::render_outcome(mode, outcome, None),
         })
     }
 }

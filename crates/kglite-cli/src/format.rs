@@ -1,5 +1,7 @@
 //! Result rendering for the shell: aligned table (default), CSV, and JSON.
 
+use std::io::IsTerminal;
+
 use kglite::api::param::kglite_value_to_json;
 use kglite::api::Value;
 
@@ -31,10 +33,42 @@ impl Mode {
     }
 }
 
-/// Render a result in the active mode.
-pub fn render(mode: Mode, columns: &[String], rows: &[Vec<Value>]) -> String {
+/// Per-cell width cap for the table renderer. `None` renders every value in
+/// full — the right answer whenever the output is data rather than a screen.
+pub type CellCap = Option<usize>;
+
+/// Widest cell a table renders on a terminal before eliding with `…`.
+const MAX_CELL_W: usize = 60;
+/// Floor for a `COLUMNS`-derived cap: a 10-column terminal still gets cells
+/// wide enough to tell rows apart.
+const MIN_CELL_W: usize = 20;
+
+/// The cap to render this process's stdout with: `None` when stdout is not a
+/// terminal, because piped/redirected output is consumed by a program, a file
+/// or an agent, and a `…` there is silent data loss (the eval's `.schema`
+/// round-trip lost property lists this way). On a terminal, the 60-char cap
+/// stands, narrowed to `COLUMNS` when the terminal is narrower than that.
+pub fn stdout_cell_cap() -> CellCap {
+    if !std::io::stdout().is_terminal() {
+        return None;
+    }
+    Some(terminal_cell_cap(std::env::var("COLUMNS").ok().as_deref()))
+}
+
+/// The terminal cap for a given `COLUMNS` value (split out so it is testable
+/// without a terminal).
+fn terminal_cell_cap(columns: Option<&str>) -> usize {
+    match columns.and_then(|c| c.trim().parse::<usize>().ok()) {
+        Some(w) => w.clamp(MIN_CELL_W, MAX_CELL_W),
+        None => MAX_CELL_W,
+    }
+}
+
+/// Render a result in the active mode. `cap` bounds table cell width; CSV and
+/// JSON are machine formats and are never truncated.
+pub fn render(mode: Mode, columns: &[String], rows: &[Vec<Value>], cap: CellCap) -> String {
     match mode {
-        Mode::Table => render_table(columns, rows),
+        Mode::Table => render_table(columns, rows, cap),
         Mode::Csv => render_csv(columns, rows),
         Mode::Json => render_json(columns, rows),
     }
@@ -119,17 +153,18 @@ pub fn cell(value: &Value) -> String {
 
 /// Render columns + rows as an aligned ASCII table (a header row, a rule,
 /// then the data) and a trailing row count. Empty-column results (a write
-/// with no RETURN) render as just the count line.
-pub fn render_table(columns: &[String], rows: &[Vec<Value>]) -> String {
+/// with no RETURN) render as just the count line. `cap` is the per-cell width
+/// ceiling; `None` (piped output) renders every value in full.
+pub fn render_table(columns: &[String], rows: &[Vec<Value>], cap: CellCap) -> String {
     let n = rows.len();
     let plural = if n == 1 { "row" } else { "rows" };
     if columns.is_empty() {
         return format!("({n} {plural})");
     }
 
-    // Column widths = max(header, widest cell), capped so one huge cell can't
-    // blow the terminal width apart.
-    const MAX_W: usize = 60;
+    // Column widths = max(header, widest cell), capped (on a terminal) so one
+    // huge cell can't blow the terminal width apart.
+    let ceiling = cap.unwrap_or(usize::MAX);
     let mut widths: Vec<usize> = columns.iter().map(|c| c.chars().count()).collect();
     let cells: Vec<Vec<String>> = rows
         .iter()
@@ -139,7 +174,7 @@ pub fn render_table(columns: &[String], rows: &[Vec<Value>]) -> String {
                 .map(|(i, v)| {
                     let s = cell(v);
                     if let Some(w) = widths.get_mut(i) {
-                        *w = (*w).max(s.chars().count()).min(MAX_W);
+                        *w = (*w).max(s.chars().count()).min(ceiling);
                     }
                     s
                 })
@@ -204,7 +239,7 @@ mod tests {
             vec![Value::String("Alice".into()), Value::Int64(30)],
             vec![Value::String("Bob".into()), Value::Int64(25)],
         ];
-        let out = render_table(&cols, &rows);
+        let out = render_table(&cols, &rows, Some(MAX_CELL_W));
         let lines: Vec<&str> = out.lines().collect();
         // header, rule, two data rows, count
         assert_eq!(lines.len(), 5);
@@ -218,9 +253,9 @@ mod tests {
 
     #[test]
     fn render_table_empty_columns_is_count_only() {
-        assert_eq!(render_table(&[], &[]), "(0 rows)");
+        assert_eq!(render_table(&[], &[], None), "(0 rows)");
         // A write with no RETURN: one logical "row" of nothing → still count-only.
-        assert_eq!(render_table(&[], &[vec![]]), "(1 row)");
+        assert_eq!(render_table(&[], &[vec![]], None), "(1 row)");
     }
 
     #[test]
@@ -288,9 +323,58 @@ mod tests {
         let cols = vec!["v".to_string()];
         let long = "x".repeat(100);
         let rows = vec![vec![Value::String(long)]];
-        let out = render_table(&cols, &rows);
+        let out = render_table(&cols, &rows, Some(MAX_CELL_W));
         assert!(out.contains('…'));
         // No data line exceeds the 60-char cap (plus nothing else on the line).
         assert!(out.lines().all(|l| l.chars().count() <= 60));
+    }
+
+    /// Piped output is data — a program, a file or an agent reads it, and an
+    /// elided value there is silent loss. `None` is the cap that says so.
+    #[test]
+    fn no_cap_renders_the_whole_value() {
+        let cols = vec!["v".to_string()];
+        let long = "x".repeat(100);
+        let rows = vec![vec![Value::String(long.clone())]];
+        let out = render_table(&cols, &rows, None);
+        assert!(!out.contains('…'), "{out}");
+        assert!(out.contains(&long), "{out}");
+        // Still aligned: header, rule and the data row share one width.
+        let lines: Vec<&str> = out.lines().collect();
+        let w = lines[0].chars().count();
+        assert!(lines[..3].iter().all(|l| l.chars().count() == w), "{out}");
+    }
+
+    #[test]
+    fn a_narrow_terminal_narrows_the_cap() {
+        // COLUMNS below the 60-char cap wins ...
+        assert_eq!(terminal_cell_cap(Some("40")), 40);
+        // ... but never below the readable floor ...
+        assert_eq!(terminal_cell_cap(Some("8")), MIN_CELL_W);
+        // ... and a wide terminal keeps the cap (a table is not one column).
+        assert_eq!(terminal_cell_cap(Some("400")), MAX_CELL_W);
+        // Unset or unparseable falls back to the cap.
+        assert_eq!(terminal_cell_cap(None), MAX_CELL_W);
+        assert_eq!(terminal_cell_cap(Some("wide")), MAX_CELL_W);
+        assert_eq!(terminal_cell_cap(Some("")), MAX_CELL_W);
+    }
+
+    #[test]
+    fn cap_applies_per_cell_not_per_row() {
+        let cols = vec!["a".to_string(), "b".to_string()];
+        let rows = vec![vec![
+            Value::String("y".repeat(30)),
+            Value::String("z".repeat(30)),
+        ]];
+        let out = render_table(&cols, &rows, Some(25));
+        // Both cells elide independently; the row is wider than the cap.
+        assert_eq!(out.matches('…').count(), 2, "{out}");
+    }
+
+    /// A non-terminal stdout is exactly what `cargo test` has, so this pins
+    /// the piped branch of the cap decision.
+    #[test]
+    fn stdout_cap_is_none_when_not_a_terminal() {
+        assert_eq!(stdout_cell_cap(), None);
     }
 }

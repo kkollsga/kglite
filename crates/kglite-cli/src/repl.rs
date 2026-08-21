@@ -6,6 +6,7 @@
 //! query is executing).
 
 use std::collections::HashMap;
+use std::io::{BufRead, IsTerminal};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -20,8 +21,8 @@ use rustyline::history::DefaultHistory;
 use rustyline::Editor;
 
 use crate::exec::{self, QueryOptions};
-use crate::format::Mode;
-use crate::helper::ShellHelper;
+use crate::format::{stdout_cell_cap, Mode};
+use crate::helper::{self, ShellHelper};
 use crate::save_loaded_graph;
 
 const PROMPT: &str = "kglite> ";
@@ -46,8 +47,9 @@ Commands:
   .timing on|off         show query wall-time after each statement
 Anything else is run as Cypher, e.g.
   MATCH (n) RETURN labels(n), count(*)
-Statements can span lines — input continues until brackets/quotes close
-(a trailing ; also terminates). Tab completes dot-commands + labels.
+Statements can span lines — a statement runs when a trailing ; terminates it
+(with brackets and quotes closed). Piped (non-interactive) input also runs a
+final, balanced statement at EOF. Tab completes dot-commands + labels.
 Ctrl-C cancels a running query; Ctrl-D (or .quit) exits.";
 
 /// Mutable shell state threaded through the loop.
@@ -73,8 +75,6 @@ pub fn run(
     // mid-query cancellation.
     let _ = ctrlc::set_handler(|| CANCEL.store(true, Ordering::SeqCst));
 
-    let mut rl: Editor<ShellHelper, DefaultHistory> = Editor::new()?;
-    rl.set_helper(Some(ShellHelper::default()));
     let mut shell = Shell {
         graph,
         path: source.map(str::to_string),
@@ -88,6 +88,24 @@ pub fn run(
     }
     println!("Type .help for commands, .quit to exit.");
 
+    // rustyline drives a terminal; it must not drive a pipe. Its non-TTY
+    // fallback (`readline_direct`) accumulates continuation lines in a local
+    // buffer that it *discards* on EOF, so a piped script whose last statement
+    // lacked a `;` ran nothing and exited 0 — silently. Reading stdin ourselves
+    // is the only way to see that buffer; the termination rule stays shared
+    // (`helper::is_terminated`), so the two readers cannot drift.
+    if std::io::stdin().is_terminal() {
+        run_interactive(&mut shell)
+    } else {
+        run_piped(&mut shell)
+    }
+}
+
+/// The terminal shell: rustyline owns line editing, history and multi-line
+/// accumulation (via `ShellHelper`'s `Validator`).
+fn run_interactive(shell: &mut Shell) -> Result<()> {
+    let mut rl: Editor<ShellHelper, DefaultHistory> = Editor::new()?;
+    rl.set_helper(Some(ShellHelper::default()));
     loop {
         // Refresh tab-completion candidates (labels + relationship types) from
         // the current graph before each prompt.
@@ -103,12 +121,8 @@ pub fn run(
                     continue;
                 }
                 let _ = rl.add_history_entry(line);
-                if let Some(cmd) = line.strip_prefix('.') {
-                    if !shell.dispatch_dot(cmd) {
-                        break; // .quit / .exit
-                    }
-                } else {
-                    shell.run_cypher(line);
+                if !dispatch(shell, line) {
+                    break; // .quit / .exit
                 }
             }
             // Ctrl-C at the prompt: abandon the line, keep the session.
@@ -122,6 +136,93 @@ pub fn run(
         }
     }
     Ok(())
+}
+
+/// The piped shell: read stdin line by line, accumulating continuation lines
+/// under the same termination rule the prompt uses (`helper::is_terminated`).
+///
+/// Two flush points exist here that a terminal does not need:
+/// * a dot-command line — a shell command is never part of a Cypher statement,
+///   so it terminates a balanced statement still waiting for its `;`;
+/// * end of input — a balanced trailing statement runs, which is what the
+///   `.help` text promises and what a `kglite g.kgl <<< 'MATCH …'` heredoc
+///   expects.
+///
+/// An *unbalanced* tail at EOF (an unclosed quote or bracket) is a truncated
+/// script, not a statement: nothing is run for it and the shell exits non-zero.
+fn run_piped(shell: &mut Shell) -> Result<()> {
+    let stdin = std::io::stdin();
+    let mut pending = String::new();
+    for line in stdin.lock().lines() {
+        let line = line?;
+        if is_dot_line(&line) && !pending.trim().is_empty() && helper::is_balanced(&pending) {
+            if !dispatch_buffer(shell, &pending) {
+                return Ok(());
+            }
+            pending.clear();
+        }
+        if !pending.is_empty() {
+            pending.push('\n');
+        }
+        pending.push_str(&line);
+        if helper::is_terminated(&pending) {
+            let keep_going = dispatch_buffer(shell, &pending);
+            pending.clear();
+            if !keep_going {
+                return Ok(());
+            }
+        }
+    }
+    let tail = pending.trim();
+    if tail.is_empty() {
+        return Ok(());
+    }
+    if helper::is_balanced(&pending) {
+        dispatch_buffer(shell, &pending);
+        return Ok(());
+    }
+    anyhow::bail!(
+        "unterminated input at end of stdin (unclosed quote or bracket) — nothing was run for: {}",
+        elide(tail)
+    )
+}
+
+/// True for a line that opens a dot-command (leading whitespace tolerated).
+fn is_dot_line(line: &str) -> bool {
+    line.trim_start().starts_with('.')
+}
+
+/// Shorten a tail for an error message so a truncated 10 MB script does not
+/// become a 10 MB diagnostic.
+fn elide(tail: &str) -> String {
+    const MAX: usize = 120;
+    if tail.chars().count() <= MAX {
+        return tail.to_string();
+    }
+    let kept: String = tail.chars().take(MAX).collect();
+    format!("{kept}…")
+}
+
+/// Normalise an accumulated buffer the way the prompt does (trim, drop the
+/// `;` terminator) and run it. Returns `false` when the shell should exit.
+fn dispatch_buffer(shell: &mut Shell, buffer: &str) -> bool {
+    let statement = buffer.trim().trim_end_matches(';').trim();
+    if statement.is_empty() {
+        return true;
+    }
+    dispatch(shell, statement)
+}
+
+/// Run one normalised statement — a dot-command or Cypher. Returns `false`
+/// when the shell should exit (`.quit` / `.exit`).
+fn dispatch(shell: &mut Shell, statement: &str) -> bool {
+    match statement.strip_prefix('.') {
+        Some(cmd) => shell.dispatch_dot(cmd),
+        None => {
+            shell.run_cypher(statement);
+            true
+        }
+    }
 }
 
 impl Shell {
@@ -274,7 +375,10 @@ impl Shell {
         };
         match exec::execute(&mut self.graph, query, &params, &options) {
             Ok(outcome) => {
-                println!("{}", exec::render_outcome(self.mode, &outcome));
+                println!(
+                    "{}",
+                    exec::render_outcome(self.mode, &outcome, stdout_cell_cap())
+                );
                 if timing {
                     println!("({:.3} ms)", start.elapsed().as_secs_f64() * 1e3);
                 }
@@ -514,7 +618,7 @@ fn statement_separator_positions(contents: &str) -> Vec<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{infer_value, is_ident, split_statements};
+    use super::{elide, infer_value, is_dot_line, is_ident, split_statements};
     use kglite::api::Value;
 
     #[test]
@@ -577,5 +681,22 @@ mod tests {
             got,
             vec!["MATCH (a) WHERE a.t = 'x;y' RETURN a", "MATCH (b) RETURN b"]
         );
+    }
+
+    #[test]
+    fn dot_lines_are_recognised_with_leading_space() {
+        assert!(is_dot_line(".quit"));
+        assert!(is_dot_line("   .schema"));
+        assert!(!is_dot_line("MATCH (n) RETURN n"));
+        assert!(!is_dot_line(""));
+    }
+
+    #[test]
+    fn elide_bounds_the_reported_tail() {
+        assert_eq!(elide("RETURN 'oops"), "RETURN 'oops");
+        let long = "x".repeat(500);
+        let short = elide(&long);
+        assert_eq!(short.chars().count(), 121); // 120 kept + the ellipsis
+        assert!(short.ends_with('…'));
     }
 }

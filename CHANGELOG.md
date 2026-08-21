@@ -476,6 +476,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   had the weakest cap and one long text property could dominate an entire
   overview. It now passes 40, matching every other surface.
 
+- **The piped shell executed nothing and exited 0 when the final statement had
+  no trailing `;`.** `printf 'MATCH (n) RETURN count(n)\n.quit\n' | kglite
+  graph.kgl` printed no rows, no error, and a success exit code — and the
+  `.help` text promised the opposite. When stdin is not a terminal, rustyline's
+  fallback reader accumulates continuation lines into a local buffer and
+  **discards it** at EOF, so the statement (and the `.quit` that followed it,
+  absorbed into the same pending buffer) was never seen by the shell at all.
+  The shell now reads a non-terminal stdin itself, sharing the prompt's
+  termination rule rather than restating it: a balanced statement runs at end
+  of input and at a dot-command line, which is what a script or heredoc
+  expects, while a tail left unbalanced by an unclosed quote or bracket runs
+  nothing, is named on stderr, and exits non-zero. Terminal behaviour is
+  unchanged — rustyline still owns the prompt, its editing and its history.
+
+- **Table output width-truncated values when it was not writing to a
+  terminal.** The 60-character per-cell cap exists so one long value cannot
+  wreck an aligned table on screen, and it was applied unconditionally: piping
+  `.schema` or a query into a file, a pipeline or an agent silently returned
+  `…`-elided property lists and text values, with the elision indistinguishable
+  from the data. The cap now applies only when stdout is a terminal, where it
+  additionally honours a narrower `COLUMNS`; piped and redirected output
+  renders every value in full, as does the JSONL session's rendered `output`
+  field. CSV and JSON modes were never truncated and are unchanged.
+
+- **The JSONL session's op set was undiscoverable from the protocol.** A driver
+  connected to `kglite session` had no way to ask what it could send, and an
+  unknown op answered `unknown op "delete"` without naming one valid
+  alternative. `{"op":"help"}` now returns the op table — each op with its
+  request shape — as a normal `ok:true` response, and the unknown-op error
+  lists the valid ops and points at `help`.
+
 ### Added
 
 - **The MCP `cypher_query` tools accept a `params` argument.** There was no way
@@ -686,6 +717,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `add_connections` can raise is now decided in one pass before the first row is
   written, so a rejected load writes nothing at any input size, and the 1000-row
   chunking is a memory bound rather than an atomicity boundary.
+
+- **`--graph` mode's default source root is documented.** Serving a `.kgl` with
+  a manifest that declares no `source_root`/`source_roots` auto-binds the
+  graph file's parent directory as the sole static source root — deliberate,
+  and the reason file tools work next to a graph with no configuration, but
+  undocumented, so the blast radius of a `.kgl` kept at the top of a home
+  directory was invisible. `docs/operators/mcp-server.md` now states the
+  default, that an explicit manifest declaration wins outright, and how to
+  scope or move it.
 
 ## [0.16.5] - 2026-08-19
 

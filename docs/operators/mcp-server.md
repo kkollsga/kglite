@@ -119,6 +119,31 @@ the flag to serve whatever mode the graph recorded.
 Keep read-only mode for untrusted agents and scope filesystem access with
 manifest `source_root`/`source_roots`.
 
+### The source root `--graph` binds by default
+
+In `--graph` mode a manifest that declares no `source_root`/`source_roots` does
+not leave the server without one: the parent directory of the `.kgl` file is
+auto-bound as the sole static source root, so the file-reading tools serve the
+files sitting next to the graph with no configuration. That is the default, not
+a fallback for a missing manifest — a manifest that configures Cypher tools and
+skills but says nothing about roots still gets it. Reads stay confined to the
+bound root, so the directory the graph lives in is exactly the blast radius:
+a `.kgl` at the top of a home directory or a shared volume binds all of it.
+
+An explicit declaration wins outright — the auto-bind applies only when the
+manifest names no roots at all:
+
+```yaml
+# serve the graph from /data but read files only from /srv/project
+source_roots: [/srv/project]
+```
+
+To scope it, name the narrower directory; to move it, name a different one; to
+serve no files from a wide graph directory, keep the graph in a directory of its
+own, or drop the source tools from `extensions.tools_allow` (above), which is
+the closed-by-default surface. `--source-root`/`--watch` mode has no auto-bind
+question: the directory is the argument.
+
 ### Pinning the write scope
 
 `cypher_query`'s `write_scope` argument is set by the agent, so by itself it is

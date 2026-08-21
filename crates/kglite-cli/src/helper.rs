@@ -67,17 +67,11 @@ impl Completer for ShellHelper {
 }
 
 impl Validator for ShellHelper {
-    /// sqlite3-style termination: a Cypher statement runs when it ends with `;`
-    /// (with brackets/quotes balanced, so a `;` inside a string doesn't count);
-    /// otherwise the prompt keeps reading (multi-line). Dot-commands and empty
-    /// input run on Enter — they never need a terminator.
+    /// sqlite3-style termination, delegated to [`is_terminated`] so the
+    /// interactive prompt and the piped (non-TTY) reader in `repl.rs` share
+    /// one rule set rather than two drifting copies.
     fn validate(&self, ctx: &mut ValidationContext) -> rustyline::Result<ValidationResult> {
-        let input = ctx.input();
-        let trimmed = input.trim();
-        if trimmed.is_empty() || trimmed.starts_with('.') {
-            return Ok(ValidationResult::Valid(None));
-        }
-        if trimmed.ends_with(';') && is_balanced(input) {
+        if is_terminated(ctx.input()) {
             Ok(ValidationResult::Valid(None))
         } else {
             Ok(ValidationResult::Incomplete)
@@ -93,9 +87,25 @@ impl Highlighter for ShellHelper {}
 
 impl Helper for ShellHelper {}
 
+/// True when an accumulated input buffer is a complete unit of work: a Cypher
+/// statement ending in `;` with brackets/quotes balanced (so a `;` inside a
+/// string doesn't count), a dot-command, or empty input. Anything else is a
+/// statement still being typed (or piped) and the reader keeps accumulating.
+///
+/// The single source of the shell's termination rule: `ShellHelper::validate`
+/// applies it through rustyline for a terminal, `repl::run_piped` applies it
+/// directly to stdin lines when the shell is not attached to one.
+pub fn is_terminated(input: &str) -> bool {
+    let trimmed = input.trim();
+    if trimmed.is_empty() || trimmed.starts_with('.') {
+        return true;
+    }
+    trimmed.ends_with(';') && is_balanced(input)
+}
+
 /// True when all `()`/`[]`/`{}` are matched and quotes (`'` and `"`) are closed,
 /// ignoring bracket characters that appear inside a string literal.
-fn is_balanced(s: &str) -> bool {
+pub fn is_balanced(s: &str) -> bool {
     let mut depth: i32 = 0;
     let mut quote: Option<char> = None;
     let mut prev_backslash = false;
@@ -120,7 +130,7 @@ fn is_balanced(s: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_balanced;
+    use super::{is_balanced, is_terminated};
 
     #[test]
     fn balanced_single_line() {
@@ -139,5 +149,22 @@ mod tests {
     fn quotes_shield_brackets() {
         assert!(is_balanced("RETURN '(' AS p")); // paren inside string
         assert!(is_balanced("RETURN \"a)b\" AS s"));
+    }
+
+    #[test]
+    fn termination_rule_matches_the_prompt() {
+        // Dot-commands and blank input run as-is.
+        assert!(is_terminated(""));
+        assert!(is_terminated("   "));
+        assert!(is_terminated(".quit"));
+        // A Cypher statement needs its `;` ...
+        assert!(is_terminated("RETURN 1;"));
+        assert!(!is_terminated("RETURN 1"));
+        // ... and the `;` must not be inside a string, nor leave brackets open.
+        assert!(!is_terminated("RETURN 'a;"));
+        assert!(!is_terminated("MATCH (n RETURN n;"));
+        // Multi-line accumulation terminates on the final line's `;`.
+        assert!(is_terminated("MATCH (n)\nRETURN count(n) AS c;"));
+        assert!(!is_terminated("MATCH (n)\nRETURN count(n) AS c"));
     }
 }

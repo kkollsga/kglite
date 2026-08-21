@@ -12,7 +12,7 @@ use kglite::api::session::{
 };
 use kglite::api::{make_dir_graph_mut, DirGraph, Value};
 
-use crate::format::{render, Mode};
+use crate::format::{render, CellCap, Mode};
 
 /// Per-query knobs shared by the REPL and one-shot commands.
 #[derive(Debug, Default)]
@@ -66,10 +66,12 @@ pub fn execute_readonly(
     Ok(execute_read(graph, query, &opts)?)
 }
 
-/// Render a Cypher outcome in the requested CLI mode.
-pub fn render_outcome(mode: Mode, outcome: &ExecuteOutcome) -> String {
+/// Render a Cypher outcome in the requested CLI mode. `cap` is the table
+/// renderer's per-cell width ceiling — `format::stdout_cell_cap()` for output
+/// a human reads, `None` for output a program parses (the JSONL session).
+pub fn render_outcome(mode: Mode, outcome: &ExecuteOutcome, cap: CellCap) -> String {
     let r = &outcome.result;
-    render(mode, &r.columns, &r.rows)
+    render(mode, &r.columns, &r.rows, cap)
 }
 
 /// Convert a Cypher outcome to typed JSON rows for agent protocols.

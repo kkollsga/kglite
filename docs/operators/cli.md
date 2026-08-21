@@ -118,6 +118,7 @@ kglite session app.kgl --format json
 Example request stream:
 
 ```json
+{"op":"help"}
 {"op":"describe","types":["Task"]}
 {"id":"w1","op":"write","query":"CREATE (:Task {id:'t1', status:'todo'})"}
 {"id":"q1","op":"query","query":"MATCH (t:Task) RETURN count(t) AS n","format":"json"}
@@ -127,6 +128,10 @@ Example request stream:
 
 Responses echo `id` when provided. In JSON mode, `query` and `write`
 return typed `rows`; table and CSV modes return rendered `output`.
+
+`{"op":"help"}` answers with the op table — every op and its request
+shape — so a driver that only has the pipe can discover the protocol from
+inside it; an unknown op names the valid ops in its error.
 
 For focused descriptions, agents can use compact or explicit object
 forms:
@@ -158,6 +163,14 @@ kglite
 Cypher statements execute when terminated by `;`, so a query can span
 multiple lines. Dot-commands execute on Enter. Tab completion covers
 dot-commands and graph labels.
+
+Piped input runs the same way, with two allowances for scripts: a
+dot-command line terminates a statement still waiting for its `;`, and so
+does the end of input, so `kglite app.kgl <<< 'MATCH (n) RETURN count(n)'`
+prints its result instead of exiting silently. A tail left unbalanced by
+an unclosed quote or bracket runs nothing, names itself on stderr, and
+exits non-zero. Table output is only width-capped on a terminal (honoring
+`COLUMNS`); piped output renders every value in full.
 
 Common dot-commands:
 
