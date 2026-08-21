@@ -2785,11 +2785,25 @@ class KnowledgeGraph:
         ...
 
     def explain(self) -> str:
-        """Return a human-readable execution plan for the current query chain.
+        """Return a human-readable execution plan for the fluent chain.
 
-        Example output::
+        Fluent methods return a new handle, so the plan lives on the object
+        they return — call ``explain()`` on the chain result, not on the graph::
 
-            SELECT Person (500 nodes) -> WHERE (42 nodes)
+            graph.select("Person").where({"city": "Oslo"}).explain()
+            # 'SELECT Person (500 nodes) -> WHERE (42 nodes)'
+
+        Each recorded operation (``SELECT``, ``WHERE``, ``TRAVERSE``,
+        ``EXPAND``, ``VALID_AT``, ``VALID_DURING``, the spatial predicates) is
+        shown with the node count it produced. Calling it on a graph with no
+        recorded operations returns a message saying so.
+
+        This reports fluent chains only. For Cypher, prefix the query with
+        ``EXPLAIN`` (plan the query without executing it) or ``PROFILE``
+        (execute it and return per-clause statistics on ``result.profile``).
+
+        Returns:
+            The chain's operations joined by ``->``.
         """
         ...
 

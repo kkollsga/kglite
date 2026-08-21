@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`explain()`'s docstring named operators from several versions ago, and its
+  empty message taught nothing.** The example output advertised
+  `TYPE_FILTER Prospect (...) -> TRAVERSE HAS_ESTIMATE (...)` — `TYPE_FILTER`
+  has been `SELECT` for many releases, and the type names came from a
+  downstream graph. Worse, the plan lives on the object a fluent method
+  *returns*, so calling `explain()` on the graph itself answered
+  `No query operations recorded` with no hint that the chain result is where
+  to ask; an external evaluation read that as evidence the method was dead.
+  The docstring (and its `.pyi` twin) now shows the real operator names and the
+  `g.select(...).where(...).explain()` call site, the empty message says where
+  the plan lives, and both point Cypher users at the `EXPLAIN` / `PROFILE`
+  prefixes (`result.profile` carries the `PROFILE` statistics).
+
 - **`vector_search()`, `search_text()` and `embeddings()` returned `[]` when no
   selection was active.** With embeddings stored and no `select()` in front of
   it, `g.vector_search('summary', q)` answered "nothing is similar" to a
@@ -534,6 +547,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lists the valid ops and points at `help`.
 
 ### Added
+
+- **`EXPLAIN` emits an `Expand` row for each variable-length pattern edge.**
+  The plan is clause-granular and a variable-length edge sits *inside* a
+  `MATCH`, so `MATCH (a:Person)-[:KNOWS*2..3]->(b:Person)` and the fixed-length
+  `-[:KNOWS]->` spelling produced the identical `Match :Person, :Person` row —
+  the entire cost of a multi-second expansion was invisible in its own plan.
+  Each var-length edge now adds `Expand (:Person)-[:KNOWS*2..3]->(:Person)`
+  after its `Match` row, in pattern order, with `estimated_rows` null: no
+  cardinality model covers variable-length expansion, and a fabricated number
+  would be worse than none. Every other row is unchanged and the `step` column
+  stays contiguous.
 
 - **The MCP `cypher_query` tools accept a `params` argument.** There was no way
   to bind a `$placeholder` over MCP at all: the tool took only `query`, so

@@ -195,3 +195,52 @@ class TestProfile:
         """Normal queries (no PROFILE prefix) have profile=None."""
         result = graph.cypher("MATCH (n:Person) RETURN n.name")
         assert result.profile is None
+
+
+class TestExplainVarLengthExpansion:
+    """A variable-length edge lives inside a MATCH clause, so the clause-granular
+    plan showed nothing for it — `MATCH (a)-[:R*2..3]->(b)` and `MATCH (a)-[:R]->(b)`
+    produced the identical `Match` row. One Expand row per var-length edge makes the
+    expansion visible; `estimated_rows` stays None because no cardinality model
+    covers var-length expansion."""
+
+    def test_var_length_edge_gets_an_expand_row(self, graph):
+        rows = graph.cypher("EXPLAIN MATCH (a:Person)-[:KNOWS*2..3]->(b:Person) RETURN count(*) AS n").to_list()
+        expands = [r for r in rows if r["operation"].startswith("Expand ")]
+        assert expands == [
+            {
+                "step": 2,
+                "operation": "Expand (:Person)-[:KNOWS*2..3]->(:Person)",
+                "estimated_rows": None,
+            }
+        ]
+        # The Expand row follows the Match row it belongs to.
+        assert rows[0]["operation"].startswith("Match")
+
+    def test_fixed_length_pattern_has_no_expand_row(self, graph):
+        rows = graph.cypher("EXPLAIN MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name").to_list()
+        assert not [r for r in rows if r["operation"].startswith("Expand ")]
+
+    def test_two_var_length_edges_give_two_rows_in_pattern_order(self, graph):
+        rows = graph.cypher(
+            "EXPLAIN MATCH (a:Person)-[:KNOWS*2..3]->(b:Person)-[:KNOWS*1..2]->(c) RETURN a.name"
+        ).to_list()
+        assert [r["operation"] for r in rows if r["operation"].startswith("Expand ")] == [
+            "Expand (:Person)-[:KNOWS*2..3]->(:Person)",
+            "Expand (:Person)-[:KNOWS*1..2]->()",
+        ]
+
+    def test_optional_match_and_reverse_direction_are_covered(self, graph):
+        rows = graph.cypher("EXPLAIN OPTIONAL MATCH (a:Person)<-[:KNOWS*2..3]-(b) RETURN a.name").to_list()
+        assert "Expand (:Person)<-[:KNOWS*2..3]-()" in [r["operation"] for r in rows]
+
+    def test_step_column_stays_contiguous_with_expand_rows(self, graph):
+        rows = graph.cypher(
+            "EXPLAIN MATCH (a:Person)-[:KNOWS*2..3]->(b:Person) RETURN a.name ORDER BY a.name"
+        ).to_list()
+        assert [r["step"] for r in rows] == list(range(1, len(rows) + 1))
+
+    def test_fixed_length_plan_is_unchanged_end_to_end(self, graph):
+        rows = graph.cypher("EXPLAIN MATCH (n:Person) WHERE n.age <> 25 RETURN n.name").to_list()
+        assert rows[0] == {"step": 1, "operation": "Match :Person", "estimated_rows": 2}
+        assert [r["step"] for r in rows] == list(range(1, len(rows) + 1))

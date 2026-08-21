@@ -45,6 +45,9 @@ pub(crate) use planner::schema_check::{collect_unknown_pattern_warnings, emit_qu
 pub use planner::simplification::rewrite_text_score;
 
 use crate::datatypes::values::Value;
+use crate::graph::core::pattern_matching::{
+    EdgeDirection, EdgePattern, NodePattern, Pattern, PatternElement,
+};
 use crate::graph::schema::DirGraph;
 use crate::graph::storage::GraphRead;
 
@@ -191,13 +194,90 @@ pub fn parse_with_mutation_check(
     Ok((parsed, is_mutation))
 }
 
+/// Render the node side of an expansion as `(:Type)` / `(:A:B)` / `()`.
+fn explain_node_display(node: Option<&NodePattern>) -> String {
+    let Some(node) = node else {
+        return "()".to_string();
+    };
+    let Some(primary) = node.node_type.as_deref() else {
+        return "()".to_string();
+    };
+    let mut out = format!("(:{primary}");
+    for label in &node.extra_labels {
+        out.push(':');
+        out.push_str(label);
+    }
+    out.push(')');
+    out
+}
+
+/// Render an edge pattern's type slot as `:A`, `:A|B`, or the empty string.
+fn explain_edge_types(edge: &EdgePattern) -> String {
+    match edge.connection_types.as_deref() {
+        Some(types) if !types.is_empty() => format!(":{}", types.join("|")),
+        _ => edge
+            .connection_type
+            .as_deref()
+            .map(|t| format!(":{t}"))
+            .unwrap_or_default(),
+    }
+}
+
+/// One `Expand` operator row per variable-length edge in `patterns`, in
+/// pattern order.
+///
+/// A variable-length edge is a [`PatternElement`] *inside* a MATCH clause, so
+/// the clause-granular plan above can never show it: `MATCH (a)-[:R*2..3]->(b)`
+/// and `MATCH (a)-[:R]->(b)` produce the identical `Match` row even though the
+/// former is where the whole query's cost lives. These rows make the expansion
+/// visible. `estimated_rows` stays `Null` — no cardinality model covers
+/// variable-length expansion (the cost model is predicate-only and join
+/// ordering excludes var-length), and a fabricated number would be worse than
+/// none.
+fn var_length_expand_ops(patterns: &[Pattern]) -> Vec<String> {
+    let node_at = |pattern: &Pattern, idx: Option<usize>| -> String {
+        let node = idx
+            .and_then(|i| pattern.elements.get(i))
+            .and_then(|e| match e {
+                PatternElement::Node(n) => Some(n),
+                PatternElement::Edge(_) => None,
+            });
+        explain_node_display(node)
+    };
+
+    let mut ops = Vec::new();
+    for pattern in patterns {
+        for (i, element) in pattern.elements.iter().enumerate() {
+            let PatternElement::Edge(edge) = element else {
+                continue;
+            };
+            let Some((min, max)) = edge.var_length else {
+                continue;
+            };
+            let left = node_at(pattern, i.checked_sub(1));
+            let right = node_at(pattern, Some(i + 1));
+            let body = format!("[{}*{min}..{max}]", explain_edge_types(edge));
+            let rendered = match edge.direction {
+                EdgeDirection::Outgoing => format!("{left}-{body}->{right}"),
+                EdgeDirection::Incoming => format!("{left}<-{body}-{right}"),
+                EdgeDirection::Both => format!("{left}-{body}-{right}"),
+            };
+            ops.push(format!("Expand {rendered}"));
+        }
+    }
+    ops
+}
+
 /// Generate a structured query plan as a CypherResult with columns
 /// [step, operation, estimated_rows].
 pub fn generate_explain_result(query: &CypherQuery, graph: &DirGraph) -> result::CypherResult {
     let mut rows = Vec::new();
 
-    for (i, clause) in query.clauses.iter().enumerate() {
-        let step = (i + 1) as i64;
+    for clause in query.clauses.iter() {
+        // `step` numbers rows, not clauses: a MATCH carrying variable-length
+        // edges contributes an Expand row per edge after its own row, and the
+        // column stays contiguous.
+        let step = (rows.len() + 1) as i64;
         let operation = executor::clause_display_name(clause);
         let est = match clause {
             Clause::Match(m) | Clause::OptionalMatch(m) => estimate_match_rows(m, graph)
@@ -224,6 +304,16 @@ pub fn generate_explain_result(query: &CypherQuery, graph: &DirGraph) -> result:
         };
 
         rows.push(vec![Value::Int64(step), Value::String(operation), est]);
+
+        if let Clause::Match(m) | Clause::OptionalMatch(m) = clause {
+            for op in var_length_expand_ops(&m.patterns) {
+                rows.push(vec![
+                    Value::Int64((rows.len() + 1) as i64),
+                    Value::String(op),
+                    Value::Null,
+                ]);
+            }
+        }
     }
 
     for pass in &query.optimizer_tags {
@@ -328,5 +418,53 @@ mod query_feature_tests {
 
         let lookalikes = query_features("RETURN 'LIMIT 200' AS text").unwrap();
         assert!(lookalikes.literal_limits.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod var_length_expand_tests {
+    use super::{var_length_expand_ops, Clause};
+
+    fn ops(query: &str) -> Vec<String> {
+        let parsed = super::parser::parse_cypher(query).expect("parse");
+        parsed
+            .clauses
+            .iter()
+            .filter_map(|c| match c {
+                Clause::Match(m) | Clause::OptionalMatch(m) => Some(m),
+                _ => None,
+            })
+            .flat_map(|m| var_length_expand_ops(&m.patterns))
+            .collect()
+    }
+
+    #[test]
+    fn renders_one_row_per_var_length_edge() {
+        assert_eq!(
+            ops("MATCH (a:Person)-[:KNOWS*2..3]->(b:Person) RETURN a"),
+            ["Expand (:Person)-[:KNOWS*2..3]->(:Person)"]
+        );
+    }
+
+    #[test]
+    fn fixed_length_edges_produce_no_row() {
+        assert!(ops("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a").is_empty());
+    }
+
+    #[test]
+    fn every_var_length_edge_appears_in_pattern_order() {
+        assert_eq!(
+            ops("MATCH (a:A)-[:R*1..2]->(b:B)-[:S*3..4]->(c) RETURN a"),
+            ["Expand (:A)-[:R*1..2]->(:B)", "Expand (:B)-[:S*3..4]->()",]
+        );
+    }
+
+    #[test]
+    fn renders_direction_types_and_the_star_default_bounds() {
+        assert_eq!(
+            ops("MATCH (a:Person)<-[:KNOWS|LIKES*2..3]-(b) RETURN a"),
+            ["Expand (:Person)<-[:KNOWS|LIKES*2..3]-()"]
+        );
+        assert_eq!(ops("MATCH (a)-[*]-(b) RETURN a"), ["Expand ()-[*1..10]-()"]);
     }
 }

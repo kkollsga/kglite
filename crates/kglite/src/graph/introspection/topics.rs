@@ -525,7 +525,7 @@ pub(super) fn write_topic_explain(xml: &mut String) {
     xml.push_str("      <ex desc=\"basic plan\">EXPLAIN MATCH (n:Person) WHERE n.age &gt; 30 RETURN n.name</ex>\n");
     xml.push_str("      <ex desc=\"inspect fused optimization\">EXPLAIN MATCH (n:Person) RETURN count(n)</ex>\n");
     xml.push_str("    </examples>\n");
-    xml.push_str("    <notes>Cardinality estimates use type_indices counts. Fused optimizations shown as single steps.</notes>\n");
+    xml.push_str("    <notes>Cardinality estimates use type_indices counts. Fused optimizations shown as single steps. Each variable-length edge adds an Expand row after its Match row, with estimated_rows null (no cardinality model covers var-length expansion).</notes>\n");
     xml.push_str("  </EXPLAIN>\n");
 }
 

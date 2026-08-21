@@ -34,6 +34,26 @@ class TestExplain:
         explanation = result.explain()
         assert isinstance(explanation, str)
 
+    def test_explain_on_the_root_object_teaches_where_the_plan_lives(self, social_graph):
+        """The plan lives on the object a fluent method returns, so calling
+        explain() on the graph itself records nothing. The message has to say
+        that, and point Cypher users at the prefixes — an external evaluation
+        read the old bare 'No query operations recorded' as evidence that the
+        method was vestigial."""
+        message = social_graph.explain()
+        assert message == (
+            "No query operations recorded — explain() reports the fluent chain it is called on: "
+            "graph.select(...).where(...).explain(). For Cypher, prefix the query with EXPLAIN or PROFILE."
+        )
+
+    def test_explain_docstring_points_at_the_chain_result_and_cypher_prefixes(self, social_graph):
+        doc = type(social_graph).explain.__doc__
+        assert "chain" in doc
+        assert "EXPLAIN" in doc and "PROFILE" in doc
+        assert "SELECT" in doc
+        # The stale operator name the docstring advertised for several versions.
+        assert "TYPE_FILTER" not in doc
+
 
 class TestOperationReports:
     def test_add_nodes_report(self):

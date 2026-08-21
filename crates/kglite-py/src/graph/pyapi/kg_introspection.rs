@@ -507,14 +507,29 @@ impl KnowledgeGraph {
         })
     }
 
-    /// Returns a string representation of the query execution plan.
+    /// Returns a string representation of the fluent chain's execution plan.
     ///
-    /// Shows each operation in the query chain with estimated and actual row counts.
-    /// Example output: "TYPE_FILTER Prospect (6775 nodes) -> TRAVERSE HAS_ESTIMATE (10954 nodes)"
+    /// Fluent methods return a new handle, so the plan lives on the object
+    /// they return — call `explain()` on the chain result, not on the graph:
+    /// `g.select("Person").where({"city": "Oslo"}).explain()`. Each recorded
+    /// operation (`SELECT`, `WHERE`, `TRAVERSE`, `EXPAND`, `VALID_AT`,
+    /// `VALID_DURING`, the spatial predicates) is shown with the node count it
+    /// produced.
+    ///
+    /// Example output: "SELECT Person (500 nodes) -> WHERE (42 nodes)"
+    ///
+    /// This reports fluent chains only. For Cypher, prefix the query with
+    /// `EXPLAIN` (plan without executing) or `PROFILE` (execute and return
+    /// per-clause statistics on `result.profile`).
     fn explain(&self) -> PyResult<String> {
         let plan = self.cursor.selection.get_execution_plan();
         if plan.is_empty() {
-            return Ok("No query operations recorded".to_string());
+            return Ok(
+                "No query operations recorded — explain() reports the fluent chain it is \
+                       called on: graph.select(...).where(...).explain(). For Cypher, prefix the \
+                       query with EXPLAIN or PROFILE."
+                    .to_string(),
+            );
         }
 
         let steps: Vec<String> = plan
