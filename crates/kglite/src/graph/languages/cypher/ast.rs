@@ -298,6 +298,25 @@ pub struct AggregateTopK {
 // MATCH Clause
 // ============================================================================
 
+/// A planner hint that the MATCH's consumer collapses row multiplicity down to
+/// one row per distinct binding of [`Self::var`].
+#[derive(Debug, Clone)]
+pub struct DistinctNodeHint {
+    /// The node variable rows may be deduplicated by.
+    pub var: String,
+    /// Whether the hint came from the *aggregate-only* route
+    /// (`RETURN count(DISTINCT f)`, `min(f.age)`, …) rather than
+    /// `RETURN DISTINCT f.id`.
+    ///
+    /// Only the aggregate route licenses sharing one seen-set **across
+    /// driving rows** in the executor's subsequent-MATCH branch: there every
+    /// projection item is a multiplicity-invariant aggregate over `var` alone,
+    /// so a driving row whose targets were all reached by an earlier row may
+    /// contribute no rows at all without the answer noticing. A
+    /// `RETURN DISTINCT` consumer keeps the per-clause dedup only.
+    pub aggregate_only: bool,
+}
+
 /// MATCH clause reuses the existing Pattern from pattern_matching.rs
 #[derive(Debug, Clone)]
 pub struct MatchClause {
@@ -305,10 +324,11 @@ pub struct MatchClause {
     pub path_assignments: Vec<PathAssignment>,
     /// Planner-set limit for early termination (pushed down from LIMIT clause)
     pub limit_hint: Option<usize>,
-    /// Planner-set hint: when RETURN DISTINCT only references a single node variable,
-    /// pre-deduplicate pattern matches by that variable's NodeIndex to avoid creating
-    /// duplicate ResultRows that would be removed later.
-    pub distinct_node_hint: Option<String>,
+    /// Planner-set hint: when the clause's consumer reads exactly one node
+    /// variable and collapses row multiplicity, pre-deduplicate pattern
+    /// matches by that variable's NodeIndex instead of building duplicate
+    /// `ResultRow`s that would be removed later.
+    pub distinct_node_hint: Option<DistinctNodeHint>,
     /// The clause's own `WHERE`, in the openCypher grammar's sense:
     /// `Match = ['OPTIONAL'] 'MATCH' Pattern [Where]` — the predicate belongs
     /// to the match, not to the pipeline. Populated by the parser **only for

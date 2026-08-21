@@ -1221,6 +1221,55 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (a:N)-[:R]->(f:N), (a)-[:S]->(g:N) RETURN DISTINCT f.id AS i",
         None,
     ),
+    # ── the UNWIND spelling of the same pushdown (part-6 phase V4b) ──
+    (
+        "khop_unwind_count_distinct_over_many_seeds",
+        "overlapping_khop_graph",
+        # One expansion per driving row, sharing one seen-set across them: the
+        # answer is still the union of the reachable sets.
+        "UNWIND [0, 4] AS i MATCH (p:N {id: i})-[:R*1..3]->(f:N) RETURN count(DISTINCT f) AS n",
+        None,
+    ),
+    (
+        "khop_unwind_count_distinct_per_source_when_the_source_escapes",
+        "overlapping_khop_graph",
+        # Escape control for the driving-row branch: the counts stay per-seed,
+        # which is exactly what a shared seen-set would fold together.
+        "UNWIND [0, 4] AS i MATCH (p:N {id: i})-[:R*1..3]->(f:N) "
+        "RETURN p.id AS pid, count(DISTINCT f) AS n ORDER BY pid",
+        None,
+    ),
+    (
+        "khop_unwind_seed_reaches_only_through_already_seen_targets",
+        "overlapping_khop_graph",
+        # Sharing the set must skip the emitted row, never the frontier: seed
+        # 1 adds only nodes that sit one hop past seed 0's targets.
+        "UNWIND [0, 1] AS i MATCH (p:N {id: i})-[:R*1..3]->(f:N) RETURN count(DISTINCT f) AS n",
+        None,
+    ),
+    (
+        "khop_unwind_repeated_seed_contributes_no_rows",
+        "overlapping_khop_graph",
+        # The second driving row reaches nothing new, so under the shared set
+        # it emits nothing at all.
+        "UNWIND [0, 0] AS i MATCH (p:N {id: i})-[:R*1..3]->(f:N) RETURN count(DISTINCT f) AS n",
+        None,
+    ),
+    (
+        "khop_unwind_count_star_is_not_dedup_safe",
+        "overlapping_khop_graph",
+        # Negative control: row count is path count, so no dedup may run.
+        "UNWIND [0, 4] AS i MATCH (p:N {id: i})-[:R*1..3]->(f:N) RETURN count(*) AS n",
+        None,
+    ),
+    (
+        "khop_two_match_count_distinct_over_many_seeds",
+        "overlapping_khop_graph",
+        # The third driving-row shape: `p` bound on the row rather than
+        # projected, expanded by a second MATCH clause.
+        "MATCH (p:N) WHERE p.id IN [0, 4] MATCH (p)-[:R*1..3]->(f:N) RETURN count(DISTINCT f) AS n",
+        None,
+    ),
     (
         "var_length_sibling_edge_shares_the_relationship",
         "two_cycle_graph",

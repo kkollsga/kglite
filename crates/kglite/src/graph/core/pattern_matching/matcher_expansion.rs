@@ -639,11 +639,16 @@ impl<'a> PatternExecutor<'a> {
                 if !self.target_satisfies_bindings(hop.node, current_match, target_idx) {
                     continue;
                 }
-                // Distinct-target dedup: at the last hop, skip targets already seen
+                // Distinct-target dedup: at the last hop, skip targets already
+                // seen — by this pass, or by an earlier execution the caller is
+                // sharing a dedup across (`distinct_prior`, read-only).
                 if hop.is_last_hop {
                     if let Some(ref dtv) = self.distinct_target_var {
                         if hop.node.variable.as_deref() == Some(dtv.as_str())
-                            && !distinct_seen.insert(target_idx)
+                            && (self
+                                .distinct_prior
+                                .is_some_and(|prior| prior.contains(&target_idx))
+                                || !distinct_seen.insert(target_idx))
                         {
                             continue;
                         }

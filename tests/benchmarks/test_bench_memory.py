@@ -243,6 +243,14 @@ def test_bench_save_kgl_spilled_5k(benchmark, graph_5k_spilled, tmp_path):
 # same fixture now cost 4.6 MB -> 6.6 MB (1.44x) release, 5.2 -> 7.2 MB (1.39x)
 # debug. The law is a plain test from here — a regression back to the row-shaped
 # implementation lands at 1.96x and cannot hide under the 1.8x ceiling.
+#
+# V4b added the UNWIND twin. V4's dedup shares one seen-set across the source
+# rows of a *single* expansion, which is what the WHERE-IN spelling runs; the
+# UNWIND spelling runs one expansion per driving row, so it stayed row-shaped
+# until the set was threaded across those executors. Release, same fixture:
+# 8.7 MB -> 16.2 MB (1.87x) before, 3.7 MB -> 3.9 MB (1.05x) after; debug lands
+# the un-shared build at 1.78x, close enough to this ceiling that the parity
+# test below, not this one, is the detector.
 
 
 #: 2x the seeds may cost at most this much more peak. The union of reachable
@@ -263,6 +271,7 @@ _KHOP_PEAK_PROBE = textwrap.dedent(
         return v / (1024 * 1024) if sys.platform == "darwin" else v / 1024
 
     node_count, seed_count, attachments = 30_000, int(sys.argv[1]), 2
+    spelling = sys.argv[2]
 
     repeated = list(range(attachments))
     src, dst = [], []
@@ -291,17 +300,24 @@ _KHOP_PEAK_PROBE = textwrap.dedent(
     ids = [(i * 197 + 13) % node_count for i in range(seed_count)]
     graph.cypher("MATCH (p:Person) RETURN count(p) AS n").to_list()
 
+    query = {
+        # The WHERE-IN spelling drives one expansion whose source rows share a
+        # seen-set; the UNWIND spelling drives one expansion per seed, so the
+        # set has to be shared across them. Same answer, same fixture.
+        "in_list": "MATCH (p:Person)-[:KNOWS*1..3]->(f:Person) WHERE p.id IN $ids "
+        "RETURN count(DISTINCT f) AS reached",
+        "unwind": "UNWIND $ids AS i MATCH (p:Person {id: i})-[:KNOWS*1..3]->(f:Person) "
+        "RETURN count(DISTINCT f) AS reached",
+    }[spelling]
+
     before = peak_mb()
-    rows = graph.cypher(
-        "MATCH (p:Person)-[:KNOWS*1..3]->(f:Person) WHERE p.id IN $ids RETURN count(DISTINCT f) AS reached",
-        params={"ids": ids},
-    ).to_list()
+    rows = graph.cypher(query, params={"ids": ids}).to_list()
     print(peak_mb() - before, rows[0]["reached"])
     """
 )
 
 
-def _khop_peak_delta_mb(seed_count: int) -> tuple[float, int]:
+def _khop_peak_delta_mb(seed_count: int, spelling: str) -> tuple[float, int]:
     """Peak-RSS delta (MB) and reached-node count for one seed count.
 
     A fresh subprocess per size, for the reason `test_unwind_scope_narrowing`
@@ -310,27 +326,28 @@ def _khop_peak_delta_mb(seed_count: int) -> tuple[float, int]:
     the reassuring direction.
     """
     proc = subprocess.run(
-        [sys.executable, "-c", _KHOP_PEAK_PROBE, str(seed_count)],
+        [sys.executable, "-c", _KHOP_PEAK_PROBE, str(seed_count), spelling],
         capture_output=True,
         text=True,
         timeout=90,
     )
-    assert proc.returncode == 0, f"probe at {seed_count} seeds failed (rc={proc.returncode})\nstderr:\n{proc.stderr}"
+    assert proc.returncode == 0, (
+        f"{spelling} probe at {seed_count} seeds failed (rc={proc.returncode})\nstderr:\n{proc.stderr}"
+    )
     delta, reached = proc.stdout.strip().splitlines()[-1].split()
     return float(delta), int(reached)
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="peak-RSS probe uses resource.getrusage (POSIX-only)")
-def test_khop3_peak_memory_scales_with_targets_not_seeds():
-    """Doubling the seeds must not double the peak.
+def _assert_khop3_peak_follows_targets(spelling: str) -> None:
+    """Doubling the seeds must not double the peak, for one query spelling.
 
     The seeds only decide how many BFS roots there are; the answer is the union
     of what they reach, which grows far more slowly. An implementation whose
     memory follows the *targets* satisfies this; one whose memory follows the
     *rows* does not.
     """
-    small_peak, small_reached = _khop_peak_delta_mb(25)
-    large_peak, large_reached = _khop_peak_delta_mb(50)
+    small_peak, small_reached = _khop_peak_delta_mb(25, spelling)
+    large_peak, large_reached = _khop_peak_delta_mb(50, spelling)
 
     # The law is only meaningful while the reachable sets stay comparable: if
     # 2x the seeds really did reach 2x the nodes, 2x the peak would be correct.
@@ -345,8 +362,67 @@ def test_khop3_peak_memory_scales_with_targets_not_seeds():
 
     seed_growth = large_peak / small_peak
     assert seed_growth <= MAX_SEED_GROWTH_FACTOR, (
-        f"2x the seeds cost {seed_growth:.2f}x the peak "
+        f"[{spelling}] 2x the seeds cost {seed_growth:.2f}x the peak "
         f"({small_peak:.1f} MB -> {large_peak:.1f} MB) while reaching only "
         f"{target_growth:.2f}x the nodes. Peak is following the seed count, "
         f"not the reachable set (ceiling {MAX_SEED_GROWTH_FACTOR}x)."
     )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="peak-RSS probe uses resource.getrusage (POSIX-only)")
+def test_khop3_peak_memory_scales_with_targets_not_seeds():
+    """The WHERE-IN spelling: one expansion, its source rows share a seen-set."""
+    _assert_khop3_peak_follows_targets("in_list")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="peak-RSS probe uses resource.getrusage (POSIX-only)")
+def test_khop3_unwind_peak_memory_scales_with_targets_not_seeds():
+    """The UNWIND spelling of the same law — one expansion per driving row.
+
+    Its twin above passes on a build where this fails: the seen-set the
+    matcher shares across the source rows of one expansion does not, by
+    itself, span the separate expansions UNWIND drives. Both spellings answer
+    `count(DISTINCT f)` over the same union, so both peaks must follow the
+    union.
+    """
+    _assert_khop3_peak_follows_targets("unwind")
+
+
+#: How much more peak the UNWIND spelling may cost than the WHERE-IN one.
+#: Measured at 50 seeds: 2.47x release / 2.33x debug before the seen-set
+#: spanned driving rows, 0.59x / 0.63x after (the driving-row branch never
+#: builds one large match vector), so 1.35x is far from both verdicts on
+#: either profile.
+MAX_SPELLING_PEAK_FACTOR = 1.35
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="peak-RSS probe uses resource.getrusage (POSIX-only)")
+def test_khop3_unwind_peak_memory_matches_the_where_in_spelling():
+    """The two spellings of one reachability answer must cost one peak.
+
+    A self-controlling pair, the memory counterpart of the `khop3_*` benchmark
+    cells: same graph, same seeds, same `count(DISTINCT f)` — so any gap is
+    the branch difference and nothing else. This is the sharp detector for the
+    driving-row dedup; the seed-growth law above lands close enough to its own
+    ceiling on the un-shared build to be a coin flip.
+    """
+    for seeds in (25, 50):
+        unwind_peak, unwind_reached = _khop_peak_delta_mb(seeds, "unwind")
+        in_list_peak, in_list_reached = _khop_peak_delta_mb(seeds, "in_list")
+
+        # Not a tautology: a pair that stopped computing the same answer is a
+        # ratio between two unrelated numbers.
+        assert unwind_reached == in_list_reached, (
+            f"the spellings disagree at {seeds} seeds: UNWIND reached "
+            f"{unwind_reached}, WHERE-IN reached {in_list_reached}"
+        )
+        assert in_list_peak >= 1.0, f"WHERE-IN peak at {seeds} seeds was {in_list_peak:.1f} MB — too small to divide by"
+
+        factor = unwind_peak / in_list_peak
+        assert factor <= MAX_SPELLING_PEAK_FACTOR, (
+            f"at {seeds} seeds the UNWIND spelling cost {factor:.2f}x the "
+            f"WHERE-IN spelling's peak ({unwind_peak:.1f} MB vs "
+            f"{in_list_peak:.1f} MB) for the same {unwind_reached}-node answer "
+            f"(ceiling {MAX_SPELLING_PEAK_FACTOR}x). The driving-row branch is "
+            "building one row per (seed, target) pair."
+        )

@@ -768,6 +768,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-source answer, and `count(*)` — where the row count is the answer — is
   excluded as before.
 
+- **Performance: the UNWIND-driven spelling of that query shares the dedup
+  across its driving rows.** `UNWIND $ids AS i MATCH (p:Person {id:
+  i})-[:KNOWS*1..3]->(f) RETURN count(DISTINCT f)` asks the question one seed
+  per row, so it runs one expansion per row and each one started with an empty
+  seen-set — the memory and time the WHERE-IN spelling had just been given
+  back, it kept paying. The seen-set now spans those expansions whenever the
+  projection is made entirely of multiplicity-invariant aggregates over the
+  deduplicated variable, so a driving row that reaches nothing new contributes
+  no rows at all. Peak memory for 50 seeds over a 30 000-node graph falls from
+  16.2 MB to 3.9 MB and stops following the seed count (1.87x per doubling to
+  1.05x), and the tracked `khop3_unwind_distinct` cell is **2.1x** faster —
+  within ~1.2x of the WHERE-IN spelling it computes the same answer as, where
+  it was 2.6x. The same sharing covers the two-clause spelling (`MATCH (p)
+  WHERE p.id IN $ids MATCH (p)-[…]->(f)`). As with the single-expansion dedup
+  it skips only *emission*, never traversal, and a projection that reads
+  anything but those aggregates — `RETURN p.id, count(DISTINCT f)`, `RETURN
+  DISTINCT f.id`, `count(*)` — keeps its per-driving-row answer.
+
 - **Performance: the variable-length BFS no longer allocates and zeroes a
   graph-sized visited buffer per row.** It sized the buffer to the whole graph
   for every source row, so the cost scaled with the node count rather than with

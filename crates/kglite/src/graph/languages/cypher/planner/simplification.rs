@@ -581,11 +581,22 @@ pub(super) fn push_distinct_into_match(query: &mut CypherQuery) {
         let Clause::Return(r) = &query.clauses[return_idx] else {
             continue;
         };
-        let distinct_var = distinct_route_var(r).or_else(|| aggregate_only_dedup_var(&r.items));
+        let hint = distinct_route_var(r)
+            .map(|var| DistinctNodeHint {
+                var,
+                aggregate_only: false,
+            })
+            .or_else(|| {
+                aggregate_only_dedup_var(&r.items).map(|var| DistinctNodeHint {
+                    var,
+                    aggregate_only: true,
+                })
+            });
 
-        let Some(dv) = distinct_var else {
+        let Some(hint) = hint else {
             continue;
         };
+        let dv = &hint.var;
         // Verify the variable is a node variable in the MATCH pattern, and
         // that the clause has exactly one pattern (see the doc comment: with
         // comma patterns the hint deduplicates before the join).
@@ -608,7 +619,7 @@ pub(super) fn push_distinct_into_match(query: &mut CypherQuery) {
         }
         // Set the hint
         if let Clause::Match(ref mut mc) = query.clauses[match_idx] {
-            mc.distinct_node_hint = Some(dv);
+            mc.distinct_node_hint = Some(hint);
         }
     }
 }

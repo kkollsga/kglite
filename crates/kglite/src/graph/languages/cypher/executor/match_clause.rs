@@ -104,6 +104,21 @@ fn simple_node_edge_node(pattern: &Pattern) -> Option<(&NodePattern, &EdgePatter
     Some((node_a, edge, node_b))
 }
 
+/// The node index a match bound to `var`, if it bound one.
+///
+/// The dedup routes read the target's identity off a `PatternMatch` before
+/// paying for row conversion, so this is deliberately a lookup on the match's
+/// binding list rather than on a converted [`ResultRow`].
+pub(super) fn match_node_index(m: &PatternMatch, var: &str) -> Option<NodeIndex> {
+    m.bindings
+        .iter()
+        .find(|(name, _)| name == var)
+        .and_then(|(_, b)| match b {
+            MatchBinding::Node { index, .. } | MatchBinding::NodeRef(index) => Some(*index),
+            _ => None,
+        })
+}
+
 /// Collect the edge indices a [`PatternMatch`] consumed, deduplicated into
 /// `out`. Fixed-length hops live on the compact `exact_path` trail (named
 /// *and* anonymous — the matcher tracks it whenever `needs_path_info` is

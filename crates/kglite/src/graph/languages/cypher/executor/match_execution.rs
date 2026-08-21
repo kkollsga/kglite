@@ -39,6 +39,20 @@ use crate::graph::core::membership::MembershipSet;
 // crossed, an offset a partition cannot know); and `limit_hint` has no
 // partitioned stopping point.
 
+/// The per-clause invariants of one subsequent-MATCH execution: everything
+/// [`CypherExecutor::expand_driving_row`] needs that is the same for every
+/// driving row, computed once by [`CypherExecutor::subsequent_match_rows`].
+struct DrivingRowPlan<'p> {
+    clause: &'p MatchClause,
+    /// One optional query-local equality index per pattern.
+    transient_indexes: Vec<Option<transient_index::TransientEqIndex>>,
+    limit_hint: Option<usize>,
+    enforce_rel_uniqueness: bool,
+    /// The variable one seen-set spans across driving rows, or `None` — see
+    /// [`CypherExecutor::cross_row_dedup_var`].
+    dedup_var: Option<&'p str>,
+}
+
 impl<'a> CypherExecutor<'a> {
     // ========================================================================
     // Variable resolution for pattern properties
@@ -171,7 +185,7 @@ impl<'a> CypherExecutor<'a> {
         clause: &'c MatchClause,
         inline_where: Option<&Predicate>,
     ) -> Option<&'c str> {
-        let hint = clause.distinct_node_hint.as_deref()?;
+        let hint = clause.distinct_node_hint.as_ref()?.var.as_str();
         match inline_where {
             None => Some(hint),
             Some(pred) if !match_clause::predicate_may_read_var(pred, hint) => Some(hint),
@@ -197,8 +211,6 @@ impl<'a> CypherExecutor<'a> {
         inline_where: Option<&Predicate>,
         matcher_distinct_target: Option<String>,
     ) -> Result<Option<Vec<ResultRow>>, String> {
-        use crate::graph::core::pattern_matching::MatchBinding;
-
         let matcher_deduped = matcher_distinct_target.is_some();
         // A slot anchor (`WHERE elementId(v) = …`) seeds the variable as a
         // pre-binding, turning the leading scan into a point lookup.
@@ -246,16 +258,10 @@ impl<'a> CypherExecutor<'a> {
         for m in matches {
             // Resolve the dedup variable's node index first so an already-kept
             // target is skipped before row conversion.
-            let dedup_idx = clause.distinct_node_hint.as_deref().and_then(|dedup_var| {
-                m.bindings
-                    .iter()
-                    .find(|(name, _)| name == dedup_var)
-                    .and_then(|(_, b)| match b {
-                        MatchBinding::Node { index, .. } => Some(*index),
-                        MatchBinding::NodeRef(index) => Some(*index),
-                        _ => None,
-                    })
-            });
+            let dedup_idx = clause
+                .distinct_node_hint
+                .as_ref()
+                .and_then(|hint| match_clause::match_node_index(&m, &hint.var));
             if let Some(idx) = dedup_idx {
                 if seen.contains(&idx) {
                     continue;
@@ -498,153 +504,13 @@ impl<'a> CypherExecutor<'a> {
             }
             all_rows
         } else {
-            // Subsequent MATCH: expand each existing row with new patterns
-            let mut new_rows = Vec::with_capacity(existing.rows.len());
-
-            // Build a query-local equality index per pattern when the
-            // shape qualifies (single typed-node + one EqualsVar/
-            // EqualsNodeProp matcher) and the outer-row count justifies
-            // the build cost. Avoids the per-row full-type scan that
-            // `PatternExecutor::execute` would otherwise do.
-            let transient_indexes: Vec<Option<transient_index::TransientEqIndex>> = clause
-                .patterns
-                .iter()
-                .map(|p| {
-                    transient_index::TransientEqIndex::try_build(self.graph, p, existing.rows.len())
-                })
-                .collect();
-
-            // Comma-separated patterns CROSS-JOIN: each pattern expands the
-            // working set produced by the previous one (seeded with the incoming
-            // row), not independent rows. Earlier this branch pushed a separate
-            // row per pattern, so `WITH/UNWIND … MATCH (a),(b)` produced
-            // half-rows ({a, null}, {null, b}) instead of the joined {a, b} —
-            // which in turn made `… CREATE (a)-[:R]->(b)` mis-bind and create
-            // spurious nodes. The single-pattern case (the hot path) reduces to
-            // one chain step and keeps the executor's `remaining` limit cap.
-            let single_pattern = clause.patterns.len() == 1;
-            for row in &existing.rows {
-                if limit_hint.is_some_and(|l| new_rows.len() >= l) {
-                    break;
-                }
-                let mut row_set: Vec<ResultRow> = vec![row.clone()];
-                // Relationship-uniqueness bookkeeping, parallel to `row_set`:
-                // the edges each working row consumed within THIS clause.
-                let mut edge_sets: Vec<Vec<petgraph::graph::EdgeIndex>> = if enforce_rel_uniqueness
-                {
-                    vec![Vec::new()]
-                } else {
-                    Vec::new()
-                };
-                for (pi, pattern) in clause.patterns.iter().enumerate() {
-                    if row_set.is_empty() {
-                        break;
-                    }
-                    // For a single pattern we can still cap the executor at the
-                    // outer LIMIT; for a cross-join the per-pattern count isn't
-                    // the final count, so don't pre-cap (apply at push instead).
-                    let exec_limit = if single_pattern {
-                        limit_hint.map(|l| l.saturating_sub(new_rows.len()))
-                    } else {
-                        None
-                    };
-                    let exec_limit = self.budget_probe_limit(exec_limit);
-                    let mut expanded: Vec<ResultRow> = Vec::with_capacity(row_set.len());
-                    let mut expanded_sets: Vec<Vec<petgraph::graph::EdgeIndex>> = Vec::new();
-                    for (ci, cur) in row_set.iter().enumerate() {
-                        // Fast path: probe the transient index when one was built
-                        // and the bind-var isn't already constrained by a prior
-                        // binding — live (`node_bindings`) or projected value
-                        // (`UNWIND collect(n) AS n` → Value::Node; OPTIONAL
-                        // MATCH miss → Null). Projected constraints are
-                        // enforced by `bindings_compatible` on the general
-                        // path, which the probe would bypass. (Transient
-                        // indexes only cover single-node patterns, so the
-                        // clause-local edge set is unchanged.)
-                        if let Some(idx) = &transient_indexes[pi] {
-                            if !cur.node_bindings.contains_key(idx.bind_var.as_str())
-                                && !cur.projected.contains_key(idx.bind_var.as_str())
-                            {
-                                if let Some(probe) = idx.probe_value(cur, self.graph) {
-                                    for &node_idx in idx.lookup(&probe) {
-                                        self.budget.reserve_rows(
-                                            expanded.len(),
-                                            1,
-                                            "MATCH indexed join",
-                                        )?;
-                                        let mut nr = cur.clone();
-                                        nr.node_bindings.insert(idx.bind_var.clone(), node_idx);
-                                        expanded.push(nr);
-                                        if enforce_rel_uniqueness {
-                                            expanded_sets.push(edge_sets[ci].clone());
-                                        }
-                                    }
-                                }
-                                continue;
-                            }
-                        }
-
-                        // Resolve EqualsVar / EqualsNodeProp references against
-                        // the current (partially-bound) row.
-                        let resolved;
-                        let pat = if Self::pattern_has_vars(pattern) {
-                            resolved = self.resolve_pattern_vars(pattern, cur);
-                            &resolved
-                        } else {
-                            pattern
-                        };
-                        // A relationship variable re-used from a prior clause
-                        // pins the pattern to that edge — seed its endpoints
-                        // so the executor doesn't enumerate every edge.
-                        let seeded = match_clause::seed_prebound_pattern_vars(pat, cur);
-                        let base = seeded.as_ref().unwrap_or(&cur.node_bindings);
-                        let anchored = match_clause::seed_clause_node_anchors(clause, base);
-                        let pre_bindings = anchored.as_ref().unwrap_or(base);
-                        let executor = PatternExecutor::with_bindings_and_params(
-                            self.graph,
-                            exec_limit,
-                            pre_bindings,
-                            self.params,
-                        )
-                        .set_deadline(self.deadline)
-                        .set_cancel(self.cancel)
-                        .set_parallel(self.parallel);
-                        let matches = executor.execute(pat)?;
-                        self.budget.check_work(matches.len(), "MATCH join")?;
-                        for m in &matches {
-                            if !self.bindings_compatible(cur, m) {
-                                continue;
-                            }
-                            if enforce_rel_uniqueness {
-                                let mut m_edges = Vec::new();
-                                match_clause::match_edge_indices(m, &mut m_edges);
-                                if m_edges.iter().any(|e| edge_sets[ci].contains(e)) {
-                                    continue; // trail rule: edge re-use across patterns
-                                }
-                                let mut next = edge_sets[ci].clone();
-                                next.extend(m_edges);
-                                expanded_sets.push(next);
-                            }
-                            let mut nr = cur.clone();
-                            self.merge_match_into_row(&mut nr, m);
-                            self.budget.reserve_rows(expanded.len(), 1, "MATCH join")?;
-                            expanded.push(nr);
-                        }
-                    }
-                    row_set = expanded;
-                    if enforce_rel_uniqueness {
-                        edge_sets = expanded_sets;
-                    }
-                }
-                for r in row_set {
-                    self.budget.reserve_rows(new_rows.len(), 1, "MATCH join")?;
-                    new_rows.push(r);
-                    if limit_hint.is_some_and(|l| new_rows.len() >= l) {
-                        break;
-                    }
-                }
-            }
-            new_rows
+            self.subsequent_match_rows(
+                clause,
+                &existing.rows,
+                limit_hint,
+                inline_where,
+                enforce_rel_uniqueness,
+            )?
         };
 
         // Propagate path bindings for non-shortestPath path assignments.
@@ -700,5 +566,321 @@ impl<'a> CypherExecutor<'a> {
             columns: existing.columns,
             lazy_return_items: None,
         })
+    }
+
+    // ========================================================================
+    // Subsequent MATCH (the driving-row branch)
+    // ========================================================================
+
+    /// The variable ONE seen-set may span **every driving row** of a
+    /// subsequent MATCH, or `None` to leave each driving row independent.
+    ///
+    /// [`Self::matcher_distinct_target`] shares a seen-set across the source
+    /// rows of a *single* expansion. This shares one across the separate
+    /// expansions the subsequent-MATCH branch runs — one `PatternExecutor` per
+    /// driving row — which is the same optimization for the UNWIND spelling of
+    /// a reachability query (`UNWIND $ids AS i MATCH (p {id: i})-[*1..3]->(f)
+    /// RETURN count(DISTINCT f)`) as the WHERE-IN spelling already gets. Like
+    /// that one it skips *emission* only: each driving row still traverses
+    /// every node an earlier one reached.
+    ///
+    /// The extra thing that has to hold here is that a driving row may
+    /// contribute **no rows at all** — every target it reaches having been
+    /// reached already — without the answer noticing. Only the aggregate route
+    /// of the hint guarantees it (see [`DistinctNodeHint::aggregate_only`]:
+    /// every projection item is a multiplicity-invariant aggregate over the
+    /// dedup variable, so no other variable of the dropped row is readable).
+    /// The remaining conditions are the licence's mechanical preconditions.
+    fn cross_row_dedup_var<'c>(
+        clause: &'c MatchClause,
+        inline_where: Option<&Predicate>,
+        limit_hint: Option<usize>,
+        enforce_rel_uniqueness: bool,
+    ) -> Option<&'c str> {
+        let hint = clause.distinct_node_hint.as_ref()?;
+        if !hint.aggregate_only {
+            return None;
+        }
+        // A fused WHERE cannot reach this branch — fusion is gated on an empty
+        // incoming result set — so the filter-after-dedup hazard
+        // [`Self::first_pattern_rows`] answers with a retry has no analogue
+        // here. Refuse the licence rather than assume the gate.
+        if inline_where.is_some() {
+            return None;
+        }
+        // A LIMIT decides *which* rows survive, so suppressing a duplicate
+        // target changes which driving rows reach the cap.
+        if limit_hint.is_some() {
+            return None;
+        }
+        // The trail rule filters matches after the matcher has already
+        // discarded a target's other representatives. (Unreachable: it needs
+        // two edge-carrying patterns, and the hint needs exactly one pattern.)
+        if enforce_rel_uniqueness {
+            return None;
+        }
+        // Exactly one pattern, carrying at least one edge. The single pattern
+        // is what the planner's hint already requires; the edge is what makes
+        // this worth doing — a node-only pattern binds one target per driving
+        // row and is the shape `transient_index` serves without an executor at
+        // all, so its rows would never reach the dedup.
+        let [pattern] = clause.patterns.as_slice() else {
+            return None;
+        };
+        if pattern.elements.len() < 2 {
+            return None;
+        }
+        Some(hint.var.as_str())
+    }
+
+    /// Execute the clause against a non-empty incoming result set: every
+    /// existing row drives its own expansion and is replaced by the rows it
+    /// produces.
+    fn subsequent_match_rows(
+        &self,
+        clause: &MatchClause,
+        existing_rows: &[ResultRow],
+        limit_hint: Option<usize>,
+        inline_where: Option<&Predicate>,
+        enforce_rel_uniqueness: bool,
+    ) -> Result<Vec<ResultRow>, String> {
+        let mut new_rows = Vec::with_capacity(existing_rows.len());
+
+        let plan = DrivingRowPlan {
+            clause,
+            // Build a query-local equality index per pattern when the
+            // shape qualifies (single typed-node + one EqualsVar/
+            // EqualsNodeProp matcher) and the outer-row count justifies
+            // the build cost. Avoids the per-row full-type scan that
+            // `PatternExecutor::execute` would otherwise do.
+            transient_indexes: clause
+                .patterns
+                .iter()
+                .map(|p| {
+                    transient_index::TransientEqIndex::try_build(self.graph, p, existing_rows.len())
+                })
+                .collect(),
+            limit_hint,
+            enforce_rel_uniqueness,
+            dedup_var: Self::cross_row_dedup_var(
+                clause,
+                inline_where,
+                limit_hint,
+                enforce_rel_uniqueness,
+            ),
+        };
+        // Targets already emitted by an earlier driving row, when the clause
+        // licenses one shared seen-set — see [`Self::cross_row_dedup_var`].
+        // A target lands here only once a match carrying it has actually
+        // become a row, so nothing a later filter or a matcher retry discarded
+        // can mark a target as answered.
+        let mut seen: std::collections::HashSet<petgraph::graph::NodeIndex> =
+            std::collections::HashSet::new();
+
+        for row in existing_rows {
+            if limit_hint.is_some_and(|l| new_rows.len() >= l) {
+                break;
+            }
+            let produced = self.expand_driving_row(&plan, row, new_rows.len(), &mut seen)?;
+            for r in produced {
+                self.budget.reserve_rows(new_rows.len(), 1, "MATCH join")?;
+                new_rows.push(r);
+                if limit_hint.is_some_and(|l| new_rows.len() >= l) {
+                    break;
+                }
+            }
+        }
+        Ok(new_rows)
+    }
+
+    /// Expand one driving row through the clause's patterns, cross-joining
+    /// them, and return the rows it produced.
+    ///
+    /// `seen` carries the cross-row dedup: the targets earlier driving rows
+    /// already emitted, under [`DrivingRowPlan::dedup_var`]. The matcher only
+    /// reads it; it is extended here, by exactly the matches that became rows.
+    fn expand_driving_row(
+        &self,
+        plan: &DrivingRowPlan<'_>,
+        row: &ResultRow,
+        produced_so_far: usize,
+        seen: &mut std::collections::HashSet<petgraph::graph::NodeIndex>,
+    ) -> Result<Vec<ResultRow>, String> {
+        let DrivingRowPlan {
+            clause,
+            transient_indexes,
+            limit_hint,
+            enforce_rel_uniqueness,
+            dedup_var,
+        } = plan;
+        let (limit_hint, enforce_rel_uniqueness, dedup_var) =
+            (*limit_hint, *enforce_rel_uniqueness, *dedup_var);
+        // Comma-separated patterns CROSS-JOIN: each pattern expands the
+        // working set produced by the previous one (seeded with the incoming
+        // row), not independent rows. Earlier this branch pushed a separate
+        // row per pattern, so `WITH/UNWIND … MATCH (a),(b)` produced
+        // half-rows ({a, null}, {null, b}) instead of the joined {a, b} —
+        // which in turn made `… CREATE (a)-[:R]->(b)` mis-bind and create
+        // spurious nodes. The single-pattern case (the hot path) reduces to
+        // one chain step and keeps the executor's `remaining` limit cap.
+        let single_pattern = clause.patterns.len() == 1;
+        let mut row_set: Vec<ResultRow> = vec![row.clone()];
+        // Relationship-uniqueness bookkeeping, parallel to `row_set`:
+        // the edges each working row consumed within THIS clause.
+        let mut edge_sets: Vec<Vec<petgraph::graph::EdgeIndex>> = if enforce_rel_uniqueness {
+            vec![Vec::new()]
+        } else {
+            Vec::new()
+        };
+        for (pi, pattern) in clause.patterns.iter().enumerate() {
+            if row_set.is_empty() {
+                break;
+            }
+            // For a single pattern we can still cap the executor at the
+            // outer LIMIT; for a cross-join the per-pattern count isn't
+            // the final count, so don't pre-cap (apply at push instead).
+            let exec_limit = if single_pattern {
+                limit_hint.map(|l| l.saturating_sub(produced_so_far))
+            } else {
+                None
+            };
+            let exec_limit = self.budget_probe_limit(exec_limit);
+            let mut expanded: Vec<ResultRow> = Vec::with_capacity(row_set.len());
+            let mut expanded_sets: Vec<Vec<petgraph::graph::EdgeIndex>> = Vec::new();
+            for (ci, cur) in row_set.iter().enumerate() {
+                // Fast path: probe the transient index when one was built
+                // and the bind-var isn't already constrained by a prior
+                // binding — live (`node_bindings`) or projected value
+                // (`UNWIND collect(n) AS n` → Value::Node; OPTIONAL
+                // MATCH miss → Null). Projected constraints are
+                // enforced by `bindings_compatible` on the general
+                // path, which the probe would bypass. (Transient
+                // indexes only cover single-node patterns, so the
+                // clause-local edge set is unchanged.)
+                if let Some(idx) = &transient_indexes[pi] {
+                    if !cur.node_bindings.contains_key(idx.bind_var.as_str())
+                        && !cur.projected.contains_key(idx.bind_var.as_str())
+                    {
+                        if let Some(probe) = idx.probe_value(cur, self.graph) {
+                            for &node_idx in idx.lookup(&probe) {
+                                self.budget.reserve_rows(
+                                    expanded.len(),
+                                    1,
+                                    "MATCH indexed join",
+                                )?;
+                                let mut nr = cur.clone();
+                                nr.node_bindings.insert(idx.bind_var.clone(), node_idx);
+                                expanded.push(nr);
+                                if enforce_rel_uniqueness {
+                                    expanded_sets.push(edge_sets[ci].clone());
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                }
+
+                // Resolve EqualsVar / EqualsNodeProp references against
+                // the current (partially-bound) row.
+                let resolved;
+                let pat = if Self::pattern_has_vars(pattern) {
+                    resolved = self.resolve_pattern_vars(pattern, cur);
+                    &resolved
+                } else {
+                    pattern
+                };
+                // A working row that already constrains the dedup variable
+                // pins the pattern to one target, so there is nothing here to
+                // deduplicate; sharing the set would only let one working row
+                // silence another's mandatory binding.
+                let cur_dedup_var = dedup_var.filter(|var| {
+                    !cur.node_bindings.contains_key(var) && !cur.projected.contains_key(var)
+                });
+                let matches =
+                    self.driving_row_matches(clause, pat, cur, exec_limit, cur_dedup_var, seen)?;
+                self.budget.check_work(matches.len(), "MATCH join")?;
+                for m in &matches {
+                    if !self.bindings_compatible(cur, m) {
+                        continue;
+                    }
+                    if enforce_rel_uniqueness {
+                        let mut m_edges = Vec::new();
+                        match_clause::match_edge_indices(m, &mut m_edges);
+                        if m_edges.iter().any(|e| edge_sets[ci].contains(e)) {
+                            continue; // trail rule: edge re-use across patterns
+                        }
+                        let mut next = edge_sets[ci].clone();
+                        next.extend(m_edges);
+                        expanded_sets.push(next);
+                    }
+                    // Record the target only now: the row exists, so no later
+                    // driving row is entitled to emit it again.
+                    if let Some(var) = cur_dedup_var {
+                        if let Some(idx) = match_clause::match_node_index(m, var) {
+                            seen.insert(idx);
+                        }
+                    }
+                    let mut nr = cur.clone();
+                    self.merge_match_into_row(&mut nr, m);
+                    self.budget.reserve_rows(expanded.len(), 1, "MATCH join")?;
+                    expanded.push(nr);
+                }
+            }
+            row_set = expanded;
+            if enforce_rel_uniqueness {
+                edge_sets = expanded_sets;
+            }
+        }
+        Ok(row_set)
+    }
+
+    /// One working row's pattern matches, with the cross-row dedup applied if
+    /// this row holds the licence.
+    ///
+    /// Matcher-level dedup keeps one arbitrary match per target, and
+    /// [`Self::bindings_compatible`] can reject exactly that one while a
+    /// suppressed match on the same target would have passed — which would
+    /// lose the target for every *later* driving row too, since the loser
+    /// never reaches the shared set. That is the same hazard
+    /// [`Self::first_pattern_rows`] answers with an uncapped retry, and the
+    /// same answer: the moment a deduplicated pass produces an incompatible
+    /// match, redo it without the dedup, where every match reaches the check.
+    fn driving_row_matches(
+        &self,
+        clause: &MatchClause,
+        pat: &Pattern,
+        cur: &ResultRow,
+        exec_limit: Option<usize>,
+        dedup_var: Option<&str>,
+        seen: &std::collections::HashSet<petgraph::graph::NodeIndex>,
+    ) -> Result<Vec<crate::graph::core::pattern_matching::PatternMatch>, String> {
+        // A relationship variable re-used from a prior clause pins the pattern
+        // to that edge — seed its endpoints so the executor doesn't enumerate
+        // every edge.
+        let seeded = match_clause::seed_prebound_pattern_vars(pat, cur);
+        let base = seeded.as_ref().unwrap_or(&cur.node_bindings);
+        let anchored = match_clause::seed_clause_node_anchors(clause, base);
+        let pre_bindings = anchored.as_ref().unwrap_or(base);
+        // Block-scoped: the PatternExecutor holds the disk arena guard (drop
+        // glue), so its borrow of `seen` must end before the caller extends it.
+        let run = |distinct: Option<&str>| -> Result<Vec<_>, String> {
+            let executor = PatternExecutor::with_bindings_and_params(
+                self.graph,
+                exec_limit,
+                pre_bindings,
+                self.params,
+            )
+            .set_deadline(self.deadline)
+            .set_cancel(self.cancel)
+            .set_parallel(self.parallel)
+            .set_distinct_target(distinct.map(str::to_string))
+            .set_distinct_prior(distinct.map(|_| seen));
+            executor.execute(pat)
+        };
+        let matches = run(dedup_var)?;
+        if dedup_var.is_some() && matches.iter().any(|m| !self.bindings_compatible(cur, m)) {
+            return run(None);
+        }
+        Ok(matches)
     }
 }

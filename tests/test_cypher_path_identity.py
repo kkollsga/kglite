@@ -316,3 +316,128 @@ def test_a_representative_rejected_by_the_fused_where_does_not_lose_its_target()
         {"c": 1}
     ]
     assert graph.cypher("MATCH (a:P)-[:K]->(f:P) WHERE a.age + 0 > 10 RETURN f.id AS i").to_list() == [{"i": 3}]
+
+
+# ── the UNWIND spelling of the same pushdown (part-6 phase V4b) ──────────────
+#
+# `UNWIND $ids AS i MATCH (p {id: i})-[...]->(f)` reaches the same answer
+# through a different branch: one PatternExecutor per driving row, so the
+# seen-set has to span executors rather than the source rows of one. These are
+# the invariance tests for that — every one of them is green before the sharing
+# lands, and each names a way sharing could break it.
+
+
+def test_unwind_multi_seed_khop_counts_the_union_of_the_reachable_sets():
+    """Same union as the WHERE-IN spelling, driven one seed per row.
+
+    A shared seen-set that suppressed a target the *first* driving row never
+    emitted — because a later filter dropped its row, or because a retry
+    re-ran the pass — answers 6 here, not 7.
+    """
+    graph = _two_component_graph()
+
+    assert graph.cypher(
+        "UNWIND [0, 4] AS i MATCH (p:P {id: i})-[:K*1..3]->(f:P) RETURN count(DISTINCT f) AS c"
+    ).to_list() == [{"c": 7}]
+    assert sorted(
+        row["i"]
+        for row in graph.cypher(
+            "UNWIND [0, 4] AS s MATCH (p:P {id: s})-[:K*1..3]->(f:P) RETURN DISTINCT f.id AS i"
+        ).to_list()
+    ) == [1, 2, 3, 4, 5, 6, 7]
+    # `count(*)` counts paths, so it is NOT dedup-safe: the aggregate whitelist
+    # must refuse it and keep all nine rows even though the shape is otherwise
+    # identical.
+    assert graph.cypher("UNWIND [0, 4] AS i MATCH (p:P {id: i})-[:K*1..3]->(f:P) RETURN count(*) AS c").to_list() == [
+        {"c": 9}
+    ]
+
+
+def test_unwind_source_in_the_projection_keeps_the_count_per_source():
+    """The escape control, driven by UNWIND.
+
+    Cross-row dedup is exactly the transformation that would fold these two
+    groups into one — so the projection naming `p` has to refuse the licence
+    here as it does on the WHERE-IN spelling.
+    """
+    graph = _two_component_graph()
+
+    assert graph.cypher(
+        "UNWIND [0, 4] AS i MATCH (p:P {id: i})-[:K*1..3]->(f:P) "
+        "RETURN p.id AS pid, count(DISTINCT f) AS c ORDER BY pid"
+    ).to_list() == [{"pid": 0, "c": 6}, {"pid": 4, "c": 3}]
+    # The unwound scalar is a projected variable rather than a pattern one, and
+    # it escapes the same way.
+    assert graph.cypher(
+        "UNWIND [0, 4] AS i MATCH (p:P {id: i})-[:K*1..3]->(f:P) RETURN i AS seed, count(DISTINCT f) AS c ORDER BY seed"
+    ).to_list() == [{"seed": 0, "c": 6}, {"seed": 4, "c": 3}]
+
+
+def test_unwind_seen_target_is_skipped_for_emission_but_still_traversed():
+    """Seed 1's own targets are only reachable *through* seed 0's.
+
+    The chain fixture again, driven by UNWIND: a shared set that pruned the
+    second driving row's BFS frontier instead of its emitted rows would lose
+    0, 4 and 8 and answer 6.
+    """
+    graph = _two_component_graph()
+
+    assert graph.cypher(
+        "UNWIND [0, 1] AS i MATCH (p:P {id: i})-[:K*1..3]->(f:P) RETURN count(DISTINCT f) AS c"
+    ).to_list() == [{"c": 9}]
+    assert graph.cypher(
+        "UNWIND [0, 1] AS i MATCH (p:P {id: i})-[:K*1..3]->(f:P) "
+        "RETURN p.id AS pid, count(DISTINCT f) AS c ORDER BY pid"
+    ).to_list() == [{"pid": 0, "c": 6}, {"pid": 1, "c": 8}]
+
+
+def test_unwind_repeated_seed_does_not_change_the_distinct_answer():
+    """A driving row whose targets were all reached may contribute no rows.
+
+    The second `0` reaches nothing new, so under the shared set it emits
+    nothing at all — the licence's core claim. `count(*)` (no licence) still
+    counts its paths twice.
+    """
+    graph = _two_component_graph()
+
+    assert graph.cypher(
+        "UNWIND [0, 0] AS i MATCH (p:P {id: i})-[:K*1..3]->(f:P) RETURN count(DISTINCT f) AS c"
+    ).to_list() == [{"c": 6}]
+    assert graph.cypher("UNWIND [0, 0] AS i MATCH (p:P {id: i})-[:K*1..3]->(f:P) RETURN count(*) AS c").to_list() == [
+        {"c": 12}
+    ]
+    # collect(DISTINCT …) and min/max are on the same whitelist and must agree.
+    assert graph.cypher(
+        "UNWIND [0, 0] AS i MATCH (p:P {id: i})-[:K*1..3]->(f:P) RETURN min(f.id) AS lo, max(f.id) AS hi"
+    ).to_list() == [{"lo": 1, "hi": 7}]
+
+
+def test_unwind_bound_target_keeps_every_driving_row():
+    """A driving row that already pins the dedup variable is not deduplicated.
+
+    Both rows bind `f` to node 3 by construction. Sharing a seen-set across
+    them would silence the second row's mandatory binding, so the licence is
+    withdrawn per row when the variable is already constrained.
+    """
+    graph = _two_component_graph()
+
+    assert graph.cypher(
+        "MATCH (f:P {id: 3}) UNWIND [0, 1] AS i MATCH (p:P {id: i})-[:K*1..3]->(f) RETURN count(*) AS c"
+    ).to_list() == [{"c": 2}]
+
+
+def test_two_match_spelling_agrees_with_the_unwind_one():
+    """`MATCH (p) WHERE … MATCH (p)-[…]->(f)` is the third driving-row shape.
+
+    Its second clause runs the same branch as the UNWIND spelling, with `p`
+    bound on the driving row rather than a projected scalar.
+    """
+    graph = _two_component_graph()
+
+    assert graph.cypher(
+        "MATCH (p:P) WHERE p.id IN [0, 4] MATCH (p)-[:K*1..3]->(f:P) RETURN count(DISTINCT f) AS c"
+    ).to_list() == [{"c": 7}]
+    assert graph.cypher(
+        "MATCH (p:P) WHERE p.id IN [0, 4] MATCH (p)-[:K*1..3]->(f:P) "
+        "RETURN p.id AS pid, count(DISTINCT f) AS c ORDER BY pid"
+    ).to_list() == [{"pid": 0, "c": 6}, {"pid": 4, "c": 3}]

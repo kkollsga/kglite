@@ -366,6 +366,15 @@ pub struct PatternExecutor<'a> {
     /// At the last hop expansion, paths leading to already-seen target nodes
     /// are skipped, avoiding PatternMatch cloning and allocation overhead.
     distinct_target_var: Option<String>,
+    /// Targets an *earlier* execution already emitted, when the caller is
+    /// deduplicating one variable across a series of executions (the Cypher
+    /// executor's subsequent-MATCH branch builds one executor per driving
+    /// row). Consulted alongside this execution's own seen-set, and
+    /// **never written to**: the caller inserts a target only once a match
+    /// carrying it has actually become a row, so neither the capped/uncapped
+    /// retry inside [`PatternExecutor::execute`] nor a match this executor's
+    /// caller later discards can leave a target marked as emitted.
+    distinct_prior: Option<&'a HashSet<NodeIndex>>,
     /// Opt-in parallel runtime for this execution (`ExecuteOptions::parallel`,
     /// threaded down like `cancel`). Default `false`. A permission, not an
     /// instruction: the candidate scan still applies its own runtime row ×
@@ -408,6 +417,7 @@ impl<'a> PatternExecutor<'a> {
             deadline: None,
             cancel: None,
             distinct_target_var: None,
+            distinct_prior: None,
             parallel: false,
             cap_truncated: AtomicBool::new(false),
             _arena_guard: graph.graph.begin_query(),
@@ -429,6 +439,7 @@ impl<'a> PatternExecutor<'a> {
             deadline: None,
             cancel: None,
             distinct_target_var: None,
+            distinct_prior: None,
             parallel: false,
             cap_truncated: AtomicBool::new(false),
             _arena_guard: graph.graph.begin_query(),
@@ -450,6 +461,7 @@ impl<'a> PatternExecutor<'a> {
             deadline: None,
             cancel: None,
             distinct_target_var: None,
+            distinct_prior: None,
             parallel: false,
             cap_truncated: AtomicBool::new(false),
             _arena_guard: graph.graph.begin_query(),
@@ -516,6 +528,14 @@ impl<'a> PatternExecutor<'a> {
     /// are skipped, avoiding PatternMatch cloning overhead.
     pub fn set_distinct_target(mut self, var: Option<String>) -> Self {
         self.distinct_target_var = var;
+        self
+    }
+
+    /// Seed the distinct-target dedup with targets an earlier execution
+    /// already emitted — see [`PatternExecutor::distinct_prior`]. Only has an
+    /// effect together with [`Self::set_distinct_target`].
+    pub fn set_distinct_prior(mut self, prior: Option<&'a HashSet<NodeIndex>>) -> Self {
+        self.distinct_prior = prior;
         self
     }
 
