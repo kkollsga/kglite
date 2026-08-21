@@ -245,7 +245,7 @@ fn borrowed_slices_are_accepted_without_an_intermediate_copy() {
     let packed: Vec<f32> = vec![1.0, 0.0, 0.0, 1.0];
     let entries = [Value::Int64(1), Value::Int64(2)]
         .into_iter()
-        .zip(packed.chunks_exact(2));
+        .zip(packed.as_chunks::<2>().0.iter().map(|c| &c[..]));
     let report = set_embeddings(&mut g, "Doc", "summary", None, entries).unwrap();
     assert_eq!(report.embeddings_stored, 2);
 }

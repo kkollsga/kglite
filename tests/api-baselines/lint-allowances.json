@@ -453,6 +453,14 @@
       "classification": "api-shape"
     },
     {
+      "identity": "crates/kglite/src/graph/storage/column_store/mod.rs::fn:load_bytes:fn load_bytes( bytes: &[u8], temp_dir: Option<&Path>, _col_name: &str, ext: &str, ) -> io::Result<MmapBytes>@occurrence:1::clippy::chunks_exact_to_as_chunks",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/column_store/mod.rs::fn:load_bytes:fn load_bytes( bytes: &[u8], temp_dir: Option<&Path>, _col_name: &str, ext: &str, ) -> io::Result<MmapBytes>@occurrence:2::clippy::chunks_exact_to_as_chunks",
+      "classification": "transitional"
+    },
+    {
       "identity": "crates/kglite/src/graph/storage/column_store/tests.rs::module::clippy::approx_constant",
       "classification": "test"
     },

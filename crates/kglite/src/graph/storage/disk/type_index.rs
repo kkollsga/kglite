@@ -56,8 +56,10 @@ fn read_le_u32(bytes: &[u8], index: usize) -> Option<u32> {
 
 fn le_u32_iter(bytes: &[u8]) -> impl Iterator<Item = u32> + '_ {
     bytes
-        .chunks_exact(4)
-        .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| u32::from_le_bytes(*chunk))
 }
 
 fn le_u32_binary_search(bytes: &[u8], wanted: u32) -> bool {
@@ -255,7 +257,7 @@ impl<'a> TypeNodesRef<'a> {
     pub fn iter(&self) -> TypeNodesIter<'_> {
         match self {
             TypeNodesRef::Overlay(s) => TypeNodesIter::Overlay(s.iter()),
-            TypeNodesRef::Mmap(s) => TypeNodesIter::Mmap(s.chunks_exact(4)),
+            TypeNodesRef::Mmap(s) => TypeNodesIter::Mmap(s.as_chunks::<4>().0.iter()),
             TypeNodesRef::Layered(levels) => TypeNodesIter::Layered {
                 levels,
                 level: 0,
@@ -360,15 +362,15 @@ impl<'a> TypeNodesRef<'a> {
 
 pub enum TypeNodesIter<'a> {
     Overlay(std::slice::Iter<'a, NodeIndex>),
-    Mmap(std::slice::ChunksExact<'a, u8>),
+    Mmap(std::slice::Iter<'a, [u8; 4]>),
     /// Walks the level stack in merge order. Only reachable while a fork is
     /// outstanding — an unlayered bucket hands out `Overlay`.
     ///
     /// The cursor is two `u32`s rather than two `usize`s, and the remaining
-    /// count is derived rather than carried, so this variant does not widen the
-    /// enum past the `Mmap` arm. The label scan iterates this type in its
-    /// hottest loop; growing it would tax every scan for a state only a forked
-    /// graph can be in.
+    /// count is derived rather than carried, so this variant stays one word
+    /// wider than the two-pointer `Overlay`/`Mmap` arms. The label scan
+    /// iterates this type in its hottest loop; growing it would tax every scan
+    /// for a state only a forked graph can be in.
     Layered {
         levels: &'a [Arc<Vec<NodeIndex>>],
         level: u32,
@@ -382,9 +384,9 @@ impl<'a> Iterator for TypeNodesIter<'a> {
     fn next(&mut self) -> Option<NodeIndex> {
         match self {
             TypeNodesIter::Overlay(it) => it.next().copied(),
-            TypeNodesIter::Mmap(it) => it.next().map(|bytes| {
-                NodeIndex::new(u32::from_le_bytes(bytes.try_into().unwrap()) as usize)
-            }),
+            TypeNodesIter::Mmap(it) => it
+                .next()
+                .map(|bytes| NodeIndex::new(u32::from_le_bytes(*bytes) as usize)),
             TypeNodesIter::Layered { levels, level, pos } => {
                 while (*level as usize) < levels.len() {
                     if let Some(idx) = levels[*level as usize].get(*pos as usize) {

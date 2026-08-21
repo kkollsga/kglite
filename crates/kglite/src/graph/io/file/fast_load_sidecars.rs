@@ -128,8 +128,8 @@ pub(crate) fn read_type_indices_bin(
         let nodes_end = nodes_offset + off_end * 4;
         let mut vec = Vec::with_capacity(off_end - off_start);
         let mut previous_node = None;
-        for chunk in payload[nodes_start..nodes_end].chunks_exact(4) {
-            let idx = u32::from_le_bytes(chunk.try_into().unwrap()) as usize;
+        for chunk in payload[nodes_start..nodes_end].as_chunks::<4>().0 {
+            let idx = u32::from_le_bytes(*chunk) as usize;
             if previous_node.is_some_and(|previous| idx <= previous) {
                 return Err(invalid_data(
                     "type index node ids are not strictly increasing",

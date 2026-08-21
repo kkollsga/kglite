@@ -237,8 +237,10 @@ mod tests {
         assert_eq!(decoded_nulls, nulls);
         Some(
             bytes
-                .chunks_exact(8)
-                .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|c| i64::from_le_bytes(*c))
                 .collect(),
         )
     }

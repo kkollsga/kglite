@@ -2227,8 +2227,8 @@ impl ColumnStore {
         col_name: &str,
     ) -> io::Result<()> {
         let mut previous = 0u64;
-        for (index, chunk) in offsets_bytes.chunks_exact(8).enumerate() {
-            let offset = u64::from_le_bytes(chunk.try_into().unwrap());
+        for (index, chunk) in offsets_bytes.as_chunks::<8>().0.iter().enumerate() {
+            let offset = u64::from_le_bytes(*chunk);
             if (index == 0 && offset != 0)
                 || offset < previous
                 || offset > last_offset_u64
@@ -2292,12 +2292,16 @@ impl ColumnStore {
                 MmapOrVec::load_mapped(&path, len)
             } else {
                 let mut data = MmapOrVec::mapped_prefilled(&path, len)?;
+                // Chunk size is an associated const; as_chunks needs generic_const_exprs.
+                #[allow(clippy::chunks_exact_to_as_chunks)]
                 for (index, chunk) in bytes.chunks_exact(T::WIDTH).enumerate() {
                     data.set(index, T::decode_le(chunk));
                 }
                 Ok(data)
             }
         } else {
+            // Chunk size is an associated const; as_chunks needs generic_const_exprs.
+            #[allow(clippy::chunks_exact_to_as_chunks)]
             let data = bytes.chunks_exact(T::WIDTH).map(T::decode_le).collect();
             Ok(MmapOrVec::Heap { data })
         }

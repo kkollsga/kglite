@@ -1030,14 +1030,13 @@ pub struct EmbeddingStore {
 }
 
 /// Squared L2 norm of a vector, computed with the same 4-accumulator
-/// `chunks_exact(8)` pattern the cosine kernel uses for the stored vector, so a
+/// 8-lane chunk pattern the cosine kernel uses for the stored vector, so a
 /// cached norm matches the value cosine would have computed inline (within fp
 /// rounding). Auto-vectorizes (SSE2/AVX2/NEON) on the hot rebuild path.
 #[inline]
 fn l2_norm_sq(v: &[f32]) -> f32 {
     let (mut s0, mut s1, mut s2, mut s3) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
-    let chunks = v.chunks_exact(8);
-    let rem = chunks.remainder();
+    let (chunks, rem) = v.as_chunks::<8>();
     for c in chunks {
         s0 += c[0] * c[0];
         s1 += c[1] * c[1];
