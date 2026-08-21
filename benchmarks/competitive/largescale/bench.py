@@ -120,7 +120,7 @@ def main():
     args = ap.parse_args()
 
     staged = Path(args.staged)
-    manifest = json.loads((staged / "manifest.json").read_text())
+    manifest = json.loads((staged / "manifest.json").read_text(encoding="utf-8"))
     p = manifest["params"]
     engines = args.engines.split(",")
     print(

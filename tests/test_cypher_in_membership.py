@@ -335,3 +335,96 @@ def test_indexed_post_with_list_matches_the_linear_scan(graph):
 )
 def test_in_param_truth_table(graph, expression, params, expected):
     assert one(graph, f"RETURN {expression} AS value", params) == expected
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Multiplicity — a repeated list element does not repeat its node.
+#
+# The index-served `IN` anchors (`{id: IN [...]}` and `{p: IN [...]}` where
+# `p` is indexed) are driven by the *list*: one index probe per element. A
+# list naming the same node twice therefore used to emit that node once per
+# element, so `count(n)` over `[1, 1, 2]` answered 3 where the scan path,
+# every other anchor, and Neo4j answer 2. A MATCH binds each node once.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("clause", "params"),
+    [
+        ("WHERE n.id IN [1, 1, 2]", None),
+        ("WHERE n.id IN $vs", {"vs": [1, 1, 2]}),
+        # Equal *values* are not the only way two elements reach one node:
+        # the id index coerces across the numeric family, so `1` and `1.0`
+        # are distinct elements resolving to the same node.
+        ("WHERE n.id IN [1, 1.0, 2]", None),
+        # The same element repeated many times is still one row.
+        ("WHERE n.id IN [1, 1, 1, 1, 2, 2]", None),
+        # A duplicated element that matches nothing changes nothing.
+        ("WHERE n.id IN [1, 999, 999, 2]", None),
+    ],
+)
+def test_duplicate_list_entries_bind_each_node_once(graph, clause, params):
+    query = f"MATCH (n:Item) {clause} RETURN n.val AS v ORDER BY v"
+    assert [r["v"] for r in rows(graph, query, params)] == [1, 2]
+    assert one(graph, f"MATCH (n:Item) {clause} RETURN count(n) AS c", params) == 2
+
+
+def test_duplicate_entries_match_the_unindexed_scan(graph):
+    """The control: a property with no index filters each node once, and
+    always answered 2. The anchored route must agree with it."""
+    for clause, params in [
+        ("WHERE n.txt IN ['a', 'a', 'b']", None),
+        ("WHERE n.txt IN $vs", {"vs": ["a", "a", "b"]}),
+    ]:
+        assert one(graph, f"MATCH (n:Item) {clause} RETURN count(n) AS c", params) == 2
+
+
+def test_duplicate_entries_keep_the_anchor_ordering(graph):
+    """Dedup keeps each node's **first** occurrence, so the id anchor still
+    answers in list order.
+
+    This is not a Cypher guarantee — the query has no ORDER BY — but it is
+    the order this anchor has always returned, and dropping a *later*
+    duplicate rather than an earlier one is what keeps it.
+    """
+    got = rows(graph, "MATCH (n:Item) WHERE n.id IN [3, 1, 3, 2] RETURN n.val AS v")
+    assert [r["v"] for r in got] == [3, 1, 2]
+
+
+def test_duplicate_entries_bind_once_on_an_indexed_property():
+    """The sibling arm: `IN` on a **non-id** property that carries a per-type
+    index probes that index once per element and concatenated the answers.
+
+    Its own graph — `create_index` would otherwise change the route the
+    module-scoped fixture's other goldens take.
+    """
+    g = kglite.KnowledgeGraph()
+    g.cypher("CREATE (:Item {id: 1, txt: 'a'}), (:Item {id: 2, txt: 'b'}), (:Item {id: 3, txt: 'c'})")
+    query = "MATCH (n:Item) WHERE n.txt IN ['a', 'a', 'b'] RETURN count(n) AS c"
+    assert g.cypher(query).to_list()[0]["c"] == 2
+    g.create_index("Item", "txt")
+    assert g.cypher(query).to_list()[0]["c"] == 2
+
+
+def test_duplicate_entries_bind_once_past_the_index_threshold():
+    """Long lists take `MembershipSet`'s hash index instead of a linear scan,
+    and 0.11.2 fixed a *different* bare-point-lookup defect that only appeared
+    past ~64 elements. Cross both boundaries with duplicates present.
+    """
+    g = kglite.KnowledgeGraph()
+    g.cypher("UNWIND range(1, 200) AS i CREATE (:Item {id: i, val: i})")
+    ids = list(range(1, 101)) * 2  # 200 elements, 100 distinct
+    query = "MATCH (n:Item) WHERE n.id IN $vs RETURN count(n) AS c"
+    assert g.cypher(query, params={"vs": ids}).to_list()[0]["c"] == 100
+    assert g.cypher(query, params={"vs": ids}, disable_optimizer=True).to_list()[0]["c"] == 100
+    got = g.cypher("MATCH (n:Item) WHERE n.id IN $vs RETURN n.val AS v ORDER BY v", params={"vs": ids}).to_list()
+    assert [r["v"] for r in got] == list(range(1, 101))
+
+
+def test_unwind_of_duplicate_ids_still_yields_one_row_per_element(graph):
+    """The neighbouring shape that is *not* a defect: UNWIND makes the
+    duplicate a driving row, so two rows are correct (Neo4j agrees). The fix
+    dedups an anchor's candidate set, never the caller's rows.
+    """
+    assert one(graph, "UNWIND [1, 1, 2] AS x MATCH (n:Item) WHERE n.id = x RETURN count(n) AS c") == 3
+    assert one(graph, "UNWIND [1, 1, 2] AS x MATCH (n:Item {id: x}) RETURN count(n) AS c") == 3

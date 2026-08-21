@@ -133,8 +133,8 @@
     {
       "path": "crates/kglite/src/graph/core/pattern_matching/matcher.rs",
       "qualified_name": "crate::PatternExecutor<'a>::try_index_lookup",
-      "lines": 237,
-      "branches": 42,
+      "lines": 203,
+      "branches": 32,
       "nesting": 4
     },
     {

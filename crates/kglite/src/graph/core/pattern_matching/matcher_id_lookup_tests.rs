@@ -415,3 +415,174 @@ fn id_miss_with_extra_predicates_is_empty() {
         0
     );
 }
+
+// ── The IN-list anchors bind each node once ──────────────────────────────
+
+use crate::graph::core::membership::MembershipSet;
+
+fn in_props(name: &str, values: Vec<Value>) -> HashMap<String, PropertyMatcher> {
+    HashMap::from([(
+        name.to_string(),
+        PropertyMatcher::In(MembershipSet::new(values)),
+    )])
+}
+
+/// **The fix.** The id anchor is driven by the list — one index probe per
+/// element — so a repeated element used to emit the same node once per
+/// occurrence. A `MATCH` binds each node once.
+///
+/// Mutation check: drop `dedup_candidates` from the id arm and this goes red
+/// with `[1, 1, 2]`.
+#[test]
+fn id_in_list_with_duplicate_entries_binds_each_node_once() {
+    let graph = seeded_docs();
+    let one =
+        lookup(&graph, "Doc", &eq_props("id", Value::Int64(1))).expect("present key answers")[0];
+    let two =
+        lookup(&graph, "Doc", &eq_props("id", Value::Int64(2))).expect("present key answers")[0];
+
+    assert_eq!(
+        lookup(
+            &graph,
+            "Doc",
+            &in_props(
+                "id",
+                vec![Value::Int64(1), Value::Int64(1), Value::Int64(2)]
+            )
+        ),
+        Some(vec![one, two]),
+        "a duplicated list entry must not bind its node twice"
+    );
+}
+
+/// Dedup keeps the **first** occurrence, so the anchor still answers in list
+/// order — the order it has always returned, and the one a caller reading
+/// rows without an `ORDER BY` sees.
+#[test]
+fn id_in_list_dedup_preserves_first_occurrence_order() {
+    let graph = seeded_docs();
+    let idx = |v: i64| {
+        lookup(&graph, "Doc", &eq_props("id", Value::Int64(v))).expect("present key answers")[0]
+    };
+    assert_eq!(
+        lookup(
+            &graph,
+            "Doc",
+            &in_props(
+                "id",
+                vec![
+                    Value::Int64(3),
+                    Value::Int64(1),
+                    Value::Int64(3),
+                    Value::Int64(2),
+                ]
+            )
+        ),
+        Some(vec![idx(3), idx(1), idx(2)]),
+        "first occurrence wins, so the surviving order is the list's"
+    );
+}
+
+/// Equal *values* are not the only way two elements land on one node: the id
+/// index coerces across the numeric family (`values_equal`), so `1` and `1.0`
+/// are two distinct list elements resolving to one node. Deduping the list
+/// instead of the candidates would miss this.
+#[test]
+fn id_in_list_coercion_equal_spellings_bind_once() {
+    let graph = seeded_docs();
+    let one =
+        lookup(&graph, "Doc", &eq_props("id", Value::Int64(1))).expect("present key answers")[0];
+    assert_eq!(
+        lookup(
+            &graph,
+            "Doc",
+            &in_props("id", vec![Value::Int64(1), Value::Float64(1.0)])
+        ),
+        Some(vec![one])
+    );
+}
+
+/// Past [`MembershipSet`]'s linear/indexed crossover the list is probed
+/// through its hash index; the anchor still walks it element-wise, so the
+/// duplicate must be dropped on the same terms.
+#[test]
+fn id_in_long_list_with_duplicates_binds_each_node_once() {
+    let mut graph = DirGraph::new();
+    run(
+        &mut graph,
+        "UNWIND range(1, 200) AS i CREATE (:Doc {id: i, name: 'n'})",
+    );
+    graph.build_id_index("Doc");
+
+    // 100 distinct ids, each named twice — 200 elements, well past the
+    // 8-element crossover and past the 64-element list size that broke the
+    // bare point lookup in 0.11.2.
+    let values: Vec<Value> = (1..=100)
+        .chain(1..=100)
+        .map(|i| Value::Int64(i as i64))
+        .collect();
+    let hits = lookup(&graph, "Doc", &in_props("id", values)).expect("the anchor answers");
+    assert_eq!(hits.len(), 100);
+    let distinct: HashSet<NodeIndex> = hits.iter().copied().collect();
+    assert_eq!(distinct.len(), 100, "no node may appear twice");
+}
+
+/// The same defect lived in the sibling arm: `IN` on a **non-id** property
+/// that carries a per-type index probes the index once per element and
+/// concatenated the answers.
+///
+/// The control is the same query without the index — that path filters each
+/// node once and always answered 2.
+#[test]
+fn indexed_property_in_list_with_duplicates_binds_each_node_once() {
+    let mut graph = seeded_docs();
+    let unindexed = lookup(
+        &graph,
+        "Doc",
+        &in_props(
+            "name",
+            vec![
+                Value::String("a".to_string()),
+                Value::String("a".to_string()),
+                Value::String("b".to_string()),
+            ],
+        ),
+    );
+    assert!(
+        unindexed.is_none(),
+        "without an index the property IN has no anchor — the caller scans"
+    );
+
+    graph.create_index("Doc", "name");
+    let hits = lookup(
+        &graph,
+        "Doc",
+        &in_props(
+            "name",
+            vec![
+                Value::String("a".to_string()),
+                Value::String("a".to_string()),
+                Value::String("b".to_string()),
+            ],
+        ),
+    )
+    .expect("the property index answers");
+    assert_eq!(hits.len(), 2, "a duplicated list entry binds its node once");
+    let distinct: HashSet<NodeIndex> = hits.iter().copied().collect();
+    assert_eq!(distinct.len(), 2);
+}
+
+/// End-to-end through the executor: the row count a user sees.
+#[test]
+fn duplicate_id_in_list_returns_one_row_per_node() {
+    let graph = seeded_docs();
+    assert_eq!(
+        count_rows(&graph, "MATCH (n:Doc) WHERE n.id IN [1, 1, 2] RETURN n.id"),
+        2
+    );
+    assert_eq!(
+        count_rows(&graph, "MATCH (n:Doc {id: 1}) RETURN n.id"),
+        1,
+        "the equality anchor is the control — it never duplicated"
+    );
+}

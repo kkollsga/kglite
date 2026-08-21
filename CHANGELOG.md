@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`WHERE n.id IN [...]` bound the same node once per duplicate list entry.**
+  The index-anchored fast path is driven by the list — one index probe per
+  element — so `count(n)` over `[1, 1, 2]` answered 3 where the scan path,
+  every other anchor, and Neo4j answer 2, and the row form returned the node
+  twice. The same defect sat in the sibling arm for `IN` on a non-id property
+  carrying a per-type index. Both now bind each node once, keeping the first
+  occurrence so the anchor's list ordering is unchanged. Candidates are
+  deduplicated rather than the list, because coercion-equal spellings
+  (`[1, 1.0]`) are two elements resolving to one node. `UNWIND [1, 1, 2] AS x
+  MATCH (n {id: x})` still yields three rows — there the duplicate is a
+  driving row, not a duplicated binding.
+
 - **`graphgen()` died with a bare `ModuleNotFoundError` when pandas was
   missing, and its docstring said "no extra deps".** The default
   `out=None` path loads the generated CSVs through DataFrames, so it needs

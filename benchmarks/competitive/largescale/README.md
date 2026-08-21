@@ -102,14 +102,16 @@ Every phase also reports its result *value* per engine, and the run prints
 `[ok]` or `[DIFF]` against the first engine — a benchmark whose engines answer
 different questions is measuring nothing.
 
-One known `[DIFF]`: the generator's `lookup_ids` list repeats ids, and
-`MATCH (n:Person) WHERE n.id IN $ids RETURN count(n)` counts matched *nodes* in
-kùzu but one row *per matching list entry* in kglite (500 vs 446 at `small`,
-measured with kglite 0.16.5 / kùzu 0.11.3). kglite's is the wrong answer — a
-MATCH binds each node once, so a repeated value in a `WHERE ... IN` list must
-not duplicate the row — and it is a defect in the id fast path, not a
-definition. Re-run after any matcher change: that line should read `[ok]`.
-The other six phases agree exactly.
+All seven phases agree exactly (verified at `small`, kglite 0.16.5 / kùzu
+0.11.3 — `point_lookup` 446 = 446 in mapped and disk).
+
+`point_lookup` is the phase to watch. The generator's `lookup_ids` list
+repeats ids, and `MATCH (n:Person) WHERE n.id IN $ids RETURN count(n)` counted
+one row *per matching list entry* in kglite against kùzu's matched *nodes*
+(500 vs 446) until the id fast path was taught to bind each node once. That
+`[DIFF]` was the only symptom anything reported — the defect was invisible to
+the differential corpus until a query was written for it — so re-run this
+harness after any matcher change and read the line.
 
 ## What this shows
 

@@ -193,6 +193,20 @@ fn str_ends_with(s: &str, suffix: &str) -> bool {
     }
 }
 
+/// Drop repeat `NodeIndex` entries from an index-built candidate list,
+/// keeping each node's **first** occurrence.
+///
+/// One pass, so the no-duplicate case (every list-driven anchor's normal
+/// shape) pays one hash insert per candidate and no reallocation.
+fn dedup_candidates(candidates: &mut Vec<NodeIndex>) {
+    if candidates.len() < 2 {
+        return;
+    }
+    let mut seen: rustc_hash::FxHashSet<NodeIndex> =
+        rustc_hash::FxHashSet::with_capacity_and_hasher(candidates.len(), Default::default());
+    candidates.retain(|&idx| seen.insert(idx));
+}
+
 /// `str::starts_with`, first byte first — see [`str_ends_with`].
 #[inline]
 fn str_starts_with(s: &str, prefix: &str) -> bool {
@@ -1029,6 +1043,76 @@ impl<'a> PatternExecutor<'a> {
         None
     }
 
+    /// Index-served `IN`-list anchors: `{id: IN [...]}` and `{p: IN [...]}`
+    /// where `p` carries a per-type property index.
+    ///
+    /// Returns `Some(candidates)` when an index answered (the same
+    /// proven-empty contract as [`Self::try_index_lookup`], whose IN arms
+    /// these are), `None` when no index covers any `IN` in `props` and the
+    /// caller should keep trying its other anchors.
+    ///
+    /// **The candidate set is deduplicated, keeping first occurrence.** These
+    /// anchors are driven by the *list*, one index probe per element, so a
+    /// list that names the same node twice — literal duplicates
+    /// (`WHERE n.id IN [1, 1, 2]`), coercion-equal spellings (`[1, 1.0]`), or
+    /// two values of an indexed property held by one node — used to emit that
+    /// node once per element. A `MATCH` binds each node once: `count(n)` over
+    /// `[1, 1, 2]` answered 3 where the scan path, every other anchor, and
+    /// Neo4j answer 2. Dedup here rather than in the list because equal
+    /// *values* are not the only way two elements land on one node, and
+    /// because this is upstream of every `max_matches` cap and of both
+    /// `CapPass` passes — a duplicate must not consume a row of the cap.
+    ///
+    /// First-occurrence order preserves the list order these anchors have
+    /// always returned (`IN [3, 1, 2]` → nodes 3, 1, 2).
+    fn try_in_list_lookup(
+        &self,
+        node_type: &str,
+        props: &HashMap<String, PropertyMatcher>,
+    ) -> Option<Vec<NodeIndex>> {
+        // Fast path: IN on id field — O(k) lookups via id index
+        if let Some(PropertyMatcher::In(values)) = props.get("id") {
+            let mut result = Vec::with_capacity(values.len());
+            for val in values {
+                if let Some(idx) = self.graph.lookup_by_id_readonly(node_type, val) {
+                    result.push(idx);
+                }
+            }
+            dedup_candidates(&mut result);
+            // Apply remaining property filters if any (e.g. {id: IN [...], status: "active"})
+            if props.len() > 1 {
+                result.retain(|&idx| self.node_matches_properties(idx, props));
+            }
+            return Some(result);
+        }
+
+        // Fast path: IN on any indexed property — O(k) lookups via property index
+        for (prop_name, matcher) in props {
+            if let PropertyMatcher::In(values) = matcher {
+                if prop_name == "id" {
+                    continue; // handled above
+                }
+                let key = (node_type.to_string(), prop_name.clone());
+                if !self.graph.property_indices.contains_key(&key) {
+                    continue;
+                }
+                let mut result = Vec::with_capacity(values.len());
+                for val in values {
+                    if let Some(indices) = self.graph.lookup_by_index(node_type, prop_name, val) {
+                        result.extend(indices);
+                    }
+                }
+                dedup_candidates(&mut result);
+                if props.len() > 1 {
+                    result.retain(|&idx| self.node_matches_properties(idx, props));
+                }
+                return Some(result);
+            }
+        }
+
+        None
+    }
+
     /// Try to use property indexes for faster node lookup.
     /// Returns None if no indexes cover the requested properties.
     ///
@@ -1068,42 +1152,8 @@ impl<'a> PatternExecutor<'a> {
             return Some(Vec::new());
         }
 
-        // Fast path: IN on id field — O(k) lookups via id index
-        if let Some(PropertyMatcher::In(values)) = props.get("id") {
-            let mut result = Vec::with_capacity(values.len());
-            for val in values {
-                if let Some(idx) = self.graph.lookup_by_id_readonly(node_type, val) {
-                    result.push(idx);
-                }
-            }
-            // Apply remaining property filters if any (e.g. {id: IN [...], status: "active"})
-            if props.len() > 1 {
-                result.retain(|&idx| self.node_matches_properties(idx, props));
-            }
+        if let Some(result) = self.try_in_list_lookup(node_type, props) {
             return Some(result);
-        }
-
-        // Fast path: IN on any indexed property — O(k) lookups via property index
-        for (prop_name, matcher) in props {
-            if let PropertyMatcher::In(values) = matcher {
-                if prop_name == "id" {
-                    continue; // handled above
-                }
-                let key = (node_type.to_string(), prop_name.clone());
-                if !self.graph.property_indices.contains_key(&key) {
-                    continue;
-                }
-                let mut result = Vec::with_capacity(values.len());
-                for val in values {
-                    if let Some(indices) = self.graph.lookup_by_index(node_type, prop_name, val) {
-                        result.extend(indices);
-                    }
-                }
-                if props.len() > 1 {
-                    result.retain(|&idx| self.node_matches_properties(idx, props));
-                }
-                return Some(result);
-            }
         }
 
         // Extract equality values from PropertyMatcher (resolve params)

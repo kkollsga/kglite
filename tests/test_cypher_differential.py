@@ -1535,6 +1535,40 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (p:Person) WHERE p.id = 7 RETURN count(p) AS n",
         None,
     ),
+    # A repeated element in an id-anchored `IN` list must not repeat its node.
+    # The anchor is driven by the list — one index probe per element — so
+    # `[3, 3, 7]` bound Person 3 twice and `count(p)` answered 3 where the
+    # naive scan (which filters each node once) answers 2. Both the count and
+    # the row form are pinned: `_normalize` sorts but keeps multiplicity, so
+    # the row entry sees the duplicate directly.
+    (
+        "id_in_duplicate_entries_count",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.id IN [3, 3, 7, 7, 7] RETURN count(p) AS n",
+        None,
+    ),
+    (
+        "id_in_duplicate_entries_rows",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.id IN [3, 3, 7] RETURN p.name AS n",
+        None,
+    ),
+    # Coercion-equal spellings are two distinct list elements resolving to one
+    # node, so deduping the *list* would not have covered this one.
+    (
+        "id_in_coercion_equal_entries",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.id IN $ids RETURN p.name AS n",
+        {"ids": [3, 3.0, 7]},
+    ),
+    # The duplicate must survive an expansion too: the anchored start set
+    # feeds the expansion, and a doubled seed doubles every row it produces.
+    (
+        "id_in_duplicate_entries_expanded",
+        "social_graph",
+        "MATCH (p:Person)-[:KNOWS]->(f:Person) WHERE p.id IN [3, 3, 7] RETURN f.name AS n",
+        None,
+    ),
     # ── IN membership above the indexing threshold ──
     # Lists longer than the linear/indexed cut-off take the coercion-
     # normalized MembershipSet instead of a per-row `values_equal` scan, and
