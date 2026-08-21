@@ -241,6 +241,17 @@ impl EdgePropertyStore {
         base_upper.max(overlay_upper)
     }
 
+    /// Number of edges whose properties are held in the heap mutation
+    /// overlay rather than the mmap-backed columnar base. Tombstones
+    /// (`None` entries) count: they occupy a heap slot too.
+    ///
+    /// Observability only — surfaced as `graph_info()['edge_property_overlay_rows']`
+    /// so a caller can see how much of a disk graph's edge-property data is
+    /// still resident rather than paged.
+    pub(crate) fn overlay_len(&self) -> usize {
+        self.overlay.len()
+    }
+
     /// Fork a transaction overlay while sharing the immutable columnar base.
     /// Only the mutation-sized overlay is copied.
     pub(crate) fn fork_overlay(&self) -> Self {

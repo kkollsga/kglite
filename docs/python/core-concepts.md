@@ -73,6 +73,25 @@ When in doubt, stay in-memory; switch only once you hit a real RAM
 ceiling. Both larger-than-RAM modes keep the identical Python and
 Cypher API, so moving up is a one-line constructor change.
 
+**`mapped` moves the property columns, and nothing else.** It is not a
+different graph: nodes and relationships stay in exactly the heap structure
+the memory backend uses, and only the property columns are spilled to
+mmap-backed files (it is `set_memory_limit(0)` as a mode). That is why typed
+lookups keep their speed, why statement rollback stays cheap (below), and why
+the saved `.kgl` is the same file shape — a mapped `.kgl` is read back by
+deserializing into a memory backend and then swapping it onto the mapped one,
+so reopening a mapped graph costs what reopening a memory graph costs. Reach
+for it when the *properties* are what stopped fitting; it does not shrink the
+topology and it will not save a graph whose nodes and edges are the problem.
+
+**`disk` is the one that changes the reload story.** A disk directory is
+already in its query-ready layout, so opening it maps files instead of
+deserializing a payload: measured **6.5× faster to reopen at ~400k edges**,
+and an external evaluation measured ~28× at 10.5M — the advantage grows with
+the graph, so treat the small-graph number as the floor rather than the rate.
+A `.kgl` (memory or mapped) has to decode its whole postcard payload before
+the first query, and that cost scales with the file.
+
 **The two larger-than-RAM modes differ in durability, not just in layout.**
 `mapped` keeps the same per-commit crash safety as in-memory, so growing out
 of RAM costs you nothing there. `disk` commits by publishing an immutable
@@ -111,6 +130,54 @@ This matters most for benchmarks: a create-then-reopen script that passes
 `storage="mapped"` on both runs now measures the mapped backend both times.
 Before the mode was recorded it silently measured the memory backend on every
 run after the first.
+
+### `enable_disk_mode()` converts; it does not shrink the process
+
+`enable_disk_mode()` is the memory→disk **materializer**. It builds the CSR
+edge arrays in files and switches the loaded graph onto the disk backend, so
+everything after it queries disk storage.
+
+What it does *not* do is reduce this process's memory. The conversion adds the
+on-disk edge structures on top of a graph that is already resident, and the
+in-memory structures it replaces are freed to an allocator that keeps the
+pages rather than returning them — so resident memory after the call is
+**higher**, not lower, and stays higher for the lifetime of the process. Call
+`kglite.trim_memory()` afterwards to hand the freed pages back to the OS.
+
+The small footprint is a property of the **saved directory reopened
+elsewhere**. Convert, save, and open that directory in a fresh process and it
+starts at roughly a tenth of the in-memory graph's resident size (measured
+56 MB against 492 MB on the same graph), because its edges are paged in on
+demand instead of built:
+
+```python
+graph.enable_disk_mode()
+graph.save("graph.kgl")
+kglite.trim_memory()          # give the conversion's freed pages back
+
+# ...in a fresh process, at ~10% of the in-memory footprint:
+graph = kglite.open("graph.kgl")
+```
+
+If you never want to pay the in-memory peak at all, do not convert — build
+into disk storage from the start with
+`KnowledgeGraph(storage="disk", path="graph.kgl")`.
+
+`graph_info()` reports the outcome: `storage_mode` becomes `"disk"` and
+`edges_mapped` becomes `True`. `columnar_is_mapped` stays `False`, and that is
+correct — it reports *property-column* spilling (`set_memory_limit`, or
+`mapped` mode), not disk-mode health, so `False` is disk mode's normal shape
+rather than a failed conversion. `edge_property_overlay_rows` reports how many
+edges still hold their properties on the heap rather than in the mapped base;
+a `save()` drains it to zero.
+
+One thing to know about where the files land: `enable_disk_mode()` currently
+builds its CSR into a temporary directory under the system temp dir, which it
+cleans up when the graph drops. On a machine whose `/tmp` is small or on a
+different (slower) device than your data, convert a large graph with that in
+mind — point `TMPDIR` somewhere with room, or build with
+`KnowledgeGraph(storage="disk", path=...)`, which writes to the path you name
+from the first byte.
 
 **Statement rollback is cheap in memory and mapped mode, expensive on disk.**
 One mutating Cypher statement is atomic: if it fails partway through, the graph

@@ -2771,9 +2771,20 @@ class KnowledgeGraph:
                   :attr:`schema_version`); ``0`` when unversioned
                 - ``columnar_heap_bytes``: Heap-resident bytes in the property
                   columns
-                - ``columnar_is_mapped``: Whether any property column is
+                - ``columnar_is_mapped``: Whether any *property column* is
                   file-backed rather than heap-resident (after a spill, or on a
-                  graph opened from a file)
+                  graph opened from a file). This reports column spilling —
+                  :meth:`set_memory_limit`, or the ``"mapped"`` storage mode
+                  which pins that limit at 0 — **not** disk-mode health. A
+                  disk graph reports ``False`` here unless its columns also
+                  spilled; that is normal, see ``edges_mapped``
+                - ``edges_mapped``: Whether the edge CSR arrays are
+                  memory-mapped from files. ``True`` on a disk graph whose CSR
+                  is materialized; always ``False`` on the memory and mapped
+                  backends, which keep edges in the heap graph and have no CSR
+                - ``edge_property_overlay_rows``: Edges whose properties are
+                  held in the disk backend's heap mutation overlay rather than
+                  the mmap-backed base. ``0`` on every non-disk backend
                 - ``memory_limit``: Configured memory limit (None if unset)
                 - ``columnar_total_rows``: Total property-column rows, including
                   rows orphaned by deleted nodes
@@ -3684,21 +3695,49 @@ class KnowledgeGraph:
     # ====================================================================
 
     def enable_disk_mode(self) -> None:
-        """Convert the graph to disk-backed storage mode.
+        """Materialize the in-memory graph as a disk-backed one.
 
-        Consolidates the property columns first, then builds
-        CSR (Compressed Sparse Row) edge arrays on disk. Nodes stay
-        in memory (~40 bytes each), edges are mmap'd from disk.
+        Builds CSR (Compressed Sparse Row) edge arrays in files and switches
+        the graph onto the disk backend. Nodes stay in memory (~40 bytes
+        each); edges are read through the mapping.
 
-        This reduces memory usage to ~10% of the in-memory graph for
-        edge-heavy graphs. Best called after all data is loaded.
+        .. warning::
 
-        All query methods (Cypher, fluent API, algorithms) work
-        identically in disk mode.
+           **This does not shrink the process.** It is a conversion, and the
+           conversion itself adds the on-disk edge structures on top of what
+           is already resident — expect resident memory to go *up*, not down,
+           for the lifetime of this process. The in-memory structures it
+           replaces are freed, but the allocator keeps the pages; call
+           :func:`kglite.trim_memory` afterwards to return them to the OS.
+
+        **Where the small footprint actually comes from** is the saved
+        directory, reopened in a fresh process. Save after converting, then
+        open that directory somewhere else: the reopened graph starts at
+        roughly a tenth of the in-memory graph's resident size (measured
+        56 MB against 492 MB on the same graph), because its edges are paged
+        in on demand instead of built.
+
+        To run at that footprint from the start — never paying the in-memory
+        peak at all — build into disk storage directly with
+        ``KnowledgeGraph(storage="disk", path="graph.kgl")``.
+
+        :meth:`graph_info` reports the result: ``storage_mode`` becomes
+        ``"disk"`` and ``edges_mapped`` becomes ``True``.
+        ``columnar_is_mapped`` is about property-column spilling and stays
+        ``False`` here — that is disk mode's normal shape, not a failed
+        conversion.
+
+        All query methods (Cypher, fluent API, algorithms) work identically
+        afterwards.
 
         Example::
 
             graph.enable_disk_mode()
+            graph.save("graph.kgl")
+            kglite.trim_memory()      # hand the freed pages back to the OS
+
+            # ...in a fresh process, at ~10% of the in-memory footprint:
+            reopened = kglite.open("graph.kgl")
         """
         ...
 
@@ -3725,11 +3764,15 @@ class KnowledgeGraph:
 
         While a limit is set, the graph spills its largest column stores to
         temporary files on disk whenever their total heap usage would exceed
-        it — checked after each write and at every consolidation point
-        (:meth:`save`, :meth:`vacuum`, :meth:`enable_disk_mode`).
-        :meth:`unspill` brings them back to the heap; the limit itself
-        survives that and is re-applied by the next write, so pass ``None``
-        first to keep them resident.
+        it — checked after each mutating statement and by the consolidation
+        pass :meth:`save` and :meth:`vacuum` run. :meth:`unspill` brings them
+        back to the heap; the limit itself survives that and is re-applied by
+        the next write, so pass ``None`` first to keep them resident.
+
+        The limit governs **property columns only** — it does not bound nodes,
+        edges or indexes, and :meth:`enable_disk_mode` is not one of its
+        checkpoints. ``graph_info()['columnar_is_mapped']`` is how you see
+        whether a spill has happened.
 
         Args:
             limit_bytes: Maximum heap bytes for column data, or ``None``

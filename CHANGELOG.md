@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`enable_disk_mode()`'s documented memory claim described an outcome it
+  cannot produce.** The docstring promised the call "reduces memory usage to
+  ~10% of the in-memory graph"; the mechanism that once did that (an
+  inline→columnar conversion) has been unconditional since 0.16.0, and the
+  conversion that remains *adds* the on-disk edge structures on top of a graph
+  that is already resident, so this process's memory goes up rather than down
+  and stays up — the allocator keeps the freed pages. The ~10% is real, but it
+  belongs to the **saved directory reopened in a fresh process** (measured
+  56 MB against 492 MB for the same graph), because the reopened graph pages
+  its edges in on demand instead of building them. The docstring, the stub and
+  `docs/python/core-concepts.md` now say which of those a caller gets, name
+  `kglite.trim_memory()` for returning the conversion's freed pages, and point
+  at `KnowledgeGraph(storage="disk", path=...)` for building at the small
+  footprint from the start. The behaviour of the call is unchanged.
+
+- **`set_memory_limit()` listed `enable_disk_mode()` as one of its spill
+  checkpoints.** It is not one: the consolidation pass that spills is skipped
+  during the disk conversion, so a caller who set a limit and converted got no
+  spill at that point. The documentation now describes the checkpoints that
+  exist (each mutating statement, plus the pass `save()` and `vacuum()` run)
+  and states that the limit governs property columns only.
+
 - **A comma-separated MATCH with `RETURN DISTINCT <one variable>` could drop
   rows.** The DISTINCT pushdown deduplicated the first pattern's matches by the
   returned variable before the remaining patterns joined, which keeps one
@@ -664,6 +686,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so the shapes it speeds up keep their speed.
 
 ### Added
+
+- **`graph_info()` reports the edges' storage shape: `edges_mapped` and
+  `edge_property_overlay_rows`.** Disk mode had no honest reading. The nearest
+  field, `columnar_is_mapped`, answers a different question — did the *memory
+  limit* spill the property columns — and answers `False` on a healthy disk
+  graph, which an external evaluation read as a failed conversion. `edges_mapped`
+  is `True` when the edge CSR arrays are memory-mapped from files (the
+  structure `enable_disk_mode()` materializes; always `False` on the memory and
+  mapped backends, which have no CSR), and `edge_property_overlay_rows` counts
+  the edges whose properties are still held on the heap rather than in the
+  mapped base — the term that dominates a conversion's in-process growth, and
+  which a `save()` drains to zero. `columnar_is_mapped` keeps its meaning
+  unchanged; its documentation now says which knob it tracks.
 
 - **`kglite.trim_memory()` returns allocator-retained memory to the OS.** The
   Rust side allocates through mimalloc, which keeps a finished workload's pages

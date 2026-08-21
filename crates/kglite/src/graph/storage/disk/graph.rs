@@ -5,8 +5,12 @@
 // Edges are stored in mmap'd CSR arrays (8 bytes per edge per direction).
 // Edge properties are stored sparsely (only for edges that have them).
 //
-// Memory budget: ~10% of equivalent petgraph InMemory graph.
-// For 100M nodes + 1B edges: ~5-6 GB RAM + OS page cache.
+// Memory budget: ~10% of the equivalent petgraph in-memory graph, for a
+// graph *opened* from a disk directory — the edges are paged in on demand.
+// For 100M nodes + 1B edges: ~5-6 GB RAM + OS page cache. Converting a
+// resident in-memory graph with `enable_disk_mode()` does not reach that
+// budget in the converting process: it builds these structures on top of
+// what is already there.
 
 use crate::datatypes::values::Value;
 use crate::graph::core::iterators::{
@@ -372,6 +376,23 @@ impl DiskGraph {
         ),
     > {
         self.column_stores.iter()
+    }
+
+    /// `true` when the out-edge CSR array is memory-mapped from a file
+    /// rather than heap-resident.
+    ///
+    /// This is the structure `enable_disk_mode()` materializes, and the one
+    /// that makes a reopened disk directory cheap: the pages are the OS's to
+    /// evict. A freshly constructed disk graph whose CSR has not been built
+    /// yet (edges still in `pending_edges`/overflow) reports `false`.
+    pub fn csr_is_mapped(&self) -> bool {
+        self.out_edges.is_mapped()
+    }
+
+    /// Rows in the edge-property heap overlay — see
+    /// [`EdgePropertyStore::overlay_len`].
+    pub fn edge_property_overlay_len(&self) -> usize {
+        self.edge_properties.overlay_len()
     }
 
     /// O(1) node type lookup from mmap'd node_slots — no materialization.

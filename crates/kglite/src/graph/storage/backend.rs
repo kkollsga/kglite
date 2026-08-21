@@ -530,6 +530,22 @@ impl GraphBackend {
         }
     }
 
+    /// Edge-storage observability for `graph_info()`: `(edges_mapped,
+    /// edge_property_overlay_rows)`.
+    ///
+    /// Only the disk backend has a CSR or an edge-property overlay; every
+    /// other backend keeps its edges in the heap `StableDiGraph` and reports
+    /// `(false, 0)`.
+    pub(crate) fn edge_storage_info(&self) -> (bool, usize) {
+        match self {
+            GraphBackend::Disk(g) => (g.csr_is_mapped(), g.edge_property_overlay_len()),
+            GraphBackend::Recording(rg) => rg.inner().edge_storage_info(),
+            GraphBackend::Memory(_) | GraphBackend::Mapped(_) | GraphBackend::Forked(_) => {
+                (false, 0)
+            }
+        }
+    }
+
     /// Hold the disk materialization arenas for one read-query lifetime.
     /// Heap/mapped backends do not materialize through shared arenas.
     pub(crate) fn begin_query(&self) -> Option<DiskQueryGuard> {

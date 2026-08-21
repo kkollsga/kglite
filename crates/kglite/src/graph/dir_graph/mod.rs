@@ -2362,6 +2362,7 @@ impl DirGraph {
     /// - A ratio above 0.3 is a good threshold for calling vacuum()
     pub fn graph_info(&self) -> GraphInfo {
         let (columnar_total, columnar_live) = self.columnar_row_census();
+        let (edges_mapped, edge_property_overlay_rows) = self.graph.edge_storage_info();
         let node_count = self.graph.node_count();
         let node_bound = self.graph.node_bound();
         let edge_count = self.graph.edge_count();
@@ -2391,6 +2392,8 @@ impl DirGraph {
                 .map(|(_, s)| s.heap_bytes())
                 .sum(),
             columnar_is_mapped: self.graph.column_stores_iter().any(|(_, s)| s.is_mapped()),
+            edges_mapped,
+            edge_property_overlay_rows,
         }
     }
 }
@@ -2449,7 +2452,21 @@ pub struct GraphInfo {
     /// there is no `DirGraph.column_stores` field to read any more.
     pub columnar_heap_bytes: usize,
     /// `true` when at least one column store has been spilled to mmap.
+    ///
+    /// Reports **property-column spilling** (`set_memory_limit`, or the
+    /// `mapped` storage mode which pins that limit at 0) — not disk-mode
+    /// health. A disk graph reports `false` here unless its *columns* also
+    /// spilled; [`Self::edges_mapped`] is the disk-mode reading.
     pub columnar_is_mapped: bool,
+    /// `true` when the edge CSR arrays are memory-mapped from files rather
+    /// than heap-resident — the structure `enable_disk_mode()` materializes.
+    /// Always `false` on the memory and mapped backends, which keep edges in
+    /// the heap graph and have no CSR at all.
+    pub edges_mapped: bool,
+    /// Edges whose properties sit in the disk backend's heap mutation overlay
+    /// instead of the mmap-backed columnar base. `0` on every non-disk
+    /// backend.
+    pub edge_property_overlay_rows: usize,
 }
 
 // `make_dir_graph_mut` (the `Arc<DirGraph>` → `&mut DirGraph` + version-bump

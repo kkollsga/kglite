@@ -77,14 +77,37 @@ impl KnowledgeGraph {
         graph.reindex();
     }
 
-    /// Convert the graph to disk-backed storage mode.
+    /// Materialize the in-memory graph as a disk-backed one.
     ///
-    /// Consolidates the property columns first, then builds
-    /// CSR (Compressed Sparse Row) edge arrays on disk. Nodes stay
-    /// in memory (~40 bytes each), edges are mmap'd from disk.
+    /// Builds CSR (Compressed Sparse Row) edge arrays in files and switches
+    /// the graph onto the disk backend. Nodes stay in memory (~40 bytes each);
+    /// edges are read through the mapping.
     ///
-    /// This reduces memory usage to ~10% of the in-memory graph for
-    /// edge-heavy graphs. Best called after all data is loaded.
+    /// **This does not shrink the process.** It is a conversion, and the
+    /// conversion itself adds the on-disk edge structures on top of what is
+    /// already resident — expect resident memory to go *up*, not down, for
+    /// the lifetime of this process. The in-memory structures it replaces are
+    /// freed, but the allocator keeps the pages; call
+    /// `kglite.trim_memory()` afterwards to return them to the OS.
+    ///
+    /// **Where the small footprint actually comes from** is the saved
+    /// directory, reopened in a fresh process: `graph.save("g.kgl")` after
+    /// this call, then `kglite.open("g.kgl")` elsewhere, starts at roughly a
+    /// tenth of the in-memory graph's resident size (measured 56 MB vs
+    /// 492 MB on the same graph) because the edges are paged in on demand
+    /// instead of built.
+    ///
+    /// To run at that footprint from the start — never paying the in-memory
+    /// peak at all — build into disk storage directly:
+    /// `KnowledgeGraph(storage="disk", path="g.kgl")`.
+    ///
+    /// `graph_info()` reports the result: `storage_mode` becomes `'disk'` and
+    /// `edges_mapped` becomes True. (`columnar_is_mapped` is about property-
+    /// column spilling and stays False here — that is disk mode's normal
+    /// shape, not a failed conversion.)
+    ///
+    /// All query methods (Cypher, fluent API, algorithms) work identically
+    /// afterwards.
     fn enable_disk_mode(&mut self) -> PyResult<()> {
         let graph = get_graph_mut(&mut self.inner);
         graph
@@ -243,6 +266,18 @@ impl KnowledgeGraph {
     ///         - 'storage_mode': 'memory', 'mapped' or 'disk' — the backend the
     ///           graph is actually running on, which for an opened graph is the
     ///           mode its checkpoint recorded
+    ///         - 'columnar_is_mapped': whether any *property column* is
+    ///           file-backed rather than heap-resident. Reports column
+    ///           spilling (`set_memory_limit`, or the 'mapped' storage mode),
+    ///           **not** disk-mode health — a disk graph reports False here
+    ///           unless its columns also spilled
+    ///         - 'edges_mapped': whether the edge CSR arrays are memory-mapped
+    ///           from files. True on a disk graph whose CSR is materialized;
+    ///           always False on the memory and mapped backends, which have no
+    ///           CSR
+    ///         - 'edge_property_overlay_rows': edges whose properties are held
+    ///           in the disk backend's heap mutation overlay rather than the
+    ///           mmap-backed base. 0 on every non-disk backend
     ///
     /// Example:
     ///     ```python
@@ -279,6 +314,15 @@ impl KnowledgeGraph {
             // reachable from a binding.
             dict.set_item("columnar_heap_bytes", info.columnar_heap_bytes)?;
             dict.set_item("columnar_is_mapped", info.columnar_is_mapped)?;
+            // Edge-storage observability (E1). `columnar_is_mapped` answers
+            // "did the memory limit spill the property columns"; these two
+            // answer "what shape are the edges in", which is what a caller
+            // checking a disk-mode conversion actually wants.
+            dict.set_item("edges_mapped", info.edges_mapped)?;
+            dict.set_item(
+                "edge_property_overlay_rows",
+                info.edge_property_overlay_rows,
+            )?;
             dict.set_item("memory_limit", self.inner.memory_limit)?;
             dict.set_item("columnar_total_rows", info.columnar_total_rows)?;
             dict.set_item("columnar_live_rows", info.columnar_live_rows)?;
@@ -326,10 +370,15 @@ impl KnowledgeGraph {
     ///
     /// While a limit is set, the graph spills its largest column stores to
     /// temporary files on disk whenever their total heap usage would exceed
-    /// it — checked after each write and at every consolidation point
-    /// (`save()`, `vacuum()`, `enable_disk_mode()`). `unspill()` brings them
-    /// back to the heap; the limit itself survives that and is re-applied by
-    /// the next write, so pass `None` first to keep them resident.
+    /// it — checked after each mutating statement and by the consolidation
+    /// pass `save()` and `vacuum()` run. `unspill()` brings them back to the
+    /// heap; the limit itself survives that and is re-applied by the next
+    /// write, so pass `None` first to keep them resident.
+    ///
+    /// The limit governs **property columns only** — it does not bound nodes,
+    /// edges or indexes, and `enable_disk_mode()` is not one of its
+    /// checkpoints. `graph_info()['columnar_is_mapped']` is how you see
+    /// whether a spill has happened.
     ///
     /// Args:
     ///     limit_bytes: Maximum heap bytes for column data, or None to disable.
