@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Breaking (semantics fix): the optimized variable-length path returned
+  distance reachability instead of Cypher's trail reachability.** The planner
+  marked a `[:T*min..max]` segment for a set-based BFS whenever the query's
+  *first* `RETURN`/`WITH` collapsed row multiplicity. That BFS visits each node
+  once and reports what a shortest path reaches, which is a different relation
+  from the one Cypher asks for, and the two come apart on any graph with a
+  cycle. Three consequences, all silent: the source node was dropped from its
+  own answer when a closed trail returned to it (`(a {id: 1})-[:R*1..3]->(b)`
+  on a triangle answered `[2, 3]`, not `[1, 2, 3]`); a minimum hop count of 2
+  or more was answered from the shortest-distance set, returning the empty set
+  or a heavy undercount (undirected `*2..2` on the same triangle answered
+  nothing where both peers are reachable, and `*3..3` on a 3 000-node ring
+  reported 12 of 16 reachable nodes); and one clause's `DISTINCT` licensed
+  every other clause in the query, so `MATCH …*1..2… WITH DISTINCT b MATCH
+  (b)-[…*1..2]->(c) RETURN c.id` returned 2 rows where the graph has 3. The
+  optimization now engages only where it is provably equivalent — minimum hop
+  count at most 1, dedup-safety proved against that clause's own consumer, and
+  the source emitted when a closed trail reaches it. Affected queries return
+  more (or differently many) rows than they did, and some become slower,
+  because they were previously answering a different question.
+
 - **`WHERE n.id IN [...]` bound the same node once per duplicate list entry.**
   The index-anchored fast path is driven by the list — one index probe per
   element — so `count(n)` over `[1, 1, 2]` answered 3 where the scan path,

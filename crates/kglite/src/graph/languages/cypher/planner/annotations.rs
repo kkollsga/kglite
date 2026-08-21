@@ -1,18 +1,21 @@
 //! Planner annotations applied after structural rewrites.
 
-use super::{Clause, CypherQuery, Expression, PassCtx};
+use super::{is_aggregate_expression, Clause, CypherQuery, Expression, PassCtx, ReturnItem};
 use crate::graph::core::pattern_matching::PatternElement;
 use crate::graph::schema::DirGraph;
 use std::collections::HashSet;
 
 /// **Pass:** `mark_fast_var_length_paths` — When a variable-length
-/// edge `[:T*1..N]` has no path assignment and no edge variable AND
-/// the downstream RETURN/WITH is `DISTINCT` or composed of dedup-safe
-/// aggregates (`min/max/count(DISTINCT)/collect(DISTINCT)`), mark
+/// edge `[:T*min..N]` has `min <= 1`, no path assignment and no edge
+/// variable, AND *its own* clause's next RETURN/WITH is `DISTINCT` or
+/// composed of dedup-safe aggregates
+/// (`min/max/count(DISTINCT)/collect(DISTINCT)`), mark
 /// `needs_path_info=false` so the executor uses a fast BFS with
-/// global target-node dedup. The downstream-safety check is critical:
-/// row count is implicit path count, so dedup-by-target silently
-/// drops rows when the user wrote a plain per-path projection like
+/// global target-node dedup. Both gates are correctness, not
+/// heuristics: the fast BFS answers distance reachability rather than
+/// Cypher's trail reachability (equivalent only for `min <= 1`), and
+/// row count is implicit path count, so dedup-by-target silently drops
+/// rows when the consumer is a plain per-path projection like
 /// `RETURN q.name`. WHY-BAIL: anything else stays on the slow per-
 /// path BFS — correct, just not as fast.
 pub(super) fn pass_mark_fast_var_length_paths(query: &mut CypherQuery, _ctx: &PassCtx) {
@@ -41,27 +44,47 @@ pub(super) fn pass_mark_skip_target_type_check(query: &mut CypherQuery, ctx: &Pa
 
 /// Mark variable-length edges that don't need path tracking.
 ///
-/// When a MATCH clause has no path assignments (`p = ...`) and the edge
-/// has no named variable (`[r:T*1..N]`), AND the query's downstream
-/// projection is provably indifferent to row multiplicity, the executor
-/// can use a fast BFS with global target-node dedup instead of tracking
-/// every distinct path.
+/// The executor's fast expansion answers *distance* reachability with one
+/// global visited set. Cypher asks for *trail* reachability. Marking an edge
+/// swaps one for the other, so the mark is legal only where the two relations
+/// provably coincide:
 ///
-/// The "indifferent to row multiplicity" check is critical: row count
-/// is itself an implicit count of paths in Cypher's semantics, so
-/// dedup-by-target silently drops rows when the user wrote a plain
-/// per-path projection like `RETURN q.name`. The fast path is only
-/// safe when the downstream is `DISTINCT`, or every projection is an
-/// aggregate (multiplicity collapses inside the aggregate).
+/// 1. **`min_hops <= 1`.** For `min_hops >= 2` walk, trail and distance
+///    reachability all differ — on a directed triangle
+///    `(a)-[:R*2..2]-(b)` is trail-reachable to both peers and
+///    distance-reachable to neither — and no set-based computation closes
+///    the gap. (Source inclusion inside the `min_hops <= 1` window is the
+///    executor's job; see `expand_var_length_fast`.)
+/// 2. **This clause's own consumer collapses row multiplicity.** Row count is
+///    an implicit path count in Cypher, so dedup-by-target silently drops rows
+///    unless the consumer is `DISTINCT` or made of multiplicity-invariant
+///    aggregates. The proof must be redone per MATCH: a query can open with
+///    `WITH DISTINCT b` and end in a plain projection, and proving only the
+///    first consumer applied that `DISTINCT` to every later clause too
+///    (`MATCH …*1..2 … WITH DISTINCT b MATCH (b)-[…*1..2]->(c) RETURN c.id`
+///    returned 2 rows where the graph has 3).
+/// 3. The clause has no path assignment and the edge has no variable — either
+///    one needs the exact relationship sequence.
 ///
 /// Caught by `tests/test_cypher_differential.py::var_length_no_var`,
 /// which previously xfail'd because the un-gated fast path returned
-/// 2 rows where Neo4j semantics demand 3.
+/// 2 rows where Neo4j semantics demand 3, and by the cyclic fixtures added
+/// alongside this gate.
 fn mark_fast_var_length_paths(query: &mut CypherQuery) {
-    if !downstream_is_dedup_safe(query) {
-        return;
-    }
-    for clause in &mut query.clauses {
+    let clause_count = query.clauses.len();
+    let consumer_safe: Vec<bool> = (0..clause_count)
+        .map(|idx| {
+            matches!(
+                query.clauses[idx],
+                Clause::Match(_) | Clause::OptionalMatch(_)
+            ) && consumer_is_dedup_safe(&query.clauses, idx)
+        })
+        .collect();
+
+    for (idx, clause) in query.clauses.iter_mut().enumerate() {
+        if !consumer_safe[idx] {
+            continue;
+        }
         let mc = match clause {
             Clause::Match(mc) | Clause::OptionalMatch(mc) => mc,
             _ => continue,
@@ -75,13 +98,68 @@ fn mark_fast_var_length_paths(query: &mut CypherQuery) {
         for pattern in &mut mc.patterns {
             for element in &mut pattern.elements {
                 if let PatternElement::Edge(ep) = element {
-                    if ep.var_length.is_some() && ep.variable.is_none() {
+                    if ep.variable.is_none() && ep.var_length.is_some_and(|(min, _)| min <= 1) {
                         ep.needs_path_info = false;
                     }
                 }
             }
         }
     }
+}
+
+/// Whether the clause at `idx` feeds a projection that collapses row
+/// multiplicity.
+///
+/// Walks forward to the first `WITH`/`RETURN` — that clause is this MATCH's
+/// consumer — and proves dedup-safety on it. Anything on the way that reads
+/// row multiplicity itself (a write clause creating one node per row, a
+/// `CALL`, a `UNION` arm, a pre-fused aggregate) is a barrier: the rows the
+/// fast path would drop are observable before the projection ever runs.
+fn consumer_is_dedup_safe(clauses: &[Clause], idx: usize) -> bool {
+    for clause in &clauses[idx + 1..] {
+        match clause {
+            Clause::Return(r) => return projection_is_dedup_safe(r.distinct, &r.items),
+            Clause::With(w) => return projection_is_dedup_safe(w.distinct, &w.items),
+            // Row-count-blind pass-throughs: they reshape or filter rows but
+            // never turn a dropped duplicate into a different answer.
+            Clause::Match(_)
+            | Clause::OptionalMatch(_)
+            | Clause::Where(_)
+            | Clause::Unwind(_)
+            | Clause::OrderBy(_) => continue,
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// Returns true iff this projection collapses row multiplicity, so the fast
+/// var-length BFS's dedup-by-target cannot change the answer.
+///
+/// Two safe cases:
+/// - `DISTINCT` — row tuples are deduped at projection anyway, so a fast-path
+///   target-dedup is consistent. Not when an item *is* multiplicity-sensitive
+///   in its own right: `WITH DISTINCT a, count(b)` groups before it dedups, so
+///   `count(b)` is a per-group row count and moves with the dropped rows.
+/// - Every item is a multiplicity-invariant aggregate: `min`/`max`,
+///   `count(DISTINCT _)`, `collect(DISTINCT _)`. Plain `count(*)` over
+///   var-length matches counts paths, not targets, so it is rejected.
+///
+/// Conservative anywhere else: we'd rather skip the optimization than
+/// silently drop rows.
+fn projection_is_dedup_safe(distinct: bool, items: &[ReturnItem]) -> bool {
+    if items.is_empty() {
+        return false;
+    }
+    if distinct {
+        return items.iter().all(|item| {
+            !is_aggregate_expression(&item.expression)
+                || is_distinct_safe_aggregate(&item.expression)
+        });
+    }
+    items
+        .iter()
+        .all(|item| is_distinct_safe_aggregate(&item.expression))
 }
 
 /// Remove fixed-trail bookkeeping when relationship reuse is impossible by type.
@@ -138,54 +216,6 @@ fn fixed_edge_types_are_pairwise_disjoint(
     }
 
     edge_count > 0
-}
-
-/// Returns true iff the query's first downstream projection collapses
-/// row multiplicity. The fast var-length BFS dedups by target node;
-/// that's only correct when the surrounding query doesn't depend on
-/// per-path row counts.
-///
-/// Two safe cases:
-/// - `RETURN/WITH DISTINCT` — row tuples are deduped at projection
-///   anyway, so a fast-path target-dedup is consistent.
-/// - `RETURN/WITH` whose every item is an aggregate — multiplicity is
-///   collapsed by the aggregate. (`count(*)` over the matches: paths
-///   would count differently than targets, so we don't allow `count(*)`
-///   here unless it's `count(DISTINCT target)` — but the simpler check
-///   "every item is an aggregate" handles `count(DISTINCT target)`,
-///   `sum(target.x)`, etc. uniformly. Plain `count(*)` over var-length
-///   matches is a real semantic question; we conservatively reject
-///   non-DISTINCT `count(*)` by requiring DISTINCT-aware aggregates.)
-///
-/// Conservative anywhere else: we'd rather skip the optimization than
-/// silently drop rows.
-fn downstream_is_dedup_safe(query: &CypherQuery) -> bool {
-    for clause in &query.clauses {
-        match clause {
-            Clause::Return(r) => {
-                if r.distinct {
-                    return true;
-                }
-                let all_agg_distinct = !r.items.is_empty()
-                    && r.items
-                        .iter()
-                        .all(|item| is_distinct_safe_aggregate(&item.expression));
-                return all_agg_distinct;
-            }
-            Clause::With(w) => {
-                if w.distinct {
-                    return true;
-                }
-                let all_agg_distinct = !w.items.is_empty()
-                    && w.items
-                        .iter()
-                        .all(|item| is_distinct_safe_aggregate(&item.expression));
-                return all_agg_distinct;
-            }
-            _ => continue,
-        }
-    }
-    false
 }
 
 /// True when an expression is an aggregate that's invariant to row
@@ -299,8 +329,122 @@ fn mark_skip_target_type_check(query: &mut CypherQuery, graph: &DirGraph) {
 
 #[cfg(test)]
 mod tests {
-    use super::fixed_edge_types_are_pairwise_disjoint;
-    use crate::graph::core::pattern_matching::parse_pattern;
+    use super::{fixed_edge_types_are_pairwise_disjoint, mark_fast_var_length_paths};
+    use crate::graph::core::pattern_matching::{parse_pattern, PatternElement};
+    use crate::graph::languages::cypher::parser::parse_cypher;
+
+    /// `needs_path_info` of every variable-length edge, in clause order.
+    fn var_length_marks(query: &str) -> Vec<bool> {
+        let mut parsed = parse_cypher(query).unwrap_or_else(|e| panic!("{query}: {e}"));
+        mark_fast_var_length_paths(&mut parsed);
+        let mut marks = Vec::new();
+        for clause in &parsed.clauses {
+            let mc = match clause {
+                super::Clause::Match(mc) | super::Clause::OptionalMatch(mc) => mc,
+                _ => continue,
+            };
+            for pattern in &mc.patterns {
+                for element in &pattern.elements {
+                    if let PatternElement::Edge(ep) = element {
+                        if ep.var_length.is_some() {
+                            marks.push(ep.needs_path_info);
+                        }
+                    }
+                }
+            }
+        }
+        marks
+    }
+
+    #[test]
+    fn dedup_safe_consumer_marks_a_min_one_segment() {
+        // `false` == marked fast.
+        assert_eq!(
+            var_length_marks("MATCH (a:N)-[:R*1..3]->(b:N) RETURN DISTINCT b.id"),
+            vec![false]
+        );
+        assert_eq!(
+            var_length_marks("MATCH (a:N)-[:R*0..3]->(b:N) RETURN count(DISTINCT b) AS n"),
+            vec![false]
+        );
+    }
+
+    #[test]
+    fn min_hops_of_two_or_more_is_never_marked() {
+        // The fast BFS answers distance reachability; for `min >= 2` that is
+        // a different relation from Cypher's trail reachability, and no
+        // downstream DISTINCT makes it the same one.
+        for query in [
+            "MATCH (a:N)-[:R*2..2]->(b:N) RETURN DISTINCT b.id",
+            "MATCH (a:N)-[:R*2..3]-(b:N) RETURN count(DISTINCT b) AS n",
+            "MATCH (a:N)-[:R*3..3]->(b:N) RETURN DISTINCT b.id",
+            "MATCH (a:N)-[:R*5]->(b:N) RETURN DISTINCT b.id",
+        ] {
+            assert_eq!(var_length_marks(query), vec![true], "{query}");
+        }
+    }
+
+    #[test]
+    fn each_clause_is_proved_against_its_own_consumer() {
+        // The first consumer's DISTINCT does not license the second clause,
+        // whose own consumer is a plain per-path projection. Marking both
+        // returned 2 rows where the graph has 3.
+        assert_eq!(
+            var_length_marks(
+                "MATCH (a:N)-[:R*1..2]->(b:N) WITH DISTINCT b                  MATCH (b)-[:R*1..2]->(c:N) RETURN c.id"
+            ),
+            vec![false, true]
+        );
+        // ... and the converse: a later clause with a dedup-safe consumer is
+        // marked even though the query's first projection is not one.
+        assert_eq!(
+            var_length_marks(
+                "MATCH (a:N)-[:R*1..2]->(b:N) WITH b                  MATCH (b)-[:R*1..2]->(c:N) RETURN DISTINCT c.id"
+            ),
+            vec![true, false]
+        );
+    }
+
+    #[test]
+    fn distinct_over_a_row_counting_aggregate_is_not_dedup_safe() {
+        // `WITH/RETURN DISTINCT a, count(b)` groups before it dedups, so
+        // `count(b)` is a per-group row count: dropping duplicate targets
+        // changes it (3 -> 2 on a triangle).
+        assert_eq!(
+            var_length_marks("MATCH (a:N)-[:R*1..3]->(b:N) RETURN DISTINCT a.id, count(b) AS n"),
+            vec![true]
+        );
+        assert_eq!(
+            var_length_marks(
+                "MATCH (a:N)-[:R*1..3]->(b:N) RETURN DISTINCT a.id, count(DISTINCT b) AS n"
+            ),
+            vec![false]
+        );
+    }
+
+    #[test]
+    fn a_write_between_the_match_and_its_projection_is_a_barrier() {
+        // One CREATE per row: the rows the fast path would drop are
+        // observable as missing nodes long before the RETURN dedups.
+        assert_eq!(
+            var_length_marks(
+                "MATCH (a:N)-[:R*1..2]->(b:N) CREATE (:Log {t: b.id}) RETURN DISTINCT b.id"
+            ),
+            vec![true]
+        );
+    }
+
+    #[test]
+    fn a_path_assignment_or_edge_variable_keeps_the_exact_trail() {
+        assert_eq!(
+            var_length_marks("MATCH p = (a:N)-[:R*1..2]->(b:N) RETURN DISTINCT b.id"),
+            vec![true]
+        );
+        assert_eq!(
+            var_length_marks("MATCH (a:N)-[r:R*1..2]->(b:N) RETURN DISTINCT b.id"),
+            vec![true]
+        );
+    }
 
     #[test]
     fn disjoint_fixed_edge_types_need_no_trail() {

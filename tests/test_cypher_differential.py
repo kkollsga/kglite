@@ -1076,6 +1076,97 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (p:Person {person_id: 1})-[r:KNOWS*1..3]->(q:Person) RETURN q.name AS n",
         None,
     ),
+    # ── mark_fast_var_length_paths on CYCLIC graphs ──
+    # Every var-length fixture above is acyclic with min=1 — the weakest
+    # possible witness for a pass whose whole job is deciding when a
+    # *distance* BFS may stand in for Cypher's *trail* semantics. On a cycle
+    # the two relations come apart, and the un-gated pass shipped both
+    # failure directions: it dropped the source node from its own answer
+    # (`*1..3` on a triangle returned 2 of 3 nodes) and it answered `min >= 2`
+    # patterns with the empty set (`*2..2` undirected on a triangle).
+    (
+        "var_length_cyclic_source_on_closed_trail",
+        "directed_triangle_graph",
+        # 1 reaches itself in 3 hops around the cycle, so it is one of its own
+        # answers. The distance BFS pre-marks the source visited and cannot
+        # see that: it returned [2, 3].
+        "MATCH (a:N {id: 1})-[:R*1..3]->(b:N) RETURN DISTINCT b.id AS i",
+        None,
+    ),
+    (
+        "var_length_cyclic_undirected_source_on_closed_trail",
+        "directed_triangle_graph",
+        "MATCH (a:N {id: 1})-[:R*1..3]-(b:N) RETURN DISTINCT b.id AS i",
+        None,
+    ),
+    (
+        "var_length_cyclic_undirected_min_two",
+        "directed_triangle_graph",
+        # Trail-reachable to both peers (1-2-3 forwards, 1-3-2 backwards),
+        # distance-reachable to neither. The fast path returned [].
+        "MATCH (a:N {id: 1})-[:R*2..2]-(b:N) RETURN DISTINCT b.id AS i",
+        None,
+    ),
+    (
+        "var_length_cyclic_count_distinct_min_two",
+        "directed_triangle_graph",
+        "MATCH (a:N {id: 1})-[:R*2..3]->(b:N) RETURN count(DISTINCT b) AS n",
+        None,
+    ),
+    (
+        "var_length_cyclic_zero_hop_control",
+        "directed_triangle_graph",
+        # `min = 0` already emits the source at zero hops; the control proves
+        # the source-inclusion fix does not double-emit it.
+        "MATCH (a:N {id: 1})-[:R*0..2]->(b:N) RETURN DISTINCT b.id AS i",
+        None,
+    ),
+    (
+        "var_length_second_clause_plain_projection",
+        "var_length_diamond_graph",
+        # The first consumer is `WITH DISTINCT b`; the second MATCH's consumer
+        # is a plain per-path projection. Proving only the first clause and
+        # marking every clause returned 2 rows where the graph has 3.
+        "MATCH (a:N {id: 1})-[:R*1..1]->(b:N) WITH DISTINCT b MATCH (b)-[:R*1..2]->(c:N) RETURN c.id AS i",
+        None,
+    ),
+    (
+        "var_length_second_clause_count_star",
+        "var_length_diamond_graph",
+        "MATCH (a:N {id: 1})-[:R*1..1]->(b:N) WITH DISTINCT b MATCH (b)-[:R*1..2]->(c:N) RETURN count(*) AS n",
+        None,
+    ),
+    (
+        "var_length_distinct_over_row_counting_aggregate",
+        "directed_triangle_graph",
+        # DISTINCT groups *after* aggregating, so `count(b)` is a per-group row
+        # count: it moves with any dropped duplicate (3 -> 2).
+        "MATCH (a:N {id: 1})-[:R*1..3]->(b:N) RETURN DISTINCT a.id AS i, count(b) AS n",
+        None,
+    ),
+    (
+        "var_length_undirected_parallel_relationships",
+        "parallel_edge_cycle_graph",
+        # Two relationships between 1 and 2 make a closed trail of length 2,
+        # so 1 is one of its own undirected answers. One relationship would
+        # not: walking back over the same one is forbidden.
+        "MATCH (a:N {id: 1})-[:R*1..2]-(b:N) RETURN DISTINCT b.id AS i",
+        None,
+    ),
+    (
+        "var_length_undirected_no_closed_trail",
+        "var_length_diamond_graph",
+        # Negative control for the same probe: node 1 has one relationship and
+        # nothing leads back to it, so it must not appear in its own answer.
+        "MATCH (a:N {id: 1})-[:R*1..3]-(b:N) RETURN DISTINCT b.id AS i",
+        None,
+    ),
+    (
+        "var_length_undirected_cycle_min_two",
+        "parallel_edge_cycle_graph",
+        "MATCH (a:N {id: 1})-[:R*2..3]-(b:N) RETURN count(DISTINCT b) AS n",
+        None,
+    ),
     # ── UNION (optimize_nested_queries) ──
     (
         "union_simple",
@@ -3046,6 +3137,167 @@ def test_limit_returns_the_rows_that_exist(query: str, expected: list[dict]) -> 
     """
     g = _build_cap_threshold_graph()
     assert g.cypher(query).to_list() == expected
+
+
+def _edge_graph(nodes: list[int], edges: list[tuple[int, int]]) -> kglite.KnowledgeGraph:
+    """`:N` nodes with an `id`/`name`, joined by `:R` relationships.
+
+    One builder for the cyclic var-length fixtures so each one is readable as
+    its edge list. Kept out of conftest: the shared fixtures are pinned by
+    absolute goldens across the suite, and a cycle added to one of them would
+    move those expectations.
+    """
+    import pandas as pd
+
+    g = kglite.KnowledgeGraph()
+    g.add_nodes(pd.DataFrame({"id": nodes, "name": [f"n{i}" for i in nodes]}), "N", "id", "name")
+    g.add_connections(
+        pd.DataFrame({"s": [e[0] for e in edges], "t": [e[1] for e in edges]}),
+        "R",
+        "N",
+        "s",
+        "N",
+        "t",
+    )
+    return g
+
+
+@pytest.fixture
+def directed_triangle_graph() -> kglite.KnowledgeGraph:
+    """1 → 2 → 3 → 1.
+
+    The smallest graph on which distance reachability and Cypher's trail
+    reachability disagree: every node is on a closed trail of length 3, and
+    undirected `*2..2` reaches both peers while the shortest-distance answer
+    reaches neither.
+    """
+    return _edge_graph([1, 2, 3], [(1, 2), (2, 3), (3, 1)])
+
+
+@pytest.fixture
+def var_length_diamond_graph() -> kglite.KnowledgeGraph:
+    """1 → 2, 2 → 3, 2 → 4, 3 → 4 — acyclic, with two routes 2 ⇒ 4.
+
+    The two routes are what make a dropped duplicate observable: a plain
+    projection over `(2)-[:R*1..2]->(c)` has three rows, one of them a repeat
+    of `4`.
+    """
+    return _edge_graph([1, 2, 3, 4], [(1, 2), (2, 3), (2, 4), (3, 4)])
+
+
+@pytest.fixture
+def parallel_edge_cycle_graph() -> kglite.KnowledgeGraph:
+    """Two parallel 1 → 2 relationships, plus 2 → 3 and 3 → 1.
+
+    Exercises both undirected closed-trail lengths: 1 returns to itself in two
+    hops over the parallel pair, and in three around the cycle.
+    """
+    return _edge_graph([1, 2, 3], [(1, 2), (1, 2), (2, 3), (3, 1)])
+
+
+VAR_LENGTH_HOP_SPECS = ["*0..2", "*1..2", "*1..3", "*2..2", "*2..3", "*3..3"]
+
+
+@pytest.fixture(scope="module")
+def var_length_scale_graph() -> kglite.KnowledgeGraph:
+    """3 000 `:N` nodes on a ring, plus a stride-7 chord from every node.
+
+    Small graphs can hide a reachability bug behind their own diameter; this
+    one is thick with short cycles, so distance reachability and trail
+    reachability come apart everywhere rather than in one hand-built corner.
+    The un-gated fast path answered undirected `*3..3` from node 0 with 12 of
+    the 16 nodes that are actually reachable, and undirected `*2..3` with 20
+    of 24.
+    """
+    import pandas as pd
+
+    n = 3000
+    g = kglite.KnowledgeGraph()
+    g.add_nodes(
+        pd.DataFrame({"id": list(range(n)), "name": [f"n{i}" for i in range(n)]}),
+        "N",
+        "id",
+        "name",
+    )
+    src = list(range(n)) + list(range(n))
+    dst = [(i + 1) % n for i in range(n)] + [(i + 7) % n for i in range(n)]
+    g.add_connections(pd.DataFrame({"s": src, "t": dst}), "R", "N", "s", "N", "t")
+    return g
+
+
+@pytest.mark.parametrize("hops", VAR_LENGTH_HOP_SPECS)
+@pytest.mark.parametrize("arrow", ["->", "-"], ids=["directed", "undirected"])
+def test_var_length_at_scale_matches_the_per_path_answer(
+    var_length_scale_graph: kglite.KnowledgeGraph, hops: str, arrow: str
+) -> None:
+    """Exact-set golden: the optimized expansion answers what the per-path one does.
+
+    The differential corpus above compares plans on graphs small enough to
+    read; this compares them where a partial answer looks plausible. Both the
+    anchored set and the whole-graph distinct count are asserted — the first
+    catches a missing source node, the second catches a systematically
+    truncated frontier.
+    """
+    g = var_length_scale_graph
+    anchored = f"MATCH (a:N {{id: 0}})-[:R{hops}]{arrow}(b:N) RETURN DISTINCT b.id AS i"
+    optimized = sorted(r["i"] for r in g.cypher(anchored).to_list())
+    naive = sorted(r["i"] for r in g.cypher(anchored, disable_optimizer=True).to_list())
+    assert optimized == naive, f"{anchored}: {len(optimized)} vs {len(naive)} nodes"
+
+    whole = f"MATCH (a:N)-[:R{hops}]{arrow}(b:N) RETURN count(DISTINCT b) AS n"
+    assert g.cypher(whole).to_list() == g.cypher(whole, disable_optimizer=True).to_list()
+
+
+def _cap_biting_var_length_graph(tail_from: int) -> kglite.KnowledgeGraph:
+    """One `:Src`, 1 200 `:Mid`, one `:Tail`; only `Mid[tail_from]` reaches it."""
+    import pandas as pd
+
+    mids = 1200
+    g = kglite.KnowledgeGraph()
+    g.add_nodes(pd.DataFrame({"id": [0], "name": ["src"]}), "Src", "id", "name")
+    g.add_nodes(
+        pd.DataFrame({"id": list(range(mids)), "name": [f"m{i}" for i in range(mids)]}),
+        "Mid",
+        "id",
+        "name",
+    )
+    g.add_nodes(pd.DataFrame({"id": [0], "name": ["tail"]}), "Tail", "id", "name")
+    g.add_connections(
+        pd.DataFrame({"s": [0] * mids, "t": list(range(mids))}),
+        "R",
+        "Src",
+        "s",
+        "Mid",
+        "t",
+    )
+    g.add_connections(pd.DataFrame({"s": [tail_from], "t": [0]}), "T", "Mid", "s", "Tail", "t")
+    return g
+
+
+@pytest.mark.parametrize("tail_from", [0, 600, 1199])
+@pytest.mark.parametrize(
+    "query",
+    [
+        "MATCH (a:Src)-[:R*1..1]->(b:Mid)-[:T]->(c:Tail) RETURN c.name AS n LIMIT 5",
+        "MATCH (a:Src)-[:R*1..1]->(b:Mid)-[:T]->(c:Tail) RETURN DISTINCT c.name AS n LIMIT 5",
+        "MATCH (a:Src)-[:R]->(b:Mid)-[:T]->(c:Tail) RETURN c.name AS n LIMIT 5",
+    ],
+    ids=["var_length", "var_length_distinct", "fixed_control"],
+)
+def test_var_length_under_limit_returns_the_row_that_exists(tail_from: int, query: str) -> None:
+    """A variable-length hop is NOT exempt from advisory-cap accounting.
+
+    The intermediate hop's advisory cap (50x `max_matches`, floor 1 000) sits
+    *above* the expansion, not inside it: `expand_from_node` ignores its
+    `max_results` for a variable-length segment, but the caller still stops
+    pushing at the cap and drops the rest. Those 200 dropped `:Mid` rows are
+    where the answer lives when `tail_from` is early in relationship order, so
+    the pass must report the bite and `execute` must re-run uncapped.
+    Suppressing the report for variable-length hops — on the theory that they
+    never pre-cap — returns `[]` here for `tail_from=0`.
+    """
+    g = _cap_biting_var_length_graph(tail_from)
+    assert g.cypher(query).to_list() == [{"n": "tail"}]
 
 
 @pytest.fixture
