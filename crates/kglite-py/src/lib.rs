@@ -162,15 +162,70 @@ fn load_err_to_pyerr(e: std::io::Error, path: Option<&str>) -> PyErr {
     crate::error_py::kg_to_pyerr(kg)
 }
 
+/// Warn — never raise — when `path`'s write-ahead sidecar holds commits the
+/// checkpoint just loaded does not contain.
+///
+/// The log-less entry points (`kglite.load`, `kglite.open_session`) read the
+/// `.kgl` alone, so on such a path they hand back a graph that is silently
+/// missing committed writes. `kglite.open` refuses this outright
+/// (`durability::ensure_recovered`, applied by `open_or_create_graph`), but
+/// these two must not: reading a checkpoint while another process writes the
+/// path durably is the documented use of `load()`, and there a sidecar ahead
+/// of the checkpoint is the steady state rather than a fault. So the answer is
+/// the same one a human reader would want and no exception can give — say what
+/// is missing, name the log, and point at the entry point that replays it.
+///
+/// The save side of this hazard stays a hard refusal
+/// (`ensure_save_target_recovered`): reading stale data is recoverable,
+/// stranding those frames in front of a newer checkpoint is not.
+fn warn_if_sidecar_runs_ahead(py: Python<'_>, path: &str, checkpoint_lsn: u64) {
+    use kglite_core::api::durable as wal;
+
+    let checkpoint = std::path::Path::new(path);
+    // Only `Refused` is this function's business. An *unreadable* sidecar says
+    // nothing about the checkpoint that was just loaded successfully, and
+    // these entry points never touch the log, so it is not their failure to
+    // report.
+    if !matches!(
+        wal::ensure_recovered(checkpoint, checkpoint_lsn),
+        Err(wal::DurableOpenError::Refused(_))
+    ) {
+        return;
+    }
+    let wpath = wal::wal_path(checkpoint);
+    // Re-read to count the gap. `ensure_recovered` answers refused/not, and the
+    // count is what makes the warning actionable ("2 commits behind" is a
+    // decision; "behind" is a shrug). Only ever paid on the warning path.
+    let ahead = wal::recover(&wpath)
+        .map(|frames| frames.iter().filter(|f| f.lsn > checkpoint_lsn).count())
+        .unwrap_or(0);
+    let message = format!(
+        "the write-ahead log at '{}' holds {ahead} commit(s) newer than this checkpoint. \
+         This call serves the checkpoint only — those commits are NOT in the graph you \
+         just loaded. Open the path with kglite.open(path, durable='full') (or 'normal') \
+         to replay them first, or move the sidecar aside to deliberately discard them. \
+         Saving this graph back over the path is refused while they are there.",
+        wpath.display(),
+    );
+    if let Ok(cmsg) = std::ffi::CString::new(message) {
+        let _ = PyErr::warn(
+            py,
+            py.get_type::<pyo3::exceptions::PyUserWarning>().as_any(),
+            cmsg.as_c_str(),
+            1,
+        );
+    }
+}
+
 #[pyfunction]
 fn load(py: Python<'_>, path: String) -> PyResult<KnowledgeGraph> {
-    py.detach(|| load_file(&path))
-        .map(|inner| {
-            let mut kg = KnowledgeGraph::from_arc(inner);
-            kg.lifecycle.source_path = Some(std::path::PathBuf::from(&path));
-            kg
-        })
-        .map_err(|e| load_err_to_pyerr(e, Some(&path)))
+    let inner = py
+        .detach(|| load_file(&path))
+        .map_err(|e| load_err_to_pyerr(e, Some(&path)))?;
+    warn_if_sidecar_runs_ahead(py, &path, inner.checkpoint_lsn);
+    let mut kg = KnowledgeGraph::from_arc(inner);
+    kg.lifecycle.source_path = Some(std::path::PathBuf::from(&path));
+    Ok(kg)
 }
 
 /// Load an RDF file into a fresh in-memory graph and return it.
@@ -239,6 +294,7 @@ fn open_session(py: Python<'_>, path: String) -> PyResult<Session> {
     let inner = py
         .detach(|| load_file(&path))
         .map_err(|e| load_err_to_pyerr(e, Some(&path)))?;
+    warn_if_sidecar_runs_ahead(py, &path, inner.checkpoint_lsn);
     Ok(Session::from_arc(inner, None))
 }
 
@@ -570,6 +626,8 @@ fn setup_durable(
             wal: walh,
             next_lsn,
             level,
+            diverged: false,
+            fail_append: false,
         });
     }
     Ok(())
@@ -600,6 +658,51 @@ fn cypher_pass_names() -> Vec<String> {
 #[pyfunction]
 fn _backend_is_forked(graph: &KnowledgeGraph) -> bool {
     graph.inner.graph.is_forked()
+}
+
+/// Make the next write-ahead-log append on `graph` fail, as a disk that has
+/// just filled would.
+///
+/// **A test hook, not an API**, in the same family as `_backend_is_forked`
+/// above. The contract it exists for — a failed append leaves the graph
+/// refusing every route back to disk, and burns no LSN — is about what happens
+/// when an `append` returns an error, and that cannot be exercised without a
+/// reachable append failure: no portable filesystem trick fails a write on an
+/// already-open append handle, and filling a real disk is not a test.
+///
+/// Raises for a graph with no log, so a test that forgets `durable=` fails
+/// loudly instead of asserting nothing.
+#[pyfunction]
+fn _fail_wal_append(graph: &mut KnowledgeGraph, fail: bool) -> PyResult<()> {
+    match graph.lifecycle.durable.as_mut() {
+        Some(ds) => {
+            ds.fail_append = fail;
+            Ok(())
+        }
+        None => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "_fail_wal_append needs a graph opened with a write-ahead log \
+             (kglite.open(path, durable='full'/'normal')); this one has none.",
+        )),
+    }
+}
+
+/// The log-sequence number `graph`'s next write-ahead frame will carry.
+///
+/// **A test hook, not an API**, and the only observable for the other half of
+/// the failed-append contract: a frame that never reached the log must not
+/// consume its LSN. The refusal latch is visible from Python (the graph stops
+/// accepting writes and saves); the counter behind it is not, and a hole in it
+/// would make `checkpoint_lsn = next_lsn - 1` claim a commit that does not
+/// exist, so the replay gate would skip the next real one.
+#[pyfunction]
+fn _wal_next_lsn(graph: &KnowledgeGraph) -> PyResult<u64> {
+    match graph.lifecycle.durable.as_ref() {
+        Some(ds) => Ok(ds.next_lsn),
+        None => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "_wal_next_lsn needs a graph opened with a write-ahead log \
+             (kglite.open(path, durable='full'/'normal')); this one has none.",
+        )),
+    }
 }
 
 /// Run the shared KGLite CLI in-process and block until it exits.
@@ -695,6 +798,8 @@ fn kglite(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(from_records_rust, m)?)?;
     m.add_function(wrap_pyfunction!(cypher_pass_names, m)?)?;
     m.add_function(wrap_pyfunction!(_backend_is_forked, m)?)?;
+    m.add_function(wrap_pyfunction!(_fail_wal_append, m)?)?;
+    m.add_function(wrap_pyfunction!(_wal_next_lsn, m)?)?;
     m.add_function(wrap_pyfunction!(_run_cli, m)?)?;
     #[cfg(feature = "mcp-server")]
     m.add_function(wrap_pyfunction!(_run_mcp_server, m)?)?;

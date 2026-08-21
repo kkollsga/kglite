@@ -257,6 +257,45 @@ pub(crate) struct DurableState {
     /// at open; this field is kept because it is the *user's* vocabulary,
     /// which error messages and `sync()` echo back.
     pub(crate) level: kglite_core::api::durable::DurabilityLevel,
+    /// Latched when an append failed: the mutation is applied in memory but
+    /// never reached the log, so the two have diverged and nothing this handle
+    /// still holds may be written back. See [`WAL_DIVERGED_MSG`].
+    pub(crate) diverged: bool,
+    /// Append fault injection for this repository's own tests, driven by the
+    /// underscore-prefixed `kglite._fail_wal_append` hook.
+    ///
+    /// Compiled unconditionally rather than behind `cfg(test)` / `cfg(debug_assertions)`:
+    /// this crate is a `cdylib` whose tests are the Python suite, so a
+    /// `cfg(test)` field would not exist in the artifact those tests import,
+    /// and a `debug_assertions` one would vanish from a release-profile
+    /// extension — turning the divergence contract into a gate that cannot
+    /// fail on exactly the build where it matters most. The cost is one `bool`
+    /// per durable graph and one branch per logged commit.
+    pub(crate) fail_append: bool,
+}
+
+/// Message every operation a failed append invalidated answers with.
+///
+/// The wheel's counterpart to the engine's `DIVERGED_MSG` (`session/durable.rs`),
+/// and deliberately worded for the other cause: the engine latches when a
+/// mutation bypassed the log, this latches when the log *refused* one. Both
+/// mean the same thing to the caller — the log no longer describes the graph —
+/// but the exits differ. There is no "fold it in with a checkpoint" here,
+/// because the state to fold in contains a statement the caller was told
+/// failed; the only exit is to drop this handle and reopen.
+pub(crate) const WAL_DIVERGED_MSG: &str = "\
+    this graph's write-ahead log refused an append (e.g. the disk filled), so the log no \
+    longer describes the graph: the statement that failed is still applied in memory but \
+    was never logged, and every write after it would sit on top of an unlogged one. This \
+    handle therefore refuses further logged writes, save() and sync(), so the unlogged \
+    state cannot reach disk. Drop it and reopen the path (kglite.open(path, \
+    durable='full'/'normal')) to get a graph built from the checkpoint plus the frames \
+    that did reach the log — the failed statement, and anything written after it, will \
+    not be there.";
+
+/// [`WAL_DIVERGED_MSG`] as the `io::Error` `flush_wal` speaks.
+pub(crate) fn wal_diverged_io_error() -> std::io::Error {
+    std::io::Error::other(WAL_DIVERGED_MSG)
 }
 
 impl std::fmt::Debug for DurableState {
@@ -410,6 +449,20 @@ impl KnowledgeGraph {
         if !durable && !self.inner.cdc_enabled() {
             return Ok(());
         }
+        // Refuse *before* the drain, not after: draining publishes this
+        // commit to the change stream and empties the capture buffer, and on a
+        // graph whose log has already diverged neither can be undone — the
+        // events would describe changes no checkpoint will ever hold. Leaving
+        // the buffer intact costs nothing (this handle can no longer save, so
+        // it is on its way to being dropped) and keeps the refusal total.
+        if self
+            .lifecycle
+            .durable
+            .as_ref()
+            .is_some_and(|ds| ds.diverged)
+        {
+            return Err(wal_diverged_io_error());
+        }
         // Drain + resolve in a scope so the `self.inner` borrow ends before
         // we touch the `self.lifecycle.durable` field (disjoint, but keep it clean).
         let ops = {
@@ -434,9 +487,64 @@ impl KnowledgeGraph {
             .as_mut()
             .expect("durable checked Some above; not cleared in between");
         let lsn = ds.next_lsn;
-        ds.next_lsn += 1;
-        ds.wal
-            .append(&kglite_core::api::durable::WalFrame { lsn, ops })
+        let appended = if ds.fail_append {
+            Err(std::io::Error::other(
+                "injected write-ahead log append failure (kglite._fail_wal_append)",
+            ))
+        } else {
+            ds.wal
+                .append(&kglite_core::api::durable::WalFrame { lsn, ops })
+        };
+        match appended {
+            Ok(()) => {
+                // Only a frame that reached the log consumes its LSN — the same
+                // rule `Session::log_working_commit` follows. Consuming it up
+                // front would leave a hole the checkpoint stamp counts as a
+                // committed frame, so `checkpoint_lsn = next_lsn - 1` would
+                // claim to have folded in a commit that never existed and the
+                // replay gate would silently skip the *next* real one.
+                ds.next_lsn = lsn + 1;
+                Ok(())
+            }
+            Err(e) => {
+                // The mutation is already applied to `self.inner` and its ops
+                // are drained, so this handle now holds state the log does not
+                // describe and cannot be made to describe. Latch, so the write
+                // the caller was told had FAILED can never be committed by a
+                // later save() (which would neither know about it nor be able
+                // to separate it from the writes that succeeded).
+                ds.diverged = true;
+                // Carry the latch into the *first* error too. This is the one
+                // the caller actually sees at ENOSPC, and a bare "No space left
+                // on device" says nothing about the graph now being unsaveable
+                // — which is the part that decides what they do next.
+                Err(std::io::Error::new(
+                    e.kind(),
+                    format!("write-ahead log append failed: {e}. {WAL_DIVERGED_MSG}"),
+                ))
+            }
+        }
+    }
+
+    /// Refuse an operation that would write this graph back after a failed
+    /// append — the `PyResult` half of the [`WAL_DIVERGED_MSG`] latch, for
+    /// `save()` and `sync()`.
+    ///
+    /// `flush_wal` covers every *logged* write; these two are the paths that
+    /// reach the disk without going through it, and are exactly where the
+    /// unlogged statement would have been committed.
+    pub(crate) fn check_wal_not_diverged(&self) -> PyResult<()> {
+        if self
+            .lifecycle
+            .durable
+            .as_ref()
+            .is_some_and(|ds| ds.diverged)
+        {
+            return Err(crate::error_py::kg_to_pyerr(crate::error::KgError::FileIo(
+                wal_diverged_io_error(),
+            )));
+        }
+        Ok(())
     }
 }
 

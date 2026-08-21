@@ -49,6 +49,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   published 0.16.5 wheel in both directions). Disk-mode graph directories are
   unaffected; their sidecars have their own integrity handling.
 
+- **A write that failed mid-append was committed by a later `save()`.** On a
+  durable graph, a statement whose write-ahead frame could not be written (a
+  full disk, an I/O fault) was reported to the caller as a `FileIoError` — and
+  then left applied in memory, with its captured ops already drained, and
+  nothing marking the graph. The next `save()` serialized whatever was in
+  memory, so a write the caller had been told did *not* happen reached disk
+  minutes later, indistinguishable from the ones that succeeded. A failed
+  append now latches the graph handle: further logged writes, `save()` and
+  `sync()` all raise, naming the reopen that recovers the last checkpoint plus
+  every frame that did reach the log. A failed append also no longer consumes
+  its log-sequence number, so the checkpoint stamp can never claim a commit
+  that was never written. Graphs opened without a log (`durable='off'`, the
+  default) are unaffected, and the engine's `Session` already had both
+  properties.
+
+- **`kglite.load()` and `kglite.open_session()` served stale data in silence.**
+  Both read the `.kgl` checkpoint alone, so on a path whose write-ahead sidecar
+  holds newer commits — a durable writer that crashed, or one still running —
+  they returned a graph missing those commits with no signal of any kind. They
+  now emit a `UserWarning` naming the sidecar, how many commits it holds beyond
+  the checkpoint, and the `kglite.open(path, durable=…)` call that replays
+  them. This is a warning rather than an error on purpose: reading a checkpoint
+  while another process writes the path durably is what these entry points are
+  for, and there a sidecar ahead of the checkpoint is the steady state. The
+  hazardous direction — *saving* such a graph back over the path — remains a
+  refusal, and a sidecar the checkpoint already contains (ordinary crash
+  residue) still loads silently.
+
 - **`CREATE` stored null-valued relationship properties; node `CREATE` did not.**
   `CREATE (a)-[:E {x: null, y: 1}]->(b)` left `x` on the edge, so `keys(r)`
   reported a property that the identical literal on a node —

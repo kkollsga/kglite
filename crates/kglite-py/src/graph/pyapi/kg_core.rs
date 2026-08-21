@@ -569,6 +569,11 @@ impl KnowledgeGraph {
 
     #[pyo3(signature = (path=None, *, fsync=true))]
     fn save(&mut self, py: Python<'_>, path: Option<&str>, fsync: bool) -> PyResult<()> {
+        // A graph whose log refused an append holds a statement the caller was
+        // told had failed. `save()` is the one call that would commit it — it
+        // serializes whatever is in memory, and cannot tell the acknowledged
+        // writes from the one that was not. Refuse before anything is touched.
+        self.check_wal_not_diverged()?;
         // Durable (WAL) graphs: `save()` is the checkpoint that TRUNCATES
         // the fsync'd WAL below. Honouring `fsync=False` here would pair a
         // maybe-not-on-disk checkpoint with a destroyed log — a crash then
@@ -714,6 +719,10 @@ impl KnowledgeGraph {
                  you want per-commit logging with on-demand barriers.",
             ));
         }
+        // A barrier over a log that no longer describes the graph would report
+        // success for exactly the state the failed append made unrepresentable
+        // — the same refusal `save()` takes, for the same reason.
+        self.check_wal_not_diverged()?;
         // Drain anything still buffered in the capture layer into a frame
         // before barriering, so `sync()` cannot report success over ops that
         // never reached the log.

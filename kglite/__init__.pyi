@@ -957,6 +957,30 @@ def _backend_is_forked(graph: "KnowledgeGraph") -> bool:
     """
     ...
 
+def _fail_wal_append(graph: "KnowledgeGraph", fail: bool) -> None:
+    """Make the next write-ahead-log append on ``graph`` fail, as a full disk would.
+
+    Internal test hook, not part of the public Python API. The contract it
+    exists for — a failed append burns no log-sequence number and leaves the
+    handle refusing further logged writes, ``save()`` and ``sync()``, so the
+    statement the caller was told had failed can never reach disk — is about
+    what an ``append`` error does, and no portable filesystem trick fails a
+    write on an already-open append handle. Raises ``ValueError`` for a graph
+    opened without a log.
+    """
+    ...
+
+def _wal_next_lsn(graph: "KnowledgeGraph") -> int:
+    """The log-sequence number ``graph``'s next write-ahead frame will carry.
+
+    Internal test hook, not part of the public Python API. The counter is what
+    ``save()`` stamps into the checkpoint as ``next_lsn - 1``, so a hole in it
+    — an LSN consumed by a frame that never reached the log — makes the
+    checkpoint claim a commit that does not exist and the replay gate skip the
+    next real one. Raises ``ValueError`` for a graph opened without a log.
+    """
+    ...
+
 def _run_cli(argv: list[str]) -> None:
     """Run the bundled Rust ``kglite`` CLI in-process.
 

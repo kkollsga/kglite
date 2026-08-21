@@ -37,6 +37,7 @@ import signal
 import subprocess
 import sys
 import textwrap
+import warnings
 
 import pytest
 
@@ -970,6 +971,79 @@ def test_save_over_crash_residue_still_works(tmp_path):
     assert kglite.load(str(path)).cypher("MATCH (p:Person) RETURN count(*) AS c").scalar() == 2
 
 
+# ── the read side: staleness is warned about, never hidden ───────────
+#
+# ``load()`` and ``open_session()`` stay open over an unrecovered sidecar —
+# reading a checkpoint while another process writes the path durably is what
+# they are for, and there a log ahead of the checkpoint is the steady state.
+# What they must not do is stay *silent* about it: the caller gets a graph that
+# is missing committed writes and nothing in the return value says so. So the
+# refusal ``kglite.open`` raises becomes a warning here, naming the sidecar,
+# how far behind the checkpoint is, and the entry point that replays it.
+
+
+def test_load_warns_when_the_sidecar_runs_ahead(tmp_path):
+    """The silent-staleness shape: ``age=2`` is committed and durable, the
+    checkpoint still says ``age=1``, and ``load()`` used to hand back the
+    checkpoint with no signal of any kind — the caller's only clue was the
+    ``save()`` refusal much later, if they ever saved at all."""
+    _crashed_writer_leaves_a_commit(tmp_path)
+    path = tmp_path / "app.kgl"
+
+    with pytest.warns(UserWarning) as record:
+        g = kglite.load(str(path))
+    message = str(record[0].message)
+    assert "app.kgl-wal" in message, "must name the sidecar that holds the commits"
+    assert "1 commit" in message, f"must quantify the gap, got: {message}"
+    assert "kglite.open" in message, "must name the entry point that replays them"
+
+    # The data contract is unchanged: the checkpoint is still served, and the
+    # commit is still in the log for the route the warning advertises.
+    assert g.cypher("MATCH (p:Person) RETURN p.age AS a").scalar() == 1
+    del g
+    g = kglite.open(str(path), durable="full")
+    assert g.cypher("MATCH (p:Person) RETURN p.age AS a").scalar() == 2
+
+
+def test_open_session_warns_when_the_sidecar_runs_ahead(tmp_path):
+    """``open_session()`` is ``load().session()`` in one call and reads the
+    checkpoint the same way, so it carries the same blind spot — and, serving a
+    thread pool, is the likelier place for stale reads to spread."""
+    _crashed_writer_leaves_a_commit(tmp_path)
+
+    with pytest.warns(UserWarning, match="app.kgl-wal"):
+        session = kglite.open_session(str(tmp_path / "app.kgl"))
+    assert session.cypher("MATCH (p:Person) RETURN p.age AS a").scalar() == 1
+
+
+def test_load_is_silent_when_nothing_is_unrecovered(tmp_path):
+    """What keeps the warning worth reading. A sidecar whose frames the
+    checkpoint already folded in is crash residue, not missing data, and a
+    warning keyed on "a sidecar exists" would fire on every durable graph's
+    normal reopen until someone silenced the category — taking the real case
+    with it."""
+    path = tmp_path / "app.kgl"
+    wal = tmp_path / "app.kgl-wal"
+
+    g = _open(path, "memory", durable="full")
+    g.cypher("CREATE (:Person {id: 1, name: 'Alice'})")
+    residue = wal.read_bytes()  # the log one instant before the checkpoint
+    g.save()
+    del g
+    wal.write_bytes(residue)  # crash between the .kgl write and the truncation
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # any warning here fails the test
+        assert kglite.load(str(path)).cypher("MATCH (p:Person) RETURN p.name AS n").scalar() == "Alice"
+        kglite.open_session(str(path))
+
+    # …and neither does the ordinary case, with no sidecar at all.
+    wal.unlink()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        kglite.load(str(path))
+
+
 # ── durability levels ────────────────────────────────────────────────
 #
 # ``durable="normal"`` logs every commit but skips the per-commit barrier.
@@ -1479,3 +1553,110 @@ def test_a_durable_graph_takes_merge_as_the_route_the_refusal_names(tmp_path):
     assert sorted((d["id"], d["tag"]) for d in g.cypher("MATCH (n:T) RETURN n.id AS id, n.tag AS tag").to_dicts()) == [
         (1, "second")
     ]
+
+
+# ── a refused append poisons the handle ──────────────────────────────
+#
+# The failure this section exists for was measured on a filling disk: the
+# statement that could not be logged was still applied in memory, its ops were
+# already drained, and it was reported to the caller as a ``FileIoError`` — but
+# nothing marked the graph. The next ``save()`` serialized whatever was in
+# memory, which included the failed statement, so a write the caller had been
+# told did NOT happen was committed to disk minutes later.
+#
+# ``kglite._fail_wal_append`` injects the append error, because no portable
+# filesystem trick fails a write on an already-open append handle.
+
+
+def _rows(g) -> list[int]:
+    return sorted(d["id"] for d in g.cypher("MATCH (r:Row) RETURN r.id AS id").to_dicts())
+
+
+def test_a_failed_append_is_reported_and_never_committed(tmp_path):
+    """The whole shape, end to end: rows 0–1 checkpointed, rows 2–3 committed
+    to the log, row 4's append fails. Row 4 must be reported as failed, must
+    not be saveable, and must not be there on reopen."""
+    path = tmp_path / "app.kgl"
+    g = _open(path, "memory", durable="full")
+    for i in (0, 1):
+        g.cypher(f"CREATE (:Row {{id: {i}}})")
+    g.save()  # checkpoint: folds 0–1 in and truncates the log
+    for i in (2, 3):
+        g.cypher(f"CREATE (:Row {{id: {i}}})")
+
+    kglite._fail_wal_append(g, True)
+    with pytest.raises(kglite.FileIoError):
+        g.cypher("CREATE (:Row {id: 4})")
+
+    # (a) the handle is poisoned: no further logged write, and neither route
+    # back to disk. Every one of these used to succeed, and `save()` was the
+    # one that turned an acknowledged failure into committed data.
+    kglite._fail_wal_append(g, False)  # the disk "recovered" — irrelevant now
+    with pytest.raises(kglite.FileIoError, match="no longer describes the graph"):
+        g.cypher("CREATE (:Row {id: 5})")
+    with pytest.raises(kglite.FileIoError, match="reopen"):
+        g.save()
+    with pytest.raises(kglite.FileIoError, match="reopen"):
+        g.sync()
+    del g  # release the single-writer lease
+
+    # (b) reopen: exactly the writes that were acknowledged, and nothing else.
+    g = kglite.open(str(path), durable="full")
+    assert _rows(g) == [0, 1, 2, 3], "the failed statement must not be in the recovered graph"
+
+
+def test_a_failed_append_consumes_no_lsn(tmp_path):
+    """The accounting half. ``save()`` stamps ``checkpoint_lsn = next_lsn - 1``,
+    so an LSN consumed by a frame that never reached the log makes the
+    checkpoint claim a commit that does not exist — and the replay gate, which
+    skips every frame at or below the stamp, then skips the next real one."""
+    path = tmp_path / "app.kgl"
+    g = _open(path, "memory", durable="full")
+    g.cypher("CREATE (:Row {id: 0})")
+    before = kglite._wal_next_lsn(g)
+
+    kglite._fail_wal_append(g, True)
+    with pytest.raises(kglite.FileIoError):
+        g.cypher("CREATE (:Row {id: 1})")
+
+    assert kglite._wal_next_lsn(g) == before, "an append that failed must not consume its LSN"
+
+
+def test_the_poison_does_not_leak_into_a_fresh_handle(tmp_path):
+    """What keeps the latch usable: it lives on the durable session, so the
+    reopen the message tells the caller to perform actually gives them a
+    working graph — and a *different* durable graph in the same process is
+    untouched."""
+    path = tmp_path / "app.kgl"
+    other = tmp_path / "other.kgl"
+
+    fresh = _open(other, "memory", durable="full")
+    g = _open(path, "memory", durable="full")
+    g.cypher("CREATE (:Row {id: 0})")
+    kglite._fail_wal_append(g, True)
+    with pytest.raises(kglite.FileIoError):
+        g.cypher("CREATE (:Row {id: 1})")
+    del g
+
+    # The other graph never saw the failure.
+    fresh.cypher("CREATE (:Row {id: 7})")
+    fresh.save()
+    del fresh
+
+    # And the advertised exit works: reopen, write, save.
+    g = kglite.open(str(path), durable="full")
+    assert _rows(g) == [0]
+    g.cypher("CREATE (:Row {id: 1})")
+    g.save()
+    del g
+    assert _rows(kglite.open(str(path), durable="full")) == [0, 1]
+
+
+def test_the_hooks_refuse_a_graph_with_no_log(tmp_path):
+    """The hooks are only meaningful on a logged graph; a test that forgot
+    ``durable=`` must fail loudly rather than assert nothing."""
+    g = kglite.KnowledgeGraph()
+    with pytest.raises(ValueError):
+        kglite._fail_wal_append(g, True)
+    with pytest.raises(ValueError):
+        kglite._wal_next_lsn(g)
