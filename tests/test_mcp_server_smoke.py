@@ -294,6 +294,13 @@ def _text_content(result: dict[str, Any]) -> str:
     return "\n".join(text_parts)
 
 
+def _is_error(result: dict[str, Any]) -> bool:
+    """Read the MCP error envelope. An absent ``isError`` means success, per
+    the spec — so a server that never sets it looks successful on every call,
+    which is exactly the shape these assertions pin against."""
+    return bool(result.get("isError", False))
+
+
 def _validate_github_user_response(result: dict[str, Any]) -> dict[str, Any]:
     """Validate the stable subset of the ``github_api`` user response contract.
 
@@ -401,6 +408,7 @@ class TestGraphMode:
             r = client.call_tool("cypher_query", {"query": "MATCH (p:Person) RETURN count(p) AS n"})
             text = _text_content(r)
             assert "4" in text  # 4 Person nodes in fixture
+            assert not _is_error(r)
         finally:
             client.shutdown()
 
@@ -426,6 +434,8 @@ class TestGraphMode:
         try:
             r = client.call_tool("cypher_query", {"query": "MATCH (p:person) RETURN count(p) AS n"})
             text = _text_content(r)
+            # An advisory is not a failure: the query ran and answered.
+            assert not _is_error(r)
             assert "warnings:" in text
             assert "unknown node label 'person'" in text
             assert "Did you mean 'Person'?" in text
@@ -466,10 +476,36 @@ class TestGraphMode:
         try:
             r = client.call_tool("cypher_query", {"query": "MATCH (p:Person {city: $city}) RETURN p.title AS who"})
             assert "Missing parameter: $city" in _text_content(r)
+            assert _is_error(r), "an unbound parameter is a failed call, not an empty answer"
             # Twice in a row: the plan cache must not serve the second call a
             # silently-empty answer.
             again = client.call_tool("cypher_query", {"query": "MATCH (p:Person {city: $city}) RETURN p.title AS who"})
             assert "Missing parameter: $city" in _text_content(again)
+        finally:
+            client.shutdown()
+
+    def test_error_envelope_marks_failures_and_leaves_answers_alone(self, graph_fixture: Path):
+        """`isError` is what a programmatic client branches on. A syntax error
+        is a failure; an empty result and a mutation ack are answers. The error
+        TEXT is the product and does not move — only the flag does."""
+        client = _spawn(["--graph", str(graph_fixture)])
+        try:
+            failed = client.call_tool("cypher_query", {"query": "RETURN @"})
+            assert _is_error(failed)
+            assert _text_content(failed).startswith("Cypher syntax error"), _text_content(failed)
+
+            unknown = client.call_tool("cypher_query", {"query": "CALL db.notAProcedure()"})
+            assert _is_error(unknown)
+            assert "Unknown procedure" in _text_content(unknown)
+
+            empty = client.call_tool(
+                "cypher_query", {"query": "MATCH (p:Person) WHERE p.city = 'Nowhere' RETURN p.title AS who"}
+            )
+            assert not _is_error(empty), "an empty result is an answer"
+            assert "No results." in _text_content(empty)
+
+            explained = client.call_tool("cypher_query", {"query": "EXPLAIN MATCH (p:Person) RETURN p.title"})
+            assert not _is_error(explained)
         finally:
             client.shutdown()
 
@@ -517,6 +553,7 @@ class TestGraphMode:
             r = client.call_tool("graph_overview", {"types": ["person"]})
             text = _text_content(r)
             assert "Did you mean 'Person'?" in text
+            assert _is_error(r), "an overview the engine could not compute is a failed call"
         finally:
             client.shutdown()
 
@@ -649,6 +686,7 @@ class TestGraphMode:
             r = client.call_tool("cypher_query", {"query": "CREATE (:Task {id: 't1'})"})
             text = _text_content(r)
             assert "not allowed" in text.lower() or "mutation" in text.lower()
+            assert _is_error(r), "a refusal is a failed call"
         finally:
             client.shutdown()
 
@@ -670,10 +708,12 @@ class TestWritableMode:
     def test_accepts_scoped_mutation_and_reads_back(self, graph_fixture: Path):
         client = _spawn(["--graph", str(graph_fixture), "--writable"])
         try:
-            client.call_tool(
+            ack = client.call_tool(
                 "cypher_query",
                 {"query": "CREATE (:Task {id: 't1', status: 'todo'})", "write_scope": ["Task"]},
             )
+            assert not _is_error(ack), "a mutation acknowledgement is a successful answer"
+            assert _text_content(ack).startswith("OK: 1 node(s) created")
             r = client.call_tool("cypher_query", {"query": "MATCH (t:Task) RETURN count(t) AS n"})
             assert "1" in _text_content(r)
         finally:
@@ -708,6 +748,7 @@ class TestWritableMode:
                 {"query": "CREATE (:Algorithm {id: 'a1'})", "write_scope": ["Task"]},
             )
             assert "write scope" in _text_content(r).lower()
+            assert _is_error(r), "a refused write is a failed call"
         finally:
             client.shutdown()
 
@@ -728,6 +769,7 @@ class TestWritableMode:
             r = client.call_tool("save_graph")
             text = _text_content(r)
             assert "Saved" in text and "node" in text  # message format check
+            assert not _is_error(r)
             assert src.stat().st_mtime > mtime_before
         finally:
             client.shutdown()
@@ -831,6 +873,7 @@ class TestSourceRootMode:
             r = client.call_tool("cypher_query", {"query": "MATCH (n) RETURN n"})
             text = _text_content(r)
             assert "No active graph" in text
+            assert _is_error(r), "no graph to query is a failed call"
         finally:
             client.shutdown()
 
@@ -1230,6 +1273,7 @@ class TestYamlManifest:
             r = client.call_tool("people_in_city", {"city": "Oslo"})
             text = _text_content(r)
             assert "Alice" in text and "Carol" in text
+            assert not _is_error(r)
             assert "Bob" not in text
             assert "Dave" not in text
         finally:
@@ -1732,7 +1776,9 @@ class TestReloadGraph:
             g.add_nodes(pd.DataFrame({"id": [9], "title": ["Zoe"], "city": ["Tromso"]}), "Person", "id", "title")
             g.save(str(graph_fixture))
 
-            reloaded = _text_content(client.call_tool("reload_graph"))
+            reload_result = client.call_tool("reload_graph")
+            assert not _is_error(reload_result)
+            reloaded = _text_content(reload_result)
             assert "1 nodes" in reloaded and "0 edges" in reloaded, reloaded
             assert str(graph_fixture) in reloaded, reloaded
             # The generation bump is what distinguishes a completed re-read
@@ -1741,6 +1787,19 @@ class TestReloadGraph:
 
             after = _text_content(client.call_tool("cypher_query", {"query": "MATCH (p:Person) RETURN p.title AS t"}))
             assert "Zoe" in after and "Alice" not in after, after
+        finally:
+            client.shutdown()
+
+    def test_a_failed_reload_is_an_error_envelope(self, graph_fixture: Path):
+        """The file is replaced by something unreadable: the served graph stays
+        active, and the call reports itself as failed rather than handing an
+        agent an error-shaped success."""
+        client = _spawn(["--graph", str(graph_fixture)])
+        try:
+            graph_fixture.write_bytes(b"not a kgl file")
+            failed = client.call_tool("reload_graph")
+            assert _is_error(failed)
+            assert _text_content(failed).startswith("reload_graph error: "), _text_content(failed)
         finally:
             client.shutdown()
 

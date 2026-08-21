@@ -73,6 +73,25 @@ impl OverviewDecorations {
     }
 }
 
+/// Apply a body decoration to whichever arm carries the text.
+///
+/// Every decoration this module applies — the rebuild-staleness warning, the
+/// bare-overview prefix and catalog hint — describes the *deployment*, not the
+/// outcome, so a failed call needs it exactly as much as a successful one: an
+/// error read against a graph the agent believes is fresh, or without the
+/// discovery hint that would let it recover, is the wrong kind of unhelpful.
+/// Decorating both arms is also what keeps the response text byte-identical to
+/// the pre-`isError` shape, where an error *was* the body.
+fn map_body(
+    body: Result<String, String>,
+    decorate: impl FnOnce(String) -> String,
+) -> Result<String, String> {
+    match body {
+        Ok(body) => Ok(decorate(body)),
+        Err(error) => Err(decorate(error)),
+    }
+}
+
 pub(crate) fn append_overview_section(rendered: &mut String, section: &str) {
     if section.is_empty() {
         return;
@@ -113,7 +132,7 @@ pub(crate) fn prepare_overview(
 /// the one whose graph is rebuilt by *someone else*, so it needs the refresh
 /// affordance most.
 pub fn register_graph_mode_tools(server: &mut McpServer, state: GraphState) {
-    server.register_typed_tool::<ReloadGraphArgs, _>(
+    server.register_typed_tool_fallible::<ReloadGraphArgs, _>(
         "reload_graph",
         "Re-read the served graph file from disk, replacing the in-memory graph — use this \
          when the file has been rebuilt by another process and queries are returning stale \
@@ -134,16 +153,16 @@ pub fn register_graph_mode_tools(server: &mut McpServer, state: GraphState) {
                         .generation()
                         .map(|g| format!(" Graph generation {g}."))
                         .unwrap_or_default();
-                    match state.schema() {
+                    Ok(match state.schema() {
                         Some((n, e)) => {
                             format!("Reloaded {path} ({n} nodes, {e} edges).{generation}")
                         }
                         None => format!("Reloaded {path}.{generation}"),
-                    }
+                    })
                 }
-                Err(e) => format!("reload_graph error: {e}"),
+                Err(e) => Err(format!("reload_graph error: {e}")),
             },
-            None => format!("reload_graph error: {NO_GRAPH}"),
+            None => Err(format!("reload_graph error: {NO_GRAPH}")),
         },
     );
 }
@@ -234,43 +253,54 @@ pub fn register(
         None => cypher_desc,
     };
     if writable {
-        server.register_typed_tool::<CypherArgs, _>("cypher_query", cypher_desc, move |args| {
-            let csv = csv.clone();
-            s.ensure_graph_fresh();
-            let codecs = s.value_codecs();
-            let scope = args.write_scope.clone();
-            let git_sha = args.git_sha.clone();
-            let modified_by = args.modified_by.clone();
-            let authz = WriteAuthz {
-                operator_scope: operator_scope.as_deref(),
-                agent_scope: scope.as_deref(),
-                git_sha: git_sha.as_deref(),
-                modified_by: modified_by.as_deref(),
-            };
-            let params = params_from_json(args.params.as_ref());
-            let body = s
-                .with_active_mut(|active| {
-                    run_cypher_write(active, &args.query, params, authz, codecs, csv.as_deref())
-                        .unwrap_or_else(|e| cypher_tool_error(&e))
-                })
-                .unwrap_or_else(|| NO_GRAPH.to_string());
-            s.with_rebuild_warning(body)
-        });
+        server.register_typed_tool_fallible::<CypherArgs, _>(
+            "cypher_query",
+            cypher_desc,
+            move |args| {
+                let csv = csv.clone();
+                s.ensure_graph_fresh();
+                let codecs = s.value_codecs();
+                let scope = args.write_scope.clone();
+                let git_sha = args.git_sha.clone();
+                let modified_by = args.modified_by.clone();
+                let authz = WriteAuthz {
+                    operator_scope: operator_scope.as_deref(),
+                    agent_scope: scope.as_deref(),
+                    git_sha: git_sha.as_deref(),
+                    modified_by: modified_by.as_deref(),
+                };
+                let params = params_from_json(args.params.as_ref());
+                let body = s
+                    .with_active_mut(|active| {
+                        run_cypher_write(active, &args.query, params, authz, codecs, csv.as_deref())
+                            .map_err(|e| cypher_tool_error(&e))
+                    })
+                    .unwrap_or_else(|| Err(NO_GRAPH.to_string()));
+                map_body(body, |body| s.with_rebuild_warning(body))
+            },
+        );
     } else {
-        server.register_typed_tool::<ReadCypherArgs, _>("cypher_query", cypher_desc, move |args| {
-            let csv = csv.clone();
-            s.ensure_graph_fresh();
-            let codecs = s.value_codecs();
-            let params = params_from_json(args.params.as_ref());
-            let body =
-                s.with_active(|g| run_cypher_tool(g, &args.query, params, codecs, csv.as_deref()));
-            s.with_rebuild_warning(body)
-        });
+        server.register_typed_tool_fallible::<ReadCypherArgs, _>(
+            "cypher_query",
+            cypher_desc,
+            move |args| {
+                let csv = csv.clone();
+                s.ensure_graph_fresh();
+                let codecs = s.value_codecs();
+                let params = params_from_json(args.params.as_ref());
+                let body = s
+                    .with_active(|g| {
+                        run_cypher_tool(g, &args.query, params, codecs, csv.as_deref())
+                    })
+                    .unwrap_or_else(|| Err(NO_GRAPH.to_string()));
+                map_body(body, |body| s.with_rebuild_warning(body))
+            },
+        );
     }
     let s = state.clone();
     let cleanup_temp = builtins.temp_cleanup_on_overview;
     let temp_dir = builtins.temp_dir.clone();
-    server.register_typed_tool::<OverviewArgs, _>(
+    server.register_typed_tool_fallible::<OverviewArgs, _>(
         "graph_overview",
         "Inspect and explore the active graph's schema — start here to understand a codebase \
          or dataset: node types, properties, connections, sample values, and a per-type \
@@ -280,14 +310,16 @@ pub fn register(
         move |args| {
             let is_bare = prepare_overview(&args, cleanup_temp, temp_dir.as_deref());
             s.ensure_graph_fresh();
-            let body = s.with_active(|g| run_overview(g, &args));
-            let body = s.with_rebuild_warning(body);
-            overview_decorations.render(body, is_bare)
+            let body = s
+                .with_active(|g| run_overview(g, &args))
+                .unwrap_or_else(|| Err(NO_GRAPH.to_string()));
+            let body = map_body(body, |body| s.with_rebuild_warning(body));
+            map_body(body, |body| overview_decorations.render(body, is_bare))
         },
     );
     if builtins.save_graph {
         let s = state.clone();
-        server.register_typed_tool::<SaveGraphArgs, _>(
+        server.register_typed_tool_fallible::<SaveGraphArgs, _>(
             "save_graph",
             "Persist the active graph to its source .kgl file (single-graph mode only).",
             move |_| {
@@ -296,7 +328,7 @@ pub fn register(
                 // graph's own Arc so `prepare_save`'s `Arc::make_mut` sees
                 // refcount 1 (no whole-graph deep copy per save).
                 s.with_active_mut(run_save)
-                    .unwrap_or_else(|| NO_GRAPH.to_string())
+                    .unwrap_or_else(|| Err(NO_GRAPH.to_string()))
             },
         );
     }
@@ -307,20 +339,20 @@ pub fn register(
     // them within one session.
     if builtins.writable {
         let s = state.clone();
-        server.register_typed_tool::<LoadGraphArgs, _>(
+        server.register_typed_tool_fallible::<LoadGraphArgs, _>(
             "load_graph",
             "Load a .kgl file as the new active graph (replaces the current one — \
              save_graph first to keep unsaved changes). Write-enabled servers only.",
             move |args| match s.load_kgl(Path::new(&args.path)) {
-                Ok(()) => match s.schema() {
+                Ok(()) => Ok(match s.schema() {
                     Some((n, e)) => format!("Loaded {} ({n} nodes, {e} edges).", args.path),
                     None => format!("Loaded {}.", args.path),
-                },
-                Err(e) => format!("load_graph error: {e}"),
+                }),
+                Err(e) => Err(format!("load_graph error: {e}")),
             },
         );
         let s = state.clone();
-        server.register_typed_tool::<CreateGraphArgs, _>(
+        server.register_typed_tool_fallible::<CreateGraphArgs, _>(
             "create_graph",
             "Create a fresh, empty graph bound to a path (its save_graph target) and \
              make it active. storage = memory (default) | mapped | disk. Write-enabled \
@@ -331,22 +363,19 @@ pub fn register(
                     .as_ref()
                     .map_or(StorageMode::Memory, StorageArg::mode);
                 match s.create_in_mode(Path::new(&args.path), mode) {
-                    Ok(()) => format!("Created empty graph at {} (active).", args.path),
-                    Err(e) => format!("create_graph error: {e}"),
+                    Ok(()) => Ok(format!("Created empty graph at {} (active).", args.path)),
+                    Err(e) => Err(format!("create_graph error: {e}")),
                 }
             },
         );
         let s = state;
-        server.register_typed_tool::<SaveGraphAsArgs, _>(
+        server.register_typed_tool_fallible::<SaveGraphAsArgs, _>(
             "save_graph_as",
             "Save the active graph to an explicit path and rebind the save target there. \
              Write-enabled servers only.",
             move |args| {
                 s.ensure_graph_fresh();
-                match s.save_as(Path::new(&args.path)) {
-                    Ok(msg) => msg,
-                    Err(e) => e,
-                }
+                s.save_as(Path::new(&args.path))
             },
         );
     }

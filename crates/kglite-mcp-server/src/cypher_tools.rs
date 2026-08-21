@@ -28,10 +28,16 @@ use crate::tools::GraphState;
 type DynFut<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
 /// Closure shape for executing a Cypher template with named arguments.
-/// Receives the raw template string + the agent's argument map and
-/// returns the rendered tool body (or an error string from the runner).
+/// Receives the raw template string + the agent's argument map and returns
+/// the rendered tool body.
+///
+/// `Err` is the agent-facing failure text for a template that did not answer
+/// — a syntax error in the manifest's own query, a mutation the read seam
+/// refuses, no active graph. The route surfaces it in an MCP error envelope
+/// (`isError: true`) with the text unchanged, so a programmatic client can
+/// branch on the failure instead of pattern-matching prose.
 pub type CypherRunner =
-    Arc<dyn Fn(&str, &Map<String, Value>) -> Result<String> + Send + Sync + 'static>;
+    Arc<dyn Fn(&str, &Map<String, Value>) -> Result<String, String> + Send + Sync + 'static>;
 
 /// Build a runner backed by the given `GraphState`. The runner forwards
 /// to [`GraphState::run_cypher_template`] which calls into the pure-Rust
@@ -43,7 +49,7 @@ pub fn make_runner(
     csv_http: Option<Arc<crate::csv_http::CsvHttpConfig>>,
 ) -> CypherRunner {
     Arc::new(move |template: &str, args: &Map<String, Value>| {
-        Ok(state.run_cypher_template(template, args, csv_http.as_deref()))
+        state.run_cypher_template(template, args, csv_http.as_deref())
     })
 }
 
@@ -90,22 +96,23 @@ pub fn register_cypher_tools(
             Arc::new(schema),
         );
         let template = spec.cypher.clone();
-        let name = spec.name.clone();
         let runner = runner.clone();
         router.add_route(ToolRoute::new_dyn(
             attr,
             move |ctx: ToolCallContext<'_, McpServer>| -> DynFut<'_, Result<CallToolResponse, McpError>> {
                 let runner = runner.clone();
                 let template = template.clone();
-                let name = name.clone();
                 let arguments = ctx.arguments.clone();
                 Box::pin(async move {
                     let args: Map<String, Value> = arguments.unwrap_or_default();
-                    let body = match runner(&template, &args) {
-                        Ok(text) => text,
-                        Err(e) => format!("cypher tool {name:?} error: {e}"),
+                    // Same text either way — only the envelope differs, so an
+                    // agent reads the identical failure prose while a
+                    // programmatic client can branch on `isError`.
+                    let result = match runner(&template, &args) {
+                        Ok(text) => CallToolResult::success(vec![ContentBlock::text(text)]),
+                        Err(text) => CallToolResult::error(vec![ContentBlock::text(text)]),
                     };
-                    Ok(CallToolResult::success(vec![ContentBlock::text(body)]).into())
+                    Ok(result.into())
                 })
             },
         ));
@@ -118,6 +125,7 @@ mod tests {
     use super::*;
     use crate::{WorkspaceGraphHooks, WorkspaceGraphMode, WorkspaceGraphResult};
     use kglite::api::storage::{new_dir_graph_in_mode, StorageMode};
+    use rmcp::ServiceExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
@@ -160,5 +168,65 @@ mod tests {
 
         assert_eq!(builds.load(Ordering::SeqCst), 2, "dirty graph was rebuilt");
         assert_eq!(output, "1 row(s):\ngeneration\n2\n");
+    }
+
+    fn manifest_with_two_templates() -> (tempfile::TempDir, Manifest) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mcp.yaml");
+        std::fs::write(
+            &path,
+            "tools:\n\
+             \x20 - name: answers\n\
+             \x20   description: Answers.\n\
+             \x20   cypher: RETURN 1 AS n\n\
+             \x20 - name: broken\n\
+             \x20   description: Does not parse.\n\
+             \x20   cypher: RETURN @\n",
+        )
+        .expect("write manifest");
+        let manifest = mcp_methods::server::load_manifest(&path).expect("load manifest");
+        (dir, manifest)
+    }
+
+    /// A manifest template that cannot run is a failed call, not an answer —
+    /// the same line KGLite's own routes are held to. The text an agent reads
+    /// is the engine's, unchanged; only the envelope distinguishes them.
+    #[tokio::test]
+    async fn a_manifest_template_that_fails_reports_an_error_envelope() {
+        let (_dir, manifest) = manifest_with_two_templates();
+        let state = GraphState::default();
+        state
+            .create_in_mode(
+                &_dir.path().join("empty.kgl"),
+                kglite::api::storage::StorageMode::Memory,
+            )
+            .expect("active graph");
+        let mut server = McpServer::new(Default::default());
+        register_cypher_tools(&mut server, &manifest, make_runner(state, None))
+            .expect("register manifest tools");
+
+        let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
+        let server_handle = tokio::spawn(async move { server.serve(server_transport).await });
+        let client = ().serve(client_transport).await.expect("start MCP client");
+
+        let ok = client
+            .call_tool(rmcp::model::CallToolRequestParams::new("answers"))
+            .await
+            .expect("call answering template");
+        assert!(
+            matches!(ok.is_error, None | Some(false)),
+            "an answering template is a success"
+        );
+
+        let failed = client
+            .call_tool(rmcp::model::CallToolRequestParams::new("broken"))
+            .await
+            .expect("call broken template");
+        assert_eq!(failed.is_error, Some(true));
+        let text = failed.content[0].as_text().expect("text body").text.clone();
+        assert!(text.starts_with("Cypher syntax error"), "{text}");
+
+        client.cancel().await.expect("stop MCP client");
+        server_handle.abort();
     }
 }

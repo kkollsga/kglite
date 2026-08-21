@@ -201,6 +201,11 @@ impl GraphState {
     }
 
     /// Append the rebuild-failure warning (if any) to a tool response.
+    ///
+    /// Applied to the error arm too (see [`map_body`]): a stale graph is
+    /// exactly as relevant to a failed call as to a successful one, and
+    /// keeping the note on both arms is what makes the text byte-identical to
+    /// the pre-`isError` responses, which carried the error inside the body.
     pub(crate) fn with_rebuild_warning(&self, body: String) -> String {
         match self.rebuild_error_note() {
             Some(note) => format!("{body}\n\n{note}"),
@@ -452,15 +457,18 @@ impl GraphState {
             .unwrap_or(false)
     }
 
-    pub(crate) fn with_active<F>(&self, f: F) -> String
+    /// Borrow the active graph for a read, or `None` when no graph is loaded.
+    ///
+    /// The no-graph substitution belongs to the caller: a tool route turns it
+    /// into an `Err(NO_GRAPH)` error envelope, while an identity or
+    /// introspection read wants the `Option` itself. Read-side twin of
+    /// [`Self::with_active_mut`].
+    pub(crate) fn with_active<F, T>(&self, f: F) -> Option<T>
     where
-        F: FnOnce(&ActiveGraph) -> String,
+        F: FnOnce(&ActiveGraph) -> T,
     {
         let guard = read_lock(&self.inner);
-        match guard.as_ref() {
-            Some(active) => f(active),
-            None => NO_GRAPH.to_string(),
-        }
+        guard.as_ref().map(f)
     }
 
     /// Borrow the active `KnowledgeGraph` for read-only inspection.

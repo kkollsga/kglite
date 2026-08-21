@@ -44,19 +44,23 @@ pub(crate) fn wipe_temp_dir(dir: &std::path::Path) {
     }
 }
 
+/// `Err` is a query that did not answer — a syntax error, an execution
+/// failure, the read-only refusal — carrying the exact text the agent reads.
+/// The route puts it in an MCP error envelope; the bytes are the same either
+/// way.
 pub(crate) fn run_cypher_tool(
     graph: &ActiveGraph,
     query: &str,
     params: HashMap<String, kglite::api::Value>,
     value_codecs: Option<&[ValueCodec]>,
     csv_http: Option<&crate::csv_http::CsvHttpConfig>,
-) -> String {
+) -> Result<String, String> {
     match run_cypher_inner(&graph.kg, query, params, value_codecs, csv_http) {
         // Compact identity footer so a query result self-identifies its
         // graph (agents often go straight to cypher_query without a prior
         // graph_overview, where a stale active root would otherwise hide).
-        Ok(s) => format!("{s}{}", graph.identity_footer()),
-        Err(e) => cypher_tool_error(&e),
+        Ok(s) => Ok(format!("{s}{}", graph.identity_footer())),
+        Err(e) => Err(cypher_tool_error(&e)),
     }
 }
 
@@ -156,7 +160,9 @@ pub(crate) fn format_mutation_ack(result: &cypher::CypherResult) -> String {
     }
 }
 
-pub(crate) fn run_overview(graph: &ActiveGraph, args: &OverviewArgs) -> String {
+/// `Err` is an overview the engine could not compute — an unknown type, a
+/// malformed drill-down — including its near-miss suggestion.
+pub(crate) fn run_overview(graph: &ActiveGraph, args: &OverviewArgs) -> Result<String, String> {
     let conn = parse_connection_detail(args.connections.as_ref());
     let cy = parse_cypher_detail(args.cypher.as_ref());
     let fluent = FluentDetail::Off;
@@ -180,8 +186,8 @@ pub(crate) fn run_overview(graph: &ActiveGraph, args: &OverviewArgs) -> String {
         // Prepend a server-level identity header so the active root + build
         // time are the first thing an agent reads — staleness after a root
         // swap is visible before any structural claim is trusted.
-        Ok(s) => format!("<active_graph{}/>\n{s}", graph.identity_attrs()),
-        Err(e) => format!("graph_overview error: {e}"),
+        Ok(s) => Ok(format!("<active_graph{}/>\n{s}", graph.identity_attrs())),
+        Err(e) => Err(format!("graph_overview error: {e}")),
     }
 }
 
@@ -215,9 +221,11 @@ pub(crate) fn parse_cypher_detail(v: Option<&DetailSelection>) -> CypherDetail {
     }
 }
 
-pub(crate) fn run_save(graph: &mut ActiveGraph) -> String {
+/// `Err` is a graph that was not persisted — no bound path, or a write the
+/// engine refused.
+pub(crate) fn run_save(graph: &mut ActiveGraph) -> Result<String, String> {
     let Some(path) = graph.source_path.as_ref() else {
-        return "save_graph requires --graph mode (no source path bound).".to_string();
+        return Err("save_graph requires --graph mode (no source path bound).".to_string());
     };
     let path_str = path.to_string_lossy().into_owned();
     // `kglite::api::io::save_graph` dispatches on storage mode (mirrors
@@ -237,11 +245,11 @@ pub(crate) fn run_save(graph: &mut ActiveGraph) -> String {
         Ok(()) => {
             // `compute_schema` only needs `&DirGraph` — no second make_mut.
             let overview = compute_schema(graph.kg.dir());
-            format!(
+            Ok(format!(
                 "Saved {path_str} ({} nodes, {} edges).",
                 overview.node_count, overview.edge_count
-            )
+            ))
         }
-        Err(e) => format!("save_graph error: {e}"),
+        Err(e) => Err(format!("save_graph error: {e}")),
     }
 }

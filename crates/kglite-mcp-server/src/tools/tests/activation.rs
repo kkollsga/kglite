@@ -56,7 +56,9 @@ fn revision_build_swaps_slot_and_records_revisions() {
         "merged multi-rev Function nodes should carry a `revs` list prop"
     );
     // The active slot records the resolved rev-set for the identity surfaces.
-    let attrs = gs.with_active(|a| a.identity_attrs());
+    let attrs = gs
+        .with_active(|a| a.identity_attrs())
+        .expect("active graph");
     assert!(
         attrs.contains(&format!("revs=\"{},{}\"", s1, s2)),
         "identity header should name the loaded revs; got: {attrs}"
@@ -110,7 +112,9 @@ fn single_rev_build_carries_no_revs_attr_or_steer() {
     std::fs::write(dir.join("m.py"), "def foo():\n    return 1\n").unwrap();
     gs.build_workspace_graph(&dir, None)
         .expect("single-rev build");
-    let attrs = gs.with_active(|a| a.identity_attrs());
+    let attrs = gs
+        .with_active(|a| a.identity_attrs())
+        .expect("active graph");
     assert!(
         !attrs.contains("revs="),
         "no revs attr for single-rev: {attrs}"

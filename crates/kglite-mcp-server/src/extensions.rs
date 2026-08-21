@@ -99,7 +99,15 @@ impl DomainGraphState {
         query: &str,
         params: &serde_json::Map<String, serde_json::Value>,
     ) -> String {
-        self.inner.run_cypher_template(query, params, None)
+        // Domain tools register through `Fn(T) -> String` (see
+        // [`DomainToolRegistry::register_typed_tool`]), so the errors-as-values
+        // contract is theirs: a failed read arrives as the same text a
+        // successful one would have carried, for the handler to render however
+        // its own tool prose calls for. KGLite's own routes take the fallible
+        // path and flip `isError` instead.
+        self.inner
+            .run_cypher_template(query, params, None)
+            .unwrap_or_else(|error| error)
     }
 }
 

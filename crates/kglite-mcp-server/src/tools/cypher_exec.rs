@@ -15,20 +15,25 @@ impl GraphState {
     /// Run a parameterised Cypher template against the active graph.
     /// Used by the YAML-declared `tools[].cypher` registration path
     /// (see [`crate::cypher_tools::register_cypher_tools`]).
+    ///
+    /// `Err` carries the agent-facing failure text — the same bytes this
+    /// returned inside `Ok` before the fallible seam landed, now separated so
+    /// the route can put it in an MCP error envelope (`isError: true`) instead
+    /// of an answer a programmatic client cannot tell from one.
     pub fn run_cypher_template(
         &self,
         template: &str,
         args: &serde_json::Map<String, serde_json::Value>,
         csv_http: Option<&crate::csv_http::CsvHttpConfig>,
-    ) -> String {
+    ) -> Result<String, String> {
         match self.execute_cypher_read(template, params_from_json(Some(args))) {
             Ok(outcome) => render_cypher_output(
                 &outcome.result,
                 outcome.output_format == cypher::OutputFormat::Csv,
                 csv_http,
             )
-            .unwrap_or_else(|error| cypher_tool_error(&error)),
-            Err(error) => legacy_cypher_error(&error),
+            .map_err(|error| cypher_tool_error(&error)),
+            Err(error) => Err(legacy_cypher_error(&error)),
         }
     }
 

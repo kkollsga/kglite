@@ -38,11 +38,13 @@ fn lifecycle_create_mutate_save_load() {
 
 /// The mode the active graph is actually running on.
 fn active_mode(state: &GraphState) -> String {
-    state.with_active(|active| {
-        kglite::api::storage::live_storage_mode(active.kg.dir())
-            .as_str()
-            .to_string()
-    })
+    state
+        .with_active(|active| {
+            kglite::api::storage::live_storage_mode(active.kg.dir())
+                .as_str()
+                .to_string()
+        })
+        .expect("active graph")
 }
 
 /// Seed a saved graph at `path` in `mode`, then release it.

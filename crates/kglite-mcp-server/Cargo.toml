@@ -44,7 +44,14 @@ path = "src/main.rs"
 # widens a deployment's agent-visible surface without its manifest saying
 # so. From 0.4.5 that needs `builtins.github: true`, which is what our
 # tools_allow contract and the smoke suite's default-off arms assert.
-mcp-methods = { version = "0.4.5", default-features = false, features = ["server"] }
+# 0.4.6 is the compile floor now: `register_typed_tool_fallible` (the
+# `Fn(T) -> Result<String, String>` registration behind every KGLite route
+# that can genuinely fail) does not exist below it, and it is what makes a
+# failed tool call report `isError: true` to a programmatic client instead
+# of an error-shaped success body. Same release also runs the result
+# postprocess hook on the error arm, so our identity/rebuild footers still
+# reach an agent reading a failure.
+mcp-methods = { version = "0.4.6", default-features = false, features = ["server"] }
 
 # kglite (pure-Rust core) — no pyo3 in the resulting binary, no
 # libpython link. The 0.10.1 lift moved KnowledgeGraph +

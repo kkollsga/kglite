@@ -33,7 +33,7 @@ fn save_does_not_deep_copy_the_active_graph() {
     active.source_path = Some(path.clone());
 
     let before = Arc::as_ptr(active.kg.dir());
-    let msg = run_save(&mut active);
+    let msg = run_save(&mut active).expect("save must succeed");
     assert!(msg.starts_with("Saved"), "save must succeed: {msg}");
     assert_eq!(
         Arc::as_ptr(active.kg.dir()),

@@ -747,6 +747,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Behaviour change for programmatic MCP clients: a tool call that fails now
+  reports `isError: true`.** Cypher syntax and execution errors, an unknown
+  procedure, the read-only refusal, a write-scope refusal (the agent's own
+  scope or the operator's pin), no active graph, a failed
+  `reload_graph`/`save_graph`/`load_graph`/`create_graph`/`save_graph_as`, an
+  overview the engine could not compute, and a manifest `tools[].cypher`
+  template that could not run all travel in an MCP error envelope instead of a
+  success envelope whose body happened to contain error text. The text itself
+  is unchanged — the teaching prose, the near-miss suggestions, the identity
+  and staleness footers all read exactly as before, on both arms — so an agent
+  reading the response sees no difference; a client that branches on the flag
+  no longer has to pattern-match prose. **Successful-but-empty and advisory
+  outcomes stay successful:** zero rows (`No results.`), the engine's warning
+  block, mutation acknowledgements, and `EXPLAIN` output. An empty result is an
+  answer. Invalid tool *arguments* (a call the framework could not even hand to
+  the handler) also flip, via mcp-methods 0.4.6, which is now the floor.
+
 - **Performance: a variable-length expansion feeding a distinct-only consumer
   no longer materialises duplicate target rows.** A multi-seed reachability
   query — `MATCH (p:Person)-[:KNOWS*1..3]->(f) WHERE p.id IN $ids RETURN

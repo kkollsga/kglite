@@ -13,6 +13,7 @@ use crate::tools::*;
 
 mod activation;
 mod cypher;
+mod error_envelope;
 mod lifecycle;
 mod overview;
 mod rebuild;
@@ -155,6 +156,22 @@ fn state_with_active(active: ActiveGraph) -> GraphState {
     let state = GraphState::default();
     *write_lock(&state.inner) = Some(active);
     state
+}
+
+/// A minimal two-type graph: enough for a label typo to have a near miss and
+/// for a scoped write to be in or out of scope. Shared by the Cypher-seam and
+/// error-envelope suites.
+fn active_with_vessel() -> ActiveGraph {
+    let mut active = fresh_active();
+    let params = std::collections::HashMap::new();
+    let opts = kglite::api::session::ExecuteOptions::eager(&params);
+    kglite::api::session::execute_mut(
+        kglite::api::make_dir_graph_mut(active.kg.dir_mut()),
+        "CREATE (:Vessel {id: 1})-[:OPERATED_BY]->(:Operator {id: 2})",
+        &opts,
+    )
+    .expect("seed");
+    active
 }
 
 fn tmp_kgl(tag: &str) -> std::path::PathBuf {
