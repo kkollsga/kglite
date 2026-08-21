@@ -617,3 +617,310 @@ def test_bench_return_node_rel_node_100(benchmark, node_projection_graph):
         node_projection_graph.cypher,
         "MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN a, r, b LIMIT 100",
     )
+
+
+# ---------------------------------------------------------------------------
+# Variable-length traversal (part-6 program, phase V1)
+# ---------------------------------------------------------------------------
+#
+# These cells are the measurement instrument for the var-length work: `*k..k`
+# lowering (V2), the EXISTS witness early-exit (V3), and the DISTINCT pushdown
+# in the UNWIND branch (V4). Each expensive cell ships with a cheap control
+# that the same phase must NOT move, so a capture can tell a real win from the
+# machine drifting under it.
+#
+# Captured *after* the V0 soundness fix on purpose. Before V0 the fast
+# var-length path answered distance reachability where Cypher asks for trail
+# reachability, so a pre-V0 number is a measurement of a different — and wrong
+# — computation and cannot baseline anything.
+#
+# NOTE ON ASSERTIONS. `make bench-check` is not the only consumer of this file:
+# CI copies it outside the checkout and runs it with `-m benchmark` against the
+# published kglite 0.13.2 wheel to get a same-runner reference leg. 0.13.2
+# predates V0, so its var-length answers differ from this tree's (6856 vs 6867
+# reachable on `khop_social_graph`). Absolute expectations therefore live in the
+# unmarked companion tests below, which that `-m benchmark` run deselects; the
+# benchmark bodies assert only version-independent invariants.
+
+
+def _scale_free_edges(node_count: int, attachments: int = 2) -> tuple[list[int], list[int]]:
+    """Deterministic preferential attachment — a social-graph degree shape.
+
+    Each new node attaches to `attachments` distinct existing nodes drawn from
+    a repeated-node list, so the draw probability is proportional to degree and
+    the result carries hubs (the property that makes k-hop reachability large
+    and traversal cost interesting). The draw uses an inlined LCG rather than
+    `random.Random`: the fixture must produce byte-identical graphs on every
+    interpreter this harness is run under, including the frozen CI copy and the
+    3.12 reference environment, and only arithmetic guarantees that.
+
+    Returned as a mutual (both-directions) edge list. A one-directional
+    attachment graph bounds 3-hop reach at `attachments ** 3` nodes, which
+    measures call overhead rather than traversal.
+    """
+    repeated = list(range(attachments))
+    src: list[int] = []
+    dst: list[int] = []
+    state = 20_260_821
+    for new in range(attachments, node_count):
+        chosen: list[int] = []
+        while len(chosen) < attachments:
+            state = (state * 1_103_515_245 + 12_345) & 0x7FFF_FFFF
+            candidate = repeated[state % len(repeated)]
+            if candidate not in chosen:
+                chosen.append(candidate)
+        for target in chosen:
+            src.append(new)
+            dst.append(target)
+            repeated.append(target)
+        repeated.extend([new] * attachments)
+    return src + dst, dst + src
+
+
+def _social_graph(node_count: int) -> KnowledgeGraph:
+    """`node_count` Person nodes joined by mutual KNOWS edges."""
+    src, dst = _scale_free_edges(node_count)
+    graph = KnowledgeGraph()
+    graph.add_nodes(
+        pd.DataFrame(
+            {
+                "pid": list(range(node_count)),
+                "name": [f"P{i}" for i in range(node_count)],
+            }
+        ),
+        "Person",
+        "pid",
+        "name",
+    )
+    graph.add_connections(
+        pd.DataFrame({"s": src, "d": dst}),
+        "KNOWS",
+        "Person",
+        "s",
+        "Person",
+        "d",
+    )
+    return graph
+
+
+#: 50 seed ids spread across `khop_social_graph`. Arithmetic rather than
+#: sampled, for the same reproducibility reason as `_scale_free_edges`; the
+#: stride is coprime with the node count over 50 terms, so they are distinct.
+KHOP_SEED_IDS = [(i * 197 + 13) % 10_000 for i in range(50)]
+
+
+@pytest.fixture(scope="module")
+def khop_social_graph():
+    """10k Person nodes, ~40k mutual KNOWS — the multi-seed k-hop shape."""
+    return _social_graph(10_000)
+
+
+@pytest.fixture(scope="module")
+def two_hop_social_graph():
+    """600 Person nodes — sized so the *unanchored* two-hop count stays a
+    low-millisecond cell.
+
+    The `*2..2`-vs-fixed gap only exists on the unanchored spelling: with an
+    id-anchored source set both spellings collapse to the same per-source
+    expansion and measure nothing (measured 1.02x at 50 seeds, against 11x
+    unanchored). Keeping the source set whole is what makes this cell a
+    lowering target, so the node count carries the runtime budget instead.
+    """
+    return _social_graph(600)
+
+
+@pytest.mark.benchmark
+def test_bench_khop3_in_list_count_distinct(benchmark, khop_social_graph):
+    """50-seed 3-hop reach, counted distinct — the eval's reported shape.
+
+    The single-pattern spelling with the IN-list on the same MATCH: this is the
+    first-MATCH branch, the one that already has the DISTINCT pushdown. Paired
+    with `khop3_unwind_distinct`, which reaches the same answer through the
+    UNWIND branch (V4).
+    """
+
+    def query_and_consume():
+        return khop_social_graph.cypher(
+            "MATCH (p:Person)-[:KNOWS*1..3]->(f:Person) WHERE p.id IN $ids RETURN count(DISTINCT f) AS reached",
+            params={"ids": KHOP_SEED_IDS},
+        ).to_list()
+
+    result = benchmark(query_and_consume)
+    assert result[0]["reached"] > 1_000
+
+
+@pytest.mark.benchmark
+def test_bench_khop3_unwind_distinct(benchmark, khop_social_graph):
+    """The UNWIND spelling of `khop3_in_list_count_distinct`'s answer.
+
+    Self-controlling pair: the two cells compute the same number over the same
+    graph, so the ratio between them is the branch difference and nothing else.
+    Closing that ratio is V4's stop rule.
+    """
+
+    def query_and_consume():
+        return khop_social_graph.cypher(
+            "UNWIND $ids AS i MATCH (p:Person {id: i})-[:KNOWS*1..3]->(f:Person) RETURN count(DISTINCT f) AS reached",
+            params={"ids": KHOP_SEED_IDS},
+        ).to_list()
+
+    result = benchmark(query_and_consume)
+    assert result[0]["reached"] > 1_000
+
+
+@pytest.mark.benchmark
+def test_bench_var_length_2_2_count_star(benchmark, two_hop_social_graph):
+    """`*2..2` counted per path — the `*k..k` lowering target (V2).
+
+    `count(*)` is not dedup-safe, so this is the per-path expansion under trail
+    semantics, exactly what the fixed spelling below computes by a different
+    route. V2 ships when this cell is within 1.2x of that control.
+    """
+
+    def query_and_consume():
+        return two_hop_social_graph.cypher(
+            "MATCH (p:Person)-[:KNOWS*2..2]->(f:Person) RETURN count(*) AS paths"
+        ).to_list()
+
+    result = benchmark(query_and_consume)
+    assert result[0]["paths"] > 1_000
+
+
+@pytest.mark.benchmark
+def test_bench_fixed_two_hop_count_star(benchmark, two_hop_social_graph):
+    """Explicit two-hop control for `var_length_2_2_count_star`.
+
+    Relationship uniqueness inside one MATCH makes this the same set of paths
+    the `*2..2` spelling must produce; the companion test pins that equality.
+    A V2 that moves this cell has changed the fixed-hop path, not lowered the
+    variable-length one.
+    """
+
+    def query_and_consume():
+        return two_hop_social_graph.cypher(
+            "MATCH (p:Person)-[:KNOWS]->(x:Person)-[:KNOWS]->(f:Person) RETURN count(*) AS paths"
+        ).to_list()
+
+    result = benchmark(query_and_consume)
+    assert result[0]["paths"] > 1_000
+
+
+@pytest.mark.benchmark
+def test_bench_exists_var_length_witness(benchmark, khop_social_graph):
+    """`EXISTS { (p)-[:KNOWS*1..3]->(:Person) }` — one witness is enough.
+
+    The pattern predicate needs a single match to answer, but the var-length
+    expansion behind it runs to completion for every candidate row. V3's stop
+    rule is this cell within 2x of the fixed-hop control below.
+    """
+
+    def query_and_consume():
+        return khop_social_graph.cypher(
+            "MATCH (p:Person) WHERE p.id IN $ids AND EXISTS { (p)-[:KNOWS*1..3]->(:Person) } "
+            "RETURN count(p) AS witnessed",
+            params={"ids": KHOP_SEED_IDS},
+        ).to_list()
+
+    result = benchmark(query_and_consume)
+    assert result[0]["witnessed"] == len(KHOP_SEED_IDS)
+
+
+@pytest.mark.benchmark
+def test_bench_exists_fixed_hop(benchmark, khop_social_graph):
+    """Single-hop EXISTS control for `exists_var_length_witness`.
+
+    Same candidate rows, same predicate shape, no variable-length expansion —
+    so it is the cost of everything *except* the thing V3 changes.
+    """
+
+    def query_and_consume():
+        return khop_social_graph.cypher(
+            "MATCH (p:Person) WHERE p.id IN $ids AND EXISTS { (p)-[:KNOWS]->(:Person) } RETURN count(p) AS witnessed",
+            params={"ids": KHOP_SEED_IDS},
+        ).to_list()
+
+    result = benchmark(query_and_consume)
+    assert result[0]["witnessed"] == len(KHOP_SEED_IDS)
+
+
+# ---------------------------------------------------------------------------
+# Companion correctness tests for the var-length cells
+# ---------------------------------------------------------------------------
+#
+# Unmarked on purpose: `-m benchmark` deselects them, which keeps them out of
+# both `make bench-check` and CI's 0.13.2 reference leg, while `make test`
+# still runs them. They are what makes the benchmark pairs trustworthy — a
+# self-controlling pair whose two halves stopped computing the same answer is
+# a ratio between two unrelated numbers.
+
+
+def test_khop3_spellings_agree(khop_social_graph):
+    """All three spellings of "3-hop reach from 50 seeds" return one answer.
+
+    The two-MATCH spelling is included because it is the shape V0's Bug B was
+    about: a second MATCH whose consumer is a plain projection was getting the
+    first clause's dedup proof applied to it.
+    """
+    params = {"ids": KHOP_SEED_IDS}
+    single = khop_social_graph.cypher(
+        "MATCH (p:Person)-[:KNOWS*1..3]->(f:Person) WHERE p.id IN $ids RETURN count(DISTINCT f) AS reached",
+        params=params,
+    ).to_list()
+    two_match = khop_social_graph.cypher(
+        "MATCH (p:Person) WHERE p.id IN $ids MATCH (p)-[:KNOWS*1..3]->(f:Person) RETURN count(DISTINCT f) AS reached",
+        params=params,
+    ).to_list()
+    unwind = khop_social_graph.cypher(
+        "UNWIND $ids AS i MATCH (p:Person {id: i})-[:KNOWS*1..3]->(f:Person) RETURN count(DISTINCT f) AS reached",
+        params=params,
+    ).to_list()
+
+    assert single == two_match == unwind
+    # Not a tautology: a shared bug returning 0 everywhere would satisfy the
+    # equality above. The seeds reach most of a 10k graph at three hops.
+    assert single[0]["reached"] > 5_000
+
+
+def test_var_length_2_2_matches_fixed_two_hop(two_hop_social_graph):
+    """`*2..2` and the explicit two-hop spelling count the same paths.
+
+    Both are trails: relationship uniqueness inside a single MATCH forbids
+    reusing an edge, and `*2..2` enforces the same across its hops. The pair is
+    only a lowering target while this holds — V2 rewrites one into the other.
+    """
+    var_length = two_hop_social_graph.cypher(
+        "MATCH (p:Person)-[:KNOWS*2..2]->(f:Person) RETURN count(*) AS paths"
+    ).to_list()
+    fixed = two_hop_social_graph.cypher(
+        "MATCH (p:Person)-[:KNOWS]->(x:Person)-[:KNOWS]->(f:Person) RETURN count(*) AS paths"
+    ).to_list()
+
+    assert var_length == fixed
+    assert var_length[0]["paths"] > 1_000
+
+
+def test_exists_var_length_matches_fixed_hop(khop_social_graph):
+    """The two EXISTS cells answer the same question on this fixture.
+
+    Semantics differ in general — "reachable within 3 hops" is weaker than "has
+    an outgoing edge". They coincide here because the mutual attachment graph
+    leaves no isolated node, which the first assertion pins: if a future fixture
+    change introduced one, this test fails rather than the control quietly
+    drifting into measuring a different row set.
+    """
+    isolated = khop_social_graph.cypher(
+        "MATCH (p:Person) WHERE NOT EXISTS { (p)-[:KNOWS]->(:Person) } RETURN count(p) AS n"
+    ).to_list()
+    assert isolated == [{"n": 0}]
+
+    params = {"ids": KHOP_SEED_IDS}
+    var_length = khop_social_graph.cypher(
+        "MATCH (p:Person) WHERE p.id IN $ids AND EXISTS { (p)-[:KNOWS*1..3]->(:Person) } RETURN count(p) AS witnessed",
+        params=params,
+    ).to_list()
+    fixed = khop_social_graph.cypher(
+        "MATCH (p:Person) WHERE p.id IN $ids AND EXISTS { (p)-[:KNOWS]->(:Person) } RETURN count(p) AS witnessed",
+        params=params,
+    ).to_list()
+
+    assert var_length == fixed == [{"witnessed": len(KHOP_SEED_IDS)}]

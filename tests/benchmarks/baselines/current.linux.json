@@ -1289,6 +1289,216 @@
         "total": 1.0455547099992941,
         "iterations": 1
       }
+    },
+    {
+      "group": null,
+      "name": "test_bench_khop3_in_list_count_distinct",
+      "fullname": "test_bench_core.py::test_bench_khop3_in_list_count_distinct",
+      "params": null,
+      "param": null,
+      "extra_info": {},
+      "options": {
+        "disable_gc": false,
+        "timer": "perf_counter",
+        "min_rounds": 100,
+        "max_time": 1.0,
+        "min_time": 5e-06,
+        "warmup": 20
+      },
+      "stats": {
+        "min": 0.03023621243191883,
+        "max": 0.036800399859203026,
+        "mean": 0.03332288042870313,
+        "stddev": 0.0014316744347440792,
+        "rounds": 124,
+        "median": 0.033318515092832963,
+        "iqr": 0.0019580418040277435,
+        "q1": 0.03227315129188355,
+        "q3": 0.03423119309591129,
+        "iqr_outliers": 0,
+        "stddev_outliers": 45,
+        "outliers": "45;0",
+        "ld15iqr": 0.03023621243191883,
+        "hd15iqr": 0.036800399859203026,
+        "ops": 30.009410565199406,
+        "total": 4.132037173159188,
+        "iterations": 1
+      }
+    },
+    {
+      "group": null,
+      "name": "test_bench_khop3_unwind_distinct",
+      "fullname": "test_bench_core.py::test_bench_khop3_unwind_distinct",
+      "params": null,
+      "param": null,
+      "extra_info": {},
+      "options": {
+        "disable_gc": false,
+        "timer": "perf_counter",
+        "min_rounds": 100,
+        "max_time": 1.0,
+        "min_time": 5e-06,
+        "warmup": 20
+      },
+      "stats": {
+        "min": 0.019610011047916487,
+        "max": 0.023048512637615204,
+        "mean": 0.020360289277303628,
+        "stddev": 0.0005140679078375868,
+        "rounds": 194,
+        "median": 0.020328180518117734,
+        "iqr": 0.0005923123564571142,
+        "q1": 0.020005701296031474,
+        "q3": 0.02059801365248859,
+        "iqr_outliers": 5,
+        "stddev_outliers": 51,
+        "outliers": "51;5",
+        "ld15iqr": 0.019610011047916487,
+        "hd15iqr": 0.02159283744986169,
+        "ops": 49.11521572116057,
+        "total": 3.949896119796904,
+        "iterations": 1
+      }
+    },
+    {
+      "group": null,
+      "name": "test_bench_var_length_2_2_count_star",
+      "fullname": "test_bench_core.py::test_bench_var_length_2_2_count_star",
+      "params": null,
+      "param": null,
+      "extra_info": {},
+      "options": {
+        "disable_gc": false,
+        "timer": "perf_counter",
+        "min_rounds": 100,
+        "max_time": 1.0,
+        "min_time": 5e-06,
+        "warmup": 20
+      },
+      "stats": {
+        "min": 0.015136547363363206,
+        "max": 0.01774126391974278,
+        "mean": 0.015488649050049222,
+        "stddev": 0.00033537413000564686,
+        "rounds": 257,
+        "median": 0.015387937647756188,
+        "iqr": 0.0003257289819885045,
+        "q1": 0.015292795140703674,
+        "q3": 0.01561852412269218,
+        "iqr_outliers": 9,
+        "stddev_outliers": 21,
+        "outliers": "21;9",
+        "ld15iqr": 0.015136547363363206,
+        "hd15iqr": 0.016144213790539652,
+        "ops": 64.56341006685939,
+        "total": 3.98058280586265,
+        "iterations": 1
+      }
+    },
+    {
+      "group": null,
+      "name": "test_bench_fixed_two_hop_count_star",
+      "fullname": "test_bench_core.py::test_bench_fixed_two_hop_count_star",
+      "params": null,
+      "param": null,
+      "extra_info": {},
+      "options": {
+        "disable_gc": false,
+        "timer": "perf_counter",
+        "min_rounds": 100,
+        "max_time": 1.0,
+        "min_time": 5e-06,
+        "warmup": 20
+      },
+      "stats": {
+        "min": 0.0007795124198310077,
+        "max": 0.0022808486013673247,
+        "mean": 0.0008606663044046889,
+        "stddev": 3.078731012460924e-05,
+        "rounds": 4511,
+        "median": 0.0008667750167660415,
+        "iqr": 2.5513640139251947e-05,
+        "q1": 0.0008448376902379096,
+        "q3": 0.0008703513303771615,
+        "iqr_outliers": 100,
+        "stddev_outliers": 1048,
+        "outliers": "1048;100",
+        "ld15iqr": 0.0008113598625641316,
+        "hd15iqr": 0.0009086998819839209,
+        "ops": 1161.8904967956032,
+        "total": 3.882465699169552,
+        "iterations": 1
+      }
+    },
+    {
+      "group": null,
+      "name": "test_bench_exists_var_length_witness",
+      "fullname": "test_bench_core.py::test_bench_exists_var_length_witness",
+      "params": null,
+      "param": null,
+      "extra_info": {},
+      "options": {
+        "disable_gc": false,
+        "timer": "perf_counter",
+        "min_rounds": 100,
+        "max_time": 1.0,
+        "min_time": 5e-06,
+        "warmup": 20
+      },
+      "stats": {
+        "min": 0.029328811046434564,
+        "max": 0.034671974997036156,
+        "mean": 0.03033094377686156,
+        "stddev": 0.0010250366672795155,
+        "rounds": 131,
+        "median": 0.03005827505257912,
+        "iqr": 0.0007099209527950734,
+        "q1": 0.029740223033877553,
+        "q3": 0.030450143986672628,
+        "iqr_outliers": 12,
+        "stddev_outliers": 13,
+        "outliers": "13;12",
+        "ld15iqr": 0.029328811046434564,
+        "hd15iqr": 0.03173576249973848,
+        "ops": 32.969630201974326,
+        "total": 3.973353634768864,
+        "iterations": 1
+      }
+    },
+    {
+      "group": null,
+      "name": "test_bench_exists_fixed_hop",
+      "fullname": "test_bench_core.py::test_bench_exists_fixed_hop",
+      "params": null,
+      "param": null,
+      "extra_info": {},
+      "options": {
+        "disable_gc": false,
+        "timer": "perf_counter",
+        "min_rounds": 100,
+        "max_time": 1.0,
+        "min_time": 5e-06,
+        "warmup": 20
+      },
+      "stats": {
+        "min": 7.637361413799226e-05,
+        "max": 0.00139473756426014,
+        "mean": 8.616827832943286e-05,
+        "stddev": 7.262799069666934e-06,
+        "rounds": 45627,
+        "median": 8.564015734009444e-05,
+        "iqr": 1.4623976312577724e-06,
+        "q1": 8.498886600136756e-05,
+        "q3": 8.645126363262534e-05,
+        "iqr_outliers": 1361,
+        "stddev_outliers": 780,
+        "outliers": "780;1361",
+        "ld15iqr": 8.287495002150536e-05,
+        "hd15iqr": 8.872499456629157e-05,
+        "ops": 11605.19879690373,
+        "total": 3.931600035337033,
+        "iterations": 1
+      }
     }
   ],
   "datetime": "2026-07-14T19:12:36.912653+00:00",
@@ -1303,7 +1513,13 @@
       "run_attempt": "1"
     },
     "cells_added": {
-      "test_bench_return_id_10k": "0.13.2 Linux from run 31934183813 (2026-08-16); other cells from run 29360541230"
+      "test_bench_return_id_10k": "0.13.2 Linux from run 31934183813 (2026-08-16); other cells from run 29360541230",
+      "test_bench_khop3_in_list_count_distinct": "PROVISIONAL ESTIMATE, not a Linux measurement: kglite 0.13.2 captured on macOS/M4 2026-08-21, scaled by 3.9x (the widest Linux/macOS ratio observed across the 25 cells both files already share; median 2.83, range 1.90-3.88). Deliberately generous so an estimate cannot fire a false red on the 30% leg-2 gate; leg 1 (same-runner 0.13.2 reference, 20%) is what actually gates these cells until the real value lands. Replace from the first CI perf run's reference artifact, or let the next release's promote_linux_benchmark overwrite the file.",
+      "test_bench_khop3_unwind_distinct": "PROVISIONAL ESTIMATE, not a Linux measurement: kglite 0.13.2 captured on macOS/M4 2026-08-21, scaled by 3.9x (the widest Linux/macOS ratio observed across the 25 cells both files already share; median 2.83, range 1.90-3.88). Deliberately generous so an estimate cannot fire a false red on the 30% leg-2 gate; leg 1 (same-runner 0.13.2 reference, 20%) is what actually gates these cells until the real value lands. Replace from the first CI perf run's reference artifact, or let the next release's promote_linux_benchmark overwrite the file.",
+      "test_bench_var_length_2_2_count_star": "PROVISIONAL ESTIMATE, not a Linux measurement: kglite 0.13.2 captured on macOS/M4 2026-08-21, scaled by 3.9x (the widest Linux/macOS ratio observed across the 25 cells both files already share; median 2.83, range 1.90-3.88). Deliberately generous so an estimate cannot fire a false red on the 30% leg-2 gate; leg 1 (same-runner 0.13.2 reference, 20%) is what actually gates these cells until the real value lands. Replace from the first CI perf run's reference artifact, or let the next release's promote_linux_benchmark overwrite the file.",
+      "test_bench_fixed_two_hop_count_star": "PROVISIONAL ESTIMATE, not a Linux measurement: kglite 0.13.2 captured on macOS/M4 2026-08-21, scaled by 3.9x (the widest Linux/macOS ratio observed across the 25 cells both files already share; median 2.83, range 1.90-3.88). Deliberately generous so an estimate cannot fire a false red on the 30% leg-2 gate; leg 1 (same-runner 0.13.2 reference, 20%) is what actually gates these cells until the real value lands. Replace from the first CI perf run's reference artifact, or let the next release's promote_linux_benchmark overwrite the file.",
+      "test_bench_exists_var_length_witness": "PROVISIONAL ESTIMATE, not a Linux measurement: kglite 0.13.2 captured on macOS/M4 2026-08-21, scaled by 3.9x (the widest Linux/macOS ratio observed across the 25 cells both files already share; median 2.83, range 1.90-3.88). Deliberately generous so an estimate cannot fire a false red on the 30% leg-2 gate; leg 1 (same-runner 0.13.2 reference, 20%) is what actually gates these cells until the real value lands. Replace from the first CI perf run's reference artifact, or let the next release's promote_linux_benchmark overwrite the file.",
+      "test_bench_exists_fixed_hop": "PROVISIONAL ESTIMATE, not a Linux measurement: kglite 0.13.2 captured on macOS/M4 2026-08-21, scaled by 3.9x (the widest Linux/macOS ratio observed across the 25 cells both files already share; median 2.83, range 1.90-3.88). Deliberately generous so an estimate cannot fire a false red on the 30% leg-2 gate; leg 1 (same-runner 0.13.2 reference, 20%) is what actually gates these cells until the real value lands. Replace from the first CI perf run's reference artifact, or let the next release's promote_linux_benchmark overwrite the file."
     }
   }
 }

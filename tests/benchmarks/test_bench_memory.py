@@ -7,6 +7,10 @@ bytes sit.
 Run with: pytest tests/benchmarks/test_bench_memory.py -m benchmark -v -s
 """
 
+import subprocess
+import sys
+import textwrap
+
 import pandas as pd
 import pytest
 
@@ -218,3 +222,140 @@ def test_bench_save_kgl_spilled_5k(benchmark, graph_5k_spilled, tmp_path):
         counter[0] += 1
 
     benchmark(save)
+
+
+# ---------------------------------------------------------------------------
+# Variable-length k-hop peak memory (part-6 program, phase V1)
+# ---------------------------------------------------------------------------
+#
+# Not a benchmark: this is a LAW, and its units are ratios, not bytes. A
+# multi-seed k-hop query's intermediate rows are `seeds x |reachable|`, so the
+# peak grows with the seed count even though the *answer* — the union of the
+# reachable sets — barely moves. That is the +3 GB the part-6 eval reported,
+# fully attributed (~300 B/row, no leak).
+#
+# Measured on this shape at 30k nodes, release build, before V4: 25 seeds reach
+# 15 847 nodes for 27.9 MB of peak; 50 seeds reach 19 268 (1.22x) for 54.7 MB
+# (1.96x). Peak tracked the seeds, not the targets.
+#
+# It is `xfail` because that is still true today. V4 (DISTINCT pushdown in the
+# UNWIND/subsequent-MATCH branch) and, if it is built, V6 (source-free
+# multi-source frontier) are what make it pass; flip it to a plain test in
+# whichever of those lands the fix. `strict=False` keeps the intermediate
+# state — a partial improvement that lands under the ceiling — from turning
+# red on the phase that has not claimed it yet.
+
+
+#: 2x the seeds may cost at most this much more peak. The union of reachable
+#: sets grows ~1.22x between the two sizes, so a frontier-shaped
+#: implementation lands near there; today's row-shaped one lands at ~1.96x.
+#: 1.8x sits clear of both, so neither verdict is a coin flip.
+MAX_SEED_GROWTH_FACTOR = 1.8
+
+_KHOP_PEAK_PROBE = textwrap.dedent(
+    """
+    import resource, sys
+    import pandas as pd
+    import kglite
+
+    def peak_mb():
+        v = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        # macOS reports bytes, Linux kilobytes.
+        return v / (1024 * 1024) if sys.platform == "darwin" else v / 1024
+
+    node_count, seed_count, attachments = 30_000, int(sys.argv[1]), 2
+
+    repeated = list(range(attachments))
+    src, dst = [], []
+    state = 20_260_821
+    for new in range(attachments, node_count):
+        chosen = []
+        while len(chosen) < attachments:
+            state = (state * 1_103_515_245 + 12_345) & 0x7FFF_FFFF
+            candidate = repeated[state % len(repeated)]
+            if candidate not in chosen:
+                chosen.append(candidate)
+        for target in chosen:
+            src.append(new)
+            dst.append(target)
+            repeated.append(target)
+        repeated.extend([new] * attachments)
+    src, dst = src + dst, dst + src
+
+    graph = kglite.KnowledgeGraph()
+    graph.add_nodes(
+        pd.DataFrame({"pid": list(range(node_count)), "name": [f"P{i}" for i in range(node_count)]}),
+        "Person", "pid", "name",
+    )
+    graph.add_connections(pd.DataFrame({"s": src, "d": dst}), "KNOWS", "Person", "s", "Person", "d")
+
+    ids = [(i * 197 + 13) % node_count for i in range(seed_count)]
+    graph.cypher("MATCH (p:Person) RETURN count(p) AS n").to_list()
+
+    before = peak_mb()
+    rows = graph.cypher(
+        "MATCH (p:Person)-[:KNOWS*1..3]->(f:Person) WHERE p.id IN $ids RETURN count(DISTINCT f) AS reached",
+        params={"ids": ids},
+    ).to_list()
+    print(peak_mb() - before, rows[0]["reached"])
+    """
+)
+
+
+def _khop_peak_delta_mb(seed_count: int) -> tuple[float, int]:
+    """Peak-RSS delta (MB) and reached-node count for one seed count.
+
+    A fresh subprocess per size, for the reason `test_unwind_scope_narrowing`
+    documents: run both in one process and the allocator's retained arenas from
+    the first size absorb the second, understating the growth — a failure in
+    the reassuring direction.
+    """
+    proc = subprocess.run(
+        [sys.executable, "-c", _KHOP_PEAK_PROBE, str(seed_count)],
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert proc.returncode == 0, f"probe at {seed_count} seeds failed (rc={proc.returncode})\nstderr:\n{proc.stderr}"
+    delta, reached = proc.stdout.strip().splitlines()[-1].split()
+    return float(delta), int(reached)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="peak-RSS probe uses resource.getrusage (POSIX-only)")
+@pytest.mark.xfail(
+    strict=False,
+    reason=(
+        "V4 target: a multi-seed k-hop still materialises seeds x |reachable| rows, "
+        "so peak RSS scales with the seed count instead of the reachable set. Flip "
+        "this to a plain test in the phase that lands the fix (V4, or V6 if built)."
+    ),
+)
+def test_khop3_peak_memory_scales_with_targets_not_seeds():
+    """Doubling the seeds must not double the peak.
+
+    The seeds only decide how many BFS roots there are; the answer is the union
+    of what they reach, which grows far more slowly. An implementation whose
+    memory follows the *targets* satisfies this; one whose memory follows the
+    *rows* does not.
+    """
+    small_peak, small_reached = _khop_peak_delta_mb(25)
+    large_peak, large_reached = _khop_peak_delta_mb(50)
+
+    # The law is only meaningful while the reachable sets stay comparable: if
+    # 2x the seeds really did reach 2x the nodes, 2x the peak would be correct.
+    target_growth = large_reached / small_reached
+    assert target_growth < 1.5, (
+        f"fixture drift: 50 seeds reach {target_growth:.2f}x the nodes 25 do "
+        f"({small_reached} -> {large_reached}). The law compares seed growth "
+        "against target growth and needs them to differ."
+    )
+    # Guard against a small side so close to zero that any large side passes.
+    assert small_peak >= 1.0, f"peak delta at 25 seeds was {small_peak:.1f} MB — too small to form a ratio from"
+
+    seed_growth = large_peak / small_peak
+    assert seed_growth <= MAX_SEED_GROWTH_FACTOR, (
+        f"2x the seeds cost {seed_growth:.2f}x the peak "
+        f"({small_peak:.1f} MB -> {large_peak:.1f} MB) while reaching only "
+        f"{target_growth:.2f}x the nodes. Peak is following the seed count, "
+        f"not the reachable set (ceiling {MAX_SEED_GROWTH_FACTOR}x)."
+    )
