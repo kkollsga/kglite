@@ -1,6 +1,5 @@
 //! Cypher executor — expression methods.
 
-use super::super::ast::*;
 use super::helpers::*;
 use super::*;
 use crate::datatypes::values::Value;

@@ -893,12 +893,26 @@ fn create_pattern_edges(
                 )?;
             }
 
-            // Evaluate edge properties
+            // Evaluate edge properties. A property that evaluates to null is
+            // *not written*, which is what `CREATE (:N {x: null})` already
+            // does for nodes — the columnar node store skips null cells, so
+            // `keys(n)` never reports one. An edge's properties are a plain
+            // key/value vector with no such skip, so the filter has to happen
+            // here or the key lands and `keys(r)` reports a property the same
+            // literal did not create on a node. It also keeps the
+            // connection-type metadata below clean: a null value would
+            // otherwise register a phantom `"Null"`-typed property that
+            // `schema_text()`/`connection_types()` then advertise forever.
+            // Relationship constraints are unaffected — `check_rel_row` judges
+            // `Some(Value::Null)` and `None` identically.
             let mut edge_props = HashMap::new();
             {
                 let executor = CypherExecutor::with_params(graph, params, None);
                 for (key, expr) in &edge_pat.properties {
                     let val = executor.evaluate_expression(expr, new_row)?;
+                    if matches!(val, Value::Null) {
+                        continue;
+                    }
                     edge_props.insert(key.clone(), val);
                 }
             }

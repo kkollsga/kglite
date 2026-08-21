@@ -63,7 +63,17 @@ pub(super) fn set_edge_property(
         ..
     }) = GraphWrite::edge_weight_mut(&mut graph.graph, edge_index)
     {
-        if let Some((_, existing)) = edge_props.iter_mut().find(|(ek, _)| *ek == key) {
+        // `SET r.p = null` leaves the property absent, not present-and-null —
+        // the node rule (a null cell is skipped by the columnar store, so
+        // `keys(n)` never reports it), applied to the key/value vector an edge
+        // stores instead. `SET r += {p: null}` desugars to this same item, so
+        // the map form follows. Counted as a property *set*, matching what the
+        // node path reports for the identical statement; `REMOVE r.p` is the
+        // spelling that counts a removal.
+        let write_null = matches!(value, Value::Null);
+        if write_null {
+            edge_props.retain(|(ek, _)| *ek != key);
+        } else if let Some((_, existing)) = edge_props.iter_mut().find(|(ek, _)| *ek == key) {
             *existing = value;
         } else {
             edge_props.push((key, value));

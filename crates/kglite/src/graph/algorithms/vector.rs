@@ -517,12 +517,10 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     let (mut na0, mut na1, mut na2, mut na3) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
     let (mut nb0, mut nb1, mut nb2, mut nb3) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
 
-    let a_chunks = a.chunks_exact(8);
-    let b_chunks = b.chunks_exact(8);
-    let a_rem = a_chunks.remainder();
-    let b_rem = b_chunks.remainder();
+    let (a_chunks, a_rem) = a.as_chunks::<8>();
+    let (b_chunks, b_rem) = b.as_chunks::<8>();
 
-    for (ac, bc) in a_chunks.zip(b_chunks) {
+    for (ac, bc) in a_chunks.iter().zip(b_chunks) {
         dot0 += ac[0] * bc[0];
         dot1 += ac[1] * bc[1];
         dot2 += ac[2] * bc[2];
@@ -573,12 +571,10 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
     let (mut s0, mut s1, mut s2, mut s3) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
 
-    let a_chunks = a.chunks_exact(8);
-    let b_chunks = b.chunks_exact(8);
-    let a_rem = a_chunks.remainder();
-    let b_rem = b_chunks.remainder();
+    let (a_chunks, a_rem) = a.as_chunks::<8>();
+    let (b_chunks, b_rem) = b.as_chunks::<8>();
 
-    for (ac, bc) in a_chunks.zip(b_chunks) {
+    for (ac, bc) in a_chunks.iter().zip(b_chunks) {
         s0 += ac[0] * bc[0];
         s1 += ac[1] * bc[1];
         s2 += ac[2] * bc[2];
@@ -601,12 +597,10 @@ pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
 pub fn neg_euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
     let (mut s0, mut s1, mut s2, mut s3) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
 
-    let a_chunks = a.chunks_exact(8);
-    let b_chunks = b.chunks_exact(8);
-    let a_rem = a_chunks.remainder();
-    let b_rem = b_chunks.remainder();
+    let (a_chunks, a_rem) = a.as_chunks::<8>();
+    let (b_chunks, b_rem) = b.as_chunks::<8>();
 
-    for (ac, bc) in a_chunks.zip(b_chunks) {
+    for (ac, bc) in a_chunks.iter().zip(b_chunks) {
         let d0 = ac[0] - bc[0];
         let d1 = ac[1] - bc[1];
         let d2 = ac[2] - bc[2];
@@ -652,12 +646,10 @@ pub fn neg_poincare_distance(a: &[f32], b: &[f32]) -> f32 {
     let (mut nb0, mut nb1, mut nb2, mut nb3) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
     let (mut d0, mut d1, mut d2, mut d3) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
 
-    let a_chunks = a.chunks_exact(8);
-    let b_chunks = b.chunks_exact(8);
-    let a_rem = a_chunks.remainder();
-    let b_rem = b_chunks.remainder();
+    let (a_chunks, a_rem) = a.as_chunks::<8>();
+    let (b_chunks, b_rem) = b.as_chunks::<8>();
 
-    for (ac, bc) in a_chunks.zip(b_chunks) {
+    for (ac, bc) in a_chunks.iter().zip(b_chunks) {
         na0 += ac[0] * ac[0];
         na1 += ac[1] * ac[1];
         na2 += ac[2] * ac[2];

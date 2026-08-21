@@ -1,6 +1,5 @@
 //! Cypher executor — return_clause methods.
 
-use super::super::ast::*;
 use super::helpers::*;
 use super::ordering::{compare_sort_keys, SortSpec, TopKCollector};
 use super::*;

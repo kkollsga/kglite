@@ -1,6 +1,5 @@
 //! Cypher executor — match_clause methods.
 
-use super::super::ast::*;
 use super::helpers::*;
 use super::ordering::{SortSpec, TopKCollector};
 use super::scan_eval::{ScanCompiler, ScanExpr, ScanPred, ScanRuntime};
