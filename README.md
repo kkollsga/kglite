@@ -129,8 +129,8 @@ parsed codebase.
   and Sodir live in the companion **kglite-datasets** project — they
   handle the *fetch + build + cache* cycle and return a queryable
   `KnowledgeGraph`. kglite's mapped and disk storage then query graphs
-  that don't fit in RAM — a billion-edge Wikidata graph on a 16 GB
-  laptop. **→ See [Public datasets](#public-datasets) below.**
+  that don't fit in RAM — the 124M-node / 861M-edge Wikidata graph on a
+  16 GB laptop. **→ See [Public datasets](#public-datasets) below.**
 - 📚 **RAG with structure.** Documents, chunks, entities, and the
   edges between them in one graph. Combine `text_score()` vector
   similarity with Cypher traversal — *"find court cases semantically
@@ -203,7 +203,7 @@ questions traverse it.
 |--------------------------------------------|-----------------------------------|-----------------------------------------------------|--------------------|--------------------|------------------------|
 | **Install**                                | `pip install kglite`              | `pip install ladybug`                               | `pip install networkx` | `pip install rustworkx` | JVM + Java deps  |
 | **Query language**                         | Cypher ([broad coverage](CYPHER.md#feature-coverage)) | Cypher                              | Python API         | Python API         | Cypher (full)          |
-| **Storage**                                | in-mem · mmap · disk (1B+ edges)  | in-mem · disk (columnar)                            | in-mem             | in-mem             | in-mem · disk (JVM)    |
+| **Storage**                                | in-mem · mmap · disk (tested to 861M edges) | in-mem · disk (columnar)                            | in-mem             | in-mem             | in-mem · disk (JVM)    |
 | **Bulk-load from pandas**                  | one-liner                         | via Arrow                                           | manual             | manual             | via driver             |
 | **MCP server for LLM agents**              | bundled in the `kglite` wheel     | [separate `mcp-server-ladybug` install](https://github.com/LadybugDB/mcp-server-ladybug) | — | — | — |
 | **`describe()` schema for LLM prompts**    | ✅                                 | —                                                   | —                  | —                  | —                      |
@@ -418,8 +418,8 @@ rather than discovering it through trial-and-error. **→
 Pre-packaged loaders that turn well-known public sources into queryable
 graphs — **SEC EDGAR** filings (insider transactions, institutional
 holdings, board composition, XBRL financials), **Wikidata** (the full
-`latest-truthy` RDF dump, parallel-decoded and built into a billion-edge
-graph), and **Sodir** (Norwegian Offshore Directorate petroleum data) —
+`latest-truthy` RDF dump, parallel-decoded and built into a 124M-node /
+861M-edge graph), and **Sodir** (Norwegian Offshore Directorate petroleum data) —
 live in the companion **[kglite-datasets](https://kglite-datasets.readthedocs.io)**
 project. Install it separately with `pip install kglite-datasets`; its Python
 package supplies the dataset-specific loaders while KGLite supplies the graph:

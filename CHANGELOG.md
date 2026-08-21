@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`graphgen()` died with a bare `ModuleNotFoundError` when pandas was
+  missing, and its docstring said "no extra deps".** The default
+  `out=None` path loads the generated CSVs through DataFrames, so it needs
+  pandas — but the docstring advertised no dependencies four paragraphs before
+  admitting one, and the failure was the raw import error with no install hint.
+  It now raises `ImportError` naming the package, the install command, and the
+  `out=DIR` streaming path, which is pure Rust and genuinely needs nothing
+  extra. Both docstrings say which path needs what.
+
+- **`export_string()` required a `format` its file-writing twin infers.**
+  `export('graph.json')` works; `export_string()` raised `TypeError` for a
+  missing argument. `format` now defaults to `'json'` — the asymmetry with
+  `export()`'s extension-inferred `graphml` fallback is deliberate (a string
+  return has no extension to read) and is documented on both. Asking
+  `export_string()` for `'csv'` — a format that writes two files — now explains
+  that and points at `export(path, format='csv')` instead of listing formats.
+
 - **`explain()`'s docstring named operators from several versions ago, and its
   empty message taught nothing.** The example output advertised
   `TYPE_FILTER Prospect (...) -> TRAVERSE HAS_ESTIMATE (...)` — `TYPE_FILTER`
@@ -776,6 +793,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   directory was invisible. `docs/operators/mcp-server.md` now states the
   default, that an explicit manifest declaration wins outright, and how to
   scope or move it.
+
+- **Public scale claims now state the measured shape, and the benchmark
+  BENCHMARKS.md points at is in the repo.** `benchmarks/competitive/largescale/`
+  — the staged-dataset harness that runs one generated graph through kùzu and
+  both kglite disk-backed modes — was excluded by a `.gitignore` rule, so the
+  "Scaling" pointer resolved to nothing for every reader outside this machine.
+  It is tracked now, with its capture provenance (date, engine revision,
+  machine), an explicit methodology note (one timed run per phase, not a
+  min-of-rounds), and a corrected generator invocation; its kùzu loader also
+  projects the staged CSVs onto the declared schema, which the current
+  generator output otherwise fails to load. Separately, "1B+ edges" and
+  "billion-edge Wikidata" (README ×3, CYPHER.md) claimed a number no
+  measurement in this repository supports; every site now reads the
+  124M-node / 861M-edge Wikidata graph the engine's own disk-path work is
+  written against.
+
+- **Three dialect deviations are documented instead of discovered.** KGLite's
+  value model has no NaN or Infinity, so `sqrt(-1)`, `log(0)` and `1.0 / 0.0`
+  are null where Neo4j returns a non-finite float (integer `1 / 0` still
+  raises, as in Neo4j); and `toInteger('3.7')` is null where Neo4j truncates to
+  `3`, because a string argument must spell an integer. CYPHER.md carries both
+  as divergence notes, the feature-coverage table reclassifies the two rows,
+  and `tests/api-baselines/cypher-dialect.json` gains matching
+  `intentional_divergence` entries backed by executable contract cases.
+  Behaviour is unchanged.
+
+- **The unbounded-row safety ceiling is documented next to
+  `set_default_max_rows()`.** The Cypher guide now states the 10,000,000-row
+  backstop that applies when a query sets no `max_rows`, quotes the error it
+  raises, and names both escape hatches (an explicit `max_rows`, or a `LIMIT`),
+  along with the O(1)-work exemption that keeps `count(*)` over a 100M-node
+  mapped graph answering.
 
 ## [0.16.5] - 2026-08-19
 

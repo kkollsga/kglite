@@ -82,7 +82,7 @@ Same engine, same results — pick in-memory for speed, mapped/disk for larger-t
 
 ### Scaling
 
-The table above is a `medium` graph chosen so every engine can run (NetworkX/igraph hold the whole graph in RAM). kglite itself scales far past that: the bundled `graphgen` generator streams **millions of nodes in bounded memory**, and kglite's `mapped`/`disk` modes load and query larger-than-RAM graphs — see `benchmarks/competitive/largescale/`.
+The table above is a `medium` graph chosen so every engine can run (NetworkX/igraph hold the whole graph in RAM). kglite itself scales far past that: the bundled `graphgen` generator streams **millions of nodes in bounded memory**, and kglite's `mapped`/`disk` modes load and query larger-than-RAM graphs — see [`benchmarks/competitive/largescale/`](benchmarks/competitive/largescale/README.md), which stages one dataset and runs it through kùzu and both kglite disk-backed modes (its recorded table is a 2026-06 capture — read its methodology note before quoting a number).
 
 ## Reproduce
 

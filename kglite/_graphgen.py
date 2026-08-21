@@ -67,7 +67,17 @@ def generate(
         return graphgen_to_dir(str(out), persons, knows_per, seed, zipf, zipf_exp)
 
     # out=None — stage to a temp dir, load into a KnowledgeGraph, clean up.
-    import pandas as pd
+    # Only this branch needs pandas; the streaming out=DIR path above is
+    # dependency-free, so the hint names the branch the caller is in.
+    try:
+        import pandas as pd
+    except ImportError:
+        raise ImportError(
+            "The 'pandas' package is required for graphgen() without out=DIR "
+            "(the returned KnowledgeGraph is loaded through DataFrames). "
+            "Install with: pip install pandas — or pass out=DIR to stream CSVs, "
+            "which needs no extra packages."
+        ) from None
 
     from . import KnowledgeGraph
 

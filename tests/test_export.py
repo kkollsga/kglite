@@ -5,6 +5,7 @@ import os
 import tempfile
 
 import pandas as pd
+import pytest
 
 from kglite import KnowledgeGraph
 
@@ -72,6 +73,25 @@ class TestExportString:
         graph = KnowledgeGraph()
         result = graph.export_string(format="graphml")
         assert isinstance(result, str)
+
+    def test_format_defaults_to_json(self, small_graph):
+        """export() infers its format from the path; a string return has no
+        path, so export_string() defaults to JSON rather than demanding an
+        argument its file-writing twin doesn't."""
+        data = json.loads(small_graph.export_string())
+        assert data == json.loads(small_graph.export_string(format="json"))
+        assert "nodes" in data and "links" in data
+
+    def test_explicit_formats_are_unchanged_by_the_default(self, small_graph):
+        assert "graphml" in small_graph.export_string("graphml").lower()
+        assert "gexf" in small_graph.export_string("gexf").lower()
+        assert small_graph.export_string("d3") == small_graph.export_string()
+        assert "INSERT INTO" in small_graph.export_string("sqlite")
+
+    def test_csv_is_refused_and_names_the_file_export(self, small_graph):
+        """csv writes two files; one string cannot carry them."""
+        with pytest.raises(ValueError, match=r"export\(path, format='csv'\)"):
+            small_graph.export_string("csv")
 
 
 class TestExportStringFormats:

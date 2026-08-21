@@ -96,10 +96,13 @@ graph.export('my_graph.csv', format='csv')           # creates _nodes.csv + _edg
 graph.export('my_graph.sql', format='sqlite')        # SQLite SQL script
 
 graphml_string = graph.export_string(format='graphml')
+json_string = graph.export_string()                  # defaults to JSON
 ```
 
 The format is inferred from the extension when you omit it, so
-`graph.export('out.sql')` is enough.
+`graph.export('out.sql')` is enough. `export_string()` has no extension to
+read, so it defaults to `'json'` instead — and it cannot produce `'csv'`, which
+writes two files.
 
 ## Export to SQLite — the no-lock-in exit
 

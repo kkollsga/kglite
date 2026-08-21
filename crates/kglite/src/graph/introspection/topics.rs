@@ -1241,7 +1241,7 @@ pub(super) fn write_fluent_topic_export(xml: &mut String) {
     xml.push_str("    <methods>\n");
     xml.push_str("      <m sig=\"export(path, format='graphml')\">Export as 'graphml', 'gexf', 'json' (D3), or 'csv'.</m>\n");
     xml.push_str(
-        "      <m sig=\"export_string(format='graphml')\">Export to string (no file).</m>\n",
+        "      <m sig=\"export_string(format='json')\">Export to string (no file); 'csv' is file-only.</m>\n",
     );
     xml.push_str("      <m sig=\"export_csv(directory)\">CSV directory tree + blueprint.json (round-trips with from_blueprint).</m>\n");
     xml.push_str("      <m sig=\"save(path)\">Binary .kgl v6 file (columnar, supports larger-than-RAM loading).</m>\n");

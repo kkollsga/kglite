@@ -41,7 +41,7 @@ surface at a glance — most of what you'd reach for is here, in-process:
 | **Value types** | int, float, string, bool, **date**, **timestamp** (date + time), duration, point, list, map, node, relationship, path |
 | **Transactions** | multi-statement with snapshot isolation + rollback (`Session` / `Transaction`) |
 | **Change data capture** | opt-in change stream with stateless cursors — `CALL db.cdc.enable/status/current/earliest/query/disable`, see [Change data capture](#change-data-capture-call-dbcdc) |
-| **Storage** | identical Cypher across in-memory, mmap, and on-disk modes (1B+ edges) |
+| **Storage** | identical Cypher across in-memory, mmap, and on-disk modes (largest graph run: Wikidata, 124M nodes / 861M edges) |
 
 Per-write `UNIQUE` / `NOT NULL` / NODE KEY / `IS :: TYPE` constraints **are**
 supported and enforced on every write path, including the bulk loader — declare
@@ -441,7 +441,7 @@ graph.cypher("""
 | `toUpper(expr)` | Convert to uppercase |
 | `toLower(expr)` | Convert to lowercase |
 | `toString(expr)` | Convert to string; `toString(null)` is `null` |
-| `toInteger(expr)` | Convert to integer |
+| `toInteger(expr)` | Convert to integer; a string must spell an integer (see below) |
 | `toFloat(expr)` | Convert to float |
 | `size(expr)` | Element count of a list, or **character** count of a string (not UTF-8 bytes) |
 | `type(r)` | Relationship type |
@@ -495,6 +495,14 @@ graph.cypher("""
 | `ts_first(n.ch)` / `ts_last(n.ch)` | First / last non-NaN value |
 | `ts_delta(n.ch, 'from', 'to')` | Value change between two time points |
 | `ts_series(n.ch [, 'start'] [, 'end'])` | Extract series as `[{time, value}, ...]` |
+
+> **Divergence — `toInteger` on a string does not truncate.** A string argument
+> must spell an *integer*: `toInteger('3')` is `3`, while `toInteger('3.7')` is
+> `null` (Neo4j parses the float and truncates to `3`). So are
+> `toInteger('abc')` and `toInteger(' 3 ')` — surrounding whitespace is not
+> trimmed. A *numeric* argument does truncate as expected
+> (`toInteger(3.7)` → `3`), so the portable spelling for a decimal string is
+> `toInteger(toFloat(s))`. `toFloat('3.7')` is `3.7`, unaffected.
 
 ### Hybrid retrieval (RAG) over a knowledge graph
 
@@ -883,6 +891,16 @@ RETURN date('2024-01-15') + duration({months: 1}) // → 2024-02-14 (1*30 days),
 | `pi()` | π constant |
 | `rand()` / `random()` | Random float [0, 1) |
 | `randomUUID()` | Random RFC 4122 v4 UUID string |
+
+> **Divergence — no NaN and no Infinity.** KGLite's value model has no
+> non-finite float, so an expression with no real result is `null` rather than
+> Neo4j's `NaN` / `Infinity`: `sqrt(-1)`, `log(0)`, `log(-1)` and `log10(-1)`
+> are `null`, and so is every float division or modulo by zero
+> (`1.0 / 0.0`, `-1.0 / 0.0`, `0.0 / 0.0`, `1.0 % 0.0`). Null then propagates
+> through the rest of the expression and through comparisons, exactly like any
+> other null. *Integer* division by zero is the one case that raises instead
+> (`RETURN 1 / 0` → "Integer division by zero"), matching Neo4j. Guard with
+> `coalesce(...)` or a `WHERE x > 0` filter where a number is required.
 
 ### Trigonometric Functions
 
@@ -3226,7 +3244,7 @@ claimed openCypher-compatible subset.
 | `collect` | Covered | |
 | `std` | Extension | Standard deviation helper |
 | `toUpper`, `toLower`, `toString` | Covered | |
-| `toInteger`, `toFloat` | Covered | |
+| `toInteger`, `toFloat` | Intentional divergence | `toFloat` is openCypher; `toInteger` of a *string* requires an integer spelling and yields null for `'3.7'`, where Neo4j truncates (see Built-in Functions). Numeric arguments truncate as in Neo4j |
 | `size`, `length` | Covered | Strings (in characters, not bytes), lists, and paths |
 | `type(r)` | Covered | Returns relationship type |
 | `id(entity)` | Covered | KGLite logical node identity and stable relationship identity |
@@ -3238,7 +3256,7 @@ claimed openCypher-compatible subset.
 | `round(x [, precision])` | Covered | |
 | `nodes(p)`, `relationships(p)` | Covered | Exact node order, relationship identity, properties, and traversal direction are preserved for parallel and incoming paths |
 | String functions | Covered | `split`, `replace`, `substring`, `left`, `right`, `trim`, `ltrim`, `rtrim`, `reverse`. All are character-indexed; `split` with an empty delimiter is a documented divergence (see String Functions) |
-| Math functions | Covered | `abs`, `ceil`, `floor`, `sqrt`, `sign`, `log`/`ln`, `log10`, `exp`, `pow`, `pi`, `rand`, `randomUUID` |
+| Math functions | Intentional divergence | `abs`, `ceil`, `floor`, `sqrt`, `sign`, `log`/`ln`, `log10`, `exp`, `pow`, `pi`, `rand`, `randomUUID`. KGLite has no NaN/Infinity value, so an undefined result (`sqrt(-1)`, `log(0)`, `1.0/0.0`) is null rather than Neo4j's non-finite float (see Math Functions) |
 | Trig functions | Covered | `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2(y,x)`, `cot`, `haversin`, `degrees`, `radians` |
 | Spatial functions | Extension | KGLite's pragmatic `point`, geometry, containment, and distance model |
 | Temporal functions | Extension | `valid_at`, `valid_during`, and KGLite temporal helpers |

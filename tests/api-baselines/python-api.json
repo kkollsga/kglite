@@ -693,7 +693,7 @@
         },
         "export_string": {
           "kind": "method",
-          "signature": "(self, /, format, selection_only=None)"
+          "signature": "(self, /, format=None, selection_only=None)"
         },
         "extend": {
           "kind": "method",

@@ -37,13 +37,15 @@
 # committed — see the "Inbox hygiene" section in CLAUDE.md.
 /inbox/
 # Competitive-library benchmarks. The public, OSS-only `graphsuite` (it powers
-# the linkable BENCHMARKS.md table) IS tracked; the rest stays local —
-# `largescale`, `embedded_app` carry private / heavy data. (`/dir/*` +
-# `!/dir/sub/` so a subdir can be re-included.)
+# the linkable BENCHMARKS.md table) and `largescale` (BENCHMARKS.md's "Scaling"
+# pointer) ARE tracked; `embedded_app` stays local — it carries private / heavy
+# data. (`/dir/*` + `!/dir/sub/` so a subdir can be re-included.)
 /benchmarks/competitive/*
 !/benchmarks/competitive/graphsuite/
-# but not graphsuite's local run artifacts
+!/benchmarks/competitive/largescale/
+# but not the local run artifacts
 /benchmarks/competitive/graphsuite/__pycache__/
+/benchmarks/competitive/largescale/__pycache__/
 
 # Ignore Rust build artifacts (keep wheels for distribution)
 /target

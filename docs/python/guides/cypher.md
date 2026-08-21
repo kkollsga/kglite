@@ -125,6 +125,29 @@ In-memory graphs default to a generous deadline (shown in
 repeatedly nears its deadline, that's the signal to add an index or anchor the
 pattern, not just to raise the budget.
 
+**There is a row ceiling even when you set none.** `max_rows` is opt-in, so a
+query that expands without bound — a nested `UNWIND` cross-product is the
+classic — used to materialize rows until the operating system killed the
+process. kglite is *embedded*: the process it kills is your application. So a
+query with no `max_rows` gets a backstop of **10,000,000 materialized rows or
+retained collection items**, and crossing it raises:
+
+```text
+Query materialized 10000001 rows while executing UNWIND, exceeding the safety
+ceiling of 10000000 rows that applies when no max_rows is set. Add a LIMIT
+clause, or set an explicit max_rows (per query: max_rows=…; per graph or
+session: set_default_max_rows(…)) to choose your own ceiling.
+```
+
+It is a last line of defence, not a planner hint: it sits at roughly twice the
+largest row set any legitimate query in this project materializes without
+`max_rows`, so reaching it means a query is running away rather than merely
+being big. Two escape hatches, both explicit: pass `max_rows=N` on the query
+(or `set_default_max_rows(N)`) to choose your own ceiling instead — a number
+above 10M lifts the backstop as well as lowering it — or add a `LIMIT`. Work
+whose memory cost is O(1) is exempt: a `count(*)` over a 100M-node mapped graph
+charges 100M *work units* and allocates nothing, so it keeps answering.
+
 ### Interrupting a query (Ctrl-C)
 
 A long-running **read** can be interrupted with `Ctrl-C` — it raises

@@ -1076,6 +1076,39 @@
       ]
     },
     {
+      "id": "function.numeric_undefined_is_null",
+      "category": "null",
+      "requirement": "KGLite has no NaN or Infinity value: a numeric expression with no real result is null, including sqrt of a negative, log of zero or a negative, and float division or modulo by zero.",
+      "query": "RETURN sqrt(-1) AS root, log(0) AS log_zero, log(-1) AS log_negative, 1.0 / 0.0 AS divided, -1.0 / 0.0 AS divided_negative, 0.0 / 0.0 AS zero_over_zero, 1.0 % 0.0 AS modulo",
+      "expected": [
+        {
+          "root": null,
+          "log_zero": null,
+          "log_negative": null,
+          "divided": null,
+          "divided_negative": null,
+          "zero_over_zero": null,
+          "modulo": null
+        }
+      ]
+    },
+    {
+      "id": "function.to_integer_string_is_exact",
+      "category": "null",
+      "requirement": "toInteger() of a string requires an integer spelling: a decimal string, a non-numeric string and a padded string are all null, while a numeric argument truncates toward zero.",
+      "query": "RETURN toInteger('3') AS exact, toInteger('3.7') AS decimal_string, toInteger('abc') AS text, toInteger(' 3 ') AS padded, toInteger(3.7) AS numeric, toFloat('3.7') AS as_float",
+      "expected": [
+        {
+          "exact": 3,
+          "decimal_string": null,
+          "text": null,
+          "padded": null,
+          "numeric": 3,
+          "as_float": 3.7
+        }
+      ]
+    },
+    {
       "id": "function.split_delimiter",
       "category": "list",
       "requirement": "split() divides a string on each occurrence of the delimiter.",

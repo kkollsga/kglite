@@ -725,17 +725,19 @@ def graphgen(
     zipf_exp: float = 1.6,
     out: str | None = None,
 ) -> KnowledgeGraph | dict[str, Any]:
-    """Generate a synthetic org/social knowledge graph (bundled, no extra deps).
+    """Generate a synthetic org/social knowledge graph (bundled generator).
 
     Seed-deterministic Person/Company/Project/Skill/City nodes +
     KNOWS/WORKS_AT/CONTRIBUTES_TO/HAS_SKILL/OWNS/DEPENDS_ON/LOCATED_IN edges —
     for demos, tests, and benchmarks.
 
     - ``out=None`` (default): build and return a :class:`KnowledgeGraph` (best
-      for small/medium; needs ``pandas``).
+      for small/medium). **Needs ``pandas``** — the staged CSVs are loaded
+      through DataFrames; a missing pandas raises ``ImportError`` with an
+      install hint.
     - ``out=DIR``: stream one CSV per type + ``manifest.json`` into ``DIR`` in
       bounded memory (millions of nodes at flat RAM); returns
-      ``{'nodes', 'edges', 'out'}``.
+      ``{'nodes', 'edges', 'out'}``. Pure Rust — no extra packages needed.
 
     Args:
         scale: ``tiny`` | ``small`` | ``medium`` (default) | ``large`` |
@@ -4663,7 +4665,10 @@ class KnowledgeGraph:
 
         Args:
             path: Output file path.
-            format: Export format. Default: inferred from extension.
+            format: Export format. Default: inferred from the extension
+                (unrecognised extensions fall back to ``graphml``).
+                :meth:`export_string` has no path to infer from and defaults to
+                ``'json'`` instead.
             selection_only: Export only selected nodes. Default: ``True`` if selection exists.
         """
         ...
@@ -4735,15 +4740,21 @@ class KnowledgeGraph:
 
     def export_string(
         self,
-        format: str,
+        format: Optional[str] = None,
         selection_only: Optional[bool] = None,
     ) -> str:
         """Export the graph to a string.
 
         Supported formats: ``graphml``, ``gexf``, ``d3``/``json``, ``sqlite``.
+        ``csv`` is **file-only** — it writes two files (nodes and edges), which
+        one string cannot carry — so it is rejected here; use
+        ``export(path, format='csv')``.
 
         Args:
-            format: Export format.
+            format: Export format. Default: ``'json'``. (:meth:`export` infers
+                its format from the path extension; a string return has no
+                extension, so this side defaults to the format such a string is
+                most often fed to.)
             selection_only: Export only selected nodes.
         """
         ...

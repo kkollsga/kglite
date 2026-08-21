@@ -149,18 +149,21 @@ def graphgen(
     zipf_exp: float = 1.6,
     out: "str | None" = None,
 ):
-    """Generate a synthetic org/social knowledge graph (bundled, no extra deps).
+    """Generate a synthetic org/social knowledge graph (bundled generator).
 
     A seed-deterministic graph of Person/Company/Project/Skill/City nodes +
     KNOWS/WORKS_AT/CONTRIBUTES_TO/HAS_SKILL/OWNS/DEPENDS_ON/LOCATED_IN edges —
     handy for demos, tests, and benchmarks.
 
     - ``out=None`` (default): build and return a :class:`KnowledgeGraph`, ready
-      to query. Best for small/medium scales (needs ``pandas``).
+      to query. Best for small/medium scales. **Needs ``pandas``** (the staged
+      CSVs are loaded through DataFrames); raises ``ImportError`` with an
+      install hint if it is missing.
     - ``out=DIR``: stream one CSV per type + ``manifest.json`` into ``DIR`` in
       **bounded memory** (millions of nodes at flat RAM); returns a stats dict
       ``{'nodes', 'edges', 'out'}``. Load later with your own pipeline, or with
       any engine — every backend that reads the same bytes gets the same graph.
+      This path is pure Rust and needs no extra packages.
 
     Args:
         scale: ``tiny`` | ``small`` | ``medium`` (default) | ``large`` |

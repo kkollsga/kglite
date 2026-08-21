@@ -22,7 +22,10 @@ impl KnowledgeGraph {
     ///
     /// Args:
     ///     path: Output file path
-    ///     format: Export format (default: inferred from file extension)
+    ///     format: Export format. Default: inferred from the file extension
+    ///         (`.graphml` / `.gexf` / `.json` / `.csv` / `.sql`), falling back
+    ///         to graphml for an unrecognised one. `export_string()` has no
+    ///         path to infer from and defaults to "json" instead.
     ///     selection_only: If True, export only selected nodes. Default: use the
     ///         selection when it actually holds nodes, otherwise the whole graph.
     ///
@@ -217,11 +220,20 @@ impl KnowledgeGraph {
     /// Useful for web APIs or further processing.
     ///
     /// Args:
-    ///     format: Export format (graphml, gexf, d3, json)
+    ///     format: Export format (graphml, gexf, d3, json, sqlite).
+    ///         Default: "json". `export()` has no string to inspect either way,
+    ///         so it infers the format from the *path* extension (falling back
+    ///         to graphml); `export_string()` has no path, so it defaults to
+    ///         the format a string return is most often fed to — JSON.
     ///     selection_only: If True, export only selected nodes
     ///
     /// Returns:
     ///     The exported data as a string
+    ///
+    /// Note:
+    ///     "csv" is a file-only format — it writes two files (nodes and edges),
+    ///     which a single string cannot carry — so `export_string('csv')` is
+    ///     rejected. Use `export(path, format='csv')`.
     ///
     /// Note:
     ///     If selection_only is not specified:
@@ -229,10 +241,15 @@ impl KnowledgeGraph {
     ///     - If selection is empty, exports the entire graph
     ///     Use selection_only=True to force selection export (may be empty)
     ///     Use selection_only=False to always export the entire graph
-    #[pyo3(signature = (format, selection_only=None))]
-    fn export_string(&self, format: &str, selection_only: Option<bool>) -> PyResult<String> {
+    #[pyo3(signature = (format=None, selection_only=None))]
+    fn export_string(
+        &self,
+        format: Option<&str>,
+        selection_only: Option<bool>,
+    ) -> PyResult<String> {
         let selection: Option<&CurrentSelection> =
             crate::graph::resolve_export_selection(self, selection_only);
+        let format = format.unwrap_or("json");
 
         match format {
             "graphml" => kglite_core::api::io::to_graphml(&self.inner, selection)
@@ -243,6 +260,12 @@ impl KnowledgeGraph {
                 .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>),
             "sqlite" => kglite_core::api::io::to_sqlite_dump(&self.inner, selection)
                 .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>),
+            "csv" => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "export_string() cannot produce 'csv': the CSV export writes two \
+                 files (nodes and edges), which one string cannot carry. Use \
+                 export(path, format='csv') instead."
+                    .to_string(),
+            )),
             _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                 "Unknown export format: '{}'. Supported: graphml, gexf, d3, json, sqlite",
                 format

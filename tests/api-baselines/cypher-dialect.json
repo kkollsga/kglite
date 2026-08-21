@@ -355,6 +355,24 @@
       "note": "Null propagates: toString(null) is null, not the string 'null'."
     },
     {
+      "id": "function.numeric_domain",
+      "syntax": "sqrt(x) / log(x) / x / 0.0",
+      "status": "intentional_divergence",
+      "case_ids": [
+        "function.numeric_undefined_is_null"
+      ],
+      "note": "KGLite's value model has no non-finite float, so an expression with no real result is null where Neo4j yields NaN or Infinity: sqrt of a negative, log/log10 of zero or a negative, and float division or modulo by zero. The null then propagates like any other null, so coalesce() supplies a default. Integer division by zero raises instead, as in Neo4j."
+    },
+    {
+      "id": "function.to_integer",
+      "syntax": "toInteger(value)",
+      "status": "intentional_divergence",
+      "case_ids": [
+        "function.to_integer_string_is_exact"
+      ],
+      "note": "A numeric argument truncates toward zero as in Neo4j. A string argument must spell an integer: toInteger('3.7') is null where Neo4j parses the float and truncates to 3, and surrounding whitespace is not trimmed. toInteger(toFloat(s)) is the portable spelling for a decimal string; toFloat() itself is unaffected."
+    },
+    {
       "id": "function.split",
       "syntax": "split(original, delimiter)",
       "status": "intentional_divergence",

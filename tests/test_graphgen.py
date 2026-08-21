@@ -2,6 +2,7 @@
 
 import json
 import os
+import sys
 import tempfile
 
 import pytest
@@ -83,3 +84,27 @@ class TestValidation:
     def test_bad_degree_dist_raises(self):
         with pytest.raises(ValueError):
             kglite.graphgen("tiny", degree_dist="power-law")
+
+
+class TestMissingPandas:
+    """The in-memory path needs pandas; the streaming path must not."""
+
+    def test_in_memory_path_names_the_package_and_the_install(self, monkeypatch):
+        # Hide pandas from the import machinery (same shape as the
+        # networkx-bridge tests), then ask for the DataFrame-loaded path.
+        monkeypatch.setitem(sys.modules, "pandas", None)
+        with pytest.raises(ImportError, match="pip install pandas"):
+            kglite.graphgen("tiny")
+
+    def test_error_points_at_the_dependency_free_alternative(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "pandas", None)
+        with pytest.raises(ImportError, match="out=DIR"):
+            kglite.graphgen("tiny")
+
+    def test_streaming_path_works_without_pandas(self, monkeypatch, tmp_path):
+        # out=DIR is pure Rust — the docstring says so, so it has to hold with
+        # pandas unimportable.
+        monkeypatch.setitem(sys.modules, "pandas", None)
+        stats = kglite.graphgen("tiny", out=str(tmp_path))
+        assert stats["nodes"] > 1000
+        assert (tmp_path / "manifest.json").exists()
