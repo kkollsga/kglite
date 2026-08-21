@@ -38,6 +38,8 @@ use crate::graph::io::ntriples::{
 };
 use crate::graph::schema::StringInterner;
 use crate::graph::storage::column_store::{ColumnStore, TypedColumn};
+use crate::graph::storage::mapped::mmap_vec::{MmapBytes, MmapOrVec};
+use rustc_hash::FxHashMap;
 
 /// Result of a unified-columns write.
 #[allow(dead_code)] // fields are part of the public API; consumed by save_disk in the future
@@ -257,32 +259,20 @@ pub fn write_unified_columns(
                     offsets,
                     data,
                     nulls,
-                    ..
+                    relocated,
                 } => {
-                    // The mega-file layout convention: offsets has
-                    // `row_count` u64 entries (cumulative ends).
-                    // TypedColumn::Str built via in-memory push has a
-                    // leading 0 → `row_count + 1` entries; the
-                    // streaming carve's TypeWriter writes only
-                    // cumulative ends so it already matches. Detect
-                    // and strip the leading zero on the in-memory
-                    // build path.
-                    let off_bytes = offsets.as_raw_bytes();
-                    let off_slice = if offsets.len() == row_count as usize + 1 {
-                        &off_bytes[8..]
-                    } else {
-                        off_bytes
-                    };
+                    let (data_bytes, offsets_bytes, nulls_bytes) =
+                        pack_str_column(offsets, data, nulls, relocated);
 
-                    let (data_r, c) = plan_region(cursor, data.as_raw_bytes());
+                    let (data_r, c) = plan_region(cursor, &data_bytes);
                     cursor = c;
-                    sources.push((data_r.offset, data.as_raw_bytes().to_vec()));
-                    let (offsets_r, c) = plan_region(cursor, off_slice);
+                    sources.push((data_r.offset, data_bytes));
+                    let (offsets_r, c) = plan_region(cursor, &offsets_bytes);
                     cursor = c;
-                    sources.push((offsets_r.offset, off_slice.to_vec()));
-                    let (nulls_r, c) = plan_region(cursor, nulls.as_raw_bytes());
+                    sources.push((offsets_r.offset, offsets_bytes));
+                    let (nulls_r, c) = plan_region(cursor, &nulls_bytes);
                     cursor = c;
-                    sources.push((nulls_r.offset, nulls.as_raw_bytes().to_vec()));
+                    sources.push((nulls_r.offset, nulls_bytes));
                     let idx = str_cols.len();
                     str_cols.push(StrColMeta {
                         data: data_r,
@@ -404,6 +394,89 @@ fn plan_region(cursor: usize, bytes: &[u8]) -> (RegionMeta, usize) {
     (region, cursor + bytes.len())
 }
 
+/// Pack a `Str` column into the mega-file's `(data, offsets, nulls)` byte
+/// triple.
+///
+/// Two conventions are reconciled here.
+///
+/// *Offsets.* The mega-file stores `row_count` cumulative **end** offsets — row
+/// 0 starts at byte 0, row `i` starts at `offsets[i - 1]` (see
+/// [`crate::graph::storage::mapped::column_store`]). An in-memory
+/// `TypedColumn::Str` instead carries `row_count + 1` offsets with a leading
+/// zero, which `str_at` reads as `offsets[i]..offsets[i + 1]`, while the
+/// streaming carve's `TypeWriter` already emits the mega-file form. Both are
+/// accepted; the leading zero is stripped.
+///
+/// *The write overlay.* `TypedColumn::set` cannot shift `offsets` for a
+/// replacement of a different length — that would move row `i + 1`'s start —
+/// so it parks the new string in `relocated` and leaves `offsets`/`data`
+/// holding the pre-`SET` bytes. The raw buffers are therefore **stale** for
+/// every overlaid row. Reading them straight through, as this writer did,
+/// silently dropped every differing-length string `SET` on a disk-mode graph:
+/// the value read back after a reload as its pre-`SET` string, or as `""` when
+/// the `SET` itself was what created the column.
+/// [`TypedColumn::write_to`](crate::graph::storage::column_store::TypedColumn)
+/// folds the overlay back for the packed sidecars; this is that fold in the
+/// mega-file's layout.
+fn pack_str_column(
+    offsets: &MmapOrVec<u64>,
+    data: &MmapBytes,
+    nulls: &MmapOrVec<u8>,
+    relocated: &FxHashMap<u32, String>,
+) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let row_count = nulls.len();
+    let nulls_bytes = nulls.as_raw_bytes().to_vec();
+    // `row_count + 1` offsets means the leading-zero form.
+    let leading_zero = offsets.len() == row_count + 1;
+
+    if relocated.is_empty() {
+        let off_bytes = offsets.as_raw_bytes();
+        let off_slice = if leading_zero {
+            &off_bytes[8..]
+        } else {
+            off_bytes
+        };
+        return (
+            data.as_raw_bytes().to_vec(),
+            off_slice.to_vec(),
+            nulls_bytes,
+        );
+    }
+
+    let offsets = offsets.as_slice();
+    let source = data.as_raw_bytes();
+    let mut new_data: Vec<u8> = Vec::with_capacity(source.len());
+    let mut new_offsets: Vec<u8> = Vec::with_capacity(row_count * 8);
+    for row in 0..row_count {
+        // A null row contributes no bytes but still advances an offset, so a
+        // reader's `offsets[i - 1] == offsets[i]` empty range lines up with the
+        // null flag. Same rule as `TypedColumn::write_to`.
+        if nulls.get(row) == 0 {
+            match relocated.get(&(row as u32)) {
+                Some(s) => new_data.extend_from_slice(s.as_bytes()),
+                None => {
+                    // Bounds-checked throughout, like `str_at`: a malformed
+                    // offsets array yields an empty row rather than a panic.
+                    let range = if leading_zero {
+                        offsets.get(row).copied().zip(offsets.get(row + 1).copied())
+                    } else if row == 0 {
+                        offsets.first().copied().map(|end| (0, end))
+                    } else {
+                        offsets.get(row - 1).copied().zip(offsets.get(row).copied())
+                    };
+                    if let Some(bytes) =
+                        range.and_then(|(start, end)| source.get(start as usize..end as usize))
+                    {
+                        new_data.extend_from_slice(bytes);
+                    }
+                }
+            }
+        }
+        new_offsets.extend_from_slice(&(new_data.len() as u64).to_le_bytes());
+    }
+    (new_data, new_offsets, nulls_bytes)
+}
+
 fn store_has_mixed(store: &ColumnStore) -> bool {
     if store
         .columns_ref()
@@ -434,22 +507,11 @@ fn extract_id_column(store: &ColumnStore) -> (bool, Vec<u8>, Vec<u8>, Vec<u8>, V
             offsets,
             data,
             nulls,
-            ..
+            relocated,
         }) => {
-            let row_count = nulls.len();
-            let off_bytes = offsets.as_raw_bytes();
-            let off_slice = if offsets.len() == row_count + 1 {
-                &off_bytes[8..]
-            } else {
-                off_bytes
-            };
-            (
-                true,
-                Vec::new(),
-                nulls.as_raw_bytes().to_vec(),
-                data.as_raw_bytes().to_vec(),
-                off_slice.to_vec(),
-            )
+            let (data_bytes, offsets_bytes, nulls_bytes) =
+                pack_str_column(offsets, data, nulls, relocated);
+            (true, Vec::new(), nulls_bytes, data_bytes, offsets_bytes)
         }
         Some(TypedColumn::UniqueId { data, nulls }) => (
             false,
@@ -477,21 +539,152 @@ fn extract_title_column(store: &ColumnStore) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
             offsets,
             data,
             nulls,
-            ..
-        }) => {
-            let row_count = nulls.len();
-            let off_bytes = offsets.as_raw_bytes();
-            let off_slice = if offsets.len() == row_count + 1 {
-                &off_bytes[8..]
-            } else {
-                off_bytes
-            };
-            (
-                data.as_raw_bytes().to_vec(),
-                off_slice.to_vec(),
-                nulls.as_raw_bytes().to_vec(),
-            )
-        }
+            relocated,
+        }) => pack_str_column(offsets, data, nulls, relocated),
         _ => (Vec::new(), Vec::new(), Vec::new()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::datatypes::values::Value;
+
+    /// Decode a packed `Str` column the way the mega-file's reader does:
+    /// `offsets[row]` is the cumulative *end*, row 0 starts at 0, and row `i`
+    /// starts at `offsets[i - 1]`.
+    fn decode(data: &[u8], offsets: &[u8], nulls: &[u8]) -> Vec<Option<String>> {
+        let ends: Vec<u64> = offsets
+            .chunks_exact(8)
+            .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(ends.len(), nulls.len(), "one end offset per row");
+        let mut out = Vec::with_capacity(nulls.len());
+        for (row, &is_null) in nulls.iter().enumerate() {
+            if is_null != 0 {
+                out.push(None);
+                continue;
+            }
+            let start = if row == 0 { 0 } else { ends[row - 1] } as usize;
+            let end = ends[row] as usize;
+            out.push(Some(String::from_utf8(data[start..end].to_vec()).unwrap()));
+        }
+        out
+    }
+
+    /// Build the in-memory `Str` shape: `row_count + 1` offsets, leading zero.
+    fn build(values: &[Option<&str>]) -> TypedColumn {
+        let mut col = TypedColumn::from_type_str("string");
+        for v in values {
+            match v {
+                Some(s) => col.push(&Value::String((*s).to_string())).unwrap(),
+                None => col.push_null(),
+            }
+        }
+        col
+    }
+
+    fn pack(col: &TypedColumn) -> Vec<Option<String>> {
+        let TypedColumn::Str {
+            offsets,
+            data,
+            nulls,
+            relocated,
+        } = col
+        else {
+            panic!("expected a Str column");
+        };
+        let (data_bytes, offsets_bytes, nulls_bytes) =
+            pack_str_column(offsets, data, nulls, relocated);
+        decode(&data_bytes, &offsets_bytes, &nulls_bytes)
+    }
+
+    #[test]
+    fn packs_a_column_with_no_overlay() {
+        let col = build(&[Some("a"), None, Some("ccc")]);
+        assert_eq!(
+            pack(&col),
+            vec![Some("a".into()), None, Some("ccc".into())],
+            "the leading zero must be stripped, not emitted as row 0's end"
+        );
+    }
+
+    #[test]
+    fn folds_a_differing_length_overwrite_back_into_the_layout() {
+        // The regression this file's `pack_str_column` exists for: `set` parks
+        // a differing-length value in `relocated` and leaves `offsets`/`data`
+        // holding the pre-`SET` bytes, so a writer reading the raw buffers
+        // emitted the stale string and lost the write.
+        let mut col = build(&[Some("aa"), Some("bb"), Some("cc")]);
+        col.set(1, &Value::String("a-much-longer-value".into()))
+            .unwrap();
+        assert_eq!(
+            pack(&col),
+            vec![
+                Some("aa".into()),
+                Some("a-much-longer-value".into()),
+                Some("cc".into()),
+            ],
+            "the overlaid row must carry the new value and its neighbours the old ones"
+        );
+    }
+
+    #[test]
+    fn folds_a_shorter_overwrite_and_renumbers_the_tail() {
+        let mut col = build(&[Some("aaaa"), Some("bbbb"), Some("cccc")]);
+        col.set(0, &Value::String("z".into())).unwrap();
+        assert_eq!(
+            pack(&col),
+            vec![Some("z".into()), Some("bbbb".into()), Some("cccc".into())],
+            "shrinking row 0 must shift every later row's offsets down"
+        );
+    }
+
+    #[test]
+    fn folds_an_overlay_onto_a_column_whose_rows_are_all_null() {
+        // The shape a brand-new key's column has: `ColumnStore::set` appends a
+        // column of nulls and then writes one row. A dropped overlay left the
+        // whole column empty, which read back as "" rather than null.
+        let mut col = build(&[None, None, None]);
+        col.set(2, &Value::String("xyz".into())).unwrap();
+        assert_eq!(pack(&col), vec![None, None, Some("xyz".into())]);
+    }
+
+    #[test]
+    fn a_null_row_advances_an_offset_without_contributing_bytes() {
+        let mut col = build(&[Some("aa"), None, Some("cc")]);
+        col.set(0, &Value::String("longer".into())).unwrap();
+        assert_eq!(
+            pack(&col),
+            vec![Some("longer".into()), None, Some("cc".into())]
+        );
+    }
+
+    #[test]
+    fn folds_an_overlay_onto_the_cumulative_ends_offset_form() {
+        // The streaming carve's `TypeWriter` emits `row_count` cumulative ends
+        // with no leading zero. Both forms reach this writer, so the fold has
+        // to read either one.
+        let mut col = TypedColumn::Str {
+            offsets: MmapOrVec::from_vec(vec![2u64, 4, 6]),
+            data: {
+                let mut d = MmapBytes::new();
+                d.extend(b"aabbcc").unwrap();
+                d
+            },
+            nulls: MmapOrVec::from_vec(vec![0u8, 0, 0]),
+            relocated: FxHashMap::default(),
+        };
+        if let TypedColumn::Str { relocated, .. } = &mut col {
+            relocated.insert(1, "BB-longer".to_string());
+        }
+        assert_eq!(
+            pack(&col),
+            vec![
+                Some("aa".into()),
+                Some("BB-longer".into()),
+                Some("cc".into()),
+            ]
+        );
     }
 }

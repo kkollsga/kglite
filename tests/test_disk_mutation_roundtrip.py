@@ -1109,34 +1109,48 @@ def test_disk_path_survives_sigkill_before_the_first_save(tmp_path):
     assert kglite.load(str(graph_dir)).cypher("MATCH (n:Doc) RETURN n.title AS t").scalar() == "after"
 
 
-@pytest.mark.parametrize(
-    "statement,probe,expected",
-    [
-        ("SET n.title = 'renamed'", "n.title", "renamed"),
-        ("SET n.brand_new = 'xyz'", "n.brand_new", "xyz"),
-    ],
-    ids=["title", "new-key"],
-)
-@pytest.mark.xfail(
-    strict=True,
-    reason="Pre-existing disk-mode defect, found while landing enable_disk_mode(path=...) "
-    "(E3, 2026-08-21) and NOT caused by it: after a disk graph's FIRST publish, a SET of "
-    "the title field or of a brand-new property key is lost on reopen — silently, and the "
-    "new key reads back as '' rather than null. An ordinary property that already has a "
-    "column persists, and memory/mapped modes are unaffected, so the loss is in the "
-    "second-generation column write (write_unified_column_file / write_column_sidecars) "
-    "or its loader, not in the SET. The existing green tests above all SET *before* the "
-    "first save, which is why the class was invisible. Flip this xfail with the fix.",
-)
-def test_disk_set_after_first_publish_survives_the_second_save(tmp_path, statement, probe, expected):
-    graph_path = str(tmp_path / "second_publish")
+# Every case here is a string `SET` on a disk-mode graph, which is the shape the
+# `columns.bin` writer used to lose: `TypedColumn::Str::set` parks a
+# differing-length replacement in the `relocated` overlay rather than shifting
+# `offsets`, and the mega-file writer read `offsets`/`data` straight through, so
+# the overlay never reached the file. The value came back as its pre-`SET`
+# string, or as '' when the `SET` was what created the column. Fixed labelled
+# E3b (2026-08-21) by folding the overlay in `pack_str_column`, the same fold
+# `TypedColumn::write_to` already did for the packed sidecars.
+_STRING_SET_CASES = [
+    # The title field is its own synthetic column, not a schema slot.
+    ("SET n.title = 'renamed'", "n.title", "renamed"),
+    # A brand-new key: the `SET` creates the column, so a dropped overlay left
+    # every row empty rather than merely stale.
+    ("SET n.brand_new = 'xyz'", "n.brand_new", "xyz"),
+    # An ordinary pre-existing string column, replaced with a longer value.
+    ("SET n.city = 'Trondheim'", "n.city", "Trondheim"),
+    # ... and with a shorter one: both directions move `offsets[i + 1]`.
+    ("SET n.city = 'Ås'", "n.city", "Ås"),
+    # Same byte length writes in place and never reaches the overlay — the one
+    # string SET that always survived, pinned so the fast path stays covered.
+    ("SET n.city = 'Brgn'", "n.city", "Brgn"),
+    # Fixed-width columns are written through their buffer, overlay or not.
+    ("SET n.age = 99", "n.age", 99),
+]
+
+
+def _seed_disk_person_graph(graph_path):
     kg = KnowledgeGraph(storage="disk", path=graph_path)
     kg.add_nodes(
-        pd.DataFrame([{"id": f"P_{i}", "title": f"P{i}", "age": 20 + i} for i in range(5)]),
+        pd.DataFrame([{"id": f"P_{i}", "title": f"P{i}", "age": 20 + i, "city": "Oslo"} for i in range(5)]),
         "Person",
         "id",
         "title",
     )
+    return kg
+
+
+@pytest.mark.parametrize("statement,probe,expected", _STRING_SET_CASES)
+def test_disk_set_after_first_publish_survives_the_second_save(tmp_path, statement, probe, expected):
+    """A `SET` between the first and second save reaches the second save's file."""
+    graph_path = str(tmp_path / "second_publish")
+    kg = _seed_disk_person_graph(graph_path)
     kg.save(graph_path)
 
     kg.cypher(f"MATCH (n:Person {{id: 'P_2'}}) {statement}", timeout_ms=10_000)
@@ -1146,3 +1160,70 @@ def test_disk_set_after_first_publish_survives_the_second_save(tmp_path, stateme
 
     reloaded = kglite.load(graph_path)
     assert _rows(reloaded.cypher(f"MATCH (n:Person {{id: 'P_2'}}) RETURN {probe} AS v"))[0]["v"] == expected
+
+
+@pytest.mark.parametrize("statement,probe,expected", _STRING_SET_CASES)
+def test_disk_set_before_the_first_save_survives_it(tmp_path, statement, probe, expected):
+    """The same loss on the *first* save — the overlay predates any publish.
+
+    The xfail this replaced blamed the second generation; the defect was never
+    about generation count, so the pre-publish order is pinned too.
+    """
+    graph_path = str(tmp_path / "first_publish")
+    kg = _seed_disk_person_graph(graph_path)
+
+    kg.cypher(f"MATCH (n:Person {{id: 'P_2'}}) {statement}", timeout_ms=10_000)
+    kg.save(graph_path)
+    del kg
+
+    reloaded = kglite.load(graph_path)
+    assert _rows(reloaded.cypher(f"MATCH (n:Person {{id: 'P_2'}}) RETURN {probe} AS v"))[0]["v"] == expected
+
+
+def test_disk_set_of_one_title_leaves_its_neighbours_intact(tmp_path):
+    """Folding the overlay must renumber *every* row's offsets, not just row 2.
+
+    A fold that copied the stale offsets array back would leave neighbouring
+    rows pointing into the wrong byte ranges — the corruption the overlay
+    exists to prevent, reintroduced at save time.
+    """
+    graph_path = str(tmp_path / "neighbours")
+    kg = _seed_disk_person_graph(graph_path)
+    kg.save(graph_path)
+    kg.cypher("MATCH (n:Person {id: 'P_2'}) SET n.title = 'a-much-longer-title'")
+    kg.save()
+    del kg
+
+    reloaded = kglite.load(graph_path)
+    titles = [r["v"] for r in _rows(reloaded.cypher("MATCH (n:Person) RETURN n.title AS v ORDER BY n.id"))]
+    assert titles == ["P0", "P1", "a-much-longer-title", "P3", "P4"]
+
+
+def test_disk_set_null_after_publish_survives_the_second_save(tmp_path):
+    """A null row contributes no bytes but still advances an offset."""
+    graph_path = str(tmp_path / "set_null")
+    kg = _seed_disk_person_graph(graph_path)
+    kg.save(graph_path)
+    kg.cypher("MATCH (n:Person {id: 'P_2'}) SET n.city = null")
+    kg.save()
+    del kg
+
+    reloaded = kglite.load(graph_path)
+    cities = [r["v"] for r in _rows(reloaded.cypher("MATCH (n:Person) RETURN n.city AS v ORDER BY n.id"))]
+    assert cities == ["Oslo", "Oslo", None, "Oslo", "Oslo"]
+
+
+def test_disk_string_set_survives_a_third_save(tmp_path):
+    """Two overlaid rows across two generations, each folded into its own file."""
+    graph_path = str(tmp_path / "third_save")
+    kg = _seed_disk_person_graph(graph_path)
+    kg.save(graph_path)
+    kg.cypher("MATCH (n:Person {id: 'P_2'}) SET n.title = 'renamed'")
+    kg.save()
+    kg.cypher("MATCH (n:Person {id: 'P_3'}) SET n.title = 'again'")
+    kg.save()
+    del kg
+
+    reloaded = kglite.load(graph_path)
+    titles = [r["v"] for r in _rows(reloaded.cypher("MATCH (n:Person) RETURN n.title AS v ORDER BY n.id"))]
+    assert titles == ["P0", "P1", "renamed", "again", "P4"]

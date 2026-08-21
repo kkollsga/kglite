@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **On a disk-mode graph, saving silently dropped every string `SET` whose new
+  value was a different byte length from the old one.** After a reload the
+  property read back as its pre-`SET` string, or as an empty string (not null)
+  when the `SET` was what created the column. It hit the node title, any
+  previously-unseen property key, and any existing string column alike, on the
+  first save as well as on later ones; a same-length replacement, a fixed-width
+  property, `REMOVE`, `SET` to null, secondary labels and edge properties were
+  never affected, which is why the class stayed invisible. `TypedColumn::set`
+  cannot shift a string column's offset array in place — that would move the
+  *next* row's start — so it parks the replacement in a `relocated` overlay; the
+  packed-sidecar writer folded that overlay back before writing, but the
+  `columns.bin` writer that disk-mode saves use read the raw offset and data
+  buffers straight through and never consulted it. Both writers now fold.
+
 - **`enable_disk_mode()` without a path wrote the converted structures to the
   system temp directory silently.** The CSR and the edge-property blob went to
   a scratch directory under `std::env::temp_dir()` that nothing named and that

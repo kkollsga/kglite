@@ -182,9 +182,9 @@
     {
       "path": "crates/kglite/src/graph/io/unified_columns.rs",
       "qualified_name": "crate::write_unified_columns",
-      "lines": 337,
-      "branches": 28,
-      "nesting": 4
+      "lines": 325,
+      "branches": 27,
+      "nesting": 3
     },
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/aggregation/materialized.rs",
