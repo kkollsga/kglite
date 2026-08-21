@@ -95,8 +95,13 @@ fn disk_crash_child() {
 
 /// Spawn the child, wait for it to park, and `SIGKILL` it.
 fn crash_child(root: &Path, ready: &Path) {
+    crash_child_named("disk_crash_child", root, ready);
+}
+
+/// [`crash_child`], for a named child test — the file has more than one.
+fn crash_child_named(child_test: &str, root: &Path, ready: &Path) {
     let mut child = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "disk_crash_child", "--nocapture"])
+        .args(["--exact", child_test, "--nocapture"])
         .env(CHILD_GRAPH, root)
         .env(CHILD_READY, ready)
         .spawn()
@@ -179,5 +184,121 @@ fn a_crashed_writer_releases_its_lease_to_the_next_process() {
         titles(&reloaded),
         vec!["after".to_string(), "saved".to_string()],
         "recovery is writable: the next save publishes on top of the survivor"
+    );
+}
+
+// ── the crash that happens *before* the first save ───────────────────
+//
+// The tests above all crash a writer that had already published one
+// generation. The harder case is the crash that lands in the window between
+// `new_dir_graph_in_mode(Disk, …)` and the first `save()`: creation
+// materialises the directory (`.kglite.lock`, `seg_000/*.bin`) but published
+// nothing, so a reopen used to resolve the legacy-flat root, find no
+// `disk_graph_meta.json`, and refuse the path outright — permanently, until an
+// operator deleted the directory by hand.
+//
+// Disk-mode creation therefore publishes an empty generation eagerly, so the
+// directory is a valid, loadable graph from the moment it exists. A crash in
+// that window then reopens as the empty graph it genuinely is.
+
+/// Child half: create the disk graph, mutate, and park — never saving.
+#[test]
+fn disk_crash_child_before_first_save() {
+    let Some(root) = std::env::var_os(CHILD_GRAPH) else {
+        return;
+    };
+    let ready = std::env::var_os(CHILD_READY).expect("ready path");
+    let root = Path::new(&root);
+
+    let mut graph =
+        Arc::new(new_dir_graph_in_mode(StorageMode::Disk, Some(root)).expect("create disk graph"));
+    run(&mut graph, "CREATE (:Person {id: 1, title: 'never-saved'})");
+
+    std::fs::write(ready, b"ready").expect("signal readiness");
+    std::thread::sleep(Duration::from_secs(60));
+}
+
+#[test]
+fn sigkill_before_the_first_save_leaves_a_loadable_empty_graph() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("graph");
+    crash_child_named(
+        "disk_crash_child_before_first_save",
+        &root,
+        &tmp.path().join("ready"),
+    );
+
+    let recovered = load_file(&root.to_string_lossy())
+        .expect("a disk path that was created but never saved must still open");
+    assert!(
+        titles(&recovered).is_empty(),
+        "nothing was ever published, so the path reopens as the empty graph it is"
+    );
+}
+
+#[test]
+fn a_never_saved_path_reopens_writable_after_the_crash() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("graph");
+    crash_child_named(
+        "disk_crash_child_before_first_save",
+        &root,
+        &tmp.path().join("ready"),
+    );
+
+    // The dead writer's `.kglite.lock` file is still on disk; liveness is
+    // OS advisory-lock based, so the next process takes over and publishes.
+    let mut recovered = load_file(&root.to_string_lossy()).expect("reopen after crash");
+    run(&mut recovered, "CREATE (:Person {id: 1, title: 'after'})");
+    save_graph(&mut recovered, &root.to_string_lossy()).expect("publish after recovery");
+
+    let reloaded = load_file(&root.to_string_lossy()).expect("reopen after republish");
+    assert_eq!(titles(&reloaded), vec!["after".to_string()]);
+}
+
+#[test]
+fn a_fresh_disk_path_is_loadable_before_any_save() {
+    // The deterministic half of the crash test: no child, no signal — just the
+    // state creation leaves behind. `CURRENT` must already select a complete
+    // generation, because that is what makes the crash above survivable.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("graph");
+    let graph = new_dir_graph_in_mode(StorageMode::Disk, Some(&root)).expect("create disk graph");
+
+    let current = std::fs::read_to_string(root.join("CURRENT"))
+        .expect("disk creation publishes a generation eagerly");
+    let name = current
+        .strip_suffix('\n')
+        .expect("CURRENT ends in a newline");
+    let selected = root.join("generations").join(name);
+    assert!(selected.join("metadata.json").is_file());
+    assert!(selected.join("disk_graph_meta.json").is_file());
+
+    // The live handle keeps working, and a second reader sees the same graph.
+    drop(graph);
+    assert!(titles(&load_file(&root.to_string_lossy()).expect("load fresh path")).is_empty());
+}
+
+#[test]
+fn creating_over_an_existing_disk_graph_does_not_publish_over_it() {
+    // The eager publish is a *create* step. Pointing a create at a directory
+    // that already holds a published graph must not move `CURRENT` off it
+    // before the caller has written anything.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("graph");
+    {
+        let mut graph = Arc::new(
+            new_dir_graph_in_mode(StorageMode::Disk, Some(&root)).expect("create disk graph"),
+        );
+        run(&mut graph, "CREATE (:Person {id: 1, title: 'existing'})");
+        save_graph(&mut graph, &root.to_string_lossy()).expect("publish generation");
+    }
+
+    let recreated = new_dir_graph_in_mode(StorageMode::Disk, Some(&root)).expect("re-create");
+    drop(recreated);
+    assert_eq!(
+        titles(&load_file(&root.to_string_lossy()).expect("reload")),
+        vec!["existing".to_string()],
+        "the published generation is still what CURRENT selects"
     );
 }

@@ -1035,3 +1035,75 @@ def test_disk_save_compaction_survives_reused_slots_and_edges(tmp_path):
     assert info["columnar_total_rows"] == info["columnar_live_rows"] == len(before)
     edges = _rows(reloaded.cypher("MATCH (a:Doc)-[:LINKS]->(b:Doc) RETURN a.id AS a, b.id AS b ORDER BY a"))
     assert edges == [{"a": 1, "b": 1000}, {"a": 1100, "b": 398}]
+
+
+# ── crash between open() and the first save() ────────────────────────
+
+
+def test_disk_open_publishes_before_the_first_save(tmp_path):
+    """`kglite.open(path, storage="disk")` must leave a *loadable* directory.
+
+    Creating a disk graph materialises the directory (`.kglite.lock`,
+    `seg_000/*.bin`) but used to publish no generation until `save()`. A
+    process that died in that window — a crash, a SIGKILL, an operator's
+    Ctrl-C — left a path that every later `open()` refused with "missing
+    disk_graph_meta.json", and the only way out was deleting it by hand.
+    Load-or-create has to hold for `storage="disk"` too, so creation publishes
+    an empty generation up front.
+    """
+    graph_dir = tmp_path / "fresh"
+    kg = kglite.open(str(graph_dir), storage="disk")
+    kg.cypher("CREATE (:Doc {id: 1, title: 'unsaved'})")
+    del kg
+
+    # No save() ever ran, so nothing was published beyond the empty create —
+    # but the path opens, rather than being stuck refusing forever.
+    reopened = kglite.load(str(graph_dir))
+    assert reopened.cypher("MATCH (n:Doc) RETURN count(n) AS c").scalar() == 0
+    del reopened
+
+    # And it is writable: the next save publishes on top of the empty graph.
+    writer = kglite.open(str(graph_dir))
+    writer.cypher("CREATE (:Doc {id: 2, title: 'after'})")
+    writer.save(str(graph_dir))
+    del writer
+    assert kglite.load(str(graph_dir)).cypher("MATCH (n:Doc) RETURN n.title AS t").scalar() == "after"
+
+
+@pytest.mark.skipif(not hasattr(__import__("signal"), "SIGKILL"), reason="SIGKILL is POSIX-only")
+def test_disk_path_survives_sigkill_before_the_first_save(tmp_path):
+    """The same guarantee under a real, uncatchable crash.
+
+    The child never saves, so there is nothing to recover — the point is that
+    the *directory* it leaves behind is a graph and not a permanently refused
+    path. `os._exit` would model a hard exit; `SIGKILL` also rules out any
+    Rust `Drop` running, which is what a stuck lock file would otherwise hide.
+    """
+    import signal
+    import subprocess
+    import sys
+    import textwrap
+
+    graph_dir = tmp_path / "killed"
+    script = textwrap.dedent(
+        f"""
+        import kglite, os, signal
+        g = kglite.open({str(graph_dir)!r}, storage="disk")
+        g.cypher("CREATE (:Doc {{id: 1, title: 'unsaved'}})")
+        os.kill(os.getpid(), signal.SIGKILL)
+        """
+    )
+    done = subprocess.run([sys.executable, "-c", script], capture_output=True)
+    assert done.returncode == -signal.SIGKILL, (
+        f"child must die on SIGKILL, got {done.returncode}; stderr={done.stderr.decode(errors='replace')}"
+    )
+
+    # The dead writer's `.kglite.lock` is still on disk; liveness is advisory
+    # OS locking, so it must not block the next process.
+    assert (graph_dir / ".kglite.lock").exists()
+    reopened = kglite.open(str(graph_dir))
+    assert reopened.cypher("MATCH (n:Doc) RETURN count(n) AS c").scalar() == 0
+    reopened.cypher("CREATE (:Doc {id: 2, title: 'after'})")
+    reopened.save(str(graph_dir))
+    del reopened
+    assert kglite.load(str(graph_dir)).cypher("MATCH (n:Doc) RETURN n.title AS t").scalar() == "after"

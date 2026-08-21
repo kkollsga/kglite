@@ -547,16 +547,23 @@ class TestSaveOutput:
         result = reopened.cypher("MATCH (p:Person) RETURN count(p) AS n")
         assert result[0]["n"] == 3
 
-    def test_disk_mode_save_false_leaves_it_unpublished(self, tmp_path):
-        """``save=False`` still means "do not write" — in disk mode too."""
+    def test_disk_mode_save_false_leaves_the_build_unpublished(self, tmp_path):
+        """``save=False`` still means "do not publish the build" on disk.
+
+        A disk graph *is* its directory, so creating one always writes: the
+        lock, ``seg_000/``, and — since load-or-create has to hold for disk
+        too — an empty generation, so that a crash before the first ``save()``
+        does not leave a path every later open refuses. What ``save=False``
+        withholds is the build. The directory therefore opens, and opens
+        *empty*: none of the blueprint's nodes are in it.
+        """
         bp_path = _minimal_blueprint(tmp_path)
         out = tmp_path / "disk-graph"
 
         from_blueprint(bp_path, save=False, storage="disk", path=str(out))
 
-        assert not (out / "CURRENT").exists()
-        with pytest.raises(Exception):
-            kglite.load(str(out))
+        assert (out / "CURRENT").exists()
+        assert kglite.load(str(out)).cypher("MATCH (p:Person) RETURN count(p) AS n")[0]["n"] == 0
 
     def test_explicit_save_without_destination_raises(self, tmp_path):
         """An explicit ``save=True`` that cannot be honoured must not pass."""

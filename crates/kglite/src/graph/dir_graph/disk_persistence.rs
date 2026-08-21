@@ -225,7 +225,11 @@ impl DirGraph {
         Ok(())
     }
 
-    fn write_disk_snapshot(&mut self, dir: &std::path::Path) -> Result<(), String> {
+    /// Write the graph's complete on-disk form into `dir` — the payload half
+    /// of a generation publish, with no pointer swap and no rebase of the live
+    /// handle. `pub(crate)` because disk-mode *creation* stages its initial
+    /// empty generation through it too (`storage::mode`).
+    pub(crate) fn write_disk_snapshot(&mut self, dir: &std::path::Path) -> Result<(), String> {
         self.consolidate_disk_for_save(dir)?;
 
         // save_to_dir needs &mut access so the edge-property store can

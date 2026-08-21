@@ -522,10 +522,7 @@ fn finalize_disk_graph(
                 );
             }
 
-            // Publish root metadata last: readers must never observe a new
-            // completion marker before its required sidecars exist.
-            std::fs::write(root_dir.join("metadata.json"), json)
-                .map_err(|e| format!("Failed to publish graph metadata: {e}"))?;
+            publish_flat_root(&root_dir, &json)?;
         }
 
         let finalising_elapsed = finalising_start.elapsed().as_secs_f64();
@@ -543,6 +540,47 @@ fn finalize_disk_graph(
     }
 
     Ok(())
+}
+
+/// Publish the finished build as the graph at `root_dir`.
+///
+/// Root metadata goes last: readers must never observe a new completion marker
+/// before the sidecars it names exist. Then any generation pointer over the
+/// directory is dropped.
+///
+/// A flat root build and a `CURRENT` pointer are mutually exclusive ways of
+/// naming the same directory's graph, and `resolve_snapshot` prefers the
+/// pointer. Disk-mode *creation* publishes an empty generation so a crash
+/// before the first `save()` still leaves a loadable path
+/// (`storage::mode::publish_initial_generation`), and that pointer would
+/// otherwise shadow the build just written to `root_dir` — a reload would
+/// return the empty graph instead of it, silently, in the one case documented
+/// as needing no `save()`.
+///
+/// Dropping the pointer is the completing half of the flat publish, and it is a
+/// single atomic unlink: until it happens a reader sees the previously
+/// published generation, after it the build. It does something only when
+/// `root_dir` really is the graph root, because that is the only directory
+/// `CURRENT` ever lives in — a build staged into a mutation workspace or into a
+/// generation finds nothing to remove. Published generations themselves are
+/// left in place; the next `save()` numbers past them.
+fn publish_flat_root(root_dir: &Path, metadata_json: &str) -> Result<(), String> {
+    std::fs::write(root_dir.join("metadata.json"), metadata_json)
+        .map_err(|e| format!("Failed to publish graph metadata: {e}"))?;
+    match std::fs::remove_file(root_dir.join("CURRENT")) {
+        Ok(()) => {
+            // Durability of the unlink, not of its contents: the
+            // reader-visible switch is the directory entry.
+            if let Ok(handle) = std::fs::File::open(root_dir) {
+                let _ = handle.sync_all();
+            }
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!(
+            "Failed to retire the previous generation pointer: {e}"
+        )),
+    }
 }
 
 fn build_columns(
@@ -2063,6 +2101,45 @@ mod tests {
 
         let reopened =
             crate::graph::io::file::load_file(disk_root.path().to_str().unwrap()).unwrap();
+        assert_column_boundary_values(&reopened);
+    }
+
+    /// A disk build published at the graph root is what a reload sees, even
+    /// when the directory already carried a published generation.
+    ///
+    /// Both halves matter. Creation publishes an empty generation so a crash
+    /// before the first `save()` leaves a loadable path, and `resolve_snapshot`
+    /// prefers a `CURRENT` pointer over the flat root — so without retiring the
+    /// pointer, this reload would come back empty while reporting success. And
+    /// pointing a fresh disk create at a directory that already holds a saved
+    /// graph is a *rebuild*: the build the caller just ran is the graph, not
+    /// the snapshot it replaced.
+    #[test]
+    fn a_disk_build_supersedes_a_previously_published_generation() {
+        use crate::graph::storage::mode::{new_dir_graph_in_mode, StorageMode};
+
+        let fixture = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(fixture.path(), column_boundary_fixture()).unwrap();
+        let root = tempfile::tempdir().unwrap();
+
+        // A saved generation to build over.
+        let mut published = new_dir_graph_in_mode(StorageMode::Disk, Some(root.path())).unwrap();
+        published
+            .save_disk(root.path().to_str().unwrap())
+            .expect("publish a generation");
+        drop(published);
+        assert!(root.path().join("CURRENT").is_file());
+
+        let mut rebuilt = graph_for_mode(StorageMode::Disk, root.path());
+        load_ntriples(
+            &mut rebuilt,
+            fixture.path().to_str().unwrap(),
+            &boundary_config(),
+        )
+        .unwrap();
+        drop(rebuilt);
+
+        let reopened = crate::graph::io::file::load_file(root.path().to_str().unwrap()).unwrap();
         assert_column_boundary_values(&reopened);
     }
 

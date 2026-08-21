@@ -73,12 +73,90 @@ pub fn new_dir_graph_in_mode(mode: StorageMode, path: Option<&Path>) -> Result<D
         StorageMode::Disk => {
             let dir =
                 path.ok_or_else(|| "storage mode 'disk' requires a directory path".to_string())?;
+            // Whether this create is landing on a directory that already holds
+            // a graph has to be answered *before* the directory is
+            // materialised, since creation writes into it.
+            let displaces_existing = disk_dir_holds_a_graph(dir);
             let dg = DiskGraph::new_at_path(dir)
                 .map_err(|e| format!("Failed to create disk graph at '{}': {e}", dir.display()))?;
             graph.graph = GraphBackend::Disk(Box::new(dg));
+            if !displaces_existing {
+                publish_initial_generation(dir)?;
+            }
         }
     }
     Ok(graph)
+}
+
+/// Whether `dir` already holds a disk graph that a *create* must not displace.
+///
+/// Two shapes count. A generational graph is named by its `CURRENT` pointer; a
+/// pre-generations flat directory is named by the `disk_graph_meta.json` at its
+/// root. Either one means the caller pointed a create at an existing graph, and
+/// the eager publish below would move `CURRENT` off real data before the caller
+/// had written anything.
+fn disk_dir_holds_a_graph(dir: &Path) -> bool {
+    dir.join("CURRENT").exists() || dir.join("disk_graph_meta.json").exists()
+}
+
+/// Publish the empty generation that makes a freshly created disk directory a
+/// loadable graph immediately, rather than only from its first `save()`.
+///
+/// **Why this is not deferred.** `DiskGraph::new_at_path` materialises the
+/// directory — the writer lock and `seg_000/*.bin` — but publishes nothing, so
+/// between creation and the first `save()` the path existed and held files yet
+/// resolved to no generation. `load_disk_dir` then fell through to the
+/// legacy-flat root, found no `disk_graph_meta.json`, and refused the path with
+/// a format error. A process that died in that window (a crash, a `SIGKILL`, an
+/// operator's Ctrl-C) left a directory that *every* later open rejected, and
+/// the only way out was deleting it by hand. Publishing up front means the path
+/// is the empty graph it genuinely is, from the moment it exists.
+///
+/// **Why not a lenient loader instead.** The missing-`CURRENT` branch is also
+/// the pre-generations flat-directory path, so treating "no generation" as
+/// "empty graph" would silently present a real legacy graph as empty — and the
+/// next `save()` would publish that emptiness over it. The error stays; the
+/// window that produced it is what closes.
+///
+/// **What this deliberately does not do is rebase the live handle.** A real
+/// `save_disk` follows the publish with `finish_generation`, which re-points
+/// the graph at the snapshot it just wrote. Doing that here would move a
+/// brand-new graph's write target from its own `seg_000/` scratch into a
+/// *published, immutable* generation, and the write-through builders that
+/// target `active_write_dir()` — `load_ntriples` above all, whose disk build is
+/// contractually reloadable with no intervening `save()` — would then mutate a
+/// snapshot readers can already see. So this is the payload plus the pointer
+/// swap and nothing else: the graph handed back writes exactly where a
+/// freshly-created one always wrote.
+///
+/// Publication is `GenerationTxn`'s usual all-or-nothing transaction — staged,
+/// fsync'd, renamed, then selected by an atomically persisted `CURRENT` — so a
+/// failure here (ENOSPC, a lost writer lease) leaves the same unpublished
+/// directory creation used to leave, never a half-published generation.
+fn publish_initial_generation(dir: &Path) -> Result<(), String> {
+    let describe = |what: &str, e: std::io::Error| {
+        format!(
+            "Failed to publish the initial generation for disk graph at '{}': {what}: {e}",
+            dir.display()
+        )
+    };
+    let txn = crate::graph::storage::disk::generation::GenerationTxn::begin(dir)
+        .map_err(|e| describe("begin", e))?;
+    // The snapshot is written by a throwaway graph in scratch space rather than
+    // by the one being handed back. Staging a snapshot builds the save-time
+    // global indexes, and that takes a writer lease and a mutation workspace —
+    // doing it to the caller's brand-new handle would move its write target off
+    // its own `seg_000/` into a workspace discarded on drop, which is where the
+    // whole `load_ntriples` disk build silently went.
+    let scratch = tempfile::tempdir().map_err(|e| describe("scratch", e))?;
+    let mut seed = DirGraph::new();
+    seed.graph = GraphBackend::Disk(Box::new(
+        DiskGraph::new_at_path(scratch.path()).map_err(|e| describe("seed", e))?,
+    ));
+    seed.write_disk_snapshot(txn.stage_dir())?;
+    drop(seed);
+    txn.publish().map_err(|e| describe("publish", e))?;
+    Ok(())
 }
 
 /// The storage mode `graph` is in **right now** — the counterpart of the mode a

@@ -182,7 +182,7 @@
     {
       "path": "crates/kglite/src/graph/io/ntriples/loader.rs",
       "qualified_name": "crate::finalize_disk_graph",
-      "lines": 311,
+      "lines": 308,
       "branches": 46,
       "nesting": 5
     },

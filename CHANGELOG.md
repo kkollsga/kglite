@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A crash between a `storage="disk"` `open()` and the first `save()` left a
+  directory every later `open()` refused.** Disk-mode creation materialised the
+  path — the writer lock and `seg_000/*.bin` — but published no generation until
+  a save, so a process that died in that window left a directory with no
+  `CURRENT` pointer, which every subsequent open rejected as
+  `FileFormatError: missing disk_graph_meta.json`. The application could not
+  restart without an operator deleting the path by hand; a fault-injection run
+  hit it on 28 of 50 killed disk-mode processes. Creation now publishes an empty
+  generation up front, so load-or-create holds for `storage="disk"` too: a path
+  that was created but never saved reopens as the empty graph it is, and is
+  writable. Creating over a directory that already holds a graph is unaffected —
+  no pointer moves until that graph's own `save()`.
+
+  Two consequences worth knowing. A blueprint built with `save=False` into a
+  disk `path` now leaves a directory that *opens* (empty) rather than one that
+  raises. And `load_ntriples`' disk build, which is contractually reloadable
+  with no intervening `save()`, retires the create-time pointer as the last step
+  of publishing itself, so the build is what a reload sees.
+
 - **`DISTINCT` used as a bare variable name inside an aggregate panicked the
   engine.** This dialect leaves `DISTINCT` and `COUNT` unreserved in name
   position, so `MATCH (DISTINCT:Person)` binds a variable — but the aggregate

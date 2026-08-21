@@ -373,6 +373,40 @@ mod tests {
         GraphDirectoryLock::try_acquire(root.path()).unwrap();
     }
 
+    /// The eager publish that disk-mode *creation* runs is the same
+    /// all-or-nothing transaction as any other. A failure part-way through it
+    /// must leave the directory in exactly the state creation used to leave —
+    /// no `CURRENT`, no generation — and never a `CURRENT` selecting a
+    /// half-written one.
+    #[test]
+    fn a_failed_initial_publish_leaves_no_pointer_and_no_generation() {
+        use crate::graph::storage::mode::{new_dir_graph_in_mode, StorageMode};
+
+        for stage in [
+            "before_generation_rename",
+            "after_generation_rename",
+            "before_current_replace",
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path().join("graph");
+            inject(stage, || {
+                assert!(
+                    new_dir_graph_in_mode(StorageMode::Disk, Some(&root)).is_err(),
+                    "{stage}: a failed initial publish must fail the create"
+                );
+            });
+            assert!(
+                !root.join(CURRENT_FILE).exists(),
+                "{stage}: no pointer may be published"
+            );
+            assert_eq!(
+                resolve_snapshot(&root).unwrap().generation,
+                None,
+                "{stage}: nothing is selectable"
+            );
+        }
+    }
+
     #[test]
     fn failures_before_pointer_keep_old_and_after_pointer_select_new() {
         let root = tempfile::tempdir().unwrap();
