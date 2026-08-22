@@ -47,7 +47,7 @@
 //!
 //! ## Non-fatal "did you mean?" warnings
 //!
-//! [`collect_unknown_pattern_warnings`] gathers the four families of
+//! [`collect_unknown_pattern_warnings`] gathers the five families of
 //! silently-empty-or-null query, all with an edit-distance hint where one
 //! applies and none of them rejecting (every shape below is legal Cypher):
 //!
@@ -65,6 +65,13 @@
 //! 4. **A relationship pattern pointing the wrong way** — every edge of the
 //!    type runs the other way, so the pattern matches nothing. See
 //!    [`warnings::reversed_direction_warnings`] for the conservatism rules.
+//! 5. **A comparison a declared property type makes vacuous** — `WHERE
+//!    p.age > 'forty'` where `p.age IS :: INTEGER` is null on every row.
+//!    Sourced from the DDL declaration alone, because that is the only type
+//!    knowledge the write path enforces. See [`type_mismatch`] for the family
+//!    resolver and the never-warn classes. Unlike families 2 and 3 this one is
+//!    *never* promoted by `lock_schema()`; it rides
+//!    [`warnings::QueryWarnings::other`].
 //!
 //! Warnings travel structurally on `QueryDiagnostics::warnings` (every
 //! programmatic surface, MCP included) and to stderr via
@@ -97,6 +104,7 @@ use crate::graph::schema::{DirGraph, InternedKey};
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 
+mod type_mismatch;
 mod warnings;
 
 pub use warnings::collect_unknown_pattern_warnings;

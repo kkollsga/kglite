@@ -189,7 +189,7 @@ fn absent_property_findings<'q>(
 /// True when `prop` is neither a built-in field nor in `node_type`'s declared
 /// metadata (and the type *has* declared metadata — empty ⇒ skip, as
 /// [`validate_property`] does, to avoid false positives on under-declared graphs).
-fn property_absent(graph: &DirGraph, node_type: &str, prop: &str) -> bool {
+pub(super) fn property_absent(graph: &DirGraph, node_type: &str, prop: &str) -> bool {
     if BUILTIN_FIELDS.contains(&prop) {
         return false;
     }
@@ -611,9 +611,13 @@ pub(crate) fn collect_query_warnings(query: &CypherQuery, graph: &DirGraph) -> Q
     // separately from them, because they are the only family a locked schema
     // rejects rather than reports.
     let absent_property = absent_property_findings(query, graph, &var_label);
+    // Family 5 (declared-type mismatches) shares `var_label` and its
+    // conservatisms, but never its dedup key — see [`super::type_mismatch`].
+    let mut type_mismatch = super::type_mismatch::type_mismatch_findings(query, graph, &var_label);
     let mut out: Vec<String> = Vec::new();
     if unknown_labels.is_empty() && unknown_rels.is_empty() {
         out.append(&mut reversed);
+        out.append(&mut type_mismatch);
         return QueryWarnings {
             absent_property,
             other: out,
@@ -666,6 +670,7 @@ pub(crate) fn collect_query_warnings(query: &CypherQuery, graph: &DirGraph) -> Q
         }
     }
     out.append(&mut reversed);
+    out.append(&mut type_mismatch);
     QueryWarnings {
         absent_property,
         other: out,

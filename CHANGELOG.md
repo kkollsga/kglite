@@ -86,6 +86,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A query warning when a *declared* property type makes a `WHERE`
+  comparison vacuous.** `MATCH (p:Person) WHERE p.age > 'forty'` on a graph
+  that declared `REQUIRE p.age IS :: INTEGER` is null on every row — legal
+  Cypher, an empty result, and no indication that the literal was the problem.
+  It now reports `WHERE compares Person.age (declared INTEGER) with a STRING
+  literal 'forty' — a cross-type ordering comparison is null in openCypher, so
+  this filters out every row.`, alongside the four warning families already
+  carried on `ResultView.warnings` / `diagnostics["warnings"]` and echoed to
+  stderr. Covers `=`, `<>`, `<`, `<=`, `>`, `>=`, `IN` over a literal list, and
+  `STARTS WITH` / `ENDS WITH` / `CONTAINS` on a property declared as anything
+  but `STRING`. `<>` gets its own wording — a cross-type `<>` is *true*, so it
+  matches every row that has the property rather than filtering them out.
+  Runtime three-valued logic is unchanged; this only describes it. The source
+  is the DDL declaration alone — the one type fact the write path enforces —
+  so `define_schema()` field types and observed metadata are not consulted, and
+  the family stays silent wherever it cannot guarantee the outcome: numeric
+  against numeric (`INTEGER` and `FLOAT` are one comparison family),
+  `DATE`/`LOCAL DATETIME` against a string (parsed at runtime, so
+  value-dependent), `DURATION`/`POINT`, `IN` lists with one comparable element,
+  parameters, property-to-property comparisons, absent properties (the existing
+  absent-property warning already explains those), built-in fields,
+  multi-label patterns and `WITH`-rebound variables. It is a warning in every
+  schema state — `lock_schema()` does not promote it.
+
 - **`ResultView.warnings`, and a process-global policy for where query
   warnings are announced.** The warnings a query collects were readable only
   as `result.diagnostics["warnings"]`, which is a `TypeError` waiting to

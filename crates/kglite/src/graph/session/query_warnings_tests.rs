@@ -218,3 +218,51 @@ fn a_correlated_subquerys_warning_is_absorbed_once() {
         "{warnings:?}"
     );
 }
+
+/// The declared-type family (`WHERE p.age > 'forty'` on an `IS :: INTEGER`
+/// property) rides the same channel as the four before it — and must clear the
+/// same cache trap, since `prepare()` returns before the schema pass on a hit.
+#[test]
+fn a_declared_type_mismatch_reaches_diagnostics_and_survives_the_cache() {
+    let _guard = plan_cache::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let params = empty_params();
+    let opts = ExecuteOptions::eager(&params);
+    let mut graph = DirGraph::new();
+    execute_mut(&mut graph, "CREATE (:Person {id: 1, age: 30})", &opts).expect("seed");
+    execute_mut(
+        &mut graph,
+        "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.age IS :: INTEGER",
+        &opts,
+    )
+    .expect("declare the property type");
+
+    let query = "MATCH (p:Person) WHERE p.age > 'forty' RETURN p";
+    instrumentation::reset();
+    let first = warnings_of(&graph, query);
+    let second = warnings_of(&graph, query);
+    let stats = instrumentation::totals().read;
+
+    assert_eq!(
+        stats.hits, 1,
+        "the second run must be a cache hit, else this case proves nothing: {stats:?}"
+    );
+    assert_eq!(first.len(), 1, "{first:?}");
+    assert!(
+        first[0].contains("Person.age (declared INTEGER)")
+            && first[0].contains("STRING literal 'forty'")
+            && first[0].contains("filters out every row"),
+        "{first:?}"
+    );
+    assert_eq!(
+        first, second,
+        "a cache hit must carry the same warnings as the miss that filled it"
+    );
+
+    // An undeclared property of the same type is untouched by the family.
+    assert!(
+        warnings_of(&graph, "MATCH (p:Person) WHERE p.id > 'forty' RETURN p").is_empty(),
+        "a built-in field carries no declaration"
+    );
+}
