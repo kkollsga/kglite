@@ -1,4 +1,5 @@
 // src/graph/maintain.rs
+use crate::datatypes::values::{classify_value_set, ValueSetType};
 use crate::datatypes::{DataFrame, Value};
 use crate::graph::constraints::{ConstraintResult, UniqueConstraintKey};
 use crate::graph::introspection::reporting::{ConnectionOperationReport, NodeOperationReport};
@@ -2277,6 +2278,35 @@ pub fn create_connections(
     Ok(report)
 }
 
+/// The observed type string `update_node_properties` records for a batch,
+/// classified across **every** value it writes rather than the first one — a
+/// heterogeneous batch has no single type, so naming one made the metadata
+/// state the opposite of what was stored (`[1, "two", 3]` recorded `Int64`).
+/// Those record `"mixed"`, the string the columnar store and WAL replay
+/// (`wal_replay::declared_type_name`) already use for a column whose values
+/// disagree and which no type-knowledge source reads as a claim. Everything
+/// else records what a bulk load of the same values records
+/// ([`get_column_types`], via [`classify_value_set`]).
+fn observed_type_string(nodes: &[(Option<NodeIndex>, Value)], validated: &[bool]) -> String {
+    let written = || {
+        nodes
+            .iter()
+            .zip(validated)
+            .filter(|(_, ok)| **ok)
+            .map(|((_, value), _)| value)
+    };
+    match classify_value_set(written()) {
+        ValueSetType::Uniform(col_type) => col_type.to_string(),
+        ValueSetType::Mixed => "mixed".to_string(),
+        // `Point`/`Duration` (no column names them, and this path does not
+        // render them as text the way a frame would) and all-null batches
+        // both observe nothing, which this path has always spelled
+        // `"Unknown"`. With *no* writable row the string is unused: the loop
+        // below is keyed off the validated rows.
+        ValueSetType::Shapeless | ValueSetType::Empty => "Unknown".to_string(),
+    }
+}
+
 pub fn update_node_properties(
     graph: &mut DirGraph,
     nodes: &[(Option<NodeIndex>, Value)],
@@ -2306,10 +2336,9 @@ pub fn update_node_properties(
     // disk query arena. Keeping the result aligned with `nodes` also avoids a
     // second backend lookup when the batch actions are assembled.
     let mut validated_nodes = Vec::with_capacity(nodes.len());
-    let mut first_value_type = None;
     let mut skipped_count = 0;
 
-    for (node_idx_opt, value) in nodes {
+    for (node_idx_opt, _) in nodes {
         if let Some(node_idx) = node_idx_opt {
             if let Some(node_type) = GraphRead::node_type_of(&graph.graph, *node_idx) {
                 // Track node type and count for each node
@@ -2317,17 +2346,6 @@ pub fn update_node_properties(
                     .entry(graph.interner.resolve(node_type).to_string())
                     .or_insert(0) += 1;
                 validated_nodes.push(true);
-
-                // Capture type of first value for schema
-                if first_value_type.is_none() {
-                    first_value_type = Some(match value {
-                        Value::Int64(_) => "Int64",
-                        Value::Float64(_) => "Float64",
-                        Value::String(_) => "String",
-                        Value::UniqueId(_) => "UniqueId",
-                        _ => "Unknown",
-                    });
-                }
             } else {
                 validated_nodes.push(false);
                 skipped_count += 1;
@@ -2340,9 +2358,7 @@ pub fn update_node_properties(
     }
 
     // Step 2: Update node type metadata for each affected node type
-    let type_string = first_value_type
-        .map(|t| t.to_string())
-        .unwrap_or_else(|| "Calculated".to_string());
+    let type_string = observed_type_string(nodes, &validated_nodes);
 
     for node_type in node_types.keys() {
         // Check for type mismatch with existing metadata
@@ -2467,3 +2483,7 @@ mod positional_delete_tests;
 #[cfg(test)]
 #[path = "maintain_property_type_tests.rs"]
 mod property_type_tests;
+
+#[cfg(test)]
+#[path = "maintain_add_property_type_tests.rs"]
+mod add_property_type_tests;

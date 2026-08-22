@@ -390,6 +390,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   It now raises that same error, before the model is loaded. An *existing* type
   with no matching rows is unchanged and still returns `{'embedded': 0}`.
 
+- **A property written with values of more than one type recorded the *first*
+  value's type as the type of all of them.** Every write that stores one value
+  per node — the fluent `store_as` targets, the calculation writers — typed the
+  whole batch from whichever value came first, so writing `[1, 'two', 3]` left
+  `describe()` reporting `type="Int64"` beside the very strings that
+  contradicted it, and a later write of the honest type reported a spurious
+  "Type mismatch for property …" against the recorded lie. The batch is now
+  classified across all of its values: a heterogeneous batch records `"mixed"`,
+  the name the columnar store and write-ahead-log replay already use for a
+  column whose values disagree and which no type-knowledge source reads as a
+  claim (so it never makes a query warn). Homogeneous batches — and the numeric
+  widening a column performs, `Int64` beside `Float64` being a `Float64` — now
+  record exactly what loading the same values through `add_nodes()` records,
+  including the `Boolean`/`DateTime`/`List`/`Map` types this path used to call
+  `"Unknown"`. Nulls do not participate; an all-null batch still records
+  `"Unknown"`.
+
 ## [0.16.6] - 2026-08-22
 
 ### Fixed

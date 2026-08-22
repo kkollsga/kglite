@@ -986,6 +986,61 @@ fn resolve_column_type(kinds: u16, ints_fit_u32: bool) -> ColumnType {
     }
 }
 
+/// How a loose set of values maps onto the [`ColumnType`] vocabulary.
+///
+/// A row-wise writer (`mutation::maintain::update_node_properties`) records a
+/// property's observed type without ever building a frame. Sharing
+/// [`resolve_column_type`] with it is what makes the type a property gets from
+/// `add_property` equal to the one the same values get from `add_nodes`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ValueSetType {
+    /// No non-null values — the set observes no type at all.
+    Empty,
+    /// This column type holds every value as itself, give or take the numeric
+    /// widening [`DataFrame::from_cypher_rows`] performs (an `Int64` beside a
+    /// `Float64` makes a `Float64` column).
+    Uniform(ColumnType),
+    /// Every value is one of the variants no column shape names (`Point`,
+    /// `Duration`, the query-time graph entities), which a frame renders as
+    /// text. Kept apart from `Mixed` because the values do agree — there is
+    /// simply no column type for them.
+    Shapeless,
+    /// The values disagree, and a frame would only take them by rewriting some
+    /// of them (text fallback, `DateTime` → midnight, a scalar wrapped in a
+    /// list). A writer that stores values unchanged has no honest single type
+    /// to record.
+    Mixed,
+}
+
+/// Classify a set of loose values against the column-type vocabulary. Nulls
+/// (and the internal `NodeRef`) do not participate: they carry no type in a
+/// column either.
+pub(crate) fn classify_value_set<'a>(values: impl IntoIterator<Item = &'a Value>) -> ValueSetType {
+    const NUMERIC: u16 = kind::UNIQUE_ID | kind::INT64 | kind::FLOAT64;
+    let mut kinds = 0u16;
+    let mut ints_fit_u32 = true;
+    for value in values {
+        kinds |= value_kind_bit(value);
+        if let Value::Int64(v) = value {
+            if *v < 0 || *v > u32::MAX as i64 {
+                ints_fit_u32 = false;
+            }
+        }
+    }
+    match kinds {
+        0 => ValueSetType::Empty,
+        kind::TEXTUAL => ValueSetType::Shapeless,
+        // One kind is trivially its own column type; a numeric mix is the one
+        // promotion `resolve_column_type` makes that no reader would call a
+        // rewrite — every arm of it stays inside the family `compare_values`
+        // treats as intercomparable.
+        k if k.count_ones() == 1 || k & !NUMERIC == 0 => {
+            ValueSetType::Uniform(resolve_column_type(kinds, ints_fit_u32))
+        }
+        _ => ValueSetType::Mixed,
+    }
+}
+
 /// Natural, unquoted text form for a value landing in a String column —
 /// total over every variant so nothing inferred can silently fall to null
 /// (only `Null` and the internal `NodeRef` map to `None`).
