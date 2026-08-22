@@ -68,13 +68,6 @@
       "nesting": 4
     },
     {
-      "path": "crates/kglite-py/src/graph/pyapi/vector.rs",
-      "qualified_name": "crate::KnowledgeGraph::embed_texts",
-      "lines": 218,
-      "branches": 43,
-      "nesting": 6
-    },
-    {
       "path": "crates/kglite/src/graph/algorithms/centrality.rs",
       "qualified_name": "crate::betweenness_centrality",
       "lines": 275,
