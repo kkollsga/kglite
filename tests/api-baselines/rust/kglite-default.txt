@@ -633,6 +633,20 @@ pub mod kglite::api::cypher::planner::join_order
 pub mod kglite::api::cypher::planner::rel_predicate_pushdown
 pub fn kglite::api::cypher::planner::rel_predicate_pushdown::extract_pushable_rel_predicates(query: &mut kglite::api::cypher::CypherQuery)
 pub mod kglite::api::cypher::planner::schema_check
+pub enum kglite::api::cypher::planner::schema_check::QueryWarningSink
+pub kglite::api::cypher::planner::schema_check::QueryWarningSink::Silent
+pub kglite::api::cypher::planner::schema_check::QueryWarningSink::Stderr
+impl core::clone::Clone for kglite::api::cypher::QueryWarningSink
+pub fn kglite::api::cypher::QueryWarningSink::clone(&self) -> kglite::api::cypher::QueryWarningSink
+impl core::cmp::Eq for kglite::api::cypher::QueryWarningSink
+impl core::cmp::PartialEq for kglite::api::cypher::QueryWarningSink
+pub fn kglite::api::cypher::QueryWarningSink::eq(&self, other: &kglite::api::cypher::QueryWarningSink) -> bool
+impl core::default::Default for kglite::api::cypher::QueryWarningSink
+pub fn kglite::api::cypher::QueryWarningSink::default() -> kglite::api::cypher::QueryWarningSink
+impl core::fmt::Debug for kglite::api::cypher::QueryWarningSink
+pub fn kglite::api::cypher::QueryWarningSink::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for kglite::api::cypher::QueryWarningSink
+impl core::marker::StructuralPartialEq for kglite::api::cypher::QueryWarningSink
 pub enum kglite::api::cypher::planner::schema_check::SchemaErrorKind
 pub kglite::api::cypher::planner::schema_check::SchemaErrorKind::UndefinedVariable
 pub kglite::api::cypher::planner::schema_check::SchemaErrorKind::UnknownNodeType
@@ -661,6 +675,8 @@ pub fn kglite::api::cypher::planner::schema_check::SchemaError::fmt(&self, f: &m
 impl core::fmt::Display for kglite::api::cypher::planner::schema_check::SchemaError
 pub fn kglite::api::cypher::planner::schema_check::SchemaError::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn kglite::api::cypher::planner::schema_check::collect_unknown_pattern_warnings(query: &kglite::api::cypher::CypherQuery, graph: &kglite::api::DirGraph) -> alloc::vec::Vec<alloc::string::String>
+pub fn kglite::api::cypher::planner::schema_check::query_warning_sink() -> kglite::api::cypher::QueryWarningSink
+pub fn kglite::api::cypher::planner::schema_check::set_query_warning_sink(sink: kglite::api::cypher::QueryWarningSink)
 pub fn kglite::api::cypher::planner::schema_check::validate_schema(query: &kglite::api::cypher::CypherQuery, graph: &kglite::api::DirGraph) -> core::result::Result<(), kglite::api::cypher::planner::schema_check::SchemaError>
 pub mod kglite::api::cypher::planner::simplification
 pub struct kglite::api::cypher::planner::simplification::TextScoreRewrite
@@ -772,6 +788,20 @@ impl core::fmt::Debug for kglite::api::cypher::OutputFormat
 pub fn kglite::api::cypher::OutputFormat::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Copy for kglite::api::cypher::OutputFormat
 impl core::marker::StructuralPartialEq for kglite::api::cypher::OutputFormat
+pub enum kglite::api::cypher::QueryWarningSink
+pub kglite::api::cypher::QueryWarningSink::Silent
+pub kglite::api::cypher::QueryWarningSink::Stderr
+impl core::clone::Clone for kglite::api::cypher::QueryWarningSink
+pub fn kglite::api::cypher::QueryWarningSink::clone(&self) -> kglite::api::cypher::QueryWarningSink
+impl core::cmp::Eq for kglite::api::cypher::QueryWarningSink
+impl core::cmp::PartialEq for kglite::api::cypher::QueryWarningSink
+pub fn kglite::api::cypher::QueryWarningSink::eq(&self, other: &kglite::api::cypher::QueryWarningSink) -> bool
+impl core::default::Default for kglite::api::cypher::QueryWarningSink
+pub fn kglite::api::cypher::QueryWarningSink::default() -> kglite::api::cypher::QueryWarningSink
+impl core::fmt::Debug for kglite::api::cypher::QueryWarningSink
+pub fn kglite::api::cypher::QueryWarningSink::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for kglite::api::cypher::QueryWarningSink
+impl core::marker::StructuralPartialEq for kglite::api::cypher::QueryWarningSink
 pub enum kglite::api::cypher::StoredType
 pub kglite::api::cypher::StoredType::Float
 pub kglite::api::cypher::StoredType::Int
@@ -929,9 +959,11 @@ pub fn kglite::api::cypher::parameter_names(query: &str) -> core::result::Result
 pub fn kglite::api::cypher::parse_cypher(query: &str) -> core::result::Result<kglite::api::cypher::CypherQuery, kglite::error::KgError>
 pub fn kglite::api::cypher::parse_with_mutation_check(query: &str) -> core::result::Result<(kglite::api::cypher::CypherQuery, bool), kglite::error::KgError>
 pub fn kglite::api::cypher::query_features(query: &str) -> core::result::Result<kglite::api::cypher::QueryFeatures, kglite::error::KgError>
+pub fn kglite::api::cypher::query_warning_sink() -> kglite::api::cypher::QueryWarningSink
 pub fn kglite::api::cypher::resolve_edge_property(graph: &kglite::api::DirGraph, edge: &kglite::api::cypher::EdgeBinding, property: &str) -> kglite::datatypes::values::Value
 pub fn kglite::api::cypher::resolve_node_property(node: kglite::api::NodeView<'_>, property: &str, graph: &kglite::api::DirGraph) -> kglite::datatypes::values::Value
 pub fn kglite::api::cypher::rewrite_text_score(query: &mut kglite::api::cypher::CypherQuery, params: &std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>) -> core::result::Result<kglite::api::cypher::planner::simplification::TextScoreRewrite, alloc::string::String>
+pub fn kglite::api::cypher::set_query_warning_sink(sink: kglite::api::cypher::QueryWarningSink)
 pub fn kglite::api::cypher::validate_schema(query: &kglite::api::cypher::CypherQuery, graph: &kglite::api::DirGraph) -> core::result::Result<(), kglite::api::cypher::planner::schema_check::SchemaError>
 pub mod kglite::api::durable
 pub enum kglite::api::durable::CaptureOrigin
