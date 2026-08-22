@@ -267,6 +267,47 @@ graph.has_vector_index('Article', 'summary')   # True
 graph.save('articles.kgl')                       # index travels with the file
 ```
 
+#### Recall on hard corpora
+
+Recall is a property of **your vectors**, not only of the index. HNSW walks a
+neighbourhood graph, so it needs neighbourhoods: vectors with real cluster or
+low-rank structure — what a sentence-embedding model produces — are found
+essentially exactly at the defaults. Uniform or independent high-dimensional
+random vectors have no such structure (every pair is nearly orthogonal), the
+walk has nothing to follow, and recall degrades with **both** corpus size and
+dimension. That is the corpus, not a defect: the same index on the same engine
+is at ~1.0 on the structured corpus and at 0.4 on the unstructured one.
+
+Measured with `tests/benchmarks/bench_vector_index.py --recall-sweep` (release
+build, `m=16`, `ef_construction=200`, `ef_search=64`, cosine, `top_k=10`,
+queries are *stored* vectors, recall@10 against the exact scan; the range spans
+two runs):
+
+| corpus | 20k×128 | 50k×128 | 100k×128 | 20k×384 | 50k×384 | 100k×384 |
+| --- | --- | --- | --- | --- | --- | --- |
+| clustered / low-rank (realistic) | ≥0.99 | ≥0.99 | ≥0.99 | ≥0.99 | ≥0.99 | ≥0.99 |
+| independent Gaussian (adversarial) | 0.94 | 0.80 | 0.62–0.71 | 0.77–0.80 | 0.52–0.57 | 0.42 |
+
+**The knobs are `ef_search`, `ef_construction` and `m`** — all arguments of
+`build_vector_index`. `ef_search` (default 64) is the query-time one, and its
+effect is very different on the two corpora:
+
+- On the **clustered** corpus there is nothing to buy: recall is already ≥0.99
+  at 64, and raising it only costs latency (100k×384: 0.10 ms at 64, 0.13 ms at
+  128, 0.19 ms at 256).
+- On the **adversarial** corpus it helps, but far less than it costs. At
+  100k×384: recall 0.42 → 0.43–0.45 → 0.46–0.50 for ef_search 64 → 128 → 256,
+  while latency goes 0.17–0.19 → 0.27–0.33 → 0.49 ms. At 100k×128: 0.62–0.71 → 0.70–0.73
+  → 0.77–0.80. Index construction inserts concurrently, so two builds of the
+  same corpus differ by ±0.04 recall on this corpus (±0.005 on the clustered
+  one) — an ef_search step of 64 → 128 is inside that noise.
+
+So `ef_search=64` stays the default: it is exact-grade on the corpora the
+feature exists for, and no reachable setting rescues a corpus with no
+neighbourhood structure. If your vectors are in that regime, **`exact=True` is
+always available** and, at these sizes, cheap: the exact scan is 0.7 ms at
+100k×128 and 1.6 ms at 100k×384 (it parallelises above 10k vectors).
+
 > The Cypher `text_score()` / `vector_score()` whole-corpus top-k
 > (`RETURN vector_score(n, prop, q) AS s ORDER BY s DESC LIMIT k`) auto-uses the
 > index too — so agent/MCP semantic search via Cypher benefits as well. The

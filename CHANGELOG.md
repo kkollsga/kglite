@@ -228,6 +228,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The CLI, MCP and Bolt servers keep their own presentation and are
   unaffected.
 
+- **Docs: measured HNSW recall, and what `ef_search` actually buys.** The
+  semantic-search guide gains a *Recall on hard corpora* section with a swept
+  recall@10 table (20k/50k/100k x 128/384 dims, clustered and unclustered
+  corpora, two release runs). Structured embeddings — the corpora the index
+  exists for — stay at >=0.99 recall at the default `ef_search=64`; independent
+  high-dimensional random vectors fall to 0.42 at 100k x 384, and raising
+  `ef_search` to 256 only reaches ~0.5 while tripling query latency, so the
+  default is unchanged and `exact=True` (1.6 ms at that size) is named as the
+  answer for that regime. `build_vector_index`'s `ef_search` docstring points
+  at it. The sweep is reproducible:
+  `python tests/benchmarks/bench_vector_index.py --recall-sweep`.
+
 ### Removed
 
 - **`as_dict=True` on `pagerank()`, `betweenness_centrality()`,

@@ -6736,7 +6736,12 @@ class KnowledgeGraph:
             ef_construction: Build-time search width (default 200). Higher →
                 better graph, slower build.
             ef_search: Default query-time search width (default 64). Higher →
-                better recall, slower query.
+                better recall, slower query. Recall at the default is ≥0.99 on
+                structured embeddings but degrades on unclustered
+                high-dimensional vectors, where raising it helps only
+                marginally — see *Recall on hard corpora* in the
+                :doc:`semantic-search guide </python/guides/semantic-search>`
+                for the measured numbers.
             metric: ``'cosine'`` (default), ``'dot_product'``, or ``'euclidean'``.
                 ``'poincare'`` is unsupported (stays exact). If omitted, uses the
                 store's metric, else ``'cosine'``.
