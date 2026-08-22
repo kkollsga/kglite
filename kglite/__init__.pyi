@@ -2746,6 +2746,23 @@ class KnowledgeGraph:
         property, enumerate the valid set, and add a 'did you mean?'
         suggestion.
 
+        A locked graph also rejects a **property name no node of the type
+        carries**, wherever it is read — ``WHERE p.agee = 1`` (which would
+        filter out every row) and ``RETURN``/``WITH``/``ORDER BY p.agee``
+        (which would produce a column of nulls beside correct-looking
+        siblings). Unlocked, both are non-fatal warnings.
+
+        The check is deliberately narrow, so a lock never rejects a valid
+        query. It stays silent on: a *sparse* property (one node carrying it
+        makes it known, however many leave it null); a property this same
+        statement writes; a type with no recorded properties; a property the
+        graph's own :meth:`define_schema` declares but nothing has written
+        yet; a multi-label pattern or a variable rebound by ``WITH``, neither
+        of which resolves to one type; and the built-ins ``id``, ``title``,
+        ``name``, ``type``. A relationship type the graph has never seen, and
+        a relationship arrow pointing the wrong way, stay warnings in both
+        states.
+
         This is the "catch my typos" mechanism — an empty result set is
         indistinguishable from "no matching data", so a typo'd label would
         otherwise reach production looking like a legitimate empty state.
@@ -2765,6 +2782,9 @@ class KnowledgeGraph:
             graph.cypher("MATCH (p:Persom) RETURN p")    # raises SchemaError
             # Schema error: Unknown node type 'Persom'. Did you mean 'Person'?
             #   Valid types: Paper, Person
+            graph.cypher("MATCH (p:Person) RETURN p.agee")  # raises SchemaError
+            # Schema error: Unknown property 'agee' on Person, referenced in
+            # RETURN. Did you mean 'age'?
 
         See Also:
             :meth:`unlock_schema`, :attr:`schema_locked`
@@ -2773,6 +2793,10 @@ class KnowledgeGraph:
 
     def unlock_schema(self) -> KnowledgeGraph:
         """Unlock the schema: allow any Cypher mutations without validation.
+
+        Also returns reads to their schemaless default: an unknown label or an
+        absent property is reported as a non-fatal warning (on stderr, and on
+        :attr:`ResultView.warnings`) instead of raising :class:`SchemaError`.
 
         Returns:
             This same graph (not a copy), so the call can be chained.

@@ -41,7 +41,9 @@ pub use parse_cache::parse_cypher_cached as parse_cypher;
 pub use planner::mark_lazy_eligibility;
 pub use planner::optimize;
 pub use planner::schema_check::validate_schema;
-pub(crate) use planner::schema_check::{collect_unknown_pattern_warnings, emit_query_warnings};
+pub(crate) use planner::schema_check::{
+    collect_query_warnings, emit_query_warnings, strict_read_error,
+};
 pub use planner::simplification::rewrite_text_score;
 
 use crate::datatypes::values::Value;

@@ -61,6 +61,8 @@ mod param_presence_tests;
 mod plan_cache_cost_tests;
 #[cfg(test)]
 mod query_warnings_tests;
+#[cfg(test)]
+mod strict_reads_tests;
 pub(crate) mod transaction;
 
 use crate::datatypes::Value;

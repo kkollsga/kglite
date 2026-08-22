@@ -522,6 +522,12 @@ impl KnowledgeGraph {
     /// conform to the currently known node types, connection types, and
     /// property types.
     ///
+    /// Reads are validated too: an unknown node label, and a property name no
+    /// node of the type carries, raise `SchemaError` instead of returning zero
+    /// rows or a column of nulls. The full set of cases the read check stays
+    /// silent on is documented on the `.pyi` stub, which is the API-doc source
+    /// of truth.
+    ///
     /// Returns:
     ///     This same graph (not a copy), so the call can be chained.
     ///
@@ -530,13 +536,16 @@ impl KnowledgeGraph {
     /// ```text
     /// graph.lock_schema()
     /// graph.cypher("CREATE (p:Typo {name: 'x'})")  # raises RuntimeError
+    /// graph.cypher("MATCH (p:Person) RETURN p.agee")  # raises SchemaError
     /// ```
     fn lock_schema(mut slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
         get_graph_mut(&mut slf.inner).schema_locked = true;
         slf
     }
 
-    /// Unlock the schema: allow any Cypher mutations without schema validation.
+    /// Unlock the schema: allow any Cypher mutations without schema validation,
+    /// and return reads to reporting unknown labels / absent properties as
+    /// non-fatal warnings.
     ///
     /// Returns:
     ///     This same graph (not a copy), so the call can be chained.

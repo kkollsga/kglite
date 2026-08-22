@@ -81,9 +81,11 @@ count). Two semantics to keep in mind:
 - **Property typos pass silently by default** (open schema): an unknown property
   on `CREATE`/`SET`/`MERGE` is simply stored. To catch typos (`summary` vs
   `note`), call `lock_schema()` — a write with an unknown property is then
-  rejected with a `Valid properties: …` / "did you mean?" hint (the same
-  guidance reads give). The bulk loaders (`add_nodes`/`add_connections`)
-  deliberately bypass the lock; it gates the Cypher write path.
+  rejected with a `Valid properties: …` / "did you mean?" hint, and so is a
+  *read* of a property no node of the type has (`WHERE`, `RETURN`, `WITH`,
+  `ORDER BY`); see [Diagnostics](#diagnostics). The bulk loaders
+  (`add_nodes`/`add_connections`) deliberately bypass the lock; it gates the
+  Cypher write path.
 
 ---
 
@@ -2428,6 +2430,19 @@ graph.cypher("MATCH (v:Vessel) RETURN v.imo").diagnostics["warnings"]
 A *sparse* property never warns: `node_type_metadata` records a property as
 soon as one node carries it, so only a genuinely absent one — a typo, or a
 field that belongs to a different type — trips these.
+
+**Under `lock_schema()` the two property families above are errors, not
+warnings.** A locked schema is the opt-in "catch my typos" mechanism, and it
+already rejected `MATCH (p:Person {agee: 1})` and `MATCH (p:Persn)`; the same
+typo written as `WHERE p.agee = 1` or `RETURN p.agee` now raises `SchemaError`
+with the same "did you mean?" hint rather than returning an empty result or a
+null column. `unlock_schema()` puts them back to warnings. The other two
+families — unknown relationship type, reversed arrow — stay warnings in both
+states, and every conservatism above still applies under the lock: sparse
+properties, properties the same statement writes, types with no recorded
+properties, fields `define_schema()` declares but nothing has written yet,
+multi-label patterns, `WITH`-rebound variables and the built-ins are all left
+alone.
 
 `timeout_ms` resolution: explicit `cypher(..., timeout_ms=N)` >
 `kg.set_default_timeout(ms)` > the Python default of 180,000 ms. Pass

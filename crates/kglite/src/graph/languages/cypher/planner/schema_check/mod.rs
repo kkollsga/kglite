@@ -100,7 +100,7 @@ use std::convert::Infallible;
 mod warnings;
 
 pub use warnings::collect_unknown_pattern_warnings;
-pub(crate) use warnings::emit_query_warnings;
+pub(crate) use warnings::{collect_query_warnings, emit_query_warnings, strict_read_error};
 pub use warnings::{query_warning_sink, set_query_warning_sink, QueryWarningSink};
 
 /// Built-in fields valid on any node type — mirrors BUILTIN_FIELDS in

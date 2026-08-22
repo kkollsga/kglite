@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`lock_schema()` now rejects a read of a property no node of the type has,
+  where it used to warn.** The lock is documented as the "catch my typos"
+  mechanism and already refused the same typo written as a pattern literal
+  (`MATCH (p:Person {agee: 1})`) or as a label (`MATCH (p:Persn)`). The two
+  shapes it let through are the two most often written: `WHERE p.agee = 1`,
+  where the null comparison filters out every row, and `RETURN`/`WITH`/`ORDER
+  BY p.agee`, where the column comes back all-null next to correct-looking
+  siblings — both indistinguishable from a legitimate empty or sparse result.
+  They now raise `SchemaError`, naming the clause, the valid property set and
+  the did-you-mean, the same way the write path does. **Unlocked graphs are
+  unchanged** — this is opt-in strictness, and `unlock_schema()` returns the
+  findings to warnings. The check promotes only that one warning family:
+  unknown relationship types and reversed-arrow patterns stay warnings in both
+  states, and every conservatism the warnings were built with holds under the
+  lock, so a valid query cannot start failing — a sparse property, a property
+  the same statement writes, a type with no recorded properties, a field
+  `define_schema()` declares but nothing has written yet, a multi-label
+  pattern, a `WITH`-rebound variable and the built-ins are all left alone.
+  Applies to reads, mutations' `WHERE` selectors, `EXPLAIN` and
+  session/transaction queries alike, since all of them share one prepare step.
+
 - **`to_networkx()`, one-arg `embeddings()` and `degrees()` now raise on a key
   collision instead of silently returning less than they were asked for.** All
   three flatten a node collection into one dict (or one NetworkX graph) keyed

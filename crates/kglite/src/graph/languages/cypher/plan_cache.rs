@@ -52,6 +52,14 @@
 //! would silently lose its warning, which is the shape this cache had before
 //! `QueryDiagnostics.warnings` was populated.
 //!
+//! One warning family is the exception, and it is excluded by *not caching the
+//! plan at all*: a statement that earned an **absent-property** finding is
+//! never inserted, because `lock_schema()` promotes that family to a
+//! `SchemaError` and a hit returns before the schema pass could re-decide it.
+//! The exclusion is what makes an entry's existence a proof that there was
+//! nothing to promote, so locking a graph mid-session cannot be outrun by a
+//! plan primed while it was open. See `session::strict_reads_tests`.
+//!
 //! Only **param-less, codec-free, no-disabled-passes, non-`text_score`**
 //! queries are cached (see `session::execute::prepare`): with those excluded,
 //! the optimized plan is a pure function of `(query, graph state)`, and

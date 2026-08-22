@@ -363,10 +363,7 @@ mod tests {
             out.contains("0.00 "),
             "a true zero must still read as 0.00:\n{out}"
         );
-        assert!(
-            out.contains("3.14"),
-            "PI must stay fixed-point:\n{out}"
-        );
+        assert!(out.contains("3.14"), "PI must stay fixed-point:\n{out}");
         assert!(
             out.contains("0.01"),
             "the band boundary stays fixed-point:\n{out}"
