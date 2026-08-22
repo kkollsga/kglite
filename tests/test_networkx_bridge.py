@@ -199,11 +199,26 @@ def test_10k_node_timing_sanity():
 
 
 def _colliding_id_graph():
-    """Two types whose ids overlap on 5, with one edge each."""
+    """Two types whose ids overlap on 5, with one edge each. Both node types
+    and one edge type carry a property, so a round trip has something to lose
+    beyond the identity columns."""
     g = kglite.KnowledgeGraph()
-    g.add_nodes(pd.DataFrame([{"id": 5, "name": "Alice"}, {"id": 6, "name": "Bob"}]), "Person", "id", "name")
-    g.add_nodes(pd.DataFrame([{"id": 5, "name": "Oslo"}]), "City", "id", "name")
-    g.add_connections(pd.DataFrame([{"src": 6, "tgt": 5}]), "KNOWS", "Person", "src", "Person", "tgt")
+    g.add_nodes(
+        pd.DataFrame([{"id": 5, "name": "Alice", "age": 30}, {"id": 6, "name": "Bob", "age": 25}]),
+        "Person",
+        "id",
+        "name",
+    )
+    g.add_nodes(pd.DataFrame([{"id": 5, "name": "Oslo", "pop": 700000}]), "City", "id", "name")
+    g.add_connections(
+        pd.DataFrame([{"src": 6, "tgt": 5, "since": 2010}]),
+        "KNOWS",
+        "Person",
+        "src",
+        "Person",
+        "tgt",
+        columns=["since"],
+    )
     g.add_connections(pd.DataFrame([{"src": 6, "tgt": 5}]), "LIVES_IN", "Person", "src", "City", "tgt")
     return g
 
@@ -344,3 +359,166 @@ def test_to_networkx_identity_attrs_win_over_same_named_properties():
         node = nxg.nodes[1 if key == "id" else ("Person", 1)]
         assert node["node_type"] == "Person"
         assert node["title"] == "Alice"
+
+
+# ── from_networkx: tuple-key round trip + no more warn-and-drop-to-empty ──
+#
+# `to_networkx(node_key="type_id")` emits (node_type, id) tuple keys. The
+# importer auto-detects that shape — a foreign tuple-labelled graph cannot
+# masquerade as one, because the detection requires each key's first element
+# to equal the node's own `node_type` attribute, which only the export writes.
+# Anything else the id column cannot store now RAISES up front instead of
+# warn-and-dropping every row into a silently empty graph.
+
+
+def test_type_id_export_round_trips_through_from_networkx():
+    """THE round trip: a colliding-id graph survives export and re-import."""
+    g = _colliding_id_graph()
+    g2 = kglite.from_networkx(g.to_networkx(node_key="type_id"))
+
+    rt = g2.to_networkx(node_key="type_id")
+    assert rt.number_of_nodes() == 3
+    assert rt.number_of_edges() == 2
+    assert set(rt.nodes) == {("Person", 5), ("Person", 6), ("City", 5)}
+    assert rt.nodes[("Person", 5)]["title"] == "Alice"
+    assert rt.nodes[("City", 5)]["title"] == "Oslo"
+    assert rt.has_edge(("Person", 6), ("Person", 5), "KNOWS")
+    assert rt.has_edge(("Person", 6), ("City", 5), "LIVES_IN")
+    assert not rt.has_edge(("Person", 6), ("Person", 5), "LIVES_IN")
+
+
+def test_type_id_round_trip_preserves_node_properties():
+    g = _colliding_id_graph()
+    g2 = kglite.from_networkx(g.to_networkx(node_key="type_id"))
+    rt = g2.to_networkx(node_key="type_id")
+    assert rt.nodes[("Person", 5)]["age"] == 30
+    assert rt.nodes[("Person", 6)]["age"] == 25
+    assert rt.nodes[("City", 5)]["pop"] == 700000
+    # The tuple key itself must not leak into the imported node.
+    assert "node_type" in rt.nodes[("City", 5)]
+    assert rt.nodes[("City", 5)]["node_type"] == "City"
+
+
+def test_type_id_round_trip_preserves_edge_properties():
+    g = _colliding_id_graph()
+    g2 = kglite.from_networkx(g.to_networkx(node_key="type_id"))
+    rt = g2.to_networkx(node_key="type_id")
+    assert rt[("Person", 6)][("Person", 5)]["KNOWS"]["since"] == 2010
+    assert rt[("Person", 6)][("City", 5)]["LIVES_IN"]["connection_type"] == "LIVES_IN"
+
+
+def test_type_id_round_trip_preserves_same_type_parallel_edges():
+    g = kglite.KnowledgeGraph()
+    g.cypher("CREATE (a:N {id:1}), (b:N {id:2}) CREATE (a)-[:R {rank:1}]->(b), (a)-[:R {rank:2}]->(b)")
+    g2 = kglite.from_networkx(g.to_networkx(node_key="type_id"))
+    rt = g2.to_networkx(node_key="type_id")
+    assert rt.number_of_nodes() == 2
+    assert rt.number_of_edges(("N", 1), ("N", 2)) == 2
+    assert {edge["rank"] for edge in rt[("N", 1)][("N", 2)].values()} == {1, 2}
+
+
+def test_from_networkx_mixed_key_shapes_raise():
+    """One tuple-keyed node and one plain-keyed node is not a shape the
+    importer can honour for both — a partial import is the disease."""
+    nxg = nx.MultiDiGraph()
+    nxg.add_node(("Person", 5), node_type="Person", title="Alice")
+    nxg.add_node(7, node_type="Person", title="Bob")
+    with pytest.raises(kglite.ArgumentError) as excinfo:
+        kglite.from_networkx(nxg)
+    message = str(excinfo.value)
+    assert "from_networkx()" in message
+    assert "mixes node-key shapes" in message
+    assert "7" in message
+
+
+def test_from_networkx_tuple_key_disagreeing_with_node_type_attr_raises():
+    """A 2-tuple key whose first element is not the node's own node_type is
+    not an export key; alongside a real one it is a shape conflict, and the
+    message must say which half disagreed."""
+    nxg = nx.MultiDiGraph()
+    nxg.add_node(("Person", 5), node_type="Person", title="Alice")
+    nxg.add_node(("Person", 9), node_type="City", title="Oslo")
+    with pytest.raises(kglite.ArgumentError) as excinfo:
+        kglite.from_networkx(nxg)
+    message = str(excinfo.value)
+    assert "node_type" in message
+    assert "City" in message
+
+
+def test_from_networkx_grid_graph_raises_unrepresentable_id():
+    """nx.grid_2d_graph nodes are (x, y) int tuples with no attributes, so
+    they can never be mistaken for a type_id export. They are also not
+    storable as ids — that used to yield a silently empty graph."""
+    nxg = nx.grid_2d_graph(3, 3)
+    with pytest.raises(kglite.ArgumentError) as excinfo:
+        kglite.from_networkx(nxg)
+    message = str(excinfo.value)
+    assert "from_networkx()" in message
+    assert "9 of 9" in message  # every node, named as a count
+    assert "tuple" in message
+    assert "integer or a string" in message
+    assert "node_type" in message  # why these tuples are not export keys
+    assert "relabel" in message.lower()  # the fix
+
+
+def test_from_networkx_three_tuple_key_raises():
+    """A 3-tuple is not the exported shape even when it starts with the
+    node_type, so it takes the plain-id path and is refused there."""
+    nxg = nx.MultiDiGraph()
+    nxg.add_node(("Person", 5, "extra"), node_type="Person")
+    with pytest.raises(kglite.ArgumentError, match="integer or a string"):
+        kglite.from_networkx(nxg)
+
+
+def test_from_networkx_tuple_key_without_node_type_attr_raises():
+    nxg = nx.MultiDiGraph()
+    nxg.add_node(("Person", 5), title="Alice")
+    with pytest.raises(kglite.ArgumentError, match="integer or a string"):
+        kglite.from_networkx(nxg)
+
+
+def test_from_networkx_fractional_float_key_raises_naming_the_count():
+    """A fractional float is the quiet half of the shrinkage class: node 1
+    imports, node 1.5 drops, and the caller is handed a smaller graph."""
+    nxg = nx.MultiDiGraph()
+    nxg.add_node(1)
+    nxg.add_node(1.5)
+    with pytest.raises(kglite.ArgumentError) as excinfo:
+        kglite.from_networkx(nxg)
+    message = str(excinfo.value)
+    assert "1 of 2" in message
+    assert "1.5" in message
+    assert "float" in message
+
+
+def test_from_networkx_non_scalar_key_raises():
+    """Any nx-legal label the id column cannot store is refused, not just
+    tuples — here a frozenset."""
+    nxg = nx.MultiDiGraph()
+    nxg.add_node(frozenset({"a"}))
+    with pytest.raises(kglite.ArgumentError, match="frozenset"):
+        kglite.from_networkx(nxg)
+
+
+@pytest.mark.parametrize("keys", [(1, 2), ("a", "b"), (1.0, 2.0)])
+def test_from_networkx_representable_keys_still_import(keys):
+    """The refusal is scoped to what the id column genuinely cannot store:
+    ints, strings and whole floats keep importing exactly as before."""
+    src, tgt = keys
+    nxg = nx.MultiDiGraph()
+    nxg.add_edge(src, tgt)
+    assert kglite.from_networkx(nxg).to_networkx().number_of_nodes() == 2
+
+
+def test_from_networkx_type_id_key_with_unstorable_id_half_raises():
+    """The detected path is not a bypass: a tuple key whose *id* half cannot
+    be stored is refused there too, instead of dropping the row."""
+    nxg = nx.MultiDiGraph()
+    nxg.add_node(("Person", 5), node_type="Person")
+    nxg.add_node(("Person", (1, 2)), node_type="Person")
+    with pytest.raises(kglite.ArgumentError) as excinfo:
+        kglite.from_networkx(nxg)
+    message = str(excinfo.value)
+    assert "1 of 2" in message
+    assert "id half" in message
+    assert "('Person', (1, 2))" in message

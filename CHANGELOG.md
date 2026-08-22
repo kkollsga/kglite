@@ -105,6 +105,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (low-rank) embeddings measured ~350 at both 64 and 384 dimensions.
   `build_vector_index()` is unaffected; only auto-selection moved.
 
+- **`from_networkx()` now raises on a node key it cannot store as an id,
+  instead of warning and returning a smaller graph.** Ids are stored as
+  integers or strings; anything else — a tuple label, a fractional float, an
+  arbitrary object — was dropped row by row by the bulk loader, so importing
+  `nx.grid_2d_graph(3, 3)` produced a `UserWarning` and a graph with **zero**
+  nodes that the caller then queried as if it were the input. The importer
+  now checks every key up front and raises `ArgumentError` naming how many of
+  how many keys are unusable, the first offender and its type, and the fix
+  (`nx.convert_node_labels_to_integers`), before a single row is loaded — and
+  the same check covers the id half of a `(node_type, id)` tuple key, so the
+  new round-trip path is not a way around it. Nothing about the loader's own
+  warn-and-drop behaviour changed; other callers see it exactly as before.
+
 ### Added
 
 - **`to_networkx(node_key="type_id")` exports a graph whose ids collide across
@@ -118,6 +131,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the default and behaves exactly as before, guard included; its collision
   error now names the new option alongside "give the colliding types disjoint
   ids". Any other value raises `ArgumentError` listing the two valid ones.
+
+- **`from_networkx()` round-trips a `node_key="type_id"` export, with no extra
+  argument.** The tuple keys the export emits are detected and unwrapped: the
+  id and both endpoint types come straight off the key, so a colliding-id
+  graph now survives `to_networkx(node_key="type_id")` → `from_networkx()`
+  with its types, titles, node properties, edge properties and parallel edges
+  intact — previously it came back as an empty graph. Detection asks whether a
+  key is a 2-tuple whose first element equals that node's own `node_type`
+  attribute, a shape only the export produces, so a foreign tuple-labelled
+  graph (`nx.grid_2d_graph` coordinates, for instance) cannot be mistaken for
+  one. It is decided per graph, not per node: a graph mixing tuple keys with
+  plain ones raises `ArgumentError` naming the two shapes rather than
+  importing the half it recognises. Plain int/string-keyed graphs are
+  unaffected.
 
 - **A query warning when a *declared* property type makes a `WHERE`
   comparison vacuous.** `MATCH (p:Person) WHERE p.age > 'forty'` on a graph

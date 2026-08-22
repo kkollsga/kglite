@@ -339,6 +339,40 @@ for node_type, rows in per_type.items():
 `to_networkx()` exports the full graph (the active selection is ignored
 in v1).
 
+### Round-tripping a tuple-keyed export
+
+A `node_key='type_id'` export imports back with no extra argument — the
+`(node_type, id)` keys are detected and unwrapped, so a graph whose types
+share ids survives the round trip intact:
+
+```python
+nxg = graph.to_networkx(node_key='type_id')
+same = kglite.from_networkx(nxg)      # types, titles, properties, edges preserved
+```
+
+Detection requires each key's first element to equal that node's own
+`node_type` attribute, which only the export writes — a foreign
+tuple-labelled graph (`nx.grid_2d_graph` coordinates, say) can never be
+mistaken for one. The decision is per graph and all-or-nothing: a graph
+that mixes tuple keys with plain ones raises an `ArgumentError` rather
+than importing the half it recognises.
+
+Node keys must be storable as ids — integers or strings. A key that is not
+raises before anything is loaded:
+
+```python
+kglite.from_networkx(nx.grid_2d_graph(3, 3))
+# ArgumentError: from_networkx(): 9 of 9 node keys cannot be stored as a
+# node id — the first is (0, 0) (type tuple). ... Relabel the nodes before
+# importing, e.g. nx.convert_node_labels_to_integers(nx_graph) ...
+```
+
+Relabel such a graph first:
+
+```python
+g = kglite.from_networkx(nx.convert_node_labels_to_integers(nx.grid_2d_graph(3, 3)))
+```
+
 ## Neo4j Export
 
 Push a graph (or the active selection) to a live Neo4j database over Bolt,

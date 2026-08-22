@@ -209,7 +209,10 @@ def from_networkx(
     """Build a :class:`KnowledgeGraph` from a ``networkx`` graph.
 
     Convenience re-export of :func:`kglite.networkx_interop.from_networkx`.
-    The inverse is :meth:`KnowledgeGraph.to_networkx`.
+    The inverse is :meth:`KnowledgeGraph.to_networkx`, including its
+    ``node_key="type_id"`` export — the ``(node_type, id)`` tuple keys are
+    detected and unwrapped automatically. A node key that cannot be stored
+    as an id raises :class:`ArgumentError` rather than being dropped.
     Requires the ``networkx`` package: ``pip install networkx``.
     """
     from .networkx_interop import from_networkx as _from_networkx

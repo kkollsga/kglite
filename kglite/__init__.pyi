@@ -1318,6 +1318,18 @@ def from_networkx(
     ``MultiDiGraph``, the edge key) use it as the edge type. Plain networkx
     graphs get ``default_node_type`` / ``default_edge_type``.
 
+    A graph exported with ``to_networkx(node_key="type_id")`` round-trips
+    without any extra argument: its ``(node_type, id)`` tuple keys are
+    detected — each key's first element repeats the node's own ``node_type``
+    attribute, which a foreign tuple-labelled graph does not carry — and the
+    id plus both endpoint types are read straight off the keys. Detection is
+    per graph and all-or-nothing; mixing tuple keys with plain ones raises.
+
+    Node keys must be storable as ids (integers or strings). A key that is
+    not — a foreign tuple label such as ``nx.grid_2d_graph`` coordinates, a
+    fractional float — raises before anything is loaded, rather than being
+    dropped row by row into a silently smaller graph.
+
     Requires the ``networkx`` extra: ``pip install "kglite[networkx]"``.
 
     Args:
@@ -1327,6 +1339,10 @@ def from_networkx(
 
     Returns:
         A new :class:`KnowledgeGraph`.
+
+    Raises:
+        ArgumentError: A node key cannot be stored as an id, or the graph
+            mixes ``(node_type, id)`` export keys with other key shapes.
 
     Example::
 
