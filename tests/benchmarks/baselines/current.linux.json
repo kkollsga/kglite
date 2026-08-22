@@ -1467,41 +1467,6 @@
     },
     {
       "group": null,
-      "name": "test_bench_exists_fixed_hop",
-      "fullname": "test_bench_core.py::test_bench_exists_fixed_hop",
-      "params": null,
-      "param": null,
-      "extra_info": {},
-      "options": {
-        "disable_gc": false,
-        "timer": "perf_counter",
-        "min_rounds": 100,
-        "max_time": 1.0,
-        "min_time": 5e-06,
-        "warmup": 20
-      },
-      "stats": {
-        "min": 7.637361413799226e-05,
-        "max": 0.00139473756426014,
-        "mean": 8.616827832943286e-05,
-        "stddev": 7.262799069666934e-06,
-        "rounds": 45627,
-        "median": 8.564015734009444e-05,
-        "iqr": 1.4623976312577724e-06,
-        "q1": 8.498886600136756e-05,
-        "q3": 8.645126363262534e-05,
-        "iqr_outliers": 1361,
-        "stddev_outliers": 780,
-        "outliers": "780;1361",
-        "ld15iqr": 8.287495002150536e-05,
-        "hd15iqr": 8.872499456629157e-05,
-        "ops": 11605.19879690373,
-        "total": 3.931600035337033,
-        "iterations": 1
-      }
-    },
-    {
-      "group": null,
       "name": "test_bench_var_length_1_8_count_distinct",
       "fullname": "test_bench_core.py::test_bench_var_length_1_8_count_distinct",
       "params": null,
@@ -1634,6 +1599,41 @@
           0.03120999998645857,
           0.03185012500034645
         ],
+        "iterations": 1
+      }
+    },
+    {
+      "group": null,
+      "name": "test_bench_exists_fixed_hop",
+      "fullname": "test_bench_core.py::test_bench_exists_fixed_hop",
+      "params": null,
+      "param": null,
+      "extra_info": {},
+      "options": {
+        "disable_gc": false,
+        "timer": "perf_counter",
+        "min_rounds": 100,
+        "max_time": 1.0,
+        "min_time": 5e-06,
+        "warmup": 20
+      },
+      "stats": {
+        "min": 7.637361413799226e-05,
+        "max": 0.00139473756426014,
+        "mean": 8.616827832943286e-05,
+        "stddev": 7.262799069666934e-06,
+        "rounds": 45627,
+        "median": 8.564015734009444e-05,
+        "iqr": 1.4623976312577724e-06,
+        "q1": 8.498886600136756e-05,
+        "q3": 8.645126363262534e-05,
+        "iqr_outliers": 1361,
+        "stddev_outliers": 780,
+        "outliers": "780;1361",
+        "ld15iqr": 8.287495002150536e-05,
+        "hd15iqr": 8.872499456629157e-05,
+        "ops": 11605.19879690373,
+        "total": 3.931600035337033,
         "iterations": 1
       }
     }

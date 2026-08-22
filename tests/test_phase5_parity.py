@@ -348,7 +348,12 @@ def test_binary_size_regression():
       property container with its serde impl.
 
 
-      - 0.16.6:       20,944,128 bytes (≈20.0 MB). Two response programs: .kgl section digests + zstd checksums, the bidirectional BFS engine + shortest-path family filters/direction/single-source, var-length trail-soundness gate + lowering pass + expansion budget, write_scope full-verb coverage, MCP operator scope + isError adoption (mcp-methods 0.4.6), diagnostics-to-every-surface plumbing.
+      - 0.16.6:       20,944,128 bytes (≈20.0 MB). Two response programs: .kgl section digests + zstd
+        checksums, the bidirectional BFS engine + shortest-path family
+        filters/direction/single-source, var-length trail-soundness gate +
+        lowering pass + expansion budget, write_scope full-verb coverage,
+        MCP operator scope + isError adoption (mcp-methods 0.4.6), and the
+        diagnostics-to-every-surface plumbing.
 
     Raising the baseline is a deliberate act — every bump should
     be accompanied by an updated growth note above. For a precise
