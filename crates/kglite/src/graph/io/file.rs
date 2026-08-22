@@ -96,6 +96,13 @@ const EMBED_PROVENANCE_MIN_VERSION: u32 = 3;
 //  2. `FileMetadata::section_digests` records a CRC32 of the *compressed*
 //     bytes, verified in `SectionCursor::take` before a byte reaches zstd.
 //
+// Both are cheap enough to run eagerly on every load, but only because the
+// CRC is hardware-accelerated: measured on a 180 MB `.kgl` (release, arm64,
+// min of 5), layer 1 costs ~20 ms (+4.7%) and layer 2 ~14 ms over a
+// digest-free 423 ms load. The software-table CRC that 0.16.6 shipped cost
+// ~360 ms (+85%) on its own, which is the regression this note now guards
+// against: keep `section_digest` on an accelerated implementation.
+//
 // Layer 2 exists because layer 1 only protects what a decoder chooses to
 // decode: a flipped bit that lands where the section *boundaries* are read
 // from, or in a section a reader skips, never reaches an XXH64 check. It also
@@ -129,8 +136,9 @@ fn column_section_key(type_name: &str) -> String {
 }
 
 /// CRC32 (IEEE) of one section's compressed bytes. Shares the WAL's
-/// table-backed implementation so both integrity checks in this crate agree on
-/// what a digest of the same bytes is.
+/// implementation so both integrity checks in this crate agree on what a
+/// digest of the same bytes is; see [`crate::graph::wal::crc32`] for why that
+/// implementation is hardware-accelerated rather than a software table.
 fn section_digest(compressed: &[u8]) -> u32 {
     crate::graph::wal::crc32(compressed)
 }
