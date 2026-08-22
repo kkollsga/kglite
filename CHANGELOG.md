@@ -56,6 +56,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Non-vacuity checked against the shipped regression — 0.16.6 reads +72% on
   this fixture, well outside the 20% gate.
 
+  The other persistence surface is closed in the same pass:
+  `test_bench_disk_dir_reopen_fresh` publishes a disk-mode directory with the
+  build under test and times `open()` on it — the reload path had no cell at
+  all, fresh artifact or stored — and a `PERSISTENCE_SURFACES` table now pairs
+  every writer cell in that harness with the cell reading a freshly written
+  artifact back, with a meta-test that goes red, naming the surface, when
+  either half of a pair is missing.
+
 ## [0.16.8] - 2026-08-23
 
 ### Fixed

@@ -1011,6 +1011,41 @@
     },
     {
       "group": null,
+      "name": "test_bench_disk_dir_reopen_fresh",
+      "fullname": "test_bench_core.py::test_bench_disk_dir_reopen_fresh",
+      "params": null,
+      "param": null,
+      "extra_info": {},
+      "options": {
+        "disable_gc": false,
+        "timer": "perf_counter",
+        "min_rounds": 100,
+        "max_time": 1.0,
+        "min_time": 5e-06,
+        "warmup": 20
+      },
+      "stats": {
+        "min": 0.014558376360218972,
+        "max": 0.01695947368280031,
+        "mean": 0.015270674288040026,
+        "stddev": 0.0004567163077245971,
+        "rounds": 100,
+        "median": 0.015096332677057943,
+        "iqr": 0.00051049436442554,
+        "q1": 0.014990055619273334,
+        "q3": 0.015500549983698875,
+        "iqr_outliers": 4,
+        "stddev_outliers": 25,
+        "outliers": "25;4",
+        "ld15iqr": 0.014558376360218972,
+        "hd15iqr": 0.016279414971359072,
+        "ops": 65.4849930748113,
+        "total": 1.5270674288040027,
+        "iterations": 1
+      }
+    },
+    {
+      "group": null,
       "name": "test_bench_return_node_10k",
       "fullname": "test_bench_core.py::test_bench_return_node_10k",
       "params": null,
@@ -1693,7 +1728,8 @@
       "test_bench_exists_var_length_witness": "PROVISIONAL ESTIMATE, not a Linux measurement: kglite 0.13.2 captured on macOS/M4 2026-08-21, scaled by 3.9x (the widest Linux/macOS ratio observed across the 25 cells both files already share; median 2.83, range 1.90-3.88). Deliberately generous so an estimate cannot fire a false red on the 30% leg-2 gate; leg 1 (same-runner 0.13.2 reference, 20%) is what actually gates these cells until the real value lands. Replace from the first CI perf run's reference artifact, or let the next release's promote_linux_benchmark overwrite the file.",
       "test_bench_exists_fixed_hop": "PROVISIONAL ESTIMATE, not a Linux measurement: kglite 0.13.2 captured on macOS/M4 2026-08-21, scaled by 3.9x (the widest Linux/macOS ratio observed across the 25 cells both files already share; median 2.83, range 1.90-3.88). Deliberately generous so an estimate cannot fire a false red on the 30% leg-2 gate; leg 1 (same-runner 0.13.2 reference, 20%) is what actually gates these cells until the real value lands. Replace from the first CI perf run's reference artifact, or let the next release's promote_linux_benchmark overwrite the file.",
       "test_bench_var_length_1_8_count_distinct": "PROVISIONAL ESTIMATE, not a Linux measurement: this tree captured on macOS/M4 2026-08-21 (two agreeing release runs), scaled by 3.9x \u2014 the same factor and the same reasoning as the five V1 cells above: the widest Linux/macOS ratio observed across the 25 cells both files already share (median 2.83, range 1.90-3.88), chosen generous so an estimate cannot fire a false red on the 30% leg-2 gate. Leg 1 (same-runner reference, 20%) is what actually gates this cell meanwhile. Replace from the first CI perf run's reference artifact, or let the next release's promote_linux_benchmark overwrite the file.",
-      "test_bench_load_kgl": "PROVISIONAL ESTIMATE, not a Linux measurement: kglite 0.13.2 captured on macOS/M4 2026-08-22 (10.791 ms min, harness unmodified -- the cell runs as-written on the reference wheel, which is what makes it usable as a reference row), scaled by 3.9x on the same basis as the khop cells: the widest Linux/macOS ratio observed across the cells both files share. Deliberately generous so an estimate cannot fire a false red on the 30% leg-2 gate; leg 1 (same-runner 0.13.2 reference, 20%) is what actually gates this cell until the real value lands. Replace from the first CI perf run's reference artifact, or let the next release's promote_linux_benchmark overwrite the file."
+      "test_bench_load_kgl": "PROVISIONAL ESTIMATE, not a Linux measurement: kglite 0.13.2 captured on macOS/M4 2026-08-22 (10.791 ms min, harness unmodified -- the cell runs as-written on the reference wheel, which is what makes it usable as a reference row), scaled by 3.9x on the same basis as the khop cells: the widest Linux/macOS ratio observed across the cells both files share. Deliberately generous so an estimate cannot fire a false red on the 30% leg-2 gate; leg 1 (same-runner 0.13.2 reference, 20%) is what actually gates this cell until the real value lands. Replace from the first CI perf run's reference artifact, or let the next release's promote_linux_benchmark overwrite the file.",
+      "test_bench_disk_dir_reopen_fresh": "PROVISIONAL ESTIMATE, not a Linux measurement: kglite 0.13.2 captured on macOS/M4 2026-08-22 (3.733 ms min, the slower of two agreeing runs [3.725 ms]; the harness ran unmodified on the reference wheel, which is what makes it usable as a reference row), scaled by 3.9x on the same basis as the other estimated rows in this file: the widest Linux/macOS ratio observed across the cells both files share. Deliberately generous so an estimate cannot fire a false red on the 30% leg-2 gate; leg 1 (same-runner 0.13.2 reference, 20%) is what actually gates this cell until the real value lands, and this build reopens the fixture roughly 4x faster than 0.13.2 does. Replace from the first CI perf run's reference artifact, or let the next release's promote_linux_benchmark overwrite the file."
     }
   }
 }
