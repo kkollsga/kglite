@@ -9,7 +9,7 @@ trade-off, not a regression gate. Run on demand::
 The sweep answers one question: *is auto-selected HNSW ever slower than the
 exact scan it replaces?*  The exact scan is a contiguous, SIMD-friendly fused
 dot product; the HNSW walk is pointer chasing, so a crossover somewhere above
-``HNSW_AUTO_MIN`` (256) is plausible a priori and has to be measured rather than
+``HNSW_AUTO_MIN`` (400) is plausible a priori and has to be measured rather than
 argued.  For each ``size x dim`` cell the sweep reports the exact-scan latency,
 the auto-selected latency (same call, ``exact=False``), recall@10 of auto
 against exact, and the index build time.

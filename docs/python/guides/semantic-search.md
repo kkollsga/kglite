@@ -207,6 +207,9 @@ graph.build_vector_index('Article', 'summary')    # opt in (like create_index)
 # vector_search / search_text now auto-use the index for whole-corpus queries:
 hits = graph.select('Article').search_text('summary', 'machine learning', top_k=10)
 
+# ...and for a whole-graph search, even when the graph holds other node types:
+hits = graph.search_text('summary', 'machine learning', top_k=10)
+
 # Force an exact scan when you need guaranteed-exact results:
 hits = graph.select('Article').vector_search('summary', query_vec, top_k=10, exact=True)
 ```
@@ -214,10 +217,19 @@ hits = graph.select('Article').vector_search('summary', query_vec, top_k=10, exa
 It behaves like `create_index`: **opt-in**, and once built it's used
 automatically. Key points:
 
-- **Auto-use, with an escape hatch.** A whole-corpus query on a large indexed
-  store (≥256 candidates) uses the index; `exact=True` always forces the exact
-  scan. The scores returned are on the exact same scale as the brute-force path
-  (the index only narrows *which* nodes get scored).
+- **Auto-use, with an escape hatch.** A query that covers most of a large
+  indexed store (≥400 covered vectors) uses the index; `exact=True` always
+  forces the exact scan. The scores returned are on the exact same scale as the
+  brute-force path (the index only narrows *which* nodes get scored).
+- **The selection doesn't have to be that one type.** While only one node type
+  carries the column, the index is used whatever else the selection spans —
+  including a whole-graph `graph.vector_search('summary', q)` on a graph full
+  of other node types. Nodes of other types simply have no vector in the store
+  and are skipped, exactly as the exact scan skips them.
+- **Two embedded types are ranked exactly.** If both `Article.summary` and
+  `Note.summary` are embedded, a selection spanning *both* falls back to an
+  exact global ranking: using one type's index would silently drop the other
+  type's rows. Select a single type to get the index back.
 - **Filtered queries stay exact.** A selective `.where(...)` before the search
   falls back to an exact scan automatically — correctness over speed when a
   filter is tight. (So an index helps "search the whole corpus", not "search a

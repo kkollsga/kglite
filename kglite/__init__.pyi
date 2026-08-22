@@ -6226,10 +6226,17 @@ class KnowledgeGraph:
                 structural field like ``title``/``type``). Use it to trim the
                 payload on wide nodes or ranking-only paths.
             exact: Force an exact brute-force scan even when an HNSW index exists
-                (see ``build_vector_index``). Default ``False`` → a whole-corpus
-                query on a large indexed store uses the approximate index; set
-                ``True`` for guaranteed-exact results. Heavily-filtered selections
-                and the ``'poincare'`` metric are always exact regardless.
+                (see ``build_vector_index``). Default ``False`` → a query
+                covering most of a large indexed store uses the approximate
+                index; set ``True`` for guaranteed-exact results. The index is
+                used whenever a single node type carries ``text_column``,
+                whatever else the selection spans — including a whole-graph
+                search on a multi-type graph. When two or more types carry the
+                column, only a selection of one of them can use that type's
+                index; a selection spanning both is ranked by exact scan so
+                neither type's rows are dropped. Selections covering little of
+                the store, and the ``'poincare'`` metric, are always exact
+                regardless.
 
         Returns:
             List of dicts (or a DataFrame if ``to_df=True``). By default a hit has
@@ -6636,10 +6643,16 @@ class KnowledgeGraph:
 
         Opt-in, like :meth:`create_index`: without it, vector search is an exact
         brute-force scan. Once built, :meth:`vector_search` / :meth:`search_text`
-        auto-use the index for whole-corpus queries on large stores; pass
+        auto-use the index for queries covering most of a large store; pass
         ``exact=True`` to force an exact scan. The index is **dropped
         automatically** whenever the store's vectors change (``add_embeddings`` /
         ``embed_texts``) or slots are remapped (``vacuum``) — rebuild it after.
+
+        The selection does not have to be ``node_type``: while only one node
+        type carries ``text_column``, a whole-graph search on a multi-type
+        graph uses the index too. When two or more types carry the same column,
+        only a selection of a single one of them can — a selection spanning
+        both is ranked by exact scan so neither type's rows are dropped.
 
         Requires an existing embedding store; build it after ingest. The index
         is a rebuildable cache: a ``.kgl`` carries it, and a graph whose stored

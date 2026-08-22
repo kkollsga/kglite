@@ -131,6 +131,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A whole-graph `vector_search()` / `search_text()` never used the HNSW
+  index on a graph with more than one node type** — the case the docstrings
+  promised it for. Eligibility for the index was proven by *type homogeneity*
+  of the candidate set: the first node of any other type disqualified the
+  search, so `graph.vector_search('summary', q)` on a graph holding
+  `Article`s and `Note`s fell back to a full exact scan while the identical
+  `graph.select('Article').vector_search('summary', q)` ran through the index
+  — measured 44x slower at 100k vectors x 384 dimensions. Routing is now
+  decided by the invariant it actually needs, **store uniqueness for the
+  embedding column**: while one node type carries the column, the index
+  serves any selection, because a node of another type has no vector in the
+  store and is skipped exactly as the exact scan skips it. When two or more
+  types carry the same column the previous rule stands — a selection spanning
+  both is ranked by exact scan, so neither type's rows can be dropped. The
+  auto-use size gate is now counted in **store vectors the selection actually
+  covers** rather than raw candidates, so admitting mixed selections cannot
+  send a search that covers one vector in 100 000 through the index. Results
+  are unchanged in every case; only which path computes them, and how fast.
+  The five places that documented the old-but-never-true rule now describe
+  this one.
+
 - **`pagerank(connection_types="KNOWS")` and its three sibling centralities
   raised `TypeError: Can't extract 'str' to 'Vec'` on a bare string.** The
   stub has always documented the parameter as `str | list[str]`, the Cypher
