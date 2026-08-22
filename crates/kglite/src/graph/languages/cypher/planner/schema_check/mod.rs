@@ -101,6 +101,7 @@ mod warnings;
 
 pub use warnings::collect_unknown_pattern_warnings;
 pub(crate) use warnings::emit_query_warnings;
+pub use warnings::{query_warning_sink, set_query_warning_sink, QueryWarningSink};
 
 /// Built-in fields valid on any node type — mirrors BUILTIN_FIELDS in
 /// `mutation/validation.rs`. Listed explicitly so it's obvious what's

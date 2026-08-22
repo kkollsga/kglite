@@ -579,6 +579,13 @@ pub mod api {
         pub use crate::graph::languages::cypher::planner;
         pub use crate::graph::languages::cypher::planner::mark_lazy_eligibility;
         pub use crate::graph::languages::cypher::planner::schema_check::validate_schema;
+        /// Where query-warning *echoes* go, process-wide. The structured
+        /// `QueryDiagnostics::warnings` channel is unconditional and
+        /// unaffected; this only moves the `warning:` line off stderr, for a
+        /// binding that presents warnings itself.
+        pub use crate::graph::languages::cypher::planner::schema_check::{
+            query_warning_sink, set_query_warning_sink, QueryWarningSink,
+        };
         pub use crate::graph::languages::cypher::planner::simplification::rewrite_text_score;
         pub use crate::graph::languages::cypher::query_features;
         pub use crate::graph::languages::cypher::result::{

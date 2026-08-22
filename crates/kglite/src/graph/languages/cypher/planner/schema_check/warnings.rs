@@ -14,6 +14,7 @@ use crate::graph::core::pattern_matching::{EdgeDirection, NodePattern, Pattern, 
 use crate::graph::mutation::validation::did_you_mean;
 use crate::graph::schema::{DirGraph, InternedKey};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 /// var → single known node label, from MATCH / OPTIONAL MATCH node patterns.
 ///
@@ -587,6 +588,59 @@ pub fn collect_unknown_pattern_warnings(query: &CypherQuery, graph: &DirGraph) -
     out
 }
 
+/// Where the *echo* of a query warning goes.
+///
+/// Only the echo. The structured channel — [`QueryDiagnostics::warnings`], and
+/// everything built on it (`ResultView.diagnostics`, the MCP `warnings:`
+/// block) — is unconditional and no variant here can switch it off: the
+/// computation happens once either way, and a caller that reads the field must
+/// never depend on a process-global setting for it.
+///
+/// A host binding that wants its own presentation (the Python wheel's
+/// `pywarn` policy re-emits through `warnings.warn`) selects [`Self::Silent`]
+/// here and does its own emission from the diagnostics it already holds — the
+/// engine never calls back into a host language.
+///
+/// [`QueryDiagnostics::warnings`]: crate::graph::languages::cypher::result::QueryDiagnostics::warnings
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QueryWarningSink {
+    /// Print `warning: <msg>` to stderr. The default, and what every release
+    /// before the sink existed did unconditionally.
+    #[default]
+    Stderr,
+    /// Print nothing. The structured channel is unaffected.
+    Silent,
+}
+
+const SINK_STDERR: u8 = 0;
+const SINK_SILENT: u8 = 1;
+
+/// Process-global, because the emit sites are deep inside the executor and
+/// the plan-cache path, and threading a presentation choice through
+/// `ExecuteOptions` would put it on every binding's hot argument struct for a
+/// setting no caller varies per query.
+static SINK: AtomicU8 = AtomicU8::new(SINK_STDERR);
+
+/// Select where query-warning echoes go, process-wide. Returns nothing; read
+/// the current value back with [`query_warning_sink`].
+pub fn set_query_warning_sink(sink: QueryWarningSink) {
+    SINK.store(
+        match sink {
+            QueryWarningSink::Stderr => SINK_STDERR,
+            QueryWarningSink::Silent => SINK_SILENT,
+        },
+        Ordering::Relaxed,
+    );
+}
+
+/// The sink [`emit_query_warnings`] is currently writing to.
+pub fn query_warning_sink() -> QueryWarningSink {
+    match SINK.load(Ordering::Relaxed) {
+        SINK_SILENT => QueryWarningSink::Silent,
+        _ => QueryWarningSink::Stderr,
+    }
+}
+
 /// Emit already-collected query warnings to stderr, matching kglite's
 /// `warning:`-prefixed convention for non-fatal query/load issues.
 ///
@@ -597,10 +651,50 @@ pub fn collect_unknown_pattern_warnings(query: &CypherQuery, graph: &DirGraph) -
 /// query warning of its own — `executor::call_clause`'s procedure-scope
 /// checks — emits through here too, so the prefix never drifts.
 ///
+/// Being the one emitter is also what makes [`set_query_warning_sink`] a
+/// single-point switch: silencing the echo is a check here, not a flag
+/// threaded through four call sites.
+///
 /// [`QueryDiagnostics::warnings`]: crate::graph::languages::cypher::result::QueryDiagnostics::warnings
 pub(crate) fn emit_query_warnings(warnings: &[String]) {
+    if query_warning_sink() == QueryWarningSink::Silent {
+        return;
+    }
     for msg in warnings {
+        #[cfg(test)]
+        echo_recorder::record(msg);
         eprintln!("warning: {msg}");
+    }
+}
+
+/// In-crate observer for the stderr branch above. `eprintln!` is captured by
+/// libtest and unreadable from a unit test, so without this the "silent really
+/// suppresses" assertion would be vacuous — it could only check that the call
+/// returned.
+#[cfg(test)]
+mod echo_recorder {
+    use std::sync::Mutex;
+
+    static RECORDED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    pub(super) fn record(msg: &str) {
+        RECORDED
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(msg.to_string());
+    }
+
+    /// Every echo recorded so far that contains `needle`. Filtered rather than
+    /// drained: the crate's tests run in parallel and other queries echo into
+    /// the same buffer.
+    pub(super) fn matching(needle: &str) -> Vec<String> {
+        RECORDED
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .filter(|m| m.contains(needle))
+            .cloned()
+            .collect()
     }
 }
 
@@ -917,5 +1011,40 @@ mod tests {
         let w = collect_unknown_pattern_warnings(&q, &g);
         assert_eq!(w.len(), 1, "{w:?}");
         assert!(w[0].contains("unknown relationship type"), "{}", w[0]);
+    }
+
+    // ── the warning-echo sink ───────────────────────────────────────────────
+
+    /// The sink is process-global; two tests flipping it at once would race.
+    static SINK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn stderr_sink_echoes_and_silent_sink_does_not() {
+        let _guard = SINK_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // Unique per assertion, so a parallel test echoing into the shared
+        // recorder cannot make either half pass or fail by accident.
+        let echoed = "sink-probe-echoed-a7f3".to_string();
+        let muted = "sink-probe-muted-a7f3".to_string();
+
+        assert_eq!(query_warning_sink(), QueryWarningSink::Stderr, "default");
+        emit_query_warnings(std::slice::from_ref(&echoed));
+        assert_eq!(echo_recorder::matching(&echoed).len(), 1);
+
+        set_query_warning_sink(QueryWarningSink::Silent);
+        assert_eq!(query_warning_sink(), QueryWarningSink::Silent);
+        emit_query_warnings(std::slice::from_ref(&muted));
+        assert!(
+            echo_recorder::matching(&muted).is_empty(),
+            "silent sink still echoed"
+        );
+
+        // Restore: every other test in the crate assumes the default.
+        set_query_warning_sink(QueryWarningSink::Stderr);
+        emit_query_warnings(std::slice::from_ref(&muted));
+        assert_eq!(
+            echo_recorder::matching(&muted).len(),
+            1,
+            "sink did not restore"
+        );
     }
 }

@@ -469,6 +469,27 @@ class ResultView:
         ...
 
     @property
+    def warnings(self) -> list[str]:
+        """The query's non-fatal warnings — shortcut for
+        ``diagnostics["warnings"]``.
+
+        Same list, and ``[]`` (never ``None``) for a clean query *and* for a
+        view that did not come from a query at all — a ``head()`` / ``tail()``
+        slice, a DataFrame round-trip — where :attr:`diagnostics` is ``None``
+        and subscripting it would raise. See :attr:`diagnostics` for what the
+        warnings cover.
+
+        Recorded unconditionally: :func:`kglite.set_query_warning_policy`
+        decides where warnings are *announced*, never whether they land here.
+
+        Example::
+
+            for w in graph.cypher(q).warnings:
+                print(w)
+        """
+        ...
+
+    @property
     def diagnostics(self) -> Optional[dict[str, Any]]:
         """Lightweight execution diagnostics for this query.
 
@@ -498,7 +519,8 @@ class ResultView:
           execution-time advisories too, e.g. a procedure scoped to a
           relationship type the graph does not have. Empty for a clean query.
           The same signal interactive users see on stderr, exposed here for
-          programmatic / agent callers.
+          programmatic / agent callers. Shortcut: :attr:`warnings`, which is
+          ``[]`` rather than an error on a view with no diagnostics.
 
         Use this to tune ``timeout_ms`` or move toward anchored queries
         when your query repeatedly approaches the deadline, and surface
@@ -970,6 +992,64 @@ def cypher_pass_names() -> list[str]:
             if naive != optimized:
                 print(f"Divergence introduced by `{name}`")
                 break
+    """
+    ...
+
+def set_query_warning_policy(policy: str) -> None:
+    """Choose how Cypher query warnings are *announced*, process-wide.
+
+    A query warning has two channels, and this only moves one of them:
+
+    * **Structured**, and unconditional — :attr:`ResultView.warnings` /
+      ``ResultView.diagnostics["warnings"]``. No policy empties it; code that
+      reads the field behaves the same under all three.
+    * **The announcement** — what a caller who is *not* reading the field
+      still sees. That is what this sets:
+
+      - ``"stderr"`` (default): a ``warning: ...`` line on stderr, exactly
+        what every earlier release did unconditionally.
+      - ``"silent"``: nothing is printed.
+      - ``"pywarn"``: each warning is raised as a ``UserWarning`` through the
+        :mod:`warnings` module **instead of** stderr, so the process's own
+        warning filters, ``logging.captureWarnings(True)`` and a custom
+        ``showwarning`` all apply. It replaces rather than supplements the
+        stderr line, because ``warnings.warn`` already routes to stderr by
+        default and doubling it would defeat a filter the host installed.
+
+    ``"pywarn"`` is opt-in and will never become the default: under
+    ``-W error`` (or pytest's ``filterwarnings = error``) it turns an advisory
+    into a raise out of ``cypher()``.
+
+    Applies to every Python query path — :meth:`KnowledgeGraph.cypher`,
+    :meth:`Session.cypher` / :meth:`Session.execute`, ``Transaction.cypher``,
+    :meth:`FrozenGraph.cypher` — including ``to_df=True`` and ``FORMAT CSV``,
+    whose return values cannot carry diagnostics and for which this is the
+    only channel. The bundled CLI, MCP and Bolt servers are separate surfaces
+    with their own presentation and are unaffected.
+
+    Args:
+        policy: ``"stderr"``, ``"silent"`` or ``"pywarn"``.
+
+    Raises:
+        kglite.ArgumentError: For any other string.
+
+    Example::
+
+        import warnings, kglite
+
+        kglite.set_query_warning_policy("pywarn")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            graph.cypher("MATCH (v:Vessel) RETURN v.imo")
+        # caught[0].message -> "RETURN projects property 'imo' which no ..."
+    """
+    ...
+
+def get_query_warning_policy() -> str:
+    """The query-warning policy currently in effect.
+
+    One of ``"stderr"`` (the default), ``"silent"`` or ``"pywarn"`` — see
+    :func:`set_query_warning_policy`.
     """
     ...
 
@@ -5403,7 +5483,14 @@ class KnowledgeGraph:
 
         Args:
             query: Cypher query string.
-            to_df: If ``True``, return a pandas DataFrame.
+            to_df: If ``True``, return a pandas DataFrame. A DataFrame has
+                nowhere to carry :attr:`ResultView.diagnostics`, and neither
+                does the string a ``FORMAT CSV`` query returns — so for both
+                shapes the query's warnings are only *announced* (stderr by
+                default, see :func:`kglite.set_query_warning_policy`), never
+                attached. Run the query without ``to_df`` / ``FORMAT CSV``
+                and call ``ResultView.to_df()`` when you want both the frame
+                and ``rv.warnings``.
             params: Optional parameter dict for ``$param`` substitution.
                 A parameter can supply a **value** or a **name**: labels and
                 relationship types accept ``$label`` / ``$(label)`` too
@@ -5504,7 +5591,8 @@ class KnowledgeGraph:
 
         Returns:
             ResultView by default, DataFrame when ``to_df=True``,
-            or CSV string when the query ends with ``FORMAT CSV``.
+            or CSV string when the query ends with ``FORMAT CSV``. Only the
+            ResultView carries ``diagnostics`` / ``warnings``.
 
         Raises:
             KeyboardInterrupt: If a long-running read is interrupted with

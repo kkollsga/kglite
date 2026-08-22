@@ -39,6 +39,7 @@ mod graph;
 mod graphgen;
 mod okf;
 mod util;
+mod warning_policy;
 
 // The pyo3 wrapper depends on the kglite engine for everything
 // non-Python. Re-export the engine's `error` module so existing
@@ -818,6 +819,14 @@ fn kglite(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(from_blueprint_rust, m)?)?;
     m.add_function(wrap_pyfunction!(from_records_rust, m)?)?;
     m.add_function(wrap_pyfunction!(cypher_pass_names, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        warning_policy::set_query_warning_policy,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        warning_policy::get_query_warning_policy,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(allocator::trim_memory, m)?)?;
     m.add_function(wrap_pyfunction!(_backend_is_forked, m)?)?;
     m.add_function(wrap_pyfunction!(_fail_wal_append, m)?)?;

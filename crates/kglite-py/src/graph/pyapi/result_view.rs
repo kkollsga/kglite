@@ -670,13 +670,31 @@ impl ResultView {
         }
     }
 
+    /// The query's non-fatal warnings, as a list of strings.
+    ///
+    /// Shortcut for ``diagnostics["warnings"]`` that is safe on a view with
+    /// no diagnostics at all — a `head()` / `tail()` slice, or a view built
+    /// from something other than a query — where it is `[]` rather than a
+    /// `TypeError` on `None`. Empty for a clean query.
+    ///
+    /// Independent of `set_query_warning_policy()`: the policy decides where
+    /// warnings are *announced*, never whether they are recorded here.
+    #[getter]
+    fn warnings(&self) -> Vec<String> {
+        self.diagnostics
+            .as_ref()
+            .map(|d| d.warnings.clone())
+            .unwrap_or_default()
+    }
+
     /// Lightweight execution diagnostics, or None when the backend
     /// didn't populate them (mutation queries, EXPLAIN, transaction
     /// paths).
     ///
     /// Returns a dict with ``elapsed_ms`` (wall-clock query duration),
-    /// ``timed_out`` (True when the deadline fired), and ``timeout_ms``
-    /// (the deadline that was in effect, or None). Use this to tune
+    /// ``timed_out`` (True when the deadline fired), ``timeout_ms``
+    /// (the deadline that was in effect, or None) and ``warnings``
+    /// (shortcut: the `warnings` property). Use this to tune
     /// ``timeout_ms`` or move toward anchored queries when queries
     /// approach the deadline.
     #[getter]

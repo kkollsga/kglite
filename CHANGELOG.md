@@ -49,6 +49,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so every binding inherits it; Cypher's `vector_score()`, which legitimately
   takes the store name, is unaffected.
 
+### Added
+
+- **`ResultView.warnings`, and a process-global policy for where query
+  warnings are announced.** The warnings a query collects were readable only
+  as `result.diagnostics["warnings"]`, which is a `TypeError` waiting to
+  happen on a view that carries no diagnostics (a `head()` slice), and their
+  presentation was fixed: a `warning:` line on stderr, for every embedding
+  host, whether or not stderr was somewhere a human would ever look.
+  `ResultView.warnings` is the same list as a plain `list[str]`, `[]` rather
+  than an error when there are no diagnostics at all.
+  `kglite.set_query_warning_policy(...)` takes `"stderr"` (the default, and
+  byte-for-byte the previous behaviour), `"silent"`, or `"pywarn"` — which
+  raises each warning as a `UserWarning` through the `warnings` module
+  *instead of* the stderr line, so the host's warning filters,
+  `logging.captureWarnings(True)` and a custom `showwarning` all apply.
+  `"pywarn"` is opt-in and will not become the default: under `-W error` it
+  turns an advisory into a raise out of `cypher()`.
+  `kglite.get_query_warning_policy()` reads it back. The policy covers every
+  Python query path — `cypher()`, `Session.cypher`/`execute`,
+  `Transaction.cypher`, `FrozenGraph.cypher`, reads and mutations alike —
+  **including `to_df=True` and `FORMAT CSV`**, whose return values have
+  nowhere to carry diagnostics and for which the announcement is the only
+  channel there is (documented on `cypher()` rather than hacked onto a
+  DataFrame). The structured channel is untouched by all of this: no policy
+  can empty `diagnostics["warnings"]`. Engine-side this is a two-state sink
+  (`kglite::api::cypher::set_query_warning_sink`) that decides whether the
+  one `warning:` emitter prints; the `warnings.warn` re-emission is wheel-side
+  and post-execution, so no Python callback ever runs inside the executor.
+  The CLI, MCP and Bolt servers keep their own presentation and are
+  unaffected.
+
 ### Removed
 
 - **`as_dict=True` on `pagerank()`, `betweenness_centrality()`,
@@ -64,6 +95,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `to_df=True` and the default `ResultView` are unchanged.
 
 ### Fixed
+
+- **Docs: the 0.16.6 note on the query-warnings channel claimed the warnings
+  reach Bolt.** They do not. The engine populates `QueryDiagnostics.warnings`
+  for every consumer including `kglite-bolt-server`, but that server forwards
+  nothing of it onto the wire — a Bolt client sees no `notifications` metadata
+  on `SUCCESS`, so from a driver's point of view the channel does not exist.
+  The 0.16.6 entry no longer lists Bolt; `ResultView.diagnostics`, the MCP
+  `warnings:` block, the CLI and stderr were and remain accurate. Bolt
+  `notifications` metadata is a real gap and is on the backlog, not shipped.
 
 - **`print(result)` rendered every small float as `0.00`.** The `ResultView`
   table formatted floats with two fixed decimal places, so a PageRank score —
@@ -1023,7 +1063,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   records a property as soon as one node carries it — and neither does a
   property the same statement is in the act of writing. Both ride the existing
   `QueryDiagnostics.warnings` channel, so they reach `ResultView.diagnostics`,
-  the MCP `warnings:` block, Bolt, the CLI and stderr with no per-surface work.
+  the MCP `warnings:` block, the CLI and stderr with no per-surface work.
 
 - **The MCP server accepts an operator-pinned write scope.** `write_scope` on
   the `cypher_query` tool is chosen by the *agent*, so on its own it is role

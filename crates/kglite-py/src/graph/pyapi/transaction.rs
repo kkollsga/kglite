@@ -252,6 +252,7 @@ impl Transaction {
                 .result
         };
 
+        crate::warning_policy::announce(py, result.diagnostics.as_ref())?;
         if pre_parsed.explain {
             let view = crate::graph::pyapi::result_view::ResultView::from_cypher_result(result);
             return Py::new(py, view).map(|v| v.into_any());

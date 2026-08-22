@@ -14,6 +14,8 @@
     "from_bytes",
     "cypher_pass_names",
     "trim_memory",
+    "set_query_warning_policy",
+    "get_query_warning_policy",
     "from_blueprint",
     "from_records",
     "graphgen",
@@ -1310,6 +1312,10 @@
         "to_list": {
           "kind": "method",
           "signature": "(self, /)"
+        },
+        "warnings": {
+          "kind": "attribute",
+          "type": "getset_descriptor"
         }
       },
       "module": "kglite"
@@ -1492,6 +1498,10 @@
       "kind": "function",
       "signature": "(spec: 'Union[dict, str]', *, save: 'Optional[str]' = None, lock_schema: 'bool' = False, storage: 'str' = 'default', path: 'Optional[str]' = None, on_missing_endpoint: 'str' = 'vivify') -> 'KnowledgeGraph'"
     },
+    "get_query_warning_policy": {
+      "kind": "function",
+      "signature": "()"
+    },
     "graphgen": {
       "kind": "function",
       "signature": "(scale: str = 'medium', *, persons: 'int | None' = None, seed: int = 1234, knows_per: int = 8, degree_dist: str = 'zipf', zipf_exp: float = 1.6, out: 'str | None' = None)"
@@ -1519,6 +1529,10 @@
     "retry_on_conflict": {
       "kind": "function",
       "signature": "(graph: 'Any', work: 'Callable[[Any], T]', *, attempts: 'int' = 5, base_delay: 'float' = 0.005, max_delay: 'float' = 0.5, jitter: 'bool' = True) -> 'T'"
+    },
+    "set_query_warning_policy": {
+      "kind": "function",
+      "signature": "(policy)"
     },
     "stamp_file_freshness": {
       "kind": "function",
