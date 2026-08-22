@@ -262,8 +262,11 @@ graph.degree_centrality(top_k=10)
 graph.closeness_centrality(top_k=10)
 
 # Alternative output formats
-graph.pagerank(as_dict=True)      # → {1: 0.45, 2: 0.32, ...} (keyed by id)
 graph.pagerank(to_df=True)        # → DataFrame with type, title, id, score columns
+
+# An {id: score} mapping, when you want one (ids are unique per type only, so
+# key by (type, id) whenever the selection spans more than one node type)
+scores = {r["id"]: r["score"] for r in graph.pagerank().to_dicts()}
 ```
 
 ## Community Detection

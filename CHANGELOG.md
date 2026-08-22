@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **`as_dict=True` on `pagerank()`, `betweenness_centrality()`,
+  `degree_centrality()` and `closeness_centrality()`.** The dict it built was
+  keyed by bare node id, and node ids are unique *per type* only — on a graph
+  where a `Person` and a `Company` both carry id `5`, the second row
+  overwrote the first and the caller got fewer entries than nodes, with no
+  error. There is no key that fixes it without changing the shape, so the
+  parameter is gone rather than silently lossy. Build the mapping from the
+  `ResultView` (the default return), which carries `type` alongside `id`:
+  `{r["id"]: r["score"] for r in g.pagerank().to_dicts()}` — or key by
+  `(r["type"], r["id"])` when the selection spans more than one node type.
+  `to_df=True` and the default `ResultView` are unchanged.
+
 ### Fixed
 
 - **`set_embeddings()`/`add_embeddings()` rejected the very column name a

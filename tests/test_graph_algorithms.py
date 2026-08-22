@@ -164,3 +164,19 @@ class TestCentrality:
     def test_zero_sample_size_is_rejected(self, social_graph, method_name):
         with pytest.raises(KgError, match="sample_size must be greater than 0"):
             getattr(social_graph, method_name)(sample_size=0)
+
+    @pytest.mark.parametrize(
+        "method_name",
+        [
+            "betweenness_centrality",
+            "pagerank",
+            "degree_centrality",
+            "closeness_centrality",
+        ],
+    )
+    def test_as_dict_kwarg_is_rejected(self, social_graph, method_name):
+        """`as_dict` was removed: it keyed by bare node id and silently dropped
+        rows whose id collided across node types. Callers build the mapping
+        themselves from the ResultView, which carries `type` alongside `id`."""
+        with pytest.raises(TypeError):
+            getattr(social_graph, method_name)(as_dict=True)

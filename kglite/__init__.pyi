@@ -4765,10 +4765,9 @@ class KnowledgeGraph:
         sample_size: Optional[int] = None,
         connection_types: Optional[Union[str, list[str]]] = None,
         top_k: Optional[int] = None,
-        as_dict: Optional[bool] = None,
         timeout_ms: Optional[int] = None,
         to_df: Optional[bool] = None,
-    ) -> Union[ResultView, dict[Any, float], pd.DataFrame]:
+    ) -> Union[ResultView, pd.DataFrame]:
         """Calculate betweenness centrality.
 
         Args:
@@ -4776,13 +4775,13 @@ class KnowledgeGraph:
             sample_size: Sample source nodes for faster computation on large graphs.
             connection_types: Only traverse these relationship types (str or list).
             top_k: Return only the top *K* nodes.
-            as_dict: Return ``{id: score}`` dict instead of list of dicts.
             timeout_ms: Abort after this many milliseconds with an error.
             to_df: Return a pandas DataFrame with columns ``type``, ``title``, ``id``, ``score``.
 
         Returns:
-            List of dicts with ``type``, ``title``, ``id``, ``score``,
-            sorted by score descending. Or a DataFrame if ``to_df=True``.
+            A :class:`ResultView` of rows with ``type``, ``title``, ``id``,
+            ``score``, sorted by score descending. Or a pandas DataFrame if
+            ``to_df=True``.
         """
         ...
 
@@ -4793,10 +4792,9 @@ class KnowledgeGraph:
         tolerance: Optional[float] = None,
         connection_types: Optional[Union[str, list[str]]] = None,
         top_k: Optional[int] = None,
-        as_dict: Optional[bool] = None,
         timeout_ms: Optional[int] = None,
         to_df: Optional[bool] = None,
-    ) -> Union[ResultView, dict[Any, float], pd.DataFrame]:
+    ) -> Union[ResultView, pd.DataFrame]:
         """Calculate PageRank centrality.
 
         Args:
@@ -4805,13 +4803,13 @@ class KnowledgeGraph:
             tolerance: Convergence threshold. Default ``1e-6``.
             connection_types: Only traverse these relationship types (str or list).
             top_k: Return only the top *K* nodes.
-            as_dict: Return ``{id: score}`` dict instead of list of dicts.
             timeout_ms: Abort after this many milliseconds with an error.
             to_df: Return a pandas DataFrame with columns ``type``, ``title``, ``id``, ``score``.
 
         Returns:
-            List of dicts with ``type``, ``title``, ``id``, ``score``.
-            Or a DataFrame if ``to_df=True``.
+            A :class:`ResultView` of rows with ``type``, ``title``, ``id``,
+            ``score``, sorted by score descending. Or a pandas DataFrame if
+            ``to_df=True``.
         """
         ...
 
@@ -4820,23 +4818,22 @@ class KnowledgeGraph:
         normalized: Optional[bool] = None,
         connection_types: Optional[Union[str, list[str]]] = None,
         top_k: Optional[int] = None,
-        as_dict: Optional[bool] = None,
         timeout_ms: Optional[int] = None,
         to_df: Optional[bool] = None,
-    ) -> Union[ResultView, dict[Any, float], pd.DataFrame]:
+    ) -> Union[ResultView, pd.DataFrame]:
         """Calculate degree centrality.
 
         Args:
             normalized: Normalise by ``(n-1)``. Default ``True``.
             connection_types: Only count these relationship types (str or list).
             top_k: Return only the top *K* nodes.
-            as_dict: Return ``{id: score}`` dict instead of list of dicts.
             timeout_ms: Abort after this many milliseconds with an error.
             to_df: Return a pandas DataFrame with columns ``type``, ``title``, ``id``, ``score``.
 
         Returns:
-            List of dicts with ``type``, ``title``, ``id``, ``score``.
-            Or a DataFrame if ``to_df=True``.
+            A :class:`ResultView` of rows with ``type``, ``title``, ``id``,
+            ``score``, sorted by score descending. Or a pandas DataFrame if
+            ``to_df=True``.
         """
         ...
 
@@ -4846,10 +4843,9 @@ class KnowledgeGraph:
         sample_size: Optional[int] = None,
         connection_types: Optional[Union[str, list[str]]] = None,
         top_k: Optional[int] = None,
-        as_dict: Optional[bool] = None,
         timeout_ms: Optional[int] = None,
         to_df: Optional[bool] = None,
-    ) -> Union[ResultView, dict[Any, float], pd.DataFrame]:
+    ) -> Union[ResultView, pd.DataFrame]:
         """Calculate closeness centrality.
 
         Args:
@@ -4858,12 +4854,13 @@ class KnowledgeGraph:
                 If ``None``, uses all nodes.
             connection_types: Filter to specific relationship types.
             top_k: Return only the top *K* nodes.
-            as_dict: Return ``{id: score}`` dict instead of list of dicts.
             timeout_ms: Abort after this many milliseconds with an error.
             to_df: Return a pandas DataFrame with columns ``type``, ``title``, ``id``, ``score``.
 
         Returns:
-            List of dicts with ``type``, ``title``, ``id``, ``score``.
+            A :class:`ResultView` of rows with ``type``, ``title``, ``id``,
+            ``score``, sorted by score descending. Or a pandas DataFrame if
+            ``to_df=True``.
         """
         ...
 

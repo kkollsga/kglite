@@ -6,10 +6,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::sync::Arc;
 
-use crate::graph::{
-    centrality_results_to_dataframe, centrality_results_to_py_dict, community_results_to_py,
-    KnowledgeGraph,
-};
+use crate::graph::{centrality_results_to_dataframe, community_results_to_py, KnowledgeGraph};
 use kglite_core::api::algorithms::{EdgeDir, Interrupt, PathOptions};
 use kglite_core::api::PlanStep;
 
@@ -1058,7 +1055,7 @@ impl KnowledgeGraph {
     ///     top_k: Return only the top K nodes by centrality (default: all)
     ///
     /// Returns:
-    ///     A list of dicts with 'node_type', 'title', 'id', and 'score' keys,
+    ///     A ResultView of rows with 'type', 'title', 'id', and 'score' keys,
     ///     sorted by score descending.
     ///
     /// Example:
@@ -1068,7 +1065,7 @@ impl KnowledgeGraph {
     ///     for node in central_nodes:
     ///         print(f"{node['title']}: {node['score']:.4f}")
     ///     ```
-    #[pyo3(signature = (normalized=None, sample_size=None, connection_types=None, top_k=None, as_dict=None, timeout_ms=None, to_df=None))]
+    #[pyo3(signature = (normalized=None, sample_size=None, connection_types=None, top_k=None, timeout_ms=None, to_df=None))]
     #[allow(clippy::too_many_arguments)]
     fn betweenness_centrality(
         &self,
@@ -1077,7 +1074,6 @@ impl KnowledgeGraph {
         sample_size: Option<usize>,
         connection_types: Option<Vec<String>>,
         top_k: Option<usize>,
-        as_dict: Option<bool>,
         timeout_ms: Option<u64>,
         to_df: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
@@ -1106,17 +1102,13 @@ impl KnowledgeGraph {
 
         if to_df.unwrap_or(false) {
             centrality_results_to_dataframe(py, &self.inner, results, top_k)
-        } else if as_dict.unwrap_or(false) {
-            centrality_results_to_py_dict(py, &self.inner, results, top_k)
         } else {
-            {
-                let view = crate::graph::pyapi::result_view::ResultView::from_centrality(
-                    &self.inner,
-                    results,
-                    top_k,
-                );
-                Py::new(py, view).map(|v| v.into_any())
-            }
+            let view = crate::graph::pyapi::result_view::ResultView::from_centrality(
+                &self.inner,
+                results,
+                top_k,
+            );
+            Py::new(py, view).map(|v| v.into_any())
         }
     }
 
@@ -1132,7 +1124,7 @@ impl KnowledgeGraph {
     ///     top_k: Return only the top K nodes by centrality (default: all)
     ///
     /// Returns:
-    ///     A list of dicts with 'node_type', 'title', 'id', and 'score' keys,
+    ///     A ResultView of rows with 'type', 'title', 'id', and 'score' keys,
     ///     sorted by score descending.
     ///
     /// Example:
@@ -1142,7 +1134,7 @@ impl KnowledgeGraph {
     ///     for node in important_nodes:
     ///         print(f"{node['title']}: {node['score']:.6f}")
     ///     ```
-    #[pyo3(signature = (damping_factor=None, max_iterations=None, tolerance=None, connection_types=None, top_k=None, as_dict=None, timeout_ms=None, to_df=None))]
+    #[pyo3(signature = (damping_factor=None, max_iterations=None, tolerance=None, connection_types=None, top_k=None, timeout_ms=None, to_df=None))]
     #[allow(clippy::too_many_arguments)]
     fn pagerank(
         &self,
@@ -1152,7 +1144,6 @@ impl KnowledgeGraph {
         tolerance: Option<f64>,
         connection_types: Option<Vec<String>>,
         top_k: Option<usize>,
-        as_dict: Option<bool>,
         timeout_ms: Option<u64>,
         to_df: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
@@ -1182,17 +1173,13 @@ impl KnowledgeGraph {
 
         if to_df.unwrap_or(false) {
             centrality_results_to_dataframe(py, &self.inner, results, top_k)
-        } else if as_dict.unwrap_or(false) {
-            centrality_results_to_py_dict(py, &self.inner, results, top_k)
         } else {
-            {
-                let view = crate::graph::pyapi::result_view::ResultView::from_centrality(
-                    &self.inner,
-                    results,
-                    top_k,
-                );
-                Py::new(py, view).map(|v| v.into_any())
-            }
+            let view = crate::graph::pyapi::result_view::ResultView::from_centrality(
+                &self.inner,
+                results,
+                top_k,
+            );
+            Py::new(py, view).map(|v| v.into_any())
         }
     }
 
@@ -1206,7 +1193,7 @@ impl KnowledgeGraph {
     ///     top_k: Return only the top K nodes by centrality (default: all)
     ///
     /// Returns:
-    ///     A list of dicts with 'node_type', 'title', 'id', and 'score' keys,
+    ///     A ResultView of rows with 'type', 'title', 'id', and 'score' keys,
     ///     sorted by score descending.
     ///
     /// Example:
@@ -1214,15 +1201,13 @@ impl KnowledgeGraph {
     ///     # Find the most connected nodes
     ///     connected_nodes = graph.degree_centrality(top_k=10)
     ///     ```
-    #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (normalized=None, connection_types=None, top_k=None, as_dict=None, timeout_ms=None, to_df=None))]
+    #[pyo3(signature = (normalized=None, connection_types=None, top_k=None, timeout_ms=None, to_df=None))]
     fn degree_centrality(
         &self,
         py: Python<'_>,
         normalized: Option<bool>,
         connection_types: Option<Vec<String>>,
         top_k: Option<usize>,
-        as_dict: Option<bool>,
         timeout_ms: Option<u64>,
         to_df: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
@@ -1248,17 +1233,13 @@ impl KnowledgeGraph {
 
         if to_df.unwrap_or(false) {
             centrality_results_to_dataframe(py, &self.inner, results, top_k)
-        } else if as_dict.unwrap_or(false) {
-            centrality_results_to_py_dict(py, &self.inner, results, top_k)
         } else {
-            {
-                let view = crate::graph::pyapi::result_view::ResultView::from_centrality(
-                    &self.inner,
-                    results,
-                    top_k,
-                );
-                Py::new(py, view).map(|v| v.into_any())
-            }
+            let view = crate::graph::pyapi::result_view::ResultView::from_centrality(
+                &self.inner,
+                results,
+                top_k,
+            );
+            Py::new(py, view).map(|v| v.into_any())
         }
     }
 
@@ -1275,7 +1256,7 @@ impl KnowledgeGraph {
     ///     top_k: Return only the top K nodes by centrality (default: all)
     ///
     /// Returns:
-    ///     A list of dicts with 'node_type', 'title', 'id', and 'score' keys,
+    ///     A ResultView of rows with 'type', 'title', 'id', and 'score' keys,
     ///     sorted by score descending.
     ///
     /// Example:
@@ -1286,7 +1267,7 @@ impl KnowledgeGraph {
     ///     close_nodes = graph.closeness_centrality(sample_size=100, top_k=10)
     ///     ```
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (normalized=None, sample_size=None, connection_types=None, top_k=None, as_dict=None, timeout_ms=None, to_df=None))]
+    #[pyo3(signature = (normalized=None, sample_size=None, connection_types=None, top_k=None, timeout_ms=None, to_df=None))]
     fn closeness_centrality(
         &self,
         py: Python<'_>,
@@ -1294,7 +1275,6 @@ impl KnowledgeGraph {
         sample_size: Option<usize>,
         connection_types: Option<Vec<String>>,
         top_k: Option<usize>,
-        as_dict: Option<bool>,
         timeout_ms: Option<u64>,
         to_df: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
@@ -1323,17 +1303,13 @@ impl KnowledgeGraph {
 
         if to_df.unwrap_or(false) {
             centrality_results_to_dataframe(py, &self.inner, results, top_k)
-        } else if as_dict.unwrap_or(false) {
-            centrality_results_to_py_dict(py, &self.inner, results, top_k)
         } else {
-            {
-                let view = crate::graph::pyapi::result_view::ResultView::from_centrality(
-                    &self.inner,
-                    results,
-                    top_k,
-                );
-                Py::new(py, view).map(|v| v.into_any())
-            }
+            let view = crate::graph::pyapi::result_view::ResultView::from_centrality(
+                &self.inner,
+                results,
+                top_k,
+            );
+            Py::new(py, view).map(|v| v.into_any())
         }
     }
 

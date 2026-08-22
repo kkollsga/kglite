@@ -1017,7 +1017,7 @@ degrees = graph.select('Person').degrees()
 
 ### Centrality
 
-All centrality methods return `ResultView` by default, with optional `as_dict` or `to_df` output:
+All centrality methods return `ResultView` by default, with optional `to_df` output:
 
 ```python
 # Betweenness centrality
@@ -1040,8 +1040,9 @@ result = graph.degree_centrality(normalized=True, top_k=10)
 # Closeness centrality
 result = graph.closeness_centrality(top_k=10)
 
-# As dict
-scores = graph.pagerank(as_dict=True)
+# As an {id: score} mapping (ids are unique per type only — key by
+# (type, id) when the selection spans more than one node type)
+scores = {r['id']: r['score'] for r in graph.pagerank().to_dicts()}
 # {'alice': 0.15, 'bob': 0.12, ...}
 ```
 

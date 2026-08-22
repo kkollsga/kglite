@@ -1062,29 +1062,6 @@ fn selection_has_nodes(kg: &KnowledgeGraph) -> bool {
         .unwrap_or(false)
 }
 
-/// Lightweight centrality result conversion: returns {title: score} dict.
-/// Creates ONE Python dict instead of N dicts — returns {title: score} format.
-/// ~3-4x faster PyO3 serialization for large graphs.
-pub(crate) fn centrality_results_to_py_dict(
-    py: Python<'_>,
-    graph: &DirGraph,
-    results: Vec<kglite_core::api::algorithms::CentralityResult>,
-    top_k: Option<usize>,
-) -> PyResult<Py<PyAny>> {
-    let _arena_guard = graph.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
-    let limit = top_k.unwrap_or(results.len());
-    let scores_dict = PyDict::new(py);
-
-    for result in results.into_iter().take(limit) {
-        if let Some(node) = graph.node_view(result.node_idx) {
-            let id_py = py_out::value_to_py(py, &node.id())?;
-            scores_dict.set_item(id_py, result.score)?;
-        }
-    }
-
-    Ok(scores_dict.into())
-}
-
 /// Convert centrality results to a pandas DataFrame with columns:
 /// type, title, id, score — sorted by score descending.
 pub(crate) fn centrality_results_to_dataframe(

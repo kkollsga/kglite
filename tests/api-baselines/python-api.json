@@ -470,7 +470,7 @@
         },
         "betweenness_centrality": {
           "kind": "method",
-          "signature": "(self, /, normalized=None, sample_size=None, connection_types=None, top_k=None, as_dict=None, timeout_ms=None, to_df=None)"
+          "signature": "(self, /, normalized=None, sample_size=None, connection_types=None, top_k=None, timeout_ms=None, to_df=None)"
         },
         "bounds": {
           "kind": "method",
@@ -510,7 +510,7 @@
         },
         "closeness_centrality": {
           "kind": "method",
-          "signature": "(self, /, normalized=None, sample_size=None, connection_types=None, top_k=None, as_dict=None, timeout_ms=None, to_df=None)"
+          "signature": "(self, /, normalized=None, sample_size=None, connection_types=None, top_k=None, timeout_ms=None, to_df=None)"
         },
         "collect": {
           "kind": "method",
@@ -602,7 +602,7 @@
         },
         "degree_centrality": {
           "kind": "method",
-          "signature": "(self, /, normalized=None, connection_types=None, top_k=None, as_dict=None, timeout_ms=None, to_df=None)"
+          "signature": "(self, /, normalized=None, connection_types=None, top_k=None, timeout_ms=None, to_df=None)"
         },
         "degrees": {
           "kind": "method",
@@ -854,7 +854,7 @@
         },
         "pagerank": {
           "kind": "method",
-          "signature": "(self, /, damping_factor=None, max_iterations=None, tolerance=None, connection_types=None, top_k=None, as_dict=None, timeout_ms=None, to_df=None)"
+          "signature": "(self, /, damping_factor=None, max_iterations=None, tolerance=None, connection_types=None, top_k=None, timeout_ms=None, to_df=None)"
         },
         "properties": {
           "kind": "method",

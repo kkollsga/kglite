@@ -287,5 +287,4 @@ All centrality methods (`pagerank`, `betweenness_centrality`, `closeness_central
 | Mode | Returns |
 |------|---------|
 | Default | `ResultView` of `{type, title, id, score}` sorted by score desc |
-| `as_dict=True` | `{id: score}` — keyed by node ID (unique per type) |
 | `to_df=True` | `DataFrame` with columns `type, title, id, score` |
