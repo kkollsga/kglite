@@ -353,7 +353,7 @@ mod tests {
             vec![float(0.0003)],
             vec![float(-0.00025)],
             vec![float(0.0)],
-            vec![float(3.14159)],
+            vec![float(std::f64::consts::PI)],
             vec![float(0.01)],
         ];
         let out = render(&ASCII_STYLE, &cols, &rows);
@@ -365,7 +365,7 @@ mod tests {
         );
         assert!(
             out.contains("3.14"),
-            "3.14159 must stay fixed-point:\n{out}"
+            "PI must stay fixed-point:\n{out}"
         );
         assert!(
             out.contains("0.01"),
@@ -383,7 +383,7 @@ mod tests {
             0.01,
             -0.01,
             1.0,
-            3.14159,
+            std::f64::consts::PI,
             1e9,
             f64::NAN,
             f64::INFINITY,
