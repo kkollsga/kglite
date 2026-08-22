@@ -70,6 +70,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so every binding inherits it; Cypher's `vector_score()`, which legitimately
   takes the store name, is unaffected.
 
+- **`vector_search()` stops auto-using an HNSW index below 400 vectors** (was
+  256). Below the crossover the index is strictly dominated: the walk costs
+  more than the contiguous scan it replaces *and* the answer is approximate.
+  Measured in release at cosine/top-k=10 over three agreeing runs, the old 256
+  floor sat inside that band — a 256-vector store served an approximate answer
+  1.04-1.15x slower than the exact scan, and a 300-vector store 1.03-1.15x
+  slower. Stores of 256-399 vectors with an index built now return exact
+  results, slightly faster. Nothing above 400 changes: the index still wins by
+  2.7-9.8x at every size and dimension measured from 400 up to 50k x 384, so
+  this is not a retreat from the index. The threshold is deliberately flat
+  rather than a function of dimension — the crossover on representative
+  (low-rank) embeddings measured ~350 at both 64 and 384 dimensions.
+  `build_vector_index()` is unaffected; only auto-selection moved.
+
 ### Added
 
 - **`ResultView.warnings`, and a process-global policy for where query

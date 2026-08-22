@@ -101,7 +101,33 @@ const PARALLEL_THRESHOLD: usize = 10_000;
 /// Minimum candidate count before an HNSW index is auto-used. Below this a
 /// brute-force scan is both faster (no index overhead) and exact, so there's no
 /// reason to risk approximate recall.
-const HNSW_AUTO_MIN: usize = 256;
+///
+/// Calibrated 2026-08-22 (release, `tests/benchmarks/bench_vector_index.py`,
+/// cosine, top_k=10, min-of-200-rounds, three agreeing runs). The previous
+/// value of 256 sat *below* the measured crossover on both corpora, so the
+/// index was auto-used in a band where it was strictly dominated — slower
+/// *and* approximate:
+///
+/// | n   | dim | low-rank corpus | Gaussian corpus |
+/// |-----|-----|-----------------|-----------------|
+/// | 256 |  64 | 1.04x slower    | 1.15x slower    |
+/// | 256 | 384 | 1.04x slower    | 1.13x slower    |
+/// | 300 | 384 | 1.03x slower    | 1.15x slower    |
+/// | 400 | 384 | 1.09x *faster*  | 1.14x slower    |
+/// | 500 | 384 | 1.18x *faster*  | 1.10x slower    |
+///
+/// 400 is the largest value at which no measured cell prefers the index and
+/// the smallest at which no measured cell prefers the scan, on the low-rank
+/// corpus that represents real embeddings (`test_bench_vector_index.py`
+/// documents why independent Gaussian noise is the adversarial case, not the
+/// workload). Raising it further to chase the Gaussian crossover (~600 at
+/// d=64, ~750 at d=384) would cost the representative corpus 1.18-1.39x.
+///
+/// The threshold is deliberately *not* dimension-aware: the representative
+/// corpus crosses over at ~350 at both d=64 and d=384, so a `f(dim)` gate
+/// would encode a dependence the measurement does not show. Above this band
+/// the index wins by 2.7-9.8x at every size and dimension swept up to 50k.
+const HNSW_AUTO_MIN: usize = 400;
 
 /// Over-fetch factor for HNSW: fetch `top_k * this` candidates so that, after
 /// dropping any that fall outside the (possibly filtered) selection, `top_k`

@@ -427,7 +427,10 @@ class TestHnswInCypher:
         assert approximate == exact
 
     def test_cypher_bypasses_index_built_for_a_different_metric(self):
-        n = 320
+        # Above HNSW_AUTO_MIN, so the metric guard is the *only* reason the
+        # index is bypassed here — a smaller corpus would pass vacuously on
+        # the size gate instead.
+        n = 512
         g = kglite.KnowledgeGraph()
         g.add_nodes(
             pd.DataFrame(
