@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`to_networkx()`, one-arg `embeddings()` and `degrees()` now raise on a key
+  collision instead of silently returning less than they were asked for.** All
+  three flatten a node collection into one dict (or one NetworkX graph) keyed
+  by a field that is not graph-unique: node ids are unique *per type* only,
+  and titles are not unique at all. Before, the second node to land on a key
+  overwrote the first with nothing on the wire to say so — `to_networkx()`
+  merged a `Person` and a `City` that both carried id `5` into a single
+  networkx node, the City's attributes winning and *both* nodes' edges
+  rewiring onto the survivor (3 kglite nodes out as 2, with a `Person`-typed
+  edge pointing at a city); `embeddings("summary")` over a selection spanning
+  two types dropped one of the two vectors; `degrees()` returned one row for
+  two same-titled nodes. Each now raises `ArgumentError` naming the colliding
+  key and the collision-safe way to get the data: give the types disjoint ids
+  (`to_networkx()` is whole-graph and ignores the selection, so filtering
+  cannot avoid it), call the two-arg `embeddings(node_type, text_column)` once
+  per type, or use `degree_centrality()`, whose `ResultView` carries one row
+  per node. Single-type and collision-free calls are unchanged. This is the
+  same doctrine `shortest_path_lengths_from()` already applied to cross-type
+  ids; all four surfaces now share one message.
+
 ### Removed
 
 - **`as_dict=True` on `pagerank()`, `betweenness_centrality()`,

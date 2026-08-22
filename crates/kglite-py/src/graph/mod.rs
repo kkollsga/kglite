@@ -1062,6 +1062,91 @@ fn selection_has_nodes(kg: &KnowledgeGraph) -> bool {
         .unwrap_or(false)
 }
 
+// ── Flat-dict node keys ──────────────────────────────────────────────
+//
+// Several Python surfaces flatten a node collection into a single dict
+// keyed by one node field. Neither candidate field is graph-unique: ids
+// are unique *per type* only, and titles are not unique at all. Left
+// unguarded, the second node to land on a key overwrites the first — a
+// merged NetworkX node with rewired edges, a dropped embedding vector,
+// a missing degree row — with nothing on the wire saying so.
+//
+// Every such surface inserts through `NodeKeyGuard` so the diagnosis
+// reads the same everywhere: what collided, why that field is not
+// unique, and the collision-safe call to make instead.
+
+/// Which node field a flat dict is keyed by — picks the "why" clause.
+#[derive(Clone, Copy)]
+pub(crate) enum NodeKeyKind {
+    /// Node `id`: unique within a type, reused across types.
+    Id,
+    /// Node `title`: not unique anywhere.
+    Title,
+}
+
+impl NodeKeyKind {
+    fn field(self) -> &'static str {
+        match self {
+            Self::Id => "id",
+            Self::Title => "title",
+        }
+    }
+
+    fn why(self) -> &'static str {
+        match self {
+            Self::Id => "ids are unique per type, not across types",
+            Self::Title => "titles are not unique, not even within one type",
+        }
+    }
+}
+
+/// One surface's collision policy: who reports, on which key field, and
+/// the recipe that gets the caller the same data without a collision.
+pub(crate) struct NodeKeyGuard<'a> {
+    /// The method as a caller would type it, e.g. `"degrees()"`.
+    pub surface: &'a str,
+    pub kind: NodeKeyKind,
+    /// Imperative clause completing "…, so <recipe>." Must be actionable
+    /// on the graph that produced the collision.
+    pub recipe: &'a str,
+}
+
+impl NodeKeyGuard<'_> {
+    /// Insert `key -> value`, refusing rather than overwriting.
+    pub(crate) fn insert<'py, V>(
+        &self,
+        dict: &Bound<'py, PyDict>,
+        key: &Bound<'py, PyAny>,
+        value: V,
+    ) -> PyResult<()>
+    where
+        V: IntoPyObject<'py>,
+    {
+        if dict.contains(key)? {
+            return Err(self.collision(key));
+        }
+        dict.set_item(key, value)
+    }
+
+    /// The refusal itself, for surfaces whose collection is not a dict
+    /// (`to_networkx` keys a NetworkX graph) but whose keys collide the
+    /// same way.
+    pub(crate) fn collision(&self, key: &Bound<'_, PyAny>) -> PyErr {
+        let rendered = match key.repr() {
+            Ok(repr) => repr.to_string_lossy().into_owned(),
+            Err(_) => "<unrepresentable>".to_string(),
+        };
+        crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(format!(
+            "{} found two nodes sharing {} {}; {}, so {}.",
+            self.surface,
+            self.kind.field(),
+            rendered,
+            self.kind.why(),
+            self.recipe,
+        )))
+    }
+}
+
 /// Convert centrality results to a pandas DataFrame with columns:
 /// type, title, id, score — sorted by score descending.
 pub(crate) fn centrality_results_to_dataframe(

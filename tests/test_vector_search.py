@@ -2274,3 +2274,59 @@ class TestNormCacheParity:
         assert [i for i, _ in before] == [i for i, _ in after]
         for (_, b), (_, a) in zip(before, after):
             assert abs(b - a) < 1e-6
+
+
+class TestEmbeddingsIdCollision:
+    """One-arg ``embeddings(text_column)`` keys a *cross-type* selection by
+    bare node id. Ids are unique per type only, so two types sharing an id
+    used to silently drop one vector; it now refuses and names the two-arg
+    form as the type-namespaced way to get both."""
+
+    @staticmethod
+    def _colliding_graph():
+        graph = kglite.KnowledgeGraph()
+        graph.add_nodes(
+            pd.DataFrame({"id": [1], "title": ["Alpha"], "summary": ["alpha text"]}),
+            "Article",
+            "id",
+            "title",
+        )
+        graph.add_nodes(
+            pd.DataFrame({"id": [1], "title": ["Note one"], "summary": ["note text"]}),
+            "Note",
+            "id",
+            "title",
+        )
+        graph.set_embeddings("Article", "summary", {1: [1.0, 0.0]})
+        graph.set_embeddings("Note", "summary", {1: [0.0, 1.0]})
+        return graph
+
+    def test_one_arg_raises_on_cross_type_id_collision(self):
+        graph = self._colliding_graph()
+        with pytest.raises(kglite.ArgumentError, match="sharing id"):
+            graph.embeddings("summary")
+
+    def test_collision_error_names_the_two_arg_form(self):
+        graph = self._colliding_graph()
+        with pytest.raises(kglite.ArgumentError) as excinfo:
+            graph.embeddings("summary")
+        message = str(excinfo.value)
+        assert "embeddings()" in message
+        assert "embeddings(node_type, text_column)" in message
+
+    def test_two_arg_form_returns_both_stores(self):
+        """The recipe the error names actually works on the same graph."""
+        graph = self._colliding_graph()
+        assert graph.embeddings("Article", "summary") == {1: [1.0, 0.0]}
+        assert graph.embeddings("Note", "summary") == {1: [0.0, 1.0]}
+
+    def test_single_type_one_arg_unchanged(self, graph_with_embeddings):
+        embs = graph_with_embeddings.select("Article").embeddings("summary")
+        assert set(embs) == {1, 2, 3, 4, 5}
+        assert embs[1] == [1.0, 0.0, 0.0]
+
+    def test_selection_narrowed_to_one_type_is_fine(self):
+        """A collision-free *selection* over a colliding graph still works —
+        the refusal fires on the keys actually produced, not on the graph."""
+        graph = self._colliding_graph()
+        assert graph.select("Note").embeddings("summary") == {1: [0.0, 1.0]}

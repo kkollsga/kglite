@@ -180,3 +180,66 @@ class TestCentrality:
         themselves from the ResultView, which carries `type` alongside `id`."""
         with pytest.raises(TypeError):
             getattr(social_graph, method_name)(as_dict=True)
+
+
+class TestDegreesTitleCollision:
+    """`degrees()` keys its dict by node TITLE, and titles are not unique —
+    not even within one type. Duplicate titles used to silently overwrite one
+    another (fewer rows out than nodes in, with no signal); the call now
+    refuses and points at the id-keyed `degree_centrality()`."""
+
+    @staticmethod
+    def _duplicate_title_graph():
+        g = KnowledgeGraph()
+        g.add_nodes(
+            pd.DataFrame({"id": [1, 2, 3], "name": ["Alice", "Alice", "Bob"]}),
+            "Person",
+            "id",
+            "name",
+        )
+        g.add_connections(
+            pd.DataFrame([{"src": 1, "tgt": 3}, {"src": 2, "tgt": 3}]),
+            "KNOWS",
+            "Person",
+            "src",
+            "Person",
+            "tgt",
+        )
+        return g
+
+    def test_duplicate_titles_raise(self):
+        g = self._duplicate_title_graph()
+        with pytest.raises(KgError, match="sharing title"):
+            g.select("Person").degrees()
+
+    def test_error_names_degree_centrality(self):
+        g = self._duplicate_title_graph()
+        with pytest.raises(KgError) as excinfo:
+            g.select("Person").degrees()
+        message = str(excinfo.value)
+        assert "degrees()" in message
+        assert "degree_centrality()" in message
+
+    def test_degree_centrality_is_the_working_drop_in(self):
+        """The recipe the error names returns a row per node, not per title."""
+        g = self._duplicate_title_graph()
+        rows = g.select("Person").degree_centrality().to_dicts()
+        assert sorted(r["id"] for r in rows) == [1, 2, 3]
+
+    def test_unique_titles_unchanged(self):
+        g = KnowledgeGraph()
+        g.add_nodes(
+            pd.DataFrame({"id": [1, 2, 3], "name": ["Alice", "Bob", "Cleo"]}),
+            "Person",
+            "id",
+            "name",
+        )
+        g.add_connections(
+            pd.DataFrame([{"src": 1, "tgt": 2}, {"src": 2, "tgt": 3}]),
+            "KNOWS",
+            "Person",
+            "src",
+            "Person",
+            "tgt",
+        )
+        assert g.select("Person").degrees() == {"Alice": 1, "Bob": 2, "Cleo": 1}

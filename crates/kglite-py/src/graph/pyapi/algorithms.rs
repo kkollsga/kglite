@@ -6,9 +6,29 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::sync::Arc;
 
-use crate::graph::{centrality_results_to_dataframe, community_results_to_py, KnowledgeGraph};
+use crate::graph::{
+    centrality_results_to_dataframe, community_results_to_py, KnowledgeGraph, NodeKeyGuard,
+    NodeKeyKind,
+};
 use kglite_core::api::algorithms::{EdgeDir, Interrupt, PathOptions};
 use kglite_core::api::PlanStep;
+
+/// `degrees()` is title-keyed, and titles are free-form — duplicates are
+/// organic. `degree_centrality()` answers the same question per node.
+const DEGREES_TITLE_KEY: NodeKeyGuard<'static> = NodeKeyGuard {
+    surface: "degrees()",
+    kind: NodeKeyKind::Title,
+    recipe: "use degree_centrality() instead, whose ResultView carries one \
+             row per node with its type and id",
+};
+
+/// Discovery-mode `shortest_path_lengths_from()` spans every node type, so
+/// its id keys are only unique once `target_type` picks a namespace.
+const REACHED_ID_KEY: NodeKeyGuard<'static> = NodeKeyGuard {
+    surface: "shortest_path_lengths_from()",
+    kind: NodeKeyKind::Id,
+    recipe: "pass target_type= to pick one id namespace",
+};
 
 /// Parse the `direction=` kwarg the shortest-path family shares with
 /// `where_connected()` / `traverse()`. `None` keeps the family's undirected
@@ -552,18 +572,12 @@ impl KnowledgeGraph {
                     let key = py_out::value_to_py(py, &node_id)?;
                     // Ids are unique per type, not across types: without a
                     // `target_type` two reached nodes can collide on one dict
-                    // key. Say so rather than silently dropping one.
-                    if target_type.is_none() && result.contains(&key)? {
-                        return Err(crate::error_py::kg_to_pyerr(
-                            crate::error::KgError::Argument(format!(
-                                "shortest_path_lengths_from() reached two nodes of different \
-                                 types sharing id {:?}; ids are unique per type, so pass \
-                                 target_type= to pick one id namespace.",
-                                node_id
-                            )),
-                        ));
+                    // key. Say so rather than silently dropping one. With one,
+                    // every key comes from that single namespace.
+                    match target_type {
+                        None => REACHED_ID_KEY.insert(&result, key.bind(py), hops)?,
+                        Some(_) => result.set_item(key, hops)?,
                     }
-                    result.set_item(key, hops)?;
                 }
             }
         }
@@ -1013,6 +1027,11 @@ impl KnowledgeGraph {
     ///
     /// Returns:
     ///     A dictionary mapping node titles to their degree counts
+    ///
+    /// Raises:
+    ///     ArgumentError: Two selected nodes share a title. Titles are not
+    ///         unique, so one degree would be lost silently; use
+    ///         `degree_centrality()`, which is keyed per node.
     fn degrees(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let result_dict = PyDict::new(py);
 
@@ -1032,7 +1051,10 @@ impl KnowledgeGraph {
         for (title, degree) in
             kglite_core::api::fluent::get_node_degrees(&self.inner, &self.cursor.selection)
         {
-            result_dict.set_item(title, degree)?;
+            // Titles are not a key: two same-titled nodes (even of one type)
+            // would silently collapse to a single row.
+            let key = pyo3::types::PyString::new(py, &title).into_any();
+            DEGREES_TITLE_KEY.insert(&result_dict, &key, degree)?;
         }
 
         Ok(result_dict.into())

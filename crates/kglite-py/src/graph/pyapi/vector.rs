@@ -8,9 +8,19 @@ use pyo3::IntoPyObjectExt;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::graph::{get_graph_mut, KnowledgeGraph};
+use crate::graph::{get_graph_mut, KnowledgeGraph, NodeKeyGuard, NodeKeyKind};
 use kglite_core::api::io as file;
 use kglite_core::api::GraphRead;
+
+/// One-arg `embeddings(text_column)` keys the *selection* by bare id, and a
+/// selection can span node types. The two-arg form is the type-namespaced
+/// way to read both stores.
+const SELECTION_ID_KEY: NodeKeyGuard<'static> = NodeKeyGuard {
+    surface: "embeddings()",
+    kind: NodeKeyKind::Id,
+    recipe: "call the two-arg form embeddings(node_type, text_column) once \
+             per type, which keys a single type's id namespace",
+};
 
 #[pymethods]
 impl KnowledgeGraph {
@@ -703,6 +713,11 @@ impl KnowledgeGraph {
     ///
     /// Returns:
     ///     Dict mapping node IDs to embedding vectors (list of floats).
+    ///
+    /// Raises:
+    ///     ArgumentError: The one-arg form's selection spans two node types
+    ///         sharing an id. Ids are unique per type only; call the two-arg
+    ///         form once per type instead.
     #[pyo3(signature = (node_type_or_text_column, text_column=None))]
     fn embeddings(
         &self,
@@ -769,7 +784,10 @@ impl KnowledgeGraph {
             if let Some(embedding) = store.get_embedding(node_idx.index()) {
                 let py_id = py_out::value_to_py(py, &node.id())?;
                 let py_vec = PyList::new(py, embedding)?;
-                result.set_item(py_id, py_vec)?;
+                // The selection can span types, and ids are only unique
+                // within one — two colliding nodes would silently leave one
+                // vector out of the dict.
+                SELECTION_ID_KEY.insert(&result, py_id.bind(py), py_vec)?;
             }
         }
 

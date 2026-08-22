@@ -839,7 +839,7 @@ pub(super) fn write_fluent_overview(xml: &mut String) {
     xml.push_str("    <method sig=\"calculate(expression, store_as=None)\">Math expressions on properties. store_as saves result as new property.</method>\n");
     xml.push_str("    <method sig=\"unique_values(property, store_as=None)\">Distinct values for a property.</method>\n");
     xml.push_str(
-        "    <method sig=\"degrees()\">Node degree counts (whole graph; no per-connection-type filter today).</method>\n",
+        "    <method sig=\"degrees()\">Node degree counts, keyed by title (no per-connection-type filter today). Duplicate titles raise - use degree_centrality() for a per-node ResultView.</method>\n",
     );
     xml.push_str("  </group>\n");
 
@@ -1115,7 +1115,7 @@ pub(super) fn write_fluent_topic_statistics(xml: &mut String) {
     xml.push_str("      <m sig=\"calculate(expression, store_as=None)\">Math expression on properties. store_as persists result.</m>\n");
     xml.push_str("      <m sig=\"unique_values(property, store_as=None)\">Distinct values for a property.</m>\n");
     xml.push_str(
-        "      <m sig=\"degrees()\">In/out/total degree counts per node (whole graph; no per-connection-type filter today).</m>\n",
+        "      <m sig=\"degrees()\">Total degree per node, keyed by title (no per-connection-type filter today). Duplicate titles raise - use degree_centrality() for a per-node ResultView.</m>\n",
     );
     xml.push_str("    </methods>\n");
     xml.push_str("    <examples>\n");

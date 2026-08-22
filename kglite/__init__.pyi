@@ -4752,6 +4752,13 @@ class KnowledgeGraph:
 
         Returns:
             ``{node_title: degree}``.
+
+        Raises:
+            ArgumentError: Two selected nodes share a title. Titles are not
+                unique — not even within one node type — so keying by title
+                would drop a node's degree with no signal. Use
+                :meth:`degree_centrality`, whose ResultView carries one row
+                per node with its ``type`` and ``id``.
         """
         ...
 
@@ -5099,6 +5106,15 @@ class KnowledgeGraph:
 
         Returns:
             A ``networkx.MultiDiGraph`` mirroring the full graph.
+
+        Raises:
+            ArgumentError: Two nodes of different types share an id. Ids are
+                unique per type, not across types, and the networkx node key
+                is the bare id — the two nodes would merge into one, the
+                second overwriting the first's attributes and both nodes'
+                edges rewiring onto the survivor. Give the colliding types
+                disjoint ids; because the export is whole-graph, narrowing
+                the selection cannot avoid it.
 
         Note:
             v1 always exports the full graph; the active selection is
@@ -6324,6 +6340,13 @@ class KnowledgeGraph:
 
         Returns:
             Dict mapping node IDs to embedding vectors.
+
+        Raises:
+            ArgumentError: The selection spans two node types sharing an id.
+                Ids are unique per type only, so one of the two vectors would
+                be dropped from the dict. Call the two-arg form
+                ``embeddings(node_type, text_column)`` once per type — it
+                keys a single type's id namespace.
         """
         ...
 
