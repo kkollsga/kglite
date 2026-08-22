@@ -27,6 +27,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   would strand stores already written under the raw spelling by `add_nodes`'
   `<col>_emb` ingest and by every existing `.kgl`.
 
+- **`embed_texts()` silently embedded nothing for an identity column.** It read
+  the source column with a raw property lookup, which excludes `id`/`title` by
+  contract, so `embed_texts('Person', 'name')` on a `title_field='name'` type —
+  and even `embed_texts('Person', 'title')` — returned
+  `{'embedded': 0, 'skipped': N}` while looking like it had run. It now resolves
+  the column through the same `resolve_source_column` predicate the ingest guard
+  uses and reads through `NodeView::resolved_field`, so the two halves of the
+  feature accept exactly the same columns (pinned by a parity test). A column
+  that resolves to nothing now raises the same `ValueError` `set_embeddings()`
+  raises, before the embedder is loaded, instead of reporting a silent zero; a
+  node type with no nodes stays the `{'embedded': 0}` no-op it was.
+
 ## [0.16.6] - 2026-08-22
 
 ### Fixed

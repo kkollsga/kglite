@@ -859,7 +859,11 @@ impl KnowledgeGraph {
     ///
     /// Args:
     ///     node_type: The node type to embed (e.g. ``'Article'``).
-    ///     text_column: The node property containing text to embed.
+    ///     text_column: The column holding the text to embed. Resolves as
+    ///         ``set_embeddings`` resolves it — a stored property, an identity
+    ///         alias (a ``title_field='name'`` type embeds its titles under
+    ///         ``'name'``), the canonical ``id``/``title``, or a structural
+    ///         alias. A column that resolves to none of those raises.
     ///     batch_size: Number of texts per ``model.embed()`` call (default 256).
     ///     show_progress: Show a tqdm progress bar (default ``True``).
     ///         Requires ``tqdm`` to be installed; silently falls back to no
@@ -901,6 +905,29 @@ impl KnowledgeGraph {
         };
         let rebuild_store = mode == "all";
 
+        // Resolve the source column through the *same* predicate the ingest
+        // guard uses (`set_embeddings`' `resolve_source_column`), and read the
+        // text through the field it returns. Reading `get_property` directly
+        // was the bug: it excludes `id`/`title` by contract, so `('Person',
+        // 'name')` on a `title_field='name'` type — and even `('Person',
+        // 'title')` — embedded nothing and reported it as `skipped`.
+        // A type with no nodes has nothing to probe and nothing to embed, so
+        // it stays the `{'embedded': 0}` no-op it has always been.
+        let node_indices: Vec<NodeIndex> = self
+            .inner
+            .type_indices
+            .get(node_type)
+            .map(|v| v.to_vec())
+            .unwrap_or_default();
+        let source_field = if node_indices.is_empty() {
+            text_column.to_string()
+        } else {
+            kglite_core::api::embeddings::resolve_source_column(&self.inner, node_type, text_column)
+                .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?
+                .to_string()
+        };
+        let source_key = kglite_core::api::InternedKey::from_str(&source_field);
+
         // Load model if it has a load() lifecycle method
         model
             .load()
@@ -939,17 +966,13 @@ impl KnowledgeGraph {
             }
         }
 
-        let node_indices: Vec<NodeIndex> = self
-            .inner
-            .type_indices
-            .get(node_type)
-            .map(|v| v.to_vec())
-            .unwrap_or_default();
-
         let changed_mode = mode == "changed";
         for &node_idx in &node_indices {
             if let Some(node) = self.inner.graph.node_view(node_idx) {
-                match node.get_property(text_column).as_deref() {
+                match node
+                    .resolved_field(node_type, &source_field, source_key)
+                    .as_deref()
+                {
                     Some(crate::datatypes::values::Value::String(s)) if !s.is_empty() => {
                         let hash = kglite_core::api::storage::EmbeddingStore::text_hash(s);
                         let has_emb = existing_store

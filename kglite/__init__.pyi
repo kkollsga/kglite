@@ -6378,9 +6378,16 @@ class KnowledgeGraph:
         """Embed a text column for all nodes of a given type.
 
         Uses the model registered via ``set_embedder()``.  Reads each node's
-        ``text_column`` property, calls ``model.embed()`` in batches, and
-        stores the resulting vectors as ``{text_column}_emb``.
+        ``text_column``, calls ``model.embed()`` in batches, and stores the
+        resulting vectors as ``{text_column}_emb``.
         Nodes with missing or non-string text are skipped.
+
+        ``text_column`` resolves exactly as :meth:`set_embeddings` resolves it
+        — a stored property, an **identity alias** (a type built with
+        ``title_field='name'`` embeds its titles under ``'name'``), the
+        canonical ``id``/``title``, or a structural alias — and a column that
+        resolves to none of those raises ``ValueError`` rather than silently
+        embedding nothing.
 
         The store also records, per node, a hash of the embedded text and (when
         the embedder names it) the model id — so a later
@@ -6391,7 +6398,8 @@ class KnowledgeGraph:
 
         Args:
             node_type: The node type to embed (e.g. ``'Article'``).
-            text_column: The node property containing text to embed.
+            text_column: The column holding the text to embed — a property,
+                an identity alias, or ``id``/``title``.
             batch_size: Number of texts per ``model.embed()`` call (default 256).
             show_progress: Show a tqdm progress bar (default ``True``).
                 Silently falls back to no bar if ``tqdm`` is not installed.

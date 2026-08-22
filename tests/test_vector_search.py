@@ -1089,9 +1089,12 @@ class TestEmbedderLifecycle:
         assert model.unload_count == 1
 
     def test_embed_texts_calls_unload_on_empty(self):
-        """unload() is called even when there are no texts to embed."""
+        """unload() is called even when there are no texts to embed. The column
+        has to be a real one: an unknown source column is now rejected before
+        the model is ever loaded (it used to embed nothing and say so only in
+        `skipped`)."""
         graph = kglite.KnowledgeGraph()
-        df = pd.DataFrame({"id": [1], "title": ["A"]})
+        df = pd.DataFrame({"id": [1], "title": ["A"], "text": [""]})
         graph.add_nodes(df, "Node", "id", "title")
 
         model = MockEmbedderWithLifecycle(dimension=3)
@@ -1100,8 +1103,24 @@ class TestEmbedderLifecycle:
         result = graph.embed_texts("Node", "text", show_progress=False)
 
         assert result["embedded"] == 0
+        assert result["skipped"] == 1
         assert model.load_count == 1
         assert model.unload_count == 1
+
+    def test_embed_texts_rejects_an_unknown_column_before_loading_the_model(self):
+        """The silent `{'embedded': 0}` for a column that exists nowhere is an
+        error now — the same one `set_embeddings` raises — and it fires before
+        any model work."""
+        graph = kglite.KnowledgeGraph()
+        df = pd.DataFrame({"id": [1], "title": ["A"], "text": ["hello"]})
+        graph.add_nodes(df, "Node", "id", "title")
+
+        model = MockEmbedderWithLifecycle(dimension=3)
+        graph.set_embedder(model)
+
+        with pytest.raises(ValueError, match="not found on any 'Node' node"):
+            graph.embed_texts("Node", "body", show_progress=False)
+        assert model.load_count == 0
 
     def test_search_text_calls_load_and_unload(self):
         """search_text calls load() before and unload() after embedding the query."""

@@ -718,3 +718,121 @@ class TestEmbeddingsOnIdentityAliases:
         ).to_list()
         assert scored[0]["pid"] == 1
         assert scored[0]["s"] > scored[1]["s"]
+
+
+class _RecordingEmbedder:
+    """Deterministic stub embedder that records the texts it was handed."""
+
+    def __init__(self, dim: int = 3) -> None:
+        self.dimension = dim
+        self.seen: list[str] = []
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        self.seen.extend(texts)
+        return [[float(len(t)), float(sum(map(ord, t)) % 97), 1.0] for t in texts]
+
+
+class TestEmbedTextsOnIdentityAliases:
+    """`embed_texts` is the other half of the same feature as
+    `set_embeddings`, and it read the column with a raw property lookup that
+    excludes `id`/`title` by contract — so it silently embedded *nothing* for
+    an identity column instead of raising. The two halves must agree on what a
+    column means."""
+
+    @staticmethod
+    def _people():
+        return kglite.from_records(
+            {
+                "nodes": [
+                    {
+                        "type": "Person",
+                        "id_field": "pid",
+                        "title_field": "name",
+                        "records": [
+                            {"pid": 1, "name": "Alpha", "dept": "sales"},
+                            {"pid": 2, "name": "Beta", "dept": "eng"},
+                        ],
+                    }
+                ]
+            }
+        )
+
+    def test_embed_texts_reads_the_title_alias(self):
+        g = self._people()
+        emb = _RecordingEmbedder()
+        g.set_embedder(emb)
+        report = g.embed_texts("Person", "name", show_progress=False)
+        assert report["embedded"] == 2
+        assert report["skipped"] == 0
+        assert sorted(emb.seen) == ["Alpha", "Beta"]
+
+    def test_embed_texts_reads_the_canonical_title(self):
+        g = self._people()
+        emb = _RecordingEmbedder()
+        g.set_embedder(emb)
+        report = g.embed_texts("Person", "title", show_progress=False)
+        assert report["embedded"] == 2
+        assert sorted(emb.seen) == ["Alpha", "Beta"]
+
+    def test_embed_texts_reads_a_plain_property_unchanged(self):
+        g = self._people()
+        emb = _RecordingEmbedder()
+        g.set_embedder(emb)
+        report = g.embed_texts("Person", "dept", show_progress=False)
+        assert report["embedded"] == 2
+        assert sorted(emb.seen) == ["eng", "sales"]
+
+    def test_embed_texts_rejects_what_set_embeddings_rejects(self):
+        """Parity, the failing direction: a column the ingest guard refuses is
+        an error here too, not a silent `{'embedded': 0}`."""
+        g = self._people()
+        g.set_embedder(_RecordingEmbedder())
+        with pytest.raises(ValueError, match="not found on any 'Person' node"):
+            g.embed_texts("Person", "headline", show_progress=False)
+
+    @pytest.mark.parametrize(
+        "column,embedded",
+        [
+            ("name", 2),  # the type's title column, by its original name
+            ("title", 2),  # the canonical identity field
+            ("dept", 2),  # an ordinary stored property
+            ("label", 2),  # structural alias -> the node type string
+            # An id alias resolves, and every row's value is an integer, so
+            # every row is *reported* as skipped rather than silently dropped.
+            ("pid", 0),
+            ("id", 0),
+        ],
+    )
+    def test_the_two_halves_accept_exactly_the_same_columns(self, column, embedded):
+        """Parity: no column may be writable by one half of the feature and
+        invisible to the other. Whatever `set_embeddings` accepts,
+        `embed_texts` resolves too — and accounts for every node, either as
+        embedded or as explicitly skipped."""
+        g = self._people()
+        assert g.set_embeddings("Person", column, {1: [1.0, 0.0]})["embeddings_stored"] == 1
+
+        g2 = self._people()
+        g2.set_embedder(_RecordingEmbedder())
+        report = g2.embed_texts("Person", column, show_progress=False)
+        assert report["embedded"] == embedded
+        assert report["embedded"] + report["skipped"] == 2
+
+    def test_embed_texts_reads_a_string_id_alias(self):
+        """The id half of the predicate is really wired, not merely accepted:
+        a type whose id column holds text embeds it."""
+        g = kglite.from_records(
+            {
+                "nodes": [
+                    {
+                        "type": "Sku",
+                        "id_field": "code",
+                        "records": [{"code": "aa-1"}, {"code": "bb-2"}],
+                    }
+                ]
+            }
+        )
+        emb = _RecordingEmbedder()
+        g.set_embedder(emb)
+        report = g.embed_texts("Sku", "code", show_progress=False)
+        assert report["embedded"] == 2
+        assert sorted(emb.seen) == ["aa-1", "bb-2"]
