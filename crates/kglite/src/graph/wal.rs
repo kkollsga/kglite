@@ -84,7 +84,6 @@
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
@@ -291,42 +290,29 @@ pub struct WalFrame {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// CRC32 (IEEE 802.3, polynomial 0xEDB88320) — dependency-free, table-
-// backed. Deterministic across processes/builds (unlike DefaultHasher),
-// which the torn-frame check relies on.
+// CRC32 (IEEE 802.3, polynomial 0xEDB88320)
 // ─────────────────────────────────────────────────────────────────────
 
-fn crc32_table() -> &'static [u32; 256] {
-    static TABLE: OnceLock<[u32; 256]> = OnceLock::new();
-    TABLE.get_or_init(|| {
-        let mut table = [0u32; 256];
-        let mut n = 0;
-        while n < 256 {
-            let mut c = n as u32;
-            let mut k = 0;
-            while k < 8 {
-                c = if c & 1 != 0 {
-                    0xEDB8_8320 ^ (c >> 1)
-                } else {
-                    c >> 1
-                };
-                k += 1;
-            }
-            table[n] = c;
-            n += 1;
-        }
-        table
-    })
-}
-
-/// CRC32 (IEEE) of `data`. Used as the per-frame integrity check.
+/// CRC32 (IEEE) of `data`.
+///
+/// The single CRC32 in this crate: the per-frame integrity check here, and
+/// the per-section digest over a `.kgl`'s compressed bytes
+/// (`graph::io::file::section_digest`). Deterministic across processes and
+/// builds (unlike `DefaultHasher`), which the torn-frame check relies on.
+///
+/// Backed by `crc32fast`, which dispatches to the CPU's CRC instructions
+/// (aarch64 `crc32*`, x86 `pclmulqdq`) and falls back to a software table
+/// elsewhere. The values are identical to the hand-rolled table this
+/// replaced — `crc32_matches_known_vector` pins them — so digests written
+/// by any previous build still verify, and digests written here still verify
+/// on one. It replaced that table because the software path runs at
+/// ~0.5 GB/s: on a 180 MB `.kgl` that is ~360 ms added to every load, which
+/// is what 0.16.6 shipped. The accelerated path costs ~14 ms for the same
+/// bytes.
 pub fn crc32(data: &[u8]) -> u32 {
-    let table = crc32_table();
-    let mut crc = 0xFFFF_FFFFu32;
-    for &b in data {
-        crc = table[((crc ^ b as u32) & 0xFF) as usize] ^ (crc >> 8);
-    }
-    crc ^ 0xFFFF_FFFF
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(data);
+    hasher.finalize()
 }
 
 // ─────────────────────────────────────────────────────────────────────

@@ -7,6 +7,7 @@ Run with: make bench-save (to save a baseline) or make bench-compare (to compare
 import pandas as pd
 import pytest
 
+import kglite
 from kglite import KnowledgeGraph
 
 # ---------------------------------------------------------------------------
@@ -537,6 +538,104 @@ def test_bench_save_kgl_new_file(benchmark, bench_graph, tmp_path):
         counter[0] += 1
 
     benchmark(save)
+
+
+# ---------------------------------------------------------------------------
+# Load throughput
+# ---------------------------------------------------------------------------
+#
+# The file under test is written by the build under test, and that is the
+# whole point of the cell. 0.16.6 added two integrity layers that only a file
+# *carrying* them pays for, and every load-shaped benchmark this repo had read
+# either a stored fixture or a directory, so the class was invisible: the
+# release measured "+11-15% on save, loads unmoved" and shipped a +85% load
+# regression, reported from downstream two days later. A cell whose fixture
+# predates the change under test cannot see the change under test.
+#
+# Version-independent by construction, which the frozen CI harness needs: it
+# times each version's own write-then-read path, with no argument or format
+# assumption. A 0.13.2 reference writes a digest-free file and reads it back;
+# this tree writes digests and verifies them. That difference is exactly the
+# quantity being gated.
+
+#: Alphabet for `_entropic_strings` — 64 symbols, so six LCG bits index it.
+_ENTROPY_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/"
+
+
+def _entropic_strings(count: int, width: int, seed: int) -> list[str]:
+    """`count` deterministic, poorly-compressible strings of `width` chars.
+
+    High entropy on purpose. Sections are zstd-compressed and the integrity
+    digest runs over the *compressed* bytes, so a fixture built from
+    templated text (`f"Node_{i}"`) collapses to a fraction of a megabyte and
+    measures fixed overhead rather than throughput — the 157k-node graph this
+    cell was sized against compressed 195 MB of real text to 13 MB of
+    `f`-strings. An inlined LCG rather than `random.Random` for the same
+    reason as `_scale_free_edges`: the fixture must be byte-identical on every
+    interpreter this harness runs under.
+    """
+    state = seed
+    out = []
+    for _ in range(count):
+        chars = []
+        for _ in range(width):
+            state = (state * 1_103_515_245 + 12_345) & 0x7FFF_FFFF
+            chars.append(_ENTROPY_ALPHABET[(state >> 16) & 63])
+        out.append("".join(chars))
+    return out
+
+
+@pytest.fixture(scope="module")
+def written_kgl_path(tmp_path_factory):
+    """A ~4 MB `.kgl` written by the build under test; ~10 ms to load.
+
+    Sized so the container payload dominates: at this scale the digest layers
+    0.16.6 introduced cost +72% against a digest-free write of the same graph,
+    which is comfortably outside the 20% gate, while 100 rounds still finish
+    in about a second.
+    """
+    nodes, edges = 20_000, 40_000
+    graph = KnowledgeGraph()
+    graph.add_nodes(
+        pd.DataFrame(
+            {
+                "nid": list(range(nodes)),
+                "name": [f"N{i}" for i in range(nodes)],
+                "body": _entropic_strings(nodes, 200, 20_260_822),
+            }
+        ),
+        "Doc",
+        "nid",
+        "name",
+    )
+    graph.add_connections(
+        pd.DataFrame(
+            {
+                "s": [i % nodes for i in range(edges)],
+                "d": [(i * 7919 + 13) % nodes for i in range(edges)],
+                "note": _entropic_strings(edges, 24, 20_260_823),
+            }
+        ),
+        "CITES",
+        "Doc",
+        "s",
+        "Doc",
+        "d",
+        columns=["note"],
+    )
+    path = str(tmp_path_factory.mktemp("load_bench") / "written.kgl")
+    graph.save(path)
+    return path
+
+
+@pytest.mark.benchmark
+def test_bench_load_kgl(benchmark, written_kgl_path):
+    """Deserialize a `.kgl` this build wrote — the process-start latency.
+
+    The timed region is the load alone; writing happens once in the fixture.
+    """
+    graph = benchmark(kglite.load, written_kgl_path)
+    assert graph.cypher("MATCH (n:Doc) RETURN count(n) AS c").to_list() == [{"c": 20_000}]
 
 
 # ---------------------------------------------------------------------------
