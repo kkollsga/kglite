@@ -1094,11 +1094,12 @@ impl KnowledgeGraph {
         py: Python<'_>,
         normalized: Option<bool>,
         sample_size: Option<usize>,
-        connection_types: Option<Vec<String>>,
+        connection_types: Option<&Bound<'_, PyAny>>,
         top_k: Option<usize>,
         timeout_ms: Option<u64>,
         to_df: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
+        let connection_types = crate::graph::string_or_list(connection_types, "connection_types")?;
         let normalized = normalized.unwrap_or(true);
         let deadline = kglite_core::api::algorithms::Interrupt::from_deadline(
             timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms)),
@@ -1164,11 +1165,12 @@ impl KnowledgeGraph {
         damping_factor: Option<f64>,
         max_iterations: Option<usize>,
         tolerance: Option<f64>,
-        connection_types: Option<Vec<String>>,
+        connection_types: Option<&Bound<'_, PyAny>>,
         top_k: Option<usize>,
         timeout_ms: Option<u64>,
         to_df: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
+        let connection_types = crate::graph::string_or_list(connection_types, "connection_types")?;
         let damping = damping_factor.unwrap_or(0.85);
         let max_iter = max_iterations.unwrap_or(100);
         let tol = tolerance.unwrap_or(1e-6);
@@ -1228,11 +1230,12 @@ impl KnowledgeGraph {
         &self,
         py: Python<'_>,
         normalized: Option<bool>,
-        connection_types: Option<Vec<String>>,
+        connection_types: Option<&Bound<'_, PyAny>>,
         top_k: Option<usize>,
         timeout_ms: Option<u64>,
         to_df: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
+        let connection_types = crate::graph::string_or_list(connection_types, "connection_types")?;
         let normalized = normalized.unwrap_or(true);
         let deadline = kglite_core::api::algorithms::Interrupt::from_deadline(
             timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms)),
@@ -1295,11 +1298,12 @@ impl KnowledgeGraph {
         py: Python<'_>,
         normalized: Option<bool>,
         sample_size: Option<usize>,
-        connection_types: Option<Vec<String>>,
+        connection_types: Option<&Bound<'_, PyAny>>,
         top_k: Option<usize>,
         timeout_ms: Option<u64>,
         to_df: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
+        let connection_types = crate::graph::string_or_list(connection_types, "connection_types")?;
         let normalized = normalized.unwrap_or(true);
         let deadline = kglite_core::api::algorithms::Interrupt::from_deadline(
             timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms)),

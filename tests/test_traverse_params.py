@@ -228,3 +228,12 @@ class TestTargetTypeEdgeCases:
         """target_type=123 raises typed kglite.KgError (was TypeError pre-A.2)."""
         with pytest.raises(kglite.KgError, match="string or list"):
             graph.select("Person").traverse("AFFILIATED_WITH", target_type=123)
+
+    def test_string_form_matches_single_element_list(self, graph):
+        """The two spellings are the same filter — pinned because the parsing
+        is now shared with `compare()` and the centralities'
+        `connection_types`."""
+        base = graph.select("Person").where({"title": "Alice"})
+        as_string = base.traverse("AFFILIATED_WITH", target_type="Company").collect()
+        as_list = base.traverse("AFFILIATED_WITH", target_type=["Company"]).collect()
+        assert [r["title"] for r in as_list] == [r["title"] for r in as_string]

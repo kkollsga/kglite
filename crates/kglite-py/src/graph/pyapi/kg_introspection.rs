@@ -832,26 +832,7 @@ impl KnowledgeGraph {
             .map(|l| l.node_count())
             .unwrap_or(0);
 
-        // Parse target_type: str → vec![str], list[str] → vec[str]
-        let target_types: Option<Vec<String>> = if let Some(tt) = target_type {
-            if let Ok(s) = tt.extract::<String>() {
-                Some(vec![s])
-            } else if let Ok(list) = tt.extract::<Vec<String>>() {
-                if list.is_empty() {
-                    None
-                } else {
-                    Some(list)
-                }
-            } else {
-                return Err(crate::error_py::kg_to_pyerr(
-                    crate::error::KgError::Argument(
-                        "target_type must be a string or list of strings".to_string(),
-                    ),
-                ));
-            }
-        } else {
-            None
-        };
+        let target_types = crate::graph::string_or_list(target_type, "target_type")?;
 
         let conditions = if let Some(cond) = r#where {
             Some(py_in::pydict_to_filter_conditions(cond)?)
@@ -1014,18 +995,10 @@ impl KnowledgeGraph {
             .map(|l| l.node_count())
             .unwrap_or(0);
 
-        // Parse target_type: str → Some(str), list[str] → first element
-        let resolved_target: Option<String> = if let Ok(s) = target_type.extract::<String>() {
-            Some(s)
-        } else if let Ok(list) = target_type.extract::<Vec<String>>() {
-            list.into_iter().next()
-        } else {
-            return Err(crate::error_py::kg_to_pyerr(
-                crate::error::KgError::Argument(
-                    "target_type must be a string or list of strings".to_string(),
-                ),
-            ));
-        };
+        // A list target_type compares against its first element only.
+        let resolved_target: Option<String> =
+            crate::graph::string_or_list(Some(target_type), "target_type")?
+                .and_then(|types| types.into_iter().next());
 
         let config = parse_method_param(method)?;
 

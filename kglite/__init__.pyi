@@ -4963,7 +4963,7 @@ class KnowledgeGraph:
             normalized: Adjust for disconnected components. Default ``True``.
             sample_size: Approximate by sampling *N* source nodes (faster for large graphs).
                 If ``None``, uses all nodes.
-            connection_types: Filter to specific relationship types.
+            connection_types: Only traverse these relationship types (str or list).
             top_k: Return only the top *K* nodes.
             timeout_ms: Abort after this many milliseconds with an error.
             to_df: Return a pandas DataFrame with columns ``type``, ``title``, ``id``, ``score``.

@@ -3,7 +3,7 @@
 import pandas as pd
 import pytest
 
-from kglite import KnowledgeGraph
+from kglite import KgError, KnowledgeGraph
 
 
 @pytest.fixture
@@ -167,3 +167,43 @@ class TestBounds:
             lon_field="longitude",
         )
         assert centroid is not None
+
+
+@pytest.fixture
+def region_site_graph():
+    """One WKT region plus two point sites — the minimal shape `compare()`
+    needs, used here to pin its ``target_type`` argument shape."""
+    graph = KnowledgeGraph()
+    graph.add_nodes(
+        pd.DataFrame([{"id": 1, "name": "RegionA", "wkt_geometry": "POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))"}]),
+        "Region",
+        "id",
+        "name",
+    )
+    graph.set_spatial("Region", geometry="wkt_geometry")
+    graph.add_nodes(
+        pd.DataFrame([{"id": 2, "name": "SiteX", "lat": 5.0, "lon": 5.0}]),
+        "Site",
+        "id",
+        "name",
+    )
+    graph.set_spatial("Site", location=("lat", "lon"))
+    return graph
+
+
+class TestCompareTargetTypeShape:
+    """`compare()`'s ``target_type`` accepts a bare string or a list; the
+    parsing is shared with `traverse()` and must stay byte-identical in
+    behaviour after the two hand-rolled blocks were unified."""
+
+    def test_string_form(self, region_site_graph):
+        assert len(region_site_graph.select("Region").compare("Site", "contains").collect()) == 1
+
+    def test_list_form_matches_string_form(self, region_site_graph):
+        as_string = region_site_graph.select("Region").compare("Site", "contains").collect()
+        as_list = region_site_graph.select("Region").compare(["Site"], "contains").collect()
+        assert [r["title"] for r in as_list] == [r["title"] for r in as_string]
+
+    def test_invalid_type_raises_naming_the_parameter(self, region_site_graph):
+        with pytest.raises(KgError, match="target_type must be a string or list of strings"):
+            region_site_graph.select("Region").compare(123, "contains")

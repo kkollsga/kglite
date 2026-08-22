@@ -131,6 +131,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`pagerank(connection_types="KNOWS")` and its three sibling centralities
+  raised `TypeError: Can't extract 'str' to 'Vec'` on a bare string.** The
+  stub has always documented the parameter as `str | list[str]`, the Cypher
+  twin (`CALL pagerank({connection_types: 'KNOWS'})`) has always accepted the
+  scalar, and `traverse(target_type=...)` accepted it too — only the four
+  Python centralities (`betweenness_centrality`, `pagerank`,
+  `degree_centrality`, `closeness_centrality`) demanded a list, and the error
+  they raised named a Rust type rather than the parameter. All four now take
+  the documented union through the one wheel-side `str | list[str]`
+  convention that `traverse()` and `compare()` also use: a bare string is a
+  one-element filter, a wrong type raises `ArgumentError` naming the
+  parameter, and an empty list means "no filter" — where it previously meant
+  "match no relationship type at all" and returned an all-zero score for
+  every node.
+
 - **Docs: the 0.16.6 note on the query-warnings channel claimed the warnings
   reach Bolt.** They do not. The engine populates `QueryDiagnostics.warnings`
   for every consumer including `kglite-bolt-server`, but that server forwards

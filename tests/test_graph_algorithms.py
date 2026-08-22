@@ -243,3 +243,81 @@ class TestDegreesTitleCollision:
             "tgt",
         )
         assert g.select("Person").degrees() == {"Alice": 1, "Bob": 2, "Cleo": 1}
+
+
+CENTRALITIES = [
+    "betweenness_centrality",
+    "pagerank",
+    "degree_centrality",
+    "closeness_centrality",
+]
+
+
+def _two_reltype_graph():
+    """Two relationship types over the same nodes, so a `connection_types`
+    filter is observable: KNOWS is a Person chain, WORKS_AT is a star into
+    one Company. Restricting to either one changes every centrality score."""
+    g = KnowledgeGraph()
+    g.add_nodes(
+        pd.DataFrame({"id": [1, 2, 3, 4], "name": ["Alice", "Bob", "Cleo", "Dan"]}),
+        "Person",
+        "id",
+        "name",
+    )
+    g.add_nodes(pd.DataFrame({"id": [100], "name": ["Acme"]}), "Company", "id", "name")
+    g.add_connections(
+        pd.DataFrame([{"src": 1, "tgt": 2}, {"src": 2, "tgt": 3}, {"src": 3, "tgt": 4}]),
+        "KNOWS",
+        "Person",
+        "src",
+        "Person",
+        "tgt",
+    )
+    g.add_connections(
+        pd.DataFrame([{"src": i, "tgt": 100} for i in (1, 2, 3, 4)]),
+        "WORKS_AT",
+        "Person",
+        "src",
+        "Company",
+        "tgt",
+    )
+    return g
+
+
+def _scores(view):
+    return {(row["type"], row["id"]): round(row["score"], 10) for row in view.to_dicts()}
+
+
+class TestCentralityConnectionTypes:
+    """`connection_types` is documented as ``str | list[str]`` in the stub
+    (and the Cypher twin accepts a bare scalar), but the four centralities
+    only ever extracted a list — a bare string raised
+    ``TypeError: Can't extract 'str' to 'Vec'``."""
+
+    @pytest.fixture
+    def graph(self):
+        return _two_reltype_graph()
+
+    @pytest.mark.parametrize("method_name", CENTRALITIES)
+    def test_string_matches_single_element_list(self, graph, method_name):
+        method = getattr(graph, method_name)
+        assert _scores(method(connection_types="KNOWS")) == _scores(method(connection_types=["KNOWS"]))
+
+    @pytest.mark.parametrize("method_name", CENTRALITIES)
+    def test_filter_is_observable(self, graph, method_name):
+        """The two relationship types give different scores, so a passing
+        string form cannot be a no-op filter that silently ignores the arg."""
+        method = getattr(graph, method_name)
+        knows = _scores(method(connection_types="KNOWS"))
+        works_at = _scores(method(connection_types="WORKS_AT"))
+        assert knows != works_at
+
+    @pytest.mark.parametrize("method_name", CENTRALITIES)
+    def test_wrong_type_names_the_parameter(self, graph, method_name):
+        with pytest.raises(KgError, match="connection_types must be a string or list of strings"):
+            getattr(graph, method_name)(connection_types=123)
+
+    @pytest.mark.parametrize("method_name", CENTRALITIES)
+    def test_empty_list_is_no_filter(self, graph, method_name):
+        method = getattr(graph, method_name)
+        assert _scores(method(connection_types=[])) == _scores(method())

@@ -43,6 +43,38 @@ use std::sync::Arc;
 // for local use without depending on the engine's pub visibility.)
 pub(crate) type EmbeddingColumnData = Vec<(String, Vec<(Value, Vec<f32>)>)>;
 
+/// Extract a Python `str | list[str] | None` parameter into `Option<Vec<String>>`.
+///
+/// The single wheel-side convention for that shape: a bare string becomes a
+/// one-element list, a list of strings passes through, an empty list means
+/// "no filter" (`None`), and anything else is an `ArgumentError` naming the
+/// parameter. Mirrors the Cypher side's `call_param_string_list`, so a scalar
+/// spells the same thing whichever surface it arrives on.
+///
+/// A plain function rather than a `FromPyObject` newtype — the same house
+/// rule `durable_level_from_arg` records in `lib.rs`: the trait's shape has
+/// moved across PyO3 releases, nothing here needs generic extraction, and the
+/// callers want the parameter name in the error.
+pub(crate) fn string_or_list(
+    obj: Option<&Bound<'_, PyAny>>,
+    param_name: &str,
+) -> PyResult<Option<Vec<String>>> {
+    let Some(obj) = obj else {
+        return Ok(None);
+    };
+    if let Ok(single) = obj.extract::<String>() {
+        return Ok(Some(vec![single]));
+    }
+    if let Ok(list) = obj.extract::<Vec<String>>() {
+        return Ok((!list.is_empty()).then_some(list));
+    }
+    Err(crate::error_py::kg_to_pyerr(
+        crate::error::KgError::Argument(format!(
+            "{param_name} must be a string or list of strings"
+        )),
+    ))
+}
+
 /// Extract `ConnectionDetail` from a Python `bool | list[str] | None` parameter.
 pub(crate) fn extract_detail_param(
     obj: Option<&Bound<'_, PyAny>>,
