@@ -134,6 +134,22 @@ class TestIndexLifecycle:
         assert victim not in after
 
 
+def _plant_cluster(g, emb, around, ids, seed=5):
+    """Overwrite ``ids``' vectors with tight perturbations of ``emb[around]``.
+
+    Gaussian fixtures have no structure, so an HNSW build's recall against
+    exact is dominated by build-to-build graph variance (measured in the R9
+    sweep: an ef step moves recall less than rebuilding does). A recall floor
+    needs a *structured* neighborhood to recover: after planting, the exact
+    top-k for ``emb[around]`` is the cluster itself, which HNSW finds at
+    ~1.0 recall, giving the assertion real margin.
+    """
+    rng = random.Random(seed)
+    cluster = {i: [v + rng.gauss(0, 0.01) for v in emb[around]] for i in ids}
+    g.add_embeddings("Doc", "summary", cluster)
+    emb.update(cluster)
+
+
 class TestAutoUseAndRecall:
     @staticmethod
     def _exact_topk(g, q, k=10):
@@ -299,6 +315,7 @@ class TestAutoUseAndRecall:
         # `never_selected_candidates_are_the_whole_graph_in_index_order` in the
         # engine's vector tests; this pins the end-to-end result).
         g, emb = _build_graph(n=2000, d=48)
+        _plant_cluster(g, emb, around=7, ids=range(100, 112))
         q = emb[7]
         g.build_vector_index("Doc", "summary")
         selected = _ids(g.select("Doc").vector_search("summary", q, top_k=10))
@@ -319,6 +336,7 @@ class TestAutoUseAndRecall:
         # `one_store_routes_a_mixed_candidate_set_to_that_store`; this pins the
         # end-to-end answer.)
         g, emb = _build_multi_type_graph()
+        _plant_cluster(g, emb, around=7, ids=range(100, 112))
         q = emb[7]
         exact_whole = _ids(g.vector_search("summary", q, top_k=10, exact=True))
         exact_selected = _ids(g.select("Doc").vector_search("summary", q, top_k=10, exact=True))
