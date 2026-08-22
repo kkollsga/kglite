@@ -1328,7 +1328,12 @@ def from_networkx(
     Node keys must be storable as ids (integers or strings). A key that is
     not — a foreign tuple label such as ``nx.grid_2d_graph`` coordinates, a
     fractional float — raises before anything is loaded, rather than being
-    dropped row by row into a silently smaller graph.
+    dropped row by row into a silently smaller graph. One node type's keys
+    must also all be the *same* shape: each type is loaded as a single id
+    column, so mixing integer and string ids within one type would store them
+    all as text and leave the edge endpoints that kept their original type
+    unmatched. That mix raises too. Different node types may use different id
+    shapes — they never share a column.
 
     Requires the ``networkx`` extra: ``pip install "kglite[networkx]"``.
 
@@ -1341,8 +1346,9 @@ def from_networkx(
         A new :class:`KnowledgeGraph`.
 
     Raises:
-        ArgumentError: A node key cannot be stored as an id, or the graph
-            mixes ``(node_type, id)`` export keys with other key shapes.
+        ArgumentError: A node key cannot be stored as an id, one node type's
+            ids mix integer and string shapes, or the graph mixes
+            ``(node_type, id)`` export keys with other key shapes.
 
     Example::
 

@@ -522,3 +522,133 @@ def test_from_networkx_type_id_key_with_unstorable_id_half_raises():
     assert "1 of 2" in message
     assert "id half" in message
     assert "('Person', (1, 2))" in message
+
+
+def test_from_networkx_mixed_int_and_str_keys_raise():
+    """The keys are individually storable; the *combination* is not. Pandas
+    types the column as object, add_nodes writes it as text, so key 1 becomes
+    id "1" while the edge endpoint stays int 1, misses, and vivifies a stub —
+    a 2-node graph imported as 3."""
+    nxg = nx.MultiDiGraph()
+    nxg.add_edge(1, "b")
+    with pytest.raises(kglite.ArgumentError) as excinfo:
+        kglite.from_networkx(nxg)
+    message = str(excinfo.value)
+    assert "from_networkx()" in message
+    assert "mixes node-id types" in message
+    assert "1 integer key" in message  # both shapes counted
+    assert "1 string key" in message
+    assert "'b'" in message
+    assert "relabel" in message.lower()  # the fix
+
+
+def test_from_networkx_mixed_id_families_count_every_node():
+    """The counts are of the whole graph, not of the first disagreement."""
+    nxg = nx.MultiDiGraph()
+    nxg.add_nodes_from([1, 2, 3, "a", "b"])
+    with pytest.raises(kglite.ArgumentError) as excinfo:
+        kglite.from_networkx(nxg)
+    message = str(excinfo.value)
+    assert "3 integer keys" in message
+    assert "2 string keys" in message
+
+
+def test_from_networkx_three_id_families_are_all_listed():
+    """All three families in one type are named, not just the first two."""
+    nxg = nx.MultiDiGraph()
+    nxg.add_nodes_from([2, "a", True])  # True == 1 in nx, so avoid key 1
+    with pytest.raises(kglite.ArgumentError) as excinfo:
+        kglite.from_networkx(nxg)
+    message = str(excinfo.value)
+    assert "1 integer key (e.g. 2), 1 string key (e.g. 'a') and 1 boolean key (e.g. True)" in message
+
+
+def test_from_networkx_type_id_mixed_id_halves_raise():
+    """The tuple path is not a bypass: two nodes of one type whose id halves
+    disagree land in the same id column and hit the same coercion — 2 nodes
+    imported as 3."""
+    nxg = nx.MultiDiGraph()
+    nxg.add_node(("A", 1), node_type="A")
+    nxg.add_node(("A", "x"), node_type="A")
+    nxg.add_edge(("A", 1), ("A", "x"))
+    with pytest.raises(kglite.ArgumentError) as excinfo:
+        kglite.from_networkx(nxg)
+    message = str(excinfo.value)
+    assert "mixes node-id types" in message
+    assert "id half" in message
+    assert "('A', 1)" in message
+    assert "('A', 'x')" in message
+
+
+def test_from_networkx_id_families_may_differ_between_node_types():
+    """The refusal is per node type, because the coercion is: each type is
+    loaded as its own DataFrame, so int-keyed People and string-keyed Cities
+    never share a column and import exactly right. Refusing them would break
+    a graph that works today."""
+    nxg = nx.MultiDiGraph()
+    nxg.add_node(1, node_type="Person")
+    nxg.add_node("oslo", node_type="City")
+    nxg.add_edge(1, "oslo")
+    g = kglite.from_networkx(nxg)
+    assert g.len() == 2
+    assert g.select("Person").ids() == [1]
+    assert g.select("City").ids() == ["oslo"]
+
+
+def test_from_networkx_type_id_families_may_differ_between_node_types():
+    """Same, on the tuple path: ('A', 1) and ('B', 'x') are different types,
+    hence different columns, hence a clean import."""
+    nxg = nx.MultiDiGraph()
+    nxg.add_node(("A", 1), node_type="A")
+    nxg.add_node(("B", "x"), node_type="B")
+    nxg.add_edge(("A", 1), ("B", "x"))
+    g = kglite.from_networkx(nxg)
+    assert g.len() == 2
+    assert g.select("A").ids() == [1]
+    assert g.select("B").ids() == ["x"]
+
+
+def test_from_networkx_bool_key_with_int_key_raises():
+    """`bool` is an `int` subclass in Python but not in a pandas column:
+    [True, 2] types as object, both endpoints stringify, and a 2-node graph
+    imports as 4. So booleans are their own id family here."""
+    nxg = nx.MultiDiGraph()
+    nxg.add_edge(True, 2)
+    with pytest.raises(kglite.ArgumentError) as excinfo:
+        kglite.from_networkx(nxg)
+    message = str(excinfo.value)
+    assert "1 boolean key" in message
+    assert "1 integer key" in message
+    assert "relabel" in message.lower()
+
+
+def test_from_networkx_all_bool_keys_still_import():
+    """A single family is always allowed, booleans included: [True, False]
+    types as a bool column and stores ids 1 and 0."""
+    nxg = nx.MultiDiGraph()
+    nxg.add_edge(True, False)
+    assert kglite.from_networkx(nxg).len() == 2
+
+
+def test_from_networkx_bytes_keys_are_the_string_family():
+    """bytes stringify into a text column, so they sit with strings (which
+    imports cleanly) and not with integers (which does not)."""
+    with_str = nx.MultiDiGraph()
+    with_str.add_edge(b"a", "b")
+    assert kglite.from_networkx(with_str).len() == 2
+
+    with_int = nx.MultiDiGraph()
+    with_int.add_edge(b"a", 2)
+    with pytest.raises(kglite.ArgumentError, match="mixes node-id types"):
+        kglite.from_networkx(with_int)
+
+
+def test_from_networkx_int_and_whole_float_keys_are_one_family():
+    """A whole float is already normalised to an integer id by the
+    representability rule, and a mixed int/float column types as float64 —
+    so this pair is one family and must keep importing."""
+    nxg = nx.MultiDiGraph()
+    nxg.add_edge(1, 2.0)
+    g = kglite.from_networkx(nxg)
+    assert g.len() == 2
+    assert sorted(g.select("Node").ids()) == [1, 2]

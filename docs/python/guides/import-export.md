@@ -373,6 +373,26 @@ Relabel such a graph first:
 g = kglite.from_networkx(nx.convert_node_labels_to_integers(nx.grid_2d_graph(3, 3)))
 ```
 
+Within a single node type the keys must also share a shape. Each type is
+bulk-loaded as one DataFrame, so its ids land in one column — mixing integers
+and strings there stores them all as text, and the edge endpoints that kept
+their original type no longer match, vivifying stub nodes:
+
+```python
+nxg = nx.MultiDiGraph()
+nxg.add_edge(1, 'b')
+kglite.from_networkx(nxg)
+# ArgumentError: from_networkx(): node type 'Node' mixes node-id types —
+# 1 integer key (e.g. 1) and 1 string key (e.g. 'b'). ... Relabel that type's
+# nodes to one id type before importing ...
+```
+
+Booleans count as their own shape (a `bool` does not share a column with an
+`int` any more than a string does); whole floats count as integers and byte
+strings as strings. Different node *types* may use different id shapes freely
+— int-keyed `Person` nodes beside string-keyed `City` nodes never share a
+column and import exactly as given.
+
 ## Neo4j Export
 
 Push a graph (or the active selection) to a live Neo4j database over Bolt,

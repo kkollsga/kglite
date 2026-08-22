@@ -118,6 +118,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   new round-trip path is not a way around it. Nothing about the loader's own
   warn-and-drop behaviour changed; other callers see it exactly as before.
 
+- **`from_networkx()` also raises when one node type's keys mix integer and
+  string ids, instead of importing more nodes than the graph has.** The keys
+  were individually storable; the *combination* was not. Each node type is
+  bulk-loaded as one DataFrame, so pandas types its whole id column at once —
+  a column holding both becomes `object`, every id is written as text, and the
+  edge endpoints that kept their original type stop matching: importing a
+  2-node / 1-edge graph keyed `1` and `'b'` returned a
+  `KnowledgeGraph(3 nodes, 1 edges)`, with node `1` present twice, once as the
+  integer and once as the vivified string stub `"1"`. `ArgumentError` now
+  names the node type, counts each id shape with an example, and gives the
+  relabel recipe. **Booleans are their own shape** despite `bool` subclassing
+  `int` in Python — `[True, 2]` types as `object` too, and that mix imported a
+  2-node graph as **4** — while whole floats count as integers and byte
+  strings as strings, matching how each is stored. The grain is the node type,
+  not the graph: int-keyed `Person` beside string-keyed `City` never shares a
+  column, imports exactly right, and keeps working. Applies equally to the id
+  halves of `(node_type, id)` tuple keys.
+
 ### Added
 
 - **`to_networkx(node_key="type_id")` exports a graph whose ids collide across

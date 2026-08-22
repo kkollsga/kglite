@@ -52,6 +52,56 @@ def _is_representable_id(value: typing.Any) -> bool:
     return False
 
 
+# Node-id families, in the order an error message lists them. A node type is
+# bulk-loaded as one DataFrame, so all of its ids share one column; two
+# families in one column is the coercion this module refuses.
+_ID_FAMILIES = ("integer", "string", "boolean")
+
+
+def _id_family(value: typing.Any) -> str:
+    """Which id-column family a representable key belongs to.
+
+    Booleans are their own family even though ``bool`` subclasses ``int`` in
+    Python: the subclassing does not survive into a pandas column — ``[True,
+    2]`` types as ``object``, not ``int64`` — so a boolean beside an integer
+    is exactly the stringifying mix this guard exists to catch (measured: it
+    imports a 2-node graph as 4). Whole floats normalise to integers
+    (``_is_representable_id`` accepts a float only when it is whole) and
+    bytes stringify, so those join integer and string respectively.
+    """
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, (str, bytes, bytearray)):
+        return "string"
+    return "integer"
+
+
+def _mixed_id_families_error(node_type: str, families: dict[str, list], key_mode: str) -> Exception:
+    """One node type's ids span more than one storage family."""
+    from . import ArgumentError
+
+    singular = "id half" if key_mode == "type_id" else "key"
+    plural = "id halves" if key_mode == "type_id" else "keys"
+    parts = []
+    for family in _ID_FAMILIES:
+        entry = families.get(family)
+        if entry is None:
+            continue
+        count, node_id, key = entry
+        sample = f"node key {key!r}" if key_mode == "type_id" else repr(node_id)
+        parts.append(f"{count} {family} {singular if count == 1 else plural} (e.g. {sample})")
+    listed = parts[0] if len(parts) == 1 else f"{', '.join(parts[:-1])} and {parts[-1]}"
+    return ArgumentError(
+        f"from_networkx(): node type {node_type!r} mixes node-id types — {listed}. "
+        f"Each node type is loaded as a single id column, and a column holding more "
+        f'than one of these is stored as text: the ids change shape (1 becomes "1"), '
+        f"the edge endpoints that kept their original type stop matching them, and "
+        f"the import vivifies a stub node for every miss — you would get back more "
+        f"nodes than the graph has. Relabel that type's nodes to one id type before "
+        f"importing, e.g. nx.relabel_nodes(nx_graph, {{key: str(key) for key in nx_graph}})."
+    )
+
+
 def _mixed_key_shapes_error(type_id_key: typing.Any, offender: typing.Any, attrs: typing.Any) -> Exception:
     """The graph holds both export tuple keys and something else."""
     from . import ArgumentError
@@ -139,6 +189,40 @@ def _reject_unrepresentable_ids(nx_graph: typing.Any, key_mode: str) -> None:
         f"nx.convert_node_labels_to_integers(nx_graph) or "
         f"nx.relabel_nodes(nx_graph, {{old: new, ...}})."
     )
+
+
+def _reject_mixed_id_families(nx_graph: typing.Any, key_mode: str, default_node_type: str) -> None:
+    """Refuse a node type whose ids are individually storable but cannot share
+    a column.
+
+    ``add_nodes`` receives one DataFrame per node type, so pandas types that
+    type's whole id column at once. Mix families in it and the column becomes
+    ``object``, every id is written as text, and the edge endpoints that kept
+    their original type miss and vivify provisional stubs — the caller is
+    handed a *larger* graph than they passed in, with duplicate ids in two
+    spellings. Runs after ``_reject_unrepresentable_ids``, so every value it
+    classifies is one the column could have stored on its own.
+
+    The grain is the node type, not the graph: int-keyed ``Person`` beside
+    string-keyed ``City`` never shares a column and imports exactly right.
+    """
+    # node_type -> family -> [count, first id, first key]
+    per_type: dict[str, dict[str, list]] = defaultdict(dict)
+    for key, attrs in nx_graph.nodes(data=True):
+        if key_mode == "type_id":
+            ntype, node_id = str(key[0]), key[1]
+        else:
+            ntype, node_id = str(attrs.get("node_type", default_node_type)), key
+        families = per_type[ntype]
+        family = _id_family(node_id)
+        entry = families.get(family)
+        if entry is None:
+            families[family] = [1, node_id, key]
+        else:
+            entry[0] += 1
+    for ntype, families in per_type.items():
+        if len(families) > 1:
+            raise _mixed_id_families_error(ntype, families, key_mode)
 
 
 def _collect_nodes(
@@ -240,7 +324,11 @@ def from_networkx(
     get ``default_node_type`` and ``default_edge_type``. Node keys must be
     storable as ids (integers or strings); a key that is not — a foreign
     tuple label, a fractional float — raises before anything is loaded,
-    rather than being dropped row by row into a smaller graph.
+    rather than being dropped row by row into a smaller graph. Within one
+    node type the keys must also share a shape: a type whose ids mix
+    integers and strings would be stored entirely as text, leaving the edge
+    endpoints that kept their original type unmatched, so that raises too.
+    Different node types may use different id shapes.
 
     Requires the ``networkx`` and ``pandas`` packages.
 
@@ -253,8 +341,9 @@ def from_networkx(
         A new :class:`KnowledgeGraph`.
 
     Raises:
-        ArgumentError: A node key cannot be stored as an id, or the graph
-            mixes ``(node_type, id)`` export keys with other key shapes.
+        ArgumentError: A node key cannot be stored as an id, one node type's
+            ids mix integer and string shapes, or the graph mixes
+            ``(node_type, id)`` export keys with other key shapes.
 
     Example::
 
@@ -282,6 +371,7 @@ def from_networkx(
     # add_nodes call, so a refusal never leaves a half-built graph behind.
     key_mode = _node_key_mode(nx_graph)
     _reject_unrepresentable_ids(nx_graph, key_mode)
+    _reject_mixed_id_families(nx_graph, key_mode, default_node_type)
 
     g = KnowledgeGraph()
 
