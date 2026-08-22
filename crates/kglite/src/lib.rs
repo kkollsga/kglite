@@ -299,9 +299,12 @@ pub mod api {
     /// Embedding ingest + vector-index construction — how a binding gets
     /// vectors *into* a graph. `set_embeddings` replaces a store,
     /// `add_embeddings` upserts into one, `build_vector_index` builds the
-    /// HNSW index that accelerates whole-corpus top-k, and `store_name` /
+    /// HNSW index that accelerates whole-corpus top-k, `store_name` /
     /// `store_key` are the one place the `"{text_column}_emb"` store name is
-    /// minted. Each ingest
+    /// minted, and `resolve_source_column` is the one place a source column is
+    /// validated and resolved (identity aliases included) — a binding that
+    /// reads the column's text itself goes through it so the validating half
+    /// and the reading half cannot disagree. Each ingest
     /// call validates every id and dimension before it touches a store and
     /// bumps the graph version on a non-empty write, so it is all-or-nothing
     /// under a plain `&mut DirGraph`.
@@ -311,8 +314,9 @@ pub mod api {
     /// `cypher_query`.
     pub mod embeddings {
         pub use crate::graph::embeddings::{
-            add_embeddings, build_vector_index, list_embeddings, set_embeddings, store_key,
-            store_name, EmbeddingIngestReport, EmbeddingStoreInfo, VectorIndexReport,
+            add_embeddings, build_vector_index, list_embeddings, resolve_source_column,
+            set_embeddings, store_key, store_name, EmbeddingIngestReport, EmbeddingStoreInfo,
+            VectorIndexReport,
         };
     }
 

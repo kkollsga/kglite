@@ -381,3 +381,123 @@ fn list_embeddings_defaults_an_unrecorded_metric_to_cosine() {
     set_embeddings(&mut g, "Doc", "summary", None, batch(&[(1, [1.0, 0.0])])).unwrap();
     assert_eq!(list_embeddings(&g)[0].metric, "cosine");
 }
+
+// ---------------------------------------------------------------------------
+// Identity-alias source columns
+//
+// `add_nodes(df, "Doc", "id", "name")` hoists the title column *out* of the
+// property map and registers `name` as the type's title alias, so a source
+// column the user still thinks of as `name` is neither `title` nor a live
+// property. These pin that the ingest guard resolves it the way every read
+// path does.
+// ---------------------------------------------------------------------------
+
+/// `docs()` with `title_alias` registered as the type's original title column
+/// — the state `add_nodes(df, "Doc", "id", <title_alias>)` leaves behind.
+fn docs_titled(ids: &[i64], title_alias: &str) -> DirGraph {
+    let mut g = docs(ids);
+    g.title_field_aliases_mut()
+        .insert("Doc".to_string(), title_alias.to_string());
+    g
+}
+
+/// `docs()` with `id_alias` registered as the type's original id column.
+fn docs_ided(ids: &[i64], id_alias: &str) -> DirGraph {
+    let mut g = docs(ids);
+    g.id_field_aliases_mut()
+        .insert("Doc".to_string(), id_alias.to_string());
+    g
+}
+
+#[test]
+fn a_per_type_title_alias_is_an_accepted_source_column() {
+    let mut g = docs_titled(&[1, 2], "name");
+    let report = set_embeddings(&mut g, "Doc", "name", None, batch(&[(1, [1.0, 0.0])])).unwrap();
+    assert_eq!(report.embeddings_stored, 1);
+}
+
+#[test]
+fn a_per_type_id_alias_is_an_accepted_source_column() {
+    let mut g = docs_ided(&[1, 2], "doc_no");
+    let report = set_embeddings(&mut g, "Doc", "doc_no", None, batch(&[(1, [1.0, 0.0])])).unwrap();
+    assert_eq!(report.embeddings_stored, 1);
+}
+
+/// No alias map at all: `name` still resolves — structurally, to the title —
+/// exactly as `MATCH (n:Doc) RETURN n.name` does.
+#[test]
+fn the_soft_alias_name_is_accepted_without_any_alias_map() {
+    let mut g = docs(&[1]);
+    assert!(g.title_field_aliases.is_empty() && g.id_field_aliases.is_empty());
+    let report = set_embeddings(&mut g, "Doc", "name", None, batch(&[(1, [1.0, 0.0])])).unwrap();
+    assert_eq!(report.embeddings_stored, 1);
+}
+
+#[test]
+fn the_soft_alias_label_is_accepted() {
+    let mut g = docs(&[1]);
+    let report = set_embeddings(&mut g, "Doc", "label", None, batch(&[(1, [1.0, 0.0])])).unwrap();
+    assert_eq!(report.embeddings_stored, 1);
+}
+
+#[test]
+fn add_embeddings_accepts_the_same_identity_aliases() {
+    let mut g = docs_titled(&[1, 2], "name");
+    let report = add_embeddings(&mut g, "Doc", "name", None, batch(&[(1, [1.0, 0.0])])).unwrap();
+    assert_eq!(report.embeddings_stored, 1);
+}
+
+/// **Store-key decision.** The store is keyed by the spelling the caller
+/// passed — resolving `name` to `title` for the *read* never renames the
+/// *store*. Pinned because the alternative (canonicalising the key) would
+/// strand every store already written under the raw spelling: `add_nodes`'
+/// `<col>_emb` ingest keys raw, so does every `.kgl` written before this
+/// change, and Cypher's `text_score(n, col, q)` rewrite has no node type to
+/// resolve with.
+#[test]
+fn the_store_is_keyed_by_the_spelling_the_caller_used() {
+    let mut g = docs_titled(&[1], "name");
+    set_embeddings(&mut g, "Doc", "name", None, batch(&[(1, [1.0, 0.0])])).unwrap();
+    assert!(g
+        .embeddings
+        .contains_key(&("Doc".to_string(), "name_emb".to_string())));
+    assert!(!g
+        .embeddings
+        .contains_key(&("Doc".to_string(), "title_emb".to_string())));
+}
+
+/// Accepting aliases must not degrade the typo guard into "anything goes".
+#[test]
+fn an_unknown_column_is_still_rejected_on_an_aliased_type() {
+    let mut g = docs_titled(&[1], "name");
+    let err =
+        set_embeddings(&mut g, "Doc", "headline", None, batch(&[(1, [1.0, 0.0])])).unwrap_err();
+    assert!(err.contains("not found on any 'Doc' node"), "{err}");
+}
+
+/// Aliases are per type: another type's title column is not this type's.
+#[test]
+fn another_types_title_alias_is_not_accepted() {
+    let mut g = docs(&[1]);
+    g.title_field_aliases_mut()
+        .insert("Other".to_string(), "headline".to_string());
+    let err =
+        set_embeddings(&mut g, "Doc", "headline", None, batch(&[(1, [1.0, 0.0])])).unwrap_err();
+    assert!(err.contains("not found on any 'Doc' node"), "{err}");
+}
+
+/// The store-name typo stays rejected even on a graph that has alias maps —
+/// registering aliases must not make the `_emb` guard fall through.
+#[test]
+fn the_store_name_typo_is_still_rejected_on_an_aliased_type() {
+    let mut g = docs_titled(&[1], "name");
+    let err = set_embeddings(
+        &mut g,
+        "Doc",
+        "summary_emb",
+        None,
+        batch(&[(1, [1.0, 0.0])]),
+    )
+    .unwrap_err();
+    assert!(err.contains("not found on any 'Doc' node"), "{err}");
+}

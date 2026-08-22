@@ -646,3 +646,75 @@ def test_a_declared_id_column_agrees_on_both_read_routes_after_create():
     assert row[0]["id"] == 101
     assert row[0]["p"]["pid"] == 101
     assert row[0]["p"]["id"] == 101
+
+
+class TestEmbeddingsOnIdentityAliases:
+    """`set_embeddings`/`add_embeddings` take a *source column*, and on an
+    aliased type the column the user knows is the alias (`name`), not the
+    canonical `title`. Rejecting it made the whole embedding surface
+    unreachable for every graph built with a `title_field`."""
+
+    @staticmethod
+    def _people():
+        return kglite.from_records(
+            {
+                "nodes": [
+                    {
+                        "type": "Person",
+                        "id_field": "pid",
+                        "title_field": "name",
+                        "records": [
+                            {"pid": 1, "name": "Alpha", "dept": "x"},
+                            {"pid": 2, "name": "Beta", "dept": "y"},
+                        ],
+                    }
+                ]
+            }
+        )
+
+    def test_set_embeddings_accepts_the_title_alias(self):
+        g = self._people()
+        report = g.set_embeddings("Person", "name", {1: [1.0, 0.0], 2: [0.0, 1.0]})
+        assert report["embeddings_stored"] == 2
+
+    def test_set_embeddings_accepts_the_id_alias(self):
+        g = self._people()
+        report = g.set_embeddings("Person", "pid", {1: [1.0, 0.0]})
+        assert report["embeddings_stored"] == 1
+
+    def test_add_embeddings_accepts_the_title_alias(self):
+        g = self._people()
+        report = g.add_embeddings("Person", "name", {1: [1.0, 0.0]})
+        assert report["embeddings_stored"] == 1
+
+    def test_an_unknown_column_is_still_rejected(self):
+        """The typo guard survives: aliases widen the accepted set, they do not
+        remove it."""
+        g = self._people()
+        with pytest.raises(ValueError, match="not found on any 'Person' node"):
+            g.set_embeddings("Person", "headline", {1: [1.0, 0.0]})
+
+    def test_the_store_name_typo_is_still_rejected(self):
+        g = self._people()
+        with pytest.raises(ValueError, match="not found on any 'Person' node"):
+            g.set_embeddings("Person", "dept_emb", {1: [1.0, 0.0]})
+
+    def test_the_store_is_keyed_by_the_spelling_the_caller_used(self):
+        """Store-key decision, pinned from the Python side: resolving `name` to
+        the title for the *read* never renames the *store*, so a store written
+        as `name` is read back as `name` on every surface."""
+        g = self._people()
+        g.set_embeddings("Person", "name", {1: [1.0, 0.0], 2: [0.0, 1.0]})
+
+        listing = g.list_embeddings()
+        assert [(e["text_column"], e["store_name"]) for e in listing] == [("name", "name_emb")]
+
+        hits = g.vector_search("name", [1.0, 0.0], top_k=1)
+        assert [h["id"] for h in hits] == [1]
+
+        scored = g.cypher(
+            "MATCH (p:Person) RETURN p.pid AS pid, text_score(p, 'name', $q) AS s ORDER BY s DESC",
+            params={"q": [1.0, 0.0]},
+        ).to_list()
+        assert scored[0]["pid"] == 1
+        assert scored[0]["s"] > scored[1]["s"]

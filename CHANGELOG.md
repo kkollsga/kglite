@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`set_embeddings()`/`add_embeddings()` rejected the very column name a
+  graph was built with.** Their source-column guard hardcoded `id`/`title`/
+  `type` and then probed live node properties — but `add_nodes(df, "Person",
+  "npdid", "name")` hoists the title column *out* of the property map and
+  registers `name` as the type's title alias, so
+  `set_embeddings("Person", "name", …)` raised `Source column 'name' not found
+  on any 'Person' node`, and no spelling the caller knew about worked. The
+  guard now resolves the column the same way every read path does — per-type
+  id/title alias, then a stored property, then the structural alias (`name`,
+  `type`, `node_type`, `label`) — so an aliased type's own column names are
+  accepted. Genuinely unknown columns and the `'summary_emb'` store-name typo
+  are still rejected with the same error. Fixed in the engine
+  (`kglite::api::embeddings::resolve_source_column`, new), so the C ABI and the
+  Java wrapper inherit it. The store is still keyed by the spelling passed —
+  `'name'` writes `name_emb`, not `title_emb` — because canonicalising the key
+  would strand stores already written under the raw spelling by `add_nodes`'
+  `<col>_emb` ingest and by every existing `.kgl`.
+
 ## [0.16.6] - 2026-08-22
 
 ### Fixed

@@ -5973,10 +5973,21 @@ class KnowledgeGraph:
         invisible to ``collect()``, ``to_df()``, and other property-based APIs.
         The embedding store key is auto-derived as ``{text_column}_emb``.
 
-        Requires ``text_column`` to exist as a property on the node type
-        (builtins ``id``, ``title``, ``type`` are always accepted) — the guard
-        that catches passing the *store* name (``'summary_emb'``) where the
-        *column* name (``'summary'``) belongs.
+        Requires ``text_column`` to name something the node type actually has
+        — the guard that catches passing the *store* name (``'summary_emb'``)
+        where the *column* name (``'summary'``) belongs. It resolves exactly as
+        a Cypher property reference does: a stored property, an **identity
+        alias** (a type built with ``title_field='name'`` accepts ``'name'``,
+        one built with ``id_field='npdid'`` accepts ``'npdid'``), the canonical
+        ``id``/``title``, or a structural alias (``name``, ``type``,
+        ``node_type``, ``label``).
+
+        The store is keyed by the spelling you pass, never by what it resolves
+        to: embedding ``'name'`` on a ``title_field='name'`` type writes
+        ``name_emb`` and is read back as ``'name'`` by
+        :meth:`vector_search`, ``text_score()`` and :meth:`list_embeddings`.
+        Pick one spelling per column — ``'name'`` and ``'title'`` there are two
+        stores holding the same text.
 
         The whole batch is resolved and dimension-checked before anything is
         written, so a rejected call leaves the store exactly as it was.
@@ -6023,11 +6034,12 @@ class KnowledgeGraph:
         ``add_nodes`` + embedding batches need to coexist without a
         read-merge-write cycle through the user's process.
 
-        Requires ``text_column`` to exist as a property on the node type,
-        exactly as :meth:`set_embeddings` does (builtins ``id``, ``title``,
-        ``type`` are always accepted). The whole batch is resolved and
-        dimension-checked before anything is written, so a rejected call
-        leaves the store exactly as it was.
+        Resolves and validates ``text_column`` exactly as
+        :meth:`set_embeddings` does — stored property, identity alias
+        (``title_field``/``id_field`` column names), ``id``/``title``, or a
+        structural alias — and keys the store by the spelling you pass. The
+        whole batch is resolved and dimension-checked before anything is
+        written, so a rejected call leaves the store exactly as it was.
 
         Call ``save()`` to persist the store: embedding stores ride the
         checkpoint. A store records the vectors, dimension and metric you
