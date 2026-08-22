@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Loading a `.kgl` written by 0.16.6 took twice as long, and the 0.16.6 entry
+  said loads were unmoved.** That claim is wrong and is corrected here: the
+  section-integrity digests 0.16.6 added were computed with a hand-rolled
+  software CRC32 table running at roughly 0.5 GB/s, and every section of the
+  container is verified before decode, so the whole compressed payload was
+  passed through it on every `load()`. Reproduced against the published wheels
+  on a 180 MB / 157 742-node / 1 008 891-edge graph (release, macOS arm64, min
+  of 5): the same file content loaded in **402 ms** when 0.16.5 had written it
+  and **729 ms** when 0.16.6 had — the file only pays if it carries digests,
+  which is why a digest-free fixture showed nothing. The digests now go through
+  `crc32fast`, which dispatches to the CPU's CRC instructions, and the same
+  0.16.6-written file loads in **446 ms** — a **1.63x** recovery against the
+  published wheel. Attributed by layer on a local release build, which reads
+  the digest-free file in 423 ms (its own control; it runs ~6% behind the
+  wheel, so the wheel comparison above understates the recovery): the CRC pass
+  cost **+360 ms (+85%)** and now costs **+14 ms**, and the zstd frame content
+  checksum costs **+20 ms (+4.7%)**. Full eager verification of a file this
+  build wrote is now **+5.3%** over a digest-free load of the same graph,
+  rather than +85%. Both layers are kept — at ~5% combined the second check is
+  worth its price, and it is the only one protecting bytes a reader skips.
+
+  The digest *values* are unchanged: `crc32fast` computes the same CRC-32/IEEE
+  as the table it replaced (both pinned by `crc32_matches_known_vector`), so
+  this is not a format change in any direction. A `.kgl` written by this build
+  is byte-identical to one written by 0.16.6 from the same graph; a file
+  written by the published 0.16.6 wheel verifies here (25 of 25 single-byte
+  flips still rejected, 0 silent loads), and a file written here verifies on
+  that wheel. The `.kgl` golden digest does not move.
+
+  Reported by the MCP-servers operator, who measured it on two production
+  graphs after `/update_kglite` rewrote them with the new writer.
+
+### Changed
+
+- **The benchmark gate now loads a file written by the build under test.** The
+  0.16.6 load regression above shipped because no tracked cell loaded a
+  freshly-written `.kgl`: `make bench-check` runs `test_bench_core.py`, whose
+  only container cells were the two save cells, so a cost that exists solely
+  in files *carrying* the new metadata was invisible by construction — the
+  release measured "+11-15% on save, loads unmoved" and was half right. The
+  new `test_bench_load_kgl` cell writes a ~4 MB graph in its fixture and times
+  the load alone. It is version-independent, so the frozen CI harness runs it
+  unchanged against the 0.13.2 reference wheel: each version writes and reads
+  through its own path, which is exactly the quantity that went unmeasured.
+  Non-vacuity checked against the shipped regression — 0.16.6 reads +72% on
+  this fixture, well outside the 20% gate.
+
 ## [0.16.8] - 2026-08-23
 
 ### Fixed

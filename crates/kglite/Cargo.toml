@@ -99,6 +99,14 @@ wkt = "0.14"
 # direct-minimal-versions select regex 1.0.0 for the whole tree.
 regex = "1.10"
 rayon = "1.12"
+# 1.5 is a real floor, not a rounding-up: this drives the CRC32 over every
+# `.kgl` section's compressed bytes on load (`graph::wal::crc32`), and 1.5.0
+# is the first release whose aarch64 hardware-CRC path is gated on a stable
+# build cfg rather than the `nightly` feature. Below it, every arm64 build --
+# which is every macOS wheel -- silently falls back to the software table and
+# the ~25x speedup of that CRC pass, which is the whole reason for the
+# dependency, disappears.
+crc32fast = "1.5"
 flate2 = "1.0.22"
 zstd = "0.13"
 memmap2 = "0.9"
