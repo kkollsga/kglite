@@ -75,16 +75,43 @@
 //! empty-map invocation that *is* cacheable binds nothing and therefore says
 //! nothing about a `$name`.
 //!
-//! Findings are plain strings on [`QueryWarnings::other`](super::warnings) —
-//! the disposition bucket a locked schema never promotes. Runtime three-valued
-//! logic is untouched by this module; it only describes what the runtime will
-//! do.
+//! ## Disposition — what `lock_schema()` promotes
+//!
+//! Findings travel as [`TypeMismatch`] values on
+//! [`QueryWarnings::type_mismatch`](super::warnings), each carrying whether it
+//! is **promotable**: under
+//! [`schema_locked`](crate::graph::schema::DirGraph::schema_locked) a
+//! promotable finding becomes a `SchemaError` ([`strict_type_error`]), exactly
+//! as an absent property does. A finding is promotable when *every* type source
+//! behind it is an `IS :: T` constraint — the write path enforces those, so
+//! "no row can satisfy this predicate" is a guarantee about the stored data
+//! rather than a claim about a declaration nothing checks. A `field_types`
+//! source therefore never promotes, in any schema state (the reason is above:
+//! its claim is conditional on data it does not police), and a property pair
+//! promotes only when both of its sides are declared.
+//!
+//! A **bound parameter** does not weaken the guarantee, so it does not block
+//! promotion: the property side is still write-enforced, and the parameter's
+//! value type is a fact of *this* call rather than a guess — `p.age > $cutoff`
+//! with a string bound to `$cutoff` is exactly as unsatisfiable as the literal
+//! spelling of it, and rather more deserving of an error, since the mistake is
+//! invisible in the query text. The verdict is therefore per call rather than
+//! per statement: the same text raises with a string bound and runs with an
+//! integer bound. That is sound because a parameterized statement is never
+//! cached, so every call re-classifies its own bindings from scratch; and a
+//! *cacheable* statement that earns a promotable finding is excluded from the
+//! cache outright, so a plan primed before the lock cannot outrun the
+//! promotion. A `field_types`-sourced finding promotes nowhere and stays
+//! cacheable, warning on every hit.
+//!
+//! Runtime three-valued logic is untouched by this module; it only describes
+//! what the runtime will do.
 
 use std::collections::{HashMap, HashSet};
 
 use super::super::super::ast::*;
 use super::warnings::property_absent;
-use super::BUILTIN_FIELDS;
+use super::{SchemaError, SchemaErrorKind, BUILTIN_FIELDS};
 use crate::datatypes::values::Value;
 use crate::graph::property_types::{value_type_name, DeclaredType};
 use crate::graph::schema::DirGraph;
@@ -184,6 +211,13 @@ impl<'a> TypeSource<'a> {
         }
     }
 
+    /// Whether the type came from the **write-enforced** source. The one
+    /// question the promotion asks: a constraint's claim holds over the stored
+    /// data, a `field_types` declaration's does not.
+    fn is_declared(self) -> bool {
+        matches!(self, Self::Declared(_))
+    }
+
     /// The type name alone, in the declaration's own vocabulary.
     fn type_name(self) -> &'a str {
         match self {
@@ -201,6 +235,63 @@ impl<'a> TypeSource<'a> {
             Self::SchemaDefined(name) => format!("schema-defined {name}"),
         }
     }
+}
+
+/// One declared-type finding, kept as its rendered message plus the one bit
+/// its *disposition* turns on.
+///
+/// The message is built where the knowledge is (each `*_message` /
+/// `*_predicate` site below), because only there are both type sources in
+/// scope in their own vocabularies; `promotable` records what that site knew
+/// about their strength, so the caller never has to re-derive it — or, worse,
+/// read it back out of the prose.
+#[derive(Debug, Clone)]
+pub(crate) struct TypeMismatch {
+    message: String,
+    /// Every type source behind this finding is a write-enforced `IS :: T`
+    /// declaration, so a locked schema may reject the query outright. See the
+    /// module docs for why a `field_types` source never sets this.
+    promotable: bool,
+}
+
+impl TypeMismatch {
+    /// The rendered warning — also the body a promoted error quotes verbatim,
+    /// so the two dispositions describe the mistake in one voice.
+    pub(crate) fn into_message(self) -> String {
+        self.message
+    }
+
+    pub(crate) fn promotable(&self) -> bool {
+        self.promotable
+    }
+}
+
+/// Reject a locked schema's guaranteed-vacuous comparisons.
+///
+/// **Caller gates on `graph.schema_locked`.** The twin of
+/// [`strict_read_error`](super::warnings::strict_read_error), one family over:
+/// there a locked schema refuses a property name no node carries, here it
+/// refuses a comparison the property's own declared type can never satisfy.
+/// Both return the **first** violation and both append the same way out, so a
+/// lock speaks with one voice whichever mistake it caught.
+///
+/// Only the promotable subset is eligible — see [`TypeMismatch::promotable`].
+/// A statement whose only findings are `field_types`-sourced returns `None`
+/// here and keeps its warnings, in a locked schema exactly as in an open one.
+pub(crate) fn strict_type_error(findings: &[TypeMismatch]) -> Option<SchemaError> {
+    let found = findings.iter().find(|finding| finding.promotable)?;
+    Some(SchemaError {
+        // The property exists and is spelled correctly; what the query got
+        // wrong is its *type*. `SchemaErrorKind` has no finer bucket than
+        // "the query's use of a property does not match the schema", and the
+        // enum is published (`error::SchemaErrorKindRepr`), so the distinction
+        // lives in the message rather than in a new wire variant.
+        kind: SchemaErrorKind::UnknownProperty,
+        message: format!(
+            "{}\n  (the schema is locked — call unlock_schema() to make this a warning instead)",
+            found.message
+        ),
+    })
 }
 
 /// A comparison's non-property operand, resolved to a value the family can
@@ -240,7 +331,7 @@ struct TypeMismatchScan<'a, 'q> {
     /// Rendered messages already emitted — an identical predicate written
     /// twice is one finding, two different ones are two.
     seen: HashSet<String>,
-    out: Vec<String>,
+    out: Vec<TypeMismatch>,
 }
 
 /// Findings for comparisons the graph's own type declarations make vacuous.
@@ -254,7 +345,7 @@ pub(super) fn type_mismatch_findings<'q>(
     graph: &DirGraph,
     var_label: &HashMap<&'q str, &'q str>,
     params: &HashMap<String, Value>,
-) -> Vec<String> {
+) -> Vec<TypeMismatch> {
     // Two fast-outs, both one probe per source: a query with no label-typed
     // variable, and a graph that declares no property type through either
     // source (the overwhelming common case).
@@ -339,9 +430,9 @@ impl<'a, 'q> TypeMismatchScan<'a, 'q> {
         }
     }
 
-    fn push(&mut self, message: String) {
-        if self.seen.insert(message.clone()) {
-            self.out.push(message);
+    fn push(&mut self, finding: TypeMismatch) {
+        if self.seen.insert(finding.message.clone()) {
+            self.out.push(finding);
         }
     }
 
@@ -373,8 +464,8 @@ impl<'a, 'q> TypeMismatchScan<'a, 'q> {
             self.string_predicate(left, "=~");
             return;
         }
-        if let Some(message) = self.comparison_message(left, operator, right) {
-            self.push(message);
+        if let Some(finding) = self.comparison_message(left, operator, right) {
+            self.push(finding);
         }
     }
 
@@ -388,7 +479,7 @@ impl<'a, 'q> TypeMismatchScan<'a, 'q> {
         left: &Expression,
         operator: ComparisonOp,
         right: &Expression,
-    ) -> Option<String> {
+    ) -> Option<TypeMismatch> {
         if let (
             Expression::PropertyAccess {
                 variable: left_var,
@@ -424,12 +515,18 @@ impl<'a, 'q> TypeMismatchScan<'a, 'q> {
         if declared_family.comparable_with(operand_family) {
             return None;
         }
-        Some(format!(
-            "WHERE compares {label}.{property} ({}) with {} — {}",
-            source.parenthetical(),
-            operand.phrase(),
-            consequence(operator, "the property")?,
-        ))
+        Some(TypeMismatch {
+            message: format!(
+                "WHERE compares {label}.{property} ({}) with {} — {}",
+                source.parenthetical(),
+                operand.phrase(),
+                consequence(operator, "the property")?,
+            ),
+            // The operand's own type is a plain fact — a literal in the text,
+            // or the value this call bound — so the declaration is the only
+            // side whose strength is in question.
+            promotable: source.is_declared(),
+        })
     }
 
     /// `n.a <op> m.b`, where **both** sides carry a declared type. One
@@ -440,7 +537,7 @@ impl<'a, 'q> TypeMismatchScan<'a, 'q> {
         left: (&str, &str),
         right: (&str, &str),
         operator: ComparisonOp,
-    ) -> Option<String> {
+    ) -> Option<TypeMismatch> {
         let (left_label, left_source) = self.declared(left.0, left.1)?;
         let (right_label, right_source) = self.declared(right.0, right.1)?;
         if left_source
@@ -450,15 +547,21 @@ impl<'a, 'q> TypeMismatchScan<'a, 'q> {
             return None;
         }
         let (left_prop, right_prop) = (left.1, right.1);
-        Some(format!(
-            "WHERE compares {left_label}.{left_prop} ({}) with {right_label}.{right_prop} ({}) \
-             — {}",
-            left_source.parenthetical(),
-            right_source.parenthetical(),
-            // Both properties must be present for either claim to hold: a null
-            // on one side makes the comparison null whatever the types are.
-            consequence(operator, "both properties")?,
-        ))
+        Some(TypeMismatch {
+            message: format!(
+                "WHERE compares {left_label}.{left_prop} ({}) with {right_label}.{right_prop} \
+                 ({}) — {}",
+                left_source.parenthetical(),
+                right_source.parenthetical(),
+                // Both properties must be present for either claim to hold: a
+                // null on one side makes the comparison null whatever the
+                // types are.
+                consequence(operator, "both properties")?,
+            ),
+            // Two declarations, two chances to be the unenforced kind: one
+            // `field_types` side makes the whole claim conditional.
+            promotable: left_source.is_declared() && right_source.is_declared(),
+        })
     }
 
     /// `n.prop IN [...]`. Warns only when **every** element is a literal of a
@@ -488,10 +591,14 @@ impl<'a, 'q> TypeMismatchScan<'a, 'q> {
         }
         let name = source.type_name();
         let parenthetical = source.parenthetical();
-        self.push(format!(
-            "WHERE tests {label}.{property} ({parenthetical}) with IN against a list holding no \
-             {name} value — cross-type values are never equal, so this filters out every row."
-        ));
+        self.push(TypeMismatch {
+            message: format!(
+                "WHERE tests {label}.{property} ({parenthetical}) with IN against a list holding \
+                 no {name} value — cross-type values are never equal, so this filters out every \
+                 row."
+            ),
+            promotable: source.is_declared(),
+        });
     }
 
     /// `STARTS WITH` / `ENDS WITH` / `CONTAINS` / `=~` are string-only at
@@ -513,11 +620,14 @@ impl<'a, 'q> TypeMismatchScan<'a, 'q> {
         if family == TypeFamily::Text {
             return;
         }
-        self.push(format!(
-            "WHERE applies {keyword} to {label}.{property} ({}) — string predicates only match \
-             STRING values, so this filters out every row.",
-            source.parenthetical()
-        ));
+        self.push(TypeMismatch {
+            message: format!(
+                "WHERE applies {keyword} to {label}.{property} ({}) — string predicates only \
+                 match STRING values, so this filters out every row.",
+                source.parenthetical()
+            ),
+            promotable: source.is_declared(),
+        });
     }
 }
 
@@ -854,8 +964,11 @@ mod tests {
         assert_eq!(w.len(), 1, "{w:?}");
     }
 
+    /// The bucket a finding lands in, and the disposition bit it carries —
+    /// asserted on the collector, because `session::prepare` reads exactly
+    /// these two things to decide between a warning and a `SchemaError`.
     #[test]
-    fn findings_land_in_the_never_promoted_bucket() {
+    fn a_declared_finding_lands_in_its_own_bucket_marked_promotable() {
         let g = typed_graph();
         let parsed = parse_cypher("MATCH (p:Person) WHERE p.age > 'forty' RETURN p").unwrap();
         let collected = collect_query_warnings(&parsed, &g, &Map::new());
@@ -863,7 +976,66 @@ mod tests {
             collected.absent_property.is_empty(),
             "a type mismatch is not an absent property"
         );
-        assert_eq!(collected.other.len(), 1, "{:?}", collected.other);
+        assert!(collected.other.is_empty(), "{:?}", collected.other);
+        assert_eq!(collected.type_mismatch.len(), 1);
+        assert!(collected.type_mismatch[0].promotable());
+    }
+
+    /// The same shape, sourced from `define_schema()`: same bucket, same
+    /// message, and **not** promotable — the write path never enforced the
+    /// declaration, so a lock has nothing to stand on.
+    #[test]
+    fn a_schema_defined_finding_is_never_promotable() {
+        let g = defined_graph();
+        let parsed = parse_cypher("MATCH (p:Person) WHERE p.age > 'forty' RETURN p").unwrap();
+        let collected = collect_query_warnings(&parsed, &g, &Map::new());
+        assert_eq!(collected.type_mismatch.len(), 1);
+        assert!(!collected.type_mismatch[0].promotable());
+    }
+
+    /// A property pair is only as strong as its weaker side. `dual` carries a
+    /// DDL `INTEGER`, `email` only a schema-defined `string`, so the finding is
+    /// real and the promotion is not available.
+    #[test]
+    fn a_property_pair_is_promotable_only_when_both_sides_are_declared() {
+        let g = defined_graph();
+        let parsed =
+            parse_cypher("MATCH (p:Person) WHERE p.dual > p.email RETURN p").expect("parses");
+        let collected = collect_query_warnings(&parsed, &g, &Map::new());
+        assert_eq!(collected.type_mismatch.len(), 1, "{:?}", collected.other);
+        assert!(!collected.type_mismatch[0].promotable());
+
+        // The both-declared control, so the case above cannot pass by the
+        // pair path simply never being promotable.
+        let g = typed_graph();
+        let parsed =
+            parse_cypher("MATCH (p:Person) WHERE p.age > p.email RETURN p").expect("parses");
+        let collected = collect_query_warnings(&parsed, &g, &Map::new());
+        assert_eq!(collected.type_mismatch.len(), 1);
+        assert!(collected.type_mismatch[0].promotable());
+    }
+
+    /// Every finding site sets the bit from its own source, not just the
+    /// comparison one: `IN`, the string predicates, and `=~`.
+    #[test]
+    fn every_finding_site_marks_a_declared_source_promotable() {
+        for (graph, promotable) in [(typed_graph(), true), (defined_graph(), false)] {
+            for query in [
+                "MATCH (p:Person) WHERE p.age IN ['a', 'b'] RETURN p",
+                "MATCH (p:Person) WHERE p.age STARTS WITH 'x' RETURN p",
+                "MATCH (p:Person) WHERE p.age CONTAINS 'x' RETURN p",
+                "MATCH (p:Person) WHERE p.age =~ 'x.*' RETURN p",
+            ] {
+                let parsed = parse_cypher(query).expect("parses");
+                let collected = collect_query_warnings(&parsed, &graph, &Map::new());
+                assert_eq!(collected.type_mismatch.len(), 1, "{query}");
+                assert_eq!(
+                    collected.type_mismatch[0].promotable(),
+                    promotable,
+                    "{query}"
+                );
+            }
+        }
     }
 
     // ── the never-warn classes, one test each ───────────────────────────────

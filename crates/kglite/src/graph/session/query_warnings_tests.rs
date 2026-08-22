@@ -21,6 +21,7 @@ use crate::datatypes::Value;
 use crate::graph::dir_graph::DirGraph;
 use crate::graph::languages::cypher::plan_cache;
 use crate::graph::languages::cypher::plan_cache::instrumentation;
+use crate::graph::schema::{NodeSchemaDefinition, SchemaDefinition, SchemaInstall};
 
 fn empty_params() -> HashMap<String, Value> {
     HashMap::new()
@@ -223,10 +224,12 @@ fn a_correlated_subquerys_warning_is_absorbed_once() {
 }
 
 /// The declared-type family (`WHERE p.age > 'forty'` on an `IS :: INTEGER`
-/// property) rides the same channel as the four before it — and must clear the
-/// same cache trap, since `prepare()` returns before the schema pass on a hit.
+/// property) reaches diagnostics on **every** run — but not through the cache.
+/// `lock_schema()` promotes this half of the family to a `SchemaError`, so the
+/// statement is excluded from the cache exactly as an absent-property one is,
+/// and a hit's inability to re-decide anything never comes up.
 #[test]
-fn a_declared_type_mismatch_reaches_diagnostics_and_survives_the_cache() {
+fn a_declared_type_mismatch_reaches_diagnostics_and_is_never_cached() {
     let _guard = plan_cache::TEST_LOCK
         .lock()
         .unwrap_or_else(|p| p.into_inner());
@@ -248,8 +251,9 @@ fn a_declared_type_mismatch_reaches_diagnostics_and_survives_the_cache() {
     let stats = instrumentation::totals().read;
 
     assert_eq!(
-        stats.hits, 1,
-        "the second run must be a cache hit, else this case proves nothing: {stats:?}"
+        (stats.insertions, stats.hits),
+        (0, 0),
+        "a promotable finding must keep the statement out of the cache: {stats:?}"
     );
     assert_eq!(first.len(), 1, "{first:?}");
     assert!(
@@ -260,7 +264,7 @@ fn a_declared_type_mismatch_reaches_diagnostics_and_survives_the_cache() {
     );
     assert_eq!(
         first, second,
-        "a cache hit must carry the same warnings as the miss that filled it"
+        "the second, uncached run must recompute the same warning"
     );
 
     // An undeclared property of the same type is untouched by the family.
@@ -268,6 +272,51 @@ fn a_declared_type_mismatch_reaches_diagnostics_and_survives_the_cache() {
         warnings_of(&graph, "MATCH (p:Person) WHERE p.id > 'forty' RETURN p").is_empty(),
         "a built-in field carries no declaration"
     );
+}
+
+/// The other half of the family, and the reason the exclusion is written as a
+/// *subset* rather than a family: a `define_schema()` field type promotes
+/// nowhere, so nothing about it can go stale behind a lock and its plan is
+/// cached like any other read's — warning included, served off the entry.
+///
+/// This is the control for the case above. Without it, "the declared one is not
+/// cached" would also pass in a build where the family disabled caching
+/// wholesale, or where nothing was cacheable at all.
+#[test]
+fn a_schema_defined_type_mismatch_still_rides_the_cache() {
+    let _guard = plan_cache::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let params = empty_params();
+    let opts = ExecuteOptions::eager(&params);
+    let mut graph = DirGraph::new();
+    execute_mut(&mut graph, "CREATE (:Person {id: 1, age: 30})", &opts).expect("seed");
+    let mut node = NodeSchemaDefinition::default();
+    node.field_types
+        .insert("age".to_string(), "integer".to_string());
+    let mut schema = SchemaDefinition::default();
+    schema.node_schemas.insert("Person".to_string(), node);
+    graph
+        .set_schema(schema, SchemaInstall::Replace)
+        .expect("the stored ages honour the declaration");
+
+    let query = "MATCH (p:Person) WHERE p.age > 'forty' RETURN p";
+    instrumentation::reset();
+    let first = warnings_of(&graph, query);
+    let second = warnings_of(&graph, query);
+    let stats = instrumentation::totals().read;
+
+    assert_eq!(
+        (stats.insertions, stats.hits),
+        (1, 1),
+        "an unpromotable finding must not cost the statement its cache entry: {stats:?}"
+    );
+    assert_eq!(first.len(), 1, "{first:?}");
+    assert!(
+        first[0].contains("Person.age (schema-defined integer)"),
+        "{first:?}"
+    );
+    assert_eq!(first, second, "the hit must carry the same warning");
 }
 
 /// A `$param` is classified through the **caller's** bindings, and the answer

@@ -42,7 +42,7 @@ pub use planner::mark_lazy_eligibility;
 pub use planner::optimize;
 pub use planner::schema_check::validate_schema;
 pub(crate) use planner::schema_check::{
-    collect_query_warnings, emit_query_warnings, strict_read_error,
+    collect_query_warnings, emit_query_warnings, strict_read_error, strict_type_error,
 };
 pub use planner::simplification::rewrite_text_score;
 

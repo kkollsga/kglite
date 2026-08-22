@@ -628,6 +628,41 @@ struct PreparedQuery {
     warnings: Arc<[String]>,
 }
 
+/// The plan-cache hit path, lifted out of [`prepare`] because it is a complete
+/// answer rather than a step: everything below the lookup in `prepare` — parse,
+/// validate, the schema pass, optimize — is precisely what a hit skips.
+///
+/// **Caller gates on the `cacheable` predicate.** Stored post lazy-marking for
+/// this `lazy_eligible`, so a hit is a pure `Arc` clone: no parse / validate /
+/// optimize / mutation.
+///
+/// A hit also skips `dynamic_labels::resolve`, which is where an unbound
+/// `$parameter` — a label position or an inline property-map value — is
+/// rejected. That is sound rather than a hole: an entry only exists because
+/// some earlier call reached the end of `prepare` with `params` empty, and that
+/// call ran the pass against the same empty map, which binds nothing. So a
+/// cached plan provably contains no parameter reference at all, and a hit is
+/// only consulted when `params` is empty. A statement that *does* reference one
+/// errors above the insert and leaves nothing behind, so its second call misses
+/// and raises again. Pinned by `session::param_presence_tests`.
+///
+/// The warnings come out of the entry rather than being recomputed: recomputing
+/// needs the parsed AST, and not skipping the parse is exactly what this early
+/// return exists to avoid. Their validity is the cache's own soundness argument
+/// — they are a pure function of `(query, graph schema)` and the key pins the
+/// graph state. Stderr repeats them per call, as it did when every call parsed.
+fn cached_plan(graph: &DirGraph, query: &str, opts: &ExecuteOptions<'_>) -> Option<PreparedQuery> {
+    let cached =
+        cypher::plan_cache::get(graph.graph_id(), graph.version(), opts.lazy_eligible, query)?;
+    cypher::emit_query_warnings(&cached.warnings);
+    Some(PreparedQuery {
+        plan: cached.plan,
+        params: HashMap::new(),
+        encode_plan: Vec::new(),
+        warnings: cached.warnings,
+    })
+}
+
 // KgError carries query context; boxing it would only burden an error path.
 #[allow(clippy::result_large_err)]
 fn prepare(
@@ -648,37 +683,8 @@ fn prepare(
         && opts.disabled_passes.is_none_or(|s| s.is_empty())
         && opts.value_codecs.is_none_or(|c| c.is_empty());
     if cacheable {
-        if let Some(cached) =
-            cypher::plan_cache::get(graph.graph_id(), graph.version(), opts.lazy_eligible, query)
-        {
-            // Stored post lazy-marking for this `lazy_eligible` — a hit is a
-            // pure Arc clone, no parse / validate / optimize / mutation.
-            //
-            // A hit also skips `dynamic_labels::resolve`, which is where an
-            // unbound `$parameter` — a label position or an inline
-            // property-map value — is rejected. That is sound rather than a
-            // hole: an entry only exists because some earlier call reached
-            // the end of this function with `params` empty, and that call ran
-            // the pass against the same empty map, which binds nothing. So a
-            // cached plan provably contains no parameter reference at all, and
-            // a hit is only consulted when `params` is empty. A statement that
-            // *does* reference one errors above the insert and leaves nothing
-            // behind, so its second call misses and raises again. Pinned by
-            // `session::param_presence_tests`.
-            //
-            // The warnings come out of the entry rather than being recomputed:
-            // recomputing needs the parsed AST, and not skipping the parse is
-            // exactly what this early return exists to avoid. Their validity
-            // is the cache's own soundness argument — they are a pure function
-            // of `(query, graph schema)` and the key pins the graph state.
-            // Stderr repeats them per call, as it did when every call parsed.
-            cypher::emit_query_warnings(&cached.warnings);
-            return Ok(PreparedQuery {
-                plan: cached.plan,
-                params: HashMap::new(),
-                encode_plan: Vec::new(),
-                warnings: cached.warnings,
-            });
+        if let Some(prepared) = cached_plan(graph, query, opts) {
+            return Ok(prepared);
         }
     }
 
@@ -724,9 +730,23 @@ fn prepare(
     // the first is heuristic, and the second is legal zero-row Cypher whose
     // locked-schema *label* case is already fatal via `validate_label`, so
     // promoting here would double-report it.
+    //
+    // The declared-type family (`WHERE p.age > 'forty'` on an `IS :: INTEGER`
+    // property) promotes the same way, but only in part: a mismatch against a
+    // write-enforced `IS :: T` constraint is a guarantee about every row the
+    // query can see, while one against a `define_schema()` field type rests on
+    // a declaration nothing checks at write time — so that half stays a
+    // warning in both schema states, and stays cacheable with it.
     let strict_absent = !collected.absent_property.is_empty();
+    let strict_type = collected
+        .type_mismatch
+        .iter()
+        .any(|finding| finding.promotable());
     if graph.schema_locked {
         if let Some(error) = cypher::strict_read_error(&collected.absent_property, graph) {
+            return Err(KgError::from(error));
+        }
+        if let Some(error) = cypher::strict_type_error(&collected.type_mismatch) {
             return Err(KgError::from(error));
         }
     }
@@ -797,17 +817,29 @@ fn prepare(
     // its own module docs) on the read-hit path that the plan cache exists to
     // keep at ~1.9 us. With no mutation ever inserted, a mutation's lookup is
     // a guaranteed miss: one shared read lock and one hash, and nothing more.
-    // ...and never for a statement carrying absent-property findings, which is
-    // what makes the strict-read promotion above independent of the cache. A
-    // hit returns before the schema pass runs, so it cannot re-decide anything;
-    // by refusing to store such a plan, a hit *proves* there was nothing to
+    // ...and never for a statement carrying findings a lock would promote,
+    // which is what makes the promotions above independent of the cache. A hit
+    // returns before the schema pass runs, so it cannot re-decide anything; by
+    // refusing to store such a plan, a hit *proves* there was nothing to
     // promote, and "prime unlocked → lock_schema() → rerun the same text"
     // raises whether or not locking bumped the graph version (through the
     // Python/`api` surface it does — `make_dir_graph_mut`; a core caller
-    // flipping the flag on an owned `DirGraph` does not). The cost is confined
-    // to statements the engine has already diagnosed as reading an all-null
-    // column, which no hot loop should contain.
-    if cacheable && params.is_empty() && !strict_absent && !cypher::is_mutation_query(&plan) {
+    // flipping the flag on an owned `DirGraph` does not).
+    //
+    // The exclusion tracks the promotable subset exactly, so it costs nothing
+    // it does not have to: every absent-property statement (the family is
+    // promoted wholesale), but only the *declared*-type mismatches — a
+    // `define_schema()`-sourced one can never become an error, so its plan
+    // stays cached and its warning rides the entry as any other family's does.
+    // What remains excluded is confined to statements the engine has already
+    // diagnosed as reading an all-null column or asking a question no row can
+    // answer, which no hot loop should contain.
+    if cacheable
+        && params.is_empty()
+        && !strict_absent
+        && !strict_type
+        && !cypher::is_mutation_query(&plan)
+    {
         cypher::plan_cache::insert(
             graph.graph_id(),
             graph.version(),

@@ -9,6 +9,7 @@
 //! doc-comment of [`super`] and on the individual functions.
 
 use super::super::super::ast::*;
+use super::type_mismatch::TypeMismatch;
 use super::{for_each_query_pattern, PatternSite, SchemaError, SchemaErrorKind, BUILTIN_FIELDS};
 use crate::datatypes::values::Value;
 use crate::graph::core::pattern_matching::{EdgeDirection, NodePattern, Pattern, PatternElement};
@@ -484,19 +485,30 @@ fn endpoint_label<'s>(
 }
 
 /// One statement's non-fatal findings, split by **disposition** rather than by
-/// family: [`Self::absent_property`] is the subset `lock_schema()` promotes to
-/// a hard error (see [`strict_read_error`]), and [`Self::other`] — unknown
-/// labels, unknown relationship types, reversed arrows — stays a warning in
-/// every schema state, because each of those shapes is legal Cypher whose
-/// zero-row answer is a legitimate thing to ask for.
+/// family.
+///
+/// [`Self::other`] — unknown labels, unknown relationship types, reversed
+/// arrows — stays a warning in every schema state, because each of those
+/// shapes is legal Cypher whose zero-row answer is a legitimate thing to ask
+/// for. The other two buckets are what `lock_schema()` can reject:
+/// [`Self::absent_property`] wholesale (see [`strict_read_error`]), and
+/// [`Self::type_mismatch`] only for the findings whose type knowledge is
+/// write-enforced (see
+/// [`strict_type_error`](super::type_mismatch::strict_type_error)) — which is
+/// why that bucket carries structured findings rather than plain strings while
+/// `other` does not.
 pub(crate) struct QueryWarnings {
     pub(crate) absent_property: Vec<AbsentProperty>,
     pub(crate) other: Vec<String>,
+    pub(crate) type_mismatch: Vec<TypeMismatch>,
 }
 
 impl QueryWarnings {
-    /// Flatten to the wire form every consumer sees — absent-property first,
-    /// matching the order the families were emitted in before the split.
+    /// Flatten to the wire form every consumer sees. The order is
+    /// user-visible (`ResultView.warnings`) and unchanged since before either
+    /// split: absent-property, then the always-warning families, then the
+    /// declared-type mismatches that used to be appended to the end of
+    /// `other`.
     pub(crate) fn into_messages(self) -> Vec<String> {
         let mut out: Vec<String> = self
             .absent_property
@@ -504,6 +516,11 @@ impl QueryWarnings {
             .map(AbsentProperty::warning)
             .collect();
         out.extend(self.other);
+        out.extend(
+            self.type_mismatch
+                .into_iter()
+                .map(TypeMismatch::into_message),
+        );
         out
     }
 }
@@ -539,6 +556,7 @@ pub(crate) fn collect_query_warnings(
         return QueryWarnings {
             absent_property: Vec::new(),
             other: Vec::new(),
+            type_mismatch: Vec::new(),
         };
     }
 
@@ -623,15 +641,18 @@ pub(crate) fn collect_query_warnings(
     let absent_property = absent_property_findings(query, graph, &var_label);
     // Family 5 (declared-type mismatches) shares `var_label` and its
     // conservatisms, but never its dedup key — see [`super::type_mismatch`].
-    let mut type_mismatch =
+    // It gets its own bucket because a locked schema promotes only *part* of
+    // it, so the caller must be able to ask each finding rather than the
+    // family.
+    let type_mismatch =
         super::type_mismatch::type_mismatch_findings(query, graph, &var_label, params);
     let mut out: Vec<String> = Vec::new();
     if unknown_labels.is_empty() && unknown_rels.is_empty() {
         out.append(&mut reversed);
-        out.append(&mut type_mismatch);
         return QueryWarnings {
             absent_property,
             other: out,
+            type_mismatch,
         };
     }
 
@@ -681,10 +702,10 @@ pub(crate) fn collect_query_warnings(
         }
     }
     out.append(&mut reversed);
-    out.append(&mut type_mismatch);
     QueryWarnings {
         absent_property,
         other: out,
+        type_mismatch,
     }
 }
 

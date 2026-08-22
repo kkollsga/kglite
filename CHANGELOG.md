@@ -30,6 +30,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Applies to reads, mutations' `WHERE` selectors, `EXPLAIN` and
   session/transaction queries alike, since all of them share one prepare step.
 
+- **`lock_schema()` also rejects a comparison a property's *declared* type can
+  never satisfy.** Extends the contract above to the declared-type warning
+  family: with `CREATE CONSTRAINT ... REQUIRE p.age IS :: INTEGER` in force,
+  `WHERE p.age > 'forty'` is null on every row, so a locked graph raises
+  `SchemaError` — same sentence the warning carried, plus the same
+  `unlock_schema()` way out — instead of returning an empty result that reads
+  exactly like "no matching data". The same mistake behind a bound parameter
+  (`WHERE p.age > $cutoff` with a string bound) raises too, since the property
+  side is still enforced and the binding's type is a fact of that call; the
+  verdict is per call, so the identical statement with an integer bound runs.
+  `IN` over an all-incomparable list and the string predicates (`STARTS
+  WITH` / `ENDS WITH` / `CONTAINS` / `=~`) on a non-`STRING` declaration
+  promote on the same rule. **A type declared only by `define_schema()` is
+  never promoted**, in any schema state: nothing enforces it at write time, so
+  the finding stays a warning and its plan stays cacheable. A property pair
+  promotes only when both sides are declared. Unlocked graphs are unchanged,
+  and every conservatism the family was built with — numeric-vs-numeric,
+  temporal-vs-string, `DURATION`/`POINT`, unrecognised schema type names,
+  unbound parameters, built-in fields, multi-label patterns and `WITH`-rebound
+  variables — still holds under the lock.
+
 - **`to_networkx()`, one-arg `embeddings()` and `degrees()` now raise on a key
   collision instead of silently returning less than they were asked for.** All
   three flatten a node collection into one dict (or one NetworkX graph) keyed

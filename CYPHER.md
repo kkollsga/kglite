@@ -2484,13 +2484,28 @@ warnings.** A locked schema is the opt-in "catch my typos" mechanism, and it
 already rejected `MATCH (p:Person {agee: 1})` and `MATCH (p:Persn)`; the same
 typo written as `WHERE p.agee = 1` or `RETURN p.agee` now raises `SchemaError`
 with the same "did you mean?" hint rather than returning an empty result or a
-null column. `unlock_schema()` puts them back to warnings. The other three
-families — unknown relationship type, reversed arrow, and the declared-type
-mismatch — stay warnings in both states, and every conservatism above still applies under the lock: sparse
+null column.
+
+**The declared-type family promotes too, but only from its enforced source.** A
+mismatch against an `IS :: T` constraint — `WHERE p.age > 'forty'` where
+`REQUIRE p.age IS :: INTEGER` is in force — raises `SchemaError` under a lock,
+carrying the same sentence the warning would have and the same `unlock_schema()`
+way out. The write path guarantees that declaration, so "no row can answer this
+predicate" is a fact about the stored data. A mismatch read from a
+`define_schema()` field type is **not** promoted, in any schema state: nothing
+enforces that declaration at write time, so a lock has no ground to reject the
+query on. A property pair promotes only when both of its sides are declared, and
+a **bound parameter** does not block the promotion — the property side is still
+enforced and the binding's type is a fact of that call, so `p.age > $cutoff`
+with a string bound raises while the same statement with an integer bound runs.
+
+`unlock_schema()` puts every one of them back to a warning. Unknown relationship
+type and reversed arrow stay warnings in both states, and every conservatism
+above still applies under the lock: sparse
 properties, properties the same statement writes, types with no recorded
 properties, fields `define_schema()` declares but nothing has written yet,
-multi-label patterns, `WITH`-rebound variables and the built-ins are all left
-alone.
+multi-label patterns, `WITH`-rebound variables, the built-ins, and every
+comparison the runtime can actually answer are all left alone.
 
 `timeout_ms` resolution: explicit `cypher(..., timeout_ms=N)` >
 `kg.set_default_timeout(ms)` > the Python default of 180,000 ms. Pass

@@ -185,8 +185,14 @@ The declared-type family reads the two *declared* type sources — DDL
 observed metadata, and quotes whichever it read in that declaration's own
 words (`declared INTEGER` vs `schema-defined integer`). It stays silent on
 everything it cannot guarantee, an unbound parameter included — see the
-"Diagnostics" section of `CYPHER.md` for the full never-warn list. It is a
-warning in every schema state; `lock_schema()` does not promote it.
+"Diagnostics" section of `CYPHER.md` for the full never-warn list.
+
+The two sources part company under `lock_schema()`: a mismatch against an
+`IS :: T` constraint becomes a `SchemaError` (the write path enforces that
+declaration, so the empty result is a certainty), while one read from a
+`define_schema()` field type stays a warning in every schema state. A bound
+parameter promotes with the property it is compared against; a property pair
+promotes only when both sides are declared.
 
 Surface `warnings` whenever an agent gets an empty result — it turns a silent
 zero-row mystery into an actionable typo hint.

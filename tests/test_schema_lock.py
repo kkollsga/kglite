@@ -451,6 +451,109 @@ class TestMatchPropertyValidation:
         assert any("AUTHRED" in w for w in result.warnings), result.warnings
 
 
+# ── Declared-type mismatches under the lock ──────────────────────────────────
+#
+# The third promotion, and the one with a boundary inside it: a comparison an
+# `IS :: T` constraint makes vacuous is an error under a lock (the write path
+# enforces the declaration), while the same claim from `define_schema()` is a
+# warning in every schema state (nothing enforces it). Every case below is a
+# pair, because a build that promoted both halves would pass any single one.
+
+
+def _declared_graph():
+    """`_make_graph()` with a DDL declaration behind `Person.age`."""
+    g = _make_graph()
+    g.cypher("CREATE CONSTRAINT person_age_typed FOR (p:Person) REQUIRE p.age IS :: INTEGER")
+    return g
+
+
+def _schema_defined_graph():
+    """The same claim from `define_schema()` — declared intent, unenforced."""
+    g = _make_graph()
+    g.define_schema({"nodes": {"Person": {"types": {"age": "integer"}}}})
+    return g
+
+
+CROSS_TYPE = "MATCH (p:Person) WHERE p.age > 'forty' RETURN p.name"
+
+
+class TestDeclaredTypeMismatch:
+    def test_a_declared_type_mismatch_raises_under_the_lock(self):
+        g = _declared_graph()
+        g.lock_schema()
+        with pytest.raises(kglite.SchemaError) as exc:
+            g.cypher(CROSS_TYPE)
+        message = str(exc.value)
+        # Both type names, so the reader sees the mismatch itself and not just
+        # that something was wrong.
+        assert "Person.age (declared INTEGER)" in message
+        assert "STRING literal 'forty'" in message
+        assert "unlock_schema()" in message
+
+    def test_a_schema_defined_type_mismatch_still_only_warns(self):
+        """The twin, same query text: it runs, and it explains itself."""
+        g = _schema_defined_graph()
+        g.lock_schema()
+        rv = g.cypher(CROSS_TYPE)
+        assert rv.to_list() == []  # the comparison really is vacuous
+        assert any("Person.age (schema-defined integer)" in w for w in rv.warnings), rv.warnings
+        # ...and a query the same declaration makes *true* everywhere returns
+        # its rows, so "runs" is not just "did not raise".
+        assert len(g.cypher("MATCH (p:Person) WHERE p.age <> 'forty' RETURN p.name")) == 2
+
+    def test_unlocking_restores_the_warning(self):
+        g = _declared_graph()
+        g.lock_schema()
+        with pytest.raises(kglite.SchemaError):
+            g.cypher(CROSS_TYPE)
+        g.unlock_schema()
+        rv = g.cypher(CROSS_TYPE)
+        assert any("declared INTEGER" in w for w in rv.warnings), rv.warnings
+
+    def test_a_bound_parameter_promotes_with_the_property_it_meets(self):
+        """The mistake the query text cannot show — and the reason the verdict
+        is per call: the same statement with an integer bound is fine."""
+        g = _declared_graph()
+        g.lock_schema()
+        query = "MATCH (p:Person) WHERE p.age > $cutoff RETURN p.name"
+        with pytest.raises(kglite.SchemaError, match=r"STRING parameter \$cutoff"):
+            g.cypher(query, params={"cutoff": "forty"})
+        assert len(g.cypher(query, params={"cutoff": 26})) == 1
+
+    def test_a_well_typed_comparison_is_never_rejected(self):
+        g = _declared_graph()
+        g.lock_schema()
+        assert len(g.cypher("MATCH (p:Person) WHERE p.age > 20 RETURN p")) == 2
+        assert len(g.cypher("MATCH (p:Person) WHERE p.age > 20.5 RETURN p")) == 2
+        # No declaration behind the property: observed metadata is not a source.
+        g.cypher("MATCH (a:Paper) WHERE a.year > 'x' RETURN a")
+
+    def test_locking_after_the_plan_was_cached_still_raises(self):
+        """A plan primed while the schema was open must not outrun the lock."""
+        g = _declared_graph()
+        for _ in range(2):
+            assert g.cypher(CROSS_TYPE).to_list() == []
+        g.lock_schema()
+        with pytest.raises(kglite.SchemaError, match="declared INTEGER"):
+            g.cypher(CROSS_TYPE)
+
+    def test_the_session_and_transaction_paths_share_the_rule(self):
+        g = _declared_graph()
+        g.lock_schema()
+        session = g.session()
+        with pytest.raises(kglite.SchemaError, match="declared INTEGER"):
+            session.cypher(CROSS_TYPE)
+        with pytest.raises(kglite.SchemaError, match="declared INTEGER"):
+            session.execute("MATCH (p:Person) WHERE p.age > 'forty' SET p.age = 99")
+
+        tx = g.begin()
+        try:
+            with pytest.raises(kglite.SchemaError, match="declared INTEGER"):
+                tx.cypher(CROSS_TYPE)
+        finally:
+            tx.rollback()
+
+
 # ── Introspection ────────────────────────────────────────────────────────────
 
 

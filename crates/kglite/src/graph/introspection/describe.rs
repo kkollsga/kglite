@@ -67,7 +67,7 @@ fn write_read_only_notice(xml: &mut String, graph: &DirGraph) {
     }
     if graph.schema_locked {
         xml.push_str(
-            "  <schema-locked>Queries and mutations validated against schema — unknown node types/properties rejected. A typo'd label in MATCH raises rather than returning zero rows, and so does a property no node of the type has, read anywhere (WHERE/RETURN/WITH/ORDER BY)</schema-locked>\n",
+            "  <schema-locked>Queries and mutations validated against schema — unknown node types/properties rejected. A typo'd label in MATCH raises rather than returning zero rows, and so does a property no node of the type has, read anywhere (WHERE/RETURN/WITH/ORDER BY), and a comparison against a property's declared IS :: type that no value of that type can satisfy</schema-locked>\n",
         );
     }
 }

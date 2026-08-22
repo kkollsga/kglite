@@ -2752,6 +2752,18 @@ class KnowledgeGraph:
         (which would produce a column of nulls beside correct-looking
         siblings). Unlocked, both are non-fatal warnings.
 
+        It rejects one more thing: a comparison a property's **declared**
+        type can never satisfy — ``WHERE p.age > 'forty'`` where
+        ``CREATE CONSTRAINT ... REQUIRE p.age IS :: INTEGER`` is in force. The
+        write path enforces that declaration, so no row can answer the
+        predicate and the empty result is a certainty rather than data. The
+        same mistake hidden behind a bound parameter
+        (``WHERE p.age > $cutoff`` with a string bound) raises too; the
+        verdict is per call, so the same statement runs with an integer bound.
+        A type declared only by :meth:`define_schema` is **not** promoted: the
+        write path never enforced it, so the mismatch stays a warning in both
+        schema states.
+
         The check is deliberately narrow, so a lock never rejects a valid
         query. It stays silent on: a *sparse* property (one node carrying it
         makes it known, however many leave it null); a property this same
@@ -2759,9 +2771,10 @@ class KnowledgeGraph:
         graph's own :meth:`define_schema` declares but nothing has written
         yet; a multi-label pattern or a variable rebound by ``WITH``, neither
         of which resolves to one type; and the built-ins ``id``, ``title``,
-        ``name``, ``type``. A relationship type the graph has never seen, and
-        a relationship arrow pointing the wrong way, stay warnings in both
-        states.
+        ``name``, ``type``. A relationship type the graph has never seen, a
+        relationship arrow pointing the wrong way, and a type mismatch read
+        from a :meth:`define_schema` field type rather than an ``IS :: T``
+        constraint, stay warnings in both states.
 
         This is the "catch my typos" mechanism — an empty result set is
         indistinguishable from "no matching data", so a typo'd label would
@@ -2785,6 +2798,8 @@ class KnowledgeGraph:
             graph.cypher("MATCH (p:Person) RETURN p.agee")  # raises SchemaError
             # Schema error: Unknown property 'agee' on Person, referenced in
             # RETURN. Did you mean 'age'?
+            graph.cypher("MATCH (p:Person) WHERE p.age > 'forty' RETURN p")
+            # raises SchemaError when p.age IS :: INTEGER is declared
 
         See Also:
             :meth:`unlock_schema`, :attr:`schema_locked`
@@ -2794,9 +2809,11 @@ class KnowledgeGraph:
     def unlock_schema(self) -> KnowledgeGraph:
         """Unlock the schema: allow any Cypher mutations without validation.
 
-        Also returns reads to their schemaless default: an unknown label or an
-        absent property is reported as a non-fatal warning (on stderr, and on
-        :attr:`ResultView.warnings`) instead of raising :class:`SchemaError`.
+        Also returns reads to their schemaless default: an unknown label, an
+        absent property, or a comparison against a declared property type that
+        no value can satisfy is reported as a non-fatal warning (on stderr, and
+        on :attr:`ResultView.warnings`) instead of raising
+        :class:`SchemaError`.
 
         Returns:
             This same graph (not a copy), so the call can be chained.
