@@ -1344,7 +1344,9 @@ pub(crate) fn parse_method_param(
         eps,
         min_samples,
     )
-    .map_err(pyo3::exceptions::PyValueError::new_err)
+    // Core validation (the `resolve` vocabulary) — an engine error, so it
+    // carries the typed `kglite.ArgumentError`, not a bare `ValueError`.
+    .map_err(|e| crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e)))
 }
 
 /// Shared comparison traversal logic used by `compare()`.
@@ -1368,7 +1370,11 @@ pub(crate) fn compare_inner(
         sort_fields,
         limit,
     )
-    .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+    // The dispatcher's failures (missing target_type, missing method
+    // settings, unknown method) originate in the engine, so they belong to
+    // the `kglite.KgError` family — a bare `ValueError` here was invisible
+    // to `except KgError`.
+    .map_err(|e| crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e)))?;
 
     let actual = selection
         .get_level(selection.get_level_count().saturating_sub(1))

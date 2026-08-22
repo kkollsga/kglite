@@ -3160,7 +3160,12 @@ class KnowledgeGraph:
 
         Raises:
             ArgumentError: If ``target_type`` is not a string or list of
-                strings, or is a list holding more than one type.
+                strings, or is a list holding more than one type; if the
+                method dict carries an unknown ``resolve`` mode; or if the
+                comparison itself rejects its inputs (unknown method name,
+                a method used without its required ``target_type`` or
+                settings such as ``max_m`` / ``property`` / ``features``).
+            TypeError: If ``method`` is neither a string nor a dict.
 
         Examples::
 

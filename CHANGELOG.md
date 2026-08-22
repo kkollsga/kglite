@@ -160,6 +160,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   raises `ArgumentError` naming the count and the workaround (call `compare()`
   once per type). A bare string and a single-element list are unchanged.
 
+- **`compare()` raised a bare `ValueError` for every failure inside the
+  comparison itself, so `except KgError` never saw it.** The wheel wrapped the
+  traversal's errors in the built-in exception instead of the typed
+  hierarchy, which meant an unknown method name, a method invoked without its
+  `target_type`, a missing `max_m` / `property` / `features`, and an unknown
+  `resolve` mode all escaped a `try: ... except kglite.KgError:` block that
+  correctly catches every other engine error — including `compare()`'s own
+  multi-target refusal, which is an `ArgumentError`. All of them now raise
+  `ArgumentError` (a `KgError` subclass carrying `.code == "InvalidArgument"`),
+  with the original wording kept behind the family's `Invalid argument:`
+  prefix. **`ArgumentError` does not inherit from `ValueError`**, so a caller
+  catching `ValueError` around `compare()` must catch `kglite.ArgumentError`
+  (or `kglite.KgError`) instead.
+
 - **A whole-graph `vector_search()` / `search_text()` never used the HNSW
   index on a graph with more than one node type** — the case the docstrings
   promised it for. Eligibility for the index was proven by *type homogeneity*

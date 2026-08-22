@@ -216,6 +216,43 @@ class TestCompareTargetTypeShape:
 
     def test_empty_list_behaves_like_omitted_target(self, region_site_graph):
         """An empty list carries no type, so it reaches the method's own
-        missing-target error rather than silently comparing against nothing."""
-        with pytest.raises(ValueError, match="requires a target_type"):
+        missing-target error rather than silently comparing against nothing —
+        raised as the typed `ArgumentError`, see `TestCompareErrorTaxonomy`."""
+        with pytest.raises(ArgumentError, match="requires a target_type"):
             region_site_graph.select("Region").compare([], "contains")
+
+
+class TestCompareErrorTaxonomy:
+    """Every failure raised *inside* the comparison traversal is an engine
+    error, so it must arrive as a typed ``kglite`` exception — catchable by
+    ``except KgError`` and carrying a stable ``.code`` — not as a bare
+    built-in ``ValueError`` that the kglite family cannot see."""
+
+    def test_missing_target_type_is_typed(self, region_site_graph):
+        with pytest.raises(KgError) as excinfo:
+            region_site_graph.select("Region").compare([], "contains")
+        assert isinstance(excinfo.value, ArgumentError)
+        assert excinfo.value.code == "InvalidArgument"
+        assert "requires a target_type" in str(excinfo.value)
+
+    def test_unknown_method_is_typed(self, region_site_graph):
+        with pytest.raises(KgError) as excinfo:
+            region_site_graph.select("Region").compare("Site", "no_such_method")
+        assert isinstance(excinfo.value, ArgumentError)
+        assert excinfo.value.code == "InvalidArgument"
+        assert "Unknown traversal method" in str(excinfo.value)
+
+    def test_missing_method_setting_is_typed(self, region_site_graph):
+        """``distance`` without ``max_m`` fails inside the dispatcher."""
+        with pytest.raises(KgError) as excinfo:
+            region_site_graph.select("Region").compare("Site", {"type": "distance"})
+        assert isinstance(excinfo.value, ArgumentError)
+        assert "requires 'max_m'" in str(excinfo.value)
+
+    def test_invalid_resolve_mode_is_typed(self, region_site_graph):
+        """The method dict is validated by the core ``MethodConfig`` builder,
+        which is engine code and owes the same typed exception."""
+        with pytest.raises(KgError) as excinfo:
+            region_site_graph.select("Region").compare("Site", {"type": "contains", "resolve": "nowhere"})
+        assert isinstance(excinfo.value, ArgumentError)
+        assert "Unknown resolve mode" in str(excinfo.value)
