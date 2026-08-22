@@ -62,7 +62,7 @@ def test_valid_query_emits_no_warning(capfd):
     assert "unknown relationship type" not in err
 
 
-# --- structured warnings via diagnostics() (agent-visible; no stderr needed) ---
+# --- structured warnings via `.diagnostics` (agent-visible; no stderr needed) ---
 
 
 def test_diagnostics_exposes_warnings():

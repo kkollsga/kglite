@@ -65,6 +65,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`print(result)` rendered every small float as `0.00`.** The `ResultView`
+  table formatted floats with two fixed decimal places, so a PageRank score —
+  which sums to 1 across the graph, and is therefore below 0.01 on any graph
+  past a hundred nodes — printed as a column of identical `0.00` cells
+  (negatives as `-0.00`), indistinguishable from a genuine zero and from each
+  other. Finite non-zero floats under 0.01 in magnitude now print with three
+  significant digits (`3.00e-4`); a true zero, the band boundary `0.01`, NaN
+  (`NULL`), the infinities and every larger float are spelled exactly as
+  before. `to_dicts()`, `to_df=True` and every other data path always carried
+  full precision — only the printed table changed. The CLI's own table is
+  unaffected.
+
 - **`set_embeddings()`/`add_embeddings()` rejected the very column name a
   graph was built with.** Their source-column guard hardcoded `id`/`title`/
   `type` and then probed live node properties — but `add_nodes(df, "Person",

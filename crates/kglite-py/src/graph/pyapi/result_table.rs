@@ -132,10 +132,40 @@ fn stdout_rejects_glyphs(py: Python<'_>) -> Option<bool> {
     (utf8_mode != 0).then_some(false)
 }
 
+/// Below this magnitude a finite float carries no information through
+/// `{:.2}` — `0.0003`, `-0.00025` and `0.0` all render as some spelling of
+/// `0.00`.
+const FIXED_POINT_FLOOR: f64 = 0.01;
+
+/// Format one cell value.
+///
+/// Identical to [`crate::datatypes::values::format_value`] except for finite
+/// non-zero floats under [`FIXED_POINT_FLOOR`], which switch to three
+/// significant digits in scientific notation (`3.00e-4`). PageRank scores sum
+/// to 1 across the graph and every normalized centrality is a fraction, so on
+/// any graph past a hundred nodes an entire score column falls inside that
+/// band and the table used to print a column of `0.00` — indistinguishable
+/// from a genuine zero and from each other.
+///
+/// `format_value` itself is deliberately left alone: it has sixteen callers,
+/// including `Display for Value` and `format_unique_values_for_storage`, whose
+/// output is pinned. Only the `ResultView` table changes.
+fn format_cell_value(value: &crate::datatypes::values::Value) -> String {
+    use crate::datatypes::values::Value;
+    match value {
+        Value::Float64(v) if v.is_finite() && *v != 0.0 && v.abs() < FIXED_POINT_FLOOR => {
+            format!("{v:.2e}")
+        }
+        // Everything else — including NaN ("NULL"), the infinities, and zero —
+        // keeps the one shared spelling.
+        other => crate::datatypes::values::format_value(other),
+    }
+}
+
 fn format_preprocessed_value(pv: &PreProcessedValue) -> String {
     // Phase A.1 / C7a — ParsedJson variant deleted; only Plain remains.
     match pv {
-        PreProcessedValue::Plain(v) => crate::datatypes::values::format_value(v),
+        PreProcessedValue::Plain(v) => format_cell_value(v),
     }
 }
 
@@ -308,6 +338,66 @@ mod tests {
 
     fn plain(v: &str) -> PreProcessedValue {
         PreProcessedValue::Plain(Value::String(v.to_string()))
+    }
+
+    fn float(v: f64) -> PreProcessedValue {
+        PreProcessedValue::Plain(Value::Float64(v))
+    }
+
+    #[test]
+    fn small_floats_are_distinguishable_from_zero() {
+        // `{:.2}` collapses every PageRank score on a graph of any size — and
+        // every normalized centrality — onto the same `0.00` as a true zero.
+        let cols = vec!["score".to_string()];
+        let rows = vec![
+            vec![float(0.0003)],
+            vec![float(-0.00025)],
+            vec![float(0.0)],
+            vec![float(3.14159)],
+            vec![float(0.01)],
+        ];
+        let out = render(&ASCII_STYLE, &cols, &rows);
+        assert!(out.contains("3.00e-4"), "0.0003 lost its digits:\n{out}");
+        assert!(out.contains("-2.50e-4"), "-0.00025 lost its digits:\n{out}");
+        assert!(
+            out.contains("0.00 "),
+            "a true zero must still read as 0.00:\n{out}"
+        );
+        assert!(
+            out.contains("3.14"),
+            "3.14159 must stay fixed-point:\n{out}"
+        );
+        assert!(
+            out.contains("0.01"),
+            "the band boundary stays fixed-point:\n{out}"
+        );
+    }
+
+    #[test]
+    fn cells_outside_the_small_band_match_format_value() {
+        // The table only diverges inside the band; everywhere else there is
+        // still exactly one spelling of a value in this codebase.
+        for v in [
+            0.0,
+            -0.0,
+            0.01,
+            -0.01,
+            1.0,
+            3.14159,
+            1e9,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            let value = Value::Float64(v);
+            assert_eq!(
+                format_cell_value(&value),
+                crate::datatypes::values::format_value(&value),
+                "diverged on {v}"
+            );
+        }
+        assert_eq!(format_cell_value(&Value::Float64(f64::NAN)), "NULL");
+        assert_eq!(format_cell_value(&Value::Int64(7)), "7");
     }
 
     #[test]
