@@ -319,6 +319,39 @@ fn index_build_requires_a_store() {
     );
 }
 
+/// Passing the *store* name where the text column belongs derives
+/// `summary_emb_emb`, which can never exist. The error has to name the column
+/// that would have worked, or the caller re-reads their own spelling as
+/// correct.
+#[test]
+fn index_build_on_a_store_name_names_the_text_column() {
+    let mut g = docs(&[1]);
+    set_embeddings(&mut g, "Doc", "summary", None, batch(&[(1, [1.0, 0.0])])).unwrap();
+
+    let err = build_vector_index(&mut g, "Doc", "summary_emb", None, None, None, None).unwrap_err();
+    assert!(
+        err.contains("No embedding store 'Doc.summary_emb_emb'"),
+        "{err}"
+    );
+    assert!(err.contains("Did you mean 'summary'?"), "{err}");
+    assert!(
+        err.contains("build_vector_index() takes the text column"),
+        "{err}"
+    );
+}
+
+/// A genuinely unknown column has no suffix story to tell, so the error falls
+/// back to what the type does have embedded.
+#[test]
+fn index_build_on_an_unknown_column_lists_the_embedded_columns() {
+    let mut g = docs(&[1]);
+    set_embeddings(&mut g, "Doc", "summary", None, batch(&[(1, [1.0, 0.0])])).unwrap();
+
+    let err = build_vector_index(&mut g, "Doc", "nope", None, None, None, None).unwrap_err();
+    assert!(err.contains("No embedding store 'Doc.nope_emb'"), "{err}");
+    assert!(err.contains("summary"), "{err}");
+}
+
 #[test]
 fn poincare_stays_on_the_exact_path() {
     let mut g = docs(&[1]);

@@ -29,6 +29,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same doctrine `shortest_path_lengths_from()` already applied to cross-type
   ids; all four surfaces now share one message.
 
+- **`vector_search()` / `search_text()` now raise when no selected node type
+  has an embedding store for the column, instead of returning `[]`.** The
+  Python surface takes the *text column* and mints the store name itself, so
+  `vector_search('summary_emb', …)` looked up `summary_emb_emb`, matched
+  nothing, skipped every candidate and returned an empty list — the same
+  answer it gives for "nothing is similar", and indistinguishable from it. A
+  benchmark comparing exact and HNSW search this way had been timing two empty
+  no-ops. The error names the store that was looked up, the node types asked
+  for it, and the column that would have worked: passing a store name gets
+  *Did you mean 'summary'? vector_search() takes the text column*, and an
+  ordinary typo gets the usual did-you-mean over the type's embedded columns.
+  **A selection where only *some* types carry the store is unchanged** — those
+  rows are a supported partial result, and the raise fires only when nothing in
+  the selection could have matched. A caller that probed for a store by trying
+  columns should use `list_embeddings()` or `has_vector_index()` instead.
+  `build_vector_index('Doc', 'summary_emb')` gains the same hint on its
+  existing error. Fixed in the engine (`kglite::api::algorithms::vector_search`),
+  so every binding inherits it; Cypher's `vector_score()`, which legitimately
+  takes the store name, is unaffected.
+
 ### Removed
 
 - **`as_dict=True` on `pagerank()`, `betweenness_centrality()`,
@@ -74,6 +94,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that resolves to nothing now raises the same `ValueError` `set_embeddings()`
   raises, before the embedder is loaded, instead of reporting a silent zero; a
   node type with no nodes stays the `{'embedded': 0}` no-op it was.
+
+- **`embed_texts()` on a node type the graph has never seen reported
+  `{'embedded': 0}`** while `set_embeddings()` on the same type raised
+  `Node type 'X' does not exist in the graph` — so a typo'd type name was a
+  silent no-op on one half of the embedding surface and an error on the other.
+  It now raises that same error, before the model is loaded. An *existing* type
+  with no matching rows is unchanged and still returns `{'embedded': 0}`.
 
 ## [0.16.6] - 2026-08-22
 

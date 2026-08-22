@@ -6127,6 +6127,16 @@ class KnowledgeGraph:
             ``MATCH ... WHERE id IN [...]`` join needed). With ``returning=[...]``
             a hit has ``id`` + ``score`` + the requested fields only.
 
+        Raises:
+            ValueError: if **no** selected node type has an embedding store for
+                ``text_column``. Passing the store name (``'summary_emb'``)
+                where the column belongs, naming a column that was never
+                embedded, or selecting only un-embedded types all land here —
+                the error names the column that would have worked. A selection
+                where *some* selected type has the store is a supported partial
+                result and returns those rows. Use :meth:`list_embeddings` to
+                see what is embedded.
+
         Example::
 
             # full hit (default)
@@ -6433,6 +6443,16 @@ class KnowledgeGraph:
             Dict with ``embedded``, ``skipped``, ``skipped_existing``,
             ``reembedded_changed``, and ``dimension``.
 
+        Raises:
+            ValueError: if ``node_type`` does not exist in the graph — the same
+                complaint :meth:`set_embeddings` makes, raised before the model
+                is loaded (an existing type with no matching rows stays a
+                ``{'embedded': 0}`` no-op); if ``text_column`` resolves to none
+                of the accepted spellings; or if ``mode`` is not
+                ``'missing'`` / ``'changed'`` / ``'all'``.
+            RuntimeError: if no embedder was registered with
+                :meth:`set_embedder`.
+
         Example::
 
             g.set_embedder(my_model)
@@ -6478,6 +6498,9 @@ class KnowledgeGraph:
 
         Returns:
             Same format as ``vector_search()`` — list of dicts or DataFrame.
+
+        Raises:
+            ValueError: same unknown-store contract as :meth:`vector_search`.
 
         Example::
 
@@ -6529,6 +6552,9 @@ class KnowledgeGraph:
 
         Raises:
             ValueError: if the store doesn't exist or the metric is unsupported.
+                A ``text_column`` that is itself a store name
+                (``'summary_emb'``) is named as such, with the column that
+                would have worked.
 
         Example::
 

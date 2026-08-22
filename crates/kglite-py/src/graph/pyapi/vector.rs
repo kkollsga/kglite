@@ -142,6 +142,12 @@ impl KnowledgeGraph {
     ///     metric; properties read live so a hit is identical before/after
     ///     save/reload). With ``returning=[...]`` each has ``id`` + ``score`` +
     ///     the requested fields only.
+    ///
+    /// Raises:
+    ///     ValueError: if **no** selected node type has an embedding store for
+    ///         ``text_column`` — a wrong column or an un-embedded type, which
+    ///         used to come back as a silent ``[]``. A selection where *some*
+    ///         type has the store is a partial result, not an error.
     #[pyo3(signature = (text_column, query_vector, top_k=10, metric=None, to_df=false, returning=None, exact=false))]
     #[allow(clippy::too_many_arguments)]
     fn vector_search(
@@ -896,6 +902,12 @@ impl KnowledgeGraph {
     /// Returns:
     ///     Dict with ``embedded``, ``skipped``, ``skipped_existing``,
     ///     ``reembedded_changed``, and ``dimension``.
+    ///
+    /// Raises:
+    ///     ValueError: if ``node_type`` does not exist in the graph (the same
+    ///         complaint ``set_embeddings`` makes — raised before the model is
+    ///         loaded), if ``text_column`` resolves to no readable column, or
+    ///         if ``mode`` is not one of the three names.
     #[pyo3(signature = (node_type, text_column, batch_size=256, show_progress=true, mode=None))]
     fn embed_texts(
         &mut self,
@@ -930,7 +942,16 @@ impl KnowledgeGraph {
         // 'name')` on a `title_field='name'` type — and even `('Person',
         // 'title')` — embedded nothing and reported it as `skipped`.
         // A type with no nodes has nothing to probe and nothing to embed, so
-        // it stays the `{'embedded': 0}` no-op it has always been.
+        // it stays the `{'embedded': 0}` no-op it has always been. A type the
+        // graph has never *seen* is a different thing entirely — a mistake —
+        // and gets `set_embeddings`' complaint, before the model is loaded, so
+        // the two halves of the embedding surface agree on what a node type is.
+        if !self.inner.type_indices.contains_key(node_type) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Node type '{}' does not exist in the graph",
+                node_type
+            )));
+        }
         let node_indices: Vec<NodeIndex> = self
             .inner
             .type_indices

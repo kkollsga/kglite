@@ -115,6 +115,72 @@ pub fn store_key(node_type: &str, text_column: &str) -> (String, String) {
     (node_type.to_string(), store_name(text_column))
 }
 
+/// The source column a store name was minted from — [`store_name`] read
+/// backwards, so the suffix still has exactly one definition. `None` when the
+/// name carries no suffix and therefore never came from [`store_name`].
+pub fn text_column_of(store: &str) -> Option<&str> {
+    store.strip_suffix("_emb")
+}
+
+/// Every source column that has a store on `node_type`, sorted and deduped —
+/// the candidate set an unknown-column error suggests from.
+pub fn embedded_text_columns<'a>(graph: &'a DirGraph, node_types: &[&str]) -> Vec<&'a str> {
+    let mut columns: Vec<&str> = graph
+        .embeddings
+        .keys()
+        .filter(|(stored_type, _)| node_types.contains(&stored_type.as_str()))
+        .map(|(_, name)| text_column_of(name).unwrap_or(name))
+        .collect();
+    columns.sort_unstable();
+    columns.dedup();
+    columns
+}
+
+/// The " Did you mean …" tail for a source column that named no store on any
+/// of `node_types`, or `""` when there is nothing honest to suggest.
+///
+/// Two mistakes produce an unreachable store, and they need different tails.
+/// Passing the *store* name where the column belongs (`'summary_emb'`) derives
+/// `summary_emb_emb` and can never match, so the tail names the column that
+/// would have worked — the same confusion `vector_score`'s
+/// `missing_embedding_error` handles from the other direction, where the store
+/// name is the correct argument. Anything else is an ordinary typo, answered
+/// by the generic
+/// [`did_you_mean`](crate::graph::mutation::validation::did_you_mean) over the
+/// columns those types do have embedded.
+///
+/// `caller` is the surface's own name (`"vector_search()"`), because the fix
+/// is "call it with the text column" and the reader needs to know which call.
+pub fn unknown_column_hint(
+    graph: &DirGraph,
+    node_types: &[&str],
+    text_column: &str,
+    caller: &str,
+) -> String {
+    if let Some(stripped) = text_column_of(text_column) {
+        if node_types.iter().any(|node_type| {
+            graph
+                .embedding_store(node_type, &store_name(stripped))
+                .is_some()
+        }) {
+            return format!(
+                " Did you mean '{stripped}'? {caller} takes the text column; \
+                 '{text_column}' is the embedding store's own name."
+            );
+        }
+    }
+    let columns = embedded_text_columns(graph, node_types);
+    let suggestion = crate::graph::mutation::validation::did_you_mean(text_column, &columns);
+    if !suggestion.is_empty() {
+        return suggestion;
+    }
+    if columns.is_empty() {
+        String::new()
+    } else {
+        format!(" Embedded text columns: {}.", columns.join(", "))
+    }
+}
+
 /// List every embedding store on the graph — a read-only projection, one
 /// [`EmbeddingStoreInfo`] per store.
 ///
@@ -129,7 +195,7 @@ pub fn list_embeddings(graph: &DirGraph) -> Vec<EmbeddingStoreInfo> {
         .iter()
         .map(|((node_type, name), store)| EmbeddingStoreInfo {
             node_type: node_type.clone(),
-            text_column: name.strip_suffix("_emb").unwrap_or(name).to_string(),
+            text_column: text_column_of(name).unwrap_or(name).to_string(),
             store_name: name.clone(),
             dimension: store.dimension,
             count: store.len(),
@@ -305,12 +371,19 @@ pub fn build_vector_index(
         ef_search: ef_search.unwrap_or(defaults.ef_search).max(1),
     };
 
-    let store = graph.embeddings.get_mut(&key).ok_or_else(|| {
-        format!(
-            "No embedding store '{}.{}_emb' to index. Call set_embeddings()/embed_texts() first.",
-            node_type, text_column
-        )
-    })?;
+    if !graph.embeddings.contains_key(&key) {
+        let hint = unknown_column_hint(graph, &[node_type], text_column, "build_vector_index()");
+        return Err(format!(
+            "No embedding store '{}.{}' to index.{} Call set_embeddings()/embed_texts() first.",
+            node_type,
+            store_name(text_column),
+            hint
+        ));
+    }
+    let store = graph
+        .embeddings
+        .get_mut(&key)
+        .expect("store presence checked immediately above");
     let indexed = store.len();
     // A deterministic seed keeps level assignment reproducible.
     let seed = 0x9E37_79B9_7F4A_7C15 ^ (indexed as u64);

@@ -181,9 +181,8 @@ pub fn export_embeddings_to_file(
     let mut stores_sorted: Vec<_> = graph.embeddings.iter().collect();
     stores_sorted.sort_unstable_by(|a, b| a.0.cmp(b.0));
     for ((node_type, store_name), store) in stores_sorted {
-        let text_column = store_name
-            .strip_suffix("_emb")
-            .unwrap_or(store_name.as_str());
+        let text_column =
+            crate::graph::embeddings::text_column_of(store_name).unwrap_or(store_name.as_str());
 
         // Apply filter
         if let Some(f) = filter {

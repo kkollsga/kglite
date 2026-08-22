@@ -327,6 +327,13 @@ pub fn vector_search(
         let mut heap = MinHeap::with_capacity(top_k);
         let mut cached_type = None;
         let mut cached_store = None;
+        // A selection spanning embedded and un-embedded types is a supported
+        // partial result, so a per-type miss only skips. "No type matched at
+        // all" is a different animal — a wrong column or an un-embedded type —
+        // and used to come back as a silent empty list, so it is recorded here
+        // and raised below. Both are computed on the cache-miss branch only.
+        let mut matched_a_store = false;
+        let mut unmatched_types: Vec<&str> = Vec::new();
 
         for &node_idx in candidates.iter() {
             let node_type = match GraphRead::node_type_of(&graph.graph, node_idx) {
@@ -339,6 +346,11 @@ pub fn vector_search(
                 let key = (node_type_name.to_string(), embedding_property.to_string());
                 cached_store = graph.embeddings.get(&key);
                 cached_type = Some(node_type);
+                if cached_store.is_some() {
+                    matched_a_store = true;
+                } else if !unmatched_types.contains(&node_type_name) {
+                    unmatched_types.push(node_type_name);
+                }
             }
             let store = match cached_store {
                 Some(s) => s,
@@ -362,10 +374,59 @@ pub fn vector_search(
             }
         }
 
+        if !matched_a_store && !unmatched_types.is_empty() {
+            return Err(missing_store_error(
+                graph,
+                &unmatched_types,
+                embedding_property,
+            ));
+        }
+
         heap.into_sorted_results()
     };
 
     Ok(results)
+}
+
+/// The error a search raises when *no* selected node type carries the store.
+///
+/// The silent-`[]` case this replaces was unrecoverable from the outside: the
+/// caller could not tell "nothing is similar" from "you named a store that does
+/// not exist". So the message names the store that was looked up, the types
+/// that were asked for it, and — through the shared probe next to
+/// [`store_name`](crate::graph::embeddings::store_name) — the column that would
+/// have worked.
+///
+/// A selection where *some* type has the store never reaches here; those rows
+/// are a legitimate partial result.
+fn missing_store_error(graph: &DirGraph, node_types: &[&str], store: &str) -> String {
+    let text_column = crate::graph::embeddings::text_column_of(store).unwrap_or(store);
+    let types = node_types
+        .iter()
+        .map(|node_type| format!("'{node_type}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let plural = if node_types.len() == 1 {
+        "type"
+    } else {
+        "types"
+    };
+    let hint = crate::graph::embeddings::unknown_column_hint(
+        graph,
+        node_types,
+        text_column,
+        "vector_search()",
+    );
+    let hint = if hint.is_empty() {
+        " Call set_embeddings()/embed_texts() first, or list_embeddings() to see \
+         what is embedded."
+            .to_string()
+    } else {
+        hint
+    };
+    format!(
+        "vector_search('{text_column}'): no embedding store '{store}' on node {plural} {types}.{hint}"
+    )
 }
 
 /// HNSW-backed top-k over a single store, restricted to `candidates` (the
@@ -985,6 +1046,126 @@ mod tests {
         )
         .expect("empty-graph search")
         .is_empty());
+    }
+
+    /// One embedded `Doc` and one un-embedded `Note`, so a selection can span a
+    /// type that has the store and one that does not.
+    fn doc_and_note_graph() -> (DirGraph, NodeIndex, NodeIndex) {
+        let (mut graph, docs) = two_doc_graph();
+        let note = NodeData::new(
+            Value::Int64(0),
+            Value::String("Note 0".to_string()),
+            "Note".to_string(),
+            HashMap::new(),
+            &mut graph.interner,
+        );
+        let note = GraphWrite::add_node(&mut graph.graph, note);
+        graph
+            .type_indices
+            .entry_or_default("Note".to_string())
+            .push(note);
+        (graph, docs[0], note)
+    }
+
+    /// The silent-`[]` bug: the Python surface mints `{column}_emb`, so a caller
+    /// who passes the *store* name searches `summary_emb_emb` — a key nothing
+    /// can ever hold. Every node was skipped and the empty list read as "no
+    /// matches". It must name the column that would have worked.
+    #[test]
+    fn a_store_no_selected_type_has_raises_and_names_the_text_column() {
+        let (graph, docs) = two_doc_graph();
+        let options = VectorSearchOptions::default().with_top_k(2);
+
+        let err = vector_search(
+            &graph,
+            &selection_of(docs),
+            "summary_emb_emb",
+            &[1.0, 0.0],
+            &options,
+        )
+        .expect_err("a store no selected type has is a caller mistake, not an empty result");
+        assert!(err.contains("summary_emb_emb"), "{err}");
+        assert!(err.contains("Did you mean 'summary'?"), "{err}");
+        assert!(
+            err.contains("vector_search() takes the text column"),
+            "{err}"
+        );
+    }
+
+    /// An unknown column has no suffix story, so the error falls back to the
+    /// columns the selected types actually have embedded.
+    #[test]
+    fn an_unknown_column_raises_listing_the_embedded_columns() {
+        let (graph, docs) = two_doc_graph();
+        let options = VectorSearchOptions::default().with_top_k(2);
+
+        let err = vector_search(
+            &graph,
+            &selection_of(docs),
+            "nope_emb",
+            &[1.0, 0.0],
+            &options,
+        )
+        .expect_err("an unknown column is a caller mistake");
+        assert!(err.contains("'nope_emb'"), "{err}");
+        assert!(err.contains("summary"), "{err}");
+    }
+
+    /// A near-miss gets the generic did-you-mean, over the type's own columns.
+    #[test]
+    fn a_near_miss_column_gets_a_suggestion() {
+        let (graph, docs) = two_doc_graph();
+        let options = VectorSearchOptions::default().with_top_k(2);
+
+        let err = vector_search(
+            &graph,
+            &selection_of(docs),
+            "summry_emb",
+            &[1.0, 0.0],
+            &options,
+        )
+        .expect_err("a near-miss column is still a caller mistake");
+        assert!(err.contains("Did you mean 'summary'?"), "{err}");
+    }
+
+    /// The supported heterogeneous case: some selected types carry the store and
+    /// some do not. That is a partial result, never an error — the raise fires
+    /// only when *nothing* in the selection could have matched.
+    #[test]
+    fn a_selection_only_partly_covered_by_the_store_still_returns_its_rows() {
+        let (graph, doc, note) = doc_and_note_graph();
+        let options = VectorSearchOptions::default().with_top_k(5);
+
+        let rows = vector_search(
+            &graph,
+            &selection_of(vec![doc, note]),
+            "summary_emb",
+            &[1.0, 0.0],
+            &options,
+        )
+        .expect("a type without the store is skipped, not fatal");
+        assert_eq!(
+            rows.iter().map(|r| r.node_idx).collect::<Vec<_>>(),
+            vec![doc]
+        );
+    }
+
+    /// The same selection narrowed to the un-embedded type alone: now nothing
+    /// matched, so it is the mistake case again.
+    #[test]
+    fn a_selection_of_only_unembedded_types_raises() {
+        let (graph, _doc, note) = doc_and_note_graph();
+        let options = VectorSearchOptions::default().with_top_k(5);
+
+        let err = vector_search(
+            &graph,
+            &selection_of(vec![note]),
+            "summary_emb",
+            &[1.0, 0.0],
+            &options,
+        )
+        .expect_err("no selected type has the store");
+        assert!(err.contains("'Note'"), "{err}");
     }
 
     #[test]

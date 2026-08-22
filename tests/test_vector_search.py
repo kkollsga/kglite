@@ -362,6 +362,71 @@ class TestVectorSearch:
         assert results == []
 
 
+# ── unknown store: an error, never a silent [] ────────────────────────────
+
+
+class TestUnknownStoreRaises:
+    """``vector_search`` used to answer "you named a store that does not exist"
+    with the same ``[]`` it uses for "nothing is similar". The two are
+    indistinguishable to the caller, and the first is always a mistake."""
+
+    def test_store_name_passed_as_the_text_column_names_the_column(self, graph_with_embeddings):
+        graph = graph_with_embeddings
+        with pytest.raises(ValueError) as excinfo:
+            graph.select("Article").vector_search("summary_emb", [1.0, 0.0, 0.0], top_k=3)
+        message = str(excinfo.value)
+        assert "Did you mean 'summary'?" in message
+        assert "vector_search() takes the text column" in message
+
+    def test_unknown_column_lists_what_is_embedded(self, graph_with_embeddings):
+        graph = graph_with_embeddings
+        with pytest.raises(ValueError, match="summary"):
+            graph.select("Article").vector_search("nope", [1.0, 0.0, 0.0], top_k=3)
+
+    def test_near_miss_column_gets_a_suggestion(self, graph_with_embeddings):
+        graph = graph_with_embeddings
+        with pytest.raises(ValueError, match="Did you mean 'summary'"):
+            graph.select("Article").vector_search("summry", [1.0, 0.0, 0.0], top_k=3)
+
+    def test_search_text_inherits_the_raise(self, graph_with_embeddings):
+        graph = graph_with_embeddings
+        graph.set_embedder(MockEmbedder(dimension=3))
+        with pytest.raises(ValueError, match="Did you mean 'summary'"):
+            graph.select("Article").search_text("summary_emb", "alpha", top_k=3)
+
+    def _two_types(self):
+        graph = kglite.KnowledgeGraph()
+        for node_type in ("Article", "Note"):
+            graph.add_nodes(
+                pd.DataFrame({"id": [1], "title": [node_type], "summary": [node_type]}),
+                node_type,
+                "id",
+                "title",
+            )
+        graph.set_embeddings("Article", "summary", {1: [1.0, 0.0]})
+        return graph
+
+    def test_partial_coverage_still_returns_its_rows(self):
+        """A selection spanning an embedded and an un-embedded type is a
+        supported partial result — the un-embedded type is skipped."""
+        graph = self._two_types()
+        rows = graph.select("Article").union(graph.select("Note")).vector_search("summary", [1.0, 0.0], top_k=5)
+        assert [(r["type"], r["id"]) for r in rows] == [("Article", 1)]
+
+    def test_selection_with_no_covered_type_raises(self):
+        graph = self._two_types()
+        with pytest.raises(ValueError, match="'Note'"):
+            graph.select("Note").vector_search("summary", [1.0, 0.0], top_k=5)
+
+    def test_build_vector_index_on_a_store_name_hints_the_column(self, graph_with_embeddings):
+        graph = graph_with_embeddings
+        with pytest.raises(ValueError) as excinfo:
+            graph.build_vector_index("Article", "summary_emb")
+        message = str(excinfo.value)
+        assert "Did you mean 'summary'?" in message
+        assert "build_vector_index() takes the text column" in message
+
+
 # ── never-selected fallback (whole graph) ─────────────────────────────────
 
 
@@ -812,17 +877,19 @@ class TestEmbedTexts:
         with pytest.raises(ValueError, match="dimension"):
             graph.embed_texts("Node", "text", show_progress=False)
 
-    def test_embed_texts_no_matching_nodes(self):
-        """No nodes of that type → embedded=0."""
+    def test_embed_texts_unknown_type_raises_before_loading_the_model(self):
+        """A node type the graph has never seen is a caller mistake, not a
+        zero-row result — the same complaint ``set_embeddings`` makes. It fires
+        before the (potentially expensive) model load."""
         graph = kglite.KnowledgeGraph()
         df = pd.DataFrame({"id": [1], "title": ["A"], "text": ["hello"]})
         graph.add_nodes(df, "Node", "id", "title")
 
-        graph.set_embedder(MockEmbedder(dimension=3))
-        result = graph.embed_texts("Other", "text", show_progress=False)
-
-        assert result["embedded"] == 0
-        assert result["skipped"] == 0
+        model = MockEmbedderWithLifecycle(dimension=3)
+        graph.set_embedder(model)
+        with pytest.raises(ValueError, match="Node type 'Other' does not exist in the graph"):
+            graph.embed_texts("Other", "text", show_progress=False)
+        assert model.load_count == 0
 
     def test_embed_texts_no_model_set(self):
         """Calling embed_texts without set_embedder raises with skeleton."""
