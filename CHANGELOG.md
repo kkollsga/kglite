@@ -131,6 +131,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`compare(target_type=['A', 'B'])` silently compared against `'A'` alone;
+  it now raises `ArgumentError`.** The comparison traversal is single-target
+  by construction — every method (`contains`, `intersects`, `distance`,
+  `text_score`, `cluster`) dispatches on one type name — but the parameter
+  accepts `str | list[str]` for symmetry with `traverse()`, and a longer list
+  was truncated to its first element with nothing on the wire to say so: a
+  caller asking to compare against two types got results for one, and the
+  missing type looked like a genuine no-match. A list of two or more now
+  raises `ArgumentError` naming the count and the workaround (call `compare()`
+  once per type). A bare string and a single-element list are unchanged.
+
 - **A whole-graph `vector_search()` / `search_text()` never used the HNSW
   index on a graph with more than one node type** — the case the docstrings
   promised it for. Eligibility for the index was proven by *type homogeneity*

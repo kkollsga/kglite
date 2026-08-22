@@ -3117,6 +3117,11 @@ class KnowledgeGraph:
 
         Args:
             target_type: Node type to compare against (e.g. ``'Well'``).
+                Exactly one type is supported: a bare string, or a
+                single-element list for symmetry with :meth:`traverse`.
+                A list of two or more raises :class:`ArgumentError` rather
+                than comparing against only the first — call ``compare()``
+                once per type instead.
             method: Comparison method — a string shorthand or a dict with
                 settings:
 
@@ -3152,6 +3157,10 @@ class KnowledgeGraph:
 
         Returns:
             A new KnowledgeGraph with comparison results selected.
+
+        Raises:
+            ArgumentError: If ``target_type`` is not a string or list of
+                strings, or is a list holding more than one type.
 
         Examples::
 

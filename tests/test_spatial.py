@@ -3,7 +3,7 @@
 import pandas as pd
 import pytest
 
-from kglite import KgError, KnowledgeGraph
+from kglite import ArgumentError, KgError, KnowledgeGraph
 
 
 @pytest.fixture
@@ -207,3 +207,15 @@ class TestCompareTargetTypeShape:
     def test_invalid_type_raises_naming_the_parameter(self, region_site_graph):
         with pytest.raises(KgError, match="target_type must be a string or list of strings"):
             region_site_graph.select("Region").compare(123, "contains")
+
+    def test_multi_element_list_refuses_instead_of_truncating(self, region_site_graph):
+        """The comparison traversal is single-target; a two-element list used to
+        silently compare against element 0 only. It must refuse, not truncate."""
+        with pytest.raises(ArgumentError, match=r"compare\(\) supports one target_type; got 2"):
+            region_site_graph.select("Region").compare(["Site", "Region"], "contains")
+
+    def test_empty_list_behaves_like_omitted_target(self, region_site_graph):
+        """An empty list carries no type, so it reaches the method's own
+        missing-target error rather than silently comparing against nothing."""
+        with pytest.raises(ValueError, match="requires a target_type"):
+            region_site_graph.select("Region").compare([], "contains")

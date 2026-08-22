@@ -965,6 +965,10 @@ impl KnowledgeGraph {
     /// Compare selected nodes against a target type using spatial, semantic,
     /// or clustering methods.
     ///
+    /// Exactly one target type is supported. A single-element list is
+    /// accepted for symmetry with `traverse()`, but a list of two or more
+    /// raises `ArgumentError` — call `compare()` once per type instead.
+    ///
     /// Examples::
     ///
     /// ```text
@@ -995,10 +999,23 @@ impl KnowledgeGraph {
             .map(|l| l.node_count())
             .unwrap_or(0);
 
-        // A list target_type compares against its first element only.
+        // The comparison traversal is single-target: every method in
+        // `make_comparison_traversal` dispatches on one type name. A
+        // multi-element list is refused rather than silently truncated.
         let resolved_target: Option<String> =
-            crate::graph::string_or_list(Some(target_type), "target_type")?
-                .and_then(|types| types.into_iter().next());
+            match crate::graph::string_or_list(Some(target_type), "target_type")? {
+                Some(types) if types.len() > 1 => {
+                    return Err(crate::error_py::kg_to_pyerr(
+                        crate::error::KgError::Argument(format!(
+                            "compare() supports one target_type; got {}. Pass a single type, \
+                             or call compare() once per type.",
+                            types.len()
+                        )),
+                    ));
+                }
+                Some(types) => types.into_iter().next(),
+                None => None,
+            };
 
         let config = parse_method_param(method)?;
 
