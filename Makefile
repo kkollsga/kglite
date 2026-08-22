@@ -91,6 +91,12 @@ bench-compare:
 ## Apple Silicon for these benchmarks (same source, different
 ## hardware).
 ## Refresh the baseline at release time via `make refresh-release-constants`.
+## Each run also appends one summary row (verdict, worst cell, watch band) to
+## the local recurrence record `dev-docs/bench/results/gate-history.csv`, so a
+## cell that approaches the gate three runs running is visible without
+## archaeology. That folder is local working state: CI never runs this target
+## (its perf job calls scripts/compare_bench.py directly, without
+## --record-history) and the script skips the append when the folder is absent.
 bench-check:
 	$(ACTIVATE) && maturin develop --release --quiet \
 		&& pytest tests/benchmarks/test_bench_core.py -m benchmark \
@@ -99,7 +105,8 @@ bench-check:
 		&& BASELINE=tests/benchmarks/baselines/current$$( [ "$$(uname)" = "Linux" ] && echo ".linux" )$$( [ "$$(uname)" = "Darwin" ] && echo "" ).json \
 		&& EXACT_SET=$$( [ "$$(uname)" = "Linux" ] && echo "--require-exact-set" || true ) \
 		&& python scripts/compare_bench.py $$BASELINE .bench-current.json \
-			--metric min --threshold 20 $$EXACT_SET
+			--metric min --threshold 20 $$EXACT_SET \
+			--record-history dev-docs/bench/results/gate-history.csv
 
 ## Cumulative perf-drift gate: newest per-release baseline vs the anchor
 ## ~3 releases back at +30% (min). Catches slow drift the per-release 20%

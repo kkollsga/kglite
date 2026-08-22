@@ -64,6 +64,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   artifact back, with a meta-test that goes red, naming the surface, when
   either half of a pair is missing.
 
+  The same gate now also *reports* the cells it is about to catch: any passing
+  cell within 8 percentage points of the threshold prints in an `APPROACHING`
+  block (exit code unchanged, silent when the band is empty), and each local
+  `make bench-check` appends one verdict/worst-cell/watch-band row to a
+  recurrence record, so a cell that sits at +17-19% for three releases is
+  visible before the release it finally crosses in.
+
 ## [0.16.6] - 2026-08-22
 
 ### Fixed
