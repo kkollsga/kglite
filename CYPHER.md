@@ -2408,7 +2408,8 @@ Keys:
   - a relationship pattern pointing the wrong way, when every edge of that
     type runs the other way (zero rows);
   - a `WHERE` comparison a **declared** property type makes vacuous — `p.age >
-    'forty'` where `p.age IS :: INTEGER` is null on every row.
+    'forty'` where `p.age IS :: INTEGER` is null on every row (the other side
+    may be a literal, a bound `$parameter`, or a second typed property).
 
   Populated on reads, mutations, `EXPLAIN`, and session/transaction queries
   alike, and mirrored to stderr for interactive users.
@@ -2432,21 +2433,47 @@ graph.cypher("MATCH (p:Person) WHERE p.age > 'forty' RETURN p").diagnostics["war
 # ["WHERE compares Person.age (declared INTEGER) with a STRING literal
 #   'forty' — a cross-type ordering comparison is null in openCypher, so this
 #   filters out every row."]
+
+graph.cypher("MATCH (p:Person) WHERE p.age > $cutoff RETURN p",
+             params={"cutoff": "forty"}).diagnostics["warnings"]
+# ["WHERE compares Person.age (declared INTEGER) with a STRING parameter
+#   $cutoff ('forty') — a cross-type ordering comparison is null in
+#   openCypher, so this filters out every row."]
 ```
 
-The declared-type family reads **only** the property types declared with
-`REQUIRE p.x IS :: T` (below), because that is the only type knowledge the
-write path enforces — a declared `INTEGER` property cannot come to hold a
-string, so "this comparison is cross-type" is a guarantee and not a guess.
-`define_schema()` field types and observed per-type metadata are not consulted.
-Everything it cannot place stays silent: numeric properties against numeric
-literals (`INTEGER`/`FLOAT` are one comparison family, all nine value pairings
-intercomparable), `DATE`/`LOCAL DATETIME` against a string (the string is
-parsed, so whether the answer is null depends on its contents), `DURATION` and
-`POINT` (no comparison rules of their own), parameters and property-to-property
-comparisons, multi-label patterns, `WITH`-rebound variables and the built-in
-fields. `<>` gets its own wording, because a cross-type `<>` is *true*: it
-matches every row that has the property rather than filtering them out.
+The family classifies **both** operands. The one being compared against the
+typed property may be a literal, a `$parameter` **the call actually bound**, or
+a second property whose type is also known — `WHERE p.age > p.email` names both
+sides and both types. `=~` joins `STARTS WITH` / `ENDS WITH` / `CONTAINS` as a
+string predicate: it answers false for every non-`STRING` value whatever the
+pattern is.
+
+Two sources of type knowledge feed it, in this order:
+
+1. **`REQUIRE p.x IS :: T`** (below) — the write path enforces it, so a declared
+   `INTEGER` property cannot come to hold a string and "this comparison is
+   cross-type" is a guarantee rather than a guess.
+2. **`define_schema()` field types** — declared intent, checked only by
+   `validate_schema()`, so the claim rests on the stored data honouring the
+   declaration.
+
+Where both cover a property **the declaration wins** — the same precedence the
+constraint-vs-lock error messages follow — and each message quotes the
+declaration it read *in that declaration's own words*: `declared INTEGER` for
+the constraint, `schema-defined integer` for the schema definition. Every other
+type name in a message is the engine's own, so the casing says which half of the
+sentence is yours. Observed per-type metadata (last-write-wins, and not a
+declaration) is consulted by neither.
+
+Everything the family cannot place stays silent: numeric properties against
+numeric literals (`INTEGER`/`FLOAT` are one comparison family, all nine value
+pairings intercomparable), `DATE`/`LOCAL DATETIME` against a string (the string
+is parsed, so whether the answer is null depends on its contents), `DURATION`
+and `POINT` (no comparison rules of their own), a schema field type it does not
+recognise, an **unbound** parameter, a property pair with one untyped side,
+multi-label patterns, `WITH`-rebound variables and the built-in fields. `<>`
+gets its own wording, because a cross-type `<>` is *true*: it matches every row
+that has the property rather than filtering them out.
 
 A *sparse* property never warns: `node_type_metadata` records a property as
 soon as one node carries it, so only a genuinely absent one — a typo, or a

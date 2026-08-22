@@ -10,6 +10,7 @@
 
 use super::super::super::ast::*;
 use super::{for_each_query_pattern, PatternSite, SchemaError, SchemaErrorKind, BUILTIN_FIELDS};
+use crate::datatypes::values::Value;
 use crate::graph::core::pattern_matching::{EdgeDirection, NodePattern, Pattern, PatternElement};
 use crate::graph::mutation::validation::did_you_mean;
 use crate::graph::schema::{DirGraph, InternedKey};
@@ -512,7 +513,12 @@ impl QueryWarnings {
 /// disposition split still intact, for the one caller (`session::execute`)
 /// that must know which findings a locked schema rejects.
 pub fn collect_unknown_pattern_warnings(query: &CypherQuery, graph: &DirGraph) -> Vec<String> {
-    collect_query_warnings(query, graph).into_messages()
+    // No caller-supplied parameter bindings: this is the published signature
+    // (pinned in `tests/api-baselines/rust/`), and the one family that reads
+    // them treats an unbound `$name` as silence, so an empty map is exactly
+    // "classify the literals". `session::execute` calls
+    // [`collect_query_warnings`] with the real map.
+    collect_query_warnings(query, graph, &HashMap::new()).into_messages()
 }
 
 /// Non-fatal counterpart to [`validate_schema`]: collect "did you mean?"
@@ -521,7 +527,11 @@ pub fn collect_unknown_pattern_warnings(query: &CypherQuery, graph: &DirGraph) -
 /// so this is *not* an error), plus the absent-property findings from
 /// [`absent_property_findings`]. Pure (no I/O), so directly testable;
 /// [`emit_query_warnings`] is the stderr side of the same computation.
-pub(crate) fn collect_query_warnings(query: &CypherQuery, graph: &DirGraph) -> QueryWarnings {
+pub(crate) fn collect_query_warnings(
+    query: &CypherQuery,
+    graph: &DirGraph,
+    params: &HashMap<String, Value>,
+) -> QueryWarnings {
     let have_node_schema =
         !graph.node_type_metadata.is_empty() || graph.type_indices.keys().next().is_some();
     let have_edge_schema = !graph.connection_type_metadata.is_empty();
@@ -613,7 +623,8 @@ pub(crate) fn collect_query_warnings(query: &CypherQuery, graph: &DirGraph) -> Q
     let absent_property = absent_property_findings(query, graph, &var_label);
     // Family 5 (declared-type mismatches) shares `var_label` and its
     // conservatisms, but never its dedup key — see [`super::type_mismatch`].
-    let mut type_mismatch = super::type_mismatch::type_mismatch_findings(query, graph, &var_label);
+    let mut type_mismatch =
+        super::type_mismatch::type_mismatch_findings(query, graph, &var_label, params);
     let mut out: Vec<String> = Vec::new();
     if unknown_labels.is_empty() && unknown_rels.is_empty() {
         out.append(&mut reversed);
@@ -1001,7 +1012,7 @@ mod tests {
     fn strict_read_error_reports_the_first_finding_in_error_voice() {
         let g = graph_with_schema();
         let q = parse_cypher("MATCH (p:Person) WHERE p.agee = 1 RETURN p.imo").unwrap();
-        let found = collect_query_warnings(&q, &g).absent_property;
+        let found = collect_query_warnings(&q, &g, &HashMap::new()).absent_property;
         assert_eq!(found.len(), 2, "{found:?}");
         let err = strict_read_error(&found, &g).expect("both findings are typos");
         assert!(
@@ -1046,7 +1057,7 @@ mod tests {
             .expect("schema installs on an empty graph");
 
         let q = parse_cypher("MATCH (p:Person) RETURN p.nickname").unwrap();
-        let collected = collect_query_warnings(&q, &g);
+        let collected = collect_query_warnings(&q, &g, &HashMap::new());
         assert_eq!(collected.absent_property.len(), 1);
         assert!(
             strict_read_error(&collected.absent_property, &g).is_none(),
@@ -1059,7 +1070,7 @@ mod tests {
         // The undeclared sibling is still promoted, so the carve-out is a
         // carve-out and not a blanket exemption for the type.
         let q2 = parse_cypher("MATCH (p:Person) RETURN p.nicknmae").unwrap();
-        let found2 = collect_query_warnings(&q2, &g).absent_property;
+        let found2 = collect_query_warnings(&q2, &g, &HashMap::new()).absent_property;
         assert!(strict_read_error(&found2, &g).is_some());
     }
 

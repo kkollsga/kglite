@@ -43,8 +43,11 @@ fn seeded() -> DirGraph {
 }
 
 fn warnings_of(graph: &DirGraph, query: &str) -> Vec<String> {
-    let params = empty_params();
-    let opts = ExecuteOptions::eager(&params);
+    warnings_with(graph, query, &empty_params())
+}
+
+fn warnings_with(graph: &DirGraph, query: &str, params: &HashMap<String, Value>) -> Vec<String> {
+    let opts = ExecuteOptions::eager(params);
     let outcome = execute_read(graph, query, &opts).expect("read");
     outcome
         .result
@@ -264,5 +267,52 @@ fn a_declared_type_mismatch_reaches_diagnostics_and_survives_the_cache() {
     assert!(
         warnings_of(&graph, "MATCH (p:Person) WHERE p.id > 'forty' RETURN p").is_empty(),
         "a built-in field carries no declaration"
+    );
+}
+
+/// A `$param` is classified through the **caller's** bindings, and the answer
+/// cannot go stale in the plan cache: a statement with bound parameters is
+/// never cached at all (`prepare`'s `cacheable` gate), and the empty-params
+/// invocation of the same text — the one that *is* cached — binds nothing and
+/// therefore says nothing about the parameter.
+#[test]
+fn a_parameter_typed_mismatch_is_diagnosed_and_never_cached() {
+    let _guard = plan_cache::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let empty = empty_params();
+    let opts = ExecuteOptions::eager(&empty);
+    let mut graph = DirGraph::new();
+    execute_mut(&mut graph, "CREATE (:Person {id: 1, age: 30})", &opts).expect("seed");
+    execute_mut(
+        &mut graph,
+        "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.age IS :: INTEGER",
+        &opts,
+    )
+    .expect("declare the property type");
+
+    let query = "MATCH (p:Person) WHERE p.age > $cutoff RETURN p";
+    let mut bound = HashMap::new();
+    bound.insert("cutoff".to_string(), Value::String("forty".to_string()));
+
+    instrumentation::reset();
+    let first = warnings_with(&graph, query, &bound);
+    assert_eq!(first.len(), 1, "{first:?}");
+    assert!(
+        first[0].contains("Person.age (declared INTEGER)")
+            && first[0].contains("STRING parameter $cutoff ('forty')"),
+        "{first:?}"
+    );
+    // Same text, well-typed binding: the finding is a fact about the *value*,
+    // so it must not survive from the run before it.
+    let mut typed = HashMap::new();
+    typed.insert("cutoff".to_string(), Value::Int64(40));
+    assert!(warnings_with(&graph, query, &typed).is_empty());
+    assert!(warnings_with(&graph, query, &bound).len() == 1);
+
+    let stats = instrumentation::totals().read;
+    assert_eq!(
+        stats.hits, 0,
+        "a parameterized statement is never cached, so nothing can be served stale: {stats:?}"
     );
 }

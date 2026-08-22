@@ -714,7 +714,7 @@ fn prepare(
     // consumed twice: stderr now (interactive users), and
     // `QueryDiagnostics.warnings` at the end of execute (every programmatic
     // surface, including the MCP server, which is where an agent reads them).
-    let collected = cypher::collect_query_warnings(&parsed, graph);
+    let collected = cypher::collect_query_warnings(&parsed, graph, opts.params);
     // ...with one exception, and it is a *disposition* change, not a second
     // walk: under `lock_schema()` the absent-property subset becomes fatal.
     // `MATCH (p:Person) WHERE p.agee = 1` returning `[]` and `RETURN p.agee`

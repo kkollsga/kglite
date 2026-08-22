@@ -95,18 +95,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   this filters out every row.`, alongside the four warning families already
   carried on `ResultView.warnings` / `diagnostics["warnings"]` and echoed to
   stderr. Covers `=`, `<>`, `<`, `<=`, `>`, `>=`, `IN` over a literal list, and
-  `STARTS WITH` / `ENDS WITH` / `CONTAINS` on a property declared as anything
-  but `STRING`. `<>` gets its own wording — a cross-type `<>` is *true*, so it
-  matches every row that has the property rather than filtering them out.
-  Runtime three-valued logic is unchanged; this only describes it. The source
-  is the DDL declaration alone — the one type fact the write path enforces —
-  so `define_schema()` field types and observed metadata are not consulted, and
-  the family stays silent wherever it cannot guarantee the outcome: numeric
-  against numeric (`INTEGER` and `FLOAT` are one comparison family),
-  `DATE`/`LOCAL DATETIME` against a string (parsed at runtime, so
-  value-dependent), `DURATION`/`POINT`, `IN` lists with one comparable element,
-  parameters, property-to-property comparisons, absent properties (the existing
-  absent-property warning already explains those), built-in fields,
+  the string predicates `STARTS WITH` / `ENDS WITH` / `CONTAINS` / `=~` on a
+  property typed as anything but `STRING`. The other operand may be a literal,
+  a **bound `$parameter`** — `WHERE p.age > $cutoff` with `cutoff='forty'`
+  names the parameter and the value it carries — or a **second typed
+  property**: `WHERE p.age > p.email` names both sides and both types. `<>`
+  gets its own wording — a cross-type `<>` is *true*, so it matches every row
+  that has the property rather than filtering them out. Runtime three-valued
+  logic is unchanged; this only describes it.
+
+  Two sources of type knowledge, in this order: the DDL declaration
+  (`REQUIRE n.p IS :: T`), which the write path enforces, and
+  `define_schema()`'s field types, which it does not. Where both cover a
+  property **the declaration wins**, and every message quotes the declaration
+  it read in the words that declaration was written in — `declared INTEGER`
+  for the constraint, `schema-defined integer` for the schema definition — so
+  it is always visible which one the claim rests on. Observed per-type
+  metadata is still not consulted by either. The family stays silent wherever
+  it cannot place a type: numeric against numeric (`INTEGER` and `FLOAT` are
+  one comparison family), `DATE`/`LOCAL DATETIME` against a string (parsed at
+  runtime, so value-dependent), `DURATION`/`POINT`, a schema type name it does
+  not recognise, `IN` lists with one comparable element, an **unbound**
+  parameter, a property pair with one untyped side, absent properties (the
+  existing absent-property warning already explains those), built-in fields,
   multi-label patterns and `WITH`-rebound variables. It is a warning in every
   schema state — `lock_schema()` does not promote it.
 

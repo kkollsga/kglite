@@ -67,11 +67,13 @@
 //!    [`warnings::reversed_direction_warnings`] for the conservatism rules.
 //! 5. **A comparison a declared property type makes vacuous** — `WHERE
 //!    p.age > 'forty'` where `p.age IS :: INTEGER` is null on every row.
-//!    Sourced from the DDL declaration alone, because that is the only type
-//!    knowledge the write path enforces. See [`type_mismatch`] for the family
-//!    resolver and the never-warn classes. Unlike families 2 and 3 this one is
-//!    *never* promoted by `lock_schema()`; it rides
-//!    [`warnings::QueryWarnings::other`].
+//!    Both operands are classified: a literal, a `$param` the caller bound,
+//!    or a second typed property. Two type sources, DDL declaration before
+//!    `define_schema()` field types, each quoted in its own vocabulary. See
+//!    [`type_mismatch`] for the family resolver, the precedence and the
+//!    never-warn classes. Unlike families 2 and 3 this one is *never* promoted
+//!    by `lock_schema()`; it rides [`warnings::QueryWarnings::other`] — and
+//!    the unenforced source is why that must stay true.
 //!
 //! Warnings travel structurally on `QueryDiagnostics::warnings` (every
 //! programmatic surface, MCP included) and to stderr via

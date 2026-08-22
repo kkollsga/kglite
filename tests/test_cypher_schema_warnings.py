@@ -255,3 +255,109 @@ def test_well_typed_and_undeclared_comparisons_stay_silent():
     assert g.cypher("MATCH (p:Person) WHERE p.age > 30 RETURN p").warnings == []
     assert g.cypher("MATCH (p:Person) WHERE p.age > 30.5 RETURN p").warnings == []
     assert g.cypher("MATCH (p:Person) WHERE p.name > 5 RETURN p").warnings == []
+
+
+# --- P-R4: the schema-definition source, parameters, `=~`, property pairs ---
+
+
+def _schema_defined() -> kglite.KnowledgeGraph:
+    """`Person.age` typed by ``define_schema()`` rather than by DDL — declared
+    intent the write path does not enforce, so the message quotes the user's own
+    lowercase word and says ``schema-defined``."""
+    g = kglite.KnowledgeGraph()
+    g.add_nodes(
+        pd.DataFrame({"pid": [1, 2], "name": ["a", "b"], "age": [30, 40], "email": ["a@b", "c@d"]}),
+        "Person",
+        "pid",
+        "name",
+    )
+    g.define_schema({"nodes": {"Person": {"types": {"age": "integer", "email": "string"}}}})
+    return g
+
+
+def test_schema_defined_type_mismatch_warns_in_the_users_vocabulary():
+    g = _schema_defined()
+    rv = g.cypher("MATCH (p:Person) WHERE p.age > 'forty' RETURN p.name")
+    assert rv.to_list() == []
+    assert len(rv.warnings) == 1, rv.warnings
+    assert "Person.age (schema-defined integer)" in rv.warnings[0], rv.warnings
+    assert "a STRING literal 'forty'" in rv.warnings[0], rv.warnings
+
+
+def test_a_ddl_declaration_beats_a_conflicting_schema_type():
+    """CYPHER.md's precedence: the declaration wins, and the message names the
+    constraint the user wrote. The schema type says ``string``, under which the
+    comparison would be well-typed and silent — so the warning's mere presence
+    is the precedence assertion."""
+    g = _schema_defined()
+    g.define_schema({"nodes": {"Person": {"types": {"age": "string"}}}})
+    g.cypher("CREATE CONSTRAINT person_age_typed FOR (p:Person) REQUIRE p.age IS :: INTEGER")
+    rv = g.cypher("MATCH (p:Person) WHERE p.age > 'forty' RETURN p.name")
+    assert len(rv.warnings) == 1, rv.warnings
+    assert "Person.age (declared INTEGER)" in rv.warnings[0], rv.warnings
+    assert "schema-defined" not in rv.warnings[0], rv.warnings
+
+
+def test_an_unrecognised_schema_type_name_stays_silent():
+    g = kglite.KnowledgeGraph()
+    g.add_nodes(pd.DataFrame({"pid": [1], "name": ["a"], "sigil": ["x"]}), "Person", "pid", "name")
+    g.define_schema({"nodes": {"Person": {"types": {"sigil": "unicorn"}}}})
+    assert g.cypher("MATCH (p:Person) WHERE p.sigil > 5 RETURN p").warnings == []
+
+
+def test_a_bound_parameter_is_classified_like_a_literal():
+    g = _declared()
+    rv = g.cypher("MATCH (p:Person) WHERE p.age > $cutoff RETURN p.name", params={"cutoff": "forty"})
+    assert rv.to_list() == []
+    assert len(rv.warnings) == 1, rv.warnings
+    assert "Person.age (declared INTEGER)" in rv.warnings[0], rv.warnings
+    assert "a STRING parameter $cutoff ('forty')" in rv.warnings[0], rv.warnings
+
+
+def test_a_well_typed_parameter_is_silent():
+    g = _declared()
+    rv = g.cypher("MATCH (p:Person) WHERE p.age > $cutoff RETURN p.name", params={"cutoff": 30})
+    assert len(rv.to_list()) == 1
+    assert rv.warnings == []
+
+
+def test_an_unbound_parameter_produces_no_type_warning(capfd):
+    """The empty-params invocation binds nothing, so the family says nothing —
+    the statement fails on the missing binding, not on a guess about its type.
+    Warnings are emitted in `prepare`, before execution, so stderr would carry
+    one if the family had fired."""
+    g = _declared()
+    try:
+        g.cypher("MATCH (p:Person) WHERE p.age > $cutoff RETURN p.name")
+        raise AssertionError("an unbound parameter must fail the query")
+    except kglite.CypherExecutionError as error:
+        assert "cutoff" in str(error)
+    assert "WHERE compares" not in capfd.readouterr().err
+
+
+def test_regex_on_a_non_string_declaration_warns():
+    g = _declared()
+    rv = g.cypher("MATCH (p:Person) WHERE p.age =~ '4.*' RETURN p.name")
+    assert rv.to_list() == []
+    assert len(rv.warnings) == 1, rv.warnings
+    assert rv.warnings[0] == (
+        "WHERE applies =~ to Person.age (declared INTEGER) — string predicates only match "
+        "STRING values, so this filters out every row."
+    )
+
+
+def test_regex_on_a_string_property_is_silent():
+    g = _schema_defined()
+    assert g.cypher("MATCH (p:Person) WHERE p.email =~ 'a.*' RETURN p").warnings == []
+
+
+def test_a_cross_family_property_pair_names_both_sides():
+    g = _schema_defined()
+    rv = g.cypher("MATCH (p:Person) WHERE p.age > p.email RETURN p.name")
+    assert rv.to_list() == []
+    assert len(rv.warnings) == 1, rv.warnings
+    assert rv.warnings[0] == (
+        "WHERE compares Person.age (schema-defined integer) with Person.email "
+        "(schema-defined string) — a cross-type ordering comparison is null in openCypher, "
+        "so this filters out every row."
+    )

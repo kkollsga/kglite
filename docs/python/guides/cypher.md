@@ -150,7 +150,8 @@ return nothing useful without raising: a `MATCH` against an unknown label or
 relationship type, a property reference (in `WHERE`, `RETURN`, `WITH` or
 `ORDER BY`) that no node of that type carries, a relationship pattern pointing
 the wrong way down a one-directional edge type, and a `WHERE` comparison that a
-declared property type makes vacuous. The same "did you mean?" hint interactive
+declared property type makes vacuous — against a literal, a bound `$parameter`,
+or a second typed property. The same "did you mean?" hint interactive
 users see on stderr is exposed here for programmatic / agent callers, on every
 kind of query (a mutation's `MATCH` can be typo'd too) and on repeat runs of a
 query the plan cache is serving:
@@ -169,10 +170,23 @@ r.diagnostics["warnings"]
 #   filters out every row."]
 ```
 
-The declared-type family reads only DDL-declared property types (`IS :: T`),
-never observed metadata, and stays silent on everything it cannot guarantee —
-see the "Diagnostics" section of `CYPHER.md` for the full never-warn list. It
-is a warning in every schema state; `lock_schema()` does not promote it.
+```python
+# The same mistake hidden behind a parameter:
+r = g.cypher("MATCH (p:Person) WHERE p.age > $cutoff RETURN p",
+             params={"cutoff": "forty"})
+r.diagnostics["warnings"]
+# ["WHERE compares Person.age (declared INTEGER) with a STRING parameter
+#   $cutoff ('forty') — a cross-type ordering comparison is null in
+#   openCypher, so this filters out every row."]
+```
+
+The declared-type family reads the two *declared* type sources — DDL
+`IS :: T` constraints first, then `define_schema()` field types — never
+observed metadata, and quotes whichever it read in that declaration's own
+words (`declared INTEGER` vs `schema-defined integer`). It stays silent on
+everything it cannot guarantee, an unbound parameter included — see the
+"Diagnostics" section of `CYPHER.md` for the full never-warn list. It is a
+warning in every schema state; `lock_schema()` does not promote it.
 
 Surface `warnings` whenever an agent gets an empty result — it turns a silent
 zero-row mystery into an actionable typo hint.
