@@ -2397,3 +2397,139 @@ class TestEmbeddingsIdCollision:
         the refusal fires on the keys actually produced, not on the graph."""
         graph = self._colliding_graph()
         assert graph.select("Note").embeddings("summary") == {1: [0.0, 1.0]}
+
+
+# ── deletion prunes the store ──────────────────────────────────────────────
+
+
+def _embedded_docs(storage: str = "default", ids=(1, 2, 3)):
+    """Docs 1..n, each embedded on a distinct axis of a 3-d space."""
+    kwargs = {} if storage == "default" else {"storage": storage}
+    graph = kglite.KnowledgeGraph(**kwargs)
+    vectors = {1: [1.0, 0.0, 0.0], 2: [0.0, 1.0, 0.0], 3: [0.0, 0.0, 1.0]}
+    df = pd.DataFrame(
+        {
+            "id": list(ids),
+            "title": [f"Doc {i}" for i in ids],
+            "summary": [f"text {i}" for i in ids],
+        }
+    )
+    graph.add_nodes(df, "Doc", "id", "title")
+    graph.set_embeddings("Doc", "summary", {i: vectors[i] for i in ids})
+    return graph
+
+
+class TestDeletionPrunesEmbeddings:
+    """A deleted node's vector must leave with it.
+
+    KGLite keys an embedding store by the engine's internal node index, and
+    the graph hands a deleted node's index straight to the next node created.
+    A vector left behind is therefore *inherited*: the new node — of any type,
+    embedded or not — comes back as a perfect-similarity top hit for the
+    deleted node's query.
+    """
+
+    def test_a_new_node_does_not_inherit_a_deleted_nodes_vector(self):
+        """The blind-review repro, verbatim."""
+        graph = _embedded_docs()
+        graph.cypher("MATCH (d:Doc {id: 2}) DETACH DELETE d")
+        graph.add_nodes(
+            pd.DataFrame({"id": [77], "title": ["Doc 77"], "summary": ["fresh"]}),
+            "Doc",
+            "id",
+            "title",
+        )
+
+        # Doc 2's own vector: the query the ghost answered with score 1.0.
+        results = graph.select("Doc").vector_search("summary", [0.0, 1.0, 0.0], top_k=5)
+
+        assert 77 not in [r["id"] for r in results], results
+        assert 2 not in [r["id"] for r in results], results
+        assert all(r["score"] < 0.99 for r in results), results
+
+    def test_a_new_node_of_another_type_does_not_inherit_it_either(self):
+        """The store is keyed by node index, not by type, so an unrelated type
+        landing on the freed index inherited just as readily."""
+        graph = _embedded_docs()
+        graph.cypher("MATCH (d:Doc {id: 2}) DETACH DELETE d")
+        graph.add_nodes(
+            pd.DataFrame({"id": [99], "title": ["Note 99"]}),
+            "Note",
+            "id",
+            "title",
+        )
+
+        # Whole-graph search (no selection) — the path a Note node is visible on.
+        results = graph.vector_search("summary", [0.0, 1.0, 0.0], top_k=5)
+        assert [(r["type"], r["id"]) for r in results if r["type"] == "Note"] == []
+
+    def test_delete_drops_the_listed_embedding_count(self):
+        graph = _embedded_docs()
+        assert graph.list_embeddings()[0]["count"] == 3
+
+        graph.cypher("MATCH (d:Doc {id: 2}) DETACH DELETE d")
+        assert graph.list_embeddings()[0]["count"] == 2
+
+        graph.cypher("MATCH (d:Doc) DETACH DELETE d")
+        # The store stays — it is a declared column — but holds nothing.
+        assert graph.list_embeddings()[0]["count"] == 0
+
+    def test_delete_removes_the_node_from_embeddings_readback(self):
+        """`embeddings()` reads through live nodes, so the heir is what makes
+        the ghost visible here: an un-pruned store hands it Doc 2's vector."""
+        graph = _embedded_docs()
+        graph.cypher("MATCH (d:Doc {id: 2}) DETACH DELETE d")
+        graph.add_nodes(
+            pd.DataFrame({"id": [77], "title": ["Doc 77"], "summary": ["fresh"]}),
+            "Doc",
+            "id",
+            "title",
+        )
+        assert set(graph.select("Doc").embeddings("summary")) == {1, 3}
+
+    def test_saved_after_delete_reloads_without_a_ghost(self):
+        graph = _embedded_docs()
+        graph.cypher("MATCH (d:Doc {id: 2}) DETACH DELETE d")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "g.kgl")
+            graph.save(path)
+            reloaded = kglite.load(path)
+
+        assert reloaded.list_embeddings()[0]["count"] == 2
+        reloaded.add_nodes(
+            pd.DataFrame({"id": [77], "title": ["Doc 77"], "summary": ["fresh"]}),
+            "Doc",
+            "id",
+            "title",
+        )
+        results = reloaded.select("Doc").vector_search("summary", [0.0, 1.0, 0.0], top_k=5)
+        assert 77 not in [r["id"] for r in results], results
+
+    @pytest.mark.parametrize("storage", ["default", "mapped"])
+    def test_pruning_is_identical_across_mutable_storage_modes(self, storage):
+        """Both mutable modes share the deletion chokepoint, so both prune.
+
+        (`storage='disk'` is a read substrate for large-graph exploration and
+        is covered by the mode-parity suite, not here.)"""
+        graph = _embedded_docs(storage)
+        graph.cypher("MATCH (d:Doc {id: 2}) DETACH DELETE d")
+
+        assert graph.list_embeddings()[0]["count"] == 2
+        assert set(graph.select("Doc").embeddings("summary")) == {1, 3}
+
+    def test_a_rolled_back_delete_leaves_vector_search_unchanged(self):
+        """Statement atomicity covers the store: the engine parks `embeddings`
+        out of the rollback checkpoint, so only an explicit undo entry brings a
+        pruned vector back."""
+        graph = _embedded_docs()
+        query = [0.0, 1.0, 0.0]
+        before = graph.select("Doc").vector_search("summary", query, top_k=5)
+
+        with pytest.raises(Exception):
+            graph.cypher(
+                "MATCH (d:Doc {id: 2}) DETACH DELETE d CREATE (:Blocked {id: 500})",
+                write_scope=["Doc"],
+            )
+
+        assert graph.select("Doc").vector_search("summary", query, top_k=5) == before
+        assert graph.list_embeddings()[0]["count"] == 3

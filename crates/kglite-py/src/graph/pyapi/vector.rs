@@ -1130,8 +1130,9 @@ impl KnowledgeGraph {
     /// scan. Once built, ``vector_search`` / ``search_text`` auto-use the index
     /// for queries covering most of a large store; pass ``exact=True`` to force
     /// an exact scan. The index is dropped automatically whenever the store's
-    /// vectors change (``add_embeddings`` / ``embed_texts`` / ``compact``) —
-    /// rebuild it afterwards.
+    /// vectors change (``add_embeddings`` / ``embed_texts`` / ``compact``) or an
+    /// embedded node is deleted (the delete prunes its vector, which moves a
+    /// slot) — rebuild it afterwards.
     ///
     /// The selection does **not** have to be that one node type: as long as
     /// only one type carries ``text_column``, a whole-graph search (or any

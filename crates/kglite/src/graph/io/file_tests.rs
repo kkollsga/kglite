@@ -187,6 +187,37 @@ mod atomic_save_tests {
         assert_eq!(store.index.as_ref().unwrap().len(), 40);
     }
 
+    /// Save-after-delete must not persist a ghost. The prune happens in
+    /// memory at the deletion chokepoint, so the `.kgl` writer sees an already
+    /// pruned store — but the round-trip is what proves nothing downstream
+    /// (the index sub-section, the norm rebuild, the shape validator) puts the
+    /// slot back, and that a reloaded graph hands the freed `NodeIndex` to a
+    /// new node with no vector attached.
+    #[test]
+    fn a_delete_before_save_leaves_no_ghost_in_the_reloaded_store() {
+        use std::collections::HashSet;
+
+        let mut g = tiny_indexed_graph();
+        let key = ("Doc".to_string(), "vec_emb".to_string());
+        let doomed = petgraph::graph::NodeIndex::new(17);
+        crate::graph::mutation::maintain::detach_delete_nodes(
+            Arc::make_mut(&mut g),
+            &HashSet::from([doomed]),
+        );
+        // The consolidation pass every `.kgl` producer runs before writing.
+        crate::graph::io::file::prepare_kgl_write(&mut g);
+
+        let mut buf: Vec<u8> = Vec::new();
+        write_kgl_to(&g, &mut buf).unwrap();
+        let loaded = load_kgl_bytes(&buf).unwrap();
+
+        let store = loaded.embeddings.get(&key).expect("store survives");
+        assert_eq!(store.len(), 39);
+        assert_eq!(store.get_embedding(doomed.index()), None);
+        assert_eq!(store.validate_shape(), Ok(()));
+        assert_eq!(store.norms.len(), 39, "norms rebuilt over the pruned store");
+    }
+
     #[test]
     fn non_default_vector_index_parameters_roundtrip() {
         use crate::graph::algorithms::hnsw::HnswParams;

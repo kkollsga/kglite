@@ -482,8 +482,8 @@ graph.drop_vector_index('Article', 'summary')   # revert to exact
 - cosine / dot_product / euclidean are indexable; `poincare` always uses the
   exact path. Recall depends on data + `ef_search` (raise it for higher recall).
 - The index is **dropped automatically** when the store's vectors change
-  (`add_embeddings`, `embed_texts`) or slots are remapped (`vacuum`) — rebuild
-  after. It **persists in the `.kgl`** (and `to_bytes()`).
+  (`add_embeddings`, `embed_texts`), slots are remapped (`vacuum`), or an
+  embedded node is deleted (the delete prunes its vector) — rebuild after. It **persists in the `.kgl`** (and `to_bytes()`).
 - The Cypher `text_score()` / `vector_score()` whole-corpus top-k
   (`... ORDER BY score DESC LIMIT k`) also auto-uses the index; a heavily-
   filtered Cypher query stays exact.

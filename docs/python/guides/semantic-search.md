@@ -249,8 +249,9 @@ automatically. Key points:
 - **Metrics.** cosine / dot_product / euclidean are indexable; `poincare` always
   uses the exact path.
 - **Lifecycle.** The index is **dropped automatically** whenever the store's
-  vectors change (`add_embeddings`, `embed_texts`) or slots are remapped
-  (`vacuum`) — rebuild it after such changes. Check with
+  vectors change (`add_embeddings`, `embed_texts`), slots are remapped
+  (`vacuum`), or an embedded node is deleted (the delete prunes its vector,
+  which moves a slot) — rebuild it after such changes. Check with
   `has_vector_index(...)`, remove with `drop_vector_index(...)`.
 - **Persisted.** The index is saved inside the `.kgl` (and `to_bytes()`), so a
   reloaded graph keeps it — no rebuild on load.

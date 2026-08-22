@@ -93,6 +93,46 @@ struct Fingerprint {
     /// the node instead of putting it back where it was would be a visible
     /// reordering, and this is what catches it.
     user_indexes: Vec<(String, String, Vec<usize>)>,
+    /// Every embedding store as `(node_type, property, dimension, slot →
+    /// (node, vector, text hash))`. Slot **order** is pinned, not just
+    /// membership: it is the order the exact scan visits vectors in, so it
+    /// decides which of two equally-scored nodes a `top_k` returns. A
+    /// `DELETE` that rolls back must therefore put the vector back on the
+    /// slot it vacated, which is what `EmbeddingStore::restore_embedding`
+    /// exists to do.
+    embeddings: Vec<StoreFingerprint>,
+}
+
+/// One embedding slot: `(node index, vector as text, text hash)`.
+type SlotFingerprint = (usize, Vec<String>, Option<u64>);
+
+/// One embedding store: `(node type, property, dimension, slots in slot order)`.
+type StoreFingerprint = (String, String, usize, Vec<SlotFingerprint>);
+
+/// Every embedding store, in a form a rollback comparison can read.
+fn fingerprint_embeddings(graph: &DirGraph) -> Vec<StoreFingerprint> {
+    let mut stores: Vec<_> = graph
+        .embeddings
+        .iter()
+        .map(|((node_type, prop), store)| {
+            let slots = store
+                .slot_to_node
+                .iter()
+                .map(|&node| {
+                    let vector = store
+                        .get_embedding(node)
+                        .unwrap_or(&[])
+                        .iter()
+                        .map(|v| format!("{v:?}"))
+                        .collect();
+                    (node, vector, store.text_hashes.get(&node).copied())
+                })
+                .collect();
+            (node_type.clone(), prop.clone(), store.dimension, slots)
+        })
+        .collect();
+    stores.sort();
+    stores
 }
 
 fn sorted_props(props: &HashMap<String, Value>) -> Vec<(String, String)> {
@@ -332,6 +372,7 @@ fn fingerprint(graph: &mut DirGraph) -> Fingerprint {
     let column_masters = fingerprint_column_masters(graph);
     let columnar_rows = fingerprint_columnar_rows(graph);
     let user_indexes = fingerprint_user_indexes(graph);
+    let embeddings = fingerprint_embeddings(graph);
 
     Fingerprint {
         version: graph.version,
@@ -349,6 +390,7 @@ fn fingerprint(graph: &mut DirGraph) -> Fingerprint {
         column_masters,
         columnar_rows,
         user_indexes,
+        embeddings,
     }
 }
 
@@ -421,6 +463,32 @@ fn seed_into(graph: &mut DirGraph) {
         graph,
         "MATCH (a:Item {id: 1}), (t:Tag {id: 1}) CREATE (a)-[:TAGGED]->(t)",
     );
+}
+
+/// `seeded()` with a vector on every `Item` — the shape a semantic-search
+/// application runs in, and the only one in which a rolled-back `DELETE` can
+/// exercise `UndoEntry::EmbeddingRemoved`.
+///
+/// The preconditions are asserted rather than assumed: a fixture whose store
+/// silently ended up empty would turn the embedding arms into a second run of
+/// the plain ones.
+fn seeded_embedded() -> DirGraph {
+    let mut graph = seeded();
+    let report = crate::graph::embeddings::set_embeddings(
+        &mut graph,
+        "Item",
+        "name",
+        Some("euclidean"),
+        [
+            (Value::Int64(1), vec![1.0f32, 0.0]),
+            (Value::Int64(2), vec![0.0, 1.0]),
+            (Value::Int64(3), vec![1.0, 1.0]),
+        ],
+    )
+    .expect("seed embeddings");
+    assert_eq!(report.embeddings_stored, 3);
+    assert_eq!(report.skipped, 0);
+    graph
 }
 
 /// `seeded()` after the consolidation pass `save()` runs (`io/file.rs`) — the

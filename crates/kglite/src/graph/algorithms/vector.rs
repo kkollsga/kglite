@@ -1685,10 +1685,19 @@ mod tests {
         assert_eq!(hnsw_covered_slots(store, &docs[..64], false), None);
     }
 
-    /// A deleted node keeps its embedding, so "the whole graph" no longer
-    /// covers that slot and the membership filter has to run.
+    /// A store slot whose node is gone voids the whole-graph coverage proof.
+    ///
+    /// **This assertion was inverted in R2**, where it pinned the *defect*:
+    /// deleting a node did not prune its embedding, so the ordinary
+    /// `DELETE` path produced exactly this state and the proof had to defend
+    /// against it. `detach_delete_nodes` now prunes (see the test below), so
+    /// the only way left to reach a dangling slot is a removal *beneath* that
+    /// chokepoint — a raw backend `remove_node`, which in production is only
+    /// the undo of a node a statement created, and no statement can embed a
+    /// node it just created. The proof stays because it is cheap and this
+    /// construction is still expressible.
     #[test]
-    fn a_deleted_embedded_node_voids_the_whole_graph_coverage_proof() {
+    fn a_dangling_store_slot_voids_the_whole_graph_coverage_proof() {
         let (mut graph, docs) = one_embedded_type_graph(8, 2);
         let store_key = ("Doc".to_string(), "summary_emb".to_string());
         assert!(whole_graph_covers_store(
@@ -1696,11 +1705,87 @@ mod tests {
             graph.embeddings.get(&store_key).expect("store")
         ));
 
+        // Beneath the chokepoint on purpose: this is the residual case.
         GraphWrite::remove_node(&mut graph.graph, docs[3]).expect("remove an embedded node");
         assert!(
             !whole_graph_covers_store(&graph, graph.embeddings.get(&store_key).expect("store")),
             "the store still holds a slot for a node the graph no longer has"
         );
+    }
+
+    /// The deletion chokepoint prunes the node's vector, so the store never
+    /// holds a slot for a node the graph no longer has.
+    #[test]
+    fn deleting_an_embedded_node_prunes_its_vector() {
+        let (mut graph, docs) = one_embedded_type_graph(8, 2);
+        let store_key = ("Doc".to_string(), "summary_emb".to_string());
+        let doomed = docs[3];
+
+        crate::graph::mutation::maintain::detach_delete_nodes(&mut graph, &HashSet::from([doomed]));
+
+        let store = graph.embeddings.get(&store_key).expect("store");
+        assert_eq!(store.len(), 7, "the deleted node gave up its slot");
+        assert_eq!(store.get_embedding(doomed.index()), None);
+        assert_eq!(store.validate_shape(), Ok(()));
+        assert!(
+            whole_graph_covers_store(&graph, store),
+            "every remaining slot belongs to a live node"
+        );
+    }
+
+    /// The ghost: `StableDiGraph` hands the deleted node's index to the next
+    /// node created, and an un-pruned store made that node inherit the
+    /// deleted one's vector — a 1.0-similarity top hit for a node of any
+    /// type that was never embedded. Pinned on both dispatch paths.
+    #[test]
+    fn a_node_reusing_a_deleted_slot_inherits_no_vector() {
+        for exact in [true, false] {
+            let (mut graph, docs) = one_embedded_type_graph(600, 2);
+            let doomed = docs[7];
+            let doomed_vector = graph
+                .embeddings
+                .get(&("Doc".to_string(), "summary_emb".to_string()))
+                .expect("store")
+                .get_embedding(doomed.index())
+                .expect("the doomed node is embedded")
+                .to_vec();
+
+            crate::graph::mutation::maintain::detach_delete_nodes(
+                &mut graph,
+                &HashSet::from([doomed]),
+            );
+            // Any type will do — the store is keyed by the global node index,
+            // so a `Note` landing on the freed slot inherits just as readily.
+            let heir = push_nodes(&mut graph, "Note", 1, None)[0];
+            assert_eq!(heir, doomed, "the freed index is reused");
+
+            // Rebuild the index the prune dropped, so the non-exact arm
+            // exercises the HNSW path rather than falling back to the scan.
+            let store = graph
+                .embeddings
+                .get_mut(&("Doc".to_string(), "summary_emb".to_string()))
+                .expect("store");
+            store
+                .build_index(DistanceMetric::Euclidean, HnswParams::default(), 7)
+                .expect("rebuild HNSW index");
+
+            let rows = vector_search(
+                &graph,
+                &CurrentSelection::new(),
+                "summary_emb",
+                &doomed_vector,
+                &VectorSearchOptions::default()
+                    .with_top_k(5)
+                    .with_metric(DistanceMetric::Euclidean)
+                    .with_exact(exact),
+            )
+            .expect("whole-graph search");
+
+            assert!(
+                !rows.iter().any(|r| r.node_idx == heir),
+                "exact={exact}: the node that reused the slot returned {rows:?}"
+            );
+        }
     }
 
     /// End-to-end: the whole-graph search on a mixed graph returns exactly the

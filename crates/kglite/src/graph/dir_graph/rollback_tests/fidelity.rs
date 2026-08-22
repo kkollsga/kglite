@@ -152,3 +152,59 @@ rollback_shapes! {
          CREATE (:Blocked {id: 901})",
         Some(&["Item"]);
 }
+
+/// A rolled-back `DELETE` must leave vector search returning exactly what it
+/// returned before.
+///
+/// `DirGraph::embeddings` is *parked* by `swap_data_scale` (it is
+/// O(V × dimension), far too large to clone per statement), so the live
+/// post-statement map is the one a rollback keeps — nothing but
+/// `UndoEntry::EmbeddingRemoved` puts a pruned vector back. Each shape below
+/// deletes a different position in the store so a restore that appends
+/// instead of refilling the vacated slot is caught: slot order is scan order,
+/// and scan order decides score ties.
+mod rolled_back_delete_restores_embeddings {
+    use super::*;
+
+    /// The middle slot — the one a tail swap moves another vector into.
+    #[test]
+    fn middle_slot() {
+        assert_rolls_back(
+            &mut seeded_embedded(),
+            "MATCH (n:Item {id: 2}) DETACH DELETE n CREATE (:Blocked {id: 510})",
+            Some(&["Item"]),
+        );
+    }
+
+    /// The tail slot — the no-swap arm of `remove_embedding`.
+    #[test]
+    fn tail_slot() {
+        assert_rolls_back(
+            &mut seeded_embedded(),
+            "MATCH (n:Item {id: 3}) DETACH DELETE n CREATE (:Blocked {id: 511})",
+            Some(&["Item"]),
+        );
+    }
+
+    /// Every slot at once — three removals whose inverses must replay in
+    /// reverse to land back on the original layout.
+    #[test]
+    fn whole_store() {
+        assert_rolls_back(
+            &mut seeded_embedded(),
+            "MATCH (n:Item) DETACH DELETE n CREATE (:Blocked {id: 512})",
+            Some(&["Item"]),
+        );
+    }
+
+    /// Non-vacuity: the fingerprint must actually be able to see an embedding
+    /// change, or the three tests above pass on a comparison that ignores the
+    /// field they exist for.
+    #[test]
+    fn the_fingerprint_sees_a_pruned_vector() {
+        let mut graph = seeded_embedded();
+        let before = fingerprint(&mut graph);
+        run(&mut graph, "MATCH (n:Item {id: 2}) DETACH DELETE n");
+        assert_ne!(before, fingerprint(&mut graph));
+    }
+}

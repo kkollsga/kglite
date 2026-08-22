@@ -918,6 +918,64 @@ mod tests {
         assert!(g.lookup_by_id("Person", &Value::Int64(2)).is_none());
     }
 
+    /// Recovery replays a node removal through `detach_delete_nodes`, so the
+    /// embedding prune rides along: a `.kgl` saved before the delete plus a
+    /// WAL carrying it must not reload a graph whose store still holds the
+    /// removed node's vector — the freed index is handed to the next node
+    /// created and would inherit it.
+    #[test]
+    fn replayed_node_removal_prunes_the_embedding_store() {
+        let mut g = DirGraph::new();
+        apply_frames(
+            &mut g,
+            &[frame(
+                1,
+                vec![
+                    upsert_node(1, "Alice", vec![]),
+                    upsert_node(2, "Bob", vec![]),
+                ],
+            )],
+            0,
+        )
+        .unwrap();
+        let report = crate::graph::embeddings::set_embeddings(
+            &mut g,
+            "Person",
+            "name",
+            None,
+            [
+                (Value::Int64(1), vec![1.0f32, 0.0]),
+                (Value::Int64(2), vec![0.0, 1.0]),
+            ],
+        )
+        .expect("seed embeddings");
+        assert_eq!(report.embeddings_stored, 2);
+        let doomed = g
+            .lookup_by_id("Person", &Value::Int64(2))
+            .expect("Bob is present");
+
+        apply_frames(
+            &mut g,
+            &[frame(
+                2,
+                vec![MutationOp::RemoveNode {
+                    node_type: "Person".into(),
+                    id: Value::Int64(2),
+                }],
+            )],
+            1,
+        )
+        .unwrap();
+
+        let store = g
+            .embeddings
+            .get(&("Person".to_string(), "name_emb".to_string()))
+            .expect("store");
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.get_embedding(doomed.index()), None);
+        assert_eq!(store.validate_shape(), Ok(()));
+    }
+
     #[test]
     fn remove_edge_keeps_endpoints() {
         let mut g = DirGraph::new();

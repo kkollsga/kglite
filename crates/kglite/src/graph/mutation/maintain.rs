@@ -5,6 +5,7 @@ use crate::graph::introspection::reporting::{ConnectionOperationReport, NodeOper
 use crate::graph::mutation::batch::{
     BatchProcessor, BatchStats, ConflictHandling, ConnectionBatchProcessor, NodeAction,
 };
+use crate::graph::mutation::delete_state::remove_doomed_nodes;
 use crate::graph::mutation::edge_props::{
     intern_edge_props, register_used_edge_property_names, resolve_edge_property_columns,
 };
@@ -1573,37 +1574,6 @@ fn journal_bucket_evictions(
 /// Clearing `connection_types` matters on disk graphs: the lazy
 /// `has_connection_type` cache would otherwise report a still-live
 /// type as gone after a delete.
-/// Remove each doomed node from storage, carrying the two pieces of state
-/// that live *above* storage and so cannot be recovered afterwards.
-///
-/// Both are read while the node still exists and are lost the moment it does
-/// not, which is why they are here rather than in the sweeps below:
-///
-/// - **The change-capture before-image's labels.** The capture wrapper reads
-///   the node's properties and title as it removes it, but secondary labels
-///   live in `DirGraph::secondary_label_index`, one layer above the backend.
-///   A delete is the one event whose only informative half is `before`, so an
-///   image missing its labels is the whole loss.
-/// - **The dropped timeseries entry.** `timeseries_store` is O(V) and so is
-///   deliberately not part of the checkpoint's schema clone; statement
-///   rollback recovers it from the undo journal instead.
-fn remove_doomed_nodes(graph: &mut DirGraph, nodes_to_delete: &HashSet<NodeIndex>) {
-    let captures_before = graph.graph.captures_before_images();
-    for &node_idx in nodes_to_delete {
-        let doomed_labels = captures_before.then(|| graph.secondary_label_names(node_idx));
-        GraphWrite::remove_node(&mut graph.graph, node_idx);
-        if let Some(labels) = doomed_labels {
-            graph.graph.backfill_node_before_labels(node_idx, labels);
-        }
-        let Some(prior) = graph.timeseries_store.remove(&node_idx.index()) else {
-            continue;
-        };
-        if let Some(journal) = graph.graph.undo_journal_mut() {
-            journal.note_timeseries_removed(node_idx.index(), prior);
-        }
-    }
-}
-
 pub(crate) fn detach_delete_nodes(
     graph: &mut DirGraph,
     nodes_to_delete: &HashSet<NodeIndex>,

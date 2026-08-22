@@ -1051,6 +1051,97 @@ mod embedding_store_tests {
         assert!(store.validate_shape().is_err());
     }
 
+    /// Pruning keeps the store dense and the maps a bijection, and drops the
+    /// index whose slot ids it just moved.
+    #[test]
+    fn removing_an_embedding_compacts_the_store() {
+        let mut store = EmbeddingStore::new(2);
+        for (node, v) in [(4usize, 0.0f32), (7, 1.0), (9, 2.0), (11, 3.0)] {
+            store.set_embedding(node, &[v, v]);
+        }
+        store.set_text_hash(7, 42);
+
+        let removed = store.remove_embedding(7).expect("node 7 is embedded");
+        assert_eq!(removed.slot, 1);
+        assert_eq!(removed.vector, vec![1.0, 1.0]);
+        assert_eq!(removed.text_hash, Some(42));
+
+        assert_eq!(store.len(), 3);
+        assert_eq!(store.validate_shape(), Ok(()));
+        assert_eq!(store.get_embedding(7), None);
+        assert!(!store.text_hashes.contains_key(&7));
+        assert_eq!(store.get_embedding(11), Some(&[3.0f32, 3.0][..]));
+        assert_eq!(store.data.len(), 6, "the buffer left no hole behind");
+        assert_eq!(
+            store.get_embedding_with_norm(11).map(|(_, n)| n),
+            Some((18.0f32).sqrt())
+        );
+        assert_eq!(store.remove_embedding(7), None, "removing twice is a no-op");
+    }
+
+    /// Reverse replay of a statement's removals rebuilds the exact
+    /// pre-statement slot layout, not merely the same set of vectors — the
+    /// contract the rollback arm depends on.
+    #[test]
+    fn restoring_removals_in_reverse_rebuilds_the_slot_layout() {
+        /// `(slot_to_node, data, norms, sorted text hashes)`.
+        type Layout = (Vec<usize>, Vec<f32>, Vec<f32>, Vec<(usize, u64)>);
+
+        /// Every field a restore has to put back, in a form whose equality
+        /// does not depend on `HashMap` iteration order — which a remove/
+        /// insert cycle perturbs even when the contents match.
+        fn layout(store: &EmbeddingStore) -> Layout {
+            let mut hashes: Vec<(usize, u64)> =
+                store.text_hashes.iter().map(|(&k, &v)| (k, v)).collect();
+            hashes.sort();
+            (
+                store.slot_to_node.clone(),
+                store.data.clone(),
+                store.norms.clone(),
+                hashes,
+            )
+        }
+
+        let mut store = EmbeddingStore::new(2);
+        for node in [4usize, 7, 9, 11, 13] {
+            store.set_embedding(node, &[node as f32, 1.0]);
+            store.set_text_hash(node, node as u64);
+        }
+        let before = layout(&store);
+
+        // A statement deleting three nodes, including the tail.
+        let removals: Vec<(usize, _)> = [7usize, 13, 4]
+            .into_iter()
+            .map(|node| (node, store.remove_embedding(node).expect("embedded")))
+            .collect();
+        assert_eq!(store.len(), 2);
+        assert_eq!(store.validate_shape(), Ok(()));
+
+        for (node, removed) in removals.into_iter().rev() {
+            store.restore_embedding(node, &removed);
+        }
+        assert_eq!(store.validate_shape(), Ok(()));
+        assert_eq!(layout(&store), before);
+    }
+
+    /// A zero-dimension store still tracks membership, so pruning must handle
+    /// it without slicing past the end of an empty buffer.
+    #[test]
+    fn removing_from_a_zero_dimension_store_is_shape_preserving() {
+        let mut store = EmbeddingStore::new(0);
+        store.set_embedding(3, &[]);
+        store.set_embedding(5, &[]);
+
+        let removed = store.remove_embedding(3).expect("embedded");
+        assert!(removed.vector.is_empty());
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.validate_shape(), Ok(()));
+
+        store.restore_embedding(3, &removed);
+        assert_eq!(store.len(), 2);
+        assert_eq!(store.validate_shape(), Ok(()));
+    }
+
     #[test]
     fn malformed_embedding_store_cannot_build_an_index() {
         use crate::graph::algorithms::hnsw::HnswParams;

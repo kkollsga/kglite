@@ -131,6 +131,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Deleting a node now removes its embedding, so a later node cannot inherit
+  the deleted node's vector.** `EmbeddingStore` is keyed by the engine's
+  internal node index, and the graph hands a deleted node's index straight to
+  the next node created — so a vector left behind was not merely orphaned, it
+  was *inherited*: embed `Doc` 1/2/3, `DETACH DELETE` `Doc` 2, add any new
+  node (`Doc` 77, or a `Note`, embedded or not), and `vector_search` returned
+  that node at score 1.0 for `Doc` 2's own query, while `list_embeddings()`
+  still counted three. The prune happens at the single deletion chokepoint, so
+  Cypher `DELETE`/`DETACH DELETE`, `purge_provisional()` and WAL replay of a
+  recovered deletion are all covered, in every mutable storage mode; `.kgl`
+  saves written after a delete carry no ghost, and statement- and
+  transaction-rollback restore the vector on the exact slot it vacated (a
+  rolled-back `DELETE` leaves search results identical). One consequence worth
+  knowing: because an HNSW index addresses vectors by slot, deleting an
+  embedded node drops that store's index — it is a rebuildable cache, so
+  search falls back to the exact scan until `build_vector_index()` is called
+  again.
+
 - **`compare(target_type=['A', 'B'])` silently compared against `'A'` alone;
   it now raises `ArgumentError`.** The comparison traversal is single-target
   by construction — every method (`contains`, `intersects`, `distance`,

@@ -6655,7 +6655,9 @@ class KnowledgeGraph:
         auto-use the index for queries covering most of a large store; pass
         ``exact=True`` to force an exact scan. The index is **dropped
         automatically** whenever the store's vectors change (``add_embeddings`` /
-        ``embed_texts``) or slots are remapped (``vacuum``) — rebuild it after.
+        ``embed_texts``), slots are remapped (``vacuum``), or an embedded node
+        is deleted (the delete prunes its vector, which moves a slot) — rebuild
+        it after.
 
         The selection does not have to be ``node_type``: while only one node
         type carries ``text_column``, a whole-graph search on a multi-type
