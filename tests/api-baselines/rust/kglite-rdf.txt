@@ -2088,6 +2088,8 @@ pub fn kglite::api::storage::EmbeddingStore::is_stale(&self, node_index: usize, 
 pub fn kglite::api::storage::EmbeddingStore::len(&self) -> usize
 pub fn kglite::api::storage::EmbeddingStore::new(dimension: usize) -> Self
 pub fn kglite::api::storage::EmbeddingStore::rebuild_norms(&mut self)
+pub fn kglite::api::storage::EmbeddingStore::remove_embedding(&mut self, node_index: usize) -> core::option::Option<kglite::graph::schema::RemovedEmbedding>
+pub fn kglite::api::storage::EmbeddingStore::restore_embedding(&mut self, node_index: usize, removed: &kglite::graph::schema::RemovedEmbedding)
 pub fn kglite::api::storage::EmbeddingStore::set_embedding(&mut self, node_index: usize, embedding: &[f32]) -> usize
 pub fn kglite::api::storage::EmbeddingStore::set_text_hash(&mut self, node_index: usize, hash: u64)
 pub fn kglite::api::storage::EmbeddingStore::text_hash(text: &str) -> u64
