@@ -362,6 +362,71 @@ class TestVectorSearch:
         assert results == []
 
 
+# ── unknown store: an error, never a silent [] ────────────────────────────
+
+
+class TestUnknownStoreRaises:
+    """``vector_search`` used to answer "you named a store that does not exist"
+    with the same ``[]`` it uses for "nothing is similar". The two are
+    indistinguishable to the caller, and the first is always a mistake."""
+
+    def test_store_name_passed_as_the_text_column_names_the_column(self, graph_with_embeddings):
+        graph = graph_with_embeddings
+        with pytest.raises(ValueError) as excinfo:
+            graph.select("Article").vector_search("summary_emb", [1.0, 0.0, 0.0], top_k=3)
+        message = str(excinfo.value)
+        assert "Did you mean 'summary'?" in message
+        assert "vector_search() takes the text column" in message
+
+    def test_unknown_column_lists_what_is_embedded(self, graph_with_embeddings):
+        graph = graph_with_embeddings
+        with pytest.raises(ValueError, match="summary"):
+            graph.select("Article").vector_search("nope", [1.0, 0.0, 0.0], top_k=3)
+
+    def test_near_miss_column_gets_a_suggestion(self, graph_with_embeddings):
+        graph = graph_with_embeddings
+        with pytest.raises(ValueError, match="Did you mean 'summary'"):
+            graph.select("Article").vector_search("summry", [1.0, 0.0, 0.0], top_k=3)
+
+    def test_search_text_inherits_the_raise(self, graph_with_embeddings):
+        graph = graph_with_embeddings
+        graph.set_embedder(MockEmbedder(dimension=3))
+        with pytest.raises(ValueError, match="Did you mean 'summary'"):
+            graph.select("Article").search_text("summary_emb", "alpha", top_k=3)
+
+    def _two_types(self):
+        graph = kglite.KnowledgeGraph()
+        for node_type in ("Article", "Note"):
+            graph.add_nodes(
+                pd.DataFrame({"id": [1], "title": [node_type], "summary": [node_type]}),
+                node_type,
+                "id",
+                "title",
+            )
+        graph.set_embeddings("Article", "summary", {1: [1.0, 0.0]})
+        return graph
+
+    def test_partial_coverage_still_returns_its_rows(self):
+        """A selection spanning an embedded and an un-embedded type is a
+        supported partial result — the un-embedded type is skipped."""
+        graph = self._two_types()
+        rows = graph.select("Article").union(graph.select("Note")).vector_search("summary", [1.0, 0.0], top_k=5)
+        assert [(r["type"], r["id"]) for r in rows] == [("Article", 1)]
+
+    def test_selection_with_no_covered_type_raises(self):
+        graph = self._two_types()
+        with pytest.raises(ValueError, match="'Note'"):
+            graph.select("Note").vector_search("summary", [1.0, 0.0], top_k=5)
+
+    def test_build_vector_index_on_a_store_name_hints_the_column(self, graph_with_embeddings):
+        graph = graph_with_embeddings
+        with pytest.raises(ValueError) as excinfo:
+            graph.build_vector_index("Article", "summary_emb")
+        message = str(excinfo.value)
+        assert "Did you mean 'summary'?" in message
+        assert "build_vector_index() takes the text column" in message
+
+
 # ── never-selected fallback (whole graph) ─────────────────────────────────
 
 
@@ -812,17 +877,19 @@ class TestEmbedTexts:
         with pytest.raises(ValueError, match="dimension"):
             graph.embed_texts("Node", "text", show_progress=False)
 
-    def test_embed_texts_no_matching_nodes(self):
-        """No nodes of that type → embedded=0."""
+    def test_embed_texts_unknown_type_raises_before_loading_the_model(self):
+        """A node type the graph has never seen is a caller mistake, not a
+        zero-row result — the same complaint ``set_embeddings`` makes. It fires
+        before the (potentially expensive) model load."""
         graph = kglite.KnowledgeGraph()
         df = pd.DataFrame({"id": [1], "title": ["A"], "text": ["hello"]})
         graph.add_nodes(df, "Node", "id", "title")
 
-        graph.set_embedder(MockEmbedder(dimension=3))
-        result = graph.embed_texts("Other", "text", show_progress=False)
-
-        assert result["embedded"] == 0
-        assert result["skipped"] == 0
+        model = MockEmbedderWithLifecycle(dimension=3)
+        graph.set_embedder(model)
+        with pytest.raises(ValueError, match="Node type 'Other' does not exist in the graph"):
+            graph.embed_texts("Other", "text", show_progress=False)
+        assert model.load_count == 0
 
     def test_embed_texts_no_model_set(self):
         """Calling embed_texts without set_embedder raises with skeleton."""
@@ -1089,9 +1156,12 @@ class TestEmbedderLifecycle:
         assert model.unload_count == 1
 
     def test_embed_texts_calls_unload_on_empty(self):
-        """unload() is called even when there are no texts to embed."""
+        """unload() is called even when there are no texts to embed. The column
+        has to be a real one: an unknown source column is now rejected before
+        the model is ever loaded (it used to embed nothing and say so only in
+        `skipped`)."""
         graph = kglite.KnowledgeGraph()
-        df = pd.DataFrame({"id": [1], "title": ["A"]})
+        df = pd.DataFrame({"id": [1], "title": ["A"], "text": [""]})
         graph.add_nodes(df, "Node", "id", "title")
 
         model = MockEmbedderWithLifecycle(dimension=3)
@@ -1100,8 +1170,24 @@ class TestEmbedderLifecycle:
         result = graph.embed_texts("Node", "text", show_progress=False)
 
         assert result["embedded"] == 0
+        assert result["skipped"] == 1
         assert model.load_count == 1
         assert model.unload_count == 1
+
+    def test_embed_texts_rejects_an_unknown_column_before_loading_the_model(self):
+        """The silent `{'embedded': 0}` for a column that exists nowhere is an
+        error now — the same one `set_embeddings` raises — and it fires before
+        any model work."""
+        graph = kglite.KnowledgeGraph()
+        df = pd.DataFrame({"id": [1], "title": ["A"], "text": ["hello"]})
+        graph.add_nodes(df, "Node", "id", "title")
+
+        model = MockEmbedderWithLifecycle(dimension=3)
+        graph.set_embedder(model)
+
+        with pytest.raises(ValueError, match="not found on any 'Node' node"):
+            graph.embed_texts("Node", "body", show_progress=False)
+        assert model.load_count == 0
 
     def test_search_text_calls_load_and_unload(self):
         """search_text calls load() before and unload() after embedding the query."""
@@ -2255,3 +2341,195 @@ class TestNormCacheParity:
         assert [i for i, _ in before] == [i for i, _ in after]
         for (_, b), (_, a) in zip(before, after):
             assert abs(b - a) < 1e-6
+
+
+class TestEmbeddingsIdCollision:
+    """One-arg ``embeddings(text_column)`` keys a *cross-type* selection by
+    bare node id. Ids are unique per type only, so two types sharing an id
+    used to silently drop one vector; it now refuses and names the two-arg
+    form as the type-namespaced way to get both."""
+
+    @staticmethod
+    def _colliding_graph():
+        graph = kglite.KnowledgeGraph()
+        graph.add_nodes(
+            pd.DataFrame({"id": [1], "title": ["Alpha"], "summary": ["alpha text"]}),
+            "Article",
+            "id",
+            "title",
+        )
+        graph.add_nodes(
+            pd.DataFrame({"id": [1], "title": ["Note one"], "summary": ["note text"]}),
+            "Note",
+            "id",
+            "title",
+        )
+        graph.set_embeddings("Article", "summary", {1: [1.0, 0.0]})
+        graph.set_embeddings("Note", "summary", {1: [0.0, 1.0]})
+        return graph
+
+    def test_one_arg_raises_on_cross_type_id_collision(self):
+        graph = self._colliding_graph()
+        with pytest.raises(kglite.ArgumentError, match="sharing id"):
+            graph.embeddings("summary")
+
+    def test_collision_error_names_the_two_arg_form(self):
+        graph = self._colliding_graph()
+        with pytest.raises(kglite.ArgumentError) as excinfo:
+            graph.embeddings("summary")
+        message = str(excinfo.value)
+        assert "embeddings()" in message
+        assert "embeddings(node_type, text_column)" in message
+
+    def test_two_arg_form_returns_both_stores(self):
+        """The recipe the error names actually works on the same graph."""
+        graph = self._colliding_graph()
+        assert graph.embeddings("Article", "summary") == {1: [1.0, 0.0]}
+        assert graph.embeddings("Note", "summary") == {1: [0.0, 1.0]}
+
+    def test_single_type_one_arg_unchanged(self, graph_with_embeddings):
+        embs = graph_with_embeddings.select("Article").embeddings("summary")
+        assert set(embs) == {1, 2, 3, 4, 5}
+        assert embs[1] == [1.0, 0.0, 0.0]
+
+    def test_selection_narrowed_to_one_type_is_fine(self):
+        """A collision-free *selection* over a colliding graph still works —
+        the refusal fires on the keys actually produced, not on the graph."""
+        graph = self._colliding_graph()
+        assert graph.select("Note").embeddings("summary") == {1: [0.0, 1.0]}
+
+
+# ── deletion prunes the store ──────────────────────────────────────────────
+
+
+def _embedded_docs(storage: str = "default", ids=(1, 2, 3)):
+    """Docs 1..n, each embedded on a distinct axis of a 3-d space."""
+    kwargs = {} if storage == "default" else {"storage": storage}
+    graph = kglite.KnowledgeGraph(**kwargs)
+    vectors = {1: [1.0, 0.0, 0.0], 2: [0.0, 1.0, 0.0], 3: [0.0, 0.0, 1.0]}
+    df = pd.DataFrame(
+        {
+            "id": list(ids),
+            "title": [f"Doc {i}" for i in ids],
+            "summary": [f"text {i}" for i in ids],
+        }
+    )
+    graph.add_nodes(df, "Doc", "id", "title")
+    graph.set_embeddings("Doc", "summary", {i: vectors[i] for i in ids})
+    return graph
+
+
+class TestDeletionPrunesEmbeddings:
+    """A deleted node's vector must leave with it.
+
+    KGLite keys an embedding store by the engine's internal node index, and
+    the graph hands a deleted node's index straight to the next node created.
+    A vector left behind is therefore *inherited*: the new node — of any type,
+    embedded or not — comes back as a perfect-similarity top hit for the
+    deleted node's query.
+    """
+
+    def test_a_new_node_does_not_inherit_a_deleted_nodes_vector(self):
+        """The blind-review repro, verbatim."""
+        graph = _embedded_docs()
+        graph.cypher("MATCH (d:Doc {id: 2}) DETACH DELETE d")
+        graph.add_nodes(
+            pd.DataFrame({"id": [77], "title": ["Doc 77"], "summary": ["fresh"]}),
+            "Doc",
+            "id",
+            "title",
+        )
+
+        # Doc 2's own vector: the query the ghost answered with score 1.0.
+        results = graph.select("Doc").vector_search("summary", [0.0, 1.0, 0.0], top_k=5)
+
+        assert 77 not in [r["id"] for r in results], results
+        assert 2 not in [r["id"] for r in results], results
+        assert all(r["score"] < 0.99 for r in results), results
+
+    def test_a_new_node_of_another_type_does_not_inherit_it_either(self):
+        """The store is keyed by node index, not by type, so an unrelated type
+        landing on the freed index inherited just as readily."""
+        graph = _embedded_docs()
+        graph.cypher("MATCH (d:Doc {id: 2}) DETACH DELETE d")
+        graph.add_nodes(
+            pd.DataFrame({"id": [99], "title": ["Note 99"]}),
+            "Note",
+            "id",
+            "title",
+        )
+
+        # Whole-graph search (no selection) — the path a Note node is visible on.
+        results = graph.vector_search("summary", [0.0, 1.0, 0.0], top_k=5)
+        assert [(r["type"], r["id"]) for r in results if r["type"] == "Note"] == []
+
+    def test_delete_drops_the_listed_embedding_count(self):
+        graph = _embedded_docs()
+        assert graph.list_embeddings()[0]["count"] == 3
+
+        graph.cypher("MATCH (d:Doc {id: 2}) DETACH DELETE d")
+        assert graph.list_embeddings()[0]["count"] == 2
+
+        graph.cypher("MATCH (d:Doc) DETACH DELETE d")
+        # The store stays — it is a declared column — but holds nothing.
+        assert graph.list_embeddings()[0]["count"] == 0
+
+    def test_delete_removes_the_node_from_embeddings_readback(self):
+        """`embeddings()` reads through live nodes, so the heir is what makes
+        the ghost visible here: an un-pruned store hands it Doc 2's vector."""
+        graph = _embedded_docs()
+        graph.cypher("MATCH (d:Doc {id: 2}) DETACH DELETE d")
+        graph.add_nodes(
+            pd.DataFrame({"id": [77], "title": ["Doc 77"], "summary": ["fresh"]}),
+            "Doc",
+            "id",
+            "title",
+        )
+        assert set(graph.select("Doc").embeddings("summary")) == {1, 3}
+
+    def test_saved_after_delete_reloads_without_a_ghost(self):
+        graph = _embedded_docs()
+        graph.cypher("MATCH (d:Doc {id: 2}) DETACH DELETE d")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "g.kgl")
+            graph.save(path)
+            reloaded = kglite.load(path)
+
+        assert reloaded.list_embeddings()[0]["count"] == 2
+        reloaded.add_nodes(
+            pd.DataFrame({"id": [77], "title": ["Doc 77"], "summary": ["fresh"]}),
+            "Doc",
+            "id",
+            "title",
+        )
+        results = reloaded.select("Doc").vector_search("summary", [0.0, 1.0, 0.0], top_k=5)
+        assert 77 not in [r["id"] for r in results], results
+
+    @pytest.mark.parametrize("storage", ["default", "mapped"])
+    def test_pruning_is_identical_across_mutable_storage_modes(self, storage):
+        """Both mutable modes share the deletion chokepoint, so both prune.
+
+        (`storage='disk'` is a read substrate for large-graph exploration and
+        is covered by the mode-parity suite, not here.)"""
+        graph = _embedded_docs(storage)
+        graph.cypher("MATCH (d:Doc {id: 2}) DETACH DELETE d")
+
+        assert graph.list_embeddings()[0]["count"] == 2
+        assert set(graph.select("Doc").embeddings("summary")) == {1, 3}
+
+    def test_a_rolled_back_delete_leaves_vector_search_unchanged(self):
+        """Statement atomicity covers the store: the engine parks `embeddings`
+        out of the rollback checkpoint, so only an explicit undo entry brings a
+        pruned vector back."""
+        graph = _embedded_docs()
+        query = [0.0, 1.0, 0.0]
+        before = graph.select("Doc").vector_search("summary", query, top_k=5)
+
+        with pytest.raises(Exception):
+            graph.cypher(
+                "MATCH (d:Doc {id: 2}) DETACH DELETE d CREATE (:Blocked {id: 500})",
+                write_scope=["Doc"],
+            )
+
+        assert graph.select("Doc").vector_search("summary", query, top_k=5) == before
+        assert graph.list_embeddings()[0]["count"] == 3

@@ -1044,13 +1044,33 @@ pub struct EmbeddingStore {
     /// vectors, built on demand via `build_vector_index`. When present (and the
     /// query isn't `exact`), top-k vector search dispatches through it instead of
     /// a full linear scan. Indexes nodes by *slot*, so any change to the slot
-    /// layout (in-place vector replacement, `add_embeddings`, compaction)
+    /// layout (in-place vector replacement, `add_embeddings`, compaction, the
+    /// pruning a node deletion does via `remove_embedding`)
     /// invalidates it — callers drop it via `invalidate_index`. NOT serialized
     /// here (`#[serde(skip)]`): it rides in a dedicated versioned, skippable
     /// sub-section of the `.kgl` so the on-disk format can evolve independently;
     /// absent that section it's simply rebuilt.
     #[serde(skip)]
     pub index: Option<crate::graph::algorithms::hnsw::HnswIndex>,
+}
+
+/// One vector lifted out of an [`EmbeddingStore`] by
+/// [`EmbeddingStore::remove_embedding`] — everything
+/// [`EmbeddingStore::restore_embedding`] needs to put it back on the slot it
+/// vacated. Carried by the undo journal so a rolled-back `DELETE` leaves
+/// vector search returning exactly what it returned before.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemovedEmbedding {
+    /// The slot the vector occupied. The restore reverses the tail swap that
+    /// freed it, so slot identity survives a rollback.
+    pub slot: usize,
+    /// The vector itself.
+    pub vector: Vec<f32>,
+    /// The node's `text_hashes` entry, if it had one (`embed_texts` stamps
+    /// it; raw `add_embeddings` does not). Restoring it keeps
+    /// `embed_texts(mode='changed')` from re-embedding a node whose delete
+    /// was rolled back.
+    pub text_hash: Option<u64>,
 }
 
 /// Squared L2 norm of a vector, computed with the same 4-accumulator
@@ -1160,6 +1180,83 @@ impl EmbeddingStore {
             self.data.extend_from_slice(embedding);
             self.norms.push(norm);
             slot
+        }
+    }
+
+    /// Drop a node's embedding, returning what it held so a statement
+    /// rollback can put it back exactly (see [`RemovedEmbedding`]).
+    /// `None` when the node has no vector in this store.
+    ///
+    /// **Deleting a node must call this.** `StableDiGraph` reuses a freed
+    /// `NodeIndex`, and the store is keyed by that index, so a vector left
+    /// behind is inherited by the next node to land on the slot — a
+    /// full-similarity hit for a node that was never embedded, of any type.
+    ///
+    /// Compacts by swapping the tail slot into the vacated one, so the store
+    /// keeps the dense, hole-free layout every reader (and the `.kgl`
+    /// serializer) already assumes; the slot layout changes, so the HNSW
+    /// index is dropped.
+    pub fn remove_embedding(&mut self, node_index: usize) -> Option<RemovedEmbedding> {
+        let slot = self.node_to_slot.remove(&node_index)?;
+        self.index = None;
+        let text_hash = self.text_hashes.remove(&node_index);
+        let dim = self.dimension;
+        let vector = self.data[slot * dim..(slot + 1) * dim].to_vec();
+        let last = self.slot_to_node.len() - 1;
+        if slot != last {
+            let moved = self.slot_to_node[last];
+            self.slot_to_node[slot] = moved;
+            self.node_to_slot.insert(moved, slot);
+            self.data
+                .copy_within(last * dim..(last + 1) * dim, slot * dim);
+            self.norms[slot] = self.norms[last];
+        }
+        self.slot_to_node.pop();
+        self.data.truncate(last * dim);
+        self.norms.pop();
+        Some(RemovedEmbedding {
+            slot,
+            vector,
+            text_hash,
+        })
+    }
+
+    /// Exact inverse of [`Self::remove_embedding`] — the undo journal's
+    /// restore half.
+    ///
+    /// Reverses the tail swap as well as the removal: whatever now occupies
+    /// `removed.slot` is pushed back to the end and the restored vector takes
+    /// its original slot. Replayed in reverse capture order (as the journal
+    /// always replays), a statement's removals therefore rebuild the exact
+    /// pre-statement slot layout, not merely the same set of vectors — which
+    /// matters because slot order is scan order, and scan order decides
+    /// score ties.
+    pub fn restore_embedding(&mut self, node_index: usize, removed: &RemovedEmbedding) {
+        self.index = None;
+        let dim = self.dimension;
+        let slot = removed.slot;
+        let len = self.slot_to_node.len();
+        debug_assert!(slot <= len, "a restore may only refill the slot it vacated");
+        let norm = l2_norm_sq(&removed.vector).sqrt();
+        if slot < len {
+            // Evict the current occupant to the tail the removal vacated.
+            let moved = self.slot_to_node[slot];
+            let moved_vector: Vec<f32> = self.data[slot * dim..(slot + 1) * dim].to_vec();
+            self.slot_to_node.push(moved);
+            self.node_to_slot.insert(moved, len);
+            self.data.extend_from_slice(&moved_vector);
+            self.norms.push(self.norms[slot]);
+            self.data[slot * dim..(slot + 1) * dim].copy_from_slice(&removed.vector);
+            self.norms[slot] = norm;
+            self.slot_to_node[slot] = node_index;
+        } else {
+            self.slot_to_node.push(node_index);
+            self.data.extend_from_slice(&removed.vector);
+            self.norms.push(norm);
+        }
+        self.node_to_slot.insert(node_index, slot);
+        if let Some(hash) = removed.text_hash {
+            self.text_hashes.insert(node_index, hash);
         }
     }
 

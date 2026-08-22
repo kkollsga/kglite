@@ -522,6 +522,12 @@ impl KnowledgeGraph {
     /// conform to the currently known node types, connection types, and
     /// property types.
     ///
+    /// Reads are validated too: an unknown node label, and a property name no
+    /// node of the type carries, raise `SchemaError` instead of returning zero
+    /// rows or a column of nulls. The full set of cases the read check stays
+    /// silent on is documented on the `.pyi` stub, which is the API-doc source
+    /// of truth.
+    ///
     /// Returns:
     ///     This same graph (not a copy), so the call can be chained.
     ///
@@ -530,13 +536,16 @@ impl KnowledgeGraph {
     /// ```text
     /// graph.lock_schema()
     /// graph.cypher("CREATE (p:Typo {name: 'x'})")  # raises RuntimeError
+    /// graph.cypher("MATCH (p:Person) RETURN p.agee")  # raises SchemaError
     /// ```
     fn lock_schema(mut slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
         get_graph_mut(&mut slf.inner).schema_locked = true;
         slf
     }
 
-    /// Unlock the schema: allow any Cypher mutations without schema validation.
+    /// Unlock the schema: allow any Cypher mutations without schema validation,
+    /// and return reads to reporting unknown labels / absent properties as
+    /// non-fatal warnings.
     ///
     /// Returns:
     ///     This same graph (not a copy), so the call can be chained.
@@ -823,26 +832,7 @@ impl KnowledgeGraph {
             .map(|l| l.node_count())
             .unwrap_or(0);
 
-        // Parse target_type: str → vec![str], list[str] → vec[str]
-        let target_types: Option<Vec<String>> = if let Some(tt) = target_type {
-            if let Ok(s) = tt.extract::<String>() {
-                Some(vec![s])
-            } else if let Ok(list) = tt.extract::<Vec<String>>() {
-                if list.is_empty() {
-                    None
-                } else {
-                    Some(list)
-                }
-            } else {
-                return Err(crate::error_py::kg_to_pyerr(
-                    crate::error::KgError::Argument(
-                        "target_type must be a string or list of strings".to_string(),
-                    ),
-                ));
-            }
-        } else {
-            None
-        };
+        let target_types = crate::graph::string_or_list(target_type, "target_type")?;
 
         let conditions = if let Some(cond) = r#where {
             Some(py_in::pydict_to_filter_conditions(cond)?)
@@ -975,6 +965,10 @@ impl KnowledgeGraph {
     /// Compare selected nodes against a target type using spatial, semantic,
     /// or clustering methods.
     ///
+    /// Exactly one target type is supported. A single-element list is
+    /// accepted for symmetry with `traverse()`, but a list of two or more
+    /// raises `ArgumentError` — call `compare()` once per type instead.
+    ///
     /// Examples::
     ///
     /// ```text
@@ -1005,18 +999,23 @@ impl KnowledgeGraph {
             .map(|l| l.node_count())
             .unwrap_or(0);
 
-        // Parse target_type: str → Some(str), list[str] → first element
-        let resolved_target: Option<String> = if let Ok(s) = target_type.extract::<String>() {
-            Some(s)
-        } else if let Ok(list) = target_type.extract::<Vec<String>>() {
-            list.into_iter().next()
-        } else {
-            return Err(crate::error_py::kg_to_pyerr(
-                crate::error::KgError::Argument(
-                    "target_type must be a string or list of strings".to_string(),
-                ),
-            ));
-        };
+        // The comparison traversal is single-target: every method in
+        // `make_comparison_traversal` dispatches on one type name. A
+        // multi-element list is refused rather than silently truncated.
+        let resolved_target: Option<String> =
+            match crate::graph::string_or_list(Some(target_type), "target_type")? {
+                Some(types) if types.len() > 1 => {
+                    return Err(crate::error_py::kg_to_pyerr(
+                        crate::error::KgError::Argument(format!(
+                            "compare() supports one target_type; got {}. Pass a single type, \
+                             or call compare() once per type.",
+                            types.len()
+                        )),
+                    ));
+                }
+                Some(types) => types.into_iter().next(),
+                None => None,
+            };
 
         let config = parse_method_param(method)?;
 

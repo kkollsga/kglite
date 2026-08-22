@@ -101,7 +101,33 @@ const PARALLEL_THRESHOLD: usize = 10_000;
 /// Minimum candidate count before an HNSW index is auto-used. Below this a
 /// brute-force scan is both faster (no index overhead) and exact, so there's no
 /// reason to risk approximate recall.
-const HNSW_AUTO_MIN: usize = 256;
+///
+/// Calibrated 2026-08-22 (release, `tests/benchmarks/bench_vector_index.py`,
+/// cosine, top_k=10, min-of-200-rounds, three agreeing runs). The previous
+/// value of 256 sat *below* the measured crossover on both corpora, so the
+/// index was auto-used in a band where it was strictly dominated — slower
+/// *and* approximate:
+///
+/// | n   | dim | low-rank corpus | Gaussian corpus |
+/// |-----|-----|-----------------|-----------------|
+/// | 256 |  64 | 1.04x slower    | 1.15x slower    |
+/// | 256 | 384 | 1.04x slower    | 1.13x slower    |
+/// | 300 | 384 | 1.03x slower    | 1.15x slower    |
+/// | 400 | 384 | 1.09x *faster*  | 1.14x slower    |
+/// | 500 | 384 | 1.18x *faster*  | 1.10x slower    |
+///
+/// 400 is the largest value at which no measured cell prefers the index and
+/// the smallest at which no measured cell prefers the scan, on the low-rank
+/// corpus that represents real embeddings (`test_bench_vector_index.py`
+/// documents why independent Gaussian noise is the adversarial case, not the
+/// workload). Raising it further to chase the Gaussian crossover (~600 at
+/// d=64, ~750 at d=384) would cost the representative corpus 1.18-1.39x.
+///
+/// The threshold is deliberately *not* dimension-aware: the representative
+/// corpus crosses over at ~350 at both d=64 and d=384, so a `f(dim)` gate
+/// would encode a dependence the measurement does not show. Above this band
+/// the index wins by 2.7-9.8x at every size and dimension swept up to 50k.
+const HNSW_AUTO_MIN: usize = 400;
 
 /// Over-fetch factor for HNSW: fetch `top_k * this` candidates so that, after
 /// dropping any that fall outside the (possibly filtered) selection, `top_k`
@@ -191,6 +217,152 @@ fn selection_candidates<'a>(
     }
 }
 
+/// How a search resolves the store(s) behind `embedding_property`.
+struct StoreRouting<'a> {
+    /// The one store the whole search can run against, when routing proved
+    /// that cannot drop rows. `None` sends the search down the per-candidate
+    /// multi-store scan.
+    single: Option<(&'a str, &'a EmbeddingStore)>,
+    /// The candidate slice is exactly this store's slots, in slot order — an
+    /// O(1)-after-the-zip proof of whole-store coverage.
+    ordered_whole_store: bool,
+}
+
+/// The single node type carrying `embedding_property`, if exactly one does.
+///
+/// Costs O(#stores) — a handful of map keys, independent of graph size.
+fn unique_store_for<'a>(
+    graph: &'a DirGraph,
+    embedding_property: &str,
+) -> Option<(&'a str, &'a EmbeddingStore)> {
+    let mut stores = graph
+        .embeddings
+        .iter()
+        .filter(|(key, _)| key.1 == *embedding_property)
+        .map(|(key, store)| (key.0.as_str(), store));
+    let only = stores.next()?;
+    stores.next().is_none().then_some(only)
+}
+
+/// Decide whether one store can serve the whole search.
+///
+/// The invariant the single-store path needs is **store uniqueness for this
+/// embedding property**, not type homogeneity of the selection: `node_to_slot`
+/// is keyed by the global node index, so a candidate of a foreign type simply
+/// misses the store and is skipped — exactly what the multi-store scan does
+/// with it. Only a *second* type carrying the same property makes the
+/// single-store path lossy (it would silently drop that type's rows), and that
+/// case keeps the homogeneity proof.
+///
+/// Routing on uniqueness also *removes* work from the common call: proving
+/// homogeneity costs O(#candidates) backend type reads, proving uniqueness
+/// costs O(#stores) map keys. The whole-graph search on a graph with a second,
+/// un-embedded type used to fail the homogeneity test on its first foreign
+/// node and fall to the scan-only path, never reaching the index at all.
+fn route_stores<'a>(
+    graph: &'a DirGraph,
+    candidates: &[NodeIndex],
+    embedding_property: &str,
+) -> StoreRouting<'a> {
+    let first_type = candidates
+        .first()
+        .and_then(|&node| GraphRead::node_type_of(&graph.graph, node));
+    let unique = unique_store_for(graph, embedding_property);
+    // With two or more stores the shape checks run against the store the first
+    // candidate's type owns, which is the only one the single-store path could
+    // have used.
+    let shape_store = unique.or_else(|| {
+        first_type.and_then(|node_type| {
+            let node_type = graph.interner.resolve(node_type);
+            let key = (node_type.to_string(), embedding_property.to_string());
+            graph.embeddings.get(&key).map(|store| (node_type, store))
+        })
+    });
+
+    // Type selections preserve embedding insertion order. Exact slot identity
+    // proves coverage without backend type reads or membership allocation;
+    // borrowing the candidate slice replaces the old candidate clone with this
+    // comparison instead of adding a second O(N) pass.
+    let ordered_whole_store = shape_store.is_some_and(|(_, store)| {
+        candidates.len() == store.len()
+            && candidates
+                .iter()
+                .zip(&store.slot_to_node)
+                .all(|(candidate, &stored)| candidate.index() == stored)
+    });
+
+    // Two or more types carry this property: looking at the first row alone
+    // would drop the others from a union selection, so non-contiguous shapes
+    // prove type homogeneity with granular primary-type reads first.
+    let single = unique.or_else(|| {
+        shape_store.filter(|_| {
+            ordered_whole_store
+                || first_type.is_some_and(|expected| {
+                    candidates.iter().all(|&candidate| {
+                        GraphRead::node_type_of(&graph.graph, candidate)
+                            .is_none_or(|node_type| node_type == expected)
+                    })
+                })
+        })
+    });
+
+    StoreRouting {
+        single,
+        ordered_whole_store,
+    }
+}
+
+/// Whether "every node in the graph" covers every slot of `store`.
+///
+/// Removing a node does not prune its embedding, so a store can hold slots for
+/// nodes that no longer exist; those are *not* covered by the whole graph and
+/// the caller must fall back to an explicit membership set. Costs O(#store)
+/// existence probes rather than the O(#candidates) set build that proof would
+/// otherwise need — which is the entire point of the whole-graph fast path.
+fn whole_graph_covers_store(graph: &DirGraph, store: &EmbeddingStore) -> bool {
+    let bound = GraphRead::node_bound(&graph.graph);
+    if GraphRead::node_count(&graph.graph) == bound {
+        // No freed slots, so every index below the bound is a live node.
+        return store.slot_to_node.iter().all(|&node| node < bound);
+    }
+    store.slot_to_node.iter().all(|&node| {
+        node < bound && GraphRead::node_type_of(&graph.graph, NodeIndex::new(node)).is_some()
+    })
+}
+
+/// The auto-use gate: `Some(covered)` when the index should serve this search,
+/// `None` to scan. `covered` is the number of store slots the selection
+/// actually contains.
+///
+/// The gate is stated in *covered slots*, never in raw candidate count. Once
+/// the single-store path admits candidates of foreign types (which it must —
+/// see [`route_stores`]) the candidate count stops being a coverage measure: a
+/// selection of one embedded node beside 100k foreign ones would clear a gate
+/// it covers 1/100 000 of, spend the index walk, and then have almost every
+/// result filtered back out.
+///
+/// The candidate-count conditions are kept as a cheap *necessary* pre-filter —
+/// `covered` can never exceed `candidates.len()` — so the O(#candidates) probe
+/// stays off the reject path, and off the proven-coverage path entirely.
+fn hnsw_covered_slots(
+    store: &EmbeddingStore,
+    candidates: &[NodeIndex],
+    coverage_proven: bool,
+) -> Option<usize> {
+    if candidates.len() < HNSW_AUTO_MIN || candidates.len().saturating_mul(2) < store.len() {
+        return None;
+    }
+    let covered = if coverage_proven {
+        store.len()
+    } else {
+        candidates
+            .iter()
+            .filter(|node| store.node_to_slot.contains_key(&node.index()))
+            .count()
+    };
+    (covered >= HNSW_AUTO_MIN && covered.saturating_mul(2) >= store.len()).then_some(covered)
+}
+
 /// Perform vector search over the current selection.
 ///
 /// Gets candidate nodes from the selection's current level, computes similarity
@@ -206,6 +378,14 @@ fn selection_candidates<'a>(
 /// stores). `exact = true` always forces the full linear scan. The Poincaré
 /// metric, small/heavily-filtered selections, and stores without an index all
 /// fall back to the (norm-accelerated) exact scan.
+///
+/// The index is reachable whenever *one* node type carries
+/// `embedding_property` — the selection may span any number of other types (see
+/// [`route_stores`]) — or, when two or more types carry it, whenever the
+/// selection is that single type. A selection spanning two embedded types is
+/// scored by scan, so no type's rows can be dropped. "Covers enough" is
+/// measured in store slots the selection actually contains, not in candidates
+/// (see [`hnsw_covered_slots`]).
 pub fn vector_search(
     graph: &DirGraph,
     selection: &CurrentSelection,
@@ -228,40 +408,13 @@ pub fn vector_search(
     }
 
     let candidates = selection_candidates(graph, selection);
-    let Some(&first_candidate) = candidates.first() else {
+    if candidates.is_empty() {
         return Ok(Vec::new());
-    };
-    let first_type = GraphRead::node_type_of(&graph.graph, first_candidate);
-    let tentative_single_type = first_type.and_then(|node_type| {
-        let node_type = graph.interner.resolve(node_type);
-        let key = (node_type.to_string(), embedding_property.to_string());
-        graph.embeddings.get(&key).map(|store| (node_type, store))
-    });
-
-    // Type selections preserve embedding insertion order. Exact slot identity
-    // proves coverage and single-store eligibility without backend type reads
-    // or membership allocation; borrowing above replaces the old candidate
-    // clone with this comparison instead of adding a second O(N) pass.
-    let ordered_whole_store = tentative_single_type.is_some_and(|(_, store)| {
-        candidates.len() == store.len()
-            && candidates
-                .iter()
-                .zip(&store.slot_to_node)
-                .all(|(candidate, &stored)| candidate.index() == stored)
-    });
-
-    // Looking at the first row alone drops other embedded types from a union
-    // selection. Non-contiguous shapes therefore prove type homogeneity with
-    // granular primary-type reads before entering the single-store branch.
-    let single_type = tentative_single_type.filter(|_| {
-        ordered_whole_store
-            || first_type.is_some_and(|expected| {
-                candidates.iter().all(|&candidate| {
-                    GraphRead::node_type_of(&graph.graph, candidate)
-                        .is_none_or(|node_type| node_type == expected)
-                })
-            })
-    });
+    }
+    let StoreRouting {
+        single: single_type,
+        ordered_whole_store,
+    } = route_stores(graph, candidates.as_ref(), embedding_property);
 
     let metric = if use_stored_metric {
         match single_type {
@@ -288,6 +441,12 @@ pub fn vector_search(
 
         let scorer = Scorer::new(metric, query_vector);
 
+        // Whole-store coverage, proven without an O(#candidates) membership
+        // set: either the candidates *are* the store's slots in slot order, or
+        // the selection was never narrowed and is therefore every live node.
+        let coverage_proven = ordered_whole_store
+            || (selection.never_selected() && whole_graph_covers_store(graph, store));
+
         // HNSW fast path: use the index when allowed, supported, and the
         // selection covers enough of the store. Returns None (→ exact fallback)
         // if a selective filter left fewer than top_k survivors.
@@ -295,38 +454,55 @@ pub fn vector_search(
             None
         } else {
             store.index.as_ref().and_then(|idx| {
-                let eligible = HnswMetric::from_distance(metric) == Some(idx.metric())
-                    && candidates.len() >= HNSW_AUTO_MIN
-                    && candidates.len().saturating_mul(2) >= store.len();
-                if eligible {
-                    hnsw_search(
-                        store,
-                        idx,
-                        candidates.as_ref(),
-                        ordered_whole_store,
-                        query_vector,
-                        top_k,
-                        &scorer,
-                    )
-                } else {
-                    None
+                if HnswMetric::from_distance(metric) != Some(idx.metric()) {
+                    return None;
                 }
+                let covered = hnsw_covered_slots(store, candidates.as_ref(), coverage_proven)?;
+                debug_assert!(covered >= HNSW_AUTO_MIN);
+                hnsw_search(
+                    store,
+                    idx,
+                    candidates.as_ref(),
+                    coverage_proven,
+                    query_vector,
+                    top_k,
+                    &scorer,
+                )
             })
         };
 
-        match hnsw_result {
+        let rows = match hnsw_result {
             Some(r) => r,
             None if candidates.len() > PARALLEL_THRESHOLD => {
                 parallel_search(&candidates, store, query_vector, top_k, &scorer)
             }
             None => sequential_search(&candidates, store, query_vector, top_k, &scorer),
+        };
+        // The single-store path admits candidates of any type, so it inherits
+        // the multi-type branch's duty to tell "nothing is similar" apart from
+        // "no selected type carries this store". Only an empty result can be
+        // the latter, so the type walk never costs a populated search anything.
+        if rows.is_empty() {
+            if let Some(err) =
+                unmatched_store_error(graph, candidates.as_ref(), node_type, embedding_property)
+            {
+                return Err(err);
+            }
         }
+        rows
     } else {
         // Multi-type path: group by node type
         let scorer = Scorer::new(metric, query_vector);
         let mut heap = MinHeap::with_capacity(top_k);
         let mut cached_type = None;
         let mut cached_store = None;
+        // A selection spanning embedded and un-embedded types is a supported
+        // partial result, so a per-type miss only skips. "No type matched at
+        // all" is a different animal — a wrong column or an un-embedded type —
+        // and used to come back as a silent empty list, so it is recorded here
+        // and raised below. Both are computed on the cache-miss branch only.
+        let mut matched_a_store = false;
+        let mut unmatched_types: Vec<&str> = Vec::new();
 
         for &node_idx in candidates.iter() {
             let node_type = match GraphRead::node_type_of(&graph.graph, node_idx) {
@@ -339,6 +515,11 @@ pub fn vector_search(
                 let key = (node_type_name.to_string(), embedding_property.to_string());
                 cached_store = graph.embeddings.get(&key);
                 cached_type = Some(node_type);
+                if cached_store.is_some() {
+                    matched_a_store = true;
+                } else if !unmatched_types.contains(&node_type_name) {
+                    unmatched_types.push(node_type_name);
+                }
             }
             let store = match cached_store {
                 Some(s) => s,
@@ -362,10 +543,89 @@ pub fn vector_search(
             }
         }
 
+        if !matched_a_store && !unmatched_types.is_empty() {
+            return Err(missing_store_error(
+                graph,
+                &unmatched_types,
+                embedding_property,
+            ));
+        }
+
         heap.into_sorted_results()
     };
 
     Ok(results)
+}
+
+/// The error a search raises when *no* selected node type carries the store.
+///
+/// The silent-`[]` case this replaces was unrecoverable from the outside: the
+/// caller could not tell "nothing is similar" from "you named a store that does
+/// not exist". So the message names the store that was looked up, the types
+/// that were asked for it, and — through the shared probe next to
+/// [`store_name`](crate::graph::embeddings::store_name) — the column that would
+/// have worked.
+///
+/// A selection where *some* type has the store never reaches here; those rows
+/// are a legitimate partial result.
+fn missing_store_error(graph: &DirGraph, node_types: &[&str], store: &str) -> String {
+    let text_column = crate::graph::embeddings::text_column_of(store).unwrap_or(store);
+    let types = node_types
+        .iter()
+        .map(|node_type| format!("'{node_type}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let plural = if node_types.len() == 1 {
+        "type"
+    } else {
+        "types"
+    };
+    let hint = crate::graph::embeddings::unknown_column_hint(
+        graph,
+        node_types,
+        text_column,
+        "vector_search()",
+    );
+    let hint = if hint.is_empty() {
+        " Call set_embeddings()/embed_texts() first, or list_embeddings() to see \
+         what is embedded."
+            .to_string()
+    } else {
+        hint
+    };
+    format!(
+        "vector_search('{text_column}'): no embedding store '{store}' on node {plural} {types}.{hint}"
+    )
+}
+
+/// The caller-mistake error for a single-store search that scored nothing:
+/// `Some` when *no* candidate's type is `store_type`, the one type carrying the
+/// store.
+///
+/// The multi-store scan raises this from its own per-candidate walk. The
+/// single-store path has no such walk — it looks nodes up in the store
+/// directly — so it reconstructs the answer here, on the empty result that is
+/// the only outcome the mistake can produce.
+fn unmatched_store_error(
+    graph: &DirGraph,
+    candidates: &[NodeIndex],
+    store_type: &str,
+    embedding_property: &str,
+) -> Option<String> {
+    let mut unmatched: Vec<&str> = Vec::new();
+    for &node_idx in candidates {
+        let Some(node_type) = GraphRead::node_type_of(&graph.graph, node_idx) else {
+            continue;
+        };
+        let node_type = graph.interner.resolve(node_type);
+        if node_type == store_type {
+            return None;
+        }
+        if !unmatched.contains(&node_type) {
+            unmatched.push(node_type);
+        }
+    }
+    (!unmatched.is_empty()).then(|| missing_store_error(graph, &unmatched, embedding_property))
 }
 
 /// HNSW-backed top-k over a single store, restricted to `candidates` (the
@@ -386,15 +646,16 @@ fn hnsw_search(
     store: &EmbeddingStore,
     idx: &HnswIndex,
     candidates: &[NodeIndex],
-    ordered_whole_store: bool,
+    coverage_proven: bool,
     query: &[f32],
     top_k: usize,
     scorer: &Scorer,
 ) -> Option<Vec<VectorSearchResult>> {
-    // Candidate collection already proved the common ordered whole-store
-    // shape. Every other shape builds membership once and reuses it both for
-    // exact coverage and for filtering HNSW results.
-    let membership: Option<HashSet<usize>> = if ordered_whole_store {
+    // Routing already proved whole-store coverage for the two shapes that can
+    // prove it without allocating (ordered whole store, never-narrowed
+    // selection). Every other shape builds membership once and reuses it both
+    // for exact coverage and for filtering HNSW results.
+    let membership: Option<HashSet<usize>> = if coverage_proven {
         None
     } else {
         let selected: HashSet<usize> = candidates.iter().map(|n| n.index()).collect();
@@ -987,11 +1248,135 @@ mod tests {
         .is_empty());
     }
 
+    /// One embedded `Doc` and one un-embedded `Note`, so a selection can span a
+    /// type that has the store and one that does not.
+    fn doc_and_note_graph() -> (DirGraph, NodeIndex, NodeIndex) {
+        let (mut graph, docs) = two_doc_graph();
+        let note = NodeData::new(
+            Value::Int64(0),
+            Value::String("Note 0".to_string()),
+            "Note".to_string(),
+            HashMap::new(),
+            &mut graph.interner,
+        );
+        let note = GraphWrite::add_node(&mut graph.graph, note);
+        graph
+            .type_indices
+            .entry_or_default("Note".to_string())
+            .push(note);
+        (graph, docs[0], note)
+    }
+
+    /// The silent-`[]` bug: the Python surface mints `{column}_emb`, so a caller
+    /// who passes the *store* name searches `summary_emb_emb` — a key nothing
+    /// can ever hold. Every node was skipped and the empty list read as "no
+    /// matches". It must name the column that would have worked.
+    #[test]
+    fn a_store_no_selected_type_has_raises_and_names_the_text_column() {
+        let (graph, docs) = two_doc_graph();
+        let options = VectorSearchOptions::default().with_top_k(2);
+
+        let err = vector_search(
+            &graph,
+            &selection_of(docs),
+            "summary_emb_emb",
+            &[1.0, 0.0],
+            &options,
+        )
+        .expect_err("a store no selected type has is a caller mistake, not an empty result");
+        assert!(err.contains("summary_emb_emb"), "{err}");
+        assert!(err.contains("Did you mean 'summary'?"), "{err}");
+        assert!(
+            err.contains("vector_search() takes the text column"),
+            "{err}"
+        );
+    }
+
+    /// An unknown column has no suffix story, so the error falls back to the
+    /// columns the selected types actually have embedded.
+    #[test]
+    fn an_unknown_column_raises_listing_the_embedded_columns() {
+        let (graph, docs) = two_doc_graph();
+        let options = VectorSearchOptions::default().with_top_k(2);
+
+        let err = vector_search(
+            &graph,
+            &selection_of(docs),
+            "nope_emb",
+            &[1.0, 0.0],
+            &options,
+        )
+        .expect_err("an unknown column is a caller mistake");
+        assert!(err.contains("'nope_emb'"), "{err}");
+        assert!(err.contains("summary"), "{err}");
+    }
+
+    /// A near-miss gets the generic did-you-mean, over the type's own columns.
+    #[test]
+    fn a_near_miss_column_gets_a_suggestion() {
+        let (graph, docs) = two_doc_graph();
+        let options = VectorSearchOptions::default().with_top_k(2);
+
+        let err = vector_search(
+            &graph,
+            &selection_of(docs),
+            "summry_emb",
+            &[1.0, 0.0],
+            &options,
+        )
+        .expect_err("a near-miss column is still a caller mistake");
+        assert!(err.contains("Did you mean 'summary'?"), "{err}");
+    }
+
+    /// The supported heterogeneous case: some selected types carry the store and
+    /// some do not. That is a partial result, never an error — the raise fires
+    /// only when *nothing* in the selection could have matched.
+    #[test]
+    fn a_selection_only_partly_covered_by_the_store_still_returns_its_rows() {
+        let (graph, doc, note) = doc_and_note_graph();
+        let options = VectorSearchOptions::default().with_top_k(5);
+
+        let rows = vector_search(
+            &graph,
+            &selection_of(vec![doc, note]),
+            "summary_emb",
+            &[1.0, 0.0],
+            &options,
+        )
+        .expect("a type without the store is skipped, not fatal");
+        assert_eq!(
+            rows.iter().map(|r| r.node_idx).collect::<Vec<_>>(),
+            vec![doc]
+        );
+    }
+
+    /// The same selection narrowed to the un-embedded type alone: now nothing
+    /// matched, so it is the mistake case again.
+    #[test]
+    fn a_selection_of_only_unembedded_types_raises() {
+        let (graph, _doc, note) = doc_and_note_graph();
+        let options = VectorSearchOptions::default().with_top_k(5);
+
+        let err = vector_search(
+            &graph,
+            &selection_of(vec![note]),
+            "summary_emb",
+            &[1.0, 0.0],
+            &options,
+        )
+        .expect_err("no selected type has the store");
+        assert!(err.contains("'Note'"), "{err}");
+    }
+
     #[test]
     fn hnsw_mixed_selection_never_returns_unselected_store_nodes() {
-        const DOCS: usize = 320;
+        // DOCS - OMITTED_DOCS must stay above HNSW_AUTO_MIN: the auto-use gate
+        // counts *store-covered* candidates, so a smaller embedded set would
+        // route the mixed case to the scan and leave the membership filter
+        // this test exists for unexercised.
+        const DOCS: usize = 520;
         const OMITTED_DOCS: usize = 32;
-        const UNEMBEDDED: usize = 320;
+        const UNEMBEDDED: usize = 520;
 
         let mut graph = DirGraph::new();
         let mut docs = Vec::with_capacity(DOCS);
@@ -1157,6 +1542,319 @@ mod tests {
         assert!(whole_exact
             .iter()
             .all(|result| whole_members.contains(&result.node_idx)));
+    }
+
+    /// `count` nodes of `node_type`, embedded into `store` when `embed`.
+    fn push_nodes(
+        graph: &mut DirGraph,
+        node_type: &str,
+        count: usize,
+        store: Option<&mut EmbeddingStore>,
+    ) -> Vec<NodeIndex> {
+        let mut store = store;
+        let mut nodes = Vec::with_capacity(count);
+        for id in 0..count {
+            let node = NodeData::new(
+                Value::Int64(id as i64),
+                Value::String(format!("{node_type} {id}")),
+                node_type.to_string(),
+                HashMap::new(),
+                &mut graph.interner,
+            );
+            let idx = GraphWrite::add_node(&mut graph.graph, node);
+            graph
+                .type_indices
+                .entry_or_default(node_type.to_string())
+                .push(idx);
+            if let Some(store) = store.as_deref_mut() {
+                store.set_embedding(idx.index(), &[id as f32, 1.0]);
+            }
+            nodes.push(idx);
+        }
+        nodes
+    }
+
+    /// An embedded `Doc` type beside an un-embedded `Note` type — the shape a
+    /// whole-graph search on any realistic multi-type graph has.
+    fn one_embedded_type_graph(docs: usize, notes: usize) -> (DirGraph, Vec<NodeIndex>) {
+        let mut graph = DirGraph::new();
+        let mut store = EmbeddingStore::with_metric(2, "euclidean");
+        let doc_nodes = push_nodes(&mut graph, "Doc", docs, Some(&mut store));
+        push_nodes(&mut graph, "Note", notes, None);
+        store
+            .build_index(DistanceMetric::Euclidean, HnswParams::default(), 7)
+            .expect("build HNSW index");
+        graph
+            .embeddings
+            .insert(("Doc".to_string(), "summary_emb".to_string()), store);
+        (graph, doc_nodes)
+    }
+
+    /// The routing bug: whole-graph search on a multi-type graph never reached
+    /// the index, because eligibility was proven by *type homogeneity* — which
+    /// the first `Note` node kills — instead of by store uniqueness.
+    #[test]
+    fn one_store_routes_a_mixed_candidate_set_to_that_store() {
+        let (graph, docs) = one_embedded_type_graph(600, 600);
+        let whole_graph: Vec<NodeIndex> = GraphRead::node_indices(&graph.graph).collect();
+        assert!(whole_graph.len() > docs.len(), "the graph is mixed");
+
+        let routing = route_stores(&graph, &whole_graph, "summary_emb");
+        let (node_type, store) = routing
+            .single
+            .expect("one type carries the property, so one store can serve any candidate set");
+        assert_eq!(node_type, "Doc");
+        assert!(
+            !routing.ordered_whole_store,
+            "the mixed candidate slice is not the store's slot order"
+        );
+
+        // Never-narrowed candidates are every live node, so they cover the
+        // store without an O(#candidates) membership set...
+        assert!(whole_graph_covers_store(&graph, store));
+        // ...and the covered-slot gate then admits the index.
+        assert_eq!(
+            hnsw_covered_slots(store, &whole_graph, true),
+            Some(store.len())
+        );
+    }
+
+    /// The never-drop guarantee: two embedded types keep the homogeneity proof,
+    /// so a union of both is scored by scan rather than by one type's index.
+    #[test]
+    fn two_embedded_types_keep_the_homogeneity_fallback() {
+        let mut graph = DirGraph::new();
+        let mut docs_store = EmbeddingStore::with_metric(2, "euclidean");
+        let mut notes_store = EmbeddingStore::with_metric(2, "euclidean");
+        let docs = push_nodes(&mut graph, "Doc", 8, Some(&mut docs_store));
+        let notes = push_nodes(&mut graph, "Note", 8, Some(&mut notes_store));
+        graph
+            .embeddings
+            .insert(("Doc".to_string(), "summary_emb".to_string()), docs_store);
+        graph
+            .embeddings
+            .insert(("Note".to_string(), "summary_emb".to_string()), notes_store);
+
+        let mut mixed = docs.clone();
+        mixed.extend(notes);
+        assert!(
+            route_stores(&graph, &mixed, "summary_emb").single.is_none(),
+            "a union of two embedded types must not be served by one of the \
+             two stores — that silently drops the other type's rows"
+        );
+        // A homogeneous selection of either type is still eligible.
+        assert_eq!(
+            route_stores(&graph, &docs, "summary_emb")
+                .single
+                .map(|s| s.0),
+            Some("Doc")
+        );
+    }
+
+    /// The coverage gate is stated in store slots, not candidates: admitting
+    /// mixed candidates makes the raw candidate count an overstatement.
+    #[test]
+    fn the_auto_use_gate_counts_covered_slots_not_candidates() {
+        let (graph, docs) = one_embedded_type_graph(600, 4_000);
+        let store = graph
+            .embeddings
+            .get(&("Doc".to_string(), "summary_emb".to_string()))
+            .expect("inserted store");
+
+        let mut one_doc_among_notes: Vec<NodeIndex> = GraphRead::node_indices(&graph.graph)
+            .skip(docs.len())
+            .collect();
+        one_doc_among_notes.push(docs[0]);
+        assert!(one_doc_among_notes.len() > HNSW_AUTO_MIN);
+        assert!(one_doc_among_notes.len() > store.len());
+        assert_eq!(
+            hnsw_covered_slots(store, &one_doc_among_notes, false),
+            None,
+            "4000 candidates covering one of 600 slots must not engage the index"
+        );
+
+        // The same shape, but genuinely covering the store, is admitted.
+        let mut most_docs_among_notes = one_doc_among_notes.clone();
+        most_docs_among_notes.extend_from_slice(&docs[1..]);
+        assert_eq!(
+            hnsw_covered_slots(store, &most_docs_among_notes, false),
+            Some(store.len())
+        );
+
+        // And a genuinely small selection is still excluded by size alone.
+        assert_eq!(hnsw_covered_slots(store, &docs[..64], false), None);
+    }
+
+    /// A store slot whose node is gone voids the whole-graph coverage proof.
+    ///
+    /// **This assertion was inverted in R2**, where it pinned the *defect*:
+    /// deleting a node did not prune its embedding, so the ordinary
+    /// `DELETE` path produced exactly this state and the proof had to defend
+    /// against it. `detach_delete_nodes` now prunes (see the test below), so
+    /// the only way left to reach a dangling slot is a removal *beneath* that
+    /// chokepoint — a raw backend `remove_node`, which in production is only
+    /// the undo of a node a statement created, and no statement can embed a
+    /// node it just created. The proof stays because it is cheap and this
+    /// construction is still expressible.
+    #[test]
+    fn a_dangling_store_slot_voids_the_whole_graph_coverage_proof() {
+        let (mut graph, docs) = one_embedded_type_graph(8, 2);
+        let store_key = ("Doc".to_string(), "summary_emb".to_string());
+        assert!(whole_graph_covers_store(
+            &graph,
+            graph.embeddings.get(&store_key).expect("store")
+        ));
+
+        // Beneath the chokepoint on purpose: this is the residual case.
+        GraphWrite::remove_node(&mut graph.graph, docs[3]).expect("remove an embedded node");
+        assert!(
+            !whole_graph_covers_store(&graph, graph.embeddings.get(&store_key).expect("store")),
+            "the store still holds a slot for a node the graph no longer has"
+        );
+    }
+
+    /// The deletion chokepoint prunes the node's vector, so the store never
+    /// holds a slot for a node the graph no longer has.
+    #[test]
+    fn deleting_an_embedded_node_prunes_its_vector() {
+        let (mut graph, docs) = one_embedded_type_graph(8, 2);
+        let store_key = ("Doc".to_string(), "summary_emb".to_string());
+        let doomed = docs[3];
+
+        crate::graph::mutation::maintain::detach_delete_nodes(&mut graph, &HashSet::from([doomed]));
+
+        let store = graph.embeddings.get(&store_key).expect("store");
+        assert_eq!(store.len(), 7, "the deleted node gave up its slot");
+        assert_eq!(store.get_embedding(doomed.index()), None);
+        assert_eq!(store.validate_shape(), Ok(()));
+        assert!(
+            whole_graph_covers_store(&graph, store),
+            "every remaining slot belongs to a live node"
+        );
+    }
+
+    /// The ghost: `StableDiGraph` hands the deleted node's index to the next
+    /// node created, and an un-pruned store made that node inherit the
+    /// deleted one's vector — a 1.0-similarity top hit for a node of any
+    /// type that was never embedded. Pinned on both dispatch paths.
+    #[test]
+    fn a_node_reusing_a_deleted_slot_inherits_no_vector() {
+        for exact in [true, false] {
+            let (mut graph, docs) = one_embedded_type_graph(600, 2);
+            let doomed = docs[7];
+            let doomed_vector = graph
+                .embeddings
+                .get(&("Doc".to_string(), "summary_emb".to_string()))
+                .expect("store")
+                .get_embedding(doomed.index())
+                .expect("the doomed node is embedded")
+                .to_vec();
+
+            crate::graph::mutation::maintain::detach_delete_nodes(
+                &mut graph,
+                &HashSet::from([doomed]),
+            );
+            // Any type will do — the store is keyed by the global node index,
+            // so a `Note` landing on the freed slot inherits just as readily.
+            let heir = push_nodes(&mut graph, "Note", 1, None)[0];
+            assert_eq!(heir, doomed, "the freed index is reused");
+
+            // Rebuild the index the prune dropped, so the non-exact arm
+            // exercises the HNSW path rather than falling back to the scan.
+            let store = graph
+                .embeddings
+                .get_mut(&("Doc".to_string(), "summary_emb".to_string()))
+                .expect("store");
+            store
+                .build_index(DistanceMetric::Euclidean, HnswParams::default(), 7)
+                .expect("rebuild HNSW index");
+
+            let rows = vector_search(
+                &graph,
+                &CurrentSelection::new(),
+                "summary_emb",
+                &doomed_vector,
+                &VectorSearchOptions::default()
+                    .with_top_k(5)
+                    .with_metric(DistanceMetric::Euclidean)
+                    .with_exact(exact),
+            )
+            .expect("whole-graph search");
+
+            assert!(
+                !rows.iter().any(|r| r.node_idx == heir),
+                "exact={exact}: the node that reused the slot returned {rows:?}"
+            );
+        }
+    }
+
+    /// End-to-end: the whole-graph search on a mixed graph returns exactly the
+    /// exact scan's answer, index or not.
+    #[test]
+    fn whole_graph_search_on_a_mixed_graph_matches_the_exact_scan() {
+        let (graph, docs) = one_embedded_type_graph(600, 600);
+        let options = VectorSearchOptions::default()
+            .with_top_k(5)
+            .with_metric(DistanceMetric::Euclidean);
+        let query = [0.0, 1.0];
+
+        let approximate = vector_search(
+            &graph,
+            &CurrentSelection::new(),
+            "summary_emb",
+            &query,
+            &options,
+        )
+        .expect("whole-graph search");
+        let exact = vector_search(
+            &graph,
+            &CurrentSelection::new(),
+            "summary_emb",
+            &query,
+            &options.clone().with_exact(true),
+        )
+        .expect("whole-graph exact search");
+        assert_eq!(
+            approximate.iter().map(|r| r.node_idx).collect::<Vec<_>>(),
+            exact.iter().map(|r| r.node_idx).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            exact.iter().map(|r| r.node_idx).collect::<Vec<_>>(),
+            docs[..5].to_vec()
+        );
+    }
+
+    /// Routing on store uniqueness must not swallow the caller mistake the
+    /// multi-store scan raises: a selection of types that do not carry the
+    /// store still errors instead of returning an empty list.
+    #[test]
+    fn a_single_store_graph_still_raises_when_no_selected_type_has_it() {
+        let (graph, doc, note) = doc_and_note_graph();
+        let options = VectorSearchOptions::default().with_top_k(5);
+
+        let err = vector_search(
+            &graph,
+            &selection_of(vec![note]),
+            "summary_emb",
+            &[1.0, 0.0],
+            &options,
+        )
+        .expect_err("the only store belongs to a type the selection excludes");
+        assert!(err.contains("'Note'"), "{err}");
+
+        // A selection that does include the store's type is a normal result.
+        let rows = vector_search(
+            &graph,
+            &selection_of(vec![doc, note]),
+            "summary_emb",
+            &[1.0, 0.0],
+            &options,
+        )
+        .expect("partial coverage is a supported result");
+        assert_eq!(
+            rows.iter().map(|r| r.node_idx).collect::<Vec<_>>(),
+            vec![doc]
+        );
     }
 
     #[test]

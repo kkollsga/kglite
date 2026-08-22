@@ -13,6 +13,18 @@
 //! `text_score` names the column too; only `vector_score` is in store-name
 //! terms.
 //!
+//! **The key is the spelling, not the resolution.** A source column may be an
+//! identity *alias* — `add_nodes(df, "Person", "npdid", "name")` makes `name`
+//! the type's title column, so `set_embeddings("Person", "name", …)` embeds
+//! titles ([`resolve_source_column`] settles what a column means). The store is
+//! still keyed `name_emb`, never `title_emb`: canonicalising the key would
+//! strand every store already written under the raw spelling — `add_nodes`'
+//! own `<col>_emb` ingest keys raw, so does every `.kgl` written before, and
+//! Cypher's `text_score(n, col, q)` rewrite has no node type to resolve with.
+//! So the rule is round-trip: read a store back with the spelling you wrote it
+//! with, and `list_embeddings` reports that spelling. The cost of the choice is
+//! that `"name"` and `"title"` on such a type are two stores of the same text.
+//!
 //! **Validate then apply.** Each ingest function resolves every id and checks
 //! every dimension *before* it touches a store, so a rejected batch leaves the
 //! graph exactly as it found it. That makes the primitives all-or-nothing by
@@ -103,6 +115,72 @@ pub fn store_key(node_type: &str, text_column: &str) -> (String, String) {
     (node_type.to_string(), store_name(text_column))
 }
 
+/// The source column a store name was minted from — [`store_name`] read
+/// backwards, so the suffix still has exactly one definition. `None` when the
+/// name carries no suffix and therefore never came from [`store_name`].
+pub fn text_column_of(store: &str) -> Option<&str> {
+    store.strip_suffix("_emb")
+}
+
+/// Every source column that has a store on `node_type`, sorted and deduped —
+/// the candidate set an unknown-column error suggests from.
+pub fn embedded_text_columns<'a>(graph: &'a DirGraph, node_types: &[&str]) -> Vec<&'a str> {
+    let mut columns: Vec<&str> = graph
+        .embeddings
+        .keys()
+        .filter(|(stored_type, _)| node_types.contains(&stored_type.as_str()))
+        .map(|(_, name)| text_column_of(name).unwrap_or(name))
+        .collect();
+    columns.sort_unstable();
+    columns.dedup();
+    columns
+}
+
+/// The " Did you mean …" tail for a source column that named no store on any
+/// of `node_types`, or `""` when there is nothing honest to suggest.
+///
+/// Two mistakes produce an unreachable store, and they need different tails.
+/// Passing the *store* name where the column belongs (`'summary_emb'`) derives
+/// `summary_emb_emb` and can never match, so the tail names the column that
+/// would have worked — the same confusion `vector_score`'s
+/// `missing_embedding_error` handles from the other direction, where the store
+/// name is the correct argument. Anything else is an ordinary typo, answered
+/// by the generic
+/// [`did_you_mean`](crate::graph::mutation::validation::did_you_mean) over the
+/// columns those types do have embedded.
+///
+/// `caller` is the surface's own name (`"vector_search()"`), because the fix
+/// is "call it with the text column" and the reader needs to know which call.
+pub fn unknown_column_hint(
+    graph: &DirGraph,
+    node_types: &[&str],
+    text_column: &str,
+    caller: &str,
+) -> String {
+    if let Some(stripped) = text_column_of(text_column) {
+        if node_types.iter().any(|node_type| {
+            graph
+                .embedding_store(node_type, &store_name(stripped))
+                .is_some()
+        }) {
+            return format!(
+                " Did you mean '{stripped}'? {caller} takes the text column; \
+                 '{text_column}' is the embedding store's own name."
+            );
+        }
+    }
+    let columns = embedded_text_columns(graph, node_types);
+    let suggestion = crate::graph::mutation::validation::did_you_mean(text_column, &columns);
+    if !suggestion.is_empty() {
+        return suggestion;
+    }
+    if columns.is_empty() {
+        String::new()
+    } else {
+        format!(" Embedded text columns: {}.", columns.join(", "))
+    }
+}
+
 /// List every embedding store on the graph — a read-only projection, one
 /// [`EmbeddingStoreInfo`] per store.
 ///
@@ -117,7 +195,7 @@ pub fn list_embeddings(graph: &DirGraph) -> Vec<EmbeddingStoreInfo> {
         .iter()
         .map(|((node_type, name), store)| EmbeddingStoreInfo {
             node_type: node_type.clone(),
-            text_column: name.strip_suffix("_emb").unwrap_or(name).to_string(),
+            text_column: text_column_of(name).unwrap_or(name).to_string(),
             store_name: name.clone(),
             dimension: store.dimension,
             count: store.len(),
@@ -293,12 +371,19 @@ pub fn build_vector_index(
         ef_search: ef_search.unwrap_or(defaults.ef_search).max(1),
     };
 
-    let store = graph.embeddings.get_mut(&key).ok_or_else(|| {
-        format!(
-            "No embedding store '{}.{}_emb' to index. Call set_embeddings()/embed_texts() first.",
-            node_type, text_column
-        )
-    })?;
+    if !graph.embeddings.contains_key(&key) {
+        let hint = unknown_column_hint(graph, &[node_type], text_column, "build_vector_index()");
+        return Err(format!(
+            "No embedding store '{}.{}' to index.{} Call set_embeddings()/embed_texts() first.",
+            node_type,
+            store_name(text_column),
+            hint
+        ));
+    }
+    let store = graph
+        .embeddings
+        .get_mut(&key)
+        .expect("store presence checked immediately above");
     let indexed = store.len();
     // A deterministic seed keeps level assignment reproducible.
     let seed = 0x9E37_79B9_7F4A_7C15 ^ (indexed as u64);
@@ -352,7 +437,7 @@ where
     // column is wrong.
     let non_empty = incoming.peek().is_some();
     if non_empty {
-        require_source_column(graph, node_type, text_column)?;
+        resolve_source_column(graph, node_type, text_column)?;
     }
 
     graph.build_id_index(node_type);
@@ -399,17 +484,41 @@ where
     })
 }
 
-/// The source column must exist on at least one node of the type. This is the
-/// typo guard that catches `set_embeddings(t, 'summary_emb', …)` — passing the
-/// *store* name where the *column* name belongs — which would otherwise
-/// silently create an unreachable `summary_emb_emb` store.
-fn require_source_column(
-    graph: &DirGraph,
+/// Validate a user-named source column and return the **matcher field** its
+/// text is read from — the single predicate for "is this a column I can embed?".
+///
+/// This is both the typo guard that catches `set_embeddings(t, 'summary_emb', …)`
+/// — passing the *store* name where the *column* name belongs, which would
+/// otherwise silently create an unreachable `summary_emb_emb` store — and the
+/// resolver a caller that reads the values itself must go through, so the
+/// half that validates and the half that reads can never disagree about what
+/// a column means. Feed the returned field (with its
+/// [`InternedKey`](crate::graph::schema::InternedKey)) to
+/// [`NodeView::resolved_field`](crate::graph::storage::NodeView::resolved_field).
+///
+/// Resolution is `node_view.rs`'s order, step for step, because that is what
+/// every read path — `WHERE`, `RETURN`, the pattern matcher, the planner's
+/// statistics — already applies:
+///
+/// 1. [`DirGraph::resolve_alias`]: a type's original id/title column name
+///    (`add_nodes(df, "Person", "npdid", "name")` → `name` means `title`),
+/// 2. a stored property of that name (a user's own `name`/`label` wins),
+/// 3. the structural soft alias ([`soft_alias_fallback`]: `name` → title,
+///    `type`/`node_type`/`label` → the type string).
+///
+/// Anything else is rejected. Note that the resolved field is *not* used to
+/// key the store: see the module header's store-key note.
+///
+/// [`DirGraph::resolve_alias`]: crate::graph::dir_graph::DirGraph::resolve_alias
+/// [`soft_alias_fallback`]: crate::graph::schema::soft_alias_fallback
+pub fn resolve_source_column<'a>(
+    graph: &'a DirGraph,
     node_type: &str,
-    text_column: &str,
-) -> Result<(), String> {
-    if matches!(text_column, "id" | "title" | "type") {
-        return Ok(());
+    text_column: &'a str,
+) -> Result<&'a str, String> {
+    let resolved = graph.resolve_alias(node_type, text_column);
+    if matches!(resolved, "id" | "title") {
+        return Ok(resolved);
     }
     let present = graph
         .type_indices
@@ -419,13 +528,16 @@ fn require_source_column(
                 graph
                     .graph
                     .node_view(idx)
-                    .map(|n| n.has_property(text_column))
+                    .map(|n| n.has_property(resolved))
                     .unwrap_or(false)
             })
         })
         .unwrap_or(false);
     if present {
-        return Ok(());
+        return Ok(resolved);
+    }
+    if crate::graph::schema::soft_alias_fallback(resolved).is_some() {
+        return Ok(resolved);
     }
     Err(format!(
         "Source column '{}' not found on any '{}' node. \

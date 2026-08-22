@@ -81,9 +81,11 @@ count). Two semantics to keep in mind:
 - **Property typos pass silently by default** (open schema): an unknown property
   on `CREATE`/`SET`/`MERGE` is simply stored. To catch typos (`summary` vs
   `note`), call `lock_schema()` — a write with an unknown property is then
-  rejected with a `Valid properties: …` / "did you mean?" hint (the same
-  guidance reads give). The bulk loaders (`add_nodes`/`add_connections`)
-  deliberately bypass the lock; it gates the Cypher write path.
+  rejected with a `Valid properties: …` / "did you mean?" hint, and so is a
+  *read* of a property no node of the type has (`WHERE`, `RETURN`, `WITH`,
+  `ORDER BY`); see [Diagnostics](#diagnostics). The bulk loaders
+  (`add_nodes`/`add_connections`) deliberately bypass the lock; it gates the
+  Cypher write path.
 
 ---
 
@@ -2396,7 +2398,7 @@ Keys:
 - `warnings` — non-fatal advisories about the query, empty for a clean one.
   Each is legal Cypher that quietly returns nothing useful, so it is a warning
   and not an error — with a "did you mean?" hint where one is genuinely close.
-  Four families:
+  Five families:
   - a `MATCH` against an unknown node label or relationship type (zero rows);
   - a `WHERE` on a property no node of that type has (null comparison, so
     every row is filtered out);
@@ -2404,7 +2406,9 @@ Keys:
     all-null column — the sibling `n.name` still resolves, so the rows read as
     half-correct);
   - a relationship pattern pointing the wrong way, when every edge of that
-    type runs the other way (zero rows).
+    type runs the other way (zero rows);
+  - a `WHERE` comparison a **declared** property type makes vacuous — `p.age >
+    'forty'` where `p.age IS :: INTEGER` is null on every row.
 
   Populated on reads, mutations, `EXPLAIN`, and session/transaction queries
   alike, and mirrored to stderr for interactive users.
@@ -2423,11 +2427,43 @@ graph.cypher("MATCH (p:Port)-[:ARRIVES_AT]->(v:Voyage) RETURN p").diagnostics["w
 graph.cypher("MATCH (v:Vessel) RETURN v.imo").diagnostics["warnings"]
 # ["RETURN projects property 'imo' which no Vessel node has — every value
 #   will be null."]
+
+graph.cypher("MATCH (p:Person) WHERE p.age > 'forty' RETURN p").diagnostics["warnings"]
+# ["WHERE compares Person.age (declared INTEGER) with a STRING literal
+#   'forty' — a cross-type ordering comparison is null in openCypher, so this
+#   filters out every row."]
 ```
+
+The declared-type family reads **only** the property types declared with
+`REQUIRE p.x IS :: T` (below), because that is the only type knowledge the
+write path enforces — a declared `INTEGER` property cannot come to hold a
+string, so "this comparison is cross-type" is a guarantee and not a guess.
+`define_schema()` field types and observed per-type metadata are not consulted.
+Everything it cannot place stays silent: numeric properties against numeric
+literals (`INTEGER`/`FLOAT` are one comparison family, all nine value pairings
+intercomparable), `DATE`/`LOCAL DATETIME` against a string (the string is
+parsed, so whether the answer is null depends on its contents), `DURATION` and
+`POINT` (no comparison rules of their own), parameters and property-to-property
+comparisons, multi-label patterns, `WITH`-rebound variables and the built-in
+fields. `<>` gets its own wording, because a cross-type `<>` is *true*: it
+matches every row that has the property rather than filtering them out.
 
 A *sparse* property never warns: `node_type_metadata` records a property as
 soon as one node carries it, so only a genuinely absent one — a typo, or a
 field that belongs to a different type — trips these.
+
+**Under `lock_schema()` the two absent-property families above are errors, not
+warnings.** A locked schema is the opt-in "catch my typos" mechanism, and it
+already rejected `MATCH (p:Person {agee: 1})` and `MATCH (p:Persn)`; the same
+typo written as `WHERE p.agee = 1` or `RETURN p.agee` now raises `SchemaError`
+with the same "did you mean?" hint rather than returning an empty result or a
+null column. `unlock_schema()` puts them back to warnings. The other three
+families — unknown relationship type, reversed arrow, and the declared-type
+mismatch — stay warnings in both states, and every conservatism above still applies under the lock: sparse
+properties, properties the same statement writes, types with no recorded
+properties, fields `define_schema()` declares but nothing has written yet,
+multi-label patterns, `WITH`-rebound variables and the built-ins are all left
+alone.
 
 `timeout_ms` resolution: explicit `cypher(..., timeout_ms=N)` >
 `kg.set_default_timeout(ms)` > the Python default of 180,000 ms. Pass

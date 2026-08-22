@@ -148,18 +148,31 @@ r.diagnostics
 The `warnings` list surfaces non-fatal advisories — the query shapes that
 return nothing useful without raising: a `MATCH` against an unknown label or
 relationship type, a property reference (in `WHERE`, `RETURN`, `WITH` or
-`ORDER BY`) that no node of that type carries, and a relationship pattern
-pointing the wrong way down a one-directional edge type. The same "did you
-mean?" hint interactive users see on stderr is exposed here for programmatic /
-agent callers, on every kind of query (a mutation's `MATCH` can be typo'd too)
-and on repeat runs of a query the plan cache is serving:
+`ORDER BY`) that no node of that type carries, a relationship pattern pointing
+the wrong way down a one-directional edge type, and a `WHERE` comparison that a
+declared property type makes vacuous. The same "did you mean?" hint interactive
+users see on stderr is exposed here for programmatic / agent callers, on every
+kind of query (a mutation's `MATCH` can be typo'd too) and on repeat runs of a
+query the plan cache is serving:
 
 ```python
 r = graph.cypher("MATCH (n:Persn) RETURN n")   # typo
 r.diagnostics["warnings"]
 # ["MATCH references unknown node label 'Persn' — the graph has no such
 #   type, so this pattern returns no rows. Did you mean 'Person'?"]
+
+# With `CREATE CONSTRAINT ... REQUIRE p.age IS :: INTEGER` declared:
+r = graph.cypher("MATCH (p:Person) WHERE p.age > 'forty' RETURN p")
+r.diagnostics["warnings"]
+# ["WHERE compares Person.age (declared INTEGER) with a STRING literal
+#   'forty' — a cross-type ordering comparison is null in openCypher, so this
+#   filters out every row."]
 ```
+
+The declared-type family reads only DDL-declared property types (`IS :: T`),
+never observed metadata, and stays silent on everything it cannot guarantee —
+see the "Diagnostics" section of `CYPHER.md` for the full never-warn list. It
+is a warning in every schema state; `lock_schema()` does not promote it.
 
 Surface `warnings` whenever an agent gets an empty result — it turns a silent
 zero-row mystery into an actionable typo hint.

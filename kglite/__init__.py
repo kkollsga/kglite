@@ -38,10 +38,12 @@ from .kglite import (  # explicit re-exports — names listed in __all__ below
     __version__,
     cypher_pass_names,
     from_bytes,
+    get_query_warning_policy,
     load,
     load_rdf,
     open,
     open_session,
+    set_query_warning_policy,
     trim_memory,
 )
 from .retry import retry_on_conflict
@@ -550,6 +552,8 @@ __all__ = [
     "from_bytes",
     "cypher_pass_names",
     "trim_memory",
+    "set_query_warning_policy",
+    "get_query_warning_policy",
     "from_blueprint",
     "from_records",
     "graphgen",

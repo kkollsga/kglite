@@ -625,7 +625,7 @@ pub fn make_comparison_traversal(
     match config.method_type.as_str() {
         "contains" => {
             let tt = target_type
-                .ok_or("method 'contains' requires a target_type (first arg to traverse)")?;
+                .ok_or("method 'contains' requires a target_type (first arg to compare())")?;
             spatial_contains_traversal(
                 graph,
                 selection,
@@ -639,7 +639,7 @@ pub fn make_comparison_traversal(
         }
         "intersects" => {
             let tt = target_type
-                .ok_or("method 'intersects' requires a target_type (first arg to traverse)")?;
+                .ok_or("method 'intersects' requires a target_type (first arg to compare())")?;
             spatial_intersects_traversal(
                 graph,
                 selection,
@@ -652,7 +652,7 @@ pub fn make_comparison_traversal(
         }
         "distance" => {
             let tt = target_type
-                .ok_or("method 'distance' requires a target_type (first arg to traverse)")?;
+                .ok_or("method 'distance' requires a target_type (first arg to compare())")?;
             let max_dist = config.max_distance_m.ok_or(
                 "method 'distance' requires 'max_m' (dict) or max_distance_m parameter",
             )?;
@@ -670,7 +670,7 @@ pub fn make_comparison_traversal(
         }
         "text_score" => {
             let tt = target_type
-                .ok_or("method 'text_score' requires a target_type (first arg to traverse)")?;
+                .ok_or("method 'text_score' requires a target_type (first arg to compare())")?;
             let prop = config
                 .property
                 .as_deref()

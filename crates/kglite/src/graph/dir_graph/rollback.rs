@@ -176,6 +176,12 @@ fn swap_data_scale(a: &mut DirGraph, b: &mut DirGraph) {
     std::mem::swap(&mut a.composite_indices, &mut b.composite_indices);
     std::mem::swap(&mut a.range_indices, &mut b.range_indices);
     std::mem::swap(&mut a.secondary_label_index, &mut b.secondary_label_index);
+    // O(V × dimension) — a 100k × 384 store is 150 MB, so cloning it per
+    // statement is out of the question. Its undo story is
+    // `UndoEntry::EmbeddingRemoved`, captured where a node deletion prunes the
+    // node's vector (`mutation::delete_state::prune_doomed_embeddings`); node
+    // deletion is the only writer that reaches this map inside a statement
+    // window (ingest runs outside one), so that entry is the whole story.
     std::mem::swap(&mut a.embeddings, &mut b.embeddings);
     std::mem::swap(&mut a.timeseries_store, &mut b.timeseries_store);
     // Parked because its inner map holds one entry per node of a constrained
@@ -433,6 +439,21 @@ fn apply(graph: &mut DirGraph, entry: UndoEntry, fallout: &mut ReplayFallout) {
         }
         UndoEntry::TimeseriesRemoved { node, prior } => {
             graph.timeseries_store.insert(node, *prior);
+        }
+        UndoEntry::EmbeddingRemoved {
+            store_key,
+            node,
+            prior,
+        } => {
+            // `embeddings` is parked (see `swap_data_scale`), so the live map
+            // is the one a rollback keeps and this entry is the only thing
+            // that puts the vector back. Pruning never drops a store, so the
+            // key is still present; a missing one would mean some other writer
+            // removed the store mid-statement, and re-creating it here from a
+            // single vector would invent a dimension.
+            if let Some(store) = graph.embeddings.get_mut(&store_key) {
+                store.restore_embedding(node, &prior);
+            }
         }
         UndoEntry::ColumnarCell {
             node_type,

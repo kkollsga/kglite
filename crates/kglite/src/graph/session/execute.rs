@@ -714,7 +714,23 @@ fn prepare(
     // consumed twice: stderr now (interactive users), and
     // `QueryDiagnostics.warnings` at the end of execute (every programmatic
     // surface, including the MCP server, which is where an agent reads them).
-    let warnings: Arc<[String]> = cypher::collect_unknown_pattern_warnings(&parsed, graph).into();
+    let collected = cypher::collect_query_warnings(&parsed, graph);
+    // ...with one exception, and it is a *disposition* change, not a second
+    // walk: under `lock_schema()` the absent-property subset becomes fatal.
+    // `MATCH (p:Person) WHERE p.agee = 1` returning `[]` and `RETURN p.agee`
+    // returning a null column are the read-side twins of the pattern-literal
+    // typo `validate_schema` already rejects above, and a lock exists to catch
+    // exactly that. Reversed arrows and unknown labels/rel-types stay warnings:
+    // the first is heuristic, and the second is legal zero-row Cypher whose
+    // locked-schema *label* case is already fatal via `validate_label`, so
+    // promoting here would double-report it.
+    let strict_absent = !collected.absent_property.is_empty();
+    if graph.schema_locked {
+        if let Some(error) = cypher::strict_read_error(&collected.absent_property, graph) {
+            return Err(KgError::from(error));
+        }
+    }
+    let warnings: Arc<[String]> = collected.into_messages().into();
     cypher::emit_query_warnings(&warnings);
 
     // text_score() rewrite. Scans for `text_score(...)` calls in the
@@ -781,7 +797,17 @@ fn prepare(
     // its own module docs) on the read-hit path that the plan cache exists to
     // keep at ~1.9 us. With no mutation ever inserted, a mutation's lookup is
     // a guaranteed miss: one shared read lock and one hash, and nothing more.
-    if cacheable && params.is_empty() && !cypher::is_mutation_query(&plan) {
+    // ...and never for a statement carrying absent-property findings, which is
+    // what makes the strict-read promotion above independent of the cache. A
+    // hit returns before the schema pass runs, so it cannot re-decide anything;
+    // by refusing to store such a plan, a hit *proves* there was nothing to
+    // promote, and "prime unlocked → lock_schema() → rerun the same text"
+    // raises whether or not locking bumped the graph version (through the
+    // Python/`api` surface it does — `make_dir_graph_mut`; a core caller
+    // flipping the flag on an owned `DirGraph` does not). The cost is confined
+    // to statements the engine has already diagnosed as reading an all-null
+    // column, which no hot loop should contain.
+    if cacheable && params.is_empty() && !strict_absent && !cypher::is_mutation_query(&plan) {
         cypher::plan_cache::insert(
             graph.graph_id(),
             graph.version(),

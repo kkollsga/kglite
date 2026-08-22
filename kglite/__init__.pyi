@@ -469,6 +469,27 @@ class ResultView:
         ...
 
     @property
+    def warnings(self) -> list[str]:
+        """The query's non-fatal warnings — shortcut for
+        ``diagnostics["warnings"]``.
+
+        Same list, and ``[]`` (never ``None``) for a clean query *and* for a
+        view that did not come from a query at all — a ``head()`` / ``tail()``
+        slice, a DataFrame round-trip — where :attr:`diagnostics` is ``None``
+        and subscripting it would raise. See :attr:`diagnostics` for what the
+        warnings cover.
+
+        Recorded unconditionally: :func:`kglite.set_query_warning_policy`
+        decides where warnings are *announced*, never whether they land here.
+
+        Example::
+
+            for w in graph.cypher(q).warnings:
+                print(w)
+        """
+        ...
+
+    @property
     def diagnostics(self) -> Optional[dict[str, Any]]:
         """Lightweight execution diagnostics for this query.
 
@@ -498,7 +519,8 @@ class ResultView:
           execution-time advisories too, e.g. a procedure scoped to a
           relationship type the graph does not have. Empty for a clean query.
           The same signal interactive users see on stderr, exposed here for
-          programmatic / agent callers.
+          programmatic / agent callers. Shortcut: :attr:`warnings`, which is
+          ``[]`` rather than an error on a view with no diagnostics.
 
         Use this to tune ``timeout_ms`` or move toward anchored queries
         when your query repeatedly approaches the deadline, and surface
@@ -970,6 +992,64 @@ def cypher_pass_names() -> list[str]:
             if naive != optimized:
                 print(f"Divergence introduced by `{name}`")
                 break
+    """
+    ...
+
+def set_query_warning_policy(policy: str) -> None:
+    """Choose how Cypher query warnings are *announced*, process-wide.
+
+    A query warning has two channels, and this only moves one of them:
+
+    * **Structured**, and unconditional — :attr:`ResultView.warnings` /
+      ``ResultView.diagnostics["warnings"]``. No policy empties it; code that
+      reads the field behaves the same under all three.
+    * **The announcement** — what a caller who is *not* reading the field
+      still sees. That is what this sets:
+
+      - ``"stderr"`` (default): a ``warning: ...`` line on stderr, exactly
+        what every earlier release did unconditionally.
+      - ``"silent"``: nothing is printed.
+      - ``"pywarn"``: each warning is raised as a ``UserWarning`` through the
+        :mod:`warnings` module **instead of** stderr, so the process's own
+        warning filters, ``logging.captureWarnings(True)`` and a custom
+        ``showwarning`` all apply. It replaces rather than supplements the
+        stderr line, because ``warnings.warn`` already routes to stderr by
+        default and doubling it would defeat a filter the host installed.
+
+    ``"pywarn"`` is opt-in and will never become the default: under
+    ``-W error`` (or pytest's ``filterwarnings = error``) it turns an advisory
+    into a raise out of ``cypher()``.
+
+    Applies to every Python query path — :meth:`KnowledgeGraph.cypher`,
+    :meth:`Session.cypher` / :meth:`Session.execute`, ``Transaction.cypher``,
+    :meth:`FrozenGraph.cypher` — including ``to_df=True`` and ``FORMAT CSV``,
+    whose return values cannot carry diagnostics and for which this is the
+    only channel. The bundled CLI, MCP and Bolt servers are separate surfaces
+    with their own presentation and are unaffected.
+
+    Args:
+        policy: ``"stderr"``, ``"silent"`` or ``"pywarn"``.
+
+    Raises:
+        kglite.ArgumentError: For any other string.
+
+    Example::
+
+        import warnings, kglite
+
+        kglite.set_query_warning_policy("pywarn")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            graph.cypher("MATCH (v:Vessel) RETURN v.imo")
+        # caught[0].message -> "RETURN projects property 'imo' which no ..."
+    """
+    ...
+
+def get_query_warning_policy() -> str:
+    """The query-warning policy currently in effect.
+
+    One of ``"stderr"`` (the default), ``"silent"`` or ``"pywarn"`` — see
+    :func:`set_query_warning_policy`.
     """
     ...
 
@@ -2666,6 +2746,23 @@ class KnowledgeGraph:
         property, enumerate the valid set, and add a 'did you mean?'
         suggestion.
 
+        A locked graph also rejects a **property name no node of the type
+        carries**, wherever it is read — ``WHERE p.agee = 1`` (which would
+        filter out every row) and ``RETURN``/``WITH``/``ORDER BY p.agee``
+        (which would produce a column of nulls beside correct-looking
+        siblings). Unlocked, both are non-fatal warnings.
+
+        The check is deliberately narrow, so a lock never rejects a valid
+        query. It stays silent on: a *sparse* property (one node carrying it
+        makes it known, however many leave it null); a property this same
+        statement writes; a type with no recorded properties; a property the
+        graph's own :meth:`define_schema` declares but nothing has written
+        yet; a multi-label pattern or a variable rebound by ``WITH``, neither
+        of which resolves to one type; and the built-ins ``id``, ``title``,
+        ``name``, ``type``. A relationship type the graph has never seen, and
+        a relationship arrow pointing the wrong way, stay warnings in both
+        states.
+
         This is the "catch my typos" mechanism — an empty result set is
         indistinguishable from "no matching data", so a typo'd label would
         otherwise reach production looking like a legitimate empty state.
@@ -2685,6 +2782,9 @@ class KnowledgeGraph:
             graph.cypher("MATCH (p:Persom) RETURN p")    # raises SchemaError
             # Schema error: Unknown node type 'Persom'. Did you mean 'Person'?
             #   Valid types: Paper, Person
+            graph.cypher("MATCH (p:Person) RETURN p.agee")  # raises SchemaError
+            # Schema error: Unknown property 'agee' on Person, referenced in
+            # RETURN. Did you mean 'age'?
 
         See Also:
             :meth:`unlock_schema`, :attr:`schema_locked`
@@ -2693,6 +2793,10 @@ class KnowledgeGraph:
 
     def unlock_schema(self) -> KnowledgeGraph:
         """Unlock the schema: allow any Cypher mutations without validation.
+
+        Also returns reads to their schemaless default: an unknown label or an
+        absent property is reported as a non-fatal warning (on stderr, and on
+        :attr:`ResultView.warnings`) instead of raising :class:`SchemaError`.
 
         Returns:
             This same graph (not a copy), so the call can be chained.
@@ -3013,6 +3117,11 @@ class KnowledgeGraph:
 
         Args:
             target_type: Node type to compare against (e.g. ``'Well'``).
+                Exactly one type is supported: a bare string, or a
+                single-element list for symmetry with :meth:`traverse`.
+                A list of two or more raises :class:`ArgumentError` rather
+                than comparing against only the first — call ``compare()``
+                once per type instead.
             method: Comparison method — a string shorthand or a dict with
                 settings:
 
@@ -3048,6 +3157,15 @@ class KnowledgeGraph:
 
         Returns:
             A new KnowledgeGraph with comparison results selected.
+
+        Raises:
+            ArgumentError: If ``target_type`` is not a string or list of
+                strings, or is a list holding more than one type; if the
+                method dict carries an unknown ``resolve`` mode; or if the
+                comparison itself rejects its inputs (unknown method name,
+                a method used without its required ``target_type`` or
+                settings such as ``max_m`` / ``property`` / ``features``).
+            TypeError: If ``method`` is neither a string nor a dict.
 
         Examples::
 
@@ -4752,6 +4870,13 @@ class KnowledgeGraph:
 
         Returns:
             ``{node_title: degree}``.
+
+        Raises:
+            ArgumentError: Two selected nodes share a title. Titles are not
+                unique — not even within one node type — so keying by title
+                would drop a node's degree with no signal. Use
+                :meth:`degree_centrality`, whose ResultView carries one row
+                per node with its ``type`` and ``id``.
         """
         ...
 
@@ -4765,10 +4890,9 @@ class KnowledgeGraph:
         sample_size: Optional[int] = None,
         connection_types: Optional[Union[str, list[str]]] = None,
         top_k: Optional[int] = None,
-        as_dict: Optional[bool] = None,
         timeout_ms: Optional[int] = None,
         to_df: Optional[bool] = None,
-    ) -> Union[ResultView, dict[Any, float], pd.DataFrame]:
+    ) -> Union[ResultView, pd.DataFrame]:
         """Calculate betweenness centrality.
 
         Args:
@@ -4776,13 +4900,13 @@ class KnowledgeGraph:
             sample_size: Sample source nodes for faster computation on large graphs.
             connection_types: Only traverse these relationship types (str or list).
             top_k: Return only the top *K* nodes.
-            as_dict: Return ``{id: score}`` dict instead of list of dicts.
             timeout_ms: Abort after this many milliseconds with an error.
             to_df: Return a pandas DataFrame with columns ``type``, ``title``, ``id``, ``score``.
 
         Returns:
-            List of dicts with ``type``, ``title``, ``id``, ``score``,
-            sorted by score descending. Or a DataFrame if ``to_df=True``.
+            A :class:`ResultView` of rows with ``type``, ``title``, ``id``,
+            ``score``, sorted by score descending. Or a pandas DataFrame if
+            ``to_df=True``.
         """
         ...
 
@@ -4793,10 +4917,9 @@ class KnowledgeGraph:
         tolerance: Optional[float] = None,
         connection_types: Optional[Union[str, list[str]]] = None,
         top_k: Optional[int] = None,
-        as_dict: Optional[bool] = None,
         timeout_ms: Optional[int] = None,
         to_df: Optional[bool] = None,
-    ) -> Union[ResultView, dict[Any, float], pd.DataFrame]:
+    ) -> Union[ResultView, pd.DataFrame]:
         """Calculate PageRank centrality.
 
         Args:
@@ -4805,13 +4928,13 @@ class KnowledgeGraph:
             tolerance: Convergence threshold. Default ``1e-6``.
             connection_types: Only traverse these relationship types (str or list).
             top_k: Return only the top *K* nodes.
-            as_dict: Return ``{id: score}`` dict instead of list of dicts.
             timeout_ms: Abort after this many milliseconds with an error.
             to_df: Return a pandas DataFrame with columns ``type``, ``title``, ``id``, ``score``.
 
         Returns:
-            List of dicts with ``type``, ``title``, ``id``, ``score``.
-            Or a DataFrame if ``to_df=True``.
+            A :class:`ResultView` of rows with ``type``, ``title``, ``id``,
+            ``score``, sorted by score descending. Or a pandas DataFrame if
+            ``to_df=True``.
         """
         ...
 
@@ -4820,23 +4943,22 @@ class KnowledgeGraph:
         normalized: Optional[bool] = None,
         connection_types: Optional[Union[str, list[str]]] = None,
         top_k: Optional[int] = None,
-        as_dict: Optional[bool] = None,
         timeout_ms: Optional[int] = None,
         to_df: Optional[bool] = None,
-    ) -> Union[ResultView, dict[Any, float], pd.DataFrame]:
+    ) -> Union[ResultView, pd.DataFrame]:
         """Calculate degree centrality.
 
         Args:
             normalized: Normalise by ``(n-1)``. Default ``True``.
             connection_types: Only count these relationship types (str or list).
             top_k: Return only the top *K* nodes.
-            as_dict: Return ``{id: score}`` dict instead of list of dicts.
             timeout_ms: Abort after this many milliseconds with an error.
             to_df: Return a pandas DataFrame with columns ``type``, ``title``, ``id``, ``score``.
 
         Returns:
-            List of dicts with ``type``, ``title``, ``id``, ``score``.
-            Or a DataFrame if ``to_df=True``.
+            A :class:`ResultView` of rows with ``type``, ``title``, ``id``,
+            ``score``, sorted by score descending. Or a pandas DataFrame if
+            ``to_df=True``.
         """
         ...
 
@@ -4846,24 +4968,24 @@ class KnowledgeGraph:
         sample_size: Optional[int] = None,
         connection_types: Optional[Union[str, list[str]]] = None,
         top_k: Optional[int] = None,
-        as_dict: Optional[bool] = None,
         timeout_ms: Optional[int] = None,
         to_df: Optional[bool] = None,
-    ) -> Union[ResultView, dict[Any, float], pd.DataFrame]:
+    ) -> Union[ResultView, pd.DataFrame]:
         """Calculate closeness centrality.
 
         Args:
             normalized: Adjust for disconnected components. Default ``True``.
             sample_size: Approximate by sampling *N* source nodes (faster for large graphs).
                 If ``None``, uses all nodes.
-            connection_types: Filter to specific relationship types.
+            connection_types: Only traverse these relationship types (str or list).
             top_k: Return only the top *K* nodes.
-            as_dict: Return ``{id: score}`` dict instead of list of dicts.
             timeout_ms: Abort after this many milliseconds with an error.
             to_df: Return a pandas DataFrame with columns ``type``, ``title``, ``id``, ``score``.
 
         Returns:
-            List of dicts with ``type``, ``title``, ``id``, ``score``.
+            A :class:`ResultView` of rows with ``type``, ``title``, ``id``,
+            ``score``, sorted by score descending. Or a pandas DataFrame if
+            ``to_df=True``.
         """
         ...
 
@@ -5102,6 +5224,15 @@ class KnowledgeGraph:
 
         Returns:
             A ``networkx.MultiDiGraph`` mirroring the full graph.
+
+        Raises:
+            ArgumentError: Two nodes of different types share an id. Ids are
+                unique per type, not across types, and the networkx node key
+                is the bare id — the two nodes would merge into one, the
+                second overwriting the first's attributes and both nodes'
+                edges rewiring onto the survivor. Give the colliding types
+                disjoint ids; because the export is whole-graph, narrowing
+                the selection cannot avoid it.
 
         Note:
             v1 always exports the full graph; the active selection is
@@ -5390,7 +5521,14 @@ class KnowledgeGraph:
 
         Args:
             query: Cypher query string.
-            to_df: If ``True``, return a pandas DataFrame.
+            to_df: If ``True``, return a pandas DataFrame. A DataFrame has
+                nowhere to carry :attr:`ResultView.diagnostics`, and neither
+                does the string a ``FORMAT CSV`` query returns — so for both
+                shapes the query's warnings are only *announced* (stderr by
+                default, see :func:`kglite.set_query_warning_policy`), never
+                attached. Run the query without ``to_df`` / ``FORMAT CSV``
+                and call ``ResultView.to_df()`` when you want both the frame
+                and ``rv.warnings``.
             params: Optional parameter dict for ``$param`` substitution.
                 A parameter can supply a **value** or a **name**: labels and
                 relationship types accept ``$label`` / ``$(label)`` too
@@ -5491,7 +5629,8 @@ class KnowledgeGraph:
 
         Returns:
             ResultView by default, DataFrame when ``to_df=True``,
-            or CSV string when the query ends with ``FORMAT CSV``.
+            or CSV string when the query ends with ``FORMAT CSV``. Only the
+            ResultView carries ``diagnostics`` / ``warnings``.
 
         Raises:
             KeyboardInterrupt: If a long-running read is interrupted with
@@ -5973,10 +6112,21 @@ class KnowledgeGraph:
         invisible to ``collect()``, ``to_df()``, and other property-based APIs.
         The embedding store key is auto-derived as ``{text_column}_emb``.
 
-        Requires ``text_column`` to exist as a property on the node type
-        (builtins ``id``, ``title``, ``type`` are always accepted) — the guard
-        that catches passing the *store* name (``'summary_emb'``) where the
-        *column* name (``'summary'``) belongs.
+        Requires ``text_column`` to name something the node type actually has
+        — the guard that catches passing the *store* name (``'summary_emb'``)
+        where the *column* name (``'summary'``) belongs. It resolves exactly as
+        a Cypher property reference does: a stored property, an **identity
+        alias** (a type built with ``title_field='name'`` accepts ``'name'``,
+        one built with ``id_field='npdid'`` accepts ``'npdid'``), the canonical
+        ``id``/``title``, or a structural alias (``name``, ``type``,
+        ``node_type``, ``label``).
+
+        The store is keyed by the spelling you pass, never by what it resolves
+        to: embedding ``'name'`` on a ``title_field='name'`` type writes
+        ``name_emb`` and is read back as ``'name'`` by
+        :meth:`vector_search`, ``text_score()`` and :meth:`list_embeddings`.
+        Pick one spelling per column — ``'name'`` and ``'title'`` there are two
+        stores holding the same text.
 
         The whole batch is resolved and dimension-checked before anything is
         written, so a rejected call leaves the store exactly as it was.
@@ -6023,11 +6173,12 @@ class KnowledgeGraph:
         ``add_nodes`` + embedding batches need to coexist without a
         read-merge-write cycle through the user's process.
 
-        Requires ``text_column`` to exist as a property on the node type,
-        exactly as :meth:`set_embeddings` does (builtins ``id``, ``title``,
-        ``type`` are always accepted). The whole batch is resolved and
-        dimension-checked before anything is written, so a rejected call
-        leaves the store exactly as it was.
+        Resolves and validates ``text_column`` exactly as
+        :meth:`set_embeddings` does — stored property, identity alias
+        (``title_field``/``id_field`` column names), ``id``/``title``, or a
+        structural alias — and keys the store by the spelling you pass. The
+        whole batch is resolved and dimension-checked before anything is
+        written, so a rejected call leaves the store exactly as it was.
 
         Call ``save()`` to persist the store: embedding stores ride the
         checkpoint. A store records the vectors, dimension and metric you
@@ -6089,10 +6240,17 @@ class KnowledgeGraph:
                 structural field like ``title``/``type``). Use it to trim the
                 payload on wide nodes or ranking-only paths.
             exact: Force an exact brute-force scan even when an HNSW index exists
-                (see ``build_vector_index``). Default ``False`` → a whole-corpus
-                query on a large indexed store uses the approximate index; set
-                ``True`` for guaranteed-exact results. Heavily-filtered selections
-                and the ``'poincare'`` metric are always exact regardless.
+                (see ``build_vector_index``). Default ``False`` → a query
+                covering most of a large indexed store uses the approximate
+                index; set ``True`` for guaranteed-exact results. The index is
+                used whenever a single node type carries ``text_column``,
+                whatever else the selection spans — including a whole-graph
+                search on a multi-type graph. When two or more types carry the
+                column, only a selection of one of them can use that type's
+                index; a selection spanning both is ranked by exact scan so
+                neither type's rows are dropped. Selections covering little of
+                the store, and the ``'poincare'`` metric, are always exact
+                regardless.
 
         Returns:
             List of dicts (or a DataFrame if ``to_df=True``). By default a hit has
@@ -6101,6 +6259,16 @@ class KnowledgeGraph:
             before/after ``save()`` + reload (no follow-up
             ``MATCH ... WHERE id IN [...]`` join needed). With ``returning=[...]``
             a hit has ``id`` + ``score`` + the requested fields only.
+
+        Raises:
+            ValueError: if **no** selected node type has an embedding store for
+                ``text_column``. Passing the store name (``'summary_emb'``)
+                where the column belongs, naming a column that was never
+                embedded, or selecting only un-embedded types all land here —
+                the error names the column that would have worked. A selection
+                where *some* selected type has the store is a supported partial
+                result and returns those rows. Use :meth:`list_embeddings` to
+                see what is embedded.
 
         Example::
 
@@ -6315,6 +6483,13 @@ class KnowledgeGraph:
 
         Returns:
             Dict mapping node IDs to embedding vectors.
+
+        Raises:
+            ArgumentError: The selection spans two node types sharing an id.
+                Ids are unique per type only, so one of the two vectors would
+                be dropped from the dict. Call the two-arg form
+                ``embeddings(node_type, text_column)`` once per type — it
+                keys a single type's id namespace.
         """
         ...
 
@@ -6366,9 +6541,16 @@ class KnowledgeGraph:
         """Embed a text column for all nodes of a given type.
 
         Uses the model registered via ``set_embedder()``.  Reads each node's
-        ``text_column`` property, calls ``model.embed()`` in batches, and
-        stores the resulting vectors as ``{text_column}_emb``.
+        ``text_column``, calls ``model.embed()`` in batches, and stores the
+        resulting vectors as ``{text_column}_emb``.
         Nodes with missing or non-string text are skipped.
+
+        ``text_column`` resolves exactly as :meth:`set_embeddings` resolves it
+        — a stored property, an **identity alias** (a type built with
+        ``title_field='name'`` embeds its titles under ``'name'``), the
+        canonical ``id``/``title``, or a structural alias — and a column that
+        resolves to none of those raises ``ValueError`` rather than silently
+        embedding nothing.
 
         The store also records, per node, a hash of the embedded text and (when
         the embedder names it) the model id — so a later
@@ -6379,7 +6561,8 @@ class KnowledgeGraph:
 
         Args:
             node_type: The node type to embed (e.g. ``'Article'``).
-            text_column: The node property containing text to embed.
+            text_column: The column holding the text to embed — a property,
+                an identity alias, or ``id``/``title``.
             batch_size: Number of texts per ``model.embed()`` call (default 256).
             show_progress: Show a tqdm progress bar (default ``True``).
                 Silently falls back to no bar if ``tqdm`` is not installed.
@@ -6392,6 +6575,16 @@ class KnowledgeGraph:
         Returns:
             Dict with ``embedded``, ``skipped``, ``skipped_existing``,
             ``reembedded_changed``, and ``dimension``.
+
+        Raises:
+            ValueError: if ``node_type`` does not exist in the graph — the same
+                complaint :meth:`set_embeddings` makes, raised before the model
+                is loaded (an existing type with no matching rows stays a
+                ``{'embedded': 0}`` no-op); if ``text_column`` resolves to none
+                of the accepted spellings; or if ``mode`` is not
+                ``'missing'`` / ``'changed'`` / ``'all'``.
+            RuntimeError: if no embedder was registered with
+                :meth:`set_embedder`.
 
         Example::
 
@@ -6439,6 +6632,9 @@ class KnowledgeGraph:
         Returns:
             Same format as ``vector_search()`` — list of dicts or DataFrame.
 
+        Raises:
+            ValueError: same unknown-store contract as :meth:`vector_search`.
+
         Example::
 
             results = g.select("Article").search_text(
@@ -6461,10 +6657,18 @@ class KnowledgeGraph:
 
         Opt-in, like :meth:`create_index`: without it, vector search is an exact
         brute-force scan. Once built, :meth:`vector_search` / :meth:`search_text`
-        auto-use the index for whole-corpus queries on large stores; pass
+        auto-use the index for queries covering most of a large store; pass
         ``exact=True`` to force an exact scan. The index is **dropped
         automatically** whenever the store's vectors change (``add_embeddings`` /
-        ``embed_texts``) or slots are remapped (``vacuum``) — rebuild it after.
+        ``embed_texts``), slots are remapped (``vacuum``), or an embedded node
+        is deleted (the delete prunes its vector, which moves a slot) — rebuild
+        it after.
+
+        The selection does not have to be ``node_type``: while only one node
+        type carries ``text_column``, a whole-graph search on a multi-type
+        graph uses the index too. When two or more types carry the same column,
+        only a selection of a single one of them can — a selection spanning
+        both is ranked by exact scan so neither type's rows are dropped.
 
         Requires an existing embedding store; build it after ingest. The index
         is a rebuildable cache: a ``.kgl`` carries it, and a graph whose stored
@@ -6489,6 +6693,9 @@ class KnowledgeGraph:
 
         Raises:
             ValueError: if the store doesn't exist or the metric is unsupported.
+                A ``text_column`` that is itself a store name
+                (``'summary_emb'``) is named as such, with the column that
+                would have worked.
 
         Example::
 

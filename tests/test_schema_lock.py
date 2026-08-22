@@ -313,6 +313,144 @@ class TestOpenSchemaUnchanged:
         assert len(g.cypher("MATCH (x:AnotherNewType) RETURN x")) == 1
 
 
+# ── Read-side property validation ────────────────────────────────────────────
+#
+# The label symmetry above closed one half of the read side. The other half is
+# the property: `MATCH (p:Person) WHERE p.agee = 1` returns `[]` and
+# `RETURN p.agee` returns a column of nulls next to correct-looking siblings —
+# both indistinguishable from a legitimate empty or sparse result, and both a
+# warning only. Under the lock they are errors; unlocked they are unchanged.
+
+
+class TestMatchPropertyValidation:
+    def test_absent_property_in_return_raises(self):
+        g = _make_graph()
+        g.lock_schema()
+        with pytest.raises(kglite.SchemaError, match="Did you mean 'age'"):
+            g.cypher("MATCH (p:Person) RETURN p.agee")
+
+    def test_absent_property_in_where_raises(self):
+        g = _make_graph()
+        g.lock_schema()
+        with pytest.raises(kglite.SchemaError) as exc:
+            g.cypher("MATCH (p:Person) WHERE p.agee = 1 RETURN p")
+        message = str(exc.value)
+        assert "Unknown property 'agee' on Person, referenced in WHERE" in message
+        # Actionable without a trip to describe(): the valid set and the way out.
+        assert "Valid properties: age" in message
+        assert "unlock_schema()" in message
+
+    def test_error_carries_the_schema_code(self):
+        g = _make_graph()
+        g.lock_schema()
+        with pytest.raises(kglite.SchemaError) as exc:
+            g.cypher("MATCH (p:Person) RETURN p.agee")
+        assert exc.value.code == "Schema"
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "MATCH (p:Person) WHERE p.agee = 1 RETURN p",
+            "MATCH (p:Person) RETURN p.agee",
+            "MATCH (p:Person) WITH p.agee AS a RETURN a",
+            "MATCH (p:Person) RETURN p ORDER BY p.agee",
+            # A mutation's selector goes through the same prepare step.
+            "MATCH (p:Person) WHERE p.agee = 1 SET p.age = 99",
+            # EXPLAIN is rejected too, exactly as it already was for a typo'd
+            # label — the check runs before the plan is rendered.
+            "EXPLAIN MATCH (p:Person) RETURN p.agee",
+        ],
+    )
+    def test_every_reading_clause_is_covered(self, query):
+        g = _make_graph()
+        g.lock_schema()
+        with pytest.raises(kglite.SchemaError, match="agee"):
+            g.cypher(query)
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            # A real property, and the built-ins, are never rejected.
+            "MATCH (p:Person) RETURN p.age, p.id, p.title, p.name",
+            # No label to reason from.
+            "MATCH (n) WHERE n.whatever = 1 RETURN n",
+            # `WITH n AS m` rebinds a var the label map never tracked.
+            "MATCH (n:Person) WITH n AS m RETURN m.agee",
+            # A property of a *different* known type is still not this type's.
+            "MATCH (a:Paper) RETURN a.year",
+        ],
+    )
+    def test_valid_reads_are_never_rejected(self, query):
+        g = _make_graph()
+        g.lock_schema()
+        g.cypher(query)
+
+    def test_a_sparse_property_is_not_a_typo(self):
+        """One node carrying a property makes it known, however many are null."""
+        import pandas as pd
+
+        g = _make_graph()
+        g.add_nodes(
+            pd.DataFrame({"pid": [3], "name": ["Cara"], "age": [41], "nickname": ["C"]}),
+            "Person",
+            "pid",
+            node_title_field="name",
+        )
+        g.lock_schema()
+        rows = g.cypher("MATCH (p:Person) RETURN p.nickname").to_list()
+        assert sum(1 for r in rows if r["p.nickname"] is None) >= 2
+
+    def test_the_session_and_transaction_paths_share_the_rule(self):
+        g = _make_graph()
+        g.lock_schema()
+        session = g.session()
+        with pytest.raises(kglite.SchemaError, match="agee"):
+            session.cypher("MATCH (p:Person) RETURN p.agee")
+        with pytest.raises(kglite.SchemaError, match="agee"):
+            session.execute("MATCH (p:Person) WHERE p.agee = 1 SET p.age = 99")
+
+        tx = g.begin()
+        try:
+            with pytest.raises(kglite.SchemaError, match="agee"):
+                tx.cypher("MATCH (p:Person) RETURN p.agee")
+        finally:
+            tx.rollback()
+
+    def test_locking_after_the_plan_was_cached_still_raises(self):
+        """The plan cache must not carry a pre-lock verdict past the lock."""
+        g = _make_graph()
+        query = "MATCH (p:Person) RETURN p.agee"
+        for _ in range(2):
+            assert len(g.cypher(query)) == 2
+        g.lock_schema()
+        with pytest.raises(kglite.SchemaError, match="agee"):
+            g.cypher(query)
+        g.unlock_schema()
+        assert len(g.cypher(query)) == 2
+
+    def test_unlocked_returns_nulls_with_a_warning_instead(self):
+        """The pair, side by side: the default is unchanged and still explains itself."""
+        g = _make_graph()
+        assert g.schema_locked is False
+        result = g.cypher("MATCH (p:Person) RETURN p.name, p.agee")
+        assert [row["p.agee"] for row in result.to_list()] == [None, None]
+        assert any("Did you mean 'age'?" in w for w in result.warnings), result.warnings
+
+    def test_a_reversed_arrow_stays_a_warning_under_the_lock(self):
+        g = _make_graph()
+        g.lock_schema()
+        result = g.cypher("MATCH (a:Paper)-[:AUTHORED]->(p:Person) RETURN p")
+        assert len(result) == 0
+        assert any("Reverse the arrow?" in w for w in result.warnings), result.warnings
+
+    def test_an_unknown_relationship_type_stays_a_warning_under_the_lock(self):
+        g = _make_graph()
+        g.lock_schema()
+        result = g.cypher("MATCH (p:Person)-[:AUTHRED]->(a:Paper) RETURN p")
+        assert len(result) == 0
+        assert any("AUTHRED" in w for w in result.warnings), result.warnings
+
+
 # ── Introspection ────────────────────────────────────────────────────────────
 
 

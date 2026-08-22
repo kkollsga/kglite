@@ -425,6 +425,16 @@ def _slow_coreness_oracle(case: GraphCase) -> dict[int, int]:
     return coreness
 
 
+def _centrality_scores(method, **kwargs) -> dict[object, float]:
+    """`{id: score}` from a centrality ResultView.
+
+    Replaces the removed `as_dict=True`, which keyed by bare id and silently
+    dropped rows on cross-type id collisions. These fixtures are single-type,
+    so the mapping is lossless; the cell still materializes every row.
+    """
+    return {row["id"]: row["score"] for row in method(**kwargs).to_dicts()}
+
+
 def _clustering_rows(graph: KnowledgeGraph) -> list[dict[str, object]]:
     return graph.cypher(
         "CALL clustering_coefficient() YIELD node, coefficient RETURN node.id AS id, coefficient"
@@ -605,12 +615,13 @@ def test_dbscan_oracle_rejects_membership_and_noise_mutations(
 def test_pagerank_matches_scalar_oracle(node_count: int) -> None:
     case = _pagerank_case(node_count)
     expected = _pagerank_oracle(case)
-    actual = case.graph.pagerank(
+    # `as_dict=True` removed: same mapping, built from the ResultView.
+    actual = _centrality_scores(
+        case.graph.pagerank,
         damping_factor=0.85,
         max_iterations=30,
         tolerance=0.0,
         connection_types=["LINK"],
-        as_dict=True,
     )
     assert set(actual) == set(expected)
     assert actual == pytest.approx(expected, rel=2e-13, abs=2e-15)
@@ -622,12 +633,13 @@ def test_pagerank_sink_heavy_matches_scalar_oracle(
 ) -> None:
     """Pin dangling redistribution on the parallel benchmark fixture."""
     expected = _pagerank_oracle(pagerank_sink_heavy_case)
-    actual = pagerank_sink_heavy_case.graph.pagerank(
+    # `as_dict=True` removed: same mapping, built from the ResultView.
+    actual = _centrality_scores(
+        pagerank_sink_heavy_case.graph.pagerank,
         damping_factor=0.85,
         max_iterations=30,
         tolerance=0.0,
         connection_types=["LINK"],
-        as_dict=True,
     )
     assert set(actual) == set(expected)
     assert actual == pytest.approx(expected, rel=2e-13, abs=2e-15)
@@ -725,11 +737,12 @@ def test_brandes_matches_networkx() -> None:
         normalized=False,
     )
     expected = {node: score * case.node_count / sample_size for node, score in expected.items()}
-    actual = case.graph.betweenness_centrality(
+    # `as_dict=True` removed: same mapping, built from the ResultView.
+    actual = _centrality_scores(
+        case.graph.betweenness_centrality,
         normalized=False,
         sample_size=sample_size,
         connection_types=["LINK"],
-        as_dict=True,
     )
     assert actual == pytest.approx(expected, abs=1e-14)
 
@@ -740,11 +753,12 @@ def test_brandes_threshold_cases_match_path_oracle(
     """Exercise the closed-form oracle on both sides of the Rayon threshold."""
     sample_size = 64
     expected = _path_brandes_oracle(brandes_threshold_case, sample_size)
-    actual = brandes_threshold_case.graph.betweenness_centrality(
+    # `as_dict=True` removed: same mapping, built from the ResultView.
+    actual = _centrality_scores(
+        brandes_threshold_case.graph.betweenness_centrality,
         normalized=True,
         sample_size=sample_size,
         connection_types=["LINK"],
-        as_dict=True,
     )
     assert actual == pytest.approx(expected, rel=2e-13, abs=2e-15)
 
@@ -855,10 +869,11 @@ def test_bench_leiden_weighted_planted(benchmark, weighted_community_case: Graph
 
 @pytest.mark.benchmark
 def test_bench_pagerank_below_parallel_threshold(benchmark, pagerank_below_case: GraphCase) -> None:
+    # `as_dict=True` removed: the cell still times full row materialization.
     result = benchmark(
+        _centrality_scores,
         pagerank_below_case.graph.pagerank,
         connection_types=["LINK"],
-        as_dict=True,
     )
     assert len(result) == pagerank_below_case.node_count
     assert sum(result.values()) == pytest.approx(1.0, abs=1e-8)
@@ -866,10 +881,11 @@ def test_bench_pagerank_below_parallel_threshold(benchmark, pagerank_below_case:
 
 @pytest.mark.benchmark
 def test_bench_pagerank_above_parallel_threshold(benchmark, pagerank_above_case: GraphCase) -> None:
+    # `as_dict=True` removed: the cell still times full row materialization.
     result = benchmark(
+        _centrality_scores,
         pagerank_above_case.graph.pagerank,
         connection_types=["LINK"],
-        as_dict=True,
     )
     assert len(result) == pagerank_above_case.node_count
     assert sum(result.values()) == pytest.approx(1.0, abs=1e-8)
@@ -878,10 +894,11 @@ def test_bench_pagerank_above_parallel_threshold(benchmark, pagerank_above_case:
 
 @pytest.mark.benchmark
 def test_bench_pagerank_sink_heavy_parallel(benchmark, pagerank_sink_heavy_case: GraphCase) -> None:
+    # `as_dict=True` removed: the cell still times full row materialization.
     result = benchmark(
+        _centrality_scores,
         pagerank_sink_heavy_case.graph.pagerank,
         connection_types=["LINK"],
-        as_dict=True,
     )
     dangling_nodes = pagerank_sink_heavy_case.node_count - len({source for source, _ in pagerank_sink_heavy_case.edges})
     assert len(result) == pagerank_sink_heavy_case.node_count
@@ -892,12 +909,13 @@ def test_bench_pagerank_sink_heavy_parallel(benchmark, pagerank_sink_heavy_case:
 
 @pytest.mark.benchmark
 def test_bench_brandes_sampled(benchmark, brandes_case: GraphCase) -> None:
+    # `as_dict=True` removed: the cell still times full row materialization.
     result = benchmark(
+        _centrality_scores,
         brandes_case.graph.betweenness_centrality,
         normalized=True,
         sample_size=64,
         connection_types=["LINK"],
-        as_dict=True,
     )
     assert len(result) == brandes_case.node_count
     assert max(result.values()) > 0.0
@@ -911,12 +929,13 @@ def test_bench_brandes_work_threshold(
     brandes_threshold_case: GraphCase,
     sample_size: int,
 ) -> None:
+    # `as_dict=True` removed: the cell still times full row materialization.
     result = benchmark(
+        _centrality_scores,
         brandes_threshold_case.graph.betweenness_centrality,
         normalized=True,
         sample_size=sample_size,
         connection_types=["LINK"],
-        as_dict=True,
     )
     expected = _path_brandes_oracle(brandes_threshold_case, sample_size)
     expected_max = max(expected.values())

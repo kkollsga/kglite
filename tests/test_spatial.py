@@ -3,7 +3,7 @@
 import pandas as pd
 import pytest
 
-from kglite import KnowledgeGraph
+from kglite import ArgumentError, KgError, KnowledgeGraph
 
 
 @pytest.fixture
@@ -167,3 +167,92 @@ class TestBounds:
             lon_field="longitude",
         )
         assert centroid is not None
+
+
+@pytest.fixture
+def region_site_graph():
+    """One WKT region plus two point sites — the minimal shape `compare()`
+    needs, used here to pin its ``target_type`` argument shape."""
+    graph = KnowledgeGraph()
+    graph.add_nodes(
+        pd.DataFrame([{"id": 1, "name": "RegionA", "wkt_geometry": "POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))"}]),
+        "Region",
+        "id",
+        "name",
+    )
+    graph.set_spatial("Region", geometry="wkt_geometry")
+    graph.add_nodes(
+        pd.DataFrame([{"id": 2, "name": "SiteX", "lat": 5.0, "lon": 5.0}]),
+        "Site",
+        "id",
+        "name",
+    )
+    graph.set_spatial("Site", location=("lat", "lon"))
+    return graph
+
+
+class TestCompareTargetTypeShape:
+    """`compare()`'s ``target_type`` accepts a bare string or a list; the
+    parsing is shared with `traverse()` and must stay byte-identical in
+    behaviour after the two hand-rolled blocks were unified."""
+
+    def test_string_form(self, region_site_graph):
+        assert len(region_site_graph.select("Region").compare("Site", "contains").collect()) == 1
+
+    def test_list_form_matches_string_form(self, region_site_graph):
+        as_string = region_site_graph.select("Region").compare("Site", "contains").collect()
+        as_list = region_site_graph.select("Region").compare(["Site"], "contains").collect()
+        assert [r["title"] for r in as_list] == [r["title"] for r in as_string]
+
+    def test_invalid_type_raises_naming_the_parameter(self, region_site_graph):
+        with pytest.raises(KgError, match="target_type must be a string or list of strings"):
+            region_site_graph.select("Region").compare(123, "contains")
+
+    def test_multi_element_list_refuses_instead_of_truncating(self, region_site_graph):
+        """The comparison traversal is single-target; a two-element list used to
+        silently compare against element 0 only. It must refuse, not truncate."""
+        with pytest.raises(ArgumentError, match=r"compare\(\) supports one target_type; got 2"):
+            region_site_graph.select("Region").compare(["Site", "Region"], "contains")
+
+    def test_empty_list_behaves_like_omitted_target(self, region_site_graph):
+        """An empty list carries no type, so it reaches the method's own
+        missing-target error rather than silently comparing against nothing —
+        raised as the typed `ArgumentError`, see `TestCompareErrorTaxonomy`."""
+        with pytest.raises(ArgumentError, match="requires a target_type"):
+            region_site_graph.select("Region").compare([], "contains")
+
+
+class TestCompareErrorTaxonomy:
+    """Every failure raised *inside* the comparison traversal is an engine
+    error, so it must arrive as a typed ``kglite`` exception — catchable by
+    ``except KgError`` and carrying a stable ``.code`` — not as a bare
+    built-in ``ValueError`` that the kglite family cannot see."""
+
+    def test_missing_target_type_is_typed(self, region_site_graph):
+        with pytest.raises(KgError) as excinfo:
+            region_site_graph.select("Region").compare([], "contains")
+        assert isinstance(excinfo.value, ArgumentError)
+        assert excinfo.value.code == "InvalidArgument"
+        assert "requires a target_type" in str(excinfo.value)
+
+    def test_unknown_method_is_typed(self, region_site_graph):
+        with pytest.raises(KgError) as excinfo:
+            region_site_graph.select("Region").compare("Site", "no_such_method")
+        assert isinstance(excinfo.value, ArgumentError)
+        assert excinfo.value.code == "InvalidArgument"
+        assert "Unknown traversal method" in str(excinfo.value)
+
+    def test_missing_method_setting_is_typed(self, region_site_graph):
+        """``distance`` without ``max_m`` fails inside the dispatcher."""
+        with pytest.raises(KgError) as excinfo:
+            region_site_graph.select("Region").compare("Site", {"type": "distance"})
+        assert isinstance(excinfo.value, ArgumentError)
+        assert "requires 'max_m'" in str(excinfo.value)
+
+    def test_invalid_resolve_mode_is_typed(self, region_site_graph):
+        """The method dict is validated by the core ``MethodConfig`` builder,
+        which is engine code and owes the same typed exception."""
+        with pytest.raises(KgError) as excinfo:
+            region_site_graph.select("Region").compare("Site", {"type": "contains", "resolve": "nowhere"})
+        assert isinstance(excinfo.value, ArgumentError)
+        assert "Unknown resolve mode" in str(excinfo.value)

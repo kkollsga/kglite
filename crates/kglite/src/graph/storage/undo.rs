@@ -27,9 +27,9 @@
 //!   every Cypher write path funnels through;
 //! - **`DirGraph`'s inverted indexes** (`type_indices`,
 //!   `secondary_label_index`, and the user-created `property_indices` /
-//!   `range_indices` / `composite_indices`) and `timeseries_store`, captured
-//!   at their documented choke-point APIs, because those structures sit
-//!   *above* storage and a backend cannot see them.
+//!   `range_indices` / `composite_indices`), `timeseries_store` and
+//!   `embeddings`, captured at their documented choke-point APIs, because
+//!   those structures sit *above* storage and a backend cannot see them.
 //!
 //! Everything else a statement can touch is O(schema)-sized and is restored
 //! verbatim from a cheap shell clone — see
@@ -74,7 +74,8 @@ use petgraph::graph::{EdgeIndex, NodeIndex};
 use crate::datatypes::Value;
 use crate::graph::features::timeseries::NodeTimeseries;
 use crate::graph::schema::{
-    CompositeIndexKey, CompositeValue, EdgeData, IndexKey, InternedKey, NodeData, TypeSchema,
+    CompositeIndexKey, CompositeValue, EdgeData, IndexKey, InternedKey, NodeData, RemovedEmbedding,
+    TypeSchema,
 };
 use crate::graph::storage::column_store::ColumnStore;
 
@@ -226,6 +227,24 @@ pub enum UndoEntry {
     TimeseriesRemoved {
         node: usize,
         prior: Box<NodeTimeseries>,
+    },
+    /// A node's vector was pruned from `DirGraph::embeddings` with the node.
+    /// Undo puts it back on the slot it vacated.
+    ///
+    /// The embedding twin of [`TimeseriesRemoved`](Self::TimeseriesRemoved),
+    /// and for the same reason: `embeddings` is parked by
+    /// `rollback::swap_data_scale` (it is O(V × dim), far too large to clone
+    /// per statement), so the live post-statement map is what a rollback keeps
+    /// — a pruned vector comes back from here or not at all. Boxed because the
+    /// vector dominates every other variant's size.
+    ///
+    /// The store key is the `(node_type, property)` pair `DirGraph::embeddings`
+    /// is keyed by; the store itself always still exists at replay time,
+    /// because pruning never removes one.
+    EmbeddingRemoved {
+        store_key: (String, String),
+        node: usize,
+        prior: Box<RemovedEmbedding>,
     },
     /// One cell of a type's master `ColumnStore` is about to be overwritten.
     /// `prior` is the value that cell held before the statement's write; undo
@@ -629,6 +648,21 @@ impl UndoJournal {
     #[inline]
     pub fn note_timeseries_removed(&mut self, node: usize, prior: NodeTimeseries) {
         self.entries.push(UndoEntry::TimeseriesRemoved {
+            node,
+            prior: Box::new(prior),
+        });
+    }
+
+    /// A node's vector was pruned out of the store at `store_key`.
+    #[inline]
+    pub fn note_embedding_removed(
+        &mut self,
+        store_key: (String, String),
+        node: usize,
+        prior: RemovedEmbedding,
+    ) {
+        self.entries.push(UndoEntry::EmbeddingRemoved {
+            store_key,
             node,
             prior: Box::new(prior),
         });

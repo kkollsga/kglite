@@ -43,6 +43,38 @@ use std::sync::Arc;
 // for local use without depending on the engine's pub visibility.)
 pub(crate) type EmbeddingColumnData = Vec<(String, Vec<(Value, Vec<f32>)>)>;
 
+/// Extract a Python `str | list[str] | None` parameter into `Option<Vec<String>>`.
+///
+/// The single wheel-side convention for that shape: a bare string becomes a
+/// one-element list, a list of strings passes through, an empty list means
+/// "no filter" (`None`), and anything else is an `ArgumentError` naming the
+/// parameter. Mirrors the Cypher side's `call_param_string_list`, so a scalar
+/// spells the same thing whichever surface it arrives on.
+///
+/// A plain function rather than a `FromPyObject` newtype — the same house
+/// rule `durable_level_from_arg` records in `lib.rs`: the trait's shape has
+/// moved across PyO3 releases, nothing here needs generic extraction, and the
+/// callers want the parameter name in the error.
+pub(crate) fn string_or_list(
+    obj: Option<&Bound<'_, PyAny>>,
+    param_name: &str,
+) -> PyResult<Option<Vec<String>>> {
+    let Some(obj) = obj else {
+        return Ok(None);
+    };
+    if let Ok(single) = obj.extract::<String>() {
+        return Ok(Some(vec![single]));
+    }
+    if let Ok(list) = obj.extract::<Vec<String>>() {
+        return Ok((!list.is_empty()).then_some(list));
+    }
+    Err(crate::error_py::kg_to_pyerr(
+        crate::error::KgError::Argument(format!(
+            "{param_name} must be a string or list of strings"
+        )),
+    ))
+}
+
 /// Extract `ConnectionDetail` from a Python `bool | list[str] | None` parameter.
 pub(crate) fn extract_detail_param(
     obj: Option<&Bound<'_, PyAny>>,
@@ -1062,27 +1094,89 @@ fn selection_has_nodes(kg: &KnowledgeGraph) -> bool {
         .unwrap_or(false)
 }
 
-/// Lightweight centrality result conversion: returns {title: score} dict.
-/// Creates ONE Python dict instead of N dicts — returns {title: score} format.
-/// ~3-4x faster PyO3 serialization for large graphs.
-pub(crate) fn centrality_results_to_py_dict(
-    py: Python<'_>,
-    graph: &DirGraph,
-    results: Vec<kglite_core::api::algorithms::CentralityResult>,
-    top_k: Option<usize>,
-) -> PyResult<Py<PyAny>> {
-    let _arena_guard = graph.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
-    let limit = top_k.unwrap_or(results.len());
-    let scores_dict = PyDict::new(py);
+// ── Flat-dict node keys ──────────────────────────────────────────────
+//
+// Several Python surfaces flatten a node collection into a single dict
+// keyed by one node field. Neither candidate field is graph-unique: ids
+// are unique *per type* only, and titles are not unique at all. Left
+// unguarded, the second node to land on a key overwrites the first — a
+// merged NetworkX node with rewired edges, a dropped embedding vector,
+// a missing degree row — with nothing on the wire saying so.
+//
+// Every such surface inserts through `NodeKeyGuard` so the diagnosis
+// reads the same everywhere: what collided, why that field is not
+// unique, and the collision-safe call to make instead.
 
-    for result in results.into_iter().take(limit) {
-        if let Some(node) = graph.node_view(result.node_idx) {
-            let id_py = py_out::value_to_py(py, &node.id())?;
-            scores_dict.set_item(id_py, result.score)?;
+/// Which node field a flat dict is keyed by — picks the "why" clause.
+#[derive(Clone, Copy)]
+pub(crate) enum NodeKeyKind {
+    /// Node `id`: unique within a type, reused across types.
+    Id,
+    /// Node `title`: not unique anywhere.
+    Title,
+}
+
+impl NodeKeyKind {
+    fn field(self) -> &'static str {
+        match self {
+            Self::Id => "id",
+            Self::Title => "title",
         }
     }
 
-    Ok(scores_dict.into())
+    fn why(self) -> &'static str {
+        match self {
+            Self::Id => "ids are unique per type, not across types",
+            Self::Title => "titles are not unique, not even within one type",
+        }
+    }
+}
+
+/// One surface's collision policy: who reports, on which key field, and
+/// the recipe that gets the caller the same data without a collision.
+pub(crate) struct NodeKeyGuard<'a> {
+    /// The method as a caller would type it, e.g. `"degrees()"`.
+    pub surface: &'a str,
+    pub kind: NodeKeyKind,
+    /// Imperative clause completing "…, so <recipe>." Must be actionable
+    /// on the graph that produced the collision.
+    pub recipe: &'a str,
+}
+
+impl NodeKeyGuard<'_> {
+    /// Insert `key -> value`, refusing rather than overwriting.
+    pub(crate) fn insert<'py, V>(
+        &self,
+        dict: &Bound<'py, PyDict>,
+        key: &Bound<'py, PyAny>,
+        value: V,
+    ) -> PyResult<()>
+    where
+        V: IntoPyObject<'py>,
+    {
+        if dict.contains(key)? {
+            return Err(self.collision(key));
+        }
+        dict.set_item(key, value)
+    }
+
+    /// The refusal itself, for surfaces whose collection is not a dict
+    /// (`to_networkx` keys a NetworkX graph) but whose keys collide the
+    /// same way.
+    pub(crate) fn collision(&self, key: &Bound<'_, PyAny>) -> PyErr {
+        let rendered = match key.repr() {
+            Ok(repr) => repr.to_string_lossy().into_owned(),
+            Err(_) => "<unrepresentable>".to_string(),
+        };
+        crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(format!(
+            "{} found two nodes sharing {} {}; {}, so {}.",
+            self.surface,
+            self.kind.field(),
+            rendered,
+            self.kind.why(),
+            self.recipe,
+        )))
+    }
 }
 
 /// Convert centrality results to a pandas DataFrame with columns:
@@ -1250,7 +1344,9 @@ pub(crate) fn parse_method_param(
         eps,
         min_samples,
     )
-    .map_err(pyo3::exceptions::PyValueError::new_err)
+    // Core validation (the `resolve` vocabulary) — an engine error, so it
+    // carries the typed `kglite.ArgumentError`, not a bare `ValueError`.
+    .map_err(|e| crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e)))
 }
 
 /// Shared comparison traversal logic used by `compare()`.
@@ -1274,7 +1370,11 @@ pub(crate) fn compare_inner(
         sort_fields,
         limit,
     )
-    .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+    // The dispatcher's failures (missing target_type, missing method
+    // settings, unknown method) originate in the engine, so they belong to
+    // the `kglite.KgError` family — a bare `ValueError` here was invisible
+    // to `except KgError`.
+    .map_err(|e| crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e)))?;
 
     let actual = selection
         .get_level(selection.get_level_count().saturating_sub(1))

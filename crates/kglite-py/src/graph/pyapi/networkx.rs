@@ -14,8 +14,20 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::datatypes::py_out::value_to_py;
-use crate::graph::KnowledgeGraph;
+use crate::graph::{KnowledgeGraph, NodeKeyGuard, NodeKeyKind};
 use kglite_core::api::GraphRead;
+
+/// Node keys are bare ids, so two types sharing an id would merge into one
+/// NetworkX node (attrs overwritten, both nodes' edges rewired onto the
+/// survivor). Refuse instead — and name a recipe the whole-graph export can
+/// actually honour.
+const ID_KEY: NodeKeyGuard<'static> = NodeKeyGuard {
+    surface: "to_networkx()",
+    kind: NodeKeyKind::Id,
+    recipe: "give the colliding node types disjoint ids - the export always \
+             covers the whole graph, so narrowing the selection cannot avoid \
+             this",
+};
 
 #[pymethods]
 impl KnowledgeGraph {
@@ -34,6 +46,13 @@ impl KnowledgeGraph {
     ///
     /// Returns:
     ///     A ``networkx.MultiDiGraph`` mirroring the full graph.
+    ///
+    /// Raises:
+    ///     ArgumentError: Two nodes of different types share an id. Ids are
+    ///         unique per type, not across types, so a bare-id node key would
+    ///         merge them into one networkx node. Give the colliding types
+    ///         disjoint ids — the export is whole-graph, so narrowing the
+    ///         selection cannot avoid it.
     ///
     /// Note:
     ///     v1 always exports the full graph (selections are ignored).
@@ -68,6 +87,10 @@ impl KnowledgeGraph {
         // endpoint so the conversion stays O(n + e), not O(n + e·k).
         let mut id_by_index: std::collections::HashMap<usize, Py<PyAny>> =
             std::collections::HashMap::with_capacity(graph.graph.node_count());
+        // Keys already handed to `add_node`. A NetworkX graph has no
+        // insert-or-fail, so the guard owns a dict of its own; `add_node`
+        // would silently overwrite.
+        let seen_keys = PyDict::new(py);
 
         // Build nodes. Node key = id (the canonical per-mode integer/string).
         for idx in graph.graph.node_indices() {
@@ -83,6 +106,7 @@ impl KnowledgeGraph {
             for (k, v) in node.properties_cloned(interner) {
                 attrs.set_item(k, value_to_py(py, &v)?)?;
             }
+            ID_KEY.insert(&seen_keys, key.bind(py), py.None())?;
             add_node.call((key.clone_ref(py),), Some(&attrs))?;
             id_by_index.insert(idx.index(), key);
         }

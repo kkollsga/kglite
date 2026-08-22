@@ -839,7 +839,7 @@ pub(super) fn write_fluent_overview(xml: &mut String) {
     xml.push_str("    <method sig=\"calculate(expression, store_as=None)\">Math expressions on properties. store_as saves result as new property.</method>\n");
     xml.push_str("    <method sig=\"unique_values(property, store_as=None)\">Distinct values for a property.</method>\n");
     xml.push_str(
-        "    <method sig=\"degrees()\">Node degree counts (whole graph; no per-connection-type filter today).</method>\n",
+        "    <method sig=\"degrees()\">Node degree counts, keyed by title (no per-connection-type filter today). Duplicate titles raise - use degree_centrality() for a per-node ResultView.</method>\n",
     );
     xml.push_str("  </group>\n");
 
@@ -851,7 +851,7 @@ pub(super) fn write_fluent_overview(xml: &mut String) {
     xml.push_str("    <method sig=\"shortest_path_lengths_from(source_type, source_id, target_type=None, target_ids=None, connection_types=None, via_types=None, direction=None, max_hops=None, timeout_ms=None)\">One source to many targets in a single BFS. Requires one of target_ids / target_type / max_hops. target_type filters the RESULT and names the id space; via_types is what restricts the walk.</method>\n");
     xml.push_str("    <method sig=\"are_connected(source_type, source_id, target_type, target_id, connection_types=None, via_types=None, direction=None, timeout_ms=None)\">Boolean reachability — true exactly when shortest_path_length() returns a distance.</method>\n");
     xml.push_str("    <method sig=\"all_paths(source_type, source_id, target_type, target_id, max_hops=None, max_results=None, connection_types=None, via_types=None, timeout_ms=None, direction=None)\">Enumerate all paths (max_hops defaults to 5).</method>\n");
-    xml.push_str("    <method sig=\"pagerank(damping_factor=None, connection_types=None, top_k=None, as_dict=None, to_df=None)\">PageRank centrality (damping_factor defaults to 0.85).</method>\n");
+    xml.push_str("    <method sig=\"pagerank(damping_factor=None, connection_types=None, top_k=None, to_df=None)\">PageRank centrality (damping_factor defaults to 0.85).</method>\n");
     xml.push_str("    <method sig=\"betweenness_centrality(normalized=None, sample_size=None, connection_types=None, top_k=None)\">Betweenness centrality.</method>\n");
     xml.push_str("    <method sig=\"louvain_communities(weight_property=None, resolution=None, connection_types=None)\">Community detection (Louvain; resolution defaults to 1.0).</method>\n");
     xml.push_str("    <method sig=\"connected_components(weak=None, titles_only=None)\">Connected component analysis (weak defaults to True).</method>\n");
@@ -1115,7 +1115,7 @@ pub(super) fn write_fluent_topic_statistics(xml: &mut String) {
     xml.push_str("      <m sig=\"calculate(expression, store_as=None)\">Math expression on properties. store_as persists result.</m>\n");
     xml.push_str("      <m sig=\"unique_values(property, store_as=None)\">Distinct values for a property.</m>\n");
     xml.push_str(
-        "      <m sig=\"degrees()\">In/out/total degree counts per node (whole graph; no per-connection-type filter today).</m>\n",
+        "      <m sig=\"degrees()\">Total degree per node, keyed by title (no per-connection-type filter today). Duplicate titles raise - use degree_centrality() for a per-node ResultView.</m>\n",
     );
     xml.push_str("    </methods>\n");
     xml.push_str("    <examples>\n");
@@ -1141,10 +1141,10 @@ pub(super) fn write_fluent_topic_algorithms(xml: &mut String) {
     xml.push_str("      <m sig=\"shortest_path_lengths_from(source_type, source_id, target_type=None, target_ids=None, connection_types=None, via_types=None, direction=None, max_hops=None, timeout_ms=None)\">Distances from ONE source to many targets in a single BFS -> {id: hops}. Bound it with target_ids (an answer per requested id, None where unreachable), target_type (only reached nodes of that type) or max_hops; an unbounded one-to-all is refused. In discovery mode an absent id means unreachable.</m>\n");
     xml.push_str("      <m sig=\"are_connected(source_type, source_id, target_type, target_id, connection_types=None, via_types=None, direction=None, timeout_ms=None)\">Boolean reachability under the same filters.</m>\n");
     xml.push_str("      <m sig=\"all_paths(source_type, source_id, target_type, target_id, max_hops=None, max_results=None, connection_types=None, via_types=None, timeout_ms=None, direction=None)\">All paths up to max_hops (default 5); max_results caps the count.</m>\n");
-    xml.push_str("      <m sig=\"pagerank(damping_factor=None, max_iterations=None, connection_types=None, top_k=None, as_dict=None, to_df=None)\">PageRank centrality → ResultView (damping_factor defaults to 0.85).</m>\n");
-    xml.push_str("      <m sig=\"betweenness_centrality(normalized=None, sample_size=None, connection_types=None, top_k=None, as_dict=None, to_df=None)\">Betweenness centrality → ResultView.</m>\n");
-    xml.push_str("      <m sig=\"degree_centrality(normalized=None, connection_types=None, top_k=None, as_dict=None, to_df=None)\">Degree centrality → ResultView (as_dict=True for a dict).</m>\n");
-    xml.push_str("      <m sig=\"closeness_centrality(normalized=None, sample_size=None, connection_types=None, top_k=None, as_dict=None, to_df=None)\">Closeness centrality → ResultView.</m>\n");
+    xml.push_str("      <m sig=\"pagerank(damping_factor=None, max_iterations=None, connection_types=None, top_k=None, to_df=None)\">PageRank centrality → ResultView (damping_factor defaults to 0.85).</m>\n");
+    xml.push_str("      <m sig=\"betweenness_centrality(normalized=None, sample_size=None, connection_types=None, top_k=None, to_df=None)\">Betweenness centrality → ResultView.</m>\n");
+    xml.push_str("      <m sig=\"degree_centrality(normalized=None, connection_types=None, top_k=None, to_df=None)\">Degree centrality → ResultView.</m>\n");
+    xml.push_str("      <m sig=\"closeness_centrality(normalized=None, sample_size=None, connection_types=None, top_k=None, to_df=None)\">Closeness centrality → ResultView.</m>\n");
     xml.push_str("      <m sig=\"louvain_communities(weight_property=None, resolution=None, connection_types=None, timeout_ms=None)\">Community detection → dict with communities, modularity, num_communities (resolution defaults to 1.0).</m>\n");
     xml.push_str("      <m sig=\"label_propagation(max_iterations=None, connection_types=None, timeout_ms=None)\">Label propagation communities → dict (max_iterations defaults to 100).</m>\n");
     xml.push_str("      <m sig=\"connected_components(weak=None, titles_only=None)\">Component analysis → list of components (weak defaults to True).</m>\n");

@@ -313,3 +313,50 @@ class TestTransactionRollbackHardening:
         assert _count(g) == 3
         g.cypher("CREATE (:N {id: 30})")
         assert _count(g) == 4
+
+
+class TestTransactionEmbeddings:
+    """A transaction's snapshot isolation covers the embedding store."""
+
+    @staticmethod
+    def _embedded(g):
+        g.set_embeddings(
+            "Person",
+            "title",
+            {1: [1.0, 0.0, 0.0], 2: [0.0, 1.0, 0.0], 3: [0.0, 0.0, 1.0]},
+        )
+        return g
+
+    def test_rollback_restores_a_deleted_nodes_vector(self, graph):
+        """A rolled-back DELETE must leave vector search returning exactly what
+        it returned before — the working copy is discarded whole, store and
+        all."""
+        g = self._embedded(graph)
+        query = [0.0, 1.0, 0.0]
+        before = g.select("Person").vector_search("title", query, top_k=5)
+
+        tx = g.begin()
+        tx.cypher("MATCH (n:Person {id: 2}) DETACH DELETE n")
+        tx.rollback()
+
+        assert g.select("Person").vector_search("title", query, top_k=5) == before
+        assert g.list_embeddings()[0]["count"] == 3
+
+    def test_commit_prunes_the_deleted_nodes_vector(self, graph):
+        """The committed half of the same contract: the vector is gone, and the
+        node index it freed carries nothing into the next node created."""
+        g = self._embedded(graph)
+
+        tx = g.begin()
+        tx.cypher("MATCH (n:Person {id: 2}) DETACH DELETE n")
+        tx.commit()
+
+        assert g.list_embeddings()[0]["count"] == 2
+        g.add_nodes(
+            pd.DataFrame({"id": [77], "title": ["Heir"]}),
+            "Person",
+            "id",
+            "title",
+        )
+        results = g.select("Person").vector_search("title", [0.0, 1.0, 0.0], top_k=5)
+        assert 77 not in [r["id"] for r in results], results

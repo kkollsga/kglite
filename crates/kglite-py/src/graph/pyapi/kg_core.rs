@@ -1751,6 +1751,9 @@ impl KnowledgeGraph {
             let outcome = kglite_core::api::session::execute_mut(graph, query, &opts)
                 .map_err(crate::error_py::kg_to_pyerr)?;
             let mut result = outcome.result;
+            // Announce before the output shape is chosen — a CSV string and a
+            // DataFrame cannot carry diagnostics, so this is their only channel.
+            crate::warning_policy::announce(py, result.diagnostics.as_ref())?;
             let output_csv = outcome.output_format == cypher::OutputFormat::Csv;
 
             if outcome.explain {
@@ -1826,6 +1829,11 @@ impl KnowledgeGraph {
             )?
         };
         let elapsed_ms = query_started.elapsed().as_millis() as u64;
+        // After the clock is read (a `pywarn` filter can run arbitrary Python,
+        // which is not query time) and before the output shape is chosen: a CSV
+        // string and a DataFrame cannot carry diagnostics, so for those two
+        // return shapes this is the caller's only channel.
+        crate::warning_policy::announce(py, result.diagnostics.as_ref())?;
         // EXPLAIN: session::execute_read renders the plan into
         // result.rows — wrap in ResultView and return.
         // (Detect via lack of regular execution markers: explain
@@ -1856,115 +1864,7 @@ impl KnowledgeGraph {
         let mut diagnostics = result.diagnostics.take().unwrap_or_default();
         diagnostics.elapsed_ms = elapsed_ms;
         diagnostics.timeout_ms = reported_timeout_ms;
-        {
-            let columns = result.columns;
-            let stats = result.stats;
-            let profile = result.profile;
-            // resolve_noderefs already happened inside the py.detach block
-            // above (Phase A.3 / 0.9.53 Issue #3 partial fix).
-            let rows = result.rows;
-            if output_csv {
-                // CSV consumes every cell — if the executor handed us a
-                // lazy descriptor (RETURN was flagged `lazy_eligible`),
-                // materialise it through ResultView first so to_csv()
-                // sees the actual values rather than the empty rows
-                // placeholder.
-                if let Some(lazy_desc) = result.lazy {
-                    let lazy_result = cypher::CypherResult {
-                        columns: columns.clone(),
-                        rows: Vec::new(),
-                        stats: None,
-                        profile: None,
-                        diagnostics: None,
-                        lazy: Some(lazy_desc),
-                    };
-                    let view =
-                        crate::graph::pyapi::result_view::ResultView::from_cypher_result_with_graph(
-                            lazy_result,
-                            std::sync::Arc::clone(&inner),
-                        );
-                    let materialised = view
-                        .materialise_all()?
-                        .into_iter()
-                        .map(|row| {
-                            row.into_iter()
-                                // Phase A.1 / C7a — ParsedJson variant deleted;
-                                // only Plain remains.
-                                .map(|pv| match pv {
-                                    cypher::py_convert::PreProcessedValue::Plain(v) => v,
-                                })
-                                .collect()
-                        })
-                        .collect();
-                    let csv_result = cypher::CypherResult {
-                        columns,
-                        rows: materialised,
-                        stats,
-                        profile,
-                        diagnostics: Some(diagnostics),
-                        lazy: None,
-                    };
-                    return csv_result.to_csv().into_py_any(py);
-                }
-                let csv_result = cypher::CypherResult {
-                    columns,
-                    rows,
-                    stats,
-                    profile,
-                    diagnostics: Some(diagnostics),
-                    lazy: None,
-                };
-                csv_result.to_csv().into_py_any(py)
-            } else if let Some(lazy_desc) = result.lazy {
-                // Lazy path: planner flagged the terminal RETURN as eligible
-                // and the executor skipped per-row property evaluation.
-                // Hand the pending rows + return items to ResultView, which
-                // materialises cells on Python access.
-                let lazy_result = cypher::CypherResult {
-                    columns,
-                    rows: Vec::new(),
-                    stats,
-                    profile,
-                    diagnostics: Some(diagnostics),
-                    lazy: Some(lazy_desc),
-                };
-                let view =
-                    crate::graph::pyapi::result_view::ResultView::from_cypher_result_with_graph(
-                        lazy_result,
-                        std::sync::Arc::clone(&inner),
-                    );
-                if to_df {
-                    // DataFrame consumes every row — let the view materialise
-                    // its lazy rows via to_df_inner (which handles both
-                    // backings). For now, route through to_list-style
-                    // materialisation by triggering the lazy resolver per
-                    // row and rebuilding the eager form.
-                    let preprocessed = view.materialise_all()?;
-                    let cols = view.columns_owned();
-                    cypher::py_convert::preprocessed_result_to_dataframe(py, &cols, &preprocessed)
-                } else {
-                    Py::new(py, view).map(|v| v.into_any())
-                }
-            } else {
-                let preprocessed = cypher::py_convert::preprocess_values_owned(rows);
-                if to_df {
-                    cypher::py_convert::preprocessed_result_to_dataframe(
-                        py,
-                        &columns,
-                        &preprocessed,
-                    )
-                } else {
-                    let view = crate::graph::pyapi::result_view::ResultView::from_preprocessed(
-                        columns,
-                        preprocessed,
-                        stats,
-                        profile,
-                        Some(diagnostics),
-                    );
-                    Py::new(py, view).map(|v| v.into_any())
-                }
-            }
-        }
+        marshal_read_result(py, result, &inner, diagnostics, output_csv, to_df)
     }
 
     /// Mutation statistics from the last Cypher mutation query (CREATE/SET/DELETE/REMOVE/MERGE).
@@ -2154,6 +2054,131 @@ fn warn_about_constraints_dropped_by_replace(
         message.as_c_str(),
         1,
     )
+}
+
+/// Marshal a live-graph **read** result into the Python return shape: a CSV
+/// string, a pandas DataFrame, or a `ResultView` (eager or lazily
+/// materialising).
+///
+/// The read-path counterpart of `session::marshal_result`, which the
+/// `Session` paths share. This one is separate rather than shared because
+/// only the live-graph read is `lazy_eligible`: it owns the lazy descriptor
+/// and the `Arc<DirGraph>` a deferred view has to pin, neither of which
+/// exists on the `Session` path.
+///
+/// `diagnostics` arrives already refined with the two fields core cannot
+/// know, and its warnings have already been announced by the caller — every
+/// branch here either attaches it to a `ResultView` or drops it on a shape
+/// that cannot carry it.
+fn marshal_read_result(
+    py: Python<'_>,
+    result: cypher::CypherResult,
+    inner: &std::sync::Arc<kglite_core::api::DirGraph>,
+    diagnostics: cypher::QueryDiagnostics,
+    output_csv: bool,
+    to_df: bool,
+) -> PyResult<Py<PyAny>> {
+    let columns = result.columns;
+    let stats = result.stats;
+    let profile = result.profile;
+    // resolve_noderefs already happened inside the py.detach block
+    // above (Phase A.3 / 0.9.53 Issue #3 partial fix).
+    let rows = result.rows;
+    if output_csv {
+        // CSV consumes every cell — if the executor handed us a
+        // lazy descriptor (RETURN was flagged `lazy_eligible`),
+        // materialise it through ResultView first so to_csv()
+        // sees the actual values rather than the empty rows
+        // placeholder.
+        if let Some(lazy_desc) = result.lazy {
+            let lazy_result = cypher::CypherResult {
+                columns: columns.clone(),
+                rows: Vec::new(),
+                stats: None,
+                profile: None,
+                diagnostics: None,
+                lazy: Some(lazy_desc),
+            };
+            let view = crate::graph::pyapi::result_view::ResultView::from_cypher_result_with_graph(
+                lazy_result,
+                std::sync::Arc::clone(inner),
+            );
+            let materialised = view
+                .materialise_all()?
+                .into_iter()
+                .map(|row| {
+                    row.into_iter()
+                        // Phase A.1 / C7a — ParsedJson variant deleted;
+                        // only Plain remains.
+                        .map(|pv| match pv {
+                            cypher::py_convert::PreProcessedValue::Plain(v) => v,
+                        })
+                        .collect()
+                })
+                .collect();
+            let csv_result = cypher::CypherResult {
+                columns,
+                rows: materialised,
+                stats,
+                profile,
+                diagnostics: Some(diagnostics),
+                lazy: None,
+            };
+            return csv_result.to_csv().into_py_any(py);
+        }
+        let csv_result = cypher::CypherResult {
+            columns,
+            rows,
+            stats,
+            profile,
+            diagnostics: Some(diagnostics),
+            lazy: None,
+        };
+        csv_result.to_csv().into_py_any(py)
+    } else if let Some(lazy_desc) = result.lazy {
+        // Lazy path: planner flagged the terminal RETURN as eligible
+        // and the executor skipped per-row property evaluation.
+        // Hand the pending rows + return items to ResultView, which
+        // materialises cells on Python access.
+        let lazy_result = cypher::CypherResult {
+            columns,
+            rows: Vec::new(),
+            stats,
+            profile,
+            diagnostics: Some(diagnostics),
+            lazy: Some(lazy_desc),
+        };
+        let view = crate::graph::pyapi::result_view::ResultView::from_cypher_result_with_graph(
+            lazy_result,
+            std::sync::Arc::clone(inner),
+        );
+        if to_df {
+            // DataFrame consumes every row — let the view materialise
+            // its lazy rows via to_df_inner (which handles both
+            // backings). For now, route through to_list-style
+            // materialisation by triggering the lazy resolver per
+            // row and rebuilding the eager form.
+            let preprocessed = view.materialise_all()?;
+            let cols = view.columns_owned();
+            cypher::py_convert::preprocessed_result_to_dataframe(py, &cols, &preprocessed)
+        } else {
+            Py::new(py, view).map(|v| v.into_any())
+        }
+    } else {
+        let preprocessed = cypher::py_convert::preprocess_values_owned(rows);
+        if to_df {
+            cypher::py_convert::preprocessed_result_to_dataframe(py, &columns, &preprocessed)
+        } else {
+            let view = crate::graph::pyapi::result_view::ResultView::from_preprocessed(
+                columns,
+                preprocessed,
+                stats,
+                profile,
+                Some(diagnostics),
+            );
+            Py::new(py, view).map(|v| v.into_any())
+        }
+    }
 }
 
 /// Map a core schema-parse refusal onto the Python exception class its class

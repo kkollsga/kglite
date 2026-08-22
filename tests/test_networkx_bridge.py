@@ -188,3 +188,80 @@ def test_10k_node_timing_sanity():
     elapsed = time.perf_counter() - t0
     assert out.number_of_nodes() == n
     assert elapsed < 5.0, f"round-trip took {elapsed:.2f}s (expected < 5s)"
+
+
+# ── id-collision refusal ───────────────────────────────────────────────
+#
+# Node ids are unique per type, not across types. A bare-id nx node key
+# therefore MERGES two types that share an id (the second add_node
+# overwrites the first's attrs and both nodes' edges rewire onto the
+# survivor) — a silently wrong graph. The export refuses instead.
+
+
+def _colliding_id_graph():
+    """Two types whose ids overlap on 5, with one edge each."""
+    g = kglite.KnowledgeGraph()
+    g.add_nodes(pd.DataFrame([{"id": 5, "name": "Alice"}, {"id": 6, "name": "Bob"}]), "Person", "id", "name")
+    g.add_nodes(pd.DataFrame([{"id": 5, "name": "Oslo"}]), "City", "id", "name")
+    g.add_connections(pd.DataFrame([{"src": 6, "tgt": 5}]), "KNOWS", "Person", "src", "Person", "tgt")
+    g.add_connections(pd.DataFrame([{"src": 6, "tgt": 5}]), "LIVES_IN", "Person", "src", "City", "tgt")
+    return g
+
+
+def test_to_networkx_raises_on_cross_type_id_collision():
+    g = _colliding_id_graph()
+    with pytest.raises(kglite.ArgumentError, match="sharing id"):
+        g.to_networkx()
+
+
+def test_to_networkx_collision_error_names_the_workaround():
+    """The export is whole-graph, so the recipe cannot be 'narrow the
+    selection' — it has to name disjoint ids."""
+    g = _colliding_id_graph()
+    with pytest.raises(kglite.ArgumentError) as excinfo:
+        g.to_networkx()
+    message = str(excinfo.value)
+    assert "to_networkx()" in message
+    assert "disjoint ids" in message
+    assert "whole graph" in message
+
+
+def test_to_networkx_ignores_selection_so_selecting_one_type_still_raises():
+    """Pins the honest limitation the error message asserts: v1 exports the
+    whole graph, so filtering to one type does NOT dodge the collision."""
+    g = _colliding_id_graph()
+    with pytest.raises(kglite.ArgumentError, match="sharing id"):
+        g.select("Person").to_networkx()
+
+
+def test_to_networkx_single_type_multi_node_unchanged():
+    """The refusal is collision-scoped: one type with many nodes still
+    exports every node with its attributes."""
+    g = kglite.KnowledgeGraph()
+    g.add_nodes(
+        pd.DataFrame(
+            [
+                {"id": 1, "name": "Alice", "age": 30},
+                {"id": 2, "name": "Bob", "age": 25},
+                {"id": 3, "name": "Cleo", "age": 41},
+            ]
+        ),
+        "Person",
+        "id",
+        "name",
+    )
+    g.add_connections(
+        pd.DataFrame([{"src": 1, "tgt": 2}, {"src": 2, "tgt": 3}]),
+        "KNOWS",
+        "Person",
+        "src",
+        "Person",
+        "tgt",
+    )
+    nxg = g.to_networkx()
+    assert nxg.number_of_nodes() == 3
+    assert nxg.number_of_edges() == 2
+    assert set(nxg.nodes) == {1, 2, 3}
+    assert nxg.nodes[3]["node_type"] == "Person"
+    assert nxg.nodes[3]["title"] == "Cleo"
+    assert nxg.nodes[3]["age"] == 41

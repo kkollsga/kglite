@@ -31,6 +31,28 @@ def _build_graph(n=3000, d=64, seed=11, metric="cosine"):
     return g, emb
 
 
+def _build_multi_type_graph(n=2000, d=48, seed=11, notes=1500):
+    """``n`` embedded ``Doc`` nodes beside ``notes`` un-embedded ``Note`` nodes.
+
+    The shape any realistic whole-graph search has: one embedded type among
+    several. Only ``Doc`` carries the ``summary`` store.
+    """
+    g, emb = _build_graph(n=n, d=d, seed=seed)
+    g.add_nodes(
+        pd.DataFrame(
+            {
+                "id": list(range(notes)),
+                "title": [f"note{i}" for i in range(notes)],
+                "body": [f"note text {i}" for i in range(notes)],
+            }
+        ),
+        "Note",
+        "id",
+        "title",
+    )
+    return g, emb
+
+
 def _query(d, seed=99):
     rng = random.Random(seed)
     return [rng.gauss(0, 1) for _ in range(d)]
@@ -196,6 +218,12 @@ class TestAutoUseAndRecall:
         )
         assert [(row["type"], row["id"]) for row in approximate] == expected
 
+        # Same guarantee for the whole-graph shape: two types carry `summary`,
+        # so neither type's index may serve the search on its own — that would
+        # silently drop the other type's rows. It stays a global exact ranking.
+        whole_graph = g.vector_search("summary", [0.0, 0.0], top_k=10, metric="euclidean")
+        assert [(row["type"], row["id"]) for row in whole_graph] == expected
+
     @pytest.mark.parametrize("node_order", [("A", "B"), ("B", "A")], ids=["nodes-a-b", "nodes-b-a"])
     @pytest.mark.parametrize("store_order", [("A", "B"), ("B", "A")], ids=["stores-a-b", "stores-b-a"])
     def test_mixed_stored_metrics_require_explicit_metric(self, node_order, store_order):
@@ -279,6 +307,38 @@ class TestAutoUseAndRecall:
         exact = set(_ids(g.select("Doc").vector_search("summary", q, top_k=10, exact=True)))
         recall = len(exact.intersection(unselected)) / 10.0
         assert recall >= 0.8
+
+    def test_whole_graph_search_on_a_multi_type_graph_rides_the_index(self):
+        # A second, un-embedded type used to disqualify the whole-graph search
+        # from the index: eligibility was proven by *type homogeneity*, which
+        # the first Note node kills, so the search fell to a scan-only path and
+        # ran orders of magnitude slower than the identical `.select('Doc')`
+        # call. Only one type carries the store, so routing on store uniqueness
+        # is lossless — foreign candidates miss the store and are skipped.
+        # (The routing decision itself is pinned in the engine's
+        # `one_store_routes_a_mixed_candidate_set_to_that_store`; this pins the
+        # end-to-end answer.)
+        g, emb = _build_multi_type_graph()
+        q = emb[7]
+        exact_whole = _ids(g.vector_search("summary", q, top_k=10, exact=True))
+        exact_selected = _ids(g.select("Doc").vector_search("summary", q, top_k=10, exact=True))
+        assert exact_whole == exact_selected
+
+        g.build_vector_index("Doc", "summary")
+        whole = _ids(g.vector_search("summary", q, top_k=10))
+        selected = _ids(g.select("Doc").vector_search("summary", q, top_k=10))
+        # Both routes now make the same dispatch decision over the same store.
+        assert whole == selected
+        assert len(set(exact_whole).intersection(whole)) / 10.0 >= 0.8
+
+    def test_whole_graph_search_raises_when_no_type_carries_the_store(self):
+        # Routing on store uniqueness must not swallow the caller mistake the
+        # multi-store scan raises: a selection of types that do not carry the
+        # store is an error, never a silent [].
+        g, _ = _build_multi_type_graph(n=600, notes=600)
+        g.build_vector_index("Doc", "summary")
+        with pytest.raises(ValueError, match="'Note'"):
+            g.select("Note").vector_search("summary", _query(48), top_k=10)
 
 
 class TestIndexRoundTrip:
@@ -427,7 +487,10 @@ class TestHnswInCypher:
         assert approximate == exact
 
     def test_cypher_bypasses_index_built_for_a_different_metric(self):
-        n = 320
+        # Above HNSW_AUTO_MIN, so the metric guard is the *only* reason the
+        # index is bypassed here — a smaller corpus would pass vacuously on
+        # the size gate instead.
+        n = 512
         g = kglite.KnowledgeGraph()
         g.add_nodes(
             pd.DataFrame(

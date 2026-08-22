@@ -7,6 +7,291 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`lock_schema()` now rejects a read of a property no node of the type has,
+  where it used to warn.** The lock is documented as the "catch my typos"
+  mechanism and already refused the same typo written as a pattern literal
+  (`MATCH (p:Person {agee: 1})`) or as a label (`MATCH (p:Persn)`). The two
+  shapes it let through are the two most often written: `WHERE p.agee = 1`,
+  where the null comparison filters out every row, and `RETURN`/`WITH`/`ORDER
+  BY p.agee`, where the column comes back all-null next to correct-looking
+  siblings — both indistinguishable from a legitimate empty or sparse result.
+  They now raise `SchemaError`, naming the clause, the valid property set and
+  the did-you-mean, the same way the write path does. **Unlocked graphs are
+  unchanged** — this is opt-in strictness, and `unlock_schema()` returns the
+  findings to warnings. The check promotes only that one warning family:
+  unknown relationship types and reversed-arrow patterns stay warnings in both
+  states, and every conservatism the warnings were built with holds under the
+  lock, so a valid query cannot start failing — a sparse property, a property
+  the same statement writes, a type with no recorded properties, a field
+  `define_schema()` declares but nothing has written yet, a multi-label
+  pattern, a `WITH`-rebound variable and the built-ins are all left alone.
+  Applies to reads, mutations' `WHERE` selectors, `EXPLAIN` and
+  session/transaction queries alike, since all of them share one prepare step.
+
+- **`to_networkx()`, one-arg `embeddings()` and `degrees()` now raise on a key
+  collision instead of silently returning less than they were asked for.** All
+  three flatten a node collection into one dict (or one NetworkX graph) keyed
+  by a field that is not graph-unique: node ids are unique *per type* only,
+  and titles are not unique at all. Before, the second node to land on a key
+  overwrote the first with nothing on the wire to say so — `to_networkx()`
+  merged a `Person` and a `City` that both carried id `5` into a single
+  networkx node, the City's attributes winning and *both* nodes' edges
+  rewiring onto the survivor (3 kglite nodes out as 2, with a `Person`-typed
+  edge pointing at a city); `embeddings("summary")` over a selection spanning
+  two types dropped one of the two vectors; `degrees()` returned one row for
+  two same-titled nodes. Each now raises `ArgumentError` naming the colliding
+  key and the collision-safe way to get the data: give the types disjoint ids
+  (`to_networkx()` is whole-graph and ignores the selection, so filtering
+  cannot avoid it), call the two-arg `embeddings(node_type, text_column)` once
+  per type, or use `degree_centrality()`, whose `ResultView` carries one row
+  per node. Single-type and collision-free calls are unchanged. This is the
+  same doctrine `shortest_path_lengths_from()` already applied to cross-type
+  ids; all four surfaces now share one message.
+
+- **`vector_search()` / `search_text()` now raise when no selected node type
+  has an embedding store for the column, instead of returning `[]`.** The
+  Python surface takes the *text column* and mints the store name itself, so
+  `vector_search('summary_emb', …)` looked up `summary_emb_emb`, matched
+  nothing, skipped every candidate and returned an empty list — the same
+  answer it gives for "nothing is similar", and indistinguishable from it. A
+  benchmark comparing exact and HNSW search this way had been timing two empty
+  no-ops. The error names the store that was looked up, the node types asked
+  for it, and the column that would have worked: passing a store name gets
+  *Did you mean 'summary'? vector_search() takes the text column*, and an
+  ordinary typo gets the usual did-you-mean over the type's embedded columns.
+  **A selection where only *some* types carry the store is unchanged** — those
+  rows are a supported partial result, and the raise fires only when nothing in
+  the selection could have matched. A caller that probed for a store by trying
+  columns should use `list_embeddings()` or `has_vector_index()` instead.
+  `build_vector_index('Doc', 'summary_emb')` gains the same hint on its
+  existing error. Fixed in the engine (`kglite::api::algorithms::vector_search`),
+  so every binding inherits it; Cypher's `vector_score()`, which legitimately
+  takes the store name, is unaffected.
+
+- **`vector_search()` stops auto-using an HNSW index below 400 vectors** (was
+  256). Below the crossover the index is strictly dominated: the walk costs
+  more than the contiguous scan it replaces *and* the answer is approximate.
+  Measured in release at cosine/top-k=10 over three agreeing runs, the old 256
+  floor sat inside that band — a 256-vector store served an approximate answer
+  1.04-1.15x slower than the exact scan, and a 300-vector store 1.03-1.15x
+  slower. Stores of 256-399 vectors with an index built now return exact
+  results, slightly faster. Nothing above 400 changes: the index still wins by
+  2.7-9.8x at every size and dimension measured from 400 up to 50k x 384, so
+  this is not a retreat from the index. The threshold is deliberately flat
+  rather than a function of dimension — the crossover on representative
+  (low-rank) embeddings measured ~350 at both 64 and 384 dimensions.
+  `build_vector_index()` is unaffected; only auto-selection moved.
+
+### Added
+
+- **A query warning when a *declared* property type makes a `WHERE`
+  comparison vacuous.** `MATCH (p:Person) WHERE p.age > 'forty'` on a graph
+  that declared `REQUIRE p.age IS :: INTEGER` is null on every row — legal
+  Cypher, an empty result, and no indication that the literal was the problem.
+  It now reports `WHERE compares Person.age (declared INTEGER) with a STRING
+  literal 'forty' — a cross-type ordering comparison is null in openCypher, so
+  this filters out every row.`, alongside the four warning families already
+  carried on `ResultView.warnings` / `diagnostics["warnings"]` and echoed to
+  stderr. Covers `=`, `<>`, `<`, `<=`, `>`, `>=`, `IN` over a literal list, and
+  `STARTS WITH` / `ENDS WITH` / `CONTAINS` on a property declared as anything
+  but `STRING`. `<>` gets its own wording — a cross-type `<>` is *true*, so it
+  matches every row that has the property rather than filtering them out.
+  Runtime three-valued logic is unchanged; this only describes it. The source
+  is the DDL declaration alone — the one type fact the write path enforces —
+  so `define_schema()` field types and observed metadata are not consulted, and
+  the family stays silent wherever it cannot guarantee the outcome: numeric
+  against numeric (`INTEGER` and `FLOAT` are one comparison family),
+  `DATE`/`LOCAL DATETIME` against a string (parsed at runtime, so
+  value-dependent), `DURATION`/`POINT`, `IN` lists with one comparable element,
+  parameters, property-to-property comparisons, absent properties (the existing
+  absent-property warning already explains those), built-in fields,
+  multi-label patterns and `WITH`-rebound variables. It is a warning in every
+  schema state — `lock_schema()` does not promote it.
+
+- **`ResultView.warnings`, and a process-global policy for where query
+  warnings are announced.** The warnings a query collects were readable only
+  as `result.diagnostics["warnings"]`, which is a `TypeError` waiting to
+  happen on a view that carries no diagnostics (a `head()` slice), and their
+  presentation was fixed: a `warning:` line on stderr, for every embedding
+  host, whether or not stderr was somewhere a human would ever look.
+  `ResultView.warnings` is the same list as a plain `list[str]`, `[]` rather
+  than an error when there are no diagnostics at all.
+  `kglite.set_query_warning_policy(...)` takes `"stderr"` (the default, and
+  byte-for-byte the previous behaviour), `"silent"`, or `"pywarn"` — which
+  raises each warning as a `UserWarning` through the `warnings` module
+  *instead of* the stderr line, so the host's warning filters,
+  `logging.captureWarnings(True)` and a custom `showwarning` all apply.
+  `"pywarn"` is opt-in and will not become the default: under `-W error` it
+  turns an advisory into a raise out of `cypher()`.
+  `kglite.get_query_warning_policy()` reads it back. The policy covers every
+  Python query path — `cypher()`, `Session.cypher`/`execute`,
+  `Transaction.cypher`, `FrozenGraph.cypher`, reads and mutations alike —
+  **including `to_df=True` and `FORMAT CSV`**, whose return values have
+  nowhere to carry diagnostics and for which the announcement is the only
+  channel there is (documented on `cypher()` rather than hacked onto a
+  DataFrame). The structured channel is untouched by all of this: no policy
+  can empty `diagnostics["warnings"]`. Engine-side this is a two-state sink
+  (`kglite::api::cypher::set_query_warning_sink`) that decides whether the
+  one `warning:` emitter prints; the `warnings.warn` re-emission is wheel-side
+  and post-execution, so no Python callback ever runs inside the executor.
+  The CLI, MCP and Bolt servers keep their own presentation and are
+  unaffected.
+
+### Removed
+
+- **`as_dict=True` on `pagerank()`, `betweenness_centrality()`,
+  `degree_centrality()` and `closeness_centrality()`.** The dict it built was
+  keyed by bare node id, and node ids are unique *per type* only — on a graph
+  where a `Person` and a `Company` both carry id `5`, the second row
+  overwrote the first and the caller got fewer entries than nodes, with no
+  error. There is no key that fixes it without changing the shape, so the
+  parameter is gone rather than silently lossy. Build the mapping from the
+  `ResultView` (the default return), which carries `type` alongside `id`:
+  `{r["id"]: r["score"] for r in g.pagerank().to_dicts()}` — or key by
+  `(r["type"], r["id"])` when the selection spans more than one node type.
+  `to_df=True` and the default `ResultView` are unchanged.
+
+### Fixed
+
+- **Deleting a node now removes its embedding, so a later node cannot inherit
+  the deleted node's vector.** `EmbeddingStore` is keyed by the engine's
+  internal node index, and the graph hands a deleted node's index straight to
+  the next node created — so a vector left behind was not merely orphaned, it
+  was *inherited*: embed `Doc` 1/2/3, `DETACH DELETE` `Doc` 2, add any new
+  node (`Doc` 77, or a `Note`, embedded or not), and `vector_search` returned
+  that node at score 1.0 for `Doc` 2's own query, while `list_embeddings()`
+  still counted three. The prune happens at the single deletion chokepoint, so
+  Cypher `DELETE`/`DETACH DELETE`, `purge_provisional()` and WAL replay of a
+  recovered deletion are all covered, in every mutable storage mode; `.kgl`
+  saves written after a delete carry no ghost, and statement- and
+  transaction-rollback restore the vector on the exact slot it vacated (a
+  rolled-back `DELETE` leaves search results identical). One consequence worth
+  knowing: because an HNSW index addresses vectors by slot, deleting an
+  embedded node drops that store's index — it is a rebuildable cache, so
+  search falls back to the exact scan until `build_vector_index()` is called
+  again.
+
+- **`compare(target_type=['A', 'B'])` silently compared against `'A'` alone;
+  it now raises `ArgumentError`.** The comparison traversal is single-target
+  by construction — every method (`contains`, `intersects`, `distance`,
+  `text_score`, `cluster`) dispatches on one type name — but the parameter
+  accepts `str | list[str]` for symmetry with `traverse()`, and a longer list
+  was truncated to its first element with nothing on the wire to say so: a
+  caller asking to compare against two types got results for one, and the
+  missing type looked like a genuine no-match. A list of two or more now
+  raises `ArgumentError` naming the count and the workaround (call `compare()`
+  once per type). A bare string and a single-element list are unchanged.
+
+- **`compare()` raised a bare `ValueError` for every failure inside the
+  comparison itself, so `except KgError` never saw it.** The wheel wrapped the
+  traversal's errors in the built-in exception instead of the typed
+  hierarchy, which meant an unknown method name, a method invoked without its
+  `target_type`, a missing `max_m` / `property` / `features`, and an unknown
+  `resolve` mode all escaped a `try: ... except kglite.KgError:` block that
+  correctly catches every other engine error — including `compare()`'s own
+  multi-target refusal, which is an `ArgumentError`. All of them now raise
+  `ArgumentError` (a `KgError` subclass carrying `.code == "InvalidArgument"`),
+  with the original wording kept behind the family's `Invalid argument:`
+  prefix. **`ArgumentError` does not inherit from `ValueError`**, so a caller
+  catching `ValueError` around `compare()` must catch `kglite.ArgumentError`
+  (or `kglite.KgError`) instead.
+
+- **A whole-graph `vector_search()` / `search_text()` never used the HNSW
+  index on a graph with more than one node type** — the case the docstrings
+  promised it for. Eligibility for the index was proven by *type homogeneity*
+  of the candidate set: the first node of any other type disqualified the
+  search, so `graph.vector_search('summary', q)` on a graph holding
+  `Article`s and `Note`s fell back to a full exact scan while the identical
+  `graph.select('Article').vector_search('summary', q)` ran through the index
+  — measured 44x slower at 100k vectors x 384 dimensions. Routing is now
+  decided by the invariant it actually needs, **store uniqueness for the
+  embedding column**: while one node type carries the column, the index
+  serves any selection, because a node of another type has no vector in the
+  store and is skipped exactly as the exact scan skips it. When two or more
+  types carry the same column the previous rule stands — a selection spanning
+  both is ranked by exact scan, so neither type's rows can be dropped. The
+  auto-use size gate is now counted in **store vectors the selection actually
+  covers** rather than raw candidates, so admitting mixed selections cannot
+  send a search that covers one vector in 100 000 through the index. Results
+  are unchanged in every case; only which path computes them, and how fast.
+  The five places that documented the old-but-never-true rule now describe
+  this one.
+
+- **`pagerank(connection_types="KNOWS")` and its three sibling centralities
+  raised `TypeError: Can't extract 'str' to 'Vec'` on a bare string.** The
+  stub has always documented the parameter as `str | list[str]`, the Cypher
+  twin (`CALL pagerank({connection_types: 'KNOWS'})`) has always accepted the
+  scalar, and `traverse(target_type=...)` accepted it too — only the four
+  Python centralities (`betweenness_centrality`, `pagerank`,
+  `degree_centrality`, `closeness_centrality`) demanded a list, and the error
+  they raised named a Rust type rather than the parameter. All four now take
+  the documented union through the one wheel-side `str | list[str]`
+  convention that `traverse()` and `compare()` also use: a bare string is a
+  one-element filter, a wrong type raises `ArgumentError` naming the
+  parameter, and an empty list means "no filter" — where it previously meant
+  "match no relationship type at all" and returned an all-zero score for
+  every node.
+
+- **Docs: the 0.16.6 note on the query-warnings channel claimed the warnings
+  reach Bolt.** They do not. The engine populates `QueryDiagnostics.warnings`
+  for every consumer including `kglite-bolt-server`, but that server forwards
+  nothing of it onto the wire — a Bolt client sees no `notifications` metadata
+  on `SUCCESS`, so from a driver's point of view the channel does not exist.
+  The 0.16.6 entry no longer lists Bolt; `ResultView.diagnostics`, the MCP
+  `warnings:` block, the CLI and stderr were and remain accurate. Bolt
+  `notifications` metadata is a real gap and is on the backlog, not shipped.
+
+- **`print(result)` rendered every small float as `0.00`.** The `ResultView`
+  table formatted floats with two fixed decimal places, so a PageRank score —
+  which sums to 1 across the graph, and is therefore below 0.01 on any graph
+  past a hundred nodes — printed as a column of identical `0.00` cells
+  (negatives as `-0.00`), indistinguishable from a genuine zero and from each
+  other. Finite non-zero floats under 0.01 in magnitude now print with three
+  significant digits (`3.00e-4`); a true zero, the band boundary `0.01`, NaN
+  (`NULL`), the infinities and every larger float are spelled exactly as
+  before. `to_dicts()`, `to_df=True` and every other data path always carried
+  full precision — only the printed table changed. The CLI's own table is
+  unaffected.
+
+- **`set_embeddings()`/`add_embeddings()` rejected the very column name a
+  graph was built with.** Their source-column guard hardcoded `id`/`title`/
+  `type` and then probed live node properties — but `add_nodes(df, "Person",
+  "npdid", "name")` hoists the title column *out* of the property map and
+  registers `name` as the type's title alias, so
+  `set_embeddings("Person", "name", …)` raised `Source column 'name' not found
+  on any 'Person' node`, and no spelling the caller knew about worked. The
+  guard now resolves the column the same way every read path does — per-type
+  id/title alias, then a stored property, then the structural alias (`name`,
+  `type`, `node_type`, `label`) — so an aliased type's own column names are
+  accepted. Genuinely unknown columns and the `'summary_emb'` store-name typo
+  are still rejected with the same error. Fixed in the engine
+  (`kglite::api::embeddings::resolve_source_column`, new), so the C ABI and the
+  Java wrapper inherit it. The store is still keyed by the spelling passed —
+  `'name'` writes `name_emb`, not `title_emb` — because canonicalising the key
+  would strand stores already written under the raw spelling by `add_nodes`'
+  `<col>_emb` ingest and by every existing `.kgl`.
+
+- **`embed_texts()` silently embedded nothing for an identity column.** It read
+  the source column with a raw property lookup, which excludes `id`/`title` by
+  contract, so `embed_texts('Person', 'name')` on a `title_field='name'` type —
+  and even `embed_texts('Person', 'title')` — returned
+  `{'embedded': 0, 'skipped': N}` while looking like it had run. It now resolves
+  the column through the same `resolve_source_column` predicate the ingest guard
+  uses and reads through `NodeView::resolved_field`, so the two halves of the
+  feature accept exactly the same columns (pinned by a parity test). A column
+  that resolves to nothing now raises the same `ValueError` `set_embeddings()`
+  raises, before the embedder is loaded, instead of reporting a silent zero; a
+  node type with no nodes stays the `{'embedded': 0}` no-op it was.
+
+- **`embed_texts()` on a node type the graph has never seen reported
+  `{'embedded': 0}`** while `set_embeddings()` on the same type raised
+  `Node type 'X' does not exist in the graph` — so a typo'd type name was a
+  silent no-op on one half of the embedding surface and an error on the other.
+  It now raises that same error, before the model is loaded. An *existing* type
+  with no matching rows is unchanged and still returns `{'embedded': 0}`.
+
 ## [0.16.6] - 2026-08-22
 
 ### Fixed
@@ -916,7 +1201,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   records a property as soon as one node carries it — and neither does a
   property the same statement is in the act of writing. Both ride the existing
   `QueryDiagnostics.warnings` channel, so they reach `ResultView.diagnostics`,
-  the MCP `warnings:` block, Bolt, the CLI and stderr with no per-surface work.
+  the MCP `warnings:` block, the CLI and stderr with no per-surface work.
 
 - **The MCP server accepts an operator-pinned write scope.** `write_scope` on
   the `cypher_query` tool is chosen by the *agent*, so on its own it is role

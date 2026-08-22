@@ -17,6 +17,7 @@ with that exact ordering outside every timed search region.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import time
 
 import numpy as np
 import pandas as pd
@@ -36,6 +37,25 @@ FIXED_SEARCH_VECTORS = 10_000
 MULTI_TYPE_VECTORS_PER_TYPE = 2_048
 SELECTOR_WIDTHS = ((8, 64), (8, 200), (16, 64), (16, 200), (32, 64), (32, 200))
 VISITED_WIDTH_TOP_K = (16, 32, 64, 128)
+#: Corpus for the auto-selection guard: inside the band the engine's
+#: ``HNSW_AUTO_MIN`` gate must exclude, at the widest dimension swept.
+AUTO_GATE_VECTORS = 300
+AUTO_GATE_DIMENSION = 384
+#: Seen from both sides on 2026-08-22 (release): with the gate correct the two
+#: arms are the same code path and measure 0.987-1.000x; with the gate mutated
+#: to admit the index at this size the same cell measures 1.10-1.17x.  1.05
+#: sits between the two clusters with ~5% margin on each side.
+AUTO_GATE_MAX_RATIO = 1.05
+#: Un-embedded nodes placed beside the embedded store for the whole-graph cell.
+WHOLE_GRAPH_FOREIGN_NODES = 10_000
+#: Whole-graph multi-type guard: the index must beat the exact scan by at least
+#: this factor.  Stated as a speedup floor, not a never-slower tolerance —
+#: when the routing is broken both arms run the same scan and the ratio is
+#: ~1.0, so only a floor below 1.0 can catch it.  Seen from both sides on
+#: 2026-08-22 (release): routed correctly the cell measures 0.35-0.38x, with
+#: the routing reverted to the type-homogeneity predicate it measures
+#: 0.99-1.00x.  0.60 is the geometric midpoint, ~1.6x of margin on each side.
+WHOLE_GRAPH_AUTO_MAX_RATIO = 0.60
 
 
 @dataclass
@@ -454,3 +474,204 @@ def test_bench_exact_vector_search_multi_type(
     benchmark.extra_info["stored_metrics"] = "cosine,cosine"
     benchmark.extra_info["metric_mode"] = metric_mode
     benchmark.extra_info["metric_argument"] = metric_kwargs.get("metric", "<omitted>")
+
+
+@pytest.fixture(scope="module")
+def whole_graph_multi_type_corpus() -> VectorCorpus:
+    """One embedded type beside an un-embedded one, searched with no selection.
+
+    The shape every realistic whole-graph search has, and the one no cell
+    covered before: the corpus is a single embedded store, but the graph also
+    holds nodes of another type, so the candidate set the search resolves is
+    heterogeneous.
+    """
+    corpus = _build_corpus(FIXED_SEARCH_VECTORS, seed=20_260_822)
+    corpus.graph.add_nodes(
+        pd.DataFrame(
+            {
+                "id": np.arange(WHOLE_GRAPH_FOREIGN_NODES, dtype=np.int64),
+                "title": [f"note{i}" for i in range(WHOLE_GRAPH_FOREIGN_NODES)],
+                "body": [f"note text {i}" for i in range(WHOLE_GRAPH_FOREIGN_NODES)],
+            }
+        ),
+        "Note",
+        "id",
+        "title",
+    )
+    corpus.graph.build_vector_index("Doc", "summary")
+    assert corpus.graph.has_vector_index("Doc", "summary")
+    return corpus
+
+
+@pytest.mark.benchmark
+def test_bench_whole_graph_multi_type_rides_the_index(benchmark, whole_graph_multi_type_corpus) -> None:
+    """A whole-graph search on a multi-type graph must reach the index.
+
+    Both arms are the identical whole-graph call, so the ratio measures the
+    engine's routing decision and nothing else.  This cell is stated as a
+    *speedup floor* rather than the usual "never slower" tolerance for a
+    reason: when routing is broken both arms run the same exact scan and land
+    at ~1.00x, which a never-slower assertion reads as a pass.  Only a floor
+    below 1.0 can go red on the defect it exists for — pinned by mutation on
+    2026-08-22 (release, see the commit that added it).
+    """
+    corpus = whole_graph_multi_type_corpus
+    query_id = corpus.query_ids[len(corpus.query_ids) // 2]
+    query = corpus.query(query_id)
+    # No `.select(...)`: the never-narrowed selection *is* the whole graph.
+    search = corpus.graph.vector_search
+
+    exact_s, auto_s = _interleaved_mins(
+        lambda: search("summary", query, top_k=TOP_K, exact=True),
+        lambda: search("summary", query, top_k=TOP_K),
+    )
+    ratio = auto_s / exact_s
+
+    rows = benchmark.pedantic(
+        search,
+        args=("summary", query),
+        kwargs={"top_k": TOP_K},
+        rounds=SEARCH_ROUNDS,
+        iterations=1,
+        warmup_rounds=SEARCH_WARMUP_ROUNDS,
+    )
+    actual = [int(row["id"]) for row in rows]
+    assert len(actual) == TOP_K
+    assert all(row["type"] == "Doc" for row in rows), "an un-embedded type leaked into the results"
+
+    # The whole-graph exact answer is the single-type exact answer: the foreign
+    # type is skipped, never scored, never dropped from the ranking.
+    exact_whole = [int(row["id"]) for row in search("summary", query, top_k=TOP_K, exact=True)]
+    assert exact_whole == corpus.exact_ids(query_id)
+    recall = len(set(exact_whole) & set(actual)) / TOP_K
+    assert recall > RECALL_FLOOR, f"whole-graph auto-selected recall@{TOP_K} too low: {recall:.3f}"
+
+    assert ratio <= WHOLE_GRAPH_AUTO_MAX_RATIO, (
+        f"whole-graph multi-type search is {ratio:.2f}x the exact scan at "
+        f"n={FIXED_SEARCH_VECTORS} d={DIMENSION} beside "
+        f"{WHOLE_GRAPH_FOREIGN_NODES} un-embedded nodes "
+        f"(auto {auto_s * 1e3:.4f} ms vs exact {exact_s * 1e3:.4f} ms) — "
+        f"the index is not being used for a whole-graph search"
+    )
+    benchmark.extra_info["auto_over_exact_ratio"] = ratio
+    benchmark.extra_info["exact_min_ms"] = exact_s * 1e3
+    benchmark.extra_info["recall_at_10"] = recall
+    benchmark.extra_info["dimension"] = DIMENSION
+    benchmark.extra_info["vectors"] = FIXED_SEARCH_VECTORS
+    benchmark.extra_info["foreign_nodes"] = WHOLE_GRAPH_FOREIGN_NODES
+    benchmark.extra_info["selection_shape"] = "whole-graph-one-store-among-two-types"
+
+
+def _timed_once(call) -> float:
+    start = time.perf_counter()
+    call()
+    return time.perf_counter() - start
+
+
+def _interleaved_mins(first, second, *, passes: int = 3) -> tuple[float, float]:
+    """Best-case wall clock for two calls, measured in alternating passes.
+
+    Alternating cancels the monotonic warming drift that biases whichever arm
+    a single sequential A-then-B comparison happens to run first — visible as a
+    ~10% gap between two arms that are, after the size gate excludes the index,
+    literally the same code path.
+    """
+    for _ in range(SEARCH_WARMUP_ROUNDS):
+        first()
+        second()
+    best = [float("inf"), float("inf")]
+    for _ in range(passes):
+        for index, call in enumerate((first, second)):
+            for _ in range(SEARCH_ROUNDS):
+                best[index] = min(best[index], _timed_once(call))
+    return best[0], best[1]
+
+
+@pytest.fixture(scope="module")
+def auto_gate_corpus() -> VectorCorpus:
+    """Adversarial corpus sized inside the band ``HNSW_AUTO_MIN`` must exclude.
+
+    Independent Gaussian vectors, deliberately unlike the low-rank corpus every
+    other cell uses: this is the ANN worst case, where the index's fixed walk
+    cost is largest relative to a scan this short.  Measured 2026-08-22 in
+    release, the index loses 1.13-1.15x here across three runs, so the size gate
+    is the only thing keeping the fast path correct *and* fast at this size.
+    """
+    rng = np.random.default_rng(20_260_822)
+    vectors = np.asarray(rng.standard_normal((AUTO_GATE_VECTORS, AUTO_GATE_DIMENSION)), dtype=np.float32)
+    graph = kglite.KnowledgeGraph()
+    graph.add_nodes(
+        pd.DataFrame(
+            {
+                "id": np.arange(AUTO_GATE_VECTORS, dtype=np.int64),
+                "title": [f"n{i}" for i in range(AUTO_GATE_VECTORS)],
+                "summary": [f"text {i}" for i in range(AUTO_GATE_VECTORS)],
+            }
+        ),
+        "Doc",
+        "id",
+        "title",
+    )
+    stored = graph.set_embeddings("Doc", "summary", dict(enumerate(vectors)), metric="cosine")
+    assert stored["embeddings_stored"] == AUTO_GATE_VECTORS
+    graph.build_vector_index("Doc", "summary")
+    assert graph.has_vector_index("Doc", "summary")
+    query_ids = tuple(int(i) for i in np.linspace(0, AUTO_GATE_VECTORS - 1, QUERY_COUNT, dtype=np.int64))
+    return VectorCorpus(graph, vectors, frozenset(range(AUTO_GATE_VECTORS)), query_ids)
+
+
+@pytest.mark.benchmark
+def test_bench_auto_selection_never_loses_to_exact(benchmark, auto_gate_corpus: VectorCorpus) -> None:
+    """Auto-selection must not be slower than the exact scan it replaces.
+
+    An index exists, so ``exact=False`` is a real dispatch decision.  Both arms
+    go through the identical Python call, so the ratio measures the engine's
+    choice and nothing else.  When the size gate is set correctly this cell
+    compares the exact path with itself and lands at ~1.00x; it goes red if the
+    gate is lowered back into the band where the HNSW walk costs more than the
+    scan.
+    """
+    query_id = auto_gate_corpus.query_ids[len(auto_gate_corpus.query_ids) // 2]
+    query = auto_gate_corpus.query(query_id)
+    search = auto_gate_corpus.graph.select("Doc").vector_search
+
+    exact_s, auto_s = _interleaved_mins(
+        lambda: search("summary", query, top_k=TOP_K, exact=True),
+        lambda: search("summary", query, top_k=TOP_K),
+    )
+    ratio = auto_s / exact_s
+
+    rows = benchmark.pedantic(
+        search,
+        args=("summary", query),
+        kwargs={"top_k": TOP_K},
+        rounds=SEARCH_ROUNDS,
+        iterations=1,
+        warmup_rounds=SEARCH_WARMUP_ROUNDS,
+    )
+    actual = [int(row["id"]) for row in rows]
+    assert len(actual) == TOP_K
+    assert set(actual) <= auto_gate_corpus.selected_ids
+
+    # Recall against the engine's own exact scan, not the NumPy oracle: at
+    # d=384 this corpus has cosine scores that tie to within f32 rounding, so
+    # oracle-vs-engine ordering differences below 1e-7 are accumulation order,
+    # not a wrong answer, and are not this cell's subject.
+    hits = 0
+    for probe_id in auto_gate_corpus.query_ids:
+        exact_ids = set(auto_gate_corpus.exact_ids(probe_id))
+        hits += len(exact_ids & set(auto_gate_corpus.approximate_ids(probe_id)))
+    recall = hits / (len(auto_gate_corpus.query_ids) * TOP_K)
+    assert recall > RECALL_FLOOR, f"auto-selected recall@{TOP_K} too low: {recall:.3f}"
+    assert ratio <= AUTO_GATE_MAX_RATIO, (
+        f"auto-selected search is {ratio:.2f}x the exact scan at "
+        f"n={AUTO_GATE_VECTORS} d={AUTO_GATE_DIMENSION} "
+        f"(auto {auto_s * 1e3:.4f} ms vs exact {exact_s * 1e3:.4f} ms) — "
+        f"HNSW_AUTO_MIN is below the measured crossover"
+    )
+    benchmark.extra_info["auto_over_exact_ratio"] = ratio
+    benchmark.extra_info["exact_min_ms"] = exact_s * 1e3
+    benchmark.extra_info["recall_at_10"] = recall
+    benchmark.extra_info["dimension"] = AUTO_GATE_DIMENSION
+    benchmark.extra_info["vectors"] = AUTO_GATE_VECTORS
+    benchmark.extra_info["distribution"] = "independent-gaussian"

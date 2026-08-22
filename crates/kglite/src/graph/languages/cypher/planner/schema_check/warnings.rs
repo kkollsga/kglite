@@ -9,11 +9,12 @@
 //! doc-comment of [`super`] and on the individual functions.
 
 use super::super::super::ast::*;
-use super::{for_each_query_pattern, PatternSite, BUILTIN_FIELDS};
+use super::{for_each_query_pattern, PatternSite, SchemaError, SchemaErrorKind, BUILTIN_FIELDS};
 use crate::graph::core::pattern_matching::{EdgeDirection, NodePattern, Pattern, PatternElement};
 use crate::graph::mutation::validation::did_you_mean;
 use crate::graph::schema::{DirGraph, InternedKey};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 /// var → single known node label, from MATCH / OPTIONAL MATCH node patterns.
 ///
@@ -67,6 +68,18 @@ enum AbsentSite {
 }
 
 impl AbsentSite {
+    /// The clause keyword, for the locked-schema *error* voice — which states
+    /// where the mistake is rather than what the query would have silently
+    /// done, because under a lock the query does not run at all.
+    fn clause(self) -> &'static str {
+        match self {
+            AbsentSite::Where => "WHERE",
+            AbsentSite::Return => "RETURN",
+            AbsentSite::With => "WITH",
+            AbsentSite::OrderBy => "ORDER BY",
+        }
+    }
+
     fn message(self, property: &str, label: &str, hint: &str) -> String {
         match self {
             AbsentSite::Where => format!(
@@ -89,22 +102,46 @@ impl AbsentSite {
     }
 }
 
-/// Best-effort, NON-FATAL warnings for `var.prop` where `prop` exists on
-/// **no** node of `var`'s label — in a `WHERE`, where `null <op> x` is false
-/// and the predicate silently filters out every row (operator feedback A1b
+/// One absent-property finding, kept structured rather than pre-rendered.
+///
+/// The *same* finding reads two ways depending on the schema state, and the
+/// disposition is not known where it is discovered: on an open schema it is a
+/// warning about what the query will silently do, and under
+/// [`DirGraph::schema_locked`] it is the error that stops the query
+/// ([`strict_read_error`]). Keeping the parts lets one walk serve both instead
+/// of the caller string-matching prose to tell the families apart.
+#[derive(Debug, Clone)]
+pub(crate) struct AbsentProperty {
+    site: AbsentSite,
+    property: String,
+    label: String,
+    /// Pre-rendered `" Did you mean 'x'?"` (empty when nothing is close).
+    hint: String,
+}
+
+impl AbsentProperty {
+    fn warning(&self) -> String {
+        self.site.message(&self.property, &self.label, &self.hint)
+    }
+}
+
+/// Best-effort findings for `var.prop` where `prop` exists on **no** node of
+/// `var`'s label — in a `WHERE`, where `null <op> x` is false and the
+/// predicate silently filters out every row (operator feedback A1b
 /// 2026-06-17), and in a `RETURN` / `WITH` / `ORDER BY`, where the column is
 /// silently all-null (external eval 2026-08-20 §3a).
 ///
-/// A warning, not an error: a legitimately-sparse property is still in the
+/// Non-fatal by default: a legitimately-sparse property is still in the
 /// type's metadata (set on ≥1 node), so only a *genuinely-absent* property
 /// trips this — no false positive on nullable columns. A property the same
 /// query writes is likewise not absent by the time it is read back; see
-/// [`AbsentPropertyScan::written`].
-fn absent_property_warnings<'q>(
+/// [`AbsentPropertyScan::written`]. `lock_schema()` opts into rejecting them
+/// instead — see [`strict_read_error`], which reuses these very findings.
+fn absent_property_findings<'q>(
     query: &'q CypherQuery,
     graph: &DirGraph,
     var_label: &HashMap<&'q str, &'q str>,
-) -> Vec<String> {
+) -> Vec<AbsentProperty> {
     if var_label.is_empty() {
         return Vec::new();
     }
@@ -152,7 +189,7 @@ fn absent_property_warnings<'q>(
 /// True when `prop` is neither a built-in field nor in `node_type`'s declared
 /// metadata (and the type *has* declared metadata — empty ⇒ skip, as
 /// [`validate_property`] does, to avoid false positives on under-declared graphs).
-fn property_absent(graph: &DirGraph, node_type: &str, prop: &str) -> bool {
+pub(super) fn property_absent(graph: &DirGraph, node_type: &str, prop: &str) -> bool {
     if BUILTIN_FIELDS.contains(&prop) {
         return false;
     }
@@ -240,7 +277,7 @@ struct AbsentPropertyScan<'a, 'q> {
     /// `WHERE` and a `RETURN` is one message, worded for the filter — the more
     /// consequential of the two.
     seen: HashSet<(&'q str, &'q str)>,
-    out: Vec<String>,
+    out: Vec<AbsentProperty>,
 }
 
 impl<'q> AbsentPropertyScan<'_, 'q> {
@@ -261,8 +298,12 @@ impl<'q> AbsentPropertyScan<'_, 'q> {
             .get(label)
             .map(|m| m.keys().map(|s| s.as_str()).collect())
             .unwrap_or_default();
-        self.out
-            .push(site.message(property, label, &did_you_mean(property, &candidates)));
+        self.out.push(AbsentProperty {
+            site,
+            property: property.to_string(),
+            label: label.to_string(),
+            hint: did_you_mean(property, &candidates),
+        });
     }
 
     fn predicate(&mut self, pred: &'q Predicate, site: AbsentSite) {
@@ -441,18 +482,54 @@ fn endpoint_label<'s>(
         .and_then(|var| var_label.get(var).copied())
 }
 
+/// One statement's non-fatal findings, split by **disposition** rather than by
+/// family: [`Self::absent_property`] is the subset `lock_schema()` promotes to
+/// a hard error (see [`strict_read_error`]), and [`Self::other`] — unknown
+/// labels, unknown relationship types, reversed arrows — stays a warning in
+/// every schema state, because each of those shapes is legal Cypher whose
+/// zero-row answer is a legitimate thing to ask for.
+pub(crate) struct QueryWarnings {
+    pub(crate) absent_property: Vec<AbsentProperty>,
+    pub(crate) other: Vec<String>,
+}
+
+impl QueryWarnings {
+    /// Flatten to the wire form every consumer sees — absent-property first,
+    /// matching the order the families were emitted in before the split.
+    pub(crate) fn into_messages(self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .absent_property
+            .iter()
+            .map(AbsentProperty::warning)
+            .collect();
+        out.extend(self.other);
+        out
+    }
+}
+
+/// Flat message list — the form `QueryDiagnostics::warnings` and every binding
+/// consume. [`collect_query_warnings`] is the same computation with the
+/// disposition split still intact, for the one caller (`session::execute`)
+/// that must know which findings a locked schema rejects.
+pub fn collect_unknown_pattern_warnings(query: &CypherQuery, graph: &DirGraph) -> Vec<String> {
+    collect_query_warnings(query, graph).into_messages()
+}
+
 /// Non-fatal counterpart to [`validate_schema`]: collect "did you mean?"
 /// warnings for MATCH patterns that reference a node label or relationship
 /// type the graph has never seen (a zero-row existence check is legal Cypher,
-/// so this is *not* an error), plus the absent-property warnings from
-/// [`absent_property_warnings`]. Pure (no I/O), so directly testable;
+/// so this is *not* an error), plus the absent-property findings from
+/// [`absent_property_findings`]. Pure (no I/O), so directly testable;
 /// [`emit_query_warnings`] is the stderr side of the same computation.
-pub fn collect_unknown_pattern_warnings(query: &CypherQuery, graph: &DirGraph) -> Vec<String> {
+pub(crate) fn collect_query_warnings(query: &CypherQuery, graph: &DirGraph) -> QueryWarnings {
     let have_node_schema =
         !graph.node_type_metadata.is_empty() || graph.type_indices.keys().next().is_some();
     let have_edge_schema = !graph.connection_type_metadata.is_empty();
     if !have_node_schema && !have_edge_schema {
-        return Vec::new();
+        return QueryWarnings {
+            absent_property: Vec::new(),
+            other: Vec::new(),
+        };
     }
 
     // Walk every read pattern — top-level MATCH / OPTIONAL MATCH *and* the
@@ -529,13 +606,22 @@ pub fn collect_unknown_pattern_warnings(query: &CypherQuery, graph: &DirGraph) -
         }
     });
 
-    // Seed with the absent-property warnings (A1b + eval §3a) so they're
-    // emitted alongside the unknown-label/rel ones even when the labels/rels
-    // are all valid.
-    let mut out: Vec<String> = absent_property_warnings(query, graph, &var_label);
+    // The absent-property findings (A1b + eval §3a) travel alongside the
+    // unknown-label/rel ones even when the labels/rels are all valid — and
+    // separately from them, because they are the only family a locked schema
+    // rejects rather than reports.
+    let absent_property = absent_property_findings(query, graph, &var_label);
+    // Family 5 (declared-type mismatches) shares `var_label` and its
+    // conservatisms, but never its dedup key — see [`super::type_mismatch`].
+    let mut type_mismatch = super::type_mismatch::type_mismatch_findings(query, graph, &var_label);
+    let mut out: Vec<String> = Vec::new();
     if unknown_labels.is_empty() && unknown_rels.is_empty() {
         out.append(&mut reversed);
-        return out;
+        out.append(&mut type_mismatch);
+        return QueryWarnings {
+            absent_property,
+            other: out,
+        };
     }
 
     out.reserve(unknown_labels.len() + unknown_rels.len());
@@ -584,7 +670,113 @@ pub fn collect_unknown_pattern_warnings(query: &CypherQuery, graph: &DirGraph) -
         }
     }
     out.append(&mut reversed);
-    out
+    out.append(&mut type_mismatch);
+    QueryWarnings {
+        absent_property,
+        other: out,
+    }
+}
+
+/// Reject a locked schema's absent-property reads.
+///
+/// **Caller gates on `graph.schema_locked`.** `lock_schema()` is the opt-in
+/// "catch my typos" mechanism, and before this it covered a typo asymmetrically:
+/// `MATCH (p:Person {agee: 1})` and `MATCH (p:Persn)` both failed, while
+/// `MATCH (p:Person) WHERE p.agee = 1` returned an empty result and
+/// `RETURN p.agee` returned a column of nulls — the two shapes an LLM or a
+/// hurried human writes most. Same finding, same conservatism rules
+/// ([`absent_property_findings`]); only the disposition differs.
+///
+/// Returns the **first** violation, like [`validate_schema`], and reuses the
+/// unknown-property wording from [`validate_property`] so a locked schema
+/// reports the same mistake identically whether it is written in a pattern
+/// literal or in an expression.
+///
+/// One finding is deliberately *not* promoted: a property the graph's
+/// [`schema_definition`](crate::graph::schema::DirGraph::schema_definition)
+/// declares but no node has written yet. The all-null column is real, so the
+/// warning stands, but the name is not a typo — it is in the user's own
+/// declared model, and the pattern-literal check accepts it for exactly that
+/// reason ([`property_is_declared`](super::property_is_declared)). Rejecting it
+/// would make a lock disagree with the schema it locks.
+pub(crate) fn strict_read_error(
+    findings: &[AbsentProperty],
+    graph: &DirGraph,
+) -> Option<SchemaError> {
+    let found = findings
+        .iter()
+        .find(|f| !super::property_is_declared(&f.label, &f.property, graph))?;
+    let mut valid: Vec<&str> = graph
+        .node_type_metadata
+        .get(&found.label)
+        .map(|m| m.keys().map(|s| s.as_str()).collect())
+        .unwrap_or_default();
+    valid.sort_unstable();
+    Some(SchemaError {
+        kind: SchemaErrorKind::UnknownProperty,
+        message: format!(
+            "Unknown property '{}' on {}, referenced in {}.{}\n  Valid properties: {}\n  \
+             (the schema is locked — call unlock_schema() to make this a warning instead)",
+            found.property,
+            found.label,
+            found.site.clause(),
+            found.hint,
+            valid.join(", ")
+        ),
+    })
+}
+
+/// Where the *echo* of a query warning goes.
+///
+/// Only the echo. The structured channel — [`QueryDiagnostics::warnings`], and
+/// everything built on it (`ResultView.diagnostics`, the MCP `warnings:`
+/// block) — is unconditional and no variant here can switch it off: the
+/// computation happens once either way, and a caller that reads the field must
+/// never depend on a process-global setting for it.
+///
+/// A host binding that wants its own presentation (the Python wheel's
+/// `pywarn` policy re-emits through `warnings.warn`) selects [`Self::Silent`]
+/// here and does its own emission from the diagnostics it already holds — the
+/// engine never calls back into a host language.
+///
+/// [`QueryDiagnostics::warnings`]: crate::graph::languages::cypher::result::QueryDiagnostics::warnings
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QueryWarningSink {
+    /// Print `warning: <msg>` to stderr. The default, and what every release
+    /// before the sink existed did unconditionally.
+    #[default]
+    Stderr,
+    /// Print nothing. The structured channel is unaffected.
+    Silent,
+}
+
+const SINK_STDERR: u8 = 0;
+const SINK_SILENT: u8 = 1;
+
+/// Process-global, because the emit sites are deep inside the executor and
+/// the plan-cache path, and threading a presentation choice through
+/// `ExecuteOptions` would put it on every binding's hot argument struct for a
+/// setting no caller varies per query.
+static SINK: AtomicU8 = AtomicU8::new(SINK_STDERR);
+
+/// Select where query-warning echoes go, process-wide. Returns nothing; read
+/// the current value back with [`query_warning_sink`].
+pub fn set_query_warning_sink(sink: QueryWarningSink) {
+    SINK.store(
+        match sink {
+            QueryWarningSink::Stderr => SINK_STDERR,
+            QueryWarningSink::Silent => SINK_SILENT,
+        },
+        Ordering::Relaxed,
+    );
+}
+
+/// The sink [`emit_query_warnings`] is currently writing to.
+pub fn query_warning_sink() -> QueryWarningSink {
+    match SINK.load(Ordering::Relaxed) {
+        SINK_SILENT => QueryWarningSink::Silent,
+        _ => QueryWarningSink::Stderr,
+    }
 }
 
 /// Emit already-collected query warnings to stderr, matching kglite's
@@ -597,10 +789,50 @@ pub fn collect_unknown_pattern_warnings(query: &CypherQuery, graph: &DirGraph) -
 /// query warning of its own — `executor::call_clause`'s procedure-scope
 /// checks — emits through here too, so the prefix never drifts.
 ///
+/// Being the one emitter is also what makes [`set_query_warning_sink`] a
+/// single-point switch: silencing the echo is a check here, not a flag
+/// threaded through four call sites.
+///
 /// [`QueryDiagnostics::warnings`]: crate::graph::languages::cypher::result::QueryDiagnostics::warnings
 pub(crate) fn emit_query_warnings(warnings: &[String]) {
+    if query_warning_sink() == QueryWarningSink::Silent {
+        return;
+    }
     for msg in warnings {
+        #[cfg(test)]
+        echo_recorder::record(msg);
         eprintln!("warning: {msg}");
+    }
+}
+
+/// In-crate observer for the stderr branch above. `eprintln!` is captured by
+/// libtest and unreadable from a unit test, so without this the "silent really
+/// suppresses" assertion would be vacuous — it could only check that the call
+/// returned.
+#[cfg(test)]
+mod echo_recorder {
+    use std::sync::Mutex;
+
+    static RECORDED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    pub(super) fn record(msg: &str) {
+        RECORDED
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(msg.to_string());
+    }
+
+    /// Every echo recorded so far that contains `needle`. Filtered rather than
+    /// drained: the crate's tests run in parallel and other queries echo into
+    /// the same buffer.
+    pub(super) fn matching(needle: &str) -> Vec<String> {
+        RECORDED
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .filter(|m| m.contains(needle))
+            .cloned()
+            .collect()
     }
 }
 
@@ -763,6 +995,74 @@ mod tests {
         );
     }
 
+    // ── Locked-schema promotion: which findings become errors ──────────────
+
+    #[test]
+    fn strict_read_error_reports_the_first_finding_in_error_voice() {
+        let g = graph_with_schema();
+        let q = parse_cypher("MATCH (p:Person) WHERE p.agee = 1 RETURN p.imo").unwrap();
+        let found = collect_query_warnings(&q, &g).absent_property;
+        assert_eq!(found.len(), 2, "{found:?}");
+        let err = strict_read_error(&found, &g).expect("both findings are typos");
+        assert!(
+            err.message
+                .starts_with("Unknown property 'agee' on Person, referenced in WHERE."),
+            "{}",
+            err.message
+        );
+        assert!(
+            err.message.contains("Did you mean 'age'?"),
+            "{}",
+            err.message
+        );
+        assert!(
+            err.message.contains("Valid properties: age, email"),
+            "{}",
+            err.message
+        );
+        assert!(err.message.contains("unlock_schema()"), "{}", err.message);
+        assert!(matches!(err.kind, SchemaErrorKind::UnknownProperty));
+    }
+
+    /// A property the graph's own `schema_definition` declares is not a typo,
+    /// even though no node has written a value for it yet — the same carve-out
+    /// `validate_property` makes for the pattern-literal form. The all-null
+    /// column is real, so the *warning* stands; only the promotion is skipped,
+    /// or a lock would reject the model it was asked to lock.
+    #[test]
+    fn a_declared_but_unwritten_property_warns_but_is_never_promoted() {
+        use crate::graph::schema::{NodeSchemaDefinition, SchemaDefinition, SchemaInstall};
+
+        let mut g = graph_with_schema();
+        let mut declared = SchemaDefinition::default();
+        declared.node_schemas.insert(
+            "Person".to_string(),
+            NodeSchemaDefinition {
+                optional_fields: vec!["nickname".to_string()],
+                ..Default::default()
+            },
+        );
+        g.set_schema(declared, SchemaInstall::Replace)
+            .expect("schema installs on an empty graph");
+
+        let q = parse_cypher("MATCH (p:Person) RETURN p.nickname").unwrap();
+        let collected = collect_query_warnings(&q, &g);
+        assert_eq!(collected.absent_property.len(), 1);
+        assert!(
+            strict_read_error(&collected.absent_property, &g).is_none(),
+            "a declared field must not be promoted to an error"
+        );
+        let messages = collected.into_messages();
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert!(messages[0].contains("'nickname'"), "{}", messages[0]);
+
+        // The undeclared sibling is still promoted, so the carve-out is a
+        // carve-out and not a blanket exemption for the type.
+        let q2 = parse_cypher("MATCH (p:Person) RETURN p.nicknmae").unwrap();
+        let found2 = collect_query_warnings(&q2, &g).absent_property;
+        assert!(strict_read_error(&found2, &g).is_some());
+    }
+
     // ── D2p §3b: reversed relationship-direction warnings ──────────────────
 
     /// Directed schema: `AUTHORED` and `REVIEWED` run Person→Paper, `KNOWS`
@@ -917,5 +1217,40 @@ mod tests {
         let w = collect_unknown_pattern_warnings(&q, &g);
         assert_eq!(w.len(), 1, "{w:?}");
         assert!(w[0].contains("unknown relationship type"), "{}", w[0]);
+    }
+
+    // ── the warning-echo sink ───────────────────────────────────────────────
+
+    /// The sink is process-global; two tests flipping it at once would race.
+    static SINK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn stderr_sink_echoes_and_silent_sink_does_not() {
+        let _guard = SINK_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // Unique per assertion, so a parallel test echoing into the shared
+        // recorder cannot make either half pass or fail by accident.
+        let echoed = "sink-probe-echoed-a7f3".to_string();
+        let muted = "sink-probe-muted-a7f3".to_string();
+
+        assert_eq!(query_warning_sink(), QueryWarningSink::Stderr, "default");
+        emit_query_warnings(std::slice::from_ref(&echoed));
+        assert_eq!(echo_recorder::matching(&echoed).len(), 1);
+
+        set_query_warning_sink(QueryWarningSink::Silent);
+        assert_eq!(query_warning_sink(), QueryWarningSink::Silent);
+        emit_query_warnings(std::slice::from_ref(&muted));
+        assert!(
+            echo_recorder::matching(&muted).is_empty(),
+            "silent sink still echoed"
+        );
+
+        // Restore: every other test in the crate assumes the default.
+        set_query_warning_sink(QueryWarningSink::Stderr);
+        emit_query_warnings(std::slice::from_ref(&muted));
+        assert_eq!(
+            echo_recorder::matching(&muted).len(),
+            1,
+            "sink did not restore"
+        );
     }
 }

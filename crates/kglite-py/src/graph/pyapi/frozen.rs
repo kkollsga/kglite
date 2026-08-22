@@ -127,6 +127,7 @@ impl FrozenGraph {
             },
         )?;
 
+        crate::warning_policy::announce(py, result.diagnostics.as_ref())?;
         if pre_parsed.output_format == cypher::OutputFormat::Csv {
             return result.to_csv().into_py_any(py);
         }

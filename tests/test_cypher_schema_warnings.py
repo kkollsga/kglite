@@ -62,7 +62,7 @@ def test_valid_query_emits_no_warning(capfd):
     assert "unknown relationship type" not in err
 
 
-# --- structured warnings via diagnostics() (agent-visible; no stderr needed) ---
+# --- structured warnings via `.diagnostics` (agent-visible; no stderr needed) ---
 
 
 def test_diagnostics_exposes_warnings():
@@ -206,3 +206,52 @@ def test_new_warnings_survive_the_plan_cache():
         second = g.cypher(query).diagnostics["warnings"]
         assert first, query
         assert first == second, query
+
+
+# --- declared-type mismatches (blind review 2026-08-22, F3) ---
+
+
+def _declared() -> kglite.KnowledgeGraph:
+    """A graph whose `Person.age` is a DDL-declared INTEGER — the only type
+    knowledge the write path enforces, and therefore the only one this warning
+    family trusts."""
+    g = kglite.KnowledgeGraph()
+    g.add_nodes(pd.DataFrame({"pid": [1, 2], "name": ["a", "b"], "age": [30, 40]}), "Person", "pid", "name")
+    g.cypher("CREATE CONSTRAINT person_age_typed FOR (p:Person) REQUIRE p.age IS :: INTEGER")
+    return g
+
+
+def test_declared_type_mismatch_warns(capfd):
+    """The blind reviewer's query: `> 'forty'` on an INTEGER property is null
+    on every row, so the empty result was the only signal it was wrong."""
+    g = _declared()
+    rv = g.cypher("MATCH (p:Person) WHERE p.age > 'forty' RETURN p.name")
+    assert rv.to_list() == []
+    assert rv.warnings, rv.warnings
+    assert len(rv.warnings) == 1, rv.warnings
+    message = rv.warnings[0]
+    assert "Person.age (declared INTEGER)" in message, message
+    assert "STRING literal 'forty'" in message, message
+    assert "filters out every row" in message, message
+    assert "warning: WHERE compares Person.age" in capfd.readouterr().err
+
+
+def test_declared_type_not_equals_says_it_matches_everything(capfd):
+    """`<>` is the one operator whose cross-type answer is *true* (Neo4j
+    equality semantics), so its message must not borrow the others' voice."""
+    g = _declared()
+    rv = g.cypher("MATCH (p:Person) WHERE p.age <> 'forty' RETURN p.name")
+    assert len(rv.to_list()) == 2  # every row matches, exactly as claimed
+    assert len(rv.warnings) == 1, rv.warnings
+    assert "matches every row that has the property" in rv.warnings[0], rv.warnings
+    assert "filters out" not in rv.warnings[0], rv.warnings
+    capfd.readouterr()
+
+
+def test_well_typed_and_undeclared_comparisons_stay_silent():
+    """A comparable literal, and a property with no declaration behind it, are
+    both left alone — observed metadata is not a declaration."""
+    g = _declared()
+    assert g.cypher("MATCH (p:Person) WHERE p.age > 30 RETURN p").warnings == []
+    assert g.cypher("MATCH (p:Person) WHERE p.age > 30.5 RETURN p").warnings == []
+    assert g.cypher("MATCH (p:Person) WHERE p.name > 5 RETURN p").warnings == []

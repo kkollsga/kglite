@@ -269,6 +269,9 @@ fn marshal_result(
     to_df: bool,
     output_csv: bool,
 ) -> PyResult<Py<PyAny>> {
+    // Both Session paths land here, and before the output shape is chosen: a
+    // CSV string and a DataFrame cannot carry diagnostics.
+    crate::warning_policy::announce(py, result.diagnostics.as_ref())?;
     if output_csv {
         return result.to_csv().into_py_any(py);
     }

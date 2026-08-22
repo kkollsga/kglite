@@ -8,9 +8,19 @@ use pyo3::IntoPyObjectExt;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::graph::{get_graph_mut, KnowledgeGraph};
+use crate::graph::{get_graph_mut, KnowledgeGraph, NodeKeyGuard, NodeKeyKind};
 use kglite_core::api::io as file;
 use kglite_core::api::GraphRead;
+
+/// One-arg `embeddings(text_column)` keys the *selection* by bare id, and a
+/// selection can span node types. The two-arg form is the type-namespaced
+/// way to read both stores.
+const SELECTION_ID_KEY: NodeKeyGuard<'static> = NodeKeyGuard {
+    surface: "embeddings()",
+    kind: NodeKeyKind::Id,
+    recipe: "call the two-arg form embeddings(node_type, text_column) once \
+             per type, which keys a single type's id namespace",
+};
 
 #[pymethods]
 impl KnowledgeGraph {
@@ -132,6 +142,12 @@ impl KnowledgeGraph {
     ///     metric; properties read live so a hit is identical before/after
     ///     save/reload). With ``returning=[...]`` each has ``id`` + ``score`` +
     ///     the requested fields only.
+    ///
+    /// Raises:
+    ///     ValueError: if **no** selected node type has an embedding store for
+    ///         ``text_column`` — a wrong column or an un-embedded type, which
+    ///         used to come back as a silent ``[]``. A selection where *some*
+    ///         type has the store is a partial result, not an error.
     #[pyo3(signature = (text_column, query_vector, top_k=10, metric=None, to_df=false, returning=None, exact=false))]
     #[allow(clippy::too_many_arguments)]
     fn vector_search(
@@ -703,6 +719,11 @@ impl KnowledgeGraph {
     ///
     /// Returns:
     ///     Dict mapping node IDs to embedding vectors (list of floats).
+    ///
+    /// Raises:
+    ///     ArgumentError: The one-arg form's selection spans two node types
+    ///         sharing an id. Ids are unique per type only; call the two-arg
+    ///         form once per type instead.
     #[pyo3(signature = (node_type_or_text_column, text_column=None))]
     fn embeddings(
         &self,
@@ -769,7 +790,10 @@ impl KnowledgeGraph {
             if let Some(embedding) = store.get_embedding(node_idx.index()) {
                 let py_id = py_out::value_to_py(py, &node.id())?;
                 let py_vec = PyList::new(py, embedding)?;
-                result.set_item(py_id, py_vec)?;
+                // The selection can span types, and ids are only unique
+                // within one — two colliding nodes would silently leave one
+                // vector out of the dict.
+                SELECTION_ID_KEY.insert(&result, py_id.bind(py), py_vec)?;
             }
         }
 
@@ -859,7 +883,11 @@ impl KnowledgeGraph {
     ///
     /// Args:
     ///     node_type: The node type to embed (e.g. ``'Article'``).
-    ///     text_column: The node property containing text to embed.
+    ///     text_column: The column holding the text to embed. Resolves as
+    ///         ``set_embeddings`` resolves it — a stored property, an identity
+    ///         alias (a ``title_field='name'`` type embeds its titles under
+    ///         ``'name'``), the canonical ``id``/``title``, or a structural
+    ///         alias. A column that resolves to none of those raises.
     ///     batch_size: Number of texts per ``model.embed()`` call (default 256).
     ///     show_progress: Show a tqdm progress bar (default ``True``).
     ///         Requires ``tqdm`` to be installed; silently falls back to no
@@ -874,6 +902,12 @@ impl KnowledgeGraph {
     /// Returns:
     ///     Dict with ``embedded``, ``skipped``, ``skipped_existing``,
     ///     ``reembedded_changed``, and ``dimension``.
+    ///
+    /// Raises:
+    ///     ValueError: if ``node_type`` does not exist in the graph (the same
+    ///         complaint ``set_embeddings`` makes — raised before the model is
+    ///         loaded), if ``text_column`` resolves to no readable column, or
+    ///         if ``mode`` is not one of the three names.
     #[pyo3(signature = (node_type, text_column, batch_size=256, show_progress=true, mode=None))]
     fn embed_texts(
         &mut self,
@@ -901,18 +935,44 @@ impl KnowledgeGraph {
         };
         let rebuild_store = mode == "all";
 
+        // Resolve the source column through the *same* predicate the ingest
+        // guard uses (`set_embeddings`' `resolve_source_column`), and read the
+        // text through the field it returns. Reading `get_property` directly
+        // was the bug: it excludes `id`/`title` by contract, so `('Person',
+        // 'name')` on a `title_field='name'` type — and even `('Person',
+        // 'title')` — embedded nothing and reported it as `skipped`.
+        // A type with no nodes has nothing to probe and nothing to embed, so
+        // it stays the `{'embedded': 0}` no-op it has always been. A type the
+        // graph has never *seen* is a different thing entirely — a mistake —
+        // and gets `set_embeddings`' complaint, before the model is loaded, so
+        // the two halves of the embedding surface agree on what a node type is.
+        if !self.inner.type_indices.contains_key(node_type) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Node type '{}' does not exist in the graph",
+                node_type
+            )));
+        }
+        let node_indices: Vec<NodeIndex> = self
+            .inner
+            .type_indices
+            .get(node_type)
+            .map(|v| v.to_vec())
+            .unwrap_or_default();
+        let source_field = if node_indices.is_empty() {
+            text_column.to_string()
+        } else {
+            kglite_core::api::embeddings::resolve_source_column(&self.inner, node_type, text_column)
+                .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?
+                .to_string()
+        };
+        let source_key = kglite_core::api::InternedKey::from_str(&source_field);
+
         // Load model if it has a load() lifecycle method
         model
             .load()
             .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
 
         let dimension: usize = model.dimension();
-
-        // Collect (node_index, text, text_hash) for nodes that need embedding
-        let mut node_texts: Vec<(NodeIndex, String, u64)> = Vec::new();
-        let mut skipped = 0usize;
-        let mut skipped_existing = 0usize;
-        let mut reembedded_changed = 0usize;
 
         let emb_key = (node_type.to_string(), embedding_property.clone());
         let existing_store = if rebuild_store {
@@ -939,58 +999,19 @@ impl KnowledgeGraph {
             }
         }
 
-        let node_indices: Vec<NodeIndex> = self
-            .inner
-            .type_indices
-            .get(node_type)
-            .map(|v| v.to_vec())
-            .unwrap_or_default();
+        let candidates = collect_embed_candidates(
+            &self.inner.graph,
+            &node_indices,
+            node_type,
+            &source_field,
+            source_key,
+            existing_store,
+            mode == "changed",
+        );
 
-        let changed_mode = mode == "changed";
-        for &node_idx in &node_indices {
-            if let Some(node) = self.inner.graph.node_view(node_idx) {
-                match node.get_property(text_column).as_deref() {
-                    Some(crate::datatypes::values::Value::String(s)) if !s.is_empty() => {
-                        let hash = kglite_core::api::storage::EmbeddingStore::text_hash(s);
-                        let has_emb = existing_store
-                            .map(|st| st.get_embedding(node_idx.index()).is_some())
-                            .unwrap_or(false);
-                        if changed_mode {
-                            // Re-embed nodes that are missing OR whose text changed.
-                            let stale = existing_store
-                                .map(|st| st.is_stale(node_idx.index(), hash))
-                                .unwrap_or(true);
-                            if stale {
-                                if has_emb {
-                                    reembedded_changed += 1;
-                                }
-                                node_texts.push((node_idx, s.clone(), hash));
-                            } else {
-                                skipped_existing += 1;
-                            }
-                        } else if has_emb {
-                            // 'missing' mode: skip nodes that already have one.
-                            skipped_existing += 1;
-                        } else {
-                            node_texts.push((node_idx, s.clone(), hash));
-                        }
-                    }
-                    _ => {
-                        skipped += 1;
-                    }
-                }
-            }
-        }
-
-        if node_texts.is_empty() {
+        if candidates.texts.is_empty() {
             model.unload();
-            let result = PyDict::new(py);
-            result.set_item("embedded", 0)?;
-            result.set_item("skipped", skipped)?;
-            result.set_item("skipped_existing", skipped_existing)?;
-            result.set_item("reembedded_changed", reembedded_changed)?;
-            result.set_item("dimension", dimension)?;
-            return Ok(result.into());
+            return candidates.report(py, 0, dimension);
         }
 
         // Clone existing store or create new — we'll merge new embeddings into it
@@ -998,74 +1019,23 @@ impl KnowledgeGraph {
             Some(s) => s.clone(),
             None => kglite_core::api::storage::EmbeddingStore::new(dimension),
         };
-        store.data.reserve(node_texts.len() * dimension);
+        store.data.reserve(candidates.texts.len() * dimension);
 
-        // Try to create a tqdm progress bar (if tqdm is installed and show_progress != false)
-        let progress_bar = if show_progress.unwrap_or(true) {
-            py.import("tqdm.auto")
-                .or_else(|_| py.import("tqdm"))
-                .ok()
-                .and_then(|tqdm_mod| {
-                    let kwargs = PyDict::new(py);
-                    let _ = kwargs.set_item("total", node_texts.len());
-                    let _ =
-                        kwargs.set_item("desc", format!("Embedding {}.{}", node_type, text_column));
-                    let _ = kwargs.set_item("unit", "text");
-                    tqdm_mod.call_method("tqdm", (), Some(&kwargs)).ok()
-                })
-        } else {
-            None
-        };
-
-        for batch in node_texts.chunks(batch_size) {
-            let texts: Vec<String> = batch.iter().map(|(_, t, _)| t.clone()).collect();
-
-            // Release the GIL while embedding — PyEmbedderAdapter
-            // reacquires inside, fastembed never needs it.
-            let embeddings = match py.detach(|| model.embed(&texts)) {
-                Ok(v) => v,
-                Err(e) => {
-                    if let Some(ref bar) = progress_bar {
-                        let _ = bar.call_method0("close");
-                    }
-                    model.unload();
-                    return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e));
-                }
-            };
-
-            if embeddings.len() != batch.len() {
-                if let Some(ref bar) = progress_bar {
-                    let _ = bar.call_method0("close");
-                }
-                model.unload();
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "model.embed() returned {} vectors for {} texts",
-                    embeddings.len(),
-                    batch.len()
-                )));
-            }
-
-            for (i, vec) in embeddings.iter().enumerate() {
-                if vec.len() != dimension {
-                    if let Some(ref bar) = progress_bar {
-                        let _ = bar.call_method0("close");
-                    }
-                    model.unload();
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                        "model.embed() returned vector of dimension {} (expected {})",
-                        vec.len(),
-                        dimension
-                    )));
-                }
-                store.set_embedding(batch[i].0.index(), vec);
-                store.set_text_hash(batch[i].0.index(), batch[i].2);
-            }
-
-            // Update progress bar
-            if let Some(ref bar) = progress_bar {
-                let _ = bar.call_method1("update", (batch.len(),));
-            }
-        }
+        let progress_bar = open_progress_bar(
+            py,
+            show_progress.unwrap_or(true),
+            candidates.texts.len(),
+            format!("Embedding {}.{}", node_type, text_column),
+        );
+        let outcome = embed_in_batches(
+            py,
+            model.as_ref(),
+            &mut store,
+            &candidates.texts,
+            batch_size,
+            dimension,
+            progress_bar.as_ref(),
+        );
 
         // Close progress bar
         if let Some(ref bar) = progress_bar {
@@ -1074,6 +1044,7 @@ impl KnowledgeGraph {
 
         // Unload model after embedding is complete
         model.unload();
+        outcome?;
 
         // Stamp the model identity onto the store (provenance) when the
         // embedder names its model — leaves a prior id intact otherwise.
@@ -1081,17 +1052,10 @@ impl KnowledgeGraph {
             store.model_id = Some(mid);
         }
 
-        let embedded = node_texts.len();
+        let embedded = candidates.texts.len();
         let g = get_graph_mut(&mut self.inner);
         g.embeddings.insert(emb_key, store);
-
-        let result = PyDict::new(py);
-        result.set_item("embedded", embedded)?;
-        result.set_item("skipped", skipped)?;
-        result.set_item("skipped_existing", skipped_existing)?;
-        result.set_item("reembedded_changed", reembedded_changed)?;
-        result.set_item("dimension", dimension)?;
-        Ok(result.into())
+        candidates.report(py, embedded, dimension)
     }
 
     /// Search embeddings using a text query.
@@ -1164,10 +1128,18 @@ impl KnowledgeGraph {
     ///
     /// Opt-in (like ``create_index``): without it, search is an exact brute-force
     /// scan. Once built, ``vector_search`` / ``search_text`` auto-use the index
-    /// for whole-corpus queries on large stores; pass ``exact=True`` to force an
-    /// exact scan. The index is dropped automatically whenever the store's
-    /// vectors change (``add_embeddings`` / ``embed_texts`` / ``compact``) —
-    /// rebuild it afterwards.
+    /// for queries covering most of a large store; pass ``exact=True`` to force
+    /// an exact scan. The index is dropped automatically whenever the store's
+    /// vectors change (``add_embeddings`` / ``embed_texts`` / ``compact``) or an
+    /// embedded node is deleted (the delete prunes its vector, which moves a
+    /// slot) — rebuild it afterwards.
+    ///
+    /// The selection does **not** have to be that one node type: as long as
+    /// only one type carries ``text_column``, a whole-graph search (or any
+    /// selection spanning other types) still uses the index. When two or more
+    /// types carry the same column, only a selection of a single one of them
+    /// does — a selection spanning both is ranked by exact scan so neither
+    /// type's rows can be dropped.
     ///
     /// Args:
     ///     node_type: The node type (e.g. ``'Article'``).
@@ -1270,4 +1242,173 @@ fn marshal_embedding_batch(
         ));
     }
     Ok(entries)
+}
+
+/// What one `embed_texts` pass decided about a node type's nodes: the texts
+/// to send to the model, plus the three skip counters its report returns.
+struct EmbedCandidates {
+    /// `(node_index, text, text_hash)` for every node that needs embedding.
+    texts: Vec<(NodeIndex, String, u64)>,
+    /// Nodes whose source field held no non-empty string.
+    skipped: usize,
+    /// Nodes left alone because their embedding is already current.
+    skipped_existing: usize,
+    /// Nodes that *had* an embedding and are being re-embedded ('changed').
+    reembedded_changed: usize,
+}
+
+impl EmbedCandidates {
+    /// `embed_texts`' return dict — one mint for the nothing-to-do early
+    /// return (`embedded = 0`) and for the completed pass alike.
+    fn report(&self, py: Python<'_>, embedded: usize, dimension: usize) -> PyResult<Py<PyAny>> {
+        let result = PyDict::new(py);
+        result.set_item("embedded", embedded)?;
+        result.set_item("skipped", self.skipped)?;
+        result.set_item("skipped_existing", self.skipped_existing)?;
+        result.set_item("reembedded_changed", self.reembedded_changed)?;
+        result.set_item("dimension", dimension)?;
+        Ok(result.into())
+    }
+}
+
+/// Split a node type's nodes into "needs embedding" and the skip counters.
+///
+/// Each node's text is read through the alias-resolved matcher field, so
+/// `source_field`/`source_key` must be what `resolve_source_column` returned —
+/// the same predicate the ingest guard applies. Reading the raw property map
+/// instead is the bug that made an identity column embed nothing.
+///
+/// `changed_mode` selects nodes that are missing an embedding *or* whose
+/// stored text hash is stale; otherwise a node that already has a vector in
+/// `existing_store` is left alone. `mode='all'` passes `existing_store =
+/// None`, which makes every node carrying text a candidate.
+fn collect_embed_candidates(
+    graph: &impl GraphRead,
+    node_indices: &[NodeIndex],
+    node_type: &str,
+    source_field: &str,
+    source_key: kglite_core::api::InternedKey,
+    existing_store: Option<&kglite_core::api::storage::EmbeddingStore>,
+    changed_mode: bool,
+) -> EmbedCandidates {
+    let mut found = EmbedCandidates {
+        texts: Vec::new(),
+        skipped: 0,
+        skipped_existing: 0,
+        reembedded_changed: 0,
+    };
+    for &node_idx in node_indices {
+        let Some(node) = graph.node_view(node_idx) else {
+            continue;
+        };
+        match node
+            .resolved_field(node_type, source_field, source_key)
+            .as_deref()
+        {
+            Some(crate::datatypes::values::Value::String(s)) if !s.is_empty() => {
+                let hash = kglite_core::api::storage::EmbeddingStore::text_hash(s);
+                let has_emb = existing_store
+                    .map(|st| st.get_embedding(node_idx.index()).is_some())
+                    .unwrap_or(false);
+                if changed_mode {
+                    // Re-embed nodes that are missing OR whose text changed.
+                    let stale = existing_store
+                        .map(|st| st.is_stale(node_idx.index(), hash))
+                        .unwrap_or(true);
+                    if stale {
+                        if has_emb {
+                            found.reembedded_changed += 1;
+                        }
+                        found.texts.push((node_idx, s.clone(), hash));
+                    } else {
+                        found.skipped_existing += 1;
+                    }
+                } else if has_emb {
+                    // 'missing' mode: skip nodes that already have one.
+                    found.skipped_existing += 1;
+                } else {
+                    found.texts.push((node_idx, s.clone(), hash));
+                }
+            }
+            _ => {
+                found.skipped += 1;
+            }
+        }
+    }
+    found
+}
+
+/// The optional tqdm bar `embed_texts` drives. `None` when the caller opted
+/// out, and `None` rather than an error when tqdm is not installed — the
+/// documented silent fallback.
+fn open_progress_bar<'py>(
+    py: Python<'py>,
+    show_progress: bool,
+    total: usize,
+    desc: String,
+) -> Option<Bound<'py, PyAny>> {
+    if !show_progress {
+        return None;
+    }
+    py.import("tqdm.auto")
+        .or_else(|_| py.import("tqdm"))
+        .ok()
+        .and_then(|tqdm_mod| {
+            let kwargs = PyDict::new(py);
+            let _ = kwargs.set_item("total", total);
+            let _ = kwargs.set_item("desc", desc);
+            let _ = kwargs.set_item("unit", "text");
+            tqdm_mod.call_method("tqdm", (), Some(&kwargs)).ok()
+        })
+}
+
+/// Embed the selected texts in `batch_size` chunks, writing each vector and
+/// its text hash into `store` and ticking the progress bar per batch.
+///
+/// Teardown on failure belongs to the caller: it closes the bar and unloads
+/// the model on every path, so the three error exits here just return.
+fn embed_in_batches(
+    py: Python<'_>,
+    model: &dyn kglite_core::api::Embedder,
+    store: &mut kglite_core::api::storage::EmbeddingStore,
+    node_texts: &[(NodeIndex, String, u64)],
+    batch_size: usize,
+    dimension: usize,
+    progress_bar: Option<&Bound<'_, PyAny>>,
+) -> PyResult<()> {
+    for batch in node_texts.chunks(batch_size) {
+        let texts: Vec<String> = batch.iter().map(|(_, t, _)| t.clone()).collect();
+
+        // Release the GIL while embedding — PyEmbedderAdapter
+        // reacquires inside, fastembed never needs it.
+        let embeddings = py
+            .detach(|| model.embed(&texts))
+            .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
+
+        if embeddings.len() != batch.len() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "model.embed() returned {} vectors for {} texts",
+                embeddings.len(),
+                batch.len()
+            )));
+        }
+
+        for (i, vec) in embeddings.iter().enumerate() {
+            if vec.len() != dimension {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "model.embed() returned vector of dimension {} (expected {})",
+                    vec.len(),
+                    dimension
+                )));
+            }
+            store.set_embedding(batch[i].0.index(), vec);
+            store.set_text_hash(batch[i].0.index(), batch[i].2);
+        }
+
+        // Update progress bar
+        if let Some(bar) = progress_bar {
+            let _ = bar.call_method1("update", (batch.len(),));
+        }
+    }
+    Ok(())
 }

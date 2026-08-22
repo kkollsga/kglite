@@ -7,11 +7,28 @@ use pyo3::types::{PyDict, PyList};
 use std::sync::Arc;
 
 use crate::graph::{
-    centrality_results_to_dataframe, centrality_results_to_py_dict, community_results_to_py,
-    KnowledgeGraph,
+    centrality_results_to_dataframe, community_results_to_py, KnowledgeGraph, NodeKeyGuard,
+    NodeKeyKind,
 };
 use kglite_core::api::algorithms::{EdgeDir, Interrupt, PathOptions};
 use kglite_core::api::PlanStep;
+
+/// `degrees()` is title-keyed, and titles are free-form — duplicates are
+/// organic. `degree_centrality()` answers the same question per node.
+const DEGREES_TITLE_KEY: NodeKeyGuard<'static> = NodeKeyGuard {
+    surface: "degrees()",
+    kind: NodeKeyKind::Title,
+    recipe: "use degree_centrality() instead, whose ResultView carries one \
+             row per node with its type and id",
+};
+
+/// Discovery-mode `shortest_path_lengths_from()` spans every node type, so
+/// its id keys are only unique once `target_type` picks a namespace.
+const REACHED_ID_KEY: NodeKeyGuard<'static> = NodeKeyGuard {
+    surface: "shortest_path_lengths_from()",
+    kind: NodeKeyKind::Id,
+    recipe: "pass target_type= to pick one id namespace",
+};
 
 /// Parse the `direction=` kwarg the shortest-path family shares with
 /// `where_connected()` / `traverse()`. `None` keeps the family's undirected
@@ -555,18 +572,12 @@ impl KnowledgeGraph {
                     let key = py_out::value_to_py(py, &node_id)?;
                     // Ids are unique per type, not across types: without a
                     // `target_type` two reached nodes can collide on one dict
-                    // key. Say so rather than silently dropping one.
-                    if target_type.is_none() && result.contains(&key)? {
-                        return Err(crate::error_py::kg_to_pyerr(
-                            crate::error::KgError::Argument(format!(
-                                "shortest_path_lengths_from() reached two nodes of different \
-                                 types sharing id {:?}; ids are unique per type, so pass \
-                                 target_type= to pick one id namespace.",
-                                node_id
-                            )),
-                        ));
+                    // key. Say so rather than silently dropping one. With one,
+                    // every key comes from that single namespace.
+                    match target_type {
+                        None => REACHED_ID_KEY.insert(&result, key.bind(py), hops)?,
+                        Some(_) => result.set_item(key, hops)?,
                     }
-                    result.set_item(key, hops)?;
                 }
             }
         }
@@ -1016,6 +1027,11 @@ impl KnowledgeGraph {
     ///
     /// Returns:
     ///     A dictionary mapping node titles to their degree counts
+    ///
+    /// Raises:
+    ///     ArgumentError: Two selected nodes share a title. Titles are not
+    ///         unique, so one degree would be lost silently; use
+    ///         `degree_centrality()`, which is keyed per node.
     fn degrees(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let result_dict = PyDict::new(py);
 
@@ -1035,7 +1051,10 @@ impl KnowledgeGraph {
         for (title, degree) in
             kglite_core::api::fluent::get_node_degrees(&self.inner, &self.cursor.selection)
         {
-            result_dict.set_item(title, degree)?;
+            // Titles are not a key: two same-titled nodes (even of one type)
+            // would silently collapse to a single row.
+            let key = pyo3::types::PyString::new(py, &title).into_any();
+            DEGREES_TITLE_KEY.insert(&result_dict, &key, degree)?;
         }
 
         Ok(result_dict.into())
@@ -1058,7 +1077,7 @@ impl KnowledgeGraph {
     ///     top_k: Return only the top K nodes by centrality (default: all)
     ///
     /// Returns:
-    ///     A list of dicts with 'node_type', 'title', 'id', and 'score' keys,
+    ///     A ResultView of rows with 'type', 'title', 'id', and 'score' keys,
     ///     sorted by score descending.
     ///
     /// Example:
@@ -1068,19 +1087,19 @@ impl KnowledgeGraph {
     ///     for node in central_nodes:
     ///         print(f"{node['title']}: {node['score']:.4f}")
     ///     ```
-    #[pyo3(signature = (normalized=None, sample_size=None, connection_types=None, top_k=None, as_dict=None, timeout_ms=None, to_df=None))]
+    #[pyo3(signature = (normalized=None, sample_size=None, connection_types=None, top_k=None, timeout_ms=None, to_df=None))]
     #[allow(clippy::too_many_arguments)]
     fn betweenness_centrality(
         &self,
         py: Python<'_>,
         normalized: Option<bool>,
         sample_size: Option<usize>,
-        connection_types: Option<Vec<String>>,
+        connection_types: Option<&Bound<'_, PyAny>>,
         top_k: Option<usize>,
-        as_dict: Option<bool>,
         timeout_ms: Option<u64>,
         to_df: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
+        let connection_types = crate::graph::string_or_list(connection_types, "connection_types")?;
         let normalized = normalized.unwrap_or(true);
         let deadline = kglite_core::api::algorithms::Interrupt::from_deadline(
             timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms)),
@@ -1106,17 +1125,13 @@ impl KnowledgeGraph {
 
         if to_df.unwrap_or(false) {
             centrality_results_to_dataframe(py, &self.inner, results, top_k)
-        } else if as_dict.unwrap_or(false) {
-            centrality_results_to_py_dict(py, &self.inner, results, top_k)
         } else {
-            {
-                let view = crate::graph::pyapi::result_view::ResultView::from_centrality(
-                    &self.inner,
-                    results,
-                    top_k,
-                );
-                Py::new(py, view).map(|v| v.into_any())
-            }
+            let view = crate::graph::pyapi::result_view::ResultView::from_centrality(
+                &self.inner,
+                results,
+                top_k,
+            );
+            Py::new(py, view).map(|v| v.into_any())
         }
     }
 
@@ -1132,7 +1147,7 @@ impl KnowledgeGraph {
     ///     top_k: Return only the top K nodes by centrality (default: all)
     ///
     /// Returns:
-    ///     A list of dicts with 'node_type', 'title', 'id', and 'score' keys,
+    ///     A ResultView of rows with 'type', 'title', 'id', and 'score' keys,
     ///     sorted by score descending.
     ///
     /// Example:
@@ -1142,7 +1157,7 @@ impl KnowledgeGraph {
     ///     for node in important_nodes:
     ///         print(f"{node['title']}: {node['score']:.6f}")
     ///     ```
-    #[pyo3(signature = (damping_factor=None, max_iterations=None, tolerance=None, connection_types=None, top_k=None, as_dict=None, timeout_ms=None, to_df=None))]
+    #[pyo3(signature = (damping_factor=None, max_iterations=None, tolerance=None, connection_types=None, top_k=None, timeout_ms=None, to_df=None))]
     #[allow(clippy::too_many_arguments)]
     fn pagerank(
         &self,
@@ -1150,12 +1165,12 @@ impl KnowledgeGraph {
         damping_factor: Option<f64>,
         max_iterations: Option<usize>,
         tolerance: Option<f64>,
-        connection_types: Option<Vec<String>>,
+        connection_types: Option<&Bound<'_, PyAny>>,
         top_k: Option<usize>,
-        as_dict: Option<bool>,
         timeout_ms: Option<u64>,
         to_df: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
+        let connection_types = crate::graph::string_or_list(connection_types, "connection_types")?;
         let damping = damping_factor.unwrap_or(0.85);
         let max_iter = max_iterations.unwrap_or(100);
         let tol = tolerance.unwrap_or(1e-6);
@@ -1182,17 +1197,13 @@ impl KnowledgeGraph {
 
         if to_df.unwrap_or(false) {
             centrality_results_to_dataframe(py, &self.inner, results, top_k)
-        } else if as_dict.unwrap_or(false) {
-            centrality_results_to_py_dict(py, &self.inner, results, top_k)
         } else {
-            {
-                let view = crate::graph::pyapi::result_view::ResultView::from_centrality(
-                    &self.inner,
-                    results,
-                    top_k,
-                );
-                Py::new(py, view).map(|v| v.into_any())
-            }
+            let view = crate::graph::pyapi::result_view::ResultView::from_centrality(
+                &self.inner,
+                results,
+                top_k,
+            );
+            Py::new(py, view).map(|v| v.into_any())
         }
     }
 
@@ -1206,7 +1217,7 @@ impl KnowledgeGraph {
     ///     top_k: Return only the top K nodes by centrality (default: all)
     ///
     /// Returns:
-    ///     A list of dicts with 'node_type', 'title', 'id', and 'score' keys,
+    ///     A ResultView of rows with 'type', 'title', 'id', and 'score' keys,
     ///     sorted by score descending.
     ///
     /// Example:
@@ -1214,18 +1225,17 @@ impl KnowledgeGraph {
     ///     # Find the most connected nodes
     ///     connected_nodes = graph.degree_centrality(top_k=10)
     ///     ```
-    #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (normalized=None, connection_types=None, top_k=None, as_dict=None, timeout_ms=None, to_df=None))]
+    #[pyo3(signature = (normalized=None, connection_types=None, top_k=None, timeout_ms=None, to_df=None))]
     fn degree_centrality(
         &self,
         py: Python<'_>,
         normalized: Option<bool>,
-        connection_types: Option<Vec<String>>,
+        connection_types: Option<&Bound<'_, PyAny>>,
         top_k: Option<usize>,
-        as_dict: Option<bool>,
         timeout_ms: Option<u64>,
         to_df: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
+        let connection_types = crate::graph::string_or_list(connection_types, "connection_types")?;
         let normalized = normalized.unwrap_or(true);
         let deadline = kglite_core::api::algorithms::Interrupt::from_deadline(
             timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms)),
@@ -1248,17 +1258,13 @@ impl KnowledgeGraph {
 
         if to_df.unwrap_or(false) {
             centrality_results_to_dataframe(py, &self.inner, results, top_k)
-        } else if as_dict.unwrap_or(false) {
-            centrality_results_to_py_dict(py, &self.inner, results, top_k)
         } else {
-            {
-                let view = crate::graph::pyapi::result_view::ResultView::from_centrality(
-                    &self.inner,
-                    results,
-                    top_k,
-                );
-                Py::new(py, view).map(|v| v.into_any())
-            }
+            let view = crate::graph::pyapi::result_view::ResultView::from_centrality(
+                &self.inner,
+                results,
+                top_k,
+            );
+            Py::new(py, view).map(|v| v.into_any())
         }
     }
 
@@ -1275,7 +1281,7 @@ impl KnowledgeGraph {
     ///     top_k: Return only the top K nodes by centrality (default: all)
     ///
     /// Returns:
-    ///     A list of dicts with 'node_type', 'title', 'id', and 'score' keys,
+    ///     A ResultView of rows with 'type', 'title', 'id', and 'score' keys,
     ///     sorted by score descending.
     ///
     /// Example:
@@ -1286,18 +1292,18 @@ impl KnowledgeGraph {
     ///     close_nodes = graph.closeness_centrality(sample_size=100, top_k=10)
     ///     ```
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (normalized=None, sample_size=None, connection_types=None, top_k=None, as_dict=None, timeout_ms=None, to_df=None))]
+    #[pyo3(signature = (normalized=None, sample_size=None, connection_types=None, top_k=None, timeout_ms=None, to_df=None))]
     fn closeness_centrality(
         &self,
         py: Python<'_>,
         normalized: Option<bool>,
         sample_size: Option<usize>,
-        connection_types: Option<Vec<String>>,
+        connection_types: Option<&Bound<'_, PyAny>>,
         top_k: Option<usize>,
-        as_dict: Option<bool>,
         timeout_ms: Option<u64>,
         to_df: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
+        let connection_types = crate::graph::string_or_list(connection_types, "connection_types")?;
         let normalized = normalized.unwrap_or(true);
         let deadline = kglite_core::api::algorithms::Interrupt::from_deadline(
             timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms)),
@@ -1323,17 +1329,13 @@ impl KnowledgeGraph {
 
         if to_df.unwrap_or(false) {
             centrality_results_to_dataframe(py, &self.inner, results, top_k)
-        } else if as_dict.unwrap_or(false) {
-            centrality_results_to_py_dict(py, &self.inner, results, top_k)
         } else {
-            {
-                let view = crate::graph::pyapi::result_view::ResultView::from_centrality(
-                    &self.inner,
-                    results,
-                    top_k,
-                );
-                Py::new(py, view).map(|v| v.into_any())
-            }
+            let view = crate::graph::pyapi::result_view::ResultView::from_centrality(
+                &self.inner,
+                results,
+                top_k,
+            );
+            Py::new(py, view).map(|v| v.into_any())
         }
     }
 
