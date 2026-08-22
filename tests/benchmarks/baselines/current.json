@@ -885,6 +885,43 @@
     },
     {
       "group": null,
+      "name": "test_bench_disk_dir_reopen_fresh",
+      "fullname": "tests/benchmarks/test_bench_core.py::test_bench_disk_dir_reopen_fresh",
+      "params": null,
+      "param": null,
+      "extra_info": {
+        "capture": "Release profile, macOS/M4 Mac mini, from the slower of two agreeing `make bench-check` runs (0.880 ms and 0.927 ms min). Captured 2026-08-22 under ordinary desktop load, per the relaxed idle-benchmark rule."
+      },
+      "options": {
+        "disable_gc": false,
+        "timer": "perf_counter",
+        "min_rounds": 100,
+        "max_time": 1.0,
+        "min_time": 5e-06,
+        "warmup": 20
+      },
+      "stats": {
+        "min": 0.0009272090392187238,
+        "max": 0.001080874993931502,
+        "mean": 0.0009527812543092296,
+        "stddev": 2.556161639751165e-05,
+        "rounds": 100,
+        "median": 0.0009460625005885959,
+        "iqr": 1.3583456166088581e-05,
+        "q1": 0.0009398545371368527,
+        "q3": 0.0009534379933029413,
+        "iqr_outliers": 12,
+        "stddev_outliers": 10,
+        "outliers": "10;12",
+        "ld15iqr": 0.0009272090392187238,
+        "hd15iqr": 0.0009744589915499091,
+        "ops": 1049.5588525458597,
+        "total": 0.09527812543092296,
+        "iterations": 1
+      }
+    },
+    {
+      "group": null,
       "name": "test_bench_return_node_10k",
       "fullname": "tests/benchmarks/test_bench_core.py::test_bench_return_node_10k",
       "params": null,
