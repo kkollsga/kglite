@@ -5221,13 +5221,16 @@ class KnowledgeGraph:
         """
         ...
 
-    def to_networkx(self) -> Any:
+    def to_networkx(self, *, node_key: str = "id") -> Any:
         """Convert the graph to a :class:`networkx.MultiDiGraph`.
 
         KGLite is a directed multigraph with typed nodes and edges, so
-        ``MultiDiGraph`` is the lossless target. Each node's ``id`` is the
-        networkx node key; ``node_type``, ``title`` and every property are
-        attached as node attributes. The first edge for a node pair uses its
+        ``MultiDiGraph`` is the lossless target. ``node_key`` chooses the
+        networkx node key: ``'id'`` (default) uses the bare node id,
+        ``'type_id'`` uses the ``(node_type, id)`` 2-tuple. ``node_type``,
+        ``title`` and every property are attached as node attributes; the two
+        identity attributes overwrite a property of the same name rather than
+        being shadowed by it. The first edge for a node pair uses its
         ``connection_type`` as the networkx key; additional same-type parallel
         edges use collision-safe composite keys. Every edge also stores the
         type in its ``connection_type`` attribute alongside all properties.
@@ -5239,17 +5242,24 @@ class KnowledgeGraph:
 
         Requires the ``networkx`` extra: ``pip install "kglite[networkx]"``.
 
+        Args:
+            node_key: ``'id'`` (default) or ``'type_id'``. Ids are unique
+                within a node type but reused across types, so ``'type_id'``
+                is the collision-free key for a multi-type graph.
+
         Returns:
             A ``networkx.MultiDiGraph`` mirroring the full graph.
 
         Raises:
-            ArgumentError: Two nodes of different types share an id. Ids are
-                unique per type, not across types, and the networkx node key
-                is the bare id — the two nodes would merge into one, the
+            ArgumentError: ``node_key`` is neither ``'id'`` nor ``'type_id'``;
+                or ``node_key='id'`` and two nodes of different types share an
+                id. Ids are unique per type, not across types, and the bare-id
+                networkx node key would merge the two nodes into one, the
                 second overwriting the first's attributes and both nodes'
                 edges rewiring onto the survivor. Give the colliding types
-                disjoint ids; because the export is whole-graph, narrowing
-                the selection cannot avoid it.
+                disjoint ids, or export with ``node_key='type_id'``; because
+                the export is whole-graph, narrowing the selection cannot
+                avoid it.
 
         Note:
             v1 always exports the full graph; the active selection is
@@ -5261,6 +5271,10 @@ class KnowledgeGraph:
 
             nxg = graph.to_networkx()
             scores = nx.pagerank(nxg)
+
+            # Multi-type graph whose ids overlap across types:
+            nxg = graph.to_networkx(node_key='type_id')
+            scores = nx.pagerank(nxg)   # keys are ('Person', 5) tuples
         """
         ...
 

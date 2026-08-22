@@ -107,6 +107,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`to_networkx(node_key="type_id")` exports a graph whose ids collide across
+  types.** Node ids are unique *within* a type, so the default bare-id node
+  key refuses a multi-type graph in which a `Person` and a `City` both carry
+  id `5` — correct, but the refusal was the only outcome available, and two
+  types both numbering from 1 is what `add_nodes` produces by default. Passing
+  `node_key="type_id"` keys every networkx node by its `(node_type, id)`
+  2-tuple, which is unique by construction: the export runs, edge endpoints
+  are the same tuples, and edge keying is untouched. `node_key="id"` remains
+  the default and behaves exactly as before, guard included; its collision
+  error now names the new option alongside "give the colliding types disjoint
+  ids". Any other value raises `ArgumentError` listing the two valid ones.
+
 - **A query warning when a *declared* property type makes a `WHERE`
   comparison vacuous.** `MATCH (p:Person) WHERE p.age > 'forty'` on a graph
   that declared `REQUIRE p.age IS :: INTEGER` is null on every row — legal
@@ -186,6 +198,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `to_df=True` and the default `ResultView` are unchanged.
 
 ### Fixed
+
+- **A property named `node_type` or `title` no longer shadows the real one in
+  `to_networkx()` output.** The export wrote the two identity attributes
+  first and then flattened every property over the top, so a node carrying a
+  property literally called `node_type` came out of the export claiming to be
+  a type it is not — and `from_networkx` reads that attribute back, so the
+  round trip silently retyped the node. Properties are now written first and
+  the identity attributes last, making them authoritative. A graph with no
+  such property is unaffected.
 
 - **Deleting a node now removes its embedding, so a later node cannot inherit
   the deleted node's vector.** `EmbeddingStore` is keyed by the engine's

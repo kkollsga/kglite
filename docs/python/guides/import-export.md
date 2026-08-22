@@ -280,11 +280,21 @@ target is `networkx.MultiDiGraph`: each node's `id` is the networkx node
 key (with `node_type`, `title`, and every property as node attributes),
 and the first edge's `connection_type` is its edge key. Additional parallel
 edges with the same endpoints and type receive collision-safe composite keys,
-while every edge retains a `connection_type` attribute.
+while every edge retains a `connection_type` attribute. `node_type` and
+`title` are identity attributes: a property of the same name does not shadow
+them.
 
 `to_networkx()` preserves same-type parallel edges. The inverse bulk importer
 uses KGLite's endpoint-plus-type DataFrame identity, so importing such a
 NetworkX graph collapses duplicates with identical endpoints and type.
+
+### Choosing the node key
+
+Ids are unique *within* a node type, not across types, so two types that both
+number from 1 would merge into one networkx node under a bare-id key. The
+default `node_key='id'` refuses that export with an `ArgumentError` rather
+than silently merging; pass `node_key='type_id'` to key each node by its
+`(node_type, id)` 2-tuple instead, which is unique by construction.
 
 Requires the `networkx` extra: `pip install kglite[networkx]`.
 
@@ -305,6 +315,23 @@ graph.add_nodes(df, 'Person', 'id', conflict_handling='update')
 
 # Import a plain networkx graph (defaults applied where attrs are absent).
 g2 = kglite.from_networkx(nxg, default_node_type='Node', default_edge_type='RELATED')
+```
+
+The same write-back with tuple keys — one DataFrame per node type, because
+the id alone no longer identifies a node:
+
+```python
+from collections import defaultdict
+
+nxg = graph.to_networkx(node_key='type_id')   # keys are ('Person', 5) tuples
+scores = nx.pagerank(nxg)
+
+per_type = defaultdict(list)
+for (node_type, nid), rank in scores.items():
+    per_type[node_type].append({'id': nid, 'pagerank': rank})
+
+for node_type, rows in per_type.items():
+    graph.add_nodes(pd.DataFrame(rows), node_type, 'id', conflict_handling='update')
 ```
 
 `from_networkx()` accepts `Graph` / `DiGraph` / `MultiGraph` /

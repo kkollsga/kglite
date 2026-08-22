@@ -11,48 +11,87 @@
 // DataFrame fast paths (`add_nodes` / `add_connections`).
 
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyString, PyTuple};
 
 use crate::datatypes::py_out::value_to_py;
 use crate::graph::{KnowledgeGraph, NodeKeyGuard, NodeKeyKind};
 use kglite_core::api::GraphRead;
 
-/// Node keys are bare ids, so two types sharing an id would merge into one
-/// NetworkX node (attrs overwritten, both nodes' edges rewired onto the
-/// survivor). Refuse instead — and name a recipe the whole-graph export can
-/// actually honour.
+/// Under `node_key="id"` node keys are bare ids, so two types sharing an id
+/// would merge into one NetworkX node (attrs overwritten, both nodes' edges
+/// rewired onto the survivor). Refuse instead — and name two recipes the
+/// whole-graph export can actually honour.
 const ID_KEY: NodeKeyGuard<'static> = NodeKeyGuard {
     surface: "to_networkx()",
     kind: NodeKeyKind::Id,
-    recipe: "give the colliding node types disjoint ids - the export always \
-             covers the whole graph, so narrowing the selection cannot avoid \
-             this",
+    recipe: "give the colliding node types disjoint ids, or export with \
+             node_key='type_id' to key nodes by (node_type, id) - the export \
+             always covers the whole graph, so narrowing the selection cannot \
+             avoid this",
 };
+
+/// How `node_key` maps a node onto its NetworkX key.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NodeKeyMode {
+    /// Bare `id`. Graph-unique only when no two types share an id, so the
+    /// `ID_KEY` guard is installed and a collision refuses the export.
+    Id,
+    /// The `(node_type, id)` 2-tuple. Ids are unique *within* a type, so this
+    /// key is graph-unique by construction — no guard, no collision.
+    TypeId,
+}
+
+impl NodeKeyMode {
+    /// Reject an unknown value by name, listing what is valid (doctrine:
+    /// never silently fall back to a default the caller did not ask for).
+    fn parse(node_key: &str) -> PyResult<Self> {
+        match node_key {
+            "id" => Ok(Self::Id),
+            "type_id" => Ok(Self::TypeId),
+            other => Err(crate::error_py::kg_to_pyerr(
+                crate::error::KgError::Argument(format!(
+                    "to_networkx() got node_key='{other}'; valid values are \
+                     'id' (bare node id - refuses a cross-type id collision) \
+                     and 'type_id' (a (node_type, id) tuple key - collision-free)."
+                )),
+            )),
+        }
+    }
+}
 
 #[pymethods]
 impl KnowledgeGraph {
     /// Convert the graph to a :class:`networkx.MultiDiGraph`.
     ///
     /// KGLite is a directed multigraph with typed nodes and typed edges,
-    /// so ``MultiDiGraph`` is the lossless target. Each node's ``id`` is
-    /// used as the networkx node key; ``node_type``, ``title`` and every
-    /// property are attached as node attributes. Each edge's
-    /// ``connection_type`` is used as the first networkx edge key for a node
-    /// pair; additional same-type parallel edges receive a collision-safe
-    /// composite key. The type is always stored as the ``connection_type``
-    /// edge attribute alongside every edge property.
+    /// so ``MultiDiGraph`` is the lossless target. ``node_key`` selects the
+    /// networkx node key: ``"id"`` (default) uses the bare node id, and
+    /// ``"type_id"`` uses the ``(node_type, id)`` 2-tuple. ``node_type``,
+    /// ``title`` and every property are attached as node attributes — the
+    /// two identity attributes always win over a same-named property. Each
+    /// edge's ``connection_type`` is used as the first networkx edge key for
+    /// a node pair; additional same-type parallel edges receive a
+    /// collision-safe composite key. The type is always stored as the
+    /// ``connection_type`` edge attribute alongside every edge property.
     ///
     /// Requires the ``networkx`` package: ``pip install networkx``.
+    ///
+    /// Args:
+    ///     node_key: ``"id"`` (default) or ``"type_id"``. Ids are unique
+    ///         within a type but reused across types, so ``"type_id"`` is
+    ///         the collision-free choice for a multi-type graph.
     ///
     /// Returns:
     ///     A ``networkx.MultiDiGraph`` mirroring the full graph.
     ///
     /// Raises:
-    ///     ArgumentError: Two nodes of different types share an id. Ids are
-    ///         unique per type, not across types, so a bare-id node key would
-    ///         merge them into one networkx node. Give the colliding types
-    ///         disjoint ids — the export is whole-graph, so narrowing the
-    ///         selection cannot avoid it.
+    ///     ArgumentError: ``node_key`` is neither ``"id"`` nor ``"type_id"``;
+    ///         or ``node_key="id"`` and two nodes of different types share an
+    ///         id. Ids are unique per type, not across types, so a bare-id
+    ///         node key would merge them into one networkx node. Give the
+    ///         colliding types disjoint ids, or export with
+    ///         ``node_key="type_id"`` — the export is whole-graph, so
+    ///         narrowing the selection cannot avoid it.
     ///
     /// Note:
     ///     v1 always exports the full graph (selections are ignored).
@@ -64,7 +103,9 @@ impl KnowledgeGraph {
     ///     nxg = graph.to_networkx()
     ///     scores = nx.pagerank(nxg)
     ///     ```
-    fn to_networkx(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (*, node_key = "id"))]
+    fn to_networkx(&self, py: Python<'_>, node_key: &str) -> PyResult<Py<PyAny>> {
+        let key_mode = NodeKeyMode::parse(node_key)?;
         let nx = py.import("networkx").map_err(|_| {
             PyErr::new::<pyo3::exceptions::PyImportError, _>(
                 "The 'networkx' package is required for to_networkx(). \
@@ -92,21 +133,38 @@ impl KnowledgeGraph {
         // would silently overwrite.
         let seen_keys = PyDict::new(py);
 
-        // Build nodes. Node key = id (the canonical per-mode integer/string).
+        // Build nodes. Node key = the id (canonical per-mode integer/string),
+        // or the (node_type, id) tuple under `node_key="type_id"`.
         for idx in graph.graph.node_indices() {
             let Some(node) = graph.graph.node_view(idx) else {
                 continue;
             };
-            let key = value_to_py(py, &node.id())?;
+            let node_type = node.node_type_str(interner);
+            let id = value_to_py(py, &node.id())?;
+            let key: Py<PyAny> = match key_mode {
+                NodeKeyMode::Id => id,
+                NodeKeyMode::TypeId => {
+                    PyTuple::new(py, [PyString::new(py, node_type).into_any().unbind(), id])?
+                        .into_any()
+                        .unbind()
+                }
+            };
             let attrs = PyDict::new(py);
-            attrs.set_item("node_type", node.node_type_str(interner))?;
-            attrs.set_item("title", value_to_py(py, &node.title())?)?;
+            // Properties first: the two identity attributes below overwrite a
+            // property that happens to share their name, rather than being
+            // silently shadowed by it (the importer reads `node_type` back).
             // properties_cloned covers both row-backed and post-reload
             // columnar property storage; property_iter is empty for the latter.
             for (k, v) in node.properties_cloned(interner) {
                 attrs.set_item(k, value_to_py(py, &v)?)?;
             }
-            ID_KEY.insert(&seen_keys, key.bind(py), py.None())?;
+            attrs.set_item("node_type", node_type)?;
+            attrs.set_item("title", value_to_py(py, &node.title())?)?;
+            // Tuple keys are graph-unique by construction (ids are unique
+            // within a type), so only the bare-id mode needs the guard.
+            if key_mode == NodeKeyMode::Id {
+                ID_KEY.insert(&seen_keys, key.bind(py), py.None())?;
+            }
             add_node.call((key.clone_ref(py),), Some(&attrs))?;
             id_by_index.insert(idx.index(), key);
         }

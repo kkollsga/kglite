@@ -1088,7 +1088,7 @@
         },
         "to_networkx": {
           "kind": "method",
-          "signature": "(self, /)"
+          "signature": "(self, /, *, node_key='id')"
         },
         "to_str": {
           "kind": "method",

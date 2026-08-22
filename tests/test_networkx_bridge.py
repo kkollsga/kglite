@@ -216,13 +216,15 @@ def test_to_networkx_raises_on_cross_type_id_collision():
 
 def test_to_networkx_collision_error_names_the_workaround():
     """The export is whole-graph, so the recipe cannot be 'narrow the
-    selection' — it has to name disjoint ids."""
+    selection' — it names disjoint ids and the `node_key='type_id'`
+    escape hatch, both of which work on the graph that collided."""
     g = _colliding_id_graph()
     with pytest.raises(kglite.ArgumentError) as excinfo:
         g.to_networkx()
     message = str(excinfo.value)
     assert "to_networkx()" in message
     assert "disjoint ids" in message
+    assert "node_key='type_id'" in message
     assert "whole graph" in message
 
 
@@ -265,3 +267,80 @@ def test_to_networkx_single_type_multi_node_unchanged():
     assert nxg.nodes[3]["node_type"] == "Person"
     assert nxg.nodes[3]["title"] == "Cleo"
     assert nxg.nodes[3]["age"] == 41
+
+
+# ── node_key="type_id": the collision-free escape hatch ────────────────
+#
+# Bare-id keys are the default and still refuse a cross-type collision.
+# `node_key="type_id"` keys every node by its `(node_type, id)` pair,
+# which IS graph-unique, so a colliding graph exports losslessly.
+
+
+def test_to_networkx_type_id_exports_colliding_graph():
+    g = _colliding_id_graph()
+    nxg = g.to_networkx(node_key="type_id")
+    assert nxg.number_of_nodes() == 3
+    assert set(nxg.nodes) == {("Person", 5), ("Person", 6), ("City", 5)}
+    assert nxg.number_of_edges() == 2
+
+
+def test_to_networkx_type_id_attrs_and_edge_endpoints():
+    g = _colliding_id_graph()
+    nxg = g.to_networkx(node_key="type_id")
+    assert nxg.nodes[("Person", 5)]["node_type"] == "Person"
+    assert nxg.nodes[("Person", 5)]["title"] == "Alice"
+    assert nxg.nodes[("City", 5)]["node_type"] == "City"
+    assert nxg.nodes[("City", 5)]["title"] == "Oslo"
+    # Endpoints are tuples too — the two same-id nodes stay distinct.
+    assert nxg.has_edge(("Person", 6), ("Person", 5), "KNOWS")
+    assert nxg.has_edge(("Person", 6), ("City", 5), "LIVES_IN")
+    assert not nxg.has_edge(("Person", 6), ("Person", 5), "LIVES_IN")
+
+
+def test_to_networkx_type_id_parallel_edge_keys_unchanged():
+    """Edge keying is orthogonal to node keying: first same-type edge keeps
+    the bare connection type, the parallel one gets the composite key."""
+    g = kglite.KnowledgeGraph()
+    g.cypher("CREATE (a:N {id:1}), (b:N {id:2}) CREATE (a)-[:R {rank:1}]->(b), (a)-[:R {rank:2}]->(b)")
+    nxg = g.to_networkx(node_key="type_id")
+    src, tgt = ("N", 1), ("N", 2)
+    assert nxg.number_of_edges(src, tgt) == 2
+    keys = list(nxg[src][tgt].keys())
+    assert "R" in keys
+    composite = [key for key in keys if key != "R"]
+    assert len(composite) == 1 and isinstance(composite[0], tuple) and composite[0][0] == "R"
+    assert {edge["rank"] for edge in nxg[src][tgt].values()} == {1, 2}
+
+
+def test_to_networkx_default_node_key_is_bare_id():
+    """The default is byte-for-byte today's behaviour: bare-id node keys."""
+    g = _build_typed_graph()
+    assert set(g.to_networkx().nodes) == {1, 2, 100}
+    assert set(g.to_networkx(node_key="id").nodes) == {1, 2, 100}
+
+
+def test_to_networkx_unknown_node_key_rejected_by_name():
+    g = _build_typed_graph()
+    with pytest.raises(kglite.ArgumentError) as excinfo:
+        g.to_networkx(node_key="uuid")
+    message = str(excinfo.value)
+    assert "uuid" in message
+    assert "'id'" in message
+    assert "'type_id'" in message
+
+
+def test_to_networkx_identity_attrs_win_over_same_named_properties():
+    """A property literally named `node_type` (or `title`) must not shadow
+    the real identity attribute — the importer reads those back."""
+    g = kglite.KnowledgeGraph()
+    g.add_nodes(
+        pd.DataFrame([{"id": 1, "name": "Alice", "node_type": "IMPOSTOR", "title": "FAKE"}]),
+        "Person",
+        "id",
+        "name",
+    )
+    for key in ("id", "type_id"):
+        nxg = g.to_networkx(node_key=key)
+        node = nxg.nodes[1 if key == "id" else ("Person", 1)]
+        assert node["node_type"] == "Person"
+        assert node["title"] == "Alice"
