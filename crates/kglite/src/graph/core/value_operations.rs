@@ -558,7 +558,11 @@ pub fn parse_value_string(s: &str) -> Value {
     if let Ok(f) = s.parse::<f64>() {
         return Value::Float64(f);
     }
-    if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
+    // `len() >= 2` matters: a lone `"` or `'` satisfies both starts_with and
+    // ends_with, and stripping it would slice `[1..0]`.
+    if s.len() >= 2
+        && ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')))
+    {
         return Value::String(s[1..s.len() - 1].to_string());
     }
     Value::String(s.to_string())
@@ -951,6 +955,17 @@ mod tests {
             Value::String("hello".into())
         );
         assert_eq!(parse_value_string("'world'"), Value::String("world".into()));
+    }
+
+    // A lone quote character satisfies both `starts_with` and `ends_with`, so
+    // the strip used to slice `[1..0]` and panic. Reachable from Cypher:
+    // `UNWIND $p AS x` with `p = "[\"]"` routes the item here.
+    #[test]
+    fn test_parse_value_string_lone_quote_is_not_a_quoted_string() {
+        assert_eq!(parse_value_string("\""), Value::String("\"".into()));
+        assert_eq!(parse_value_string("'"), Value::String("'".into()));
+        assert_eq!(parse_value_string("\"\""), Value::String(String::new()));
+        assert_eq!(parse_value_string("''"), Value::String(String::new()));
     }
 
     #[test]

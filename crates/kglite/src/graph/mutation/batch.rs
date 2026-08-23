@@ -427,8 +427,11 @@ impl BatchProcessor {
             let interned_props = update.properties;
 
             if is_disk {
-                let (type_name, row_id) = match &graph.graph {
-                    crate::graph::schema::GraphBackend::Disk(ref dg) => {
+                // `as_disk`, not a bare `Disk` match: the `is_disk` guard above
+                // looks *through* the write-capture wrapper, so a wrapped disk
+                // graph reaches here and a bare match would abort the load.
+                let (type_name, row_id) = match graph.graph.as_disk() {
+                    Some(dg) => {
                         let slot = dg.node_slot(update.node_idx.index());
                         if !slot.is_alive() {
                             continue;
@@ -437,7 +440,7 @@ impl BatchProcessor {
                         let type_name = graph.interner.resolve(type_key).to_string();
                         (type_name, slot.row_id)
                     }
-                    _ => unreachable!("is_disk guard"),
+                    None => unreachable!("is_disk guard"),
                 };
 
                 let Some(arc_store) = graph.column_store_mut(&type_name) else {

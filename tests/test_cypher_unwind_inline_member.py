@@ -102,3 +102,15 @@ def test_legacy_string_list_splits_on_the_matching_quote_only():
         params={"items": '["a,b\'", 2]'},
     ).to_dicts()
     assert [r["x"] for r in rows] == ["a,b'", 2]
+
+
+def test_legacy_string_list_with_a_lone_quote_item_returns_a_row():
+    """`UNWIND '["]'` yields the one-character item, it must not panic.
+
+    A lone quote is both the opening and the closing delimiter as far as
+    `starts_with`/`ends_with` see it, so stripping the quotes used to slice
+    `[1..0]` and abort the query with a PanicException.
+    """
+    kg = kglite.KnowledgeGraph()
+    assert [r["x"] for r in kg.cypher("UNWIND $p AS x RETURN x", params={"p": '["]'}).to_dicts()] == ['"']
+    assert [r["x"] for r in kg.cypher("UNWIND $p AS x RETURN x", params={"p": "[']"}).to_dicts()] == ["'"]

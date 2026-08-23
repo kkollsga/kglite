@@ -13,7 +13,6 @@ use super::range_index_layer::LayeredRangeIndex;
 use super::{DirGraph, IndexStats};
 use crate::datatypes::values::Value;
 use crate::graph::schema::{CompositeIndexKey, CompositeValue, IndexKey, InternedKey};
-use crate::graph::storage::backend::GraphBackend;
 use crate::graph::storage::undo::BucketId;
 use crate::graph::storage::GraphRead;
 use petgraph::graph::NodeIndex;
@@ -193,7 +192,10 @@ impl DirGraph {
     /// reports `persistent = true`; the in-memory `property_indices` HashMap
     /// would need multiple GB of heap for a ~13M-row type and be rebuilt on
     /// every load. Memory and mapped backends build the HashMap via
-    /// [`Self::create_index`].
+    /// [`Self::create_index`]. The disk check goes through
+    /// `GraphBackend::as_disk_mut`, which looks past the write-capture
+    /// wrapper `durable=True` / `cdc::enable` install — a bare `Disk` match
+    /// sends every such graph down the heap path.
     ///
     /// **Every caller that installs an equality index on behalf of a user must
     /// route through here.** [`Self::create_index`] is the in-memory primitive
@@ -208,7 +210,7 @@ impl DirGraph {
         node_type: &str,
         property: &str,
     ) -> Result<(usize, bool), String> {
-        if let GraphBackend::Disk(disk) = &mut self.graph {
+        if let Some(disk) = self.graph.as_disk_mut() {
             let count = disk
                 .build_property_index(node_type, property)
                 .map_err(|error| error.to_string())?;
@@ -217,9 +219,13 @@ impl DirGraph {
         Ok((self.create_index(node_type, property), false))
     }
 
-    /// Returns true if the index existed and was removed.
+    /// Returns true if the index existed and was removed. Routes by backend
+    /// through `GraphBackend::as_disk_mut`, the write-capture-transparent
+    /// counterpart of [`Self::create_property_index_routed`]: matching `Disk`
+    /// directly would drop the (absent) heap entry on a durable/CDC disk graph
+    /// and report success while the persistent index stayed on disk.
     pub fn drop_index(&mut self, node_type: &str, property: &str) -> Result<bool, String> {
-        if let GraphBackend::Disk(disk) = &mut self.graph {
+        if let Some(disk) = self.graph.as_disk_mut() {
             return disk
                 .drop_property_index(node_type, property)
                 .map_err(|error| format!("persistent index removal failed: {error}"));
@@ -250,19 +256,14 @@ impl DirGraph {
     /// two structures serve different predicates: this one is a sorted key
     /// array and range-scans a prefix, the in-memory hash cannot.
     ///
-    /// Looks *through* the write-capture wrapper: `durable=True` and
-    /// `cdc::enable` both replace the backend with `GraphBackend::Recording`,
-    /// and a bare `Disk` match answers "no index" for every such graph.
+    /// Looks *through* the write-capture wrapper (see
+    /// `GraphBackend::as_disk`): `durable=True` and `cdc::enable` both
+    /// replace the backend with `GraphBackend::Recording`, and a bare `Disk`
+    /// match answers "no index" for every such graph.
     pub fn has_persistent_property_index(&self, node_type: &str, property: &str) -> bool {
-        use crate::graph::storage::backend::GraphBackend;
-        let mut backend = &self.graph;
-        if let GraphBackend::Recording(rg) = backend {
-            backend = rg.inner();
-        }
-        match backend {
-            GraphBackend::Disk(dg) => dg.has_property_index(node_type, property),
-            _ => false,
-        }
+        self.graph
+            .as_disk()
+            .is_some_and(|dg| dg.has_property_index(node_type, property))
     }
 
     pub fn list_indexes(&self) -> Vec<(String, String)> {

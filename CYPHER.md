@@ -2618,7 +2618,7 @@ graph.create_index('Country', 'label')
 
 On a `storage='disk'` graph the index is **persistent** — written as four mmap'd, SHA-256-addressed files next to the CSR (`property_index_v2_{digest}_{meta,keys,offsets,ids}.bin`). Versioned metadata stores and validates the exact type/property identity, so punctuation, Unicode, underscores, and case-distinct names cannot overwrite one another. Indexes are lazy-loaded on first query after reopen; legacy filename-based bundles remain readable by exact request. No heap HashMap rebuild occurs on `load()`. On in-memory graphs the existing `property_indices` HashMap is used (no change).
 
-`describe()` annotates indexed properties so agents can see which columns hit the fast path before writing a query. String indexes support both equality and prefix; numeric indexes support equality only:
+`describe()` annotates indexed properties so agents can see which columns hit the fast path before writing a query. A string index supports both equality and prefix **on a `storage='disk'` graph only** — prefix is the sorted mmap's own capability, and the in-memory hash index annotates `eq` alone because `STARTS WITH` full-scans there; numeric indexes support equality only:
 
 ```xml
 <prop name="label"  type="String" unique="5" indexed="eq,prefix" vals="Norway|..."/>
@@ -2627,7 +2627,7 @@ On a `storage='disk'` graph the index is **persistent** — written as four mmap
 
 ### STARTS WITH pushdown
 
-With a string index in place, `WHERE n.prop STARTS WITH 'x'` is pushed into the MATCH pattern and served by the prefix side of the sorted mmap:
+With a `storage='disk'` string index in place, `WHERE n.prop STARTS WITH 'x'` is pushed into the MATCH pattern and served by the prefix side of the sorted mmap:
 
 ```python
 graph.cypher("MATCH (n:Country) WHERE n.label STARTS WITH 'O' RETURN n.nid")
@@ -2977,7 +2977,7 @@ works — never a syntax error, and **never a success that enforces nothing**.
 | Statement | Why, and what to use |
 |---|---|
 | `REQUIRE n.p IS :: LIST<STRING>` | Only the type names with an exact KGLite value counterpart are accepted (see [Property-type constraints](#property-type-constraints-is--t)). Lists, unions, zoned temporal types and decorated forms are refused by name rather than approximated; the error lists the names that work. `validate_schema()` audits existing data against `define_schema`'s per-type `types` map, and `lock_schema()` rejects a write whose value disagrees with the recorded property type |
-| `REQUIRE n.id IS UNIQUE` / `IS NODE KEY` | Uniqueness over the identity field — under **any** spelling that resolves to it, `id` itself or the node type's own id column (`person_id`) — is refused. `id` is a `NodeData` field, not an entry in the property map, so the write-path claim is never produced and the constraint would admit duplicates while reporting success. Declare the node type's primary key instead: `define_schema({'nodes': {'Person': {'primary_key': 'id'}}})` probes the per-type id index on every write path, and `MERGE` is the idempotent alternative to `CREATE`. Only `id` is affected — `title`, a column aliased to `title`, and ordinary properties all enforce correctly. `IS NOT NULL` on `id` **is** accepted: it is present by construction, so the requirement is genuinely satisfied |
+| `REQUIRE n.id IS UNIQUE` / `IS NODE KEY` | Uniqueness over the identity field — under **any** spelling that resolves to it, `id` itself or the node type's own id column (`person_id`) — is refused. `id` is a `NodeData` field, not an entry in the property map, so the write-path claim is never produced and the constraint would admit duplicates while reporting success. Declare the node type's primary key instead: `define_schema({'nodes': {'Person': {'primary_key': 'id'}}})` probes the per-type id index on every write path, and `MERGE` is the idempotent alternative to `CREATE`. Only `id` is affected — `title`, a column aliased to `title`, and ordinary properties all enforce correctly. `IS NOT NULL` on `id` **is** accepted, and genuinely enforced: every write path resolves an id before the check, so an *omitted* one satisfies the requirement, but an explicit `CREATE (:Person {id: null})` violates it — and the declaration itself is refused when existing rows already carry a null `id` |
 | `FOR ()-[r:T]-() REQUIRE r.p IS UNIQUE` / `IS RELATIONSHIP KEY` | KGLite has no single answer for when two relationships of a type are the same one — the bulk loader deduplicates `(type, source, target)` while Cypher `CREATE` freely makes parallel edges — so a uniqueness declaration would mean different things depending on which write path produced the data. Presence and property type **are** served on relationships (see [Relationship constraints](#relationship-constraints)) |
 | `REQUIRE …` with no properties | Nothing to constrain |
 | `CREATE CONSTRAINT <name> …` reusing a live name | Names are unique per graph; drop the existing one or choose another name |

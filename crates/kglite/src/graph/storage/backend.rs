@@ -177,6 +177,30 @@ impl GraphBackend {
         }
     }
 
+    /// The `DiskGraph` underneath, looking **through** any write-capture
+    /// wrapper. `durable=True` and `cdc::enable` both replace the backend with
+    /// `Recording`, so a bare `matches!(.., Disk(_))` answers "not a disk
+    /// graph" for every such graph — and a caller routing by storage backend
+    /// then takes the memory path on a graph that cannot afford it.
+    #[inline]
+    pub(crate) fn as_disk(&self) -> Option<&DiskGraph> {
+        match self {
+            GraphBackend::Disk(dg) => Some(dg),
+            GraphBackend::Recording(rg) => rg.inner().as_disk(),
+            _ => None,
+        }
+    }
+
+    /// Mutable counterpart of [`as_disk`](Self::as_disk).
+    #[inline]
+    pub(crate) fn as_disk_mut(&mut self) -> Option<&mut DiskGraph> {
+        match self {
+            GraphBackend::Disk(dg) => Some(dg),
+            GraphBackend::Recording(rg) => rg.inner_mut().as_disk_mut(),
+            _ => None,
+        }
+    }
+
     /// Wrap this backend in the write-capture layer, idempotently. See
     /// [`crate::graph::storage::recording::wrap_for_durability`] for the
     /// `DirGraph`-shaped entry point every binding calls.

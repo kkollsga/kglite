@@ -5580,8 +5580,9 @@ class KnowledgeGraph:
         structural field rather than a stored property, so the unique secondary
         index never sees the write. Declare ``primary_key`` through
         :meth:`define_schema` instead — it probes the per-type id index on every
-        write path. ``IS NOT NULL`` on ``id`` **is** accepted, since it is
-        present by construction. ``SHOW CONSTRAINTS`` and ``SHOW INDEXES`` are
+        write path. ``IS NOT NULL`` on ``id`` **is** accepted and enforced: an
+        omitted id is resolved by every write path and satisfies it, an
+        explicit ``{id: null}`` violates it. ``SHOW CONSTRAINTS`` and ``SHOW INDEXES`` are
         reads and work on a read-only graph. See the "Cypher constraint DDL"
         section of ``CYPHER.md``.
 

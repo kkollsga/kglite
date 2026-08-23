@@ -1159,3 +1159,148 @@ mod selection_remap_tests {
         assert_eq!(sel.current_node_count(), 0);
     }
 }
+
+/// A disk graph wrapped for write capture (`durable=` / `cdc::enable`, whose
+/// disk refusals are the *caller's* — see `durability::open_log`) is still a
+/// disk graph. Code that matches `GraphBackend::Disk` directly misses it while
+/// the guard in front of it (`GraphRead::is_disk`, `create_property_index_routed`)
+/// does not: `CREATE INDEX` falls to the in-memory hash builder the routed
+/// entry point exists to avoid, `DROP INDEX` reports success while the
+/// persistent index stays on disk, and the bulk loader aborts on `unreachable!`.
+#[cfg(test)]
+mod capture_wrapped_backend_routing_tests {
+    use super::*;
+    use crate::datatypes::Value;
+    use crate::graph::storage::backend::GraphBackend;
+    use tempfile::TempDir;
+
+    /// Built through `add_nodes` so the type carries the column metadata the
+    /// disk property-index builder reads, and saved as a disk graph. Each test
+    /// calls `wrap_for_capture` itself, at the point that makes its assertion
+    /// non-vacuous.
+    fn disk_graph(dir: &TempDir) -> DirGraph {
+        let frame = crate::datatypes::DataFrame::from_cypher_rows(
+            vec!["id".into(), "title".into(), "city".into()],
+            vec![
+                vec![
+                    Value::Int64(1),
+                    Value::String("p1".into()),
+                    Value::String("Oslo".into()),
+                ],
+                vec![
+                    Value::Int64(2),
+                    Value::String("p2".into()),
+                    Value::String("Bergen".into()),
+                ],
+            ],
+        )
+        .unwrap();
+        let mut graph = DirGraph::new();
+        crate::graph::mutation::maintain::add_nodes(
+            &mut graph,
+            frame,
+            "Person".to_string(),
+            "id".to_string(),
+            Some("title".to_string()),
+            None,
+        )
+        .unwrap();
+        graph.enable_disk_mode().unwrap();
+        graph.save_disk(dir.path().to_str().unwrap()).unwrap();
+        graph
+    }
+
+    fn wrap(graph: &mut DirGraph) {
+        graph.graph.wrap_for_capture();
+        assert!(
+            matches!(&graph.graph, GraphBackend::Recording(_)),
+            "the fixture must be capture-wrapped"
+        );
+    }
+
+    #[test]
+    fn create_index_routes_to_the_persistent_builder_under_capture() {
+        let dir = TempDir::new().unwrap();
+        let mut graph = disk_graph(&dir);
+        wrap(&mut graph);
+        let (count, persistent) = graph
+            .create_property_index_routed("Person", "city")
+            .unwrap();
+        assert!(
+            persistent,
+            "a capture-wrapped disk graph must still build the mmap index"
+        );
+        assert_eq!(count, 2);
+        assert!(graph.has_persistent_property_index("Person", "city"));
+        assert!(
+            !graph.has_index("Person", "city"),
+            "no in-memory hash index may be built over a disk graph"
+        );
+    }
+
+    /// The bulk loader gates its columnar-write path on `GraphRead::is_disk`,
+    /// which *does* look through the wrapper — so the disk arm behind it must
+    /// too, or a wrapped disk graph reaches an `unreachable!` and aborts the
+    /// load.
+    #[test]
+    fn a_bulk_update_on_a_captured_disk_graph_writes_the_columnar_row() {
+        let dir = TempDir::new().unwrap();
+        let mut graph = disk_graph(&dir);
+        wrap(&mut graph);
+        let update = crate::datatypes::DataFrame::from_cypher_rows(
+            vec!["id".into(), "title".into(), "city".into()],
+            vec![vec![
+                Value::Int64(1),
+                Value::String("p1".into()),
+                Value::String("Trondheim".into()),
+            ]],
+        )
+        .unwrap();
+        crate::graph::mutation::maintain::add_nodes(
+            &mut graph,
+            update,
+            "Person".to_string(),
+            "id".to_string(),
+            Some("title".to_string()),
+            Some("update".to_string()),
+        )
+        .unwrap();
+        let rows = graph
+            .type_indices
+            .get("Person")
+            .map_or(0, |nodes| nodes.iter().count());
+        assert_eq!(rows, 2, "an update must not add a row");
+        let reader = graph.property_reader("Person", "city");
+        let cities: Vec<Option<Value>> = graph
+            .type_indices
+            .get("Person")
+            .unwrap()
+            .iter()
+            .map(|idx| graph.read_indexed(&reader, idx))
+            .collect();
+        assert!(
+            cities.contains(&Some(Value::String("Trondheim".into()))),
+            "the updated columnar row must be readable: {cities:?}"
+        );
+    }
+
+    #[test]
+    fn drop_index_removes_the_persistent_index_under_capture() {
+        let dir = TempDir::new().unwrap();
+        let mut graph = disk_graph(&dir);
+        // Built *before* wrapping, so this test pins the drop side alone: the
+        // index it removes is unambiguously the persistent one.
+        assert!(
+            graph
+                .create_property_index_routed("Person", "city")
+                .unwrap()
+                .1
+        );
+        wrap(&mut graph);
+        assert!(graph.drop_index("Person", "city").unwrap());
+        assert!(
+            !graph.has_persistent_property_index("Person", "city"),
+            "DROP INDEX reported success, so the index must be gone"
+        );
+    }
+}
