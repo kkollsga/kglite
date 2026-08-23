@@ -12,23 +12,18 @@ use pyo3::IntoPyObjectExt;
 // PreProcessedValue — the core data type for ResultView rows
 // ========================================================================
 //
-// Phase A.1 / C7a — the standalone `json_value_to_py` helper that
-// recursively converted a `serde_json::Value` to a Python object is
-// deleted along with `ParsedJson`. The JSON-string inference hack
-// it served (C4 removal target) is gone, so no caller remains.
-// Native `Value::List` / `Value::Map` / `Value::Node` / ... flow
-// straight through `py_out::value_to_py` instead.
+// There is no `serde_json::Value` → Python conversion helper here, and
+// no JSON-string inference to serve it. Native `Value::List` /
+// `Value::Map` / `Value::Node` / ... flow straight through
+// `py_out::value_to_py`.
 
 /// Wraps a Value for the Python conversion boundary.
 ///
-/// Phase A.1 / C7a — collapsed to a single `Plain(Value)` variant
-/// after the C4 removal of the JSON-string inference hack made the
-/// `ParsedJson(serde_json::Value)` variant dead. Kept as a newtype-
-/// style enum (rather than an `pub struct(Value)` or just `Value`)
-/// because the existing public API surface in `result_view.rs` and
-/// `kg_core.rs` consumes `PreProcessedValue` by pattern match — a
-/// later cleanup can collapse this enum entirely once those sites
-/// migrate to bare `Value`.
+/// A single `Plain(Value)` variant. Kept as a newtype-style enum (rather
+/// than a `pub struct(Value)` or just `Value`) because the existing
+/// public API surface in `result_view.rs` and `kg_core.rs` consumes
+/// `PreProcessedValue` by pattern match — a later cleanup can collapse
+/// this enum entirely once those sites migrate to bare `Value`.
 #[derive(Clone)]
 pub enum PreProcessedValue {
     /// The only variant. Convert via py_out::value_to_py.
@@ -48,18 +43,13 @@ pub fn preprocessed_value_to_py(py: Python<'_>, pv: &PreProcessedValue) -> PyRes
 
 /// Wrap owned Value rows for the Python conversion boundary.
 ///
-/// Phase A.1 / C4 — the prior JSON-string inference hack here (detect
-/// `Value::String("[...]")` / `Value::String("{...}")` and re-parse via
-/// `serde_json::from_str` into `PreProcessedValue::ParsedJson`) is
-/// removed. Native `Value::List` / `Value::Map` / `Value::Node` /
-/// `Value::Relationship` / `Value::Path` now flow through
-/// `py_out::value_to_py` directly — no inference, no mis-parse risk
-/// (a user-set property value of `"[shopping list]"` no longer gets
-/// silently re-typed as a list).
-///
-/// `PreProcessedValue::ParsedJson` is preserved as a variant for now
-/// (other call sites reference it); slated for removal in the C7a
-/// slim-down pass once the dead path is fully audited.
+/// No JSON-string inference happens here: a `Value::String("[...]")` or
+/// `Value::String("{...}")` is never re-parsed via `serde_json::from_str`.
+/// Native `Value::List` / `Value::Map` / `Value::Node` /
+/// `Value::Relationship` / `Value::Path` flow through
+/// `py_out::value_to_py` directly — no mis-parse risk (a user-set
+/// property value of `"[shopping list]"` is not silently re-typed as a
+/// list).
 pub fn preprocess_values_owned(rows: Vec<Vec<Value>>) -> Vec<Vec<PreProcessedValue>> {
     rows.into_iter()
         .map(|row| row.into_iter().map(PreProcessedValue::Plain).collect())

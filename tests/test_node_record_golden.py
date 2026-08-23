@@ -2,7 +2,7 @@
 
 # Why this file exists (Part N safety net, phase N1)
 
-Part N (`dev-docs/plans/arc-values-rel-constraints-cdc2.md`, amended N2)
+Part N (the ``Arc``'d value-representation work, amended N2)
 replaces ``NodeValue``/``RelValue``'s ``properties: BTreeMap<String, Value>``
 with an ``Arc``'d sorted flat map with shared keys. That change rewrites both
 sides of the Python boundary: the Rust materialisation

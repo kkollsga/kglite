@@ -229,9 +229,8 @@ mod fork_aliasing_tests {
     /// A reader holding a snapshot therefore reports the **writer's** edge
     /// counts. No error, no panic, and nothing else in the suite looks at it.
     ///
-    /// This is pre-existing (it needs only a `Clone`), but D2 Phase 2 made forks
-    /// cheap and therefore frequent, which is what moved it from latent to live
-    /// and earned it a test.
+    /// This needs only a `Clone`, and forks are cheap and therefore frequent,
+    /// which is what moves it from latent to live and earns it a test.
     #[test]
     fn a_held_reader_reports_its_own_edge_type_counts_not_the_writers() {
         let mut writer = Arc::new(two_edge_graph());

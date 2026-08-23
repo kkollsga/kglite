@@ -1,8 +1,6 @@
 //! Per-process LRU cache for parsed CypherQuery ASTs.
 //!
-//! Phase A.3 / 0.9.53 — Issue #2 fix.
-//!
-//! Pre-cache, every `cypher()` call re-parsed the input string from scratch.
+//! Without it, every `cypher()` call re-parses the input string from scratch.
 //! The audit showed parse + plan accounts for ~80% of small-query cost
 //! (1.1µs out of 1.4µs for a typical `MATCH (n {id: X}) RETURN n.prop`).
 //! Bolt sessions with hot query loops (parameterized queries reissued many
@@ -12,7 +10,7 @@
 //! still re-runs per call because plan output depends on graph state
 //! (schema, cardinality estimates) which changes whenever the graph
 //! mutates. Caching post-optimization would need a schema-version key
-//! and cache-invalidation on every mutation — deferred to a future pass.
+//! and cache-invalidation on every mutation.
 //!
 //! Concurrency: the cache is a `RwLock<HashMap>`. Reads (cache hits) take
 //! a read lock; misses upgrade to a write lock for insertion. Eviction

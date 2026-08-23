@@ -233,8 +233,6 @@ pub(crate) fn run_save(graph: &mut ActiveGraph) -> Result<String, String> {
     //   - disk-backed → `save_disk(path)` (the folder IS the graph)
     //   - in-memory  → `prepare_kgl_write` (metadata + column
     //     consolidation) → `write_kgl`
-    // The pre-0.9.45 inline `save_disk` call errored "save_disk requires
-    // disk mode" for in-memory `.kgl` graphs — see CHANGELOG [0.9.45].
     //
     // Save through the active graph's OWN Arc (`dir_mut`), under the
     // caller's write lock. The previous `graph.kg.dir().clone()` bumped

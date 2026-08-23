@@ -2,14 +2,17 @@
 //!
 //! # Why this file exists (Part N safety net, phase N1)
 //!
+//! Part N is the `Arc`'d value-representation work; N1 lands these goldens
+//! *before* any representation change, N2 makes the change.
+//!
 //! `NodeValue`, `RelValue` and `PathValue` all derive `PartialOrd`/`Ord`. A
 //! derived `Ord` is **field-declaration order**, so the sort key of every
 //! `ORDER BY n` in the engine is a silent consequence of how the struct
-//! happens to be written down. Part N (`dev-docs/plans/arc-values-rel-constraints-cdc2.md`)
-//! replaces `properties: BTreeMap<String, Value>` with an `Arc`'d sorted flat
-//! map. That change touches the `properties` field's *type* and its position
-//! in the struct — either of which can reorder results without a single test
-//! noticing, because nothing else in the suite pins the comparison order.
+//! happens to be written down. Representing `properties` as an `Arc`'d sorted
+//! flat map rather than a `BTreeMap<String, Value>` touches that field's
+//! *type* and its position in the struct — either of which can reorder results
+//! without a single test noticing, because nothing else in the suite pins the
+//! comparison order.
 //!
 //! These tests are **snapshot-style**: the expected ordering is written down
 //! as a checked-in literal, never re-derived from the same `Ord` under test.

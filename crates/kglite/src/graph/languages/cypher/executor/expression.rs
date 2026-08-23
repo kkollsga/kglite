@@ -15,10 +15,9 @@ impl<'a> CypherExecutor<'a> {
     /// List comprehension over nodes(p): bind each path node as a node_binding
     /// so that property access (n.name, n.type, etc.) resolves correctly.
     ///
-    /// Phase A.1 / C4 — emits native Value::List. When no map expression
-    /// is provided, each item is a Value::Node (matching what
-    /// `RETURN n` produces); with a map expression, each item is the
-    /// projected Value directly.
+    /// Emits a native Value::List. When no map expression is provided,
+    /// each item is a Value::Node (matching what `RETURN n` produces);
+    /// with a map expression, each item is the projected Value directly.
     pub(super) fn list_comp_nodes(
         &self,
         variable: &str,
@@ -63,7 +62,7 @@ impl<'a> CypherExecutor<'a> {
 
     /// List comprehension over relationships(p): bind each relationship as a projected value.
     ///
-    /// Phase A.1 / C4 — emits native Value::List of Value::Relationship.
+    /// Emits a native Value::List of Value::Relationship.
     /// Uses the exact edge recorded by the matcher for every hop.
     pub(super) fn list_comp_relationships(
         &self,
@@ -553,9 +552,9 @@ impl<'a> CypherExecutor<'a> {
                 }
                 return Ok(Value::Null);
             }
-            // Phase A.1 / C2 — Value::Node in projected (the post-A.1
-            // shape that `RETURN n` / Variable resolution emits). Look
-            // up the property directly off the materialised node value.
+            // Value::Node in projected — the shape that `RETURN n` /
+            // Variable resolution emits. Look up the property directly
+            // off the materialised node value.
             // For node-aliased properties (id/title vs user-set names),
             // try the canonical names first since materialize_node_value
             // populated them under the virtual keys.

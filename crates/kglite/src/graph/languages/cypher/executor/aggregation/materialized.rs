@@ -802,10 +802,9 @@ impl<'a> CypherExecutor<'a> {
     /// The `evaluate_aggregate_with_rows` catch-all. A wrapper whose subtree
     /// holds an aggregate — `{c: count(*)}`, `[collect(x)]`, `-count(*)`,
     /// `CASE … THEN count(*)`, `count(*) > 2` — routes to the
-    /// nested-aggregate rewrite (pre-fix these fell through to per-row
-    /// evaluation and died in the scalar dispatcher with "Aggregate function
-    /// … cannot be used outside of RETURN/WITH", the same class as the
-    /// pre-0.9.6 ListSlice bug documented at planner/fusion/aggregate.rs).
+    /// nested-aggregate rewrite (without it these fall through to per-row
+    /// evaluation and die in the scalar dispatcher with "Aggregate function
+    /// … cannot be used outside of RETURN/WITH").
     /// A plain non-aggregate expression evaluates against the first row.
     fn evaluate_aggregation_fallback(
         &self,
@@ -1356,10 +1355,9 @@ impl<'a> CypherExecutor<'a> {
         rows: &[&ResultRow],
         distinct: bool,
     ) -> Result<Value, String> {
-        // Phase A.1 / C2 — native `Value::List`. Pre-A.1
-        // this emitted a JSON-formatted string; the
-        // `parse_list_value()` helper now handles both
-        // shapes during the cutover, but new producers
+        // Emits a native `Value::List`. The
+        // `parse_list_value()` helper still accepts the
+        // legacy JSON-string shape, but new producers
         // should emit native lists.
         let mut values: Vec<Value> = Vec::new();
         let mut seen: FxHashSet<Value> = FxHashSet::default();

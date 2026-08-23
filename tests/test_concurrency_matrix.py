@@ -1,4 +1,4 @@
-"""Concurrency / durability / serialization matrix (Phase E).
+"""Concurrency / durability / serialization matrix.
 
 The operator asked us to test the 0.11.0 surface hard before release, since a lot
 landed at once and they can't verify from outside. This covers the gaps not

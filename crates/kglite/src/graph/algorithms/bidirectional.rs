@@ -15,14 +15,14 @@ use rustc_hash::FxHashMap;
 /// reconstruction walk.
 ///
 /// A `HashMap` rather than two `node_bound`-sized `Vec`s, deliberately: the
-/// 0.9.53 fix measured that the flat arrays cost 500 KB + 2 MB of allocate +
-/// zero per call on a 500 K-node graph *regardless of how far the search
-/// actually walked*, and that this alone dominated a shallow lookup (37 µs →
-/// 4 µs when it went away). The Cypher `shortestPath()` executor runs one of
-/// these per row, so the per-call floor is the number that matters, not the
-/// per-node constant. The same reasoning is why [`bidirectional_bfs`] does not
-/// borrow S3's [`BfsScratch`], whose generation stamps pay for themselves only
-/// across many searches over one fixed vertex space.
+/// flat arrays cost 500 KB + 2 MB of allocate + zero per call on a 500 K-node
+/// graph *regardless of how far the search actually walked*, and that alone
+/// dominates a shallow lookup (measured 37 µs → 4 µs when it went away). The
+/// Cypher `shortestPath()` executor runs one of these per row, so the
+/// per-call floor is the number that matters, not the per-node constant. The
+/// same reasoning is why [`bidirectional_bfs`] does not borrow S3's
+/// [`BfsScratch`], whose generation stamps pay for themselves only across many
+/// searches over one fixed vertex space.
 type BfsTree = FxHashMap<u32, (u32, u32)>;
 
 /// The four references one round of [`bidirectional_bfs`] works on: the

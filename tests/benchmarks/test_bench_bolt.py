@@ -134,10 +134,9 @@ def test_bench_bolt_pull_10k_scalars(benchmark, _bench_driver):
 
 
 def test_bench_bolt_pull_10k_nodes(benchmark, _bench_driver):
-    """Cost of streaming 10k Node structs (Phase A.1 Value::Node →
-    Phase C.4 BoltNode encoding). Compare against
-    `test_bench_return_node_10k` for the wire tax on the full Node
-    projection path."""
+    """Cost of streaming 10k Node structs (Value::Node → BoltNode
+    encoding). Compare against `test_bench_return_node_10k` for the
+    wire tax on the full Node projection path."""
     session = _bench_driver.session()
     try:
 

@@ -47,11 +47,11 @@ use std::sync::Arc;
 ///
 /// The snapshot/working/CoW/OCC state machine is delegated to the engine's
 /// [`CoreTransaction`] (`kglite_core::graph::session::Transaction`) — the same
-/// type the bolt-server drives — so deferred forking
-/// materialisation, and version tracking live in one place (Phase E). This
-/// wrapper adds only the binding-specific concerns: the owning
-/// `KnowledgeGraph` (so `commit()` swaps *its* `Arc`), the optional
-/// transaction-level deadline, and the Python result marshalling.
+/// type the bolt-server drives — so deferred forking, materialisation,
+/// and version tracking live in one place. This wrapper adds only the
+/// binding-specific concerns: the owning `KnowledgeGraph` (so `commit()`
+/// swaps *its* `Arc`), the optional transaction-level deadline, and the
+/// Python result marshalling.
 ///   - **Deferred** (initial): `CoreTransaction::current()` reads the Arc
 ///     snapshot; no clone cost.
 ///   - **Materialized** (after first mutation): `CoreTransaction::working_mut()`
@@ -125,7 +125,7 @@ impl Transaction {
         // Check transaction-level deadline first
         if let Some(tx_deadline) = self.deadline {
             if std::time::Instant::now() >= tx_deadline {
-                // Phase A.3 / 0.9.53 — typed exception (was PyTimeoutError).
+                // Typed exception, not the built-in PyTimeoutError.
                 return Err(crate::error_py::kg_to_pyerr(
                     crate::error::KgError::CypherTimeout {
                         elapsed_ms: 0,
@@ -170,11 +170,11 @@ impl Transaction {
             None => HashMap::new(),
         };
 
-        // Phase E (completed) — both the execution pipeline and the
-        // snapshot/working state machine now live in core: the engine
-        // `CoreTransaction` holds the snapshot/working copy and
-        // `session::execute_*` runs parse+validate+optimize+execute. This
-        // wrapper only routes and marshals.
+        // Both the execution pipeline and the snapshot/working state
+        // machine live in core: the engine `CoreTransaction` holds the
+        // snapshot/working copy and `session::execute_*` runs
+        // parse+validate+optimize+execute. This wrapper only routes and
+        // marshals.
         //
         // Decision routing:
         //   - is_mutation + read_only → reject (begin()-appropriate message)

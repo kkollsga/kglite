@@ -16,7 +16,7 @@ impl<'a> CypherExecutor<'a> {
     ) -> Result<Option<Value>, String> {
         let result: Result<Value, String> = match name {
             "size" => {
-                // Phase A.1 / C2 — native Value::List fast path;
+                // Native Value::List fast path;
                 // string fallback stays for legacy collect-as-JSON
                 // and parameter-passed lists. Plain strings count
                 // characters — see `string_scalar_length`.
@@ -37,7 +37,7 @@ impl<'a> CypherExecutor<'a> {
                 }
                 let val = self.evaluate_expression(super::first_arg(name, args)?, row)?;
                 match val {
-                    // Phase A.1 / C2 — native Value::List/Path/Map paths.
+                    // Native Value::List/Path/Map paths.
                     Value::List(items) => Ok(Value::Int64(items.len() as i64)),
                     Value::Map(m) => Ok(Value::Int64(m.len() as i64)),
                     Value::Path(p) => Ok(Value::Int64(p.rels.len() as i64)),
@@ -154,7 +154,7 @@ impl<'a> CypherExecutor<'a> {
                 self.budget.consume_collection(len, "range()")?;
                 self.check_deadline()?;
 
-                // Phase A.1 / C4 — native Value::List of Value::Int64.
+                // Native Value::List of Value::Int64.
                 // `try_reserve_exact` turns impossible theoretical ranges into
                 // a query error instead of an aborting allocator request.
                 let mut vals: Vec<Value> = Vec::new();

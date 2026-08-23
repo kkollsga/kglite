@@ -1,13 +1,13 @@
 //! `BoltBackend` implementation for kglite.
 //!
-//! Phase C.1 through C.6 ✅ shipped: handshake / session lifecycle /
-//! scalar RUN+PULL / parameter decoding / Node-Rel-Path RETURN /
-//! explicit transactions (BEGIN/COMMIT/ROLLBACK) + `--readonly`
-//! enforcement / typed `KgError` → `Neo.{Class}.{Category}.{Title}`
-//! FAILURE-code mapping (via `crate::error_map`) / `--auth basic`
-//! credential validator (wired in `main.rs`) / `db.*` schema-
-//! introspection procedure pass-through (works via the standard
-//! Cypher CALL pipeline — Phase A.3 added the procs to kglite core).
+//! Covers handshake, session lifecycle, scalar and Node/Rel/Path
+//! RUN+PULL, parameter decoding, explicit transactions
+//! (BEGIN/COMMIT/ROLLBACK) with `--readonly` enforcement, typed
+//! `KgError` → `Neo.{Class}.{Category}.{Title}` FAILURE-code mapping
+//! (via `crate::error_map`), the `--auth basic` credential validator
+//! (wired in `main.rs`), server metadata, routing, and `db.*` schema-
+//! introspection procedures served through the standard Cypher CALL
+//! pipeline.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -133,7 +133,7 @@ use intercepts::{
 /// One instance is constructed at server boot and shared across all
 /// connections via `Arc` inside `BoltServer::serve`.
 ///
-/// **State model** (Phase C.5 + robustness pass RA-1):
+/// **State model**:
 /// - `session` holds the canonical shared `Arc<DirGraph>`. Auto-commit
 ///   reads take an immutable snapshot; commits atomically replace the
 ///   current Arc.
@@ -162,9 +162,9 @@ use intercepts::{
 /// server is genuinely write-rejecting; there's no read-only-tx
 /// surface today.
 pub struct KgliteBackend {
-    /// Canonical shared graph + transaction-commit machinery,
-    /// extracted to `kglite::api::session` in Phase E. Sessions
-    /// snapshot via `session.snapshot()`; commits go through
+    /// Canonical shared graph + transaction-commit machinery, owned
+    /// by `kglite::api::session`. Sessions snapshot via
+    /// `session.snapshot()`; commits go through
     /// `session.commit(tx, check_occ)` which handles the OCC
     /// version bump + Arc swap atomically.
     session: Arc<kglite::api::session::Session>,
@@ -204,9 +204,9 @@ pub struct KgliteBackend {
     tx_counter: AtomicU64,
     /// "host:port" string returned in `route()`'s `RoutingTable`
     /// so cluster-aware drivers (`neo4j://` URIs) know where to
-    /// reconnect. Phase F #5. Typically matches the bind address
-    /// but can differ when running behind a reverse proxy
-    /// (`--advertise-addr` flag on `main.rs`).
+    /// reconnect. Typically matches the bind address but can differ
+    /// when running behind a reverse proxy (`--advertise-addr` flag
+    /// on `main.rs`).
     advertised_addr: String,
     /// LOAD CSV filesystem capability for every query on this server.
     ///
@@ -417,7 +417,7 @@ impl KgliteBackend {
 
 #[async_trait]
 impl BoltBackend for KgliteBackend {
-    // ---- Session lifecycle (Phase C.1 ✓) ---------------------------------
+    // ---- Session lifecycle -----------------------------------------------
 
     async fn create_session(&self, config: &SessionConfig) -> Result<SessionHandle, BoltError> {
         let id = self.session_counter.fetch_add(1, Ordering::Relaxed);
@@ -543,10 +543,9 @@ impl BoltBackend for KgliteBackend {
         extra: &BoltDict,
         transaction: Option<&TransactionHandle>,
     ) -> Result<ResultStream, BoltError> {
-        // Input gates (Phase robustness RB-2). These produce clear
-        // Protocol/ClientError responses so users see actionable
-        // errors instead of opaque parser failures or silent partial
-        // execution.
+        // Input gates. These produce clear Protocol/ClientError
+        // responses so users see actionable errors instead of opaque
+        // parser failures or silent partial execution.
 
         // Empty or whitespace-only query.
         let trimmed = query.trim();
@@ -694,7 +693,7 @@ impl BoltBackend for KgliteBackend {
         })
     }
 
-    // ---- Transactions (Phase C.5 ✓) --------------------------------------
+    // ---- Transactions ----------------------------------------------------
 
     async fn begin_transaction(
         &self,
@@ -784,11 +783,11 @@ impl BoltBackend for KgliteBackend {
         }
 
         // Delegate to session::Session::commit which handles OCC +
-        // Arc swap atomically. Phase E.4 wires OCC (was deferred in
-        // C.5); a concurrent writer that lost the race gets
-        // ConflictDetected -> BoltError::Query carrying the retriable
-        // `Neo.TransientError.*` status code, so driver-managed
-        // transactions re-run the unit of work by themselves.
+        // Arc swap atomically. A concurrent writer that lost the race
+        // gets ConflictDetected -> BoltError::Query carrying the
+        // retriable `Neo.TransientError.*` status code, so
+        // driver-managed transactions re-run the unit of work by
+        // themselves.
         let Some(tx) = state.inner.take() else {
             // Defensive fallthrough — was already consumed.
             return Ok(BoltDict::new());
@@ -950,7 +949,7 @@ impl BoltBackend for KgliteBackend {
         Ok(())
     }
 
-    // ---- Server metadata (Phase C.1 ✓) -----------------------------------
+    // ---- Server metadata -------------------------------------------------
 
     async fn get_server_info(&self) -> Result<BoltDict, BoltError> {
         let version = env!("CARGO_PKG_VERSION");
@@ -975,7 +974,7 @@ impl BoltBackend for KgliteBackend {
         Ok(info)
     }
 
-    // ---- Routing (Phase F #5: single-server self-pointing table) ----------
+    // ---- Routing (single-server self-pointing table) ----------------------
     //
     // Cluster-aware drivers (`neo4j://` URIs, the default scheme
     // in Neo4j 5.x drivers) send a ROUTE message at connect time
@@ -1019,8 +1018,8 @@ impl BoltBackend for KgliteBackend {
 
 /// Heuristic: does this query string contain a statement separator
 /// outside of any string literal? Used by the multi-statement gate
-/// in `execute()` (RB-2). Returns true on `MATCH (a) RETURN a; MATCH
-/// (b) RETURN b`. Does NOT false-positive on `RETURN 'a;b' AS s`.
+/// in `execute()`. Returns true on `MATCH (a) RETURN a; MATCH (b)
+/// RETURN b`. Does NOT false-positive on `RETURN 'a;b' AS s`.
 ///
 /// The scan tracks the active quote (Cypher allows both `'` and `"`)
 /// and treats backslash as an escape. It does not handle block

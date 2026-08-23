@@ -738,7 +738,7 @@ impl CypherParser {
         // Parse procedure name (may be namespaced: `db.labels`, `apoc.coll.sum`).
         // The tokenizer splits these into Identifier/Dot/Identifier sequences;
         // we re-join them into a single flat `String` so the executor dispatch
-        // can match on the qualified name. Phase A.3 (Bolt-compat: `db.*`).
+        // can match on the qualified name (Bolt compat: `db.*`).
         let mut procedure_name = match self.peek().cloned() {
             Some(CypherToken::Identifier(name)) => {
                 self.advance();

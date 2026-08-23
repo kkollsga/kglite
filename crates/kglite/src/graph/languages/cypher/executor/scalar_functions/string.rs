@@ -111,7 +111,7 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
             "text_ngrams" => {
-                // Phase A.1 / C4 — native Value::List of Value::String.
+                // Native Value::List of Value::String.
                 if args.len() != 2 {
                     return Err("text_ngrams() requires 2 arguments: (string, n)".into());
                 }
@@ -148,9 +148,9 @@ impl<'a> CypherExecutor<'a> {
                     Value::String(s) => s.clone(),
                     _ => return Ok(Some(Value::Null)),
                 };
-                // Phase A.1 / C4 — accept native Value::List, legacy
-                // JSON-string list, single-string second arg, or
-                // variadic remaining args.
+                // Accepts a native Value::List, a legacy JSON-string
+                // list, a single-string second arg, or variadic
+                // remaining args.
                 if args.len() == 2 {
                     let list_val = self.evaluate_expression(&args[1], row)?;
                     if let Value::List(needles) = &list_val {
@@ -201,8 +201,7 @@ impl<'a> CypherExecutor<'a> {
                     Value::String(s) => s.clone(),
                     _ => return Ok(Some(Value::Null)),
                 };
-                // Phase A.1 / C4 — same native-list handling as
-                // text_contains_any.
+                // Same native-list handling as text_contains_any.
                 if args.len() == 2 {
                     let list_val = self.evaluate_expression(&args[1], row)?;
                     if let Value::List(prefixes) = &list_val {

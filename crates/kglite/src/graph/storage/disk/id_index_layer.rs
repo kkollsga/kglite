@@ -5,9 +5,8 @@
 //!
 //! `id_indices` is a `HashMap` with one entry per node of every materialised
 //! type, so `DirGraph::clone` deep-copies it on every fork. Measured 2026-08-10
-//! at 1M nodes: **3.7 ms**, which after D2 Phase 2 removed the backend row is
-//! **90% of everything left** in a plain graph's fork. This type is what makes
-//! that O(changes).
+//! at 1M nodes: **3.7 ms**, which is **90% of everything left** in a plain
+//! graph's fork. This type is what makes that O(changes).
 //!
 //! ## The split has to happen inside `Clone`
 //!
@@ -64,8 +63,7 @@ fn tombstone() -> NodeIndex {
 /// One node type's id index.
 #[derive(Debug, Clone)]
 pub enum TypeEntry {
-    /// Uniquely owned by this graph — the steady state, and byte-for-byte what
-    /// this field held before D2 Phase 3.
+    /// Uniquely owned by this graph — the steady state.
     Owned(TypeIdIndex),
     /// A base shared with at least one other graph, plus this graph's delta.
     /// Reads chain delta → base; writes only ever touch `delta`.

@@ -64,9 +64,8 @@
 //! spelling. The registry is never the source of truth — the constraint lives in
 //! the enforcement structure, and `prune_constraint_names` drops any name whose
 //! declaration has gone — so a lost name can degrade addressability but never
-//! enforcement. Bringing index names into line is a possible follow-up now that
-//! the format cost is known; it would change `SHOW INDEXES` output, so it is not
-//! folded in here.
+//! enforcement. Index names stay derived rather than stored: bringing them
+//! into line would change `SHOW INDEXES` output.
 
 use super::super::ast::*;
 use super::super::result::{MutationStats, ResultRow, ResultSet};
@@ -1835,9 +1834,9 @@ mod tests {
             // type can express.
             assert!(err.contains("validate_schema"), "for `{query}`: {err}");
             // The suggestion must name the key the schema parser actually
-            // accepts. Until 0.16.1 it said `field_types` — the Rust field's
-            // name, which the dialect ignores — so following the advice
-            // declared nothing and validate_schema() then found no violations.
+            // accepts. `field_types` is the Rust field's name and the dialect
+            // ignores it, so advice naming that key would declare nothing and
+            // validate_schema() would then find no violations.
             assert!(
                 err.contains("'types': {'age':"),
                 "the suggested key must be the dialect's, for `{query}`: {err}"

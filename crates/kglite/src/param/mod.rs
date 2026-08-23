@@ -70,9 +70,8 @@ pub fn json_value_to_kglite_value(v: &serde_json::Value) -> Value {
         // recursing element-wise. This matches the PyO3 (`py_value_to_value`)
         // and Bolt parameter paths so every binding agrees: `UNWIND $rows AS r
         // CREATE (:T {id: r.id})` sees real list/map params, not a stringified
-        // blob. (The engine-side fix shipped in 0.11.2 for the Python wheel;
-        // this is the matching fix in the shared JSON converter that the C ABI,
-        // MCP server, and future REST/gRPC bindings all route through.)
+        // blob. This shared JSON converter is the path the C ABI, MCP server,
+        // and future REST/gRPC bindings all route through.
         serde_json::Value::Array(items) => {
             Value::List(items.iter().map(json_value_to_kglite_value).collect())
         }
@@ -108,11 +107,10 @@ pub fn json_value_to_kglite_value(v: &serde_json::Value) -> Value {
 ///   `{"months", "days", "seconds"}`
 ///
 /// **The match is deliberately exhaustive — there is no catch-all arm.**
-/// Until 0.16.1 the fall-through rendered every unlisted variant as its
-/// Rust `Debug` string, so `RETURN n` reached C-ABI, CLI `--mode json`,
-/// MCP recipe and okf consumers as `"Node(NodeValue { id: 7, ... })"`.
-/// A new `Value` variant must now choose its JSON shape at compile time
-/// rather than silently inherit that leak.
+/// A fall-through would render every unlisted variant as its Rust `Debug`
+/// string, leaking `"Node(NodeValue { id: 7, ... })"` to C-ABI, CLI
+/// `--mode json`, MCP recipe and okf consumers. A new `Value` variant must
+/// choose its JSON shape at compile time instead.
 pub fn kglite_value_to_json(v: &Value) -> serde_json::Value {
     use serde_json::Value as J;
     match v {

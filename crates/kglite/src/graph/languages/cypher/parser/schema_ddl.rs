@@ -408,9 +408,8 @@ impl CypherParser {
 
     /// `CREATE CONSTRAINT` body, after the `CONSTRAINT` word is consumed.
     ///
-    /// Parsed structurally even though Sprint 4a's executor rejects every
-    /// constraint: the shape here is exactly what enforcement needs, so 4b
-    /// swaps the executor arm without touching the parser.
+    /// Parsed structurally into the shape the executor's enforcement path
+    /// needs — including the constraint forms the executor refuses by name.
     fn parse_create_constraint_body(&mut self) -> Result<CreateConstraint, String> {
         let name = self.take_optional_ddl_name()?;
         let if_not_exists = self.parse_if_not_exists()?;

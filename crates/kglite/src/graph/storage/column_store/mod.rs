@@ -380,10 +380,9 @@ impl ColumnStore {
         }
         // Lazy promotion: if this store is mmap-backed, the local
         // `title_column` is None and `set_title` would silently drop the
-        // write (pre-0.9.4 Bug C). Materialize a Mixed column from the
-        // mmap-backed titles so subsequent reads via `get_title` see
-        // both the override at `row_id` and the original titles for the
-        // rest. The new column is dense (one entry per row); titles for
+        // write. Materialize a Mixed column from the mmap-backed titles
+        // so subsequent reads via `get_title` see both the override at
+        // `row_id` and the original titles for the rest. The new column is dense (one entry per row); titles for
         // unmodified rows are read out of mmap once and rewritten as
         // owned Values, paying a one-time RAM cost on first SET-title.
         if self.title_column.is_none() {

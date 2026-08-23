@@ -1,4 +1,4 @@
-//! D2 Phase 2 — rollback while a reader holds the base
+//! Rollback while a reader holds the base
 
 use super::unique_claims::{seeded_with_unique_name, unique_fingerprint};
 use super::*;

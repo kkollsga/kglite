@@ -19,11 +19,10 @@
 //!
 //! # Keys are owned, and that is a measured decision
 //!
-//! [`PropKey`] is an owned `String`. The N0 spike
-//! (`dev-docs/bench/results/2026-08-19-nodevalue-spike.md`) predicted that
-//! **sharing** keys — handing every row the interner's own `Arc<str>` — would
-//! combine with this container for a +7.2–9.0% win on `return_node_10k`.
-//! Built faithfully and measured, it does the opposite:
+//! [`PropKey`] is an owned `String`. A design spike predicted that **sharing**
+//! keys — handing every row the interner's own `Arc<str>` — would combine with
+//! this container for a +7.2–9.0% win on `return_node_10k`. Built faithfully
+//! and measured, it does the opposite:
 //!
 //! | key type | `return_node_10k` | `collect_n_10k` | `properties_n_10k` |
 //! |---|---|---|---|

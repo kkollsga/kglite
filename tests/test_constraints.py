@@ -412,12 +412,12 @@ def test_primary_key_on_id_keeps_its_dedicated_message(mode, tmp_path):
 
 
 # ===========================================================================
-# Rollback interaction  (Sprint 1 shared integration point)
+# Rollback interaction
 #
 # These assert the OBSERVABLE property — a statement that violates a constraint
 # part-way through leaves the graph exactly as it was — not the mechanism. They
-# pass against today's clone-based checkpoint and must keep passing once Sprint
-# 1 replaces it with inverse-op replay. Re-run these after Sprint 1 merges.
+# pass against the clone-based checkpoint and must keep passing against any
+# replacement rollback mechanism.
 # ===========================================================================
 
 

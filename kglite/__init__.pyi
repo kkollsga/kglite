@@ -18,7 +18,7 @@ import pandas as pd
 
 __version__: str
 
-# ─── Typed exception hierarchy (Phase A.2 / C1) ──────────────────────────────
+# ─── Typed exception hierarchy ───────────────────────────────────────────────
 #
 # Typed engine, query, schema, storage, and transaction failures subclass
 # `KgError`. Conventional Python protocol failures retain their built-in

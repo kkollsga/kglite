@@ -585,7 +585,7 @@ class TestParallelEdges:
 
 
 # ============================================================================
-# Phase A.3 — db.* schema-introspection procedures.
+# db.* schema-introspection procedures.
 # ============================================================================
 
 
@@ -843,8 +843,8 @@ class TestDbIndexes:
         assert names == sorted(names)
 
     def test_schema_method_still_reports_same_indexes(self, indexed_graph):
-        """Phase A.3 refactored compute_schema() to share collect_indexes_structured —
-        ensure the existing schema()['indexes'] output shape is preserved."""
+        """compute_schema() shares collect_indexes_structured — ensure the
+        existing schema()['indexes'] output shape is preserved."""
         schema_indexes = indexed_graph.schema()["indexes"]
         # The schema() API formats names with " [range]" suffix and comma+space
         # in composite property lists; verify both shapes survive the refactor.

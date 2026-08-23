@@ -1,9 +1,8 @@
 """Build four Cat G-N fixture graphs for kglite's pre-release test suite.
 
 Originally authored by the MCP-servers project (delivered via inbox in
-2026-05); promoted to the kglite repo at the end of Phase A.3 / 0.9.53
-when Phase A.1's hard v3→v4 format break invalidated the committed
-v3-format fixtures.
+2026-05); promoted to the kglite repo in 0.9.53, when the hard v3→v4
+format break invalidated the committed v3-format fixtures.
 
 Deterministic — `random.seed(42)` for the timeseries values. Re-running this
 script under the same kglite version produces byte-identical fixtures.

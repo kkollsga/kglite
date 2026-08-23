@@ -1,9 +1,8 @@
-"""Before/after oracles for the perf hot-path program (`dev-docs/plans/
-perf-hotpath-program.md`, Phase P1).
+"""Before/after oracles for the perf hot-path program.
 
 **These are program-lifecycle cells, not gate cells.** They exist to pin the
-ten findings of `dev-docs/plans/perf-hotpath-scan-2026-08-14.md` at branch HEAD
-so each later phase can show what it moved, and they assert nothing about time.
+program's ten hot-path findings at branch HEAD so each later phase can show
+what it moved, and they assert nothing about time.
 The release that ships the program may retire them (a defect that is gone needs
 no standing cell) or promote the survivors into `test_bench_core.py` with a
 baseline recapture. Neither is decided here.

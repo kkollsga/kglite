@@ -139,10 +139,10 @@ macro_rules! impl_heap_graph_read {
 
             // These four resolve through `NodeView` rather than reading
             // `NodeData` directly, so the heap backends have exactly **one**
-            // store-resolution point (`NodeView::from_node_data`) — the thing
-            // D1 Phase 3 re-points, and the thing Phase 2's poison hook
-            // intercepts. `NodeView` is `Copy` and its constructor is one match
-            // on the storage variant, so this is the same work as before.
+            // store-resolution point (`NodeView::from_node_data`) — the point
+            // the poison hook intercepts. `NodeView` is `Copy` and its
+            // constructor is one match on the storage variant, so this is the
+            // same work as before.
             #[inline]
             fn get_node_property(&self, idx: NodeIndex, key: InternedKey) -> Option<Value> {
                 self.node_view(idx).and_then(|v| v.get_value(key))

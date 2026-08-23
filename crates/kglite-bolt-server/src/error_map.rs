@@ -1,12 +1,11 @@
 //! Map kglite's typed [`KgError`] / [`KgErrorCode`] onto Bolt FAILURE
 //! status codes (`Neo.{Class}.{Category}.{Title}` strings).
 //!
-//! Phase A.2 added the typed error hierarchy on the Python boundary
+//! The same typed hierarchy backs the Python boundary
 //! (`kglite.CypherSyntaxError`, `kglite.CypherTimeoutError`, etc.);
-//! Phase C.6 (this module) wires the same hierarchy to the Bolt wire
-//! so the neo4j Python driver raises the matching driver-side
-//! exception class (`CypherSyntaxError` instead of generic
-//! `ClientError`).
+//! this module wires it to the Bolt wire so the neo4j Python driver
+//! raises the matching driver-side exception class
+//! (`CypherSyntaxError` instead of generic `ClientError`).
 //!
 //! ## Mapping table
 //!

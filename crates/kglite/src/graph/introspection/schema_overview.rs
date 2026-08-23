@@ -384,7 +384,7 @@ pub(super) fn compute_join_candidates(
 
 /// All node-type names (Neo4j "labels"), sorted alphabetically.
 ///
-/// Phase A.3 — single source of truth for `db.labels()` and any other
+/// The single source of truth for `db.labels()` and any other
 /// caller that needs a deterministic enumeration of node types. Pulls
 /// from both `type_indices` (types with live nodes) and
 /// `node_type_metadata` (types declared via schema validation but no
@@ -428,14 +428,14 @@ impl IndexKind {
 /// Field shape mirrors Neo4j's `db.indexes()` minimal subset:
 /// `name, type, entityType, labelsOrTypes, properties, state`. Degenerate
 /// columns (`uniqueness`, `populationPercent`, `indexProvider`) are
-/// deferred until a Bolt client demands them — see Phase A.3 plan.
+/// omitted until a Bolt client demands them.
 #[derive(Debug, Clone)]
 pub(crate) struct IndexInfo {
     /// Stable string ID — `"<node_type>.<property>"` for equality/range,
     /// `"<node_type>.(<p1>,<p2>,...)"` for composite.
     pub name: String,
     pub kind: IndexKind,
-    /// Always `"NODE"` today; relationship indexes not yet supported.
+    /// Always `"NODE"` — KGLite indexes node properties only.
     pub entity_type: &'static str,
     /// Node types this index covers — always a single-element vec today.
     pub labels_or_types: Vec<String>,
@@ -447,7 +447,7 @@ pub(crate) struct IndexInfo {
 
 /// All indexes installed on the graph, in deterministic order.
 ///
-/// Phase A.3 — single source of truth for `db.indexes()` and the
+/// The single source of truth for `db.indexes()` and the
 /// `compute_schema()` formatted string list. Walks all three index
 /// stores (`property_indices`, `composite_indices`, `range_indices`)
 /// and produces structured rows. Sorted by `name` so the output is
@@ -668,7 +668,7 @@ fn constraint_name(
 
 /// All connection-type names (Neo4j "relationship types"), sorted alphabetically.
 ///
-/// Phase A.3 — single source of truth for `db.relationshipTypes()`. Unions
+/// The single source of truth for `db.relationshipTypes()`. Unions
 /// two sources to match Neo4j semantics ("types that currently exist in
 /// the graph"):
 ///   1. `connection_type_metadata` — types declared via `add_connections`
@@ -781,8 +781,8 @@ pub(super) fn value_type_name(v: &Value) -> &'static str {
         Value::Duration { .. } => "duration",
         Value::Null => "unknown",
         Value::NodeRef(_) => "noderef",
-        // Phase A.1 — these typically appear in query results, not as
-        // stored properties, but classify defensively for introspection.
+        // These typically appear in query results, not as stored
+        // properties, but classify defensively for introspection.
         Value::List(_) => "list",
         Value::Map(_) => "map",
         Value::Node(_) => "node",
@@ -826,7 +826,7 @@ pub(super) fn value_display_compact(v: &Value, truncate_at: Option<usize>) -> St
         } => format!("dur(M={},D={},S={})", months, days, seconds),
         Value::NodeRef(idx) => format!("node#{}", idx),
         Value::Null => String::new(),
-        // Phase A.1 — collection / graph-entity variants delegate to
+        // Collection / graph-entity variants delegate to
         // format_value; truncation applies only to the String variant.
         Value::List(_)
         | Value::Map(_)

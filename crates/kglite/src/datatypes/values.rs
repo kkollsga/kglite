@@ -58,11 +58,11 @@ pub enum Value {
     /// — far past anything the user can reasonably need.
     ///
     /// **Layout note**: Duration was the LAST variant in `.kgl` v3.
-    /// Phase A.1 (0.10.0) appends Node/Relationship/Path/List/Map
-    /// after it and bumps the `.kgl` format to v4 — a hard break;
-    /// v3 files do not load with v4 binaries. Discriminants 0..=8
-    /// (Null .. NodeRef .. Duration) stay stable; 9..=13 are the
-    /// new collection / graph-entity variants.
+    /// Node/Relationship/Path/List/Map append after it and bump the
+    /// `.kgl` format to v4 — a hard break; v3 files do not load with
+    /// v4 binaries. Discriminants 0..=8 (Null .. NodeRef .. Duration)
+    /// stay stable; 9..=13 are the new collection / graph-entity
+    /// variants.
     Duration {
         months: i32,
         days: i32,
@@ -264,8 +264,8 @@ impl Ord for Value {
                 Value::Duration { .. } => 7,
                 Value::Point { .. } => 8,
                 Value::NodeRef(_) => 9,
-                // Phase A.1 — collection / graph-entity variants sort
-                // after the scalars. Mirrors openCypher's general
+                // Collection / graph-entity variants sort after the
+                // scalars. Mirrors openCypher's general
                 // "scalars < lists < maps < entities" ordering loosely;
                 // exact ordering within is by id / structural compare.
                 Value::List(_) => 10,
@@ -324,9 +324,9 @@ impl Ord for Value {
                     seconds: bs,
                 },
             ) => am.cmp(bm).then(ad.cmp(bd)).then(as_.cmp(bs)),
-            // Phase A.1 same-variant arms — defer to the derived Ord
-            // on the contained payload types (NodeValue, RelValue,
-            // PathValue all `#[derive(Ord)]`; Vec/BTreeMap do too).
+            // Same-variant arms — defer to the derived Ord on the
+            // contained payload types (NodeValue, RelValue, PathValue
+            // all `#[derive(Ord)]`; Vec/BTreeMap do too).
             (Value::List(a), Value::List(b)) => a.cmp(b),
             (Value::Map(a), Value::Map(b)) => a.cmp(b),
             (Value::Node(a), Value::Node(b)) => a.cmp(b),
@@ -381,7 +381,7 @@ impl Hash for Value {
             }
             Value::Null => 0.hash(state),
             Value::NodeRef(v) => v.hash(state),
-            // Phase A.1 — defer to derived Hash on payload types.
+            // Defer to derived Hash on payload types.
             // BTreeMap<String, Value> implements Hash (iterates in
             // key order); Vec<Value> implements Hash; NodeValue/
             // RelValue/PathValue all derive Hash.
@@ -412,13 +412,13 @@ impl Value {
         }
     }
 
-    /// Canonical PascalCase variant name. Phase A.1 / C7a — added so
-    /// the (formerly duplicated) `value_type_name` / `value_kind`
+    /// Canonical PascalCase variant name — the single source of truth
+    /// for the (formerly duplicated) `value_type_name` / `value_kind`
     /// helpers across executor/write.rs and mutation/subgraph_streaming_
-    /// writer.rs share one source of truth. Other classifiers
-    /// (introspection/schema_overview.rs `str`/`int`/..., validation.rs
-    /// `string`/`integer`/..., export.rs blueprint shape) use
-    /// consumer-specific conventions and keep their own tables.
+    /// writer.rs. Other classifiers (introspection/schema_overview.rs
+    /// `str`/`int`/..., validation.rs `string`/`integer`/..., export.rs
+    /// blueprint shape) use consumer-specific conventions and keep their
+    /// own tables.
     pub fn type_name(&self) -> &'static str {
         match self {
             Value::Null => "Null",
@@ -441,12 +441,10 @@ impl Value {
     }
 }
 
-/// Phase A.1 / C7a — Display impl delegating to the existing
-/// `format_value` free function. Lets `format!("{}", value)` and
-/// `to_string()` work directly on `Value`, replacing the need to
-/// import + call `format_value` everywhere. The free function stays
-/// for now (some callers explicitly import it); a follow-up pass can
-/// retire it once every site converts.
+/// Display impl delegating to the existing `format_value` free function.
+/// Lets `format!("{}", value)` and `to_string()` work directly on `Value`,
+/// replacing the need to import + call `format_value` everywhere. The free
+/// function stays because some callers explicitly import it.
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", format_value(self))
@@ -890,9 +888,9 @@ impl DataFrame {
                         .to_string(),
                 )
             }
-            // Phase A.1 — collection / graph-entity variants don't
-            // fit columnar storage. Same rationale as Duration: these
-            // are query-result-time values, not column types.
+            // Collection / graph-entity variants don't fit columnar
+            // storage. Same rationale as Duration: these are
+            // query-result-time values, not column types.
             Value::List(_)
             | Value::Map(_)
             | Value::Node(_)
@@ -1142,9 +1140,9 @@ impl std::fmt::Display for DataFrame {
 /// [`format_value`] which produces a Cypher-literal-style rendering
 /// (quoted strings, `NULL` for null, `%.2f` for floats).
 ///
-/// `Null` → empty string. The Phase A.1 collection / graph-entity
-/// variants delegate to [`format_value`] (their multi-line shapes are
-/// the same in both contexts).
+/// `Null` → empty string. The collection / graph-entity variants delegate
+/// to [`format_value`] (their multi-line shapes are the same in both
+/// contexts).
 ///
 /// Consolidated 0.9.53 from three nearly-identical copies in
 /// `graph/mod.rs`, `graph/explore.rs`, `graph/io/export.rs`.
@@ -1199,9 +1197,9 @@ pub fn format_value(value: &Value) -> String {
             "duration(months={}, days={}, seconds={})",
             months, days, seconds
         ),
-        // Phase A.1 — Cypher-ish surface syntax for the collection /
-        // graph-entity variants. Not round-trip-parseable; this fn is
-        // for display / debug, not serialisation.
+        // Cypher-ish surface syntax for the collection / graph-entity
+        // variants. Not round-trip-parseable; this fn is for display /
+        // debug, not serialisation.
         Value::List(items) => {
             let inner: Vec<String> = items.iter().map(format_value).collect();
             format!("[{}]", inner.join(", "))

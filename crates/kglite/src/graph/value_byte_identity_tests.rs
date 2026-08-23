@@ -3,12 +3,15 @@
 //!
 //! # N2 MUST PASS AGAINST THESE BYTES UNCHANGED
 //!
-//! Part N (`dev-docs/plans/arc-values-rel-constraints-cdc2.md`, amended N2)
-//! replaces `NodeValue`/`RelValue`'s `properties: BTreeMap<String, Value>` —
-//! and possibly `Value::Map`'s container — with an `Arc`'d sorted flat map
-//! with shared keys. The entire premise of that change is that it is
-//! **invisible to persistence**: serde's `rc` feature is already on, and a
-//! custom `Serialize`/`Deserialize` keeps postcard's map framing identical.
+//! Part N is the `Arc`'d value-representation work; N1 lands these goldens
+//! *before* any representation change, N2 makes the change.
+//!
+//! `NodeValue`/`RelValue` — and potentially `Value::Map` — represent
+//! `properties` as an `Arc`'d sorted flat map rather than a
+//! `BTreeMap<String, Value>`. The entire premise of that representation is
+//! that it is **invisible to persistence**: serde's `rc` feature is already
+//! on, and a custom `Serialize`/`Deserialize` keeps postcard's map framing
+//! identical.
 //!
 //! This file is the instrument that proves it. The expectations below are
 //! checked-in hex literals and a checked-in `.kgl` digest. **N2 does not

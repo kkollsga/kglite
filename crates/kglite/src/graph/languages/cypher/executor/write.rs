@@ -730,7 +730,7 @@ fn execute_create(
     // CREATE works on every storage mode. On disk, node properties are routed
     // through the per-type ColumnStore by `DirGraph::insert_node_routed` (the
     // same mechanism `add_nodes` uses), which writes straight into the store the
-    // backend owns — there is no second copy to sync since D1 Phase 3.
+    // backend owns — there is no second copy to sync.
     // (SET/DELETE/REMOVE already work on disk via the staged-write path.)
     // One CREATE per incoming row, and nothing at all for zero rows. A leading
     // CREATE gets its single empty row from the pipeline's implicit-start-row
@@ -1184,10 +1184,10 @@ fn ensure_type_metadata(graph: &mut DirGraph, node_type: &str) {
 
 /// Map a Value variant to its type name string (for SchemaNode property types).
 ///
-/// Phase A.1 / C7a — thin wrapper around the canonical `Value::type_name`
-/// method; kept as a free function so `value_type_name(&v)` callsites
-/// don't have to change. Future cleanup can replace each callsite with
-/// the method form and drop this.
+/// A thin wrapper around the canonical `Value::type_name` method; kept as
+/// a free function so `value_type_name(&v)` callsites don't have to change.
+/// Future cleanup can replace each callsite with the method form and drop
+/// this.
 fn value_type_name(v: &Value) -> String {
     v.type_name().to_string()
 }
@@ -1259,8 +1259,8 @@ fn is_null_write_target(row: &ResultRow, variable: &str) -> bool {
 /// Every property key currently set on `variable`'s binding — the clear-list
 /// for `SET n = {…}` / `SET r = {…}`.
 ///
-/// Extracted from `execute_set` (D1 Phase 1) so the accessor migration does not
-/// push that function past its size cap.
+/// Extracted from `execute_set` so the accessor migration does not push that
+/// function past its size cap.
 fn existing_property_keys(
     graph: &crate::graph::dir_graph::DirGraph,
     row: &ResultRow,
@@ -1318,9 +1318,9 @@ fn existing_property_keys(
 /// node's inline title field, not in the store), and for a columnar node whose
 /// type the backend has no store for. Returns whether the node existed.
 ///
-/// Extracted from `execute_set` (D1 Phase 3) so routing the write through
-/// `GraphWrite` — which a columnar node now requires — does not push that
-/// function past its size cap.
+/// Extracted from `execute_set` so routing the write through `GraphWrite` —
+/// which a columnar node requires — does not push that function past its
+/// size cap.
 pub(super) fn set_node_property_direct(
     graph: &mut crate::graph::dir_graph::DirGraph,
     node_idx: NodeIndex,

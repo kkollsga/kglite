@@ -7,10 +7,8 @@
 //! source slices.
 //!
 //! The lexical ranker is deliberately simple — exact-name match wins
-//! big, name-contains is next, signature/docstring matches trail. We
-//! don't currently use the vector embedder even when configured;
-//! semantic re-ranking is a follow-up once we know what fixture-shape
-//! makes a useful evaluation harness.
+//! big, name-contains is next, signature/docstring matches trail. The
+//! vector embedder is not used here even when one is configured.
 //!
 //! Source slices come from `KnowledgeGraph::source_roots` if present,
 //! otherwise we resolve `file_path` against the cwd. Reading happens

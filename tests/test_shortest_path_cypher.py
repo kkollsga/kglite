@@ -131,10 +131,9 @@ class TestShortestPathFunctions:
         assert titles == ["Alice", "Bob", "Charlie"]
 
     def test_relationships_function(self, chain_graph):
-        """relationships(p) returns list of Rel dicts (post-A.1).
+        """relationships(p) returns a list of Rel dicts.
 
-        Pre-A.1 returned list of type strings; Phase A.1 / C2 now
-        returns full Rel dicts. Extract `.type` for legacy shape.
+        Extract `.type` for the legacy list-of-type-strings shape.
         """
         result = chain_graph.cypher(
             "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..10]->(b:Person {name: 'Charlie'})) "
@@ -158,7 +157,7 @@ class TestShortestPathFunctions:
         assert "Alice" in titles and "Dave" in titles
         rels = row["relationships(p)"]
         assert isinstance(rels, list)
-        # Phase A.1 / C2 — Rel dicts; check .type field.
+        # Rel dicts; check the .type field.
         assert all(r["type"] == "KNOWS" for r in rels)
 
     def test_source_target_variables(self, chain_graph):

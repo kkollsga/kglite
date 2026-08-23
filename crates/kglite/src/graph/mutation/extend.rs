@@ -30,7 +30,7 @@
 //!   by `add_nodes`. `id` is the canonical integer node id in every
 //!   storage mode (post-0.10.10). Conflicts resolve per
 //!   `conflict_handling`.
-//! - **Secondary labels** (multi-label, since 0.10.5) are *unioned*
+//! - **Secondary labels** (multi-label) are *unioned*
 //!   onto the matched/created target node via
 //!   [`DirGraph::add_node_label`] — idempotent, never removes a label.
 //! - **Edges** dedup exactly as `add_connections` does: an edge with the

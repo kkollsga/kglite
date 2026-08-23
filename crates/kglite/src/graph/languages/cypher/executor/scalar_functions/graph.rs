@@ -112,10 +112,9 @@ impl<'a> CypherExecutor<'a> {
                 // nodes(p) returns the list of nodes in a path
                 // (source + intermediates + target).
                 //
-                // Phase A.1 / C2 — native `Value::List(Vec<Value::Node>)`.
-                // Each element is a full NodeValue (id, labels, properties)
-                // mirroring what `RETURN n` would emit. Replaces the
-                // pre-A.1 JSON-string list of dicts.
+                // Emits `Value::List(Vec<Value::Node>)`. Each element is a
+                // full NodeValue (id, labels, properties) mirroring what
+                // `RETURN n` would emit.
                 if let Some(Expression::Variable(var)) = args.first() {
                     if let Some(path) = row.path_bindings.get(var) {
                         let mut items: Vec<Value> = Vec::with_capacity(path.path.len() + 1);
@@ -135,7 +134,7 @@ impl<'a> CypherExecutor<'a> {
             "relationships" | "rels" => {
                 // relationships(p) — list of relationships in a path.
                 //
-                // Phase A.1 / C2 — native `Value::List(Vec<Value::Relationship>)`.
+                // Emits `Value::List(Vec<Value::Relationship>)`.
                 // Each element is a full RelValue (id, start, end, type,
                 // properties), using the exact edge recorded for each hop.
                 if let Some(Expression::Variable(var)) = args.first() {
@@ -300,7 +299,7 @@ impl<'a> CypherExecutor<'a> {
             "keys" => {
                 // keys(n) or keys(r) — return property names as a list.
                 //
-                // Phase A.1 / C2 — native `Value::List(Vec<Value::String>)`.
+                // Emits `Value::List(Vec<Value::String>)`.
                 // For nodes, derive the key set from `materialize_node_value`
                 // so it exactly matches `keys(properties(n))` and the property
                 // dict carried by `RETURN n`: virtual id/title/type, every
@@ -359,7 +358,7 @@ impl<'a> CypherExecutor<'a> {
             "properties" => {
                 // properties(n) / properties(r) → native Value::Map.
                 //
-                // Phase A.1 / C2 — emits `Value::Map(BTreeMap)` directly.
+                // Emits `Value::Map(BTreeMap)` directly.
                 // For nodes, delegate to `materialize_node_value` so the map
                 // is byte-for-byte the property dict `RETURN n` produces:
                 // virtual id/title/type, every user-set property, AND the

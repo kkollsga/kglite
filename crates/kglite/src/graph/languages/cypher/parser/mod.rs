@@ -696,12 +696,12 @@ pub(super) fn soft_word_eq(candidate: &str, canonical: &str) -> bool {
 /// (line, col).
 /// Parse Cypher source into a typed AST.
 ///
-/// Phase A.2 / C2 — returns [`KgError`] with structured `line` and
-/// `col` fields (when the parser knows them) instead of an opaque
-/// `Result<_, String>` whose message embedded the position. The
-/// position survives the PyO3 boundary and reaches Python consumers
-/// via `kglite.CypherSyntaxError.args[0]` (still in the message for
-/// human display) and as dedicated `.line` / `.col` attributes.
+/// Returns [`KgError`] with structured `line` and `col` fields (when
+/// the parser knows them) rather than an opaque `Result<_, String>`
+/// whose message only embeds the position. The position survives the
+/// PyO3 boundary and reaches Python consumers via
+/// `kglite.CypherSyntaxError.args[0]` (still in the message for human
+/// display) and as dedicated `.line` / `.col` attributes.
 ///
 /// The internal tokenizer/parser still produce `Result<_, String>`
 /// for ergonomic `?` chains inside the parsing code — only the

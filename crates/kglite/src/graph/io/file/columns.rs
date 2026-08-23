@@ -2,8 +2,8 @@
 //!
 //! Split out of `io/file.rs` when that file passed its 2500-line ceiling. These
 //! three functions are the only place a load installs column stores onto the
-//! storage backend, which since D1 Phase 3 is their sole owner: the loader
-//! reads a section (or a per-type sidecar), builds a `ColumnStore`, hands it to
+//! storage backend, which is their sole owner: the loader reads a section
+//! (or a per-type sidecar), builds a `ColumnStore`, hands it to
 //! `DirGraph::install_column_store`, and then points each node of the type at
 //! its row.
 

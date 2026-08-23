@@ -726,8 +726,8 @@ fn build_columns(
     // Free everything not needed for Phase 2+3 to maximize page cache.
     // Phase 2 only needs qnum_to_idx + edge_buffer. Phase 3 only needs pending_edges.
     if graph.graph.is_disk() {
-        // One map to clear, not two: the backend owns it (D1 Phase 3), so
-        // there is no DirGraph copy left behind to resurrect the pages.
+        // One map to clear, not two: the backend owns it, so there is no
+        // DirGraph copy left behind to resurrect the pages.
         let dropped_stores = graph.column_store_count();
         graph.clear_column_stores();
         drop(type_meta);

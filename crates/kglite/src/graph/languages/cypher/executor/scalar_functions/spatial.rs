@@ -320,7 +320,7 @@ impl<'a> CypherExecutor<'a> {
                 }
                 let mut geoms: Vec<geo::Geometry<f64>> = Vec::new();
                 // Single list argument: parse list of WKT strings.
-                // Phase A.1 / C4 — native Value::List path.
+                // Native Value::List path.
                 if args.len() == 1 {
                     let val = self.evaluate_expression(&args[0], row)?;
                     if let Value::List(items) = &val {

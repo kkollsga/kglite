@@ -28,7 +28,7 @@ mod window;
 
 // Re-exports for convenience.
 //
-// Phase A.3 / 0.9.53 (Issue #2): `parse_cypher` is the cached wrapper.
+// `parse_cypher` is the cached wrapper.
 // Direct callers (cypher() / Transaction.cypher() / mcp-server) all go
 // through the cache. The raw uncached parser lives at
 // `parser::parse_cypher`; only the cache implementation itself and a

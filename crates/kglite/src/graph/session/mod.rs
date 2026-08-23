@@ -6,7 +6,7 @@
 //! snapshot/working CoW transaction mechanics live here exactly
 //! once.
 //!
-//! **Why this module exists.** Before Phase E, the same pipeline
+//! **Why this module exists.** The same pipeline
 //! (parse → validate → rewrite_text_score → optimize → mark_lazy →
 //! mutation gate → execute) was duplicated three times — once in
 //! `src/graph/pyapi/kg_core.rs::cypher`, once in
@@ -20,7 +20,7 @@
 //! surfaced it.
 //!
 //! See [`docs/history/bolt-implementation.md`](../../../../../docs/history/bolt-implementation.md)
-//! Phase E for the full rationale.
+//! for the full rationale.
 //!
 //! ## Surface
 //!
@@ -97,8 +97,8 @@ pub const QUERY_THREAD_STACK_SIZE: usize = 8 * 1024 * 1024;
 /// node identity through the planner — it should never appear in
 /// output.
 ///
-/// Lifted from the wheel crate in 0.10.1 so every binding can call
-/// the same post-execute cleanup instead of re-implementing it.
+/// Lives here so every binding can call the same post-execute cleanup
+/// instead of re-implementing it.
 pub fn resolve_noderefs(graph: &GraphBackend, rows: &mut [Vec<Value>]) {
     // Arena guard: node_weight materializes on the disk backend (arena
     // protocol in disk/graph.rs, enforced by a debug assert); no-op on

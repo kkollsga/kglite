@@ -287,7 +287,7 @@ def test_copy_does_not_share_a_backend_with_its_source(graph: kglite.KnowledgeGr
     """`g.copy()` forks *from* `g`, so `g` becomes somebody else's base.
 
     Writing through `g` afterwards would edit a backend the copy is reading —
-    the hazard D2 Phase 2's `ensure_writable` exists for, and one that panicked
+    the hazard `ensure_writable` exists for, and one that panicked
     five Python tests when it was missing.
     """
     other = graph.copy()

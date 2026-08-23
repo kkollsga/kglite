@@ -1,7 +1,7 @@
 """Concurrency stress tests for kglite-bolt-server.
 
 Opt-in via `pytest -m bolt_stress`. These tests exercise the per-tx
-mutex split (RA-1) — without it, multi-tx scenarios would serialize
+mutex split — without it, multi-tx scenarios would serialize
 through the global transactions mutex and run very slowly (or
 deadlock under unfortunate timing).
 
@@ -122,8 +122,8 @@ def test_8_readers_plus_1_writer(bolt_server):
 
 def test_4_concurrent_writers(bolt_server):
     """4 parallel transactions each create 5 nodes. Without per-tx
-    mutex splitting (RA-1), these would serialize on the global
-    transactions mutex. With OCC enforced (Phase E.4), losing writers
+    mutex splitting, these would serialize on the global
+    transactions mutex. With OCC enforced, losing writers
     get the conflict status code on commit — `_run_write_tx` uses the
     raw explicit-transaction path rather than a managed one, so it sees
     the conflict itself and treats it as expected, not an error (a
@@ -299,7 +299,7 @@ def test_reset_during_transaction(bolt_server):
 
 def test_concurrent_sessions_creating_distinct_data(bolt_server):
     """8 sessions, each in its own tx, each creates 1 node with a
-    UNIQUE id. With OCC enforced (Phase E.4), losers see a
+    UNIQUE id. With OCC enforced, losers see a
     ClientError("conflict") — those are expected (the writes are
     *intent*, not committed) and filtered out by `_run_write_tx`.
     No SESSION should hard-crash and at least one writer's row

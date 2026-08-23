@@ -211,7 +211,7 @@ class TestGILReleasePerformance:
         assert counter["value"] > 0
 
 
-# ── Phase A.3 / 0.9.53 — Bolt-scale concurrency stress + documented quirks ──
+# ── Bolt-scale concurrency stress + documented quirks ───────────────────────
 
 
 class TestBoltScaleConcurrency:

@@ -46,7 +46,7 @@
 //! `&Vec<NodeIndex>`. Keeping every level behind an `Arc`, including the one
 //! being written, makes `Clone` a pointer copy from `&self` alone; the writer
 //! discovers the fork lazily at its next mutation through `Arc::get_mut`. It is
-//! also what avoids the D2 Phase 3 §B.2 trap by construction: there is no
+//! also what avoids the merge-on-share trap by construction: there is no
 //! `share()` that must merge a non-empty delta before it can hand back one
 //! immutable value.
 
@@ -67,9 +67,9 @@ type Level<K> = HashMap<K, Option<Vec<NodeIndex>>>;
 /// Matches `type_index_layer::MAX_LAYER_DEPTH` and
 /// `id_index_layer::MAX_CHAIN_DEPTH` for the same measured reason: the flatten
 /// is O(index), so its amortised cost is `|index| / K` per fork, and K = 8 put a
-/// spike of ~5x the median into one round in eight (D2 Phase 3 residual profile
-/// §B). A stack only grows while a reader is continuously held; any mutation
-/// with nothing shared folds it back to one level.
+/// spike of ~5x the median into one round in eight. A stack only grows while a
+/// reader is continuously held; any mutation with nothing shared folds it back
+/// to one level.
 pub(crate) const MAX_LAYER_DEPTH: usize = 32;
 
 /// A user index's `value -> members` map.
@@ -285,8 +285,8 @@ impl<K: Eq + Hash + Clone> LayeredIndex<K> {
         let first = tail.next().expect("split_off yields at least one level");
         // The leading owned level is **moved** out of its `Arc`, never copied:
         // spelling this as "collect everything into a fresh map" is the O(N)
-        // compaction trap from D2 Phase 3 §B.1, which turns every write after a
-        // dropped reader into a full index copy.
+        // compaction trap, which turns every write after a dropped reader
+        // into a full index copy.
         let mut merged = Arc::try_unwrap(first)
             .unwrap_or_else(|_| unreachable!("position proved sole ownership"));
         for level in tail {

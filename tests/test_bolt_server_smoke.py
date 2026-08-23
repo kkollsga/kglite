@@ -37,7 +37,7 @@ pytestmark = [pytest.mark.bolt]
 
 
 def test_bolt_handshake_and_verify_connectivity(bolt_server):
-    """Phase C.1 ✓: HELLO/LOGON/GOODBYE + a `verify_connectivity()` ping.
+    """HELLO/LOGON/GOODBYE + a `verify_connectivity()` ping.
 
     The backend's `create_session` / `get_server_info` / `close_session`
     + `set_session_auth` (which by design only logs the principal — this
@@ -52,7 +52,7 @@ def test_bolt_handshake_and_verify_connectivity(bolt_server):
 
 
 def test_bolt_run_returns_scalar_rows(bolt_server):
-    """Phase C.2 ✓: RUN a trivial scalar query, PULL all, check the rows."""
+    """RUN a trivial scalar query, PULL all, check the rows."""
     with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
         with driver.session() as session:
             result = session.run("MATCH (n:Person) RETURN n.title AS name ORDER BY name")
@@ -61,7 +61,7 @@ def test_bolt_run_returns_scalar_rows(bolt_server):
 
 
 def test_bolt_run_supports_parameters(bolt_server):
-    """Phase C.3 ✓: RUN with `$param` map decoded from PackStream."""
+    """RUN with `$param` map decoded from PackStream."""
     with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
         with driver.session() as session:
             result = session.run(
@@ -73,7 +73,7 @@ def test_bolt_run_supports_parameters(bolt_server):
 
 
 def test_bolt_return_node_yields_node_struct(bolt_server):
-    """Phase C.4 ✓: `RETURN n` maps Value::Node → BoltNode PackStream struct (0x4E)."""
+    """`RETURN n` maps Value::Node → BoltNode PackStream struct (0x4E)."""
     with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
         with driver.session() as session:
             result = session.run("MATCH (n:Person {title: 'Alice'}) RETURN n")
@@ -87,7 +87,7 @@ def test_bolt_return_node_yields_node_struct(bolt_server):
 
 
 def test_bolt_return_relationship_yields_rel_struct(bolt_server):
-    """Phase C.4 ✓: `RETURN r` maps Value::Relationship → BoltRelationship (0x52)."""
+    """`RETURN r` maps Value::Relationship → BoltRelationship (0x52)."""
     with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
         with driver.session() as session:
             result = session.run("MATCH (:Person {title: 'Alice'})-[r:KNOWS]->(:Person {title: 'Bob'}) RETURN r")
@@ -99,7 +99,7 @@ def test_bolt_return_relationship_yields_rel_struct(bolt_server):
 
 
 def test_bolt_transaction_commit_and_rollback(bolt_server):
-    """Phase C.5 ✓: explicit `tx.run()` + `tx.commit()` / `tx.rollback()`."""
+    """Explicit `tx.run()` + `tx.commit()` / `tx.rollback()`."""
     with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
         with driver.session() as session:
             # Commit a mutation, verify it's visible.
@@ -118,7 +118,7 @@ def test_bolt_transaction_commit_and_rollback(bolt_server):
 
 
 def test_bolt_rejects_writes_when_readonly(bolt_server_readonly):
-    """Phase C.5 ✓: `--readonly` flag rejects mutations with a Bolt FAILURE.
+    """The `--readonly` flag rejects mutations with a Bolt FAILURE.
 
     Uses its own readonly fixture (the default `bolt_server` fixture is
     read-write). The CREATE attempts — both auto-commit and explicit-tx —
@@ -135,11 +135,10 @@ def test_bolt_rejects_writes_when_readonly(bolt_server_readonly):
 
 
 def test_bolt_returns_failure_on_parse_error(bolt_server):
-    """Phase C.6 ✓: a syntactically invalid Cypher returns Bolt FAILURE
-    with a `Neo.ClientError.Statement.SyntaxError` code (the canonical
-    Neo4j status code for this case), driven by the KgErrorCode
-    enum that Phase A.2 shipped + the kg_to_bolt mapper that Phase C.6
-    added."""
+    """A syntactically invalid Cypher returns Bolt FAILURE with a
+    `Neo.ClientError.Statement.SyntaxError` code (the canonical Neo4j
+    status code for this case), driven by the KgErrorCode enum plus the
+    kg_to_bolt mapper."""
     with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
         with driver.session() as session:
             with pytest.raises(neo4j.exceptions.ClientError) as exc_info:

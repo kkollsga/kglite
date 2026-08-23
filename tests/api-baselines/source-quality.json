@@ -175,7 +175,7 @@
     {
       "path": "crates/kglite/src/graph/io/unified_columns.rs",
       "qualified_name": "crate::write_unified_columns",
-      "lines": 325,
+      "lines": 324,
       "branches": 27,
       "nesting": 3
     },
@@ -252,7 +252,7 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/scalar_functions/graph.rs",
       "qualified_name": "crate::CypherExecutor<'a>::eval_graph_fn",
-      "lines": 329,
+      "lines": 328,
       "branches": 65,
       "nesting": 5
     },
@@ -273,7 +273,7 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/scalar_functions/string.rs",
       "qualified_name": "crate::CypherExecutor<'a>::eval_string_fn",
-      "lines": 381,
+      "lines": 380,
       "branches": 157,
       "nesting": 7
     },
@@ -455,7 +455,7 @@
     {
       "path": "crates/kglite/src/graph/storage/disk/graph_persist.rs",
       "qualified_name": "crate::DiskGraph::seal_to_new_segment",
-      "lines": 263,
+      "lines": 262,
       "branches": 43,
       "nesting": 3
     }

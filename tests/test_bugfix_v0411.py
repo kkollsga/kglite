@@ -124,8 +124,7 @@ class TestPathFunctionReturnTypes:
     """nodes(p) should return list of dicts, relationships(p) list of strings."""
 
     def test_nodes_returns_list_of_dicts(self, social_graph):
-        # Phase A.1 / C6 — nodes() returns full Node dicts with
-        # id/labels/properties (was JSON-string-of-dicts pre-A.1).
+        # nodes() returns full Node dicts with id/labels/properties.
         rows = social_graph.cypher(
             "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..5]->(b:Person {name: 'Charlie'})) "
             "RETURN nodes(p)"
@@ -138,9 +137,8 @@ class TestPathFunctionReturnTypes:
         assert "Charlie" in titles
 
     def test_relationships_returns_list_of_strings(self, social_graph):
-        # Phase A.1 / C6 — relationships() returns full Rel dicts
-        # (was list of type strings pre-A.1). Extract `.type` to get
-        # the prior shape.
+        # relationships() returns full Rel dicts. Extract `.type` to
+        # get the list-of-type-strings shape.
         rows = social_graph.cypher(
             "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..5]->(b:Person {name: 'Bob'})) "
             "RETURN relationships(p)"

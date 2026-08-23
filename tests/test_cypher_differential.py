@@ -2337,7 +2337,7 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "RETURN q.name AS q, c.name AS c ORDER BY q, c",
         None,
     ),
-    # ── Phase A.3 — db.* schema-introspection procedures ──
+    # ── db.* schema-introspection procedures ──
     # Pin the canonical YIELD shapes against optimizer rewrites and
     # cross-mode parity. These have no planner pass to validate, but
     # the corpus also serves as the cross-mode oracle.

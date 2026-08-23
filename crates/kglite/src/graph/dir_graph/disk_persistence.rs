@@ -164,8 +164,8 @@ impl DirGraph {
 
         // The heap backend owns the stores; the new `DiskGraph` must inherit
         // them, or every columnar property read returns Null after the switch.
-        // Before D1 Phase 3 a DirGraph-level copy survived the swap and
-        // an explicit mirror step pushed it in — there is no such copy now.
+        // A DirGraph-level copy once survived the swap and an explicit
+        // mirror step pushed it in — there is no such copy now.
         let carried_stores: HashMap<InternedKey, Arc<ColumnStore>> = self
             .graph
             .column_stores_iter()
@@ -310,8 +310,8 @@ impl DirGraph {
         dg.save_to_dir(dir, &self.interner)
             .map_err(|e| format!("DiskGraph save failed: {}", e))?;
         // No mirror to refresh: `DiskGraph` *is* the owner of the column
-        // stores (D1 Phase 3), so the sidecar writer below reads the same
-        // `Arc`s `save_to_dir` just flushed into. The pre-D1 shape kept a
+        // stores, so the sidecar writer below reads the same `Arc`s
+        // `save_to_dir` just flushed into. An earlier shape kept a
         // second copy on `DirGraph`, and a stale one is exactly how Cypher
         // `SET` / `DETACH DELETE` corrections once failed to reach disk.
 

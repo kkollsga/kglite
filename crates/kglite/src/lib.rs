@@ -89,10 +89,10 @@ pub mod api {
     /// Core schema data types — the node and edge records (`NodeData` /
     /// `EdgeData`), the projected `NodeInfo`, geo/temporal validity configs
     /// (`SpatialConfig` / `TemporalConfig`), and the declarative
-    /// schema-definition + validation types. Generic across bindings;
-    /// lifted in roadmap Piece 3 cleanup. `EdgeData` joined in 0.15.11:
-    /// `GraphWrite::add_edge` and `DiskGraph::from_stable_digraph` name it
-    /// in public signatures, so it must be publicly nameable too.
+    /// schema-definition + validation types. Generic across bindings.
+    /// `EdgeData` is included because `GraphWrite::add_edge` and
+    /// `DiskGraph::from_stable_digraph` name it in public signatures, so it
+    /// must be publicly nameable too.
     pub use crate::graph::schema::{
         parse_spatial_column_types_from_pairs, parse_temporal_column_types_from_pairs,
         ConnectionSchemaDefinition, EdgeData, NodeData, NodeInfo, NodeSchemaDefinition,
@@ -145,8 +145,8 @@ pub mod api {
     pub use crate::graph::storage::GraphRead;
     /// The canonical graph write trait (`GraphWrite: GraphRead`) —
     /// storage-variant-routed mutation, including `set_node_property` and
-    /// its siblings, the documented replacements for the `NodeData` mutators
-    /// removed in 0.15.9. Non-object-safe like `GraphRead`: consumers take
+    /// its siblings, the documented replacements for the removed `NodeData`
+    /// mutators. Non-object-safe like `GraphRead`: consumers take
     /// `&mut impl GraphWrite`, never `&mut dyn`. Implemented by the storage
     /// backends — reach it as `graph.graph.set_node_property(..)` on a
     /// `DirGraph` (the `graph` field is public), the same call the Cypher
@@ -168,7 +168,7 @@ pub mod api {
     /// as-of filter a binding's cursor carries for temporal-validity
     /// auto-filtering. Lifted in roadmap Piece 4.
     pub use crate::graph::TemporalContext;
-    // `Arc<DirGraph>` → `&mut DirGraph` + version bump (lifted in 0.10.1).
+    // `Arc<DirGraph>` → `&mut DirGraph` + version bump.
     pub use crate::graph::handle::make_dir_graph_mut;
     // (Mutation reports → `api::mutation`; schema introspection /
     // `SchemaOverview` / detail enums → `api::introspection`; `.kgl`
@@ -605,7 +605,7 @@ pub mod api {
         // the executor/parser internals stay un-exported and the optimizer can
         // keep inlining the per-query hot path. (Re-exporting the whole
         // executor module measurably regressed cypher micro-query latency by
-        // ~60% on tiny graphs — roadmap Piece 4 perf follow-up.)
+        // ~60% on tiny graphs.)
         pub use crate::graph::languages::cypher::executor::helpers::{
             resolve_edge_property, resolve_node_property,
         };

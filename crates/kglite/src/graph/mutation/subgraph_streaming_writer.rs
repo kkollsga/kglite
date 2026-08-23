@@ -45,9 +45,8 @@ use std::sync::Arc;
 /// Linux pipe buffer; trades a bit of heap for fewer syscalls during
 /// the write loop. With ~5 files per typed column × ~5 columns × 4500
 /// types = ~100 K open BufWriters, 64 KB × 100 K = 6.4 GB worst-case
-/// — too high. Tune down for small types if needed; for now, the
-/// kernel only allocates the buffer on first write so types with zero
-/// rows pay no cost.
+/// — too high. The kernel only allocates the buffer on first write, so
+/// types with zero rows pay no cost.
 const BUF_SIZE: usize = 64 * 1024;
 
 /// Per-type streaming writer.
@@ -954,8 +953,8 @@ fn borrowed_kind(v: &BorrowedValue<'_>) -> &'static str {
 /// would print large payloads.
 #[cfg(test)]
 fn value_kind(v: &Value) -> &'static str {
-    // Phase A.1 / C7a — delegates to Value::type_name (canonical
-    // PascalCase form); was a duplicate per-variant match.
+    // Delegates to Value::type_name (canonical PascalCase form);
+    // was a duplicate per-variant match.
     v.type_name()
 }
 

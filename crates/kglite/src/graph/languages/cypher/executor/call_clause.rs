@@ -386,9 +386,7 @@ impl<'a> CypherExecutor<'a> {
                 _ => self.evaluate_expression(&clause.expression, &row)?,
             };
             match val {
-                // Phase A.1 / C4 — native Value::List fast path.
-                // Replaces the prior JSON-string split, which only
-                // fired when collect() / list-literals emitted strings.
+                // Native Value::List fast path.
                 Value::List(items) => {
                     let total = items.len();
                     self.budget.check_work(total, "UNWIND collection")?;
@@ -885,7 +883,7 @@ impl<'a> CypherExecutor<'a> {
                 }
                 rows
             }
-            // Phase A.3 — Neo4j schema introspection procedures. Both yield
+            // Neo4j schema introspection procedures. Both yield
             // a single `name` column; the underlying helpers in
             // `introspection::schema_overview` are the single source of
             // truth and are also consumed by `describe()` to prevent drift.
@@ -1635,7 +1633,7 @@ impl<'a> CypherExecutor<'a> {
 }
 
 // ============================================================================
-// Phase A.3 — shared helper for single-column name-yielding procedures.
+// Shared helper for single-column name-yielding procedures.
 // ============================================================================
 
 /// Build `ResultRow`s for a procedure that yields a single string

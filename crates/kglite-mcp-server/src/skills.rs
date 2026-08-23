@@ -43,10 +43,8 @@ pub(crate) fn install_skills(
     recipe_catalog_summary: Option<crate::recipe_queries::CatalogSummary>,
 ) {
     // Skill `.md` bodies live at `crates/kglite-mcp-server/skills/` — the
-    // single canonical home since 0.10.25, when the Python MCP server (and
-    // its duplicate `kglite/mcp_server/skills/`) was retired and this Rust
-    // binary became the one MCP server. `cargo publish` only packages
-    // files inside the crate dir, so they must live here (not behind a
+    // single canonical home. `cargo publish` only packages files inside
+    // the crate dir, so they must live here (not behind a
     // `../../../kglite/...` `include_str!` path).
     let registry = SkillRegistry::new()
         .add_bundled(BundledSkill {

@@ -241,7 +241,7 @@ where
         let count = interned_props.len();
         for (ik, v) in interned_props {
             // Through the backend: a columnar node's properties live in the
-            // store the backend owns, not on the node (D1 Phase 3).
+            // store the backend owns, not on the node.
             GraphWrite::set_node_property(&mut graph.graph, node_idx, ik, v);
         }
         nodes_updated += 1;

@@ -1,13 +1,12 @@
 //! `kglite::api::Value` ↔ `boltr::types::BoltValue` adapter.
 //!
-//! Phase C.2 + C.3 + C.4 status: `to_bolt` is real for ALL outbound
-//! variants (scalars, collections, temporal/spatial, Node, Relationship,
-//! Path); only `Value::NodeRef` returns an error (it's an internal
-//! placeholder that shouldn't reach the boundary). `from_bolt` rejects
-//! inbound Node/Rel/Path (drivers don't pass those as parameters),
-//! inbound time-of-day variants (kglite has date-only precision today),
-//! inbound Bytes (no Value variant), and inbound Point3D (kglite has
-//! only Point2D).
+//! `to_bolt` handles ALL outbound variants (scalars, collections,
+//! temporal/spatial, Node, Relationship, Path); only `Value::NodeRef`
+//! returns an error (it's an internal placeholder that shouldn't reach
+//! the boundary). `from_bolt` rejects inbound Node/Rel/Path (drivers
+//! don't pass those as parameters), inbound time-of-day variants
+//! (kglite has date-only precision today), inbound Bytes (no Value
+//! variant), and inbound Point3D (kglite has only Point2D).
 //!
 //! # Mapping table (the implementer's spec)
 //!
@@ -31,8 +30,8 @@
 //!
 //! `from_bolt` is the inbound direction for parameters. The graph-structure
 //! variants (`Node`/`Relationship`/`Path`) on input would mean a driver
-//! passed a node *as a parameter* — Neo4j drivers don't do this; the
-//! Phase C.3 implementation will reject them with `BoltError::Protocol`.
+//! passed a node *as a parameter* — Neo4j drivers don't do this, and
+//! `from_bolt` rejects them with `BoltError::Protocol`.
 
 use std::collections::HashMap;
 
@@ -44,8 +43,7 @@ use boltr::types::{
 
 use kglite::api::Value;
 
-/// kglite → Bolt. Called by `execute`'s record emission (Phase C.2; the
-/// graph-structure arms ship in C.4).
+/// kglite → Bolt. Called by `execute`'s record emission.
 ///
 /// Returns `Err(BoltError::Backend)` rather than panicking so a query
 /// that touches an unimplemented variant doesn't orphan the tokio
@@ -74,7 +72,7 @@ pub fn to_bolt(value: &Value) -> Result<BoltValue, BoltError> {
 
         // ---- Temporal / spatial / duration ------------------------------
         Value::DateTime(date) => {
-            // kglite Phase A.1 kept `DateTime` as `NaiveDate` (date only);
+            // kglite's `DateTime` is a `NaiveDate` (date only);
             // Bolt's BoltDate is also days-since-Unix-epoch.
             // `signed_duration_since` is unambiguous; the bare `-` op
             // resolves to the wrong impl in some chrono versions.
@@ -118,7 +116,7 @@ pub fn to_bolt(value: &Value) -> Result<BoltValue, BoltError> {
             nanoseconds: 0,
         })),
 
-        // ---- Phase C.4 — Node / Relationship / Path ---------------------
+        // ---- Node / Relationship / Path ---------------------------------
         Value::Node(node) => {
             let properties = props_to_bolt_dict(&node.properties)?;
             Ok(BoltValue::Node(BoltNode {
@@ -248,7 +246,7 @@ fn path_to_bolt_path(p: &kglite::api::PathValue) -> Result<BoltPath, BoltError> 
     })
 }
 
-/// Bolt → kglite. Called by `execute`'s parameter decoding (Phase C.3).
+/// Bolt → kglite. Called by `execute`'s parameter decoding.
 ///
 /// Returns `BoltError::Protocol` on inbound variants that don't make
 /// sense in a parameter context: graph structures (Node/Relationship/

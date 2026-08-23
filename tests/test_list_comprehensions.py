@@ -162,8 +162,8 @@ class TestListComprehensionPathFunctions:
     def test_relationships_identity(self, chain_graph):
         """[r IN relationships(p)] returns the relationships themselves.
 
-        Phase A.1 / C2 — `r` is now a Rel dict; pre-A.1 it was a type
-        string. Check `.type` for the legacy shape.
+        `r` is a Rel dict, not a type string. Check `.type` for the
+        legacy shape.
         """
         result = chain_graph.cypher(
             "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..10]->(b:Person {name: 'Charlie'})) "

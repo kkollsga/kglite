@@ -1012,8 +1012,7 @@ pub enum SchemaCommand {
     },
     /// Constraint DDL. Parsed into a typed command so a ported Neo4j schema
     /// script gets a specific unsupported-feature error at *execution* rather
-    /// than a syntax error. Sprint 4b replaces that error with enforcement —
-    /// the parser does not change.
+    /// than a syntax error.
     Constraint(ConstraintCommand),
 }
 
@@ -1143,8 +1142,8 @@ pub enum DropIndexSelector {
     },
 }
 
-/// Constraint DDL. Sprint 4a parses these; the executor rejects them with a
-/// specific message. Sprint 4b routes them to enforcement.
+/// Constraint DDL. The parser accepts every shape; the executor enforces the
+/// ones it supports and refuses the rest by name.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConstraintCommand {
     Create(CreateConstraint),
@@ -1281,8 +1280,7 @@ pub fn is_aggregate_expression(expr: &Expression) -> bool {
         // `RETURN [count(*), collect(x)]` — a list literal wrapping aggregates
         // is an aggregate projection. Absent this arm the query routes to the
         // plain projection path and dies with "Aggregate function 'count'
-        // cannot be used outside of RETURN/WITH" (same class as the pre-0.9.6
-        // ListSlice bug documented at planner/fusion/aggregate.rs).
+        // cannot be used outside of RETURN/WITH".
         Expression::ListLiteral(items) => items.iter().any(is_aggregate_expression),
         Expression::PredicateExpr(pred) => match pred.as_ref() {
             Predicate::Comparison { left, right, .. } => {

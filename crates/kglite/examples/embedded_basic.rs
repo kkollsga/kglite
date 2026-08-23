@@ -41,7 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── 2. Count nodes via Cypher ─────────────────────────────────
     //
     // The session module is the canonical query pipeline — same
-    // path Python, Bolt, and MCP all flow through (Phase E).
+    // path Python, Bolt, and MCP all flow through.
     let params = HashMap::new();
     let opts = session::ExecuteOptions::eager(&params);
     let outcome = session::execute_read(&graph, "MATCH (n) RETURN count(n) AS total", &opts)?;

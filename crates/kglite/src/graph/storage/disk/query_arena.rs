@@ -23,8 +23,8 @@
 //!   `>= E`. Records are dropped in exactly that moment, by the guard whose
 //!   release advances the oldest-live id.
 //! * With no live queries at all, every stamp qualifies and both arenas are
-//!   emptied. That is the pre-0.15.13 rule, which this protocol contains as its
-//!   special case.
+//!   emptied — the quiescent case, which this protocol contains as a special
+//!   case of the same rule.
 //!
 //! The bound this buys: retained records are only those materialized since the
 //! **currently oldest** query started, instead of since the last moment the

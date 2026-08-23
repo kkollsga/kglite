@@ -87,7 +87,7 @@ impl MethodConfig {
     /// in kglite-py unpacks a `Bound<PyAny>` into these arguments and
     /// calls this constructor; pure-Rust callers (CLI tools, JSON/YAML
     /// config loaders, future bindings) can call it directly with the
-    /// same data shape. Lifted from kglite-py in 0.10.1.
+    /// same data shape.
     ///
     /// `method_type` is required — the dict's `"type"` key.
     /// `resolve_str` is the dict's `"resolve"` key, validated via
@@ -1649,7 +1649,7 @@ pub fn get_children_properties(
                             ),
                             Some(Value::Null) => "null".to_string(),
                             Some(Value::NodeRef(idx)) => format!("node#{}", idx),
-                            // Phase A.1 — collection / graph-entity property
+                            // Collection / graph-entity property
                             // values are an edge case for hierarchical
                             // child-grouping; delegate to format_value.
                             Some(other) => crate::datatypes::values::format_value(other),

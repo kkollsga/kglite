@@ -128,8 +128,8 @@ class TestPathBindingConsistency:
     def test_relationships_shortest_path(self, chain_graph):
         """relationships(p) for shortestPath returns all edge types.
 
-        Phase A.1 / C2 — extract `.type` from each Rel dict for the
-        legacy list-of-strings shape.
+        Extract `.type` from each Rel dict for the legacy
+        list-of-strings shape.
         """
         result = chain_graph.cypher("""
             MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..5]->(d:Person {name: 'Diana'}))
@@ -831,8 +831,8 @@ class TestCollectNodePropertyAccess:
     def test_collect_index_bare_variable(self, reserves_graph):
         """RETURN lr (without property) should still expose the title.
 
-        Phase A.1 / C2 — `RETURN lr` (the variable) now returns a full
-        Node dict; the title lives in `properties["title"]`.
+        `RETURN lr` (the variable) returns a full Node dict; the title
+        lives in `properties["title"]`.
         """
         result = reserves_graph.cypher(
             "MATCH (fr:FieldReserves)-[:OF_FIELD]->(f:Field {name: 'ULA'}) "
@@ -1217,10 +1217,10 @@ class TestMapStringFieldAccess:
         """A property access that doesn't match any map key returns
         Null (Cypher semantics).
 
-        Phase A.1 / C4 — Value::Map is now a proper Python dict at the
-        boundary; accessing a missing key returns Null rather than
-        the legacy "whole map string passthrough" behaviour, which
-        was an artifact of the pre-A.1 JSON-string representation.
+        Value::Map is a proper Python dict at the boundary; accessing
+        a missing key returns Null rather than the legacy "whole map
+        string passthrough" behaviour, which was an artifact of the
+        older JSON-string representation.
         """
         result = list(
             hub_graph.cypher("""

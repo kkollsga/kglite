@@ -4,9 +4,9 @@
 //! Mirrors `mapped_graph_impl.rs` for the other heap backend, and exists for
 //! the same reason: `storage/mod.rs` holds the trait definitions and the struct
 //! declarations and is at its 800-line module cap, so the impl blocks live in a
-//! sibling. D2 Phase 1 moved `Clone` / `new` / `from_graph` / `deep_clone` /
-//! the undo accessors / `inner` / `inner_mut` here when the `SlotMirror` field
-//! pushed `mod.rs` over the cap — split, never raise the cap.
+//! sibling: `Clone` / `new` / `from_graph` / `deep_clone` / the undo accessors
+//! / `inner` / `inner_mut` live here because the `SlotMirror` field pushed
+//! `mod.rs` over the cap — split, never raise the cap.
 
 use super::slot_mirror::SlotMirror;
 use super::undo::UndoJournal;
@@ -98,13 +98,13 @@ impl MemoryGraph {
     /// A genuine deep copy of this backend, spelled out so it cannot be
     /// confused with an `Arc` refcount bump.
     ///
-    /// `GraphBackend::Memory` holds an `Arc<MemoryGraph>` since D2 Phase 1, and
-    /// on an `Arc` handle `.clone()` copies the *pointer*. The two spellings
-    /// are one character apart, sit in the same `match`, and mean opposite
+    /// `GraphBackend::Memory` holds an `Arc<MemoryGraph>`, and on an `Arc`
+    /// handle `.clone()` copies the *pointer*. The two spellings are one
+    /// character apart, sit in the same `match`, and mean opposite
     /// things — one preserves the whole-graph copy the fork is defined as, the
     /// other silently shares a backend that every write then mutates in place
     /// under the reader. Naming the deep copy makes the intended one
-    /// unmistakable at the call site and gives D2 Phase 2 a single seam to
+    /// unmistakable at the call site and gives the fork path a single seam to
     /// change.
     #[inline]
     pub(crate) fn deep_clone(&self) -> Self {

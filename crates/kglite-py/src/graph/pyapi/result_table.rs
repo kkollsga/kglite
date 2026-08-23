@@ -163,7 +163,7 @@ fn format_cell_value(value: &crate::datatypes::values::Value) -> String {
 }
 
 fn format_preprocessed_value(pv: &PreProcessedValue) -> String {
-    // Phase A.1 / C7a — ParsedJson variant deleted; only Plain remains.
+    // `Plain` is PreProcessedValue's only variant.
     match pv {
         PreProcessedValue::Plain(v) => format_cell_value(v),
     }

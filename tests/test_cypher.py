@@ -313,9 +313,8 @@ class TestEmptyResults:
 
 class TestSyntaxErrors:
     def test_invalid_query(self, cypher_graph):
-        # Phase A.2 / C2 — parse_cypher raises typed CypherSyntaxError
-        # (was ValueError pre-A.2). Catchable via either the specific
-        # class or the universal kglite.KgError base.
+        # parse_cypher raises a typed CypherSyntaxError, catchable via
+        # either the specific class or the universal kglite.KgError base.
         import kglite
 
         with pytest.raises(kglite.CypherSyntaxError):
@@ -2555,8 +2554,8 @@ class TestBugMultiHopPath:
         assert len(rows[0]["chain"]) == 3  # a, b, pr
 
     def test_two_hop_path_relationships(self, cypher_graph):
-        # Phase A.1 / C2 — relationships() returns Rel dicts; extract
-        # `.type` for the legacy list-of-strings shape.
+        # relationships() returns Rel dicts; extract `.type` for the
+        # legacy list-of-strings shape.
         rows = cypher_graph.cypher("""
             MATCH p = (a:Person)-[:KNOWS]->(b:Person)-[:PURCHASED]->(pr:Product)
             WHERE a.name = 'Alice'
@@ -2634,11 +2633,11 @@ class TestBugLabelsInconsistency:
     def test_labels_filter_equality(self, cypher_graph):
         """Should be able to filter by labels(n) in WHERE.
 
-        Phase A.1 / C2 — labels(n) returns native list ['Person'] now,
-        so the WHERE comparison is against a list, not a string. The
-        legacy `labels(n) = 'Person'` comparison was a string-vs-string
-        comparison via the JSON-encoded list; that surface is gone.
-        Use `labels(n)[0] = 'Person'` or membership instead.
+        labels(n) returns a native list ['Person'], so the WHERE
+        comparison is against a list, not a string. The legacy
+        `labels(n) = 'Person'` string-vs-string comparison via the
+        JSON-encoded list is gone. Use `labels(n)[0] = 'Person'` or
+        membership instead.
         """
         rows = cypher_graph.cypher("""
             MATCH (n) WHERE labels(n)[0] = 'Person' RETURN count(n) AS cnt

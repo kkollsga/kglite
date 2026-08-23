@@ -245,16 +245,15 @@ pub(crate) fn is_fusable_with_clause(with: &WithClause) -> bool {
 /// the materialized executor handles those via its general aggregate
 /// evaluator.
 ///
-/// The recursion set must mirror `ast::is_aggregate_expression` —
-/// pre-0.9.6 this matched only `FunctionCall`, arithmetic ops, and
-/// `Negate`, and fell through to `_ => true` for everything else.
-/// `collect(x)[0..3]` (a `ListSlice` wrapping a `FunctionCall`) hit
-/// the fall-through arm and was wrongly classified as "all aggregates
-/// are count", which let the OPTIONAL-MATCH fusion accept it. The
-/// fused executor then ran `evaluate_expression` per-row on the
-/// substituted (still-containing-collect) expression and the runtime
-/// rejected the per-row aggregate call with "Aggregate function
-/// 'collect' cannot be used outside of RETURN/WITH".
+/// The recursion set must mirror `ast::is_aggregate_expression`: any
+/// wrapper this does not recurse into falls through to `_ => true` and is
+/// wrongly classified as "all aggregates are count", which lets the
+/// OPTIONAL-MATCH fusion accept it. `collect(x)[0..3]` (a `ListSlice`
+/// wrapping a `FunctionCall`) is the shape that catches — the fused
+/// executor would run `evaluate_expression` per-row on the substituted
+/// (still-containing-collect) expression and the runtime would reject the
+/// per-row aggregate call with "Aggregate function 'collect' cannot be
+/// used outside of RETURN/WITH".
 fn aggregates_only_count(expr: &Expression) -> bool {
     use crate::graph::languages::cypher::ast::is_aggregate_expression;
     match expr {

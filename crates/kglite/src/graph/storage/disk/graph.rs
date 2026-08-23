@@ -1482,9 +1482,8 @@ impl DiskGraph {
                     }
                 }
             }
-            // Replace the Arc wholesale. This map is the only owner
-            // (D1 Phase 3), so every later reader sees the flushed store
-            // without a mirror step.
+            // Replace the Arc wholesale. This map is the only owner, so every
+            // later reader sees the flushed store without a mirror step.
             self.column_stores
                 .insert(type_key, std::sync::Arc::new(new_store));
         }

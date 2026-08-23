@@ -65,8 +65,8 @@ impl MappedGraph {
     /// A genuine deep copy of this backend — see
     /// [`MemoryGraph::deep_clone`](crate::graph::storage::MemoryGraph::deep_clone)
     /// for why the deep copy is named rather than left as a bare `.clone()`:
-    /// `GraphBackend::Mapped` holds an `Arc<MappedGraph>` since D2 Phase 1, and
-    /// on the handle `.clone()` bumps a refcount instead.
+    /// `GraphBackend::Mapped` holds an `Arc<MappedGraph>`, and on the handle
+    /// `.clone()` bumps a refcount instead.
     #[inline]
     pub(crate) fn deep_clone(&self) -> Self {
         self.clone()

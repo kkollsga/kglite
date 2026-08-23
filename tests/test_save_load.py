@@ -108,8 +108,8 @@ class TestSaveLoadWithFeatures:
 class TestV3Format:
     """Tests for the columnar binary format.
 
-    Class name kept as `TestV3Format` for git-blame continuity; Phase A.1 / C5
-    introduced v4; the current v5 header adds an explicit Postcard codec tag.
+    Class name kept as `TestV3Format` for git-blame continuity; the current
+    v6 header adds an explicit Postcard codec tag.
     """
 
     def test_v3_magic_bytes(self):
@@ -148,7 +148,7 @@ class TestV3Format:
 
             assert magic == b"RGF\x06"
             assert codec == b"\x02"
-            # 2 — Phase A.1 (Value enum); 3 — 0.10.29 (embedding model_id + text_hashes)
+            # 2 — Value enum; 3 — 0.10.29 (embedding model_id + text_hashes)
             assert core_version == 3
             assert metadata_len > 0  # metadata should not be empty
         finally:

@@ -5,8 +5,8 @@ must match.
 This is the **strongest correctness gate** for the bolt-server: the
 27-query corpus in `tests/test_cypher_differential.py` already exercises
 every optimizer pass + historical correctness-bug shapes. Running each
-over Bolt confirms that the Bolt projection path (Phase C.4 to_bolt,
-Phase A.1 Value::Node) doesn't silently drop, duplicate, or reorder
+over Bolt confirms that the Bolt projection path (`to_bolt` over
+Value::Node) doesn't silently drop, duplicate, or reorder
 rows.
 
 When the row sets diverge, the failure shows which query exposed the

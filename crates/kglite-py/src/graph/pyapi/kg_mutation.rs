@@ -1,9 +1,8 @@
 //! KnowledgeGraph #[pymethods]: node + connection ingestion.
 //!
-//! Part of the Phase 9 split of the kg_methods.rs monolith (5,419 lines
-//! single pymethods block). PyO3 merges multiple `#[pymethods] impl`
-//! blocks at class-registration time, so the split is purely structural —
-//! no runtime impact.
+//! PyO3 merges multiple `#[pymethods] impl` blocks at class-registration
+//! time, so splitting them across files is purely structural — no runtime
+//! impact.
 
 use crate::datatypes::on_invalid::{self, OnInvalid};
 use crate::datatypes::py_in;
@@ -1304,7 +1303,7 @@ impl KnowledgeGraph {
     ///     **node** properties it acts as ``update`` (matches
     ///     ``ConflictHandling::Sum`` in ``add_nodes`` / ``add_connections``).
     ///
-    /// - **Secondary labels** (multi-label, since 0.10.5) are *unioned*
+    /// - **Secondary labels** (multi-label) are *unioned*
     ///   onto the matched/created node — never removed. Idempotent.
     /// - **Property schemas** merge: a property present in ``other`` but
     ///   not here extends this graph's type schema (same path

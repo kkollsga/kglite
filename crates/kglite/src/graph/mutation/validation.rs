@@ -252,7 +252,7 @@ pub fn get_value_type_name(value: &Value) -> String {
         Value::Duration { .. } => "duration".to_string(),
         Value::Null => "null".to_string(),
         Value::NodeRef(_) => "noderef".to_string(),
-        // Phase A.1 — these typically appear in query results, not as
+        // These typically appear in query results, not as
         // stored properties. Validation that sees them is likely
         // surfacing a bug; classify for the error message.
         Value::List(_) => "list".to_string(),

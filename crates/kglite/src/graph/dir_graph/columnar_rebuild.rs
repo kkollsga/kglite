@@ -51,8 +51,8 @@ impl DirGraph {
     ///
     /// # Why the fast path is still sound without the Arc-identity check
     ///
-    /// Before D1 Phase 3 this guard compared each node's own store `Arc` with
-    /// the graph's by pointer, because `PropertyStorage::insert` on a columnar
+    /// This guard once compared each node's own store `Arc` with the graph's
+    /// by pointer, because `PropertyStorage::insert` on a columnar
     /// node did `Arc::make_mut` and forked the node away from the master —
     /// an `add_nodes(conflict_handling="update")` followed by `save()` would
     /// otherwise silently drop the new properties.

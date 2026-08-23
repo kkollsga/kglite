@@ -1,11 +1,11 @@
 //! Typed error taxonomy for KGLite.
 //!
-//! Phase A.2 of docs/history/bolt-implementation.md — replaces the prior
-//! "everything is a `String` then wrapped as `PyValueError` /
-//! `PyRuntimeError`" pattern with a structured [`KgError`] enum + a
-//! [`KgErrorCode`] classification. Existing per-module error types
-//! (`SchemaError`, `ValidationError`, `ExprError`) are preserved and
-//! bridged in via `From` impls — no taxonomy duplication.
+//! Replaces the prior "everything is a `String` then wrapped as
+//! `PyValueError` / `PyRuntimeError`" pattern with a structured
+//! [`KgError`] enum + a [`KgErrorCode`] classification. Existing
+//! per-module error types (`SchemaError`, `ValidationError`, `ExprError`)
+//! are preserved and bridged in via `From` impls — no taxonomy
+//! duplication.
 //!
 //! ## Why
 //!
@@ -13,15 +13,15 @@
 //!   grep'ing message strings.
 //! - Cypher parser line/col survives the boundary instead of being
 //!   embedded in the formatted string.
-//! - Phase C.6 (Bolt FAILURE-code mapping) needs typed codes; landing
-//!   them now means the whole engine surface is uniformly classified.
+//! - Bolt FAILURE-code mapping needs typed codes, so the whole engine
+//!   surface is uniformly classified.
 //! - MCP server error responses gain structured codes; agents can
 //!   react programmatically.
 //!
 //! ## Hierarchy
 //!
 //! Every kglite-raised exception is a subclass of `kglite.KgError`.
-//! The Python class chain is defined in [`crate::error_py`] via PyO3's
+//! The Python class chain is defined in kglite-py's `error_py` via PyO3's
 //! `create_exception!` macro. The Rust [`KgError`] enum + the
 //! `From<KgError> for PyErr` impl at the boundary pick the most
 //! specific subclass for each variant.
@@ -58,8 +58,8 @@ use crate::graph::storage::interner::InternerCollision;
 /// Canonical classification of every error KGLite raises.
 ///
 /// Maps 1-to-1 with the [`KgError`] enum variants but is `Copy + Eq +
-/// Hash` so it can be used in match dispatch tables (e.g. Phase C.6's
-/// Bolt FAILURE-code lookup).
+/// Hash` so it can be used in match dispatch tables (e.g. the Bolt
+/// FAILURE-code lookup).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum KgErrorCode {
     // Cypher pipeline
@@ -259,7 +259,7 @@ impl fmt::Display for KgErrorCode {
 /// (directly or via `?` from a `From`-convertible source type).
 ///
 /// At the PyO3 boundary, a `From<KgError> for PyErr` impl (in
-/// [`crate::error_py`]) picks the most specific Python exception
+/// kglite-py's `error_py`) picks the most specific Python exception
 /// subclass based on the variant.
 #[derive(Debug)]
 pub enum KgError {
@@ -387,7 +387,7 @@ pub enum KgError {
 
     /// A file exists but its contents are malformed (bad `.kgl` header,
     /// truncated blueprint JSON, etc.). The v3→v4 hard-break message
-    /// from Phase A.1 / C5 surfaces here too.
+    /// surfaces here too.
     FileFormat { path: PathBuf, message: String },
 
     /// Generic I/O failure (permission denied, mid-read EOF, mmap

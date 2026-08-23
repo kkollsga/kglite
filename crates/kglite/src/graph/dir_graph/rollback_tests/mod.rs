@@ -238,8 +238,8 @@ fn fingerprint_columnar_rows(graph: &DirGraph) -> Vec<(usize, u32)> {
         let PropertyStorage::Columnar(row) = &node.properties else {
             continue;
         };
-        // A node carries a row id, not a store handle (D1 Phase 3), so the
-        // identity worth fingerprinting is which row it points at.
+        // A node carries a row id, not a store handle, so the identity
+        // worth fingerprinting is which row it points at.
         columnar_rows.push((idx.index(), row.row_id()));
     }
     columnar_rows.sort();

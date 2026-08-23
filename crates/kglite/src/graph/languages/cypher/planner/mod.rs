@@ -345,8 +345,7 @@ fn pass_lower_fixed_var_length_hops(query: &mut CypherQuery, _ctx: &PassCtx) {
 /// `disabled`. When THIS pass is itself disabled the recursion never
 /// runs, so a fully-disabled optimizer leaves bodies un-optimized too,
 /// making the differential corpus's optimized-vs-naive comparison
-/// meaningful for subquery bodies (Phase 5: previously the executor
-/// stopgap optimized bodies unconditionally, ignoring the outer knob).
+/// meaningful for subquery bodies.
 ///
 /// This pass OWNS `CALL { }` body optimization (the executor runs the
 /// body exactly as planned here). Two body shapes are optimized
@@ -619,8 +618,8 @@ fn pass_reorder_match_patterns(query: &mut CypherQuery, ctx: &PassCtx) {
 /// **Pass:** `push_limit_into_match` — Mark the trailing `LIMIT N` as
 /// an early-stop hint on the preceding `MATCH` so the executor can
 /// short-circuit pattern expansion. WHY-BAIL: requires single-MATCH
-/// queries (multi-MATCH + WHERE on late-bound var produced silent row
-/// drops in 0.8.27 — see CHANGELOG).
+/// queries (multi-MATCH + WHERE on a late-bound var silently drops
+/// rows).
 fn pass_push_limit_into_match(query: &mut CypherQuery, ctx: &PassCtx) {
     push_limit_into_match(query, ctx.graph)
 }
@@ -663,9 +662,8 @@ fn pass_fuse_count_short_circuits(query: &mut CypherQuery, ctx: &PassCtx) {
 /// `OPTIONAL MATCH ... RETURN <agg>` into a single
 /// `FusedOptionalMatchAggregate` clause that counts matches per input
 /// row without materializing intermediate per-row expansions. WHY-BAIL:
-/// gate growing — most recently extended in 0.8.31 to recognize edge
-/// vars (`count(r)`) as local-to-OPT; multi-pattern clauses and a
-/// clause-owned `WHERE` (`OPTIONAL MATCH … WHERE …`) also bail, the latter
+/// edge vars (`count(r)`) count as local-to-OPT; multi-pattern clauses
+/// and a clause-owned `WHERE` (`OPTIONAL MATCH … WHERE …`) bail, the latter
 /// because the fused counter counts a pattern's matches with no hook to
 /// test a predicate per candidate.
 fn pass_fuse_optional_match_aggregate(query: &mut CypherQuery, _ctx: &PassCtx) {

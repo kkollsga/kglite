@@ -359,10 +359,9 @@ pub struct DirGraph {
     /// Lazy edge-type count cache — avoids O(E) rescan for FusedCountEdgesByType.
     /// Invalidated on edge mutations (add/remove).
     ///
-    /// **Fork-private** since D2 Phase 3 — see [`caches::ForkPrivateCache`] for
-    /// the aliasing bug that earned it (a snapshot reporting the writer's edge
-    /// counts) and for why `wkt_cache` and `property_ndv_cache` deliberately
-    /// stay shared.
+    /// **Fork-private** — see [`caches::ForkPrivateCache`] for the aliasing
+    /// bug that earned it (a snapshot reporting the writer's edge counts) and
+    /// for why `wkt_cache` and `property_ndv_cache` deliberately stay shared.
     #[serde(skip)]
     pub edge_type_counts_cache: caches::ForkPrivateCache<Arc<HashMap<String, usize>>>,
     /// Cached type connectivity: (source_type, connection_type, target_type) → count.
@@ -621,8 +620,7 @@ impl DirGraph {
     /// downstream consumers (the Python `Transaction` class, the
     /// `kglite-bolt-server` per-tx commit path).
     ///
-    /// Exposed via `kglite::api::DirGraph::version` since Phase E;
-    /// previously the field was `pub(crate)` only.
+    /// Exposed publicly via `kglite::api::DirGraph::version`.
     pub fn version(&self) -> u64 {
         self.version
     }
@@ -1181,10 +1179,9 @@ impl DirGraph {
         // in an empty set, flipping `has_connection_type` from "fall
         // through to metadata" mode (which sees every existing type) to
         // "use cache" mode (which returns false for every type except
-        // this one). Manifested in 0.9.4 as: load disk graph →
-        // add_connections of any new edge type → all subsequent
-        // typed-anchored MATCH queries on existing edge types return 0
-        // rows.
+        // this one): load a disk graph, add_connections of any new edge
+        // type, and every subsequent typed-anchored MATCH query on an
+        // existing edge type returns 0 rows.
         if self.connection_types.is_empty() && !self.connection_type_metadata.is_empty() {
             self.build_connection_types_cache();
         }
@@ -1300,12 +1297,11 @@ impl DirGraph {
     /// round-trips through save/load — so this O(#types) plan-time scan is an
     /// exact gate.
     ///
-    /// **O(#types), so call it only where it is used.** Until 0.15.15 this was
-    /// evaluated as a call argument to `fuse_count_short_circuits`, i.e. on
-    /// every statement the planner touched rather than on the count-by-type
-    /// shape that reads it — ~23 ns per declared node type, 4.6 µs per
-    /// statement on a 200-type schema. A new caller belongs behind its own
-    /// shape gate for the same reason.
+    /// **O(#types), so call it only where it is used** — roughly 23 ns per
+    /// declared node type, i.e. 4.6 µs per statement on a 200-type schema if
+    /// it is evaluated on every statement the planner touches rather than on
+    /// the count-by-type shape that reads it. A new caller belongs behind its
+    /// own shape gate.
     pub fn has_type_shadowing_property(&self) -> bool {
         self.node_type_metadata.values().any(|props| {
             props.contains_key("type")
@@ -1436,8 +1432,8 @@ impl DirGraph {
     /// that asymmetry is deliberate:
     ///
     /// * **memory / mapped** — the inline fields are the `Value::Null`
-    ///   sentinel. Every ingest path has been columnar since 0.16.0, so the
-    ///   node's identity lives in its type's `ColumnStore`, not on the record.
+    ///   sentinel. Every ingest path is columnar, so the node's identity
+    ///   lives in its type's `ColumnStore`, not on the record.
     /// * **disk** — the arena copy is materialised with the real `id`/`title`
     ///   before it is handed out, so the same call answers with real values.
     ///
@@ -1455,13 +1451,13 @@ impl DirGraph {
 
     // ── Column stores: DirGraph is the access point, the backend is the owner ──
     //
-    // D1 Phase 3 moved the per-type `ColumnStore` map onto the storage backend
-    // (`MemoryGraph` / `MappedGraph` / `DiskGraph` all carry one now) and
-    // deleted `DirGraph.column_stores` along with both halves of the
-    // DirGraph↔DiskGraph mirror that used to keep two copies in step. DirGraph
-    // keeps every lifecycle entry point — `enable_columnar`, `save`, spill,
-    // vacuum — and reaches the stores through these delegates, which translate
-    // the type *name* callers use into the `InternedKey` the backend keys by.
+    // The per-type `ColumnStore` map lives on the storage backend
+    // (`MemoryGraph` / `MappedGraph` / `DiskGraph` all carry one): there is no
+    // `DirGraph.column_stores` field and no DirGraph↔DiskGraph mirror keeping
+    // two copies in step. DirGraph keeps every lifecycle entry point —
+    // `enable_columnar`, `save`, spill, vacuum — and reaches the stores
+    // through these delegates, which translate the type *name* callers use
+    // into the `InternedKey` the backend keys by.
 
     /// The store for `node_type`, if that type is columnar.
     #[inline]
@@ -1915,22 +1911,6 @@ impl DirGraph {
         }
     }
 
-    /// Insert one node, routing storage by backend; returns the new index.
-    ///
-    /// Every backend routes id/title/properties through the type's
-    /// `ColumnStore` first (the same mechanism `batch.rs::flush_chunk` uses for
-    /// bulk `add_nodes`): register schema keys, push id/title/row, then
-    /// `add_node` a `Columnar` slot and `update_row_id`. On disk the last step
-    /// also stamps the `DiskNodeSlot`, which is where disk reads resolve the
-    /// row from; on the heap backends it is a no-op.
-    ///
-    /// Used by Cypher `CREATE` (`executor::write::create_node`) so a single
-    /// choke point gives uniform create semantics across modes. The caller
-    /// owns id-index / type-index / property-index / metadata bookkeeping.
-    ///
-    /// The store it mutates is the backend's own (D1 Phase 3), so there is no
-    /// read-side copy to push to afterwards — the pre-D1 shape kept a second
-    /// map on `DirGraph` and needed an explicit sync per batch.
     /// Check heap usage of column stores and spill largest to disk if over limit.
     /// No-op if memory_limit is None or the backend is memory-mode.
     ///
@@ -2447,9 +2427,9 @@ pub struct GraphInfo {
     pub columnar_live_rows: usize,
     /// Heap bytes held by the column stores the backend owns.
     ///
-    /// Lifted into `GraphInfo` by D1 Phase 3 so a binding can report columnar
-    /// memory without reaching into storage: the stores are backend-owned and
-    /// there is no `DirGraph.column_stores` field to read any more.
+    /// Exposed here so a binding can report columnar memory without reaching
+    /// into storage: the stores are backend-owned and there is no
+    /// `DirGraph.column_stores` field to read.
     pub columnar_heap_bytes: usize,
     /// `true` when at least one column store has been spilled to mmap.
     ///

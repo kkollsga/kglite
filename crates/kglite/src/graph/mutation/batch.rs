@@ -385,7 +385,7 @@ impl BatchProcessor {
         let affected_types: HashSet<String> = creates.iter().map(|c| c.node_type.clone()).collect();
         for node_type in &affected_types {
             let store_was_new = graph.column_store(node_type).is_none();
-            // D1 Phase 3: no detach pass. The old code stripped every existing
+            // No detach pass. The old code stripped every existing
             // node's `PropertyStorage` purely so `Arc::try_unwrap` below could
             // succeed — nodes held strong handles and would otherwise force a
             // whole-store clone. Nodes now hold a row id and no handle, so the
@@ -623,7 +623,7 @@ impl BatchProcessor {
     ///
     /// Routed through `GraphWrite` rather than `&mut NodeData` because a
     /// columnar node's properties live in the store the backend owns; there is
-    /// no per-node storage left to write into (D1 Phase 3). Title stays an
+    /// no per-node storage left to write into. Title stays an
     /// inline `NodeData` field and keeps its own short borrow.
     fn apply_node_update(
         graph: &mut DirGraph,

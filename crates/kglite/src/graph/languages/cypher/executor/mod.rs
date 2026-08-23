@@ -711,9 +711,8 @@ impl<'a> CypherExecutor<'a> {
     /// `MATCH (n) RETURN labels(n), count(*)` and its `n.type` spellings.
     ///
     /// `type_as_list` selects the projection shape: `labels(n)` yields a
-    /// single-element list (Phase A.1 / C6 native-list format), while
-    /// `n.type` / `n.node_type` / `n.label` yield the scalar type string —
-    /// each matching its own un-fused output.
+    /// single-element list, while `n.type` / `n.node_type` / `n.label` yield
+    /// the scalar type string — each matching its own un-fused output.
     fn execute_fused_count_by_type(
         &self,
         type_alias: &str,

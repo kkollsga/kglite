@@ -331,7 +331,7 @@ fn classify_aggregate(ast: Expr) -> Result<AggKind, String> {
                     }
                 }
                 // count(expr) — treat as Sum(if(expr is not null, 1, 0))
-                // semantic. For simplicity require count(*) for now;
+                // semantic. This site accepts only count(*);
                 // count_distinct handles the column case.
                 return Err(
                     "count: only count(*) supported here (use count_distinct for column counts)"

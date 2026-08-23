@@ -214,10 +214,10 @@ impl GraphState {
     }
 
     pub fn load_kgl(&self, path: &Path) -> Result<()> {
-        // Phase G.3-pre: load_file now returns Arc<DirGraph>;
-        // wrap into KnowledgeGraph here to preserve ActiveGraph's
-        // existing shape (kg.set_embedder_native, kg.source_location,
-        // kg.cypher, etc. are still used downstream).
+        // `load_file` returns Arc<DirGraph>; wrap into KnowledgeGraph
+        // here to preserve ActiveGraph's existing shape
+        // (kg.set_embedder_native, kg.source_location, kg.cypher, etc.
+        // are still used downstream).
         self.open_or_create(path, None).map(|_| ())
     }
 

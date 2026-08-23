@@ -133,7 +133,7 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
             "ts_series" => {
-                // Phase A.1 / C4 — native Value::List of Value::Map.
+                // Native Value::List of Value::Map.
                 // Each entry: {"time": <date-str>, "value": <float|null>}.
                 if args.is_empty() || args.len() > 3 {
                     return Err(

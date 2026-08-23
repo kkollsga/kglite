@@ -186,10 +186,9 @@ impl<'g> CypherExecutor<'g> {
     /// and no enumeration of what it might touch stays true. Instead:
     ///
     /// * **Disk is excluded** — its `node_weight` materialises into the shared
-    ///   query arena on every call. Deferred to its own phase; a `parallel`
-    ///   request on a disk graph is silently served serially, because
-    ///   `parallel` is a hint and refusing it would break portable code that
-    ///   runs against all three modes.
+    ///   query arena on every call. A `parallel` request on a disk graph is
+    ///   silently served serially, because `parallel` is a hint and refusing
+    ///   it would break portable code that runs against all three modes.
     /// * **Spatial graphs are excluded** — a spatial config disables the scan
     ///   compiler outright, so every row routes through the interpreter and
     ///   populates the per-node spatial cache. That is a genuine per-row
@@ -399,9 +398,9 @@ impl InlineAccumulators {
                 self.sum_was_int[ai] = false;
             }
         }
-        // Phase A.2 / C4 — short-circuit on is_none() guarantees the unwrap
-        // can't fire, but the .expect() makes the invariant explicit if a
-        // future refactor reorders the conditions.
+        // The is_none() short-circuit guarantees the unwrap can't fire, but
+        // the .expect() makes the invariant explicit if a future refactor
+        // reorders the conditions.
         if self.mins[ai].is_none()
             || crate::graph::core::filtering::total_order(
                 val,

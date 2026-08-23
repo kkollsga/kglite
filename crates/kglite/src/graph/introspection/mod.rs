@@ -3,7 +3,7 @@
 //! All functions take `&DirGraph` and return Rust structs. PyO3 conversion
 //! happens in `graph::pyapi`.
 //!
-//! Submodules (Phase 9 split of the monolithic `introspection.rs`):
+//! Submodules:
 //! - [`capabilities`] — TypeCapabilities + endpoint-type discovery
 //! - [`connectivity`] — type connectivity triples + neighbors_from_triples
 //! - [`schema_overview`] — schema / property / neighbors / sample / join candidates
@@ -100,9 +100,9 @@ pub struct PropertyStatInfo {
     pub values: Option<Vec<Value>>,
     /// One example value when `values` is None (high-cardinality property).
     /// Lets the schema output show what a property *looks like* even when
-    /// the full set is too large to enumerate. Added in 0.9.30 for
-    /// operator-reported friction where the agent had to guess the value
-    /// shape of properties like `file_path` from the name alone.
+    /// the full set is too large to enumerate — without it an agent has to
+    /// guess the value shape of properties like `file_path` from the name
+    /// alone.
     pub sample: Option<Value>,
     /// `true` when `unique` / `values` are NOT exhaustive — the population was
     /// sampled (only some nodes scanned) or the distinct-value set hit its cap.

@@ -1,7 +1,7 @@
 //! `AuthValidator` implementations.
 //!
-//! Phase C.6 ships [`BasicAuthValidator`] for the `--auth basic` CLI
-//! mode. `--auth none` doesn't wire any validator — boltr handles
+//! [`BasicAuthValidator`] backs the `--auth basic` CLI mode.
+//! `--auth none` doesn't wire any validator — boltr handles
 //! LOGON SUCCESS itself when no validator is supplied, accepting any
 //! credentials the driver sends.
 

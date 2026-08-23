@@ -318,9 +318,9 @@ pub trait GraphRead {
 
     // ─────────────── column-store ownership (read side) ───────────────
     //
-    // The backend is the sole owner of a columnar type's `ColumnStore`
-    // (D1 Phase 3). A node carries only its `row_id`; the store is resolved
-    // here, keyed by the node's type.
+    // The backend is the sole owner of a columnar type's `ColumnStore`. A node
+    // carries only its `row_id`; the store is resolved here, keyed by the
+    // node's type.
 
     /// The column store this backend owns for `type_key`, if the type is
     /// columnar.
@@ -728,7 +728,7 @@ pub struct MemoryGraph {
     /// state, so reads pay nothing and writes pay one discriminant check.
     /// See [`crate::graph::storage::undo`].
     pub(crate) undo: Option<Box<UndoJournal>>,
-    /// Mirror of petgraph's node/edge free lists, so D2 Phase 2's overlay can
+    /// Mirror of petgraph's node/edge free lists, so the fork overlay can
     /// *predict* the slot `add_node`/`add_edge` will hand out before the base
     /// graph is available to ask. See [`crate::graph::storage::slot_mirror`].
     pub(crate) slot_mirror: SlotMirror,

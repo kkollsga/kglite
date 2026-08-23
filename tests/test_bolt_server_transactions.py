@@ -17,7 +17,7 @@ The 18 contracts:
 8. Read-only session/tx surface (NOTE: Neo4j driver doesn't have
    begin_read like kglite's pyapi; we test --readonly server)
 9. OCC conflict — two sessions both write, second commit conflicts
-   (OCC version checking enforced via session::Session::commit; Phase E.4)
+   (OCC version checking enforced via session::Session::commit)
 9b. Managed-transaction retry — the conflict is published in the
    retriable `Neo.TransientError.*` class, so `session.execute_write`
    re-runs the losing unit of work by itself and both writes land
@@ -328,8 +328,8 @@ def test_readonly_rejects_each_mutation_class(bolt_server_readonly, query):
 
 def test_auto_commit_reads_are_independently_visible(bolt_server):
     """Each session.run is its own auto-commit (no wrapping tx). For
-    bolt-server: writes are NOT allowed in auto-commit (Phase C.5
-    contract), but each read sees the current graph state."""
+    bolt-server: writes are NOT allowed in auto-commit, but each read
+    sees the current graph state."""
     with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
         with driver.session() as session:
             # Two independent reads each return current state.
@@ -349,7 +349,7 @@ def test_multi_statement_in_one_run_pinned_behavior(bolt_server):
     """Multiple statements in one RUN — kglite's parser handles one
     statement per RUN, so `CREATE ...; CREATE ...` either parses only
     the first or errors. Either way, the test exists to pin which.
-    RB-2 will explicitly reject multi-statement with a structured
+    The server rejects multi-statement input with a structured
     error."""
     with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
         with driver.session() as session:

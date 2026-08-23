@@ -1,7 +1,7 @@
-"""Phase A.1 / C6 — pin the new RETURN shapes introduced by the
-`Value::{Node, Relationship, Path, List, Map}` enum extension.
+"""Pin the RETURN shapes produced by the
+`Value::{Node, Relationship, Path, List, Map}` enum.
 
-These tests are the post-A.1 contract: `RETURN n` yields a dict with
+These tests are the contract: `RETURN n` yields a dict with
 ``id``/``labels``/``properties`` (not a title string); `labels(n)` /
 `properties(n)` / `nodes(p)` / `relationships(p)` / `collect(n)` /
 list/map literals all yield native Python lists/dicts (not JSON strings
@@ -261,8 +261,8 @@ class TestNodeChaining:
 
 class TestDeleteSurvivesCountInSameQuery:
     """Cypher semantics: count(n) in the same query as DELETE n must
-    return the matched-row count, not the post-delete count. Phase A.1 / C2
-    preserves this via the tombstone Node path in the Variable resolver."""
+    return the matched-row count, not the post-delete count. The tombstone
+    Node path in the Variable resolver preserves this."""
 
     def test_detach_delete_count_in_same_query(self, graph_all_modes):
         rows = list(

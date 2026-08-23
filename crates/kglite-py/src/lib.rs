@@ -67,15 +67,15 @@ use kglite_core::api::io::load_file;
 /// independent — it stays as the wheel's primary surface.
 pub mod api {
     pub use crate::datatypes::Value;
-    // Per-variant carriers for the Value enum's compound shapes. Phase A.1
-    // added `Value::Node` / `Relationship` / `Path` carrying these struct
+    // Per-variant carriers for the Value enum's compound shapes:
+    // `Value::Node` / `Relationship` / `Path` carry these struct
     // types; downstream Rust consumers (kglite-bolt-server's value adapter,
     // and future Arrow/Polars exporters) want to pattern-match into them
     // without re-deriving accessors.
     pub use crate::datatypes::values::{NodeValue, PathValue, RelValue};
-    // Typed error surface — Phase A.2 added KgError + KgErrorCode for the
-    // Python boundary; Phase C.6 (bolt-server) consumes them to map onto
-    // Neo4j `Neo.ClientError.*` wire codes via `BoltError::Query`.
+    // Typed error surface — KgError + KgErrorCode for the Python
+    // boundary; the bolt-server consumes them to map onto Neo4j
+    // `Neo.ClientError.*` wire codes via `BoltError::Query`.
     pub use crate::error::{KgError, KgErrorCode};
     #[cfg(feature = "fastembed")]
     pub use crate::graph::embedder::fastembed::FastEmbedAdapter;
@@ -123,8 +123,7 @@ pub mod api {
     /// All bindings (pyapi, mcp-server, bolt-server, future Go/TS/JVM)
     /// wrap this module's types and free functions.
     ///
-    /// See `docs/rust/session.md` for the operator-facing
-    /// guide and `bolt_implementation.md` Phase E for the rationale.
+    /// See `docs/rust/session.md` for the operator-facing guide.
     pub mod session {
         pub use kglite_core::api::session::{
             execute_mut, execute_read, CommitOutcome, ExecuteOptions, ExecuteOutcome, Session,
@@ -594,7 +593,7 @@ fn setup_durable(
 ) -> PyResult<()> {
     use kglite_core::api::GraphRead;
     // `wal` stays a below-api reach (durable-transaction internals) —
-    // deferred to a high-level durable-transaction api lift (roadmap Piece 2).
+    // deferred to a high-level durable-transaction api lift.
     use kglite_core::api::durable as wal;
 
     if level.logs() && kg.inner.graph.is_disk() {
@@ -840,8 +839,8 @@ fn kglite(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Transaction>()?;
     m.add_class::<ResultView>()?;
     m.add_class::<ResultIter>()?;
-    // Phase A.2 / C1 — typed exception class hierarchy. Every kglite
-    // error surfaces as `kglite.KgError` or a more specific subclass.
+    // Typed exception class hierarchy. Every kglite error surfaces as
+    // `kglite.KgError` or a more specific subclass.
     error_py::register(py, m)?;
     graphgen::register(py, m)?;
     okf::pyapi::register(py, m)?;

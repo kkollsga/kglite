@@ -165,10 +165,9 @@ def test_error_validate_schema_unknown_property(bolt_server):
 
 
 def test_neo4j_scheme_uri_routing_works(bolt_server):
-    """Phase F #5: `neo4j://` routing is supported via a
-    single-server self-pointing routing table. Pre-F this raised a
-    Protocol error; post-F the cluster-aware driver path works the
-    same as direct `bolt://` connections."""
+    """`neo4j://` routing is supported via a single-server
+    self-pointing routing table, so the cluster-aware driver path
+    works the same as direct `bolt://` connections."""
     routed_url = bolt_server.replace("bolt://", "neo4j://")
     with neo4j.GraphDatabase.driver(routed_url, auth=("neo4j", "password")) as driver:
         # verify_connectivity uses ROUTE under neo4j:// scheme; the
@@ -224,13 +223,13 @@ def test_error_basic_auth_correct_password(tmp_path, bolt_binary_path):
 def test_edge_empty_query(bolt_server):
     """Empty query — the neo4j driver itself rejects with ValueError
     before the RUN message ever leaves the client (pre-server validation).
-    Whitespace-only goes to the server, where RB-2 catches it."""
+    Whitespace-only goes to the server, which rejects it."""
     with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
         with driver.session() as session:
             # Empty string — driver-side ValueError.
             with pytest.raises((ValueError, neo4j.exceptions.ClientError)):
                 session.run("").consume()
-            # Whitespace-only — passes driver, server's RB-2 gate
+            # Whitespace-only — passes driver, the server's empty-query gate
             # converts to a clean ClientError ("empty Cypher query").
             with pytest.raises(neo4j.exceptions.ClientError) as exc_info:
                 session.run("   \n\t  ").consume()
@@ -238,7 +237,7 @@ def test_edge_empty_query(bolt_server):
 
 
 def test_edge_multi_statement_query_rejected(bolt_server):
-    """Multi-statement query (semicolon separator) — RB-2 rejects
+    """Multi-statement query (semicolon separator) — the server rejects
     with a structured Protocol error pointing at "one statement per
     RUN". Without this gate, kglite's parser would silently process
     only the first statement."""
@@ -256,7 +255,7 @@ def test_edge_trailing_semicolon_allowed(bolt_server):
         with driver.session() as session:
             # kglite's parser may or may not accept the trailing
             # semicolon; either outcome is fine, but it shouldn't
-            # trigger the RB-2 multi-statement gate (which has
+            # trigger the multi-statement gate (which has
             # error message "multi-statement" / "one statement").
             try:
                 result = session.run("MATCH (n:Person) RETURN count(n) AS c ; ")
@@ -280,8 +279,9 @@ def test_edge_semicolon_in_string_literal_not_split(bolt_server):
 
 
 def test_edge_whitespace_only_query(bolt_server):
-    """Whitespace-only query — RB-2 gate catches and returns a
-    clean ClientError. (Covered above in test_edge_empty_query.)"""
+    """Whitespace-only query — the server's empty-query gate catches
+    it and returns a clean ClientError. (Covered above in
+    test_edge_empty_query.)"""
     # Kept for completeness; the assertion is identical to the
     # whitespace-only branch in test_edge_empty_query.
     with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
@@ -489,9 +489,9 @@ def test_edge_return_count_zero(bolt_server):
 
 
 def test_edge_call_db_labels(bolt_server):
-    """`CALL db.labels()` — the Phase A.3 schema procs flow through Bolt
-    via the standard CALL pipeline. Phase F.1 aligned the yield
-    column with Neo4j's convention: `label` (was `name` pre-F)."""
+    """`CALL db.labels()` — the schema procs flow through Bolt via the
+    standard CALL pipeline. The yield column follows Neo4j's
+    convention: `label`."""
     with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
         with driver.session() as session:
             result = session.run("CALL db.labels() YIELD label RETURN label")
@@ -500,8 +500,8 @@ def test_edge_call_db_labels(bolt_server):
 
 
 def test_edge_call_db_relationship_types(bolt_server):
-    """`CALL db.relationshipTypes()` — same as above. Phase F.1 yields
-    `relationshipType` (Neo4j convention; was `name` pre-F)."""
+    """`CALL db.relationshipTypes()` — same as above, yielding
+    `relationshipType` (the Neo4j convention)."""
     with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
         with driver.session() as session:
             result = session.run("CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType")
@@ -509,13 +509,12 @@ def test_edge_call_db_relationship_types(bolt_server):
             assert "KNOWS" in types
 
 
-# ─── Phase F #5: neo4j:// routing for cluster-aware drivers ─────────────────
+# ─── neo4j:// routing for cluster-aware drivers ─────────────────────────────
 
 
 def test_neo4j_scheme_routing(bolt_server):
-    """`neo4j://` URIs trigger a ROUTE message; the backend now
-    returns a single-server routing table (Phase F #5). Pre-F this
-    raised a Protocol error from the bolt backend.
+    """`neo4j://` URIs trigger a ROUTE message; the backend
+    returns a single-server routing table.
 
     The driver internally calls `route()` at connect time when the
     URI scheme is `neo4j://` (vs the direct `bolt://`). It then uses
@@ -549,7 +548,7 @@ def test_neo4j_scheme_routing_readonly_session(bolt_server):
 
 
 def test_tls_self_signed_works(tmp_path, bolt_binary_path):
-    """Phase F #6: --tls-cert / --tls-key wraps the listener in
+    """--tls-cert / --tls-key wraps the listener in
     TLS. A driver connecting via `bolt+ssc://` (self-signed
     certificate; +ssc = "ssl, skip cert verification") completes
     the handshake and runs queries. Skips if the binary isn't built."""

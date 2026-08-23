@@ -4,7 +4,7 @@
 //! Mirrors the pattern that previously lived inline in
 //! `src/graph/pyapi/transaction.rs` (Python-bound) and was mirrored
 //! again in `crates/kglite-bolt-server/src/backend.rs::TxState`
-//! (per-Bolt-session). Phase E extracts it once so future bindings
+//! (per-Bolt-session). Extracted once here so future bindings
 //! (Go, TypeScript, JVM) don't multiply the drift.
 //!
 //! ## Shape

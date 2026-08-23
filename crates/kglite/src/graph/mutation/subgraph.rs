@@ -88,11 +88,11 @@ pub fn extract_subgraph(
     new_graph.type_schemas = source.type_schemas.clone();
 
     // Carry the source's column stores. A copied node keeps its `row_id`, and
-    // since D1 Phase 3 that row id means nothing without the store the backend
-    // owns — before, the node carried its own `Arc` and its properties
-    // travelled with it. Sharing the `Arc` keeps every row id valid; the rows
-    // belonging to unselected nodes are orphans, which `enable_columnar`
-    // already detects and compacts away on the next save.
+    // that row id means nothing without the store the backend owns — the node
+    // does not carry its own `Arc`, so its properties do not travel with it.
+    // Sharing the `Arc` keeps every row id valid; the rows belonging to
+    // unselected nodes are orphans, which `enable_columnar` already detects
+    // and compacts away on the next save.
     for (type_key, store) in source
         .graph
         .column_stores_iter()

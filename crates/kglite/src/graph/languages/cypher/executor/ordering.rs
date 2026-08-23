@@ -3,10 +3,8 @@
 //! Sort order is defined exactly once here — [`compare_sort_keys`] — and is
 //! shared by the full sort ([`super::CypherExecutor::execute_order_by`]), the
 //! streaming top-K operator ([`super::stream::heap_top_k`]) and both fused
-//! top-K executors (`FusedOrderByTopK`, `FusedNodeScanTopK`). Before 0.15.14
-//! each of those carried its own comparison, and the fused ones disagreed with
-//! the full sort on NULL keys (they dropped NULL-keyed rows entirely, so
-//! `ORDER BY x DESC LIMIT k` returned the wrong rows — or fewer than `k`).
+//! top-K executors (`FusedOrderByTopK`, `FusedNodeScanTopK`), so no path can
+//! disagree with another on NULL keys.
 //!
 //! [`TopKCollector`] is the heap those top-K paths share: it keeps at most `K`
 //! entries ranked by `compare_sort_keys`, so a fused plan and the unfused

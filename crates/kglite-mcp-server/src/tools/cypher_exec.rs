@@ -206,7 +206,7 @@ fn render_cypher_body(
             match crate::csv_http::write_csv(cfg, &csv) {
                 Ok(name) => {
                     let url = cfg.url_for(&name);
-                    // 0.9.19 fix: count rows from the CSV body, not from
+                    // Count rows from the CSV body, not from
                     // `result.rows.len()`. The planner's lazy_eligible
                     // pass leaves `rows` empty for simple
                     // MATCH-RETURN-LIMIT queries and materialises through
@@ -281,8 +281,7 @@ pub(crate) fn cap_inline_csv(csv: &str) -> String {
 }
 
 /// Render a CypherResult as an inline 15-row preview (header + repr per
-/// row). Matches the format the pre-0.9.18 Python shim produced via
-/// `format_cypher_result`.
+/// row).
 pub(crate) fn format_cypher_inline(result: &cypher::CypherResult) -> String {
     let len = result.rows.len();
     if len == 0 {
@@ -351,11 +350,11 @@ pub(crate) fn push_value_repr(out: &mut String, val: &Value) {
         Value::NodeRef(idx) => {
             let _ = write!(out, "node[{idx}]");
         }
-        // Phase A.1 / C5 — collection / graph-entity variants. Render
-        // as compact JSON for the MCP text surface; the structured
-        // form is already what agents consume via `to_dicts()` /
-        // `to_list()`. Falls back to `?` on serialisation failure
-        // (shouldn't happen — these all derive Serialize).
+        // Collection / graph-entity variants. Render as compact JSON
+        // for the MCP text surface; the structured form is already
+        // what agents consume via `to_dicts()` / `to_list()`. Falls
+        // back to `?` on serialisation failure (shouldn't happen —
+        // these all derive Serialize).
         Value::List(_)
         | Value::Map(_)
         | Value::Node(_)

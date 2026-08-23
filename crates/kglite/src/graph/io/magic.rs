@@ -1,8 +1,7 @@
 //! `.kgl` container magic bytes, and the refusals an unreadable header earns.
 //!
-//! Split out of `io/file.rs` in 0.16.1 when the header *discriminator* landed:
-//! recognising a container version and explaining a header this binary cannot
-//! read are one concern, and `file.rs` was at its line ceiling.
+//! Recognising a container version and explaining a header this binary cannot
+//! read are one concern, and it lives here rather than in `io/file.rs`.
 //!
 //! Every kglite single-file container since v3 begins `RGF` followed by a
 //! one-byte version. That prefix is the only thing separating "an old kglite
@@ -16,10 +15,10 @@ use std::io;
 /// "rebuild your graph" error rather than a generic "unrecognized".
 pub(crate) const V3_MAGIC: [u8; 4] = [0x52, 0x47, 0x46, 0x03];
 
-/// Magic bytes for the v4 columnar format: "RGF\x04". Phase A.1 / C5
-/// introduced v4 alongside the `Value::Node`/`Relationship`/`Path`/
-/// `List`/`Map` enum extension. Hard break on v3 files (no read-compat
-/// path) per the docs/history/bolt-implementation.md plan.
+/// Magic bytes for the v4 columnar format: "RGF\x04". v4 arrived
+/// alongside the `Value::Node`/`Relationship`/`Path`/`List`/`Map` enum
+/// extension. Hard break on v3 files (no read-compat path) per
+/// docs/history/bolt-implementation.md.
 pub(crate) const V4_MAGIC: [u8; 4] = [0x52, 0x47, 0x46, 0x04];
 
 /// Magic bytes for the v5 columnar format. v5 retains the v4 section layout
@@ -34,7 +33,7 @@ pub(crate) const V5_MAGIC: [u8; 4] = [0x52, 0x47, 0x46, 0x05];
 pub(crate) const V6_MAGIC: [u8; 4] = [0x52, 0x47, 0x46, 0x06];
 
 /// Hard-break message for v3 files in a v4 binary. Per the
-/// Phase A.1 user-decision in docs/history/bolt-implementation.md: no read-compat
+/// user decision in docs/history/bolt-implementation.md: no read-compat
 /// path; rebuild the graph from source. Message gives the operator
 /// enough breadcrumbs to know what changed and what to do.
 pub(crate) const V3_HARD_BREAK_MSG: &str = "kglite .kgl file format v3 is not supported by this \

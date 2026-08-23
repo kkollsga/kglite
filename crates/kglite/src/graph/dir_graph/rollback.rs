@@ -64,9 +64,9 @@
 //!
 //! ## Columnar mode: one entry per changed cell, replayed into the live store
 //!
-//! The per-type master `ColumnStore` map lives on the **storage backend**
-//! (D1 Phase 3), which `swap_data_scale` swaps wholesale — so it is journal
-//! territory, not shell territory: the shell restore never sees it.
+//! The per-type master `ColumnStore` map lives on the **storage backend**,
+//! which `swap_data_scale` swaps wholesale — so it is journal territory,
+//! not shell territory: the shell restore never sees it.
 //! [`UndoEntry::ColumnarCell`] carries the prior value of each `(row, key)` a
 //! statement overwrote, and its replay writes that value straight back into the
 //! live store. [`UndoEntry::ColumnarSchemaGrown`] is its companion for the one

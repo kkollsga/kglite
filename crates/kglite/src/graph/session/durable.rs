@@ -1,6 +1,6 @@
 //! Durable sessions — the write-ahead log wired through [`Session`].
 //!
-//! The engine has shipped a complete logical WAL since 0.14 (`graph/wal.rs`:
+//! The engine carries a complete logical WAL (`graph/wal.rs`:
 //! CRC frames, torn-tail recovery, [`DurabilityLevel`], the `checkpoint_lsn`
 //! replay gate) plus the write-capture layer that feeds it
 //! (`graph/storage/recording.rs`). What lived *only* in the Python wheel was

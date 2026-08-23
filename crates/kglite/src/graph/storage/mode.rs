@@ -206,7 +206,7 @@ pub fn convert_dir_graph_to_mode(
     if current == StorageMode::Disk || requested == StorageMode::Disk {
         return Err(disk_conversion_refusal(current, requested));
     }
-    // The stores are backend-owned state (D1 Phase 3); the new backend must
+    // The stores are backend-owned state; the new backend must
     // inherit them or every columnar node loses its properties, id and title.
     let carried_stores: Vec<(InternedKey, std::sync::Arc<ColumnStore>)> = graph
         .graph

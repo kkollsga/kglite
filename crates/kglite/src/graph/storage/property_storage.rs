@@ -25,7 +25,7 @@
 //!
 //! A columnar node's properties live in a per-type
 //! [`ColumnStore`](crate::graph::storage::column_store::ColumnStore) that the
-//! **storage backend owns** (D1 Phase 3). `PropertyStorage::Columnar` carries a
+//! **storage backend owns**. `PropertyStorage::Columnar` carries a
 //! [`ColumnarRow`] — a row id and nothing else. There is no handle on the node,
 //! so there is no replica to drift, no `Arc::make_mut` fork per write, and no
 //! re-point sweep after a master write.
@@ -66,12 +66,11 @@ use crate::graph::storage::StrField;
 
 /// A node's columnar row — **identity only**.
 ///
-/// D1 Phase 3 deleted the `Arc<ColumnStore>` that used to live here. A node no
-/// longer knows *which* store holds its properties, only *which row* it is; the
-/// store is resolved by the storage backend from the node's type
-/// (`GraphRead::column_store`). That is the whole point of the programme: one
-/// owner, no replicas to drift, and a `SET` that mutates one row in place
-/// instead of forking a whole store per node.
+/// There is no `Arc<ColumnStore>` here. A node does not know *which* store
+/// holds its properties, only *which row* it is; the store is resolved by the
+/// storage backend from the node's type (`GraphRead::column_store`). That is
+/// the whole point: one owner, no replicas to drift, and a `SET` that mutates
+/// one row in place instead of forking a whole store per node.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ColumnarRow {
     row_id: u32,

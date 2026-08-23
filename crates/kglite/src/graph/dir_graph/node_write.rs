@@ -57,6 +57,21 @@ use crate::graph::storage::undo::ColumnarAppendPreImage;
 use crate::graph::storage::GraphWrite;
 
 impl DirGraph {
+    /// Insert one node, routing storage by backend; returns the new index.
+    ///
+    /// Every backend routes id/title/properties through the type's
+    /// `ColumnStore` first (the same mechanism `batch.rs::flush_chunk` uses for
+    /// bulk `add_nodes`): register schema keys, push id/title/row, then
+    /// `add_node` a `Columnar` slot and `update_row_id`. On disk the last step
+    /// also stamps the `DiskNodeSlot`, which is where disk reads resolve the
+    /// row from; on the heap backends it is a no-op.
+    ///
+    /// Used by Cypher `CREATE` (`executor::write::create_node`) so a single
+    /// choke point gives uniform create semantics across modes. The caller
+    /// owns id-index / type-index / property-index / metadata bookkeeping.
+    ///
+    /// The store it mutates is the backend's own, so there is no read-side
+    /// copy to push to afterwards.
     pub fn insert_node_routed(
         &mut self,
         id: Value,

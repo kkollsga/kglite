@@ -1,9 +1,8 @@
 //! KnowledgeGraph #[pymethods]: caches + schema + cypher + transactions.
 //!
-//! Part of the Phase 9 split of the kg_methods.rs monolith (5,419 lines
-//! single pymethods block). PyO3 merges multiple `#[pymethods] impl`
-//! blocks at class-registration time, so the split is purely structural —
-//! no runtime impact.
+//! PyO3 merges multiple `#[pymethods] impl` blocks at class-registration
+//! time, so splitting them across files is purely structural — no runtime
+//! impact.
 
 use crate::datatypes::{py_in, py_out};
 use crate::graph::languages::cypher;
@@ -1683,7 +1682,7 @@ impl KnowledgeGraph {
                 None
             };
 
-        // Phase E.2: pre-parse to decide whether this is a mutation
+        // Pre-parse to decide whether this is a mutation
         // (routes to execute_mut against &mut DirGraph) or a read
         // (routes to execute_read against &DirGraph via Arc snapshot).
         // The parser is cached so this second parse inside
@@ -1918,7 +1917,7 @@ impl KnowledgeGraph {
     ///     ```
     #[pyo3(signature = (timeout_ms=None))]
     fn begin(slf: Py<Self>, timeout_ms: Option<u64>) -> PyResult<Transaction> {
-        // Phase A.3 / 0.9.53 — Issue #1 fix: deferred clone.
+        // Deferred clone.
         //
         // Previously this call deep-cloned the entire DirGraph up front,
         // costing O(graph_size) per begin(). For a 100k-node graph that's
@@ -2081,8 +2080,7 @@ fn marshal_read_result(
     let columns = result.columns;
     let stats = result.stats;
     let profile = result.profile;
-    // resolve_noderefs already happened inside the py.detach block
-    // above (Phase A.3 / 0.9.53 Issue #3 partial fix).
+    // resolve_noderefs already happened inside the py.detach block above.
     let rows = result.rows;
     if output_csv {
         // CSV consumes every cell — if the executor handed us a
@@ -2108,8 +2106,7 @@ fn marshal_read_result(
                 .into_iter()
                 .map(|row| {
                     row.into_iter()
-                        // Phase A.1 / C7a — ParsedJson variant deleted;
-                        // only Plain remains.
+                        // `Plain` is PreProcessedValue's only variant.
                         .map(|pv| match pv {
                             cypher::py_convert::PreProcessedValue::Plain(v) => v,
                         })

@@ -2,13 +2,12 @@
 //!
 //! # What "divergence" means here
 //!
-//! Before D1 Phase 3 a columnar type's `ColumnStore` was reachable through
-//! **two** `Arc`s on a memory/mapped graph: a `DirGraph`-level master and the
-//! handle inside every node's `PropertyStorage::Columnar`. Nothing stopped
-//! those drifting apart — `Arc::make_mut` on either side forked — and deleting
-//! one of them was the whole point of the programme. The backend is the sole
-//! owner now; these tests keep asking the same questions of the surviving
-//! route.
+//! A columnar type's `ColumnStore` was once reachable through **two** `Arc`s
+//! on a memory/mapped graph: a `DirGraph`-level master and the handle inside
+//! every node's `PropertyStorage::Columnar`. Nothing stopped those drifting
+//! apart — `Arc::make_mut` on either side forked — so one of them was deleted.
+//! The backend is the sole owner now; these tests keep asking the same
+//! questions of the surviving route.
 //!
 //! This module forks them deliberately and then asks every public read surface
 //! what it sees. Two classes of assertion live here:
@@ -160,10 +159,9 @@ fn node_row_id(graph: &DirGraph, idx: NodeIndex) -> Option<u32> {
 /// Does node `idx` still share the master's `Arc`?
 /// Is the type's master store owned by the backend alone?
 ///
-/// The D1 Phase 3 successor to `node_shares_master`: there is no node-held
-/// handle to compare against any more, so the question that matters is whether
-/// anything at all shares the store — which is what decides whether the next
-/// write forks or mutates in place.
+/// There is no node-held handle to compare against, so the question that
+/// matters is whether anything at all shares the store — which is what decides
+/// whether the next write forks or mutates in place.
 fn master_is_uniquely_owned(graph: &DirGraph) -> bool {
     graph
         .column_store("Item")
@@ -330,13 +328,9 @@ fn all_public_reads_agree_under_master_node_divergence() {
 
 // ── 2. Which replica wins — pinned, inverted by Phase 3 ────────────────────
 
-/// **Inverted by D1 Phase 3** (was `today_the_node_handle_wins_over_the_master`).
-///
-/// Before Phase 3 a master-only write was invisible: every read resolved
-/// through the node's own `Arc`, and this test asserted it read the *stale*
-/// value with an instruction to flip when ownership moved. Ownership has moved.
-/// The backend's store is now the only store, so a write into it is what every
-/// read returns.
+/// The backend's store is the only store, so a master-only write is what every
+/// read returns — there is no node-held `Arc` left to shadow it with a stale
+/// value.
 #[test]
 fn the_backend_store_is_the_only_read_route() {
     let mut graph = seeded_columnar();
@@ -552,8 +546,8 @@ fn spill_reclaims_the_heap_it_materialises() {
 // ── 5. Defect 1 — columnar enumeration completeness ────────────────────────
 
 /// `describe()`'s per-type property block and node samples read through the
-/// accessors now; before D1 Phase 1 they went through `NodeData::property_iter`
-/// and enumerated **nothing** for a saved graph.
+/// accessors, not `NodeData::property_iter`, which enumerated **nothing** for
+/// a saved graph.
 #[test]
 fn describe_reports_columnar_properties() {
     use crate::graph::introspection::{ConnectionDetail, CypherDetail, FluentDetail};
@@ -624,15 +618,12 @@ fn property_ndv_counts_columnar_rows() {
 
 /// Install a **different** store for `node_type`, with `edit` applied.
 ///
-/// # What this proves after D1 Phase 3
+/// # What this proves
 ///
-/// In Phase 2 the poison had to fabricate a disagreement between two replicas —
-/// a stale copy on every node and the truth in the master — because both routes
-/// pointed at the same object and a gate that cannot tell them apart is not a
-/// gate. Phase 3 deleted the node-held replica outright, so the disagreement is
-/// no longer expressible: `column_store(type)` *is* the read route, and the
-/// compile-time gate (`ColumnarRow` carries a row id and nothing else) is what
-/// now rules out the class the thread-local hook used to catch.
+/// There is no node-held replica any more, so a disagreement between two
+/// replicas is not expressible: `column_store(type)` *is* the read route, and
+/// the compile-time gate (`ColumnarRow` carries a row id and nothing else) is
+/// what rules out the class the thread-local hook used to catch.
 ///
 /// What survives here is still worth having: a caller that captured an `Arc` of
 /// the store earlier — a cache, a snapshot taken across a write — keeps reading
@@ -956,17 +947,16 @@ fn r14_resolve_noderefs_reads_the_authoritative_store() {
 
 // ── The compile-time gate's enumerated escape list ────────────────────────
 
-/// **D1 Phase 3 landed: the escapes are gone.**
+/// **The escapes are gone.**
 ///
 /// `ColumnarRow::node_handle` and `::repoint` were the only two ways to reach a
-/// node's own `Arc<ColumnStore>` outside `graph::storage`, and Phase 2 pinned
-/// their call sites file-by-file as the Phase-3 work list. Phase 3 deleted the
-/// field they exposed, so both methods and every one of their 13 call sites are
-/// gone — the expected set is empty.
+/// node's own `Arc<ColumnStore>` outside `graph::storage`. The field they
+/// exposed no longer exists, so both methods and every one of their call sites
+/// are gone — the expected set is empty.
 ///
 /// The test is kept rather than deleted because an empty expectation is the
 /// strongest form of the gate: re-introducing either name anywhere in the crate
-/// fails it. If a future phase legitimately needs a node-held handle again, it
+/// fails it. If a future change legitimately needs a node-held handle again, it
 /// has to say so here.
 const NODE_HANDLE_ESCAPE_SITES: &[(&str, usize)] = &[];
 

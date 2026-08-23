@@ -567,8 +567,8 @@ __all__ = [
     "from_networkx",
     "Agg",
     "Spatial",
-    # Phase A.2 / C1 — typed exception classes. See
-    # docs/explanation/error-handling.md for the hierarchy.
+    # Typed exception classes. See docs/python/error-handling.md for the
+    # hierarchy.
     "KgError",
     "CypherError",
     "CypherSyntaxError",

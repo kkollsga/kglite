@@ -1180,8 +1180,8 @@ fn append_overflow_data(
         mmap = unsafe { MmapMut::map_mut(&file)? };
 
         // Write overflow data and record regions. Accumulate summary stats
-        // instead of printing one line per type (Wikidata triggered ~90 k
-        // lines of mostly-noise here pre-0.8.15).
+        // instead of printing one line per type (Wikidata would otherwise
+        // emit ~90 k lines of mostly-noise here).
         let mut overflow_types: u32 = 0;
         let mut overflow_sparse_cols: u64 = 0;
         let mut overflow_bytes_total: u64 = 0;

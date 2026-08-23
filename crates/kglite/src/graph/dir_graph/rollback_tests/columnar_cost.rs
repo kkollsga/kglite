@@ -338,11 +338,11 @@ fn a_failed_multi_node_create_truncates_to_the_pre_statement_row_count() {
 
 /// **Replaces `every_node_shares_the_master_column_store_handle`.**
 ///
-/// That test pinned the pre-D1 design: `enable_columnar` pointed every node of
+/// That test pinned an earlier design: `enable_columnar` pointed every node of
 /// a type at the master, so its strong count was `1 + nodes-of-type` and every
-/// first-write-of-a-statement forked the whole store. D1 Phase 3 deleted the
-/// node-held handle, and this is the inverted assertion: *no* node holds one,
-/// and the master is uniquely owned.
+/// first-write-of-a-statement forked the whole store. The node-held handle is
+/// gone, and this is the inverted assertion: *no* node holds one, and the
+/// master is uniquely owned.
 ///
 /// Keeping the coverage rather than the assertion is deliberate — the property
 /// this file cares about is what the refcount implies for `Arc::make_mut`, and

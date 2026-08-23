@@ -6,8 +6,8 @@
 //! Statement rollback guarantees that a node or edge comes back on **the exact
 //! `NodeIndex`/`EdgeIndex` it vacated** (`dir_graph/rollback.rs`, "What
 //! `identical` means here"), and `NodeIndex` is the key of every index
-//! structure on `DirGraph`. D2 Phase 2 puts a *writer-side overlay* in front of
-//! the shared base graph: the overlay must hand out an index at write time and
+//! structure on `DirGraph`. A *writer-side overlay* sits in front of the
+//! shared base graph: the overlay must hand out an index at write time and
 //! then reproduce that same index when the overlay is folded back into the base
 //! at compaction. `StableGraph::add_node` reuses free-list slots and offers no
 //! index-controlled insertion, so an overlay that invents indices from

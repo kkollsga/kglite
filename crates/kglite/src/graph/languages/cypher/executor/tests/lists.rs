@@ -104,7 +104,7 @@ fn test_list_slice_basic() {
     let no_params = HashMap::new();
     let executor = CypherExecutor::with_params(&graph, &no_params, None);
 
-    // Phase A.1 / C4 — slice now returns Value::List, not JSON string.
+    // Slice returns Value::List, not a JSON string.
 
     // [start..end]
     let q = parser::parse_cypher("RETURN [1,2,3,4,5][1..3]").unwrap();
@@ -137,7 +137,7 @@ fn test_list_slice_edge_cases() {
     let no_params = HashMap::new();
     let executor = CypherExecutor::with_params(&graph, &no_params, None);
 
-    // Phase A.1 / C4 — slice returns native Value::List.
+    // Slice returns a native Value::List.
 
     // Out of bounds — clamps to available
     let q = parser::parse_cypher("RETURN [1,2,3][..100]").unwrap();

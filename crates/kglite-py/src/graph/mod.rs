@@ -215,8 +215,8 @@ pub struct KnowledgeGraph {
     /// Backend-agnostic via [`embedder::Embedder`] trait: Python
     /// embedders flow through [`embedder::py_adapter::PyEmbedderAdapter`];
     /// Rust-native embedders (e.g. fastembed-rs) implement the trait
-    /// directly. Switched from `Option<Py<PyAny>>` in 0.9.18 so
-    /// downstream Rust binaries (kglite-mcp-server) don't inherit a
+    /// directly. Held as a trait object rather than `Option<Py<PyAny>>`
+    /// so downstream Rust binaries (kglite-mcp-server) don't inherit a
     /// libpython dep transitively.
     pub(crate) embedder: Option<Arc<dyn embedder::Embedder>>,
     /// Default per-query timeout in milliseconds. Applied to cypher() when
@@ -417,8 +417,7 @@ impl KnowledgeGraph {
     /// and the sibling Rust crates (kglite-bolt-server,
     /// kglite-mcp-server) that consume `kglite_core::api::io::load_file ->
     /// Arc<DirGraph>` and need to wrap it into a `KnowledgeGraph`
-    /// alongside their own state. Phase G.3-pre decoupled the
-    /// engine-side constructors from the binding-side wrapper.
+    /// alongside their own state.
     pub fn from_arc(inner: Arc<DirGraph>) -> Self {
         KnowledgeGraph {
             inner,
@@ -795,7 +794,6 @@ impl KnowledgeGraph {
     }
 
     /// Thin delegate to `kglite_core::api::infer_selection_node_type`.
-    /// Engine logic lifted to core in 0.10.1.
     pub(crate) fn infer_selection_node_type(&self) -> Option<String> {
         kglite_core::api::infer_selection_node_type(&self.cursor.selection, &self.inner)
     }
@@ -929,8 +927,7 @@ pub(crate) fn parse_spatial_column_types(
 ) -> PyResult<(Option<kglite_core::api::SpatialConfig>, Py<PyDict>)> {
     // PyO3-only boundary: extract dict → Vec<(String, String)>,
     // delegate to core, repack cleaned pairs into a fresh PyDict.
-    // Engine logic in `kglite::api::parse_spatial_column_types_from_pairs`
-    // (lifted in 0.10.1).
+    // Engine logic in `kglite::api::parse_spatial_column_types_from_pairs`.
     let mut pairs: Vec<(String, String)> = Vec::new();
     for (key, value) in column_types.iter() {
         let col_name: String = key.extract()?;
@@ -976,10 +973,10 @@ pub(crate) fn parse_temporal_column_types(
 
 // ─── Inline timeseries parsing ──────────────────────────────────────────────
 
-// `TimeSpec` and `InlineTimeseriesConfig` moved to
-// `kglite_core::graph::features::timeseries` in 0.10.1. Re-exported
-// under the wheel's previous paths so the local `parse_inline_timeseries`
-// + downstream `pyapi/*.rs` callers compile unchanged.
+// `TimeSpec` and `InlineTimeseriesConfig` live in
+// `kglite_core::graph::features::timeseries`. Re-exported here so the
+// local `parse_inline_timeseries` + downstream `pyapi/*.rs` callers can
+// name them at this path.
 pub(crate) use kglite_core::api::timeseries::{InlineTimeseriesConfig, TimeSpec};
 
 /// Parse the `timeseries` PyDict parameter from `add_nodes`.
@@ -1004,7 +1001,7 @@ pub(crate) fn parse_inline_timeseries(
     // PyO3-only step: extract the heterogeneous `time` value into either
     // a String (Variant A) or a HashMap (Variant B). Engine logic in
     // core's `InlineTimeseriesConfig::from_components` validates the
-    // shape and assembles the config (lifted in 0.10.1).
+    // shape and assembles the config.
     let (time_col, time_components) = if let Ok(col_name) = time_val.extract::<String>() {
         (Some(col_name), None)
     } else if let Ok(dict) = time_val.cast::<PyDict>() {
@@ -1290,8 +1287,8 @@ pub(crate) fn parse_method_param(
     })?;
 
     // PyO3-only boundary: extract each dict field, then hand off to
-    // `MethodConfig::from_components` (lifted to core in 0.10.1) which
-    // validates the resolve string and assembles the struct.
+    // `MethodConfig::from_components`, which validates the resolve
+    // string and assembles the struct.
     let method_type: String = dict
         .get_item("type")?
         .ok_or_else(|| {

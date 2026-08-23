@@ -320,7 +320,7 @@ class TestSegmentManifestRecordsIndexes:
         p_hash = _fnv1a_64("label")
         assert (t_hash, p_hash) in {(e[0], e[1]) for e in ranges}
         placeholder_entry = next(e for e in ranges if (e[0], e[1]) == (t_hash, p_hash))
-        # Phase 5 only emits the placeholder; numeric / bloom variants land later.
+        # Only the placeholder is emitted today; numeric / bloom variants land later.
         assert placeholder_entry[2] == "StringBloomPlaceholder"
 
     def test_manifest_empty_without_indexes(self, disk_dir):

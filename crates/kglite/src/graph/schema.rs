@@ -6,12 +6,12 @@ pub(crate) use crate::graph::storage::interner::{
 };
 use crate::graph::storage::GraphRead;
 // `PropertyStorage` lives under `graph::storage` so a columnar node's store
-// handle cannot be reached from outside the storage layer (D1 Phase 2).
+// handle cannot be reached from outside the storage layer.
 // Re-exported here to preserve the `crate::graph::schema::PropertyStorage`
 // import path every caller already uses.
 pub(crate) use crate::graph::storage::property_storage::{ColumnarRow, PropertyStorage};
 
-// Phase 9 split: DirGraph + GraphBackend moved to sibling modules.
+// DirGraph + GraphBackend live in sibling modules.
 // Re-exported here to preserve `crate::graph::schema::X` import paths.
 pub use crate::graph::dir_graph::DirGraph;
 use crate::graph::dir_graph::NodeRemap;
@@ -177,8 +177,7 @@ pub struct SpatialConfig {
 /// (`float` for lat/lon, `str` for WKT shapes) so downstream
 /// dataframe loaders treat them correctly.
 ///
-/// Lifted from kglite-py's `parse_spatial_column_types` in 0.10.1 —
-/// the wheel keeps only the `Bound<PyDict>` → `Vec<(String, String)>`
+/// The wheel keeps only the `Bound<PyDict>` → `Vec<(String, String)>`
 /// extraction wrapper.
 /// Result of column-type parsing: optional config + cleaned (col_name, type_str) pairs.
 pub type SpatialColumnParseResult = (Option<SpatialConfig>, Vec<(String, String)>);
@@ -318,7 +317,6 @@ pub struct TemporalConfig {
 /// Returns `Err` if exactly one is found (asymmetric config is a
 /// data-shape mistake — better to fail loudly).
 ///
-/// Lifted from kglite-py's `parse_temporal_column_types` in 0.10.1.
 /// Result of temporal column-type parsing: optional config + cleaned pairs.
 pub type TemporalColumnParseResult = (Option<TemporalConfig>, Vec<(String, String)>);
 
@@ -1479,7 +1477,7 @@ impl NodeData {
     /// call answers differently there — see [`crate::graph::dir_graph::DirGraph::get_node`].
     ///
     /// **Read an id through [`GraphRead::get_node_id`] or `NodeView::id`**,
-    /// which resolve the store; never off a bare `NodeData` (D1 Phase 3).
+    /// which resolve the store; never off a bare `NodeData`.
     ///
     /// [`GraphRead::get_node_id`]: crate::graph::storage::GraphRead::get_node_id
     #[inline]

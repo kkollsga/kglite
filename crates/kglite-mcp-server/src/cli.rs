@@ -206,8 +206,8 @@ pub(crate) fn validate_mode_paths(mode: &Mode, cli: &Cli) -> Result<()> {
 
 /// Manifest `workspace.kind: local` wins over CLI flags — promote `mode` to
 /// `LocalWorkspace` so the rest of boot sees it. Mirrors the framework's own
-/// `mcp-server` binary (`crates/mcp-server/src/main.rs` in 0.3.23+). Returns
-/// `mode` unchanged when no local-workspace manifest is in play.
+/// `mcp-server` binary (`crates/mcp-server/src/main.rs`). Returns `mode`
+/// unchanged when no local-workspace manifest is in play.
 pub(crate) fn promote_local_workspace(mode: Mode, manifest: Option<&Manifest>) -> Result<Mode> {
     let Some(wcfg) = manifest.and_then(|m| m.workspace.as_ref()) else {
         return Ok(mode);

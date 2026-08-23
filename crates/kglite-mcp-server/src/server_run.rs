@@ -267,12 +267,11 @@ fn boot_builtins(
                 )
             })
             .unwrap_or(false),
-        // 0.9.19 fix: temp_cleanup target dir was hardcoded to `./temp`
-        // (cwd-relative) — that's the wrong place to look when the
-        // server's cwd doesn't match the manifest's parent. Resolve
-        // against the manifest base, reusing the csv_http_server
-        // directory when configured so both sides of the CSV pipeline
-        // agree on what counts as "the temp dir".
+        // The temp_cleanup target resolves against the manifest base, not
+        // the cwd — the server's cwd need not match the manifest's parent.
+        // Reuse the csv_http_server directory when configured so both
+        // sides of the CSV pipeline agree on what counts as "the temp
+        // dir".
         temp_dir: Some(
             csv_http_cfg
                 .map(|c| c.dir.clone())

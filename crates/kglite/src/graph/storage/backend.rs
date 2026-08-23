@@ -47,7 +47,7 @@ pub(crate) fn backend_clone_nodes() -> usize {
 
 /// Record `n` nodes genuinely copied.
 ///
-/// **Re-pointed in D2 Phase 2** and this is load-bearing. `impl Clone for
+/// **Which paths call this is load-bearing.** `impl Clone for
 /// GraphBackend` used to bump this by `node_count()` on *every* clone; once the
 /// `Memory` arm started producing a shallow `Forked` overlay, that would have
 /// gone on reporting a whole-graph copy that no longer happens — the oracle
@@ -101,18 +101,16 @@ pub(crate) fn unique_heap_backend<T: Clone>(handle: &mut Arc<T>) -> &mut T {
 /// that switch on "what's the underlying storage" keep working
 /// unchanged when wrapped.
 pub enum GraphBackend {
-    /// **`Arc` since D2 Phase 1**, and the indirection is the whole point of
-    /// that phase: it is what lets a fork share the heap graph with a reader
-    /// instead of deep-copying it (Phase 2). Until Phase 2 lands, the handle is
-    /// always uniquely owned — see [`unique_heap_backend`].
+    /// The `Arc` indirection is the whole point: it is what lets a fork share
+    /// the heap graph with a reader instead of deep-copying it. A write regains
+    /// a uniquely-owned handle first — see [`unique_heap_backend`].
     ///
     /// Reads pay one pointer deref (`&**g`) per backend dispatch. That single
-    /// cost is what Phase 1's ≤5% gate measures, and it is measured *before*
-    /// any overlay code exists so nothing else can be blamed for it.
+    /// cost is what the ≤5% dispatch gate measures.
     Memory(Arc<MemoryGraph>),
-    /// **A writer's copy-on-write overlay over a base a reader still holds**
-    /// (D2 Phase 2). Produced by `Clone` in place of a deep copy whenever the
-    /// base qualifies (`forked::can_fork`), and collapsed back to `Memory` by
+    /// **A writer's copy-on-write overlay over a base a reader still holds.**
+    /// Produced by `Clone` in place of a deep copy whenever the base qualifies
+    /// (`forked::can_fork`), and collapsed back to `Memory` by
     /// [`try_compact`](Self::try_compact) the moment the reader drops.
     ///
     /// Every predicate below treats it as memory storage, because it *is* one —
@@ -341,9 +339,8 @@ impl GraphBackend {
         }
     }
 
-    /// Make this backend safe to mutate in place, given that D2 Phase 2 lets a
-    /// `Memory` arm's `Arc` be shared — as the *base* of somebody else's
-    /// overlay.
+    /// Make this backend safe to mutate in place, given that a `Memory` arm's
+    /// `Arc` can be shared — as the *base* of somebody else's overlay.
     ///
     /// The shape that needs it: `g.copy()` (or a transaction snapshot) forks
     /// **from** `g`, so the fork's `base` and `g`'s own `Memory(_)` are now the
@@ -665,8 +662,7 @@ impl GraphBackend {
         match self {
             // The column stores are *owned* state, not a lazy index: carry
             // them across the swap or every columnar node's properties vanish
-            // (D1 Phase 3 — `vacuum` is the caller that would otherwise lose
-            // them).
+            // (`vacuum` is the caller that would otherwise lose them).
             GraphBackend::Memory(g) => {
                 let g = unique_heap_backend(g);
                 let stores = std::mem::take(&mut g.column_stores);
@@ -966,9 +962,9 @@ impl Clone for GraphBackend {
         #[cfg(test)]
         BACKEND_CLONE_COUNT.set(BACKEND_CLONE_COUNT.get() + 1);
         match self {
-            // **The fork site.** D2 Phase 2: instead of deep-copying every node
-            // and edge, hand the writer an overlay over the same base. The
-            // reader's `Arc<MemoryGraph>` is left byte-for-byte untouched.
+            // **The fork site.** Instead of deep-copying every node and edge,
+            // hand the writer an overlay over the same base. The reader's
+            // `Arc<MemoryGraph>` is left byte-for-byte untouched.
             //
             // `can_fork` is the slot-identity precondition (free lists provably
             // empty, so the fold-back reproduces the overlay's indices); a base

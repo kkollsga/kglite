@@ -1,11 +1,10 @@
 //! Append-only on-disk journal for entity-label → type-name resolution.
 //!
-//! Before 0.8.9 the `load_ntriples` pipeline kept a
-//! `HashMap<u32, String>` of every entity's Q-number → label so that
-//! `auto_type` could rename types like `Q5` → `human` in the
-//! post-Phase-1 rename pass. On Wikidata (124M entities) that map
-//! grew to ~10 GB of heap — enough to push a 16 GB machine into swap
-//! and collapse the streaming rate from 1.8M triples/s to 450K/s.
+//! Holding a `HashMap<u32, String>` of every entity's Q-number → label,
+//! so that `auto_type` can rename types like `Q5` → `human` in the
+//! post-Phase-1 rename pass, costs ~10 GB of heap on Wikidata (124M
+//! entities) — enough to push a 16 GB machine into swap and collapse the
+//! streaming rate from 1.8M triples/s to 450K/s.
 //!
 //! This module replaces that in-memory cache with a streaming journal
 //! on disk:

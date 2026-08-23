@@ -12,13 +12,9 @@
 //! (`IS :: <TYPE>`). **What is refused:** `IS UNIQUE` and `IS RELATIONSHIP KEY`,
 //! by name — see [`unsupported_rel_uniqueness_message`].
 //!
-//! **Declaration only, for now.** Installing validates the requested constraint
-//! against every existing relationship of the type and refuses on a violation,
-//! so a declaration that succeeds is true of the data at that moment. Gating it
-//! on *new* writes is the write-path half and lands with the choke points; until
-//! then the CHANGELOG says nothing about relationship constraints, because a
-//! half-enforced constraint is exactly the enforces-nothing-but-reports-success
-//! shape this project refuses to advertise.
+//! Installing validates the requested constraint against every existing
+//! relationship of the type and refuses on a violation, so a declaration that
+//! succeeds is true of the data at that moment.
 
 use super::super::ast::{ConstraintRequirement, CreateConstraint};
 use super::super::result::MutationStats;

@@ -1,10 +1,10 @@
 //! Python-side machinery for the [`crate::error::KgError`] taxonomy.
 //!
-//! Phase A.2 of docs/history/bolt-implementation.md — defines the typed Python
-//! exception classes (`kglite.CypherSyntaxError`, `kglite.SchemaError`,
-//! etc.) via PyO3's `create_exception!` macro, and provides the
-//! [`From<KgError> for PyErr`] impl that picks the most specific
-//! subclass for each variant at the PyO3 boundary.
+//! Defines the typed Python exception classes
+//! (`kglite.CypherSyntaxError`, `kglite.SchemaError`, etc.) via PyO3's
+//! `create_exception!` macro, and provides the [`From<KgError> for PyErr`]
+//! impl that picks the most specific subclass for each variant at the
+//! PyO3 boundary.
 //!
 //! ## Hierarchy
 //!

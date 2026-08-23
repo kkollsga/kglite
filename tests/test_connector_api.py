@@ -135,7 +135,7 @@ class TestAddConnectionsBulk:
             }
         ]
 
-        # Phase A.2 / C6 — typed kglite.KgError (was ValueError pre-A.2).
+        # Typed kglite.KgError.
         import kglite
 
         with pytest.raises(kglite.KgError) as exc_info:

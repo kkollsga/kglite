@@ -247,7 +247,7 @@ pub fn validate_keys_sorted(keys: &[NaiveDate]) -> Result<(), String> {
     Ok(())
 }
 
-// ─── Inline timeseries config (lifted from kglite-py in 0.10.1) ──────────────
+// ─── Inline timeseries config ────────────────────────────────────────────────
 //
 // Parsed shape of the `timeseries=` kwarg that `add_nodes()` accepts.
 // Used by bindings to drop the timeseries columns from regular node
@@ -292,7 +292,6 @@ impl InlineTimeseriesConfig {
     /// in kglite-py unpacks a `PyDict` into these arguments and calls
     /// this constructor; pure-Rust callers (CLI tools, JSON/YAML
     /// config loaders, future bindings) can call it directly.
-    /// Lifted from kglite-py in 0.10.1.
     ///
     /// `time_col` is `Some` for a single string column (Variant A);
     /// `time_components` is `Some` for a semantic-key dict (Variant B)

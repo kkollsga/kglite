@@ -156,7 +156,7 @@ pub(super) fn execute_affected_tests(
 /// case. Only a missing or wrong-type parameter is an error.
 fn require_files_param(params: &HashMap<String, Value>) -> Result<Vec<String>, String> {
     match params.get("files") {
-        // Phase A.1 / C4 — native Value::List path.
+        // Native Value::List path.
         Some(Value::List(items)) => Ok(items
             .iter()
             .filter_map(|v| match v {

@@ -131,8 +131,8 @@ def _parity_query(kg: KnowledgeGraph) -> list[tuple]:
 # silently drifts.
 GOLDEN_V3_DIGEST = "0e085f44e83a8767a99341e9f78ff571e369df7b0c09e7dcc41582312be7942a"
 
-# Phase A.1 / C5 cleared this set on the v3 → v4 format break. The
-# new v4 loader rejects v3 files (per the user-decided hard break
+# The v3 → v4 format break cleared this set. The
+# v4 loader rejects v3 files (per the user-decided hard break
 # in docs/history/bolt-implementation.md), so every digest captured against a v3
 # binary is now meaningless — the test would never re-see those byte
 # patterns. The name `GOLDEN_V3_DIGEST` is kept for git-blame
@@ -426,7 +426,7 @@ def test_kgl_golden_hash():
 
 @pytest.mark.parity
 def test_kgl_v3_file_rejected_with_clear_error(tmp_path: Path):
-    """Phase A.1 / C5 — v3 `.kgl` files must error cleanly under the v5
+    """v3 `.kgl` files must error cleanly under the v5
     binary, with a message that names the format change and tells the
     user how to recover.
 

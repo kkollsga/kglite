@@ -55,9 +55,9 @@ pub fn value_to_py(py: Python, value: &Value) -> PyResult<Py<PyAny>> {
             dict.set_item("seconds", seconds)?;
             Ok(dict.into_any().unbind())
         }
-        // Phase A.1 / C4 — native conversion of the collection /
-        // graph-entity variants. Replaces the prior JSON-string-
-        // inference hack (PreProcessedValue in py_convert.rs).
+        // Native conversion of the collection / graph-entity variants —
+        // no JSON-string inference (see PreProcessedValue in
+        // py_convert.rs).
         Value::List(items) => {
             let py_items: PyResult<Vec<Py<PyAny>>> =
                 items.iter().map(|v| value_to_py(py, v)).collect();

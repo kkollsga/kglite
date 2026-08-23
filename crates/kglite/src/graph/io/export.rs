@@ -930,8 +930,8 @@ fn value_type_name(value: &Value) -> String {
         Value::Duration { .. } => "string".to_string(),
         Value::Null => "string".to_string(),
         Value::NodeRef(_) => "int".to_string(),
-        // Phase A.1 — collection / graph-entity values serialize as
-        // JSON-ish strings in CSV (round-trip is best-effort).
+        // Collection / graph-entity values serialize as JSON-ish
+        // strings in CSV (round-trip is best-effort).
         Value::List(_)
         | Value::Map(_)
         | Value::Node(_)
@@ -1102,7 +1102,7 @@ fn json_value(value: &Value) -> String {
         ),
         Value::Null => "null".to_string(),
         Value::NodeRef(idx) => idx.to_string(),
-        // Phase A.1 — JSON-encode the new variants recursively via
+        // JSON-encode these variants recursively via
         // serde_json (List, Map, Node, Relationship, Path all derive
         // Serialize). Fallback to "null" if serialisation fails (it
         // shouldn't — these are owned structures with no cycles).

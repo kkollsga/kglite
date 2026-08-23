@@ -20,8 +20,8 @@
 //! range-scanning between `lower_bound(prefix)` and
 //! `lower_bound(next_prefix)`.
 //!
-//! Restricted to `TypedColumn::Str` columns — numeric equality is a
-//! follow-up.
+//! Restricted to `TypedColumn::Str` columns; numeric equality is not
+//! indexed here.
 
 use crate::graph::schema::InternedKey;
 use crate::graph::storage::mapped::mmap_vec::MmapBytes;

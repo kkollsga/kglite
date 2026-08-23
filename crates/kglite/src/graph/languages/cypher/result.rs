@@ -548,7 +548,7 @@ fn csv_value(buf: &mut String, val: &Value) {
             use std::fmt::Write;
             let _ = write!(buf, "{}", idx);
         }
-        // Phase A.1 — collection / graph-entity variants are CSV-
+        // Collection / graph-entity variants are CSV-
         // serialised as JSON-ish strings (delegate to format_value
         // and quote-escape via csv_field).
         Value::List(_)

@@ -1,9 +1,8 @@
 //! KnowledgeGraph #[pymethods]: maintenance + introspection.
 //!
-//! Part of the Phase 9 split of the kg_methods.rs monolith (5,419 lines
-//! single pymethods block). PyO3 merges multiple `#[pymethods] impl`
-//! blocks at class-registration time, so the split is purely structural —
-//! no runtime impact.
+//! PyO3 merges multiple `#[pymethods] impl` blocks at class-registration
+//! time, so splitting them across files is purely structural — no runtime
+//! impact.
 
 use crate::datatypes::values::Value;
 use crate::datatypes::{py_in, py_out};
@@ -397,8 +396,8 @@ impl KnowledgeGraph {
                 kglite_core::api::storage::live_storage_mode(&self.inner).as_str(),
             )?;
             // Columnar memory info — from `graph_info()`, not from storage:
-            // the column stores belong to the backend (D1 Phase 3) and are not
-            // reachable from a binding.
+            // the column stores belong to the backend and are not reachable
+            // from a binding.
             dict.set_item("columnar_heap_bytes", info.columnar_heap_bytes)?;
             dict.set_item("columnar_is_mapped", info.columnar_is_mapped)?;
             // Edge-storage observability (E1). `columnar_is_mapped` answers
@@ -1598,9 +1597,8 @@ impl KnowledgeGraph {
                         }) => format!("duration(M={},D={},S={})", months, days, seconds),
                         Some(Value::NodeRef(idx)) => format!("node#{}", idx),
                         Some(Value::Null) | None => "null".to_string(),
-                        // Phase A.1 — collection / graph-entity
-                        // property values delegate to format_value
-                        // for the group-by key.
+                        // Collection / graph-entity property values
+                        // delegate to format_value for the group-by key.
                         Some(other) => crate::datatypes::values::format_value(other),
                     };
                     *groups.entry(key).or_insert(0) += 1;

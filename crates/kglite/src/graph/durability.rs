@@ -1,8 +1,8 @@
 //! Durable-open and checkpoint orchestration, independent of any binding.
 //!
-//! The engine has shipped the WAL machinery itself since 0.14 (`graph/wal.rs`
-//! for the frame format and recovery scan, `graph/mutation/wal_replay.rs` for
-//! replay, `graph/storage/recording.rs` for write capture). What sits here is
+//! The WAL machinery itself lives elsewhere (`graph/wal.rs` for the frame
+//! format and recovery scan, `graph/mutation/wal_replay.rs` for replay,
+//! `graph/storage/recording.rs` for write capture). What sits here is
 //! the *orchestration* around it — the orderings that make those pieces add up
 //! to crash safety — so that a durability owner is assembled the same way
 //! whichever binding is doing the assembling.

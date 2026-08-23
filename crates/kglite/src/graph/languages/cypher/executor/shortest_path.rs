@@ -1,10 +1,8 @@
 //! `MATCH p = shortestPath(...)` executor.
 //!
-//! Extracted from `executor/mod.rs` in 0.9.53 — see `test_mod_rs_purity`.
-//! The Phase A.3 "binding fix" added enough lines to push mod.rs past
-//! the 1300-line shim cap; the natural home for the function is its
-//! own module since it represents a distinct execution shape (BFS
-//! between two anchor points rather than the usual pattern-walk).
+//! Its own module rather than part of `executor/mod.rs`, which is held to a
+//! 1300-line shim cap by `test_mod_rs_purity`: this is a distinct execution
+//! shape (BFS between two anchor points rather than the usual pattern-walk).
 
 use super::*;
 use crate::graph::core::pattern_matching::{NodePattern, PathHop, PatternExecutor};
@@ -114,15 +112,14 @@ impl<'a> CypherExecutor<'a> {
     ) -> Result<Vec<EndpointPair<'r>>, String> {
         // Build the (source_idx, target_idx, prior_row) work-list.
         //
-        // Phase A.3 / 0.9.53 fix: when the source or target variable is
-        // already bound from a prior MATCH clause (the canonical Neo4j
-        // pattern is `MATCH (a {id: X}), (b {id: Y}) MATCH p =
-        // shortestPath((a)-[*]-(b))`), we MUST use the bound NodeIndex
-        // and skip re-resolution. Pre-fix, this branch called
-        // `find_matching_nodes_pub` on the bare-variable patterns,
-        // which (correctly) returned ALL nodes in the graph — turning a
-        // single BFS into a 500K × 500K cartesian-product runaway on
-        // realistic agent workloads.
+        // When the source or target variable is already bound from a
+        // prior MATCH clause (the canonical Neo4j pattern is `MATCH
+        // (a {id: X}), (b {id: Y}) MATCH p = shortestPath((a)-[*]-(b))`),
+        // we MUST use the bound NodeIndex and skip re-resolution. Calling
+        // `find_matching_nodes_pub` on the bare-variable patterns instead
+        // (correctly) returns ALL nodes in the graph — turning a single
+        // BFS into a 500K × 500K cartesian-product runaway on realistic
+        // agent workloads.
         //
         // Fast path: every input row contributes exactly one (src, tgt)
         // pair (or zero, if a variable isn't bound and the pattern is

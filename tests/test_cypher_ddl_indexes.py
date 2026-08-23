@@ -389,7 +389,7 @@ NEO4J_SCHEMA_SCRIPT: list[tuple[str, str | None]] = [
     ),
     ("CREATE LOOKUP INDEX node_labels IF NOT EXISTS FOR (n) ON EACH labels(n)", "LOOKUP INDEX"),
     ("CREATE INDEX knows_since IF NOT EXISTS FOR ()-[r:KNOWS]-() ON (r.since)", "KNOWS"),
-    # Constraint DDL is served as of Sprint 4b: uniqueness, presence, and node
+    # Constraint DDL is served: uniqueness, presence, and node
     # keys all route to real enforcement. `person_id` is unique across the
     # fixture and `name` is present on every row, so each declaration holds.
     # `person_id` is this fixture's unique_id_field, so it resolves to the

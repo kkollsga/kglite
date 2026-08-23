@@ -3,7 +3,7 @@
 //!
 //! ## Why
 //!
-//! After D2 Phase 2 removed the backend row and Phase 3 removed `id_indices`,
+//! With the backend row and `id_indices` no longer copied on a fork,
 //! `type_indices` was the **only O(V) field left in `DirGraph::clone`** on a
 //! plain graph — ~80 µs of a 128 µs held-view round at 1M nodes. The bucket is
 //! a `Vec<NodeIndex>` with one entry per node of the type, so the derived clone
@@ -41,10 +41,9 @@
 //! copy from `&self` alone, and the writer discovers the fork lazily, at its
 //! next push, through `Arc::get_mut`.
 //!
-//! This is the trap D2 Phase 3 §B.2 recorded, avoided by construction: a
-//! `share()` that has to merge before it can hand back one immutable value is
-//! O(N) *on every fork that follows a write*, which is the founding defect's
-//! own shape.
+//! That avoids a known trap by construction: a `share()` that has to merge
+//! before it can hand back one immutable value is O(N) *on every fork that
+//! follows a write*, which is the founding defect's own shape.
 //!
 //! ## Removals flatten; that is deliberate
 //!
@@ -90,8 +89,8 @@ use petgraph::graph::NodeIndex;
 /// The value matches `id_index_layer::MAX_CHAIN_DEPTH` and for the same
 /// measured reason: the flatten is O(N_type), so its amortised cost is
 /// `|bucket| / K` per fork, and K = 8 put a spike of ~5x the median into one
-/// round in eight (D2 Phase 3 residual profile §B). K = 32 keeps the worst case
-/// near 2x the median without retaining a deep stack of deltas.
+/// round in eight. K = 32 keeps the worst case near 2x the median without
+/// retaining a deep stack of deltas.
 pub(crate) const MAX_LAYER_DEPTH: usize = 32;
 
 /// One node type's member list.
@@ -169,8 +168,8 @@ impl TypeBucket {
     /// it, so the common shape (one big base plus small deltas) merges in
     /// O(delta) rather than O(N). Written this way on purpose: the obvious
     /// spelling — collect everything into a fresh `Vec` — is the O(N)
-    /// compaction trap recorded in D2 Phase 3 §B.1, which turns every write
-    /// after a dropped reader into a full copy.
+    /// compaction trap, which turns every write after a dropped reader into a
+    /// full copy.
     fn flatten(&mut self) {
         if self.levels.len() <= 1 {
             if self.levels.len() == 1 && Arc::get_mut(&mut self.levels[0]).is_none() {
@@ -349,9 +348,9 @@ mod tests {
         assert_eq!(members(&writer), vec![1, 2, 3]);
     }
 
-    /// Compaction must move the base rather than copy it — the D2 Phase 3 §B.1
-    /// trap, where a fold spelled as "materialise into a fresh Vec" turned every
-    /// post-reader write into a full copy.
+    /// Compaction must move the base rather than copy it — the O(N) trap, where
+    /// a fold spelled as "materialise into a fresh Vec" turned every post-reader
+    /// write into a full copy.
     #[test]
     fn compaction_moves_the_base_allocation_instead_of_copying_it() {
         // Spare capacity so that appending during the fold cannot reallocate

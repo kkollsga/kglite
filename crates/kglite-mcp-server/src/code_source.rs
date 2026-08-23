@@ -2,11 +2,8 @@
 //! `read_source`. Resolves a code-entity name through `graph.source()` and
 //! returns the corresponding file slice in one MCP call.
 //!
-//! The pre-0.9.14 bundled Python CLI exposed this on `read_source` itself
-//! (via `read_source(qualified_name='Type::method')`). The 0.9.14+ Rust
-//! framework took read_source over and trimmed it to `file_path` only —
-//! reasonable since the framework is graph-agnostic. This module restores
-//! the qualified-name flow as a kglite-side companion tool.
+//! The framework's `read_source` takes `file_path` only — it is
+//! graph-agnostic — so the qualified-name flow lives here instead.
 //!
 //! Output is the same shape `read_source` produces (a single string body
 //! suitable for `ContentBlock::text`), so agents can mix-and-match the two

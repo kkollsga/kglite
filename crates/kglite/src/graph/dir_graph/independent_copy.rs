@@ -66,8 +66,8 @@ mod tests {
     /// `independent_copy` must hand back a graph whose caches nothing else can
     /// write through.
     ///
-    /// Split by mechanism since D2 Phase 3, because the two families now get
-    /// there differently and it is worth saying which is which:
+    /// Split by mechanism, because the two families get there differently and
+    /// it is worth saying which is which:
     ///
     /// - `wkt_cache` / `property_ndv_cache` are `Arc`-shared by ordinary
     ///   `Clone` **on purpose** (pure-function and version-tagged respectively —

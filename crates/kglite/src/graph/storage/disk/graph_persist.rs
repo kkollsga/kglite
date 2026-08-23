@@ -851,11 +851,10 @@ impl DiskGraph {
         //
         // Without these, typed-edge matches, peer-count aggregates,
         // and `edge_weight()` all return incomplete results on the
-        // sealed edges — phase 8's seal_to_new_segment commit doc
-        // documented this as a deferred limitation. Now we write the
-        // per-segment `conn_type_index_*`, `peer_count_*`, and flush
-        // the global `edge_properties` overlay so the sealed edges'
-        // properties survive into the segment's store.
+        // sealed edges. We write the per-segment `conn_type_index_*`,
+        // `peer_count_*`, and flush the global `edge_properties`
+        // overlay so the sealed edges' properties survive into the
+        // segment's store.
         //
         // Segment-local inputs: the just-built node_slots / out_offsets
         // / out_edges / edge_endpoints vectors above. All are
@@ -1323,10 +1322,9 @@ fn load_compressed<T: crate::graph::storage::mapped::mmap_vec::MmapPod>(
 /// The auxiliary inverted indexes (`conn_type_index_*`, `peer_count_*`)
 /// and the `edge_properties` / `column_stores` / per-type property
 /// indexes are **not** bundled here — they remain loaded from segment 0
-/// only. That's a known limitation pending the phase 8 multi-segment
-/// write path, which will exercise it end-to-end. No current code
-/// produces multi-segment graphs, so no existing workload sees the
-/// limitation today.
+/// only. That is a known limitation: a multi-segment write path would
+/// have to bundle them. No current code produces multi-segment graphs,
+/// so no existing workload sees the limitation today.
 pub(crate) struct SegmentCsr {
     pub(crate) node_slots: MmapOrVec<super::csr::DiskNodeSlot>,
     pub(crate) out_offsets: MmapOrVec<u64>,
@@ -1460,9 +1458,8 @@ fn load_with_inferred_len<T: crate::graph::storage::mapped::mmap_vec::MmapPod>(
 /// essentially nothing beyond the function call.
 ///
 /// The returned `SegmentCsr` is always `MmapOrVec::Vec`-backed — it
-/// does not touch the filesystem. A graph-level page cache concat-to-
-/// disk would be a future win; for now the in-memory combined CSR is
-/// what the read path sees.
+/// does not touch the filesystem. The read path sees the in-memory
+/// combined CSR; there is no graph-level concat-to-disk.
 ///
 /// Assumptions on inputs (documented so the phase-8 writer obeys them):
 ///   1. Segments are provided in manifest order (ascending

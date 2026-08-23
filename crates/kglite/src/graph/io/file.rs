@@ -69,8 +69,8 @@ const DISK_SERDE_MAGIC: &[u8; 8] = b"KGLDSC1\0";
 /// Current core data version. Bump ONLY when NodeData, EdgeData, or Value enum changes.
 /// This is independent of metadata — metadata uses JSON and handles changes via serde defaults.
 ///
-/// 0.9.52 / Phase A.1: bumped to 2 — the `Value` enum gained five
-/// structured variants (Node, Relationship, Path, List, Map).
+/// 0.9.52: bumped to 2 — the `Value` enum gained five structured
+/// variants (Node, Relationship, Path, List, Map).
 ///
 /// 0.10.29: bumped to 3 — `EmbeddingStore` gained `model_id` +
 /// `text_hashes` (positional Serde fields), so an embeddings section
@@ -1634,7 +1634,7 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
     load_disk_column_stores(dir, &mut graph)?;
 
     // No sync: the stores were installed straight onto the backend, which is
-    // their only owner (D1 Phase 3 deleted the DirGraph↔DiskGraph mirror).
+    // their only owner — there is no DirGraph↔DiskGraph mirror.
 
     // Load id_indices from disk.
     //

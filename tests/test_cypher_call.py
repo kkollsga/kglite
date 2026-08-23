@@ -353,7 +353,7 @@ class TestCallErrors:
             graph.cypher("CALL pagerank() YIELD node, community")
 
     def test_missing_yield_mid_pipeline(self, graph):
-        # Phase A.2 / C2 — typed CypherSyntaxError (was ValueError).
+        # Typed CypherSyntaxError.
         # Since 2026-08-15 a standalone "CALL pagerank()" is legal (bare CALL
         # expands to the declared columns); YIELD stays mandatory only when
         # the CALL is combined with other clauses.

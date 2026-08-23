@@ -64,9 +64,9 @@ impl<'a> NodeView<'a> {
     ///
     /// The only constructor. `store` comes from
     /// [`GraphRead::column_store`](crate::graph::storage::GraphRead::column_store),
-    /// resolved by the node's type — a node itself knows only its `row_id`
-    /// (D1 Phase 3). A `None` store on a columnar node means the backend has
-    /// no store for that type, which reads as an empty property set.
+    /// resolved by the node's type — a node itself knows only its `row_id`.
+    /// A `None` store on a columnar node means the backend has no store for
+    /// that type, which reads as an empty property set.
     #[inline]
     pub(crate) fn new(data: &'a NodeData, store: Option<(&'a ColumnStore, u32)>) -> Self {
         NodeView { data, store }
@@ -136,9 +136,7 @@ impl<'a> NodeView<'a> {
     /// an in-memory `Mixed` column — the shape a list property takes. That is
     /// not a detail: the executor's list subscript reads the container through
     /// this method once per element, so an owning read makes `n.vec[i]` cost
-    /// the length of `n.vec`. The 0.15.11 fix that established the borrow was
-    /// undone by 0.16.0's always-columnar construction, which moved every list
-    /// out of the `Map` arm and into the columnar one; it is pinned now by
+    /// the length of `n.vec`. The borrow is pinned by
     /// `tests::an_in_memory_list_property_is_borrowed_not_cloned`.
     #[inline]
     pub fn get(&self, key: InternedKey) -> Option<Cow<'a, Value>> {

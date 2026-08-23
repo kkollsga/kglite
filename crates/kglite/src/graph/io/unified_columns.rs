@@ -342,8 +342,7 @@ pub fn write_unified_columns(
         // here in the mega-file), so the right gate is "no bytes
         // planned". Skipping with non-empty unhandled used to fall
         // through to `mmap::map_mut` of a 0-byte file, which returns
-        // EINVAL on every Unix and broke disk-graph save_disk in 0.9.15
-        // (every test in test_disk_property_index was a failure mode).
+        // EINVAL on every Unix and breaks disk-graph save_disk.
         let _ = fs::remove_file(&bin_path);
         let _ = fs::remove_file(&json_path);
         return Ok(WriteResult {

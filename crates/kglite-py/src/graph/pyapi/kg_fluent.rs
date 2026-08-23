@@ -1,9 +1,8 @@
 //! KnowledgeGraph #[pymethods]: selection / filter / traversal chain.
 //!
-//! Part of the Phase 9 split of the kg_methods.rs monolith (5,419 lines
-//! single pymethods block). PyO3 merges multiple `#[pymethods] impl`
-//! blocks at class-registration time, so the split is purely structural —
-//! no runtime impact.
+//! PyO3 merges multiple `#[pymethods] impl` blocks at class-registration
+//! time, so splitting them across files is purely structural — no runtime
+//! impact.
 
 use crate::datatypes::values::{FilterCondition, Value};
 use crate::datatypes::{py_in, py_out};

@@ -1,12 +1,11 @@
-"""Phase A.2 / C1 — pin the typed exception class hierarchy.
+"""Pin the typed exception class hierarchy.
 
 These tests assert the *contract* — class names exported, inheritance
-chains, and that `kglite.KgError` catches every typed engine error. They don't yet
-exercise the executor's error paths (that's C2-C5's job; those tests
-flip from xfail to passing as the migration sweeps through).
+chains, and that `kglite.KgError` catches every typed engine error. They
+do not exercise the executor's error paths.
 
-See `docs/python/error-handling.md` (added in C12) for the
-full taxonomy and migration guidance.
+See `docs/python/error-handling.md` for the full taxonomy and migration
+guidance.
 """
 
 from __future__ import annotations
@@ -229,8 +228,8 @@ class TestCypherExceptionsCrossMode:
 
 
 class TestExceptionMessageHelpful:
-    """Phase A.2 contract: error messages tell the user what went wrong
-    AND how to fix it. These tests pin the diagnostic-quality bar."""
+    """Error messages tell the user what went wrong AND how to fix it.
+    These tests pin the diagnostic-quality bar."""
 
     def test_syntax_error_includes_caret(self):
         g = kglite.KnowledgeGraph()

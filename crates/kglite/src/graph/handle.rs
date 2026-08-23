@@ -599,9 +599,9 @@ impl KnowledgeGraph {
 /// if other strong refs exist) plus the canonical post-mutation version
 /// increment that downstream OCC commit-checks + the plan cache rely on.
 ///
-/// Lifted from the wheel crate in 0.10.1 so bindings + embedders that
-/// hold an `Arc<DirGraph>` and want to mutate it have a single,
-/// consistent entry point. Re-exported as `kglite::api::make_dir_graph_mut`.
+/// The single, consistent entry point for bindings + embedders that hold
+/// an `Arc<DirGraph>` and want to mutate it. Re-exported as
+/// `kglite::api::make_dir_graph_mut`.
 /// (Homed here rather than in `dir_graph.rs` to keep that file under the
 /// god-file ceiling.)
 ///
@@ -633,7 +633,7 @@ pub(crate) fn make_dir_graph_mut_preserving_lineage(arc: &mut Arc<DirGraph>) -> 
     if let Some(parent) = parent {
         graph.graph.adopt_shared_writer_lineage(&parent.graph);
     }
-    // D2 Phase 2 compaction point. If this graph is a copy-on-write overlay and
+    // Compaction point. If this graph is a copy-on-write overlay and
     // the reader that forced the fork has since dropped, fold the delta back
     // into the base here and return to the flat representation. This is the
     // earliest moment the writer can observe the reader's departure —
@@ -647,8 +647,8 @@ pub(crate) fn make_dir_graph_mut_preserving_lineage(arc: &mut Arc<DirGraph>) -> 
     // shared, which is the steady state.
     graph.graph.ensure_writable();
     // The same fold for `id_indices`, whose entries layer over a shared base of
-    // their own (D2 Phase 3). Per entry this is `Arc::get_mut` + an O(delta)
-    // merge, so it is a probe when nothing is shared.
+    // their own. Per entry this is `Arc::get_mut` + an O(delta) merge, so it
+    // is a probe when nothing is shared.
     graph.id_indices.try_compact();
     // ...and for `type_indices`, whose buckets are stacks of shared levels
     // (D2). Per bucket this is an `Arc::get_mut` probe plus an O(delta) merge.
@@ -854,7 +854,7 @@ mod boundary_lift_tests {
 /// fork registers the node count. That turns a ~28 ms cliff at 1M nodes into an
 /// exact integer at ten — no idle machine, no statistics, no marker.
 ///
-/// **Inverted 2026-08-10 by D2 Phase 2**, exactly as the previous version of
+/// **Inverted 2026-08-10**, exactly as the previous version of
 /// this paragraph instructed. `held_reader_forces_a_whole_graph_copy` is now
 /// [`held_reader_copies_no_nodes`]: a held reader makes the writer fork to a
 /// copy-on-write overlay (`storage/forked.rs`) and copies **zero** nodes. The
@@ -1011,7 +1011,7 @@ mod held_reference_clone_tests {
     }
 
     /// The **id index** must answer for the graph you asked, not the one that
-    /// wrote last — the D2 Phase 3 counterpart of
+    /// wrote last — the counterpart of
     /// `a_held_reader_never_observes_the_writers_edits`.
     ///
     /// `id_indices` is layered over a base the two graphs share

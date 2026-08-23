@@ -189,8 +189,8 @@ fn mapped_rolls_back_completely() {
 /// Mapped had no journal to capture into. The moment it got one, the default
 /// makes every silent write clone a `NodeData` pre-image. The sweeps that used
 /// to justify this — the columnar handle refresh and `add_nodes`'
-/// detach/reattach dance — are gone with D1 Phase 3, but the override still
-/// has to hold: `BatchProcessor::reattach_columnar_stores` remains a silent
+/// detach/reattach dance — are gone, but the override still has to hold:
+/// `BatchProcessor::reattach_columnar_stores` remains a silent
 /// per-node write, it runs only under `is_mapped() || is_disk()`, and no
 /// memory-backed test exercises it. That is exactly the O(type)-per-write
 /// amplification commit 3bf9ef00 removed from the WAL, re-created inside the

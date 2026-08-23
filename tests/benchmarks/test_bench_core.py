@@ -540,20 +540,18 @@ def test_bench_save_kgl_new_file(benchmark, bench_graph, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Value::Node projection benchmarks (Phase A.1 → Phase C.4 Bolt consumer)
+# Value::Node projection benchmarks (shared with the Bolt consumer)
 # ---------------------------------------------------------------------------
 #
-# Phase A.1 (shipped in 0.10.0) added Value::Node / Relationship / Path / List
-# / Map variants. `RETURN n` no longer collapses to a title string — it
-# materializes a full {id, labels, properties} structure. The Bolt server
-# (Phase C.4) routes this over PackStream as a Node struct, so any
-# regression in projection cost shows up in both Python `cypher()` and Bolt
-# PULL.
+# The Value enum carries Node / Relationship / Path / List / Map variants, so
+# `RETURN n` does not collapse to a title string — it materializes a full
+# {id, labels, properties} structure. The Bolt server routes this over
+# PackStream as a Node struct, so any regression in projection cost shows up
+# in both Python `cypher()` and Bolt PULL.
 #
-# These benchmarks are the pre-Bolt baseline for that path. Captured to
+# These benchmarks are the baseline for that path. Captured to
 # `tests/benchmarks/baselines/<version>.json` on the next release commit
-# via `make refresh-release-constants`. Phase B itself doesn't ship a
-# release.
+# via `make refresh-release-constants`.
 
 
 @pytest.fixture
@@ -587,8 +585,8 @@ def test_bench_return_node_10k(benchmark, node_projection_graph):
     """RETURN n over 10k nodes — eager Value::Node projection.
 
     Drives the projection path shared between Python `cypher()` and the
-    Bolt server's RECORD emission (Phase C.4). Regressions here are
-    visible everywhere downstream of A.1.
+    Bolt server's RECORD emission. Regressions here are visible
+    everywhere downstream of Value::Node projection.
     """
     benchmark(node_projection_graph.cypher, "MATCH (n:Person) RETURN n")
 

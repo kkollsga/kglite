@@ -734,8 +734,8 @@ fn insert_field_alias<S: PropertySink>(
     }
 }
 
-/// Phase A.1 / C2 — materialise a graph node into an owned
-/// [`NodeValue`] suitable for `Value::Node`.
+/// Materialise a graph node into an owned [`NodeValue`] suitable for
+/// `Value::Node`.
 ///
 /// Returns `None` if the index doesn't resolve (defensive — callers
 /// pass indices from active bindings, so this should always succeed).
@@ -997,8 +997,8 @@ fn complete_from_type_schema<S: PropertySink>(
     }
 }
 
-/// Phase A.1 / C2 — materialise an edge into an owned [`RelValue`]
-/// suitable for `Value::Relationship`. Mirrors `materialize_node_value`.
+/// Materialise an edge into an owned [`RelValue`] suitable for
+/// `Value::Relationship`. Mirrors `materialize_node_value`.
 pub(crate) fn materialize_rel_value(
     edge_idx: petgraph::graph::EdgeIndex,
     graph: &crate::graph::DirGraph,
@@ -1033,8 +1033,8 @@ pub(crate) fn materialize_rel_value(
     })
 }
 
-/// Phase A.1 / C2 — materialise a variable-length [`PathBinding`]
-/// into an owned [`PathValue`] suitable for `Value::Path`.
+/// Materialise a variable-length [`PathBinding`] into an owned
+/// [`PathValue`] suitable for `Value::Path`.
 ///
 /// Every hop carries its exact edge slot, so parallel relationships and
 /// incoming/undirected traversal retain the relationship actually matched.
@@ -1074,15 +1074,6 @@ pub(super) fn map_subscript(container: &Value, key: &str) -> Value {
     }
 }
 
-/// Parse a list value.
-///
-/// Phase A.1 / C2 — fast path for native `Value::List`: just clone the
-/// items, no parsing needed. The legacy `Value::String("[a, b, c]")`
-/// path stays for back-compat with any remaining JSON-string-producing
-/// sites and for parameters / literals that come in as strings. Once
-/// every producer emits native lists (C4 removes PreProcessedValue;
-/// later cleanups retire the string path), this function can shrink
-/// to just the List arm.
 /// Index a container value with a (possibly negative) integer, cloning **only**
 /// the selected element. A native `Value::List` is indexed by reference — the
 /// whole list is never cloned, which is what makes `list[i]` O(1) in list
@@ -1117,6 +1108,13 @@ fn index_list_slice(items: &[Value], integer_index: i64) -> Value {
     }
 }
 
+/// Parse a list value.
+///
+/// Fast path for native `Value::List`: just clone the items, no parsing
+/// needed. The legacy `Value::String("[a, b, c]")` path stays for
+/// back-compat with any remaining JSON-string-producing sites and for
+/// parameters / literals that come in as strings. Once every producer
+/// emits native lists, this function can shrink to just the List arm.
 pub(in crate::graph::languages::cypher) fn parse_list_value(val: &Value) -> Vec<Value> {
     match val {
         Value::List(items) => items.clone(),
@@ -1515,7 +1513,7 @@ pub(super) fn call_param_string_list(
     key: &str,
 ) -> Option<Vec<String>> {
     params.get(key).and_then(|v| match v {
-        // Phase A.1 / C4 — native Value::List from list literals
+        // Native Value::List from list literals
         // (`connection_types: ['CALLS', 'IMPORTS']`).
         Value::List(items) => {
             let strs: Vec<String> = items

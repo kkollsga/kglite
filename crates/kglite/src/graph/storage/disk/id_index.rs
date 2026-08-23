@@ -401,7 +401,7 @@ pub struct IdIndexStore {
 }
 
 impl Clone for IdIndexStore {
-    /// **The fork seam for `id_indices`** (D2 Phase 3).
+    /// **The fork seam for `id_indices`.**
     ///
     /// Instead of deep-copying a map with one entry per node of every
     /// materialised type — 3.7 ms at 1M, and 90% of what a plain graph's fork

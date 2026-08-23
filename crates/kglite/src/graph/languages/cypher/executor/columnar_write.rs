@@ -90,7 +90,7 @@ pub(super) enum PriorCell {
 /// - **WAL**: the write bypasses the recorded `GraphWrite` path, so the one
 ///   mutated node is captured explicitly. Exactly one node — there is no
 ///   end-of-clause sweep any more, because no node holds a store handle to
-///   re-point (D1 Phase 3).
+///   re-point.
 /// - **Undo**: the cell's prior value is captured, **before** the write, as
 ///   [`UndoEntry::ColumnarCell`]. That ordering is load-bearing — after the
 ///   write the prior value is gone — but it no longer forces a copy of
