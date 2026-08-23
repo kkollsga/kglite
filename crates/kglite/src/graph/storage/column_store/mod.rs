@@ -72,8 +72,15 @@ pub struct ColumnStore {
     /// Shared like [`Self::columns`]; see [`Self::id_column`].
     title_column: Option<Arc<TypedColumn>>,
     /// Overflow bag for sparse properties: offset array + data blob.
-    overflow_offsets: Option<MmapOrVec<u64>>,
-    overflow_data: Option<MmapBytes>,
+    ///
+    /// Shared, not copied, on the same terms as [`Self::columns`] — and for a
+    /// sharper reason. The bag is O(all sparse property bytes) and is written
+    /// exactly once, at build/load time ([`Self::replace_overflow_bag`],
+    /// `load_packed`); nothing appends to it in place. Cloning it by value both
+    /// paid its full bytes per fork *and* pulled a file-backed bag onto the
+    /// heap, because `MmapOrVec`/`MmapBytes` clone into their `Heap` variant.
+    overflow_offsets: Option<Arc<MmapOrVec<u64>>>,
+    overflow_data: Option<Arc<MmapBytes>>,
     /// Optional mmap-backed store for disk mode. When present, get/get_id/get_title
     /// delegate to this instead of the TypedColumn arrays above.
     mmap_store: Option<Arc<crate::graph::storage::mapped::column_store::MmapColumnStore>>,
@@ -158,11 +165,10 @@ pub(crate) fn column_store_row_pushes() -> usize {
 /// each; the deep copy happens later, one column at a time, at
 /// [`ColumnStore::column_mut`].
 ///
-/// Two things are copied outright: `tombstones`, at one byte per row against a
-/// column's eight-plus, and the overflow bag — `MmapOrVec`/`MmapBytes` clone
-/// into a `Heap` variant, so a store carrying a bag pays its full bytes per
-/// clone and lands them on the heap. Only the paths in
-/// [`ColumnStore::has_overflow`] produce one.
+/// One thing is copied outright: `tombstones`, at one byte per row against a
+/// column's eight-plus. The overflow bag is behind an `Arc` as well, because it
+/// is written once at build/load time and never appended to in place; a fork of
+/// a store carrying one shares the blob instead of copying it onto the heap.
 impl Clone for ColumnStore {
     fn clone(&self) -> Self {
         #[cfg(test)]
@@ -1444,8 +1450,8 @@ impl ColumnStore {
     /// `load_packed` reads back via the `__overflow_offsets__` /
     /// `__overflow_data__` pseudo-columns.
     pub fn replace_overflow_bag(&mut self, offsets: MmapOrVec<u64>, data: MmapBytes) {
-        self.overflow_offsets = Some(offsets);
-        self.overflow_data = Some(data);
+        self.overflow_offsets = Some(Arc::new(offsets));
+        self.overflow_data = Some(Arc::new(data));
     }
 
     /// Set the row count after wiring up replaced columns. The store's
@@ -1939,12 +1945,12 @@ impl ColumnStore {
                     &col_name,
                     "off",
                 )?;
-                store.overflow_offsets = Some(offsets);
+                store.overflow_offsets = Some(Arc::new(offsets));
                 continue;
             }
             if col_name == "__overflow_data__" {
                 let data = Self::load_bytes(data_blob, temp_dir, &col_name, "dat")?;
-                store.overflow_data = Some(data);
+                store.overflow_data = Some(Arc::new(data));
                 continue;
             }
 

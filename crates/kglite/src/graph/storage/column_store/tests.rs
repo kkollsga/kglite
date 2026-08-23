@@ -1193,3 +1193,104 @@ fn a_cloned_store_spills_to_its_own_files() {
     );
     assert_eq!(copy.get(7, age), Some(Value::Int64(4242)));
 }
+
+/// A store clone must share the overflow bag, not copy it.
+///
+/// The bag is O(all sparse property bytes) — on an RDF/disk-derived store it is
+/// the bulk of the payload — and every copy-on-write fork (`copy()`, a
+/// transaction's `working_mut`, a held view) clones the store. Deep-copying it
+/// there defeats the per-column `Arc` sharing the rest of the struct exists for.
+#[test]
+fn test_clone_shares_overflow_bag() {
+    let store = store_with_every_row_class();
+    assert!(store.has_overflow(), "fixture must carry an overflow bag");
+
+    let clone = store.clone();
+
+    let offsets_ptr = |s: &ColumnStore| {
+        s.overflow_offsets
+            .as_ref()
+            .expect("bag")
+            .as_raw_bytes()
+            .as_ptr()
+    };
+    let data_ptr = |s: &ColumnStore| {
+        s.overflow_data
+            .as_ref()
+            .expect("bag")
+            .as_raw_bytes()
+            .as_ptr()
+    };
+
+    assert_eq!(
+        offsets_ptr(&store),
+        offsets_ptr(&clone),
+        "clone deep-copied the overflow offsets array instead of sharing it"
+    );
+    assert_eq!(
+        data_ptr(&store),
+        data_ptr(&clone),
+        "clone deep-copied the overflow data blob instead of sharing it"
+    );
+
+    // Sharing must not change what the clone reads.
+    for row in 0..store.row_count {
+        assert_eq!(store.row_properties(row), clone.row_properties(row));
+    }
+}
+
+/// A clone of a store whose bag is file-backed keeps it file-backed.
+///
+/// `MmapOrVec`/`MmapBytes` clone into a `Heap` variant, so cloning the bag by
+/// value also pulls a mapped one onto the heap — the fork of a disk-mode store
+/// paid the bag's full bytes in RAM. Sharing the bag behind an `Arc` avoids
+/// both halves of that.
+#[test]
+fn test_clone_keeps_mapped_overflow_bag_mapped() {
+    use crate::graph::storage::mapped::mmap_vec::{MmapBytes, MmapOrVec};
+
+    let dir = tempfile::tempdir().unwrap();
+    let (schema, meta, interner) = make_schema_and_meta();
+    let mut store = ColumnStore::new(schema, &meta, &interner);
+    store.push_row(&[(InternedKey::from_str("name"), Value::String("Ann".into()))]);
+
+    let mut blob = 1u16.to_le_bytes().to_vec();
+    crate::graph::storage::overflow::encode_value(
+        &mut blob,
+        InternedKey::from_str("sparse"),
+        &Value::Int64(9),
+    );
+
+    let mut offsets = MmapOrVec::<u64>::mapped(&dir.path().join("off.bin"), 4).unwrap();
+    offsets.push(0);
+    offsets.push(blob.len() as u64);
+    let mut data = MmapBytes::mapped(&dir.path().join("dat.bin"), 64).unwrap();
+    data.extend(&blob).unwrap();
+    assert!(offsets.is_mapped() && data.is_mapped());
+    store.replace_overflow_bag(offsets, data);
+
+    let bag_heap_bytes = |s: &ColumnStore| {
+        s.overflow_offsets.as_ref().unwrap().heap_bytes()
+            + s.overflow_data.as_ref().unwrap().heap_bytes()
+    };
+    assert_eq!(bag_heap_bytes(&store), 0, "mapped bag holds no heap bytes");
+
+    let clone = store.clone();
+    assert!(
+        clone.overflow_offsets.as_ref().unwrap().is_mapped(),
+        "clone pulled the mapped overflow offsets onto the heap"
+    );
+    assert!(
+        clone.overflow_data.as_ref().unwrap().is_mapped(),
+        "clone pulled the mapped overflow blob onto the heap"
+    );
+    assert_eq!(
+        bag_heap_bytes(&clone),
+        0,
+        "clone of a mapped bag must not allocate the blob on the heap"
+    );
+    assert_eq!(
+        clone.get_overflow_property(0, InternedKey::from_str("sparse")),
+        Some(Value::Int64(9))
+    );
+}
