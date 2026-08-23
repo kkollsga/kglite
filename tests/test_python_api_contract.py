@@ -15,7 +15,6 @@ from interface_contracts import capture_python_api  # noqa: E402
 BASELINE = ROOT / "tests" / "api-baselines" / "python-api.json"
 TYPING_ONLY = {"EmbeddingModel"}
 STUB_INTERNAL = {"_backend_is_forked", "_fail_wal_append", "_wal_next_lsn", "_run_cli", "_run_mcp_server"}
-RUNTIME_INTERNAL_MEMBERS = {"KnowledgeGraph": {"add_connections_internal"}}
 NONCONSTRUCTIBLE = {"FrozenGraph", "ResultIter", "ResultView", "Session", "Transaction"}
 
 
@@ -72,7 +71,7 @@ def test_runtime_class_members_are_stubbed_or_internal():
             node.name for node in stub_cls.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         }
         runtime_members = {name for name in runtime_cls.__dict__ if not name.startswith("_")}
-        assert runtime_members - stub_members == RUNTIME_INTERNAL_MEMBERS.get(class_name, set())
+        assert runtime_members - stub_members == set()
 
 
 def test_pyclass_module_and_constructibility_contract():

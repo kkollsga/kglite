@@ -512,9 +512,7 @@ fn local_move<S: NeighborSource>(
     let max_iterations = 100;
     for _ in 0..max_iterations {
         if deadline.exceeded() {
-            {
-                return Err(algorithm_timeout_err());
-            }
+            return Err(algorithm_timeout_err());
         }
 
         let mut improved = false;
@@ -729,7 +727,6 @@ pub fn louvain_communities(
     graph: &DirGraph,
     options: &CommunityOptions,
 ) -> Result<CommunityResult, String> {
-    let _arena_guard = graph.graph.begin_query();
     let CommunityOptions {
         weight_property,
         resolution,
@@ -920,7 +917,6 @@ pub fn leiden_communities(
     graph: &DirGraph,
     options: &CommunityOptions,
 ) -> Result<CommunityResult, String> {
-    let _arena_guard = graph.graph.begin_query();
     let CommunityOptions {
         weight_property,
         resolution,
@@ -969,7 +965,6 @@ pub fn label_propagation(
     graph: &DirGraph,
     options: &LabelPropagationOptions,
 ) -> Result<CommunityResult, String> {
-    let _arena_guard = graph.graph.begin_query();
     let LabelPropagationOptions {
         max_iterations,
         connection_types,
@@ -1035,9 +1030,7 @@ pub fn label_propagation(
     for _ in 0..max_iterations {
         // Timeout check each iteration — error rather than return partial.
         if deadline.exceeded() {
-            {
-                return Err(algorithm_timeout_err());
-            }
+            return Err(algorithm_timeout_err());
         }
 
         let mut changed = false;
@@ -1155,9 +1148,7 @@ fn label_propagation_streaming(
 
     for _ in 0..max_iterations {
         if deadline.exceeded() {
-            {
-                return Err(algorithm_timeout_err());
-            }
+            return Err(algorithm_timeout_err());
         }
 
         let mut changed = false;

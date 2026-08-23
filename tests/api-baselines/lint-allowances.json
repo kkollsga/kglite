@@ -531,19 +531,11 @@
       "classification": "dead-code"
     },
     {
-      "identity": "crates/kglite/src/graph/io/file.rs::fn:apply_to:pub(crate) fn apply_to(self, graph: &mut DirGraph)::dead_code",
-      "classification": "dead-code"
-    },
-    {
       "identity": "crates/kglite/src/graph/io/unified_columns.rs::fn:write_unified_columns:pub fn write_unified_columns( dir: &Path, column_stores: &HashMap<String, Arc<ColumnStore>>, _interner: &StringInterner, ) -> io::Result<WriteResult>::dead_code",
       "classification": "dead-code"
     },
     {
       "identity": "crates/kglite/src/graph/languages/cypher/planner/schema_check/mod.rs::fn:fmt:fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result::dead_code",
-      "classification": "dead-code"
-    },
-    {
-      "identity": "crates/kglite/src/graph/storage/column_store/mod.rs::fn:column_type_str:pub fn column_type_str(&self, slot: usize) -> Option<&'static str>::dead_code",
       "classification": "dead-code"
     },
     {
@@ -575,23 +567,7 @@
       "classification": "dead-code"
     },
     {
-      "identity": "crates/kglite/src/graph/storage/column_store/mod.rs::fn:replace_columns:pub fn replace_columns(&mut self, columns: Vec<TypedColumn>)::dead_code",
-      "classification": "dead-code"
-    },
-    {
-      "identity": "crates/kglite/src/graph/storage/column_store/mod.rs::fn:replace_id_column:pub fn replace_id_column(&mut self, col: TypedColumn)::dead_code",
-      "classification": "dead-code"
-    },
-    {
-      "identity": "crates/kglite/src/graph/storage/column_store/mod.rs::fn:replace_title_column:pub fn replace_title_column(&mut self, col: TypedColumn)::dead_code",
-      "classification": "dead-code"
-    },
-    {
       "identity": "crates/kglite/src/graph/storage/column_store/mod.rs::fn:row_properties_map:pub fn row_properties_map( &self, row_id: u32, interner: &StringInterner, ) -> HashMap<String, Value>::dead_code",
-      "classification": "dead-code"
-    },
-    {
-      "identity": "crates/kglite/src/graph/storage/column_store/mod.rs::fn:set_row_count:pub fn set_row_count(&mut self, n: u32)::dead_code",
       "classification": "dead-code"
     },
     {
@@ -692,10 +668,6 @@
     },
     {
       "identity": "crates/kglite/src/graph/storage/mapped/mmap_vec.rs::fn:save_to_file:pub fn save_to_file(&self, path: &Path) -> io::Result<()>::dead_code",
-      "classification": "dead-code"
-    },
-    {
-      "identity": "crates/kglite/src/graph/storage/mod.rs::fn:is_memory:fn is_memory(&self) -> bool::dead_code",
       "classification": "dead-code"
     }
   ]

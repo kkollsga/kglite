@@ -714,21 +714,11 @@ fn char_offset_to_line_col(input: &str, target_char: usize) -> (usize, usize) {
     (line, col)
 }
 
-/// Hook for reframing a parser error as "feature not yet implemented".
-/// Always `None`: the candidates it was written for (NULLS, datetime
-/// accessors, variable-length paths) all parse today, so there is nothing
-/// left to detect.
-fn intent_level_rewrite(_input: &str, _err: &str) -> Option<String> {
-    None
-}
-
 /// Build the human-readable parse-error message body. The (line, col)
 /// is included in the message text *and* carried as struct fields on
 /// `KgError::CypherSyntax`; the duplication is intentional so the
 /// raw message printed by `Display` is still self-contained.
 fn format_parse_error_message(input: &str, err: &str, line: usize, col: usize) -> String {
-    let intent = intent_level_rewrite(input, err);
-
     // A single-line excerpt + caret marker, rather than the whole query.
     let lines: Vec<&str> = input.lines().collect();
     let excerpt = if line >= 1 && line <= lines.len() {
@@ -740,8 +730,7 @@ fn format_parse_error_message(input: &str, err: &str, line: usize, col: usize) -
         String::new()
     };
 
-    let body = intent.as_deref().unwrap_or(err);
-    format!("{}{}", body, excerpt)
+    format!("{}{}", err, excerpt)
 }
 
 #[cfg(test)]

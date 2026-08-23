@@ -812,10 +812,8 @@ impl<'a> CypherExecutor<'a> {
                     .map(|v| v.to_vec())
                     .unwrap_or_default()
             } else {
-                {
-                    let g = &self.graph.graph;
-                    g.node_indices().collect()
-                }
+                let g = &self.graph.graph;
+                g.node_indices().collect()
             };
 
             let prop_executor = group_node_props.as_ref().map(|_| {

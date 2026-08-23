@@ -907,30 +907,50 @@ fn test_multi_match_no_reverse_when_bound_var_first() {
 
 #[test]
 fn test_multi_match_reorder_prefers_anchored_pattern() {
-    // A second MATCH whose two patterns share the pre-bound `p`. The
-    // assertion is deliberately weak: it pins only that the cross-clause
-    // bound-vars logic leaves both patterns intact, not which one runs first.
+    // A second MATCH with one pattern rooted on the pre-bound `p` and one
+    // rooted on a fresh, unconstrained `(x)`. `reorder_match_patterns` scores
+    // a variable bound by an earlier clause as fully selective, so the
+    // `p`-rooted pattern must run first even though it is written second.
     let mut query = parse_cypher(
         "MATCH (p {id: 1}) \
-         MATCH (p)-[:R1]->(:T1), (p)-[:R2]->({id: 99}) \
+         MATCH (x)-[:R1]->(y), (p)-[:R2]->(z) \
          RETURN p",
     )
     .unwrap();
+
+    let second_match = |q: &CypherQuery| -> Vec<Option<String>> {
+        q.clauses
+            .iter()
+            .filter_map(|c| match c {
+                Clause::Match(m) => Some(m),
+                _ => None,
+            })
+            .nth(1)
+            .expect("expected second MATCH")
+            .patterns
+            .iter()
+            .map(|pat| match pat.elements.first() {
+                Some(PatternElement::Node(np)) => np.variable.clone(),
+                _ => None,
+            })
+            .collect()
+    };
+
+    // Non-vacuity: as written, the unanchored pattern comes first.
+    assert_eq!(
+        second_match(&query),
+        vec![Some("x".to_string()), Some("p".to_string())]
+    );
 
     let graph = DirGraph::new();
     let params = HashMap::new();
     optimize(&mut query, &graph, &params);
 
-    let m2 = query
-        .clauses
-        .iter()
-        .filter_map(|c| match c {
-            Clause::Match(m) => Some(m),
-            _ => None,
-        })
-        .nth(1)
-        .expect("expected second MATCH");
-    assert_eq!(m2.patterns.len(), 2);
+    assert_eq!(
+        second_match(&query),
+        vec![Some("p".to_string()), Some("x".to_string())],
+        "the pattern rooted on the pre-bound variable must be reordered first"
+    );
 }
 
 #[test]
@@ -1492,8 +1512,14 @@ fn test_fold_pass_through_with_keeps_useful_with() {
     let params = HashMap::new();
     optimize(&mut query, &graph, &params);
 
-    // `WITH p, r` covers exactly what RETURN references, so it folds; the
-    // converse needs a WITH that *renames* a variable.
+    assert!(
+        !query.clauses.iter().any(|c| matches!(c, Clause::With(_))),
+        "`WITH p, r` covers exactly what RETURN references, so it folds away; \
+         clauses: {:#?}",
+        query.clauses
+    );
+
+    // The converse needs a WITH that *renames* a variable.
     let mut renaming =
         parse_cypher("MATCH (p)-[r]->(q) WITH p AS person RETURN person LIMIT 10").unwrap();
     optimize(&mut renaming, &graph, &params);

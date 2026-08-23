@@ -2159,3 +2159,17 @@ fn test_bidirectional_directed_agrees_with_the_transpose_query() {
         }
     }
 }
+
+#[test]
+fn test_ready_set_expired_deadline_reports_the_actionable_timeout() {
+    let (graph, _idx) = build_chain_graph();
+    let expired = Interrupt::from_deadline(Some(
+        std::time::Instant::now() - std::time::Duration::from_secs(1),
+    ));
+    let err = ready_set_scoped(&graph, None, None, &HashSet::new(), expired)
+        .expect_err("an expired deadline must abort rather than return a partial ready set");
+    // Every other scoped algorithm hands back algorithm_timeout_err(), which
+    // tells the caller how to extend or scope the run; a bare "Query
+    // interrupted" leaves them with no next step.
+    assert_eq!(err, algorithm_timeout_err(), "unexpected error: {err}");
+}

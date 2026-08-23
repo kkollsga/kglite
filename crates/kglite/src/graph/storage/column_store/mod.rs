@@ -1422,21 +1422,18 @@ impl ColumnStore {
     /// Replace the schema-keyed property columns wholesale. The new
     /// `Vec<TypedColumn>` must have exactly `self.schema().len()` entries
     /// in slot order; the caller is responsible for the correspondence.
-    #[allow(dead_code)]
     pub fn replace_columns(&mut self, columns: Vec<TypedColumn>) {
         self.spillable_growth = true;
         self.columns = columns.into_iter().map(Arc::new).collect();
     }
 
     /// Replace the id sidecar column.
-    #[allow(dead_code)]
     pub fn replace_id_column(&mut self, col: TypedColumn) {
         self.spillable_growth = true;
         self.id_column = Some(Arc::new(col));
     }
 
     /// Replace the title sidecar column.
-    #[allow(dead_code)]
     pub fn replace_title_column(&mut self, col: TypedColumn) {
         self.spillable_growth = true;
         self.title_column = Some(Arc::new(col));
@@ -1457,14 +1454,12 @@ impl ColumnStore {
     /// Set the row count after wiring up replaced columns. The store's
     /// authoritative row count is the merged total; without this the
     /// fresh shell reports 0 rows even though the columns hold data.
-    #[allow(dead_code)]
     pub fn set_row_count(&mut self, n: u32) {
         self.row_count = n;
     }
 
     /// Type-tag string for the column at `slot`, e.g. `"int64"`, `"string"`,
     /// `"mixed"`. Used by the chunked-spill merge to dispatch per variant.
-    #[allow(dead_code)]
     pub fn column_type_str(&self, slot: usize) -> Option<&'static str> {
         self.columns.get(slot).map(|c| c.type_tag())
     }

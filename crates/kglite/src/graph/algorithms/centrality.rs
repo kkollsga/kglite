@@ -238,7 +238,6 @@ pub fn betweenness_centrality(
     graph: &DirGraph,
     options: &CentralityOptions,
 ) -> Result<Vec<CentralityResult>, String> {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
     let CentralityOptions {
         normalized,
         sample_size,
@@ -338,10 +337,8 @@ pub fn betweenness_centrality(
                             break;
                         }
                         if deadline_ref.exceeded() {
-                            {
-                                timed_out_ref.store(true, Ordering::Relaxed);
-                                break;
-                            }
+                            timed_out_ref.store(true, Ordering::Relaxed);
+                            break;
                         }
                     }
 
@@ -413,9 +410,7 @@ pub fn betweenness_centrality(
         for (source_counter, &s_idx) in source_indices.iter().enumerate() {
             // Periodic timeout check (every 10 source nodes)
             if source_counter.is_multiple_of(10) && deadline.exceeded() {
-                {
-                    return Err(algorithm_timeout_err());
-                }
+                return Err(algorithm_timeout_err());
             }
 
             stack.clear();
@@ -526,7 +521,6 @@ pub fn pagerank(
     graph: &DirGraph,
     options: &PagerankOptions,
 ) -> Result<Vec<CentralityResult>, String> {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
     let PagerankOptions {
         damping_factor,
         max_iterations,
@@ -606,9 +600,7 @@ pub fn pagerank(
         // Half-converged PageRank scores are misleading; an explicit error
         // tells the caller to extend timeout_ms or scope the graph.
         if deadline.exceeded() {
-            {
-                return Err(algorithm_timeout_err());
-            }
+            return Err(algorithm_timeout_err());
         }
 
         // Calculate dangling node contribution
@@ -696,7 +688,6 @@ pub fn degree_centrality(
     graph: &DirGraph,
     options: &DegreeCentralityOptions,
 ) -> Result<Vec<CentralityResult>, String> {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
     let DegreeCentralityOptions {
         normalized,
         connection_types,
@@ -733,9 +724,7 @@ pub fn degree_centrality(
     } {
         edge_counter += 1;
         if edge_counter & 0xFFFFF == 0 && deadline.exceeded() {
-            {
-                return Err(algorithm_timeout_err());
-            }
+            return Err(algorithm_timeout_err());
         }
         if let Some(ref types) = interned_ct {
             if !types.iter().any(|t| *t == edge.connection_type()) {
@@ -783,7 +772,6 @@ pub fn closeness_centrality(
     graph: &DirGraph,
     options: &CentralityOptions,
 ) -> Result<Vec<CentralityResult>, String> {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
     let CentralityOptions {
         normalized,
         sample_size,
@@ -869,13 +857,11 @@ pub fn closeness_centrality(
                         };
                     }
                     if deadline_ref.exceeded() {
-                        {
-                            timed_out_ref.store(true, Ordering::Relaxed);
-                            return CentralityResult {
-                                node_idx: source,
-                                score: 0.0,
-                            };
-                        }
+                        timed_out_ref.store(true, Ordering::Relaxed);
+                        return CentralityResult {
+                            node_idx: source,
+                            score: 0.0,
+                        };
                     }
                 }
 
@@ -958,9 +944,7 @@ pub fn closeness_centrality(
 
         // Periodic timeout check (every 10 source nodes)
         if i.is_multiple_of(10) && deadline.exceeded() {
-            {
-                return Err(algorithm_timeout_err());
-            }
+            return Err(algorithm_timeout_err());
         }
 
         // Sparse reset from previous iteration (only visited nodes)

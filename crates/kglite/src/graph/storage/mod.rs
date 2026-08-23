@@ -151,7 +151,6 @@ pub trait GraphRead {
     /// `true` for heap-resident [`crate::graph::schema::GraphBackend::Memory`].
     /// Gates the fused-match `peer_counts` fast path, and the backend-identity
     /// assertions in `recording.rs`.
-    #[allow(dead_code)]
     fn is_memory(&self) -> bool;
 
     fn is_mapped(&self) -> bool {

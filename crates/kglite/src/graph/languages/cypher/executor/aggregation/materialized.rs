@@ -1100,8 +1100,10 @@ impl<'a> CypherExecutor<'a> {
         let mut mins: Vec<Option<Value>> = vec![None; n];
         let mut maxs: Vec<Option<Value>> = vec![None; n];
 
-        // Deduplicate expressions so a shared argument is evaluated once.
-        let mut unique_exprs: Vec<&Expression> = Vec::new();
+        // One evaluation slot per aggregate that takes an argument. Each
+        // return item owns its own AST node, so two specs never point at the
+        // same `Expression` and there is nothing to share between slots.
+        let mut arg_exprs: Vec<&Expression> = Vec::new();
         let mut spec_expr_idx: Vec<usize> = Vec::with_capacity(n);
 
         for spec in &specs {
@@ -1109,24 +1111,15 @@ impl<'a> CypherExecutor<'a> {
                 spec_expr_idx.push(usize::MAX); // sentinel — no expression needed
                 continue;
             }
-            // Pointer equality, not structural — this is a fast path, not a
-            // semantic requirement.
-            let idx = unique_exprs
-                .iter()
-                .position(|&e| std::ptr::eq(e, spec.expr));
-            if let Some(idx) = idx {
-                spec_expr_idx.push(idx);
-            } else {
-                spec_expr_idx.push(unique_exprs.len());
-                unique_exprs.push(spec.expr);
-            }
+            spec_expr_idx.push(arg_exprs.len());
+            arg_exprs.push(spec.expr);
         }
 
-        let mut eval_buf: Vec<Value> = vec![Value::Null; unique_exprs.len()];
+        let mut eval_buf: Vec<Value> = vec![Value::Null; arg_exprs.len()];
 
         for (row_idx, row) in group_rows.iter().enumerate() {
             self.check_interrupt_periodic(row_idx)?;
-            for (i, expr) in unique_exprs.iter().enumerate() {
+            for (i, expr) in arg_exprs.iter().enumerate() {
                 eval_buf[i] = self.evaluate_expression(expr, row)?;
             }
 

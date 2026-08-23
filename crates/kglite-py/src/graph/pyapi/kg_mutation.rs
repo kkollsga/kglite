@@ -1890,7 +1890,14 @@ impl KnowledgeGraph {
             modified_by.as_deref(),
         )
     }
+}
 
+/// Plain `impl`, deliberately outside `#[pymethods]`: this is the Rust-side
+/// body shared by [`KnowledgeGraph::add_connections_bulk`] and
+/// [`KnowledgeGraph::add_connections_from_source`]. Inside a `#[pymethods]`
+/// block PyO3 would export it as a public Python method that
+/// `kglite/__init__.pyi` does not declare.
+impl KnowledgeGraph {
     /// Internal helper for bulk connection loading
     fn add_connections_internal(
         &mut self,

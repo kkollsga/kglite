@@ -416,7 +416,6 @@ impl BatchProcessor {
         // mapped go through the node — O(types) `Arc::make_mut` clones per
         // chunk rather than O(rows). Why the split: [`Self::apply_row_update`].
         let is_disk = GraphRead::is_disk(&graph.graph);
-        let mut disk_updates_applied = false;
         // Interned once outside the loop; only the Update/Sum arms use it.
         let provisional_key = graph.interner.get_or_intern(PROVISIONAL_KEY);
 
@@ -453,7 +452,6 @@ impl BatchProcessor {
                     update.conflict_mode,
                     provisional_key,
                 );
-                disk_updates_applied = true;
                 stats.updates += 1;
             } else if graph.graph.node_weight(update.node_idx).is_some() {
                 Self::apply_node_update(
@@ -469,7 +467,6 @@ impl BatchProcessor {
         }
 
         // No re-sync: `column_store_mut` above mutated the backend's own store.
-        let _ = disk_updates_applied;
     }
 
     /// Write one pending update into a columnar row — the disk

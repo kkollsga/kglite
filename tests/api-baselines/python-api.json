@@ -422,10 +422,6 @@
           "kind": "method",
           "signature": "(self, /, connections, *, git_sha=None, modified_by=None)"
         },
-        "add_connections_internal": {
-          "kind": "method",
-          "signature": "(self, /, connections, filter_to_loaded, git_sha, modified_by)"
-        },
         "add_embeddings": {
           "kind": "method",
           "signature": "(self, /, node_type, text_column, embeddings, metric=None)"

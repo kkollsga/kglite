@@ -1087,9 +1087,7 @@ fn find_all_paths_recursive(
     }
 
     if deadline.exceeded() {
-        {
-            return;
-        }
+        return;
     }
 
     if current == target {
@@ -1337,9 +1335,7 @@ pub fn weakly_connected_components_scoped(
     } {
         edge_counter += 1;
         if edge_counter & 0xFFFFF == 0 && deadline.exceeded() {
-            {
-                return Err(algorithm_timeout_err());
-            }
+            return Err(algorithm_timeout_err());
         }
         if !edge_matches(edge.connection_type()) {
             continue;
@@ -1428,9 +1424,7 @@ fn build_scoped_adjacency_over(
     } {
         counter += 1;
         if counter & 0xFFFFF == 0 && deadline.exceeded() {
-            {
-                return Err(algorithm_timeout_err());
-            }
+            return Err(algorithm_timeout_err());
         }
         if !edge_matches(edge.connection_type()) {
             continue;
@@ -1569,9 +1563,7 @@ fn coreness_scoped_streaming(
     let mut deg: Vec<u32> = Vec::with_capacity(n);
     for v in 0..n {
         if v & 0xFFFFF == 0 && deadline.exceeded() {
-            {
-                return Err(algorithm_timeout_err());
-            }
+            return Err(algorithm_timeout_err());
         }
         src.neighbors_deduped(v, &mut buf);
         deg.push(buf.len() as u32);
@@ -1608,9 +1600,7 @@ fn coreness_scoped_streaming(
     // Pass 2: peel in degree order, re-streaming each vertex's neighbours once.
     for i in 0..n {
         if i & 0xFFFFF == 0 && deadline.exceeded() {
-            {
-                return Err(algorithm_timeout_err());
-            }
+            return Err(algorithm_timeout_err());
         }
         let v = vert[i];
         let dv = deg[v];
@@ -1684,7 +1674,7 @@ pub fn ready_set_scoped(
     let mut ready = Vec::new();
     for (i, node) in candidates.into_iter().enumerate() {
         if i & 0xFFFF == 0 && deadline.exceeded() {
-            return Err("Query interrupted".to_string());
+            return Err(algorithm_timeout_err());
         }
         if done.contains(&node) {
             continue;
@@ -1716,9 +1706,7 @@ pub fn clustering_coefficient_scoped(
 
     for v in 0..n {
         if v & 0xFFFF == 0 && deadline.exceeded() {
-            {
-                return Err(algorithm_timeout_err());
-            }
+            return Err(algorithm_timeout_err());
         }
         let nbrs = &adj[v];
         let k = nbrs.len();
@@ -2085,9 +2073,7 @@ pub fn shortest_path_weighted(
 
         visit_count += 1;
         if visit_count.is_multiple_of(1000) && deadline.exceeded() {
-            {
-                return None;
-            }
+            return None;
         }
 
         let current = NodeIndex::new(current_idx);

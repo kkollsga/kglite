@@ -898,12 +898,38 @@ mod tests {
 
     #[test]
     fn double_commit_via_take_working_drops_state() {
-        // The current API takes Transaction by value in commit, so
-        // double-commit is statically impossible (the second call doesn't have
-        // a tx to pass). Pinned by construction: there is nothing to assert.
+        // `commit` takes the Transaction by value and drains it through
+        // `take_working`, so a second commit of the same state is
+        // unrepresentable rather than merely discouraged. Two things that are
+        // observable, and would break if the drain ever became a copy: the
+        // working copy moves out exactly once, and a drained (write-less) tx
+        // commits as a no-op that leaves the version where it was.
         let s = Session::new(empty_graph());
-        let tx = s.begin();
-        let _ = s.commit(tx, true);
+        let mut tx = s.begin();
+        tx.working_mut().expect("rw tx");
+        let (working, base) = tx.take_working();
+        assert!(
+            working.is_some(),
+            "the materialized working copy moves to the caller"
+        );
+        assert_eq!(base, 0);
+        assert_eq!(
+            s.version(),
+            0,
+            "taking the working copy commits nothing by itself"
+        );
+
+        let drained = Transaction {
+            snapshot: None,
+            working: None,
+            base_version: base,
+            read_only: false,
+        };
+        assert!(
+            matches!(s.commit(drained, true), CommitOutcome::NoWritesNoOp),
+            "a tx whose working copy is gone has nothing left to apply"
+        );
+        assert_eq!(s.version(), 0, "and so must not bump the version");
     }
 
     // ── True-parallel concurrency tests ─────────────────────────────────

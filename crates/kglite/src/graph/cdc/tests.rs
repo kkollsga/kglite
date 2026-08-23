@@ -178,7 +178,7 @@ fn create_update_and_delete_publish_one_event_each() {
             &published[2].change,
             CdcChange::Node { after: None, id, .. } if *id == Value::Int64(3)
         ),
-        "a delete carries identity only — v1 keeps no before-image"
+        "with enrichment off, a delete carries identity only — no before-image"
     );
 }
 
@@ -531,8 +531,8 @@ fn eviction_bounds_the_ring_and_advances_the_earliest_watermark() {
     assert_eq!(
         cdc::read(&graph, 0, None, &[]).map(|read| read.len()),
         Some(4),
-        "a cursor older than the watermark reads what survives; B2 turns that \
-         into a typed 'cursor too old' refusal"
+        "a cursor older than the watermark reads what survives; the typed \
+         'cursor too old' refusal lives one layer up, in db.cdc.query"
     );
 }
 

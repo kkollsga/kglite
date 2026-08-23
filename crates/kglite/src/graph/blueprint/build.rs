@@ -408,10 +408,6 @@ fn load_manual_nodes(
 
         let mut df = DataFrame::new(Vec::new());
         let values: Vec<String> = distinct.into_iter().collect();
-        let col_type_strings = vec![Some(String::from("string")); values.len()]
-            .iter()
-            .all(|_| true);
-        let _ = col_type_strings; // silence unused
         let data = crate::datatypes::values::ColumnData::String(
             values.iter().cloned().map(Some).collect(),
         );
