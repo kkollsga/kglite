@@ -2454,3 +2454,87 @@ fn test_element_id_anchor_reads_a_conjunct_and_the_scoped_optional_where() {
         "OPTIONAL MATCH carries its WHERE inside the clause"
     );
 }
+
+#[test]
+fn test_count_distinct_edge_var_is_not_fused() {
+    // The fused DISTINCT path counts distinct *peer NodeIndices*, which is not
+    // edge identity: two parallel a→b edges make `count(DISTINCT r)` 2 and the
+    // peer-dedup answer 1. Both fusion entry points must decline the shape.
+    let shapes = [
+        "MATCH (a:N)-[r:R]->(b:N) RETURN a, count(DISTINCT r) AS c",
+        "MATCH (a:N)-[r:R]->(b:N) WITH a, count(DISTINCT r) AS c RETURN a, c",
+        // Anonymous other endpoint: the edge variable is the only non-group
+        // variable in scope, so this shape reaches the same gate.
+        "MATCH (a:N)<-[r:R]-() RETURN a, count(DISTINCT r) AS c",
+    ];
+    let graph = DirGraph::new();
+    let params = HashMap::new();
+    for source in shapes {
+        let mut query = parse_cypher(source).unwrap();
+        optimize(&mut query, &graph, &params);
+        assert!(
+            !query.clauses.iter().any(|clause| matches!(
+                clause,
+                Clause::FusedMatchReturnAggregate { .. } | Clause::FusedMatchWithAggregate { .. }
+            )),
+            "count(DISTINCT <edge var>) must not fuse to a distinct-peer count: {source}"
+        );
+    }
+}
+
+#[test]
+fn test_count_of_edge_var_without_distinct_still_fuses() {
+    // Control for `test_count_distinct_edge_var_is_not_fused`: the non-DISTINCT
+    // edge count is what the fused edge-centric path actually computes.
+    let mut query = parse_cypher("MATCH (a:N)-[r:R]->(b:N) RETURN a, count(r) AS c").unwrap();
+    let graph = DirGraph::new();
+    let params = HashMap::new();
+    optimize(&mut query, &graph, &params);
+    assert!(
+        query.clauses.iter().any(|clause| matches!(
+            clause,
+            Clause::FusedMatchReturnAggregate {
+                distinct_count: false,
+                ..
+            }
+        )),
+        "plain count(<edge var>) must keep fusing: {:#?}",
+        query.clauses
+    );
+}
+
+#[test]
+fn test_push_limit_into_aggregate_bails_on_with_inline_filter() {
+    // `execute_with` (and the streaming pipeline) project first and filter
+    // after, so a capped group set drops groups the filter would have kept and
+    // the LIMIT still had room for.
+    let filtered = [
+        "MATCH (n:T) WITH n.k AS k, collect(n.id) AS ids WHERE size(ids) > 1 LIMIT 5 RETURN k, ids",
+        "MATCH (n:T) WITH n.k AS k, collect(n.id) AS ids HAVING size(ids) > 1 LIMIT 5 RETURN k, ids",
+    ];
+    let graph = DirGraph::new();
+    let params = HashMap::new();
+    for source in filtered {
+        let mut query = parse_cypher(source).unwrap();
+        optimize(&mut query, &graph, &params);
+        for clause in &query.clauses {
+            if let Clause::With(w) = clause {
+                assert_eq!(
+                    w.group_limit_hint, None,
+                    "a filtered WITH must not carry a group cap: {source}"
+                );
+            }
+        }
+    }
+
+    // Control: the same shape without the filter still gets the hint.
+    let mut query =
+        parse_cypher("MATCH (n:T) WITH n.k AS k, collect(n.id) AS ids LIMIT 5 RETURN k, ids")
+            .unwrap();
+    optimize(&mut query, &graph, &params);
+    let hinted = query
+        .clauses
+        .iter()
+        .any(|clause| matches!(clause, Clause::With(w) if w.group_limit_hint == Some(5)));
+    assert!(hinted, "unfiltered WITH + LIMIT must still be hinted");
+}

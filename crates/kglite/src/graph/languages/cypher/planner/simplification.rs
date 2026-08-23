@@ -240,8 +240,13 @@ pub(super) fn collect_or_equalities(
 /// answer (you need every group to find the top N), so the pass leaves
 /// those queries to the materialised path. DISTINCT on the projection
 /// is left alone for the same reason — the executor's DISTINCT-after-
-/// projection step needs all groups to dedup against. HAVING and
-/// having-style filters on the projection also bail.
+/// projection step needs all groups to dedup against. `RETURN … HAVING`
+/// and a `WITH`'s inline `WHERE`/`HAVING` bail for the same reason and
+/// it is not cosmetic: both `execute_with` and the streaming pipeline
+/// run the group-limited projection *first* and filter after, so a
+/// capped group set can drop qualifying groups the LIMIT still had room
+/// for (`WITH k, collect(x) AS xs WHERE size(xs) > 1 LIMIT 5` returned
+/// 2 rows where 5 qualified).
 ///
 /// **Triggering shape — Wikidata hub-anchor case.**
 ///
@@ -293,7 +298,9 @@ pub(super) fn push_limit_into_aggregate(query: &mut CypherQuery, _graph: &DirGra
                 }
             }
             Clause::With(w) => {
-                if w.distinct {
+                // `where_clause` also carries `WITH … HAVING` — the parser
+                // folds both spellings into it.
+                if w.distinct || w.where_clause.is_some() {
                     (false, false)
                 } else {
                     let g = w
@@ -818,7 +825,7 @@ impl TextScoreCollector {
             _ => {
                 return Err(
                     "text_score(): second argument must be a string literal column name".into(),
-                )
+                );
             }
         };
         let query_text = text_score_query_arg(&args[2], params)?;

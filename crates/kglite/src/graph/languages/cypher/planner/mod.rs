@@ -588,8 +588,11 @@ fn pass_push_limit_into_match(query: &mut CypherQuery, ctx: &PassCtx) {
 /// continue to feed their aggregates. WHY-BAIL: ORDER BY between
 /// projection and LIMIT changes which N rows survive (need every group
 /// to find the top N), so the pass leaves those queries to the
-/// materialised path. DISTINCT / HAVING also bail. The trailing LIMIT
-/// clause stays in the plan as a hard cap.
+/// materialised path. DISTINCT, `RETURN … HAVING` and a `WITH`'s inline
+/// `WHERE`/`HAVING` also bail — the filter runs *after* the projection,
+/// so a capped group set would drop qualifying groups the LIMIT still
+/// had room for. The trailing LIMIT clause stays in the plan as a hard
+/// cap.
 fn pass_push_limit_into_aggregate(query: &mut CypherQuery, ctx: &PassCtx) {
     push_limit_into_aggregate(query, ctx.graph)
 }

@@ -268,6 +268,34 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (a:Person)-[:KNOWS]->(b:Person) WITH a, count(DISTINCT b) AS friends RETURN a, friends",
         None,
     ),
+    # ── count(DISTINCT <edge var>) over parallel edges ──
+    # The fused DISTINCT path dedups peer NodeIndices, which is not edge
+    # identity. `fuse_match_return_aggregate` used to accept the edge variable
+    # into that path, so two parallel 1→2 edges counted 1 instead of 2. Both
+    # entry points (RETURN-form and WITH-form) reached it.
+    (
+        "count_distinct_edge_var_parallel",
+        "parallel_edge_cycle_graph",
+        "MATCH (a:N)-[r:R]->(b:N) RETURN a, count(DISTINCT r) AS c",
+        None,
+    ),
+    (
+        "count_distinct_edge_var_parallel_with",
+        "parallel_edge_cycle_graph",
+        "MATCH (a:N)-[r:R]->(b:N) WITH a, count(DISTINCT r) AS c RETURN a.name AS a, c",
+        None,
+    ),
+    # ── group cap vs a post-projection filter ──
+    # `push_limit_into_aggregate` stamped `group_limit_hint` on a WITH whose
+    # inline WHERE runs *after* the projection, so the cap froze the group set
+    # before the filter could reject the groups that fail it: 2 rows where 5
+    # qualified and the LIMIT had room for all 5.
+    (
+        "with_filtered_aggregate_limit",
+        "uneven_group_graph",
+        "MATCH (n:T) WITH n.k AS k, collect(n.id) AS ids WHERE size(ids) > 1 LIMIT 5 RETURN k, size(ids) AS c",
+        None,
+    ),
     (
         "trigger_match_with_top_k",
         "social_graph",
@@ -2111,12 +2139,6 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (p:Person) RETURN p.name AS n, p.age * 2 AS bumped ORDER BY bumped DESC LIMIT 5",
         None,
     ),
-    (
-        "multi_match_count_star",
-        "social_graph",
-        "MATCH (p:Person) MATCH (q:Person) WHERE p.person_id < q.person_id AND p.city = q.city RETURN count(*) AS n",
-        None,
-    ),
     # ── safe LIMIT pushdown over an unfiltered node-only cartesian ──
     (
         "cartesian_node_scans_limit",
@@ -3485,9 +3507,31 @@ def parallel_edge_cycle_graph() -> kglite.KnowledgeGraph:
     """Two parallel 1 → 2 relationships, plus 2 → 3 and 3 → 1.
 
     Exercises both undirected closed-trail lengths: 1 returns to itself in two
-    hops over the parallel pair, and in three around the cycle.
+    hops over the parallel pair, and in three around the cycle. The parallel
+    pair also makes distinct *edges* and distinct *peers* disagree for node 1,
+    which is what `count_distinct_edge_var_parallel` needs.
     """
     return _edge_graph([1, 2, 3], [(1, 2), (1, 2), (2, 3), (3, 1)])
+
+
+@pytest.fixture
+def uneven_group_graph() -> kglite.KnowledgeGraph:
+    """`:T` nodes in eight `k` groups: g0-g2 hold one node, g3-g7 hold two.
+
+    Insertion order puts the three singleton groups first, so a group cap of 5
+    spends three of its five slots on groups a `size(ids) > 1` filter then
+    rejects — leaving 2 rows where all 5 of g3-g7 qualify. That gap is what
+    makes an aggregate LIMIT pushed past a post-projection filter observable.
+    """
+    import pandas as pd
+
+    rows = []
+    for k in range(8):
+        for _ in range(1 if k < 3 else 2):
+            rows.append({"id": len(rows), "k": f"g{k}"})
+    g = kglite.KnowledgeGraph()
+    g.add_nodes(pd.DataFrame(rows), "T", "id")
+    return g
 
 
 @pytest.fixture

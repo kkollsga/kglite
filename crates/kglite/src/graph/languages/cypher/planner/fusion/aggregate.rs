@@ -646,9 +646,10 @@ pub(crate) fn fuse_match_return_aggregate(query: &mut CypherQuery, has_secondary
         // instead of the materialised edge-row set.
         //
         // distinct_count is true when a count aggregate uses DISTINCT on the
-        // OTHER node variable or the edge variable: the executor's node-centric
-        // path dedups peer NodeIndices per group, bypassing the edge-centric
-        // fast path (which counts edges, not distinct peers).
+        // OTHER node variable: the executor's node-centric path dedups peer
+        // NodeIndices per group, bypassing the edge-centric fast path (which
+        // counts edges, not distinct peers). `count(DISTINCT <edge var>)` is
+        // NOT fusable for exactly that reason — see the gate below.
         let (fusable, distinct_count) = if let Clause::Return(r) = &query.clauses[i + 1] {
             if r.distinct {
                 (false, false)
@@ -765,15 +766,23 @@ pub(crate) fn fuse_match_return_aggregate(query: &mut CypherQuery, has_secondary
                                     //   (b) the edge variable — both count the
                                     //       same per-row pattern matches, so
                                     //       count(r) ≡ count(other).
-                                    // DISTINCT on either sets `distinct_count`;
-                                    // the executor then counts distinct peer
-                                    // NodeIndices per group, never distinct
-                                    // edges.
+                                    // DISTINCT is honoured for (a) only, via
+                                    // `distinct_count`: the fused executor
+                                    // dedups peer NodeIndices, which is not
+                                    // edge identity. `count(DISTINCT r)` over
+                                    // two parallel a→b edges must be 2, and the
+                                    // peer-dedup answer is 1 — so that shape
+                                    // declines fusion and takes the
+                                    // materialised path.
                                     if let Some(Expression::Variable(var)) = args.first() {
                                         let matches_other =
                                             other_var.as_deref() == Some(var.as_str());
                                         let matches_edge =
                                             edge_var.as_deref() == Some(var.as_str());
+                                        if matches_edge && *distinct {
+                                            count_var_ok = false;
+                                            break;
+                                        }
                                         if matches_other || matches_edge {
                                             has_count = true;
                                             if *distinct {
@@ -1491,7 +1500,7 @@ pub(crate) fn fuse_match_with_aggregate(query: &mut CypherQuery, has_secondary_l
         }
 
         // (fusable, distinct_count) — distinct_count tracks whether
-        // count(DISTINCT v) was seen on the OTHER node or the edge variable.
+        // count(DISTINCT v) was seen on the OTHER node variable.
         let (fusable, distinct_count) = if let Clause::With(w) = &query.clauses[i + 1] {
             if w.distinct {
                 (false, false)
@@ -1560,7 +1569,9 @@ pub(crate) fn fuse_match_with_aggregate(query: &mut CypherQuery, has_secondary_l
                                         continue;
                                     }
                                     // Same gate as fuse_match_return_aggregate:
-                                    // count(<other-node>) or count(<edge-var>).
+                                    // count(<other-node>) or count(<edge-var>),
+                                    // and DISTINCT on the edge var declines
+                                    // (peer dedup ≠ edge identity).
                                     // With an anonymous endpoint (`MATCH
                                     // (n)<-[r]-() WITH n, count(r)`) the only
                                     // bound non-group variable IS the edge var.
@@ -1569,6 +1580,10 @@ pub(crate) fn fuse_match_with_aggregate(query: &mut CypherQuery, has_secondary_l
                                             other_var.as_deref() == Some(var.as_str());
                                         let matches_edge =
                                             edge_var.as_deref() == Some(var.as_str());
+                                        if matches_edge && *distinct {
+                                            count_var_ok = false;
+                                            break;
+                                        }
                                         if matches_other || matches_edge {
                                             has_count = true;
                                             if *distinct {
