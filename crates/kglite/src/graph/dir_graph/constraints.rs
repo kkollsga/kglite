@@ -609,29 +609,28 @@ impl DirGraph {
     /// write-path fast-out.
     ///
     /// True for a declared `primary_key` as well as for `required_fields`, since
-    /// a primary key is unique **and** present (NODE KEY). A key on `id` does not
-    /// count: `id` is a `NodeData` field that always exists.
+    /// a primary key is unique **and** present (NODE KEY). A key on `id` counts
+    /// like any other: `id` is resolved by every write path but can still be
+    /// nulled explicitly — see [`Self::check_required_fields`].
     #[inline]
     pub(crate) fn has_required_fields(&self, node_type: &str) -> bool {
-        if !self.required_fields_for(node_type).is_empty() {
-            return true;
-        }
-        matches!(self.primary_key_for(node_type), Some(pk) if pk != "id")
+        !self.required_fields_for(node_type).is_empty() || self.primary_key_for(node_type).is_some()
     }
 
     /// Every property `node_type` requires to be present: the declared
-    /// `required_fields` plus a non-`id` primary key. Borrow-free so the caller
-    /// can hold `&self` while reading values.
+    /// `required_fields` plus the primary key. Borrow-free so the caller can
+    /// hold `&self` while reading values.
     fn required_property_names(&self, node_type: &str) -> Vec<&str> {
         let mut names: Vec<&str> = self
             .required_fields_for(node_type)
             .iter()
             .map(String::as_str)
             .collect();
-        // A primary key is required by definition. Skip `id` — it is a
-        // `NodeData` field, present by construction.
+        // A primary key is required by definition, `id` included: a write can
+        // null it explicitly, exactly as it can null `title` — see
+        // [`Self::check_required_fields`].
         if let Some(pk) = self.primary_key_for(node_type) {
-            if pk != "id" && !names.contains(&pk) {
+            if !names.contains(&pk) {
                 names.push(pk);
             }
         }
@@ -692,14 +691,20 @@ impl DirGraph {
     where
         F: Fn(&str) -> Option<Value>,
     {
-        let required = self.required_property_names(node_type);
-        if required.is_empty() {
+        // Iterated rather than collected: this runs once per row of every bulk
+        // load into a constrained type, and `required_property_names`'s `Vec`
+        // would be one heap allocation per row.
+        let declared = self.required_fields_for(node_type);
+        let primary_key = self
+            .primary_key_for(node_type)
+            .filter(|pk| !declared.iter().any(|field| field == pk));
+        if declared.is_empty() && primary_key.is_none() {
             return Ok(());
         }
         if matches!(read(PROVISIONAL_KEY), Some(Value::Boolean(true))) {
             return Ok(());
         }
-        for property in required {
+        for property in declared.iter().map(String::as_str).chain(primary_key) {
             if property == "type" {
                 continue;
             }
@@ -812,8 +817,8 @@ impl DirGraph {
         before != node.required_fields.len()
     }
 
-    /// Whether `property` is declared NOT NULL on `node_type`. A non-`id`
-    /// primary key counts: it is required by definition.
+    /// Whether `property` is declared NOT NULL on `node_type`. A primary key
+    /// counts: it is required by definition.
     pub(crate) fn has_not_null_constraint(&self, node_type: &str, property: &str) -> bool {
         self.required_property_names(node_type).contains(&property)
     }
@@ -1525,6 +1530,49 @@ mod not_null_declaration_tests {
             graph.unique_kind_for("Person", &["email".to_string()]),
             ConstraintKind::NodeKey
         );
+    }
+
+    /// A primary key is unique **and** present, and `id` is no more exempt from
+    /// the presence half than a `required: ["id"]` declaration is (see
+    /// `declaring_not_null_on_id_or_title_is_enforced_against_an_explicit_null`).
+    /// Exempting it made `primary_key: "id"` admit `CREATE (:T {id: null})`
+    /// while `primary_key: "email"` rejected the same shape.
+    #[test]
+    fn a_primary_key_on_id_is_required_like_any_other_primary_key() {
+        use crate::graph::schema::{NodeSchemaDefinition, SchemaDefinition, SchemaInstall};
+
+        for pk in ["id", "email"] {
+            let mut graph = person_graph(&[(1, "Alice", Some("a@b.c"))]);
+            let mut schema = SchemaDefinition::new();
+            schema.add_node_schema(
+                "Person".to_string(),
+                NodeSchemaDefinition {
+                    primary_key: Some(pk.to_string()),
+                    ..Default::default()
+                },
+            );
+            graph
+                .set_schema(schema, SchemaInstall::Merge)
+                .expect("schema install");
+
+            assert!(graph.has_required_fields("Person"), "pk = {pk}");
+            assert!(graph.has_not_null_constraint("Person", pk), "pk = {pk}");
+
+            // The write paths resolve the key before checking, so a write that
+            // carries it passes...
+            graph
+                .check_required_fields("Person", |name| {
+                    (name == pk).then(|| Value::String("resolved".to_string()))
+                })
+                .unwrap_or_else(|e| panic!("pk = {pk}: {e}"));
+
+            // ...and an explicit null (`CREATE (:Person {id: null})`) does not.
+            let violation = graph
+                .check_required_fields("Person", |_| None)
+                .expect_err(&format!("pk = {pk}: a null primary key must be rejected"));
+            assert_eq!(violation.kind, ConstraintKind::NodeKey, "pk = {pk}");
+            assert!(violation.to_string().contains(pk), "{violation}");
+        }
     }
 }
 

@@ -76,6 +76,58 @@ fn test_create_rejects_duplicate_primary_key() {
     assert_eq!(graph.graph.node_count(), 3);
 }
 
+/// A primary key is unique **and** present. `CREATE (n:T {id: null})` supplies
+/// an explicit null identity — the one shape that reaches storage with no id —
+/// so a declared primary key on `id` must reject it, exactly as a primary key
+/// on any other property does. Exempting `id` ("present by construction") made
+/// `primary_key: "id"` the weakest primary key rather than the strongest.
+#[test]
+fn test_create_rejects_a_null_primary_key() {
+    use crate::graph::schema::{NodeSchemaDefinition, SchemaDefinition, SchemaInstall};
+
+    fn run(g: &mut DirGraph, q: &str) -> Result<(), String> {
+        let query = parser::parse_cypher(q).unwrap();
+        execute_mutable(
+            g,
+            &query,
+            HashMap::new(),
+            crate::graph::algorithms::Interrupt::default(),
+        )
+        .map(|_| ())
+    }
+
+    for pk in ["id", "email"] {
+        let mut graph = DirGraph::new();
+        let mut schema = SchemaDefinition::new();
+        schema.add_node_schema(
+            "Person".to_string(),
+            NodeSchemaDefinition {
+                primary_key: Some(pk.to_string()),
+                ..Default::default()
+            },
+        );
+        graph
+            .set_schema(schema, SchemaInstall::Merge)
+            .expect("schema install");
+
+        match run(
+            &mut graph,
+            &format!("CREATE (n:Person {{{pk}: null, name: 'A'}})"),
+        ) {
+            Ok(()) => panic!("pk = {pk}: a null primary key must be rejected"),
+            Err(e) => assert!(e.contains(pk), "pk = {pk}, got: {e}"),
+        }
+        assert_eq!(graph.graph.node_count(), 0, "pk = {pk}");
+
+        // The engine-minted id still satisfies the key: a bare CREATE that
+        // never mentions `id` is not a null write.
+        if pk == "id" {
+            run(&mut graph, "CREATE (n:Person {name: 'A'})").unwrap();
+            assert_eq!(graph.graph.node_count(), 1);
+        }
+    }
+}
+
 /// Every id the *engine* mints must be unique — a `CREATE` with no `id`
 /// property asks the engine for an identity, so handing out one that is
 /// already live is engine-side identity corruption, not the documented

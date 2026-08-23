@@ -103,12 +103,18 @@ fn collect_regex_patterns(condition: &FilterCondition, cache: &mut HashMap<Strin
 /// Python's loose typing.
 pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
     // Cypher three-valued logic: NULL ≠ anything (including NULL).
-    // Grouping/DISTINCT use Value's PartialEq directly, which is unaffected.
     if matches!(a, Value::Null) || matches!(b, Value::Null) {
         return false;
     }
+    // `Value`'s `==` is *total* equality — NaN equals NaN, so a `HashSet` key
+    // agrees with `sort`+`dedup` (grouping and DISTINCT want exactly that).
+    // Cypher's `=` is IEEE instead: NaN equals nothing, itself included. The
+    // two relations differ only at a NaN leaf, so one check re-applies IEEE
+    // here — and only after `==` already matched, keeping it off the miss path
+    // that scans spend their time on. `MembershipSet` mirrors the rule by
+    // giving a NaN element no key.
     if a == b {
-        return true;
+        return !a.contains_nan();
     }
     match (a, b) {
         (Value::Int64(i), Value::Float64(f)) => (*i as f64) == *f,

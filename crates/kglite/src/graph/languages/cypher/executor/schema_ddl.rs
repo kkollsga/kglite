@@ -1045,8 +1045,11 @@ pub(super) fn reject_name_collision(
 /// index is a gap in the enforcement layer, not something constraint DDL can
 /// paper over.
 ///
-/// `IS NOT NULL` on `id` is unaffected: it is present by construction, so the
-/// requirement is genuinely satisfied rather than ignored.
+/// `IS NOT NULL` on `id` is unaffected, and for the opposite reason: it is
+/// genuinely enforced. Every write path resolves an id before the check, so an
+/// omitted one satisfies the requirement, but an explicit
+/// `CREATE (:T {id: null})` does not — see
+/// `DirGraph::check_required_fields`.
 fn reject_structural_uniqueness(
     graph: &DirGraph,
     label: &str,

@@ -24,7 +24,7 @@ pub enum FilterCondition {
     Not(Box<FilterCondition>),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Value {
     UniqueId(u32),
     Int64(i64),
@@ -222,10 +222,80 @@ impl<'a> BorrowedValue<'a> {
     }
 }
 
+/// `f64` equality under the *total* rule `Ord` and `Hash` already use: NaN
+/// equals NaN, `-0.0` equals `0.0`.
+#[inline]
+fn total_f64_eq(a: f64, b: f64) -> bool {
+    // `==` already ties -0.0 with 0.0; only NaN needs the second arm.
+    a == b || (a.is_nan() && b.is_nan())
+}
+
+/// **Total** equality — the container contract, not Cypher's `=`.
+///
+/// `Ord` calls two NaNs `Equal` and `Hash` puts them in one bucket, so
+/// equality has to agree: a derived `PartialEq` left `HashSet<Value>` holding
+/// two NaNs where `sort`+`dedup` and `BTreeMap` held one, and `Eq`'s
+/// reflexivity promise — which every one of those containers relies on — was
+/// simply false. Same rule for `Point`'s two coordinates, which `Ord` compares
+/// with `cmp_f64_total`.
+///
+/// Cypher's `=` is IEEE (NaN equals nothing, itself included) and must not
+/// inherit this. It reaches values through
+/// [`crate::graph::core::filtering::values_equal`], which re-applies IEEE via
+/// [`Value::contains_nan`]; `MembershipSet` mirrors the same rule for `IN`.
+///
+/// Every non-float arm is exactly what the derive produced — written out
+/// rather than routed through `cmp` so the hot `String`/`Int64` compares keep
+/// `==`'s early-out instead of paying for an `Ordering`.
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Float64(a), Value::Float64(b)) => total_f64_eq(*a, *b),
+            (
+                Value::Point {
+                    lat: a_lat,
+                    lon: a_lon,
+                },
+                Value::Point {
+                    lat: b_lat,
+                    lon: b_lon,
+                },
+            ) => total_f64_eq(*a_lat, *b_lat) && total_f64_eq(*a_lon, *b_lon),
+            (Value::UniqueId(a), Value::UniqueId(b)) => a == b,
+            (Value::Int64(a), Value::Int64(b)) => a == b,
+            (Value::String(a), Value::String(b)) => a == b,
+            (Value::Boolean(a), Value::Boolean(b)) => a == b,
+            (Value::DateTime(a), Value::DateTime(b)) => a == b,
+            (Value::Timestamp(a), Value::Timestamp(b)) => a == b,
+            (Value::Null, Value::Null) => true,
+            (Value::NodeRef(a), Value::NodeRef(b)) => a == b,
+            (
+                Value::Duration {
+                    months: am,
+                    days: ad,
+                    seconds: as_,
+                },
+                Value::Duration {
+                    months: bm,
+                    days: bd,
+                    seconds: bs,
+                },
+            ) => am == bm && ad == bd && as_ == bs,
+            // Recursive through this same impl, so a NaN nested in a list, a
+            // map or an entity's properties folds identically.
+            (Value::List(a), Value::List(b)) => a == b,
+            (Value::Map(a), Value::Map(b)) => a == b,
+            (Value::Node(a), Value::Node(b)) => a == b,
+            (Value::Relationship(a), Value::Relationship(b)) => a == b,
+            (Value::Path(a), Value::Path(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
 impl Eq for Value {
-    // Empty: `PartialEq` is derived, so Float64 compares with IEEE semantics
-    // (NaN != NaN, -0.0 == 0.0). The NaN / -0.0 normalisation that keeps
-    // sorting and hashing coherent lives in `Ord` and `Hash` below.
+    // Empty: [`PartialEq`] above is already the total relation `Ord` and
+    // `Hash` implement, so `Eq`'s reflexivity holds for NaN too.
 }
 
 impl PartialOrd for Value {
@@ -321,30 +391,36 @@ impl Ord for Value {
     }
 }
 
+/// Hashable bits for an `f64`, folding the two cases [`total_f64_eq`] calls
+/// equal: every NaN to one payload, `-0.0` to `0.0`.
+#[inline]
+fn canonical_f64_bits(v: f64) -> u64 {
+    if v.is_nan() {
+        f64::NAN.to_bits()
+    } else if v == 0.0 {
+        0.0f64.to_bits()
+    } else {
+        v.to_bits()
+    }
+}
+
 impl Hash for Value {
     fn hash<H: Hasher>(&self, state: &mut H) {
         std::mem::discriminant(self).hash(state);
         match self {
             Value::UniqueId(v) => v.hash(state),
             Value::Int64(v) => v.hash(state),
-            Value::Float64(v) => {
-                if v.is_nan() {
-                    f64::NAN.to_bits().hash(state)
-                } else {
-                    // -0.0 == 0.0, so they must hash alike.
-                    if *v == 0.0 {
-                        0.0f64.to_bits().hash(state)
-                    } else {
-                        v.to_bits().hash(state)
-                    }
-                }
-            }
+            Value::Float64(v) => canonical_f64_bits(*v).hash(state),
             Value::String(v) => v.hash(state),
             Value::Boolean(v) => v.hash(state),
             Value::DateTime(v) => v.hash(state),
             Value::Point { lat, lon } => {
-                lat.to_bits().hash(state);
-                lon.to_bits().hash(state);
+                // Same canonicalisation as `Float64` above: `Ord` compares the
+                // coordinates with `cmp_f64_total`, which ties NaN with NaN and
+                // -0.0 with 0.0, so raw bits would bucket values the ordering
+                // (and `PartialEq`) call one.
+                canonical_f64_bits(*lat).hash(state);
+                canonical_f64_bits(*lon).hash(state);
             }
             Value::Duration {
                 months,
@@ -377,6 +453,35 @@ impl Hash for Value {
 }
 
 impl Value {
+    /// Whether any `f64` leaf of this value is NaN.
+    ///
+    /// The single case where [`Value`]'s own `==` (total, so containers have
+    /// one notion of "same key") and IEEE equality disagree: `-0.0`/`0.0` are
+    /// equal under both. Cypher's `=` is IEEE, so
+    /// [`crate::graph::core::filtering::values_equal`] consults this before
+    /// trusting `==` — see the NaN row of `MembershipSet`'s normalisation
+    /// table, which gives a NaN element no key for the same reason.
+    pub(crate) fn contains_nan(&self) -> bool {
+        match self {
+            Value::Float64(f) => f.is_nan(),
+            Value::Point { lat, lon } => lat.is_nan() || lon.is_nan(),
+            Value::List(items) => items.iter().any(Value::contains_nan),
+            Value::Map(map) => map.iter().any(|(_, v)| v.contains_nan()),
+            Value::Node(node) => node.properties.iter().any(|(_, v)| v.contains_nan()),
+            Value::Relationship(rel) => rel.properties.iter().any(|(_, v)| v.contains_nan()),
+            Value::Path(path) => {
+                path.nodes
+                    .iter()
+                    .any(|n| n.properties.iter().any(|(_, v)| v.contains_nan()))
+                    || path
+                        .rels
+                        .iter()
+                        .any(|r| r.properties.iter().any(|(_, v)| v.contains_nan()))
+            }
+            _ => false,
+        }
+    }
+
     pub fn as_string(&self) -> Option<String> {
         match self {
             Value::String(s) => Some(s.clone()),
@@ -1180,6 +1285,106 @@ fn format_col_type(col_type: &ColumnType) -> String {
         ColumnType::Map => "map",
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod total_equality_tests {
+    use super::*;
+    use std::collections::{BTreeMap, HashSet};
+
+    /// `Value`'s `Eq`/`Ord`/`Hash` triple is the **container** contract, and a
+    /// container has exactly one notion of "same key". `Ord` calls two NaNs
+    /// `Equal` and `Hash` gives them one bucket, so `PartialEq` must call them
+    /// equal too — otherwise a `HashSet` keeps both while `sort`+`dedup` and a
+    /// `BTreeMap` keep one, and the three disagree about the same pair.
+    #[test]
+    fn nan_is_one_key_in_every_container() {
+        let nan = || Value::Float64(f64::NAN);
+
+        assert_eq!(nan(), nan(), "reflexivity is what Eq promises");
+        assert_eq!(nan().cmp(&nan()), std::cmp::Ordering::Equal);
+
+        let set: HashSet<Value> = [nan(), nan()].into_iter().collect();
+        assert_eq!(set.len(), 1, "HashSet must fold the two NaNs into one key");
+
+        let mut sorted = vec![nan(), nan()];
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 1, "sort+dedup must agree with the HashSet");
+
+        let map: BTreeMap<Value, u8> = [(nan(), 1), (nan(), 2)].into_iter().collect();
+        assert_eq!(map.len(), 1, "BTreeMap must agree with the HashSet");
+    }
+
+    /// A NaN nested inside a container inherits the same rule — `List`/`Map`
+    /// equality is elementwise over `Value`, so a leaf that broke reflexivity
+    /// broke the whole container's.
+    #[test]
+    fn nan_nested_in_a_list_is_one_key_too() {
+        let row = || Value::List(vec![Value::Int64(1), Value::Float64(f64::NAN)]);
+        assert_eq!(row(), row());
+        let set: HashSet<Value> = [row(), row()].into_iter().collect();
+        assert_eq!(set.len(), 1);
+    }
+
+    /// `Point` carries two raw `f64`s. `Ord` routes them through
+    /// `cmp_f64_total` (NaN ties with NaN, `-0.0` ties with `0.0`), so `Hash`
+    /// has to canonicalise the same two cases — hashing raw bits put
+    /// `Point { lat: 0.0 }` and `Point { lat: -0.0 }` in different buckets
+    /// while `Ord`, `Eq` and `dedup` called them one value.
+    #[test]
+    fn point_hashes_agree_with_its_ordering() {
+        fn point(lat: f64, lon: f64) -> Value {
+            Value::Point { lat, lon }
+        }
+        for (a, b) in [
+            (point(0.0, 1.0), point(-0.0, 1.0)),
+            (point(1.0, 0.0), point(1.0, -0.0)),
+            (point(f64::NAN, 1.0), point(-f64::NAN, 1.0)),
+        ] {
+            assert_eq!(a.cmp(&b), std::cmp::Ordering::Equal, "{a:?} vs {b:?}");
+            assert_eq!(a, b, "{a:?} vs {b:?}");
+            let set: HashSet<Value> = [a.clone(), b.clone()].into_iter().collect();
+            assert_eq!(set.len(), 1, "{a:?} vs {b:?}");
+        }
+    }
+
+    /// The container contract must NOT leak into the query language. Cypher's
+    /// `=` is IEEE — NaN equals nothing, itself included — and every `=`,
+    /// `<>`, `IN` and index probe reaches it through
+    /// [`crate::graph::core::filtering::values_equal`], whose `MembershipSet`
+    /// mirror deliberately gives NaN no key.
+    #[test]
+    fn cypher_equality_keeps_ieee_nan_semantics() {
+        use crate::graph::core::filtering::values_equal;
+        let nan = Value::Float64(f64::NAN);
+        assert!(!values_equal(&nan, &nan), "NaN <> NaN under Cypher `=`");
+        assert!(!values_equal(
+            &Value::List(vec![nan.clone()]),
+            &Value::List(vec![nan.clone()]),
+        ));
+        assert!(!values_equal(
+            &Value::Point {
+                lat: f64::NAN,
+                lon: 1.0
+            },
+            &Value::Point {
+                lat: f64::NAN,
+                lon: 1.0
+            },
+        ));
+
+        // Everything else keeps answering exactly as before.
+        assert!(values_equal(&Value::Float64(0.0), &Value::Float64(-0.0)));
+        assert!(values_equal(&Value::Float64(1.5), &Value::Float64(1.5)));
+        assert!(values_equal(&Value::Int64(3), &Value::Float64(3.0)));
+        assert!(!values_equal(&Value::Float64(1.0), &Value::Float64(2.0)));
+        assert!(!values_equal(&Value::Null, &Value::Null));
+        assert!(values_equal(
+            &Value::List(vec![Value::Float64(1.0)]),
+            &Value::List(vec![Value::Float64(1.0)]),
+        ));
+    }
 }
 
 #[cfg(test)]

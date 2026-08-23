@@ -341,8 +341,9 @@ fn matches_opt(wanted: &Option<String>, actual: &str) -> bool {
 ///
 /// Plain `Value` equality, with the caveat that `Value` carries floats: a
 /// float id never compares equal to an integer one of the same magnitude
-/// (`1.0` is not `1`), and `NaN` matches nothing including itself. Graph ids
-/// are integers or strings in practice, and a float id that cannot be
+/// (`1.0` is not `1`). `Value`'s equality is *total* rather than IEEE — a NaN
+/// id would select a NaN id — but only Cypher's `=` needs the IEEE rule, and
+/// graph ids are integers or strings in practice. A float id that cannot be
 /// selected is a better outcome than one that matches approximately.
 fn ids_equal(wanted: &Value, actual: &Value) -> bool {
     wanted == actual
