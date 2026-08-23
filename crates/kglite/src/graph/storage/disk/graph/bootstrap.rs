@@ -130,7 +130,6 @@ impl DiskGraph {
         self.mutation_workspace = None;
         self.parent_workspaces.clear();
         self.independent_root = None;
-        self.mark_persisted();
         Ok(())
     }
 
@@ -180,7 +179,6 @@ impl DiskGraph {
             mutation_workspace: None,
             parent_workspaces: Vec::new(),
             independent_root: None,
-            metadata_dirty: false,
             csr_sorted_by_type: false,
             // `defer_csr = false` by default so one-off Cypher CREATE /
             // MERGE inserts route directly to overflow_out / overflow_in
@@ -375,7 +373,6 @@ impl DiskGraph {
             mutation_workspace: None,
             parent_workspaces: Vec::new(),
             independent_root: None,
-            metadata_dirty: false,
             csr_sorted_by_type: false,
             // `defer_csr = false` by default so one-off Cypher CREATE /
             // MERGE inserts route directly to overflow_out / overflow_in

@@ -578,7 +578,7 @@ fn second_disk_writer_is_rejected_before_mutation() {
 }
 
 #[test]
-fn failed_graph_save_keeps_dirty_state_and_withholds_root_metadata() {
+fn failed_graph_save_withholds_root_metadata_and_stays_retryable() {
     // `target` must be declared before `graph`: reverse-declaration drop
     // order then destroys the graph (and its mappings into `target`) first.
     // `TempGraphDir` asserts that ordering instead of trusting it — on Unix a
@@ -595,20 +595,16 @@ fn failed_graph_save_keeps_dirty_state_and_withholds_root_metadata() {
         .expect_err("a blocked generations directory must fail the save");
     assert!(error.contains("Failed to begin disk generation"));
     assert!(!target.path().join("CURRENT").exists());
-    match &graph.graph {
-        GraphBackend::Disk(disk) => assert!(disk.persistence_is_dirty()),
-        _ => panic!("graph unexpectedly left disk mode"),
-    }
+    assert!(
+        matches!(&graph.graph, GraphBackend::Disk(_)),
+        "a failed save must not knock the graph out of disk mode"
+    );
 
     std::fs::remove_file(blocked_generations).unwrap();
     graph.save_disk(target.path().to_str().unwrap()).unwrap();
     let snapshot =
         crate::graph::storage::disk::generation::resolve_snapshot(target.path()).unwrap();
     assert!(snapshot.snapshot_dir.join("metadata.json").exists());
-    match &graph.graph {
-        GraphBackend::Disk(disk) => assert!(!disk.persistence_is_dirty()),
-        _ => panic!("graph unexpectedly left disk mode"),
-    }
 }
 
 fn seg(
@@ -1210,7 +1206,6 @@ fn seal_round_trip_basic_reads() {
     let ep0 = reloaded.edge_endpoints.get(0);
     assert_eq!(ep0.source, 0);
     assert_eq!(ep0.target, 1);
-    let _ = (n1, n4); // silence unused-warnings if optimised out
 }
 
 #[test]
@@ -1255,7 +1250,7 @@ fn seal_round_trip_auxiliary_indexes() {
         "peer_count_offsets.bin",
         "peer_count_entries.bin",
     ] {
-        assert!(seg1.join(name).exists(), "phase-5 missing {name}");
+        assert!(seg1.join(name).exists(), "sealed segment missing {name}");
     }
 
     drop(dg);
@@ -1333,7 +1328,7 @@ fn save_to_dir_auto_wires_seal_when_tail_is_clean() {
 
     assert!(
         tmp.path().join("seg_001").exists(),
-        "phase-6 auto-wire should have produced seg_001/"
+        "the auto-wired seal should have produced seg_001/"
     );
     assert_eq!(dg.sealed_nodes_bound, 4);
 
@@ -1370,7 +1365,7 @@ fn save_to_dir_seals_cross_segment_overflow_as_full_range() {
     dg.save_to_dir(tmp.path(), &interner).unwrap();
     assert!(
         tmp.path().join("seg_001").exists(),
-        "phase-7 save_to_dir should seal cross-segment overflow"
+        "save_to_dir should seal cross-segment overflow"
     );
 
     drop(dg);
@@ -1471,7 +1466,7 @@ fn compact_rewrite_after_seal_cleans_stale_segs_and_persists_heap_arrays() {
 
     assert!(
         tmp.path().join("seg_001").exists(),
-        "phase-6 seal should have produced seg_001"
+        "the seal should have produced seg_001"
     );
 
     // Now add *edges* between existing nodes only — `sealed_nodes_bound

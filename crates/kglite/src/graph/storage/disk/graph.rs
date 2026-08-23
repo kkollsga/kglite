@@ -147,10 +147,6 @@ pub struct DiskGraph {
     /// root. Generic clones retain this lineage; only `independent_copy`
     /// replaces it with a fresh root.
     pub(super) independent_root: Option<Arc<super::generation::IndependentGraphRoot>>,
-    // ── Persistence-in-flight flag. Set by the mutating entry points and by
-    // `begin_persist`; cleared only once a complete save (sidecars included)
-    // has succeeded, so every failure path leaves it set.
-    pub(super) metadata_dirty: bool,
     // ── CSR edges are sorted by (node, connection_type) — enables binary search
     pub(crate) csr_sorted_by_type: bool,
     // ── Defer CSR build: edges accumulate in pending_edges without
@@ -622,7 +618,6 @@ impl DiskGraph {
 
     pub fn add_node(&mut self, data: NodeData) -> NodeIndex {
         self.clear_arenas();
-        self.metadata_dirty = true;
 
         let row_id = match &data.properties {
             crate::graph::schema::PropertyStorage::Columnar(row) => row.row_id(),
@@ -649,7 +644,6 @@ impl DiskGraph {
     }
 
     pub fn remove_node(&mut self, idx: NodeIndex) -> Option<NodeData> {
-        self.metadata_dirty = true;
         self.clear_arenas();
         let i = idx.index();
         if i >= self.node_slot_len() {
@@ -1463,7 +1457,6 @@ impl DiskGraph {
         if ep.source == TOMBSTONE_EDGE {
             return None;
         }
-        self.metadata_dirty = true;
         // Store in a dedicated cache, not the arena: the arena is append-only
         // and shared with the read-only `edge_weight`, so flushing writes back
         // out of it would need fragile offset tracking.
@@ -1503,7 +1496,6 @@ impl DiskGraph {
                 .expect("deferred bulk callers must use try_add_pending_edge");
         }
         self.clear_arenas();
-        self.metadata_dirty = true;
         let edge_idx = self.next_edge_idx;
         self.next_edge_idx += 1;
 
@@ -1537,8 +1529,8 @@ impl DiskGraph {
     }
 
     /// Fallible bulk-build edge append. The mmap write happens before any
-    /// counters, properties, or dirty state change, so callers can retry an
-    /// allocation/I/O failure without observing a partial edge.
+    /// counter or property change, so callers can retry an allocation/I/O
+    /// failure without observing a partial edge.
     pub(crate) fn try_add_pending_edge(
         &mut self,
         a: NodeIndex,
@@ -1553,7 +1545,6 @@ impl DiskGraph {
         };
         self.pending_edges.get_mut().try_push(pending)?;
 
-        self.metadata_dirty = true;
         if !data.properties.is_empty() {
             self.edge_properties.insert(edge_idx, data.properties);
         }
@@ -1564,7 +1555,6 @@ impl DiskGraph {
 
     pub fn remove_edge(&mut self, idx: EdgeIndex) -> Option<EdgeData> {
         self.clear_arenas();
-        self.metadata_dirty = true;
         let ei = idx.index();
         if ei >= self.next_edge_idx as usize {
             return None;
@@ -1986,7 +1976,6 @@ impl Clone for DiskGraph {
             mutation_workspace: None,
             parent_workspaces: self.parent_workspaces.clone(),
             independent_root: self.independent_root.clone(),
-            metadata_dirty: self.metadata_dirty,
             csr_sorted_by_type: self.csr_sorted_by_type,
             defer_csr: self.defer_csr,
             edge_type_counts_raw: self.edge_type_counts_raw.clone(),

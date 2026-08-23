@@ -62,6 +62,36 @@ mod atomic_save_tests {
         assert_eq!(loaded.graph.node_count(), g.graph.node_count());
     }
 
+    /// `save_metadata.format_version` (surfaced as `graph_info()['format_version']`
+    /// and through the C ABI's `kglite_storage_format_version().kgl`) must be the
+    /// one container version this build writes — the same number whether the
+    /// graph was just built, just saved, or just loaded. Until 0.16.8 the load
+    /// path stamped a hard-coded `3` (the container version of the day, frozen in
+    /// 2026-03) while a fresh save stamped `2`, so the same graph reported two
+    /// different "on-disk layout versions" either side of a round-trip and
+    /// neither matched the v6 container actually on disk.
+    #[test]
+    fn format_version_is_the_container_version_on_both_sides_of_a_roundtrip() {
+        let expected = u32::from(V6_MAGIC[3]);
+        assert_eq!(
+            crate::graph::schema::KGL_FORMAT_VERSION,
+            expected,
+            "KGL_FORMAT_VERSION must track the container magic this build writes"
+        );
+
+        let built = tiny_graph(4);
+        assert_eq!(built.save_metadata.format_version, expected);
+
+        let mut buf: Vec<u8> = Vec::new();
+        write_kgl_to(&built, &mut buf).unwrap();
+        let loaded = load_kgl_bytes(&buf).unwrap();
+        assert_eq!(
+            loaded.save_metadata.format_version, built.save_metadata.format_version,
+            "a round-trip must not change the reported format version"
+        );
+        assert_eq!(loaded.save_metadata.format_version, expected);
+    }
+
     #[test]
     fn to_bytes_roundtrips_via_load_kgl_bytes() {
         let g = tiny_graph(4);

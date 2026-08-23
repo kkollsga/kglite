@@ -414,7 +414,6 @@ impl FileMetadata {
     /// Apply metadata fields to a DirGraph during load. Equivalent to
     /// `apply_to_with(graph, true)` — preserved for the in-memory `.kgl`
     /// load path that doesn't have a separate `type_connectivity.bin.zst`.
-    #[allow(dead_code)]
     pub(crate) fn apply_to(self, graph: &mut DirGraph) {
         self.apply_to_with(graph, true)
     }
@@ -450,8 +449,11 @@ impl FileMetadata {
         graph.timeseries_configs = self.timeseries_configs;
         graph.temporal_node_configs = self.temporal_node_configs;
         graph.temporal_edge_configs = self.temporal_edge_configs;
+        // `format_version` is not persisted, so the load side has to re-derive
+        // it: the constant this build writes, not a literal pinned to whatever
+        // container was current when this line was written.
         graph.save_metadata = SaveMetadata {
-            format_version: 3,
+            format_version: crate::graph::schema::KGL_FORMAT_VERSION,
             library_version: self.library_version,
         };
         if let Some(counts) = self.edge_type_counts {

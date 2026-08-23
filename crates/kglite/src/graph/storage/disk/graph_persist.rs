@@ -294,22 +294,6 @@ impl DiskGraph {
         property_index::validate_v2_bundles(target)
     }
 
-    /// Mark the graph as having persistence work in flight. Callers leave
-    /// this set on every failure path and clear it only after the complete
-    /// graph-level save (including sidecars) succeeds.
-    pub(crate) fn begin_persist(&mut self) {
-        self.metadata_dirty = true;
-    }
-
-    pub(crate) fn mark_persisted(&mut self) {
-        self.metadata_dirty = false;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn persistence_is_dirty(&self) -> bool {
-        self.metadata_dirty
-    }
-
     /// Write metadata JSON to the graph directory, called at the end of a
     /// CSR build. Reads the edge-property file metadata from the current
     /// data_dir so the JSON reflects whatever was last persisted there;
@@ -474,7 +458,6 @@ impl DiskGraph {
         target_dir: &Path,
         _interner: &crate::graph::schema::StringInterner,
     ) -> std::io::Result<()> {
-        self.begin_persist();
         // Drain mutation caches: `edge_mut_cache` → `edge_properties`, and
         // `node_mut_cache` → `self.column_stores` via clone-apply-replace.
         // The caller (`DirGraph::save_disk`) mirrors the post-flush Arcs
@@ -1134,7 +1117,6 @@ impl DiskGraph {
                 mutation_workspace: None,
                 parent_workspaces: Vec::new(),
                 independent_root: None,
-                metadata_dirty: false,
                 csr_sorted_by_type: meta.csr_sorted_by_type,
                 defer_csr: false,
                 edge_type_counts_raw: None,

@@ -32,6 +32,12 @@ pub(crate) const V5_MAGIC: [u8; 4] = [0x52, 0x47, 0x46, 0x05];
 /// `io::file`'s module header). Both are decoded by the same reader.
 pub(crate) const V6_MAGIC: [u8; 4] = [0x52, 0x47, 0x46, 0x06];
 
+/// The container version byte this build writes — the number
+/// [`crate::graph::schema::KGL_FORMAT_VERSION`] reports to `graph_info()` and
+/// to the C ABI. Bumping the written container means adding a `V7_MAGIC` and
+/// pointing this at it; nothing else needs to move.
+pub(crate) const CURRENT_CONTAINER_VERSION: u8 = V6_MAGIC[3];
+
 /// Hard-break message for v3 files in a v4 binary. Per the
 /// user decision in docs/history/bolt-implementation.md: no read-compat
 /// path; rebuild the graph from source. Message gives the operator

@@ -268,7 +268,6 @@ impl DirGraph {
             disk.writer_lock = Some(writer_lock.clone());
             disk.prepare_mutation()
                 .map_err(|e| format!("Failed to prepare disk workspace: {e}"))?;
-            disk.begin_persist();
         }
         let generation = crate::graph::storage::disk::generation::GenerationTxn::begin(&root)
             .map_err(|e| format!("Failed to begin disk generation: {e}"))?;
@@ -296,7 +295,6 @@ impl DirGraph {
             GraphBackend::Disk(dg) => dg,
             _ => return Err("save_disk requires disk mode".to_string()),
         };
-        dg.begin_persist();
 
         // `save_to_dir` runs `clear_arenas` internally, which drains
         // `node_mut_cache` via the clone-apply-replace flush, updating
@@ -388,7 +386,6 @@ impl DirGraph {
         // generation stages are distinct directories and always rewrite.
         let mut rewriting = false;
         if let GraphBackend::Disk(ref mut dg) = self.graph {
-            dg.begin_persist();
             rewriting = dg.save_disposition(dir)
                 == crate::graph::storage::disk::graph_persist::SaveDisposition::Rewrite;
             if rewriting && dg.has_overflow() {

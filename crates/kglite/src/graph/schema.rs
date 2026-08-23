@@ -850,16 +850,24 @@ pub struct CompositeValue(pub Vec<Value>);
 /// The single source of truth for [`SaveMetadata::current`]; also surfaced to
 /// bindings through `kglite::api::io` so an embedder can report the persisted
 /// format it writes, distinct from the engine SemVer.
-pub const KGL_FORMAT_VERSION: u32 = 2;
+///
+/// **Derived from the container magic, never written as a literal.** Two
+/// hand-maintained copies of this number drifted for four container bumps: the
+/// save side froze at `2` (the v2 era) and the portable load side at `3`, so
+/// the documented promise — "changes when the engine's storage format changes"
+/// (`docs/python/guides/schema-migrations.md`) — was false in both directions.
+/// Deriving it means a new `Vn_MAGIC` moves it by construction.
+pub const KGL_FORMAT_VERSION: u32 = crate::graph::io::magic::CURRENT_CONTAINER_VERSION as u32;
 
 /// Version info stamped into saved files, reported through `graph_info()`.
 /// Nothing gates a load on it — the loader enforces format through the `.kgl`
 /// container magic (`io/magic.rs`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SaveMetadata {
-    /// [`KGL_FORMAT_VERSION`] on a fresh save; `0` for a file written before
-    /// this field existed (via serde default). Not itself persisted — a
-    /// portable load stamps its own constant (`io/file.rs`).
+    /// [`KGL_FORMAT_VERSION`] on a fresh save *and* on a load, so a graph
+    /// reports the same layout version either side of a round-trip; `0` for a
+    /// file written before this field existed (via serde default). Not itself
+    /// persisted — the load path re-stamps the constant (`io/file.rs`).
     pub format_version: u32,
     /// Library version at save time, e.g. "0.4.7".
     pub library_version: String,
