@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.7] - 2026-08-23
+
 ### Changed
 
 - **`lock_schema()` now rejects a read of a property no node of the type has,
