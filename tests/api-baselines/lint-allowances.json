@@ -53,15 +53,15 @@
       "classification": "boundary"
     },
     {
-      "identity": "crates/kglite-py/src/graph/pyapi/algorithms.rs::fn:betweenness_centrality:fn betweenness_centrality( &self, py: Python<'_>, normalized: Option<bool>, sample_size: Option<usize>, connection_types: Option<Vec<String>>, top_k: Option<usize>, timeout_ms: Option<u64>, to_df: Option<bool>, ) -> PyResult<Py<PyAny>>::clippy::too_many_arguments",
+      "identity": "crates/kglite-py/src/graph/pyapi/algorithms.rs::fn:betweenness_centrality:fn betweenness_centrality( &self, py: Python<'_>, normalized: Option<bool>, sample_size: Option<usize>, connection_types: Option<&Bound<'_, PyAny>>, top_k: Option<usize>, timeout_ms: Option<u64>, to_df: Option<bool>, ) -> PyResult<Py<PyAny>>::clippy::too_many_arguments",
       "classification": "boundary"
     },
     {
-      "identity": "crates/kglite-py/src/graph/pyapi/algorithms.rs::fn:closeness_centrality:fn closeness_centrality( &self, py: Python<'_>, normalized: Option<bool>, sample_size: Option<usize>, connection_types: Option<Vec<String>>, top_k: Option<usize>, timeout_ms: Option<u64>, to_df: Option<bool>, ) -> PyResult<Py<PyAny>>::clippy::too_many_arguments",
+      "identity": "crates/kglite-py/src/graph/pyapi/algorithms.rs::fn:closeness_centrality:fn closeness_centrality( &self, py: Python<'_>, normalized: Option<bool>, sample_size: Option<usize>, connection_types: Option<&Bound<'_, PyAny>>, top_k: Option<usize>, timeout_ms: Option<u64>, to_df: Option<bool>, ) -> PyResult<Py<PyAny>>::clippy::too_many_arguments",
       "classification": "boundary"
     },
     {
-      "identity": "crates/kglite-py/src/graph/pyapi/algorithms.rs::fn:pagerank:fn pagerank( &self, py: Python<'_>, damping_factor: Option<f64>, max_iterations: Option<usize>, tolerance: Option<f64>, connection_types: Option<Vec<String>>, top_k: Option<usize>, timeout_ms: Option<u64>, to_df: Option<bool>, ) -> PyResult<Py<PyAny>>::clippy::too_many_arguments",
+      "identity": "crates/kglite-py/src/graph/pyapi/algorithms.rs::fn:pagerank:fn pagerank( &self, py: Python<'_>, damping_factor: Option<f64>, max_iterations: Option<usize>, tolerance: Option<f64>, connection_types: Option<&Bound<'_, PyAny>>, top_k: Option<usize>, timeout_ms: Option<u64>, to_df: Option<bool>, ) -> PyResult<Py<PyAny>>::clippy::too_many_arguments",
       "classification": "boundary"
     },
     {
