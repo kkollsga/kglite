@@ -7,21 +7,19 @@
     "function_nesting": 8
   },
   "file_exceptions": {},
-  "enum_match_whitelist": {
-    "dir_graph/mod.rs": "DirGraph index maintenance (petgraph-only fast paths)",
-    "dir_graph/indexes.rs": "DirGraph secondary-index build/drop dispatch (petgraph fast paths vs persistent disk index)",
-    "dir_graph/disk_persistence.rs": "DirGraph disk lifecycle and durable-save dispatch",
-    "introspection/connectivity.rs": "disk-mode Rayon connectivity fast path",
-    "io/file.rs": "persisted-graph construction and disk sidecar restoration boundary",
-    "io/ntriples/column_builder.rs": "disk-specific durable column path selection",
-    "io/ntriples/loader.rs": "storage-specific bulk-load finalization and compaction",
-    "io/ntriples/writer.rs": "disk-internal bulk-build edge writer",
-    "mutation/batch.rs": "disk-internal update-path row-id lookup",
-    "mutation/subgraph_streaming.rs": "disk-internal streaming subgraph filter",
-    "storage/mode.rs": "explicit storage-mode transition constructor",
-    "storage/backend.rs": "central GraphBackend trait dispatcher",
-    "languages/cypher/executor/match_clause/fused_match.rs": "storage-specific fused traversal primitives"
-  },
+  "enum_match_whitelist": [
+    "dir_graph/mod.rs",
+    "dir_graph/disk_persistence.rs",
+    "introspection/connectivity.rs",
+    "io/file.rs",
+    "io/ntriples/column_builder.rs",
+    "io/ntriples/loader.rs",
+    "io/ntriples/writer.rs",
+    "mutation/subgraph_streaming.rs",
+    "storage/mode.rs",
+    "storage/backend.rs",
+    "languages/cypher/executor/match_clause/fused_match.rs"
+  ],
   "safety_roots": [
     "crates/kglite/src/graph"
   ],
@@ -70,14 +68,14 @@
     {
       "path": "crates/kglite/src/graph/algorithms/centrality.rs",
       "qualified_name": "crate::betweenness_centrality",
-      "lines": 275,
+      "lines": 270,
       "branches": 25,
       "nesting": 6
     },
     {
       "path": "crates/kglite/src/graph/algorithms/centrality.rs",
       "qualified_name": "crate::closeness_centrality",
-      "lines": 248,
+      "lines": 243,
       "branches": 19,
       "nesting": 5
     },
@@ -110,13 +108,6 @@
       "nesting": 6
     },
     {
-      "path": "crates/kglite/src/graph/core/pattern_matching/matcher.rs",
-      "qualified_name": "crate::PatternExecutor<'a>::find_matching_nodes",
-      "lines": 201,
-      "branches": 42,
-      "nesting": 7
-    },
-    {
       "path": "crates/kglite/src/graph/core/traversal.rs",
       "qualified_name": "crate::make_traversal_full",
       "lines": 218,
@@ -133,7 +124,7 @@
     {
       "path": "crates/kglite/src/graph/introspection/describe.rs",
       "qualified_name": "crate::write_type_detail",
-      "lines": 345,
+      "lines": 342,
       "branches": 40,
       "nesting": 5
     },
@@ -154,8 +145,8 @@
     {
       "path": "crates/kglite/src/graph/io/ntriples/loader.rs",
       "qualified_name": "crate::ingest_phase1",
-      "lines": 263,
-      "branches": 47,
+      "lines": 256,
+      "branches": 46,
       "nesting": 5
     },
     {
@@ -168,42 +159,42 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/aggregation/materialized.rs",
       "qualified_name": "crate::CypherExecutor<'a>::evaluate_aggregate_with_rows",
-      "lines": 314,
+      "lines": 313,
       "branches": 98,
       "nesting": 5
     },
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/aggregation/materialized.rs",
       "qualified_name": "crate::CypherExecutor<'a>::execute_return_with_aggregation",
-      "lines": 229,
+      "lines": 224,
       "branches": 25,
       "nesting": 4
     },
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/call_clause.rs",
       "qualified_name": "crate::CypherExecutor<'a>::execute_call",
-      "lines": 540,
+      "lines": 536,
       "branches": 101,
       "nesting": 5
     },
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/call_clause.rs",
       "qualified_name": "crate::CypherExecutor<'a>::execute_call_cluster",
-      "lines": 223,
+      "lines": 222,
       "branches": 37,
       "nesting": 6
     },
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/match_clause/fused_match.rs",
       "qualified_name": "crate::CypherExecutor<'a>::execute_fused_match_return_aggregate",
-      "lines": 877,
+      "lines": 871,
       "branches": 136,
       "nesting": 7
     },
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/match_clause/fused_match.rs",
       "qualified_name": "crate::CypherExecutor<'a>::execute_fused_match_with_aggregate",
-      "lines": 235,
+      "lines": 229,
       "branches": 30,
       "nesting": 3
     },
@@ -280,7 +271,7 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/where_clause.rs",
       "qualified_name": "crate::CypherExecutor<'a>::execute_where",
-      "lines": 280,
+      "lines": 279,
       "branches": 34,
       "nesting": 4
     },
@@ -294,23 +285,16 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/planner/fusion/aggregate.rs",
       "qualified_name": "crate::fuse_match_return_aggregate",
-      "lines": 345,
-      "branches": 57,
+      "lines": 354,
+      "branches": 58,
       "nesting": 11
     },
     {
       "path": "crates/kglite/src/graph/languages/cypher/planner/fusion/aggregate.rs",
       "qualified_name": "crate::fuse_match_with_aggregate",
-      "lines": 235,
-      "branches": 43,
+      "lines": 241,
+      "branches": 44,
       "nesting": 10
-    },
-    {
-      "path": "crates/kglite/src/graph/languages/cypher/planner/fusion/aggregate.rs",
-      "qualified_name": "crate::try_fuse_two_match_with_aggregate",
-      "lines": 204,
-      "branches": 49,
-      "nesting": 5
     },
     {
       "path": "crates/kglite/src/graph/languages/cypher/planner/fusion/count.rs",
@@ -364,7 +348,7 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/tokenizer.rs",
       "qualified_name": "crate::tokenize_cypher_with_positions",
-      "lines": 336,
+      "lines": 333,
       "branches": 69,
       "nesting": 6
     },
@@ -392,7 +376,7 @@
     {
       "path": "crates/kglite/src/graph/mutation/maintain.rs",
       "qualified_name": "crate::create_connections",
-      "lines": 260,
+      "lines": 259,
       "branches": 47,
       "nesting": 10
     },
@@ -406,21 +390,21 @@
     {
       "path": "crates/kglite/src/graph/storage/disk/builder.rs",
       "qualified_name": "crate::DiskGraph::build_csr_partitioned",
-      "lines": 246,
+      "lines": 237,
       "branches": 33,
       "nesting": 4
     },
     {
       "path": "crates/kglite/src/graph/storage/disk/graph_persist.rs",
       "qualified_name": "crate::DiskGraph::load_from_dir",
-      "lines": 258,
+      "lines": 254,
       "branches": 25,
       "nesting": 4
     },
     {
       "path": "crates/kglite/src/graph/storage/disk/graph_persist.rs",
       "qualified_name": "crate::DiskGraph::seal_to_new_segment",
-      "lines": 257,
+      "lines": 243,
       "branches": 43,
       "nesting": 3
     }
@@ -447,5 +431,6 @@
       "branches": 33,
       "nesting": 3
     }
-  ]
+  ],
+  "enum_match_exceptions": []
 }

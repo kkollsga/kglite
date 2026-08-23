@@ -7,6 +7,106 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **An edge-property write taken while a second reference to the graph was live
+  (`SET r.p` / `REMOVE r.p` with a held `ResultView`, `freeze()`, `Session`, or
+  open `Transaction`) was invisible to traversal reads of that property.**
+  `RETURN r.p` saw the new value while `WHERE r.p = ...` filtered on the old
+  one, silently dropping rows from the same statement's results. Edge-weight
+  writes now materialise the fork the way adjacency edits already did.
+- **`count(DISTINCT <relationship variable>)` returned the number of distinct
+  peer nodes** instead of distinct relationships, undercounting whenever
+  parallel edges join the same pair. The shape now declines fusion and counts
+  correctly; pinned in the differential corpus.
+- **An aggregating `WITH ... WHERE/HAVING ... LIMIT N` could return fewer than
+  `N` rows** — the LIMIT was pushed into the aggregator ahead of the filter, so
+  groups the filter would have rejected consumed the cap. The pushdown now
+  bails on any inline filter; pinned in the differential corpus.
+- **Composite indexes are keyed by their property names sorted**, so an index
+  created in non-alphabetical order (`CREATE INDEX FOR (n:L) ON (n.city,
+  n.age)`, `create_composite_index('L', ['city', 'age'])`) is actually used by
+  `MATCH` and `MERGE` instead of silently falling through to a full label
+  scan. `has_composite_index`, `drop_composite_index` and
+  `composite_index_stats` accept either spelling. Existing `.kgl` files are
+  canonicalized on load.
+- **On `storage="mapped"` graphs, `MATCH (n:Type {prop: value})` could serve
+  values a later `SET`/`REMOVE` had overwritten** — the backend's lazy property
+  index was never dropped by the property writers. It is now, and an index
+  that cannot cover all of a type's rows reports itself absent so the match
+  falls back to a scan instead of returning a partial answer.
+- **`primary_key: "id"` no longer exempts a node type from the presence half
+  of its own key** — `CREATE (n:T {id: null})` is rejected with the same NODE
+  KEY violation a primary key on any other property raises. Bare `CREATE`
+  (engine-allocated id), `MERGE` and `add_nodes` are unaffected, and
+  `SHOW CONSTRAINTS` now reports the declaration as `NODE_KEY` rather than
+  `NODE_PROPERTY_EXISTENCE`.
+- **`load_ntriples` on a `storage="mapped"` graph no longer lets a single
+  unparseable Q-code subject null out `n.id` for every other entity of the
+  same node type.** Such subjects are dropped in mapped mode exactly as they
+  already were in disk mode; memory mode still keeps them as string ids.
+- **`UNWIND` over a JSON-string list** no longer mis-splits items containing
+  the other quote character (`'["a,b\'", 2]'` yields two rows, not one glued
+  row), and a lone-quote item (`'["]'`) returns its row instead of aborting
+  the query with a panic.
+- **Spatial fluent methods** (`near_point`, `near_point_m`, `within_bounds`,
+  `bounds`, `centroid`): passing only `lat_field` or only `lon_field` no
+  longer discards the spatial-config name for the other side, which silently
+  produced zero or wrong matches on graphs whose coordinate columns are not
+  named `latitude`/`longitude`.
+- **`Value` equality is now total**, matching the ordering and hashing it
+  already used — a `HashSet`, a `BTreeMap` and `sort`+`dedup` no longer
+  disagree about NaN, and `point()` values differing only by `-0.0` vs `0.0`
+  hash alike. Cypher's `=`, `<>` and `IN` keep IEEE semantics (NaN equals
+  nothing, itself included); `DISTINCT` and grouping fold equivalent NaNs
+  into one row, matching Neo4j.
+- **`graph_info()['format_version']` reports the real `.kgl` container
+  version** (currently `6`), identical for a freshly built, saved, or loaded
+  graph, and derived from the container magic so a future bump moves it
+  automatically. It previously reported `2` or `3` depending on how the graph
+  was obtained — both container versions frozen releases ago. Same correction
+  reaches `kglite_storage_format_version().kgl` (C ABI) and Java's
+  `storageFormatVersion().kgl`. No on-disk change.
+- **`describe()` / `graph_overview()` index annotations report what the
+  engine actually serves**: `eq` for the in-memory hash index (prefix
+  acceleration was advertised where `STARTS WITH` full-scans), `range` for
+  range indexes (previously unreported), `eq,prefix` only for the sorted
+  disk-backed string index — and enabling CDC or durability on a disk graph
+  no longer hides its persistent indexes from the annotation or the routed
+  `CREATE INDEX`/`DROP INDEX` entry points.
+- `index_stats()` / `composite_index_stats()` reported an inflated
+  `unique_values` (and deflated `avg_entries_per_value`) after a held read
+  view was dropped — the level fold left removed values counted as live.
+- `begin()` and `begin_read()` raised a Rust panic instead of the documented
+  `RuntimeError` when another thread was mutating the same `KnowledgeGraph`,
+  matching `cypher()`'s behaviour.
+- Copy-on-write forks of a graph loaded from RDF/disk (or a `.kgl` saved from
+  one) no longer deep-copy the sparse-property overflow blob; `copy()`, a
+  transaction fork, and holding a result view share it by reference, and a
+  file-backed blob is no longer pulled into RAM by the fork.
+- The disk subset scan returns an error when its kept-edges file cannot be
+  created, instead of silently falling back to a heap buffer sized by the
+  source graph's total edge count.
+- `CALL ready_set(...)` reports the actionable "CALL procedure timed out"
+  message on deadline expiry, matching every other graph procedure.
+
+### Changed
+
+- A composite index's canonical name and reported `properties`
+  (`SHOW INDEXES`, `CALL db.indexes()`, `list_composite_indexes()`,
+  `indexes()`, `schema()`) use the sorted property order rather than
+  declaration order — `Person.(age,city)` for `ON (p.city, p.age)`.
+- `KnowledgeGraph.add_connections_internal` is no longer exposed on the
+  Python class; it was an undocumented Rust-side helper for
+  `add_connections_bulk` / `add_connections_from_source`, which are
+  unchanged.
+
+- Corrected `CYPHER.md` and the matching docstrings: `REQUIRE n.id IS NOT
+  NULL` is accepted **and enforced** (an explicit `{id: null}` violates it),
+  and string-index prefix acceleration is `storage='disk'` only. A deep
+  comment audit over the 104 densest source files corrected ~230 false code
+  comments and six published-docstring clusters in the same release.
+
 ## [0.16.7] - 2026-08-23
 
 ### Changed

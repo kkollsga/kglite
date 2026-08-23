@@ -1685,7 +1685,7 @@ pub(crate) fn mark_return_lazy_eligible(query: &mut CypherQuery) {
     // here and falls to the catch-all below. An `OPTIONAL MATCH … WHERE`
     // disqualifies for the same reason — the predicate just lives in the clause
     // now. This gate decides whether a result holds an `Arc<DirGraph>` open, so
-    // its exact membership is pinned by `planner_tests::lazy_eligibility_corpus`.
+    // its exact membership is pinned by `planner_fusion_tests::lazy_eligibility_corpus`.
     //
     // KNOWN WART, deliberately left. The WHERE rule splits two spellings of the
     // same lookup:

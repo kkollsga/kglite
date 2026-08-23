@@ -698,3 +698,7 @@ fn pass_reorder_predicates_by_cost(query: &mut CypherQuery, _ctx: &PassCtx) {
 #[cfg(test)]
 #[path = "planner_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "planner_fusion_tests.rs"]
+mod fusion_tests;
