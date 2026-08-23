@@ -471,6 +471,13 @@ impl_heap_pre_image_capture!(MappedGraph);
 /// fields, so the disjoint-field borrow below is what makes this expressible at
 /// all — and is the reason the property writers sit on the backend rather than
 /// on `&mut NodeData`.
+///
+/// That destructure is also why every writer opens with `note_property_write`:
+/// reaching `inner.node_weight_mut` through the fields skips
+/// [`GraphWrite::node_weight_mut`] and therefore skips the lazy-index
+/// invalidation that method owes. The hook is per-backend — a no-op on
+/// `MemoryGraph`, which derives no such index, and
+/// `invalidate_property_index` on `MappedGraph`.
 macro_rules! impl_heap_column_writes {
     () => {
         #[inline]
@@ -512,6 +519,7 @@ macro_rules! impl_heap_column_writes {
         /// rebuild. A node with no store for its type (row storage, or a type
         /// whose store was dropped) falls back to the inline write.
         fn set_node_title(&mut self, idx: NodeIndex, value: Value) {
+            self.note_property_write();
             let columnar = self.inner.node_weight(idx).and_then(|nd| {
                 nd.properties
                     .columnar_row_id()
@@ -553,6 +561,7 @@ macro_rules! impl_heap_column_writes {
         }
 
         fn set_node_property(&mut self, idx: NodeIndex, key: InternedKey, value: Value) {
+            self.note_property_write();
             self.capture_property_pre_image(idx, ColumnarWrite::Cell(key));
             let Self {
                 inner,
@@ -573,6 +582,7 @@ macro_rules! impl_heap_column_writes {
         }
 
         fn set_node_property_if_absent(&mut self, idx: NodeIndex, key: InternedKey, value: Value) {
+            self.note_property_write();
             self.capture_property_pre_image(idx, ColumnarWrite::Cell(key));
             let Self {
                 inner,
@@ -595,6 +605,7 @@ macro_rules! impl_heap_column_writes {
         }
 
         fn remove_node_property(&mut self, idx: NodeIndex, key: InternedKey) -> Option<Value> {
+            self.note_property_write();
             self.capture_property_pre_image(idx, ColumnarWrite::Cell(key));
             let Self {
                 inner,
@@ -616,6 +627,7 @@ macro_rules! impl_heap_column_writes {
         }
 
         fn clear_node_property(&mut self, idx: NodeIndex, key: InternedKey) -> Option<Value> {
+            self.note_property_write();
             self.capture_property_pre_image(idx, ColumnarWrite::Cell(key));
             let Self {
                 inner,
@@ -644,6 +656,7 @@ macro_rules! impl_heap_column_writes {
             // Whole-row shape: every present cell is nulled below, then `pairs`
             // are written, so the pre-image spans both sets.
             let written: Vec<InternedKey> = pairs.iter().map(|(k, _)| *k).collect();
+            self.note_property_write();
             self.capture_property_pre_image(idx, ColumnarWrite::ReplaceRow(&written));
             let Self {
                 inner,
@@ -1127,7 +1140,10 @@ impl GraphRead for MappedGraph {
 // `node_weight_mut_silent`, `add_node` and `remove_node` invalidate the
 // property index, since each can change the set of `(value, node_idx)` pairs
 // it was built from. The property writers shared from
-// `impl_heap_column_writes!` invalidate neither.
+// `impl_heap_column_writes!` invalidate the property index too, through the
+// `note_property_write` hook that macro calls — they bypass
+// `node_weight_mut`, so the invalidation cannot ride along with it. They leave
+// the type index alone: a property write cannot change an edge's conn_type.
 //
 // On top of that, the same undo-capture seam `MemoryGraph` carries above, in
 // the same shape and for the same reason: `inner` is a heap `StableDiGraph`,

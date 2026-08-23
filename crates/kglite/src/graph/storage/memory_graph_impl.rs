@@ -165,6 +165,17 @@ impl MemoryGraph {
     pub fn inner_mut(&mut self) -> &mut StableDiGraph<NodeData, EdgeData> {
         &mut self.inner
     }
+
+    /// The property-write hook `impl_heap_column_writes!` calls, so one macro
+    /// body can serve both heap backends.
+    ///
+    /// A deliberate no-op: this backend derives no lazy index from node
+    /// properties, so there is nothing a property write could stale. Keep it
+    /// empty — it sits on the in-memory write path, which is the path this
+    /// project optimises for, and the work it would otherwise do belongs to
+    /// `MappedGraph::note_property_write` alone.
+    #[inline]
+    pub(crate) fn note_property_write(&mut self) {}
 }
 
 // Read-only Deref for MemoryGraph / MappedGraph stays — petgraph's

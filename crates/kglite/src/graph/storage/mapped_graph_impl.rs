@@ -155,10 +155,24 @@ impl MappedGraph {
         }
     }
 
+    /// The property-write hook `impl_heap_column_writes!` calls — the mapped
+    /// half of `MemoryGraph::note_property_write`, which is a no-op.
+    ///
+    /// The shared property writers reach `inner.node_weight_mut` through a
+    /// disjoint-field destructure rather than through
+    /// `GraphWrite::node_weight_mut`, so they get none of that method's
+    /// invalidation. Without this hook a `SET`/`REMOVE` left the cached block
+    /// mapping the *overwritten* value, and the matcher trusts a non-empty
+    /// block verbatim — a wrong `MATCH` result, not a slow one.
+    #[inline]
+    pub(crate) fn note_property_write(&mut self) {
+        self.invalidate_property_index();
+    }
+
     /// Drop the cached property indexes (both per-type and global).
     /// Called by node-mutation paths (`add_node`, `remove_node`,
-    /// `node_weight_mut`) since any of those can change the set of
-    /// `(value, node_idx)` pairs an index is built from.
+    /// `node_weight_mut`) and by every property writer, since any of those can
+    /// change the set of `(value, node_idx)` pairs an index is built from.
     #[inline]
     pub(crate) fn invalidate_property_index(&mut self) {
         if let Ok(mut map) = self.property_index.write() {
@@ -227,6 +241,23 @@ impl MappedGraph {
     /// (`title` / `label` / `name`, `id` / `nid` / `qid`). We do the
     /// same here so `lookup_by_property_eq("Person", "name", "Alice")`
     /// finds rows whose name was stored as the title.
+    ///
+    /// **Columnar rows turn the index off.** A columnar node keeps its values
+    /// in the type's `ColumnStore`, which this build does not read: `get_value`
+    /// answers `None` for `PropertyStorage::Columnar`, and `title()`/`id()`
+    /// return the `Null` sentinel the store is authoritative over. Skipping
+    /// such a node would publish a block covering only the row-storage half of
+    /// a mixed type, and the matcher returns a non-empty block's answer
+    /// verbatim — so `MATCH (n:T {p: v})` would miss the columnar rows
+    /// outright. Bailing to an empty block instead reports "no index" and the
+    /// matcher scans, which is the same behaviour an all-columnar graph
+    /// already gets (nothing indexable is found, so the block is empty).
+    ///
+    /// That bail is also the reason the per-cell store writers
+    /// (`GraphWrite::column_store_mut`, i.e. the executor's `columnar_write`)
+    /// need no invalidation hook: a *live* block for a type implies the type
+    /// has no columnar rows, and a live global block implies the graph has
+    /// none, so no store cell a write can reach is inside one.
     fn build_property_index_block(
         &self,
         node_type: Option<&str>,
@@ -246,6 +277,9 @@ impl MappedGraph {
                 if nd.node_type != tk {
                     continue;
                 }
+            }
+            if nd.properties.columnar_row_id().is_some() {
+                return MappedPropertyIndex::default();
             }
             // Regular property lookup via InternedKey hash.
             if let Some(Value::String(s)) = nd.properties.get_value(prop_key) {

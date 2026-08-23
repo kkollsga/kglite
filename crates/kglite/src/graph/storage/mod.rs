@@ -664,6 +664,10 @@ pub use mapped::{MappedGraph, MappedPropertyIndex, MappedTypeIndex};
 #[path = "column_ownership_tests.rs"]
 mod column_ownership_tests;
 
+#[cfg(test)]
+#[path = "mapped_property_index_tests.rs"]
+mod mapped_property_index_tests;
+
 // Recording backend — re-exported so downstream consumers can
 // construct it without reaching into `storage::recording::`. DO NOT REMOVE
 // despite unused-import warnings; the centralized source-quality gate asserts
