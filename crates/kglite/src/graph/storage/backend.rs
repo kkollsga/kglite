@@ -736,9 +736,8 @@ impl GraphBackend {
                     );
                 }
             }
-            // The overlay never adds or removes an edge (module doc), so the base
-            // holds every edge; an overlay copy of an edge weight differs only in
-            // `properties`, which this endpoints-and-type sweep never reads.
+            // The overlay never adds, removes or rewrites an edge (module doc),
+            // so the base holds every edge exactly as this backend reads it.
             GraphBackend::Forked(g) => {
                 for er in g.base_stable_digraph().edge_references() {
                     let w = er.weight();
@@ -814,6 +813,10 @@ impl GraphBackend {
                     f(src, tgt, edge_idx, props)
                 });
             }
+            // Reads the base's `properties` directly, which is sound only
+            // because an edge weight is one of the writes the overlay refuses
+            // (module doc) — an overlay that parked one would serve the
+            // pre-write properties here.
             GraphBackend::Forked(g) => {
                 for er in g.base_stable_digraph().edge_references() {
                     let w = er.weight();
@@ -854,9 +857,9 @@ impl GraphBackend {
             GraphBackend::Recording(graph) => graph
                 .inner()
                 .cached_edge_counts_grouped_by_peer(conn_type, dir, deadline)?,
-            // Cold by design: the fork resets peer counts rather than sharing the
-            // base's, so the writer never publishes a count into a reader's
-            // snapshot. The owned fallback is correct, just uncached.
+            // Cold by design: the fork keeps no peer-count cache of its own, so
+            // the writer can never publish a count into a reader's snapshot.
+            // The owned fallback is correct, just uncached.
             GraphBackend::Forked(_) | GraphBackend::Mapped(_) | GraphBackend::Disk(_) => None,
         })
     }
@@ -1764,9 +1767,17 @@ impl GraphWrite for GraphBackend {
 
     #[inline]
     fn edge_weight_mut(&mut self, idx: EdgeIndex) -> Option<&mut EdgeData> {
+        // An overlay cannot express an edge-weight edit either, for a reason
+        // that is not adjacency: `edges_directed`, `edge_references` and the
+        // rest hand out `&EdgeData` borrowed straight out of the base, so a
+        // weight held in a delta would be invisible to every iterating read
+        // while `edge_weight`'s point lookup saw it — `WHERE r.prop = x`
+        // filtering on the pre-write value with no error. Collapse first (see
+        // `flatten_fork`), hence the unreachable `Forked` arm below.
+        self.flatten_fork();
         match self {
             Self::Memory(g) => GraphWrite::edge_weight_mut(unique_heap_backend(g), idx),
-            Self::Forked(g) => GraphWrite::edge_weight_mut(g.as_mut(), idx),
+            Self::Forked(_) => unreachable!("flatten_fork above collapsed the overlay"),
             Self::Mapped(g) => GraphWrite::edge_weight_mut(unique_heap_backend(g), idx),
             Self::Disk(g) => GraphWrite::edge_weight_mut(g.as_mut(), idx),
             Self::Recording(rg) => GraphWrite::edge_weight_mut(rg.as_mut(), idx),

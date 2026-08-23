@@ -353,3 +353,123 @@ fn a_replace_write_on_a_forked_columnar_row_rolls_back_the_cells_it_nulled() {
          and the ones it nulled"
     );
 }
+
+/// An edge-property write taken while a reader holds the base must be visible
+/// to every later read of that edge, including the iterating ones.
+///
+/// `GraphRead::edge_weight` is a point lookup and probes an overlay first, but
+/// pattern matching reaches edges through `edges_directed_filtered` /
+/// `edges_directed` / `edge_references`, which hand out `&EdgeData` borrowed
+/// from whatever store the backend iterates. A backend that answered those from
+/// a base while answering the point lookup from a delta returns the pre-write
+/// weight to any `WHERE` on a relationship variable — a silent wrong answer,
+/// with no error and nothing else in this file able to see it (every other
+/// fixture owns its graph outright, so nothing forks). Until 2026-08-23 the
+/// forked backend did exactly that: `RETURN r.weight` read 99 while
+/// `WHERE r.weight = 99` matched nothing.
+///
+/// Both arms are their own held-reader episode on purpose. The seam is
+/// `GraphBackend::edge_weight_mut`, and both verbs reach it, but only the write
+/// that runs *while the backend is still forked* can see whether it does.
+///
+/// The clone counts are the cost half of the same contract: the write flattens
+/// the overlay, and it does so **once** — the backend is a plain `Memory`
+/// afterwards, so a second edge write copies nothing. A per-write copy would be
+/// the fix introducing a cliff worse than the defect.
+///
+/// The reader assertion is the third half: the write is the writer's alone, so
+/// the held snapshot must still read the pre-write weight.
+#[test]
+fn an_edge_property_write_under_a_held_reader_reaches_traversal_reads() {
+    use crate::graph::handle::make_dir_graph_mut;
+    use crate::graph::session::execute::execute_read;
+    use crate::graph::storage::backend::{backend_clone_nodes, reset_backend_clone_count};
+    use std::sync::Arc;
+
+    const PAIR: &str = "MATCH (:Item {id: 1})-[r:LINKS]->(:Item {id: 2})";
+
+    for (verb, predicate) in [
+        ("SET r.weight = 99", "r.weight = 99"),
+        ("REMOVE r.weight", "r.weight IS NULL"),
+    ] {
+        let mut writer = Arc::new(seeded());
+        let reader = Arc::clone(&writer);
+        let fixture_nodes = reader.graph.node_count();
+
+        let graph = make_dir_graph_mut(&mut writer);
+        assert!(
+            graph.graph.is_forked(),
+            "{verb}: precondition — the held reader must have forked the write"
+        );
+
+        reset_backend_clone_count();
+        run(graph, &format!("{PAIR} {verb}"));
+        assert_eq!(
+            backend_clone_nodes(),
+            fixture_nodes,
+            "{verb}: the edge-property write flattens the overlay — one copy of the base"
+        );
+        assert!(
+            !graph.graph.is_forked(),
+            "{verb}: flattening must leave a plain backend, so the copy is paid once"
+        );
+
+        reset_backend_clone_count();
+        run(
+            graph,
+            "MATCH (:Item {id: 2})-[r:LINKS]->(:Item {id: 3}) SET r.weight = 77",
+        );
+        assert_eq!(
+            backend_clone_nodes(),
+            0,
+            "{verb}: after flattening, a second edge-property write copies nothing"
+        );
+
+        let params = HashMap::new();
+        let opts = ExecuteOptions::new(&params);
+
+        // The filter is the shape that silently drops rows — it reads the
+        // weight through the traversal iterator rather than by edge index.
+        let filtered = execute_read(
+            graph,
+            &format!("MATCH (:Item)-[r:LINKS]->(:Item) WHERE {predicate} RETURN count(r) AS c"),
+            &opts,
+        )
+        .unwrap_or_else(|e| panic!("{verb}: filter query failed: {e}"))
+        .result
+        .rows;
+        assert_eq!(
+            filtered,
+            vec![vec![Value::Int64(1)]],
+            "{verb}: a WHERE on the edge property must see the write, and match \
+             only the edge it touched"
+        );
+
+        // ...and the projection, which reads it by edge index.
+        let projected = execute_read(graph, &format!("{PAIR} RETURN r.weight AS w"), &opts)
+            .unwrap_or_else(|e| panic!("{verb}: projection query failed: {e}"))
+            .result
+            .rows;
+        let expected = if verb.starts_with("SET") {
+            Value::Int64(99)
+        } else {
+            Value::Null
+        };
+        assert_eq!(
+            projected,
+            vec![vec![expected]],
+            "{verb}: the projection must agree with the filter"
+        );
+
+        // The reader keeps the pre-write graph.
+        let held = execute_read(&reader, &format!("{PAIR} RETURN r.weight AS w"), &opts)
+            .unwrap_or_else(|e| panic!("{verb}: held-reader query failed: {e}"))
+            .result
+            .rows;
+        assert_eq!(
+            held,
+            vec![vec![Value::Int64(5)]],
+            "{verb}: the held snapshot must not observe the writer's edit"
+        );
+    }
+}

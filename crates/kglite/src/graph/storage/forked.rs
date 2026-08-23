@@ -23,22 +23,34 @@
 //! | write | forked behaviour |
 //! |---|---|
 //! | node weight (`SET`, `REMOVE`, labels, title, id) | copied into `nodes` on first touch, O(1) |
-//! | edge weight | copied into `edges` on first touch, O(1) |
 //! | `add_node` (`CREATE`, `MERGE` insert) | appended to `nodes` at a predicted index, O(1) |
 //! | column-store writes | the overlay owns its own map, O(types) `Arc` bumps at fork |
-//! | **`add_edge` / `remove_node` / `remove_edge`** | **materialise, then proceed** |
+//! | **edge weight (`SET r.p`), `add_edge`, `remove_node`, `remove_edge`** | **materialise, then proceed** |
 //!
-//! The last row is a deliberate scope boundary, not an oversight.
-//! `StableDiGraph` threads adjacency through per-node linked lists, so any of
-//! those three edits rewrites *existing* nodes' adjacency — which an overlay
-//! cannot express without reimplementing `edges_directed`,
-//! `edges_directed_filtered`, `edges_connecting`, `neighbors_*` and
-//! `edge_references` as base⊕overlay chains behind their GAT iterator types.
+//! The last row is a deliberate scope boundary, not an oversight, and its two
+//! halves are out of scope for different reasons.
 //!
-//! **Because no edit reaches base adjacency, the overlay needs no adjacency
-//! chaining at all** — traversal and edge iteration delegate straight to the
-//! base, only `node_indices` gains a variant, and the read path is unchanged
-//! apart from the node- and edge-weight probes.
+//! `StableDiGraph` threads adjacency through per-node linked lists, so
+//! `add_edge` / `remove_node` / `remove_edge` each rewrite *existing* nodes'
+//! adjacency — which an overlay cannot express without reimplementing
+//! `edges_directed`, `edges_directed_filtered`, `edges_connecting`,
+//! `neighbors_*` and `edge_references` as base⊕overlay chains behind their GAT
+//! iterator types.
+//!
+//! An **edge weight** would need that same rewrite for a different reason:
+//! those iterators hand out `&EdgeData` borrowed out of the base, so a weight
+//! parked in a delta would be served by `edge_weight`'s point lookup and missed
+//! by every iterating read — `WHERE r.p = x` silently filtering on the
+//! pre-write value, which is what it did until 2026-08-23
+//! (`held_reader::an_edge_property_write_under_a_held_reader_reaches_traversal_reads`).
+//! Node weights have no such split: `node_indices` is the only node-level
+//! iterator and it yields indices, which every caller resolves through
+//! `node_weight`.
+//!
+//! **Because no edit reaches base adjacency or a base edge weight, the overlay
+//! needs no edge chaining at all** — traversal and edge iteration delegate
+//! straight to the base, only `node_indices` gains a variant, and the read path
+//! is unchanged apart from the node-weight probe.
 //!
 //! `materialise` is exactly today's cost — a base deep clone plus the overlay
 //! replayed — so a topology write while a reader is held is no worse than
@@ -64,7 +76,7 @@
 //! `rollback::journal_covers` takes.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::stable_graph::StableDiGraph;
@@ -89,9 +101,6 @@ pub struct ForkedGraph {
     /// Node weights that diverge from the base: copies taken on first write,
     /// plus every node appended since the fork. Keyed by raw node index.
     nodes: FxHashMap<u32, NodeData>,
-    /// Edge weights that diverge from the base. No edge is ever *added* here —
-    /// `add_edge` materialises first (see the module doc).
-    edges: FxHashMap<u32, EdgeData>,
     /// How many nodes have been appended past `base.node_bound()`. Appends are
     /// contiguous by construction (see [`can_fork`]), which is what keeps
     /// `node_indices` globally ascending without a merge.
@@ -99,9 +108,6 @@ pub struct ForkedGraph {
     /// The overlay's own column-store map, seeded with one `Arc` bump per type
     /// at fork time. Complete, so reads never chain into the base for it.
     column_stores: FxHashMap<InternedKey, Arc<ColumnStore>>,
-    /// Own, never shared with the base. Sharing would let the writer's
-    /// post-mutation counts be observed through the reader's snapshot.
-    peer_counts: RwLock<HashMap<u64, Arc<super::MemoryPeerCounts>>>,
     /// Statement-scoped inverse-op buffer. Lives *here*, so every undo entry
     /// reverses through this backend's `GraphWrite` and therefore lands in the
     /// overlay — never in the shared base.
@@ -133,12 +139,8 @@ impl ForkedGraph {
         Self {
             base,
             nodes: FxHashMap::default(),
-            edges: FxHashMap::default(),
             appended: 0,
             column_stores,
-            // Cold on purpose: correct-but-cold beats a cache shared with a
-            // reader's snapshot.
-            peer_counts: RwLock::new(HashMap::new()),
             undo: None,
             slot_mirror,
         }
@@ -201,14 +203,6 @@ impl ForkedGraph {
                 *slot = data;
             }
         }
-        for (idx, data) in self.edges.drain() {
-            if let Some(slot) = target
-                .inner_mut()
-                .edge_weight_mut(EdgeIndex::new(idx as usize))
-            {
-                *slot = data;
-            }
-        }
         target.column_stores = std::mem::take(&mut self.column_stores);
         target.undo = self.undo.take();
         self.appended = 0;
@@ -253,10 +247,8 @@ impl ForkedGraph {
         let mut clone = ForkedGraph {
             base: Arc::clone(&self.base),
             nodes: self.nodes.clone(),
-            edges: self.edges.clone(),
             appended: self.appended,
             column_stores: self.column_stores.clone(),
-            peer_counts: RwLock::new(HashMap::new()),
             undo: None,
             slot_mirror: self.slot_mirror.clone(),
         };
@@ -280,13 +272,6 @@ impl ForkedGraph {
         self.undo.as_deref_mut()
     }
 
-    #[inline]
-    fn invalidate_peer_counts(&mut self) {
-        if let Ok(mut cache) = self.peer_counts.write() {
-            cache.clear();
-        }
-    }
-
     /// The overlay's copy of a base node, taken on first write.
     ///
     /// This is the single point where a base node stops being shared, and the
@@ -302,16 +287,6 @@ impl ForkedGraph {
         self.nodes.get_mut(&raw)
     }
 
-    #[inline]
-    fn cow_edge(&mut self, idx: EdgeIndex) -> Option<&mut EdgeData> {
-        let raw = idx.index() as u32;
-        if !self.edges.contains_key(&raw) {
-            let base = self.base.inner().edge_weight(idx)?.clone();
-            self.edges.insert(raw, base);
-        }
-        self.edges.get_mut(&raw)
-    }
-
     /// Clone `idx`'s current weight into the journal as its pre-statement
     /// state. Reads through [`GraphRead::node_weight`], i.e. overlay-then-base,
     /// so the pre-image is what *this writer* would have read — not what the
@@ -321,14 +296,6 @@ impl ForkedGraph {
         let current = GraphRead::node_weight(self, idx).cloned();
         if let Some(journal) = self.undo.as_deref_mut() {
             journal.note_node_weight(idx, || current);
-        }
-    }
-
-    #[cold]
-    fn capture_edge_weight(&mut self, idx: EdgeIndex) {
-        let current = GraphRead::edge_weight(self, idx).cloned();
-        if let Some(journal) = self.undo.as_deref_mut() {
-            journal.note_edge_weight(idx, || current);
         }
     }
 
@@ -390,10 +357,8 @@ impl Clone for ForkedGraph {
         Self {
             base: Arc::clone(&self.base),
             nodes: self.nodes.clone(),
-            edges: self.edges.clone(),
             appended: self.appended,
             column_stores: self.column_stores.clone(),
-            peer_counts: RwLock::new(HashMap::new()),
             undo: None,
             slot_mirror: self.slot_mirror.clone(),
         }
@@ -405,17 +370,17 @@ impl std::fmt::Debug for ForkedGraph {
         write!(
             f,
             "ForkedGraph {{ base: {} nodes / {} edges, overlay: {} node weights, \
-             {} edge weights, {} appended }}",
+             {} appended }}",
             self.base.inner().node_count(),
             self.base.inner().edge_count(),
             self.nodes.len(),
-            self.edges.len(),
             self.appended
         )
     }
 }
 
-// Node and edge weights are overlay-then-base; adjacency is all the base's.
+// Node weights are overlay-then-base; adjacency and edge weights are all the
+// base's, because no write this backend accepts touches either (module doc).
 impl GraphRead for ForkedGraph {
     type NodeIndicesIter<'a> = GraphNodeIndices<'a>;
     type EdgeIndicesIter<'a> = <MemoryGraph as GraphRead>::EdgeIndicesIter<'a>;
@@ -484,11 +449,10 @@ impl GraphRead for ForkedGraph {
         self.node_view(idx)?.str_prop_eq(key, target)
     }
 
-    // Adjacency delegation from here down: nothing this backend writes reaches
-    // base adjacency (module doc), so for structure the base's answer is the
-    // whole answer. Not so for edge *weights* — the iterating reads below hand
-    // out the base's `EdgeData` refs, while `edge_weight` probes the overlay
-    // first, so a weight `cow_edge` copied is seen through the latter only.
+    // Edge delegation from here down, structure and weights alike: no write
+    // this backend accepts reaches base adjacency *or* a base `EdgeData`
+    // (module doc), so the base's answer is the whole answer and the iterating
+    // reads below agree with `edge_weight`'s point lookup by construction.
 
     #[inline]
     fn edges_directed_filtered(
@@ -587,10 +551,7 @@ impl GraphRead for ForkedGraph {
 
     #[inline]
     fn edge_weight(&self, idx: EdgeIndex) -> Option<&EdgeData> {
-        match self.edges.get(&(idx.index() as u32)) {
-            Some(data) => Some(data),
-            None => self.base.inner().edge_weight(idx),
-        }
+        self.base.inner().edge_weight(idx)
     }
 
     #[inline]
@@ -635,13 +596,12 @@ impl GraphWrite for ForkedGraph {
         self.cow_node(idx)
     }
 
-    #[inline]
-    fn edge_weight_mut(&mut self, idx: EdgeIndex) -> Option<&mut EdgeData> {
-        self.invalidate_peer_counts();
-        if self.undo.is_some() {
-            self.capture_edge_weight(idx);
-        }
-        self.cow_edge(idx)
+    /// Unreachable for the same reason as the three below, though not for the
+    /// same cause: `GraphBackend` materialises before dispatching an edge-weight
+    /// write, because an overlay copy of one would be invisible to every
+    /// iterating read (see the module doc).
+    fn edge_weight_mut(&mut self, _idx: EdgeIndex) -> Option<&mut EdgeData> {
+        unreachable!("forked backend must be materialised before edge_weight_mut")
     }
 
     #[inline]
