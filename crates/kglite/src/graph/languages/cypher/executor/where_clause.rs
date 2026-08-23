@@ -155,10 +155,9 @@ impl<'a> CypherExecutor<'a> {
             } else {
                 pattern
             };
-            // `exists_witness_cap` bounds the common single-pattern shape at
-            // one witness, but returns `None` for a multi-pattern subquery or
-            // one carrying a WHERE — exactly the shapes whose expansion can
-            // run away, so the ceiling is what covers those.
+            // `witness_cap` is `None` for exactly the shapes whose expansion
+            // can run away (see `exists_witness_cap`), so the operator's
+            // match ceiling is what bounds those.
             let matches = self
                 .materializing_executor(
                     witness_cap,
@@ -232,7 +231,8 @@ impl<'a> CypherExecutor<'a> {
     ///    (`UNWIND collect(n) AS n`, a folded `WITH n`) and relationship
     ///    variables bound on the row are not: `bindings_compatible` rejects
     ///    those afterwards, which a cap of one has no second candidate to
-    ///    survive. Same three guards `try_fast_exists_check` applies.
+    ///    survive. `try_fast_exists_check` applies guards 1 and 3 as well; it
+    ///    does not need 2, evaluating an inner WHERE per candidate edge.
     pub(super) fn exists_witness_cap(
         patterns: &[crate::graph::core::pattern_matching::Pattern],
         where_clause: &Option<Box<Predicate>>,
@@ -336,12 +336,11 @@ impl<'a> CypherExecutor<'a> {
                     None => return false,
                 };
 
-                // Get contained side: a Point (location | constant) or
-                // — 0.9.0 §4 — a Geometry (when the contained variable
-                // is a polygon-bearing node with no Location). The
-                // pre-§4 fast path silently returned false for the
-                // polygon-vs-polygon case, masking outer-contains-inner
-                // matches.
+                // Contained side: a Point (a constant, or the node's
+                // Location) or a Geometry (a polygon-bearing node with no
+                // Location). Without the Geometry arm the fast path
+                // silently returned false for polygon-vs-polygon, masking
+                // outer-contains-inner matches.
                 #[derive(Clone)]
                 enum ContainedSide {
                     Point(f64, f64),
@@ -653,13 +652,10 @@ impl<'a> CypherExecutor<'a> {
     /// Evaluate a predicate in boolean (WHERE-row-keep) terms.
     ///
     /// External callers (HAVING, OPTIONAL MATCH filter, list comprehensions,
-    /// spatial joins) only care whether to keep the row. This wrapper
-    /// collapses three-valued NULL semantics: `Some(true)` → `true`,
-    /// `Some(false)` and `None` → `false`. That preserves the historical
-    /// "row drops on false" contract at every callsite while letting the
-    /// internal tristate machinery enforce correct NULL propagation
-    /// through `NOT` / `AND` / `OR` / `XOR` / comparison operators and
-    /// string predicates (B1, B2). See `evaluate_predicate_tristate`.
+    /// spatial joins) only care whether to keep the row, so NULL collapses
+    /// with `false` here — the historical "row drops on false" contract at
+    /// every callsite — while NULL propagation stays exact internally. See
+    /// `evaluate_predicate_tristate`.
     pub(super) fn evaluate_predicate(
         &self,
         pred: &Predicate,

@@ -11,10 +11,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 // Centrality algorithms live in the sibling `centrality` module (god-file
 // ceiling); re-exported so existing `graph_algorithms::…` paths keep resolving.
-pub use super::centrality::*;
-// Community detection lives in a sibling module, but the historical
-// `graph_algorithms::*` paths remain the public compatibility surface.
 use super::bidirectional::bidirectional_bfs;
+pub use super::centrality::*;
+// Community detection likewise: sibling module, same compatibility re-export.
 pub use super::community::*;
 use super::community::{scoped_universe, DedupNeighborSource};
 
@@ -108,7 +107,6 @@ fn filtered_neighbors_undirected(
     neighbors
 }
 
-/// Get directed (outgoing only) neighbors filtered by edge connection type.
 fn filtered_neighbors_outgoing(
     graph: &DirGraph,
     node: NodeIndex,
@@ -282,11 +280,11 @@ pub struct PathNodeInfo {
     pub id: Value,
 }
 
-/// Tunable options for the single-path finders — [`shortest_path`],
-/// [`shortest_path_directed`], [`shortest_path_weighted`], and
-/// [`shortest_path_cost_weighted`] — all of which take the same
-/// edge-type / via-type / interrupt knobs. The endpoints (and, for the
-/// weighted finders, the weight property) stay positional as primary inputs.
+/// The shared edge-type / via-type / direction / interrupt knobs the path
+/// finders in this module take — [`shortest_path`], the `shortest_path_cost*`
+/// family, [`shortest_path_weighted`], [`are_connected_with`] and
+/// [`shortest_path_costs_from`]. The endpoints (and, for the weighted finders,
+/// the weight property) stay positional as primary inputs.
 /// Construct via [`PathOptions::default`] then the `with_*` builders.
 #[derive(Clone, Default)]
 #[non_exhaustive]
@@ -615,12 +613,10 @@ pub fn shortest_path_cost_with(
     let via_set: Option<HashSet<&str>> =
         via_types.map(|vt| vt.iter().map(|s| s.as_str()).collect());
     let interned = intern_connection_types(connection_types);
-    // The same meet-in-the-middle search [`shortest_path`] runs, with the
-    // reconstructed sequence discarded. Reconstruction is O(hops) against a
-    // search that is exponentially cheaper than the one-sided scan this used
-    // to run, so keeping a second hop-count-only BFS alive to save it would
-    // trade a large win for a negligible one — and a second copy of the
-    // termination rule to get wrong.
+    // The same meet-in-the-middle search `shortest_path` runs, with the
+    // reconstructed sequence discarded: a separate hop-count-only BFS would
+    // save only the O(hops) reconstruction, at the cost of a second copy of
+    // the termination rule to get wrong.
     bidirectional_path(
         graph,
         source,
@@ -1953,8 +1949,8 @@ pub fn are_connected(graph: &DirGraph, source: NodeIndex, target: NodeIndex) -> 
 }
 
 /// [`are_connected`] honouring a [`PathOptions`] — "is there a path at all",
-/// asking exactly the question [`shortest_path_cost_with`] asks and skipping
-/// the path reconstruction the answer does not need.
+/// answered by the same search [`shortest_path_cost_with`] runs, with the
+/// distance discarded.
 pub fn are_connected_with(
     graph: &DirGraph,
     source: NodeIndex,
@@ -1999,10 +1995,11 @@ pub struct WeightedPathResult {
     pub weight: f64,
 }
 
-/// Dijkstra-based weighted shortest path. Treats the graph as undirected
-/// (mirrors [`shortest_path`]) and reads `weight_property` from each edge,
-/// defaulting to 1.0 when the property is absent or non-numeric — the same
-/// fallback Louvain uses for its weighted-adjacency build.
+/// Dijkstra-based weighted shortest path. Undirected by default and directed
+/// on [`PathOptions::direction`], exactly as [`shortest_path`]; reads
+/// `weight_property` from each edge, defaulting to 1.0 when the property is
+/// absent or non-numeric — the same fallback Louvain uses for its
+/// weighted-adjacency build.
 ///
 /// Returns `None` when no path exists, when the deadline expires, or when
 /// any traversed edge has a negative weight (Dijkstra requires non-negative
@@ -2149,8 +2146,9 @@ pub fn shortest_path_weighted(
     None
 }
 
-/// Lightweight variant of [`shortest_path_weighted`] that returns only the
-/// total weight without reconstructing the path.
+/// [`shortest_path_weighted`] returning only the total weight. The path is
+/// still reconstructed and then dropped — this saves the caller a field, not
+/// the search any work.
 pub fn shortest_path_cost_weighted(
     graph: &DirGraph,
     source: NodeIndex,

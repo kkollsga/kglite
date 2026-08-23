@@ -1,8 +1,6 @@
-//! Disk CSR builder — external merge-sort construction, peer-count
-//! histogram, connection-type index, tombstone swap.
-//!
-//! These are the heavy build/maintenance methods extracted from
-//! `disk_graph.rs` to keep the main file under the 2,500-line cap.
+//! Disk CSR builder — merge-sort and partitioned CSR construction, atomic
+//! swap of the CSR files, connection-type inverted index, peer-count
+//! histogram.
 
 use super::csr::{CsrEdge, EdgeEndpoints, MergeSortEntry, TOMBSTONE_EDGE};
 use super::csr_build;
@@ -13,25 +11,20 @@ use std::io;
 use std::path::Path;
 
 impl DiskGraph {
-    /// External merge-sort CSR build. Thin orchestrator over
-    /// [`csr_build::build_csr_files`] — sets up build/temp directories,
-    /// drives the four CSR passes via the extracted module, then atomically
-    /// swaps the resulting files into `self.data_dir` and rebuilds the
-    /// auxiliary indexes.
-    ///
-    /// Reads chunking config from `KGLITE_CSR_CHUNK_MB` /
-    /// `KGLITE_CSR_FORCE_CHUNKS` via `BuilderConfig::from_env()` so the
-    /// environment-variable surface is preserved byte-for-byte.
+    /// External merge-sort CSR build. Sets up the build/temp directories,
+    /// drives the four CSR passes in [`csr_build::build_csr_files`], then
+    /// atomically swaps the resulting files into the active write directory
+    /// and rebuilds the auxiliary indexes. Chunking config comes from
+    /// `KGLITE_CSR_CHUNK_MB` / `KGLITE_CSR_FORCE_CHUNKS` via
+    /// `BuilderConfig::from_env()`.
     pub(super) fn build_csr_merge_sort(
         &mut self,
         node_bound: usize,
         edge_count: usize,
         verbose: bool,
     ) -> io::Result<()> {
-        // Production reads chunking config from the environment. Tests use
-        // `build_csr_merge_sort_with_config` with an explicit config instead,
-        // so they never touch the process-global env vars (which would race
-        // across the test harness's parallel threads — see the flake fix).
+        // Tests call `build_csr_merge_sort_with_config` instead: the
+        // process-global env vars race across the harness's parallel threads.
         self.build_csr_merge_sort_with_config(
             node_bound,
             edge_count,
@@ -74,10 +67,8 @@ impl DiskGraph {
             verbose,
         )?;
 
-        // Clean up temp dir (sort chunks).
         let _ = std::fs::remove_dir_all(&tmp_dir);
 
-        // Atomic swap: move build files to data_dir, re-mmap.
         self.swap_csr_files(
             &build_dir,
             node_bound,
@@ -93,9 +84,7 @@ impl DiskGraph {
         self.csr_sorted_by_type = true;
         self.edge_type_counts_raw = Some(artifacts.edge_type_counts);
 
-        // Build connection-type inverted index from the swapped CSR.
         self.build_conn_type_index(node_bound, verbose)?;
-        // Build per-(type, peer) count histogram — single scan of edge_endpoints.
         self.build_peer_count_histogram(verbose)?;
 
         self.write_metadata()?;
@@ -112,9 +101,12 @@ impl DiskGraph {
         Ok(())
     }
 
-    /// Hash-partitioned CSR build (Kuzu pattern).
-    /// Partitions edges by node group, then local counting sort per partition.
-    /// O(n) total — no global sort, no intermediate files, cache-friendly.
+    /// Hash-partitioned CSR build (Kuzu pattern). `out_edges` is filled by a
+    /// buffered scatter into per-node-group chunk buffers — no global sort, no
+    /// spill files — then sorted per node by connection type. `in_edges` cannot
+    /// use scatter (power-law target degree thrashes the page cache), so it
+    /// goes through the external merge sort in [`build_in_edges_merge_sort`],
+    /// which does spill.
     pub(super) fn build_csr_partitioned(
         &mut self,
         node_bound: usize,
@@ -124,7 +116,6 @@ impl DiskGraph {
         let write_dir = self.active_write_dir().to_path_buf();
         let pending = self.pending_edges.get_mut();
         let phase3_start = std::time::Instant::now();
-        // CSR output goes to a separate build dir, then atomically swapped into data_dir.
         let build_dir = write_dir.join(format!(
             "_csr_output_{:x}",
             std::time::SystemTime::now()
@@ -135,8 +126,7 @@ impl DiskGraph {
         std::fs::create_dir_all(&build_dir)?;
         let out_dir = &build_dir;
 
-        // ── Step 1: Build edge_endpoints + count degrees ──
-        // Single sequential pass over pending_edges: write endpoints + count degrees.
+        // ── Step 1: edge_endpoints + degree counts (single sequential pass) ──
         let step = std::time::Instant::now();
         let mut edge_endpoints_vec =
             MmapOrVec::mapped(&out_dir.join("edge_endpoints.bin"), edge_count)?;
@@ -192,8 +182,7 @@ impl DiskGraph {
         }
 
         // ── Step 3: Buffered scatter for out_edges (by source) ──
-        // Read edge_endpoints sequentially, scatter to out_edges via chunked buffers.
-        // Uses mapped_zeroed — OS zero-fills lazily, no explicit pre-fill I/O.
+        // mapped_zeroed: the OS zero-fills lazily, so there is no pre-fill I/O.
         let step = std::time::Instant::now();
         let mut out_edges = MmapOrVec::mapped_zeroed(&out_dir.join("out_edges.bin"), edge_count)?;
 
@@ -310,9 +299,6 @@ impl DiskGraph {
         drop(out_edges);
 
         // ── Step 4: Build in_edges via merge sort (by target) ──
-        // Scatter is slow for in_edges due to power-law target degree distribution
-        // (popular targets cause page cache thrashing on the external drive).
-        // Merge sort uses only sequential I/O: read → sort chunks → merge → write.
         let step = std::time::Instant::now();
 
         let in_edges =
@@ -327,7 +313,6 @@ impl DiskGraph {
         // Reload out_edges (dropped before step 4) — still in build_dir
         let out_edges: MmapOrVec<CsrEdge> = MmapOrVec::load_mapped(&out_edges_path, edge_count)?;
 
-        // Atomic swap: move build files to data_dir, re-mmap
         self.swap_csr_files(
             &build_dir,
             node_bound,
@@ -343,9 +328,7 @@ impl DiskGraph {
         self.csr_sorted_by_type = true;
         self.edge_type_counts_raw = Some(edge_type_counts);
 
-        // Build connection-type inverted index from the swapped CSR
         self.build_conn_type_index(node_bound, verbose)?;
-        // Build per-(type, peer) count histogram — single scan of edge_endpoints.
         self.build_peer_count_histogram(verbose)?;
 
         self.write_metadata()?;
@@ -362,11 +345,8 @@ impl DiskGraph {
         Ok(())
     }
 
-    // ====================================================================
-    // CSR swap helper — atomic replacement of mmap'd CSR files
-    // ====================================================================
-
-    /// Swap CSR files built in `build_dir` into `self.data_dir`.
+    /// Swap CSR files built in `build_dir` into the active write directory
+    /// (bound as `data_dir` below).
     /// 1. Drop old mmap fields (releases file handles)
     /// 2. Drop build mmaps (releases handles to temp files)
     /// 3. Rename temp files → data_dir (atomic on same filesystem)
@@ -455,7 +435,6 @@ impl DiskGraph {
             }
         }
 
-        // Re-mmap from data_dir
         self.out_offsets =
             MmapOrVec::load_mapped(&data_dir.join("out_offsets.bin"), node_bound + 1)?;
         self.out_edges = MmapOrVec::load_mapped(&data_dir.join("out_edges.bin"), edge_count)?;
@@ -464,7 +443,6 @@ impl DiskGraph {
         self.edge_endpoints =
             MmapOrVec::load_mapped(&data_dir.join("edge_endpoints.bin"), edge_count)?;
 
-        // Re-load conn_type_index if swapped
         let types_path = data_dir.join("conn_type_index_types.bin");
         if types_path.exists() {
             let num_types =
@@ -485,14 +463,13 @@ impl DiskGraph {
             }
         }
 
-        // Clean up build dir
         let _ = std::fs::remove_dir_all(build_dir);
         Ok(())
     }
 
     /// Build connection-type inverted index from current CSR arrays.
     /// Reads self.out_offsets, self.out_edges, self.edge_endpoints (must be valid).
-    /// Writes index files to self.data_dir and assigns to self.
+    /// Writes the index files under `active_write_dir()` and adopts them.
     pub(super) fn build_conn_type_index(
         &mut self,
         node_bound: usize,
@@ -522,11 +499,6 @@ impl DiskGraph {
         Ok(())
     }
 
-    /// Build per-(conn_type, peer) edge-count histogram. Answers unanchored
-    /// aggregate queries in O(distinct-peers) instead of O(|edge_endpoints|).
-    /// Scans edge_endpoints once in parallel chunks and folds into per-thread
-    /// HashMap<(conn_type, peer), u32>; reduces + flattens to three mmap'd
-    /// arrays sorted by (conn_type, peer).
     /// Build (or rebuild) the per-(conn_type, peer) edge-count histogram from
     /// the current `edge_endpoints`. Safe to call on a loaded graph; writes
     /// `peer_count_*.bin` files next to the other disk artifacts.
@@ -536,10 +508,14 @@ impl DiskGraph {
         self.build_peer_count_histogram(verbose)
     }
 
+    /// Build the per-(conn_type, peer) edge-count histogram, which answers
+    /// unanchored aggregate queries in O(distinct-peers) instead of
+    /// O(|edge_endpoints|).
     pub(super) fn build_peer_count_histogram(&mut self, verbose: bool) -> io::Result<()> {
-        // Use edge_endpoints.len() rather than next_edge_idx — after certain
-        // build paths (compact, merge rebuilds) next_edge_idx may have been
-        // reset while edge_endpoints still holds the authoritative count.
+        // Bound the scan by both counters rather than trusting either: some
+        // build paths (compact, merge rebuilds) reset next_edge_idx while the
+        // endpoint arrays still hold rows, so the min is the range both agree
+        // is populated.
         let total = self.edge_endpoint_len().min(self.next_edge_idx as usize);
         if total == 0 {
             return Ok(());
@@ -571,7 +547,11 @@ impl DiskGraph {
     }
 }
 
-/// Standalone per-segment `peer_count_*` writer — see `write_conn_type_index`.
+// `write_peer_count_histogram` here and `write_conn_type_index` below are also
+// called by `seal_to_new_segment`, with segment-local slices, to write one
+// segment's indexes without constructing a throwaway `DiskGraph`; that caller
+// discards the returned mmap handles because it only needs the files on disk.
+
 /// Scans `endpoints[edge_lo..edge_hi]` into a per-`(conn_type, peer)` count
 /// histogram and flushes three mmap'd files under `target_dir`.
 pub(super) fn write_peer_count_histogram(
@@ -702,29 +682,15 @@ pub(super) fn write_peer_count_histogram(
     Ok((pc_types, pc_offsets, pc_entries))
 }
 
-// ============================================================================
-// Standalone builder helpers — reused by seal_to_new_segment (phase 5) to
-// write segment-local auxiliary indexes from segment-local array slices
-// without constructing a throwaway `DiskGraph`. Each returns the mmap'd
-// handles so the caller may use them directly if it's the DiskGraph's
-// canonical index; `seal_to_new_segment` discards the handles because it
-// only needs the files on disk.
-// ============================================================================
-
-/// Build a `conn_type_index_*` into `target_dir` from supplied CSR slices.
-/// Parallelised via Rayon: each thread scans a partition of nodes and
-/// builds a local `HashMap<conn_type, Vec<node_id>>`; the maps are merged,
-/// each type's sources sorted, then flushed to the three on-disk files.
 /// Build the `in_edges` CSR array by external merge sort on target node.
 ///
-/// Split out of [`DiskGraph::build_csr_partitioned`], which handles the four
-/// build steps and had grown past the point where the merge sort could be read
-/// on its own. Scatter is slow here because target degree is power-law
-/// distributed and popular targets thrash the page cache, so this path uses
-/// only sequential I/O: read -> sort chunks -> merge -> write.
+/// Scatter is slow here because target degree is power-law distributed and
+/// popular targets thrash the page cache, so this path uses only sequential
+/// I/O: read -> sort chunks -> merge -> write.
 ///
-/// Writes `out_dir/in_edges.bin` and spills sort chunks under `out_dir/_in_sort`,
-/// which is removed before returning.
+/// Writes `out_dir/in_edges.bin`. A multi-chunk sort spills into
+/// `out_dir/_in_sort` and removes it before returning; the single-chunk path
+/// leaves that directory empty for the caller's build-dir cleanup.
 fn build_in_edges_merge_sort(
     edge_endpoints_vec: &MmapOrVec<EdgeEndpoints>,
     edge_count: usize,
@@ -857,6 +823,10 @@ fn build_in_edges_merge_sort(
     }
 }
 
+/// Build a `conn_type_index_*` into `target_dir` from supplied CSR slices.
+/// Parallelised via Rayon: each thread scans a partition of nodes and
+/// builds a local `HashMap<conn_type, Vec<node_id>>`; the maps are merged,
+/// each type's sources sorted, then flushed to the three on-disk files.
 pub(super) fn write_conn_type_index(
     out_offsets: &MmapOrVec<u64>,
     out_edges: &MmapOrVec<CsrEdge>,
@@ -1059,7 +1029,6 @@ mod tests {
         let index = collect_index(&dg);
         assert_eq!(index.len(), 3, "expected 3 connection types");
 
-        // Types sorted ascending.
         let types: Vec<u64> = index.iter().map(|(ct, _)| *ct).collect();
         let mut sorted = types.clone();
         sorted.sort();
@@ -1260,9 +1229,10 @@ mod tests {
         }
     }
 
-    /// Programmatic chunk override via `BuilderConfig` (exposed for the
-    /// streaming-filter path) must drive the same multi-chunk merge as the
-    /// env-var override. Smoke test that the API surface works end-to-end.
+    /// `BuilderConfig` is constructed directly by the streaming-filter path,
+    /// so its fields must survive construction unmodified and `from_env()`
+    /// must not invent a `force_chunks` when no env var is set. The merge it
+    /// drives is covered by `merge_sort_multi_chunk_via_force_chunks`.
     #[test]
     fn builder_config_force_chunks_via_api() {
         use super::csr_build::BuilderConfig;
@@ -1270,15 +1240,12 @@ mod tests {
             chunk_mb_override: None,
             force_chunks: Some(3),
         };
-        // chunk_mb_override = None still falls back to the env var/default
-        // path. Just confirm the struct constructs and is non-default in the
-        // expected way.
         assert_eq!(cfg.force_chunks, Some(3));
         assert!(cfg.chunk_mb_override.is_none());
 
         let env_cfg = BuilderConfig::from_env();
-        // No env vars set in the standard test environment.
-        // (force_chunks=Some(0) is filtered to None inside from_env.)
+        // No env vars set in the standard test environment; `from_env`
+        // filters force_chunks=0 to None.
         assert!(env_cfg.force_chunks.is_none() || env_cfg.force_chunks.unwrap() > 0);
     }
 

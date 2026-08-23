@@ -196,7 +196,7 @@ impl GraphState {
 
     /// Append the rebuild-failure warning (if any) to a tool response.
     ///
-    /// Applied to the error arm too (see [`map_body`]): a stale graph is
+    /// Applied to the error arm too (see `register::map_body`): a stale graph is
     /// exactly as relevant to a failed call as to a successful one, and
     /// keeping the note on both arms is what makes the text byte-identical to
     /// the pre-`isError` responses, which carried the error inside the body.
@@ -208,10 +208,6 @@ impl GraphState {
     }
 
     pub fn load_kgl(&self, path: &Path) -> Result<()> {
-        // `load_file` returns Arc<DirGraph>; wrap into KnowledgeGraph
-        // here to preserve ActiveGraph's existing shape
-        // (kg.set_embedder_native, kg.source_location, kg.cypher, etc.
-        // are still used downstream).
         self.open_or_create(path, None).map(|_| ())
     }
 
@@ -371,10 +367,13 @@ impl GraphState {
         Some((overview.node_count as u64, overview.edge_count as u64))
     }
 
-    /// A one-line schema mini-map for the workspace activation message
-    /// (the mcp-methods 0.3.46 activation-summary hook). Steers an agent's
-    /// FIRST move toward the graph before it defaults to grep — the
-    /// activation result is the one message read before any tool choice.
+    /// Test-only accessor for the one-line schema mini-map the workspace
+    /// activation message carries (the mcp-methods 0.3.46 activation-summary
+    /// hook); production reaches it through
+    /// [`Self::reusable_activation_summary`] and the workspace rebuild path.
+    /// Steers an agent's FIRST move toward the graph before it defaults to
+    /// grep — the activation result is the one message read before any tool
+    /// choice.
     /// Also carries a lazy-discovery escape hatch: a client that loads MCP
     /// tools lazily (Codex / code-mode / tool-search) can surface only
     /// grep/read_source on a broad first search and miss the always-registered
@@ -463,10 +462,9 @@ impl GraphState {
         guard.as_ref().map(f)
     }
 
-    /// Borrow the active `KnowledgeGraph` for read-only inspection.
-    /// Returns `None` when no graph is loaded — callers format their
-    /// own "no graph active" message so the surrounding tool can give
-    /// a tool-specific hint.
+    /// Borrow the active `KnowledgeGraph` for read-only inspection, or `None`
+    /// when no graph is loaded — the no-graph substitution belongs to the
+    /// caller, as in [`Self::with_active`].
     pub fn with_kg<F, T>(&self, f: F) -> Option<T>
     where
         F: FnOnce(&kglite::api::KnowledgeGraph) -> T,
@@ -491,10 +489,9 @@ impl GraphState {
     }
 
     /// Exclusive (write-locked) access to the active graph, for the
-    /// write-enabled `cypher_query` path. The `RwLock` write-lock
-    /// serializes mutations and excludes concurrent readers for the
-    /// duration of the mutation — correct under any MCP dispatch model
-    /// (serial or concurrent). Returns `None` when no graph is active.
+    /// write-enabled `cypher_query` path: the write lock is what keeps
+    /// mutation correct under any MCP dispatch model, serial or concurrent.
+    /// `None` when no graph is active.
     pub(crate) fn with_active_mut<F, T>(&self, f: F) -> Option<T>
     where
         F: FnOnce(&mut ActiveGraph) -> T,

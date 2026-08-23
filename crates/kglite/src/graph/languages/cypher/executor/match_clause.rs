@@ -82,9 +82,11 @@ fn expression_may_read_var(expr: &Expression, var: &str) -> bool {
 /// inline property map. Returns `None` for every other shape, which the
 /// callers turn into their own "fall back to the full executor" answer.
 ///
-/// Variable-length edges and edge property filters are excluded here rather
-/// than at each call site: neither the direct `edges_directed_filtered`
-/// sweep nor the CSR counter can honour them.
+/// Variable-length edges and inline edge property maps are excluded here
+/// rather than at each call site: neither the direct `edges_directed_filtered`
+/// sweep nor the CSR counter can honour them. (`edge.edge_filter`, the
+/// planner-pushed relationship predicate, is a different field and is not
+/// excluded here — `count_simple_pattern_from_bound` applies it per edge.)
 fn simple_node_edge_node(pattern: &Pattern) -> Option<(&NodePattern, &EdgePattern, &NodePattern)> {
     if pattern.elements.len() != 3 {
         return None;
@@ -522,8 +524,7 @@ impl<'a> CypherExecutor<'a> {
         let enforce_rel_uniqueness = clause_needs_rel_uniqueness(clause);
         let mut row_set: Vec<ResultRow> = vec![row.clone()];
         // Relationship-uniqueness bookkeeping, parallel to `row_set`: the
-        // edges each working row consumed within THIS clause. Only
-        // maintained when two or more comma patterns carry edges.
+        // edges each working row consumed within THIS clause.
         let mut edge_sets: Vec<Vec<EdgeIndex>> = if enforce_rel_uniqueness {
             vec![Vec::new()]
         } else {
@@ -694,8 +695,11 @@ impl<'a> CypherExecutor<'a> {
             let node_idx = row.node_bindings.get(node_vars[i + 1])?;
             let binding_name = edge_var
                 .map(str::to_string)
-                // PatternExecutor names internal fixed-edge bindings with
-                // the following node element's index.
+                // Anonymous fixed edges have no edge binding — the matcher
+                // keeps them on the `exact_path` trail (the `__fixed_path`
+                // path binding the caller consults first). Nothing emits
+                // this name, so the lookup below fails and synthesis
+                // returns None.
                 .unwrap_or_else(|| format!("__anon_edge_{}", edge_element_indices[i] + 1));
             let edge = row.edge_bindings.get(&binding_name)?;
             path.push(crate::graph::core::pattern_matching::PathHop {
@@ -799,7 +803,7 @@ impl<'a> CypherExecutor<'a> {
     /// Fast path for EXISTS / NOT EXISTS: when the subquery is a single
     /// 3-element pattern (node-edge-node) with exactly one node already bound
     /// from the outer row, we can check edge existence directly via
-    /// `edges_directed()` instead of creating a full PatternExecutor.
+    /// `edges_directed_filtered()` instead of creating a full PatternExecutor.
     /// Returns `Some(true/false)` if the fast path applies, `None` otherwise.
     pub(super) fn try_fast_exists_check(
         &self,
@@ -872,7 +876,7 @@ impl<'a> CypherExecutor<'a> {
 
         // Pre-allocate a mutable row for WHERE evaluation (avoids clone per edge)
         let (has_where, mut eval_row) = if where_clause.is_some() {
-            let mut r = row.clone(); // single clone
+            let mut r = row.clone();
             if let Some(ref var) = other_var {
                 r.node_bindings.insert(var.clone(), NodeIndex::new(0)); // placeholder
             }
@@ -1109,8 +1113,7 @@ impl<'a> CypherExecutor<'a> {
 
         // Slow path: iterate incident edges. This loop can cover millions of
         // edges for hub nodes (Q5 has ~40 M incoming P31 edges), so check the
-        // deadline every 1 M iterations. For undirected `[r]-` patterns we
-        // sweep both directions.
+        // deadline every 1 M iterations.
         let pe = PatternExecutor::new_lightweight_with_params(self.graph, None, self.params);
         let mut count: i64 = 0;
         let mut peers: HashSet<NodeIndex> = HashSet::new();
@@ -1217,8 +1220,9 @@ impl<'a> CypherExecutor<'a> {
         }))
     }
 
-    /// Count matches for a 5-element pattern (a)-[e1]->(b)<-[e2]-(c)
-    /// from a bound first node, without materializing intermediate rows.
+    /// Count matches of a 5-element `(a)-[e1]-(b)-[e2]-(c)` pattern from a
+    /// bound first node, without materializing intermediate rows. Each hop
+    /// may point either way.
     pub(super) fn count_two_hop_pattern(
         &self,
         pattern: &crate::graph::core::pattern_matching::Pattern,
@@ -1227,9 +1231,9 @@ impl<'a> CypherExecutor<'a> {
         self.count_two_hop_from_anchor(pattern, first_idx, false)
     }
 
-    /// Count matches for a 5-element pattern traversed in reverse:
-    /// (a)-[e1]->(b)-[e2]->(c) counted from c (position 4) backward.
-    /// Reads elements [3],[2],[1],[0] with flipped edge directions.
+    /// [`Self::count_two_hop_pattern`] anchored at the last node (element 4)
+    /// instead of the first: reads elements [3],[2],[1],[0] with both edge
+    /// directions flipped.
     pub(super) fn count_two_hop_pattern_reverse(
         &self,
         pattern: &crate::graph::core::pattern_matching::Pattern,
@@ -1323,7 +1327,6 @@ impl<'a> CypherExecutor<'a> {
         let mut total: i64 = 0;
         let mut work = 0usize;
 
-        // First hop: anchor --hop1--> middle nodes
         for e1_ref in self
             .graph
             .graph
@@ -1346,7 +1349,6 @@ impl<'a> CypherExecutor<'a> {
                 continue;
             }
 
-            // Second hop: mid_idx --hop2--> end nodes (just count)
             for e2_ref in self
                 .graph
                 .graph

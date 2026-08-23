@@ -1667,11 +1667,9 @@ mod tests {
         );
     }
 
-    /// The row cap is `maxRows`, not `limit`, and that is forced rather than
-    /// chosen: LIMIT is a reserved clause word which the map-key grammar
-    /// deliberately keeps reserved, so `{limit: 1}` cannot be written at all.
-    /// Pinned so the name is not "tidied" back to `limit` by someone who
-    /// assumes it was arbitrary.
+    /// Pins the `maxRows` name against a "tidy" back to `limit`: the
+    /// reserved-word grammar makes `{limit: 1}` unwritable at all (see the
+    /// `maxRows` parse above), so the name is forced rather than arbitrary.
     #[test]
     fn limit_is_not_spellable_as_a_map_key_which_is_why_the_key_is_max_rows() {
         let mut graph = enabled(None);
@@ -2059,14 +2057,16 @@ mod tests {
         }
     }
 
-    /// The read *dispatcher* must refuse a lifecycle verb rather than fall
-    /// into its trailing `unreachable!()`.
+    /// The read *dispatcher* must refuse a lifecycle verb rather than
+    /// mis-diagnose it, and `execute_call` must route it here rather than into
+    /// its trailing `unreachable!()`.
     ///
     /// Calls `execute_call` directly, because that is the only way to reach
     /// the dispatcher: `execute_read` refuses mutations upfront using the same
     /// classifier, so going through it would pin the upstream guard instead of
     /// this arm — and the arm exists precisely for the case where that
-    /// classifier is wrong. Without the arm this panics.
+    /// classifier is wrong. Without the guard the caller is told "capture is
+    /// not enabled", which blames the log rather than the routing.
     #[test]
     fn the_read_dispatcher_refuses_a_lifecycle_verb_rather_than_panicking() {
         use crate::graph::languages::cypher::ast::Clause;

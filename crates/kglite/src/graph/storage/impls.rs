@@ -30,10 +30,10 @@ use std::time::Instant;
 // `MemoryGraph` and `MappedGraph` wrap identical `StableDiGraph` today but
 // carry distinct type identity for per-backend divergence. The
 // `impl_heap_graph_read!` macro emits the shared read body. The write side is
-// written out per backend: both carry the statement-scoped undo journal, but
-// `MappedGraph` also maintains its own lazy type/property indexes and
-// `MemoryGraph` its peer counts, so the two have nothing left in common to
-// share.
+// written out per backend — `MappedGraph` maintains lazy type/property
+// indexes and `MemoryGraph` peer counts, so the trait methods diverge — with
+// the parts that don't (column-store writes, undo pre-image capture) shared
+// through the two macros below.
 // ──────────────────────────────────────────────────────────────────────────
 
 /// The edges `StableGraph::remove_node(idx)` is about to free, **in the order
@@ -118,10 +118,9 @@ macro_rules! impl_heap_graph_read {
                 self.inner().node_weight(idx).map(|nd| nd.node_type)
             }
 
-            // NodeData no longer carries extra_labels — secondary labels
-            // live in `DirGraph.secondary_label_index`. `node_labels_of`
-            // returns only the primary; the full list comes from
-            // `DirGraph::node_labels`.
+            // `node_labels_of` is left on its trait default (primary type
+            // only): secondary labels live in `DirGraph.secondary_label_index`,
+            // so the full list comes from `DirGraph::node_labels`.
 
             #[inline]
             fn node_weight(&self, idx: NodeIndex) -> Option<&NodeData> {
@@ -130,10 +129,8 @@ macro_rules! impl_heap_graph_read {
 
             // These four resolve through `NodeView` rather than reading
             // `NodeData` directly, so the heap backends have exactly **one**
-            // store-resolution point (`NodeView::from_node_data`) — the point
-            // the poison hook intercepts. `NodeView` is `Copy` and its
-            // constructor is one match on the storage variant, so this is the
-            // same work as before.
+            // store-resolution point (`GraphRead::node_view`) — the point the
+            // ownership tests' poison hook swaps a store behind.
             #[inline]
             fn get_node_property(&self, idx: NodeIndex, key: InternedKey) -> Option<Value> {
                 self.node_view(idx).and_then(|v| v.get_value(key))
@@ -318,11 +315,6 @@ impl_heap_graph_read!(MemoryGraph, is_memory = true, is_mapped = false);
 // ──────────────────────────────────────────────────────────────────────────
 // MemoryGraph — GraphWrite, and the statement-scoped undo capture seam.
 //
-// Written out rather than macro-generated: `MappedGraph` has its own
-// hand-written `GraphWrite` (below) and only `MemoryGraph` carries an undo
-// journal, so a shared macro had exactly one user and no longer earned the
-// indirection.
-//
 // Every method follows the same shape: capture the inverse of the edit into
 // the journal *if one is installed*, then perform the edit. With no journal
 // (the steady state, and every read path) the added cost is one `Option`
@@ -391,11 +383,11 @@ macro_rules! impl_heap_pre_image_capture {
             /// which it is holding:
             ///
             /// - **row storage** → a `NodeData` clone, exactly what
-            ///   `node_weight_mut` captures. The five property writers bypass
-            ///   that method (they need `column_stores` at the same time), so
-            ///   they capture here or a failed statement cannot restore the
-            ///   value — which is what `rollback_tests::set_properties` caught
-            ///   when this was missing.
+            ///   `node_weight_mut` captures. The property writers that call
+            ///   this hook bypass that method (they need `column_stores` at
+            ///   the same time), so they capture here or a failed statement
+            ///   cannot restore the value — which is what
+            ///   `rollback_tests::set_properties` caught when this was missing.
             /// - **columnar** → the prior value of each cell `write` names, as
             ///   `UndoEntry::ColumnarCell` (plus one
             ///   `UndoEntry::ColumnarSchemaGrown` when the write introduces a
@@ -477,8 +469,8 @@ impl_heap_pre_image_capture!(MappedGraph);
 /// A columnar node has no store handle, so a property write needs the store and
 /// the node's `row_id` at the same time. Both live on `self`, in different
 /// fields, so the disjoint-field borrow below is what makes this expressible at
-/// all — and is the reason these five methods sit on the backend rather than on
-/// `&mut NodeData`.
+/// all — and is the reason the property writers sit on the backend rather than
+/// on `&mut NodeData`.
 macro_rules! impl_heap_column_writes {
     () => {
         #[inline]
@@ -698,17 +690,17 @@ impl GraphWrite for MemoryGraph {
 
     /// Bypasses the undo journal as well as the WAL recorder.
     ///
-    /// The one caller is `mutation::batch`'s columnar detach/reattach sweep,
-    /// which re-points every node of a type at a rebuilt master store.
-    /// Capturing a `NodeData` pre-image for each of them would make a
-    /// chunked `add_nodes` cost one clone per node *of the type* per chunk —
-    /// the O(V+E)-per-write cost this journal exists to remove, reintroduced
-    /// at a smaller constant. That sweep runs with no journal installed; see
-    /// `batch::detach_columnar_stores` for why that is what makes the bypass
-    /// sound.
+    /// No production call site reaches it today: the sweeps that used to —
+    /// `mutation::batch`'s columnar detach/reattach and the executor's
+    /// end-of-`SET` handle refresh — are gone, now that a node holds a row id
+    /// and no store handle. The override still has to exist, because the trait
+    /// default forwards to the *recorded* `node_weight_mut`: any silent
+    /// per-node sweep that returns would then clone one `NodeData` pre-image
+    /// per node *of the type*, the O(V+E)-per-write cost this journal exists
+    /// to remove. `dir_graph::rollback_tests` pins the bypass from the seam.
     ///
-    /// Nothing else may use this method to skip capture: a caller that
-    /// changes a node's *content* silently is unrecoverable on rollback.
+    /// Nothing may use this method to skip capture: a caller that changes a
+    /// node's *content* silently is unrecoverable on rollback.
     #[inline]
     fn node_weight_mut_silent(&mut self, idx: NodeIndex) -> Option<&mut NodeData> {
         self.inner.node_weight_mut(idx)
@@ -782,13 +774,15 @@ impl GraphWrite for MemoryGraph {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// MappedGraph — hand-written GraphRead impl with a lazy per-conn-type
-// index. Delegates most methods to `self.inner` (identical to the macro
-// body) and overrides `edges_directed_filtered`,
-// `sources_for_conn_type_bounded`, `lookup_peer_counts`, and
-// `count_edges_grouped_by_peer` to consult the index. Disk already has
-// these structures as persistent mmap; for mapped we rebuild them in
-// RAM on first query.
+// MappedGraph — hand-written GraphRead impl with lazy per-conn-type and
+// per-property indexes. Delegates most methods to `self.inner` (identical to
+// the macro body); the bulk-answer methods —
+// `sources_for_conn_type_bounded`, `lookup_peer_counts`,
+// `count_edges_grouped_by_peer`, `count_edges_filtered` and the four
+// `lookup_by_property_*` — consult an index instead. Per-node
+// `edges_directed_filtered` deliberately does not; see its comment below.
+// Disk already has these structures as persistent mmap; for mapped we
+// rebuild them in RAM on first query.
 // ──────────────────────────────────────────────────────────────────────────
 
 impl GraphRead for MappedGraph {
@@ -842,9 +836,7 @@ impl GraphRead for MappedGraph {
     fn node_type_of(&self, idx: NodeIndex) -> Option<InternedKey> {
         self.inner().node_weight(idx).map(|nd| nd.node_type)
     }
-    // node_labels_of falls back to the default trait impl (returns the
-    // primary type only). The full label list comes from
-    // `DirGraph::node_labels`, which consults `secondary_label_index`.
+    // node_labels_of: trait default, as in the heap macro above.
 
     #[inline]
     fn node_weight(&self, idx: NodeIndex) -> Option<&NodeData> {
@@ -1131,21 +1123,19 @@ impl GraphRead for MappedGraph {
 // ──────────────────────────────────────────────────────────────────────────
 // MappedGraph GraphWrite — lazy-index invalidation + undo-journal capture
 //
-// GraphWrite invalidates the type index on every edge mutation and the
-// property index on every node-property mutation. `add_node` and
-// `remove_node` also clear the property index since the set of
-// `(value, node_idx)` pairs has changed.
+// Every edge mutation invalidates the type index; `node_weight_mut`,
+// `node_weight_mut_silent`, `add_node` and `remove_node` invalidate the
+// property index, since each can change the set of `(value, node_idx)` pairs
+// it was built from. The property writers shared from
+// `impl_heap_column_writes!` invalidate neither.
 //
-// On top of that, and since 2026-07-30, the same undo-capture seam
-// `MemoryGraph` carries above — for the same reason: `inner` is a heap
-// `StableDiGraph`, so every `UndoEntry` variant, all keyed on a petgraph
-// index, is expressible here. What `StorageMode::Mapped` changes is where
-// *properties* live (mmap-spilled column stores), not the node/edge graph, so
-// the journal transfers verbatim.
-//
-// Each method captures the inverse of the edit *if a journal is installed*,
-// then performs the edit — never at the cost of the invalidation it already
-// owed.
+// On top of that, the same undo-capture seam `MemoryGraph` carries above, in
+// the same shape and for the same reason: `inner` is a heap `StableDiGraph`,
+// so every `UndoEntry` variant, all keyed on a petgraph index, is expressible
+// here. What `StorageMode::Mapped` changes is where *properties* live
+// (mmap-spilled column stores), not the node/edge graph, so the journal
+// transfers verbatim — never at the cost of the invalidation the method
+// already owed.
 // ──────────────────────────────────────────────────────────────────────────
 
 impl MappedGraph {
@@ -1202,22 +1192,20 @@ impl GraphWrite for MappedGraph {
 
     /// Bypasses the undo journal as well as the WAL recorder.
     ///
-    /// Two callers, both pure storage bookkeeping and both mapped-relevant:
-    /// the columnar handle-refresh sweep in
-    /// [`crate::graph::languages::cypher::executor`], and the
-    /// detach/reattach pair in [`crate::graph::mutation::batch`], which runs
-    /// *only* under `is_mapped() || is_disk()` and touches every existing node
-    /// of a type per chunk. Capturing a `NodeData` pre-image for each of them
-    /// would make one `SET`, or one bulk `CREATE`, cost a clone per node *of
-    /// the type* — the O(V+E)-per-write cost this journal exists to remove,
-    /// reintroduced at a smaller constant. Without this override `MappedGraph`
-    /// would inherit the trait default, which forwards to the *recorded*
-    /// `node_weight_mut`; that is precisely the quadratic amplification commit
-    /// 3bf9ef00 removed from the WAL, and no existing guard would see it in
-    /// the journal.
+    /// Same standing as `MemoryGraph`'s override above: no production call
+    /// site reaches it today, and it exists so that one cannot silently cost
+    /// a `NodeData` clone per node *of the type*. Without it `MappedGraph`
+    /// inherits the trait default, which forwards to the *recorded*
+    /// `node_weight_mut` — precisely the quadratic amplification commit
+    /// 3bf9ef00 removed from the WAL, re-created inside the journal where no
+    /// WAL-byte or backend-clone guard would see it. Mapped is where that is
+    /// easiest to lose: the sweeps that would reach this seam are gated on
+    /// `is_mapped() || is_disk()`, so no memory-backed test covers them;
+    /// `rollback_tests::journal_invariants::the_mapped_silent_write_path_records_nothing`
+    /// is the guard.
     ///
-    /// Nothing else may use this method to skip capture: a caller that
-    /// changes a node's *content* silently is unrecoverable on rollback.
+    /// Nothing may use this method to skip capture: a caller that changes a
+    /// node's *content* silently is unrecoverable on rollback.
     #[inline]
     fn node_weight_mut_silent(&mut self, idx: NodeIndex) -> Option<&mut NodeData> {
         self.invalidate_property_index();

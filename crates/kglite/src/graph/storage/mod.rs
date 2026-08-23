@@ -86,9 +86,6 @@ impl StrField<'_> {
 
 /// Read-side interface shared by every storage backend.
 ///
-/// Implemented for [`crate::graph::schema::GraphBackend`] and directly for
-/// the mapped and disk backends where their storage-specific iterators matter.
-///
 /// ### GATs and object-safety
 ///
 /// The iterator methods use generic associated types (e.g.
@@ -101,11 +98,8 @@ impl StrField<'_> {
 ///
 /// ### Disk-only helpers
 ///
-/// Methods such as [`GraphRead::sources_for_conn_type_bounded`],
-/// [`GraphRead::lookup_peer_counts`], and [`GraphRead::iter_peers_filtered`]
-/// have meaningful implementations only on the disk backend (they read
-/// from persistent indexes built at `.kgl` load time). Memory and mapped
-/// backends return `None` / fall back via `edges_directed`.
+/// The methods under the `disk-only helpers` marker default to `None` or to a
+/// generic fallback; only the disk backend implements them meaningfully.
 pub trait GraphRead {
     // ─────────────── generic associated types ───────────────
 
@@ -154,8 +148,9 @@ pub trait GraphRead {
     /// a no-op out of an explicit `vacuum()`.
     fn edge_bound(&self) -> usize;
 
-    /// `true` for heap-resident [`GraphBackend::Memory`]. Used by
-    /// `recording.rs` tests to verify backend identity.
+    /// `true` for heap-resident [`crate::graph::schema::GraphBackend::Memory`].
+    /// Gates the fused-match `peer_counts` fast path, and the backend-identity
+    /// assertions in `recording.rs`.
     #[allow(dead_code)]
     fn is_memory(&self) -> bool;
 
@@ -500,7 +495,7 @@ pub trait GraphWrite: GraphRead {
     /// variant (the removed `NodeData` mutators wrote only the node's
     /// replica, which columnar storage ignores).
     ///
-    /// **Disk backend staging contract (0.9.0 Cluster 6):** on disk,
+    /// **Disk backend staging contract:** on disk,
     /// `node_weight_mut` does NOT mutate the live store directly. It
     /// stages writes in an internal `node_mut_cache` to dodge the
     /// `Arc<ColumnStore>` share-clone storm; the cache is drained
@@ -616,12 +611,10 @@ pub trait GraphWrite: GraphRead {
     /// see writes immediately — default no-op.
     ///
     /// Disk drains its `node_mut_cache` / `edge_mut_cache` lazily on the next
-    /// `&mut self` op (e.g. on save), so without an explicit flush at the end
-    /// of a mutation query the next read goes through `node_weight`, reads
-    /// `column_stores` directly, and misses the staged writes — Cypher SET
-    /// appears to silently no-op until the next `add_node`/`save`. The disk
-    /// override routes through `clear_arenas` (clone-apply-replace flush +
-    /// arena reset).
+    /// `&mut self` op, so without an explicit flush the next read goes to
+    /// `column_stores` and misses the staged writes — a Cypher SET appears to
+    /// silently no-op until the next `add_node`/`save`. The disk override
+    /// routes through `clear_arenas` (clone-apply-replace flush + arena reset).
     fn flush_pending_writes(&mut self) {}
 }
 

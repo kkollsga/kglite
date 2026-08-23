@@ -79,8 +79,9 @@ pub(crate) fn unique_heap_backend<T: Clone>(handle: &mut Arc<T>) -> &mut T {
 /// copy-on-write overlay over a shared memory base, mmap-columnar-spilled
 /// mapped, CSR-on-disk, and a write-capture wrapper. `MappedGraph` is a
 /// distinct struct rather than a type alias, so each backend owns its own
-/// [`GraphRead`] / [`GraphWrite`] impl in [`crate::graph::storage::impls`].
-/// This enum is a dumb dispatcher.
+/// [`GraphRead`] / [`GraphWrite`] impl — Memory/Mapped/Disk in
+/// [`crate::graph::storage::impls`], `ForkedGraph` and `RecordingGraph` in
+/// their own modules. This enum is a dumb dispatcher.
 ///
 /// The `Recording` variant wraps any other `GraphBackend` — including, in
 /// principle, another `Recording`. Its `is_memory` / `is_mapped` / `is_disk`
@@ -110,11 +111,11 @@ pub enum GraphBackend {
     Mapped(Arc<MappedGraph>),
     Disk(Box<DiskGraph>),
     // Write-capture wrapper: the production backend of every graph opened with
-    // `durable=True`. The binding wraps the loaded backend via
-    // `wrap_backend_for_durability`, so each mutation crossing the `GraphWrite`
-    // seam is buffered as a `RawOp` and flushed to the log. Because it wraps
-    // the enum itself, the capture layer is identical for a memory, mapped, or
-    // disk graph underneath.
+    // `durable=True`. `graph::durability` wraps the loaded backend (via
+    // `recording::wrap_for_durability`) once its WAL replay has finished, so
+    // each mutation crossing the `GraphWrite` seam is buffered as a `RawOp` and
+    // flushed to the log. Because it wraps the enum itself, the capture layer is
+    // identical for a memory, mapped, or disk graph underneath.
     Recording(Box<RecordingGraph<GraphBackend>>),
 }
 
@@ -140,7 +141,7 @@ impl GraphBackend {
     }
 
     #[inline]
-    // Keep the established constructor-only backend API stable in this hardening pass.
+    // Keep the established constructor-only backend API stable.
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         GraphBackend::Memory(Arc::new(MemoryGraph::new()))
@@ -237,7 +238,8 @@ impl GraphBackend {
     #[inline]
     pub(crate) fn supports_checkpoint_free_mutation(&self) -> bool {
         // `Forked` answers as the `Memory` it forked from — see the variant
-        // doc. Pinned by `rollback_tests::forked_statements_copy_zero_nodes`.
+        // doc. Pinned by
+        // `rollback_tests::forked_statements_copy_zero_nodes_except_one_flatten`.
         matches!(self, GraphBackend::Memory(_) | GraphBackend::Forked(_))
     }
 
@@ -304,9 +306,7 @@ impl GraphBackend {
     /// same allocation. `g` is still a uniquely-owned `Arc<DirGraph>`, so
     /// `Arc::make_mut` at the `DirGraph` level does nothing and the write would
     /// go straight into a backend the fork is reading. Before the copy-on-write
-    /// overlay a `Memory` handle was always unique, so this could not happen —
-    /// which is why five `g.copy()`-then-write-the-original Python tests are
-    /// what found it.
+    /// overlay a `Memory` handle was always unique, so this could not happen.
     ///
     /// The resolution is symmetric with the fork itself: `g` becomes an overlay
     /// over the shared base too. Both graphs then read the same untouched base
@@ -530,9 +530,9 @@ impl GraphBackend {
 
     /// Whether writes on this backend capture before-images.
     ///
-    /// The gate the two **side-channel choke points** test before doing any
-    /// work: both sit on hot write paths and must cost a bool read, not a
-    /// state read, when enrichment is off (which is the default).
+    /// The gate the **side-channel choke points** test before doing any work:
+    /// they sit on hot write paths and must cost a bool read, not a state read,
+    /// when enrichment is off (which is the default).
     #[inline]
     pub fn captures_before_images(&self) -> bool {
         match self {
@@ -672,7 +672,8 @@ impl GraphBackend {
 
     /// Borrow the inner heap `StableDiGraph` for petgraph algorithms
     /// (e.g. `kosaraju_scc`) that require concrete petgraph types.
-    /// Disk panics — callers must gate on [`GraphRead::is_disk`].
+    /// Disk **and** `Forked` panic — callers must gate on
+    /// [`GraphRead::is_disk`] and [`is_forked`](Self::is_forked) first.
     /// `Recording` forwards to the wrapped backend.
     #[inline]
     pub fn as_stable_digraph(&self) -> &StableDiGraph<NodeData, EdgeData> {
@@ -735,7 +736,9 @@ impl GraphBackend {
                     );
                 }
             }
-            // No overlay edge exists (module doc), so the base carries every edge.
+            // The overlay never adds or removes an edge (module doc), so the base
+            // holds every edge; an overlay copy of an edge weight differs only in
+            // `properties`, which this endpoints-and-type sweep never reads.
             GraphBackend::Forked(g) => {
                 for er in g.base_stable_digraph().edge_references() {
                     let w = er.weight();
@@ -936,7 +939,8 @@ impl Clone for GraphBackend {
     }
 }
 
-// Delegates to StableDiGraph so the binary format is identical to before.
+// Every serializable variant emits the bare inner `StableDiGraph`, so which
+// backend holds a graph has no effect on the persisted format.
 impl Serialize for GraphBackend {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
@@ -944,8 +948,7 @@ impl Serialize for GraphBackend {
             GraphBackend::Mapped(g) => g.serialize(serializer),
             // Serialization needs one concrete `StableDiGraph`, so the overlay is
             // folded into a throwaway copy. O(V+E) — but so is writing the file,
-            // and the bytes are identical to the unforked graph's: this variant is
-            // a pure in-memory representation with **no** `.kgl` format impact.
+            // and the bytes are identical to the unforked graph's.
             GraphBackend::Forked(g) => g.to_memory_graph().serialize(serializer),
             GraphBackend::Disk(_) => Err(serde::ser::Error::custom(
                 "Disk backend does not support serialization",
@@ -986,8 +989,9 @@ impl std::fmt::Debug for GraphBackend {
     }
 }
 
-// GraphRead / GraphWrite dispatcher impls — dumb per-variant forwarding. The
-// real impls live on each backend in `src/graph/storage/impls.rs`.
+// GraphRead / GraphWrite dispatcher impls — per-variant forwarding. The real
+// impls live on each backend: `impls.rs` (Memory/Mapped/Disk), `forked.rs`,
+// `recording.rs`.
 
 use crate::datatypes::values::Value;
 use std::collections::HashMap;

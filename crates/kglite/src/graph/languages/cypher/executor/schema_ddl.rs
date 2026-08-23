@@ -94,8 +94,7 @@ pub(crate) const SHOW_INDEXES_COLUMNS: &[&str] = &[
     "state",
 ];
 
-/// `SHOW INDEXES` — a read. Rows come from the same collector that backs
-/// `CALL db.indexes()`, so the two surfaces can never drift.
+/// `SHOW INDEXES` — a read, over the shared collector named above.
 pub(crate) fn show_indexes_result_set(graph: &DirGraph) -> ResultSet {
     let mut out = ResultSet::new();
     out.rows = collect_indexes_structured(graph)
@@ -196,16 +195,14 @@ fn show_procedures_result_set(yield_items: &[YieldItem]) -> Result<ResultSet, St
             let value = match item.name.as_str() {
                 "name" => Value::String(spec.name.to_string()),
                 "description" => Value::String(spec.description.to_string()),
-                // Read from the registry, not hard-coded: the CDC lifecycle
-                // verbs mutate, and reporting them as READ would tell a client
-                // it can run them on a read-only connection.
+                // The CDC lifecycle verbs mutate; reporting them as READ would
+                // tell a client it can run them on a read-only connection.
                 "mode" => {
                     Value::String(super::procedure_registry::procedure_mode(spec.name).to_string())
                 }
                 "worksOnSystem" => Value::Boolean(false),
-                // Neo4j-style signature. KGLite procedures take one optional
-                // config map, so the input side is uniform; outputs are the
-                // declared columns, untyped (ANY?).
+                // The input side is hard-coded because every KGLite procedure
+                // takes exactly one optional config map.
                 "signature" => Value::String(format!(
                     "{}(config = {{}} :: MAP?) :: ({})",
                     spec.name,
@@ -324,8 +321,8 @@ pub(crate) fn execute_schema_read(
 /// the rollback checkpoint all key on `is_mutation_query`, so DDL has to
 /// classify as a mutation to be covered by them.
 ///
-/// `SHOW INDEXES` is not handled here — it is a read
-/// ([`show_indexes_result_set`]).
+/// The `SHOW …` commands are reads and never reach here — see
+/// [`execute_schema_read`].
 pub(crate) fn execute_schema_mutation(
     graph: &mut DirGraph,
     command: &SchemaCommand,
@@ -512,7 +509,7 @@ enum DdlPurpose {
 }
 
 impl DdlPurpose {
-    /// What cannot be done to the *type*, and to a *property*, respectively.
+    /// What cannot be done to the *type*.
     fn on_type(self) -> &'static str {
         match self {
             DdlPurpose::Index => "no index can be created on it",
@@ -520,6 +517,7 @@ impl DdlPurpose {
         }
     }
 
+    /// What cannot be done to a *property*.
     fn on_property(self) -> &'static str {
         match self {
             DdlPurpose::Index => "it cannot be indexed",
@@ -748,8 +746,7 @@ fn unsupported_index_type_message(index_type: DdlIndexType) -> String {
 /// What KGLite will actually install for a parsed `REQUIRE … IS …`.
 ///
 /// Deciding this up front — before anything is written — is what keeps the
-/// unsupported forms from partially applying, and keeps the per-requirement
-/// logic in small named strategy functions rather than one branching monolith.
+/// unsupported forms from partially applying.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConstraintPlan {
     /// Uniqueness only, via `DirGraph::create_unique_constraint`.
@@ -1127,16 +1124,19 @@ fn reject_unsatisfiable_structural_type(
     Ok(())
 }
 
-/// `IS :: <TYPE>` / `IS TYPED <TYPE>`.
+/// `IS :: <TYPE>` / `IS TYPED <TYPE>` where `<TYPE>` is outside
+/// `DeclaredType`'s accept-list. A name the accept-list covers installs an
+/// enforced constraint instead (`ConstraintPlan::PropertyType`); only an
+/// unmappable one reaches this message.
 ///
-/// KGLite has no write-time property-type constraint to route this to. The
-/// per-type `types` map a `define_schema` call accepts (stored as
-/// `NodeSchemaDefinition::field_types`) is checked only by the offline
-/// `validate_schema()`, and the write-time check a locked schema performs reads
-/// `node_type_metadata` — the observed per-type property types — not that map.
-/// Declaring one here would therefore report success while enforcing nothing on
-/// the next write, which is the one outcome worse than an error: users build
-/// data-integrity assumptions on a constraint that reported success.
+/// There is nothing to route an unmappable name to. The per-type `types` map a
+/// `define_schema` call accepts (stored as `NodeSchemaDefinition::field_types`)
+/// is checked only by the offline `validate_schema()`, and the write-time check
+/// a locked schema performs reads `node_type_metadata` — the observed per-type
+/// property types — not that map. Accepting the name here would therefore
+/// report success while enforcing nothing on the next write, which is the one
+/// outcome worse than an error: users build data-integrity assumptions on a
+/// constraint that reported success.
 ///
 /// The suggestion names the **schema dialect's** key, `types` — not the Rust
 /// field's name. Spelling it `field_types` (as this message did until 0.16.1)
@@ -1304,9 +1304,7 @@ pub(crate) const SHOW_CONSTRAINTS_COLUMNS: &[&str] = &[
     "propertyType",
 ];
 
-/// `SHOW CONSTRAINTS` — a read, exactly as `SHOW INDEXES` is. Rows come from the
-/// same collector that backs `CALL db.constraints()`, so the two surfaces can
-/// never drift.
+/// `SHOW CONSTRAINTS` — a read, over the shared collector named above.
 pub(crate) fn show_constraints_result_set(graph: &DirGraph) -> ResultSet {
     let mut out = ResultSet::new();
     out.rows = collect_constraints_structured(graph)
@@ -1346,9 +1344,8 @@ fn constraint_info_to_row(info: &ConstraintInfo) -> ResultRow {
         "properties".to_string(),
         Value::List(info.properties.iter().cloned().map(Value::String).collect()),
     );
-    // Null for every kind that is not a declared property type — the column
-    // exists for all rows, as it does in Neo4j, rather than appearing only on
-    // the rows that fill it.
+    // Null, not absent, for every kind that is not a declared property type —
+    // see `SHOW_CONSTRAINTS_COLUMNS`.
     row.projected.insert(
         "propertyType".to_string(),
         info.property_type

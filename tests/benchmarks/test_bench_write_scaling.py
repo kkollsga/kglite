@@ -51,11 +51,11 @@ LINEAR_MARKER_SIZES = [1_000, 100_000]
 # for these statements the first call is ~1000x cheaper than every call after
 # it: the fixture leaves the type's id index warm, the first call invalidates
 # it, and every later call pays a full rebuild. Calibration therefore schedules
-# thousands of rounds of a multi-millisecond call. Observed while writing this
-# file: 12,686 rounds of a 24 ms call = 5 minutes, from one test.
-# `--benchmark-min-rounds` only raises the floor, and a `-m benchmark` run is
-# exempt from the 120 s pytest hang ceiling, so nothing interrupts it.
-# `pedantic` skips calibration entirely and honours these numbers.
+# thousands of rounds of a multi-millisecond call — 12,686 rounds of a 24 ms
+# call, 5 minutes from one test. `--benchmark-min-rounds` only raises the
+# floor, and a `-m benchmark` run is exempt from the 120 s pytest hang ceiling,
+# so nothing interrupts it. `pedantic` skips calibration and honours these
+# numbers.
 OV_ROUNDS = 20
 OV_WARMUP_ROUNDS = 1
 
@@ -143,8 +143,7 @@ def test_bench_multi_clause_write(benchmark, scaled_graphs, size):
     """A two-clause write — the shape no fast path ever covered.
 
     A `SET` followed by a `CREATE` cannot be proven infallible after its first
-    write, so before the journal this always paid the full clone. It is the
-    clearest before/after of the sprint.
+    write, so before the journal this always paid the full clone.
     """
     graph = scaled_graphs[size]
     ids = iter(range(20_000_000, 1 << 30))
@@ -214,22 +213,22 @@ def test_bench_id_index_invalidation_on_create(benchmark, scaled_graphs_no_pk, s
 
 # ── the shape gap: fresh graphs are not the graphs users write to ────
 #
-# Every fixture above builds a graph and never persists it, so every cell above
-# measures the `Compact` (row) write path. That is the gap this whole file
-# missed: `save()` consolidates each type into a columnar master
-# `Arc<ColumnStore>`, and from then on a single-row `SET` takes a different
-# route — one that deep-clones the touched type's whole store per statement,
-# because the undo journal holds the second `Arc` handle and `Arc::make_mut`
-# therefore forks. The cost is O(rows_of_type × cols) per statement and it never
-# amortises. A write-perf program run against fresh-only fixtures reported flat
-# curves that were true and beside the point. Measured on the 0.15.14 wheel,
-# single-row SET at 50k x 12:
+# No fixture above persists its graph, and that used to put every cell above on
+# a row-shaped write path no saved graph took. That was the gap this whole file
+# missed: `save()` consolidated each type into a columnar master
+# `Arc<ColumnStore>`, and a single-row `SET` afterwards deep-cloned the touched
+# type's whole store per statement, because the undo journal held the second
+# `Arc` handle and `Arc::make_mut` therefore forked — O(rows_of_type × cols)
+# per statement, never amortised. A write-perf program run against fresh-only
+# fixtures reported flat curves that were true and beside the point. Measured
+# on the 0.15.14 wheel, single-row SET at 50k x 12:
 #
 #     fresh  4.3 us  |  post-save  328 us  |  mapped ~3,020 us
 #
-# The three cells below close that gap: with the cell-grained undo journal in
-# place, post-save must stay within 2x of fresh — anything worse is a
-# regression in the columnar write path.
+# The three cells below close that gap. Construction is columnar from the first
+# node now, so the arms differ only in whether a consolidation pass has run,
+# and with the cell-grained undo journal in place post-save must stay within 2x
+# of fresh — anything worse is a regression in the columnar write path.
 
 #: The baseline grid's headline cell. Wide enough that the per-statement store
 #: clone is unmistakable (12 int columns x 50k rows ~ 6 MB copied to write one
@@ -351,10 +350,9 @@ def test_bench_wide_set_mapped(benchmark, tmp_path):
 #   "off"    — no log
 #
 # Measuring all three side by side attributes the cost rather than assuming it.
-# Reading the code says the barrier should dominate "full" and that "normal"
-# should land near "off", because a WAL frame is one postcard encode, one
-# CRC32, and one `write` — but that is a hypothesis derived from reading, and
-# these cells exist so it is measured before anyone quotes a number.
+# Reading the code says the barrier should dominate "full" and "normal" should
+# land near "off" (a WAL frame is one postcard encode, one CRC32, one `write`)
+# — a hypothesis from reading, which is why these cells measure it.
 #
 # Read `normal - off` as the true cost of logging, and `full - normal` as the
 # true cost of the barrier. Both are per-commit and neither should scale with
@@ -362,23 +360,23 @@ def test_bench_wide_set_mapped(benchmark, tmp_path):
 #
 # ── correction, 2026-07-27: what `off` is, and what it is not ────────
 #
-# A competitive benchmark read the `off` cell at 1.8 us and called it
-# impossible, on the grounds that it beat the tracked `cypher_match` READ
-# baseline of 6.2 us and a write must do strictly more work than a read.
-# Both halves of that are wrong, and the correction is worth keeping because
-# the cell invites the mistake:
+# The `off` cell reads ~1.8 us, and was once called impossible on the grounds
+# that it beat the tracked `cypher_match` READ baseline of 6.2 us and a write
+# must do strictly more work than a read. Both halves are wrong, and the cell
+# invites the mistake:
 #
 #   * The comparison is not like-for-like. `test_bench_cypher_match` is
 #     `MATCH (n:Item) RETURN n.title, n.value LIMIT 100` *without* `.to_list()`
-#     — a lazy 100-row scan, tracked at 5.42 us min / 6.22 us mean. Its
+#     — a lazy 100-row scan, tracked at 5.42 us min / 6.22 us mean; its
 #     materialized sibling is 19.08 us min. A single-node insert with a warm
-#     plan cache producing no rows is simply less work than planning and
-#     scanning 100 rows. 1.8 us (a min) against 6.2 us (a mean) compares two
-#     different statistics of two different workloads.
-#   * Nothing is being skipped. At `off`, `logs()` is false, so `setup_durable`
-#     never runs (`lib.rs:416-418`), the backend is never wrapped in
-#     `RecordingGraph`, and `flush_wal` returns immediately on
-#     `durable.is_none()` (`graph/mod.rs:405-407`). The mutation itself is
+#     plan cache producing no rows is less work than planning and scanning 100
+#     rows, and 1.8 us (a min) against 6.2 us (a mean) compares two statistics
+#     of two workloads.
+#   * Nothing is being skipped. At `off`, `logs()` is false, so `open_log`
+#     (`graph/durability.rs`) returns before wrapping the backend in
+#     `RecordingGraph` — it still reads the sidecar, because recovery on open
+#     is unconditional — and `flush_wal` (`graph/mod.rs`) returns immediately
+#     for a graph that is neither durable nor capturing. The mutation itself is
 #     applied in place and synchronously at every level; there is no write
 #     buffer, no deferred commit, no background thread, and no coalescing
 #     anywhere in `wal.rs`. At `off` the write is a petgraph insert and index
@@ -438,10 +436,10 @@ def _persisted_graph(path, level: str) -> KnowledgeGraph:
 def _wal_bytes(path) -> int:
     """Size of the `<path>-wal` sidecar, or 0 when no log exists.
 
-    `wal_path` is `<checkpoint>-wal` (`wal.rs:520-524`). This is the only
-    Python-visible window onto the WAL — `DurableState` exposes no getter for
-    `wal`, `next_lsn` or `level` — and it is enough to prove which level a cell
-    actually ran at.
+    `wal_path` is `<checkpoint>-wal`. The sidecar is the right instrument for
+    an `off` cell specifically: the internal `kglite._wal_next_lsn` hook raises
+    for a graph opened without a log, so only the file's presence separates
+    "no log, as claimed" from "a log this cell was not supposed to have".
     """
     try:
         return os.path.getsize(str(path) + "-wal")
@@ -493,8 +491,8 @@ def test_bench_unlogged_write_control(benchmark):
     `off` row means something other than what it says.
 
     The honest cost of durability at `off` is `save()` amortised over N writes,
-    and `save()` is O(graph) (tracked separately as
-    `test_bench_columnar_save_kgl`, 300 us min at 1k and `fsync=False`).
+    and `save()` is O(graph) (tracked separately as `test_bench_save_kgl`,
+    300 us min at 1k and `fsync=False`).
     """
     graph = _graph(DURABILITY_BENCH_SIZE)
     ids = iter(range(70_000_000, 1 << 30))
@@ -541,13 +539,14 @@ def test_durable_off_loses_unsaved_writes(tmp_path):
 # **1439 us — below the same file's create-only cost at `full`**, which is
 # impossible. The source says why it was measuring no ordering at all:
 #
-#   * `sync()` at `full` is a **hard early return** (`kg_core.rs:711-713`). It
-#     touches no state — no flush, no barrier, no flag — because every commit
-#     was already barriered. `SyncMode` is fixed at `Wal::open` and never
-#     mutated afterwards, and nothing anywhere caches, batches or amortises
-#     across commits.
-#   * `Wal::append` is unconditional (`wal.rs:704-711`): no size threshold, no
-#     timer, no coalescing window. So at `full`, `CREATE` + `sync()` performs
+#   * At `full`, `sync()` (`kg_core.rs`) drains the capture buffer and then
+#     returns **without barriering**, because every commit was already
+#     barriered — and the drain is empty at that point, so no frame is
+#     appended either. `SyncMode` is fixed at `Wal::open` and never mutated
+#     afterwards, and nothing anywhere caches, batches or amortises across
+#     commits.
+#   * `Wal::append` (`wal.rs`) is unconditional: no size threshold, no timer,
+#     no coalescing window. So at `full`, `CREATE` + `sync()` performs
 #     *exactly* the same work as `CREATE` alone.
 #
 # The old cell therefore duplicated `test_bench_single_create_by_durability_
@@ -557,11 +556,11 @@ def test_durable_off_loses_unsaved_writes(tmp_path):
 #
 # The repair moves the `CREATE` into an untimed `pedantic` setup so the timed
 # region is the barrier and nothing else. `full` should now read ~0 (pinning the
-# early return) and `normal` one barrier — the number a caller needs to decide
-# how often to call it, previously buried under a create.
+# skipped barrier) and `normal` one barrier — the number a caller needs to
+# decide how often to call it, previously buried under a create.
 #
 # `off` is absent from the parametrisation because `sync()` raises `ValueError`
-# there (`kg_core.rs:693-701`) rather than silently doing nothing.
+# there rather than silently doing nothing.
 
 
 @pytest.mark.benchmark
@@ -569,8 +568,8 @@ def test_durable_off_loses_unsaved_writes(tmp_path):
 def test_bench_explicit_sync(benchmark, tmp_path, level):
     """`sync()` alone — the on-demand barrier, with the commit untimed.
 
-    Under `"normal"` this is one real `F_FULLFSYNC`; under `"full"` it is an
-    early return. The gap between the two arms is the cost of taking a
+    Under `"normal"` this is one real `F_FULLFSYNC`; under `"full"` the
+    barrier is skipped. The gap between the two arms is the cost of taking a
     power-safe point on demand, and it is what makes `"normal"` adoptable
     rather than merely fast.
 
@@ -592,21 +591,17 @@ def test_bench_explicit_sync(benchmark, tmp_path, level):
 #
 # A `test_bench_create_with_lazy_result_alive` pair used to sit here, aimed at
 # the `Arc::make_mut` whole-graph clone that a held `ResultView` forces. It
-# reported **no difference**, and that null was wrong twice over:
-#
-#   1. **Under-powered.** It ran only at `DURABILITY_BENCH_SIZE` (1k), where
-#      the clone is ~1000x too small to separate from a write. The clone is
-#      O(V+E); at 100k it is ~5 ms, at 1M ~28 ms.
-#   2. **Structurally blind.** The reference was taken ONCE, outside the
-#      measurement. The clone fires on the first write after a second
-#      `Arc<DirGraph>` appears and once only — so `min`, `p50` and `p95` all
-#      saw post-clone rounds and read healthy. Only `max` could see it.
+# reported **no difference**, and that null was wrong twice over: it ran only
+# at 1k, where the O(V+E) clone is ~1000x too small to separate from a write
+# (~5 ms at 100k, ~28 ms at 1M), and it took the reference ONCE, outside the
+# measurement — the clone fires on the first write after a second
+# `Arc<DirGraph>` appears and once only, so `min`, `p50` and `p95` all saw
+# post-clone rounds and read healthy. Only `max` could see it.
 #
 # Rewritten as `test_bench_fast_write_path.py::
 # test_bench_first_write_after_reference`, which takes the reference in an
-# untimed per-round `setup` and runs at 1k and 100k. Left here as a signpost
-# because a null result that was believed for a while is worth being able to
-# trace.
+# untimed per-round `setup` and runs at 1k and 100k. The signpost stays so a
+# null that was believed for a while can be traced.
 
 
 # ---------------------------------------------------------------------------

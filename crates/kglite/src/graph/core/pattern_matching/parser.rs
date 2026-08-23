@@ -9,10 +9,6 @@ use super::pattern::{
     EdgeDirection, EdgePattern, NodePattern, ParamLabel, Pattern, PatternElement, PropertyMatcher,
 };
 
-// ============================================================================
-// Tokenizer
-// ============================================================================
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     LParen,      // (
@@ -55,7 +51,6 @@ fn lex_number(chars: &mut Peekable<Chars<'_>>, negative: bool) -> Result<Token, 
     }
     let mut has_dot = false;
     if chars.peek() == Some(&'.') {
-        // Leading-dot float: `.5` → `0.5`
         chars.next();
         num_str.push_str("0.");
         has_dot = true;
@@ -65,15 +60,13 @@ fn lex_number(chars: &mut Peekable<Chars<'_>>, negative: bool) -> Result<Token, 
             num_str.push(c);
             chars.next();
         } else if c == '.' && !has_dot {
-            // Peek ahead to check if this is '..' (range operator).
-            // Clone the iterator to peek ahead without consuming.
+            // A `..` range operator ends the literal; a lone `.` is a decimal
+            // point. Peek through a clone so neither is consumed here.
             let mut peek_chars = chars.clone();
-            peek_chars.next(); // skip the first '.'
+            peek_chars.next();
             if peek_chars.peek() == Some(&'.') {
-                // This is '..', stop here and don't include the dot
                 break;
             }
-            // It's a decimal point for a float
             has_dot = true;
             num_str.push(c);
             chars.next();
@@ -202,7 +195,6 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                 chars.next();
             }
             '.' => {
-                // Check for '..' (range operator)
                 let mut ahead = chars.clone();
                 ahead.next();
                 if ahead.peek() == Some(&'.') {
@@ -210,14 +202,12 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                     chars.next();
                     tokens.push(Token::DotDot);
                 } else if ahead.peek().is_some_and(|c| c.is_ascii_digit()) {
-                    // It's a float starting with '.'
                     tokens.push(lex_number(&mut chars, false)?);
                 } else {
                     chars.next();
-                    // Lone '.' — property access in an inline-map value,
-                    // e.g. `MATCH (b {id: prior.id})`. `parse_properties`
-                    // consumes the `ident . ident` sequence as a correlated
-                    // node-property reference (EqualsNodeProp).
+                    // Lone '.' — `parse_properties` consumes the
+                    // `ident . ident` sequence as a correlated node-property
+                    // reference (EqualsNodeProp).
                     tokens.push(Token::Dot);
                 }
             }
@@ -287,7 +277,6 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                         break;
                     }
                 }
-                // Check for boolean literals
                 match ident.to_lowercase().as_str() {
                     "true" => tokens.push(Token::BoolLit(true)),
                     "false" => tokens.push(Token::BoolLit(false)),
@@ -321,14 +310,9 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
     Ok(tokens)
 }
 
-// ============================================================================
-// Parser
-// ============================================================================
-
-/// Parses Cypher-like pattern strings into a `Pattern` AST.
-///
-/// Tokenizes the input, then builds a sequence of `PatternElement`
-/// nodes and edges: `(a:Type {key: val})-[:REL]->(b:Type)`.
+/// Builds a `Pattern` AST out of the token stream produced by [`tokenize`]:
+/// a sequence of `PatternElement` nodes and edges,
+/// `(a:Type {key: val})-[:REL]->(b:Type)`.
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
@@ -393,13 +377,9 @@ impl Parser {
     /// Parse a complete pattern: node (edge node)*
     pub fn parse_pattern(&mut self) -> Result<Pattern, String> {
         let mut elements = Vec::new();
-
-        // Must start with a node pattern
         elements.push(PatternElement::Node(self.parse_node_pattern()?));
 
-        // Parse edge-node pairs
         while self.peek().is_some() {
-            // Check for edge pattern (starts with - or <)
             match self.peek() {
                 Some(Token::Dash) | Some(Token::LessThan) => {
                     elements.push(PatternElement::Edge(self.parse_edge_pattern()?));
@@ -442,7 +422,6 @@ impl Parser {
         const TYPE_ERR: &str =
             "Expected node type name after ':'. Example: (:Person), (n:Person) or (n:$label)";
 
-        // Check what comes next
         match self.peek() {
             Some(Token::RParen) => {
                 // Empty node pattern: ()
@@ -457,11 +436,9 @@ impl Parser {
                 }
             }
             Some(Token::Identifier(_)) => {
-                // Variable name
                 if let Some(Token::Identifier(name)) = self.advance().cloned() {
                     variable = Some(name);
                 }
-                // Check for type
                 if let Some(Token::Colon) = self.peek() {
                     self.advance(); // consume :
                     let (name, param) = self.expect_label_name(TYPE_ERR)?;
@@ -493,7 +470,6 @@ impl Parser {
             }
         }
 
-        // Check for properties
         if let Some(Token::LBrace) = self.peek() {
             properties = Some(self.parse_properties()?);
         }
@@ -517,7 +493,6 @@ impl Parser {
         let mut direction = EdgeDirection::Both;
         let mut incoming_start = false;
 
-        // Check for incoming arrow start: <-
         if let Some(Token::LessThan) = self.peek() {
             self.advance(); // consume <
             incoming_start = true;
@@ -534,7 +509,6 @@ impl Parser {
             if let Some(Token::GreaterThan) = self.peek() {
                 self.advance(); // consume >
                 if incoming_start {
-                    // <--> is invalid
                     return Err("Invalid edge pattern: cannot have both '<' and '>' arrows. Use --> for outgoing, <-- for incoming, or -- for both directions.".to_string());
                 }
                 direction = EdgeDirection::Outgoing;
@@ -566,7 +540,6 @@ impl Parser {
         const TYPE_ERR: &str = "Expected connection/edge type after ':'. \
              Example: -[:KNOWS]->, -[e:WORKS_AT]-> or -[:$type]->";
 
-        // Check what comes next
         match self.peek() {
             Some(Token::RBracket) => {
                 // Empty edge pattern: []
@@ -581,11 +554,9 @@ impl Parser {
                 }
             }
             Some(Token::Identifier(_)) => {
-                // Variable name
                 if let Some(Token::Identifier(name)) = self.advance().cloned() {
                     variable = Some(name);
                 }
-                // Check for type
                 if let Some(Token::Colon) = self.peek() {
                     self.advance(); // consume :
                     let (name, param) = self.expect_label_name(TYPE_ERR)?;
@@ -604,8 +575,7 @@ impl Parser {
             _ => {}
         }
 
-        // Handle pipe-separated types: [:A|B|C]
-        // After parsing the first type, consume any |TYPE continuations
+        // Pipe-separated types: [:A|B|C] — first type already parsed.
         if connection_type.is_some() {
             if let Some(Token::Pipe) = self.peek() {
                 let mut types = vec![connection_type.clone().unwrap()];
@@ -626,12 +596,10 @@ impl Parser {
             }
         }
 
-        // Check for variable-length marker: *
         if let Some(Token::Star) = self.peek() {
             var_length = Some(self.parse_var_length()?);
         }
 
-        // Check for properties
         if let Some(Token::LBrace) = self.peek() {
             properties = Some(self.parse_properties()?);
         }
@@ -639,11 +607,9 @@ impl Parser {
         self.expect(&Token::RBracket)?;
         self.expect(&Token::Dash)?;
 
-        // Check for outgoing arrow end: ->
         if let Some(Token::GreaterThan) = self.peek() {
             self.advance(); // consume >
             if incoming_start {
-                // <-[]-> is invalid
                 return Err("Invalid edge pattern: cannot have both '<' and '>' arrows. Use -[]-> for outgoing, <-[]- for incoming, or -[]- for both directions.".to_string());
             }
             direction = EdgeDirection::Outgoing;
@@ -692,9 +658,8 @@ impl Parser {
             })
         }
 
-        const DEFAULT_MAX_HOPS: usize = 10; // Reasonable limit to prevent runaway queries
+        const DEFAULT_MAX_HOPS: usize = 10;
 
-        // Check what follows the *
         match self.peek() {
             Some(Token::IntLit(_)) => {
                 // *N or *N..M or *N..
@@ -704,10 +669,8 @@ impl Parser {
                     return Err("Expected integer after '*' for variable-length path. Examples: *2, *1..3, *..5, *1..".to_string());
                 };
 
-                // Check for range
                 if let Some(Token::DotDot) = self.peek() {
                     self.advance(); // consume ..
-                                    // Check for max
                     if let Some(Token::IntLit(_)) = self.peek() {
                         let max = if let Some(Token::IntLit(n)) = self.advance().cloned() {
                             hop_count(n)?
@@ -723,9 +686,8 @@ impl Parser {
                         }
                         Ok((min, max))
                     } else {
-                        // *N.. means "N or more", capped at the engine's
-                        // default ceiling — but never an empty range: an
-                        // explicit minimum above the default raises the cap.
+                        // *N.. is "N or more", capped at the default —
+                        // raised to `min` so the range is never empty.
                         Ok((min, min.max(DEFAULT_MAX_HOPS)))
                     }
                 } else {
@@ -765,7 +727,6 @@ impl Parser {
                     break;
                 }
                 Some(Token::Identifier(_)) => {
-                    // Parse key: value
                     let key = if let Some(Token::Identifier(k)) = self.advance().cloned() {
                         k
                     } else {
@@ -774,7 +735,6 @@ impl Parser {
 
                     self.expect(&Token::Colon)?;
 
-                    // Check if next token is a parameter reference
                     if let Some(Token::Parameter(_)) = self.peek() {
                         if let Some(Token::Parameter(name)) = self.advance().cloned() {
                             props.insert(key, PropertyMatcher::EqualsParam(name));
@@ -809,7 +769,6 @@ impl Parser {
                         props.insert(key, PropertyMatcher::Equals(value));
                     }
 
-                    // Check for comma or end
                     if let Some(Token::Comma) = self.peek() {
                         self.advance();
                     }

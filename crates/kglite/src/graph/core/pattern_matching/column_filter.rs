@@ -211,7 +211,8 @@ pub(super) struct ColumnFilter<'a> {
 
 impl<'a> ColumnFilter<'a> {
     /// Compile `props` (already alias-resolved by the caller) against `store`,
-    /// or `None` when any of them resolves through more than one column.
+    /// or `None` when any of them resolves through anything but one column of
+    /// this store — the module docs enumerate those cases.
     pub(super) fn compile(
         store: Option<&'a std::sync::Arc<ColumnStore>>,
         props: impl ExactSizeIterator<
@@ -278,12 +279,12 @@ impl<'a> ColumnFilter<'a> {
         {
             return None;
         }
+        #[cfg(test)]
+        ROWS_FILTERED.set(ROWS_FILTERED.get() + 1);
         // The bounds/tombstone guard `ColumnStore`'s property reads apply, taken
         // once per row instead of once per predicate. Identity reads do not
         // apply it (`id_field`/`title_field` go straight to their column), so it
         // gates only the property arms.
-        #[cfg(test)]
-        ROWS_FILTERED.set(ROWS_FILTERED.get() + 1);
         let dead = row >= self.store.row_count() || self.store.is_tombstoned(row);
         for pred in &self.preds {
             let matched = if pred.source == Source::Property && dead {
@@ -317,9 +318,6 @@ impl<'a> ColumnFilter<'a> {
     }
 }
 
-// Test hooks. Neither exists outside `cfg(test)`; the scan has no runtime
-// switch, and the row route stays the reference implementation both of these
-// are measured and compared against.
 #[cfg(test)]
 thread_local! {
     /// Force every scan back onto the row route.
@@ -346,15 +344,14 @@ thread_local! {
     ///
     /// **Still thread-local, deliberately — and the parallel scan folds its
     /// workers' rows back into it** (see [`local_rows_filtered`] /
-    /// [`add_rows_filtered`]). R8 says a meter a worker cannot increment reads
-    /// zero and turns its assertion into decoration; the obvious fix is a global
-    /// `AtomicUsize`, and it was tried and reverted, because `sweep` asserts the
-    /// count is **byte-identical** across the forced row route — that *zero*
-    /// additional rows reached a compiled filter. `cargo test` runs ~2000 tests on
-    /// several threads, and any of them running a filtered scan bumps a global
-    /// counter inside that window; the assertion failed non-deterministically the
-    /// moment the two sweep tests ran together. Folding deltas keeps the meter
-    /// worker-visible *and* keeps every reading attributable to one thread.
+    /// [`add_rows_filtered`]). A global `AtomicUsize` — the obvious fix for a
+    /// meter a worker cannot increment — was tried and reverted: `sweep` asserts
+    /// the count is **byte-identical** across the forced row route, that *zero*
+    /// additional rows reached a compiled filter, and any of `cargo test`'s ~2000
+    /// tests running a filtered scan on another thread bumps a global inside that
+    /// window, so the assertion failed the moment the two sweep tests ran
+    /// together. Folding deltas keeps the meter worker-visible *and* every
+    /// reading attributable to one thread.
     static ROWS_FILTERED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -511,8 +508,8 @@ mod differential_tests {
         graph
     }
 
-    /// The scan-probe fixture: the differential fixture at scale, with the
-    /// straddler benchmark's title shape (`Node_<i>`, suffix-filterable).
+    /// The differential fixture at scale, carrying the straddler benchmark's
+    /// title shape (`Node_<i>`, suffix-filterable).
     pub(super) fn scan_probe_fixture(n: i64) -> DirGraph {
         fixture(n, true)
     }
@@ -661,8 +658,8 @@ mod differential_tests {
     }
 
     /// The sweep is only a test if the fixture actually compiles a filter.
-    /// Proven the way the phase's other equivalence tests are: by the decline
-    /// hook being able to turn it off, and by the compiled shape existing.
+    /// Proven by the compiled shape existing, and by the decline hook being able
+    /// to turn it off.
     #[test]
     fn the_sweep_actually_exercises_the_column_filter() {
         let graph = fixture(20, true);

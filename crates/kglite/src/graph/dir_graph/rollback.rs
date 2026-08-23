@@ -19,12 +19,13 @@
 //!
 //! ## How the journal path splits `DirGraph`'s state
 //!
-//! `DirGraph` has ~44 fields, split by *clone cost*:
+//! `DirGraph`'s fields split by *clone cost*:
 //!
 //! - **O(schema)-sized fields are cloned** into a `shell` and restored
 //!   verbatim: the whole schema surface a statement can grow, and also every
 //!   field nobody has thought about yet, which is the point — **a field that
-//!   is not explicitly parked is automatically restored**.
+//!   is not explicitly parked is automatically restored**, so forgetting to
+//!   park a new large field costs speed, never correctness.
 //!
 //!   Six of them scale with schema width (`node_type_metadata`,
 //!   `connection_type_metadata`, `type_schemas`, the two alias maps and
@@ -45,10 +46,6 @@
 //! undo story of *either* kind is the one way to make this module wrong — see
 //! the `unique_indices` note on [`swap_data_scale`].
 //!
-//! Getting that split wrong fails in the safe direction: forgetting to park a
-//! new large field makes the checkpoint *slower*, never wrong. Only an
-//! explicit addition to [`swap_data_scale`] can introduce a correctness gap.
-//!
 //! ## Columnar mode: one entry per changed cell, replayed into the live store
 //!
 //! The per-type master `ColumnStore` map lives on the **storage backend**,
@@ -56,9 +53,10 @@
 //! not shell territory: the shell restore never sees it.
 //! [`UndoEntry::ColumnarCell`] carries the prior value of each `(row, key)` a
 //! statement overwrote, and its replay writes that value straight back into the
-//! live store. [`UndoEntry::ColumnarSchemaGrown`] is its companion for the one
-//! non-cell edit a `SET` can make: introducing a property the type's schema
-//! lacks, which grows the schema and appends a null-backfilled column.
+//! live store. [`UndoEntry::ColumnarSchemaGrown`] is its companion for the
+//! schema edit a `SET` can make: introducing a property the type's schema
+//! lacks, which grows the schema and appends a null-backfilled column. A title
+//! is not a schema slot, so it gets its own [`UndoEntry::ColumnarTitle`].
 //!
 //! What makes that sufficient:
 //!
@@ -100,8 +98,8 @@
 //!
 //! - A cell that was **absent** before the statement is restored by writing
 //!   `Value::Null`. `ColumnStore::get` answers `None` for absent and null
-//!   alike and `row_properties` skips both, so no read surface — including this
-//!   module's own `fingerprint` oracle — can tell the difference.
+//!   alike and `row_properties` skips both, so no read surface — including the
+//!   `rollback_tests::fingerprint` oracle — can tell the difference.
 //! - A rolled-back write whose value did not fit the column's type left the
 //!   column **demoted to `Mixed`** on its way in, and the restore puts the
 //!   value back without re-narrowing it. Values and reads are identical; only
@@ -309,11 +307,8 @@ impl StatementCheckpoint {
 }
 
 impl DirGraph {
-    /// Clone only the O(schema) half of this graph.
-    ///
-    /// Implemented by parking the O(V+E) fields in a throwaway husk, cloning
-    /// what is left, and handing them straight back — so the returned shell
-    /// has empty data-scale fields and a faithful copy of everything else.
+    /// Clone only the O(schema) half of this graph: the returned shell has
+    /// empty data-scale fields and a faithful copy of everything else.
     ///
     /// The six schema-scale maps in "everything else" are `Arc`-shared, so the
     /// copy, if any, happens at the statement's first writer. See
@@ -654,8 +649,9 @@ fn undo_bucket_removed(graph: &mut DirGraph, bucket: BucketId, idx: NodeIndex, p
 /// as touched.
 ///
 /// Both lookups fail silently, and both failures mean the same thing — the
-/// type no longer exists to restore into, because the shell restore already
-/// rolled the schema back past it — so there is nothing to write.
+/// type has no name or no store to restore into, so there is nothing to write.
+/// (Replay runs *before* the shell restore, so what they read is the failed
+/// statement's schema, not the pre-statement one.)
 fn edit_column_master(
     graph: &mut DirGraph,
     node_type: InternedKey,
@@ -706,12 +702,11 @@ fn undo_columnar_rows_appended(
 
 /// Report a node type whose master column store the replay just wrote.
 ///
-/// A columnar `SET` lands in the master store, not in any node's weight, so it
-/// produces no `NodeWeight` entry for the node it changed — the columnar undo
-/// entries are the *only* signal that a value under a declared unique
-/// constraint may have moved. Without the report, a failed columnar `SET` hits
-/// exactly the failure mode `swap_data_scale` warns about for the parked
-/// `unique_indices`.
+/// A columnar `SET` produces no `NodeWeight` entry (see the module doc), so
+/// the columnar undo entries are the *only* signal that a value under a
+/// declared unique constraint may have moved. Without the report, a failed
+/// columnar `SET` hits exactly the failure mode `swap_data_scale` warns about
+/// for the parked `unique_indices`.
 fn columnar_type_touched(fallout: &mut ReplayFallout, type_name: String) {
     fallout.stale_unique_indices.insert(type_name);
 }

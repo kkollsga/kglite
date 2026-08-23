@@ -222,16 +222,17 @@ impl KnowledgeGraph {
         Ok(result_list.into_any().unbind())
     }
 
-    /// List all existing indexes.
+    /// List the in-memory equality indexes. Disk-backed persistent indexes,
+    /// range indexes and composite indexes are not included.
     ///
     /// Returns:
-    ///     List of dictionaries with 'type' and 'property' keys
+    ///     List of dictionaries with 'node_type' and 'property' keys
     ///
     /// Example:
     ///     ```python
     ///     indexes = graph.list_indexes()
     ///     for idx in indexes:
-    ///         print(f"{idx['type']}.{idx['property']}")
+    ///         print(f"{idx['node_type']}.{idx['property']}")
     ///     ```
     fn list_indexes(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let indexes = self.inner.list_indexes();
@@ -247,7 +248,8 @@ impl KnowledgeGraph {
         Ok(result_list.into())
     }
 
-    /// Check if an index exists.
+    /// Check if an in-memory equality index exists. A disk-backed persistent
+    /// index (one ``create_index`` reported as ``persistent``) reports False.
     ///
     /// Args:
     ///     node_type: The type of nodes
@@ -266,7 +268,8 @@ impl KnowledgeGraph {
     ///     property: The property name
     ///
     /// Returns:
-    ///     Dictionary with index statistics, or None if index doesn't exist
+    ///     Dictionary with index statistics, or None when no in-memory
+    ///     equality index exists — a disk-backed persistent index reports None
     ///
     /// Example:
     ///     ```python
@@ -299,7 +302,8 @@ impl KnowledgeGraph {
     ///     property: The property name to index.
     ///
     /// Returns:
-    ///     dict with keys: ``type``, ``property``, ``unique_values``, ``created``
+    ///     dict with keys: ``node_type``, ``property``, ``unique_values``,
+    ///     ``created``
     ///
     /// Example:
     ///     ```python
@@ -338,7 +342,8 @@ impl KnowledgeGraph {
         Ok(removed)
     }
 
-    /// Rebuild all indexes.
+    /// Rebuild the in-memory equality indexes. Range, composite and
+    /// disk-backed persistent indexes are left untouched.
     ///
     /// Call this after batch updates to ensure indexes are current.
     ///
@@ -366,7 +371,8 @@ impl KnowledgeGraph {
     ///     properties: A list of property names to include in the composite index
     ///
     /// Returns:
-    ///     Number of unique value combinations indexed
+    ///     Dict with ``node_type``, ``properties``, and
+    ///     ``unique_combinations`` (count of indexed combinations)
     ///
     /// Example:
     ///     ```python
@@ -413,7 +419,7 @@ impl KnowledgeGraph {
     /// List all composite indexes in the graph.
     ///
     /// Returns:
-    ///     A list of dicts with 'type' and 'properties' keys
+    ///     A list of dicts with 'node_type' and 'properties' keys
     fn list_composite_indexes(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let indexes = self.inner.list_composite_indexes();
 

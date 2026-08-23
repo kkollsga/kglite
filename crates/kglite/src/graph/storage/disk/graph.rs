@@ -75,8 +75,8 @@ pub(crate) const CURRENT_CSR_LAYOUT_VERSION: u8 = 1;
 ///   Actual node data (id, title, properties) in ColumnStore columns (mmap'd).
 ///   `node_weight()` materializes NodeData into an arena on access.
 /// - Edges: CSR arrays (`out_offsets`, `out_edges`, etc.) — mmap'd
-/// - Edge properties: sparse HashMap (loaded to heap)
-/// - Arenas: append-only caches for materialized NodeData/EdgeData refs
+/// - Edge properties: mmap'd columnar base + heap overlay for mutations
+/// - Arenas: query-lifetime parking for materialized NodeData/EdgeData refs
 pub struct DiskGraph {
     // ── Node storage (mmap'd on disk) ──
     pub(crate) node_slots: MmapOrVec<DiskNodeSlot>,
@@ -107,7 +107,6 @@ pub struct DiskGraph {
     pub(super) in_offsets: MmapOrVec<u64>,
     pub(super) in_edges: MmapOrVec<CsrEdge>,
 
-    // ── Edge metadata ──
     pub(crate) edge_endpoints: MmapOrVec<EdgeEndpoints>,
     /// Endpoints appended after the immutable base snapshot and logical
     /// removals of base/overflow edges. CSR arrays themselves stay frozen.
@@ -116,25 +115,19 @@ pub struct DiskGraph {
     pub(crate) edge_count: usize,
     pub(crate) next_edge_idx: u32,
 
-    // ── Edge properties (columnar base + mutation overlay) ──
-    // Overlay grows with mutations, base is mmap'd. See edge_properties.rs.
+    // ── Edge properties: mmap'd columnar base + heap overlay that grows with
+    // mutation count, not graph size. See edge_properties.rs.
     pub(super) edge_properties: EdgePropertyStore,
 
     /// Cache for edge_weight_mut: stores materialized EdgeData that may be modified.
     /// Flushed to edge_properties on next clear_arenas call.
     pub(super) edge_mut_cache: HashMap<u32, EdgeData>,
-    /// Cache for `node_weight_mut`: stages Cypher-SET-style exact-row
-    /// writes as `PropertyStorage::Map`. On `clear_arenas`, drains are
-    /// grouped by type, each type's ColumnStore is cloned once, all
-    /// staged writes are applied to the clone, and the result is
-    /// inserted back into `self.column_stores` as a fresh `Arc`. This
-    /// mirrors the full-`Arc` replacement pattern that
-    /// `batch.rs::flush_chunk` uses for `add_nodes` — avoiding
-    /// `Arc::make_mut` on an `Arc` that DirGraph still holds (which
-    /// would clone + diverge, losing writes).
+    /// Cache for `node_weight_mut`: stages Cypher-SET-style exact-row writes
+    /// as `PropertyStorage::Map` until `clear_arenas` drains it — see
+    /// `flush_node_mut_cache` for why the flush must replace whole `Arc`s
+    /// rather than mutate through them.
     pub(super) node_mut_cache: HashMap<u32, NodeData>,
 
-    // ── Pending edges ──
     // File-backed (MmapOrVec) to avoid ~14 GB heap allocation at Wikidata scale.
     // Interior mutability: see item 2 of the SAFETY block below.
     pub(crate) pending_edges: UnsafeCell<MmapOrVec<PendingEdge>>,
@@ -154,14 +147,17 @@ pub struct DiskGraph {
     /// root. Generic clones retain this lineage; only `independent_copy`
     /// replaces it with a fresh root.
     pub(super) independent_root: Option<Arc<super::generation::IndependentGraphRoot>>,
-    // ── Dirty flag: flushed on Drop or next query ──
+    // ── Persistence-in-flight flag. Set by the mutating entry points and by
+    // `begin_persist`; cleared only once a complete save (sidecars included)
+    // has succeeded, so every failure path leaves it set.
     pub(super) metadata_dirty: bool,
     // ── CSR edges are sorted by (node, connection_type) — enables binary search
     pub(crate) csr_sorted_by_type: bool,
     // ── Defer CSR build: edges accumulate in pending_edges without
-    // intermediate CSR rebuilds, and the CSR is built once at save time via
-    // ensure_disk_edges_built(). Set true during construction from
-    // add_nodes/add_connections, cleared after CSR build.
+    // intermediate CSR rebuilds, and the CSR is built at the next
+    // `DirGraph::ensure_disk_edges_built` (save and write-statement flush
+    // points). Set true during construction from add_nodes/add_connections,
+    // cleared after CSR build.
     pub(crate) defer_csr: bool,
     // ── Edge type counts computed during CSR build (raw InternedKey u64 → count).
     // Converted to String keys by the caller using the interner.
@@ -266,12 +262,12 @@ use std::sync::Arc;
 //    nothing is reading; `clear_arenas` takes `&mut self`, which the borrow
 //    checker already orders after any outstanding materialization borrow.
 //
-// 2. `pending_edges: UnsafeCell<MmapOrVec<…>>` — only accessed via
-//    `get_mut()` in `&mut self` contexts (`add_edge` with `defer_csr`,
-//    `build_csr_from_pending`, `compact`). `UnsafeCell` is retained here
-//    for a planned future auto-CSR-build-from-`&self` path; today no
-//    `&self` access exists, so the current soundness argument is just
-//    Rust's standard borrow checker.
+// 2. `pending_edges: UnsafeCell<MmapOrVec<…>>` — every *mutation* goes
+//    through `get_mut()` in a `&mut self` context (`try_add_pending_edge`,
+//    `build_csr_from_pending`, `compact`, the bootstrap/builder paths), so
+//    the borrow checker already excludes a concurrent writer. The one
+//    `&self` reader is `Clone`, which dereferences the cell to copy the
+//    buffer; its own SAFETY note carries that argument.
 unsafe impl Send for DiskGraph {}
 unsafe impl Sync for DiskGraph {}
 
@@ -430,10 +426,6 @@ impl DiskGraph {
         }
     }
 
-    // ====================================================================
-    // Node methods
-    // ====================================================================
-
     /// Materialize a NodeData from disk slot + ColumnStore into the arena.
     ///
     /// Every call parks a record that survives until the calling query ends.
@@ -545,8 +537,6 @@ impl DiskGraph {
         // a `Columnar` variant routes `node.set_property(k, v)` through
         // `Arc::make_mut(store)`, which clones the store when DirGraph still
         // holds another Arc and lands the mutation on a detached copy.
-        // `clear_arenas` groups by type, clones each ColumnStore once, applies
-        // all pending writes and replaces the Arc — as `flush_chunk` does.
         //
         // Reseed path: `batch.rs::flush_chunk` (and similar bulk paths)
         // transiently assigns `PropertyStorage::Columnar{...}`; a stale one
@@ -705,7 +695,8 @@ impl DiskGraph {
         Some(data)
     }
 
-    /// Used after BuildColumnStore conversion to fix per-type row_id mapping.
+    /// Repoint a node slot at its per-type ColumnStore row. Bulk paths assign
+    /// the row while building the store and call this to persist the mapping.
     pub fn update_row_id(&mut self, node_idx: NodeIndex, row_id: u32) {
         let i = node_idx.index();
         if i < self.node_slot_len() {
@@ -718,10 +709,6 @@ impl DiskGraph {
     pub fn node_indices_iter(&self) -> DiskNodeIndices<'_> {
         DiskNodeIndices::new(self)
     }
-
-    // ====================================================================
-    // Edge methods
-    // ====================================================================
 
     /// Materialize an EdgeData into the arena. Reads conn_type from
     /// EdgeEndpoints (O(1) lookup) and properties from `edge_properties`.
@@ -877,10 +864,11 @@ impl DiskGraph {
         Ok(count)
     }
 
-    /// Iterate peer node indices for edges of a specific type, without materializing
-    /// EdgeData. Yields (peer_idx, edge_idx) pairs. With sorted CSR, uses binary
-    /// search. Completely avoids reading edge_endpoints.bin (13 GB) — only touches
-    /// out_edges.bin/in_edges.bin + node_slots.bin.
+    /// Peers reachable over edges of a specific type, without materializing
+    /// EdgeData. When the CSR is sorted by type the matching slice is found by
+    /// binary search and nothing reads edge_endpoints.bin (13 GB at Wikidata
+    /// scale); with a type filter the unsorted-CSR and overflow paths still
+    /// probe it per edge to recover the connection type.
     pub fn iter_peers_filtered(
         &self,
         node: NodeIndex,
@@ -950,10 +938,9 @@ impl DiskGraph {
         result
     }
 
-    /// Count all edges of a connection type, grouped by peer (target for outgoing,
-    /// source for incoming). Returns a HashMap<peer_node_idx, count>.
-    /// Uses a single sequential scan of edge_endpoints — O(E) total, purely sequential
-    /// I/O (no random access). For outgoing grouping: counts by target. For incoming: by source.
+    /// Count all edges of a connection type, grouped by peer (target for
+    /// outgoing, source for incoming). Single sequential scan of
+    /// edge_endpoints — O(E) total, no random access.
     pub fn count_edges_grouped_by_peer(
         &self,
         conn_type: u64,
@@ -1049,10 +1036,9 @@ impl DiskGraph {
             }
         }
 
-        // Supplement with overflow sources — check each overflow node for matching edges.
-        // Overflow is almost always small; we don't apply `max` here because it'd require
-        // a second dedup pass and complicate the contract. Callers that use `max` on cold
-        // reads will rarely hit overflow anyway.
+        // Supplement with overflow sources. `max` is not applied here: overflow
+        // is almost always small, and bounding it would need a second dedup
+        // pass to keep the contract honest.
         if !self.overflow_out.is_empty() {
             for (&node_id, edges) in &self.overflow_out {
                 for e in edges {
@@ -1074,7 +1060,8 @@ impl DiskGraph {
     }
 
     /// Iterate only the edges matching `conn_type`, yielding `(src, tgt, edge_idx)`
-    /// per match. Never calls `materialize_edge` — no growth of `edge_arena`.
+    /// per match. Never calls `materialize_edge` — nothing is parked in the
+    /// query arenas.
     ///
     /// Path: the persisted inverted index (`conn_type_index_*`) gives the sources
     /// with at least one outgoing edge of that type; each source's outgoing CSR
@@ -1190,7 +1177,7 @@ impl DiskGraph {
 
     /// Borrow an edge's property slice without materializing `EdgeData`.
     /// Returns `None` when the edge has no custom properties (common case).
-    /// Safe to call in hot loops — does not push into `edge_arena`.
+    /// Safe to call in hot loops — nothing is parked in the query arenas.
     ///
     /// The returned `Cow` is `Borrowed` for overlay hits (zero copy) and
     /// `Owned` for columnar-base hits (one binary payload decode). Callers
@@ -1245,9 +1232,9 @@ impl DiskGraph {
     /// Warm hot mmap regions into page cache after load. Non-blocking — the
     /// kernel reads the pages asynchronously.
     pub fn prefetch_hot_regions(&self) {
-        // Prefetch out_offsets + in_offsets (948 MB each — always needed for traversal).
-        // Skip node_slots (2 GB) — prefetching it adds too much load latency.
-        // The kernel will page in node_slots on demand during queries.
+        // Offsets only (948 MB each at Wikidata scale, needed by every
+        // traversal). node_slots (2 GB) costs more load latency than it saves
+        // and is left to page in on demand.
         self.out_offsets.advise_willneed();
         self.in_offsets.advise_willneed();
     }
@@ -1660,10 +1647,6 @@ impl DiskGraph {
         }))
     }
 
-    // ====================================================================
-    // Neighbor methods
-    // ====================================================================
-
     pub fn neighbors_directed_iter(&self, a: NodeIndex, dir: Direction) -> DiskNeighbors {
         self.ensure_csr();
         let node = a.index();
@@ -1732,13 +1715,10 @@ impl DiskGraph {
         DiskNeighbors::from_collected(peers)
     }
 
-    // ====================================================================
-    // CSR construction from pending edges
-    // ====================================================================
-
     /// True if any overflow edges are present (edges added after the initial
-    /// CSR build). Used by `ensure_disk_edges_built` to decide whether to
-    /// merge overflow back into CSR so downstream indexes stay consistent.
+    /// CSR build). Save uses it to decide whether to `compact` first, so the
+    /// derived indexes it rebuilds cover every live edge; the per-batch
+    /// `ensure_disk_edges_built` deliberately skips that O(E) merge.
     pub fn has_overflow(&self) -> bool {
         self.overflow_out.values().any(|v| !v.is_empty())
             || self.overflow_in.values().any(|v| !v.is_empty())

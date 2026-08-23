@@ -13,8 +13,9 @@
 //! - **`CREATE (n:T {prop: v})`** and `CREATE`-style multi-element paths.
 //! - **`MERGE (n:T {prop: v})`** including the embedded `CREATE` shape.
 //!
-//! Deliberately *never rejects* (these are legal, so they are warned about
-//! non-fatally instead — see below — never turned into errors):
+//! Deliberately *never rejects on an open schema* (these are legal, so they
+//! are warned about non-fatally instead — see below). `lock_schema()` promotes
+//! some of them to errors; the bullets note where it does:
 //! - Unknown node types in MATCH **on an open schema** (`MATCH
 //!   (n:Nonexistent)` legitimately returns zero rows and is a common
 //!   existence-check idiom). Under `lock_schema()` this *is* rejected —
@@ -23,7 +24,9 @@
 //!   edge type is not yet part of what a schema lock covers).
 //! - Property references in WHERE / RETURN expressions (virtual columns,
 //!   timeseries sub-nodes, aliases can be legitimate `n.prop` accesses
-//!   not present in `node_type_metadata`).
+//!   not present in `node_type_metadata`). Under `lock_schema()` an absent
+//!   one *is* rejected — by [`warnings::strict_read_error`] at the session
+//!   layer, not by [`validate_schema`] here.
 //! - `SET n.prop = X` and `REMOVE n.prop` — SET may legitimately
 //!   introduce new properties depending on kglite's mutation policy;
 //!   REMOVE of a non-existent property is benign.
@@ -54,9 +57,10 @@
 //!    or a second typed property. Two type sources, DDL declaration before
 //!    `define_schema()` field types, each quoted in its own vocabulary. See
 //!    [`type_mismatch`] for the family resolver, the precedence and the
-//!    never-warn classes. Unlike families 2 and 3 this one is *never* promoted
-//!    by `lock_schema()`; it rides [`warnings::QueryWarnings::other`] — and
-//!    the unenforced source is why that must stay true.
+//!    never-warn classes. It rides [`warnings::QueryWarnings::type_mismatch`],
+//!    and `lock_schema()` promotes only the write-enforced half: a
+//!    `define_schema()` field type is a declaration nothing checks at write
+//!    time, so that half stays a warning in both schema states.
 //!
 //! Warnings travel structurally on `QueryDiagnostics::warnings` (every
 //! programmatic surface, MCP included) and to stderr via
@@ -66,7 +70,7 @@
 //! Both surfaces — the fatal check and these warnings — reach patterns through
 //! the single traversal in [`walk_query_patterns`] (see it for the covered and
 //! uncovered nesting forms). The exception is the var → label map
-//! ([`warnings::match_var_labels`]), which families 2-4 consult and which is
+//! ([`warnings::match_var_labels`]), which families 2-5 consult and which is
 //! built from top-level MATCH patterns only, for want of a scope model: a var
 //! rebound by a projection (`WITH n AS m`) is simply absent from it, so those
 //! checks stay silent about `m` rather than guessing.

@@ -1,4 +1,6 @@
-//! KnowledgeGraph #[pymethods]: maintenance + introspection.
+//! KnowledgeGraph #[pymethods]: maintenance, introspection, and the
+//! traverse / compare / derive-property half of the fluent chain (the
+//! selection and filter half is in `kg_fluent.rs`).
 //!
 //! PyO3 merges multiple `#[pymethods] impl` blocks at class-registration
 //! time, so splitting them across files is purely structural — no runtime
@@ -79,8 +81,8 @@ impl KnowledgeGraph {
     /// Materialize the in-memory graph as a disk-backed one.
     ///
     /// Builds CSR (Compressed Sparse Row) edge arrays in files and switches
-    /// the graph onto the disk backend. Nodes stay in memory (~40 bytes each);
-    /// edges are read through the mapping.
+    /// the graph onto the disk backend. Node slots become a mmap'd array of
+    /// 16 bytes per node; edges are read through the mapping.
     ///
     /// Args:
     ///     path: Directory to materialize the graph into and publish it at.
@@ -467,8 +469,9 @@ impl KnowledgeGraph {
     /// Set or query read-only mode for the Cypher layer.
     ///
     /// When enabled, all Cypher mutation queries (CREATE, SET, DELETE, REMOVE,
-    /// MERGE) are rejected with an error, and `describe()` omits mutation
-    /// documentation.  Read-only queries (MATCH, RETURN, CALL, etc.) are
+    /// MERGE) are rejected with an error, and `describe()` announces the
+    /// restriction in a `<read-only>` element (the Cypher reference it renders
+    /// is unchanged).  Read-only queries (MATCH, RETURN, CALL, etc.) are
     /// unaffected.
     ///
     /// Args:
@@ -893,8 +896,7 @@ impl KnowledgeGraph {
             }
         };
 
-        // All inputs are pure Rust by now — run the traversal off-GIL so other
-        // Python threads keep making progress during a large expansion.
+        // All inputs are pure Rust by now — run the traversal off-GIL.
         {
             let inner = &self.inner;
             let selection = &mut new_kg.cursor.selection;
@@ -1544,8 +1546,7 @@ impl KnowledgeGraph {
                         }) => format!("duration(M={},D={},S={})", months, days, seconds),
                         Some(Value::NodeRef(idx)) => format!("node#{}", idx),
                         Some(Value::Null) | None => "null".to_string(),
-                        // Collection / graph-entity property values
-                        // delegate to format_value for the group-by key.
+                        // Everything left is a collection or graph-entity value.
                         Some(other) => crate::datatypes::values::format_value(other),
                     };
                     *groups.entry(key).or_insert(0) += 1;
@@ -1823,8 +1824,7 @@ impl KnowledgeGraph {
     fn copy(&self) -> Self {
         KnowledgeGraph {
             inner: Arc::new(self.inner.independent_copy()),
-            // copy() resets the selection/reports/stats but preserves the
-            // temporal context (the as-of date carries to the independent copy).
+            // Deliberate: the as-of date carries to the copy, the rest does not.
             cursor: crate::graph::CursorState {
                 selection: CowSelection::new(),
                 reports: OperationReports::new(),

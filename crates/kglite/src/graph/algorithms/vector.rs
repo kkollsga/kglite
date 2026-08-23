@@ -189,10 +189,9 @@ fn selection_candidates<'a>(
         .filter(|level| level.node_count() > 0);
 
     match level {
-        // A normal select/filter/set-operation level has one group. Borrow its
-        // contiguous node slice directly so the common vector-search path does
-        // not clone O(N) candidates before inspecting them; multi-parent
-        // traversal levels retain the established flattened owned shape.
+        // A normal select/filter/set-operation level has one group: borrow its
+        // contiguous slice so the common path does not clone O(N) candidates.
+        // Multi-parent traversal levels stay on the flattened owned shape.
         Some(level) => {
             let mut groups = level.iter_groups();
             match (groups.next(), groups.next()) {
@@ -269,10 +268,8 @@ fn route_stores<'a>(
         })
     });
 
-    // Type selections preserve embedding insertion order. Exact slot identity
-    // proves coverage without backend type reads or membership allocation;
-    // borrowing the candidate slice replaces the old candidate clone with this
-    // comparison instead of adding a second O(N) pass.
+    // Type selections preserve embedding insertion order, so exact slot
+    // identity proves coverage without backend type reads or a membership set.
     let ordered_whole_store = shape_store.is_some_and(|(_, store)| {
         candidates.len() == store.len()
             && candidates
@@ -428,9 +425,6 @@ pub fn vector_search(
         let coverage_proven = ordered_whole_store
             || (selection.never_selected() && whole_graph_covers_store(graph, store));
 
-        // HNSW fast path: use the index when allowed, supported, and the
-        // selection covers enough of the store. Returns None (→ exact fallback)
-        // if a selective filter left fewer than top_k survivors.
         let hnsw_result = if exact {
             None
         } else {
@@ -459,10 +453,8 @@ pub fn vector_search(
             }
             None => sequential_search(&candidates, store, query_vector, top_k, &scorer),
         };
-        // The single-store path admits candidates of any type, so it inherits
-        // the multi-store scan's duty to raise the caller mistake
-        // `missing_store_error` describes. Only an empty result can be one, so
-        // the type walk never costs a populated search anything.
+        // The mistake `unmatched_store_error` reconstructs can only surface as
+        // an empty result, so the walk never costs a populated search anything.
         if rows.is_empty() {
             if let Some(err) =
                 unmatched_store_error(graph, candidates.as_ref(), node_type, embedding_property)
@@ -472,7 +464,6 @@ pub fn vector_search(
         }
         rows
     } else {
-        // Multi-type path: group by node type
         let scorer = Scorer::new(metric, query_vector);
         let mut heap = MinHeap::with_capacity(top_k);
         let mut cached_type = None;
@@ -631,10 +622,8 @@ fn hnsw_search(
     top_k: usize,
     scorer: &Scorer,
 ) -> Option<Vec<VectorSearchResult>> {
-    // Routing already proved whole-store coverage for the two shapes that can
-    // prove it without allocating (ordered whole store, never-narrowed
-    // selection). Every other shape builds membership once and reuses it both
-    // for exact coverage and for filtering HNSW results.
+    // Shapes routing could not prove without allocating build membership once
+    // and reuse it for both the coverage test and the HNSW result filter.
     let membership: Option<HashSet<usize>> = if coverage_proven {
         None
     } else {
@@ -761,14 +750,13 @@ impl Scorer {
     }
 }
 
-/// Cosine similarity between two f32 slices.
+/// Cosine similarity between two f32 slices, in [-1.0, 1.0].
 /// Uses 4 independent accumulators per metric for instruction-level parallelism,
-/// with chunks_exact(8) for LLVM auto-vectorization (SSE2/AVX2/NEON).
-/// Returns similarity in [-1.0, 1.0].
+/// with `as_chunks::<8>()` for LLVM auto-vectorization (SSE2/AVX2/NEON).
 ///
-/// Standalone SIMD util exercised by this module's tests; the live vector
-/// scoring path inlines its own distance math (`vector_score`), so this is
-/// not currently wired into production — kept (and tested) for reuse.
+/// Standalone SIMD util exercised by this module's tests; production cosine
+/// scoring goes through [`Scorer`]'s cached-norm kernel instead, so this has
+/// no production caller — kept, and tested, as that kernel's parity oracle.
 #[allow(dead_code)]
 #[inline]
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
@@ -2023,7 +2011,6 @@ mod tests {
         let score_mid = neg_poincare_distance(&origin, &mid);
         let score_far = neg_poincare_distance(&origin, &far);
 
-        // Closer points have higher (less negative) scores
         assert!(
             score_near > score_mid,
             "near {} should > mid {}",

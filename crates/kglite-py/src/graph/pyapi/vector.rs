@@ -159,8 +159,7 @@ impl KnowledgeGraph {
         let top_k = top_k.unwrap_or(10);
         let exact = exact.unwrap_or(false);
         let embedding_property = kglite_core::api::embeddings::store_name(text_column);
-        // Projection set: None = include everything (default). Some = include
-        // only these fields; `id` and `score` are always kept (identity + rank).
+        // `id` and `score` are always kept — identity + rank.
         let keep: Option<std::collections::HashSet<String>> =
             returning.map(|v| v.into_iter().collect());
         let want =
@@ -212,9 +211,8 @@ impl KnowledgeGraph {
                         dict.set_item("type", node.node_type_str(&self.inner.interner))?;
                     }
                     dict.set_item("score", r.score)?;
-                    // properties_cloned reads from PropertyStorage::Columnar
-                    // (the post-reload variant); property_iter yields
-                    // nothing for that variant.
+                    // properties_cloned reads PropertyStorage::Columnar (the
+                    // durable shape); property_iter yields nothing for it.
                     for (k, v) in node.properties_cloned(&self.inner.interner) {
                         if want(&k) {
                             dict.set_item(k, py_out::value_to_py(py, &v)?)?;
@@ -434,8 +432,8 @@ impl KnowledgeGraph {
         // when an embedding store keys against them.
         //
         // Use `properties_cloned()`, not `property_iter()`: the latter yields
-        // *nothing* for `PropertyStorage::Columnar` (the variant nodes use
-        // after a save+reload cycle), which produced `nodes_with_property=0`
+        // *nothing* for `PropertyStorage::Columnar` — the durable shape every
+        // node's properties land in — which produced `nodes_with_property=0`
         // for every columnarised graph and flipped a healthy steady-state
         // graph's status to `store_orphan`.
         for type_name in &types_to_scan {
@@ -814,10 +812,6 @@ impl KnowledgeGraph {
         }
     }
 
-    // ========================================================================
-    // Text-Level Embedding API
-    // ========================================================================
-
     /// Register or unbind an embedding model on the graph.
     ///
     /// Pass a model object to register; pass ``None`` to unbind the
@@ -954,11 +948,8 @@ impl KnowledgeGraph {
             self.inner.embeddings.get(&emb_key)
         };
 
-        // An incremental embed into a store
-        // whose dimension differs from the current model's would silently mix
-        // dimensions and corrupt similarity search. Reject it with a clear
-        // recipe instead. `mode='all'` rebuilds a fresh store at the new
-        // dimension below, so a model swap is deterministic that way.
+        // Reject an incremental embed at a dimension the store doesn't hold:
+        // mixing dimensions silently corrupts similarity search.
         if let Some(s) = existing_store {
             if s.dimension != dimension {
                 model.unload();
@@ -1211,7 +1202,7 @@ fn marshal_embedding_batch(
 }
 
 /// What one `embed_texts` pass decided about a node type's nodes: the texts
-/// to send to the model, plus the three skip counters its report returns.
+/// to send to the model, plus the three counters its report returns.
 struct EmbedCandidates {
     /// `(node_index, text, text_hash)` for every node that needs embedding.
     texts: Vec<(NodeIndex, String, u64)>,

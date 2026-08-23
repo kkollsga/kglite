@@ -14,11 +14,12 @@ appropriate row-equality assertion.
 It does NOT catch:
 
 - **Gate misses** (a fusion pass bails when it could fuse): both
-  paths produce the same result, just slower. Needs plan-shape or perf
-  regression testing — covered by follow-ups.
+  paths produce the same result, just slower. Pinned instead by the
+  PASS_TRIGGER_CASES plan-shape assertions below.
 - **Execution semantic bugs** that exist in both fast and slow paths
   (rare but real, e.g. 0.8.30 startNode(r) was actually present in both
-  paths). Needs cross-mode parity (cypher vs. fluent vs. naive).
+  paths). Needs absolute goldens — several live below — or cross-mode
+  parity.
 
 When fixing a future silent-correctness bug, **add the bug's triggering
 query to DIFFERENTIAL_QUERIES** so the regression is permanent.
@@ -41,9 +42,9 @@ import kglite
 #    multi-MATCH chains.
 #
 # The corpus deliberately skips vector_score / text_score and spatial
-# fusion — those depend on registered embedders or geometry data and
-# don't exist in the shared fixtures. They warrant a separate harness
-# that builds purpose-specific fixtures.
+# fusion — those depend on registered embedders or geometry data the shared
+# fixtures do not carry. They live in
+# tests/test_cypher_specialized_optimizer.py, which builds its own.
 DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
     ("simple_match", "small_graph", "MATCH (p:Person) RETURN p.name AS n", None),
     ("simple_match_param", "small_graph", "MATCH (p:Person) WHERE p.age > $min RETURN p.name AS n", {"min": 30}),
@@ -960,8 +961,8 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (p:Person) RETURN p.name AS n, p.age AS age ORDER BY p.city DESC, p.age ASC LIMIT 8",
         None,
     ),
-    # First key ties on every row (all Persons share the type), so the
-    # emitted set is decided entirely by the second key.
+    # Five Persons share each city, so the LIMIT-4 cut falls inside a
+    # first-key tie group and the second key decides which rows are emitted.
     (
         "order_by_tie_on_first_key_resolved_by_second",
         "social_graph",
@@ -3273,12 +3274,11 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
 ]
 
 
-# Sized to cross the pattern executor's candidate caps, whose smallest form is
-# a flat floor of 1 000 (`max(limit * 100, 1000)` start nodes,
-# `max(limit * 50, 1000)` intermediates). Every other fixture in this file is
-# two or three orders of magnitude below that floor, which is why the corpus —
-# an instrument that would otherwise have caught the bug outright — stayed
-# green through it for eight minor versions.
+# Sized to cross the candidate caps described at the `cap_threshold_graph`
+# corpus entries above. Every other fixture in this file is two or three orders
+# of magnitude below the caps' 1 000 floor, which is why the corpus — an
+# instrument that would otherwise have caught the bug outright — stayed green
+# through it for eight minor versions.
 _CAP_FILLERS = 1100
 _CAP_PAPERS = 1200
 
@@ -4092,12 +4092,6 @@ MUTATION_QUERIES: list[tuple[str, str]] = [
     ("create_constraint_not_null_ddl", "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS NOT NULL"),
     ("create_constraint_node_key_ddl", "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS NODE KEY"),
     ("drop_constraint_ddl_missing_if_exists", "DROP CONSTRAINT person_name_u IF EXISTS"),
-    # Declaring one half of a node key on a property that already carries the
-    # other must *add* to it rather than replace it, so the post-statement graph
-    # state carries both. A pass that dropped or reordered the second statement
-    # would leave only one half enforced — which this harness sees as diverging
-    # post-state once a later write is rejected on one path and not the other.
-    # Both orders, because the merge is order-sensitive code.
     # Multi-statement merge/drop sequences live in CONSTRAINT_DDL_SEQUENCES below.
     # ── Shapes whose rollback checkpoint is an undo journal ──────────────
     #
@@ -4279,8 +4273,9 @@ def test_optimized_matches_naive(
     # Every pass must remain an optional optimization. Run the complete corpus
     # with each pass disabled in isolation so one pass cannot silently become
     # load-bearing for another pass's correctness. This is intentionally the
-    # full corpus rather than a representative cohort: 30 passes × the current
-    # corpus is cheap, and failures identify the exact query/pass pair.
+    # full corpus rather than a representative cohort: every registered pass ×
+    # the current corpus is cheap, and failures identify the exact query/pass
+    # pair.
     for pass_name in kglite.cypher_pass_names():
         isolated = _normalize(g.cypher(query, disabled_passes=[pass_name], **kwargs).to_list())
         assert isolated == naive, (
@@ -4295,10 +4290,9 @@ def test_optimized_matches_naive(
 
 # ── Known divergences (xfail) ────────────────────────────────────────
 #
-# These shapes diverge between optimized and naive but the divergence
-# was discovered by the harness on first run. They land here as
-# permanent regression tests: when a fix lands, flip xfail → expected
-# pass and the test starts protecting the fix.
+# Shapes that diverge between optimized and naive and whose fix is not yet
+# available. They land here as permanent regression tests: when the fix lands,
+# flip xfail → expected pass and the test starts protecting it.
 
 KNOWN_DIVERGENT: list[tuple[str, str, str, str]] = [
     # Empty: every divergence the harness has surfaced is now fixed and
@@ -4518,20 +4512,20 @@ def test_mutation_optimized_matches_naive(name: str, query: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Columnar (saved-graph) write shapes
+# Columnar (consolidated-store) write shapes
 # ---------------------------------------------------------------------------
 #
-# Every corpus above runs on a *fresh* graph, whose nodes hold row storage
-# (`Map` / `Compact`). The moment a graph is saved it converts to per-type
-# column stores and keeps that shape for the rest of its life — so the write
-# paths a real deployment exercises are the columnar ones, which the corpora
-# above never reach.
+# Properties are columnar from construction, so the corpora above already write
+# through a column store — but only ever one carrying its growth history. A
+# save / vacuum / unspill consolidates that into a single contiguous run of
+# rows, which is the shape a loaded graph carries and therefore the one a real
+# deployment writes to for the rest of its life.
 #
 # The shapes here are the ones that path touches: a multi-row `SET` and
-# `REMOVE` against a saved type (which write through the per-type master store
-# and then re-point every node's handle), `MERGE … ON MATCH SET` over several
-# rows (one `execute_set` per row), and `SET n = {…}` (which enumerates the
-# node's existing keys before clearing them). `SET n.name` is kept separate
+# `REMOVE` against a consolidated type (which write through the per-type master
+# store and then re-point every node's handle), `MERGE … ON MATCH SET` over
+# several rows (one `execute_set` per row), and `SET n = {…}` (which enumerates
+# the node's existing keys before clearing them). `SET n.name` is kept separate
 # because a title-aliased property is *not* in the store — it takes the
 # node-private copy-on-write route instead, which is a different code path with
 # different failure modes.
@@ -4645,7 +4639,7 @@ def test_columnar_mutation_fixture_is_actually_columnar() -> None:
     ids=[entry[0] for entry in COLUMNAR_MUTATION_QUERIES],
 )
 def test_columnar_mutation_optimized_matches_naive(name: str, query: str, probe: str) -> None:
-    """Optimized and naive must agree on a *saved* graph — in the returned
+    """Optimized and naive must agree on a *consolidated* store — in the returned
     rows, in the post-statement counts, and in what a later read observes."""
     g_opt = _build_columnar_mutation_graph()
     rows_opt = _normalize(g_opt.cypher(query).to_list())
@@ -4672,8 +4666,8 @@ def test_columnar_mutation_optimized_matches_naive(name: str, query: str, probe:
     ids=[entry[0] for entry in COLUMNAR_MUTATION_QUERIES],
 )
 def test_columnar_mutation_matches_row_storage(name: str, query: str, probe: str) -> None:
-    """The same write must produce the same observable on a saved graph as on a
-    fresh one.
+    """The same write must produce the same observable on a consolidated store
+    as on one still carrying its growth history.
 
     This is the arm that catches a columnar write landing in one replica of the
     type's column store and not the other: optimized-vs-naive agrees whenever

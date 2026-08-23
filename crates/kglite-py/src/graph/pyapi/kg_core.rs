@@ -26,21 +26,15 @@ use std::sync::Arc;
 /// The one conversion every write-path I/O failure on this class takes:
 /// `kglite.FileIoError`, carrying the stable `"FileIo"` `.code`.
 ///
-/// `PyIOError` is an alias for the *builtin* `OSError`, so raising it directly
-/// — which `save()`, `sync()` and `to_bytes()` all used to do — put the whole
-/// write path outside the documented `kglite.*` taxonomy: a full disk or a
-/// read-only directory came back as a bare `OSError`, indistinguishable from
-/// any unrelated OS failure and carrying no `.code`. Routing through
-/// [`crate::error_py::kg_to_pyerr`] is what the load path already does, so the
-/// two halves of the file lifecycle now classify a write fault and a read
-/// fault the same way.
+/// Not `PyIOError` — that is an alias for the *builtin* `OSError`, which puts
+/// the fault outside the documented `kglite.*` taxonomy and carries no
+/// `.code`, leaving a full disk indistinguishable from any unrelated OS
+/// failure. Routing through [`crate::error_py::kg_to_pyerr`] classifies a
+/// write fault the way the load path already classifies a read fault.
 ///
 /// `kglite.FileIoError` descends from `kglite.KgError`, **not** from
-/// `OSError`, so this is a deliberate break for a caller that wrapped
-/// `save()` in `except OSError` — the same break `load()` took when it
-/// stopped raising bare `OSError`, and the reason it is worth taking is that
-/// the previous class was unclassifiable: nothing distinguished "the disk is
-/// full" from any other `OSError` the call stack could raise.
+/// `OSError`, so a caller wrapping `save()` in `except OSError` does not
+/// catch it — deliberate, because the alternative class was unclassifiable.
 pub(crate) fn file_io_err(error: std::io::Error) -> PyErr {
     crate::error_py::kg_to_pyerr(crate::error::KgError::FileIo(error))
 }
@@ -109,9 +103,9 @@ impl ProgressSink for PyProgressSink {
 /// `KnowledgeGraph`. PyO3's `#[pyclass]` is `RefCell`-guarded: while one
 /// thread mutates the graph (`add_nodes` / `embed_texts` / a `CREATE`
 /// query / `save`) it holds the exclusive borrow, and a second thread
-/// touching the *same* instance hits the guard. The raw symptom is either
-/// a cryptic `RuntimeError: Already borrowed` or — at the hand-written
-/// `slf.borrow()` sites — a panic. We turn both into this one message.
+/// touching the *same* instance hits the guard. The raw symptom is a cryptic
+/// `RuntimeError: Already borrowed`, or a panic where the borrow is taken by
+/// hand; the `try_borrow` sites in `cypher()` map it to this one message.
 ///
 /// Kept in the Python wrapper (not core `KgError`): the borrow guard is a
 /// PyO3/GIL concern, so a non-Python binding never raises it. Raised as a
@@ -186,8 +180,6 @@ impl KnowledgeGraph {
         // run under `py.detach()` — a rebuild that takes minutes on
         // Wikidata-scale graphs must not wedge every other Python thread.
 
-        // Single O(E) pass over edge_endpoint_keys() — mmap reads only, no
-        // heap allocation per edge.
         let triples = {
             let inner = &self.inner;
             py.detach(|| introspection::compute_type_connectivity(inner))
@@ -207,9 +199,9 @@ impl KnowledgeGraph {
 
         let derived = introspection::derive_edge_counts_from_triples(&triples);
 
-        // Populate edge type counts cache. Poison-recovering: the guarded
-        // state is swapped in place (never left half-written), so a panic
-        // in some other holder must not turn every later rebuild into one.
+        // Poison-recovering: the guarded state is swapped in place (never left
+        // half-written), so a panic in some other holder must not turn every
+        // later rebuild into one.
         *self
             .inner
             .edge_type_counts_cache
@@ -839,9 +831,9 @@ impl KnowledgeGraph {
         )
     }
 
-    /// Persist the graph to its remembered origin path and release nothing
-    /// else (the graph stays usable). No-op if the graph has no associated
-    /// path (built in memory, never opened/saved to a file) — there is
+    /// Persist the graph to its remembered origin path; the graph itself stays
+    /// usable afterwards. No-op if the graph has no associated path (built in
+    /// memory, never opened/saved to a file) — there is
     /// nowhere to write, and silently doing nothing is friendlier than
     /// raising on a best-effort cleanup call. Pair with `save(path)` if you
     /// need an explicit target.
@@ -1200,9 +1192,8 @@ impl KnowledgeGraph {
         let schema = schema_from_value(&py_in::py_value_to_value(schema_dict.as_any())?)
             .map_err(schema_parse_to_pyerr)?;
 
-        // Replacing withdraws the declarations of every type this call did not
-        // name, so say which enforcement is going away. The default merge cannot
-        // reach an unnamed type, and so has nothing to warn about.
+        // Only replace can withdraw a declaration from a type this call never
+        // named, so only replace has enforcement loss to warn about.
         let mode = if replace {
             warn_about_constraints_dropped_by_replace(py, &slf.inner, &schema)?;
             SchemaInstall::Replace
@@ -1851,11 +1842,12 @@ impl KnowledgeGraph {
     /// transaction are isolated until ``commit()`` is called. If the transaction
     /// is rolled back (or dropped without committing), no changes are applied.
     ///
-    /// **Note:** the snapshot is a full deep-clone of the graph, so creating a
-    /// transaction on a very large graph has a one-time memory cost proportional
-    /// to graph size. Embeddings, indexes and timeseries are part of `DirGraph`
-    /// and are cloned with it, so the copy covers the whole graph — budget for
-    /// it on an embedding-heavy graph.
+    /// **Note:** `begin()` itself is O(1) (an `Arc` snapshot); the deep clone
+    /// is deferred to the first mutation, so a *mutating* transaction on a very
+    /// large graph has a one-time memory cost proportional to graph size — a
+    /// read-only-then-commit transaction pays nothing. Embeddings, indexes and
+    /// timeseries are part of `DirGraph` and are cloned with it, so that copy
+    /// covers the whole graph — budget for it on an embedding-heavy graph.
     ///
     /// Can also be used as a context manager:
     ///
@@ -2114,10 +2106,9 @@ fn marshal_read_result(
     }
 }
 
-/// Map a core schema-parse refusal onto the Python exception class its class
-/// names, so `define_schema` raises exactly what its hand-written walk used to:
-/// a wrong shape is a `TypeError`, a missing key a `KeyError`, an unaccepted
-/// value a `ValueError`. The grammar and the messages live in core
+/// Map a core schema-parse refusal onto the Python exception class its kind
+/// names: a wrong shape is a `TypeError`, a missing key a `KeyError`, an
+/// unaccepted value a `ValueError`. The grammar and the messages live in core
 /// (`kglite::api::schema_from_value`); only the exception *class* is
 /// Python-specific, which is why the kind travels rather than being baked in.
 fn schema_parse_to_pyerr(e: SchemaParseError) -> PyErr {
@@ -2155,15 +2146,14 @@ fn build_disabled_passes(
     Ok(set)
 }
 
-/// Backend-aware default Cypher timeout (milliseconds).
-///
-/// Default Cypher query deadline applied when no per-call `timeout_ms` and
-/// no `set_default_timeout()` are set. A 3-minute ceiling is loose enough
-/// that legitimate cold queries on large mapped/disk graphs complete, while
-/// still guaranteeing that pathological scans (e.g. unanchored patterns on
-/// a 100M+ node graph) error out instead of wedging the host process or an
-/// MCP server. Users override per-call with `timeout_ms=N` (or `0` to
-/// disable), or globally via `set_default_timeout(ms)`.
+/// Default Cypher query deadline (milliseconds), applied when no per-call
+/// `timeout_ms` and no `set_default_timeout()` are set — the same value for
+/// every backend. A 3-minute ceiling is loose enough that legitimate cold
+/// queries on large mapped/disk graphs complete, while still guaranteeing that
+/// pathological scans (e.g. unanchored patterns on a 100M+ node graph) error
+/// out instead of wedging the host process or an MCP server. Users override
+/// per-call with `timeout_ms=N` (or `0` to disable), or globally via
+/// `set_default_timeout(ms)`.
 pub(crate) fn backend_default_timeout_ms(_graph: &kglite_core::api::DirGraph) -> Option<u64> {
     Some(180_000)
 }

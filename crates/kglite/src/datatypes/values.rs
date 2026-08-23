@@ -49,17 +49,17 @@ pub enum Value {
     /// still a `NaiveDate`, so DateTime + Duration discards the seconds
     /// component.
     ///
-    /// Field widths (months/days as i32) sized to keep the enum
-    /// payload at 16 bytes (matches Point's 2×f64). months/days are
+    /// Field widths (months/days as i32) sized to keep Duration's
+    /// payload at 16 bytes (matching Point's 2×f64). months/days are
     /// bounded around ±2e9 — 178 M years / 5.8 M years respectively
     /// — far past anything the user can reasonably need.
     ///
     /// **Layout note**: Duration was the LAST variant in `.kgl` v3.
     /// Node/Relationship/Path/List/Map append after it and bump the
     /// `.kgl` format to v4 — a hard break; v3 files do not load with
-    /// v4 binaries. Discriminants 0..=8 (Null .. NodeRef .. Duration)
-    /// stay stable; 9..=13 are the new collection / graph-entity
-    /// variants.
+    /// v4 binaries. Discriminants 0..=9 (UniqueId .. NodeRef,
+    /// Duration) stay stable; 10..=14 are the new collection /
+    /// graph-entity variants.
     Duration {
         months: i32,
         days: i32,
@@ -69,10 +69,8 @@ pub enum Value {
     /// Boxed because [`NodeValue`] is large (id + labels + props map)
     /// and Node values are rarer than scalars.
     ///
-    /// `Value::NodeRef(u32)` (variant 8) stays as the *transient*
-    /// internal handle used during WITH/UNWIND chains. NodeRef is
-    /// never user-visible — it gets materialised to `Node` at
-    /// projection time and never persisted.
+    /// [`Value::NodeRef`] stays the transient internal handle; it is
+    /// materialised into a `Node` at projection time.
     Node(Box<NodeValue>),
     /// A materialised graph relationship — the projection result for
     /// `RETURN r` where `r` is a relationship variable.
@@ -84,9 +82,8 @@ pub enum Value {
     ///
     /// `[]` in Cypher syntax; `labels(n)`, `nodes(p)`, `collect(...)`,
     /// `range(...)` all produce this. Kept inline (not Boxed) because
-    /// list iteration is a hot path; the +24 bytes vs the prior
-    /// largest variant (Point at 16) is the deliberate cost of
-    /// having native collections.
+    /// list iteration is a hot path; a `Vec` payload is the same 24
+    /// bytes as the `String` variant, so it does not widen the enum.
     List(Vec<Value>),
     /// A string-keyed map of values.
     ///
@@ -129,12 +126,12 @@ pub enum Value {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NodeValue {
     /// Stable integer id; mirrors what Bolt encodes as the Node struct's
-    /// `identity` field. Sourced from `NodeData.id` if numeric, else a
-    /// fallback derived from the petgraph NodeIndex.
+    /// `identity` field. Always the petgraph NodeIndex, never the user's
+    /// `id` property.
     pub id: u32,
-    /// Type labels. KGLite is single-label (one entry today), but the
-    /// list shape matches Neo4j/Bolt's `labels` field and stays
-    /// forward-compatible with multi-label work.
+    /// Full label set — primary type plus any secondary labels, so a
+    /// materialised node carries the same labels `labels(n)` reports.
+    /// Shape matches Neo4j/Bolt's `labels` field.
     pub labels: Vec<String>,
     /// Properties as a string-keyed map. Key order is stable (sorted), so
     /// equality/hash/serialisation are deterministic — and cloning the node
@@ -206,8 +203,9 @@ pub enum BorrowedValue<'a> {
 }
 
 impl<'a> BorrowedValue<'a> {
-    /// Materialize into an owned [`Value`]. Allocates for `String`.
-    /// Takes `self` by value since `BorrowedValue` is `Copy`.
+    /// Materialize into an owned [`Value`]. Allocates for `String` and
+    /// `List`; `Map` is a refcount bump. Takes `self` by value since
+    /// `BorrowedValue` is `Copy`.
     pub fn to_value(self) -> Value {
         match self {
             BorrowedValue::Null => Value::Null,
@@ -225,11 +223,11 @@ impl<'a> BorrowedValue<'a> {
 }
 
 impl Eq for Value {
-    // Empty: every variant compares exactly except Float64, whose NaN /
-    // -0.0 handling lives in PartialEq.
+    // Empty: `PartialEq` is derived, so Float64 compares with IEEE semantics
+    // (NaN != NaN, -0.0 == 0.0). The NaN / -0.0 normalisation that keeps
+    // sorting and hashing coherent lives in `Ord` and `Hash` below.
 }
 
-// NaN sorts after all other floats; cross-variant ordering uses discriminant index.
 impl PartialOrd for Value {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
@@ -413,7 +411,7 @@ impl Value {
     }
 }
 
-/// Delegates to [`format_value`], which stays public because callers
+/// [`format_value`] stays public alongside this impl because callers
 /// import it directly.
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -660,12 +658,9 @@ impl DataFrame {
     /// columnar DataFrame format used by `add_connections` and other fluent APIs.
     ///
     /// Type inference scans **every** value in each column and promotes to the
-    /// narrowest lossless common type (see [`resolve_column_type`]): mixed
-    /// Int64/Float64 becomes Float64, a UniqueId column containing an Int64
-    /// that doesn't fit `u32` widens to Int64, any List makes the column List
-    /// (non-list cells wrap as 1-element lists), and any other heterogeneous
-    /// mix falls back to String with each value in its natural text form —
-    /// never silently coerced or nulled. All-null columns default to Int64.
+    /// narrowest lossless common type; [`resolve_column_type`] carries the
+    /// promotion matrix. Nothing is silently coerced or nulled — a mix no
+    /// column type covers lands in a String column in its natural text form.
     pub fn from_cypher_rows(columns: Vec<String>, rows: Vec<Vec<Value>>) -> Result<Self, String> {
         let num_cols = columns.len();
         let num_rows = rows.len();
@@ -853,9 +848,6 @@ impl DataFrame {
                         .to_string(),
                 )
             }
-            // Collection / graph-entity variants don't fit columnar
-            // storage. Same rationale as Duration: these are
-            // query-result-time values, not column types.
             Value::List(_)
             | Value::Map(_)
             | Value::Node(_)
@@ -887,7 +879,6 @@ mod kind {
     pub const TIMESTAMP: u16 = 1 << 6;
     pub const LIST: u16 = 1 << 7;
     pub const MAP: u16 = 1 << 8;
-    /// Point / Duration / Node / Relationship / Path — String-serialised.
     pub const TEXTUAL: u16 = 1 << 9;
 }
 
@@ -1229,8 +1220,8 @@ mod tests {
             v
         );
 
-        // Appended last → discriminant 15 unchanged-prefix property:
-        // a date-only value still orders before any timestamp.
+        // Ord's own `disc` table (not the serde discriminant) sorts
+        // Timestamp last, so a date-only value orders before any timestamp.
         let date = Value::DateTime(NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
         assert!(date < v);
 

@@ -9,6 +9,8 @@
 //!      implicit `parent` → `OF_{PARENT}` edges).
 //!   5. Junction edges — many-to-many CSVs with two FK columns + optional
 //!      property columns.
+//!   6. Provisional purge — under `settings.auto_purge`, stub nodes that
+//!      no real row ever promoted are dropped with their edges.
 
 use super::csv_loader::{
     map_blueprint_type, read_csv_chunks, read_csv_raw, typed_dataframe, RawCsv,
@@ -38,10 +40,9 @@ pub fn build(
     mut blueprint: Blueprint,
     blueprint_dir: &Path,
 ) -> Result<BuildReport, String> {
-    // 0.9.47 K2: validate the compute pipeline before any phase
-    // touches data. Catches bad expressions / dangling type refs /
-    // misplaced aggregate functions at load time, not midway through
-    // the build.
+    // Validate the compute pipeline before any phase touches data, so bad
+    // expressions / dangling type refs / misplaced aggregate functions fail
+    // at load time rather than midway through the build.
     super::validation::validate_compute(&blueprint)?;
 
     let root = blueprint
@@ -57,12 +58,10 @@ pub fn build(
         })
         .unwrap_or_else(|| blueprint_dir.to_path_buf());
 
-    // 0.9.47 K3+: run compute primitives as a CSV-shaping pre-phase.
-    // Each op reads its source CSV, applies the primitive, writes
-    // output to `<root>/computed/*.csv`, and mutates the blueprint
-    // to point subsequent phases at the new files. The 5-phase load
-    // below consumes the augmented blueprint as if compute didn't
-    // exist.
+    // Compute primitives run as a CSV-shaping pre-phase: each op reads its
+    // source CSV, writes `<root>/computed/*.csv`, and repoints the blueprint
+    // at the new files, so the load phases below consume the augmented
+    // blueprint as if compute didn't exist.
     super::compute::apply_compute(&mut blueprint, &root)?;
 
     let mut report = BuildReport {
@@ -99,16 +98,10 @@ pub fn build(
     // Phase 0: pre-parse node + sub-node CSV paths in parallel so later
     // phases hit the cache without blocking on disk I/O.
     //
-    // E3 note: junction-edge CSVs are NOT pre-parsed any more. They're
-    // streamed via `read_csv_chunks` inside `load_junction_edges`. Pre-
-    // caching them would defeat the streaming memory bound.
-    //
-    // F3 note: streamable node specs are excluded from pre-parsing.
-    // Their CSVs are read on demand by `load_streamed_node_spec` and
-    // `load_streamed_fk_edges` via `read_csv_chunks`. Pre-caching
-    // them would hold a full `RawCsv` in memory for the whole build,
-    // re-introducing the RAM ceiling the streaming path is designed
-    // to avoid.
+    // Junction-edge CSVs and streamable node specs are deliberately
+    // excluded — both are read on demand via `read_csv_chunks`, and
+    // pre-caching them would pin a full `RawCsv` for the whole build,
+    // re-introducing the RAM ceiling streaming exists to avoid.
     let csv_cache: CsvCache = CsvCache::default();
     let mut buffered_csv_paths: Vec<String> = Vec::new();
     for s in core_specs.iter().chain(sub_specs.iter()) {
@@ -163,7 +156,6 @@ pub fn build(
         eprintln!("  load_sub_nodes: {} ms", t.elapsed().as_millis());
     }
 
-    // Register parent types for sub-nodes
     for sub in &sub_specs {
         if let Some(parent) = &sub.parent {
             if graph.type_indices.contains_key(&sub.node_type)
@@ -191,9 +183,8 @@ pub fn build(
         eprintln!("  load_junction_edges: {} ms", t.elapsed().as_millis());
     }
 
-    // Phase 6: drop unpromoted provisional stub nodes if the blueprint
-    // opted in. A stub no real node row ever promoted is a dangling
-    // reference; `auto_purge` discards it (and its edges) at build end.
+    // Phase 6: a provisional stub that no real node row ever promoted is a
+    // dangling reference; `auto_purge` discards it and its edges.
     if blueprint.settings.auto_purge {
         let t = std::time::Instant::now();
         let (purged, _edges) = maintain::purge_provisional_nodes(graph);
@@ -318,8 +309,8 @@ fn clone_without_subs(spec: &NodeSpec) -> NodeSpec {
 
 /// Cache of raw CSVs keyed by relative path. Populated in parallel at the
 /// start of the build (see `parse_in_parallel`) so serial phases that read
-/// the same CSV (e.g. node load + FK edges + junction edges) never block
-/// on disk.
+/// the same CSV (node load + FK edges) never block on disk. Junction edges
+/// bypass it entirely — see `load_junction_edges`.
 #[derive(Default)]
 struct CsvCache {
     inner: std::sync::Mutex<HashMap<String, std::sync::Arc<RawCsv>>>,
@@ -415,7 +406,6 @@ fn load_manual_nodes(
         let pk = ms.spec.pk.clone().unwrap_or_else(|| "name".to_string());
         let title = ms.spec.title.clone().unwrap_or_else(|| pk.clone());
 
-        // Build a tiny single-column (or two-column) DataFrame by hand.
         let mut df = DataFrame::new(Vec::new());
         let values: Vec<String> = distinct.into_iter().collect();
         let col_type_strings = vec![Some(String::from("string")); values.len()]
@@ -498,7 +488,6 @@ fn prep_node_spec(
         ts::drop_zero_time_components(&mut raw, tspec);
     }
 
-    // Handle pk: "auto"
     let pk = spec.spec.pk.clone().unwrap_or_else(|| "id".to_string());
     let (pk, synth_pk_values) = if pk == "auto" {
         let synth = format!("_{}_id", spec.node_type);
@@ -623,17 +612,15 @@ fn load_node_specs(
     use rayon::prelude::*;
     let profile = std::env::var("KGLITE_BLUEPRINT_PROFILE").is_ok();
 
-    // F1: split specs by streaming eligibility. Streamable specs run
-    // through a per-chunk `read_csv_chunks → typed_dataframe → add_nodes`
-    // loop that bounds peak RAM by chunk size. Buffered specs (timeseries,
-    // spatial, manual, *and* anything below the size threshold) keep
-    // the parallel-prep path. The size threshold (F4) prevents a ~20%
-    // dispatch-overhead regression on small/medium CSVs where the
-    // streaming RAM win is moot.
+    // Streamable specs run a per-chunk `read_csv_chunks → typed_dataframe
+    // → add_nodes` loop that bounds peak RAM by chunk size. Everything else
+    // (timeseries, spatial, manual, and anything below the size threshold)
+    // keeps the parallel-prep path — `should_stream_spec` carries why small
+    // CSVs stay buffered.
     let (buffered, streamable): (Vec<&FlatSpec>, Vec<&FlatSpec>) =
         specs.iter().partition(|s| !should_stream_spec(s, root));
 
-    // Buffered path: parallel prep + serial dispatch (existing behaviour).
+    // Buffered path: parallel prep, serial dispatch.
     let t_par = std::time::Instant::now();
     let prepped: Vec<Result<Option<PreppedNode>, String>> = buffered
         .par_iter()
@@ -683,9 +670,9 @@ fn load_node_specs(
         }
     }
 
-    // Streaming path: serial per-spec dispatch, per-chunk add_nodes.
-    // Per-spec errors land in `report.errors` (parity with the buffered
-    // path) — missing CSVs / type mismatches must not abort the build.
+    // Streaming path: per-spec errors land in `report.errors` (parity with
+    // the buffered path) — missing CSVs / type mismatches must not abort
+    // the build.
     let t_stream = std::time::Instant::now();
     for spec in &streamable {
         if let Err(e) = load_streamed_node_spec(graph, spec, root, report) {
@@ -717,11 +704,9 @@ fn load_node_specs(
 /// - timeseries specs (need full row set for grouping + dedup-by-pk)
 /// - spatial specs (geometry conversion mutates RawCsv in-place)
 ///
-/// `pk: "auto"` is streamable via F2's per-spec counter: each chunk
-/// receives a dense id range matching the row order the buffered
-/// path would have assigned. Filter is applied to chunks in
-/// CSV-read order, preserving buffered semantics — filtered chunks
-/// advance the id counter by their post-filter row count.
+/// `pk: "auto"` stays streamable — a per-spec counter hands each chunk
+/// a dense id range matching the buffered path's row order (see
+/// `load_streamed_node_spec`).
 fn is_streamable_node_spec(spec: &FlatSpec) -> bool {
     if spec.is_manual {
         return false;
@@ -745,14 +730,13 @@ fn is_streamable_node_spec(spec: &FlatSpec) -> bool {
 ///
 /// The streaming dispatch carries ~20% overhead per spec vs the
 /// buffered parallel-prep on a single 500K-row CSV — fine on
-/// 50M-row CSVs where the streaming RAM bound is the point, but
-/// not worth paying on Sodir-scale (few KB) or SEC-1yr-scope
-/// (~50MB per heavy spec) graphs. Threshold default: 100 MB.
-/// Tunable via `KGLITE_BLUEPRINT_STREAMING_THRESHOLD_MB`.
+/// 50M-row CSVs where the streaming RAM bound is the point, not
+/// worth paying on the KB-to-~50MB CSVs typical of current graphs.
+/// Threshold default: 100 MB, tunable via
+/// `KGLITE_BLUEPRINT_STREAMING_THRESHOLD_MB`.
 ///
-/// On unreadable / missing metadata, returns the semantic check —
-/// the streaming path's own `read_csv_chunks` will surface a
-/// clearer error than `metadata()` would.
+/// Falls back to the buffered path when the file can't be stat'd —
+/// that path's error reporting handles missing files.
 fn should_stream_spec(spec: &FlatSpec, root: &Path) -> bool {
     if !is_streamable_node_spec(spec) {
         return false;
@@ -763,8 +747,6 @@ fn should_stream_spec(spec: &FlatSpec, root: &Path) -> bool {
     let path = root.join(csv_rel);
     match std::fs::metadata(&path) {
         Ok(m) => m.len() >= streaming_threshold_bytes(),
-        // If we can't stat the file, fall back to the buffered path
-        // — its existing error reporting handles missing files.
         Err(_) => false,
     }
 }
@@ -777,12 +759,10 @@ fn streaming_threshold_bytes() -> u64 {
     mb.saturating_mul(1024 * 1024)
 }
 
-/// Streaming node-spec loader: reads the CSV in chunks via
-/// `read_csv_chunks`, applies `filter` + `typed_dataframe` per chunk,
-/// then dispatches via `maintain::add_nodes`. `add_nodes` is
-/// upsert-by-id (`nodes_created`/`nodes_updated`), so successive
-/// chunks accumulate cleanly into the same node type without
-/// resurrecting the per-spec working clone the buffered path needs.
+/// Streaming node-spec loader: `filter` + `typed_dataframe` per chunk,
+/// then `maintain::add_nodes`. `add_nodes` is upsert-by-id, so successive
+/// chunks accumulate cleanly into the same node type without resurrecting
+/// the per-spec working clone the buffered path needs.
 fn load_streamed_node_spec(
     graph: &mut DirGraph,
     spec: &FlatSpec,
@@ -822,9 +802,9 @@ fn load_streamed_node_spec(
         }
     }
 
-    // F2: per-spec auto-pk counter. Plain `u64` (not atomic) is
-    // fine because chunks are processed serially within a spec.
-    // First id starts at 1 — matches the buffered path's `1..=n`.
+    // Per-spec auto-pk counter. Plain `u64` (not atomic) is fine because
+    // chunks are processed serially within a spec, and the first id is 1 to
+    // match the buffered path's `1..=n`.
     let mut auto_pk_counter: u64 = 1;
 
     for chunk_result in chunks {
@@ -836,11 +816,9 @@ fn load_streamed_node_spec(
             continue;
         }
         if is_auto_pk {
-            // Append the synthesised id column to this chunk before
-            // typed_dataframe sees it. Ids span auto_pk_counter ..
-            // auto_pk_counter + chunk.row_count(); the counter then
-            // advances by the chunk's post-filter row count so the
-            // total assignment matches the buffered path's 1..=N.
+            // Ids span auto_pk_counter .. + row_count, so the counter
+            // advances by each chunk's post-filter row count and the total
+            // assignment matches the buffered path's 1..=N.
             raw.headers.push(pk.clone());
             for r in 0..raw.row_count() {
                 raw.rows[r].push(auto_pk_counter.to_string());
@@ -876,10 +854,9 @@ fn load_streamed_node_spec(
 /// one chunk so the streaming path matches the buffered path
 /// in `add_nodes` / `connect()` call count).
 ///
-/// Configurable via env var for perf experiments / RAM-tight
-/// hosts. The junction-edge loader keeps its own 100K default
-/// because junction CSVs typically span far more rows and have
-/// tighter per-row memory than node CSVs.
+/// The junction-edge loader keeps its own 100K default because
+/// junction CSVs typically span far more rows and have tighter
+/// per-row memory than node CSVs.
 fn node_chunk_size() -> usize {
     std::env::var("KGLITE_BLUEPRINT_NODE_CHUNK_SIZE")
         .ok()
@@ -952,7 +929,6 @@ fn apply_timeseries(
 // ─── Phase 4: FK edges ────────────────────────────────────────────────────
 
 struct PreppedFkEdges {
-    /// Source type (borrowed from the FlatSpec).
     source_type: String,
     /// Source PK column name (which may be a synthesised `_type_id` for `pk: "auto"`).
     pk: String,
@@ -1122,16 +1098,15 @@ fn load_fk_edges(
     use rayon::prelude::*;
     let profile = std::env::var("KGLITE_BLUEPRINT_PROFILE").is_ok();
 
-    // F3: same predicate as node streaming — keeps the design coherent
-    // and lets a spec's nodes + FK edges either both stream or both
-    // buffer. Mixing streaming + buffering for a single spec would
-    // re-introduce the cache requirement we're trying to drop.
+    // Same predicate as node streaming, so a spec's nodes and FK edges
+    // either both stream or both buffer. Mixing the two for one spec would
+    // re-introduce the cache requirement streaming exists to drop.
     let (streamable, buffered): (Vec<&FlatSpec>, Vec<&FlatSpec>) = specs
         .iter()
         .copied()
         .partition(|s| should_stream_spec(s, root));
 
-    // Buffered path: parallel prep + serial connect (existing behaviour).
+    // Buffered path: parallel prep, serial connect.
     let t_par = std::time::Instant::now();
     let prepped: Vec<Option<PreppedFkEdges>> = buffered
         .par_iter()
@@ -1166,10 +1141,7 @@ fn load_fk_edges(
         }
     }
 
-    // Streaming path: per-spec, per-chunk dispatch via the same
-    // `build_fk_columns` + `build_edge_df` + `connect` chain the
-    // buffered path uses — just applied to one chunk at a time so
-    // peak RAM is bounded by chunk size.
+    // Streaming path: same chain, one chunk at a time.
     let t_stream = std::time::Instant::now();
     for spec in &streamable {
         if let Err(e) = load_streamed_fk_edges(graph, spec, root, report) {
@@ -1191,12 +1163,10 @@ fn load_fk_edges(
     Ok(())
 }
 
-/// Streaming FK-edge loader for streamable specs. Mirrors
-/// `load_streamed_node_spec` row-handling — read CSV chunks, apply
-/// filter, synthesise auto-pk per chunk via a per-spec counter — but
-/// the per-chunk output is one `connect()` call per declared FK edge
-/// (built via `build_fk_columns` + `build_edge_df`, same primitives
-/// the buffered path uses).
+/// Streaming FK-edge loader. Mirrors `load_streamed_node_spec`
+/// row-handling, but each chunk emits one `connect()` call per declared
+/// FK edge, built with the same `build_fk_columns` + `build_edge_df`
+/// primitives the buffered path uses.
 ///
 /// The auto-pk counter advances in lock-step with
 /// `load_streamed_node_spec`'s counter so source ids match across
@@ -1212,8 +1182,8 @@ fn load_streamed_fk_edges(
         return Ok(());
     };
 
-    // Build the full fk_edges map (declared edges + implicit
-    // OF_PARENT for sub-nodes with `parent` + `parent_fk`).
+    // Declared edges plus the implicit `OF_{PARENT}` edge for any spec
+    // that declares both `parent` and `parent_fk`.
     let mut fk_edges: IndexMap<String, super::schema::FkEdge> = spec
         .spec
         .connections
@@ -1462,13 +1432,11 @@ fn connect(
     }
 }
 
-// ─── Phase 5: junction edges (streaming, E3+) ─────────────────────────────
+// ─── Phase 5: junction edges (streaming) ──────────────────────────────────
 //
-// The pre-E3 `prep_junction_edges` (cached buffered prep) was removed
-// in favour of `load_junction_edges`' inline streaming loop above. The
-// streaming path bounds peak RAM at chunk_size × cols × avg_string_len
-// regardless of the junction CSV's total size — critical for the
-// 10M+ row junction tables (e.g. SEC HOLDS at full-universe scale).
+// Streaming bounds peak RAM at chunk_size × cols × avg_string_len whatever
+// the junction CSV's total size — the 10M+ row junction tables (e.g. SEC
+// HOLDS at full-universe scale) are why.
 
 /// Junction-edge chunk size. ~100K rows × ~10 columns × ~20B avg
 /// string ≈ 20 MB peak per chunk, well under any reasonable RAM
@@ -1492,18 +1460,13 @@ fn load_junction_edges(
     let profile = std::env::var("KGLITE_BLUEPRINT_PROFILE").is_ok();
     let t_total = std::time::Instant::now();
 
-    // E3: stream junction CSVs in chunks. For each (spec, junction edge):
-    //   open chunked iterator → per chunk: typed_dataframe + connect()
-    //   The OS page cache handles any repeat reads (none here — each
-    //   junction CSV is only read once).
-    // The legacy CsvCache + parse_in_parallel path is no longer used
-    // for junctions; node specs still rely on the cache.
+    // Junction CSVs are streamed, never cached: each is read exactly once,
+    // so the `CsvCache` that node specs rely on would buy nothing here —
+    // hence the unused `_cache` parameter.
     for spec in specs {
         for (edge_type, junc) in &spec.spec.connections.junction_edges {
             let csv_path = root.join(&junc.csv);
 
-            // Build the keep-columns list once per junction; we'll
-            // apply it to every chunk.
             let mut keep: Vec<String> = vec![junc.source_fk.clone(), junc.target_fk.clone()];
             for p in &junc.properties {
                 if !keep.contains(p) {
@@ -1533,7 +1496,6 @@ fn load_junction_edges(
                         continue;
                     }
                 };
-                // Only keep columns present in the chunk's headers.
                 let chunk_keep: Vec<String> = keep
                     .iter()
                     .filter(|p| chunk.col_index(p).is_some())
@@ -1586,8 +1548,9 @@ impl RawCsv {
     }
 }
 
-/// Keep only the first row per unique pk value. Used for timeseries specs:
-/// one node per carrier, time samples stored separately.
+/// Keep only the first row per unique pk value; rows with a null pk all
+/// pass through. Used for timeseries specs: one node per carrier, time
+/// samples stored separately.
 fn dedupe_by_pk(raw: &RawCsv, pk_col: &str) -> RawCsv {
     let Some(idx) = raw.col_index(pk_col) else {
         return raw.clone_raw();

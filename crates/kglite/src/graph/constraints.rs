@@ -1,11 +1,11 @@
 //! Declared integrity constraints and the violation they raise.
 //!
-//! A constraint is *declared* (per node type, per property tuple) and then
-//! *enforced on every write*. This module owns the vocabulary — which kinds
-//! exist, what a violation looks like, and how it reads to a user. The live
-//! enforcement structures and the write-path probes live on `DirGraph`
-//! ([`crate::graph::dir_graph::constraints`]); the persisted declaration is
-//! `DirGraph::unique_constraint_keys` plus
+//! A constraint is *declared* (per node or relationship type, per property
+//! tuple) and then *enforced on every write*. This module owns the vocabulary
+//! — which kinds exist, what a violation looks like, and how it reads to a
+//! user. The live enforcement structures and the write-path probes live on
+//! `DirGraph` ([`crate::graph::dir_graph::constraints`]); the persisted
+//! declaration is `DirGraph::unique_constraint_keys` plus
 //! [`crate::graph::schema::NodeSchemaDefinition`]'s `primary_key` /
 //! `required_fields`.
 //!
@@ -129,9 +129,9 @@ impl EntityKind {
 /// stop resolving their constraint names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConstraintKind {
-    /// No two nodes of the type may share the property tuple.
+    /// No two entities of the type may share the property tuple.
     Unique,
-    /// The property must be present and non-null on every node of the type.
+    /// The property must be present and non-null on every entity of the type.
     NotNull,
     /// The type's primary key: unique **and** not null.
     NodeKey,
@@ -143,10 +143,9 @@ pub enum ConstraintKind {
     /// (`DirGraph::ddl_property_type_constraints`, and
     /// [`crate::graph::property_types::DeclaredType`] for the vocabulary).
     ///
-    /// **New in the persisted format**: a `.kgl` file containing a named
-    /// property-type constraint does not load on a binary that predates this
-    /// variant, because serde cannot resolve the unknown name. That is the
-    /// deliberate one-way format posture, not an accident.
+    /// A `.kgl` file containing a named property-type constraint does not load
+    /// on a binary that predates this variant, because serde cannot resolve the
+    /// unknown name — the deliberate one-way format posture, not an accident.
     PropertyType,
 }
 
@@ -183,11 +182,11 @@ impl ConstraintKind {
 /// Why the constraint check failed.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConstraintFailure {
-    /// The write would put a second node onto an already-occupied unique
+    /// The write would put a second entity onto an already-occupied unique
     /// tuple. `values` is positional against the constraint's `properties`.
     Duplicate { values: Vec<Value> },
     /// A required property was absent, or explicitly set to null, on the
-    /// written node.
+    /// written entity.
     Missing { property: String },
     /// Declaring the constraint failed because the data already violates it.
     /// `sample` is one offending tuple, so the message is actionable without

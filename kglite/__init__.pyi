@@ -1158,10 +1158,13 @@ def _run_mcp_server(argv: list[str], embedder_factory: Optional[Callable[[str], 
     ``["--graph", "foo.kgl"]``); argument parsing happens Rust-side (clap).
     The GIL is released for the server's lifetime.
 
-    ``embedder_factory(model_name) -> EmbeddingModel`` is invoked only when a
-    manifest declares ``extensions.embedder.backend: python``; the returned
-    model backs ``text_score()`` (called once per query, GIL re-acquired just
-    for the embed).
+    ``embedder_factory(config_json) -> EmbeddingModel`` is invoked when a
+    manifest declares an ``extensions.embedder`` whose ``library`` is anything
+    other than ``fastembed-rs`` (the only Rust-hosted engine); it receives the
+    whole ``extensions.embedder`` object serialized as JSON, so the library set
+    and its options live on the Python side. The returned model backs
+    ``text_score()`` (called once per query, GIL re-acquired just for the
+    embed).
     """
     ...
 
@@ -2511,7 +2514,7 @@ class KnowledgeGraph:
         """Find code entities by name, with disambiguation context.
 
         ⚠ **Code-entity search only.** ``find()`` searches nodes of type
-        ``Function``, ``Struct``, ``Class``, ``Enum``, ``Trait``,
+        ``Function``, ``Struct``, ``Class``, ``Mixin``, ``Enum``, ``Trait``,
         ``Protocol``, ``Interface``, ``Module``, or ``Constant`` — the
         types produced by code-graph builders (e.g. codingest). On graphs that don't
         contain these types (e.g. a social graph with ``Person`` nodes),
@@ -2739,7 +2742,9 @@ class KnowledgeGraph:
         """Set or query read-only mode for the Cypher layer.
 
         When enabled, all Cypher mutation queries (CREATE, SET, DELETE, REMOVE,
-        MERGE) are rejected, and ``describe()`` omits mutation docs.
+        MERGE) are rejected, and ``describe()`` announces the restriction in a
+        ``<read-only>`` element (the Cypher reference it renders is unchanged).
+        Read-only queries (MATCH, RETURN, CALL, etc.) are unaffected.
 
         Args:
             enabled: If ``True``, enable read-only mode. If ``False``, disable.
@@ -3855,8 +3860,8 @@ class KnowledgeGraph:
         """Materialize the in-memory graph as a disk-backed one.
 
         Builds CSR (Compressed Sparse Row) edge arrays in files and switches
-        the graph onto the disk backend. Nodes stay in memory (~40 bytes
-        each); edges are read through the mapping.
+        the graph onto the disk backend. Node slots become a mmap'd array of
+        16 bytes per node; edges are read through the mapping.
 
         With ``path``, the conversion writes into that directory and publishes
         it: the live handle ends on the published generation (mapped edges, no
@@ -5376,19 +5381,35 @@ class KnowledgeGraph:
         ...
 
     def list_indexes(self) -> list[dict[str, str]]:
-        """List all indexes. Each dict has ``type`` and ``property``."""
+        """List the in-memory equality indexes.
+
+        Each dict has ``node_type`` and ``property``. Range, composite and
+        disk-backed persistent indexes are not included.
+        """
         ...
 
     def has_index(self, node_type: str, property: str) -> bool:
-        """Check if an index exists."""
+        """Check if an in-memory equality index exists.
+
+        A disk-backed persistent index (one ``create_index`` reported as
+        ``persistent``) reports ``False``.
+        """
         ...
 
     def index_stats(self, node_type: str, property: str) -> Optional[dict[str, Any]]:
-        """Get statistics for an index. Returns ``None`` if not found."""
+        """Get statistics for an in-memory equality index.
+
+        Returns ``None`` when no such index exists — a disk-backed persistent
+        index reports ``None``.
+        """
         ...
 
     def rebuild_indexes(self) -> int:
-        """Rebuild all indexes. Returns the number of indexes rebuilt."""
+        """Rebuild the in-memory equality indexes.
+
+        Range, composite and disk-backed persistent indexes are left
+        untouched. Returns the number of indexes rebuilt.
+        """
         ...
 
     # ====================================================================
@@ -5406,7 +5427,8 @@ class KnowledgeGraph:
             property: Property name to index.
 
         Returns:
-            Dict with ``type``, ``property``, ``unique_values``, ``created``.
+            Dict with ``node_type``, ``property``, ``unique_values``,
+            ``created``.
 
         Example::
 
@@ -5435,7 +5457,8 @@ class KnowledgeGraph:
             properties: List of property names for the composite key.
 
         Returns:
-            Dict with ``type``, ``properties``, ``unique_combinations``.
+            Dict with ``node_type``, ``properties``, and
+            ``unique_combinations``.
         """
         ...
 
@@ -5860,8 +5883,8 @@ class KnowledgeGraph:
             max_lat: North bound latitude.
             min_lon: West bound longitude.
             max_lon: East bound longitude.
-            lat_field: Latitude property name. Default ``'latitude'``.
-            lon_field: Longitude property name. Default ``'longitude'``.
+            lat_field: Latitude property name. Default from spatial config or ``'latitude'``.
+            lon_field: Longitude property name. Default from spatial config or ``'longitude'``.
 
         Returns:
             A new KnowledgeGraph with only nodes in the bounding box.
@@ -5882,8 +5905,8 @@ class KnowledgeGraph:
             center_lat: Center latitude.
             center_lon: Center longitude.
             max_distance: Maximum distance in degrees.
-            lat_field: Latitude property name. Default ``'latitude'``.
-            lon_field: Longitude property name. Default ``'longitude'``.
+            lat_field: Latitude property name. Default from spatial config or ``'latitude'``.
+            lon_field: Longitude property name. Default from spatial config or ``'longitude'``.
 
         Returns:
             A new KnowledgeGraph with nearby nodes.
@@ -5927,7 +5950,8 @@ class KnowledgeGraph:
         Args:
             lat: Query point latitude.
             lon: Query point longitude.
-            geometry_field: WKT geometry property name. Default ``'geometry'``.
+            geometry_field: WKT geometry property name. Default from
+                spatial config or ``'geometry'``.
 
         Returns:
             A new KnowledgeGraph with containing nodes.
@@ -5943,7 +5967,8 @@ class KnowledgeGraph:
 
         Args:
             query_wkt: WKT string or shapely geometry object.
-            geometry_field: Geometry property name. Default ``'geometry'``.
+            geometry_field: Geometry property name. Default from spatial
+                config or ``'geometry'``.
 
         Returns:
             A new KnowledgeGraph with intersecting nodes.
@@ -5959,8 +5984,8 @@ class KnowledgeGraph:
         """Get geographic bounds of selected nodes.
 
         Args:
-            lat_field: Latitude property name. Default ``'latitude'``.
-            lon_field: Longitude property name. Default ``'longitude'``.
+            lat_field: Latitude property name. Default from spatial config or ``'latitude'``.
+            lon_field: Longitude property name. Default from spatial config or ``'longitude'``.
             as_shapely: If ``True``, return a ``shapely.geometry.Polygon``
                 (box) instead of a dict.
 
@@ -5980,8 +6005,8 @@ class KnowledgeGraph:
         """Get the geographic centroid (average lat/lon) of selected nodes.
 
         Args:
-            lat_field: Latitude property name. Default ``'latitude'``.
-            lon_field: Longitude property name. Default ``'longitude'``.
+            lat_field: Latitude property name. Default from spatial config or ``'latitude'``.
+            lon_field: Longitude property name. Default from spatial config or ``'longitude'``.
             as_shapely: If ``True``, return a ``shapely.geometry.Point``
                 instead of a dict.
 

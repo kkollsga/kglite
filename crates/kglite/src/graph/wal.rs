@@ -1,12 +1,10 @@
-//! Write-ahead log for durable in-memory graphs (Stage 1 of the
-//! embedded-Cypher-DB durability work).
-//!
-//! ## What this is
+//! Write-ahead log for durable in-memory graphs.
 //!
 //! A `.kgl-wal` sidecar holds an append-only sequence of **logical**
 //! mutation frames. Each committed mutation operation appends one
 //! [`WalFrame`] — a batch of [`MutationOp`]s tagged with a log-sequence
-//! number (LSN) — and `fsync`s. On open, the engine loads the `.kgl`
+//! number (LSN) — and makes it durable to the degree the configured
+//! [`DurabilityLevel`] promises. On open, the engine loads the `.kgl`
 //! checkpoint snapshot, then replays every WAL frame with
 //! `lsn > DirGraph::checkpoint_lsn` to recover work committed since the
 //! last checkpoint. A checkpoint (a full `.kgl` save) truncates the WAL
@@ -14,10 +12,8 @@
 //!
 //! The LSN is a **counter owned by the log**, not the graph `version`:
 //! the writing binding hands out `next_lsn` and increments it (see
-//! `KnowledgeGraph::flush_wal`). It is monotonic for the life of the log
-//! and survives checkpoint truncation, which is what lets the stamped
-//! `checkpoint_lsn` distinguish a frame the snapshot already contains
-//! from one committed after it. Graph `version` advances on work that is
+//! `KnowledgeGraph::flush_wal`), and it never restarts at a checkpoint
+//! (see [`WalFrame::lsn`]). Graph `version` advances on work that is
 //! never logged, and is not a log position.
 //!
 //! This module owns only the **on-disk format**: the op schema, the
@@ -142,8 +138,7 @@ pub enum DurabilityLevel {
 }
 
 impl DurabilityLevel {
-    /// Whether this level writes a WAL at all. `false` only for
-    /// [`DurabilityLevel::Off`].
+    /// Whether this level writes a WAL at all.
     #[inline]
     pub fn logs(self) -> bool {
         !matches!(self, Self::Off)
@@ -690,9 +685,6 @@ fn prepare_wal_file(path: &Path) -> io::Result<()> {
     if file_len == 0 {
         write_header(&mut file)?;
         file.sync_all()?;
-        // fsync the parent directory so the file's creation itself survives a
-        // crash (same doctrine as io/file.rs's atomic save: without this the
-        // fsync'd file can vanish with the unsynced directory entry).
         sync_parent_dir(path);
         return Ok(());
     }
@@ -892,9 +884,8 @@ mod tests {
         read_frames(Cursor::new(bytes), len)
     }
 
-    /// Open a WAL at the full barrier — the default level, and the one every
-    /// pre-existing test in this module was written against. Tests that care
-    /// about the no-barrier rung call [`Wal::open`] directly with
+    /// Open a WAL at the full barrier — the default level, and what tests in
+    /// this module assume unless they call [`Wal::open`] directly with
     /// [`SyncMode::PageCache`].
     fn open_wal(path: PathBuf) -> io::Result<Wal> {
         Wal::open(path, SyncMode::Barrier)
@@ -1323,7 +1314,7 @@ mod tests {
     }
 
     /// Garbage mid-file: recovery stops at the first bad frame and
-    /// returns everything before it (existing contract, locked in).
+    /// returns everything before it.
     #[test]
     fn garbage_mid_file_stops_at_first_bad_frame() {
         let good = vec![frame(1), frame(2)];

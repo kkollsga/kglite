@@ -284,9 +284,8 @@ fn normalize_and_validate_algo_params(
 
 impl<'a> CypherExecutor<'a> {
     /// [`normalize_and_validate_algo_params`] against this executor's graph,
-    /// with the non-fatal half recorded on the query: the scope warnings reach
-    /// `QueryDiagnostics.warnings` (and stderr) rather than being returned to
-    /// a caller that would have to know to look at them.
+    /// recording its non-fatal warnings on the query rather than returning
+    /// them to a caller that would have to know to look at them.
     fn validate_algo_params(
         &self,
         proc: &str,
@@ -390,7 +389,6 @@ impl<'a> CypherExecutor<'a> {
                     for (i, item_val) in items.into_iter().enumerate() {
                         self.check_interrupt_periodic(i)?;
                         if i + 1 == total {
-                            // Last item: move row instead of cloning
                             row.projected.insert(clause.alias.clone(), item_val);
                             new_rows.push(row);
                             break;
@@ -424,7 +422,6 @@ impl<'a> CypherExecutor<'a> {
                     // UNWIND null produces zero rows per Cypher spec
                 }
                 _ => {
-                    // Single value: move directly (no clone needed)
                     self.budget.reserve_rows(new_rows.len(), 1, "UNWIND")?;
                     row.projected.insert(clause.alias.clone(), val);
                     new_rows.push(row);
@@ -438,10 +435,6 @@ impl<'a> CypherExecutor<'a> {
             lazy_return_items: None,
         })
     }
-
-    // ========================================================================
-    // CALL (graph algorithm procedures)
-    // ========================================================================
 
     pub(super) fn execute_call(
         &self,
@@ -523,8 +516,8 @@ impl<'a> CypherExecutor<'a> {
         ) && (self.graph.graph.is_disk() || self.graph.graph.is_mapped());
 
         let mut params = self.extract_call_params(&clause.parameters)?;
-        // Alias the scoping keys and reject unknown config keys, so a typo or a
-        // wrong-procedure key errors instead of silently no-op'ing — see
+        // Alias the scoping keys and reject unknown config keys, so a typo
+        // errors instead of silently no-op'ing — see
         // `normalize_and_validate_algo_params`.
         self.validate_algo_params(proc_name.as_str(), &mut params)?;
 
@@ -832,10 +825,9 @@ impl<'a> CypherExecutor<'a> {
                 )?
             }
             "list_procedures" => {
-                // One row per registry entry — the registry is the single
-                // source of truth shared with YIELD validation and
-                // SHOW PROCEDURES (its predecessor here was a second
-                // hand-written list that had drifted from the validator).
+                // One row per registry entry — the same table that backs
+                // YIELD validation and SHOW PROCEDURES (see
+                // `valid_yield_columns`).
                 let mut rows = Vec::new();
                 for spec in super::procedure_registry::PROCEDURES {
                     let mut row = ResultRow::new();
@@ -867,10 +859,10 @@ impl<'a> CypherExecutor<'a> {
                 }
                 rows
             }
-            // Neo4j schema introspection procedures. Both yield
-            // a single `name` column; the underlying helpers in
-            // `introspection::schema_overview` are the single source of
-            // truth and are also consumed by `describe()` to prevent drift.
+            // Neo4j schema introspection procedures, each yielding a single
+            // string column (`label` / `relationshipType`). The underlying
+            // helpers in `introspection::schema_overview` are the single
+            // source of truth and are also consumed by `describe()`.
             "db.labels" => super::schema_procedures::execute_schema_procedure(
                 self,
                 &proc_name,
@@ -885,7 +877,7 @@ impl<'a> CypherExecutor<'a> {
             )?,
             // db.constraints() lists every declared constraint, sharing its
             // collector with `SHOW CONSTRAINTS` the way db.indexes() shares one
-            // with `SHOW INDEXES`. Identical dispatch, so one arm serves both.
+            // with `SHOW INDEXES`.
             "db.indexes" | "db.constraints" => super::schema_procedures::execute_schema_procedure(
                 self,
                 &proc_name,
@@ -917,8 +909,7 @@ impl<'a> CypherExecutor<'a> {
             )?,
             // db.graph_stats() yields one row with the top-level
             // counts (node_count, edge_count, label_count,
-            // relationship_type_count). Useful for an agent's first
-            // "what's in this graph?" query.
+            // relationship_type_count).
             "db.graph_stats" => super::schema_procedures::execute_schema_procedure(
                 self,
                 &proc_name,
@@ -927,8 +918,7 @@ impl<'a> CypherExecutor<'a> {
             )?,
             // db.property_stats(node_type, property) → one row with
             // value_count (non-null occurrences), null_count, and
-            // distinct_count. Helps agents understand cardinality
-            // before writing GROUP BY or selectivity-sensitive queries.
+            // distinct_count.
             "db.property_stats" => super::schema_procedures::execute_schema_procedure(
                 self,
                 &proc_name,
@@ -939,8 +929,7 @@ impl<'a> CypherExecutor<'a> {
             // property a candidate unique-index column? Yields
             // is_unique (true ⟺ distinct_count == value_count),
             // violation_count (value_count − distinct_count), and
-            // distinct_count. Common pre-flight before declaring a
-            // constraint.
+            // distinct_count.
             "db.property_uniqueness" => super::schema_procedures::execute_schema_procedure(
                 self,
                 &proc_name,
@@ -1056,7 +1045,6 @@ impl<'a> CypherExecutor<'a> {
             ));
         }
 
-        // Build feature vectors and run clustering
         let assignments = if let Some(ref prop_names) = properties {
             // ── Explicit property mode ──
             let mut features: Vec<Vec<f64>> = Vec::new();
@@ -1127,8 +1115,8 @@ impl<'a> CypherExecutor<'a> {
                 .map(|ca| (node_indices[valid_indices[ca.index]], ca.cluster))
                 .collect::<Vec<_>>()
         } else {
-            // ── Spatial mode ──
-            // Auto-detect lat/lon from spatial config
+            // ── Spatial mode: lat/lon auto-detected from the node type's
+            // spatial config ──
             let mut points: Vec<(f64, f64)> = Vec::new();
             let mut valid_indices: Vec<usize> = Vec::new();
 
@@ -1303,10 +1291,6 @@ impl<'a> CypherExecutor<'a> {
         Ok(rows)
     }
 
-    // ========================================================================
-    // UNION
-    // ========================================================================
-
     pub(super) fn execute_union(
         &self,
         clause: &UnionClause,
@@ -1339,8 +1323,6 @@ impl<'a> CypherExecutor<'a> {
             result_set.columns.clone()
         };
 
-        // Compute a row-hash for set operators. Returns the same value for
-        // structurally identical rows so HashSet membership matches.
         let row_hash = |row: &ResultRow, cols: &[String]| -> u64 {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -1675,10 +1657,8 @@ fn valid_yield_columns(
 
 /// Build `ResultRow`s for `db.indexes()` from structured `IndexInfo`.
 ///
-/// Column dispatch matches against `item.name`; the YIELD validator already
-/// pre-filtered to the known set so any unknown column would have been
-/// rejected at validate time. We still ignore unknowns defensively in case
-/// the validator's whitelist drifts.
+/// Unknown `item.name`s are ignored defensively: the YIELD validator already
+/// rejected them, so this only matters if its whitelist drifts.
 pub(super) fn indexes_to_rows(
     infos: &[crate::graph::introspection::schema_overview::IndexInfo],
     yield_items: &[YieldItem],

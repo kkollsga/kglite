@@ -15,8 +15,8 @@
 //
 // Runtime state: columnar `base` (read-only mmap) + HashMap `overlay`
 // for edges mutated since last save. The overlay grows with mutation
-// count, not graph size — bounded by workload, per the bounded-memory
-// constraint in `feedback_bounded_memory.md`.
+// count, not graph size — disk mode's bounded-memory rule forbids heap
+// structures that scale with the graph.
 //
 // Sequential access pattern: iterating edges in edge_idx order reads
 // offsets and heap linearly. Random single-edge lookups incur one
@@ -24,7 +24,6 @@
 // the retired zstd-decode-whole-HashMap-at-load path.
 //
 // Pre-0.14 format 0/1 graphs are rejected before payload decoding.
-// Current columnar reads store raw hashes and never touch the interner.
 
 use crate::datatypes::values::Value;
 use crate::graph::schema::{InternedKey, StringInterner};
@@ -36,8 +35,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// Filename constants for the columnar base. Both live under the graph's
-/// data directory alongside the existing CSR/column files.
+/// Columnar base filenames, written into the graph's data directory
+/// alongside the CSR/column files.
 pub const OFFSETS_FILE: &str = "edge_prop_offsets.bin";
 pub const HEAP_FILE: &str = "edge_prop_heap.bin";
 
@@ -62,8 +61,7 @@ pub struct EdgePropertyStoreMeta {
 struct ColumnarBase {
     /// offsets[edge_idx]..offsets[edge_idx + 1] = byte range in heap.
     offsets: MmapOrVec<u64>,
-    /// Concatenated Postcard blobs. Each populated slot is a
-    /// `Vec<(u64, Value)>` — u64 is the raw `InternedKey` hash.
+    /// Concatenated Postcard blobs, one `Vec<(u64, Value)>` per populated slot.
     heap: MmapBytes,
     codec: crate::serde_codec::CodecVersion,
 }
@@ -124,9 +122,8 @@ fn staged_path(path: &Path) -> PathBuf {
 }
 
 /// Encode `(InternedKey, Value)` pairs directly into the provided heap
-/// buffer. Avoids the per-edge `Vec<u8>` allocation that dominated
-/// save-path cost during PR2 phase-2 benchmarking. The interner is not
-/// consulted — we store the raw u64 hash.
+/// buffer. Avoids the per-edge `Vec<u8>` allocation that dominated measured
+/// save-path cost. The interner is not consulted — we store the raw u64 hash.
 fn encode_props_into(props: &[(InternedKey, Value)], heap: &mut Vec<u8>) -> io::Result<()> {
     let raw: Vec<(u64, &Value)> = props.iter().map(|(k, v)| (k.as_u64(), v)).collect();
     let encoded =
@@ -157,8 +154,7 @@ impl EdgePropertyStore {
     /// - Overlay hit: returns `Cow::Borrowed` (zero copy).
     /// - Overlay tombstone: returns `None`.
     /// - Base hit: deserializes the columnar slot into an owned `Vec`
-    ///   and wraps in `Cow::Owned`. No interner needed — the blob stores
-    ///   raw `InternedKey` u64 hashes directly.
+    ///   and wraps in `Cow::Owned`.
     pub fn get(&self, edge_idx: u32) -> Option<Cow<'_, [(InternedKey, Value)]>> {
         // Overlay first. `Some(None)` = explicit tombstone, hide base.
         if let Some(entry) = self.overlay.get(&edge_idx) {
@@ -286,14 +282,12 @@ impl EdgePropertyStore {
         let writing_in_place =
             self.base.as_ref().and_then(|b| b.offsets.file_path()) == Some(offsets_path.as_path());
 
-        // 0.8.12 phase-1 fast path: skip the O(upper_bound) sweep when
-        // no edge has any properties. The pre-phase-1 loop ran 6.7M
-        // overlay HashMap lookups and wrote a 54 MB all-zero offsets
-        // file on every save of a property-less wiki500m graph — ~1–2 s
-        // per save. Now we emit zero-length files and reload resolves
-        // to an empty base (see matching guard in `load_from`). Every
-        // `get(edge_idx)` on the reloaded store returns `None`, which
-        // is exactly what the full-sweep path produced anyway.
+        // Fast path: skip the O(upper_bound) sweep when no edge has any
+        // properties. The sweep ran 6.7M overlay HashMap lookups and wrote a
+        // 54 MB all-zero offsets file on every save of a property-less
+        // wiki500m graph — ~1–2 s per save. Zero-length files instead; reload
+        // resolves them to an empty base (matching guard in `load_from`) and
+        // every `get(edge_idx)` returns `None`, as the full sweep did.
         if self.is_empty() {
             // A base mapping these paths contributes nothing readable here
             // (`is_empty` already proved it holds no edges), so releasing it
@@ -346,7 +340,8 @@ impl EdgePropertyStore {
             std::fs::rename(&heap_out, &heap_path)?;
         }
 
-        // Remove the legacy file if it's lingering from a format=0 load.
+        // Drop the retired pre-0.14 combined file if a rebuilt graph is being
+        // written over a directory that still carries one.
         let legacy = target_dir.join(LEGACY_FILE);
         if legacy.exists() {
             let _ = std::fs::remove_file(&legacy);
@@ -394,13 +389,12 @@ impl EdgePropertyStore {
         if !offsets_path.exists() {
             return Ok(Self::new());
         }
-        // 0.8.12 phase-1: the save path now emits zero-length
-        // offsets/heap files for the "no properties anywhere" case.
-        // `MmapOrVec::load_mapped` with `len == 0` would try to
-        // `map_mut` a zero-byte region, which fails on some platforms.
-        // Short-circuit to an empty store — every `get()` on this
-        // store will resolve via the overlay check (base is None) and
-        // return `None`, matching the semantic of "no edge has props".
+        // The save path emits zero-length offsets/heap files for the "no
+        // properties anywhere" case, and `MmapOrVec::load_mapped` with
+        // `len == 0` would `map_mut` a zero-byte region, which fails on some
+        // platforms. Short-circuit to an empty store: `get()` resolves via the
+        // overlay check (base is `None`) and returns `None`, which is the
+        // semantic of "no edge has props".
         if meta.offsets_len == 0 {
             return Ok(Self::new());
         }
@@ -416,10 +410,10 @@ impl EdgePropertyStore {
         })
     }
 
-    /// Compute the on-disk metadata for this store — call after `save_to`
+    /// On-disk metadata for the columnar files in `dir` — call after `save_to`
     /// or [`EdgePropertyWriter::finish`] to get the values that belong in
-    /// `DiskGraphMeta`. The returned counts reflect what was just written,
-    /// not the in-memory state.
+    /// `DiskGraphMeta`. The counts are read back off the files, so they reflect
+    /// what was written, not any in-memory state.
     pub fn meta_for(dir: &Path) -> EdgePropertyStoreMeta {
         let offsets = dir.join(OFFSETS_FILE);
         let heap = dir.join(HEAP_FILE);
@@ -823,17 +817,16 @@ mod tests {
 
     #[test]
     fn empty_store_save_emits_zero_length_files_and_reload_preserves_semantics() {
-        // 0.8.12 phase-1 fast path: when no edge has properties, save
-        // must not sweep `0..upper_bound` or write a 54 MB all-zero
-        // offsets file. Verify the files are zero-length *and* that a
-        // reload with a large `upper_bound` answers `get()` as None for
-        // every edge.
+        // Pins the empty-store fast path: when no edge has properties, save
+        // must not sweep `0..upper_bound` or write a 54 MB all-zero offsets
+        // file. Verify the files are zero-length *and* that a reload with a
+        // large `upper_bound` answers `get()` as None for every edge.
         let tmp = TempDir::new().unwrap();
         let mut interner = StringInterner::new();
         let mut s = EdgePropertyStore::new();
 
-        // upper_bound is deliberately large — pre-phase-1 this would
-        // have written 1_000_000 * 8 = 8 MB of zeros.
+        // upper_bound is deliberately large — the sweep would have written
+        // 1_000_000 * 8 = 8 MB of zeros.
         s.save_to(tmp.path(), 1_000_000).unwrap();
 
         let offsets_meta = std::fs::metadata(tmp.path().join(OFFSETS_FILE)).unwrap();
@@ -847,8 +840,8 @@ mod tests {
 
         let reloaded = EdgePropertyStore::load_from(tmp.path(), 2, meta, &mut interner).unwrap();
         assert!(reloaded.is_empty());
-        // get() on any edge_idx returns None — matches the pre-phase-1
-        // behavior where every edge had an empty slot.
+        // get() on any edge_idx returns None — matches the sweep's behavior
+        // where every edge had an empty slot.
         assert!(reloaded.get(0).is_none());
         assert!(reloaded.get(999_999).is_none());
         assert!(reloaded.get(u32::MAX).is_none());

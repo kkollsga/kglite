@@ -447,7 +447,6 @@ fn distinct_fusable_3elem_with_constrained_group(
         _ => return false,
     };
 
-    // Find the group variable from the next clause's non-aggregate items.
     let group_var: Option<&str> = match next_clause {
         Clause::Return(r) => r.items.iter().find_map(|item| {
             if is_aggregate_expression(&item.expression) {
@@ -501,8 +500,8 @@ fn distinct_fusable_3elem_with_constrained_group(
 /// 3. The RETURN is either a lone `count(*)`, or all non-aggregate items group
 ///    by one endpoint node variable or direct properties of that variable
 /// 4. All `count()` args reference the second node variable (or `*`)
-/// 5. `count(DISTINCT v)` is allowed when `v` is the OTHER node variable AND
-///    the group node is type/property constrained (see
+/// 5. `count(DISTINCT v)` is allowed when `v` is the OTHER node variable or the
+///    edge variable, AND the group node is type/property constrained (see
 ///    `distinct_fusable_3elem_with_constrained_group`).
 pub(crate) fn fuse_match_return_aggregate(query: &mut CypherQuery, has_secondary_labels: bool) {
     use crate::graph::languages::cypher::ast::is_aggregate_expression;
@@ -608,8 +607,9 @@ pub(crate) fn fuse_match_return_aggregate(query: &mut CypherQuery, has_secondary
         };
 
         // Edge property filters and variable-length edges require the full executor.
-        // Node property filters on the second (unbound) node are allowed — the
-        // counting loop checks them inline via columnar access.
+        // Node property filters on the 3-element pattern's second (unbound) node
+        // are allowed — the counting loop checks them inline via columnar access.
+        // (The 5-element branch above already bailed on its own node filters.)
         if edge_has_props {
             i += 1;
             continue;
@@ -646,9 +646,9 @@ pub(crate) fn fuse_match_return_aggregate(query: &mut CypherQuery, has_secondary
         // instead of the materialised edge-row set.
         //
         // distinct_count is true when a count aggregate uses DISTINCT on the
-        // OTHER node variable: the executor's node-centric path dedups peers
-        // via a per-group HashSet<NodeIndex>, bypassing the edge-centric fast
-        // path (which counts edges, not distinct peers).
+        // OTHER node variable or the edge variable: the executor's node-centric
+        // path dedups peer NodeIndices per group, bypassing the edge-centric
+        // fast path (which counts edges, not distinct peers).
         let (fusable, distinct_count) = if let Clause::Return(r) = &query.clauses[i + 1] {
             if r.distinct {
                 (false, false)
@@ -678,7 +678,6 @@ pub(crate) fn fuse_match_return_aggregate(query: &mut CypherQuery, has_secondary
                 let mut count_var_ok = true;
                 let mut saw_distinct = false;
 
-                // First pass: identify which variable group-by items reference
                 for item in &r.items {
                     if !is_aggregate_expression(&item.expression) {
                         let refs_var = match &item.expression {
@@ -718,7 +717,7 @@ pub(crate) fn fuse_match_return_aggregate(query: &mut CypherQuery, has_secondary
                             all_valid = false;
                         }
                     } else {
-                        all_valid = false; // no group keys found
+                        all_valid = false;
                     }
                 }
 
@@ -734,7 +733,6 @@ pub(crate) fn fuse_match_return_aggregate(query: &mut CypherQuery, has_secondary
                     all_valid = false;
                 }
 
-                // Second pass: check count() aggregates
                 if all_valid {
                     let other_var = if group_var == first_var.as_deref() {
                         &second_var
@@ -764,12 +762,13 @@ pub(crate) fn fuse_match_return_aggregate(query: &mut CypherQuery, has_secondary
                                     //   (a) the OTHER node variable
                                     //       (`MATCH (a)-[:E]->(b) RETURN b,
                                     //       count(a)`: group=b, other=a), or
-                                    //   (b) the edge variable — a 3-element
-                                    //       pattern has exactly one edge per
-                                    //       (other, group) pair, so
+                                    //   (b) the edge variable — both count the
+                                    //       same per-row pattern matches, so
                                     //       count(r) ≡ count(other).
-                                    // DISTINCT on either is allowed: dedup by
-                                    // NodeIndex / EdgeIndex per group.
+                                    // DISTINCT on either sets `distinct_count`;
+                                    // the executor then counts distinct peer
+                                    // NodeIndices per group, never distinct
+                                    // edges.
                                     if let Some(Expression::Variable(var)) = args.first() {
                                         let matches_other =
                                             other_var.as_deref() == Some(var.as_str());
@@ -1213,7 +1212,6 @@ fn try_fuse_two_match_with_aggregate(query: &mut CypherQuery, i: usize) -> bool 
         return false;
     }
 
-    // ---- M1 inspection ----
     let (m1_first_var, m1_second_var, m1_edge_var) = {
         let m1 = if let Clause::Match(m) = &query.clauses[i] {
             m
@@ -1245,7 +1243,6 @@ fn try_fuse_two_match_with_aggregate(query: &mut CypherQuery, i: usize) -> bool 
         (first_var, second_var, m1_edge_var)
     };
 
-    // ---- M2 inspection ----
     let (m2_shared_var, m2_edge_var) = {
         let m2 = if let Clause::Match(m) = &query.clauses[i + 1] {
             m
@@ -1292,7 +1289,6 @@ fn try_fuse_two_match_with_aggregate(query: &mut CypherQuery, i: usize) -> bool 
         (shared, edge_var)
     };
 
-    // ---- WITH inspection ----
     let w = if let Clause::With(w) = &query.clauses[i + 2] {
         w
     } else {
@@ -1392,9 +1388,8 @@ fn try_fuse_two_match_with_aggregate(query: &mut CypherQuery, i: usize) -> bool 
             with_clause,
             secondary_match: Some(secondary),
             top_k: None,
-            // The 2-MATCH variant counts edges (m2_edge_var); DISTINCT
-            // semantics on edges collapse to the same as non-distinct since
-            // edge bindings are unique per row. Always false here.
+            // The 2-MATCH variant counts edges (m2_edge_var), and the WITH
+            // gate above rejects DISTINCT outright.
             distinct_count: false,
         },
     );
@@ -1402,9 +1397,11 @@ fn try_fuse_two_match_with_aggregate(query: &mut CypherQuery, i: usize) -> bool 
 }
 
 /// Fuse MATCH (node-edge-node) + WITH (group-by + count) into a single pass
-/// that counts edges directly per node. Same criteria as
-/// `fuse_match_return_aggregate` but targets WITH clauses so the pipeline can
-/// continue (e.g. out-degree histogram: WITH p, count(cited) → RETURN).
+/// that counts edges directly per node — the `fuse_match_return_aggregate`
+/// shape aimed at WITH so the pipeline can continue (e.g. out-degree
+/// histogram: WITH p, count(cited) → RETURN). Narrower than that pass: no
+/// 5-element patterns, no property group keys, and a property filter on the
+/// second node bails.
 pub(crate) fn fuse_match_with_aggregate(query: &mut CypherQuery, has_secondary_labels: bool) {
     use crate::graph::languages::cypher::ast::is_aggregate_expression;
 
@@ -1494,7 +1491,7 @@ pub(crate) fn fuse_match_with_aggregate(query: &mut CypherQuery, has_secondary_l
         }
 
         // (fusable, distinct_count) — distinct_count tracks whether
-        // count(DISTINCT v) was seen on the OTHER node variable.
+        // count(DISTINCT v) was seen on the OTHER node or the edge variable.
         let (fusable, distinct_count) = if let Clause::With(w) = &query.clauses[i + 1] {
             if w.distinct {
                 (false, false)
@@ -1647,9 +1644,9 @@ pub(crate) fn fuse_match_with_aggregate(query: &mut CypherQuery, has_secondary_l
 /// Python actually accesses cells.
 ///
 /// Eligible when (conservative cut):
-/// - The query is exactly one MATCH (or OptionalMatch) and a terminal RETURN,
-///   with no WHERE in any form (see the WART note in the body). No WITH, no
-///   UNWIND, no CALL — WITH binds projected values whose property extraction
+/// - Every clause is a MATCH / OPTIONAL MATCH (any number, none carrying a
+///   WHERE — see the WART note in the body) plus one terminal RETURN. No WITH,
+///   no UNWIND, no CALL — WITH binds projected values whose property extraction
 ///   goes through a different resolver path than node_bindings.
 /// - Every RETURN item is `PropertyAccess` (single-property reads). Plain
 ///   `Variable(v)` returns a whole-node value the lazy resolver doesn't handle.

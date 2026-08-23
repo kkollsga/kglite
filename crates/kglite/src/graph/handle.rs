@@ -7,18 +7,17 @@
 //! Python-flavored state (selection / reports / mutation stats /
 //! temporal context / default timeout / default max rows).
 //!
-//! This is the **Rust-side** `KnowledgeGraph`. The Python-side
-//! `KnowledgeGraph` (the `#[pyclass]` wrapper backing
-//! `pip install kglite`'s `import kglite`) lives in the
-//! `kglite-py` crate at `crates/kglite-py/src/graph/mod.rs`. Two
-//! types named `KnowledgeGraph` exist in distinct crates with
-//! distinct audiences; mirrors the polars precedent
+//! This is the **Rust-side** `KnowledgeGraph`; the Python-side one
+//! (the `#[pyclass]` wrapper backing `pip install kglite`'s
+//! `import kglite`) lives in the `kglite-py` crate at
+//! `crates/kglite-py/src/graph/mod.rs` — same name, distinct crates
+//! and audiences, mirroring the polars precedent
 //! (`polars::DataFrame` vs `polars.DataFrame`).
 //!
-//! The heavy logic — `source_location` + `resolve_code_entity` —
-//! lives as free functions in this module so the wheel's full
-//! `KnowledgeGraph` can delegate to the same implementation,
-//! keeping the single source of truth in `kglite` (the core).
+//! The code-entity and exporter-column logic lives as free functions
+//! in this module so the wheel's full `KnowledgeGraph` delegates to
+//! the same implementation, keeping the single source of truth in
+//! `kglite` (the core).
 
 use std::sync::Arc;
 
@@ -31,12 +30,10 @@ use crate::graph::schema;
 use crate::graph::storage::GraphRead;
 use crate::graph::{SourceLocation, SourceLookup};
 
-/// Code-entity node types used by `source_location` / `resolve_code_entity`
-/// when the caller doesn't specify a `node_type`. Matches what the
-/// code-graph builders (e.g. codingest) emit — language-specific subsets (Rust:
-/// `Struct`/`Enum`/`Trait`; Python: `Class`/`Mixin`/`Protocol`; etc.)
-/// are all listed so a single search covers every supported source
-/// language.
+/// Code-entity node types searched when the caller specifies no `node_type`.
+/// The union of what the code-graph builders (e.g. codingest) emit: the
+/// per-language subsets are all listed so a single search covers every
+/// supported source language.
 pub const CODE_TYPES: &[&str] = &[
     "Function",
     "Struct",
@@ -452,9 +449,8 @@ pub fn discover_property_keys_excluding(
 /// from a miss ([`SourceLookup::NotFound`]).
 ///
 /// All optional fields on [`SourceLocation`] mirror the
-/// corresponding node fields. Graphs built from non-code-tree
-/// sources (e.g. a codingest-built code graph, or a
-/// manually-constructed graph) may have fewer populated.
+/// corresponding node fields, and are `None` when the graph's
+/// builder did not populate them.
 pub fn source_location(dir: &Arc<DirGraph>, name: &str, node_type: Option<&str>) -> SourceLookup {
     // Arena guard: disk-backed node reads materialize into the query arena
     // (protocol in disk/graph.rs); no-op on memory/mapped.
@@ -505,11 +501,9 @@ pub fn source_location(dir: &Arc<DirGraph>, name: &str, node_type: Option<&str>)
     }
 }
 
-/// Thin pure-Rust graph handle. Holds an `Arc<DirGraph>` plus an
-/// optional [`Embedder`] for `text_score()` queries. For Rust
-/// embedders (mcp-server, bolt-server, third-party binaries) that
-/// don't need the Python wheel's full state — see the module docs
-/// for the two same-named types.
+/// Thin pure-Rust graph handle: an `Arc<DirGraph>` plus an optional
+/// [`Embedder`] for `text_score()` queries. See the module docs for the
+/// intended embedders and the two same-named types.
 pub struct KnowledgeGraph {
     inner: Arc<DirGraph>,
     embedder: Option<Arc<dyn Embedder>>,
@@ -592,9 +586,8 @@ pub(crate) fn make_dir_graph_mut_preserving_lineage(arc: &mut Arc<DirGraph>) -> 
     // over the shared base too — one `Arc::get_mut` probe when nothing is
     // shared, which is the steady state.
     graph.graph.ensure_writable();
-    // The same fold for `id_indices`, whose entries layer over a shared base of
-    // their own: `Arc::get_mut` plus an O(delta) merge per entry, so a bare
-    // probe when nothing is shared.
+    // The same fold for `id_indices`, whose entries layer over a shared base
+    // of their own: `Arc::get_mut` plus an O(delta) merge per entry.
     graph.id_indices.try_compact();
     // ...and for `type_indices`, whose buckets are stacks of shared levels.
     graph.type_indices.try_compact();
@@ -614,12 +607,11 @@ pub(crate) fn make_dir_graph_mut_preserving_lineage(arc: &mut Arc<DirGraph>) -> 
     graph
 }
 
-/// Get a `&mut DirGraph` from an `Arc<DirGraph>` and bump the version
-/// counter. Wraps [`Arc::make_mut`] plus the canonical post-mutation version
-/// increment that downstream OCC commit-checks + the plan cache rely on. The
-/// single entry point for bindings + embedders that hold an `Arc<DirGraph>`
-/// and want to mutate it. (Homed here rather than in `dir_graph.rs` to keep
-/// that file under the god-file ceiling.)
+/// Get a `&mut DirGraph` from an `Arc<DirGraph>`, bumping the version counter
+/// that downstream OCC commit-checks + the plan cache rely on. The single
+/// entry point for bindings + embedders that hold an `Arc<DirGraph>` and want
+/// to mutate it. (Homed here rather than in `dir_graph.rs` to keep that file
+/// under the god-file ceiling.)
 ///
 /// **Cost when other `Arc<DirGraph>` references exist** (a snapshot held by an
 /// open transaction, a clone held by a still-alive `ResultView`, a `freeze()`):
@@ -822,9 +814,6 @@ mod boundary_lift_tests {
 /// only where node storage is genuinely duplicated
 /// (`backend::note_nodes_copied`). A test that cannot tell the fix from the
 /// defect is worse than no test.
-///
-/// These pin behaviour in both directions and must not be relaxed: if a later
-/// phase makes the fork copy nodes again, this file is what says so.
 #[cfg(test)]
 mod held_reference_clone_tests {
     use super::*;

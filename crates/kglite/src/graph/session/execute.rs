@@ -129,10 +129,8 @@ impl<'a> ExecuteOptions<'a> {
     }
 
     /// Eager-execution defaults — the constructor for any binding without a
-    /// lazy result materializer: `lazy_eligible: false`, no deadline, no
-    /// max_rows, no disabled passes, no embedder. Override individual fields
-    /// after construction (deadline for timeouts, embedder when `text_score()`
-    /// queries are expected).
+    /// lazy result materializer (`lazy_eligible: false`). Override individual
+    /// fields after construction.
     pub fn eager(params: &'a HashMap<String, Value>) -> Self {
         Self {
             params,
@@ -618,9 +616,10 @@ fn prepare(
     cypher::plan_cache::instrumentation::begin_prepare();
     // Plan cache: a param-less, codec-free, no-disabled-passes query against an
     // unchanged graph reuses its fully-optimized plan, skipping parse + validate
-    // + optimize. Keyed on (graph_id, version) so any mutation invalidates it
-    // and it never leaks across graphs (see `cypher::plan_cache`). Lazy-marking
-    // is applied fresh per call since it depends on `opts.lazy_eligible`.
+    // + optimize. Keyed on (graph_id, version, lazy_eligible) so any mutation
+    // invalidates it and it never leaks across graphs (see
+    // `cypher::plan_cache`). [`cached_plan`] carries the hit-path soundness
+    // argument.
     let cacheable = opts.params.is_empty()
         && opts.disabled_passes.is_none_or(|s| s.is_empty())
         && opts.value_codecs.is_none_or(|c| c.is_empty());
@@ -712,7 +711,6 @@ fn prepare(
             Cow::Borrowed(opts.params)
         };
 
-    // The static empty set avoids a HashSet allocation in the common case.
     let disabled_default = cypher::planner::empty_disabled_set();
     let disabled_ref = opts.disabled_passes.unwrap_or(disabled_default);
     cypher::planner::optimize_with_disabled(&mut parsed, graph, &params, disabled_ref);

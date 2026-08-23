@@ -61,9 +61,8 @@ fn empty_store_like(source: &ColumnStore, interner: &StringInterner) -> ColumnSt
 
 /// Append `source`'s row `row_id` to `destination`, returning its new row id.
 ///
-/// `scratch` is the caller's reusable property buffer — this runs once per live
-/// node, and a fresh `Vec` per row was the allocation the in-memory rebuild
-/// pass had to hoist out for exactly the same reason.
+/// `scratch` is the caller's reusable property buffer: this runs once per live
+/// node, so a fresh `Vec` per row would allocate once per node.
 fn copy_row(
     source: &ColumnStore,
     row_id: u32,
@@ -93,7 +92,8 @@ impl DirGraph {
     /// into a **scratch directory under the system temp location**.
     ///
     /// Enables columnar storage first, then builds CSR edge arrays on disk.
-    /// Nodes stay in memory (~40 bytes each), edges are mmap'd.
+    /// Node slots become a 16-byte-per-node mmap'd array alongside the mmap'd
+    /// CSR and edge properties.
     ///
     /// The scratch directory is process-scoped: it is removed when this graph
     /// drops, so nothing here survives the process. To *land* the converted
@@ -160,8 +160,7 @@ impl DirGraph {
 
         // The heap backend owns the stores; the new `DiskGraph` must inherit
         // them, or every columnar property read returns Null after the switch.
-        // A DirGraph-level copy once survived the swap and an explicit
-        // mirror step pushed it in — there is no such copy now.
+        // There is no DirGraph-level mirror to push them in afterwards.
         let carried_stores: HashMap<InternedKey, Arc<ColumnStore>> = self
             .graph
             .column_stores_iter()
@@ -212,7 +211,8 @@ impl DirGraph {
     }
 
     /// Build CSR from pending edges if in disk mode. No-op otherwise.
-    /// Called after add_connections, before queries, and before save.
+    /// Called after `add_connections` and Cypher edge creation, so queries see
+    /// them, and by the save path.
     pub fn ensure_disk_edges_built(&mut self) -> Result<(), String> {
         if let GraphBackend::Disk(ref mut dg) = self.graph {
             dg.build_csr_from_pending()
@@ -291,7 +291,7 @@ impl DirGraph {
         self.consolidate_disk_for_save(dir)?;
 
         // save_to_dir needs &mut access so the edge-property store can
-        // drop its base mmap before overwriting (PR2).
+        // drop its base mmap before overwriting.
         let dg = match &mut self.graph {
             GraphBackend::Disk(dg) => dg,
             _ => return Err("save_disk requires disk mode".to_string()),
@@ -505,11 +505,10 @@ impl DirGraph {
         // locality the original build gave them.
         //
         // **Cost.** Two allocations are sized by the *compacted types*: the
-        // replacement stores (the live data itself, heap-resident even where
-        // the store they replace was mmap-backed) and the node-slot overlay,
-        // which takes one entry per renumbered slot because a published
-        // generation's `node_slots.bin` may be mapped by other readers and must
-        // not be written through. A rewriting save already materialises every
+        // replacement stores, and the node-slot overlay, which takes one entry
+        // per renumbered slot because a published generation's
+        // `node_slots.bin` may be mapped by other readers and must not be
+        // written through. A rewriting save already materialises every
         // column as bytes to write `columns.bin`, so this is a constant factor
         // on a path already sized by the graph, not a new order of growth.
         let mut pairs: Vec<(InternedKey, Value)> = Vec::new();
@@ -545,15 +544,15 @@ impl DirGraph {
 
     /// Write the unified `columns.bin` mega-file for a graph that has none.
     ///
-    /// Mode 3 (0.9.15): a fresh save — streaming carve, `save_subset`, or the
+    /// Since 0.9.15 a fresh save — streaming carve, `save_subset`, or the
     /// mutation persist of an in-memory build — emits the same layout the
     /// ntriples builder produces, so the saved graph reloads through the mmap
     /// fast path. Without it a saved `DiskGraph` fell back to per-type zstd
     /// sidecars and took ~70 s to load on a 17 M-node Wikidata carve against
     /// ~150 ms for the full graph.
     ///
-    /// A pre-existing `columns.bin` (root or `seg_000/`, the pre- and
-    /// post-phase-4 layouts) means the ntriples builder already wrote one;
+    /// A pre-existing `columns.bin` (the legacy flat root or the segmented
+    /// `seg_000/`) means the ntriples builder already wrote one;
     /// [`Self::write_column_sidecars`] covers the types added since.
     fn write_unified_column_file(&self, dir: &std::path::Path) -> Result<(), String> {
         let preexisting_columns_bin =

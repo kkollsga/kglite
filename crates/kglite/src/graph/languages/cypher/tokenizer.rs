@@ -56,14 +56,11 @@ pub enum CypherToken {
     Having,
     Xor,
 
-    // Parameters
-    //
-    // Both spellings produce this one token: `$name` and the Neo4j 5
-    // parenthesised form `$(name)`. They are the same reference to the same
-    // parameter, so collapsing them here means every consumer — the value
-    // path, the pattern re-serializer, `parameter_names` — handles the new
-    // spelling without a second arm. `$(...)` accepts a parameter *name*
-    // only; the general `$(<expression>)` form is not implemented.
+    // Both spellings produce this one token — they are the same reference to
+    // the same parameter, so collapsing them here means every consumer (the
+    // value path, the pattern re-serializer, `parameter_names`) handles the
+    // parenthesised spelling without a second arm. Spelling and the
+    // name-only restriction are on `lex_parameter`.
     Parameter(String), // $param_name / $(param_name)
 
     LParen,      // (
@@ -108,10 +105,6 @@ pub enum CypherToken {
     /// stream first.
     BlockCommentOpen,
 }
-
-// ============================================================================
-// Tokenizer
-// ============================================================================
 
 /// Tokenizer output: positioned tokens plus the verbatim source
 /// lexeme of every keyword token.
@@ -182,13 +175,12 @@ fn lex_parameter(chars: &[char], at: usize) -> Result<(String, usize, usize), St
 /// Same as [`tokenize_cypher`] but returns the **char-position** at
 /// the start of each token, alongside the token — plus the verbatim
 /// keyword lexeme table (see [`TokenizedCypher`]). 0.9.0 Cluster 3 —
-/// the parser uses positions to format byte-precise `(line, col)` in
-/// error messages instead of the prior approximate token re-walk.
+/// the parser uses positions to point at the exact token in error
+/// messages instead of the prior approximate token re-walk.
 ///
 /// Char-position is the index into `input.chars().collect()` —
-/// converted to byte offset / line:col by the consumer on error
-/// (rare path; not worth a parallel byte-offset table for the hot
-/// path).
+/// `parse_cypher` walks the input to turn it into 1-based line/col on
+/// the error path only, so nothing parallel is kept for the hot path.
 pub fn tokenize_cypher_with_positions(input: &str) -> Result<TokenizedCypher, String> {
     let mut tokens: Vec<(CypherToken, usize)> = Vec::new();
     let mut keyword_lexemes: Vec<(usize, String)> = Vec::new();
@@ -463,10 +455,7 @@ pub fn tokenize_cypher_with_positions(input: &str) -> Result<TokenizedCypher, St
                             // parsed as a Dash token followed by the
                             // positive literal — so `-9223372036854775808`
                             // is unrepresentable through the normal
-                            // route. Look back: if we're directly after a
-                            // Dash and the digit string is exactly 2^63,
-                            // consume the Dash and emit IntLit(i64::MIN).
-                            // Otherwise the literal is genuinely too large.
+                            // route, so the Dash is folded in here instead.
                             if num_str == "9223372036854775808"
                                 && tokens
                                     .last()
@@ -626,8 +615,9 @@ fn keyword_token(ident: &str) -> Option<CypherToken> {
     Some(tok)
 }
 
-/// Convert a keyword token back to its string form for use as an alias name.
-/// Returns None for non-keyword tokens (symbols, literals, etc.).
+/// Lowercase source word for a keyword token — the spelling used for `AS`
+/// aliases and, uppercased, for keywords in parser error messages. `None`
+/// for symbols, literals and identifiers.
 pub fn token_to_keyword_name(token: &CypherToken) -> Option<String> {
     let name = match token {
         CypherToken::Match => "match",
@@ -696,8 +686,7 @@ pub fn token_to_keyword_name(token: &CypherToken) -> Option<String> {
 /// parser stores is the **verbatim source lexeme** from
 /// [`TokenizedCypher::keyword_lexemes`] (`{order: 1}` → key `order`, matching
 /// Neo4j's case-preserving property keys). The canonical uppercase returned
-/// here is only the fallback for parsers constructed without a lexeme table
-/// (unit tests).
+/// here is only the fallback for a token index missing from that table.
 ///
 /// Distinct from `token_to_keyword_name` (lowercase, for `AS` aliases).
 ///
@@ -873,7 +862,7 @@ fn token_symbol(token: &CypherToken) -> Option<&'static str> {
 /// value position never consults this and keeps reading the literal
 /// (`{x: true}`, `WHERE n.x = true`, `RETURN null`). As with the soft keywords
 /// the stored NAME is the verbatim lexeme; this word is only the fallback for
-/// parsers built without a lexeme table (unit tests).
+/// a token index missing from that table.
 pub fn reserved_literal_name_token(token: &CypherToken) -> Option<&'static str> {
     match token {
         CypherToken::True => Some("TRUE"),

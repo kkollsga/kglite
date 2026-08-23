@@ -46,8 +46,7 @@ impl LeaseState {
         }
         let state = unsafe { Box::from_raw(handle.cast::<LeaseState>()) };
         // Dropping the lease *is* the release — `GraphWriterLease::drop`
-        // unlocks the sidecar. Spelled out rather than left to the Box drop,
-        // because the release point is what a reader comes here to find.
+        // unlocks the sidecar; spelled out rather than left to the Box drop.
         drop(state.inner);
     }
 }
@@ -238,8 +237,8 @@ unsafe fn acquire_lease(
 /// # Safety
 ///
 /// `lease` must be either null or a pointer previously returned by
-/// [`kglite_writer_lease_acquire`] and not yet freed. Calling twice on the
-/// same pointer is UB.
+/// [`kglite_writer_lease_acquire`] or [`kglite_writer_lease_acquire_ex`] and
+/// not yet freed. Calling twice on the same pointer is UB.
 #[no_mangle]
 pub unsafe extern "C" fn kglite_writer_lease_free(lease: *mut KgliteWriterLease) {
     crate::ffi::void_boundary(|| unsafe { LeaseState::free_handle(lease) });
@@ -327,10 +326,9 @@ pub unsafe extern "C" fn kglite_open_or_create_graph_in_mode(
                 Ok(s) => s,
                 Err(_) => return KgliteStatusCode::InvalidUtf8,
             };
-            // Null mode is the C spelling of `Option::None` — unspecified,
-            // not "memory". Parsed up front so an unknown spelling is
-            // rejected even when the path exists and the mode would only
-            // have been consulted for a conversion.
+            // Parsed up front so an unknown spelling is rejected even when
+            // the path exists and the mode would only have been consulted
+            // for a conversion.
             let requested = if mode.is_null() {
                 None
             } else {

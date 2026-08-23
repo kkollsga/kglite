@@ -30,7 +30,7 @@ fn build_chain_graph() -> (DirGraph, Vec<petgraph::graph::NodeIndex>) {
     (graph, indices)
 }
 
-/// Build a triangle graph: A -- B -- C -- A
+/// Build a triangle graph: A -> B -> C -> A
 fn build_triangle_graph() -> (DirGraph, Vec<petgraph::graph::NodeIndex>) {
     let mut graph = DirGraph::new();
     let mut indices = Vec::new();
@@ -49,7 +49,6 @@ fn build_triangle_graph() -> (DirGraph, Vec<petgraph::graph::NodeIndex>) {
             .push(idx);
         indices.push(idx);
     }
-    // A->B, B->C, C->A
     let pairs = [(0, 1), (1, 2), (2, 0)];
     for (from, to) in pairs {
         let edge = EdgeData::new("LINK".to_string(), HashMap::new(), &mut graph.interner);
@@ -77,18 +76,12 @@ fn build_disconnected_graph() -> (DirGraph, Vec<petgraph::graph::NodeIndex>) {
             .push(idx);
         indices.push(idx);
     }
-    // Component 1: A-B
     let edge_ab = EdgeData::new("LINK".to_string(), HashMap::new(), &mut graph.interner);
     graph.graph.add_edge(indices[0], indices[1], edge_ab);
-    // Component 2: C-D
     let edge_cd = EdgeData::new("LINK".to_string(), HashMap::new(), &mut graph.interner);
     graph.graph.add_edge(indices[2], indices[3], edge_cd);
     (graph, indices)
 }
-
-// ========================================================================
-// shortest_path
-// ========================================================================
 
 #[test]
 fn test_shortest_path_adjacent() {
@@ -136,10 +129,6 @@ fn test_shortest_path_reverse_direction() {
     assert_eq!(result.unwrap().cost, 4);
 }
 
-// ========================================================================
-// all_paths
-// ========================================================================
-
 #[test]
 fn test_all_paths_basic() {
     let (graph, indices) = build_chain_graph();
@@ -157,7 +146,6 @@ fn test_all_paths_basic() {
 #[test]
 fn test_all_paths_limited_hops() {
     let (graph, indices) = build_chain_graph();
-    // With max_hops=1, can only reach adjacent node
     let paths = all_paths(
         &graph,
         indices[0],
@@ -266,10 +254,6 @@ fn test_shortest_path_connection_type_filter() {
     );
     assert_eq!(result.unwrap().cost, 1);
 }
-
-// ========================================================================
-// connected_components / weakly_connected_components
-// ========================================================================
 
 #[test]
 fn test_weakly_connected_components_connected() {
@@ -539,10 +523,6 @@ fn test_wcc_scoped_relationship_only_induces_subgraph() {
     assert_eq!(components.iter().map(|c| c.len()).sum::<usize>(), 4);
 }
 
-// ========================================================================
-// are_connected
-// ========================================================================
-
 #[test]
 fn test_are_connected_true() {
     let (graph, indices) = build_chain_graph();
@@ -555,10 +535,6 @@ fn test_are_connected_false() {
     assert!(!are_connected(&graph, indices[0], indices[2]));
 }
 
-// ========================================================================
-// node_degree
-// ========================================================================
-
 #[test]
 fn test_node_degree() {
     let (graph, indices) = build_chain_graph();
@@ -569,10 +545,6 @@ fn test_node_degree() {
     // Last node: 1 incoming
     assert_eq!(node_degree(&graph, indices[4]), 1);
 }
-
-// ========================================================================
-// Centrality algorithms
-// ========================================================================
 
 #[test]
 fn test_betweenness_centrality_chain() {
@@ -607,7 +579,6 @@ fn test_betweenness_centrality_with_sampling() {
     )
     .unwrap();
     assert_eq!(results.len(), 5);
-    // Middle node should still have a non-zero betweenness score
     let middle_score = results
         .iter()
         .find(|r| r.node_idx == indices[2])
@@ -648,7 +619,6 @@ fn test_pagerank_basic() {
     let (graph, _) = build_triangle_graph();
     let results = pagerank(&graph, &PagerankOptions::default()).unwrap();
     assert_eq!(results.len(), 3);
-    // All nodes in a symmetric triangle should have roughly equal PageRank
     let scores: Vec<f64> = results.iter().map(|r| r.score).collect();
     let diff = (scores[0] - scores[2]).abs();
     assert!(
@@ -721,10 +691,6 @@ fn test_pagerank_empty_graph() {
     assert!(results.is_empty());
 }
 
-// ========================================================================
-// get_node_info / get_path_connections
-// ========================================================================
-
 #[test]
 fn test_get_node_info() {
     let (graph, indices) = build_chain_graph();
@@ -744,10 +710,6 @@ fn test_get_path_connections() {
     assert_eq!(connections[0], Some("NEXT".to_string()));
     assert_eq!(connections[1], Some("NEXT".to_string()));
 }
-
-// ========================================================================
-// multilevel Louvain + hierarchy
-// ========================================================================
 
 /// Two triangles {A,B,C} and {D,E,F}, each fully connected, joined by a single
 /// bridge edge C--D. Classic community-structure fixture.
@@ -946,7 +908,6 @@ fn test_louvain_deterministic() {
 
 #[test]
 fn test_louvain_empty_and_isolated() {
-    // empty
     let g = DirGraph::new();
     let r = louvain_communities(&g, &CommunityOptions::default()).unwrap();
     assert_eq!(r.num_communities, 0);
@@ -970,10 +931,6 @@ fn test_louvain_empty_and_isolated() {
     assert_eq!(r3.num_communities, 3);
     assert_eq!(r3.modularity, 0.0);
 }
-
-// ========================================================================
-// Leiden
-// ========================================================================
 
 /// Assert every multi-node community in `result` is a connected subgraph
 /// (Leiden's well-connectedness guarantee). Rebuilds an undirected adjacency
@@ -1034,7 +991,7 @@ fn test_leiden_communities_well_connected() {
     let r = leiden_communities(&graph, &CommunityOptions::default()).unwrap();
     assert_all_communities_connected(&graph, &r);
 
-    // also on a chain and a triangle — the invariant must always hold
+    // also on a chain — the invariant must always hold
     let (chain, _) = build_chain_graph();
     let rc = leiden_communities(&chain, &CommunityOptions::default()).unwrap();
     assert_all_communities_connected(&chain, &rc);
@@ -1076,13 +1033,13 @@ fn test_leiden_empty_and_isolated() {
 
 // ============================================================================
 // EdgeDir: direction-aware expansion, the directed scoped adjacency, and the
-// batch API's restricted-universe contract (S2).
+// batch API's restricted-universe contract.
 // ============================================================================
 
 /// Mirrors `tests/test_shortest_path_python_parity.py`'s fixture:
 ///
 /// ```text
-/// P0 -KNOWS-> P1 <-KNOWS- P3        P2 -LIVES_IN-> C(4) <-LIVES_IN- P3
+/// P0 -KNOWS-> P1 <-KNOWS- P3        P2 -LIVES_IN-> C(5) <-LIVES_IN- P3
 /// P1 -KNOWS-> P4 -KNOWS-> P3
 /// ```
 ///
@@ -1464,7 +1421,7 @@ fn test_all_paths_direction() {
 }
 
 // ============================================================================
-// shortest_path_costs_from: the one-to-many member (S3).
+// shortest_path_costs_from: the one-to-many member.
 // ============================================================================
 
 /// `(node index position, hops)` pairs, sorted, for stable comparison.
@@ -1735,12 +1692,12 @@ fn test_eccentricity_agrees_with_costs_from() {
 }
 
 // ========================================================================
-// S4: the bidirectional (meet-in-the-middle) pair finder.
+// The bidirectional (meet-in-the-middle) pair finder.
 //
 // `shortest_path` / `shortest_path_directed` / `shortest_path_cost{,_with}`
-// no longer run the one-sided BFS that used to live in `reconstruct_path_bfs`.
-// That loop survives here as `one_sided_reference` — the oracle the randomized
-// cross-check measures the new engine against.
+// no longer run a one-sided BFS. That loop survives here as
+// `one_sided_reference` — the oracle the randomized cross-check measures the
+// new engine against.
 //
 // The cross-check asserts LENGTH equality and path VALIDITY, never sequence
 // equality: when several shortest paths tie, meeting in the middle picks a
@@ -2108,7 +2065,7 @@ fn test_bidirectional_matches_one_sided_on_random_graphs() {
         let (n, m) = match seed % 4 {
             0 => (20, 24),
             1 => (12, 30),
-            2 => (30, 31), // very sparse: long paths, and frontiers that run dry
+            2 => (30, 31),
             _ => (14, 16),
         };
         let (graph, idx) = build_random_graph(&mut rng, n, m);

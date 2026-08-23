@@ -22,7 +22,7 @@ use crate::graph::core::membership::MembershipSet;
 // `pattern_match_to_row` allocates a `ResultRow` (three `Bindings` vectors)
 // per match, so the loop is allocator-bound: ten threads contend for the
 // allocator instead of sharing work. It is the same shape, and the same
-// verdict, as the projection fan-out that Q2 measured at 1.96x *slower* below
+// verdict, as the projection fan-out measured at 1.96x *slower* below
 // its crossover — see `parallel::PROJECTION_MIN_ROWS`. The scan feeding this
 // loop *is* partitioned and wins 4-6x; the win is simply not here.
 //
@@ -245,8 +245,6 @@ impl<'a> CypherExecutor<'a> {
                 Default::default(),
             );
         for m in matches {
-            // Resolve the dedup variable's node index first so an already-kept
-            // target is skipped before row conversion.
             let dedup_idx = clause
                 .distinct_node_hint
                 .as_ref()
@@ -287,8 +285,9 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
         }
-        // Post-match truncation: for edge patterns without inline WHERE,
-        // limit_hint wasn't passed to the PatternExecutor, so truncate here.
+        // Redundant with the in-loop break above, which caps `rows` at
+        // `limit_hint` — except for `limit_hint == 0`, where that break only
+        // fires after the first push.
         if inline_where.is_none() {
             if let Some(limit) = limit_hint {
                 rows.truncate(limit);
@@ -829,8 +828,9 @@ impl<'a> CypherExecutor<'a> {
         let base = seeded.as_ref().unwrap_or(&cur.node_bindings);
         let anchored = match_clause::seed_clause_node_anchors(clause, base);
         let pre_bindings = anchored.as_ref().unwrap_or(base);
-        // Block-scoped: the PatternExecutor holds the disk arena guard (drop
-        // glue), so its borrow of `seen` must end before the caller extends it.
+        // The PatternExecutor holds the disk arena guard (drop glue) and
+        // borrows `seen`; both end within each `run` call, before the caller
+        // extends the set.
         let run = |distinct: Option<&str>| -> Result<Vec<_>, String> {
             self.materializing_executor(exec_limit, pre_bindings, "MATCH join")
                 .set_distinct_target(distinct.map(str::to_string))

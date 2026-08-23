@@ -74,12 +74,12 @@ fn boot_graph_watch(manifest: Option<&mcp_methods::server::Manifest>) -> Result<
 
 /// `extensions.tools_allow: [name, ...]` — the closed-by-default tool surface.
 ///
-/// Absent key = no allowlist = every registered route stays visible (today's
-/// behaviour). Present, it names the *final* tool surface: see
-/// [`apply_tool_allowlist`] for what that means and what it deliberately does
-/// not do. An explicit empty list is honoured literally — a server with no
-/// tools — because the alternative (silently treating `[]` as "no allowlist")
-/// would widen a surface an operator asked to close.
+/// Absent key = no allowlist = every registered route stays visible. Present,
+/// it names the *final* tool surface: see [`apply_tool_allowlist`] for what
+/// that means and what it deliberately does not do. An explicit empty list is
+/// honoured literally — a server with no tools — because the alternative
+/// (silently treating `[]` as "no allowlist") would widen a surface an
+/// operator asked to close.
 ///
 /// A non-list value, or a non-string element, is a boot error rather than a
 /// dropped key: an allowlist that silently fails open is worse than no
@@ -240,11 +240,11 @@ fn writer_lease_policy(
 }
 
 /// Builtin toggles from the manifest.
-///   - `save_graph`: gate registration on `builtins.save_graph: true`.
-///     Historically always-on, exposing a destructive operation to the agent on
-///     every graph regardless of intent.
+///   - `save_graph`: registration gated on [`graph_writes_enabled`], so a
+///     destructive operation is not exposed to the agent on every graph
+///     regardless of intent.
 ///   - `temp_cleanup: on_overview`: wipe `temp/` on every bare
-///     `graph_overview()`. Historically parsed-but-ignored.
+///     `graph_overview()`.
 fn boot_builtins(
     manifest: Option<&mcp_methods::server::Manifest>,
     cli: &Cli,
@@ -336,15 +336,14 @@ fn code_tools_are_dead(mode: &Mode, builtins: &tools::Builtins, graph_state: &Gr
         && !(graph_state.has_node_type("Function") || graph_state.has_node_type("Class"))
 }
 
-/// `extensions.embedder:` in the manifest selects the embedding backend for
-/// `text_score()`:
-///   - `backend: fastembed` — the Rust-native fastembed-rs adapter (cargo
-///     `--features fastembed`). The only option for the standalone
-///     libpython-free binary.
-///   - `backend: python` — a fastembed-py model, built by the wheel's
-///     `_run_mcp_server` factory and wrapped in a `PyEmbedderAdapter`. Only
-///     available when a factory is supplied (the pip-hosted server); the cargo
-///     binary rejects it with a clear message.
+/// Bind the manifest's `extensions.embedder:` as the embedder `text_score()`
+/// uses.
+///
+/// Selection is by `library:` — `fastembed-rs` for the Rust-native adapter (the
+/// only option on the standalone libpython-free binary), anything else for a
+/// Python library built by the wheel-supplied factory. The rules, and the
+/// `trust.allow_embedder` gate they sit behind, live in
+/// [`build_embedder_from_manifest`].
 fn bind_manifest_embedder(
     manifest: Option<&mcp_methods::server::Manifest>,
     py_embedder_factory: Option<&PyEmbedderFactory>,
@@ -414,18 +413,16 @@ pub(crate) async fn run_async(
         // decision it governs. Both read the same `graph_writes_enabled`.
         .with_writer_lease_policy(writer_lease_policy(manifest.as_ref(), &cli));
 
-    // Mode-specific bindings: source roots, workspace handle, initial graph
-    // build.
     let options = bind_mode(&mode, &cli, manifest.as_ref(), &graph_state, options)?;
 
-    // Runtime graph-over-grep steering (mcp-methods 0.3.46 result-postprocess
-    // hook): append a one-line footer to a builtin tool result at the moment of
-    // a likely misuse — a definition-shaped or zero-match `grep`, or a
+    // Runtime graph-over-grep steering (mcp-methods result-postprocess hook):
+    // append a one-line footer to a builtin tool result at the moment of a
+    // likely misuse — a definition-shaped or zero-match `grep`, or a
     // `cypher_query` result carrying `qualified_name`. Delivered on the RESULT
     // (read every call), it corrects course where the load-once tool
-    // description could not (petekSuite field report 2026-07-02). Returns `None`
-    // — leaving the result byte-for-byte unchanged — unless a code graph is
-    // active and the shape matches, so non-code deployments are untouched.
+    // description could not (petekSuite field report 2026-07-02). See
+    // `graph_result_footer` for when it declines and leaves the result
+    // untouched.
     let options = {
         let gs = graph_state.clone();
         options.with_result_postprocess(Arc::new(

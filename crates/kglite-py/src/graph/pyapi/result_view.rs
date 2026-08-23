@@ -1,6 +1,3 @@
-// The Cypher-internal preprocessing logic stays in
-// `languages/cypher/py_convert.rs`; we import it here.
-
 use crate::datatypes::values::Value;
 use crate::graph::languages::cypher::py_convert::{
     preprocess_values_owned, preprocessed_result_to_dataframe, preprocessed_value_to_py,
@@ -28,9 +25,7 @@ use std::sync::{Arc, Mutex};
 /// consumes the rows (one batched pass beats per-row resolution by 12–15%
 /// across every size measured) and dead loss when it does not — a query whose
 /// rows are never read, or read only via `len()`, now does work it previously
-/// skipped. Since a read is far more common than a read held across a write,
-/// the tax on the former has to be invisible before the saving on the latter
-/// counts for anything.
+/// skipped.
 ///
 /// Measured on a 100k-node graph, `MATCH (n:Item) RETURN n.title, n.value
 /// LIMIT k`, release build, never consumed — the shape the tracked
@@ -64,9 +59,9 @@ const EAGER_MATERIALISE_MAX_CELLS: usize = 32;
 struct LazyRows {
     descriptor: LazyResultDescriptor,
     graph: Arc<DirGraph>,
-    /// Memoised materialisation. `cache[i]` is `Some(row)` once
-    /// `materialise_row(i)` has run for that row index. Mutex (rather than
-    /// RwLock or cell) keeps it Send + Sync, which #[pyclass] requires.
+    /// Memoised materialisation. `cache[i]` is `Some(row)` once row `i` has
+    /// been materialised. Mutex (rather than RwLock or cell) keeps it
+    /// Send + Sync, which #[pyclass] requires.
     cache: Mutex<Vec<Option<Vec<PreProcessedValue>>>>,
 }
 
@@ -122,14 +117,11 @@ pub struct ResultView {
     lazy: Option<LazyRows>,
 }
 
-// Rust-only constructors — not exposed to Python.
-
 impl ResultView {
     /// Cypher read path: data already preprocessed during py.detach
-    /// (GIL-free); O(1), just moves owned data into the struct.
-    /// `diagnostics` attaches elapsed-time / timeout bookkeeping for agent
-    /// feedback; pass `None` when not applicable (mutation paths, centrality
-    /// results).
+    /// (GIL-free). `diagnostics` attaches elapsed-time / timeout bookkeeping
+    /// for agent feedback; pass `None` when not applicable (mutation paths,
+    /// centrality results).
     pub fn from_preprocessed(
         columns: Vec<String>,
         rows: Vec<Vec<PreProcessedValue>>,
@@ -164,23 +156,24 @@ impl ResultView {
     /// `Some`, the executor flagged the RETURN as `lazy_eligible` and
     /// skipped per-row property evaluation; this constructor stashes the
     /// pending rows and graph reference so cells materialise on demand at
-    /// the Python boundary. Falls back to the eager
-    /// `from_preprocessed`-equivalent path when `result.lazy` is `None`.
+    /// the Python boundary. Falls back to the eager `from_cypher_result`
+    /// path when `result.lazy` is `None`.
     ///
     /// **Small results materialise immediately and keep no graph reference.**
     /// A retained lazy view pins the `Arc<DirGraph>` it was built from, so the
     /// next write through the owning `KnowledgeGraph` finds a shared Arc and
-    /// `Arc::make_mut` deep-clones the entire graph — every node, edge, index
-    /// and embedding. That turns the ordinary read-then-write request handler
+    /// has to fork. On a memory backend that fork is copy-on-write and costs
+    /// O(the write) (`storage/forked.rs`); on `Mapped` and `Disk` it is still a
+    /// deep clone of the entire graph — every node, edge, index and embedding —
+    /// so there the ordinary read-then-write request handler
     /// (`rows = g.cypher(...)` then `g.cypher("... SET ...")`, with `rows`
-    /// still in scope) into a whole-graph copy *per request*.
+    /// still in scope) pays a whole-graph copy *per request*.
     ///
-    /// Deferral only earns that risk when most rows are never consumed, which
-    /// needs a large result to matter. Within the cell budget the projection is
-    /// bounded and cheap, and paying it up front is strictly better than
-    /// risking an O(V+E) fork — so the view drops the `Arc` and becomes eager.
-    /// Materialisation failures fall through to the lazy path deliberately, so
-    /// an error still surfaces at access time exactly as before.
+    /// Within `EAGER_MATERIALISE_MAX_CELLS` the projection is bounded and
+    /// cheap, so paying it up front beats risking that fork and the view
+    /// drops the `Arc`; bigger results keep the pin. Materialisation failures
+    /// fall through to the lazy path deliberately, so an error still surfaces
+    /// at access time exactly as before.
     pub fn from_cypher_result_with_graph(result: CypherResult, graph: Arc<DirGraph>) -> Self {
         if let Some(lazy_desc) = result.lazy {
             let n = lazy_desc.len();
@@ -386,8 +379,8 @@ impl ResultView {
         Ok(cells)
     }
 
-    /// Materialise a contiguous lazy range with one provenance check and one
-    /// cache lock per batch. The core still holds a separate disk arena guard
+    /// Materialise a contiguous lazy range with one provenance check per batch
+    /// instead of one per row. The core still holds a separate disk arena guard
     /// for every row, preserving bounded arena lifetime under large reads.
     fn materialise_lazy_range(
         &self,
@@ -461,10 +454,9 @@ impl ResultView {
     }
 
     /// Row → dict using pre-interned column-name keys. The bulk `to_list`
-    /// path interns the column names ONCE and reuses them for every row,
-    /// instead of re-creating the same Python strings per cell (the old
-    /// `set_item(col, …)` allocated a fresh key string for every cell —
-    /// rows × cols allocations of a handful of distinct names).
+    /// path interns the column names once and reuses them for every row;
+    /// passing `&str` keys instead allocates a fresh Python string per cell —
+    /// rows × cols allocations of a handful of distinct names.
     fn row_to_py_keyed(
         &self,
         py: Python<'_>,

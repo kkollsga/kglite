@@ -29,20 +29,19 @@
 //! One map, one key discipline, and the demotion logic is reused rather than
 //! mirrored.
 //!
-//! That two-variant split turns out **not** to be the obstacle it looked like:
-//! `TypeIdIndex::get` takes `&Value` and does its own `UniqueId`/`Int64`/
-//! `Float64` coercion per map, so a `Layered` entry can chain a `General` delta
-//! over an `Integer` base and every lookup still resolves under whichever
-//! spelling the value was stored as.
+//! The two-variant split costs nothing at lookup: `TypeIdIndex::get` takes
+//! `&Value` and coerces `UniqueId`/`Int64`/`Float64` per map, so a `General`
+//! delta can chain over an `Integer` base and every lookup still resolves under
+//! whichever spelling the value was stored as.
 //!
 //! ## Rollback needs nothing here
 //!
 //! Unlike the user index families, `id_indices` has **no undo entries**: a
 //! failed statement drops the touched type's index and the next read rebuilds
-//! it from the graph (`dir_graph/rollback.rs`, and the `id_indices` note on
-//! `swap_data_scale`). Dropping a `Layered` entry releases the shared base and
-//! rebuilds from the restored graph, which is the same self-healing path as
-//! before — so this layer adds no rollback surface at all.
+//! it from the graph (the rebuilt-not-journal-reversed note in the
+//! `dir_graph/rollback.rs` module doc). Dropping a `Layered` entry releases the
+//! shared base and rebuilds from the restored graph, which is the same
+//! self-healing path as before — so this layer adds no rollback surface at all.
 
 use std::sync::Arc;
 
@@ -102,21 +101,23 @@ pub enum TypeEntry {
 /// per-round cost.
 ///
 /// 128 measured identically in-window (mean 129 µs) and would amortise the
-/// flatten 4x further, but every extra level is a probe on a read miss and a
-/// retained delta, and 32 already moves the worst case from ~5x the median to
-/// ~2x. Raising it further is tuning against one benchmark's hold window rather
-/// than against a mechanism.
+/// flatten 4x further, but 32 already moves the worst case from ~5x the median
+/// to ~2x, and each extra level still costs a probe and a retained delta.
+/// Raising it further is tuning against one benchmark's hold window, not
+/// against a mechanism.
 pub(crate) const MAX_CHAIN_DEPTH: u16 = 32;
 
 /// The measured value, pinned as a value rather than as a symbol.
 ///
-/// Every test below is written in terms of `MAX_CHAIN_DEPTH`, which makes them
-/// *any*-value tests: set it to 1 or to 4096 and they all still pass, because
-/// the expectations move with it. The number itself is the finding — the
-/// profile above rejects 8 (a ~5x-median spike in one round in eight)
-/// and rejects raising it past 32 (128 measured identically and only deepens
-/// the read-miss probe) — so the number gets a check of its own. Changing it is
-/// legitimate; changing it *without a new measurement* is what this stops.
+/// Every behavioural test below except
+/// `the_chain_flattens_on_the_thirty_third_uncompacted_fork` is written in
+/// terms of `MAX_CHAIN_DEPTH`, which makes them *any*-value tests: set it to 1
+/// or to 4096 and they still pass, because the expectations move with it. That
+/// one test pins the *behaviour* the number buys; this pins the number itself,
+/// which is the finding — the profile above rejects 8 (a ~5x-median spike in
+/// one round in eight) and rejects raising it past 32 (128 measured identically
+/// and only deepens the read-miss probe). Changing it is legitimate; changing
+/// it *without a new measurement* is what this stops.
 const _: () = assert!(
     MAX_CHAIN_DEPTH == 32,
     "MAX_CHAIN_DEPTH is a measured value (D2 Phase 3 residual profile §B), not a \
@@ -215,7 +216,8 @@ impl TypeEntry {
     }
 
     /// The merged view as one owned index. Cold path — `save`, N-Triples
-    /// export, and the `add_nodes` conflict-check fast path.
+    /// export, `IdIndexStore::remove`, and the non-overlay fallback in
+    /// connection-endpoint resolution (`CombinedTypeLookup::from_id_indices`).
     pub fn materialize(&self) -> TypeIdIndex {
         match self {
             TypeEntry::Owned(index) => index.clone(),
@@ -239,12 +241,13 @@ impl TypeEntry {
     /// clone can start from the same allocation.
     ///
     /// **Called from `IdIndexStore::clone` through the store's `RwLock`** — the
-    /// only place the split can happen (see the module doc). `Owned` is wrapped
-    /// in place; an already-`Layered` entry with an empty delta re-shares its
-    /// existing base for free, and one with writes merges them into a fresh
-    /// base first. That merge is the only O(N_type) path here, and it needs a
-    /// *second* fork after writes to reach — the common
-    /// fork-write-drop-fork sequence compacts in between.
+    /// only place the split can happen (see the module doc). O(1) whatever this
+    /// entry already is: the current value is moved into a fresh `Arc` and this
+    /// entry becomes an empty delta one level above it — `Owned` and a
+    /// `Layered` carrying writes alike, which is what the recursive `base`
+    /// buys (see [`TypeEntry::Layered`]). The one O(N_type) path is the
+    /// depth-cap flatten below, and reaching it takes `MAX_CHAIN_DEPTH`
+    /// uncompacted rounds.
     pub fn share(&mut self) -> Arc<TypeEntry> {
         if self.depth() >= MAX_CHAIN_DEPTH {
             // Flatten first: this is the only O(N_type) path, and reaching it

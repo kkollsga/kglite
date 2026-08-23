@@ -23,11 +23,8 @@ use std::sync::Arc;
 
 // ─── add_nodes phase helpers ────────────────────────────────────────────────
 //
-// `add_nodes` is the most-touched user-facing function in the project. It
-// runs eight independent phases over its inputs (parse config → extract
-// embeddings → convert DataFrame → apply batch → register feature configs
-// → store embeddings → apply timeseries → finalize). Each phase is a
-// private free function below; the pymethod itself is a thin orchestrator.
+// The `add_nodes` pymethod is a thin orchestrator: every phase it runs is a
+// private free function below, called in order.
 
 struct InlineConfig {
     ts_config: Option<InlineTimeseriesConfig>,
@@ -35,25 +32,12 @@ struct InlineConfig {
     column_list: Vec<String>,
 }
 
-/// Run a pure-Rust batch-mutation closure with the GIL released, mapping
-/// the engine's `String` error to the typed `kglite.*` exception.
-///
-/// The apply phase of `add_nodes` / `add_connections` operates purely on
-/// already-converted Rust data (`DataFrame`, `&mut DirGraph`), so holding
-/// the GIL through it starves every other Python thread for the duration
-/// of a bulk insert. Detach only spans like this one — anything touching
-/// `Bound`/`PyAny` must stay attached.
 /// Map a bulk-write failure onto the typed error it deserves.
 ///
 /// The engine's write channel is `Result<_, String>`, but a constraint refusal
 /// parks the structured violation on the graph alongside the message it
 /// produced. Recovering it here is what makes a bulk write raise
 /// `kglite.ConstraintViolationError` rather than the generic `ArgumentError`.
-///
-/// Shared by every bulk entry point rather than written per call site: the
-/// connection loaders went without it until relationship constraints gave them
-/// a violation to raise, and the reason they went without it is that the step
-/// lived inline in `add_nodes`, where nothing else could reach it.
 fn bulk_write_err(graph: &mut DirGraph, message: String) -> pyo3::PyErr {
     let error = graph
         .take_constraint_error(&message)
@@ -75,6 +59,13 @@ where
     outcome.map_err(|message| bulk_write_err(graph, message))
 }
 
+/// Run a pure-Rust batch-mutation closure with the GIL released, mapping
+/// the engine's `String` error to the typed `kglite.*` exception.
+///
+/// The apply phase of a bulk loader operates purely on already-converted Rust
+/// data (`DataFrame`, `&mut DirGraph`), so holding the GIL through it starves
+/// every other Python thread for the duration of a bulk insert. Detach only
+/// spans like this one — anything touching `Bound`/`PyAny` must stay attached.
 fn detach_mutation<T, F>(py: Python<'_>, f: F) -> PyResult<T>
 where
     F: pyo3::marker::Ungil + Send + FnOnce() -> Result<T, String>,
@@ -202,8 +193,7 @@ fn build_connection_df_from_pandas(
 /// into the columnar frame the edge loader takes, stamping `extra_properties`
 /// onto every row as constant columns.
 ///
-/// The query-mode counterpart of [`build_connection_df_from_pandas`]: both end
-/// at one [`DataFrame`], which is where the two paths converge.
+/// The query-mode counterpart of [`build_connection_df_from_pandas`].
 fn build_connection_df_from_query(
     graph: &Arc<DirGraph>,
     query_str: &str,
@@ -517,9 +507,8 @@ fn write_connections(
 /// Shared tail of both `write_connections` paths: make the edges durable, file
 /// the operation report, and marshal it for Python.
 ///
-/// Extracted because the query path and the DataFrame path finished with the
-/// same three steps, and the WAL flush is the step most easily forgotten — one
-/// place to get it right rather than two to keep in sync.
+/// Shared by both paths so the WAL flush — the step most easily forgotten —
+/// lives in one place rather than two that must stay in sync.
 fn finish_connection_write(
     kg: &mut KnowledgeGraph,
     result: &kglite_core::api::mutation::ConnectionOperationReport,
@@ -709,8 +698,6 @@ fn convert_dataframe<'py>(
     })
 }
 
-/// Apply the converted node batch with the GIL released — the DataFrame is
-/// already pure Rust at this point, so the insert runs off-GIL.
 struct NodeBatchInput {
     df: DataFrame,
     node_type: String,
@@ -719,6 +706,8 @@ struct NodeBatchInput {
     conflict_handling: Option<String>,
 }
 
+/// Apply the converted node batch with the GIL released — the DataFrame is
+/// already pure Rust at this point, so the insert runs off-GIL.
 fn apply_node_batch(
     py: Python<'_>,
     graph: &mut DirGraph,
@@ -1017,10 +1006,8 @@ fn build_node_report_dict<'py>(
     }
     report_dict.set_item("has_errors", has_errors)?;
 
-    // Emit a Python warning whenever the report carries any skips or
-    // errors. Silent skips on bulk loads were a recurring footgun —
-    // surface them at warn level so the user sees them without needing
-    // to inspect last_report().
+    // Silent skips on bulk loads were a recurring footgun — surface them at
+    // warn level rather than only in last_report().
     if has_errors && on_invalid.warns() {
         let total = result.nodes_created + result.nodes_updated + result.nodes_skipped;
         let detail = if result.errors.is_empty() {
@@ -1173,7 +1160,8 @@ impl KnowledgeGraph {
     ///         are auto-detected from the DataFrame dtype.
     ///     node_title_field: Column used as display title. Defaults to unique_id_field.
     ///     columns: Whitelist of columns to include. None = all.
-    ///     conflict_handling: 'update' (default), 'replace', 'skip', or 'preserve'.
+    ///     conflict_handling: 'update' (default), 'replace', 'skip', 'preserve',
+    ///         or 'sum'.
     ///     skip_columns: Columns to exclude from properties.
     ///     column_types: Override column type detection: {'col': 'string'|'integer'|'float'|'datetime'|'uniqueid'}.
     ///     nullable_int_downcast: When True, Float64 columns whose non-null
@@ -1428,7 +1416,8 @@ impl KnowledgeGraph {
     ///     columns: Optional edge-property whitelist (data mode only). None keeps all
     ///         non-skipped DataFrame columns, matching add_nodes.
     ///     skip_columns: Columns to exclude from edge properties (data mode only).
-    ///     conflict_handling: 'update' (default), 'replace', 'skip', or 'preserve'.
+    ///     conflict_handling: 'update' (default), 'replace', 'skip', 'preserve',
+    ///         or 'sum'.
     ///     column_types: Override column type detection (data mode only).
     ///     query: Cypher query string (alternative to data). Must be a read-only
     ///         query that RETURNs columns matching source_id_field and target_id_field.
@@ -1522,7 +1511,8 @@ impl KnowledgeGraph {
     ///     columns: Optional edge-property whitelist (data mode only). None keeps all
     ///         non-skipped DataFrame columns, matching add_nodes.
     ///     skip_columns: Columns to exclude from edge properties (data mode only).
-    ///     conflict_handling: 'update' (default), 'replace', 'skip', or 'preserve'.
+    ///     conflict_handling: 'update' (default), 'replace', 'skip', 'preserve',
+    ///         or 'sum'.
     ///     column_types: Override column type detection (data mode only).
     ///     query: Cypher query string (alternative to data). Must be read-only.
     ///     extra_properties: Static properties stamped onto every edge (query mode only).
@@ -1584,7 +1574,7 @@ impl KnowledgeGraph {
     /// Get the set of node types that exist in the graph.
     ///
     /// Returns:
-    ///     List of node type names (excludes internal SchemaNode type)
+    ///     List of node type names present in the graph.
     ///
     /// Example:
     ///     ```python
@@ -1781,7 +1771,6 @@ impl KnowledgeGraph {
                 ))
             })?;
 
-            // Get columns from dataframe
             let df_cols = data.getattr("columns")?;
             let all_columns: Vec<String> = df_cols.extract()?;
 
@@ -1953,7 +1942,6 @@ impl KnowledgeGraph {
                 ))
             })?;
 
-            // Skip if filtering and types not loaded
             if filter_to_loaded
                 && (!loaded_types.contains(&source_type) || !loaded_types.contains(&target_type))
             {
@@ -1964,11 +1952,9 @@ impl KnowledgeGraph {
             let source_id_field = "source_id".to_string();
             let target_id_field = "target_id".to_string();
 
-            // Get columns from dataframe
             let df_cols = data.getattr("columns")?;
             let all_columns: Vec<String> = df_cols.extract()?;
 
-            // Verify required columns exist
             if !all_columns.contains(&source_id_field) {
                 return Err(crate::error_py::kg_to_pyerr(
                     crate::error::KgError::Argument(format!(

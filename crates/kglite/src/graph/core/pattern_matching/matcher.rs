@@ -1,5 +1,3 @@
-// Matcher — executes parsed Pattern against a DirGraph.
-
 use crate::datatypes::values::Value;
 use crate::graph::core::filtering::{compare_values, str_values_equal, values_equal};
 use crate::graph::languages::cypher::executor::budget::MatchCeiling;
@@ -559,7 +557,8 @@ impl<'a> PatternExecutor<'a> {
         }
     }
 
-    /// Public wrapper for find_matching_nodes (used by Cypher executor for shortestPath)
+    /// Public wrapper for [`Self::find_matching_nodes`] — shortestPath
+    /// endpoints and the fused node-scan operators.
     pub fn find_matching_nodes_pub(&self, pattern: &NodePattern) -> Result<Vec<NodeIndex>, String> {
         self.find_matching_nodes(pattern)
     }
@@ -586,7 +585,8 @@ impl<'a> PatternExecutor<'a> {
                                 return Ok(vec![]);
                             }
                         }
-                        // Suppress unused-binding warning when no extras.
+                        // The view is only an existence check — the label tests
+                        // read `labels`, so nothing here consumes `node`.
                         let _ = node;
                     }
                     if let Some(ref props) = pattern.properties {
@@ -639,9 +639,8 @@ impl<'a> PatternExecutor<'a> {
                 }
             }
 
-            // Gather candidates: primary type_indices ∪ secondary_label_index.
-            // The choke-point API forbids primary==secondary on the same
-            // node, so the union has no duplicates.
+            // The choke-point API forbids primary==secondary on the same node,
+            // so this type_indices ∪ secondary_label_index has no duplicates.
             let mut candidates = self
                 .graph
                 .type_indices
@@ -659,9 +658,8 @@ impl<'a> PatternExecutor<'a> {
             }
             self.filter_node_candidates(&candidates, pattern.properties.as_ref(), &extra_keys)
         } else if let Some(ref props) = pattern.properties {
-            // Fast path: untyped node with {id: X} — cross-type id lookup.
-            // Tries lookup_by_id_readonly on each type. When id_indices are built,
-            // each lookup is O(1). Total: O(types) which is fast even for 132K types.
+            // Fast path: untyped node with {id: X} — cross-type id lookup, one
+            // O(1) id-index probe per type, so O(types): fast even at 132K types.
             //
             // Only `{id: N}` routes to the id-index here; `{nid: 'Q76'}` is a
             // plain string property (0.11.0) served by the cross-type
@@ -753,7 +751,6 @@ impl<'a> PatternExecutor<'a> {
             }
             Ok(out)
         } else {
-            // No type, no properties — all nodes
             let g = &self.graph.graph;
             let mut out = Vec::with_capacity(g.node_count());
             for (i, idx) in g.node_indices().enumerate() {
@@ -788,7 +785,7 @@ impl<'a> PatternExecutor<'a> {
 
     /// Whether the candidate scan may fan out.
     ///
-    /// **Write-freedom (D4) is provable here rather than argued.** Unlike the
+    /// **Write-freedom is provable here rather than argued.** Unlike the
     /// Cypher scan operators, this loop evaluates `PropertyMatcher`s, never
     /// Cypher expressions, so it cannot re-enter the interpreter: every call it
     /// makes — `node_has_label`, `interner::try_resolve`, `column_store`,
@@ -800,9 +797,9 @@ impl<'a> PatternExecutor<'a> {
     /// **Disk stays excluded** even though the arena hazard the rest of the
     /// engine has on disk is genuinely bypassed here (`owned_node_data`
     /// materialises into the caller's frame rather than parking a record in the
-    /// shared query arena): D7 defers disk mode wholesale to its own phase, and
-    /// an exclusion uniform with the Q2 operators is one rule to state to
-    /// users — disk ignores `parallel`.
+    /// shared query arena): disk mode is deferred wholesale, and an exclusion
+    /// uniform with the Cypher scan operators is one rule to state to users —
+    /// disk ignores `parallel`.
     fn may_fan_out_candidate_scan(
         &self,
         candidates: &[NodeIndex],
@@ -859,7 +856,7 @@ impl<'a> PatternExecutor<'a> {
 
     /// Fan the candidate scan across the query pool.
     ///
-    /// Order-preserving by construction (D5): `par_chunks` partitions the
+    /// Order-preserving by construction: `par_chunks` partitions the
     /// candidate vector by index range, `collect` on an indexed parallel
     /// iterator restores partition order, and the partitions are concatenated
     /// in that order — so the surviving candidates come back in exactly the
@@ -1352,7 +1349,8 @@ impl<'a> PatternExecutor<'a> {
         None
     }
 
-    /// Public wrapper for node property matching, used by FusedNodeScanAggregate.
+    /// Public wrapper for node property matching, used by the fused node-scan
+    /// operators and by peer filtering in edge expansion.
     pub fn node_matches_properties_pub(
         &self,
         idx: NodeIndex,
@@ -1366,10 +1364,8 @@ impl<'a> PatternExecutor<'a> {
     /// candidate stream must go through [`Self::filter_node_candidates`], which
     /// resolves per *type* instead of per node.
     ///
-    /// One implementation for every backend: the disk-only "columnar fast path"
-    /// that used to live here — resolving the node's column store once per node
-    /// rather than once per property read — is now what `NodeView` does for all
-    /// of them.
+    /// One implementation for every backend: `NodeView` resolves the node's
+    /// column store once per node, not once per property read.
     fn node_matches_properties(
         &self,
         idx: NodeIndex,
@@ -1726,9 +1722,9 @@ impl<'a> PatternExecutor<'a> {
             for edge in edges {
                 // Connection-type check uses the cheap accessor — on disk this
                 // avoids materialising the edge (heap alloc + property clone)
-                // for every edge just to read its type.
-                // For single conn_key, DiskGraph already pre-filtered; this is a no-op.
-                // For multi-type conn_keys, post-filter is still needed.
+                // for every edge just to read its type. A single conn_key is
+                // already pre-filtered by DiskGraph (this is then a no-op);
+                // multi-type conn_keys still need the post-filter.
                 let conn_type = edge.connection_type();
                 if let Some(ref keys) = conn_keys {
                     if !keys.contains(&conn_type) {

@@ -147,7 +147,7 @@ impl TypeFamily {
     }
 
     /// The family a literal value sits in. `None` — hence silence — for
-    /// nulls, lists, maps and everything else with no comparison arm.
+    /// nulls, lists, maps and everything else no family covers.
     fn of_value(value: &Value) -> Option<Self> {
         match value {
             Value::Int64(_) | Value::Float64(_) | Value::UniqueId(_) => Some(Self::Numeric),
@@ -220,11 +220,10 @@ impl<'a> TypeSource<'a> {
 /// One declared-type finding, kept as its rendered message plus the one bit
 /// its *disposition* turns on.
 ///
-/// The message is built where the knowledge is (each `*_message` /
-/// `*_predicate` site below), because only there are both type sources in
-/// scope in their own vocabularies; `promotable` records what that site knew
-/// about their strength, so the caller never has to re-derive it — or, worse,
-/// read it back out of the prose.
+/// The message is built at each finding site below, because only there are
+/// both type sources in scope in their own vocabularies; `promotable` records
+/// what that site knew about their strength, so the caller never has to
+/// re-derive it out of the message text.
 #[derive(Debug, Clone)]
 pub(crate) struct TypeMismatch {
     message: String,
@@ -807,7 +806,6 @@ mod tests {
 
     #[test]
     fn a_numeric_property_ordered_against_a_string_warns() {
-        // The blind reviewer's query, verbatim.
         let w = one_warning("MATCH (p:Person) WHERE p.age > 'forty' RETURN p");
         assert_eq!(
             w,
@@ -867,11 +865,10 @@ mod tests {
         assert!(!w.contains("matches every row"), "{w}");
     }
 
-    /// `<>` is the one operator whose cross-type answer is **true** — Neo4j
-    /// equality semantics, confirmed behaviourally on this engine — so its
-    /// message must not borrow the "filters out every row" voice of its five
-    /// siblings. A reviewer's claim that `<>` diverges from openCypher here
-    /// was probed and falsified; the wording is the only thing that changes.
+    /// `<>` is the one operator whose cross-type answer is **true** (see
+    /// [`consequence`]), so its message must not borrow the "filters out every
+    /// row" voice of its five siblings. A reviewer's claim that `<>` diverges
+    /// from openCypher here was probed on this engine and falsified.
     #[test]
     fn not_equals_gets_the_opposite_wording() {
         let w = one_warning("MATCH (p:Person) WHERE p.age <> 'forty' RETURN p");
@@ -1057,8 +1054,8 @@ mod tests {
         assert!(text.comparable_with(temporal) && temporal.comparable_with(text));
     }
 
-    /// `DURATION` and `POINT` have no comparison arms at all — v1 places them
-    /// in no family, so it makes no claim about them.
+    /// `DURATION` and `POINT` have no comparison arms at all, so the resolver
+    /// places them in no family and this family claims nothing about them.
     #[test]
     fn duration_and_point_declarations_say_nothing() {
         assert!(TypeFamily::of_declared(DeclaredType::Duration).is_none());
@@ -1079,8 +1076,8 @@ mod tests {
     }
 
     /// Observed metadata is not a declaration. `nickname` is recorded as a
-    /// string by `node_type_metadata` and nothing else — v1 does not consult
-    /// it, so a numeric comparison against it is silent.
+    /// string by `node_type_metadata` and nothing else — this family does not
+    /// consult it, so a numeric comparison against it is silent.
     #[test]
     fn an_undeclared_property_says_nothing_even_with_observed_metadata() {
         assert_silent("MATCH (p:Person) WHERE p.nickname > 5 RETURN p");
@@ -1098,7 +1095,7 @@ mod tests {
         let w = one_warning("MATCH (p:Person) WHERE p.height > 'forty' RETURN p");
         assert!(w.starts_with("WHERE references property 'height'"), "{w}");
         assert!(!w.contains("declared INTEGER"), "{w}");
-        // And the plan's named double-report case: a property that is neither
+        // And the other double-report risk: a property that is neither
         // declared nor observed.
         let typo = one_warning("MATCH (p:Person) WHERE p.agee > 'forty' RETURN p");
         assert!(
@@ -1247,8 +1244,8 @@ mod tests {
         }
     }
 
-    /// A graph that declares nothing pays one `BTreeMap::is_empty` and
-    /// produces nothing, whatever the query says.
+    /// A graph that declares nothing through either source takes the fast-out
+    /// and produces nothing, whatever the query says.
     #[test]
     fn a_graph_with_no_declarations_is_silent() {
         let g = super::super::tests::graph_with_schema();

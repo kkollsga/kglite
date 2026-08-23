@@ -31,9 +31,8 @@ use std::sync::Arc;
 #[repr(C)]
 pub struct KgliteGraph {
     _opaque: [u8; 0],
-    // Prevent C-side stack allocation: the !Send/!Sync marker isn't
-    // visible across the C ABI but stops downstream Rust callers
-    // from accidentally constructing one by value.
+    // Opaque-FFI marker: makes the handle !Send/!Sync/!Unpin, so a Rust-side
+    // caller can't send it across threads or move it out of place.
     _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
 }
 
@@ -72,7 +71,7 @@ impl GraphState {
 /// by opening a session ([`kglite_session_new`](crate::kglite_session_new))
 /// and running `CREATE` / `MERGE` Cypher through
 /// [`kglite_session_execute_mut`](crate::kglite_session_execute_mut), or
-/// by bulk-loading via the dataset / blueprint entry points. Before this
+/// by bulk-loading via the blueprint entry point. Before this
 /// existed, the only way to obtain a graph at the C boundary was to load
 /// a pre-built `.kgl` file — a binding could not start one from scratch.
 ///
@@ -428,7 +427,6 @@ pub unsafe extern "C" fn kglite_load_rdf(
                 }
             };
 
-            // `Err(())` on invalid UTF-8, so the caller maps it to InvalidUtf8.
             let cstr_opt = |p: *const c_char| -> Result<Option<&str>, ()> {
                 if p.is_null() {
                     Ok(None)
@@ -446,7 +444,7 @@ pub unsafe extern "C" fn kglite_load_rdf(
                 Err(()) => return KgliteStatusCode::InvalidUtf8,
             };
 
-            // JSON-array args (the §7 JSON-at-boundary convention for nested shapes).
+            // JSON-array args, per the JSON-at-boundary convention for nested shapes.
             let languages = match cstr_opt(languages_json) {
                 Ok(None) => None,
                 Ok(Some(s)) => match serde_json::from_str::<Vec<String>>(s) {
@@ -588,9 +586,7 @@ pub unsafe extern "C" fn kglite_save_graph(
                 Ok(s) => s,
                 Err(_) => return KgliteStatusCode::InvalidUtf8,
             };
-            // Safety: caller's responsibility per the function's safety
-            // doc — graph must be a valid handle. We take a transient
-            // &mut to its inner Arc (save_graph needs &mut Arc).
+            // `save_graph` takes `&mut Arc`, hence the transient mutable borrow.
             let state = unsafe { GraphState::from_handle_mut(graph) };
             match save_graph(&mut state.inner, path_str) {
                 Ok(()) => {
@@ -632,7 +628,6 @@ pub unsafe extern "C" fn kglite_save_graph(
 #[no_mangle]
 pub unsafe extern "C" fn kglite_graph_free(graph: *mut KgliteGraph) {
     crate::ffi::void_boundary(|| {
-        // Safety: caller's responsibility per the function's safety doc.
         unsafe { GraphState::free_handle(graph) };
     });
 }

@@ -12,16 +12,14 @@ use crate::graph::storage::property_storage::ColumnarRow;
 use std::path::Path;
 
 /// Canonical streaming-filter spec. The fluent chain
-/// (`select().expand().save_subset()`) lowers into this; future Cypher
-/// integration will lower into the same struct.
+/// (`select().expand().save_subset()`) lowers into this.
 #[derive(Clone, Debug, Default)]
 pub struct SubsetSpec {
     /// Restrict to edges of these types. `None` means all edge types.
     pub edge_types: Option<Vec<InternedKey>>,
 }
 
-/// Stats reported back from a Pass A scan. Used for sanity-checking on
-/// real Wikidata before committing to write the output graph.
+/// Stats reported back from a Pass A scan.
 #[derive(Clone, Debug, Default)]
 pub struct ScanStats {
     pub kept_node_count: u64,
@@ -506,8 +504,8 @@ pub fn save_subset_streaming_disk(
     //    heap is bounded by `(open_buf_writers × BUF_SIZE) + Mixed-column
     //    heap`. `subgraph_streaming_writer.rs` documents the writer protocol.
     //
-    //    A row_id within a store is just the push position; the
-    //    `old_idx → dest_row_id` mapping comes from the rank index, so the
+    //    A row_id within a store is just the push position; the separate
+    //    `old_id → dest NodeIndex` mapping comes from the rank index, so the
     //    edge phase builds the right `NodeIndex`.
     use crate::graph::mutation::subgraph_streaming_writer::TypeWriter;
 
@@ -581,9 +579,10 @@ pub fn save_subset_streaming_disk(
         _ => None,
     };
 
-    // Sub-phase timers on the same KGLITE_STREAMING_TIMING flag. Each
-    // `Instant::now()` is ~50 ns on macOS, so 4 calls × 17 M iterations adds
-    // ~3-4 s on Wikidata — small against the 446 s node walk, zero when unset.
+    // Sub-phase timers on the same KGLITE_STREAMING_TIMING flag. A clock read
+    // is ~50 ns on macOS and five sub-phases are timed per row, so Wikidata's
+    // 17 M rows pay a few seconds — small against the 446 s node walk, zero
+    // when unset.
     let mut t_lookups = std::time::Duration::ZERO;
     let mut t_read_id_title = std::time::Duration::ZERO;
     let mut t_read_props = std::time::Duration::ZERO;
@@ -591,9 +590,8 @@ pub fn save_subset_streaming_disk(
     let mut t_add_node = std::time::Duration::ZERO;
     let mut row_counter: u64 = 0;
 
-    // Periodic per-million-row breakdown when timing is on: assesses a perf
-    // change in ~30 s of bench time instead of 10 minutes — if the
-    // per-million numbers don't move, the fix isn't working.
+    // Periodic per-million-row breakdown when timing is on: a perf change
+    // shows in ~30 s instead of after the full ten-minute walk.
     const PROGRESS_EVERY: u64 = 1_000_000;
     let mut last_progress_row: u64 = 0;
     let mut last_progress_at = Instant::now();
@@ -950,10 +948,8 @@ mod tests {
     }
 
     /// Distinct Wikidata-observed type names that share an ASCII-prefix
-    /// shape (after non-alnum→`_` mapping) MUST sanitize to distinct
-    /// paths. Without per-type uniqueness, the writers' files race and
-    /// the second-to-finalize type truncates the first's mmap-backed
-    /// files out from under it.
+    /// shape (after non-alnum→`_` mapping) MUST sanitize to distinct paths —
+    /// see `sanitize_type_name` for the truncation panic this pins.
     #[test]
     fn sanitize_type_name_is_collision_free() {
         let groups = vec![

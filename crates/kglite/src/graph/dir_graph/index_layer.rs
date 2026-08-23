@@ -150,8 +150,7 @@ impl<K: Eq + Hash + Clone> LayeredIndex<K> {
     ///
     /// Cold paths only: eviction journalling on delete, index statistics, and
     /// the composite occupancy scan. With one level this is the plain map
-    /// iterator; a layered index pays a seen-set to mask shadowed keys, which
-    /// is why the single-level arm is spelled out rather than folded in.
+    /// iterator; a layered index pays a seen-set to mask shadowed keys.
     pub fn iter(&self) -> IndexIter<'_, K> {
         match self.levels.as_slice() {
             [] => IndexIter::Empty,
@@ -211,9 +210,8 @@ impl<K: Eq + Hash + Clone> LayeredIndex<K> {
     /// so the base a forked reader is using stays untouched.
     pub fn remove(&mut self, key: &K) -> Option<Vec<NodeIndex>> {
         if self.is_flat() {
-            // Nothing below to mask, so drop the entry outright and keep the
-            // invariant that an unshared index carries no tombstones — which is
-            // what lets `len` and `iter` take their single-level fast paths.
+            // Nothing below to mask, so drop the entry outright rather than
+            // leaving a tombstone with nothing under it.
             return Arc::get_mut(&mut self.levels[0])
                 .expect("is_flat proved sole ownership")
                 .remove(key)
@@ -342,9 +340,6 @@ impl<K: Eq + Hash + Clone> LayeredIndex<K> {
 
     /// Copy this value's merged bucket into the writable tail and hand back a
     /// `&mut` to it. Creates an empty bucket when the value is absent.
-    ///
-    /// The copy is what makes the journal's reversals correct unchanged (module
-    /// doc), and it is bounded by the bucket rather than by the index.
     fn materialize(&mut self, key: &K) -> &mut Vec<NodeIndex> {
         let tail_has = self
             .levels
@@ -367,7 +362,8 @@ impl<K: Eq + Hash + Clone> LayeredIndex<K> {
             .get_or_insert_with(Vec::new)
     }
 
-    /// Merge every level into one uniquely-owned level, dropping tombstones.
+    /// Merge the levels into one uniquely-owned level, dropping tombstones. A
+    /// lone level is only made unique — its tombstones, if any, survive.
     fn flatten(&mut self) {
         if self.levels.len() <= 1 {
             if self.levels.len() == 1 && Arc::get_mut(&mut self.levels[0]).is_none() {
@@ -411,8 +407,8 @@ impl<'a, K> Iterator for IndexIter<'a, K> {
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             IndexIter::Empty => None,
-            // A single owned level carries no tombstones (see `remove`), but
-            // filter anyway: a level shared with a fork can, until it folds.
+            // Any level may hold tombstones — one shared with a fork until it
+            // folds, and `try_compact` merges them into the level it folds to.
             IndexIter::Flat(it) => it.find_map(|(key, entry)| Some((key, entry.as_ref()?))),
             IndexIter::Merged(it) => it.next(),
         }

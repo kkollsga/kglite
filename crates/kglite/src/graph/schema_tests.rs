@@ -1,4 +1,4 @@
-//! Unit tests extracted from schema.rs to keep the production module focused.
+//! Unit tests for the `schema` module.
 
 use super::*;
 
@@ -67,17 +67,17 @@ mod maintenance_tests {
     use super::*;
     use crate::graph::storage::{GraphRead, GraphWrite};
 
-    /// Helper: create a DirGraph with N Person nodes and edges between consecutive pairs.
+    /// Creates a DirGraph with N Person nodes and, when `num_edges`, edges
+    /// between consecutive pairs.
     ///
     /// Built through **`add_nodes`**, the real ingest funnel, rather than by
-    /// hand-assembling `NodeData` and pushing into `type_indices`. The hand-built
-    /// form bypassed every construction path a user can reach, and since 0.16.0
-    /// made construction columnar everywhere, that is the difference between a
-    /// fixture whose nodes carry inline `id`/`title` values and one whose nodes
-    /// carry the `Value::Null` sentinel with their identity in the type's
-    /// `ColumnStore` — i.e. between a fixture that hides the sentinel class and
-    /// one that exercises it. Tests here therefore read values through
-    /// `node_view`, never off `node_weight` (codingest's 0.16.0 report, ask 4b).
+    /// hand-assembling `NodeData` and pushing into `type_indices`: since 0.16.0
+    /// made construction columnar everywhere, a hand-built node carries inline
+    /// `id`/`title` values where an ingested one carries the `Value::Null`
+    /// sentinel with its identity in the type's `ColumnStore` — hiding the
+    /// sentinel class instead of exercising it. Tests here therefore read
+    /// values through `node_view`, never off `node_weight` (codingest's 0.16.0
+    /// report, ask 4b).
     fn make_test_graph(num_nodes: usize, num_edges: bool) -> DirGraph {
         use crate::datatypes::DataFrame;
         use crate::graph::mutation::maintain::add_nodes;
@@ -158,7 +158,7 @@ mod maintenance_tests {
     fn test_reindex_rebuilds_type_indices() {
         let mut g = make_test_graph(5, false);
 
-        // Manually corrupt type_indices (simulate drift)
+        // Simulate index drift.
         g.type_indices.clear();
         assert!(g.type_indices.is_empty());
 
@@ -213,7 +213,7 @@ mod maintenance_tests {
 
         g.reindex();
 
-        // id_indices should be cleared (lazy rebuild on next access)
+        // Cleared, not rebuilt: the rebuild is lazy, on next access.
         assert!(g.id_indices.is_empty());
     }
 
@@ -293,7 +293,6 @@ mod maintenance_tests {
             "vacuum must not drop the WAL capture wrapper"
         );
 
-        // And the wrapper must still be capturing afterwards.
         let before = g.graph.recorded_ops_len();
         let data = NodeData::new(
             Value::Int64(99),
@@ -458,8 +457,6 @@ mod maintenance_tests {
         assert_eq!(g.graph_info().node_tombstones, 0);
         assert_eq!(g.graph_info().fragmentation_ratio, 0.0);
     }
-
-    // ─── Incremental index update tests ──────────────────────────────────
 
     #[test]
     fn test_update_property_indices_for_add() {
@@ -715,8 +712,6 @@ mod maintenance_tests {
         );
     }
 
-    // ─── Columnar storage tests ──────────────────────────────────────────
-
     #[test]
     fn test_enable_columnar_preserves_properties() {
         let mut g = make_test_graph(5, false);
@@ -816,14 +811,12 @@ mod maintenance_tests {
     /// path**, which is the only production serializer that meets a columnar
     /// node.
     ///
-    /// Replaces `test_columnar_serialize_roundtrip`, which serialized the
-    /// backend directly and expected properties in the topology stream. That is
-    /// no longer possible: the store belongs to the backend, and
-    /// `PropertyStorage` — which is what serde sees — carries only a row id.
-    /// `write_kgl_to` therefore writes columns in their own sections and sets
-    /// `StripPropertiesGuard` while serializing topology; the `Serialize` impl
-    /// `debug_assert!`s that guard is set, so a new save path that forgets it
-    /// fails loudly instead of writing empty property maps.
+    /// Serializing the backend directly cannot substitute: the store belongs
+    /// to the backend, and `PropertyStorage` — which is what serde sees —
+    /// carries only a row id. `write_kgl_to` therefore writes columns in their
+    /// own sections and sets `StripPropertiesGuard` while serializing topology;
+    /// the `Serialize` impl `debug_assert!`s that guard is set, so a new save
+    /// path that forgets it fails loudly instead of writing empty property maps.
     #[test]
     fn columnar_properties_round_trip_through_the_kgl_save_path() {
         let mut g = make_test_graph(3, false);
@@ -861,8 +854,7 @@ mod maintenance_tests {
     /// Vacuum a **columnar** graph — the combination the `test_vacuum_*` family
     /// above never reaches, because every one of them builds row storage.
     ///
-    /// Three things this release changed meet here and nothing else pins their
-    /// junction:
+    /// Two things meet here and nothing else pins their junction:
     ///
     /// * `GraphBackend::replace_heap_graph` has to *carry* the per-type column
     ///   stores across the swap. Dropping them leaves every node holding a

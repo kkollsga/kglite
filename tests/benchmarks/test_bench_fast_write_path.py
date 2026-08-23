@@ -1,10 +1,10 @@
 """Does an ordinary user action silently move every later write onto a
 whole-graph clone?
 
-Two independent defects live here. Both make a single write O(V+E) instead of
-O(changes), both are invisible at small scale, and both were found by an
-external competitive benchmark rather than by this suite — because nothing in
-this suite was shaped to see them.
+Two independent defects are pinned here, both since fixed. Both made a single
+write O(V+E) instead of O(changes), both are invisible at small scale, and both
+were found by an external competitive benchmark rather than by this suite —
+because nothing in this suite was shaped to see them.
 
 ────────────────────────────────────────────────────────────────────────────
 Defect A — the ``journal_covers`` vetoes (fixed in PR #86, ``59478b43``)
@@ -33,8 +33,9 @@ After PR #86 ``journal_covers`` (``rollback.rs``) has **exactly one** term left
 — ``graph.graph.supports_undo_journal()``. Neither ``save()`` nor any index
 family vetoes it any more. The only remaining way to force the clone is the
 *backend*: ``Memory`` **and ``Mapped``** journal (both wrap the same heap
-``StableDiGraph``), ``Recording`` forwards to its inner backend, and only
-``Disk`` returns ``false`` — it has no petgraph and therefore no
+``StableDiGraph``), ``Forked`` — the copy-on-write overlay — answers as the
+``Memory`` it forked from, ``Recording`` forwards to its inner backend, and
+only ``Disk`` returns ``false`` — it has no petgraph and therefore no
 ``NodeIndex`` identity for an ``UndoEntry`` to name
 (``storage/backend.rs::supports_undo_journal``). A reintroduced veto is
 therefore a new conjunct in a one-conjunct predicate — cheap to add by
@@ -57,7 +58,7 @@ the clone path *no matter what the gate says*. PR #86 added ``seeded_columnar``
 and ``seeded_indexed`` arms, and those are the authoritative, deterministic
 guard: they assert ``backend_clone_nodes() == 0``, an exact oracle for *which
 path ran*. This file cannot do that — ``backend_clone_nodes`` is ``#[cfg(test)]
-pub(crate)`` on a thread-local (``storage/backend.rs:42``) and is not reachable
+pub(crate)`` on a thread-local (``storage/backend.rs``) and is not reachable
 from Python by any route. **These benchmarks are the cost/scaling complement,
 not a replacement**: they measure that the fast path is still *cheap* and still
 *flat*, and they cover the one combination the Rust arms do not — saved **and**
@@ -65,16 +66,25 @@ indexed at once, through a real ``save()``.
 
 ────────────────────────────────────────────────────────────────────────────
 Defect B — ``Arc::make_mut`` deep clone on a merely-held reference
+(fixed 2026-08-10, ``813f2fa4``; ``docs/rust/structural-sharing.md``)
 ────────────────────────────────────────────────────────────────────────────
 
-Holding a returned result view across a write triggers one full graph clone.
-Measured at 100k (2026-07-27): mean 0.0561 ms, p50 0.0044 ms, **max 5.17 ms**,
-with full recovery once the reference is released; ``freeze()`` held behaves
-the same (max 5.83 ms); ~28 ms at 1M. No threading, no snapshot API, no
-explicit copy — merely keeping the ``ResultView`` a query returned.
+Holding a returned result view across a write used to trigger one full graph
+clone. Measured at 100k (2026-07-27): mean 0.0561 ms, p50 0.0044 ms, **max
+5.17 ms**, with full recovery once the reference was released; ``freeze()``
+held behaved the same (max 5.83 ms); ~28 ms at 1M. No threading, no snapshot
+API, no explicit copy — merely keeping the ``ResultView`` a query returned.
 
-**Re-pinned 2026-08-10** (release, two agreeing runs). Mean µs of
-the timed first-write, every round against a freshly acquired reference:
+The write still forks — ``Arc::make_mut`` on a shared ``Arc<DirGraph>`` is
+unavoidable in safe Rust — but in memory mode the fork is now a copy-on-write
+overlay that folds back on the first write after the last reader drops, so it
+costs O(changes). ``Mapped`` and ``Disk`` still deep-copy, and an adjacency
+edit flattens the overlay at one copy per fork.
+
+**Pinned 2026-08-10** (release, two agreeing runs) immediately before that fix,
+so this table is the *baseline these cells defend against*, not what a healthy
+run reads today — the 1M ``result_view`` cell is ~4.6 µs now. Mean µs of the
+timed first-write, every round against a freshly acquired reference:
 
 ===============  =========  ===========  ============
 holder            1k         100k         1M
@@ -100,7 +110,7 @@ Three things that table says and the 2026-07-26 one could not:
   3,400x to **13x/1,240x/12,100x**. Removing per-write cost elsewhere made this
   the dominant term, not a smaller one.
 
-Memory is the other half: at 1M the fork grew process peak RSS by **668.8 MB**
+Memory was the other half: at 1M the fork grew process peak RSS by **668.8 MB**
 in a single round — a second whole copy of the graph — while the ``none`` and
 ``dropped_view`` arms immediately before it grew it by 0.0 MB.
 
@@ -122,10 +132,10 @@ the signal is a **ratio**, and there are two of them:
    change of machine, and it cannot be explained away as thermal noise.
 
 Nothing here is in the ``make bench-check`` tracked set. That gate runs
-``tests/benchmarks/test_bench_core.py`` only (see ``Makefile:85``), so a new
-file cannot perturb it — and, for defect B specifically, that gate compares on
-``--metric min``, which is structurally blind to it (again, see the trap
-comment).
+``tests/benchmarks/test_bench_core.py`` only (the ``bench-check`` target in the
+``Makefile``), so a new file cannot perturb it — and, for defect B
+specifically, that gate compares on ``--metric min``, which is structurally
+blind to it (again, see the trap comment).
 
 Run with::
 
@@ -232,12 +242,13 @@ _FRESH_GRAPH_IDS = itertools.count(20_000_000)
 
 # ⚠ STATEMENT SHAPE — THE SINGLE EASIEST WAY TO SILENTLY DISABLE THIS FILE.
 #
-# `session/execute.rs:390-394` opens a `StatementCheckpoint` only when
-# `can_skip_rollback_checkpoint(...)` is false. That whitelist
-# (`execute.rs:309-337`) returns true — meaning NO CHECKPOINT IS OPENED AT ALL,
+# `session/execute.rs::execute_mut` opens a `StatementCheckpoint` only when
+# `can_skip_rollback_checkpoint(...)` is false. That whitelist (same file)
+# returns true — meaning NO CHECKPOINT IS OPENED AT ALL,
 # `StatementCheckpoint::None` — for a query that is exactly one `Clause::Create`
 # with a single-node pattern, on a backend with
-# `supports_checkpoint_free_mutation()` (`backend.rs:94-96`: `Memory` only).
+# `supports_checkpoint_free_mutation()` (`backend.rs`: `Memory` and `Forked`,
+# the copy-on-write overlay a held reference produces).
 #
 # So `CREATE (:Item {id: 1})` on an in-memory graph takes the same free path
 # before and after PR #86, on every variant. A benchmark built on it reads
@@ -459,17 +470,14 @@ def test_bench_update_after_veto_trigger(benchmark, veto_graphs, size, variant):
 # sub-millisecond benchmarks, because median pulls upward with system load.
 # That guidance is correct in general and WRONG HERE.
 #
-# The clone fires on the FIRST write after a second `Arc<DirGraph>` appears,
-# and once only — afterwards the graph is uniquely owned again and every
+# The fork fires on the FIRST write after a second `Arc<DirGraph>` appears, and
+# once only — afterwards the writer's graph is unshared again and every
 # subsequent write is back to normal speed. The measured 100k signature is
 # exactly that: mean 0.0561 ms, p50 0.0044 ms, max 5.17 ms. So over N rounds
-# with a single reference taken once:
-#
-#   * `min`  sees round 2..N  -> healthy. Blind by construction.
-#   * `p50`  sees round N/2   -> healthy. Blind by construction.
-#   * `p95`  is healthy for any N > 20. Blind by construction.
-#   * only `max` sees it, and `max` is the one statistic nobody gates on
-#     because it is where genuine noise lands.
+# with a single reference taken once, `min`, `p50` and `p95` all sample the
+# recovered rounds and read healthy — blind by construction (`p95` for any
+# N > 20). Only `max` sees it, and `max` is the one statistic nobody gates on
+# because it is where genuine noise lands.
 #
 # `test_bench_write_scaling.py` already had a cell aimed at this defect
 # (`test_bench_create_with_lazy_result_alive`) and it reported NO DIFFERENCE —
@@ -493,9 +501,10 @@ def _wide_result(graph: KnowledgeGraph):
     """A lazy `ResultView` that keeps its own `Arc<DirGraph>` alive.
 
     Every clause of this query is chosen against the laziness rules in
-    `planner/fusion/aggregate.rs:1733-1819` and `result_view.rs:112,203-217`,
-    because a view that materialises eagerly drops its `Arc` and silently
-    becomes the `holder="none"` case under a name claiming otherwise:
+    `planner/fusion/aggregate.rs::mark_return_lazy_eligible` and
+    `result_view.rs::from_cypher_result_with_graph`, because a view that
+    materialises eagerly drops its `Arc` and silently becomes the
+    `holder="none"` case under a name claiming otherwise:
 
     * **>32 cells.** `EAGER_MATERIALISE_MAX_CELLS = 32`, applied as
       `rows * columns`. Two columns x `LIMIT 100` = 200 cells, comfortably past
@@ -568,11 +577,11 @@ def _peak_rss_mb() -> float:
     alphabetical: `none` and `dropped_view` run **first** at each size and
     establish the peak without holding anything, so the first pinning holder's
     growth is attributable to the fork and nothing else. Measured 2026-08-10 at
-    1M: `none` and `dropped_view` grew the peak by 0.0 MB, and `result_view` —
-    the very next cell, differing only in that it kept the view — grew it by
-    **668.8 MB**, i.e. a whole second copy of the graph. The three holders after
-    it read 0.0 MB because the peak was already there, not because they were
-    free.
+    1M, immediately before the copy-on-write overlay landed: `none` and
+    `dropped_view` grew the peak by 0.0 MB, and `result_view` — the very next
+    cell, differing only in that it kept the view — grew it by **668.8 MB**,
+    i.e. a whole second copy of the graph. The three holders after it read
+    0.0 MB because the peak was already there, not because they were free.
 
     Do not "fix" this by resetting between cells; there is no way to reset
     `ru_maxrss`. Read the first pinning arm, or run one cell per process.
@@ -603,27 +612,28 @@ def test_bench_first_write_after_reference(benchmark, ref_graphs, size, holder):
     """The first write after a reference to the graph appears.
 
     Defends (measured 2026-07-27, 100k): holding a returned `ResultView` across
-    a write costs **max 5.17 ms** against a 0.0044 ms p50, with full recovery
-    on release; `freeze()` held is the same at **max 5.83 ms**; ~28 ms at 1M.
+    a write cost **max 5.17 ms** against a 0.0044 ms p50, with full recovery
+    on release; `freeze()` held was the same at **max 5.83 ms**; ~28 ms at 1M.
     `holder="none"` is the control and must stay at the ordinary write cost.
 
     Read this as `result_view` / `frozen` against `none` at the same size, and
-    each against itself across sizes — the clone is O(V+E), so a present defect
-    shows a ~100x gap between 1k and 100k while the control stays flat.
+    each against itself across sizes — a deep clone is O(V+E), so a
+    reintroduced defect shows a ~100x gap between 1k and 100k while the control
+    stays flat.
 
     Every round re-acquires the reference in an untimed `setup`; see the long
     comment above for why that is load-bearing and not refactorable.
 
     A bare single-node `CREATE` is deliberately correct here, unlike in the
-    defect-A cells. `Arc::make_mut` fires in `get_graph_mut`
-    (`kg_core.rs:1569` -> `handle.rs:630`) *before* the checkpoint whitelist is
-    ever consulted, so the cheapest possible statement still triggers the
-    clone — which isolates defect B from checkpoint cost rather than summing
+    defect-A cells. `Arc::make_mut` fires in `get_graph_mut` (the kglite-py
+    alias for `handle.rs::make_dir_graph_mut`) *before* the checkpoint
+    whitelist is ever consulted, so the cheapest possible statement still
+    forks — which isolates defect B from checkpoint cost rather than summing
     the two.
 
     **Memory is recorded alongside time**, as `extra_info`. The fork's cost is
-    not only latency: a copy of the whole graph is also a transient allocation
-    the size of the graph, and at 1M nodes that is the difference between a
+    not only latency: a deep copy is also a transient allocation the size of
+    the graph, and at 1M nodes that is the difference between a
     process that fits and one that does not. Read `rss_peak_growth_mb` across
     holders at one size; `_peak_rss_mb` explains why it is not per-round.
     """
@@ -830,13 +840,14 @@ def test_the_wide_result_stays_past_the_eager_materialise_cutoff(guard_graph):
 
 @pytest.mark.parametrize("holder", PINNING_HOLDERS)
 def test_a_held_reference_keeps_its_pre_write_values(guard_graph, holder):
-    """The semantic invariant the whole D2 program must preserve.
+    """A held reference sees the graph as of its acquisition, never the write.
 
-    Today this passes for the *expensive* reason — the write forks the graph,
-    so the holder is left looking at an untouched copy. Structural sharing must
-    make it pass for a cheap reason instead. If a future change makes the
-    holder observe the write, this is the test that says the program broke its
-    own contract rather than merely got faster.
+    This used to pass for the *expensive* reason — the write deep-copied the
+    graph, so the holder was left looking at an untouched copy. The
+    copy-on-write overlay makes it pass cheaply instead, and the observable
+    contract is identical either way. If a future change makes the holder
+    observe the write, this is the test that says the overlay broke the
+    contract rather than merely got faster.
 
     The write is a `SET` on a node the holder can see, not a `CREATE`: an
     inserted node is invisible to a `LIMIT 100` view whether or not isolation
@@ -915,7 +926,7 @@ def test_held_view_writes_do_not_grow_a_graph_copy_per_write(ref_graphs, holder)
     * **dropped** — take a view, write, drop it, x20. A regression looks like
       growth proportional to *rounds*: every round forks and never folds back.
     * **held** — one view alive across 20 writes. A regression looks like growth
-      proportional to *writes*: a graph copy per write, the pre-D2 shape.
+      proportional to *writes*: a graph copy per write, the deep-clone shape.
     * **released** — drop the view, write once more. A regression looks like no
       settling: the overlay never folds, so the base stays pinned forever.
 

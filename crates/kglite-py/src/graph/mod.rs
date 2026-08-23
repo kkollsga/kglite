@@ -5,9 +5,6 @@
 // The engine subtree is not glob-re-exported: the wheel reaches the engine
 // exclusively through `kglite_core::api::*` (roadmap Piece 4 hard seal), and
 // `kglite_core::graph` is `pub(crate)` in the engine, unreachable from here.
-// This module adds the PyO3 wrapper concerns (KnowledgeGraph #[pyclass],
-// pyapi/, param-extract helpers) plus the wheel's own graph-namespaced
-// modules below.
 pub mod embedder;
 pub mod languages;
 pub mod pyapi;
@@ -16,13 +13,11 @@ pub use pyapi::transaction::Transaction;
 
 use crate::datatypes::py_out;
 use crate::datatypes::values::{FilterCondition, Value};
-use kglite_core::api::mutation::{OperationReport, OperationReports};
-use kglite_core::api::DirGraph;
-// `MutationStats` is not yet in `api::cypher` (Piece 2 lift candidate);
-// `CowSelection`/`PlanStep` are the fluent cursor types (Piece 3 decision).
 use kglite_core::api::code_entities::SourceLookup;
 use kglite_core::api::cypher;
 use kglite_core::api::introspection;
+use kglite_core::api::mutation::{OperationReport, OperationReports};
+use kglite_core::api::DirGraph;
 use kglite_core::api::TemporalContext;
 use kglite_core::api::{CowSelection, PlanStep};
 use petgraph::graph::NodeIndex;
@@ -156,8 +151,8 @@ pub(crate) use kglite_core::api::session::resolve_noderefs;
 /// `date()` temporal context, the last cypher-mutation stats, and the
 /// accumulated operation reports.
 ///
-/// Cloned onto every derived view (O(1) — `selection`/`reports` are Arc-backed)
-/// and reset by `copy()`.
+/// Cloned onto every derived view (O(1) — `selection`/`reports` are Arc-backed).
+/// `copy()` starts a fresh one, carrying only the `date()` context across.
 #[derive(Clone)]
 pub(crate) struct CursorState {
     pub(crate) selection: CowSelection,
@@ -169,8 +164,6 @@ pub(crate) struct CursorState {
 }
 
 impl CursorState {
-    /// A fresh cursor. Used by `from_arc`, `copy()`, and other fresh-graph
-    /// sites.
     pub(crate) fn new() -> Self {
         CursorState {
             selection: CowSelection::new(),
@@ -377,12 +370,11 @@ impl std::fmt::Debug for DurableState {
 impl KnowledgeGraph {
     /// Wrap an `Arc<DirGraph>` in a `KnowledgeGraph` with default
     /// binding-ergonomic state (no embedder, default temporal context,
-    /// no timeout, no row cap). Used by the pyapi `load()` pyfunction,
-    /// code-graph builders (e.g. codingest),
-    /// and the sibling Rust crates (kglite-bolt-server,
-    /// kglite-mcp-server) that consume `kglite_core::api::io::load_file ->
-    /// Arc<DirGraph>` and need to wrap it into a `KnowledgeGraph`
-    /// alongside their own state.
+    /// no timeout, no row cap). The entry point for consumers holding an
+    /// `Arc<DirGraph>` from `kglite_core::api::io::load_file` — the pyapi
+    /// `load()` pyfunction, kglite-mcp-server, out-of-tree code-graph
+    /// builders (e.g. codingest) — that need to wrap it into a
+    /// `KnowledgeGraph` alongside their own state.
     pub fn from_arc(inner: Arc<DirGraph>) -> Self {
         KnowledgeGraph {
             inner,
@@ -864,8 +856,8 @@ impl KnowledgeGraph {
 /// `point.<name>.lon`, `shape.<name>`. These are replaced with natural storage
 /// types (`float` / `str`) in the returned dict so `pandas_to_dataframe` can handle them.
 ///
-/// Returns `(Some(config), cleaned_dict)` if any spatial entries were found,
-/// or `(None, original_dict)` if none were found.
+/// The config is `None` when no spatial entries were found; the returned dict
+/// then carries the same entries as the input.
 pub(crate) fn parse_spatial_column_types(
     py: Python<'_>,
     column_types: &Bound<'_, PyDict>,
@@ -890,8 +882,9 @@ pub(crate) fn parse_spatial_column_types(
 /// Recognizes: `validFrom`, `validTo`. These are replaced with `datetime` in the
 /// returned dict so `pandas_to_dataframe` can handle them as date columns.
 ///
-/// Returns `(Some(config), cleaned_dict)` if both validFrom and validTo were found,
-/// or `(None, original_dict)` if neither or only one was found.
+/// The config is `Some` only when both `validFrom` and `validTo` were found,
+/// `None` when neither was; exactly one of them is an incomplete config and
+/// raises `ValueError`.
 pub(crate) fn parse_temporal_column_types(
     py: Python<'_>,
     column_types: &Bound<'_, PyDict>,
@@ -910,8 +903,6 @@ pub(crate) fn parse_temporal_column_types(
     }
     Ok((config, cleaned.unbind()))
 }
-
-// ─── Inline timeseries parsing ──────────────────────────────────────────────
 
 pub(crate) use kglite_core::api::timeseries::{InlineTimeseriesConfig, TimeSpec};
 
@@ -1141,8 +1132,8 @@ pub(crate) fn centrality_results_to_dataframe(
     Ok(df.unbind())
 }
 
-/// Helper to convert community detection results to Python dict.
-/// Accesses node data directly and uses interned keys for faster dict construction.
+/// Convert community detection results to a Python dict: `communities`
+/// (community id → member node dicts), `modularity`, `num_communities`.
 pub(crate) fn community_results_to_py(
     py: Python<'_>,
     graph: &DirGraph,

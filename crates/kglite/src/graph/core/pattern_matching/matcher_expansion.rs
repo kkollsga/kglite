@@ -89,9 +89,9 @@ fn dedup_interchangeable_partials(
 }
 
 /// Everything about one expansion hop that is invariant across the matches
-/// being expanded. Built once per hop by [`PatternExecutor::execute`] — the
-/// internal binding name in particular must not be formatted afresh for every
-/// matched relationship on the expansion hot path.
+/// being expanded. Built once per hop by [`PatternExecutor::execute_pass`] —
+/// the internal binding name in particular must not be formatted afresh for
+/// every matched relationship on the expansion hot path.
 struct HopPlan<'p> {
     edge: &'p EdgePattern,
     node: &'p NodePattern,
@@ -146,8 +146,8 @@ enum CapPass {
 
 impl<'a> PatternExecutor<'a> {
     /// Choose and materialise the start-node set for `pattern`, capped at
-    /// `source_cap`. Runs once per [`Self::execute`] call, before the
-    /// expansion loop — never per row.
+    /// `source_cap`. Runs once per [`Self::execute_pass`], before the
+    /// expansion loop.
     fn seed_start_nodes(
         &self,
         pattern: &Pattern,
@@ -265,9 +265,6 @@ impl<'a> PatternExecutor<'a> {
     /// capped one) is what keeps the distinct-target dedup, the lazy seeding
     /// and the per-hop bookkeeping consistent: the retry is an ordinary
     /// execution that happens to have no pre-caps.
-    ///
-    /// A dense pattern — one where the cap is met by real rows — never reads
-    /// the bit for anything: it returns `max_matches` rows and returns here.
     pub fn execute(&self, pattern: &Pattern) -> Result<Vec<PatternMatch>, String> {
         self.take_cap_truncated();
         let matches = self.execute_pass(pattern, CapPass::Capped)?;
@@ -296,11 +293,8 @@ impl<'a> PatternExecutor<'a> {
             .then(|| format!("__anon_vlpath_{element_index}")),
             track_fixed_trail: edge_pattern.var_length.is_none() && edge_pattern.needs_path_info,
             is_last_hop,
-            // At the last hop `max_matches` is exact. At an intermediate hop it
-            // is a generous overcommit (50×) that avoids expanding far more
-            // intermediates than needed — advisory, because a sparse
-            // intermediate can push the rows that survive to the last hop past
-            // it. The uncapped retry drops it entirely.
+            // Intermediate-hop overcommit: advisory, not a bound — a sparse
+            // intermediate can push surviving rows past it. See `CapPass`.
             limit: if is_last_hop {
                 self.max_matches
             } else {
@@ -336,12 +330,10 @@ impl<'a> PatternExecutor<'a> {
 
         let has_edges = pattern.elements.len() > 1;
         let source_cap = if has_edges {
-            // Multi-hop with LIMIT: cap sources to avoid O(N) allocation +
-            // PatternMatch construction for millions of nodes; the expansion
-            // loop enforces exact max_matches via early-exit. The 100x headroom
-            // assumes ~1% of sources produce a match, but the start-node set is
-            // relationship-type-blind, so it is a selectivity guess, not a
-            // bound — a short result under it is retried uncapped by `execute`.
+            // Multi-hop with LIMIT: cap sources so a millions-of-nodes start
+            // set is never materialised whole; the expansion loop enforces the
+            // exact max_matches by early exit. The 100× headroom is advisory —
+            // the start-node set is relationship-type-blind — see `CapPass`.
             match pass {
                 CapPass::Capped => self.max_matches.map(|m| m.saturating_mul(100).max(1000)),
                 CapPass::Uncapped => None,
@@ -457,7 +449,9 @@ impl<'a> PatternExecutor<'a> {
                 return Err(msg);
             }
 
-            // The parallel path cannot early-exit, so truncate its overflow here.
+            // A guard, not a live truncation: the sequential path stops at
+            // `hop.limit` itself, and the parallel path runs only when there is
+            // no limit.
             if let Some(max) = hop.limit {
                 if new_matches.len() > max {
                     if !is_last_hop {
@@ -486,7 +480,7 @@ impl<'a> PatternExecutor<'a> {
     /// Expand one hop across every current match in parallel — each match's
     /// `expand_from_node` is independent. Only reachable with no
     /// `max_matches`: there is no early exit to honour, so every match is
-    /// expanded and the caller truncates.
+    /// expanded.
     ///
     /// Errors (deadline, cancellation, expansion failure) are captured by the
     /// shared [`ParallelInterrupt`] latch and the first message is propagated

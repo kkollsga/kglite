@@ -49,19 +49,25 @@ pub struct ColumnStore {
     /// transaction copied every column of the type — 406 µs on a 50 k x 24
     /// graph whose unshared write costs 4.5 µs.
     ///
-    /// Read through the slice (the `Arc` derefs); mutate only through
-    /// [`Self::column_mut`] / [`Self::columns_mut`], never by reaching for
-    /// `Arc::make_mut` at a call site.
+    /// Read through the slice (the `Arc` derefs); mutate through
+    /// [`Self::column_mut`] / [`Self::columns_mut`], or — where a method
+    /// already holds the element ([`Self::push_row`], [`Self::set_at_slot`])
+    /// — the identical `Arc::make_mut` on that element. What must never
+    /// happen is an `Arc::make_mut` on the store itself: that copies every
+    /// column of the type.
     columns: Vec<Arc<TypedColumn>>,
     row_count: u32,
     /// Tombstone bitmap: true = row deleted
     tombstones: Vec<bool>,
-    /// Node ID column (mapped mode only). When present, NodeData.id is Value::Null sentinel.
+    /// Reserved node-ID column. When present, `NodeData.id` carries the
+    /// `Value::Null` sentinel and the id is read from here; an mmap-backed
+    /// store leaves it `None` and reads ids through `mmap_store` instead.
     ///
     /// Shared like [`Self::columns`] and for the same reason: it is O(rows),
     /// so a store copy must not deep-copy it either.
     id_column: Option<Arc<TypedColumn>>,
-    /// Node title column (mapped mode only). When present, NodeData.title is Value::Null sentinel.
+    /// Reserved node-title column, on the same terms as [`Self::id_column`]:
+    /// when present, `NodeData.title` carries the `Value::Null` sentinel.
     ///
     /// Shared like [`Self::columns`]; see [`Self::id_column`].
     title_column: Option<Arc<TypedColumn>>,
@@ -147,12 +153,16 @@ pub(crate) fn column_store_row_pushes() -> usize {
     COLUMN_STORE_ROW_PUSHES.get()
 }
 
-/// **Copies the store, shares its data.** Every O(rows) field —
-/// [`columns`](ColumnStore::columns), the two sidecars, the overflow bag — is
-/// behind an `Arc` or an `MmapOrVec` handle, so this is a refcount bump per
-/// column; the deep copy happens later, one column at a time, at
-/// [`ColumnStore::column_mut`]. `tombstones` is the one plain `Vec` left, at
-/// one byte per row against a column's eight-plus.
+/// **Copies the store, shares its columns.** [`columns`](ColumnStore::columns)
+/// and the two sidecars are behind `Arc`s, so those cost one refcount bump
+/// each; the deep copy happens later, one column at a time, at
+/// [`ColumnStore::column_mut`].
+///
+/// Two things are copied outright: `tombstones`, at one byte per row against a
+/// column's eight-plus, and the overflow bag — `MmapOrVec`/`MmapBytes` clone
+/// into a `Heap` variant, so a store carrying a bag pays its full bytes per
+/// clone and lands them on the heap. Only the paths in
+/// [`ColumnStore::has_overflow`] produce one.
 impl Clone for ColumnStore {
     fn clone(&self) -> Self {
         #[cfg(test)]
@@ -294,8 +304,6 @@ impl ColumnStore {
         super::overflow::decode_blob(blob)
     }
 
-    // ─── Id/Title column methods (mapped mode only) ──────────────────────
-
     /// Push a node ID value into the id column, creating the column typed from
     /// the first value pushed if it does not exist yet.
     ///
@@ -346,9 +354,7 @@ impl ColumnStore {
         }
     }
 
-    /// Overwrite the title value at `row_id`. Used by update-path mutations
-    /// on mapped / disk graphs where properties live in the columnar store
-    /// rather than in a per-node heap map. Returns `true` on success.
+    /// Overwrite the title value at `row_id`. Returns `true` on success.
     pub fn set_title(&mut self, row_id: u32, value: &Value) -> bool {
         if (row_id as usize) >= self.row_count as usize {
             return false;
@@ -409,7 +415,8 @@ impl ColumnStore {
         None
     }
 
-    /// Whether this store has id/title columns (mapped mode).
+    /// Whether ids/titles are read from this store's reserved columns (or its
+    /// mmap base) rather than from the inline `NodeData` fields.
     #[inline]
     pub fn has_id_title_columns(&self) -> bool {
         self.id_column.is_some() || self.title_column.is_some() || self.mmap_store.is_some()
@@ -423,7 +430,7 @@ impl ColumnStore {
         self.mmap_store.as_ref()?.id_borrowed(row_id)
     }
 
-    /// Borrowed view of the title column. See [`id_borrowed`].
+    /// Borrowed view of the title column. See [`Self::id_borrowed`].
     #[inline]
     pub fn title_borrowed(&self, row_id: u32) -> Option<&str> {
         self.mmap_store.as_ref()?.title_borrowed(row_id)
@@ -433,9 +440,10 @@ impl ColumnStore {
     /// `save_subset_streaming_disk` to skip the per-row
     /// `Vec<(InternedKey, Value)>` and `Value::String` clones that
     /// dominated v3's node walk on Wikidata (~298 s of 446 s).
-    /// Mmap-backed stores hit the fast path; heap-overlay stores
-    /// fall back to allocating `row_properties` (the streaming
-    /// pipeline only ever sees disk-mode sources today).
+    /// The fast path needs an mmap base *and* no dense overlay
+    /// columns; anything else falls back to allocating
+    /// `row_properties` (the streaming pipeline only ever sees
+    /// disk-mode sources today).
     pub fn try_for_each_property_borrowed<F, E>(&self, row_id: u32, mut f: F) -> Result<(), E>
     where
         F: FnMut(InternedKey, crate::datatypes::values::BorrowedValue<'_>) -> Result<(), E>,
@@ -522,9 +530,12 @@ impl ColumnStore {
     /// The companion disqualifier to [`Self::has_mmap_base`] for readers that
     /// walk the dense columns directly: `get`/`row_properties` fall through to
     /// the bag when a dense column has nothing for a row, so a column-major
-    /// walk of a store carrying one would silently drop those values. Only the
-    /// disk loader builds a bag; every in-memory and packed-`.kgl` store
-    /// answers `false`.
+    /// walk of a store carrying one would silently drop those values.
+    ///
+    /// A bag reaches a heap store from the RDF/disk column builder or the
+    /// streaming subgraph carve, and round-trips through
+    /// `write_packed`/`load_packed` — so a `.kgl` saved from such a graph
+    /// carries one too. A store built by ordinary in-memory writes never does.
     #[inline]
     pub(crate) fn has_overflow(&self) -> bool {
         self.overflow_offsets.is_some()
@@ -1216,7 +1227,7 @@ impl ColumnStore {
     }
 
     /// Where [`Self::materialize_to_files`] puts this store's column files,
-    /// given the graph's spill root. See [`Self::spill_token`](#structfield).
+    /// given the graph's spill root. See the `spill_token` field.
     pub(crate) fn spill_subdir(&self, root: &Path) -> std::path::PathBuf {
         root.join(self.spill_token.to_string())
     }
@@ -1341,11 +1352,12 @@ impl ColumnStore {
         self.columns.get(slot).map(|col| &**col)
     }
 
-    /// The one way a column is mutated: privatise it, then hand out `&mut`.
+    /// Privatise the column at `slot`, then hand out `&mut` — the deep copy
+    /// the per-column `Arc` defers until a write actually lands on it.
     ///
-    /// Every mutating path goes through this or [`Self::columns_mut`]; a call
-    /// site that reaches for the `Arc` directly reintroduces the whole-store
-    /// copy the [`columns`](Self::columns) field exists to avoid.
+    /// [`Self::push_row`] and [`Self::set_at_slot`] inline the identical
+    /// element-level `Arc::make_mut`; what must never happen is an
+    /// `Arc::make_mut` on the *store*, which copies every column of the type.
     #[inline]
     fn column_mut(&mut self, slot: usize) -> Option<&mut TypedColumn> {
         self.columns.get_mut(slot).map(Arc::make_mut)
@@ -1696,7 +1708,6 @@ impl ColumnStore {
         buf.extend_from_slice(&(tag_bytes.len() as u16).to_le_bytes());
         buf.extend_from_slice(tag_bytes);
 
-        // Column data — write length placeholder, then data directly, then patch length
         let len_offset = buf.len();
         buf.extend_from_slice(&0u64.to_le_bytes());
         match delta_blob {
@@ -1733,12 +1744,12 @@ impl ColumnStore {
 
     /// The user column names carried by a packed payload, **in payload order**.
     ///
-    /// The packed block is self-describing: [`write_packed_with_codec`]
+    /// The packed block is self-describing: [`Self::write_packed_with_codec`]
     /// emits `(name, type_tag, data)` per column, iterating `self.schema` in
     /// slot order. So the payload — not the `.kgl` metadata sidecar, which is
     /// an unordered map — is where a saved file records its column order.
     ///
-    /// [`load_packed_inner`] places each column at `schema.slot(name)`, i.e.
+    /// [`Self::load_packed_inner`] places each column at `schema.slot(name)`, i.e.
     /// the slot order of the schema it is *given*. Handing it a schema built
     /// from this function reproduces the exact order the file was written
     /// with; building one from the metadata map instead makes slot order a
@@ -1977,10 +1988,6 @@ impl ColumnStore {
         Ok(store)
     }
 
-    /// A tag dispatcher: the five fixed-width tags differ only in their element
-    /// type and the variant they build, so they share
-    /// [`Self::unpack_fixed_width`]; the two variable-width forms (`string` and
-    /// the `Mixed` fallback) own a function each.
     fn unpack_column(
         type_tag: &str,
         data_blob: &[u8],
@@ -2183,7 +2190,6 @@ impl ColumnStore {
         Ok(TypedColumn::Mixed { data })
     }
 
-    /// Load raw bytes into a MmapOrVec<T>, optionally via temp file + mmap.
     fn load_typed_vec<T: PackedElement>(
         bytes: &[u8],
         len: usize,
@@ -2231,7 +2237,6 @@ impl ColumnStore {
         }
     }
 
-    /// Load raw bytes into a MmapBytes, optionally via temp file + mmap.
     fn load_bytes(
         bytes: &[u8],
         temp_dir: Option<&Path>,

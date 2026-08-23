@@ -168,8 +168,7 @@ impl DirGraph {
         // only when the storage key matches.
         let store_key = (node_type.to_string(), property.to_string());
 
-        // Read through `read_indexed` so this index covers exactly the
-        // value-space MATCH consults.
+        // Read through `read_indexed` — see its doc for why not `get_property`.
         let reader = self.property_reader(node_type, property);
         let mut index: HashMap<Value, Vec<NodeIndex>> = HashMap::new();
 
@@ -229,7 +228,8 @@ impl DirGraph {
         Ok(self.property_indices.remove(&key).is_some())
     }
 
-    /// Whether an **in-memory** index exists — see [`Self::has_any_index`].
+    /// Whether an **in-memory hash equality** index exists — not the range or
+    /// composite stores, and not a disk-backed one (see [`Self::has_any_index`]).
     pub fn has_index(&self, node_type: &str, property: &str) -> bool {
         let key = (node_type.to_string(), property.to_string());
         self.property_indices.contains_key(&key)
@@ -254,7 +254,11 @@ impl DirGraph {
         self.property_indices.keys().cloned().collect()
     }
 
-    /// `None` when no index exists on `(node_type, property)`.
+    /// `None` when `(node_type, property)` carries no in-memory index — and
+    /// equally when the index exists but holds no bucket for `value`. The two
+    /// are indistinguishable here: the matcher's `IN` arm pre-checks
+    /// `property_indices` itself when it needs to tell them apart, and its
+    /// equality arm treats both as "fall back to a scan".
     pub fn lookup_by_index(
         &self,
         node_type: &str,
@@ -459,8 +463,8 @@ impl DirGraph {
     // Bulk-path Index Refresh
     // ========================================================================
 
-    /// Maintain `node_type`'s secondary indexes for a bulk append that only
-    /// *created* rows, by giving each appended node the same per-node
+    /// Maintain `node_type`'s secondary indexes for a bulk batch by folding in
+    /// its per-row effects — each appended node gets the same per-node
     /// treatment a Cypher `CREATE` gives it — instead of rebuilding every
     /// covering index from every member of the type.
     ///
@@ -477,10 +481,12 @@ impl DirGraph {
     /// pre-image is also what lets a `UNIQUE` tuple be *released* rather than
     /// re-derived, so a constrained type no longer forces the rebuild either.
     ///
-    /// Returns `false` — meaning "rebuild instead" — only when the appended
-    /// tail cannot be identified (the type's member vector is shorter than the
-    /// batch claims to have created), because the tail *is* how a created row
-    /// is mapped back to its node.
+    /// Returns `false` — meaning "rebuild instead" — when the appended tail
+    /// cannot be identified (the type's member vector is shorter than the batch
+    /// claims to have created), because the tail *is* how a created row is
+    /// mapped back to its node; and when the cost model judges the rebuild
+    /// cheaper ([`Self::folding_moves_beats_a_rebuild`] /
+    /// [`Self::claiming_beats_a_rebuild`]).
     ///
     /// **Bucket order.** For creates it is the rebuild's, exactly: the rebuild
     /// walks the type's members in order, so the appended nodes land at the end
@@ -671,8 +677,7 @@ impl DirGraph {
                 .keys()
                 .filter(|(nt, _)| nt == node_type)
                 .count();
-            // A composite move scans every bucket of the index looking for the
-            // node, so its walk is the whole index rather than one bucket.
+            // A composite move's walk is the whole index, not one bucket.
             worst_bucket = worst_bucket.max(members);
         }
         if covering == 0 {
@@ -712,8 +717,8 @@ impl DirGraph {
     ///
     /// Called once per updated node, before the batch executes — after it, the
     /// old values no longer exist anywhere. `properties` is
-    /// [`Self::maintained_index_properties`], resolved once per call rather
-    /// than per row.
+    /// [`Self::maintained_index_properties`], resolved once per bulk call
+    /// rather than per row.
     pub(crate) fn capture_update_pre_image(
         &mut self,
         node_type: &str,

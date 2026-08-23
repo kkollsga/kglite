@@ -47,7 +47,7 @@ const NAME_SLOT_TERMINATORS: &[&str] = &["FOR", "IF", "ON", "OPTIONS"];
 
 impl CypherParser {
     // ========================================================================
-    // Dispatch predicates — cheap, peek-only, called from the clause loop
+    // Dispatch predicates
     // ========================================================================
 
     /// True when the `CREATE` at the current position opens a schema DDL
@@ -525,13 +525,11 @@ impl CypherParser {
     /// Reject an `IS <scope> <word>` requirement whose scope word disagrees
     /// with the `FOR` pattern.
     ///
-    /// This is a *parse* error rather than an executor rejection, and that is
-    /// the right side of this module's "syntax error vs unsupported feature"
-    /// line: the statement is not asking for something KGLite lacks, it is
-    /// asking for two different constraints at once, so there is nothing an
-    /// executor could serve however capable it became. An absent scope word is
-    /// legal for either target — plain `IS UNIQUE` / `IS KEY` mean "whatever
-    /// this pattern targets".
+    /// A *parse* error rather than an executor rejection, on the right side of
+    /// this module's "syntax error vs unsupported feature" line: the statement
+    /// asks for two different constraints at once, which no executor could
+    /// serve. An absent scope word is legal for either target — plain
+    /// `IS UNIQUE` / `IS KEY` mean "whatever this pattern targets".
     fn check_constraint_scope(
         &self,
         scope: Option<EntityKind>,
@@ -589,9 +587,9 @@ impl CypherParser {
     // `super` — `LOAD CSV` parses the same way (non-reserved words arriving
     // as `Identifier`), so they are shared rather than duplicated.
 
-    /// Consume an index-type word when it is immediately followed by `INDEX`.
-    /// Without the lookahead, `CREATE INDEX range FOR …` (an index *named*
-    /// `range`) would lose its name.
+    /// Consume the index-type word of `CREATE <TYPE> INDEX`. The `INDEX`
+    /// lookahead keeps the helper self-contained; on every reachable call
+    /// [`Self::create_opens_schema_ddl`] has already established it.
     fn take_index_type_word(&mut self) -> DdlIndexType {
         let Some(word) = self.soft_word_at(0) else {
             return DdlIndexType::Unspecified;
@@ -980,16 +978,17 @@ mod tests {
                 "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.age IS :: INTEGER",
                 ConstraintRequirement::PropertyType("INTEGER".to_string()),
             ),
-            // Neo4j 4 spelled the keyword ASSERT.
+            // Neo4j 4 spelled the keyword ASSERT and wrote `ON (p:Person)`
+            // where Neo4j 5 writes `FOR (...)`. Only the FOR spelling parses,
+            // so the loop's guard skips this case; ASSERT itself is exercised
+            // by the Python DDL constraint suite.
             (
                 "CREATE CONSTRAINT ON (p:Person) ASSERT p.email IS UNIQUE",
                 ConstraintRequirement::Unique,
             ),
         ];
         for (input, expected) in cases {
-            // The Neo4j 4 form writes `ON (p:Person)` instead of `FOR (...)`;
-            // only the FOR spelling is accepted, so check that one here and
-            // the legacy spelling in its own test.
+            // Skips the `ON (...)` case above, which does not parse.
             if input.contains("FOR (") {
                 match schema(input) {
                     SchemaCommand::Constraint(ConstraintCommand::Create(create)) => {
@@ -1164,7 +1163,7 @@ mod tests {
     fn graph_create_and_identifier_clauses_are_untouched() {
         let query = parse_cypher("CREATE (n:Person {name: 'A'}) RETURN n").unwrap();
         assert!(matches!(query.clauses[0], Clause::Create(_)));
-        // `index` / `show` / `drop` remain usable as ordinary names.
+        // `index` / `show` remain usable as ordinary names.
         let query = parse_cypher("MATCH (n:Person) RETURN n.index AS show").unwrap();
         assert_eq!(query.clauses.len(), 2);
     }

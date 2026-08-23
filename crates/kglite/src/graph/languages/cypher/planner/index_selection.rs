@@ -1,4 +1,6 @@
-//! Predicate pushdown into MATCH — equality/comparison extraction + application.
+//! Predicate pushdown into MATCH — equality/comparison extraction and
+//! application, plus the subsumption test a fused scan uses before dropping
+//! the safety-net WHERE the pushdown leaves behind.
 
 use super::super::ast::*;
 use crate::datatypes::values::Value;
@@ -54,10 +56,9 @@ pub(super) fn push_where_into_match(query: &mut CypherQuery, params: &HashMap<St
             _ => unreachable!("MATCH/OPTIONAL MATCH checked above"),
         };
 
-        // Collect vars bound by prior clauses (for correlated-equality pushdown).
-        // Node vars come from earlier MATCH/OPTIONAL MATCH patterns; scalar vars
-        // from WITH/UNWIND projections. We only collect names here — runtime
-        // resolution picks the right binding map (node_bindings vs projected).
+        // Names only — runtime resolution picks the right binding map
+        // (node_bindings for prior-MATCH nodes, projected values for
+        // WITH/UNWIND/LOAD CSV scalars).
         let prior_node_vars = collect_prior_node_vars(&query.clauses[..i], &match_vars);
         let prior_scalar_vars = collect_prior_scalar_vars(&query.clauses[..i]);
 
@@ -104,11 +105,12 @@ pub(super) fn push_where_into_match(query: &mut CypherQuery, params: &HashMap<St
                 pushable_text,
             );
 
-            // When all predicates are pushed into the pattern, keep the WHERE
-            // clause as-is so it acts as a safety-net filter. The pushed
-            // predicates provide fast-path filtering in the pattern matcher,
-            // but the WHERE clause must survive for correctness (e.g. when
-            // fuse_match_return_aggregate rejects patterns with properties).
+            // A fully-pushed WHERE stays in place as a safety net: consumers of
+            // the rewritten clause list either ignore pattern properties or key
+            // a fusion off the `(Match, Where, …)` adjacency, so dropping it
+            // here would change which operator runs. It is dropped later, by
+            // whichever operator can prove it enforces the predicate itself —
+            // see `where_subsumed_by_pattern`.
             if !all_applied {
                 query.clauses[i + 1] = Clause::Where(WhereClause {
                     predicate: where_pred,
@@ -492,7 +494,6 @@ fn extract_from_predicate(
             operator: ComparisonOp::Equals,
             right,
         } => {
-            // 1) Try literal/param equality first (fully resolved at plan time)
             if let Some((var, prop, val)) = try_extract_equality(left, right, match_vars, params) {
                 if reserve_exclusive(reservations, &var, &prop) {
                     pushable.push((var, prop, val));
@@ -500,7 +501,6 @@ fn extract_from_predicate(
                 }
                 return Some(pred.clone());
             }
-            // 2) Try correlated node-prop equality: cur.prop = prior.other_prop
             if let Some((var, prop, ref_var, ref_prop)) =
                 try_extract_correlated_nodeprop(left, right, match_vars, prior_node_vars)
             {
@@ -510,7 +510,6 @@ fn extract_from_predicate(
                 }
                 return Some(pred.clone());
             }
-            // 3) Try scalar-var equality: cur.prop = scalar_var
             if let Some((var, prop, ref_name)) =
                 try_extract_scalar_var(left, right, match_vars, prior_scalar_vars)
             {
@@ -560,7 +559,7 @@ fn extract_from_predicate(
                     if let Some(values) = all_literals {
                         if reserve_exclusive(reservations, variable, property) {
                             pushable_in.push((variable.clone(), property.clone(), values));
-                            return None; // Fully consumed
+                            return None;
                         }
                         return Some(pred.clone());
                     }
@@ -581,7 +580,6 @@ fn extract_from_predicate(
                             return Some(pred.clone());
                         }
                         pushable_in.push((variable.clone(), property.clone(), values.clone()));
-                        // The pushdown anchors the scan (e.g. via the id index).
                         // Replace the surviving WHERE with the O(1) HashSet form
                         // so the safety-net re-filter doesn't re-parse the list
                         // per row — matching the speed of a literal `IN [...]`.
@@ -663,15 +661,15 @@ fn extract_from_predicate(
 }
 
 /// Resolve an `IN <rhs>` right-hand side to a concrete list of values at plan
-/// time, when possible. The RHS must be a `$param` or an inline literal whose
-/// value is a list. Reuses the executor's [`parse_list_value`], which accepts
-/// both a native `Value::List` and the JSON-array `Value::String("[...]")` form
-/// that the Python binding currently uses for list params — so the *same*
-/// element parsing drives the index pushdown here and the WHERE safety-net
-/// filter at run time. Returns `None` for anything not known at plan time
-/// (e.g. a correlated sub-expression). Empty lists are returned as a known
-/// empty candidate set. (A bracket list `IN [a, b]` parses to `Predicate::In`,
-/// not `InExpression`, and is handled separately.)
+/// time: the RHS must be a `$param` or an inline literal whose value is a list,
+/// and anything not known at plan time (a correlated sub-expression) yields
+/// `None`. Reuses the executor's `parse_list_value`, which accepts both a
+/// native `Value::List` and the JSON-array `Value::String("[...]")` form the
+/// Python binding uses for list params — so the *same* element parsing drives
+/// the index pushdown here and the WHERE safety-net filter at run time. An
+/// empty list is returned as a known-empty candidate set. (A bracket list
+/// `IN [a, b]` parses to `Predicate::In`, not `InExpression`, and is handled
+/// separately.)
 fn resolve_value_list(expr: &Expression, params: &HashMap<String, Value>) -> Option<Vec<Value>> {
     let val = match expr {
         Expression::Parameter(name) => params.get(name.as_str())?,
@@ -757,13 +755,12 @@ pub(super) fn try_extract_equality(
         }
     }
 
-    // id(variable) = $param and its commutation — resolved from bound
-    // params exactly like the `v.prop = $x` arms above. These were never
-    // written, so `WHERE id(v) = 2` pushed into the pattern while
-    // `WHERE id(v) = $x` did not: with the pre-fix lossy untyped id anchor
-    // that meant a literal and a parameter answered DIFFERENT rows
-    // (measured 1 vs 68, 2026-08-15). The two spellings must plan
-    // identically — the same equivalence dynamic labels promise.
+    // id(variable) = $param and its commutation — resolved from bound params
+    // exactly like the `v.prop = $x` arms above. Missing them once let
+    // `WHERE id(v) = 2` push into the pattern while `WHERE id(v) = $x` did
+    // not, and against the then-lossy untyped id anchor the two spellings
+    // answered DIFFERENT rows (measured 1 vs 68, 2026-08-15). They must plan
+    // identically.
     if let (Expression::FunctionCall { name, args, .. }, Expression::Parameter(pname)) =
         (left, right)
     {
@@ -833,7 +830,7 @@ pub(super) fn try_extract_correlated_nodeprop(
 }
 
 /// Try to extract a scalar-var equality: `cur.prop = scalar_var`, where
-/// `scalar_var` is defined by a prior WITH/UNWIND. Returns `(cur_var,
+/// `scalar_var` is defined by a prior WITH/UNWIND/LOAD CSV. Returns `(cur_var,
 /// cur_prop, ref_name)` that the planner pushes as an `EqualsVar` matcher.
 pub(super) fn try_extract_scalar_var(
     left: &Expression,
@@ -983,7 +980,7 @@ pub(super) fn merge_comparison(
         _ => return None,
     };
 
-    // Only opposite directions merge cleanly; two lowers or two uppers can't.
+    // Only opposite directions merge cleanly.
     if existing_lower == new_lower {
         return None;
     }
@@ -1140,10 +1137,6 @@ pub(super) fn apply_nodeprop_to_patterns(
     }
     false
 }
-
-// ============================================================================
-// Subsumption — is a surviving WHERE already enforced by the pattern?
-// ============================================================================
 
 /// True when every conjunct of `pred` is *already* enforced, identically, by
 /// node property matchers on `patterns`.

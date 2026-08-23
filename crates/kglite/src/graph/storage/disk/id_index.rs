@@ -34,7 +34,8 @@
 //!
 //! Lookup is `O(log n)` binary search on `keys` for the Integer variant
 //! (cache-friendly, ~24 comparisons even at 13M entries) and a single
-//! `HashMap` probe for the General variant (lazily deserialized).
+//! `HashMap` probe for the General variant (decoded at load, where each
+//! General payload is decoded to validate it).
 
 use crate::datatypes::Value;
 use crate::graph::schema::{InternedKey, StringInterner, TypeIdIndex};
@@ -87,7 +88,8 @@ pub struct IdIndexBase {
     /// type_name -> directory entry. Built once at load (88k entries × ~50 bytes ≈ 4 MB).
     /// Strings owned to keep the API HashMap-compatible without lifetime gymnastics.
     dir: HashMap<String, BaseEntry>,
-    /// Lazy materialization cache for codec-selected General payloads.
+    /// Decoded General payloads. Filled at load, which decodes every General
+    /// entry to validate it; `general_map` decodes only on a miss.
     /// Integer variant never enters here — it's read directly from mmap.
     general_cache: RwLock<HashMap<String, Arc<FxHashMap<Value, NodeIndex>>>>,
 }
@@ -101,7 +103,8 @@ struct BaseEntry {
 }
 
 impl IdIndexBase {
-    /// Load `id_indices.bin` from `dir`. Returns `Ok(None)` if absent or magic mismatch.
+    /// Load `id_indices.bin` from `dir`. Returns `Ok(None)` if absent, shorter
+    /// than the header, or magic mismatch.
     pub fn load_from(dir: &Path, interner: &StringInterner) -> std::io::Result<Option<Self>> {
         let path = dir.join("id_indices.bin");
         if !path.exists() {
@@ -560,7 +563,8 @@ impl IdIndexStore {
     }
 
     /// Materialize the full `id → NodeIndex` map for a type, or None when the
-    /// type isn't indexed. Used by the add_nodes conflict-check fast path.
+    /// type isn't indexed. Used by `CombinedTypeLookup::from_id_indices`, which
+    /// resolves connection rows' endpoints against the endpoint types.
     pub fn materialize_type(&self, name: &str) -> Option<FxHashMap<Value, NodeIndex>> {
         {
             let ov = self.overlay.read().unwrap();
@@ -668,14 +672,15 @@ impl IdIndexStore {
     }
 
     /// Owned snapshot of every live `TypeIdIndex` (overlay first, then base
-    /// entries that aren't shadowed/removed). Cold path — used by save and
-    /// N-Triples export. Returns owned indices because the read lock can't
-    /// be held across the caller's iteration.
+    /// entries that aren't shadowed/removed). Cold path — used by N-Triples
+    /// export. Returns owned indices because the read lock can't be held
+    /// across the caller's iteration.
     pub fn values(&self) -> Vec<TypeIdIndex> {
         self.snapshot().into_iter().map(|(_, v)| v).collect()
     }
 
-    /// Owned `(name, TypeIdIndex)` snapshot of every live entry. Cold path.
+    /// Owned `(name, TypeIdIndex)` snapshot of every live entry. Cold path —
+    /// used by save.
     pub fn iter(&self) -> Vec<(String, TypeIdIndex)> {
         self.snapshot()
     }
@@ -699,8 +704,9 @@ impl IdIndexStore {
     }
 
     /// HashMap-`entry`-shaped accessor: materialize any base entry into the
-    /// overlay (or default-construct), then hand back a `&mut` to it. Used by
-    /// the N-Triples loader's per-entity incremental build. `&mut self` gives
+    /// overlay (or default-construct), then hand back a `&mut` to it. Used
+    /// wherever the index is maintained incrementally: the N-Triples and RDF
+    /// loaders' per-entity build, and the create paths. `&mut self` gives
     /// exclusive access, so `get_mut()` is uncontended (no lock cost).
     pub fn entry_or_default(&mut self, name: String) -> &mut TypeEntry {
         let needs_materialize = {

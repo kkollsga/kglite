@@ -1,8 +1,9 @@
 //! describe() entry point + core XML writers + inventory builders.
 //!
-//! The `compute_description` function is the PyO3 `.describe()` target.
-//! It dispatches to per-axis builders (inventory / type-detail /
-//! connections / cypher / fluent) and assembles an XML document.
+//! `compute_description` backs every surface that renders a schema — Python
+//! `.describe()`, the CLI, and the MCP `graph_overview` tool. It dispatches to
+//! per-axis builders (inventory / type-detail / connections / cypher / fluent)
+//! and assembles an XML document.
 
 use crate::datatypes::values::Value;
 use crate::graph::schema::{ConnectivityTriple, DirGraph, InternedKey};
@@ -97,11 +98,11 @@ fn write_graph_instructions(xml: &mut String, graph: &DirGraph) {
 
 /// Maximum `<conn>` lines the inventory-tier `<connections>` map emits.
 ///
-/// The endpoint lists inside each line were already capped at 10 types, and
-/// the Extreme tier caps the map itself at 50, but the Large/Small tiers
-/// emitted one line per connection type without limit — which is what made a
-/// mid-size graph's overview the measured 4k-token worst case. 50 matches the
-/// Extreme tier's number so the two tiers agree on what "the map" means.
+/// The endpoint lists inside each line were already capped at 10 types, but
+/// the map itself emitted one line per connection type without limit — which
+/// is what made a mid-size graph's overview the measured 4k-token worst case.
+/// 50 matches the cap `write_connections_overview` applies to the standalone
+/// `connections=True` listing, so the two agree on what "the map" means.
 const MAX_CONNECTION_MAP_TYPES: usize = 50;
 
 /// Render a connection type's `properties=` attribute as `name:Type` pairs.
@@ -369,8 +370,6 @@ fn accumulate_connection_topic(
         return acc;
     }
 
-    // Decide how much work each edge has to do so hot-path checks are
-    // cheap for the common topology-only case.
     let collect_pairs = need_pair_scan;
     let collect_props = need_property_scan;
     let sample_cap: usize = 2;
@@ -428,7 +427,8 @@ fn accumulate_connection_topic(
     acc
 }
 
-/// Connections overview: all connection types with count, endpoints, property names.
+/// Connections overview: every connection type with count, endpoints, property
+/// names — truncated to the 50 largest once the graph carries over 500 of them.
 fn write_connections_overview(xml: &mut String, graph: &DirGraph) {
     let mut conn_stats = compute_connection_type_stats(graph);
     if conn_stats.is_empty() {
@@ -664,7 +664,9 @@ fn write_connections_detail(
     Ok(())
 }
 
-/// Write the `<extensions>` element — only sections the graph actually uses.
+/// Write the `<extensions>` element. The timeseries, spatial, semantic and
+/// connections sections appear only when the graph carries that feature; the
+/// language-surface sections are unconditional.
 fn write_extensions(xml: &mut String, graph: &DirGraph) {
     let has_timeseries = !graph.timeseries_configs.is_empty();
     let has_spatial = !graph.spatial_configs.is_empty()
@@ -706,8 +708,7 @@ fn write_exploration_hints(xml: &mut String, graph: &DirGraph, conn_stats: &[Con
     let type_count = graph.type_indices.len();
     let edge_count = graph.graph.edge_count();
 
-    // Guard: not useful for trivial graphs, no edges, or too many types
-    // (join candidate search is O(types²) — infeasible above 200 core types)
+    // Join-candidate search is O(types²) — infeasible above 200 core types.
     let core_count = graph
         .type_indices
         .keys()
@@ -864,10 +865,9 @@ fn property_attrs(
     }
     attrs.push_str(&coverage_attr(prop.non_null, type_count));
     if graph.has_any_index(node_type, &prop.property_name) {
-        // All string indexes are sorted-array layouts and
-        // support both equality and prefix (STARTS WITH)
-        // lookup. Numeric indexes (when added) will need to
-        // differentiate.
+        // The persistent string index is a sorted array, so it
+        // serves prefix (STARTS WITH) as well as equality; every
+        // other value type is equality-only.
         let kind = if matches!(prop.type_string.as_str(), "String" | "string") {
             "eq,prefix"
         } else {
@@ -947,8 +947,8 @@ fn write_type_detail(
         alias_attrs
     ));
 
-    // For very large types (>1M nodes), skip property sampling and use metadata-only
-    // property names. This avoids cold-cache page faults on multi-GB column files.
+    // Above 1M nodes, metadata-only property names: sampling would cold-fault
+    // multi-GB column files.
     if count > 1_000_000 {
         if let Some(meta) = graph.node_type_metadata.get(node_type) {
             let mut prop_names: Vec<&String> = meta
@@ -1012,8 +1012,6 @@ fn write_type_detail(
                 } else {
                     truncate_at
                 };
-                // Approximate stats render `unique` as `N+` with
-                // `approx="true"`, so any listed `vals` reads as non-exhaustive.
                 let attrs = property_attrs(graph, node_type, prop, prop_truncate, count);
                 xml.push_str(&format!("{}    <prop {}/>\n", indent, attrs));
             }
@@ -1023,13 +1021,12 @@ fn write_type_detail(
         // Schema-adapted example query: anchor on this type's real identifier
         // property (its id_alias, else the builtin `id`) with a concrete sampled
         // value, so a discovery client copies a query matching THIS type's key
-        // shape instead of guessing a wrong property (e.g. File keys on `id`
-        // while code entities key on `qualified_name`).
+        // shape instead of guessing a wrong one.
         let anchor = id_alias.unwrap_or("id");
-        // The identifier's sampled values live under the canonical "id" key in
-        // compute_property_stats regardless of its display alias, so look there
-        // first (this is what makes aliased code-graph types — Function keyed on
-        // `qualified_name` — produce a concrete example, not just a template).
+        // compute_property_stats files the identifier's sampled values under the
+        // canonical "id" key whatever its display alias, so look there first —
+        // that is what gives an aliased type (Function keyed on
+        // `qualified_name`) a concrete example rather than a bare template.
         let anchor_sample = stats
             .iter()
             .find(|p| p.property_name == "id")
@@ -1225,9 +1222,9 @@ fn write_type_detail(
                 let mut sorted_props = node.property_pairs_named(&graph.interner);
                 sorted_props.sort_by(|a, b| a.0.cmp(&b.0));
                 for (k, v) in sorted_props.iter().map(|(k, v)| (k.as_str(), v)) {
-                    // Skip nulls and `false` booleans — the same suppression the
-                    // <properties> block applies, so the 4-property preview is
-                    // not crowded by uniformly-false frontend flags.
+                    // Skip nulls, `false` booleans and provenance keys so the
+                    // 4-property preview is not crowded by the other frontends'
+                    // uniformly-false flags.
                     if is_null_value(v)
                         || matches!(v, Value::Boolean(false))
                         || crate::graph::schema::is_reserved_provenance_key(k)
@@ -1254,7 +1251,7 @@ fn write_type_detail(
 
 // ── Describe: builders ─────────────────────────────────────────────────────
 
-/// Build inventory for complex graphs (>15 types): size bands with
+/// Build inventory for Medium-tier graphs (16-200 types): size bands with
 /// complexity markers and capability flags.
 fn build_inventory(graph: &DirGraph) -> String {
     build_inventory_capped(graph, None)
@@ -1396,7 +1393,6 @@ fn build_extreme_inventory(graph: &DirGraph) -> String {
     write_read_only_notice(&mut xml, graph);
     write_user_schema_version(&mut xml, graph);
 
-    // Type distribution by size tier + top-20 types
     let mut type_entries: Vec<(&str, usize)> = graph
         .type_indices
         .iter()
@@ -1429,7 +1425,6 @@ fn build_extreme_inventory(graph: &DirGraph) -> String {
     xml.push_str("    </top>\n");
     xml.push_str("  </type_distribution>\n");
 
-    // Connection summary: top-20 by count.
     // Only use edge type counts if cache is warm — avoid O(E) scan on cold start.
     if conn_type_count > 0 && graph.has_edge_type_counts_cache() {
         let edge_counts = graph.get_edge_type_counts();
@@ -1633,6 +1628,9 @@ fn build_focused_detail(
 /// 2. For each match, compute bounded neighbor schema (sample if >50K nodes).
 /// 3. Collect connected types (layer 1) — show their neighbor schemas too, cap at 30.
 /// 4. Output as XML with progressive disclosure hints.
+///
+/// Every cap above is the Small/Medium one; Large and Extreme graphs use the
+/// tighter set computed at the top of the function.
 fn build_type_search_results(graph: &DirGraph, pattern: &str) -> String {
     let pattern_lower = pattern.to_lowercase();
     let scale = graph_scale(graph);
@@ -2127,10 +2125,9 @@ fn write_connection_property(
     } else {
         String::new()
     };
-    // Declared relationship constraints, in the same two
-    // attributes the node idiom uses: an agent planning an edge
-    // write learns it will be rejected before attempting it, and
-    // learns it from the same vocabulary on both element kinds.
+    // Declared relationship constraints, in the same two attributes
+    // (and vocabulary) the node idiom uses — rationale on
+    // `property_attrs`.
     let mut constraint_attrs = String::new();
     if let Some(constraint) = describe_rel_property_constraint(graph, rel_type, prop_name) {
         constraint_attrs.push_str(&format!(" constraint=\"{constraint}\""));

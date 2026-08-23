@@ -32,8 +32,8 @@ pub struct CypherQuery {
 /// **Execution is split across two engines** keyed on whether a clause
 /// mutates (see `clause_is_mutation` / `is_mutation_query` in
 /// `executor/write.rs`): reads + fused nodes run in `executor/mod.rs`;
-/// `Create`/`Set`/`Delete`/`Remove`/`Merge` (and future mutation
-/// control-flow like `FOREACH`) run in `executor/write.rs`.
+/// `Create`/`Set`/`Delete`/`Remove`/`Merge`/`Foreach`, non-`SHOW` schema DDL,
+/// and `Call`s of a mutating procedure run in `executor/write.rs`.
 #[derive(Debug, Clone)]
 pub enum Clause {
     Match(MatchClause),
@@ -111,11 +111,11 @@ pub enum Clause {
         /// caller has absorbed both ORDER BY and LIMIT. Mutually exclusive with
         /// `candidate_emit`.
         top_k: Option<(usize, bool, usize)>,
-        /// Multi-key ORDER BY fusion (0.8.12 phase 4): emit the superset of
-        /// candidates whose primary sort key (the count aggregate) is
-        /// within the top-k-by-primary — boundary ties included. The
-        /// downstream OrderBy + Limit clauses are still in the pipeline and
-        /// re-sort those candidates using the full multi-key spec.
+        /// Multi-key ORDER BY fusion: emit the superset of candidates whose
+        /// primary sort key (the count aggregate) is within the
+        /// top-k-by-primary — boundary ties included. The downstream OrderBy +
+        /// Limit clauses are still in the pipeline and re-sort those
+        /// candidates using the full multi-key spec.
         /// Tuple: `(count_item_index, descending, k)`. Mutually exclusive
         /// with `top_k`.
         candidate_emit: Option<(usize, bool, usize)>,
@@ -482,9 +482,9 @@ pub enum Expression {
         variable: String,
         items: Vec<MapProjectionItem>,
     },
-    /// IS NULL expression: expr IS NULL → bool
+    /// `expr IS NULL` → bool
     IsNull(Box<Expression>),
-    /// IS NOT NULL expression: expr IS NOT NULL → bool
+    /// `expr IS NOT NULL` → bool
     IsNotNull(Box<Expression>),
     /// Map literal: {key: expr, key2: expr, ...}
     /// Evaluates to a JSON-like map object.
@@ -550,7 +550,7 @@ pub enum ListQuantifier {
 pub enum MapProjectionItem {
     /// Shorthand property: .prop — projects node.prop as "prop"
     Property(String),
-    /// All properties: .* — projects all node properties
+    /// All node properties: .*
     AllProperties,
     /// Computed/aliased: key: expr
     Alias { key: String, expr: Expression },
@@ -572,8 +572,10 @@ pub struct ReturnClause {
     /// Planner-set: when `true`, the executor skips per-row evaluation of
     /// the RETURN items and instead carries `node_bindings` forward into a
     /// lazy `ResultView` that materialises each cell on Python access.
-    /// Only set when every item is `Variable` or `PropertyAccess`, no
-    /// DISTINCT/HAVING, and no downstream operator consumes row values.
+    /// Set by the `mark_return_lazy_eligible` planner pass only when every
+    /// item is a `PropertyAccess` (a whole-node `Variable` is not lazily
+    /// resolvable), there is no DISTINCT/HAVING and no `WHERE` in any form,
+    /// and nothing but SKIP/LIMIT surrounds the MATCH + RETURN.
     pub lazy_eligible: bool,
     /// Planner-set: when grouping aggregation is followed by a literal
     /// `LIMIT N` *without* an intervening `ORDER BY`, the aggregator can
@@ -603,10 +605,6 @@ pub struct WithClause {
     /// `ReturnClause` that `execute_with` builds.
     pub group_limit_hint: Option<usize>,
 }
-
-// ============================================================================
-// ORDER BY / SKIP / LIMIT
-// ============================================================================
 
 #[derive(Debug, Clone)]
 pub struct OrderByClause {
@@ -669,10 +667,6 @@ pub struct LimitClause {
     pub count: Expression,
 }
 
-// ============================================================================
-// UNWIND / LOAD CSV / UNION
-// ============================================================================
-
 /// UNWIND clause: expand a list into rows
 #[derive(Debug, Clone)]
 pub struct UnwindClause {
@@ -734,19 +728,15 @@ pub enum SetOpKind {
     Except,
 }
 
-/// UNION / INTERSECT / EXCEPT clause: combine result sets. Named
-/// `UnionClause` for backwards compatibility — the `kind` field selects
-/// the actual set operator.
+/// UNION / INTERSECT / EXCEPT clause: combine result sets. Despite the name
+/// it carries all three — `kind` selects the operator, and `all` is forced
+/// `false` for INTERSECT/EXCEPT (see [`SetOpKind`]).
 #[derive(Debug, Clone)]
 pub struct UnionClause {
     pub all: bool,
     pub query: Box<CypherQuery>,
     pub kind: SetOpKind,
 }
-
-// ============================================================================
-// Mutation Clauses
-// ============================================================================
 
 #[derive(Debug, Clone)]
 pub struct CreateClause {
@@ -875,11 +865,6 @@ pub struct YieldItem {
     pub name: String,
     pub alias: Option<String>,
 }
-
-// ============================================================================
-// Schema DDL (Neo4j 5 `CREATE INDEX` / `DROP INDEX` / `SHOW INDEXES`, and the
-// constraint counterparts)
-// ============================================================================
 
 /// A schema-definition statement.
 ///
@@ -1100,10 +1085,6 @@ impl ConstraintRequirement {
         }
     }
 }
-
-// ============================================================================
-// Expression classification helpers
-// ============================================================================
 
 /// The single source of truth for the aggregate name set —
 /// `is_aggregate_expression` classifies with it, and the nested-aggregate

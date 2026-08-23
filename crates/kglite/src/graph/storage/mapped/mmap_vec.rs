@@ -1,7 +1,8 @@
 // MmapOrVec<T>: a contiguous buffer of Copy+Pod values backed by either
 // a heap Vec<T> or a memory-mapped file. Provides transparent read/write
-// access regardless of backing. When mmap-backed, grow operations
-// require dropping and recreating the mapping (memmap2 limitation).
+// access regardless of backing. When mmap-backed, grow operations must
+// re-establish the mapping (memmap2 cannot resize one in place); the
+// unmap/remap order is platform-split — see `try_push`.
 //
 // SAFETY invariants shared by every `unsafe { ... }` in this file:
 //  - `T: MmapPod` — no drop glue, padding, or invalid bit patterns.
@@ -140,9 +141,10 @@ impl_mmap_pod_primitive!(u8, u32, u64, i32, i64, f64);
 /// A resizable buffer of [`MmapPod`] values, optionally file-backed.
 ///
 /// Switching from Heap to Mapped writes current data to a file and mmaps it.
-/// Growing a Mapped buffer requires unmap → ftruncate → remap (invalidates
-/// old pointers, which is safe because `PropertyStorage::Columnar` returns
-/// owned `Cow::Owned` values, never references into the mapping).
+/// Growing a Mapped buffer ftruncates and re-maps (order platform-split, see
+/// [`Self::try_push`]), invalidating old pointers — safe because
+/// `PropertyStorage::Columnar` returns owned `Cow::Owned` values, never
+/// references into the mapping.
 #[derive(Debug)]
 pub enum MmapOrVec<T: MmapPod> {
     Heap {
@@ -232,8 +234,7 @@ impl<T: MmapPod> MmapOrVec<T> {
     }
 
     /// Create a file-backed buffer pre-sized to `count` elements.
-    /// Elements are zero-initialized by the OS (lazy page-fault zero-fill), so
-    /// `set(index, value)` works immediately and no pre-fill I/O is performed.
+    /// Same contract as [`Self::mapped_zeroed`].
     pub fn mapped_prefilled(path: &Path, count: usize) -> io::Result<Self> {
         let cap = count.max(64);
         let byte_len = capacity_bytes::<T>(cap)?;
@@ -348,8 +349,6 @@ impl<T: MmapPod> MmapOrVec<T> {
 
     /// Advise the kernel that this region is no longer needed.
     /// Releases page cache pages, reducing memory pressure after large scans.
-    /// Uses UncheckedAdvice because MADV_DONTNEED can discard dirty pages
-    /// (safe for our read-only mmap usage).
     #[cfg(unix)]
     pub fn advise_dontneed(&self) {
         if let MmapOrVec::Mapped { mmap, len, .. } = self {
@@ -369,15 +368,14 @@ impl<T: MmapPod> MmapOrVec<T> {
     #[cfg(not(unix))]
     pub fn advise_dontneed(&self) {}
 
-    /// Tell the kernel the file's page-cache contents are no longer needed via
+    /// Tell the kernel the file's page-cache contents are no longer needed:
     /// `posix_fadvise(POSIX_FADV_DONTNEED)` on Linux. macOS exposes no
     /// retroactive-eviction primitive, so it gets `fcntl(F_NOCACHE, 1)`, which
-    /// only discourages caching of future reads and may have no observable
-    /// impact — recorded so future kernel improvements pick it up automatically.
+    /// only discourages caching of *future* reads and may do nothing today —
+    /// kept so a future kernel improvement applies automatically.
     ///
-    /// The targeted complement to [`Self::advise_dontneed`] (which uses
-    /// `madvise` on the mmap region): the file-descriptor-level hint reaches
-    /// the page cache directly on Linux.
+    /// The fd-level complement to [`Self::advise_dontneed`] (`madvise` on the
+    /// mapped region): on Linux this reaches the page cache directly.
     ///
     /// No-op for heap-backed storage and on non-Unix platforms.
     #[cfg(target_os = "linux")]
@@ -421,10 +419,9 @@ impl<T: MmapPod> MmapOrVec<T> {
     pub fn fadvise_dontneed(&self) {}
 
     /// Flush dirty pages to the backing file (msync), then advise the
-    /// kernel to drop them from the page cache. Used during streaming
-    /// builds (e.g. `save_subset_streaming_disk`) to keep dirty-mmap
-    /// pressure bounded — without this, peak RSS climbs with the total
-    /// bytes pushed even when the data is file-backed.
+    /// kernel to drop them from the page cache, bounding dirty-mmap
+    /// pressure: without it, peak RSS climbs with the total bytes pushed
+    /// even when the data is file-backed.
     ///
     /// `flush()` (synchronous msync) is required before DONTNEED so the
     /// kernel doesn't discard un-persisted writes. Heap-backed and empty
@@ -614,9 +611,9 @@ impl<T: MmapPod> MmapOrVec<T> {
 
     /// Borrowed view of the whole column.
     ///
-    /// One `Heap`/`Mapped` dispatch for the whole read instead of one per
-    /// element: a per-row string read touches the null byte and two offsets,
-    /// and paid the match three times over.
+    /// One `Heap`/`Mapped` dispatch per read instead of one per element —
+    /// a per-row string read touches a null byte and two offsets, and paid
+    /// the match for each.
     #[inline]
     pub fn as_slice(&self) -> &[T] {
         match self {
@@ -632,7 +629,7 @@ impl<T: MmapPod> MmapOrVec<T> {
         }
     }
 
-    /// Get a mutable slice of the data. Works for both Heap and Mapped variants.
+    /// Mutable view of the whole column.
     ///
     /// SAFETY: For `Mapped`, the returned slice aliases the mmap's backing
     /// storage. Because this method takes `&mut self`, no other borrow of the
@@ -794,7 +791,7 @@ impl<T: MmapPod> MmapOrVec<T> {
     /// starting capacity and extends the file before writing. No-op on
     /// `Heap`. Used by the disk backend's save path to collapse the 64-
     /// element minimum-capacity padding of `mapped(path, cap)` on small
-    /// graphs, so multi-segment file-size inference (phase 7 concat)
+    /// graphs, so multi-segment file-size inference (`concat_segment_csrs`)
     /// reads the correct element count.
     ///
     /// Leaves `len` unchanged; shrinks `capacity` to equal `len`.
@@ -967,8 +964,8 @@ impl<T: MmapPod> Default for MmapOrVec<T> {
 
 // ─── MmapBytes ──────────────────────────────────────────────────────────────
 
-/// Variable-length byte buffer (for strings) with mmap support.
-/// Similar to MmapOrVec but for raw bytes with append-only semantics.
+/// Variable-length, append-only byte buffer (for strings), heap- or
+/// mmap-backed.
 #[derive(Debug)]
 pub enum MmapBytes {
     Heap {

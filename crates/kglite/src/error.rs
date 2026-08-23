@@ -16,26 +16,25 @@
 //!
 //! ## Hierarchy
 //!
-//! Every kglite-raised exception is a subclass of `kglite.KgError`.
-//! The Python class chain is defined in kglite-py's `error_py` via PyO3's
-//! `create_exception!` macro. The Rust [`KgError`] enum + the
-//! `From<KgError> for PyErr` impl at the boundary pick the most
-//! specific subclass for each variant.
+//! Every kglite-raised exception subclasses `kglite.KgError` — except
+//! [`Cancelled`](KgError::Cancelled), which deliberately surfaces as the
+//! builtin `KeyboardInterrupt`. The Python class chain is defined in
+//! kglite-py's `error_py` via PyO3's `create_exception!` macro; the
+//! `kg_to_pyerr` function there picks the most specific subclass per variant
+//! (the `From<KgError> for PyErr` impl form is orphan-rule blocked).
 //!
 //! Cypher: `CypherSyntaxError`, `CypherTimeoutError`,
 //! `CypherExecutionError`, `CypherTypeMismatchError` — all subclass
-//! `CypherError` which subclasses `KgError`.
+//! `CypherError`, which subclasses `KgError`.
 //!
-//! Schema/Validation: `SchemaError`, `ValidationError` — subclass
-//! `KgError` directly.
+//! Constraints: `ConstraintViolationError`, `ConstraintCreationError` — both
+//! subclass `ConstraintError`.
 //!
-//! Resource access: `NodeNotFoundError`, `ConnectionNotFoundError`,
-//! `PropertyNotFoundError` — subclass `KgError`.
-//!
-//! File/IO: `FileError`, `FileFormatError` — subclass `KgError`.
-//!
-//! Argument validation: `ArgumentError`, `MissingArgumentError` —
-//! subclass `KgError`.
+//! Everything else subclasses `KgError` directly: `SchemaError`,
+//! `ValidationError`, `ExprError`, `TransactionConflictError`,
+//! `NodeNotFoundError`, `ConnectionNotFoundError`, `PropertyNotFoundError`,
+//! `FileError`, `FileFormatError`, `FileIoError`, `ArgumentError`,
+//! `MissingArgumentError`, `InternerCollisionError`, `InternalError`.
 //!
 //! Internal identity: `InternerCollisionError` reports a rejected persisted
 //! name-key collision. `InternalError` is reserved for invariants that should
@@ -51,9 +50,10 @@ use crate::graph::storage::interner::InternerCollision;
 
 /// Canonical classification of every error KGLite raises.
 ///
-/// Maps 1-to-1 with the [`KgError`] enum variants but is `Copy + Eq +
-/// Hash` so it can be used in match dispatch tables (e.g. the Bolt
-/// FAILURE-code lookup).
+/// Every [`KgError`] variant maps to one code, but not one-to-one: `Argument`
+/// shares `InvalidArgument` and `InternerCollision` shares `Internal`. Unlike
+/// `KgError` this is `Copy + Eq + Hash`, so it can key match dispatch tables
+/// (e.g. the Bolt FAILURE-code lookup).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum KgErrorCode {
     CypherSyntax,
@@ -98,8 +98,10 @@ pub enum KgErrorCode {
 }
 
 impl KgErrorCode {
-    /// Stable string representation. Used by the MCP server and Bolt
-    /// server for typed wire reporting. PascalCase variant name.
+    /// Stable string representation (the PascalCase variant name). Published
+    /// as the MCP server's `kglite_code`, the wheel's `.code` exception
+    /// attribute, and the C ABI's `kglite_status_code_name`. The Bolt server
+    /// reports [`Self::neo4j_status_code`] instead.
     pub fn as_str(&self) -> &'static str {
         match self {
             KgErrorCode::CypherSyntax => "CypherSyntax",
@@ -136,13 +138,13 @@ impl KgErrorCode {
     ///   `FileNotFound` → 404 Not Found
     /// - `CypherTimeout` → 408 Request Timeout
     /// - `TransactionConflict` → 409 Conflict
-    /// - `Schema`, `Validation`, `Expr` → 422 Unprocessable Entity
+    /// - `Schema`, `Validation`, `Expr`, `ConstraintViolation`,
+    ///   `ConstraintCreationFailed` → 422 Unprocessable Entity
+    /// - `Cancelled` → 499 Client Closed Request
     /// - `CypherExecution`, `FileFormat`, `FileIo`, `Internal` →
     ///   500 Internal Server Error
     ///
     /// Companion to [`Self::neo4j_status_code`] for HTTP-shaped bindings.
-    /// Bindings still wrap the code in their own response shape; only the code
-    /// itself is shared.
     pub fn http_status_code(&self) -> u16 {
         match self {
             KgErrorCode::CypherSyntax
@@ -238,9 +240,8 @@ impl fmt::Display for KgErrorCode {
 /// reachable from the public API returns `Result<T, KgError>`
 /// (directly or via `?` from a `From`-convertible source type).
 ///
-/// At the PyO3 boundary, a `From<KgError> for PyErr` impl (in
-/// kglite-py's `error_py`) picks the most specific Python exception
-/// subclass based on the variant.
+/// At the PyO3 boundary, kglite-py's `error_py::kg_to_pyerr` picks the most
+/// specific Python exception subclass based on the variant.
 #[derive(Debug)]
 pub enum KgError {
     /// Cypher syntax error from the tokenizer or parser. Carries the
@@ -434,9 +435,9 @@ impl From<crate::graph::languages::cypher::planner::schema_check::SchemaErrorKin
 }
 
 impl KgError {
-    /// Canonical [`KgErrorCode`] for this error. Drives the
-    /// `From<KgError> for PyErr` boundary mapping and the future Bolt
-    /// `Neo.ClientError.*` lookup.
+    /// Canonical [`KgErrorCode`] for this error. Drives kglite-py's
+    /// `kg_to_pyerr` boundary mapping and the Bolt server's
+    /// [`neo4j_status_code`](KgErrorCode::neo4j_status_code) lookup.
     pub fn code(&self) -> KgErrorCode {
         match self {
             KgError::CypherSyntax { .. } => KgErrorCode::CypherSyntax,

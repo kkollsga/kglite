@@ -1,10 +1,10 @@
 //! Write-capture backend — [`RecordingGraph`].
 //!
-//! The production write-capture seam for the WAL. `RecordingGraph<G>` wraps
-//! any `G: GraphRead`/`GraphWrite`, forwards every call, and — on the mutation
-//! methods only — buffers a [`RawOp`] describing the change. Reads forward
-//! with **zero overhead** (no logging), so a durable graph pays the wrapper
-//! cost only on writes.
+//! The production write-capture seam for the write-ahead log and change data
+//! capture. `RecordingGraph<G>` wraps any `G: GraphRead`/`GraphWrite`,
+//! forwards every call, and — on the mutation methods only — buffers a
+//! [`RawOp`] describing the change. Reads forward with **zero overhead** (no
+//! logging), so a durable graph pays the wrapper cost only on writes.
 //!
 //! It drives the [`crate::graph::schema::GraphBackend::Recording`] enum
 //! variant: a durable graph's backend is
@@ -23,9 +23,9 @@
 //! string-keyed, identity-keyed [`crate::graph::wal::MutationOp`]s the
 //! WAL persists. Upserts are captured as a placeholder index and
 //! resolved against the *final* post-batch node/edge state (so an
-//! add-then-SET collapses to one upsert; an add-then-remove drops the
-//! upsert and keeps the remove). Removes capture their logical
-//! `(type, id)` *before* the entry vanishes.
+//! add-then-SET yields two identical whole-entity upserts, idempotent on
+//! replay; an add-then-remove drops the upsert and keeps the remove).
+//! Removes capture their logical `(type, id)` *before* the entry vanishes.
 //!
 //! ## `Send + Sync` without a `Mutex`
 //!
@@ -140,9 +140,10 @@ pub enum RawOp {
         before: Option<Box<BeforeImage>>,
     },
     /// A node's secondary-label set changed. Like the upserts this carries
-    /// only the index and is resolved against final state, so several
-    /// `SET n:A SET n:B` in one batch collapse to one op holding both.
-    /// Dropped at resolve time if the node was later removed.
+    /// only the index and resolves against final state, so several
+    /// `SET n:A SET n:B` in one batch each resolve to the *same* whole-set
+    /// op — idempotent on replay, not merged into one. Dropped at resolve
+    /// time if the node was later removed.
     SetNodeLabels(NodeIndex, Option<Box<BeforeImage>>),
 }
 
@@ -384,10 +385,13 @@ impl<G: GraphRead> RecordingGraph<G> {
 
     /// Fill in the label half of a node's already-captured image.
     ///
-    /// The label choke point calls this when the node was first touched by a
-    /// *property* write, which could not see labels. The set it passes is
-    /// still the commit-start one: this is the commit's first label edit on
-    /// the node, or the image would already carry labels.
+    /// Two callers. The label choke point calls it when the node was first
+    /// touched by a *property* write, which could not see labels; its set is
+    /// still the commit-start one, because a later label edit finds `labels`
+    /// already filled and leaves it. The delete path
+    /// (`mutation::delete_state`) calls it *after* `remove_node`, passing
+    /// labels read while the node still existed — the image the removal
+    /// captured could not see them either.
     pub fn backfill_node_before_labels(&mut self, idx: NodeIndex, labels: Vec<String>) {
         if !self.capture_before {
             return;
@@ -744,10 +748,10 @@ pub fn resolve_ops(
                 });
             }
             RawOp::SetNodeLabels(idx, _) => {
-                // Resolved against final state, so repeated `SET n:A`/`SET
-                // n:B` in one batch collapse into a single whole-set op. A
-                // node removed later in the batch yields `None` and is
-                // dropped — its `RemoveNode` already carries the outcome.
+                // Resolved against final state: repeated `SET n:A`/`SET n:B`
+                // in one batch each emit the same whole-set op, idempotent on
+                // replay. A node removed later in the batch yields `None` and
+                // is dropped — its `RemoveNode` already carries the outcome.
                 if let Some((node_type, id)) = logical_node(graph, *idx, interner) {
                     out.push(MutationOp::SetNodeLabels {
                         node_type,
@@ -1082,8 +1086,8 @@ impl<G: GraphRead> GraphRead for RecordingGraph<G> {
     }
 }
 
-// GraphWrite — forward to the inner backend AND buffer a RawOp. This is the
-// WAL capture seam; see the module docs.
+// GraphWrite — the capture seam itself; see the module docs. Not every method
+// records: the column-store and silent/bookkeeping ones only delegate.
 impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
     // ── Column-store ownership: delegated, never recorded ──
     //
@@ -1142,9 +1146,6 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
         self.inner.set_node_property(idx, key, value);
     }
 
-    /// A title write is a logical mutation like any other property write, and
-    /// on a columnar node it no longer passes through `node_weight_mut` — so
-    /// it is recorded here or it never reaches the log.
     #[inline]
     fn set_node_title(&mut self, idx: NodeIndex, value: Value) {
         if self.inner.node_weight(idx).is_some() {
@@ -1364,8 +1365,8 @@ mod tests {
     }
 
     fn make_mapped_backend(interner: &mut StringInterner) -> GraphBackend {
-        // Mapped backend has identical shape to Memory at this stage;
-        // difference is trait-impl identity, which is what we test.
+        // Same node/edge shape as the memory fixture, so the read-surface
+        // parity below measures trait-impl dispatch, not the data.
         let mut g = MappedGraph::new();
         let a = g.add_node(NodeData::new(
             Value::UniqueId(1),

@@ -298,8 +298,8 @@ pub(super) fn merge_profile(acc: &mut Vec<ClauseStats>, batch: Vec<ClauseStats>)
 
 /// Run `clauses` against `graph`, starting from `seed`.
 ///
-/// Extracted from `execute_mutable_with_csv` so the `LOAD CSV` driver can call
-/// it once per row batch. `seed` is empty for an ordinary query and holds one
+/// Separate from `execute_mutable_with_csv` so the `LOAD CSV` driver can call
+/// it once per row batch: `seed` is empty for an ordinary query and holds one
 /// batch of CSV rows otherwise.
 fn run_clause_pipeline(
     graph: &mut DirGraph,
@@ -497,9 +497,9 @@ fn clause_needs_implicit_row(clause: &Clause) -> bool {
 
 /// Flush staged writes and project the pipeline's rows into a `CypherResult`.
 ///
-/// Split out of `execute_mutable_with_csv` alongside [`run_clause_pipeline`]:
-/// the flush and the projection happen exactly once per query, even when the
-/// `LOAD CSV` driver ran the pipeline many times.
+/// Outside [`run_clause_pipeline`] so the flush and the projection happen
+/// exactly once per query, even when the `LOAD CSV` driver ran the pipeline
+/// many times.
 fn finalize_mutation(
     graph: &mut DirGraph,
     query: &CypherQuery,
@@ -605,7 +605,7 @@ fn execute_foreach(
 /// Apply one clause inside a FOREACH body. Only update clauses and nested
 /// FOREACH are valid (the parser enforces this; the catch-all is a guard).
 /// Mirrors the per-clause mutation handling (incl. disk flush/sync) from
-/// `execute_mutable`.
+/// `run_clause_pipeline`.
 fn apply_foreach_body_clause(
     graph: &mut DirGraph,
     clause: &Clause,
@@ -615,12 +615,12 @@ fn apply_foreach_body_clause(
     interrupt: &Interrupt,
     budget: &super::budget::ExecutionBudget,
 ) -> Result<ResultSet, String> {
-    // Per-element flush is REQUIRED on disk, not just for add_nodes: a disk
-    // property read in the same or a later iteration (e.g. `coalesce(n.hits, 0)`)
-    // reads the type's column store, which only reflects a staged write after
-    // `flush_pending_writes` drains `node_mut_cache`. Reducing this safely needs
-    // the disk read path to consult the mut-cache, a deeper storage change out
-    // of scope here. (Memory mode pays ~nothing.)
+    // The flush is per element, not per clause: on disk a property read in the
+    // same or a later iteration (e.g. `coalesce(n.hits, 0)`) reads the type's
+    // column store, which only reflects a staged write once
+    // `flush_pending_writes` has drained `node_mut_cache`. Reducing it safely
+    // needs the disk read path to consult the mut-cache, a deeper storage
+    // change. (Memory mode pays ~nothing.)
     match clause {
         Clause::Create(create) => {
             execute_create(graph, create, result_set, params, stats, interrupt)
@@ -1044,7 +1044,7 @@ fn create_node(
     ensure_type_metadata(graph, &label);
 
     // Apply secondary labels from `CREATE (n:A:B:C)` patterns. The
-    // first label is the primary type (set via NodeData::new_compact
+    // first label is the primary type (set by `insert_node_routed`
     // above); the rest are added through the choke-point API so the
     // secondary_label_index stays in sync.
     for extra in &node_pat.extra_labels {
@@ -1481,7 +1481,8 @@ fn stamp_node_provenance(graph: &mut DirGraph, nodes_to_stamp: &HashMap<NodeInde
             let type_key = InternedKey::from_str(node_type);
             for &(pname, ref pval) in &prov {
                 let key = graph.interner.get_or_intern(pname);
-                // Read-check first — see the note in `apply_landed_property_write`.
+                // Read-check first — see the note in
+                // `set_row::finish_node_property_write`.
                 let needs_key = graph
                     .type_schemas
                     .get(node_type)
@@ -1659,7 +1660,7 @@ fn execute_delete(
     // Phase 4-7: DETACH-delete the nodes — incident edges, the nodes,
     // and index cleanup. For a plain DELETE, Phase 2 has verified the
     // nodes carry no edges, so none are removed here. Shared with
-    // `purge_provisional` via `maintain::detach_delete_nodes`.
+    // `purge_provisional_nodes` via `maintain::detach_delete_nodes`.
     //
     // Write scope: the incident edges removed here are **collateral of an
     // already-authorized node delete** and are deliberately not re-checked per
@@ -2043,8 +2044,8 @@ fn try_match_merge_pattern(
 
                     // 3. Multi-property: try composite index
                     if expected_props.len() >= 2 {
-                        // Build sorted key/value arrays for composite lookup
-                        // (exclude id/name/title which use special storage)
+                        // Composite lookup excludes id/name/title: they use
+                        // special storage, not ordinary property columns.
                         let mut indexable: Vec<(&str, &Value)> = expected_props
                             .iter()
                             .filter(|(k, _)| *k != "id" && *k != "name" && *k != "title")

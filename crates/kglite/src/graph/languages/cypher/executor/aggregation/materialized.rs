@@ -85,8 +85,6 @@ impl<'a> CypherExecutor<'a> {
             .map(|&i| self.fold_constants_expr(&clause.items[i].expression))
             .collect();
 
-        // Bound-node property accesses get a cheap NodeIndex surrogate key;
-        // everything else is fully evaluated per row.
         let strategies: Vec<GroupExprStrategy> = folded_group_exprs
             .iter()
             .map(GroupExprStrategy::for_expr)
@@ -113,12 +111,12 @@ impl<'a> CypherExecutor<'a> {
         let surrogate_cap = group_limit.map(|n| n.saturating_mul(2).max(n + 8));
 
         // The grouping pass stays **sequential, on measurement.** It was
-        // implemented partitioned (per-partition group vector + index map,
-        // merged in partition order so first-seen order and every group's
-        // globally-ascending row-index list survived) and removed, because it
-        // is a net drag at every cardinality. Release, 1M-node graphgen
-        // fixture, min of 15, `collect`-grouped queries — parallel against the
-        // sequential path, with the across-group evaluation held constant:
+        // implemented partitioned — order-preserving, so first-seen group order
+        // and every group's globally-ascending row-index list survived — and
+        // removed, because it is a net drag at every cardinality. Release,
+        // 1M-node graphgen fixture, min of 15, `collect`-grouped queries —
+        // parallel against the sequential path, with the across-group
+        // evaluation held constant:
         //
         //   cell        grouping-pass only   across-group only   both
         //   low_card    0.94x                1.29x               1.17x
@@ -129,8 +127,7 @@ impl<'a> CypherExecutor<'a> {
         // Per-partition hash maps have to be allocated and then re-hashed into
         // one on merge, and the per-row work they parallelise is a binding
         // lookup and an integer hash — there is nothing there to win back. The
-        // across-group evaluation below is where the whole benefit is, and
-        // adding the grouping pass to it *subtracts* about ten points.
+        // across-group evaluation below is where the whole benefit is.
         //
         // A `group_limit_hint` would have excluded it anyway: a capped pass
         // freezes its group set once the cap is reached and drops later rows
@@ -201,12 +198,10 @@ impl<'a> CypherExecutor<'a> {
             }
         }
 
-        // Hard cap from `group_limit_hint` — the surrogate-stage cap
-        // overshoots by 2× to absorb NodeIndex→Value collisions; this
-        // truncate enforces the user's literal LIMIT N. The trailing
-        // Limit clause is retained for correctness when the planner
-        // pass declines (e.g. ORDER BY present), so this is a strict
-        // belt-and-braces enforcement.
+        // `surrogate_cap` above deliberately overshoots, so the
+        // user's literal LIMIT N is enforced here. The trailing Limit clause
+        // is retained for the case where the planner pass declines (e.g.
+        // ORDER BY present), making this belt-and-braces.
         if let Some(n) = group_limit {
             if groups.len() > n {
                 groups.truncate(n);
@@ -444,7 +439,7 @@ impl<'a> CypherExecutor<'a> {
         rows: &[&ResultRow],
     ) -> Result<Value, String> {
         match expr {
-            // Every arm below reads `args[0]`. The parser rejects a
+            // Every aggregate arm below reads `args[0]`. The parser rejects a
             // zero-argument aggregate call, so this is only reachable from an
             // internally misconstructed AST — where a blind index would abort
             // the whole host process, an embedded engine's worst failure mode.
@@ -553,8 +548,7 @@ impl<'a> CypherExecutor<'a> {
                         Ok(Value::Float64(m))
                     }
                 }
-                // Any Value type; nulls are skipped rather than counted,
-                // and an empty group is Null.
+                // Any Value type; nulls skipped, empty group → Null.
                 "mode" => self.eval_mode_aggregate(args, rows, *distinct),
                 "percentile_cont" => {
                     if args.len() != 2 {
@@ -1220,11 +1214,9 @@ impl<'a> CypherExecutor<'a> {
         if args.len() == 1 && matches!(args[0], Expression::Star) {
             Ok(Value::Int64(rows.len() as i64))
         } else if distinct {
-            // For DISTINCT on a node/edge variable, key on the
-            // binding index directly — typed sets avoid the
-            // per-row `format!("n:{}", ...)` allocation the
-            // previous implementation used. For other expression
-            // forms, key on the Value itself.
+            // DISTINCT on a node/edge variable keys on the binding
+            // index — typed sets, no per-row `format!("n:{}", …)`
+            // allocation. Other expression forms key on the `Value`.
             let var_name = match &args[0] {
                 Expression::Variable(v) => Some(v.as_str()),
                 _ => None,
@@ -1299,10 +1291,9 @@ impl<'a> CypherExecutor<'a> {
         rows: &[&ResultRow],
         distinct: bool,
     ) -> Result<Value, String> {
-        // Emits a native `Value::List`. The
-        // `parse_list_value()` helper still accepts the
-        // legacy JSON-string shape, but new producers
-        // should emit native lists.
+        // `parse_list_value()` still accepts the legacy
+        // JSON-string list shape, but new producers emit
+        // native `Value::List`.
         let mut values: Vec<Value> = Vec::new();
         let mut seen: FxHashSet<Value> = FxHashSet::default();
         for (row_idx, row) in rows.iter().enumerate() {

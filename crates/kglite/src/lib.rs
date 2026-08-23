@@ -9,11 +9,11 @@
 //!
 //! ## Public API
 //!
-//! Downstream Rust consumers (the Python wheel, the bolt and
-//! mcp server binaries, future Go/TypeScript/JVM bindings)
-//! should depend on the curated [`api`] module — those items
-//! get semver guarantees. Anything else is an implementation
-//! detail.
+//! Downstream Rust consumers (the Python wheel, the C ABI, the
+//! CLI, the bolt and mcp server binaries) should depend on the
+//! curated [`api`] module — those items get semver guarantees.
+//! Anything else is an implementation detail. Non-Rust bindings
+//! (Java today) reach that same surface through the C ABI.
 //!
 //! See `docs/rust/embedding.md` for the embedder guide.
 
@@ -88,14 +88,13 @@ pub mod api {
     };
     /// The fluent **selection** data model — the cursor state threaded
     /// through the fluent query chain (and through Selection-scoped
-    /// capabilities like `algorithms::vector_search`, `mutation`
+    /// capabilities like `algorithms::vector_search`, `fluent`
     /// set-ops/subgraph, and the spatial predicates). `CowSelection` is
     /// the Arc copy-on-write wrapper a binding holds as its cursor;
     /// `CurrentSelection` is the underlying level/plan state; `PlanStep`
     /// is an `explain()` plan entry. Pure core types (petgraph node
-    /// indices and hash maps), no binding coupling. The high-level fluent
-    /// chain operations live in `api::fluent`; the fine-grained `core::*`
-    /// primitives stay internal.
+    /// indices and hash maps), no binding coupling. The operations that
+    /// consume them live in `api::fluent`.
     pub use crate::graph::schema::{
         CowSelection, CurrentSelection, PlanStep, SelectionLevel, SelectionOperation,
     };
@@ -155,12 +154,11 @@ pub mod api {
     pub use crate::graph::handle::make_dir_graph_mut;
 
     /// Parameter-shape helpers for bindings — wire-shaped values
-    /// (JSON / protobuf-map / etc.) ↔ `kglite::api::Value`. Future
-    /// REST / gRPC bindings shouldn't re-implement the JSON dispatch
-    /// each time; these re-exports hand them the canonical converters
-    /// for both directions: `json_value_to_kglite_value` (inbound
-    /// params) and `kglite_value_to_json` (outbound result cells, in
-    /// natural untagged JSON).
+    /// (JSON / protobuf-map / etc.) ↔ `kglite::api::Value`. The
+    /// canonical converters both ways, so no binding re-implements the
+    /// JSON dispatch: `json_value_to_kglite_value` (inbound params) and
+    /// `kglite_value_to_json` (outbound result cells, in natural
+    /// untagged JSON).
     pub mod param {
         pub use crate::param::{
             json_object_to_value_map, json_value_to_kglite_value, kglite_value_to_json,
@@ -169,7 +167,7 @@ pub mod api {
 
     /// Bulk graph construction + maintenance. `add_edges_from_specs` is
     /// the DataFrame-free edge-ingest path that non-Python bindings use
-    /// (the C ABI's `create_edges_batch` wraps it); the DataFrame-based
+    /// (the C ABI's `kglite_create_edges_batch` wraps it); the DataFrame-based
     /// `add_nodes` / `add_connections` / `replace_connections` are the
     /// Rust-side bulk-ingest path (`DataFrame` in, operation report out).
     /// That `DataFrame` is kglite's own columnar container
@@ -202,18 +200,15 @@ pub mod api {
     }
 
     /// Selection-scoped operations — selection set algebra
-    /// (`union`/`intersection`/`difference`/`symmetric_difference`) and
-    /// subgraph extract / expand / stats. These take `&CurrentSelection`
-    /// (an api type) and are the building blocks the fluent chain composes.
-    ///
-    /// The bulk of this module is the **shared selection-based
+    /// (`union`/`intersection`/`difference`/`symmetric_difference`),
+    /// subgraph extract / expand / stats, and the **shared selection-based
     /// query-primitive layer** used by both Cypher and the fluent API. Each op
     /// takes `(&DirGraph, &mut CurrentSelection, …already-marshalled params)`
     /// and mutates the selection in place; a binding building a fluent surface
     /// composes these directly (the wheel's `kg_fluent` / `kg_introspection`
     /// PyO3 methods marshal Python args, then call straight into here). The
-    /// primitives stay *defined* in `crate::graph::core`; this is their
-    /// curated, stable re-export surface.
+    /// `core::*` primitives stay *defined* in `crate::graph::core`; this is
+    /// their curated, stable re-export surface.
     pub mod fluent {
         // Selection set algebra + subgraph.
         pub use crate::graph::mutation::set_ops::{
@@ -291,14 +286,12 @@ pub mod api {
     }
 
     /// Graph algorithms — pathfinding, components, centrality, community
-    /// detection (the typed, direct-call surface). Every binding that
-    /// exposes a typed `shortest_path()` / `pagerank()` / `louvain()`
-    /// method reaches these; they all take `&DirGraph` + plain params and
-    /// return the result structs below. (Per-query algorithm access is
-    /// also available through Cypher procedures; this is the typed-result
-    /// path for bindings that want structs, not result rows.)
-    /// `vector_search` + `VectorSearchResult` are here too — vector search
-    /// is scoped to a selection.
+    /// detection. The typed, direct-call surface: each takes `&DirGraph` +
+    /// plain params and returns a result struct, for bindings that want
+    /// structs rather than result rows. (The same algorithms are reachable
+    /// per-query as Cypher procedures.) `vector_search` +
+    /// `VectorSearchResult` are here too — vector search is scoped to a
+    /// selection.
     pub mod algorithms {
         pub use crate::graph::algorithms::graph_algorithms::{
             all_paths, are_connected, are_connected_with, betweenness_centrality,
@@ -320,11 +313,9 @@ pub mod api {
 
     /// Timeseries date/query helpers — the pure date-parsing and
     /// range-finding utilities behind inline timeseries support.
-    /// `parse_date_query` ("2013" / "2010..2015" → `NaiveDate` +
-    /// `DatePrecision`), `expand_end`, `date_from_ymd`, `find_range`, and
-    /// the validators are plain functions every binding's date handling
-    /// reaches; `TimeseriesConfig` / `NodeTimeseries` are the config/data
-    /// types.
+    /// `parse_date_query` maps a user string ("2013" / "2010..2015") to a
+    /// `NaiveDate` + `DatePrecision`; `TimeseriesConfig` / `NodeTimeseries`
+    /// are the config/data types.
     pub mod timeseries {
         pub use crate::graph::features::timeseries::{
             date_from_ymd, expand_end, find_range, parse_date_query, validate_channel_length,
@@ -428,9 +419,7 @@ pub mod api {
     /// Storage backend configuration — the in-memory / mmap / disk backends
     /// (`GraphBackend` + `DiskGraph` / `MappedGraph` constructors), the
     /// per-type lookup, and the embedding store. CLAUDE.md designates
-    /// storage-backend configuration a direct-api concern; these let a
-    /// binding open / inspect a graph in a specific storage mode and manage
-    /// embeddings.
+    /// storage-backend configuration a direct-api concern.
     pub mod storage {
         pub use crate::graph::schema::EmbeddingStore;
         pub use crate::graph::storage::backend::GraphBackend;
@@ -502,9 +491,8 @@ pub mod api {
 
     /// Blueprint loader + builder — declarative graph construction
     /// from a YAML/JSON spec + a directory of CSVs. The wheel's
-    /// `from_blueprint` is a thin ergonomics wrapper around
-    /// [`load_blueprint_file`] + [`build`]; future bindings (Go,
-    /// JS, JVM, …) call these directly.
+    /// `from_blueprint` and the C ABI's `kglite_blueprint_build` are both
+    /// thin wrappers around [`load_blueprint_file`] + [`build`].
     pub mod blueprint {
         pub use crate::graph::blueprint::build::{build, BuildReport, FlatSpec};
         pub use crate::graph::blueprint::json_records::{from_records, RecordsReport};

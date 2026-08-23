@@ -1,4 +1,6 @@
-//! KnowledgeGraph #[pymethods]: selection / filter / traversal chain.
+//! KnowledgeGraph #[pymethods]: the selection and filter half of the fluent
+//! chain, plus its materialisers and the code-entity lookups (the traverse /
+//! compare / derive-property half is in `kg_introspection.rs`).
 //!
 //! PyO3 merges multiple `#[pymethods] impl` blocks at class-registration
 //! time, so splitting them across files is purely structural — no runtime
@@ -763,7 +765,6 @@ impl KnowledgeGraph {
             emitted_identity.push("id");
         }
 
-        // Fast path: use TypeSchema for key discovery when all nodes share a type
         let discover = |nodes: &Vec<(&str, kglite_core::api::NodeView<'_>)>| {
             kglite_core::api::discover_property_keys_excluding(
                 nodes,
@@ -771,6 +772,8 @@ impl KnowledgeGraph {
                 &emitted_identity,
             )
         };
+        // Fast path: past ~50 single-typed nodes, take the keys from the
+        // TypeSchema instead of scanning every node.
         let prop_keys: Vec<String> = if nodes_data.len() > 50 {
             let first_type = nodes_data[0].0;
             let all_same = nodes_data.iter().all(|(nt, _)| *nt == first_type);
@@ -1209,15 +1212,11 @@ impl KnowledgeGraph {
             .is_some())
     }
 
-    // ========================================================================
-    // Code Entity Search Methods
-    // ========================================================================
-
     /// Find code entities by name, with disambiguation context.
     ///
-    /// Searches across code entity node types (Function, Struct, Class, Enum,
-    /// Trait, Protocol, Interface, Module, Constant) for nodes matching the
-    /// given name or qualified_name.
+    /// Searches across code entity node types (Function, Struct, Class, Mixin,
+    /// Enum, Trait, Protocol, Interface, Module, Constant) for nodes matching
+    /// the given name or qualified_name.
     ///
     /// Args:
     ///     name: Entity name to search for (e.g. "execute", "KnowledgeGraph")
@@ -1470,10 +1469,8 @@ impl KnowledgeGraph {
             }
         }
 
-        // Sort by line_number
         entities.sort_by_key(|e| e.3);
 
-        // Build summary: type -> count
         let mut summary: HashMap<String, usize> = HashMap::new();
         for e in &entities {
             *summary.entry(e.0.clone()).or_insert(0) += 1;

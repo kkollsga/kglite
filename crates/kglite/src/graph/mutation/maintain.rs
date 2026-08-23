@@ -337,9 +337,10 @@ struct UpdateFold {
 }
 
 impl UpdateFold {
-    /// Rows-per-member below which a per-row capture is worth taking. A
-    /// capture reads and clones each maintained property of the row's node;
-    /// the rebuild it avoids reads every member of the type once. The ratio is
+    /// Members-per-row above which a per-row capture is worth taking — a batch
+    /// touching more than 1/4 of its type takes the rebuild instead. A capture
+    /// reads and clones each maintained property of the row's node; the
+    /// rebuild it avoids reads every member of the type once. The ratio is
     /// deliberately conservative — being wrong costs time on one call and
     /// never an answer, since both paths leave the same index.
     const CAPTURE_RATIO: usize = 4;
@@ -479,10 +480,9 @@ fn parse_conflict_mode(option: Option<&str>) -> Result<ConflictHandling, String>
     }
 }
 
-/// Track the numeric ids a bulk load supplies, so the engine's auto-id
-/// high-water mark can be raised past them once after the row loop (see
-/// `DirGraph::next_auto_node_id` — an unraised mark would let a later
-/// bare `CREATE` mint a live id).
+/// Track the numeric ids a bulk load supplies, so the caller can raise the
+/// engine's auto-id high-water mark past them after the row loop (why it
+/// matters: the call site in `add_nodes`).
 fn note_loaded_id(max_loaded_id: &mut u32, id: &Value) {
     match id {
         Value::UniqueId(u) => *max_loaded_id = (*max_loaded_id).max(*u),
@@ -627,9 +627,8 @@ pub fn add_nodes(
         .get_column_index(&title_field)
         .ok_or_else(|| format!("Column '{}' not found", title_field))?;
 
-    // Every refusal happens here, ahead of the first write. See `gate_batch`:
-    // the metadata install below and the build loop's chunk flushes are both
-    // observable, so a gate placed among them cannot leave the graph untouched.
+    // Every refusal happens here, ahead of the first write — see `gate_batch`
+    // for why none of the writes below is a safe place for one.
     let constraint_columns = ConstraintColumns::for_batch(graph, &node_type, &df_data);
     let pk_enforced = graph.primary_key_for(&node_type).is_some();
     gate_batch(
@@ -673,7 +672,6 @@ pub fn add_nodes(
     // One clock read per call; every row receives the same complete stamp.
     let provenance_stamps = install_type_schema(graph, &node_type, &property_columns);
 
-    // Pre-intern property column keys once (avoids re-interning per row)
     let interned_columns: Vec<(InternedKey, usize)> = property_columns
         .iter()
         .map(|(col_name, col_idx)| (graph.interner.get_or_intern(col_name), *col_idx))
@@ -809,13 +807,13 @@ pub struct EdgeSpecReport {
 }
 
 /// Bulk-create edges from explicit specs, addressed by stable node id +
-/// type. The DataFrame-free sibling of [`add_connections`]: it drives the
-/// *same* engine (`CombinedTypeLookup` + `ConnectionBatchProcessor`) but
-/// takes a spec list instead of a [`DataFrame`] — the path the C ABI (and
-/// future Go / JS / JVM bindings, which can't cheaply build a DataFrame)
-/// use, plus any caller that already has edges as records. (That
-/// `DataFrame` is kglite's own columnar container in
-/// `crate::datatypes::values`; kglite does not depend on polars.)
+/// type. The DataFrame-free sibling of [`add_connections`]: same
+/// `ConnectionBatchProcessor`, and the same `CombinedTypeLookup` that
+/// `add_connections` falls back to, but a spec list instead of a
+/// [`DataFrame`] — the path the C ABI takes (`kglite_create_edges_batch`,
+/// and through it the Java binding), plus any caller that already holds
+/// edges as records. (That `DataFrame` is kglite's own columnar container
+/// in `crate::datatypes::values`; kglite does not depend on polars.)
 ///
 /// Specs are grouped by `(source_type, target_type, edge_type)`; each
 /// group gets one type lookup and one batch, mirroring `add_connections`.
@@ -848,8 +846,7 @@ pub fn add_edges_from_specs(
         .prepare_disk_mutation()
         .map_err(|e| format!("disk mutation lease failed: {e}"))?;
 
-    // Group by (source_type, target_type, edge_type) for deterministic,
-    // one-lookup-one-batch-per-group processing.
+    // BTreeMap, not HashMap: group order decides edge-creation order.
     type EdgeRows = Vec<(Value, Value, HashMap<String, Value>)>;
     let mut groups: BTreeMap<(String, String, String), EdgeRows> = BTreeMap::new();
     for spec in specs {
@@ -879,8 +876,7 @@ pub fn add_edges_from_specs(
         }
         let lookup = &lookup_cache[&pair];
         let mut batch = ConnectionBatchProcessor::new(edges.len());
-        // Same initial-load fast path as add_connections: skip per-edge
-        // existence checks when this connection type has no edges yet.
+        // Same initial-load fast path as `add_connections`.
         let is_initial_load = !graph.connection_type_metadata.contains_key(&edge_type);
         batch.set_skip_existence_check(is_initial_load);
 
@@ -1547,9 +1543,9 @@ fn journal_bucket_evictions(
 /// indexes. Shared by the Cypher DETACH DELETE executor and
 /// `purge_provisional`. Returns `(nodes_deleted, edges_removed)`.
 ///
-/// Clearing `connection_types` matters on disk graphs: the lazy
-/// `has_connection_type` cache would otherwise report a still-live
-/// type as gone after a delete.
+/// Clearing `connection_types` matters because `has_connection_type` treats a
+/// non-empty set as authoritative: one left over from before the delete
+/// answers from memory instead of the live edge set.
 pub(crate) fn detach_delete_nodes(
     graph: &mut DirGraph,
     nodes_to_delete: &HashSet<NodeIndex>,
@@ -2129,7 +2125,6 @@ pub fn create_connections(
 
     for (parent_opt, targets) in target_level_data.iter_groups() {
         let Some(parent_idx) = parent_opt else {
-            // Root-level targets have no parent — skip
             skipped += targets.len();
             continue;
         };

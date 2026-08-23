@@ -352,10 +352,10 @@ impl NeighborSource for CsrSource<'_> {
 }
 
 /// The scoped vertex universe shared by the unweighted scoped algorithms
-/// (k-core, clustering coefficient). `node_types` sets the universe (other types
-/// excluded); else if `edge_types` is set, the endpoints of matching edges; else
-/// all nodes. Extracted so the materialised builder and the streaming source
-/// agree on the universe.
+/// (k-core, clustering coefficient, batch shortest paths). `node_types` sets the
+/// universe (other types excluded); else if `edge_types` is set, the endpoints
+/// of matching edges; else all nodes. Extracted so the materialised builder and
+/// the streaming source agree on the universe.
 pub(super) fn scoped_universe(
     graph: &DirGraph,
     node_types: Option<&[String]>,
@@ -465,16 +465,15 @@ impl<'a> DedupNeighborSource<'a> {
 
 /// One Louvain local-moving phase over a compact weighted adjacency list.
 ///
-/// Each node starts in its own community and greedily moves to the neighbouring
-/// community with the largest modularity gain until no node moves (or
-/// `max_iterations`). Returns the (not-yet-renumbered) community id per node.
-/// Deterministic: nodes scanned in index order, `> best_delta` tie-break keeps
-/// the lowest community.
+/// Starts from `init` (Leiden: the previous level's partition) or from
+/// singletons, then greedily moves each node to the neighbouring community with
+/// the largest modularity gain until no node moves or 100 sweeps elapse. Returns
+/// the (not-yet-renumbered) community id per node. Deterministic: nodes scanned
+/// in index order, `> best_delta` tie-break keeps the lowest community.
 ///
-/// Self-loops (`neighbor == i`, produced by aggregation) count toward a node's
-/// degree but are excluded when scoring moves — they are the node's own internal
-/// weight, not a link to another node. The original graph is loop-free, so this
-/// exclusion never fires at level 0 and behaviour there is unchanged.
+/// Self-loops (`neighbor == i`, from aggregation or from a user-created loop
+/// edge) count toward a node's degree but are excluded when scoring moves — they
+/// are the node's own internal weight, not a link to another node.
 fn local_move<S: NeighborSource>(
     src: &S,
     init: Option<&[usize]>,
@@ -483,8 +482,7 @@ fn local_move<S: NeighborSource>(
 ) -> Result<Vec<usize>, String> {
     let n = src.len();
     let total_weight = src.total_weight();
-    // Start from the given partition (Leiden: previous level's communities) or
-    // from singletons (Louvain / level 0). Community ids stay in `0..n`.
+    // Community ids stay in `0..n`.
     let mut community: Vec<usize> = match init {
         Some(p) => p.to_vec(),
         None => (0..n).collect(),
@@ -616,8 +614,7 @@ fn aggregate_graph<S: NeighborSource>(src: &S, community: &[usize], k: usize) ->
 
 /// Multilevel Louvain driver: `local_move` → `aggregate` until no further
 /// merging. Returns one partition per level in **original** node-index space
-/// (`0..n0`), finest (level 0) → coarsest (last). Reuses [`local_move`],
-/// [`renumber_communities`], [`aggregate_graph`].
+/// (`0..n0`), finest (level 0) → coarsest (last).
 fn louvain_levels<S: NeighborSource>(
     level0: &S,
     resolution: f64,
@@ -747,8 +744,8 @@ pub fn louvain_communities(
     // Unscoped disk/mapped: stream level 0 from the CSR (O(nodes) heap) — the
     // bounded-memory path for whole-graph runs. In-memory, or any *scoped* run:
     // materialise the (scope-bounded) adjacency. build_weighted_adjacency reads
-    // through GraphRead (scoped_node_set / edge_in_scope), exactly like
-    // connected_components' scoped path, so scoping works on every storage mode.
+    // through GraphRead (scoped_node_set / edge_in_scope), so scoping needs no
+    // disk-specific path.
     let (nodes, levels) = if (graph.graph.is_disk() || graph.graph.is_mapped()) && scope.is_none() {
         let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
         if nodes.is_empty() {
@@ -983,10 +980,8 @@ pub fn label_propagation(
     // arena, which must run under a DiskQueryGuard (arena protocol in
     // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
     let _arena_guard = graph.graph.begin_query();
-    // Unscoped disk/mapped: stream the deduped neighbours (bounded memory). A
-    // *scoped* run falls through to the materialised path below — the scoped
-    // subgraph is bounded and scoped_node_set reads through GraphRead, so it
-    // works on every storage mode (see louvain_communities).
+    // Unscoped disk/mapped: stream the deduped neighbours (bounded memory);
+    // scoped runs take the materialised path below (see `louvain_communities`).
     if (graph.graph.is_disk() || graph.graph.is_mapped()) && scope.is_none() {
         return label_propagation_streaming(graph, max_iterations, connection_types, deadline);
     }
@@ -1086,13 +1081,13 @@ pub fn label_propagation(
         }
     }
 
-    // Single-level: `levels` empty ⇒ consumers read `assignments` as level 0.
     Ok(label_prop_result(graph, &nodes, &labels, connection_types))
 }
 
 /// Build the single-level `CommunityResult` shared by both the in-memory and the
-/// streaming label-propagation paths: renumber labels contiguously, emit one
-/// assignment per node, and compute modularity over the bound-sized label array.
+/// streaming label-propagation paths: renumber labels contiguously in first-seen
+/// order, emit one assignment per node, and compute modularity over the
+/// bound-sized label array.
 fn label_prop_result(
     graph: &DirGraph,
     nodes: &[NodeIndex],
@@ -1107,7 +1102,6 @@ fn label_prop_result(
         node_exists[node.index()] = true;
     }
 
-    // Renumber labels to be contiguous in first-seen order.
     let mut id_map: HashMap<usize, usize> = HashMap::new();
     for &lbl in labels {
         let next_id = id_map.len();

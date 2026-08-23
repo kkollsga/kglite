@@ -14,20 +14,17 @@
 //! `NodeView` is the single place a node's property read resolves its store.
 //! Callers ask the storage backend for a view
 //! ([`GraphRead::node_view`](crate::graph::storage::GraphRead::node_view)) and
-//! then read through it — which is what let the backend become the sole owner
-//! of the stores without a single caller changing: only `NodeView`'s
-//! constructor and the backend accessors moved.
+//! then read through it.
 //!
 //! # The columnar completeness contract
 //!
-//! `NodeData::property_iter` yields **nothing** for
-//! `PropertyStorage::Columnar` — it cannot, because columnar values are
-//! constructed on read and there is no `&'a Value` to hand out. Every
-//! enumeration method on `NodeView` ([`NodeView::property_pairs`],
-//! [`NodeView::property_keys`], [`NodeView::properties_cloned`],
-//! [`NodeView::property_pairs_named`]) is **complete for every storage
-//! variant**, columnar included. That is the contract: if you enumerate through
-//! a `NodeView` you see the node's real properties.
+//! A borrowing iterator cannot enumerate `PropertyStorage::Columnar`: columnar
+//! values are constructed on read, so there is no `&'a Value` to hand out —
+//! which is why the removed `NodeData::property_iter` yielded **nothing**
+//! there. Every enumeration method on `NodeView`
+//! ([`NodeView::property_pairs`], [`NodeView::property_keys`],
+//! [`NodeView::properties_cloned`], [`NodeView::property_pairs_named`]) is
+//! **complete for every storage variant**, columnar included.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -53,9 +50,9 @@ use crate::graph::storage::StrField;
 #[derive(Clone, Copy)]
 pub struct NodeView<'a> {
     data: &'a NodeData,
-    /// The resolved column store for this node's row, when the node's
-    /// properties are columnar. Resolving once per view rather than once per
-    /// read is the point of the type.
+    /// The resolved column store for this node's row, when its properties are
+    /// columnar. Resolving once per view rather than once per read is the
+    /// point of the type.
     store: Option<(&'a ColumnStore, u32)>,
 }
 
@@ -95,14 +92,14 @@ impl<'a> NodeView<'a> {
     }
 
     /// The node's primary type, resolved to a string. Alias of
-    /// [`NodeView::node_type_str`], matching `NodeData`'s two spellings so
-    /// migrated call sites read unchanged.
+    /// [`NodeView::node_type_str`], kept so call sites migrated off the older
+    /// spelling read unchanged.
     #[inline]
     pub fn get_node_type_ref<'i>(&self, interner: &'i StringInterner) -> &'i str {
         interner.resolve(self.data.node_type)
     }
 
-    /// The node's id (resolving the mapped-mode `Null` sentinel through the
+    /// The node's id (resolving the columnar `Null` sentinel through the
     /// column store).
     #[inline]
     pub fn id(&self) -> Cow<'a, Value> {
@@ -116,7 +113,7 @@ impl<'a> NodeView<'a> {
         Cow::Borrowed(&self.data.id)
     }
 
-    /// The node's title (resolving the mapped-mode `Null` sentinel through the
+    /// The node's title (resolving the columnar `Null` sentinel through the
     /// column store).
     #[inline]
     pub fn title(&self) -> Cow<'a, Value> {
@@ -192,7 +189,7 @@ impl<'a> NodeView<'a> {
     /// Every consumer of "what would a filter on `field` see?" must come
     /// through here. The planner's NDV statistic did not, read the property map
     /// alone, and so found *nothing* for a type's title field — scoring an
-    /// equality filter on it as completely non-selective (Track H2).
+    /// equality filter on it as completely non-selective.
     #[inline]
     pub fn resolved_field(
         &self,
@@ -328,11 +325,9 @@ impl<'a> NodeView<'a> {
 
     /// Number of present (non-`Null`) properties.
     ///
-    /// Counted without materialising the row: the columnar arm used to build
-    /// the whole `Vec<(InternedKey, Value)>` to take its `len()`, and both
-    /// callers (`calculate()`/`statistics()`'s capacity hint, the GraphML
-    /// export's "has any property?" test) build the row again immediately
-    /// afterwards.
+    /// Counted without materialising the row — never reintroduce
+    /// `property_pairs().len()`, which builds the whole
+    /// `Vec<(InternedKey, Value)>` just to measure it.
     #[inline]
     pub fn property_count(&self) -> usize {
         match self.store {
@@ -379,8 +374,7 @@ impl<'a> NodeView<'a> {
 
     /// Every present property as `(interned key, owned value)`.
     ///
-    /// **Complete for columnar storage** — the removed
-    /// `NodeData::property_iter` yielded nothing there.
+    /// **Complete for columnar storage.**
     pub fn property_pairs(&self) -> Vec<(InternedKey, Value)> {
         match self.store {
             Some((store, row_id)) => store.row_properties(row_id),
@@ -397,8 +391,10 @@ impl<'a> NodeView<'a> {
 
     /// Every present property key, resolved to a string.
     ///
-    /// **Complete for columnar storage.** Keys that the interner cannot resolve
-    /// are skipped, matching the pre-existing `PropertyStorage::keys` contract.
+    /// **Complete for columnar storage.** The columnar arm skips a key the
+    /// interner cannot resolve; the `Map` arm goes through
+    /// `PropertyStorage::keys`, which resolves unconditionally and panics on an
+    /// unknown key.
     pub fn property_keys(&self, interner: &'a StringInterner) -> Vec<&'a str> {
         match self.store {
             Some((store, row_id)) => store
@@ -431,9 +427,7 @@ impl<'a> NodeView<'a> {
 
     /// Every present property as `(name, owned value)`.
     ///
-    /// **Complete for columnar storage** — the replacement for
-    /// `property_iter().map(|(k, v)| (k.to_string(), v.clone()))`, which
-    /// silently produced an empty vector for saved graphs.
+    /// **Complete for columnar storage.**
     pub fn property_pairs_named(&self, interner: &StringInterner) -> Vec<(String, Value)> {
         self.property_pairs()
             .into_iter()

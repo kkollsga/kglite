@@ -33,11 +33,10 @@ pub struct CypherParser {
     tokens: Vec<CypherToken>,
     pos: usize,
     /// Nesting depth of the expression/predicate AST currently under
-    /// construction. Charged by [`Self::descend`] for *recursive* nesting
-    /// (parens/lists/`NOT`) and by [`Self::deepen`] for the *iteratively*
-    /// built left-associative operator chains, so pathologically nested
-    /// input returns a parse error instead of overflowing the stack and
-    /// aborting the process.
+    /// construction, charged against [`MAX_EXPRESSION_DEPTH`] so
+    /// pathologically nested input returns a parse error instead of
+    /// overflowing the stack and aborting the process. See that constant
+    /// for what [`Self::descend`] and [`Self::deepen`] each charge.
     depth: usize,
     /// Verbatim source lexeme per keyword-token index (see
     /// [`super::tokenizer::TokenizedCypher::keyword_lexemes`]). Keyword
@@ -59,9 +58,8 @@ pub struct CypherParser {
 /// It does not, however, bound their *stack use* equally. Only
 /// [`CypherParser::descend`] grows the stack on demand (via `stacker`); the
 /// planner, executor and `Drop` walkers recurse on whatever stack their
-/// thread already has. That has now been measured
-/// (`super::stack_probe`, macOS/aarch64, worst shape: an `OR`/`AND`/`NOT`
-/// tree walked by the executor):
+/// thread already has. Measured (`super::stack_probe`, macOS/aarch64, worst
+/// shape: an `OR`/`AND`/`NOT` tree walked by the executor):
 ///
 /// | stage | debug | release |
 /// |---|---|---|
@@ -105,10 +103,9 @@ const STACK_RED_ZONE: usize = 128 * 1024;
 const STACK_GROW_SIZE: usize = 4 * 1024 * 1024;
 
 impl CypherParser {
-    /// Construct with the tokenizer's verbatim keyword-lexeme table —
-    /// the production path (`parse_cypher`). An empty table is valid;
-    /// such parsers fall back to canonical keyword spellings in name
-    /// position.
+    /// Construct with the tokenizer's verbatim keyword-lexeme table. An
+    /// empty table is valid: such parsers fall back to canonical keyword
+    /// spellings in name position.
     pub fn with_keyword_lexemes(
         tokens: Vec<CypherToken>,
         keyword_lexemes: Vec<(usize, String)>,
@@ -150,12 +147,11 @@ impl CypherParser {
     /// releases the whole run at once.
     pub(super) fn deepen(&mut self) -> Result<(), String> {
         if self.depth >= MAX_EXPRESSION_DEPTH {
-            // Name the rewrite. The overwhelmingly common way to reach this
-            // limit is generated code — a filter/facet builder emitting one
-            // `OR` term per selected value — and each term costs a nesting
-            // level while the equivalent `IN [...]` costs one level no matter
-            // how many values it holds. "Simplify the query" alone leaves the
-            // author guessing at a limit they did not know existed.
+            // The limit is overwhelmingly reached by generated `OR` chains
+            // (a filter/facet builder emitting one term — one nesting level
+            // — per selected value), so the message names the `IN [...]`
+            // rewrite instead of leaving the author to guess at a limit they
+            // did not know existed.
             return Err(format!(
                 "Expression nesting exceeds {} levels; simplify the query. \
                  Long chains of OR'd equality tests are the usual cause and \
@@ -187,10 +183,6 @@ impl CypherParser {
         self.depth = entry_depth;
         result
     }
-
-    // ========================================================================
-    // Token Navigation
-    // ========================================================================
 
     pub(super) fn peek(&self) -> Option<&CypherToken> {
         self.tokens.get(self.pos)
@@ -227,10 +219,6 @@ impl CypherParser {
         self.peek() == Some(token)
     }
 
-    // ========================================================================
-    // Soft-keyword helpers
-    // ========================================================================
-    //
     // Several Cypher constructs are spelled with words the tokenizer
     // deliberately does *not* reserve — `INDEX`, `CONSTRAINT`, `FOR`,
     // `OPTIONS` (schema DDL) and `LOAD`, `CSV`, `HEADERS`, `FROM`,
@@ -277,7 +265,7 @@ impl CypherParser {
     /// Accepts identifiers and reserved keywords (e.g. `AS optional`, `AS type`).
     /// Case-preserving: a keyword alias keeps its verbatim source spelling
     /// (`AS Order` names the column `Order`), falling back to the canonical
-    /// lowercase word when no lexeme table is present (unit tests).
+    /// lowercase word when no lexeme table is present.
     pub(super) fn try_consume_alias_name(&mut self) -> Result<String, String> {
         match self.advance().cloned() {
             Some(CypherToken::Identifier(name)) => Ok(name),
@@ -306,8 +294,7 @@ impl CypherParser {
     /// `context` names the position for the error message, preserving the
     /// original "Expected <X>" wording. Case-preserving: a keyword name keeps
     /// its verbatim source spelling (`{order: 1}` stores key `order`), falling
-    /// back to the canonical uppercase word when no lexeme table is present
-    /// (unit tests).
+    /// back to the canonical uppercase word when no lexeme table is present.
     ///
     /// This is a **name position by construction** — every caller has already
     /// consumed the `:`, `.` or `{` that makes the next token a name — so
@@ -589,10 +576,9 @@ impl CypherParser {
                     clauses.push(self.parse_foreach_clause()?);
                 }
                 // The two soft-keyword clause heads. Both arrive as
-                // `Identifier` (neither word is reserved), and both own a
+                // `Identifier` (neither word is reserved) and each owns a
                 // positional rule, so each parses in its own method rather
-                // than inline — see `parse_leading_load_csv` and
-                // `parse_format_tail`.
+                // than inline.
                 Some(CypherToken::Identifier(_)) if self.identifier_opens_load_csv() => {
                     clauses.push(self.parse_leading_load_csv(clauses.is_empty(), end_at_rbrace)?)
                 }
@@ -647,20 +633,15 @@ pub(super) fn soft_word_eq(candidate: &str, canonical: &str) -> bool {
 
 /// Parse Cypher source into a typed AST.
 ///
-/// Returns [`KgError`] with structured `line` and `col` fields (when the
-/// parser knows them) rather than an opaque `Result<_, String>` whose message
-/// only embeds the position. The position survives the PyO3 boundary and
-/// reaches Python consumers via `kglite.CypherSyntaxError.args[0]` (still in
-/// the message for human display) and as dedicated `.line` / `.col`
-/// attributes. The internal tokenizer/parser still produce
-/// `Result<_, String>` for ergonomic `?` chains — only the outer boundary is
-/// typed.
-///
-/// On error the bare token-level message is enriched with a **byte-precise**
-/// source position — `line N col M` plus an excerpt with a caret at the
-/// failing position — so a user can tell "you typo'd" from "not implemented"
-/// by reading the error. The tokenizer attaches a char offset to every token
-/// and the parser threads them through.
+/// Errors carry a **character-precise** source position: the bare token-level
+/// message is enriched with `line N col M` plus an excerpt with a caret at the
+/// failing token (the tokenizer attaches a char offset to every token and the
+/// parser threads them through), and the same position is repeated as
+/// structured `line` / `col` fields on [`KgError`]. Those fields survive the
+/// PyO3 boundary and reach Python as `kglite.CypherSyntaxError.line` / `.col`,
+/// with the message still in `args[0]` for human display. The internal
+/// tokenizer/parser keep returning `Result<_, String>` for ergonomic `?`
+/// chains — only this outer boundary is typed.
 // KgError deliberately carries structured context; boxing it would change the public result type.
 #[allow(clippy::result_large_err)]
 pub fn parse_cypher(input: &str) -> Result<CypherQuery, KgError> {
@@ -733,12 +714,10 @@ fn char_offset_to_line_col(input: &str, target_char: usize) -> (usize, usize) {
     (line, col)
 }
 
-/// Rewrite a parser error into an intent-level "feature not yet implemented"
-/// message. Conservative: reframes only when the original query clearly
-/// targeted an unimplemented feature.
-///
-/// Currently a stub — there is nothing stable to detect; the named candidates
-/// (NULLS, datetime accessors, variable-length paths) all parse today.
+/// Hook for reframing a parser error as "feature not yet implemented".
+/// Always `None`: the candidates it was written for (NULLS, datetime
+/// accessors, variable-length paths) all parse today, so there is nothing
+/// left to detect.
 fn intent_level_rewrite(_input: &str, _err: &str) -> Option<String> {
     None
 }

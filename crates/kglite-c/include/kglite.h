@@ -523,7 +523,7 @@ KgliteStatusCode kglite_session_list_embeddings(const struct KgliteSession *sess
  * by opening a session ([`kglite_session_new`](crate::kglite_session_new))
  * and running `CREATE` / `MERGE` Cypher through
  * [`kglite_session_execute_mut`](crate::kglite_session_execute_mut), or
- * by bulk-loading via the dataset / blueprint entry points. Before this
+ * by bulk-loading via the blueprint entry point. Before this
  * existed, the only way to obtain a graph at the C boundary was to load
  * a pre-built `.kgl` file — a binding could not start one from scratch.
  *
@@ -1031,8 +1031,8 @@ KgliteStatusCode kglite_writer_lease_acquire_ex(const char *path,
  * # Safety
  *
  * `lease` must be either null or a pointer previously returned by
- * [`kglite_writer_lease_acquire`] and not yet freed. Calling twice on the
- * same pointer is UB.
+ * [`kglite_writer_lease_acquire`] or [`kglite_writer_lease_acquire_ex`] and
+ * not yet freed. Calling twice on the same pointer is UB.
  */
  void kglite_writer_lease_free(struct KgliteWriterLease *lease);
 

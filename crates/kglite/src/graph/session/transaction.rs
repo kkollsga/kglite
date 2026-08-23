@@ -58,7 +58,7 @@ impl DirGraph {
 
 /// Shared graph state. Sessions live in bindings' top-level state
 /// (Python's `KnowledgeGraph.inner` is conceptually a Session; the
-/// bolt-server's `KgliteBackend.graph` IS one).
+/// bolt-server's `KgliteBackend.session` IS one).
 ///
 /// **Concurrency model.** The outer `Mutex` is brief-acquire-only:
 /// - [`snapshot`](Self::snapshot) takes the lock, `Arc::clone`s the
@@ -149,11 +149,12 @@ impl Session {
     ///
     /// # Not for durable sessions
     ///
-    /// A session opened via [`Session::open_durable`] **refuses** this path —
-    /// its mutations are captured by the recording backend but nothing drains
-    /// that buffer into a WAL frame, and the next copy-on-write fork resets
-    /// it, so the write would apply and then vanish on a crash. Callers with
-    /// an error channel check [`Session::check_direct_write_allowed`] first.
+    /// A session opened via [`Session::open_durable`] **must not** take this
+    /// path — its mutations are captured by the recording backend but nothing
+    /// drains that buffer into a WAL frame, and the next copy-on-write fork
+    /// resets it, so the write would apply and then vanish on a crash. Callers
+    /// with an error channel check [`Session::check_direct_write_allowed`]
+    /// first.
     ///
     /// This signature has none: it returns a guard, and a guard cannot carry a
     /// refusal. Silently dropping the write is the very hazard being closed, so
@@ -294,9 +295,9 @@ impl Session {
     /// Commit a transaction. Returns a [`CommitOutcome`] so the binding can
     /// map it to its own error type.
     ///
-    /// OCC is opt-in: pass `true` for `check_occ` to enforce. Pass
-    /// `false` for last-writer-wins semantics (current bolt-server
-    /// default until the binding wires the check).
+    /// OCC is opt-in: pass `true` for `check_occ` to enforce, `false` for
+    /// last-writer-wins — which silently discards any write that landed
+    /// between this tx's begin and commit.
     pub fn commit(&self, tx: Transaction, check_occ: bool) -> CommitOutcome {
         let (working_opt, base_version) = tx.take_working();
         let Some(mut working) = working_opt else {
@@ -449,8 +450,9 @@ impl Transaction {
 pub enum CommitOutcome {
     /// Read-only-then-commit / no mutations happened. Cheap path.
     NoWritesNoOp,
-    /// Working copy was swapped into the shared graph. The new
-    /// version is `base_version + 1`.
+    /// Working copy was swapped into the shared graph. The new version is one
+    /// past the *current* version under the commit lock, which equals this tx's
+    /// `base_version` only when no other writer intervened.
     Committed { new_version: u64 },
     /// OCC conflict: another writer committed between this tx's
     /// `begin` and `commit`. The current shared graph's version is
@@ -832,7 +834,6 @@ mod tests {
         let mut tx_a = s.begin();
         let _ = tx_a.working_mut().unwrap();
 
-        // Tx B: begins (sees version 0), mutates, commits → version 1.
         let mut tx_b = s.begin();
         let _ = tx_b.working_mut().unwrap();
         let outcome_b = s.commit(tx_b, true);

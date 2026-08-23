@@ -41,21 +41,24 @@ use graph::pyapi::session::Session;
 use graph::{KnowledgeGraph, Transaction};
 use kglite_core::api::io::load_file;
 
-/// Curated Rust-side façade for downstream binaries (notably
-/// `kglite-mcp-server`), and the **only** stable Rust API this wrapper
-/// promises to keep: `pub mod graph` is public for tooling, but its internals
-/// can move between minor releases. Breakage here is a semver concern.
+/// Curated Rust-side façade, and the **only** stable Rust API this wrapper
+/// promises to keep: every other module in this crate is private, and the
+/// internals behind these re-exports move between minor releases. Breakage
+/// here is a semver concern. The workspace's own servers do not come through
+/// it — `kglite-mcp-server` and `kglite-bolt-server` depend on the engine
+/// crate's `kglite::api` directly, which keeps pyo3 out of their dependency
+/// trees.
 ///
 /// The Python API (`#[pymethods]` on `KnowledgeGraph`, etc.) is independent
 /// and stays the wheel's primary surface.
 pub mod api {
     pub use crate::datatypes::Value;
-    // Carriers for `Value::Node` / `Relationship` / `Path`, re-exported so
-    // downstream consumers (bolt-server's value adapter) can pattern-match
-    // into them without re-deriving accessors.
+    // Carriers for `Value::Node` / `Relationship` / `Path`, so a consumer can
+    // pattern-match into them without re-deriving accessors.
     pub use crate::datatypes::values::{NodeValue, PathValue, RelValue};
-    // The bolt-server maps these onto Neo4j `Neo.ClientError.*` wire codes
-    // via `BoltError::Query`.
+    // Typed engine errors plus their stable codes — the code is what a wire
+    // binding maps onto its own protocol error space (kglite-bolt-server does
+    // exactly that, from the engine crate's copy of these types).
     pub use crate::error::{KgError, KgErrorCode};
     #[cfg(feature = "fastembed")]
     pub use crate::graph::embedder::fastembed::FastEmbedAdapter;

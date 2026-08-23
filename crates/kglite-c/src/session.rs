@@ -1,9 +1,10 @@
 //! `KgliteSession` opaque handle — session creation +
 //! execute_read / execute_mut.
 //!
-//! The Session owns the graph after [`kglite_session_new`] — the
-//! Arc moves in and the caller should NOT free the graph handle
-//! afterwards.
+//! The Session owns the graph after a *successful*
+//! [`kglite_session_new`] — the Arc moves in and the caller must not
+//! free the graph handle afterwards. A failed call moves nothing and
+//! leaves the handle the caller's to free.
 
 use crate::graph::{GraphState, KgliteGraph};
 use crate::result::{result_to_json_object, KgliteCypherResult, ResultState};
@@ -364,10 +365,9 @@ unsafe fn execute_mut_impl(
                 Err(rc) => return rc,
             };
 
-            // `execute_mut` takes `*mut` for the C ABI but the SessionState
-            // mutex makes the actual interior mutation thread-safe — we
-            // borrow `&SessionState` here and rely on Session's internal
-            // Mutex for the commit-swap.
+            // The ABI signature is `*mut`, but the handle is only borrowed
+            // shared here: the mutation is serialized by the Session's own
+            // lock, taken below.
             let session_state = unsafe { SessionState::from_handle(session) };
             let mut opts = session_state.make_opts(&params);
             if timeout_ms > 0 {
@@ -396,8 +396,11 @@ unsafe fn execute_mut_impl(
                     KgliteStatusCode::Ok
                 }
                 Err(err) => {
-                    // The write guard drops without committing — no mutation
-                    // reaches the session's stored Arc.
+                    // `execute_mut` rolled its own statement checkpoint back
+                    // before returning, so the graph under the guard is
+                    // unmutated. The guard has no commit step of its own —
+                    // anything that reached it is already in the session's
+                    // stored Arc.
                     unsafe {
                         *out_result = std::ptr::null_mut();
                     }
@@ -756,10 +759,9 @@ impl SessionState {
     }
 }
 
-/// Parse a JSON-string params argument into a HashMap. Null /
-/// empty / "{}" → empty map. Any other shape (array, scalar,
-/// nested object value) maps via
-/// [`json_value_to_kglite_value`](kglite::api::param::json_value_to_kglite_value).
+/// Parse a JSON-string params argument into a HashMap. Null / empty /
+/// `null` / `{}` → empty map; a JSON object → its converted map. Any other
+/// top-level shape (array, scalar) → `InvalidArgument`.
 fn parse_params_json(
     params_json: *const c_char,
 ) -> Result<HashMap<String, Value>, KgliteStatusCode> {
@@ -933,8 +935,6 @@ mod tests {
         unsafe { crate::kglite_free_string(mode) };
         unsafe { crate::kglite_graph_free(graph) };
     }
-
-    // ── kglite_create_edges_batch ────────────────────────────────────
 
     /// Build a session handle around a fresh in-memory graph. Callers
     /// free it via `kglite_session_free`.

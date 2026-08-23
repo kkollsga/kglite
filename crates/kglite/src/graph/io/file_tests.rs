@@ -35,7 +35,6 @@ mod atomic_save_tests {
         arc
     }
 
-    /// Build a tiny columnar in-memory graph ready for `write_kgl*`.
     fn tiny_graph(n: i64) -> Arc<DirGraph> {
         let mut g = DirGraph::new();
         fill_docs(&mut g, n);
@@ -80,7 +79,7 @@ mod atomic_save_tests {
 
     /// The v5 container is still decoded. This checks the *dispatch* only —
     /// that a v5 magic reaches the shared reader rather than the
-    /// unrecognised-format arm; `tests/test_kgl_v5_compat.py` pins the real
+    /// unrecognised-format arm; `tests/test_kgl_format_compat.py` pins the real
     /// thing against files a published 0.15.14 wheel wrote.
     #[test]
     fn v5_magic_still_reaches_the_shared_reader() {
@@ -130,7 +129,6 @@ mod atomic_save_tests {
                 && V3_HARD_BREAK_MSG.contains("from_blueprint"),
             "v3 hard-break message must name the export_csv/from_blueprint recovery path"
         );
-        // A fabricated v3-magic byte buffer surfaces the hint through load_kgl_bytes.
         let v3_buf = [V3_MAGIC[0], V3_MAGIC[1], V3_MAGIC[2], V3_MAGIC[3], 0, 0];
         let err = load_kgl_bytes(&v3_buf).err().unwrap();
         assert!(err.to_string().contains("export_csv"));
@@ -142,14 +140,13 @@ mod atomic_save_tests {
         // Bytes that are not a kglite container at all get the *opposite*
         // treatment, deliberately (0.16.1): there is no graph to export, so
         // recovery instructions would be advice about a file the user does
-        // not have. Rewritten from a pin that asserted the hint here.
+        // not have.
         let bad = [0u8, 1, 2, 3, 4, 5];
         let err = load_kgl_bytes(&bad).err().unwrap().to_string();
         assert!(!err.contains("from_blueprint"), "{err}");
         assert!(err.contains("not a kglite graph"), "{err}");
     }
 
-    /// Build a tiny graph carrying one HNSW-indexed embedding store.
     fn tiny_indexed_graph() -> Arc<DirGraph> {
         use crate::graph::algorithms::hnsw::HnswParams;
         use crate::graph::algorithms::vector::DistanceMetric;
@@ -1467,9 +1464,8 @@ mod property_type_roundtrip_tests {
             .expect("a conforming write is still allowed");
     }
 
-    /// A graph that declares nothing must write the same bytes it wrote before
-    /// the field existed, or every `.kgl` shifts for a feature almost no graph
-    /// uses.
+    /// Byte-neutral when undeclared, for the reason the DDL provenance set
+    /// above spells out.
     #[test]
     fn an_untyped_graph_writes_no_property_types_into_the_metadata() {
         let json = serde_json::to_string(&FileMetadata::from_graph(&person_graph())).unwrap();

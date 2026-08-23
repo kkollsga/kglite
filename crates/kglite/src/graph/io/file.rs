@@ -322,10 +322,8 @@ pub(crate) struct FileMetadata {
     /// write order: the reader looks up the one section it is about to take,
     /// and a section with no entry is simply not verified.
     ///
-    /// Additive in both directions: older files carry no keys, so the load path
-    /// verifies nothing exactly as it did before the field existed, and older
-    /// *binaries* ignore the key because this metadata has never denied unknown
-    /// fields. Skipped for the disk-mode `metadata.json`, whose sections live in
+    /// Additive in both directions (see the "Section integrity" note above).
+    /// Skipped for the disk-mode `metadata.json`, whose sections live in
     /// separate files with their own integrity story.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     section_digests: BTreeMap<String, u32>,
@@ -421,12 +419,12 @@ impl FileMetadata {
         self.apply_to_with(graph, true)
     }
 
-    /// Apply metadata fields with control over the type-connectivity
-    /// derive fallback. Disk loaders pass `derive_type_connectivity=false`
-    /// when a dedicated `type_connectivity.bin.zst` will populate the
-    /// cache below — the cartesian-product derive over
-    /// `connection_type_metadata` clones millions of String triples on
-    /// large graphs and dominated load time before this gate.
+    /// Apply metadata fields with control over the type-connectivity derive
+    /// fallback. Disk loaders pass `derive_type_connectivity=false`: the
+    /// cartesian-product derive over `connection_type_metadata` clones millions
+    /// of String triples on large graphs and dominated load time, and the cache
+    /// is filled lazily on the first `describe()` instead (or eagerly from
+    /// `type_connectivity.bin.zst` under `KGLITE_EAGER_TYPE_CONNECTIVITY`).
     pub(crate) fn apply_to_with(self, graph: &mut DirGraph, derive_type_connectivity: bool) {
         graph.schema_definition = self.schema_definition;
         graph.property_index_keys = self.property_index_keys;
@@ -591,7 +589,7 @@ pub(crate) fn decode_disk_serde<'de, T: Deserialize<'de>>(
 }
 
 /// Wrap a sidecar decode failure in an error that names the file and
-/// tells the operator what to do. Used by `load_disk_dir` for optional
+/// tells the operator what to do. Used by `load_disk_sidecars` for optional
 /// sidecars (embeddings / timeseries / secondary labels): a *missing*
 /// sidecar is legitimate (older graphs), but a present-and-undecodable
 /// one is corruption and must fail the load rather than silently
@@ -868,8 +866,8 @@ pub fn write_kgl_with(graph: &DirGraph, path: &str, fsync: bool) -> io::Result<(
 /// The bytes are the v6 container: `V6_MAGIC`, an explicit Postcard codec
 /// tag, and `CURRENT_CORE_DATA_VERSION`.
 ///
-/// The graph MUST have columnar storage enabled before calling this function.
-/// The caller (Python `save()`) handles auto-enable/disable.
+/// The graph MUST have columnar storage enabled before calling this function;
+/// [`prepare_kgl_write`] is the step that does it.
 pub fn write_kgl(graph: &DirGraph, path: &str) -> io::Result<()> {
     write_kgl_with(graph, path, true)
 }
@@ -1535,7 +1533,7 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
 
     // Load id_indices from disk.
     //
-    // Three formats, in priority order:
+    // Two formats, in priority order:
     //   1. id_indices.bin   — 0.8.28+ raw mmap-resident layout (lazy reads,
     //      ~ms load even at Wikidata scale).
     //   2. id_indices.bin.zst with KGLIIDX1 magic — 0.8.13 flat-CSR format
@@ -1606,12 +1604,11 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
 fn load_disk_column_stores(dir: &std::path::Path, graph: &mut DirGraph) -> io::Result<()> {
     use crate::graph::io::load_timing::{log_stage, stage_timer};
 
-    // Prefer the mmap-backed pair (columns.bin + columns_meta).
-    // 0.8.12 phase-1: PR1 phase 4 moved these files to `seg_000/`. Check
-    // both locations so post-phase-4 saves still take the fast mmap path
-    // — without this the load fell through to the per-type
-    // `columns/<type>/columns.zst` branch, which returned an empty
-    // `column_stores` map, breaking `MATCH (n:Type)` queries after a
+    // Prefer the mmap-backed pair (columns.bin + columns_meta), checking
+    // `seg_000/` as well as the directory root: a later layout moved these
+    // files into `seg_000/`, and without both locations the load fell through
+    // to the per-type `columns/<type>/columns.zst` branch, which returned an
+    // empty `column_stores` map and broke `MATCH (n:Type)` queries after a
     // disk-mode save + reload.
     let mmap_path = {
         let seg0 = dir.join("seg_000/columns.bin");
@@ -1699,10 +1696,8 @@ fn load_disk_column_stores(dir: &std::path::Path, graph: &mut DirGraph) -> io::R
 /// Split out of `load_disk_dir` to keep it under the function-complexity
 /// ceiling; cold load-time path with one shared fail-loud-on-corruption policy.
 fn load_disk_sidecars(dir: &std::path::Path, graph: &mut DirGraph) -> io::Result<()> {
-    // Load embeddings if present. Absent file = fine (older graphs, or no
-    // embeddings). A file that EXISTS but fails to decode is corruption and
-    // must fail the load loudly — silently loading without embeddings would
-    // present a complete-looking graph with data quietly missing.
+    // Absent file = fine (older graphs, or no embeddings); present-but-
+    // undecodable is corruption — see [`corrupt_sidecar_error`].
     let emb_path = dir.join("embeddings.bin.zst");
     if emb_path.exists() {
         let mut embeddings = (|| -> io::Result<HashMap<(String, String), EmbeddingStore>> {
@@ -1719,7 +1714,6 @@ fn load_disk_sidecars(dir: &std::path::Path, graph: &mut DirGraph) -> io::Result
         graph.embeddings = embeddings;
     }
 
-    // Load timeseries if present — same fail-loud-on-corruption policy.
     let ts_path = dir.join("timeseries.bin.zst");
     if ts_path.exists() {
         graph.timeseries_store = (|| -> io::Result<HashMap<usize, NodeTimeseries>> {
@@ -1731,13 +1725,11 @@ fn load_disk_sidecars(dir: &std::path::Path, graph: &mut DirGraph) -> io::Result
         .map_err(|e| corrupt_sidecar_error("timeseries.bin.zst", &e))?;
     }
 
-    // Load secondary labels sidecar if present (0.10.5+). Disk's
-    // columnar layout has no slot for NodeData.extra_labels, so the
-    // sidecar carries the inverted index. Older disk graphs (0.10.4
-    // and earlier) won't have this file — that's the graceful single-
-    // label degrade path (the reader returns Ok(false) when absent).
-    // A present-but-undecodable file fails the load, same policy as
-    // embeddings/timeseries above.
+    // Secondary labels (0.10.5+): disk's columnar layout has no slot for
+    // NodeData.extra_labels, so the sidecar carries the inverted index. Older
+    // disk graphs (0.10.4 and earlier) won't have this file — that's the
+    // graceful single-label degrade path (the reader returns Ok(false) when
+    // absent).
     read_secondary_labels_bin(dir, graph)
         .map_err(|e| corrupt_sidecar_error("secondary_labels.bin.zst", &e))?;
     Ok(())
@@ -1768,12 +1760,8 @@ fn apply_disk_metadata(dir: &std::path::Path, graph: &mut DirGraph) -> io::Resul
     if let Some(ctm) = read_connection_type_metadata_bin(dir)? {
         meta.connection_type_metadata = ctm;
     }
-    // Skip the cartesian-product derive of `type_connectivity` at load time —
-    // on slice-built graphs with populated source/target sets it clones tens of
-    // millions of String triples (4-15 s). The cache is lazy-populated on first
-    // `describe()` access via the existing `compute_type_connectivity` fallback
-    // (see `introspection/describe.rs`); read sites that miss the cache already
-    // fall through to bounded edge scans.
+    // `false`: skip the load-time cartesian-product derive of
+    // `type_connectivity` — see [`FileMetadata::apply_to_with`].
     meta.apply_to_with(graph, false);
     Ok(())
 }
@@ -1909,9 +1897,8 @@ fn load_portable_column_section(
     // slot order a `RandomState` artefact that differed on every load, so
     // re-saving a file produced different bytes each run.
     //
-    // Reading the order the file actually recorded makes a reload reproduce the
-    // schema the save was written from, so a re-save is byte-identical to the
-    // original rather than merely deterministic.
+    // Reading the recorded order makes a re-save byte-identical to the
+    // original, not merely deterministic.
     let mut ordered_names = ColumnStore::packed_column_names(&packed)?;
     // A key the metadata declares but the payload does not carry has no
     // recorded position; append such keys by name so they still get a slot and

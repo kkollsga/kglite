@@ -316,9 +316,11 @@ pub struct DirGraph {
     /// and older payloads working.
     #[serde(default)]
     pub cdc_handoff: Option<crate::graph::cdc::CdcHandoff>,
-    /// Auto-vacuum threshold: if Some(t), vacuum() is triggered automatically after
-    /// DELETE operations when fragmentation_ratio exceeds t and tombstones > 100.
-    /// Default: Some(0.3). Set to None to disable.
+    /// Auto-vacuum threshold: if Some(t), vacuum() is triggered automatically
+    /// after DELETE operations when the worst of the three garbage populations
+    /// (node slots, dead columnar rows, edge slots) exceeds 100 and the worst
+    /// of their ratios exceeds t — [`Self::check_auto_vacuum`] owns the
+    /// arithmetic. Default: Some(0.3). Set to None to disable.
     #[serde(default = "default_auto_vacuum_threshold")]
     pub auto_vacuum_threshold: Option<f64>,
     /// How many times [`Self::check_auto_vacuum`] has fired a vacuum on this
@@ -509,7 +511,9 @@ pub struct DirGraph {
     /// Fast-skip flag: true if any node has secondary labels.
     /// Read paths short-circuit the secondary_label_index scan entirely
     /// when this is false, so single-label graphs pay no perf tax.
-    /// `#[serde(skip)]` — rebuilt by `rebuild_type_indices`.
+    /// `#[serde(skip)]` — maintained by the same writers as
+    /// [`Self::secondary_label_index`] (the choke-point label API, the load
+    /// path, WAL replay); `rebuild_type_indices` leaves both alone.
     #[serde(skip)]
     pub has_secondary_labels: bool,
     /// O(1) secondary-label index: label_key → [NodeIndex]. **The
@@ -538,8 +542,7 @@ pub(crate) fn default_auto_vacuum_threshold() -> Option<f64> {
 
 impl Drop for DirGraph {
     fn drop(&mut self) {
-        // Clean up temp directories created during load or columnar spill.
-        // Only the last Arc holder actually removes the dirs.
+        // Only the last Arc holder removes the shared temp dirs.
         if let Ok(dirs) = self.temp_dirs.lock() {
             if Arc::strong_count(&self.temp_dirs) <= 1 {
                 for dir in dirs.iter() {
@@ -864,8 +867,9 @@ impl DirGraph {
         self.timeseries_store.get(&node_index)
     }
 
-    /// Look up an embedding store by `(&str, &str)` without allocating owned Strings.
-    /// Falls back to a linear scan of the embeddings map (typically 1-3 entries).
+    /// Look up an embedding store by `(&str, &str)`: a linear scan of the
+    /// embeddings map (typically 1-3 entries), so no owned `String` key has to
+    /// be allocated for a `HashMap` probe.
     #[inline]
     pub fn embedding_store(&self, node_type: &str, prop_name: &str) -> Option<&EmbeddingStore> {
         self.embeddings
@@ -1219,8 +1223,6 @@ impl DirGraph {
         triples
     }
 
-    // ── Type metadata (replaces SchemaNode graph nodes) ──
-
     /// Get metadata for a node type (property names → type strings).
     pub fn get_node_type_metadata(&self, node_type: &str) -> Option<&HashMap<String, String>> {
         self.node_type_metadata.get(node_type)
@@ -1495,9 +1497,7 @@ impl DirGraph {
         self.graph.edge_weight_mut(index)
     }
 
-    // ── Serialization helpers ──
-
-    /// Snapshot which property/composite indexes exist so they survive
+    /// Snapshot which property/composite/range indexes exist so they survive
     /// serialization. Called automatically before save.
     pub fn populate_index_keys(&mut self) {
         self.property_index_keys = self.property_indices.keys().cloned().collect();
@@ -1524,8 +1524,8 @@ impl DirGraph {
         self.prune_constraint_names();
     }
 
-    /// Rebuild property and composite indexes from the persisted key lists.
-    /// Called automatically after load.
+    /// Rebuild property, composite and range indexes from the persisted key
+    /// lists. Called automatically after load.
     ///
     /// Unique constraints are rebuilt too. Any violation the loaded data already
     /// contains is discarded here rather than failing the load — see
@@ -1553,8 +1553,6 @@ impl DirGraph {
 
         let _preexisting_violations = self.rebuild_unique_indices_from_keys();
     }
-
-    // ── Graph maintenance: reindex, vacuum, graph_info ──
 
     /// Rebuild type_indices from the live graph. Called after deserialization
     /// (type_indices is `#[serde(skip)]`) and by [`Self::reindex`].
@@ -1802,8 +1800,8 @@ impl DirGraph {
         }
     }
 
-    /// Check heap usage of column stores and spill largest to disk if over limit.
-    /// No-op if memory_limit is None or the backend is memory-mode.
+    /// Check heap usage of column stores and spill largest to disk if over
+    /// limit. No-op if `memory_limit` is None.
     ///
     /// Two guards decide, in order, that there is nothing to do — and both are
     /// load-bearing, because this runs after *every* mutating statement
@@ -1936,15 +1934,17 @@ impl DirGraph {
     /// can update any external references (e.g., selections). An empty mapping
     /// means nothing was remapped.
     ///
-    /// No-op if there are no tombstones (node_count == node_bound), and a
-    /// no-op on the **disk** backend: its CSR arrays are frozen mmap, not a
-    /// `StableDiGraph`, so there is no petgraph tombstone to compact — disk
-    /// reclaims space by publishing a fresh generation, whose columns are
+    /// Skips the rebuild when there is no petgraph tombstone of either shape
+    /// (`node_count == node_bound` *and* `edge_count == edge_bound`); column
+    /// stores still holding orphaned rows are rebuilt even then.
+    ///
+    /// A full no-op on the **disk** backend: its CSR arrays are frozen mmap,
+    /// not a `StableDiGraph`, so there is no petgraph tombstone to compact —
+    /// disk reclaims space by publishing a fresh generation, whose columns are
     /// written without the rows no live node points at
     /// ([`DirGraph::save_disk`]), not by rebuilding in place. Rebuilding would
-    /// also have to materialise the
-    /// whole graph on the heap, which is the one thing the disk backend
-    /// exists to avoid.
+    /// also have to materialise the whole graph on the heap, which is the one
+    /// thing the disk backend exists to avoid.
     ///
     /// The rebuild preserves the backend variant and any write-capture
     /// wrapper. **Callers on a durable graph must flush the write-ahead log
@@ -2140,10 +2140,10 @@ impl DirGraph {
     /// Check whether auto-vacuum should run after a delete, and run it if so.
     ///
     /// Called after `DELETE` / `DETACH DELETE`. Vacuums only when
-    /// `auto_vacuum_threshold` is set, the worst of the three garbage
+    /// `auto_vacuum_threshold` is set, the largest of the three garbage
     /// populations (free node slots, dead columnar rows, free edge slots)
-    /// exceeds 100 — so tiny graphs never pay for a rebuild — and its
-    /// fragmentation ratio exceeds the threshold.
+    /// exceeds 100 — so tiny graphs never pay for a rebuild — and the worst of
+    /// their three fragmentation ratios exceeds the threshold.
     ///
     /// # Return value
     ///

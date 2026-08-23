@@ -1,8 +1,11 @@
 //! Non-fatal query warnings — the "why did this return nothing?" family.
 //!
-//! The fatal schema check stays in [`super`]; everything here *only ever
-//! appends to a `Vec<String>`*, and that separation is the point: a bug in this
-//! file can make a message wrong or missing, never a valid query rejected.
+//! The fatal schema check stays in [`super`]; the walks here *only ever
+//! append findings*, and that separation is the point: a bug in a walk can
+//! make a message wrong or missing, never a valid query rejected. The single
+//! exception is opt-in and lives in [`strict_read_error`]: under
+//! [`DirGraph::schema_locked`] an absent-property finding becomes the error
+//! that stops the query.
 
 use super::super::super::ast::*;
 use super::type_mismatch::TypeMismatch;
@@ -628,15 +631,14 @@ pub(crate) fn collect_query_warnings(
     });
 
     // The absent-property findings (A1b + eval §3a) travel alongside the
-    // unknown-label/rel ones even when the labels/rels are all valid — and
-    // separately from them, because they are the only family a locked schema
-    // rejects rather than reports.
+    // unknown-label/rel ones even when the labels/rels are all valid — and in
+    // their own bucket, because a locked schema rejects them wholesale rather
+    // than reporting them.
     let absent_property = absent_property_findings(query, graph, &var_label);
     // Family 5 (declared-type mismatches) shares `var_label` and its
     // conservatisms, but never its dedup key — see [`super::type_mismatch`].
-    // It gets its own bucket because a locked schema promotes only *part* of
-    // it, so the caller must be able to ask each finding rather than the
-    // family.
+    // Its own bucket again: a lock promotes only *part* of this family, so the
+    // caller must be able to ask each finding rather than the family.
     let type_mismatch =
         super::type_mismatch::type_mismatch_findings(query, graph, &var_label, params);
     let mut out: Vec<String> = Vec::new();

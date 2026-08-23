@@ -243,7 +243,7 @@ pub(super) fn collect_or_equalities(
 /// projection step needs all groups to dedup against. HAVING and
 /// having-style filters on the projection also bail.
 ///
-/// **Triggering shape — Wikidata hub-anchor case (Bug 3).**
+/// **Triggering shape — Wikidata hub-anchor case.**
 ///
 /// ```text
 /// MATCH (x)-[:P31]->(hub {nid: 'Q11424'})
@@ -330,13 +330,14 @@ pub(super) fn push_limit_into_aggregate(query: &mut CypherQuery, _graph: &DirGra
 }
 
 /// Precondition: a single-MATCH query whose terminal `RETURN ... LIMIT n`
-/// (or `WITH ... LIMIT n`) follows with no intervening cardinality-changing
-/// clause. Pattern: stamps `limit_hint = n` onto the MATCH so the pattern
-/// executor stops expanding once n rows exist, and removes the now-redundant
-/// LIMIT clause. Why-bail: multi-MATCH queries and correlated/filtered
-/// comma-pattern shapes interact incorrectly with the per-row `max_matches`
-/// bound and can return fewer rows than LIMIT requests (see the safety notes
-/// in the body); only the provably-safe shapes are rewritten.
+/// follows with no intervening cardinality-changing clause (a `WITH ... LIMIT`
+/// projection is not matched). Pattern: stamps `limit_hint = n` onto the MATCH
+/// so the pattern executor stops expanding once n rows exist, and removes the
+/// now-redundant LIMIT clause. Why-bail: multi-MATCH queries and
+/// correlated/filtered comma-pattern shapes interact incorrectly with the
+/// per-row `max_matches` bound and can return fewer rows than LIMIT requests
+/// (see the safety notes in the body); only the provably-safe shapes are
+/// rewritten.
 pub(super) fn push_limit_into_match(query: &mut CypherQuery, _graph: &DirGraph) {
     if query.clauses.len() < 3 {
         return;
@@ -593,7 +594,7 @@ pub(super) fn push_distinct_into_match(query: &mut CypherQuery) {
 
 /// The `RETURN DISTINCT <one variable>` route: every item is a bare variable or
 /// a property access, all naming the same variable, and none is an aggregate
-/// (`WITH DISTINCT a, count(b)` groups before it dedups, so `count(b)` moves
+/// (`RETURN DISTINCT a, count(b)` groups before it dedups, so `count(b)` moves
 /// with the rows a target-dedup would drop).
 fn distinct_route_var(r: &ReturnClause) -> Option<String> {
     if !r.distinct {
@@ -620,10 +621,6 @@ fn distinct_route_var(r: &ReturnClause) -> Option<String> {
     }
     var.map(String::from)
 }
-
-// ============================================================================
-// text_score → vector_score AST Rewrite
-// ============================================================================
 
 /// Collected texts that the caller must embed before execution.
 ///
@@ -1400,8 +1397,12 @@ fn pass_through_projection(clause: &Clause) -> Option<HashSet<String>> {
     Some(out)
 }
 
-/// Walk every expression / predicate / pattern variable in `clause`
-/// and insert the names of all `Variable` references into `out`.
+/// Insert the names of the variables `clause` references into `out`.
+///
+/// Not exhaustive over clause kinds: the write / procedure clauses and the
+/// fused shapes contribute nothing, so a caller that needs "this variable is
+/// definitely unreferenced" must first check
+/// [`unwind_scope_refs_are_enumerable`].
 fn collect_clause_variables(clause: &Clause, out: &mut HashSet<String>) {
     match clause {
         Clause::Match(m) | Clause::OptionalMatch(m) => {

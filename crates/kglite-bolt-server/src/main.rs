@@ -642,7 +642,6 @@ async fn shutdown_signal() {
 }
 
 fn init_tracing() {
-    // The same filter kglite-mcp-server uses.
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("kglite_bolt_server=info,boltr=warn,warn"));
     tracing_subscriber::fmt()
@@ -711,8 +710,7 @@ async fn serve() -> Result<()> {
         storage = started.live_mode.as_str(),
         // Present only when `--storage` moved an existing graph off the mode it
         // was saved in. Logged because an operator who does not see the switch
-        // cannot tell it from the flag being ignored, which is the failure this
-        // path used to have.
+        // cannot tell it from the flag being ignored.
         converted_from = started.converted_from.map(StorageMode::as_str),
         durability = durability.level.name(),
         "graph ready; constructing Bolt server"
@@ -811,7 +809,11 @@ fn configure_builder(cli: &Cli, backend: KgliteBackend) -> Result<BoltServer<Kgl
     let mut builder = BoltServer::builder(backend)
         .max_sessions(cli.max_sessions)
         .max_message_size(cli.max_message_size)
-        // Subsequent signals bypass this and let the default handler abort.
+        // One-shot, and there is no second chance: tokio installs its signal
+        // handlers for the life of the process and never restores the default,
+        // so a second SIGINT/SIGTERM after this future has fired is swallowed
+        // rather than aborting. SIGKILL is the only escape from a shutdown
+        // that hangs.
         .shutdown(shutdown_signal());
 
     if let Some(secs) = cli.idle_timeout {
@@ -998,8 +1000,6 @@ mod tests {
         }
     }
 
-    // ── --durability ────────────────────────────────────────────────────────
-
     /// The vocabulary is the engine's, not a second list that could drift from
     /// it, and the environment hands over whatever a unit file wrote.
     #[test]
@@ -1053,11 +1053,10 @@ mod tests {
         }
     }
 
-    /// The shipped default is `normal`: a commit this server acknowledges
-    /// survives the process dying. Pinned as a test because the level decides
-    /// what an operator gets without asking, and because `full` — the level
-    /// that also survives power loss — costs 88% of committed throughput here
-    /// (R3.3, `bolt_durability:*` in the results CSV) and is therefore opt-in.
+    /// Pinned as a test because the level decides what an operator gets
+    /// without asking, and because `full` — the only level that also survives
+    /// power loss — costs 88% of committed throughput here and is therefore
+    /// opt-in. Measurement: [`DEFAULT_DURABILITY`].
     #[test]
     fn the_default_level_is_normal() {
         assert_eq!(DEFAULT_DURABILITY, DurabilityLevel::Normal);

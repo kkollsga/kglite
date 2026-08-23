@@ -1,11 +1,13 @@
 //! `BoltBackend` implementation for kglite.
 //!
-//! Covers handshake, session lifecycle, RUN+PULL, parameter decoding,
-//! explicit transactions with `--readonly` enforcement, typed `KgError` →
-//! `Neo.{Class}.{Category}.{Title}` FAILURE codes (via `crate::error_map`),
-//! the `--auth basic` credential validator (wired in `main.rs`), server
-//! metadata, routing, and `db.*` schema introspection served through the
-//! standard Cypher CALL pipeline.
+//! Covers handshake identity, session lifecycle, RUN+PULL, parameter decoding,
+//! explicit transactions with `--readonly` enforcement, server metadata,
+//! routing, and the bolt-layer verb intercepts (`db.checkpoint()`,
+//! `dbms.components()`, `dbms.showCurrentUser()`, `SHOW DATABASES`) the Cypher
+//! engine has no state to answer. Anything else — the engine's own `db.*`
+//! introspection procedures included — falls through to the Cypher pipeline.
+//! LOGON credential checking lives in `crate::auth`, and `KgError` →
+//! `Neo.{Class}.{Category}.{Title}` FAILURE-code mapping in `crate::error_map`.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -663,10 +665,9 @@ impl BoltBackend for KgliteBackend {
         session: &SessionHandle,
         transaction: &TransactionHandle,
     ) -> Result<BoltDict, BoltError> {
-        // Brief outer-mutex hold: remove the per-tx entry from the
-        // HashMap. We then check session ownership + extract working
-        // under the per-tx mutex (which we own exclusively since we
-        // just removed it). If ownership check fails, re-insert.
+        // Brief outer-mutex hold to remove the per-tx entry; ownership and the
+        // transaction itself are taken afterwards, off the outer lock. A failed
+        // ownership check re-inserts the entry.
         let state_arc = {
             let mut txs = self.transactions.lock().unwrap_or_else(|p| p.into_inner());
             txs.remove(&transaction.0).ok_or_else(|| {
@@ -1105,8 +1106,7 @@ impl KgliteBackend {
         // `text_score()` isn't wired either (embedder = None in the defaults);
         // text-score queries are rejected at the session level.
         let mut opts = kglite::api::session::ExecuteOptions::eager(kg_params);
-        // write_scope gates mutations; git_sha / modified_by stamp write
-        // provenance. All no-ops on reads.
+        // All three are no-ops on reads; see `TxMeta` for what they carry.
         opts.write_scope = meta.write_scope.as_ref();
         opts.git_sha = meta.git_sha.as_deref();
         opts.modified_by = meta.modified_by.as_deref();
@@ -1120,17 +1120,14 @@ impl KgliteBackend {
     /// Run the `db.checkpoint()` verb: write the served graph back to the
     /// path it came from, fsync'd, and report what happened.
     ///
-    /// **Refusals, in order.** Inside an explicit transaction the call is a
-    /// `Protocol` error: a checkpoint saves the session's *committed* graph, so
-    /// the client would get a file silently omitting the work it just did, plus
-    /// a success record saying otherwise. `--readonly` and disk-mode graphs are
-    /// `Forbidden`, for the same reasons `--save-on-exit` refuses them at
-    /// startup.
+    /// **Refusals, in order.** Inside an explicit transaction it is a
+    /// `Protocol` error: the save covers the *committed* graph, so the client
+    /// would get a file omitting the work it just did plus a success record
+    /// saying otherwise. `--readonly` and disk-mode graphs are `Forbidden`, for
+    /// the same reasons `--save-on-exit` refuses them at startup. A failed save
+    /// is `Backend` — fail-closed: the client is told it did not happen.
     ///
-    /// **Digest-skip** and the save itself are [`checkpoint_if_changed`]'s.
-    ///
-    /// A failed save is `Backend` — fail-closed: the client is told the
-    /// checkpoint did not happen.
+    /// The version-skip and the save itself are [`checkpoint_if_changed`]'s.
     fn run_checkpoint(
         &self,
         call: &CheckpointCall,
@@ -1151,8 +1148,8 @@ impl KgliteBackend {
                 "server is read-only — db.checkpoint() rejected (--readonly flag)".into(),
             ));
         }
-        // Bound to a `let` so the snapshot Arc it borrows is dropped right
-        // here: a snapshot alive across the save below would turn the save's
+        // The snapshot stays a temporary, dropped at the end of this statement:
+        // one still alive across the save below would turn the save's
         // `Arc::make_mut` into a deep clone of the whole graph (see
         // `Session::save`).
         let mode = kglite::api::storage::live_storage_mode(&self.session.snapshot());
@@ -1205,10 +1202,8 @@ impl KgliteBackend {
         }
     }
 
-    /// Auto-commit path: take a snapshot, delegate to
-    /// `session::execute_read`, reject mutations. Mutations in
-    /// auto-commit aren't supported (drivers always wrap writes in
-    /// explicit transactions in practice).
+    /// Auto-commit path. Mutations are rejected rather than supported:
+    /// drivers wrap writes in explicit transactions in practice.
     fn execute_auto_commit(
         &self,
         query: &str,
@@ -1241,11 +1236,10 @@ impl KgliteBackend {
         Ok((outcome.result, "r"))
     }
 
-    /// Tx path: take outer mutex briefly to clone the per-tx Arc,
-    /// release outer, then take the inner per-tx mutex for the
-    /// actual pipeline + execute. Other sessions can operate on
-    /// other transactions in parallel — the only contention is
-    /// within a single tx (which is sequential by Bolt semantics).
+    /// Tx path: outer mutex only long enough to clone the per-tx Arc, then the
+    /// inner per-tx mutex for the whole pipeline (lock ordering: see
+    /// [`KgliteBackend`]). Contention is confined to a single tx, which Bolt
+    /// already serializes; other sessions run their transactions in parallel.
     ///
     /// Delegates the snapshot/working CoW + pipeline orchestration
     /// to `kglite::api::session::{Transaction, execute_read,
@@ -1401,9 +1395,9 @@ mod tests {
         memory_backend_at(unique_disk_path().join("memory.kgl"), false)
     }
 
-    /// A memory-mode backend serving `path` — which, unlike
-    /// [`memory_backend`]'s, is a real writable location, so a checkpoint can
-    /// actually land there.
+    /// A memory-mode backend serving the caller's `path`. Checkpoint tests
+    /// pass a writable one ([`unique_kgl_path`]); [`memory_backend`]'s parent
+    /// directory is never created, so a checkpoint there would fail.
     fn memory_backend_at(path: std::path::PathBuf, readonly: bool) -> KgliteBackend {
         let graph = new_dir_graph_in_mode(StorageMode::Memory, None).expect("create memory graph");
         KgliteBackend::new(
@@ -1881,7 +1875,7 @@ mod tests {
         assert_eq!(row[col("home")], BoltValue::Boolean(true));
     }
 
-    /// The digest-skip, and its mutation check: a checkpoint after an
+    /// The version-skip, and its mutation check: a checkpoint after an
     /// unchanged graph must skip, and a checkpoint after a *committed write*
     /// must save again. Without the second half a parser that always skipped
     /// would pass.

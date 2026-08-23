@@ -23,8 +23,8 @@
 //! Data section: contiguous `[u32]` slices per type (NodeIndex values).
 //! ```
 //!
-//! Lookup is `O(log num_types)` directory probe at load (cached as a
-//! `HashMap<String, BaseEntry>`) plus `O(1)` slice access.
+//! The directory is scanned into a `HashMap<String, BaseEntry>` once at load,
+//! so a lookup is an `O(1)` name probe plus `O(1)` slice access.
 
 use memmap2::Mmap;
 use petgraph::graph::NodeIndex;
@@ -91,7 +91,8 @@ struct BaseEntry {
 }
 
 impl TypeIndexBase {
-    /// Load `type_indices.bin` from `dir`. Returns `Ok(None)` if absent or magic mismatch.
+    /// Load `type_indices.bin` from `dir`. Returns `Ok(None)` if the file is
+    /// absent, shorter than a header, or does not carry the magic.
     pub fn load_from(dir: &Path, interner: &StringInterner) -> std::io::Result<Option<Self>> {
         let path = dir.join("type_indices.bin");
         if !path.exists() {
@@ -205,7 +206,7 @@ impl TypeIndexBase {
         self.dir.contains_key(name)
     }
 
-    /// Slice of u32 NodeIndex values for `name`, mapped directly from the file.
+    /// `name`'s payload as raw little-endian `u32` bytes, borrowed from the mmap.
     pub fn slice_for(&self, name: &str) -> Option<&[u8]> {
         let entry = self.dir.get(name)?;
         let n = entry.num_entries as usize;
@@ -216,8 +217,8 @@ impl TypeIndexBase {
         self.mmap.get(off..off.checked_add(n.checked_mul(4)?)?)
     }
 
-    /// Materialize a base entry into an owned Vec. Used on save and on
-    /// first mutation when the entry must be promoted into the overlay.
+    /// Materialize a base entry into an owned Vec, for the paths that must
+    /// promote it into the overlay (first mutation, or a full materialization).
     pub fn materialize(&self, name: &str) -> Option<Vec<NodeIndex>> {
         let slice = self.slice_for(name)?;
         Some(
@@ -297,8 +298,9 @@ impl<'a> TypeNodesRef<'a> {
         }
     }
 
-    /// Linear scan for membership. O(n); used in tests and light callers
-    /// (delete paths use a HashSet built from the slice instead).
+    /// Linear scan for membership, O(n). No production caller left: delete
+    /// paths build a HashSet from the slice, and the fused type filter binary-
+    /// searches. Kept as the fallback the sortedness note below describes.
     #[allow(dead_code)]
     pub fn contains(&self, idx: &NodeIndex) -> bool {
         match self {
@@ -329,7 +331,7 @@ impl<'a> TypeNodesRef<'a> {
     /// floor at 200k one-shot and 20k incremental creates), but it breaks a
     /// different contract. `DirGraph::appended_tail` defines a bulk append's
     /// delta as the bucket's *tail*, and both post-append index folds
-    /// (`fold_appended_ids_into_index`, `fold_appended_into_user_indexes`) read
+    /// (`fold_appended_ids_into_index`, `fold_batch_into_user_indexes`) read
     /// it; an ordered insert puts a slot-reusing create in the middle, so the
     /// folds index the wrong nodes. `maintain::incremental_index_tests::
     /// deleting_then_recreating_an_id_repoints_the_index` fails outright on it
@@ -502,8 +504,7 @@ impl TypeIndexStore {
     pub fn get(&self, name: &str) -> Option<TypeNodesRef<'_>> {
         if let Some(bucket) = self.overlay.get(name) {
             return Some(match bucket.levels() {
-                // The steady state: one level, handed out as the plain slice
-                // this returned before the field was layered.
+                // The steady state: one level, handed out as a plain slice.
                 [only] => TypeNodesRef::Overlay(only.as_slice()),
                 levels => TypeNodesRef::Layered(levels),
             });
@@ -668,10 +669,9 @@ impl TypeIndexStore {
     /// the order of every survivor**.
     ///
     /// Order is not an aesthetic here: the bucket is the scan order of an
-    /// un-`ORDER BY`'d `MATCH`, the save writer's row order, and the coordinate
-    /// system the statement journal records its `BucketRemoved` positions in.
-    /// So this closes the gaps with one `copy_within` per surviving run rather
-    /// than swap-removing.
+    /// un-`ORDER BY`'d `MATCH`, and the coordinate system the statement journal
+    /// records its `BucketRemoved` positions in. So this closes the gaps with
+    /// one `copy_within` per surviving run rather than swap-removing.
     pub fn remove_positions(&mut self, name: &str, hits: &[(usize, NodeIndex)]) {
         if hits.is_empty() {
             return;

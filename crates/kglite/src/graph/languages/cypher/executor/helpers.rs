@@ -10,7 +10,6 @@ use crate::graph::schema::{soft_alias_fallback, DirGraph, InternedKey, SoftAlias
 use crate::graph::storage::{GraphRead, NodeView};
 use std::collections::{HashMap, HashSet};
 
-// Re-exported so downstream code can name it via the executor namespace.
 pub use super::super::ast::is_aggregate_expression;
 
 /// True when an evaluation error reports a mistake in the *query or its
@@ -710,8 +709,8 @@ fn insert_field_alias<S: PropertySink>(
     if properties.contains(alias) {
         return;
     }
-    // Match the old metadata-pass behaviour: a Null resolution is omitted,
-    // not inserted (preserves the null-omission rule in returned nodes).
+    // A Null resolution is omitted, not inserted — the null-omission rule
+    // for returned nodes.
     let v = value();
     if !matches!(v, Value::Null) {
         properties.insert(alias, v);
@@ -1107,10 +1106,10 @@ pub(in crate::graph::languages::cypher) fn parse_list_value(val: &Value) -> Vec<
 }
 
 /// Parse a single value token (the same grammar as items inside a
-/// formatted list/map). Recognizes integers, floats, booleans, null, the
-/// `__nref:N` node-reference sentinel, and quoted strings with `\\`/`\"`
-/// escapes. Anything else is returned as a `Value::String` after
-/// stripping outer quotes.
+/// formatted list/map). Recognizes integers, floats, booleans, null, and
+/// quoted strings with `\\`/`\"` escapes — including the `__nref:N`
+/// node-reference sentinel, which is only recognised *inside* quotes.
+/// Anything else is returned as a `Value::String`.
 pub(super) fn parse_value_token(s: &str) -> Value {
     let trimmed = s.trim();
     if trimmed.is_empty() {
@@ -1128,7 +1127,6 @@ pub(super) fn parse_value_token(s: &str) -> Value {
         "null" => return Value::Null,
         _ => {}
     }
-    // Quoted string: strip the quotes and unescape `\\`/`\"`.
     let bytes = trimmed.as_bytes();
     if bytes.len() >= 2
         && (bytes[0] == b'"' || bytes[0] == b'\'')
@@ -1191,8 +1189,8 @@ pub(super) fn extract_map_field(s: &str, key: &str) -> Option<Value> {
 
 /// Pull a named field out of a `Value::Point { lat, lon }` produced by
 /// `centroid()`, `point()`, etc. Accepts the canonical Cypher names
-/// (`latitude`/`longitude`) plus their short aliases (`lat`/`lon`,
-/// `x`/`y`) that some users reach for. Returns `Value::Null` for
+/// (`latitude`/`longitude`) plus the short aliases users reach for
+/// (`lat`/`y`; `lon`/`lng`/`long`/`x`). Returns `Value::Null` for
 /// unknown fields or non-Point inputs.
 pub(super) fn point_field(val: &Value, property: &str) -> Value {
     if let Value::Point { lat, lon } = val {
@@ -1375,8 +1373,8 @@ pub(super) fn parse_value_string(s: &str) -> Value {
 }
 
 /// Split a list string like "[1, 2, [3, 4], 5]" into top-level items,
-/// respecting nested brackets and quoted strings. Returns inner items
-/// as string slices. Empty list "[]" returns empty vec.
+/// respecting nested brackets and quoted strings. The outer brackets are
+/// assumed present and are stripped; "[]" yields an empty vec.
 pub(super) fn split_list_top_level(s: &str) -> Vec<&str> {
     let inner = &s[1..s.len() - 1];
     if inner.trim().is_empty() {
@@ -1419,10 +1417,6 @@ pub(super) fn split_list_top_level(s: &str) -> Vec<&str> {
     }
     items
 }
-
-// ============================================================================
-// CALL parameter helpers
-// ============================================================================
 
 pub(super) fn call_param_f64(params: &HashMap<String, Value>, key: &str, default: f64) -> f64 {
     params

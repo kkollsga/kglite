@@ -139,7 +139,8 @@ ECOSYSTEM_ROOT = _default_ecosystem_root(REPO_ROOT)
 # Ecosystem configuration
 # --------------------------------------------------------------------------
 
-#: Sibling repos, in dependency order. ``upstream`` is the release source.
+#: The release source, then the sibling repos that consume it, in dependency
+#: order.
 UPSTREAM_REPO = "KGLite"
 DOWNSTREAM_REPOS = ("codingest", "kglite-datasets", "sonagram", "sonara", "mcp-methods")
 
@@ -719,17 +720,16 @@ _LEDGER_ROW = re.compile(r"^\|\s*\d{4}-\d{2}-\d{2}\s*\|")
 
 # ---- declaration vs citation ----------------------------------------------
 #
-# A version *declaration* — a pin, a documented floor, "requires >= X", an
-# install line — states what you must use, so it goes stale the moment a
-# release lands. A version *citation* — "introduced in X", "the X → Y move",
-# "verified against X", a dated correction — states what happened, and is true
-# forever. Telling a downstream to "move" one of those to the current version
-# asks them to falsify their own record; codingest's PARITY.md provenance line
-# was cited that way in three consecutive release notes.
+# A declaration — a pin, a documented floor, "requires >= X", an install line —
+# states what you must use, so it goes stale the moment a release lands. A
+# citation — "introduced in X", "the X → Y move", "verified against X", a dated
+# correction — states what happened, and is true forever; asking a downstream to
+# "move" one to the current version asks it to falsify its own record, as three
+# consecutive release notes did to codingest's PARITY.md provenance line.
 #
-# The classifier is deliberately conservative in one direction: anything it
-# cannot recognise as a record stays a finding, because a missed stale pin
-# costs more than a false positive that a human dismisses.
+# Conservative in one direction: anything it cannot recognise as a record stays
+# a finding, because a missed stale pin costs more than a false positive that a
+# human dismisses.
 
 #: Past-tense / provenance cues. Presence of one inside the sentence carrying
 #: the version means the sentence is talking about the past.
@@ -855,11 +855,10 @@ _MAVEN_COORD_RE = re.compile(
 #:     <artifactId>kglite</artifactId>
 #:     <version>0.15.9</version>
 #:
-#: `_MAVEN_COORD_RE` cannot see it — there is no `:` anywhere — yet this is the
-#: form a Java consumer is most likely to copy, because it is what a `pom.xml`
-#: takes. A README carrying only the Gradle line would have exactly half its
-#: install instructions watched, which is the shape where the *unwatched* half
-#: is the one that goes stale unnoticed.
+#: `_MAVEN_COORD_RE` cannot see it — there is no `:` anywhere — yet it is what a
+#: `pom.xml` takes, so a README carrying only the Gradle line would have exactly
+#: half its install instructions watched, and the unwatched half is the one that
+#: goes stale unnoticed.
 _MAVEN_XML_ARTIFACT_RE = re.compile(r"<artifactId>\s*(?P<name>[A-Za-z][\w.-]*)\s*</artifactId>")
 _MAVEN_XML_VERSION_RE = re.compile(r"<version>\s*(?P<spec>\d+\.\d+(?:\.\d+)?[0-9A-Za-z.+-]*)\s*</version>")
 
@@ -923,8 +922,8 @@ def scan_docs(repo: str, path: Path, tracked: set[str]) -> list[Declaration]:
 
     Prose is the noisiest site, so this is deliberately conservative: it only
     matches ``<tracked-package> <x.y[.z]>`` with an optional ``v``, only for
-    ecosystem packages (a doc saying ``pyo3 0.27`` is not our problem), and
-    never inside a document that exists to record history.
+    packages this ecosystem tracks, and never inside a document that exists to
+    record history.
     """
     if HISTORICAL_DOCS.search(str(path)):
         return []
@@ -1307,12 +1306,13 @@ def analyse(
     return findings
 
 
-#: Documented versions that are *supposed* to name an older release, with the
-#: reason. Prose cannot be classified mechanically — "use kglite 0.13.4 to
-#: convert pre-0.14 artifacts" is correct forever, while "a thin KGLite 0.14.3
-#: frontend" is rot, and no regex separates them. So the checker surfaces every
-#: candidate and this table records the adjudicated ones, in the same spirit as
-#: `scripts/check_lint_allowances.py`. Key: ``(path suffix, package)``.
+#: ``ACKNOWLEDGED`` below: documented versions that are *supposed* to name an
+#: older release, with the reason. Prose cannot be classified mechanically —
+#: "use kglite 0.13.4 to convert pre-0.14 artifacts" is correct forever, while
+#: "a thin KGLite 0.14.3 frontend" is rot, and no regex separates them. So the
+#: checker surfaces every candidate and this table records the adjudicated ones,
+#: in the same spirit as `scripts/check_lint_allowances.py`.
+#: Key: ``(repo, path suffix, package)``.
 #: A one-off can instead carry the inline `version-check: ignore` marker.
 _BRIDGE = "0.13.4 is the documented pre-0.14 artifact-conversion bridge"
 ACKNOWLEDGED: dict[tuple[str, str, str], str] = {

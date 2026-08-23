@@ -59,7 +59,6 @@ pub fn compute_connection_type_stats(graph: &DirGraph) -> Vec<ConnectionTypeStat
         if has_empty {
             let triples_guard = graph.type_connectivity_cache.read().unwrap();
             if let Some(triples) = triples_guard.as_ref() {
-                // Derive endpoints from cached triples — zero I/O
                 let derived = derive_edge_counts_from_triples(triples);
                 for ct in &mut result {
                     if ct.source_types.is_empty() && ct.target_types.is_empty() {
@@ -286,7 +285,7 @@ pub(super) fn compute_join_candidates(
 
     'outer: for i in 0..core_types.len() {
         if candidates.len() >= max_candidates * 3 {
-            break; // Early exit: we have enough raw candidates
+            break;
         }
         for j in (i + 1)..core_types.len() {
             if candidates.len() >= max_candidates * 3 {
@@ -369,11 +368,9 @@ pub(super) fn compute_join_candidates(
 
 /// All node-type names (Neo4j "labels"), sorted alphabetically.
 ///
-/// The single source of truth for `db.labels()` and any other
-/// caller that needs a deterministic enumeration of node types. Pulls
-/// from both `type_indices` (types with live nodes) and
-/// `node_type_metadata` (types declared via schema validation but no
-/// live nodes yet), matching the existing `get_node_types()` semantics.
+/// Single source of truth for `db.labels()`, on `get_node_types()` semantics:
+/// types with live nodes *and* types declared via schema validation that have
+/// no live nodes yet.
 pub(crate) fn collect_labels(graph: &DirGraph) -> Vec<String> {
     let mut labels = graph.get_node_types();
     labels.sort();
@@ -670,8 +667,7 @@ pub(crate) fn collect_relationship_types(graph: &DirGraph) -> Vec<String> {
 ///
 /// Single source of truth for `db.propertyKeys()` (Neo4j-compatible). Unions
 /// `node_type_metadata` (per-type `prop → declared_type`) with each
-/// `connection_type_metadata` entry's `property_types`. Mirrors how
-/// `collect_labels`/`collect_relationship_types` feed their `db.*` procedures.
+/// `connection_type_metadata` entry's `property_types`.
 pub(crate) fn collect_property_keys(graph: &DirGraph) -> Vec<String> {
     let mut keys: HashSet<String> = HashSet::new();
     for props in graph.node_type_metadata.values() {
@@ -711,12 +707,8 @@ pub fn compute_schema(graph: &DirGraph) -> SchemaOverview {
 
     let connection_types = compute_connection_type_stats(graph);
 
-    // Indexes — formatted from the structured helper that also feeds
-    // `db.indexes()`. String shape preserved to keep schema() Python API
-    // tests green:
-    //   - Equality: "Type.prop"
-    //   - Composite: "Type.(p1, p2)"
-    //   - Range: "Type.prop [range]"
+    // The string shapes below are pinned by the schema() Python API tests; the
+    // structured helper they format also feeds `db.indexes()`.
     let mut indexes: Vec<String> = collect_indexes_structured(graph)
         .into_iter()
         .map(|idx| match idx.kind {
@@ -804,8 +796,6 @@ pub(super) fn value_display_compact(v: &Value, truncate_at: Option<usize>) -> St
         } => format!("dur(M={},D={},S={})", months, days, seconds),
         Value::NodeRef(idx) => format!("node#{}", idx),
         Value::Null => String::new(),
-        // Collection / graph-entity variants delegate to
-        // format_value; truncation applies only to the String variant.
         Value::List(_)
         | Value::Map(_)
         | Value::Node(_)
@@ -869,10 +859,8 @@ impl PropAccum {
     /// the column's dispatch once for the whole walk. Visit order stays `rows`
     /// order, so `first_type` (the only order-sensitive field) is unchanged.
     ///
-    /// The arms differ only in how cheaply they can answer "non-null":
-    /// `Mixed` lends its `Value`, `Float64` must be *read* because a NaN counts
-    /// as null here ([`is_null_value`]) while its null byte says otherwise, and
-    /// every other shape can answer from the null byte alone once the
+    /// The arms differ only in how cheaply they can answer "non-null" (see
+    /// each arm); the general one needs nothing but the null byte once the
     /// accumulator stops needing values.
     ///
     /// Returns whether any row yielded a value — which is exactly whether the
@@ -935,10 +923,9 @@ fn builtin_accum_keys() -> (InternedKey, InternedKey) {
 
 // Test hook: force `accumulate_property_values` down its row-major route.
 //
-// The column-major path has to produce byte-identical stats, and the only way
-// to assert that is to run the *same* fixture both ways in one process. This
-// is the decline switch the equivalence test flips — not a configuration knob;
-// it does not exist outside `cfg(test)`.
+// The column-major path has to produce the same stats, and the only way to
+// assert that is to run the *same* fixture both ways in one process. The
+// decline switch the equivalence test flips — not a configuration knob.
 #[cfg(test)]
 thread_local! {
     static FORCE_ROW_MAJOR_STATS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -1096,9 +1083,9 @@ fn resolve_accum_names(
 /// Property stats for one node type.
 ///
 /// `max_values`: include the `values` list when the unique count is ≤ this
-/// threshold (0 = never). `sample_size`: when `Some(n)`, sample n
-/// evenly-spaced nodes instead of scanning all, and scale the resulting
-/// non-null counts to the full population.
+/// threshold (0 = never). `sample_size`: when `Some(n)` and `n` is below the
+/// type's node count, sample n evenly-spaced nodes instead of scanning all,
+/// and scale the resulting non-null counts to the full population.
 pub fn compute_property_stats(
     graph: &DirGraph,
     node_type: &str,
@@ -1115,9 +1102,8 @@ pub fn compute_property_stats(
 
     let total_nodes = node_indices.len();
 
-    // Cap `value_set` at max_values+1 — one extra to detect "too many unique
-    // values" without cloning every value of a high-cardinality property. When
-    // capped, `unique` is a lower bound and `values` is None.
+    // max_values+1: the extra slot is what detects "more distinct values than
+    // we report" without cloning a whole high-cardinality column.
     let value_cap = if max_values > 0 {
         max_values + 1
     } else {
@@ -1209,9 +1195,8 @@ pub fn compute_property_stats(
                 .unwrap_or_else(|| pa.first_type.unwrap_or("unknown").to_string());
 
             let unique = pa.value_set.len();
-            // The distinct-value set is capped at `value_cap`; hitting it means
-            // `unique` is a lower bound (there may be more distinct values we
-            // stopped counting). Either that or a subset scan makes stats approx.
+            // Hitting the cap means `unique` is a lower bound, which — like a
+            // subset scan — makes the stats approximate.
             let capped = pa.value_cap != usize::MAX && unique >= pa.value_cap;
             let approx = sampled || capped;
             let non_null = (pa.non_null as f64 * scale_factor).round() as usize;
@@ -1484,9 +1469,9 @@ mod column_major_stats_tests {
         graph
     }
 
-    /// The Track-H shape: many wide, high-cardinality string properties, the
-    /// case whose per-row `String` materialisation the column-major path is
-    /// meant to remove. Shared with the release A/B probe.
+    /// Many wide, high-cardinality string properties: the case whose per-row
+    /// `String` materialisation the column-major path is meant to remove.
+    /// Shared with the release A/B probe.
     pub(super) fn wide_probe_fixture(n: i64) -> DirGraph {
         let mut graph = DirGraph::new();
         let names = [

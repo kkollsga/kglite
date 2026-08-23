@@ -15,8 +15,9 @@
 //! before this feature) pays one `HashMap::is_empty` per write and allocates
 //! nothing. A type that *does* carry constraints pays a scan of the
 //! declaration keys, one property read per constrained property, and one hash
-//! probe per constraint — no full scan, and no allocation beyond the claim
-//! vector, which is only built when the type actually has a constraint.
+//! probe per constraint — never a full scan. A create allocates only the claim
+//! vector; a property write additionally composes before/after maps over the
+//! type's constrained properties ([`DirGraph::plan_property_write`]).
 //!
 //! # NULL semantics
 //!
@@ -24,14 +25,14 @@
 //! tuple reads as present and non-null — matching Neo4j, where a uniqueness
 //! constraint does not apply to nodes missing the property, and a composite
 //! constraint requires the whole tuple. So many nodes may share "no email"
-//! while `email` is still UNIQUE. [`Self::unique_claims`] encodes this by
+//! while `email` is still UNIQUE. [`DirGraph::unique_claims`] encodes this by
 //! producing no claim for an incomplete tuple.
 //!
 //! # Persistence
 //!
 //! `unique_indices` is `#[serde(skip)]`; the declaration list
 //! `unique_constraint_keys` is persisted and replayed by
-//! [`Self::rebuild_unique_indices_from_keys`] on load — the same
+//! [`DirGraph::rebuild_unique_indices_from_keys`] on load — the same
 //! persist-keys/rebuild-on-load pattern the property, range, and composite
 //! indexes use. The rebuild re-verifies the constraint for free, since building
 //! a single-occupant map *is* the duplicate check.
@@ -102,10 +103,10 @@ impl DirGraph {
     /// `conflict_handling` mode that skipped or merged the write is reflected
     /// automatically.
     ///
-    /// Reads through [`DirGraph::read_indexed`] and returns through
-    /// [`Self::unique_claims`], the same two funnels
-    /// [`Self::build_unique_index`] uses, so a folded occupancy and a rebuilt
-    /// one cannot disagree about which tuple a node holds.
+    /// Reads through [`DirGraph::read_indexed`] and applies the same
+    /// incomplete-tuple exemption [`Self::build_unique_index`] does — here via
+    /// [`Self::unique_claims`], there via `read_complete_tuple` — so a folded
+    /// occupancy and a rebuilt one cannot disagree about which tuple a node holds.
     pub(crate) fn stored_unique_claims(
         &mut self,
         node_type: &str,
@@ -142,8 +143,9 @@ impl DirGraph {
         self.find_unique_key(node_type, properties).is_some()
     }
 
-    /// Every declared unique constraint, as `(node_type, properties)` in
-    /// declaration order. Backs `SHOW CONSTRAINTS`.
+    /// Every declared unique constraint, as `(node_type, properties)`, sorted —
+    /// `unique_indices` is a `HashMap`, so an unsorted listing would vary
+    /// between runs. Backs `SHOW CONSTRAINTS`.
     pub fn list_unique_constraints(&self) -> Vec<UniqueConstraintKey> {
         let mut all: Vec<UniqueConstraintKey> = self.unique_indices.keys().cloned().collect();
         all.sort();
@@ -1006,9 +1008,7 @@ impl DirGraph {
     ///
     /// Fails with [`ConstraintViolation::preexisting_type_mismatch`] when
     /// existing nodes hold a value of another type, and installs nothing in
-    /// that case — mirroring [`Self::create_not_null_constraint`], because a
-    /// constraint that exempts the rows already present is worse than a
-    /// rejected declaration.
+    /// that case, mirroring [`Self::create_not_null_constraint`].
     ///
     /// Idempotent: re-declaring the same type re-verifies it and changes
     /// nothing. Declaring a *different* type for a property that already has
@@ -1249,8 +1249,8 @@ impl DirGraph {
     /// tuple keeps its first occupant, the constraint stays declared and live
     /// for all *subsequent* writes, and the duplicates are returned for the
     /// caller to surface. A violating file can only come from a write path that
-    /// predates enforcement or one that bypasses it (see the RDF loaders in the
-    /// coverage notes), not from a normal write.
+    /// predates enforcement or one that bypasses it (the RDF loaders), not from
+    /// a normal write.
     pub(crate) fn rebuild_unique_indices_from_keys(&mut self) -> Vec<ConstraintViolation> {
         let keys: Vec<UniqueConstraintKey> = std::mem::take(&mut self.unique_constraint_keys);
         let mut violations = Vec::new();

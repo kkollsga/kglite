@@ -39,8 +39,8 @@
 //! node-remove will detach it anyway), and so is a label set.
 //!
 //! Labels fold in their own map rather than riding on `UpsertNode`, because
-//! in the live graph properties and labels are independent state: neither
-//! `SET n.x = 1` nor `SET n:B` disturbs the other. See [`LabelNet`].
+//! properties and labels are independent state in the live graph — see
+//! [`LabelNet`].
 //!
 //! ## Recovery is value-faithful
 //!
@@ -248,10 +248,9 @@ fn apply_node_upserts(
     }
     for (node_type, group) in node_groups {
         let (framed, exact) = split_faithful_columns(&group.columns, &group.rows);
-        // `id` and `title` cannot be held back — `add_nodes` addresses rows by
-        // them — so a type whose ids or titles differ in type across nodes is
-        // split into one bulk call per shape instead. Only such a type pays
-        // the extra call; the usual one keeps a single `add_nodes`.
+        // Fixed columns cannot be held back like a property, so a type whose
+        // ids or titles differ in type is split by shape instead (module
+        // header); only such a type pays more than one `add_nodes`.
         if fixed_columns_are_faithful(&group.rows) {
             upsert_node_rows(graph, node_type, &framed, &exact, &group.rows)?;
         } else {
@@ -272,15 +271,13 @@ fn upsert_node_rows(
     exact: &[String],
     rows: &[UpsertRow],
 ) -> Result<(), String> {
-    // Declare the held-back columns *before* the bulk create, not after. The
-    // create is what builds the type's `ColumnStore`, and it types each column
-    // from the type's declared metadata — so a column whose declaration arrives
-    // afterwards is instead typed from whichever exact value happens to be
-    // written into it first. For a property that mixes an int and a float that
-    // is the difference between a `Mixed` column that returns both values as
-    // logged and a `Float64` column that promotes the int on the way in
-    // (`int_and_float_under_one_property_do_not_promote`). Latent on
-    // mapped/disk before construction became columnar; universal after.
+    // Declare the held-back columns *before* the bulk create, not after: the
+    // create builds the type's `ColumnStore` and types each column from the
+    // declared metadata, so a declaration arriving afterwards leaves the column
+    // typed from whichever exact value is written into it first. For an
+    // int/float mix that is a `Mixed` column returning both values as logged
+    // versus a `Float64` one promoting the int on the way in
+    // (`int_and_float_under_one_property_do_not_promote`).
     declare_exact_node_columns(graph, node_type, exact, rows);
     let df = build_dataframe(&["id", "title"], framed, rows)?;
     add_nodes(
@@ -427,10 +424,9 @@ fn apply_edge_upserts(
     }
     for ((conn, src_type, tgt_type), group) in edge_groups {
         let (framed, exact) = split_faithful_columns(&group.columns, &group.rows);
-        // The endpoint-id columns get the same treatment as a node's `id`,
-        // and for a sharper reason: `add_connections` *vivifies* a stub for an
-        // endpoint id it cannot find, so a stringified `2` does not merely
-        // lose an edge — it invents a node under the id `"2"`.
+        // Endpoint ids get the same treatment as a node's `id`, for the
+        // sharper reason in the module header: a stringified endpoint id does
+        // not merely lose an edge, `add_connections` vivifies a node under it.
         let key = EdgeGroup {
             conn,
             src_type,
@@ -546,11 +542,9 @@ fn apply_exact_edge_props(
 /// load paths that share the builder, unrecoverable type loss for replay (see
 /// the module header, "Recovery is value-faithful").
 ///
-/// A column is *faithful* when every value it carries has an exact column
-/// shape and they all share it; `Null` carries no type and is ignored (the
-/// frame fills absent cells with `Null`, which `add_nodes` skips). Anything
-/// else — a mix, or a variant with no dense column at all such as `Point` —
-/// is returned as `exact` for its caller to write value by value.
+/// A column [`column_is_faithful`] rejects — a type mix, or a variant with no
+/// dense column at all such as `Point` — is returned as `exact` for its caller
+/// to write value by value.
 fn split_faithful_columns(columns: &[String], rows: &[UpsertRow]) -> (Vec<String>, Vec<String>) {
     let mut framed = Vec::with_capacity(columns.len());
     let mut exact = Vec::new();
@@ -1308,9 +1302,9 @@ mod tests {
         assert_eq!(prop(&mut g, 2, "n"), Some(Value::Float64(2.5)));
     }
 
-    /// Same defect class, single-typed: a `Point` has no columnar shape, so
-    /// the frame column falls back to `String` and the value replays as WKT
-    /// text.
+    /// Same defect class, single-typed: a `Point` has no exact frame column,
+    /// so it must ride the per-value path — carried in the frame it would fall
+    /// back to `String` and replay as WKT text.
     #[test]
     fn point_property_survives_replay_as_a_point() {
         let mut g = DirGraph::new();

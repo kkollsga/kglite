@@ -16,12 +16,8 @@
 //! 1. **Cross-surface consistency** (`all_public_reads_agree_*`). Whatever a
 //!    read resolves to, *every* surface must resolve to the same thing. It is
 //!    independent of who owns the store, and it is the real gate.
-//! 2. **Which replica wins** (`*_today_*`). Pinned as an exact fact; a failure
-//!    means an unintended ownership change. The names date from when a
-//!    re-point sweep pushed master writes back onto the nodes at end-of-clause,
-//!    making master-authority a permanently red assertion — so each pin
-//!    recorded the answer of the day, and removing the handle inverted them in
-//!    place.
+//! 2. **Which replica wins.** Pinned as an exact fact; a failure means an
+//!    unintended ownership change.
 //!
 //! # The mutation-proof gate
 //!
@@ -70,7 +66,9 @@ fn read_one(graph: &DirGraph, query: &str) -> Value {
         .unwrap_or(Value::Null)
 }
 
-/// `n` `Item` nodes with two ordinary properties each — **not** yet columnar.
+/// `n` `Item` nodes with two ordinary properties each, unconsolidated.
+/// Construction is columnar on every backend, so the rows already live in a
+/// store; what has not run yet is `enable_columnar`'s consolidation pass.
 fn sized_rows(n: i64) -> DirGraph {
     let mut g = DirGraph::new();
     let rows: Vec<Vec<Value>> = (1..=n)
@@ -105,7 +103,7 @@ fn sized_rows(n: i64) -> DirGraph {
     g
 }
 
-/// A row-storage fixture, for tests that drive `enable_columnar` themselves.
+/// Unconsolidated, for tests that drive `enable_columnar` themselves.
 fn docs_fixture() -> DirGraph {
     sized_rows(N)
 }
@@ -260,7 +258,7 @@ fn all_read_surfaces(
     ]
 }
 
-// ── 1. Cross-surface consistency — phase-independent ───────────────────────
+// ── 1. Cross-surface consistency ───────────────────────────────────────────
 
 /// Without divergence, every surface must see the stored value. Without this
 /// arm the consistency test below would pass on a build where every surface
@@ -276,10 +274,11 @@ fn all_public_reads_agree_without_divergence() {
     }
 }
 
-/// **The gate.** Under master/node divergence every public read surface must
-/// still agree with every other one. Which replica wins is pinned separately;
-/// what must never happen is two surfaces answering differently, because that
-/// is a user-visible inconsistency no matter which side is authoritative.
+/// **The gate.** After a write straight into the backend's store
+/// (`diverge_master`), every public read surface must still agree with every
+/// other one. Which replica wins is pinned separately; what must never happen
+/// is two surfaces answering differently, because that is a user-visible
+/// inconsistency no matter which side is authoritative.
 #[test]
 fn all_public_reads_agree_under_master_node_divergence() {
     let mut graph = seeded_columnar();
@@ -323,7 +322,7 @@ fn the_backend_store_is_the_only_read_route() {
     );
 }
 
-// ── 3. Writes reconverge the two replicas ──────────────────────────────────
+// ── 3. Writes leave the master uniquely owned ──────────────────────────────
 
 /// No node handles are left to re-point: the write goes into the store the
 /// backend owns, the journal releases its pre-image at commit, and every
@@ -460,7 +459,7 @@ fn save_and_reload_round_trips_the_observed_value() {
     );
 }
 
-// ── 4. Defect 2 — `maybe_spill_columns` reclaims nothing ───────────────────
+// ── 4. `maybe_spill_columns` must reclaim the heap it materialises ─────────
 
 /// `maybe_spill_columns` calls `Arc::make_mut` on the type's store and then
 /// `materialize_to_files`. While every node still held a strong handle,
@@ -514,7 +513,7 @@ fn spill_reclaims_the_heap_it_materialises() {
     );
 }
 
-// ── 5. Defect 1 — columnar enumeration completeness ────────────────────────
+// ── 5. Columnar enumeration completeness ───────────────────────────────────
 
 /// `describe()`'s per-type property block and node samples read through the
 /// accessors, not `NodeData::property_iter`, which enumerated **nothing** for
@@ -1237,11 +1236,7 @@ fn a_forked_columnar_replace_drops_the_properties_it_omits() {
 // resolve" and "who holds it after a write" are exactly the backend's business.
 
 /// `n` `Item` nodes on `mode`, consolidated — the mapped/disk counterpart of
-/// [`sized_columnar`].
-///
-/// The preconditions are asserted rather than assumed: a fixture that silently
-/// landed on the wrong backend, or that carried no column store, would make
-/// every arm below pass without testing anything.
+/// [`sized_columnar`]. Its two preconditions are asserted, not assumed.
 fn sized_columnar_in_mode(
     n: i64,
     mode: crate::graph::storage::mode::StorageMode,
@@ -1421,7 +1416,7 @@ fn the_backend_store_is_the_only_read_route_on_disk() {
     );
 }
 
-// ── 4b. P4 — the spill pass converges, and still fires when it must ────────
+// ── 4b. The spill pass converges, and still fires when it must ─────────────
 
 /// The spill trigger must reach a fixed point.
 ///

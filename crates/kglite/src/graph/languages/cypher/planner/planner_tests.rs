@@ -463,9 +463,8 @@ fn test_comparison_range_merge() {
 
 #[test]
 fn test_correlated_nodeprop_pushdown() {
-    // The classic shape from sodir-prospect build:
-    //   MATCH (a:A) MATCH (b:B) WHERE b.x = a.y
-    // should push { x: EqualsNodeProp { var: "a", prop: "y" } } onto B.
+    // The classic shape from the sodir-prospect build: a correlated equality
+    // across two separate MATCH clauses.
     let mut query =
         parse_cypher("MATCH (a:A) MATCH (b:B) WHERE b.x = a.y RETURN a.id, b.id").unwrap();
 
@@ -537,8 +536,6 @@ fn test_correlated_nodeprop_reversed_sides() {
 
 #[test]
 fn test_scalar_var_pushdown_from_unwind() {
-    // WHERE s.title = fname where fname comes from UNWIND should become
-    // an EqualsVar matcher on the pattern.
     let mut query =
         parse_cypher("UNWIND ['x','y'] AS fname MATCH (s:Strat) WHERE s.title = fname RETURN s.id")
             .unwrap();
@@ -716,7 +713,6 @@ fn test_label_cardinality_includes_secondary_carriers() {
 
 #[test]
 fn test_undirected_pattern_no_reverse_when_first_is_anchor() {
-    // Reverse case: anchor is already first — no reversal expected.
     let mut query =
         parse_cypher("MATCH (p {title: 'X'})-[r]-(other) RETURN type(r), count(other)").unwrap();
 
@@ -911,10 +907,9 @@ fn test_multi_match_no_reverse_when_bound_var_first() {
 
 #[test]
 fn test_multi_match_reorder_prefers_anchored_pattern() {
-    // When a single MATCH has two patterns sharing a pre-bound variable,
-    // the more selective pattern should run first. The planner already
-    // does intra-clause reordering — this test pins the cross-clause
-    // bound-vars logic so it doesn't regress.
+    // A second MATCH whose two patterns share the pre-bound `p`. The
+    // assertion is deliberately weak: it pins only that the cross-clause
+    // bound-vars logic leaves both patterns intact, not which one runs first.
     let mut query = parse_cypher(
         "MATCH (p {id: 1}) \
          MATCH (p)-[:R1]->(:T1), (p)-[:R2]->({id: 99}) \
@@ -926,7 +921,6 @@ fn test_multi_match_reorder_prefers_anchored_pattern() {
     let params = HashMap::new();
     optimize(&mut query, &graph, &params);
 
-    // Just ensure optimization doesn't crash and patterns survive.
     let m2 = query
         .clauses
         .iter()
@@ -1123,7 +1117,6 @@ fn test_reorder_match_clauses_skips_when_cache_missing() {
     let params = HashMap::new();
     optimize(&mut query, &graph, &params);
 
-    // Original textual order preserved: VERY_COMMON first.
     let matches: Vec<_> = query
         .clauses
         .iter()
@@ -1360,7 +1353,6 @@ fn test_global_two_hop_count_with_repeated_variable_is_not_fused() {
 
 #[test]
 fn test_fuse_match_with_aggregate_count_distinct() {
-    // Single-MATCH + WITH with count(DISTINCT v) — pipeline form.
     let mut query = parse_cypher(
         "MATCH (a:Person)-[:KNOWS]->(b:Person) \
          WITH a, count(DISTINCT b) AS friends \
@@ -1450,8 +1442,8 @@ fn test_count_distinct_5_element_pattern_not_fused() {
 #[test]
 fn test_fold_pass_through_with_between_matches() {
     // The cohort-top-K shape: `Match WITH p Match Return ...`. The
-    // pass-through WITH should be stripped so downstream Match-Match
-    // fusion can fire.
+    // pass-through WITH should be stripped so the multi-MATCH desugar sees
+    // the shape — which it then leaves on the eager path (see below).
     let mut query = parse_cypher(
         "MATCH (p)-[:T1]->({id: 1}) \
          WITH p \
@@ -1500,10 +1492,8 @@ fn test_fold_pass_through_with_keeps_useful_with() {
     let params = HashMap::new();
     optimize(&mut query, &graph, &params);
 
-    // The pass-through WITH `WITH p, r` covers exactly what RETURN
-    // references, so it CAN be safely folded in this case. To ensure
-    // the converse test, use a different shape where the WITH
-    // *renames* a variable.
+    // `WITH p, r` covers exactly what RETURN references, so it folds; the
+    // converse needs a WITH that *renames* a variable.
     let mut renaming =
         parse_cypher("MATCH (p)-[r]->(q) WITH p AS person RETURN person LIMIT 10").unwrap();
     optimize(&mut renaming, &graph, &params);
@@ -1540,9 +1530,9 @@ fn test_fold_pass_through_with_skipped_when_orderby_follows() {
 
 #[test]
 fn test_desugar_multi_match_return_aggregate() {
-    // The Variant-B shape (Match-Match-Return-aggregate, no WITH).
-    // Should be rewritten into Match-Match-With(group, agg)-Return so
-    // the existing aggregate fusion fires.
+    // Match-Match-Return-aggregate with no WITH: rewritten into
+    // Match-Match-With(group, agg)-Return so the aggregate passes see a
+    // shape they can reason about — here they decline it (see below).
     let mut query = parse_cypher(
         "MATCH (p)-[:T1]->({id: 1}) \
          MATCH (p)-[r]->() \
@@ -2008,7 +1998,7 @@ fn test_text_score_unknown_parameter_still_errors() {
 }
 
 // ============================================================================
-// NDV selectivity on identity fields (Track H2)
+// NDV selectivity on identity fields
 // ============================================================================
 //
 // `property_ndv` feeds `estimate_node_selectivity`'s `type_count / ndv`

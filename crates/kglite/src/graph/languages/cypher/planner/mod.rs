@@ -68,9 +68,8 @@ type PassFn = fn(&mut CypherQuery, &PassCtx);
 /// subquery's per-row cardinality is unknown at plan time and a
 /// correlated body depends on its seeded input — so NO pass may move a
 /// clause across it, fuse a window through it, or push a LIMIT/predicate
-/// into or past it. Correctness beats optimization: a pass that can't
-/// confidently reason about a CallSubquery bails on any query containing
-/// one. Every pass is safe today; only two are not safe purely by shape:
+/// into or past it. Every pass is safe today; only two are not safe
+/// purely by shape:
 ///
 /// - `optimize_nested_queries` — **recurses by design.** Owns body
 ///   optimization; import-aware (disables seed-ignoring fusion for
@@ -279,7 +278,7 @@ pub fn optimize_with_disabled(
 /// **Pass:** `lower_fixed_var_length_hops` — **Precondition:** a
 /// `MATCH` / `OPTIONAL MATCH` with no path assignment. **Pattern
 /// matched:** a relationship element whose `var_length` is `(k, k)`,
-/// `1 <= k <= 8`. **Rewrite:** `k` copies of that element with
+/// `k >= 1`. **Rewrite:** `k` copies of that element with
 /// `var_length` cleared, separated by anonymous unlabelled nodes; type
 /// alternations, inline relationship properties and direction are
 /// replicated onto every copy, which is what variable-length semantics
@@ -287,8 +286,9 @@ pub fn optimize_with_disabled(
 /// pass below — relationship pushdown, start-node selection, the fusion
 /// family, `mark_disjoint_fixed_trails`, `mark_skip_target_type_check` —
 /// declines a variable-length element, so the star spelling of a
-/// fixed-length question paid for none of them (measured 20x on an
-/// unanchored two-hop count).
+/// fixed-length question paid for none of them (measured 3.4x to 17x
+/// inside the one-or-two-hop window; the table is in
+/// `var_length_lowering`).
 ///
 /// **Why-bail:** `min != max`; `k == 0` (the zero-length identity is not
 /// a hop); `k` or the pattern's post-lowering hop count above the
@@ -325,8 +325,7 @@ fn pass_lower_fixed_var_length_hops(query: &mut CypherQuery, _ctx: &PassCtx) {
 ///   operators are correct.
 /// - **Correlated body whose patterns anchor on an imported variable**
 ///   (`!import_pattern_anchors(body, import).is_empty()`): the
-///   seed-ignoring fusion passes are disabled for that body. Those
-///   passes ((fuse_anchored_edge_count, fuse_*_aggregate, fuse_node_scan_*)
+///   [`seed_ignoring_fusion_passes`] are disabled for that body — they
 ///   emit plan-time-anchored operators that ignore the per-row seed and
 ///   would return the GLOBAL count for every outer row. Disabling them
 ///   leaves a plain `Match`/`Return` that honours the seeded binding via
@@ -531,8 +530,11 @@ fn pass_desugar_multi_match_return_aggregate(query: &mut CypherQuery, _ctx: &Pas
 }
 
 /// **Pass:** `fuse_spatial_join` — Specialize `MATCH ... WHERE
-/// contains(geom_a, geom_b)` into a spatial-join iterator that uses
-/// the spatial index instead of a cartesian product + per-pair filter.
+/// contains(geom_a, geom_b)` into a spatial-join iterator that probes a
+/// per-query R-tree over the container type instead of running a
+/// cartesian product + per-pair filter. WHY-BAIL: a graph with secondary
+/// labels — the R-tree is built from primary `type_indices` only, so it
+/// would miss secondary-labelled nodes.
 fn pass_fuse_spatial_join(query: &mut CypherQuery, ctx: &PassCtx) {
     fuse_spatial_join(query, ctx.graph)
 }
@@ -606,9 +608,14 @@ fn pass_fuse_anchored_edge_count(query: &mut CypherQuery, ctx: &PassCtx) {
     fuse_anchored_edge_count(query, ctx.graph)
 }
 
-/// **Pass:** `fuse_count_short_circuits` — Merge `RETURN count(DISTINCT *)`
-/// with the preceding COUNT/GROUP BY when both can be evaluated in the
-/// same pass.
+/// **Pass:** `fuse_count_short_circuits` — Answer a `MATCH` + `RETURN`
+/// count query from type-bucket / CSR metadata instead of expanding the
+/// pattern: `MATCH (n[:Type])` or `MATCH ()-[r[:T]]->()` with
+/// `count(*)`/`count(var)`, optionally paired with a `type(r)`/`labels(n)`
+/// group key. WHY-BAIL: `DISTINCT`, `HAVING`, a path assignment, more than
+/// one pattern, an inline property filter or a repeated variable, a
+/// multi-label `(n:A:B)` (needs an intersection the O(1) bucket count
+/// cannot express), and undirected or `[:A|B]` edges.
 fn pass_fuse_count_short_circuits(query: &mut CypherQuery, ctx: &PassCtx) {
     fuse_count_short_circuits(query, ctx.graph.has_secondary_labels, ctx.graph)
 }

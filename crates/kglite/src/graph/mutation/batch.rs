@@ -42,11 +42,9 @@ pub enum NodeAction {
     Update {
         node_idx: NodeIndex,
         title: Option<Value>, // None leaves the existing title untouched
-        /// Pre-interned, exactly like `CreateInterned`: the ingest row builder
-        /// already has the keys interned, and resolving them back to `String`
-        /// here only to re-intern them in `apply_updates` cost a `String`
-        /// allocation, a `SipHash` map insert and an interner probe per
-        /// property per updated row.
+        /// Pre-interned like `CreateInterned`: resolving these back to `String`
+        /// only to re-intern them in `apply_updates` cost an allocation, a
+        /// `SipHash` map insert and an interner probe per property per row.
         properties: Vec<(InternedKey, Value)>,
         conflict_mode: ConflictHandling,
     },
@@ -186,16 +184,14 @@ impl BatchProcessor {
     fn flush_chunk(&mut self, graph: &mut DirGraph) -> Result<BatchStats, String> {
         let start = Instant::now();
         let mut stats = BatchStats::default();
-        // Two passes, on every backend, to avoid O(n²) Arc cloning:
-        // Pass 1: take each affected type's store out of the graph and push all
-        //         rows into it while it is uniquely owned.
-        // Pass 2: wrap the stores back in Arc, install them, and point every
-        //         created node at its row.
-        //
-        // This avoids Arc::make_mut cloning the entire store per row. The pair
-        // used to run for mapped/disk only, with memory building row-shaped
-        // nodes instead; construction is columnar in every mode now
-        // (see `dir_graph::node_write`), so there is one path.
+        // Two passes on every backend, to keep a bulk append linear: pass 1
+        // owns each affected type's store outright while rows are pushed into
+        // it ([`Self::detach_columnar_stores`]), pass 2 installs the stores
+        // again and points every created node at its row
+        // ([`Self::reattach_columnar_stores`]). The pair used to run for
+        // mapped/disk only, with memory building row-shaped nodes instead;
+        // construction is columnar in every mode now (see
+        // `dir_graph::node_write`), so there is one path.
         let mut deferred_columnar: DeferredColumnarRows = Vec::new();
         let mut owned_stores: OwnedColumnStores =
             Self::detach_columnar_stores(&self.creates_interned, graph);
@@ -315,18 +311,17 @@ impl BatchProcessor {
     /// removed the refcount is 1, `try_unwrap` succeeds, and the append mutates
     /// in place. [`Self::reattach_columnar_stores`] installs the stores again.
     ///
-    /// The master store's *contents* are not covered by cell entries — this
-    /// funnel emits none, because it swaps stores wholesale rather than writing
-    /// cells, and `column_stores` lives on the storage backend, which
-    /// `rollback::swap_data_scale` parks so the schema shell cannot restore it.
-    /// What it does journal, when a checkpoint happens to be open, is the
-    /// append pre-image per affected type: the swap only ever *appends* rows to
-    /// the store it took out, so truncating back to the captured length undoes
-    /// the whole chunk. No Cypher statement reaches this funnel today (the
-    /// executor creates nodes through `DirGraph::insert_node_routed`), so the
-    /// capture is defensive rather than load-bearing — but it is what makes a
-    /// future `CALL` procedure that does route bulk ingest through here
-    /// reversible instead of silently surviving a rollback.
+    /// The store's *contents* are not covered by cell entries: this funnel
+    /// swaps stores wholesale rather than writing cells, and `column_stores`
+    /// lives on the storage backend, which `rollback::swap_data_scale` parks so
+    /// the schema shell cannot restore it. What it journals instead, when a
+    /// checkpoint is open, is the append pre-image per affected type — the swap
+    /// only ever *appends* rows to the store it took out, so truncating back to
+    /// the captured length undoes the whole chunk. Defensive today: no Cypher
+    /// statement reaches this funnel (the executor creates nodes through
+    /// `DirGraph::insert_node_routed`), but it is what would make a bulk-ingest
+    /// `CALL` routed through here reversible instead of silently surviving a
+    /// rollback.
     fn detach_columnar_stores(
         creates: &[NodeCreationInterned],
         graph: &mut DirGraph,
@@ -414,18 +409,15 @@ impl BatchProcessor {
         // backend's own map, which is what disk reads resolve through.
     }
 
-    /// Apply this chunk's pending updates. Split from [`Self::flush_chunk`]
-    /// because the update half shares nothing with the create half but the
-    /// stats counter: it resolves each target's storage representation and
-    /// dispatches to the matching writer.
+    /// Apply this chunk's pending updates: resolve each target's storage
+    /// representation and dispatch to the matching writer.
     fn apply_updates(&mut self, graph: &mut DirGraph, stats: &mut BatchStats) {
         // Disk writes reach the backend's `ColumnStore` directly, memory and
         // mapped go through the node — O(types) `Arc::make_mut` clones per
         // chunk rather than O(rows). Why the split: [`Self::apply_row_update`].
         let is_disk = GraphRead::is_disk(&graph.graph);
         let mut disk_updates_applied = false;
-        // Promotion: a real node-row upsert clears the `_provisional`
-        // stub marker. Interned once — only the Update/Sum arms use it.
+        // Interned once outside the loop; only the Update/Sum arms use it.
         let provisional_key = graph.interner.get_or_intern(PROVISIONAL_KEY);
 
         for update in self.updates.drain(..) {
@@ -622,10 +614,9 @@ impl BatchProcessor {
         // Honour the memory limit once the whole batch has landed — not per
         // chunk, which would re-spill a store the next chunk is about to append
         // to. This is what makes an in-process mapped graph actually mapped:
-        // `StorageMode::Mapped` is `memory_limit = Some(0)`, and until the
-        // limit was enforced somewhere on the ingest path, a mapped graph built
-        // by `add_nodes` stayed wholly on the heap until its first write
-        // (measured during the shape-convergence programme's Phase 4). A no-op
+        // `StorageMode::Mapped` is `memory_limit = Some(0)`, and with the limit
+        // enforced nowhere on the ingest path a mapped graph built by
+        // `add_nodes` stayed wholly on the heap until its first write. A no-op
         // when no limit is set, which is the default-mode path.
         graph.maybe_spill_columns();
 
@@ -732,9 +723,11 @@ impl ConnectionBatchProcessor {
             }
         }
 
-        // Only keys that actually carry a value are registered — a caller that
-        // skipped its null cells (every one of them does) must not see an
-        // all-null column materialize in the connection type's property list.
+        // Registration follows the row, so a caller that skips its null cells
+        // never sees an all-null column materialize in the connection type's
+        // property list. A key that does arrive Null still registers, but
+        // contributes no type — it stays "Unknown" until a concrete value
+        // shows up (see [`Self::schema_property_types`]).
         for (key, value) in &properties {
             self.schema_properties.insert(*key);
             let type_name = value.type_name();
@@ -769,20 +762,17 @@ impl ConnectionBatchProcessor {
 
         let conn_type_key = graph.interner.get_or_intern(connection_type);
 
-        // A1 fix: build a per-flush (source, target) -> edge_id map once,
-        // restricted to the chunk's unique source set and this connection
-        // type. Replaces the per-edge `edges_connecting().find()` walk —
-        // for hub-source fan-out into an *existing* connection type, the
-        // old code was O(N * max_degree); this is O(sum_of_unique_source_degrees).
+        // Per-flush (source, target) -> edge_id map over the chunk's unique
+        // source set and this connection type. The per-edge
+        // `edges_connecting().find()` walk it replaces was O(N * max_degree)
+        // for hub-source fan-out into an *existing* connection type; this is
+        // O(sum_of_unique_source_degrees). Mutated as we go, preserving that
+        // code's within-chunk dedup semantics: two chunk entries with the same
+        // (src, tgt) consolidate onto one edge.
         //
-        // The map is mutated as we go, preserving the within-chunk dedup
-        // semantics of the original `edges_connecting`-per-iteration code: two
-        // chunk entries with the same (src, tgt) consolidate onto one edge.
-        //
-        // `skip_existence_check` (initial-load fast path) skips both the
-        // build and the per-edge lookup entirely — there are no existing
-        // edges of this type, and within-chunk consolidation is the
-        // responsibility of the caller in that mode.
+        // `skip_existence_check` (initial-load fast path) skips both the build
+        // and the per-edge lookup — there are no existing edges of this type,
+        // and within-chunk consolidation is the caller's job in that mode.
         let mut existing_lookup: HashMap<(NodeIndex, NodeIndex), EdgeIndex> = HashMap::new();
         if !self.skip_existence_check {
             let unique_sources: HashSet<NodeIndex> =
@@ -808,7 +798,7 @@ impl ConnectionBatchProcessor {
             if let Some(edge_idx) = existing_edge {
                 match self.conflict_mode {
                     ConflictHandling::Skip => {
-                        // Skip this edge (should already be filtered in add_connection)
+                        // Defensive: `add_connection` already filtered these.
                         continue;
                     }
                     ConflictHandling::Replace => {
@@ -889,9 +879,8 @@ impl ConnectionBatchProcessor {
                     edge_data,
                 );
                 // Within-chunk dedup: later iterations targeting the same
-                // (src, tgt) now resolve to this edge via Update/Preserve/Sum.
-                // No-op when skip_existence_check is true (the lookup is
-                // unused and kept empty for that path).
+                // (src, tgt) resolve to this edge via Update/Preserve/Sum.
+                // Skipped for the initial-load path, whose lookup stays empty.
                 if !self.skip_existence_check {
                     existing_lookup.insert((conn.source_idx, conn.target_idx), new_id);
                 }
@@ -1028,9 +1017,10 @@ mod tests {
 /// *recorded* `node_weight_mut` that was `O(n²/chunk)` `RawOp::UpsertNode`s
 /// for an `n`-row append, each resolving to a full property-map clone.
 ///
-/// This is deliberately a **byte-count** assertion, not a timing one: it needs
-/// no idle machine, has no `min`-vs-`mean` ambiguity, and fails deterministically
-/// on any reintroduction of a recorded borrow in either sweep.
+/// These are deliberately **counting** assertions (WAL ops, then WAL bytes),
+/// not timing ones: they need no idle machine, have no `min`-vs-`mean`
+/// ambiguity, and fail deterministically on any reintroduction of a recorded
+/// borrow in either sweep.
 #[cfg(test)]
 mod wal_amplification_tests {
     use crate::datatypes::{DataFrame, Value};
@@ -1090,7 +1080,7 @@ mod wal_amplification_tests {
         (op_count, encoded.len())
     }
 
-    /// One op per row, at every size — the crisp form of the invariant.
+    /// One op per row, at every size.
     ///
     /// `n` spans four `LARGE_BATCH_CHUNK_SIZE` chunks, so the amplifying
     /// shape (chunk `k` re-touching the `k * 1000` rows already present) is

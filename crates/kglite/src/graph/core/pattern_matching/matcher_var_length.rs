@@ -10,9 +10,6 @@
 //! - [`PatternExecutor::expand_var_length_fast`] — a BFS over *distances*
 //!   with one global visited set. That is a different relation, and it only
 //!   coincides with the trail one under the conditions documented on it.
-//!
-//! Split out of `matcher.rs` (at its file-size ceiling); these are inherent
-//! methods on `PatternExecutor`, so the split is a file boundary only.
 
 use super::*;
 use crate::graph::core::iterators::GraphEdgeRef;
@@ -154,14 +151,12 @@ enum SourceRole {
     Absent,
     /// `min_hops == 0`: the zero-length row, and nothing else.
     ZeroHop(MatchBinding),
-    /// Directed `min_hops == 1`: leaving the source unvisited lets the
-    /// ordinary BFS rediscover it at its shortest closed walk, which in a
-    /// directed graph is a simple cycle and therefore a trail.
+    /// Directed `min_hops == 1`: leaving the source unvisited lets the ordinary
+    /// BFS rediscover it — why that is sound is on
+    /// [`PatternExecutor::var_length_source_role`].
     Rediscover,
     /// Undirected `min_hops == 1`: only [`PatternExecutor::source_closed_trail`]
-    /// can answer, and it costs up to [`CLOSED_TRAIL_PROBE_BUDGET`] edge
-    /// examinations — so it runs last, and only when the rows already found
-    /// have not satisfied the caller's cap.
+    /// can answer, at up to [`CLOSED_TRAIL_PROBE_BUDGET`] edge examinations.
     Probe,
 }
 
@@ -437,7 +432,7 @@ impl<'a> PatternExecutor<'a> {
     /// - For `min_hops <= 1` every node at distance `1..=max_hops` is
     ///   trail-reachable (a shortest path is a trail) and every
     ///   trail-reachable node is within that distance — *except the source
-    ///   itself*, handled by [`Self::var_length_source_results`].
+    ///   itself*, handled by [`Self::var_length_source_role`].
     /// - For `min_hops >= 2` there is no set-based computation to make:
     ///   `(a)-[:R*2..2]-(b)` on a triangle is trail-reachable from `a` to both
     ///   peers and distance-reachable to neither. Those stay on the per-path
@@ -488,9 +483,6 @@ impl<'a> PatternExecutor<'a> {
             return Ok(Some(results));
         }
 
-        // Global visited set — each node is explored at most once. Reusing the
-        // caller's `VisitedStamps` is what keeps the cost proportional to the
-        // marks this row writes rather than to the graph's node count.
         visited.begin(self.graph.graph.node_bound(), max_results.is_some());
         if !leave_source_unvisited {
             visited.visit(source.index());
@@ -585,10 +577,9 @@ impl<'a> PatternExecutor<'a> {
             }
         }
 
-        // Deferred: the undirected closed-trail probe. Reached only when the
-        // BFS did not already satisfy the caller's cap, so an existence check
-        // with a witness never pays for it. `insert(0, …)` keeps the source
-        // row where the eager version put it — first.
+        // The undirected closed-trail probe, reached only when the BFS did not
+        // already satisfy the caller's cap — an existence check with a witness
+        // never pays for it. `insert(0, …)` keeps the source row first.
         if probe_pending {
             match self.source_closed_trail(source, edge_pattern, max_hops, &conn, directions)? {
                 ClosedTrail::Found(hops) => {
@@ -622,7 +613,6 @@ impl<'a> PatternExecutor<'a> {
             min_hops,
             max_hops,
         } = *segment;
-        // Fast path: when path info isn't needed, use global-dedup BFS.
         // `min_hops <= 1` is a *correctness* condition, not a heuristic — see
         // `expand_var_length_fast`. The planner's `mark_fast_var_length_paths`
         // gate applies the same rule; this is the executor-side backstop for
@@ -640,9 +630,8 @@ impl<'a> PatternExecutor<'a> {
         let directions = segment_directions(edge_pattern);
         let conn = ConnFilter::new(edge_pattern);
 
-        // BFS state: (current_node, depth, exact trail).  Edge identity is
-        // required both for parallel-edge cardinality and for the Cypher rule
-        // that a relationship occurs at most once in a path.
+        // The queued trail carries edge identity, not just nodes: parallel-edge
+        // cardinality and the relationship-uniqueness rule below both need it.
         type PathInfo = Vec<PathHop>;
         let mut queue: VecDeque<(NodeIndex, usize, PathInfo)> = VecDeque::new();
 

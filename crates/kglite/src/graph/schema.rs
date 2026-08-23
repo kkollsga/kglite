@@ -45,7 +45,8 @@ use std::sync::Arc;
 pub const PROVISIONAL_KEY: &str = "_provisional";
 
 /// Shared schema for all nodes of one type — maps property keys to dense slot indices.
-/// All nodes of the same type share an `Arc<TypeSchema>`, keeping per-node overhead to 8 bytes.
+/// Held once per type by that type's `ColumnStore`; a node carries only its row
+/// index (see `ColumnarRow`), never a schema handle of its own.
 #[derive(Debug, Clone)]
 pub struct TypeSchema {
     /// slot_index → interned key (for iteration / serialization)
@@ -563,7 +564,7 @@ pub struct SelectionLevel {
 }
 
 impl SelectionLevel {
-    // Keep the established constructor-only selection API stable in this hardening pass.
+    // `new()` is the whole constructor surface; `Default` would add unused public API.
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         SelectionLevel {
@@ -598,7 +599,6 @@ impl SelectionLevel {
             .flat_map(|children| children.iter().copied())
     }
 
-    /// Non-allocating node count.
     pub fn node_count(&self) -> usize {
         self.selections.values().map(|v| v.len()).sum()
     }
@@ -848,12 +848,14 @@ pub struct CompositeValue(pub Vec<Value>);
 /// format it writes, distinct from the engine SemVer.
 pub const KGL_FORMAT_VERSION: u32 = 2;
 
-/// Metadata stamped into saved files for version tracking and portability warnings.
+/// Version info stamped into saved files, reported through `graph_info()`.
+/// Nothing gates a load on it — the loader enforces format through the `.kgl`
+/// container magic (`io/magic.rs`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SaveMetadata {
-    /// Format version — incremented when DirGraph layout changes.
-    /// 0 = files saved before this field existed (via serde default).
-    /// 1 = first versioned format.
+    /// [`KGL_FORMAT_VERSION`] on a fresh save; `0` for a file written before
+    /// this field existed (via serde default). Not itself persisted — a
+    /// portable load stamps its own constant (`io/file.rs`).
     pub format_version: u32,
     /// Library version at save time, e.g. "0.4.7".
     pub library_version: String,
@@ -1314,7 +1316,7 @@ impl EmbeddingStore {
     }
 
     #[inline]
-    // Adding a public companion method would change the curated Rust API in a cleanup phase.
+    // An `is_empty()` companion would add public API the curated surface does not want.
     #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.slot_to_node.len()
@@ -1468,7 +1470,6 @@ impl Serialize for EdgeData {
     }
 }
 
-// connection_type arrives as a string on disk, properties as a map.
 impl<'de> Deserialize<'de> for EdgeData {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
@@ -1574,7 +1575,6 @@ impl EdgeData {
         self.properties.len()
     }
 
-    /// Clone all properties into a new HashMap<String, Value> (for export/interop).
     #[inline]
     pub fn properties_cloned(&self, interner: &StringInterner) -> HashMap<String, Value> {
         self.properties
@@ -1583,10 +1583,6 @@ impl EdgeData {
             .collect()
     }
 }
-
-// ============================================================================
-// Schema Definition & Validation Types
-// ============================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NodeSchemaDefinition {

@@ -36,9 +36,9 @@
 //! `edge_references` as base⊕overlay chains behind their GAT iterator types.
 //!
 //! **Because no edit reaches base adjacency, the overlay needs no adjacency
-//! chaining at all** — every edge and traversal method delegates straight to
-//! the base, only `node_indices` gains a variant, and the read path is
-//! unchanged apart from a node-weight probe.
+//! chaining at all** — traversal and edge iteration delegate straight to the
+//! base, only `node_indices` gains a variant, and the read path is unchanged
+//! apart from the node- and edge-weight probes.
 //!
 //! `materialise` is exactly today's cost — a base deep clone plus the overlay
 //! replayed — so a topology write while a reader is held is no worse than
@@ -82,8 +82,9 @@ use crate::graph::storage::{GraphRead, GraphWrite, MemoryGraph};
 pub struct ForkedGraph {
     /// The reader's graph. **Never mutated while this exists** — that is the
     /// one unforgivable failure mode in this design, because a reader observing
-    /// a writer's edit is silent and unrecoverable. `pin_base_generation` is
-    /// the golden-snapshot guard for it.
+    /// a writer's edit is silent and unrecoverable. The over-specified
+    /// fingerprint in `dir_graph::rollback_tests::held_reader` is the
+    /// golden-snapshot guard for it.
     base: Arc<MemoryGraph>,
     /// Node weights that diverge from the base: copies taken on first write,
     /// plus every node appended since the fork. Keyed by raw node index.
@@ -223,9 +224,8 @@ impl ForkedGraph {
         if Arc::get_mut(&mut self.base).is_none() {
             return Err(self);
         }
-        // Sole owner: take the base out and fold into it in place. No node or
-        // edge is copied — this is the payoff, and it is why compaction is
-        // O(changes) rather than O(V+E).
+        // Sole owner: take the base out and fold into it in place — no node or
+        // edge is copied, which is what makes compaction O(changes), not O(V+E).
         let mut owned = Arc::try_unwrap(std::mem::replace(
             &mut self.base,
             Arc::new(MemoryGraph::new()),
@@ -247,8 +247,8 @@ impl ForkedGraph {
     }
 
     /// A standalone graph equal to what this overlay reads as, without
-    /// disturbing it. For `Serialize` and for the petgraph-typed algorithm
-    /// path, both of which need one concrete `StableDiGraph`.
+    /// disturbing it. For the `Serialize` arm in `backend.rs`, which needs one
+    /// concrete `StableDiGraph`.
     pub(crate) fn to_memory_graph(&self) -> MemoryGraph {
         let mut clone = ForkedGraph {
             base: Arc::clone(&self.base),
@@ -415,7 +415,7 @@ impl std::fmt::Debug for ForkedGraph {
     }
 }
 
-// Node state is overlay-then-base; everything edge-shaped is the base's.
+// Node and edge weights are overlay-then-base; adjacency is all the base's.
 impl GraphRead for ForkedGraph {
     type NodeIndicesIter<'a> = GraphNodeIndices<'a>;
     type EdgeIndicesIter<'a> = <MemoryGraph as GraphRead>::EdgeIndicesIter<'a>;
@@ -484,8 +484,11 @@ impl GraphRead for ForkedGraph {
         self.node_view(idx)?.str_prop_eq(key, target)
     }
 
-    // Pure base delegation from here down: nothing this backend writes reaches
-    // base adjacency (module doc), so the base's answer is the whole answer.
+    // Adjacency delegation from here down: nothing this backend writes reaches
+    // base adjacency (module doc), so for structure the base's answer is the
+    // whole answer. Not so for edge *weights* — the iterating reads below hand
+    // out the base's `EdgeData` refs, while `edge_weight` probes the overlay
+    // first, so a weight `cow_edge` copied is seen through the latter only.
 
     #[inline]
     fn edges_directed_filtered(

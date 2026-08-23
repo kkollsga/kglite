@@ -208,14 +208,11 @@ impl ConnTypeFilter {
 }
 
 /// Inline edge filter — evaluated during expansion to skip edges the
-/// downstream `WHERE` would have discarded. Wraps the [`RelEdgePredicate`]
-/// with the anchor side, which determines how `startNode(r)` / `endNode(r)`
-/// map onto the matcher's `direction` parameter.
+/// downstream `WHERE` would have discarded.
 #[derive(Debug, Clone)]
 pub struct RelEdgeFilter {
     pub predicate: RelEdgePredicate,
-    /// Which endpoint the matcher expands from; see [`AnchorSide`]. Set by
-    /// the planner when it compiles `startNode(r)` / `endNode(r)` references.
+    /// Which endpoint the matcher expands from; see [`AnchorSide`].
     pub anchor: AnchorSide,
 }
 
@@ -243,11 +240,10 @@ pub enum AnchorSide {
     Target,
 }
 
-/// Compiled per-edge predicate used by [`RelEdgeFilter`]. Evaluated in
-/// the matcher hot loop with `(edge_data, direction)` and an optional
-/// pre-resolved peer node. Anything outside this enum the planner is
-/// able to compile leaves the WHERE clause untouched and falls
-/// through to the materialized predicate evaluator.
+/// Compiled per-edge predicate used by [`RelEdgeFilter`], evaluated in the
+/// matcher hot loop by [`RelEdgePredicate::eval`]. A predicate the planner
+/// cannot compile into this enum stays in the `WHERE` clause and is
+/// evaluated by the materialized predicate evaluator instead.
 ///
 /// `StartNodeIs` / `EndNodeIs` (with a bound `NodeIndex`) are
 /// reserved for a future pushdown that sees `startNode(r) = $param`
@@ -495,8 +491,8 @@ pub enum PropertyMatcher {
 }
 
 /// A single pattern match with variable bindings.
-/// Uses Vec instead of HashMap — patterns add 1-6 unique variables,
-/// so linear search is faster than hashing and clone is a single memcpy.
+/// Uses Vec instead of HashMap — patterns add 1-6 unique variables, so
+/// linear search beats hashing and the bindings sit in one allocation.
 #[derive(Debug, Clone)]
 pub struct PatternMatch {
     pub bindings: Vec<(String, MatchBinding)>,

@@ -105,11 +105,12 @@ impl std::error::Error for DurableOpenError {}
 ///
 /// - **Unreplayed frames at level `off`** — the data-loss case the module docs
 ///   describe.
-/// - **A graph already wrapped for capture** — the observable signature of
-///   another durable owner over the same data. Two owners sharing one log
-///   interleave their `next_lsn` counters and each checkpoint stamps a
+/// - **A graph whose capture wrapper a log already owns** — the observable
+///   signature of another durable owner over the same data. Two owners sharing
+///   one log interleave their `next_lsn` counters and each checkpoint stamps a
 ///   `checkpoint_lsn` the other's frames sit below, so replay silently drops
-///   committed data.
+///   committed data. A wrapper installed by change data capture alone claims no
+///   ownership and does not refuse.
 ///
 /// **Disk-mode graphs are the caller's refusal, not this function's.** A disk
 /// graph commits by publishing an immutable generation, so it keeps no logical
@@ -298,8 +299,7 @@ pub fn ensure_save_target_recovered(
 }
 
 /// The one predicate both refusals ask, so an open and a save can never
-/// disagree about what counts as unrecovered: the sidecar path when it holds
-/// frames past `checkpoint_lsn`, `None` when it does not.
+/// disagree about what counts as unrecovered.
 fn unrecovered_sidecar(
     checkpoint_path: &Path,
     checkpoint_lsn: u64,
@@ -358,7 +358,7 @@ mod recording_over_a_fork_tests {
         execute_mut(graph, query, &opts).unwrap_or_else(|e| panic!("query failed: {query}: {e}"));
     }
 
-    /// Every `Person` as `(id, age)`, sorted.
+    /// Every node carrying an integer `id` and `age`, as `(id, age)`, sorted.
     fn people(graph: &DirGraph) -> Vec<(i64, i64)> {
         let mut out: Vec<(i64, i64)> = graph
             .graph

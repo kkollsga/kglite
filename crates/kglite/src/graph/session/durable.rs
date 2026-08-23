@@ -2,10 +2,9 @@
 //!
 //! The logical WAL itself lives in `graph/wal.rs` (CRC frames, torn-tail
 //! recovery, [`DurabilityLevel`], the `checkpoint_lsn` replay gate), fed by the
-//! write-capture layer in `graph/storage/recording.rs`. This module holds the
-//! orchestration around them — the open ordering, the commit-time flush, the
-//! four-step checkpoint — in the engine, so every binding gets it from one
-//! place instead of writing it again.
+//! write-capture layer in `graph/storage/recording.rs`. This module wires them
+//! onto [`Session`]: the open ordering, the commit-time append, the four-step
+//! checkpoint.
 //!
 //! ## The three orders that are correctness, not preference
 //!
@@ -57,9 +56,11 @@
 //! one sidecar interleave their independent `next_lsn` counters and each
 //! checkpoint stamps a `checkpoint_lsn` the other's frames sit below, so
 //! replay silently drops committed data. The engine enforces what it can
-//! observe: [`Session::open_durable`] refuses a graph whose backend is
-//! *already* wrapped for capture, which is the signature another durable owner
-//! leaves behind. Making the wheel's `KnowledgeGraph` and a `Session` mutually
+//! observe: [`Session::open_durable`] refuses a graph whose capture wrapper is
+//! *already* claimed by a write-ahead log, which is the signature another
+//! durable owner leaves behind. (Mere capture wrapping is not the signature —
+//! change data capture wraps too, and must not lock a graph out of
+//! durability.) Making the wheel's `KnowledgeGraph` and a `Session` mutually
 //! exclusive over one path is the binding layer's half of the same rule.
 
 use std::path::Path;
@@ -103,7 +104,8 @@ const DIVERGED_MSG: &str = "this durable session was mutated through Session::wr
      Take a checkpoint (Session::save) to fold them in and start a fresh log, or run \
      mutations through Session::begin / Session::commit, which are logged.";
 
-/// Message shared by the two direct-write paths.
+/// The refusal [`Session::check_direct_write_allowed`] hands back on behalf of
+/// the two direct-write paths, neither of which has an error channel of its own.
 pub(super) const DIRECT_WRITE_REFUSAL: &str =
     "a durable session does not support direct writes through Session::write / \
      Session::transact: their mutations are captured by the recording backend but \
@@ -118,8 +120,9 @@ impl Session {
     /// described in the module docs.
     ///
     /// `checkpoint_path` is the `.kgl` path, not the log path; the sidecar is
-    /// derived from it by [`wal_path`] exactly as every other binding derives
-    /// it, so a graph saved by one and reopened by another finds the same log.
+    /// derived from it by [`wal_path`](crate::graph::wal::wal_path) exactly as
+    /// every other binding derives it, so a graph saved by one and reopened by
+    /// another finds the same log.
     ///
     /// # Levels
     ///
@@ -135,9 +138,11 @@ impl Session {
     /// - **Disk-mode graphs**, at any logging level: a disk graph commits by
     ///   publishing an immutable generation, so there is no logical WAL for it
     ///   at any level.
-    /// - **A graph already wrapped for capture**: that is the observable
-    ///   signature of another durable owner over the same data, and two owners
-    ///   sharing one log corrupt each other's replay gate (module docs).
+    /// - **A graph whose capture wrapper a log already owns**, at a logging
+    ///   level: that is the observable signature of another durable owner over
+    ///   the same data, and two owners sharing one log corrupt each other's
+    ///   replay gate (module docs). A capture wrapper installed by change data
+    ///   capture alone is not that signature and does not refuse.
     /// - **Unreplayed frames at level `Off`**, as above.
     ///
     /// # Ownership
@@ -701,7 +706,8 @@ mod tests {
         let session = fresh(&path);
         commit_query(&session, "CREATE (:N {id: 1})");
 
-        // The observable signature of the first owner: the graph is wrapped.
+        // The observable signature of the first owner: a log already owns the
+        // graph's capture wrapper.
         let err = refusal(Session::open_durable(
             session.snapshot(),
             &path.to_string_lossy(),

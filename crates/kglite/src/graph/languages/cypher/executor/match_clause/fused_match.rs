@@ -17,11 +17,8 @@ impl<'a> CypherExecutor<'a> {
         // - group keys (Variable / PropertyAccess on pre-OPTIONAL var)
         // - pure count aggregates (`count(rp)` directly)
         // - derived expressions whose only aggregates are count() — e.g.
-        //   `total - count(rp) AS cultural`. The fused operator computes
-        //   count once per upstream row, substitutes it into each
-        //   derived expression, and evaluates the result. Same row cost
-        //   as the pure-count path; avoids the OPTIONAL MATCH expansion
-        //   that the materialized executor would otherwise run.
+        //   `total - count(rp) AS cultural` (substituted below, at the same
+        //   per-row cost as the pure-count path).
         let mut group_key_indices = Vec::new();
         let mut count_items: Vec<(usize, &ReturnItem)> = Vec::new();
         let mut derived_items: Vec<(usize, &ReturnItem)> = Vec::new();
@@ -89,7 +86,6 @@ impl<'a> CypherExecutor<'a> {
                 group_key_indices.len() + count_items.len() + derived_items.len(),
             );
 
-            // Group key pass-throughs
             for &idx in &group_key_indices {
                 let item = &with_clause.items[idx];
                 let key = return_item_column_name(item);
@@ -110,7 +106,6 @@ impl<'a> CypherExecutor<'a> {
                 projected.insert(key, val);
             }
 
-            // Count aggregates: count(*) vs count(var) per item.
             for &(_, item) in &count_items {
                 let key = return_item_column_name(item);
                 let value = match &item.expression {
@@ -120,12 +115,10 @@ impl<'a> CypherExecutor<'a> {
                 projected.insert(key, Value::Int64(value));
             }
 
-            // Create the result row, preserving bindings for every variable the
-            // grouping keys read (see `helpers::carry_group_bindings`). This
-            // operator is what an `OPTIONAL MATCH` + `count()` query fuses
-            // into, so narrowing the carry-over to bare-variable keys here is
-            // what made `ORDER BY t.priority` differ between the OPTIONAL and
-            // non-OPTIONAL spellings of the same query.
+            // Preserve bindings for every variable the grouping keys read (see
+            // `helpers::carry_group_bindings`): narrowing the carry-over to
+            // bare-variable keys made `ORDER BY t.priority` differ between the
+            // OPTIONAL and non-OPTIONAL spellings of the same query.
             let mut new_row = ResultRow::from_projected(projected);
             carry_group_bindings(&carried_vars, row, &mut new_row);
 
@@ -714,15 +707,10 @@ impl<'a> CypherExecutor<'a> {
                 }
 
                 // Group at SOURCE — semantic dual of the target case. The
-                // persistent histogram is keyed by edge target so we can't
-                // just look up; instead, do one sequential pass over
-                // `for_each_edge_of_conn_type` (O(matching edges) on disk
-                // via conn_type_index_*, NOT a full edge_endpoints scan) and
-                // accumulate counts keyed by source. For Wikidata's typical
-                // edge types (P166, P527, P57, ...) that's 200k–10M entries
-                // — a couple hundred ms vs the 30s timeout the prior slow
-                // node-centric path was hitting on `MATCH (h:human)-[:P166]
-                // ->(award) ...`.
+                // persistent histogram is keyed by edge target, so there is
+                // nothing to look up; the source-keyed counts are built on
+                // the fly below. The prior node-centric path hit the 30 s
+                // timeout on `MATCH (h:human)-[:P166]->(award) ...`.
                 let group_is_source = matches!(
                     (group_elem_idx, edge_direction),
                     (0, Some(EdgeDirection::Outgoing)) | (2, Some(EdgeDirection::Incoming))
@@ -743,8 +731,7 @@ impl<'a> CypherExecutor<'a> {
                     // but its random reads on cold mmap pages thrash the page
                     // cache — measured at >100s on the same query that the
                     // sequential variant runs in 14s. Sequential I/O wins
-                    // even when total bytes are higher (see
-                    // `feedback_disk_io_patterns.md`).
+                    // even when total bytes are higher.
                     let counts = self.graph.graph.count_edges_grouped_by_peer(
                         conn_key,
                         Direction::Incoming,
@@ -805,8 +792,11 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
 
-            // Node-centric top-K path (for typed group nodes or group=source
-            // patterns).
+            // Node-centric top-K path: reached when the edge-centric
+            // preconditions above fail — DISTINCT counts, 5-element patterns,
+            // an untyped/filtered/alternating edge, a constrained group or
+            // opposite endpoint, or an undirected (`-[]-`) edge, which is
+            // neither group_is_target nor group_is_source.
             let group_node_type = match &pattern.elements[group_elem_idx] {
                 PatternElement::Node(np) => np.node_type.as_deref(),
                 _ => None,
@@ -987,15 +977,14 @@ impl<'a> CypherExecutor<'a> {
                     }
                 };
 
-                // 0.8.12 phase-4: multi-key ORDER BY LIMIT was kept in the
-                // pipeline (fusion set `candidate_emit` instead of
-                // `top_k`). Trim via a heap on the primary key, grab the
-                // threshold, then build rows only for entries whose
-                // primary count is ≥ threshold. Downstream OrderBy +
-                // Limit re-sort with the full multi-key spec and trim
-                // to K. For P31-class-counts-shaped data this drops
-                // `build_row` calls (each of which resolves `c.title`)
-                // from O(distinct peers) to O(~K).
+                // Multi-key ORDER BY LIMIT stays in the pipeline (fusion sets
+                // `candidate_emit` instead of `top_k`). Trim via a heap on the
+                // primary key, grab the threshold, then build rows only for
+                // entries whose primary count is ≥ threshold; downstream
+                // OrderBy + Limit re-sort with the full multi-key spec and
+                // trim to K. For P31-class-counts-shaped data this drops
+                // `build_row` calls (each of which resolves `c.title`) from
+                // O(distinct peers) to O(~K).
                 let emit_rows: Vec<ResultRow> =
                     if let Some(&(_, descending, k)) = candidate_emit.as_ref() {
                         use std::cmp::Reverse;
@@ -1560,25 +1549,19 @@ impl<'a> CypherExecutor<'a> {
             })
             .collect();
 
-        // 0.8.12 phase-3: edge-centric aggregation via peer_count_histogram
-        // (shape preconditions on `try_fast_with_aggregate_via_histogram`).
-        // For wiki-style queries like
-        //   MATCH (h:Q5)-[:P27]->(c) WITH c, count(h) AS k
-        // this drops wall time from O(|tgt nodes| × avg in-degree) to
-        // O(|distinct peers|).
+        // Edge-centric aggregation via peer_count_histogram (shape
+        // preconditions on `try_fast_with_aggregate_via_histogram`).
         //
-        // The fast path is tried BEFORE computing `group_matches`
-        // because `group_matches = executor.execute(&MATCH (c))` for
-        // an untyped group target scans every node in the graph — on
-        // wiki1000m that's a 14.7 M-node full scan (~3 s) that the
-        // histogram path never looks at. Running it only when the
-        // slow path actually fires cuts `WITH P27 count` from 5.4 s
-        // to under 500 ms at 1 B triples.
-        // Histogram fast path only applies to the single-MATCH shape — the
-        // two-MATCH variant has a separate pattern driving the count, so the
-        // histogram (keyed on M1's edge type) doesn't answer the right
-        // question. Skip it when secondary_match is set, and skip it for
-        // distinct counts (the histogram counts edges, not distinct peers).
+        // Tried BEFORE computing `group_matches`, because
+        // `group_matches = executor.execute(&MATCH (c))` for an untyped group
+        // target scans every node in the graph — on wiki1000m that's a
+        // 14.7 M-node full scan (~3 s) the histogram path never looks at.
+        // Running it only when the slow path actually fires cuts
+        // `WITH P27 count` from 5.4 s to under 500 ms at 1 B triples.
+        //
+        // Skipped for the two-MATCH shape (a separate pattern drives the
+        // count, so a histogram keyed on M1's edge type answers the wrong
+        // question) and for distinct counts (it counts edges, not peers).
         if secondary_match.is_none() && !distinct_count {
             if let Some(rows) = self.try_fast_with_aggregate_via_histogram(
                 pattern,
@@ -1724,7 +1707,7 @@ impl<'a> CypherExecutor<'a> {
         })
     }
 
-    /// 0.8.12 phase-3 fast path for
+    /// Fast path for
     ///   `MATCH (src [:Type])-[:T]->(tgt) WITH tgt, count(src) [AS k] ...`
     /// — answers in O(|distinct peers|) via the `peer_count_histogram`
     /// instead of the per-source iteration that the generic path takes.
@@ -1734,10 +1717,11 @@ impl<'a> CypherExecutor<'a> {
     ///
     /// Preconditions for the fast path:
     ///   1. Pattern is exactly 3 elements: node, edge, node.
-    ///   2. Group variable is the *target* (element index 2).
+    ///   2. Group variable is the edge's *target* — either spelling, see
+    ///      the direction-aware check in the body.
     ///   3. Edge has a connection type (`[:T]`) — required to look up
     ///      the histogram at all.
-    ///   4. Target element has no property constraints (`{…}`) — the
+    ///   4. Neither endpoint has property constraints (`{…}`) — the
     ///      histogram counts every peer, so an added property filter
     ///      would require post-filter which defeats the point.
     ///   5. Source's type constraint (if any) is a no-op on this edge
@@ -1779,9 +1763,8 @@ impl<'a> CypherExecutor<'a> {
         // alternation would need its per-type histograms merged. Reading the
         // singular `connection_type` instead counted only the first branch —
         // a wrong answer. Bail to the caller's per-source counter, which
-        // honours every branch: merging k histograms is a plan-shape choice
-        // this fast path does not need to make, and the fallback is correct
-        // at the cost of the O(distinct-peers) shortcut for alternations only.
+        // honours every branch at the cost of the O(distinct-peers) shortcut
+        // for alternations only.
         if edge_pat.connection_types.is_some() {
             return Ok(None);
         }
@@ -1805,7 +1788,7 @@ impl<'a> CypherExecutor<'a> {
         // which is also the side whose props/type the type-anchor logic
         // below cares about. Mirrors the planner-reversal duality.
         let source_elem_idx = if group_elem_idx == 2 { 0 } else { 2 };
-        // Target must have no property constraint; it's the group key.
+        // Neither endpoint may carry a property constraint (precondition 4).
         let (tgt_props, src_type, src_props) = match (
             &pattern.elements[source_elem_idx],
             &pattern.elements[group_elem_idx],
@@ -1824,9 +1807,9 @@ impl<'a> CypherExecutor<'a> {
 
         // Two fast paths. (A) no source constraint → precomputed
         // `peer_count_histogram`, O(distinct peers). (B) source has a
-        // type constraint → single-pass sweep of the edge-type's
-        // matching edges via `for_each_edge_of_conn_type`, filtering
-        // sources by `node_type_of` and accumulating per-peer counts.
+        // type constraint → single-pass sweep of the edge type's edges
+        // (size-gated between two sweeps, below), filtering sources by
+        // `node_type_of` and accumulating per-peer counts.
         //
         // Path (B) previously iterated per source and called
         // `edges_directed_filtered` for each; every matching edge went
@@ -2006,7 +1989,6 @@ impl<'a> CypherExecutor<'a> {
                 continue;
             }
 
-            // Build a temporary row for evaluating group-key expressions
             let mut tmp_row = ResultRow::new();
             tmp_row
                 .node_bindings

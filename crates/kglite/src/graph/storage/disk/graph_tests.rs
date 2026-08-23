@@ -734,7 +734,7 @@ fn sustained_overlapping_reads_do_not_grow_the_arena() {
     );
 }
 
-// ------------- segment_subdir + enumerate (pre-phase-7 cases) -------------
+// ------------- segment_subdir + enumerate -------------
 
 #[test]
 fn segment_subdir_zero_pads_three_digits() {
@@ -790,7 +790,7 @@ fn enumerate_segment_dirs_empty_root_returns_empty() {
     assert!(enumerate_segment_dirs(tmp.path()).is_empty());
 }
 
-// ------------- concat_segment_csrs (phase 7) -------------
+// ------------- concat_segment_csrs -------------
 
 #[test]
 fn concat_empty_input_returns_all_empty() {
@@ -805,8 +805,8 @@ fn concat_empty_input_returns_all_empty() {
 
 #[test]
 fn concat_single_segment_returns_it_unchanged() {
-    // Node 0 → node 1 (edge_idx 0). One node, one edge for simplicity
-    // of comparison: passthrough must not mutate anything.
+    // Node 0 → node 1 (edge_idx 0). Two nodes, one edge: the minimal
+    // shape for comparison — passthrough must not mutate anything.
     let s = seg(
         vec![slot(7, 100), slot(7, 101)],
         vec![0, 1, 1], // out_offsets: node 0 emits edge [0,1), node 1 emits nothing
@@ -994,7 +994,6 @@ fn concat_three_segments_keeps_offset_chain_consistent() {
 
 #[test]
 fn concat_handles_edgeless_segment() {
-    // A segment with nodes but no edges, e.g. one freshly created.
     let s0 = seg(
         vec![slot(1, 0)],
         vec![0, 1],
@@ -1013,6 +1012,7 @@ fn concat_handles_edgeless_segment() {
             connection_type: 1,
         }],
     );
+    // Middle segment: nodes but no edges, e.g. one freshly created.
     let s_empty = seg(
         vec![slot(1, 1)],
         vec![0, 0],
@@ -1052,7 +1052,7 @@ fn concat_handles_edgeless_segment() {
     assert_eq!(c.out_edges.get(1).edge_idx, 1);
 }
 
-// ------------- seal_to_new_segment round-trip (phase 8) -------------
+// ------------- seal_to_new_segment round-trip -------------
 
 fn seal_test_node(interner: &mut StringInterner, id: i64, ntype: &str) -> NodeData {
     NodeData::new(
@@ -1084,10 +1084,10 @@ fn seal_rejects_when_nothing_to_seal() {
 
 #[test]
 fn seal_accepts_cross_segment_edges_via_full_range() {
-    // Cross-segment overflow no longer errors. The new
-    // segment writes full-range out_offsets (indexed by global
-    // node id) so an edge from a seg_0 source into a tail target
-    // — or between two seg_0 sources — is reachable after reload.
+    // Cross-segment overflow is legal: the sealed segment writes
+    // full-range out_offsets (indexed by global node id) so an edge
+    // from a seg_0 source into a tail target — or between two seg_0
+    // sources — is reachable after reload.
     let tmp = TempDir::new().unwrap();
     let mut interner = StringInterner::new();
     let mut dg = super::DiskGraph::new_at_path(tmp.path()).unwrap();
@@ -1178,7 +1178,7 @@ fn seal_round_trip_basic_reads() {
     assert_eq!(manifest.segments[1].node_id_hi, 5);
     assert_eq!(manifest.segments[1].edge_count, 1);
 
-    // Reload exercises the phase-7 concat read path.
+    // Reload exercises the concat read path.
     drop(dg);
     let mut interner2 = StringInterner::new();
     let (reloaded, _tmp_zst) = super::DiskGraph::load_from_dir(tmp.path(), &mut interner2).unwrap();
@@ -1197,7 +1197,7 @@ fn seal_round_trip_basic_reads() {
     let e = reloaded.out_edges.get(start);
     assert_eq!(e.peer, 4);
     // Combined edge_idx = segment-local 0 + endpoint_base (= seg_0's 1)
-    // = 1. Verifies the phase-7 concat shift lands at the right slot.
+    // = 1. Verifies the concat shift lands at the right slot.
     assert_eq!(e.edge_idx, 1);
     // edge_endpoints at that global index should hold the original
     // global node ids.
@@ -1395,9 +1395,9 @@ fn conn_type_index_sources_are_global_after_segment_local_seal() {
     let mut interner = StringInterner::new();
     let mut dg = super::DiskGraph::new_at_path(tmp.path()).unwrap();
     // Stay in the default `defer_csr = false` mode — mirrors the
-    // path Python mutations take (ntriples is the only caller that
-    // flips defer_csr on, and it always owns a matching
-    // build_csr_from_pending after its batch).
+    // path Python mutations take (the streaming subset save is the
+    // only caller that flips defer_csr on, and its save_disk owns
+    // the matching CSR build).
     // seg_0: 5 nodes, no edges.
     for i in 0..5 {
         dg.add_node(seal_test_node(&mut interner, i, "A"));
@@ -1496,7 +1496,7 @@ fn compact_rewrite_after_seal_cleans_stale_segs_and_persists_heap_arrays() {
     assert_eq!(reloaded.edge_count, 3, "3 T-edges must survive");
 }
 
-// ---------- enable_disk_mode's conversion (E2) ----------
+// ---------- enable_disk_mode's conversion ----------
 
 #[test]
 fn conversion_streams_edge_properties_into_the_mapped_base() {
@@ -1610,7 +1610,7 @@ fn conversion_without_edge_properties_writes_no_blob() {
     assert!(dg.edge_properties_at(0).is_none());
 }
 
-// ---------- enable_disk_mode's published form (E3) ----------
+// ---------- enable_disk_mode's published form ----------
 
 /// `enable_disk_mode_at` must leave the same end state the two-call
 /// `enable_disk_mode()` + `save_disk(dir)` sequence does — a published

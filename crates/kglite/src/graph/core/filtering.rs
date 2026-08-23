@@ -77,7 +77,6 @@ pub fn matches_condition_cached(
     }
 }
 
-/// Pre-compile all regex patterns from a conditions map.
 fn precompile_regex_patterns(
     conditions: &HashMap<String, FilterCondition>,
 ) -> HashMap<String, regex::Regex> {
@@ -234,10 +233,10 @@ pub fn compare_values(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
 /// | 11 | `UniqueId`, `Int64`, `Float64` | one numeric rank — numbers compare *numerically* across the three, never by variant |
 /// | 12 | `Null` | NULL last ascending / first descending, per Neo4j |
 ///
-/// `ORDER BY` never reaches the NULL rank: [`SortSpec`](crate::graph::languages
-/// ::cypher::executor::ordering) places NULLs by the clause's explicit or
-/// default `NULLS FIRST/LAST`. The rank still defines NULL so the order is
-/// total for every other caller.
+/// `ORDER BY` never reaches the NULL rank:
+/// [`SortSpec`](crate::graph::languages::cypher::executor::ordering::SortSpec)
+/// places NULLs by the clause's explicit or default `NULLS FIRST/LAST`. The
+/// rank still defines NULL so the order is total for every other caller.
 #[inline]
 fn type_rank(v: &Value) -> u8 {
     match v {
@@ -304,8 +303,9 @@ pub fn total_order(a: &Value, b: &Value) -> std::cmp::Ordering {
         ) => cmp_f64_total(*alat, *blat).then_with(|| cmp_f64_total(*alon, *blon)),
         (Value::List(x), Value::List(y)) => cmp_sequence(x, y),
         (Value::Map(x), Value::Map(y)) => cmp_map(x, y),
-        // Graph entities order structurally (id first — both derive `Ord`
-        // with `id` as the leading field), which is total.
+        // Graph entities order structurally, and every one of the three is
+        // total: `NodeValue`/`RelValue` derive `Ord` with `id` as the leading
+        // field, `PathValue` over its `nodes` then `rels` vectors.
         (Value::Node(x), Value::Node(y)) => x.cmp(y),
         (Value::Relationship(x), Value::Relationship(y)) => x.cmp(y),
         (Value::Path(x), Value::Path(y)) => x.cmp(y),
@@ -825,7 +825,7 @@ pub fn process_nodes(
 /// Backs the fluent `select(..., include_secondary=True)` entry point.
 ///
 /// On a single-label graph this selects exactly the same nodes as the
-/// primary `type == label` filter, so it is a strict additive extension.
+/// primary `type == label` filter.
 pub fn filter_nodes_by_label(
     graph: &DirGraph,
     selection: &mut CurrentSelection,

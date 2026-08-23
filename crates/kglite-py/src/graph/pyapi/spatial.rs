@@ -54,8 +54,10 @@ fn make_shapely_box(
     Ok(polygon.unbind())
 }
 
-/// Resolve lat/lon field names: an explicit argument wins, else the first
-/// selected node's spatial config, else `"latitude"`/`"longitude"`.
+/// Resolve lat/lon field names. Passing *either* argument takes the pair from
+/// the arguments alone — the omitted side falls back to `"latitude"`/
+/// `"longitude"`, not to spatial config. With neither given, the first selected
+/// node's spatial config wins, else `"latitude"`/`"longitude"`.
 fn resolve_lat_lon_fields<'a>(
     graph: &'a DirGraph,
     selection: &CowSelection,
@@ -95,7 +97,6 @@ fn resolve_geometry_field<'a>(
     "geometry"
 }
 
-/// Resolve the geometry fallback field from spatial config.
 fn resolve_geom_fallback<'a>(graph: &'a DirGraph, selection: &CowSelection) -> Option<&'a str> {
     let node_type = selection.first_node_type(graph)?;
     let config = graph.get_spatial_config(&node_type)?;
@@ -114,8 +115,8 @@ impl KnowledgeGraph {
     ///     max_lat: Maximum latitude (north bound)
     ///     min_lon: Minimum longitude (west bound)
     ///     max_lon: Maximum longitude (east bound)
-    ///     lat_field: Name of the latitude property (default: 'latitude')
-    ///     lon_field: Name of the longitude property (default: 'longitude')
+    ///     lat_field: Name of the latitude property (default: from spatial config or 'latitude')
+    ///     lon_field: Name of the longitude property (default: from spatial config or 'longitude')
     ///
     /// Returns:
     ///     A new KnowledgeGraph with only nodes within the bounding box
@@ -188,8 +189,8 @@ impl KnowledgeGraph {
     ///     center_lat: Center point latitude
     ///     center_lon: Center point longitude
     ///     max_distance: Maximum distance in degrees
-    ///     lat_field: Name of the latitude property (default: 'latitude')
-    ///     lon_field: Name of the longitude property (default: 'longitude')
+    ///     lat_field: Name of the latitude property (default: from spatial config or 'latitude')
+    ///     lon_field: Name of the longitude property (default: from spatial config or 'longitude')
     ///
     /// Returns:
     ///     A new KnowledgeGraph with only nodes within the distance
@@ -322,7 +323,7 @@ impl KnowledgeGraph {
     /// Args:
     ///     lat: Query point latitude
     ///     lon: Query point longitude
-    ///     geometry_field: Name of the WKT geometry property (default: 'geometry')
+    ///     geometry_field: Name of the WKT geometry property (default: from spatial config or 'geometry')
     ///
     /// Returns:
     ///     A new KnowledgeGraph with only nodes whose geometry contains the point
@@ -380,7 +381,7 @@ impl KnowledgeGraph {
     ///
     /// Args:
     ///     query_wkt: WKT string or shapely geometry object
-    ///     geometry_field: Name of the geometry property (default: 'geometry')
+    ///     geometry_field: Name of the geometry property (default: from spatial config or 'geometry')
     ///
     /// Returns:
     ///     A new KnowledgeGraph with only intersecting nodes
@@ -440,11 +441,13 @@ impl KnowledgeGraph {
     /// in the current selection.
     ///
     /// Args:
-    ///     lat_field: Name of the latitude property (default: 'latitude')
-    ///     lon_field: Name of the longitude property (default: 'longitude')
+    ///     lat_field: Name of the latitude property (default: from spatial config or 'latitude')
+    ///     lon_field: Name of the longitude property (default: from spatial config or 'longitude')
+    ///     as_shapely: If True, return a shapely box polygon instead of a dict
     ///
     /// Returns:
     ///     Dictionary with 'min_lat', 'max_lat', 'min_lon', 'max_lon',
+    ///     a shapely box polygon when as_shapely=True,
     ///     or None if no valid coordinates found
     ///
     /// Example:
@@ -493,11 +496,13 @@ impl KnowledgeGraph {
     /// in the current selection.
     ///
     /// Args:
-    ///     lat_field: Name of the latitude property (default: 'latitude')
-    ///     lon_field: Name of the longitude property (default: 'longitude')
+    ///     lat_field: Name of the latitude property (default: from spatial config or 'latitude')
+    ///     lon_field: Name of the longitude property (default: from spatial config or 'longitude')
+    ///     as_shapely: If True, return a shapely.geometry.Point instead of a dict
     ///
     /// Returns:
     ///     Dictionary with 'latitude' and 'longitude',
+    ///     a shapely.geometry.Point when as_shapely=True,
     ///     or None if no valid coordinates found
     ///
     /// Example:
@@ -583,10 +588,6 @@ impl KnowledgeGraph {
             ))),
         }
     }
-
-    // ========================================================================
-    // Spatial Configuration
-    // ========================================================================
 
     /// Configure spatial properties for a node type.
     ///

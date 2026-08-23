@@ -45,16 +45,14 @@ fn parse_direction(direction: Option<&str>) -> PyResult<EdgeDir> {
     }
 }
 
-/// Build an [`Interrupt`] from the wheel's `timeout_ms` kwarg.
 fn deadline_from(timeout_ms: Option<u64>) -> Interrupt {
     Interrupt::from_deadline(
         timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms)),
     )
 }
 
-/// Assemble a [`PathOptions`] from the wheel's optional connection/via-type
-/// and direction args, keeping the Python kwarg surface identical while the
-/// core takes an options struct.
+/// Exists so the Python kwarg surface stays flat while the core takes an
+/// options struct.
 fn path_options<'a>(
     connection_types: Option<&'a [String]>,
     via_types: Option<&'a [String]>,
@@ -75,10 +73,6 @@ fn path_options<'a>(
 
 #[pymethods]
 impl KnowledgeGraph {
-    // ========================================================================
-    // Graph Algorithms: Path Finding & Connectivity
-    // ========================================================================
-
     /// Find the shortest path between two nodes.
     ///
     /// Args:
@@ -854,6 +848,8 @@ impl KnowledgeGraph {
     /// Args:
     ///     weak: If True (default), find weakly connected components (treating graph as undirected).
     ///           If False, find strongly connected components (respecting edge direction).
+    ///     titles_only: If True, each component is a list of node titles
+    ///           instead of node info dicts.
     ///
     /// Returns:
     ///     A list of components, each component is a list of node info dicts.
@@ -1028,10 +1024,6 @@ impl KnowledgeGraph {
 
         Ok(result_dict.into())
     }
-
-    // ========================================================================
-    // Centrality Algorithms
-    // ========================================================================
 
     /// Calculate betweenness centrality for nodes in the graph.
     ///
@@ -1308,10 +1300,6 @@ impl KnowledgeGraph {
         }
     }
 
-    // ========================================================================
-    // Community Detection
-    // ========================================================================
-
     /// Detect communities using the Louvain modularity optimization algorithm.
     ///
     /// Args:
@@ -1383,10 +1371,6 @@ impl KnowledgeGraph {
         )?;
         community_results_to_py(py, &self.inner, result)
     }
-
-    // ========================================================================
-    // Subgraph Extraction Methods
-    // ========================================================================
 
     /// Expand the current selection by N hops.
     ///
@@ -1552,7 +1536,6 @@ impl KnowledgeGraph {
                     }
                 };
 
-                // Pass A: sequential edge scan → kept_nodes bitset.
                 let scan_t0 = std::time::Instant::now();
                 let pass_a = pass_a_scan(disk, &spec);
                 let scan_secs = scan_t0.elapsed().as_secs_f64();
@@ -1741,10 +1724,12 @@ impl KnowledgeGraph {
     /// filter and returns scan stats.
     ///
     /// Walks the source disk graph's `edge_endpoints.bin` sequentially,
-    /// filters by `edge_types`, and builds the kept-nodes bitset. No
-    /// output files are written. The leading underscore marks this as an
-    /// unstable surface with no compatibility promise — it exists to
-    /// measure and differentially check the scan pass on its own, apart
+    /// filters by `edge_types`, and builds the kept-nodes bitset. Nothing is
+    /// written unless `kept_edges_out` names a path, which streams the kept
+    /// edge records to it and adds `kept_edges_path`, `kept_edge_records` and
+    /// `rank_kept_count` to the returned dict. The leading underscore marks
+    /// this as an unstable surface with no compatibility promise — it exists
+    /// to measure and differentially check the scan pass on its own, apart
     /// from the public `save_subset`.
     ///
     /// Errors when the source graph is not disk-backed — Memory and

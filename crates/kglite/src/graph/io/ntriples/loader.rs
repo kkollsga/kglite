@@ -1,8 +1,9 @@
 //! `load_ntriples` entry point + columnar build pipeline.
 //!
 //! Streaming single-pass load: parse → accumulate → flush → build columns.
-//! Supports mem/mapped/disk storage modes; disk mode uses an overflow
-//! edge buffer and mmap-backed column builders.
+//! Supports mem/mapped/disk storage modes; the streaming modes (disk and
+//! mapped) spill edges to a file-backed buffer and build columns from a
+//! property log.
 
 use crate::datatypes::values::Value;
 use crate::graph::schema::{DirGraph, InternedKey, NodeData, PropertyStorage};
@@ -636,7 +637,6 @@ fn build_columns(
     type_meta: HashMap<String, TypeBuildMeta>,
     type_rename_map: &HashMap<String, String>,
 ) -> Result<(), String> {
-    // Phase 1b: Convert to columnar storage.
     // Disk and mapped modes pre-allocate columns from metadata, then
     // direct-write from the property log.
     if let Some(log_writer) = prop_log.take() {
@@ -755,7 +755,6 @@ fn build_edges(
         },
     )?;
 
-    // Phase 2: Create edges from buffer
     let edge_start = Instant::now();
     if let Some(ref qt) = qnum_to_idx {
         // Fast path: use pre-built qnum_to_idx from Phase 1 (disk mode)
@@ -785,7 +784,6 @@ fn build_edges(
         },
     )?;
 
-    // Free qnum_to_idx after Phase 2
     if let Some(qt) = qnum_to_idx.take() {
         let qt_path = qt.file_path().map(|p| p.to_path_buf());
         drop(qt);
@@ -794,7 +792,6 @@ fn build_edges(
         }
     }
 
-    // Free edge_buffer before Phase 3.
     let edge_file_path = match &edge_buffer {
         EdgeBuffer::Compact(buf) => buf.file_path().map(|p| p.to_path_buf()),
         _ => None,
@@ -812,7 +809,6 @@ fn build_disk_csr(
     config: &NTriplesConfig,
     sink: Option<&dyn ProgressSink>,
 ) -> Result<(), String> {
-    // Phase 3: Build CSR from pending edges (disk mode)
     if let crate::graph::schema::GraphBackend::Disk(ref mut dg) = graph.graph {
         if config.verbose {
             eplog!("[Phase 3] Building CSR edge index");
@@ -1000,7 +996,7 @@ fn initialize_spills(graph: &mut DirGraph, config: &NTriplesConfig) -> Result<Lo
     let use_compact = use_streaming_build;
 
     // Property log for streaming builds: serialize properties during Phase 1,
-    // replay in Phase 1b. Used by both disk and mapped modes.
+    // replay in Phase 1b.
     let prop_log: Option<crate::graph::storage::memory::property_log::PropertyLogWriter> =
         if use_streaming_build {
             let spill_dir = graph.spill_dir.clone().unwrap_or_else(|| {
@@ -1185,9 +1181,8 @@ fn ingest_phase1(context: Phase1Ingest<'_>) -> Result<(), String> {
         eplog!("[Phase 1] Streaming and parsing N-triples ({})", path);
     }
     let sink = config.progress.as_deref();
-    // The bar tracks triples — the loop's natural unit. When the
-    // caller has set `max_triples` we use that as the bar's total so
-    // tqdm shows ETA; otherwise the bar runs unbounded.
+    // `max_triples` doubles as the bar's total so tqdm can show an ETA;
+    // without it the bar runs unbounded.
     let phase1_label = format!(
         "Phase 1: Streaming N-triples ({})",
         path_obj
@@ -1444,13 +1439,10 @@ pub fn load_ntriples(
     let reader = open_reader_for_load(graph, path_obj, path)?;
     // Reader thread: decompresses + reads lines via channel (hides I/O latency).
     //
-    // Each batch packs lines into a single `LineBuffer` (contiguous bytes
-    // + offset table) instead of `Vec<String>` with 200k separately
-    // heap-allocated `String`s. Cache-friendly iteration on the loader
-    // side, no per-line allocation in the reader, and the channel
-    // transports one buffer at a time. Channel capacity 32 × ~16 MB =
-    // ~512 MB ceiling on in-flight bytes — well within memory budget,
-    // smooths out short loader stalls.
+    // Each batch packs lines into a single `LineBuffer` (contiguous bytes +
+    // offset table) instead of `Vec<String>` with 200k separately
+    // heap-allocated `String`s. Channel capacity 32 × ~16 MB caps in-flight
+    // bytes at ~512 MB, which smooths out short loader stalls.
     let (rx, reader_handle) = spawn_reader(reader);
 
     let mut stats = NTriplesStats {
@@ -1464,7 +1456,7 @@ pub fn load_ntriples(
     // Phase 1: Parse and ingest. Disk and mapped modes stream properties into
     // a compressed log (~100 ns/entity) plus a packed `EdgeBuffer::Compact`,
     // which Phase 1b replays into ColumnStores in bulk; memory mode inserts
-    // `PropertyStorage::Map` rows and converts at the end of Phase 1b.
+    // `PropertyStorage::Map` rows and converts them in one bulk pass instead.
     let LoadSpills {
         mut prop_log,
         mut edge_buffer,
@@ -1551,7 +1543,7 @@ fn flush_entity(
     // Reusable property-log buffer, hoisted to the caller (see `ingest_phase1`).
     scratch_props: &mut Vec<(InternedKey, Value)>,
 ) -> Result<(), String> {
-    // Disk/mapped mode requires a `u32` Q-number. A `Value::String` id
+    // Disk mode requires a `u32` Q-number. A `Value::String` id
     // would flip `id_is_string=true` on the type's columnar metadata,
     // and `flush_type_entries` would then leave the *other* (UniqueId)
     // rows' offsets at zero — which makes `MmapColumnStore::read_str`
@@ -1617,8 +1609,8 @@ fn flush_entity(
     // `n.id` is the same integer and `{id: N}` matches identically in memory,
     // mapped, and disk. The human-readable string form (`"Q42"`) lives in the
     // `nid` property (stored above) — query `{nid: 'Q42'}`, not `{id: 'Q42'}`.
-    // Non-parseable ids fall back to `String` (memory keeps them via the
-    // General id-index; disk/mapped already dropped them at the guard above).
+    // Non-parseable ids fall back to `String` (memory and mapped keep them
+    // via the General id-index; disk dropped them at the guard above).
     let id_value = parse_qcode_number(&acc.id)
         .map(Value::UniqueId)
         .unwrap_or_else(|| Value::String(acc.id.clone()));
@@ -1746,8 +1738,7 @@ pub(super) fn format_count(n: u64) -> String {
 }
 
 /// Compact duration formatter for phase headers — `1h32m04s` / `47m18s` /
-/// `12.3s`. Uses the same shape as `examples/wikidata_disk.py::_fmt_dur` so
-/// users see identical wording from Rust and Python.
+/// `12.3s`.
 pub(super) fn fmt_dur(secs: f64) -> String {
     if secs < 60.0 {
         return format!("{:.1}s", secs);

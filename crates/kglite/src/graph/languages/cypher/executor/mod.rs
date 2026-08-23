@@ -8,19 +8,20 @@
 //! *upstream* in `graph::session::execute` by `is_mutation_query`
 //! (defined in `executor/write.rs`):
 //!
-//! - **read engine — THIS module.** `execute_clauses` / `execute_clause`
-//!   handle reads and the optimizer's fused nodes. The mutation arm here
-//!   (`Create | Set | Delete | Remove | Merge`) is an *unreachable
+//! - **read engine — THIS module.** `execute_clauses` /
+//!   `execute_single_clause` handle reads and the optimizer's fused nodes.
+//!   The mutation arm here (`Create | Set | Delete | Remove | Merge |
+//!   Foreach`, plus every non-`SHOW` schema command) is an *unreachable
 //!   defensive guard*: a real mutation never lands here because the
 //!   router already sent the whole query to the mutable engine.
 //! - **mutable engine — `executor/write.rs`.** `execute_mutable` plus
 //!   `execute_create` / `_set` / `_delete` / `_remove` / `_merge` apply
 //!   the writes.
 //!
-//! A clause that mutates — or whose *body* can mutate, e.g. a future
-//! `FOREACH (x IN list | <updates>)` — must be (1) recognised by
-//! `clause_is_mutation` in `write.rs` so routing picks the mutable
-//! engine, and (2) executed there, not here.
+//! A clause that mutates — or whose *body* can mutate, e.g.
+//! `FOREACH (x IN list | <updates>)` or a `CALL { }` body — must be (1)
+//! recognised by `clause_is_mutation` in `write.rs` so routing picks the
+//! mutable engine, and (2) executed there, not here.
 
 use super::ast::*;
 use super::result::*;
@@ -514,8 +515,7 @@ impl<'a> CypherExecutor<'a> {
     /// `profile` accumulator. A correlated `CALL { ... }` subquery calls
     /// it via `execute_clauses` with a single seed row carrying the
     /// imported bindings (and `profile = None`), so the body's first
-    /// `MATCH` expands from the bound outer node/edge (§1.2 rule 1 / §4 of
-    /// the design doc).
+    /// `MATCH` expands from the bound outer node/edge.
     fn execute_clauses_profiled(
         &self,
         query: &CypherQuery,
@@ -532,7 +532,8 @@ impl<'a> CypherExecutor<'a> {
         let mut result_set = initial;
         let profiling = query.profile;
 
-        // Track which clauses have been consumed by fusion (WHERE into MATCH)
+        // Clauses already consumed: a WHERE folded into the preceding MATCH,
+        // or a run absorbed by the streaming pipeline below.
         let mut skip_clause = vec![false; query.clauses.len()];
 
         for (i, clause) in query.clauses.iter().enumerate() {
@@ -1022,8 +1023,8 @@ impl<'a> CypherExecutor<'a> {
             // below is a defensive guard for a mutation clause reaching the
             // read path directly, e.g. a hand-built clause list in a test;
             // FOREACH always classifies as a mutation and arrives the same
-            // way. `SHOW INDEXES` is the one schema command that reads rather
-            // than writes, so it lives on this side of the engine split.
+            // way. The `SHOW` schema commands read rather than write, so they
+            // live on this side of the engine split.
             Clause::Schema(command) if schema_ddl::is_schema_read(command) => {
                 schema_ddl::execute_schema_read(self.graph, command)
             }

@@ -18,10 +18,15 @@
 //! The state one statement can mutate lives in two layers, so capture does
 //! too:
 //!
-//! - the **storage backend** (petgraph nodes/edges), captured inside
-//!   `MemoryGraph`'s `GraphWrite` impl — the same choke point the WAL's
-//!   [`crate::graph::storage::recording::RecordingGraph`] hooks, and the one
-//!   every Cypher write path funnels through;
+//! - the **storage backend** (petgraph nodes/edges plus the per-type
+//!   `ColumnStore`s), captured inside the `GraphWrite` impl of every
+//!   petgraph-backed backend — `MemoryGraph`, `MappedGraph` and
+//!   `ForkedGraph` — which is the same choke point the WAL's
+//!   [`crate::graph::storage::recording::RecordingGraph`] hooks. The one
+//!   backend write that does *not* funnel through `GraphWrite` is Cypher's
+//!   columnar master fast path (`cypher/executor/columnar_write.rs`): it
+//!   reaches `column_store_mut` directly, so it captures its own cell
+//!   pre-images at that call site;
 //! - **`DirGraph`'s inverted indexes** (`type_indices`,
 //!   `secondary_label_index`, and the user-created `property_indices` /
 //!   `range_indices` / `composite_indices`), `timeseries_store` and
@@ -140,10 +145,11 @@ pub(crate) fn journal_columnar_cells() -> usize {
 }
 
 /// A `Vec<NodeIndex>` bucket in one of `DirGraph`'s inverted indexes.
-/// Bucket edits are journalled with a *position* so a rollback restores the
-/// original ordering, not just the original membership — scan order is what
-/// an un-`ORDER BY`'d `MATCH` returns, and a failed statement must not
-/// perturb it.
+/// Bucket *removals* are journalled with the vacated *position* (appends go
+/// to the tail and need none), so a rollback restores the original ordering
+/// and not merely the original membership — scan order is what an
+/// un-`ORDER BY`'d `MATCH` returns, and a failed statement must not perturb
+/// it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BucketId {
     /// `DirGraph::type_indices`, keyed by node-type name.
@@ -444,8 +450,10 @@ impl ColumnarAppendPreImage {
 
 /// Buffer of inverse operations for exactly one statement.
 ///
-/// Installed on the in-memory backend for the duration of a mutating
-/// statement and taken back out when the statement commits or rolls back;
+/// Installed on a petgraph-backed backend — `Memory`, `Mapped` or `Forked`,
+/// with `Recording` forwarding to whatever it wraps — for the duration of a
+/// mutating statement, and taken back out when the statement commits or rolls
+/// back;
 /// `None` is the steady state, so a graph that is not mid-statement pays one
 /// `Option` discriminant check per write call and nothing at all on reads.
 #[derive(Debug, Default)]
@@ -558,6 +566,11 @@ impl UndoJournal {
     }
 
     // ── DirGraph-seam capture ───────────────────────────────────────────
+    //
+    // Above-storage state: inverted-index buckets, timeseries, embeddings.
+    // `note_columnar_title` / `note_columnar_tombstone` sit here for locality
+    // only — their state is the backend's `column_stores` and their callers
+    // are the `GraphWrite` impls, so they are backend-seam capture.
 
     #[inline]
     pub fn note_bucket_appended(&mut self, bucket: BucketId, idx: NodeIndex, bucket_was_new: bool) {

@@ -55,7 +55,7 @@ pub struct OpenGraphResult {
 /// what lets the holder be *named* on every platform instead of degrading to
 /// an anonymous "another process" exactly where that matters most.
 ///
-/// The same mandatory-lock mechanism is documented at the disk backend's
+/// The same mandatory-lock mechanism is documented at the disk backend tests'
 /// `snapshot_files` helper, which skips `.kglite.lock` for this reason.
 pub struct GraphWriterLease {
     file: File,
@@ -174,9 +174,9 @@ fn writer_lease_path(graph_path: &Path) -> std::path::PathBuf {
 /// [`io::ErrorKind::WouldBlock`]; the Windows one is uncategorised. A `kind()`
 /// check therefore recognises contention on Unix and silently misses it on
 /// Windows, where two things then go wrong at once: the raw platform error
-/// escapes instead of a message naming the holder, *and* the retry loop below
-/// never runs, so a caller's timeout (the CLI and MCP server both pass 30s)
-/// returns instantly instead of waiting.
+/// escapes instead of a message naming the holder, *and* the retry loop in
+/// [`GraphWriterLease::acquire_ex`] never runs, so a caller's timeout (the CLI
+/// and MCP server both pass 30s) returns instantly instead of waiting.
 ///
 /// [`fs2::lock_contended_error`] exists precisely so callers can compare
 /// portably. The `WouldBlock` arm is kept as a belt-and-braces fallback for an
@@ -800,8 +800,6 @@ mod tests {
             "a mapped-saved checkpoint must reopen mapped with no storage argument at all"
         );
 
-        // …and a memory-saved one still comes back memory, whatever the
-        // creation mode says.
         let memory_path = tmp.path().join("memory.kgl");
         let mut memory = Arc::new(DirGraph::new());
         crate::graph::io::file::save_graph(&mut memory, &memory_path.to_string_lossy()).unwrap();
