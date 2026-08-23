@@ -172,12 +172,11 @@ impl MemoryGraph {
 // the same shape as the GraphRead trait methods, and trait dispatch
 // is enforced explicitly elsewhere via UFCS or `use Trait`.
 //
-// DerefMut is REMOVED (0.9.0 Cluster 6 / D2 hygiene). Without it,
-// callers that need a mutable petgraph view must go through
-// `inner_mut()`, and any mutation that requires lazy-index
-// invalidation must route through the GraphWrite trait. This kills
-// the silent footgun: pre-fix, `g.add_node(data)` on `&mut MappedGraph`
-// auto-deref'd to petgraph, bypassing
+// DerefMut is REMOVED. Without it, callers that need a mutable petgraph
+// view must go through `inner_mut()`, and any mutation that requires
+// lazy-index invalidation must route through the GraphWrite trait. This
+// kills the silent footgun: pre-fix, `g.add_node(data)` on
+// `&mut MappedGraph` auto-deref'd to petgraph, bypassing
 // `MappedGraph::invalidate_property_index()`. Post-fix, the same call
 // site fails to compile and forces the author to choose explicitly.
 impl std::ops::Deref for MemoryGraph {

@@ -148,7 +148,7 @@ class TestExportWithSelection:
 
 # ─────────────────────────────────────────────────────────────────────────
 # Property-naming round-trip — surfaced by the test-suite fortification's
-# Phase 5 Neo4j conformance check. The d3 export and the to_neo4j adapter
+# Neo4j conformance check. The d3 export and the to_neo4j adapter
 # both rename properties relative to what the user originally set. This
 # matters because (a) the d3 format is the on-the-wire shape every export
 # consumer sees, and (b) `to_neo4j` is the canonical Neo4j bridge that

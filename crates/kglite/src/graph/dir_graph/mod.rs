@@ -19,7 +19,7 @@ use crate::graph::storage::disk::id_index::IdIndexStore;
 use crate::graph::storage::disk::type_index::TypeIndexStore;
 
 // Counts full `enable_columnar` rebuilds, so the save fast path can be pinned
-// by measurement rather than by argument (D1 risk 1). Test-only.
+// by measurement rather than by argument. Test-only.
 //
 // Thread-local: `cargo test` runs tests in parallel, and a global counter would
 // make the rebuild count depend on what else happened to be running.
@@ -100,8 +100,8 @@ pub struct DirGraph {
     ///
     /// Each index's `value -> members` map is a [`LayeredIndex`]: a stack of
     /// shared, immutable levels, so a fork shares the buckets instead of
-    /// copying one `Value` key and one `Vec` per distinct value (D2 — 48.0 ms
-    /// at 1M before layering). Reads and edits keep the `HashMap` shape.
+    /// copying one `Value` key and one `Vec` per distinct value (48.0 ms at 1M
+    /// before layering). Reads and edits keep the `HashMap` shape.
     #[serde(skip)]
     pub property_indices: HashMap<IndexKey, LayeredIndex<Value>>,
     /// Composite indexes for multi-field queries: (node_type, [properties]) -> composite_value -> [node_indices]
@@ -1715,8 +1715,8 @@ impl DirGraph {
 
         // Fallback: if metadata is empty (pre-metadata graph), scan nodes.
         // Arena guard: node_weight materializes on the disk backend
-        // (protocol in disk/graph.rs); scoped so the borrow ends before
-        // Phase 3's node_weight_mut.
+        // (protocol in disk/graph.rs); scoped so the borrow ends with the
+        // fallback scan rather than outliving it.
         if schemas.is_empty() {
             let _guard = self.graph.begin_query();
             for node_idx in self.graph.node_indices() {
@@ -1992,8 +1992,8 @@ impl DirGraph {
             let type_dir = spill_dir.join(&type_name);
             // The backend owns the store and nothing else holds a handle, so
             // `make_mut` mutates it in place: the spill actually reclaims the
-            // heap it materialises to files (D1 defect 2). Before Phase 3 every
-            // node held a strong `Arc`, so this forked and reclaimed nothing.
+            // heap it materialises to files. Back when every node also held a
+            // strong `Arc` on the store, this forked and reclaimed nothing.
             let interner = &self.interner;
             let Some(arc) = self
                 .graph

@@ -161,7 +161,7 @@ pub fn add_properties(
                 match spec {
                     PropertySpec::CopyAll => {
                         // Complete for columnar storage: `property_iter`
-                        // yielded nothing on a saved graph (D1 defect 1).
+                        // yielded nothing on a saved graph.
                         for (k, v) in ancestor_node.property_pairs_named(&graph.interner) {
                             props_to_set.insert(k, v);
                         }
@@ -470,7 +470,7 @@ fn add_properties_aggregate(
                             if let Some(ancestor_node) = graph.graph.node_view(ancestor_idx) {
                                 // Complete for columnar storage: the previous
                                 // `property_iter` route copied *nothing* from a
-                                // saved graph's ancestor node (D1 defect 1).
+                                // saved graph's ancestor node.
                                 for (k, v) in ancestor_node.property_pairs_named(&graph.interner) {
                                     updates.entry(target_idx).or_default().insert(k, v);
                                 }

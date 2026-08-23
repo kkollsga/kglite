@@ -87,7 +87,7 @@ CLEAN_BYTES_0_15_14 = 396_369
 DELETE_HEAVY_BYTES_0_15_14 = 312_020
 SCHEMA_GROWTH_BYTES_0_15_14 = 52_899
 
-# ── Pinned sizes for this tree, measured 2026-08-14 (`.kgl` v6, Phase 6b) ────
+# ── Pinned sizes for this tree, measured 2026-08-14 (`.kgl` v6) ──────────────
 #
 # Ratios against the 0.15.14 reference above: 0.934x, 0.427x, 0.789x. The
 # delete-heavy cell moves the most because deleting every id where `id % 5 < 2`

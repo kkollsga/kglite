@@ -9,7 +9,8 @@
 //! - [`schema_overview`] — schema / property / neighbors / sample / join candidates
 //! - [`describe`] — XML describe() entry point + inventory builders + XML writers
 //! - [`topics`] — tier-3 Cypher + Fluent topic detail writers
-//! - [`bug_report`] / [`debugging`] / [`reporting`] — Phase 7 helpers (pre-existing)
+//! - [`bug_report`] / [`debugging`] / [`reporting`] — bug-report writer, debug
+//!   dumps, structured mutation reports
 
 pub mod bug_report;
 pub mod capabilities;

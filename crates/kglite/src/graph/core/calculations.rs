@@ -557,7 +557,7 @@ fn has_aggregation(expr: &Expr) -> bool {
 /// Reads through [`NodeView`](crate::graph::storage::NodeView): the previous
 /// `property_iter` route yielded **nothing** for columnar storage, so every
 /// `statistics()` / `calculate()` expression over a saved graph evaluated
-/// against an empty object (D1 defect 1).
+/// against an empty object.
 fn convert_node_to_object(
     node: crate::graph::storage::NodeView<'_>,
     interner: &StringInterner,

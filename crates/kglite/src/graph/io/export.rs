@@ -81,7 +81,7 @@ pub fn to_graphml(
             ));
 
             // Serialize properties as JSON
-            // D1 defect 1: this read used to be `node.property_iter(..)`,
+            // This read used to be `node.property_iter(..)`,
             // which yields *nothing* for `PropertyStorage::Columnar` while
             // `property_count()` reports the real count — so every node of a
             // saved graph got an empty `{}` here. `NodeView` enumeration is
@@ -192,8 +192,8 @@ pub fn to_d3_json(
             obj.push_str(&format!("\"title\":{}", json_value(&node.title())));
 
             // Add select properties (not all to keep output clean).
-            // D1 defect 1: `property_iter` yielded nothing for columnar
-            // (saved) graphs, silently dropping every property here.
+            // `property_iter` yielded nothing for columnar (saved) graphs,
+            // silently dropping every property here.
             for (key, value) in node.property_pairs_named(&graph.interner) {
                 if key != "id" && key != "title" && key != "type" {
                     obj.push_str(&format!(",{}:{}", json_string(&key), json_value(&value)));

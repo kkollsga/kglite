@@ -1,6 +1,4 @@
 //! `Transaction` `#[pyclass]` + its `#[pymethods]`.
-//!
-//! Moved out of `graph::mod.rs` in Phase 8.
 
 use crate::datatypes::py_in;
 use crate::datatypes::values::Value;

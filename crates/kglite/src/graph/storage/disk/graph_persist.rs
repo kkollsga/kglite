@@ -513,12 +513,12 @@ impl DiskGraph {
             return Ok(());
         }
 
-        // PR1 phase 4: CSR binaries live under a per-segment subdirectory.
-        // Fresh graphs already have self.data_dir pointing at their own
+        // CSR binaries live under a per-segment subdirectory. Fresh
+        // graphs already have self.data_dir pointing at their own
         // seg_000/; save-as to a different path creates a matching
-        // subdir. Phase 6 parameterised the subdir name on segment id —
-        // today every save still targets id 0 until phase 7 splits
-        // writes across segments.
+        // subdir. The subdir name is parameterised on segment id; this
+        // compact-rewrite path always consolidates into id 0, while the
+        // seal path above is what writes higher ids.
         let csr_target = target_dir.join(segment_subdir(0));
         std::fs::create_dir_all(&csr_target)?;
 
@@ -579,8 +579,8 @@ impl DiskGraph {
         // Save edge properties (columnar: edge_prop_offsets.bin + edge_prop_heap.bin).
         // Always write even when empty so format=2 + zero-length files are
         // self-consistent with the metadata. No interner/guard needed —
-        // the columnar format stores raw u64 hashes directly. Phase-4
-        // layout puts these alongside the CSR in `csr_target`.
+        // the columnar format stores raw u64 hashes directly. The
+        // segment layout puts these alongside the CSR in `csr_target`.
         let upper = self.next_edge_idx;
         self.edge_properties.save_to(&csr_target, upper)?;
         let edge_props_meta = EdgePropertyStore::meta_for(&csr_target);
@@ -788,7 +788,7 @@ impl DiskGraph {
         // ─── out_offsets / out_edges: CSR keyed by (segment-local
         //     or global) source. For segment-local mode the offset
         //     index is `src - tail_lo`; for full-range it's `src`
-        //     directly. Phase 7's concat uses `offsets_len` vs
+        //     directly. The concat uses `offsets_len` vs
         //     `node_slots.len() + 1` to distinguish modes. ───
         let offset_key = |s: u32| -> u32 {
             if has_cross_segment {
@@ -969,25 +969,23 @@ impl DiskGraph {
         let serde_codec = validate_disk_format(&meta)?;
         log_stage("dg.meta_parse", t);
 
-        // PR1 phase 4: CSR binaries live under seg_NNN/ when the graph
-        // was written with csr_layout_version >= 1. Legacy .kgl directories
+        // CSR binaries live under seg_NNN/ when the graph was written
+        // with csr_layout_version >= 1. Legacy .kgl directories
         // (version=0, the serde default) keep the flat layout.
         //
-        // Phase 6 added `enumerate_segment_dirs`; phase 7 wires the
-        // multi-segment concat read path through it. For csr_layout
-        // version >= 1 the CSR dir choice (single-segment) or the
-        // concat'd combined arrays (multi-segment) come out of this
-        // block. Writes are still single-segment today (phase 8 will
-        // seal overflow into additional segments), so the N>1 branch
-        // is only exercised by unit tests on `concat_segment_csrs`
-        // until then.
+        // `enumerate_segment_dirs` finds the segments; for csr_layout
+        // version >= 1 this block yields either the single segment's
+        // CSR dir or the concat'd combined arrays across segments.
+        // Multi-segment graphs are produced by ordinary saves:
+        // `save_to_dir` seals a clean tail into a new seg_NNN whenever
+        // a prior save exists (see `save_disposition`).
         //
-        // Auxiliary per-segment data (conn_type_index_*, peer_count_*,
-        // edge_properties, column_stores, per-(type,prop) property
-        // indexes) is still loaded from segment 0 only in the N>1
-        // branch — that's a documented limitation on `SegmentCsr`
-        // pending phase 8. No code path produces an N>1 graph today,
-        // so no running workload sees it.
+        // Auxiliary per-segment data is handled unevenly in the N>1
+        // branch: conn_type_index_* and peer_count_* are merged across
+        // segments by `concat_segment_csrs`, while edge_properties,
+        // column_stores and the per-(type,prop) property indexes are
+        // still loaded from segment 0 only — a documented limitation
+        // on `SegmentCsr`.
         // Temp dir for legacy .zst decompression (only created if needed).
         // Lives inside graph dir so no external temp space required.
         let temp_dir = dir.join("_zst_cache");
@@ -1006,7 +1004,8 @@ impl DiskGraph {
                 1 => {
                     // Single-segment: stay on the direct mmap path using
                     // the graph-level `meta.*_len` values. No allocation,
-                    // zero overhead vs pre-phase-7 load.
+                    // and none of the concat work the multi-segment
+                    // branch below does.
                     let seg_dir = segs.into_iter().next().unwrap().1;
                     let csr = SegmentCsr {
                         node_slots: load_raw_or_zst(
@@ -1320,11 +1319,13 @@ fn load_compressed<T: crate::graph::storage::mapped::mmap_vec::MmapPod>(
 ///     (unchanged by concat).
 ///
 /// The auxiliary inverted indexes (`conn_type_index_*`, `peer_count_*`)
-/// and the `edge_properties` / `column_stores` / per-type property
-/// indexes are **not** bundled here — they remain loaded from segment 0
-/// only. That is a known limitation: a multi-segment write path would
-/// have to bundle them. No current code produces multi-segment graphs,
-/// so no existing workload sees the limitation today.
+/// are bundled per segment and merged by `concat_segment_csrs`. The
+/// `edge_properties` / `column_stores` / per-(type,prop) property
+/// indexes are **not** bundled here — they are loaded from segment 0
+/// only. Sealing flushes the new segment's edge properties back into
+/// seg_0's store and concat preserves global `edge_idx`, so edge
+/// properties survive; per-segment property indexes remain a known
+/// limitation.
 pub(crate) struct SegmentCsr {
     pub(crate) node_slots: MmapOrVec<super::csr::DiskNodeSlot>,
     pub(crate) out_offsets: MmapOrVec<u64>,
@@ -1332,9 +1333,8 @@ pub(crate) struct SegmentCsr {
     pub(crate) in_offsets: MmapOrVec<u64>,
     pub(crate) in_edges: MmapOrVec<super::csr::CsrEdge>,
     pub(crate) edge_endpoints: MmapOrVec<super::csr::EdgeEndpoints>,
-    // Phase 5: per-segment auxiliary indexes. Each segment carries its
-    // own inverted indexes; `concat_segment_csrs` merges them at load
-    // time.
+    // Per-segment auxiliary indexes. Each segment carries its own
+    // inverted indexes; `concat_segment_csrs` merges them at load time.
     pub(crate) conn_type_index_types: MmapOrVec<u64>,
     pub(crate) conn_type_index_offsets: MmapOrVec<u64>,
     pub(crate) conn_type_index_sources: MmapOrVec<u32>,
@@ -1604,7 +1604,7 @@ pub(crate) fn concat_segment_csrs(mut segments: Vec<SegmentCsr>) -> std::io::Res
                 in_offsets.try_push(in_edges.len() as u64)?;
             }
 
-            // ─── Phase 5: auxiliary index merge ───────────────────────────
+            // ─── Auxiliary index merge ────────────────────────────────────
             //
             // conn_type_index — per-type source-list union across segments.
             // Each segment's source list is globally sorted (segments own

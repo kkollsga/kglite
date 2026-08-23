@@ -103,11 +103,11 @@ pub struct ForkedGraph {
     /// at fork time. Complete, so reads never chain into the base for it.
     column_stores: FxHashMap<InternedKey, Arc<ColumnStore>>,
     /// Own, never shared with the base. Sharing would let the writer's
-    /// post-mutation counts be observed through the reader's snapshot (D2 R4).
+    /// post-mutation counts be observed through the reader's snapshot.
     peer_counts: RwLock<HashMap<u64, Arc<super::MemoryPeerCounts>>>,
     /// Statement-scoped inverse-op buffer. Lives *here*, so every undo entry
     /// reverses through this backend's `GraphWrite` and therefore lands in the
-    /// overlay — never in the shared base (D2 R3).
+    /// overlay — never in the shared base.
     undo: Option<Box<UndoJournal>>,
     /// Continues the base's mirror. Predictions must stay in step across the
     /// fork or the fold-back would allocate different slots.
@@ -140,7 +140,7 @@ impl ForkedGraph {
             appended: 0,
             column_stores,
             // Cold on purpose: correct-but-cold beats a cache shared with a
-            // reader's snapshot (D2 R4).
+            // reader's snapshot.
             peer_counts: RwLock::new(HashMap::new()),
             undo: None,
             slot_mirror,
@@ -241,7 +241,7 @@ impl ForkedGraph {
 
     /// Deep-copy the base and fold into the copy. Used when a write cannot be
     /// expressed in the overlay while a reader is still holding the base — the
-    /// pre-D2 cost, paid only on that write.
+    /// whole-graph copy the overlay exists to avoid, paid only on that write.
     pub(crate) fn materialise(&mut self) -> MemoryGraph {
         #[cfg(test)]
         super::backend::note_nodes_copied(self.base.inner().node_count());
@@ -689,9 +689,8 @@ impl GraphWrite for ForkedGraph {
         // right: the reader's base must keep the store it was forked with. It
         // is once per fork, not once per statement: the copy the overlay now
         // owns is uniquely held, so every later write mutates it in place. This
-        // is the one place the master legitimately forks after Phase 2, and it
-        // is why the write-site assertion in `columnar_write.rs` exempts a
-        // forked backend.
+        // is the one place the master legitimately forks, and it is why the
+        // write-site assertion in `columnar_write.rs` exempts a forked backend.
         if let Some((type_key, row_id)) = self.columnar_row_of(idx) {
             if let Some(store) = self.column_stores.get_mut(&type_key) {
                 Arc::make_mut(store).set(row_id, key, &value, None);

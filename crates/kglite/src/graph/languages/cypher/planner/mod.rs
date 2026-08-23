@@ -1,6 +1,6 @@
 //! Cypher query optimizer.
 //!
-//! Split (Phase 9):
+//! Submodules:
 //! - [`join_order`] — pattern-start node selection, selectivity-based reordering
 //! - [`index_selection`] — predicate pushdown into MATCH, equality/comparison helpers
 //! - [`cost_model`] — predicate / expression cost heuristics
@@ -71,7 +71,7 @@ type PassFn = fn(&mut CypherQuery, &PassCtx);
 /// wrapper, register here with a unique name, doc-comment the wrapper,
 /// add at least one query to `tests/test_cypher_differential.py`.
 ///
-/// ## `CALL { }` (CallSubquery) barrier audit (Phase 5)
+/// ## `CALL { }` (CallSubquery) barrier audit
 ///
 /// `Clause::CallSubquery` is an OPAQUE barrier to every pass below. A
 /// subquery's per-row cardinality is unknown at plan time and a
@@ -92,7 +92,7 @@ type PassFn = fn(&mut CypherQuery, &PassCtx);
 /// | `fuse_spatial_join` | safe-by-shape | Matches `(Match, Where)` adjacency. |
 /// | `reorder_match_clauses` | safe-by-shape | Reorders only WITHIN a contiguous span of `Clause::Match`; a CallSubquery ends the span (`_ => break`). |
 /// | `optimize_pattern_start_node` / `reorder_match_patterns` | safe-by-shape | Reorder patterns WITHIN one MATCH; never move clauses. CallSubquery hits `_ => continue`; its body vars don't enter bound_vars (heuristic-only anyway). |
-/// | `reorder_cyclic_pattern_edges` | safe-by-shape | Reorders edge elements WITHIN one MATCH pattern; never moves or spans clauses (added post-Phase-5 audit). |
+/// | `reorder_cyclic_pattern_edges` | safe-by-shape | Reorders edge elements WITHIN one MATCH pattern; never moves or spans clauses. |
 /// | `push_limit_into_match` | safe-by-shape | Matches `Match → [Where] → Return → Limit` adjacency; a CallSubquery breaks it. The `only_match` guard also bails if any MATCH is non-first. |
 /// | `push_limit_into_aggregate` | safe-by-shape | Matches `(Return\|With) → Limit` adjacency. |
 /// | `push_distinct_into_match` | safe-by-shape | Matches `Match → [Where] → Return` adjacency. |
@@ -731,11 +731,10 @@ fn pass_reorder_predicates_by_cost(query: &mut CypherQuery, _ctx: &PassCtx) {
     reorder_predicates_by_cost(query)
 }
 
-// Historical note: the fusion docstrings for `FusedCountAll`,
-// `FusedCountByType`, `FusedCountEdgesByType`, and
-// `FusedCountAnchoredEdges` moved to their respective fuse functions in
-// `src/graph/languages/cypher/planner/fusion.rs` during the Phase 9
-// split. See those functions for the current prose.
+// The fusion docstrings for `FusedCountAll`, `FusedCountByType`,
+// `FusedCountEdgesByType`, and `FusedCountAnchoredEdges` live on their
+// respective fuse functions in
+// `src/graph/languages/cypher/planner/fusion.rs`.
 
 // ============================================================================
 // Tests

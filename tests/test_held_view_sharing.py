@@ -39,7 +39,7 @@ EAGER_MATERIALISE_MAX_CELLS = 32
 #: `DISTINCT`, any of which disqualifies laziness outright. A view that
 #: materialises eagerly drops its reference and turns these tests green for the
 #: wrong reason — that exact substitution produced a 16x-too-good benchmark
-#: number during D2 and was caught only because a second holder disagreed.
+#: number, and was caught only because a second holder disagreed.
 WIDE_QUERY = "MATCH (n:Item) RETURN n.name, n.qty LIMIT 100"
 
 FIXTURE_NODES = 200
@@ -188,8 +188,8 @@ def test_a_held_view_survives_indexed_and_deleting_writes(graph: kglite.Knowledg
     )
 
     # A node removal rewrites existing nodes' adjacency, which an overlay cannot
-    # express, so it **flattens** — one copy, the pre-D2 cost, paid once per
-    # fork rather than once per statement (the deliberate Phase 2 boundary, see
+    # express, so it **flattens** — one whole copy, paid once per fork rather
+    # than once per statement (a deliberate boundary, see
     # `docs/rust/structural-sharing.md`). The reader is unaffected either way,
     # which is what this asserts.
     graph.cypher("MATCH (n:Item {id: 8}) DELETE n")

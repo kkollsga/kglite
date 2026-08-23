@@ -129,12 +129,12 @@ impl TypeSchema {
 }
 
 /// Serialize a `HashMap` with key-sorted entries. `.kgl` bytes are contractually
-/// reproducible (equivalent graphs → identical files; see the Phase 4 golden-hash
-/// test and the byte-determinism regression in `io/file_tests.rs`), but HashMap's
-/// per-process `RandomState` randomizes iteration order, so any map serialized
-/// raw breaks that. Wire-compatible in both directions: the payload is the same
-/// length-prefixed entry sequence, just ordered, and `HashMap` deserialization
-/// accepts any order.
+/// reproducible (equivalent graphs → identical files; see the `test_phase4_parity`
+/// golden-hash test and the byte-determinism regression in `io/file_tests.rs`),
+/// but HashMap's per-process `RandomState` randomizes iteration order, so any
+/// map serialized raw breaks that. Wire-compatible in both directions: the
+/// payload is the same length-prefixed entry sequence, just ordered, and
+/// `HashMap` deserialization accepts any order.
 pub(crate) fn serialize_sorted_map<K, V, S>(
     map: &HashMap<K, V>,
     serializer: S,
@@ -933,9 +933,10 @@ pub struct ConnectionTypeInfo {
 
 /// Custom serializer emits sorted keys for the two HashSet<String> and the
 /// HashMap<String, String> so that `.kgl` v3 saves stay byte-deterministic
-/// regardless of per-run HashMap seed. Phase 4's golden-hash test pinned the
-/// current digest; Phase 5 hardened the invariant so richer fixtures
-/// (multiple source/target types or property keys) don't slip through.
+/// regardless of per-run HashMap seed. The `test_phase4_parity` golden-hash test
+/// pins the current digest, and its fixtures deliberately carry multiple
+/// source/target types and property keys so an unsorted collection cannot slip
+/// through.
 impl Serialize for ConnectionTypeInfo {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;

@@ -1,4 +1,7 @@
-//! D1 — column-store ownership: divergence coverage and the ownership pins.
+//! Column-store ownership: divergence coverage and the ownership pins.
+//!
+//! What this file pins: **the storage backend is the sole owner of a type's
+//! `ColumnStore`.**
 //!
 //! # What "divergence" means here
 //!
@@ -9,46 +12,41 @@
 //! The backend is the sole owner now; these tests keep asking the same
 //! questions of the surviving route.
 //!
-//! This module forks them deliberately and then asks every public read surface
-//! what it sees. Two classes of assertion live here:
+//! Two classes of assertion live here:
 //!
 //! 1. **Cross-surface consistency** (`all_public_reads_agree_*`). Whatever a
-//!    read resolves to, *every* surface must resolve to the same thing. This
-//!    holds today (all of them read the node handle) and must still hold after
-//!    Phase 3 (all of them will read the backend's store). It is
-//!    phase-independent and is the real gate.
-//! 2. **Which replica wins** (`*_today_*`). Pinned as an exact fact with an
-//!    inversion instruction, in the style of `handle.rs`'s
-//!    `held_reader_forces_a_whole_graph_copy`. Phase 3 flips these; a failure
-//!    before then means an unintended ownership change.
+//!    read resolves to, *every* surface must resolve to the same thing. It is
+//!    independent of who owns the store, and it is the real gate.
+//! 2. **Which replica wins** (`*_today_*`). Pinned as an exact fact, in the
+//!    style of `handle.rs`'s `held_reader_forces_a_whole_graph_copy`. A
+//!    failure means an unintended ownership change.
 //!
-//! # Phase 2 — the mutation-proof gate
+//! # The mutation-proof gate
 //!
-//! Phase 1 re-routed every caller; Phase 2 makes that irreversible. Two layers:
+//! Two layers make single ownership irreversible:
 //!
-//! - **Compile-time.** A columnar node's store handle lives behind
-//!   `ColumnarRow`, whose `store` field is private to `graph::storage`, and the
-//!   `NodeData` property readers Phase 1 emptied are deleted. New code
-//!   *cannot* express a direct-route read; it fails to compile. The two named
-//!   escapes (`ColumnarRow::node_handle` / `::repoint`) are pinned site-for-site
-//!   by `no_code_reaches_a_node_held_column_store_handle`, so the
-//!   remaining direct-route set is an enumerated work list rather than a
-//!   guess.
-//! - **Runtime**, for what the compiler cannot see: a caller that *could* have
-//!   used the accessors but reads a `NodeData` it already holds. `poison_*`
-//!   makes the node handle and the backend's store disagree — exactly as
-//!   Phase 3 will — and one named test per caller class asserts the class
-//!   observes the authoritative value. Each was shown red by reverting that
-//!   one call site; see the commit body.
+//! - **Compile-time.** A columnar node carries a `ColumnarRow`, which holds a
+//!   row id and nothing else; there is no node-held store handle left for new
+//!   code to read, so a direct-route read cannot be expressed and fails to
+//!   compile. The names of the two accessors that used to expose one are
+//!   pinned against an *empty* expected set by
+//!   `no_code_reaches_a_node_held_column_store_handle`, so re-introducing
+//!   either anywhere in the crate turns that test red.
+//! - **Runtime**, for what the compiler cannot see: a caller reading a
+//!   `NodeData` it already holds, or an `Arc` of the store it captured before
+//!   a write. `poison_*` installs a *different* store behind the backend, and
+//!   one named test per caller class asserts the class observes the
+//!   authoritative value. Each was shown red by reverting that one call site;
+//!   see the commit body.
 //!
 //! # Why the divergence tests do not just assert "the master wins"
 //!
-//! Through Phases 1-2 the node handle *was* the read route on memory/mapped,
-//! and a re-point sweep pushed master writes back onto the nodes at
-//! end-of-clause; asserting master-authority then would have been a
-//! permanently red test, so the pins recorded the current answer instead.
-//! Phase 3 removed the handle, and those pins are inverted in place rather
-//! than deleted — each one names what it used to assert.
+//! While the node handle was still the read route on memory/mapped, a
+//! re-point sweep pushed master writes back onto the nodes at end-of-clause;
+//! asserting master-authority then would have been a permanently red test, so
+//! the pins recorded the answer of the day — hence the `*_today_*` names.
+//! Removing the handle inverted those pins in place rather than deleting
+//! them, and each one still names what it used to assert.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -170,14 +168,14 @@ fn master_is_uniquely_owned(graph: &DirGraph) -> bool {
 
 /// Write `value` straight into the type's master store.
 ///
-/// **Named for the pre-Phase-3 world and kept for continuity of the tests that
-/// call it, but it no longer diverges anything.** It used to fork the master
+/// **The name is a holdover and it no longer diverges anything**, but it is
+/// kept for continuity of the tests that call it. It used to fork the master
 /// away from the node-held handles, and `Arc::make_mut` succeeded at that
-/// precisely because the nodes held strong handles (D1 §1.2). Phase 3 deleted
-/// those handles, so the store is uniquely owned (see
-/// `master_is_uniquely_owned`) and `make_mut` now mutates it in place. The
-/// callers are consequently asserting "a read returns what the backend's store
-/// holds", not "the surfaces agree despite a divergence" — which is the
+/// precisely because the nodes held strong handles. Those handles are gone,
+/// so the store is uniquely owned (see `master_is_uniquely_owned`) and
+/// `make_mut` now mutates it in place. The callers are consequently asserting
+/// "a read returns what the backend's store holds", not "the surfaces agree
+/// despite a divergence" — which is the
 /// strongest statement still expressible, since the divergence it was built to
 /// create is no longer constructible.
 ///
@@ -326,7 +324,7 @@ fn all_public_reads_agree_under_master_node_divergence() {
     );
 }
 
-// ── 2. Which replica wins — pinned, inverted by Phase 3 ────────────────────
+// ── 2. Which replica wins — pinned ─────────────────────────────────────────
 
 /// The backend's store is the only store, so a master-only write is what every
 /// read returns — there is no node-held `Arc` left to shadow it with a stale
@@ -346,8 +344,8 @@ fn the_backend_store_is_the_only_read_route() {
 
 // ── 3. Writes reconverge the two replicas ──────────────────────────────────
 
-/// A columnar `SET` writes through the master and then re-points every node of
-/// the type. Post-Phase-3 there are no node handles to re-point: the write goes
+/// A columnar `SET` used to write through the master and then re-point every
+/// node of the type. There are no node handles left to re-point: the write goes
 /// into the store the backend owns, the journal releases its pre-image at
 /// commit, and every surface reads the new value.
 #[test]
@@ -484,11 +482,11 @@ fn save_and_reload_round_trips_the_observed_value() {
 
 // ── 4. Defect 2 — `maybe_spill_columns` reclaims nothing ───────────────────
 
-/// **D1 defect 2 — CLOSED, and inverted here** (was
+/// **Closed, and inverted here** (was
 /// `spill_forks_the_master_and_reclaims_nothing_today`).
 ///
 /// `maybe_spill_columns` calls `Arc::make_mut` on the type's store and then
-/// `materialize_to_files`. Before Phase 3 every node held a strong handle, so
+/// `materialize_to_files`. When every node still held a strong handle,
 /// `make_mut` *forked*: the master became the file-backed copy while all N
 /// nodes kept the pre-spill in-heap store alive, and — unlike the SET path —
 /// no sweep re-pointed them. Reads stayed correct; the memory the spill exists
@@ -611,7 +609,7 @@ fn property_ndv_counts_columnar_rows() {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-// Phase 2 — the mutation-proof gate
+// The mutation-proof gate
 // ══════════════════════════════════════════════════════════════════════════
 
 // ── The poison primitive ──────────────────────────────────────────────────
@@ -644,8 +642,8 @@ fn poison_row(
     PoisonGuard
 }
 
-/// Kept as a unit so the call sites read unchanged across Phase 2 → 3; the
-/// swap is permanent for the graph under test, which is built per test.
+/// Kept as a unit so the call sites read unchanged; the swap is permanent
+/// for the graph under test, which is built per test.
 struct PoisonGuard;
 
 /// Poison one row's property column.
@@ -1015,7 +1013,7 @@ fn no_code_reaches_a_node_held_column_store_handle() {
     );
 }
 
-// ── The save fast path (D1 risk 1) ────────────────────────────────────────
+// ── The save fast path ────────────────────────────────────────────────────
 
 /// Saving a freshly built graph must **not** rebuild the stores — and neither
 /// must saving it again.
@@ -1027,9 +1025,9 @@ fn no_code_reaches_a_node_held_column_store_handle() {
 /// used to *require* that, as the only way to tell a skipped rebuild from a
 /// graph that had never been columnar).
 ///
-/// The second half is the idempotence guard whose replacement reasoning D1
-/// risk 1 flagged as *believed* sufficient — counted rather than trusted,
-/// because losing the fast path costs a full O(N) rebuild on every save
+/// The second half is the idempotence guard: its replacement reasoning was
+/// only *believed* sufficient, so it is counted rather than trusted —
+/// losing the fast path costs a full O(N) rebuild on every save
 /// (~257 s at wiki100m).
 #[test]
 fn saving_a_freshly_built_graph_skips_the_rebuild() {
@@ -1136,8 +1134,8 @@ fn a_row_appended_out_of_index_order_is_detected_as_drift() {
 
 /// A one-row `SET` on a saved type must touch one row, whatever N is.
 ///
-/// The structural half of the perf claim (the timing half waits for Phase 5's
-/// release measurement): the deleted sweep was O(N_type) per clause, so the
+/// The structural half of the perf claim (the timing half belongs to a
+/// release-mode benchmark): the deleted sweep was O(N_type) per clause, so the
 /// observable is that a graph of 200 nodes and a graph of 20 nodes both leave
 /// every *other* row untouched and the master uniquely owned.
 #[test]
@@ -1388,7 +1386,7 @@ fn the_backend_store_is_the_only_read_route_on_mapped() {
 /// mechanism this file exists to guard.
 ///
 /// Red-first: holding a second `Arc` on the master across the statement — what
-/// the pre-Phase-2 `ColumnarHandles` journal capture did — forces `make_mut` to
+/// the old `ColumnarHandles` journal capture did — forces `make_mut` to
 /// fork and turns the pointer assertion red. Verified by doing exactly that.
 #[test]
 fn set_leaves_the_master_uniquely_owned_on_mapped() {

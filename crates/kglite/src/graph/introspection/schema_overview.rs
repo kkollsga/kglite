@@ -1036,7 +1036,7 @@ fn columnar_scan_rows(
 /// `NodeData::property_iter` route yielded **nothing** for columnar storage, so
 /// on a saved graph this pass contributed no values at all and the stats
 /// degraded to whatever the `type_schemas` pre-seed supplied — keys with a zero
-/// non-null count (D1 defect 1). `property_pairs` is the same complete route as
+/// non-null count. `property_pairs` is the same complete route as
 /// `property_pairs_named`, minus the per-key `String`.
 fn accumulate_property_values(
     graph: &DirGraph,

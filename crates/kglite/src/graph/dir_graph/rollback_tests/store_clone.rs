@@ -2,18 +2,19 @@
 
 use super::*;
 
-/// **The flipped Phase-1 pin** (was
+/// **The flipped defect pin** (was
 /// `a_columnar_statement_still_deep_clones_the_master_pinned_defect`).
 ///
-/// Until Phase 2 every mutating statement's first columnar write handed the
-/// undo journal an `Arc::clone` of the touched type's master `ColumnStore`,
-/// which made the `Arc::make_mut` two lines later deep-copy every column of
-/// that type — for a one-cell write. The journal dropped at commit, the
+/// Every mutating statement's first columnar write used to hand the undo
+/// journal an `Arc::clone` of the touched type's master `ColumnStore`, which
+/// made the `Arc::make_mut` two lines later deep-copy every column of that
+/// type — for a one-cell write. The journal dropped at commit, the
 /// refcount returned to one, and the next statement paid again. Measured on
 /// 0.15.14: a single-row `SET` cost 4.3 µs on a fresh 50k×12 graph and 328 µs
 /// on the same graph after `save()`, a 76× tax scaling with the type's row
-/// count. Phase 1 pinned that as `(1, 1)` so it could not vanish unobserved;
-/// this is the same test with the number the fix produces.
+/// count. This test first pinned that defect as `(1, 1)` so it could not
+/// vanish unobserved; it is now the same test with the number the fix
+/// produces.
 ///
 /// The mechanism now: the journal holds the changed cell's prior value
 /// (`UndoEntry::ColumnarCell`), never a handle on the store, so the master

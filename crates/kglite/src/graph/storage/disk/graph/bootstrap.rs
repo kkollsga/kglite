@@ -182,10 +182,10 @@ impl DiskGraph {
             independent_root: None,
             metadata_dirty: false,
             csr_sorted_by_type: false,
-            // Phase 5: `defer_csr = false` by default so one-off Cypher
-            // CREATE / MERGE inserts route directly to overflow_out /
-            // overflow_in + edge_endpoints, where `edges_directed` reads
-            // them immediately. Bulk loaders that want to batch edges in
+            // `defer_csr = false` by default so one-off Cypher CREATE /
+            // MERGE inserts route directly to overflow_out / overflow_in
+            // + edge_endpoints, where `edges_directed` reads them
+            // immediately. Bulk loaders that want to batch edges in
             // `pending_edges` and rebuild the CSR at the end (ntriples)
             // flip this to `true` on the freshly-constructed DiskGraph.
             // Previously the default-`true` path silently dropped
@@ -377,10 +377,10 @@ impl DiskGraph {
             independent_root: None,
             metadata_dirty: false,
             csr_sorted_by_type: false,
-            // Phase 5: `defer_csr = false` by default so one-off Cypher
-            // CREATE / MERGE inserts route directly to overflow_out /
-            // overflow_in + edge_endpoints, where `edges_directed` reads
-            // them immediately. Bulk loaders that want to batch edges in
+            // `defer_csr = false` by default so one-off Cypher CREATE /
+            // MERGE inserts route directly to overflow_out / overflow_in
+            // + edge_endpoints, where `edges_directed` reads them
+            // immediately. Bulk loaders that want to batch edges in
             // `pending_edges` and rebuild the CSR at the end (ntriples)
             // flip this to `true` on the freshly-constructed DiskGraph.
             // Previously the default-`true` path silently dropped

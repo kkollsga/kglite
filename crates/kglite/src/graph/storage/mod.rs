@@ -6,9 +6,9 @@
 //! Per-backend trait impls live in [`crate::graph::storage::impls`].
 //!
 //! - [`MemoryGraph`] — heap-resident, petgraph `StableDiGraph`.
-//! - [`MappedGraph`] — mmap-columnar-spill variant (Phase 5 promoted
-//!   this from a type alias to a distinct struct so its trait impls
-//!   can diverge from memory's once the column ownership differs).
+//! - [`MappedGraph`] — mmap-columnar-spill variant (a distinct struct
+//!   rather than a type alias, so its trait impls can diverge from
+//!   memory's where the column ownership differs).
 //! - [`crate::graph::storage::disk::graph::DiskGraph`] — CSR + mmap
 //!   columns.
 //!
@@ -96,13 +96,12 @@ impl StrField<'_> {
 
 /// Read-side interface shared by every storage backend.
 ///
-/// Phase 0.3 seeded this trait with counts + single-property reads.
-/// Phase 1 expanded it to cover iteration, neighbour lookup, backend-kind
-/// predicates, and disk-only helpers. Phase 3 converted iterator-returning
-/// methods to GATs (associated types with lifetime parameters) and promoted
-/// the remaining inherent edge accessors (`edges`, `edge_references`,
-/// `edge_weight`, `edge_indices`, `find_edge`, `edges_connecting`,
-/// `edge_weights`) onto the trait.
+/// Covers counts and single-property reads, iteration, neighbour lookup,
+/// backend-kind predicates, and disk-only helpers. Iterator-returning
+/// methods use GATs (associated types with lifetime parameters), and the edge
+/// accessors (`edges`, `edge_references`, `edge_weight`, `edge_indices`,
+/// `find_edge`, `edges_connecting`, `edge_weights`) live on the trait rather
+/// than being inherent on any backend.
 ///
 /// Implemented for [`crate::graph::schema::GraphBackend`] and directly for
 /// the mapped and disk backends where their storage-specific iterators matter.
@@ -538,8 +537,7 @@ pub trait GraphRead {
 
 /// Write-side interface shared by every storage backend.
 ///
-/// Phase 2 of the 0.8.0 refactor. Pulls together the
-/// mutation methods that were inherent on
+/// Pulls together the mutation methods that were once inherent on
 /// [`crate::graph::schema::GraphBackend`] so write-path files can
 /// dispatch through the trait instead of matching on the backend
 /// variant.
@@ -748,13 +746,13 @@ pub mod recording;
 // resolving for every existing call site.
 pub use mapped::{MappedGraph, MappedPropertyIndex, MappedTypeIndex};
 
-// Phase-6 recording backend — re-exported so downstream consumers can
-// construct it without reaching into `storage::recording::`. DO NOT REMOVE
-// despite unused-import warnings; the centralized source-quality gate asserts
-// this exact line survives.
 #[cfg(test)]
 #[path = "column_ownership_tests.rs"]
 mod column_ownership_tests;
 
+// Recording backend — re-exported so downstream consumers can
+// construct it without reaching into `storage::recording::`. DO NOT REMOVE
+// despite unused-import warnings; the centralized source-quality gate asserts
+// this exact line survives.
 #[allow(unused_imports)]
 pub use recording::RecordingGraph;

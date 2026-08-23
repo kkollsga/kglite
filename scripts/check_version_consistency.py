@@ -1982,7 +1982,7 @@ BREAKING_SYMBOLS_BY_VERSION: dict[str, list[str]] = {
         "TypeLookup::from_id_indices",
         "kglite_value_to_json",
     ],
-    # 0.15.9 — D1/D2 Rust-API surgery (semver-major, shipped in a patch per
+    # 0.15.9 — Rust-API surgery (semver-major, shipped in a patch per
     # project policy; Python and C surfaces were additive-only that release).
     "0.15.9": [
         "NodeData::get_property",

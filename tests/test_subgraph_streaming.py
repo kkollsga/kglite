@@ -153,7 +153,7 @@ class TestPassAFileOutput:
         out_path = os.path.join(disk_dir, "kept_edges.tmp")
         stats = g._scan_edges_filtered(edge_types=["AUTHORED_BY"], kept_edges_out=out_path)
 
-        # Phase 3 RankIndex built from Pass A's bitset must produce the
+        # The RankIndex built from Pass A's bitset must produce the
         # same kept count as Bitset::count_ones — sanity check the rank
         # primitive end-to-end on real disk data.
         assert stats["rank_kept_count"] == stats["kept_node_count"]

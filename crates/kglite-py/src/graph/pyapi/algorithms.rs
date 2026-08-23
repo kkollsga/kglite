@@ -1787,14 +1787,15 @@ impl KnowledgeGraph {
         Ok(result_dict.into())
     }
 
-    /// [DEBUG] Phase 2 spike for `save_subset`: drives Pass A of the
-    /// streaming disk-to-disk subgraph filter and returns scan stats.
+    /// [DEBUG] Drives Pass A of the streaming disk-to-disk subgraph
+    /// filter and returns scan stats.
     ///
     /// Walks the source disk graph's `edge_endpoints.bin` sequentially,
     /// filters by `edge_types`, and builds the kept-nodes bitset. No
     /// output files are written. The leading underscore marks this as an
-    /// unstable API surface; the public `save_subset` ships in a later
-    /// phase.
+    /// unstable surface with no compatibility promise — it exists to
+    /// measure and differentially check the scan pass on its own, apart
+    /// from the public `save_subset`.
     ///
     /// Errors when the source graph is not disk-backed — Memory and
     /// Mapped graphs already have a fast `to_subgraph().save()` path and
@@ -1852,9 +1853,9 @@ impl KnowledgeGraph {
                 })?;
 
                 // Build the rank index from the bitset we got back —
-                // exercises the Phase 3 primitive end-to-end on real
-                // disk data, and surfaces kept_count for differential
-                // checks against `count_ones`.
+                // exercises `RankIndex` end-to-end on real disk data,
+                // and surfaces kept_count for differential checks
+                // against `count_ones`.
                 let rank = RankIndex::from_bitset(result.kept_nodes);
 
                 dict.set_item("kept_node_count", result.stats.kept_node_count)?;

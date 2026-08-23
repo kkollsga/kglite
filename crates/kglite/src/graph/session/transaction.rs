@@ -202,8 +202,8 @@ impl Session {
     /// signal that every mutation path routes through. Detection is
     /// *post*-execution: the fork still happens, because the closure needs a
     /// `&mut DirGraph` and the atomicity guarantee (an error publishes
-    /// nothing) depends on mutating a copy. Since D2 that fork is O(changes),
-    /// and skipping the swap is what the caller actually observes.
+    /// nothing) depends on mutating a copy. That fork is O(changes), and
+    /// skipping the swap is what the caller actually observes.
     ///
     /// # Not for durable sessions
     ///

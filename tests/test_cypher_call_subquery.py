@@ -68,7 +68,7 @@ def tagged():
 
 
 # ──────────────────────────────────────────────────────────────────
-# Phase 3 — uncorrelated execution
+# Uncorrelated execution
 # ──────────────────────────────────────────────────────────────────
 
 
@@ -167,7 +167,7 @@ class TestUncorrelatedScoping:
 
 
 # ──────────────────────────────────────────────────────────────────
-# Phase 4 — correlated execution (per-row inner join)
+# Correlated execution (per-row inner join)
 # ──────────────────────────────────────────────────────────────────
 
 
@@ -421,7 +421,7 @@ class TestCorrelatedCallAfterOptionalMatch:
 
 
 # ──────────────────────────────────────────────────────────────────
-# Phase 1/2 — parse errors and structural rejections (unchanged)
+# Parse errors and structural rejections
 # ──────────────────────────────────────────────────────────────────
 
 

@@ -112,8 +112,8 @@ pub(crate) const MAX_CHAIN_DEPTH: u16 = 32;
 ///
 /// Every test below is written in terms of `MAX_CHAIN_DEPTH`, which makes them
 /// *any*-value tests: set it to 1 or to 4096 and they all still pass, because
-/// the expectations move with it. The number itself is the finding — the D2
-/// Phase 3 profile above rejects 8 (a ~5x-median spike in one round in eight)
+/// the expectations move with it. The number itself is the finding — the
+/// profile above rejects 8 (a ~5x-median spike in one round in eight)
 /// and rejects raising it past 32 (128 measured identically and only deepens
 /// the read-miss probe) — so the number gets a check of its own. Changing it is
 /// legitimate; changing it *without a new measurement* is what this stops.

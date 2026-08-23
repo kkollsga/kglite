@@ -934,7 +934,7 @@ pub(super) fn write_conn_type_index(
     idx_offsets.try_push(offset)?;
 
     // Trim each file to exact element count — `MmapOrVec::mapped` has a
-    // 64-element minimum. Phase-7's multi-segment concat uses file-size
+    // 64-element minimum. The multi-segment concat uses file-size
     // inference on these files (via `load_raw_or_zst_optional`), so stray
     // padding would poison the inverted-index types array.
     idx_types.trim_to_logical_length()?;
@@ -1175,7 +1175,7 @@ mod tests {
         assert!(dg.lookup_peer_counts(missing).is_none());
     }
 
-    // ── Phase 1 regression: merge-sort builder via csr_build module ──
+    // ── Regression: merge-sort builder via csr_build module ──
 
     /// The merge-sort path (now plumbed through `csr_build::build_csr_files`)
     /// must produce a logically equivalent CSR to the partitioned default

@@ -4,7 +4,7 @@
 //!
 //! A columnar node's properties live in a per-type
 //! [`ColumnStore`](crate::graph::storage::column_store::ColumnStore) that the
-//! **storage backend owns**. Before D1 three `Arc`s pointed at the same store —
+//! **storage backend owns**. Three `Arc`s once pointed at the same store —
 //! the node's own handle, a `DirGraph`-level map, and `DiskGraph`'s — so a read
 //! resolved *one particular replica* rather than the owner, which is how two
 //! shipped defects arose (an empty columnar `property_iter`, and a spill that
@@ -14,9 +14,9 @@
 //! `NodeView` is the single place a node's property read resolves its store.
 //! Callers ask the storage backend for a view
 //! ([`GraphRead::node_view`](crate::graph::storage::GraphRead::node_view)) and
-//! then read through it. When the backend becomes the sole owner of the stores,
-//! only [`NodeView::from_node_data`] and the backend accessors change; every
-//! caller keeps compiling and keeps its meaning.
+//! then read through it — which is what let the backend become the sole owner
+//! of the stores without a single caller changing: only `NodeView`'s
+//! constructor and the backend accessors moved.
 //!
 //! # The columnar completeness contract
 //!

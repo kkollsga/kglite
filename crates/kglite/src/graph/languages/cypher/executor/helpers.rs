@@ -837,7 +837,7 @@ fn collect_node_properties<S: PropertySink>(
     // (direct `n.updated_at` still resolves via the property path).
     // Complete for every storage variant: `NodeView` enumeration reads the
     // node's column store on saved graphs, where `NodeData::property_iter`
-    // used to yield nothing (D1 defect 1). The columnar completion pass
+    // used to yield nothing. The columnar completion pass
     // further down stays — it recovers schema-declared properties that the
     // row itself does not carry.
     let unresolved_key = sink.absorb_stored(node, graph);

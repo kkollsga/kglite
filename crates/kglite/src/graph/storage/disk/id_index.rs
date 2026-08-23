@@ -405,7 +405,7 @@ impl Clone for IdIndexStore {
     ///
     /// Instead of deep-copying a map with one entry per node of every
     /// materialised type — 3.7 ms at 1M, and 90% of what a plain graph's fork
-    /// still cost after Phase 2 — this converts each of *our own* entries into
+    /// still cost at that point — this converts each of *our own* entries into
     /// a shared base in place and hands the child an empty delta over the same
     /// allocation. Both graphs then read identical content; only the
     /// representation changed.

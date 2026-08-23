@@ -608,8 +608,8 @@ impl KnowledgeGraph {
 /// **Cost when other `Arc<DirGraph>` references exist** (a snapshot held by an
 /// open transaction, a clone held by a still-alive `ResultView`, a `freeze()`):
 ///
-/// * **Memory mode — a copy-on-write fork, not a copy.** D2 replaced the
-///   whole-graph clone this warning used to describe: the backend forks to an
+/// * **Memory mode — a copy-on-write fork, not a copy.** Instead of the
+///   whole-graph clone this warning used to describe, the backend forks to an
 ///   overlay over the shared data and the indexes layer over shared levels, so
 ///   the write is O(write) and the overlay folds back on the first write after
 ///   the last reader drops. See `docs/rust/structural-sharing.md`, and
@@ -650,8 +650,8 @@ pub(crate) fn make_dir_graph_mut_preserving_lineage(arc: &mut Arc<DirGraph>) -> 
     // their own. Per entry this is `Arc::get_mut` + an O(delta) merge, so it
     // is a probe when nothing is shared.
     graph.id_indices.try_compact();
-    // ...and for `type_indices`, whose buckets are stacks of shared levels
-    // (D2). Per bucket this is an `Arc::get_mut` probe plus an O(delta) merge.
+    // ...and for `type_indices`, whose buckets are stacks of shared levels.
+    // Per bucket this is an `Arc::get_mut` probe plus an O(delta) merge.
     graph.type_indices.try_compact();
     // ...and the three user index families, same mechanism over their
     // `value -> members` maps (`dir_graph/index_layer.rs`, and
@@ -973,8 +973,8 @@ mod held_reference_clone_tests {
     /// post-write one, with the writer's edits landing nowhere the reader can
     /// see them.
     ///
-    /// This is the semantic contract the whole programme exists to preserve.
-    /// Before D2 it held for the *expensive* reason (the reader owned a private
+    /// This is the semantic contract copy-on-write forking exists to preserve.
+    /// It used to hold for the *expensive* reason (the reader owned a private
     /// deep copy); it must now hold for the cheap one.
     #[test]
     fn a_held_reader_never_observes_the_writers_edits() {

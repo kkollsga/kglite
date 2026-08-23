@@ -183,7 +183,7 @@ impl CypherParser {
     }
 
     // ========================================================================
-    // UNWIND / UNION (Phase 3 stubs)
+    // UNWIND / UNION
     // ========================================================================
 
     pub(super) fn parse_unwind_clause(&mut self) -> Result<Clause, String> {

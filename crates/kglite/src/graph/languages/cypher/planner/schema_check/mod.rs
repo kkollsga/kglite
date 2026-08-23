@@ -1177,8 +1177,8 @@ mod tests {
     #[test]
     fn tolerates_unknown_node_type() {
         // `MATCH (n:Nonexistent) RETURN n` is valid Cypher — returns 0
-        // rows. Phase 3 will surface a "did you mean?" hint via
-        // diagnostics rather than rejecting.
+        // rows, so validation must not reject it. The typo is surfaced
+        // non-fatally instead, by `collect_unknown_pattern_warnings`.
         let g = graph_with_schema();
         let q = parse_cypher("MATCH (n:person) RETURN n").unwrap();
         assert!(validate_schema(&q, &g).is_ok());

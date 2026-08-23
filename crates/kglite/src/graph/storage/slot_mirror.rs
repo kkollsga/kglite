@@ -16,11 +16,11 @@
 //! programme (`docs/rust/structural-sharing.md`), because a gap produces wrong
 //! data rather than a crash.
 //!
-//! This module is Phase 1's answer, landed a phase early **on purpose**: it
-//! costs a `Vec` push/pop per node/edge add/remove today and buys a debug
-//! assertion that validates the prediction against real petgraph behaviour on
-//! every insert the whole test suite performs — 1500 Rust tests and the entire
-//! Python suite — *before* anything depends on it being right.
+//! This module is the answer, and it deliberately landed **before anything
+//! depended on it**: it costs a `Vec` push/pop per node/edge add/remove and
+//! buys a debug assertion that validates the prediction against real petgraph
+//! behaviour on every insert the whole test suite performs — 1500 Rust tests
+//! and the entire Python suite.
 //!
 //! ## How petgraph behaves, and why a `Vec` mirrors it
 //!

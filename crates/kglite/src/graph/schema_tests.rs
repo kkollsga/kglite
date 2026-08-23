@@ -848,8 +848,8 @@ mod maintenance_tests {
     /// node.
     ///
     /// Replaces `test_columnar_serialize_roundtrip`, which serialized the
-    /// backend directly and expected properties in the topology stream. D1
-    /// Phase 3 made that impossible: the store belongs to the backend, and
+    /// backend directly and expected properties in the topology stream. That is
+    /// no longer possible: the store belongs to the backend, and
     /// `PropertyStorage` — which is what serde sees — carries only a row id.
     /// `write_kgl_to` therefore writes columns in their own sections and sets
     /// `StripPropertiesGuard` while serializing topology; the `Serialize` impl

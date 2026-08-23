@@ -448,7 +448,7 @@
     {
       "path": "crates/kglite/src/graph/storage/disk/graph_persist.rs",
       "qualified_name": "crate::DiskGraph::load_from_dir",
-      "lines": 269,
+      "lines": 268,
       "branches": 25,
       "nesting": 4
     },

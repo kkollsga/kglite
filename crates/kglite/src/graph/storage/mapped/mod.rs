@@ -24,14 +24,13 @@ use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::{Arc, RwLock};
 
-/// Memory-mapped in-memory graph backend — Phase 5 promoted this to a
-/// distinct struct (previously a type alias for [`MemoryGraph`]) so
-/// per-backend trait impls can diverge. 0.8.15 added a lazy per-
-/// connection-type index to accelerate typed edge traversals and
-/// aggregations — `MappedGraph` builds per-type inverted indexes on
-/// first use, mirroring the `conn_type_index_*` / `peer_count_*`
-/// structures `DiskGraph` persists on save but materialising them
-/// in-memory from `StableDiGraph::edge_references()`.
+/// Memory-mapped in-memory graph backend — a distinct struct rather than
+/// a type alias for `MemoryGraph`, so per-backend trait impls can
+/// diverge. 0.8.15 added a lazy per-connection-type index to accelerate
+/// typed edge traversals and aggregations — `MappedGraph` builds per-type
+/// inverted indexes on first use, mirroring the `conn_type_index_*` /
+/// `peer_count_*` structures `DiskGraph` persists on save but
+/// materialising them in-memory from `StableDiGraph::edge_references()`.
 #[derive(Debug, Default)]
 pub struct MappedGraph {
     pub(crate) inner: StableDiGraph<NodeData, EdgeData>,
@@ -69,7 +68,7 @@ pub struct MappedGraph {
     /// the same name and [`crate::graph::storage::slot_mirror`]. Mapped carries
     /// it for the same reason it carries an undo journal: `inner` is the same
     /// heap `StableDiGraph`, so leaving it off would make Mapped the arm that is
-    /// silently half-done (D2 risk R5).
+    /// silently half-done.
     pub(crate) slot_mirror: SlotMirror,
 }
 

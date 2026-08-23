@@ -193,14 +193,14 @@ class TestSpillToDisk:
 # re-enforces the limit afterwards. Measured: 1.65 MB → 7.99 MB against a 1 MB
 # limit, `columnar_is_mapped` True → False, after 20 single-row SETs.
 #
-# Fixed in two steps by the shape-convergence program: Phase 2's cell-grained
-# undo journal removed the whole-store clone, and Phase 4 made a write to a
-# mapped column write *through* the mapping (`MmapOrVec::set` into the
-# `map_mut` region) instead of pulling that column onto the heap. The spill
-# files are process-owned temp files — a mapped load copies each column into
-# its own `temp_dir/column_N.ext` first — so the byte belongs in them.
+# Fixed in two steps: the cell-grained undo journal removed the whole-store
+# clone, and a write to a mapped column now goes *through* the mapping
+# (`MmapOrVec::set` into the `map_mut` region) instead of pulling that column
+# onto the heap. The spill files are process-owned temp files — a mapped load
+# copies each column into its own `temp_dir/column_N.ext` first — so the byte
+# belongs in them.
 #
-# Phase 5(ii) closed the last hole, pinned below in
+# A third fix closed the last hole, pinned below in
 # `test_new_column_from_set_stays_inside_the_limit`: a column that does not
 # exist yet is now typed from declared metadata or the value in hand rather
 # than born `Mixed`, so it can be spilled, and a completed mutating statement

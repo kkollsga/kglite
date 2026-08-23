@@ -1429,8 +1429,8 @@ impl<'a> PatternExecutor<'a> {
     /// One implementation for every backend. The disk backend used to take a
     /// separate "columnar fast path" whose distinguishing property was
     /// resolving the node's column store once per node rather than once per
-    /// property read; since D1 that is what `NodeView` does for every backend,
-    /// so the two bodies had become identical.
+    /// property read; that is now what `NodeView` does for every backend, so
+    /// the two bodies had become identical.
     fn node_matches_properties(
         &self,
         idx: NodeIndex,

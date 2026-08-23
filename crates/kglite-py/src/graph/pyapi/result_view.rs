@@ -2,9 +2,9 @@
 // Lazy ResultView — Polars-style result container.
 // Data stays in Rust and converts to Python only on access.
 //
-// Moved from src/graph/languages/cypher/result_view.rs in Phase 8 to bring
-// all #[pyclass] definitions under pyapi/. The Cypher-internal preprocessing
-// logic stays in `languages/cypher/py_convert.rs`; we import it here.
+// Holds the #[pyclass] itself, like every other definition under pyapi/.
+// The Cypher-internal preprocessing logic stays in
+// `languages/cypher/py_convert.rs`; we import it here.
 
 use crate::datatypes::values::Value;
 use crate::graph::languages::cypher::py_convert::{
@@ -724,8 +724,8 @@ impl ResultView {
     /// ```
     fn to_list(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let list = pyo3::types::PyList::empty(py);
-        // Intern the column-name dict keys ONCE and reuse them for every row
-        // (Phase 2: avoids re-creating the same Python strings per cell).
+        // Intern the column-name dict keys ONCE and reuse them for every row,
+        // which avoids re-creating the same Python strings per cell.
         let keys: Vec<pyo3::Bound<'_, pyo3::types::PyString>> = self
             .columns
             .iter()

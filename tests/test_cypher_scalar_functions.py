@@ -87,7 +87,7 @@ SCALAR_CASES: list[tuple[str, str, object]] = [
     ("col_range", "RETURN range(1,5) AS x", [1, 2, 3, 4, 5]),
     ("col_coalesce", "RETURN coalesce(null,7) AS x", 7),
     # NOTE: reverse([...]) on a list is exercised in test_reverse_list below
-    # (it was a bug, fixed in the Phase-1b commit).
+    # (it was a bug, since fixed).
     # ── temporal (see also test_v0_9_03_date_functions.py) ──
     ("tmp_date", "RETURN toString(date('2020-01-15')) AS x", "2020-01-15"),
     ("tmp_add_days", "RETURN toString(add_days(date('2020-01-01'),10)) AS x", "2020-01-11"),

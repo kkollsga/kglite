@@ -2498,9 +2498,9 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (p:Person) RETURN p {.*} AS m ORDER BY m.id",
         None,
     ),
-    # ── CALL { } uncorrelated subqueries (Phase 3) ──
+    # ── CALL { } uncorrelated subqueries ──
     # The body runs once and its rows cartesian-product with the outer
-    # stream. CALL { } is opaque to the optimizer passes this phase (the
+    # stream. CALL { } is opaque to the optimizer passes (the
     # body is optimized once locally), so these entries validate that the
     # run-once + cartesian-combine path is deterministic across the
     # optimizer-on / optimizer-off outer runs.
@@ -2530,7 +2530,7 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "CALL { CALL { MATCH (n:Person) RETURN count(n) AS c } RETURN c AS cc } RETURN cc",
         None,
     ),
-    # ── CALL { } correlated subqueries (Phase 4) ──
+    # ── CALL { } correlated subqueries ──
     # The body is planned once and executed per outer row, seeded with the
     # imported variables only. The unoptimized run is the oracle for the
     # optimized run; both must agree on the inner-join cardinality + the
@@ -2587,7 +2587,7 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "RETURN p.name AS pn, colleagues ORDER BY pn",
         None,
     ),
-    # ── CALL { } cross-clause barrier (Phase 5) ──
+    # ── CALL { } cross-clause barrier ──
     # These shapes would diverge optimized-vs-naive if a planner pass were
     # to treat CallSubquery as transparent — fusing through it, reordering
     # a MATCH across it, or pushing LIMIT/predicates past it. Each pairs a
@@ -2676,7 +2676,7 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "RETURN c.name AS cn, pc ORDER BY cn LIMIT 2",
         None,
     ),
-    # ── CALL { } Neo4j-conformance shapes (Phase 6) ──
+    # ── CALL { } Neo4j-conformance shapes ──
     # These target the five shapes called out in the design's §5 Neo4j
     # conformance plan. They flow into scripts/cypher_conformance.py (which
     # imports DIFFERENTIAL_QUERIES) automatically — the next
@@ -4573,10 +4573,10 @@ def test_mutation_optimized_matches_naive(name: str, query: str) -> None:
 # Every corpus above runs on a *fresh* graph, whose nodes hold row storage
 # (`Map` / `Compact`). The moment a graph is saved it converts to per-type
 # column stores and keeps that shape for the rest of its life — so the write
-# paths a real deployment exercises are the columnar ones, and until D1 none of
-# them were in this corpus.
+# paths a real deployment exercises are the columnar ones, which the corpora
+# above never reach.
 #
-# The shapes here are the ones the D1 programme touches: a multi-row `SET` and
+# The shapes here are the ones that path touches: a multi-row `SET` and
 # `REMOVE` against a saved type (which write through the per-type master store
 # and then re-point every node's handle), `MERGE … ON MATCH SET` over several
 # rows (one `execute_set` per row), and `SET n = {…}` (which enumerates the
@@ -4618,7 +4618,7 @@ COLUMNAR_MUTATION_QUERIES: list[tuple[str, str, str]] = [
     ),
     (
         # `SET n = {…}` enumerates the node's existing property keys to clear
-        # them — the path that read an empty key set on a saved graph before D1.
+        # them — the path that once read an empty key set on a saved graph.
         "columnar_set_map_replace",
         "MATCH (p:Person {person_id: 1}) SET p = {name: 'A', age: 99} RETURN p.age AS age",
         "MATCH (p:Person) RETURN p.person_id AS pid, p.age AS age, p.city AS city ORDER BY pid",

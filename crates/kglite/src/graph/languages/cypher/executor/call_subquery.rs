@@ -1,23 +1,23 @@
 //! Cypher executor — `CALL { ... }` subquery execution.
 //!
-//! Phase 3 ships the **uncorrelated** path (`import.is_empty()`): the
-//! body runs exactly once via a fresh sub-executor over the same graph,
-//! and its result rows are cartesian-producted with the outer row stream
-//! (§1.1 of `dev_workfolder/dev-documentation/design/call-subqueries.md`). The body sees
+//! The **uncorrelated** path (`import.is_empty()`): the body runs exactly
+//! once via a fresh sub-executor over the same graph, and its result rows
+//! are cartesian-producted with the outer row stream (§1.1 of
+//! `dev_workfolder/dev-documentation/design/call-subqueries.md`). The body sees
 //! NO outer variables (§1.2 rule 1 — a fresh, empty executor scope); only
 //! the body's terminal `RETURN` columns flow back into the outer scope.
 //!
-//! Phase 4 ships the **correlated** path (`!import.is_empty()`, Strategy
-//! B1 / §4): the body is planned ONCE, then executed once per outer row
-//! against a seed carrying ONLY the imported variables — preserving each
+//! The **correlated** path (`!import.is_empty()`, Strategy B1 / §4): the
+//! body is planned ONCE, then executed once per outer row against a seed
+//! carrying ONLY the imported variables — preserving each
 //! import's binding kind (node → node binding, edge → edge binding,
 //! projected value → projected). The subquery's result rows are
 //! inner-joined back to *that* outer row; zero rows drops the outer row
 //! (§1.3), an aggregating body always returns one row (count = 0) so the
 //! outer row survives.
 //!
-//! Phase 5 moved body OPTIMIZATION into the planner: this module no longer
-//! optimizes bodies. `planner::pass_optimize_nested_queries` recurses into
+//! Body OPTIMIZATION belongs to the planner: this module does not
+//! optimize bodies. `planner::pass_optimize_nested_queries` recurses into
 //! every `CALL { }` body once at plan time (import-aware: it disables the
 //! seed-ignoring fusion passes for correlated bodies that anchor on an
 //! imported variable) and the executor runs the body exactly as planned.
@@ -60,10 +60,10 @@ impl<'a> CypherExecutor<'a> {
         result_set: ResultSet,
         declared: &std::collections::HashSet<String>,
     ) -> Result<ResultSet, String> {
-        // Import validation (deferred from Phase 2 — needs the outer scope,
-        // available only now). Every imported name must be *declared* by a
-        // clause preceding the CALL — NOT merely "present as a binding on
-        // the first row". An upstream OPTIONAL MATCH that missed leaves its
+        // Import validation needs the outer scope, available only here.
+        // Every imported name must be *declared* by a clause preceding the
+        // CALL — NOT merely "present as a binding on the first row". An
+        // upstream OPTIONAL MATCH that missed leaves its
         // variable declared-but-absent (null) on that row; the engine
         // represents the miss as the binding being absent from the row, so
         // probing a row can't tell "never declared" (typo → error) from
@@ -308,8 +308,8 @@ impl<'a> CypherExecutor<'a> {
         //
         // The body is ALREADY optimized: the planner's
         // `pass_optimize_nested_queries` recurses into `CALL { }` bodies at
-        // plan time (Phase 5). The executor runs the body as planned and
-        // does NOT re-optimize — so a `disable_optimizer=True` outer query,
+        // plan time. The executor runs the body as planned and does NOT
+        // re-optimize — so a `disable_optimizer=True` outer query,
         // which disables that recursion, leaves the body naive too (the
         // differential corpus relies on this for body-level coverage).
         let sub = CypherExecutor::with_params(self.graph, self.params, self.deadline)
@@ -449,9 +449,9 @@ fn splice_subquery_columns(row: &mut ResultRow, sub_row: &[Value], sub_columns: 
     }
 }
 
-// `import_pattern_anchors` and `seed_ignoring_fusion_passes` moved to the
-// planner (`planner::mod`) in Phase 5 — they encode the plan-time
-// seed-ignoring-fusion decision, which the planner now OWNS. The executor
-// re-uses `import_pattern_anchors` for per-row NULL-anchor detection via
-// the planner re-export.
+// `import_pattern_anchors` and `seed_ignoring_fusion_passes` live in the
+// planner (`planner::mod`) — they encode the plan-time seed-ignoring-fusion
+// decision, which the planner OWNS. The executor re-uses
+// `import_pattern_anchors` for per-row NULL-anchor detection via the
+// planner re-export.
 use crate::graph::languages::cypher::planner::import_pattern_anchors;

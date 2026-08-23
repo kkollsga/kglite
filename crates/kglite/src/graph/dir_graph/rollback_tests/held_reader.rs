@@ -6,10 +6,10 @@ use super::*;
 /// A failed statement run while a reader is holding the graph must leave
 /// **both** graphs exactly as they were.
 ///
-/// This is D2 risk R3, and it is the one unforgivable failure mode in the whole
-/// programme: every `UndoEntry` is keyed on a `NodeIndex`/`EdgeIndex` and is
-/// reversed through `GraphWrite`. On a `Forked` backend that reversal must land
-/// in the *overlay*. If any of it reached the shared base instead, the reader's
+/// This is the one unforgivable failure mode in the whole held-reader design:
+/// every `UndoEntry` is keyed on a `NodeIndex`/`EdgeIndex` and is reversed
+/// through `GraphWrite`. On a `Forked` backend that reversal must land in the
+/// *overlay*. If any of it reached the shared base instead, the reader's
 /// snapshot would silently acquire a rolled-back write — no error, no crash,
 /// and no other test in this file would see it, because every other test owns
 /// its graph outright.
@@ -119,7 +119,7 @@ fn a_rollback_while_a_reader_is_held_touches_neither_graph() {
 ///
 /// Both directions are pinned: the fallback must fire *and* cost exactly one
 /// whole-graph copy, so neither "it forked after a delete" (slot identity
-/// broken) nor "it copied per statement" (the cliff D2 removed) can pass.
+/// broken) nor "it copied per statement" (the cliff since removed) can pass.
 #[test]
 fn a_write_under_a_held_reader_after_a_delete_takes_the_clone_path() {
     use crate::graph::handle::make_dir_graph_mut;
@@ -196,19 +196,19 @@ fn a_write_under_a_held_reader_after_a_delete_takes_the_clone_path() {
 /// — and the one write it cannot express must cost exactly one copy, not one
 /// per statement.
 ///
-/// D2 risk R2: `journal_covers` has exactly one term left,
-/// `supports_undo_journal()`. If `Forked` answered `false` there, every
-/// statement taken while a view is held would open a
-/// `StatementCheckpoint::Clone` — an O(V+E) copy *per statement* instead of the
-/// one-off fork this phase removed, i.e. the fix introducing a cliff worse than
-/// the defect. The zeros below are what would break.
+/// `journal_covers` has exactly one term left, `supports_undo_journal()`. If
+/// `Forked` answered `false` there, every statement taken while a view is held
+/// would open a `StatementCheckpoint::Clone` — an O(V+E) copy *per statement*
+/// instead of the one-off fork the held-view path performs, i.e. the fix
+/// introducing a cliff worse than the defect. The zeros below are what would
+/// break.
 ///
 /// The middle assertion is the honest half. An overlay cannot express an
 /// adjacency edit (`storage/forked.rs` module doc), so the edge `CREATE`
-/// flattens the overlay — one deep copy, the pre-D2 cost. What matters is that
-/// it happens **once**: the backend is a plain `Memory` afterwards, so every
-/// later statement is back to mutating in place. A per-statement copy here
-/// would be the R2 accident wearing a different hat.
+/// flattens the overlay — one deep copy, the cost every statement used to pay.
+/// What matters is that it happens **once**: the backend is a plain `Memory`
+/// afterwards, so every later statement is back to mutating in place. A
+/// per-statement copy here would be that same accident wearing a different hat.
 #[test]
 fn forked_statements_copy_zero_nodes_except_one_flatten() {
     use crate::graph::handle::make_dir_graph_mut;

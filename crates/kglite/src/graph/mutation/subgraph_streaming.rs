@@ -95,8 +95,8 @@ impl Bitset {
 
 // ── Rank-1 over the kept-nodes bitset ──────────────────────────────────────
 //
-// Phase 3: build a popcount-prefix array so old→new node id translation
-// is O(1) and entirely in RAM. No 480 MB dense remap.
+// Build a popcount-prefix array so old→new node id translation is O(1)
+// and entirely in RAM. No 480 MB dense remap.
 //
 // `block_prefix[k]` holds `popcount(bitset[0..k*64])`. For a query
 // `old_to_new(old_id)`:
@@ -256,20 +256,19 @@ pub fn pass_a_scan(source: &DiskGraph, spec: &SubsetSpec) -> PassAResult {
     }
 }
 
-// ── Pass A with file output — Phase 4 ──────────────────────────────────────
+// ── Pass A with file output ────────────────────────────────────────────────
 //
 // Same sequential scan as `pass_a_scan` but also spills the kept edges to
 // a `MmapOrVec<PendingEdge>` at `kept_edges_path`. The on-disk record
 // shape matches the existing CSR builder's input
 // (`csr_build::build_csr_files` consumes `&MmapOrVec<PendingEdge>`),
-// so a later phase can drive the merge sort over this file by translating
+// so a consumer can drive the merge sort over this file by translating
 // `(src, tgt)` via the rank index in the iterator.
 //
-// Edge property bytes are NOT inlined yet — that's a Phase 5 extension
-// that requires either (a) a sidecar file keyed by source edge_idx or
-// (b) a fourth column in the temp record. For Phase 4 we keep the temp
-// file shape compatible with the existing builder; properties travel
-// independently in subsequent work.
+// Edge property bytes are NOT inlined — inlining them would need either
+// (a) a sidecar file keyed by source edge_idx or (b) a fourth column in
+// the temp record. The temp file shape is instead kept compatible with the
+// existing builder; properties travel independently.
 //
 // Memory: bitset (~15 MB at 120M nodes). No heap buffer scales with kept
 // edge count; appended records go straight to the mmap'd file.
@@ -278,8 +277,8 @@ pub fn pass_a_scan(source: &DiskGraph, spec: &SubsetSpec) -> PassAResult {
 // `kept_edges_path`.
 
 /// Result of [`pass_a_scan_to_file`]. The temp file path is returned so
-/// the caller (Phase 5+) can hand it to `csr_build::build_csr_files`
-/// after wrapping it with a rank-translating iterator.
+/// the caller can hand it to `csr_build::build_csr_files` after wrapping
+/// it with a rank-translating iterator.
 pub struct PassAFileResult {
     pub kept_nodes: Bitset,
     pub stats: ScanStats,
@@ -290,8 +289,8 @@ pub struct PassAFileResult {
 /// Pass A with file output. Identical semantics to [`pass_a_scan`] but
 /// also appends `(src, tgt, conn_type)` for each kept edge to a file at
 /// `kept_edges_path` via `MmapOrVec::mapped`. The file is sized for the
-/// total edge count up front (a safe upper bound on kept edges); Phase 5
-/// reads the actual count from `kept_edge_records`.
+/// total edge count up front (a safe upper bound on kept edges); the
+/// consumer reads the actual count from `kept_edge_records`.
 pub fn pass_a_scan_to_file(
     source: &DiskGraph,
     spec: &SubsetSpec,
@@ -388,7 +387,7 @@ pub fn pass_a_scan_to_file(
 //    the dest disk graph appends to its file-backed `pending_edges`
 //    (sequential write, bounded heap).
 // 6. `dest.save_disk(out_path)` triggers `build_csr_from_pending` (the
-//    Phase 1 merge-sort builder, all sequential I/O).
+//    external merge-sort builder, all sequential I/O).
 //
 // Memory budget at Wikidata Articles+P50+Authors scale (17.4M kept):
 //  - kept_per_type indices: ~70 MB (sorted u32 per kept type)
@@ -966,8 +965,8 @@ pub fn save_subset_streaming_disk(
         // generically here, so fall back to per-edge lookup via
         // `edge_references()`. Less optimal but correct.
         use petgraph::visit::IntoEdgeReferences;
-        // Plain-`Memory` fast path only; every other backend (including a D2
-        // copy-on-write overlay) takes the generic walk below.
+        // Plain-`Memory` fast path only; every other backend (including a
+        // copy-on-write overlay fork) takes the generic walk below.
         let backend = source.graph.plain_memory_digraph();
         if let Some(g) = backend {
             for er in g.edge_references() {
@@ -1016,7 +1015,7 @@ pub fn save_subset_streaming_disk(
     //    returns 0.
     dest.rebuild_type_indices();
 
-    // 8. Save: triggers build_csr_from_pending (the Phase 1 merge sort).
+    // 8. Save: triggers build_csr_from_pending (the external merge sort).
     let save_result = dest.save_disk(path_str);
     log_phase("save_disk (CSR build + sidecars)", phase_save);
     log_phase("TOTAL", phase_start);
@@ -1117,10 +1116,10 @@ mod tests {
     }
 
     // Note: `pass_a_scan` requires a real `DiskGraph`. End-to-end tests
-    // live in `tests/test_subgraph_streaming.py` (Phase 2) where building
+    // live in `tests/test_subgraph_streaming.py`, where building
     // a disk graph is straightforward via the public Python API.
 
-    // ── Phase 3: RankIndex ────────────────────────────────────────────
+    // ── RankIndex ─────────────────────────────────────────────────────
 
     /// Helper: brute-force rank-1 to validate the popcount-prefix
     /// implementation against. Iterates the bitset bit-by-bit, counting

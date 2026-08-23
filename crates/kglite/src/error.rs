@@ -423,11 +423,10 @@ pub enum KgError {
     // ── Internal ─────────────────────────────────────────────────────
     /// An invariant was violated. Reserved for "should never happen"
     /// — e.g. a node-binding lookup whose existence was guaranteed by
-    /// an upstream pattern match. Used when replacing `unwrap()`s in
-    /// Phase A.4 (folded into A.2 / C4): if the unwrap would have
-    /// panicked, this returns the typed error instead. The `location`
-    /// is a `'static str` pointing at the source site (e.g.
-    /// `"match_clause.rs::evaluate_pattern node_var lookup"`).
+    /// an upstream pattern match. Used in place of an `unwrap()`: where
+    /// the unwrap would have panicked, this returns the typed error
+    /// instead. The `location` is a `'static str` pointing at the source
+    /// site (e.g. `"match_clause.rs::evaluate_pattern node_var lookup"`).
     Internal {
         message: String,
         location: &'static str,

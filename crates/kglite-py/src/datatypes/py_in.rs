@@ -927,9 +927,9 @@ pub fn py_value_to_value(value: &Bound<'_, PyAny>) -> PyResult<Value> {
     }
 
     // list / tuple → native Value::List (recursive). UNWIND, `IN`, and
-    // vector_score all accept the native list shape (the "post-A.1" form;
-    // extract_float_list takes both List and the legacy JSON string), so a
-    // list of dicts now unwinds into real maps instead of stringified nulls.
+    // vector_score all accept a real `Value::List` (extract_float_list
+    // takes both that and the legacy JSON string), so a list of dicts
+    // unwinds into real maps instead of stringified nulls.
     if let Ok(list) = value.cast::<pyo3::types::PyList>() {
         let items: PyResult<Vec<Value>> =
             list.iter().map(|item| py_value_to_value(&item)).collect();

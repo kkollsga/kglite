@@ -747,7 +747,7 @@ fn packed_column_names_cannot_escape_temp_root() {
     }
 }
 
-// ── Mapped columns stay mapped across writes (Phase 4 contract) ─────────────
+// ── Mapped columns stay mapped across writes ────────────────────────────────
 //
 // `set_memory_limit` is the only bound a caller can place on the columnar
 // heap. A spilled column that comes back to the heap the first time it is
@@ -921,7 +921,7 @@ fn a_held_reader_is_isolated_from_a_mapped_write_through() {
     );
 }
 
-// ── Schema growth without a rebuild (Phase 5(i)) ─────────────────────────────
+// ── Schema growth without a rebuild ──────────────────────────────────────────
 //
 // `push_row` used to build its slot→value lookup from `self.schema.slot(key)`
 // and drop every key the lookup missed — silently, with no error and no
@@ -1025,7 +1025,7 @@ fn growing_the_key_set_over_a_stream_pushes_each_row_exactly_once() {
     }
 }
 
-// ── Typed columns at creation (Phase 5(ii)) ──────────────────────────────────
+// ── Typed columns at creation ────────────────────────────────────────────────
 
 #[test]
 fn set_types_a_new_column_from_the_value_when_metadata_is_silent() {

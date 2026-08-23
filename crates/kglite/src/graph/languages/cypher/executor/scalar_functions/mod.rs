@@ -343,7 +343,7 @@ impl<'a> CypherExecutor<'a> {
                 Ok(result)
             }
             _ => {
-                // Evaluate; accept Value::List (post-A.1 native shape)
+                // Evaluate; accept Value::List (the native shape)
                 // or Value::String (legacy JSON string).
                 let val = self.evaluate_expression(expr, row)?;
                 match val {

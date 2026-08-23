@@ -49,7 +49,7 @@
 //!
 //! A delete, a `retain`, or a positional rollback insert needs a single mutable
 //! `Vec`, so [`TypeBucket::to_mut`] merges the levels first — O(N) when the
-//! bucket is genuinely shared, free when it is not. This mirrors the Phase 2
+//! bucket is genuinely shared, free when it is not. This mirrors the
 //! boundary where `remove_node` flattens the backend overlay: the cost is paid
 //! **once per fork**, not per statement, and it keeps the delete path's
 //! semantics byte-identical to the pre-layer code.

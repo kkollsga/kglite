@@ -9,7 +9,7 @@
 // `SerdeDeserializeGuard`). A third guard (`StripPropertiesGuard`)
 // enables the v3 topology-mode serialization path.
 //
-// Extracted from `src/graph/schema.rs` in Phase 7 (Stage 2.2).
+// Extracted from `src/graph/schema.rs`.
 
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};

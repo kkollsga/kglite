@@ -66,7 +66,7 @@ def test_mixed_int_list_roundtrips():
     assert [r["s"] for r in rows] == [1, 2, 3]
 
 
-# ── Cross-mode parity (Phase 2): lists survive every storage backend and
+# ── Cross-mode parity: lists survive every storage backend and
 #    the persistence round-trips (.kgl save/load + streaming-disk subset). ──
 
 _EXPECTED = [{"id": 1, "al": ["x", "y"]}, {"id": 2, "al": ["z"]}]
@@ -106,7 +106,7 @@ def test_list_property_save_reload(mode, tmp_path):
 def test_list_property_streaming_disk_subset(tmp_path):
     # save_subset on a disk-backed source takes the streaming-disk writer,
     # which marshals each property through the borrowed-value overflow path.
-    # Before Phase 2 a list there serialized to NULL; now it round-trips.
+    # A list there used to serialize to NULL; now it round-trips.
     src = kglite.KnowledgeGraph(storage="disk", path=str(tmp_path / "src"))
     src.add_nodes(_person_df(), node_type="Person", unique_id_field="id")
     out = str(tmp_path / "subset.kgl")

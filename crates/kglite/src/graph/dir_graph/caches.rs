@@ -16,7 +16,7 @@ use std::sync::RwLock;
 /// A lazily-filled cache that a graph **clone does not share** — it is reborn
 /// empty on every fork.
 ///
-/// ## Why this type exists (D2 risk R6, settled 2026-08-10)
+/// ## Why this type exists (settled 2026-08-10)
 ///
 /// `edge_type_counts_cache` and `type_connectivity_cache` used to be
 /// `Arc<RwLock<Option<T>>>`, and `DirGraph`'s derived `Clone` copies the
@@ -37,8 +37,8 @@ use std::sync::RwLock;
 /// shared handle to reason about, and a future field added here cannot
 /// reintroduce the hazard by being forgotten. The cost is that a fork starts
 /// cold and the first grouped aggregation pays one O(E) rescan — the same
-/// trade-off `MemoryGraph::clone` already makes for `peer_counts` (D2 risk R4),
-/// and the same "correct-but-cold beats subtly-shared" default.
+/// trade-off `MemoryGraph::clone` already makes for `peer_counts`, and the
+/// same "correct-but-cold beats subtly-shared" default.
 ///
 /// ## What must NOT move into this type
 ///
@@ -51,7 +51,8 @@ use std::sync::RwLock;
 ///   a result.
 ///
 /// Both are deliberately left `Arc`-shared. That decision is the other half of
-/// R6 and is pinned by `the_pure_and_versioned_caches_are_deliberately_shared`.
+/// the same call and is pinned by
+/// `the_pure_and_versioned_caches_are_deliberately_shared`.
 #[derive(Debug, Default)]
 pub struct ForkPrivateCache<T>(RwLock<Option<T>>);
 
@@ -217,7 +218,7 @@ mod fork_aliasing_tests {
         graph
     }
 
-    /// **D2 risk R6, as an executable failure.**
+    /// **The fork-shared-cache hazard, as an executable failure.**
     ///
     /// `edge_type_counts_cache` is `Arc<RwLock<…>>` and the derived
     /// `DirGraph::clone` copies the *handle*, so a fork and its parent share one

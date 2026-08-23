@@ -629,9 +629,9 @@ fn seg(
         in_offsets: from_vec(in_offsets),
         in_edges: from_vec(in_edges),
         edge_endpoints: from_vec(edge_endpoints),
-        // Phase-5 auxiliary fields default to empty in these
-        // CSR-only unit tests. Dedicated phase-5 tests populate
-        // them explicitly.
+        // Auxiliary index fields default to empty in these CSR-only
+        // unit tests. The auxiliary-index tests populate them
+        // explicitly.
         conn_type_index_types: MmapOrVec::new(),
         conn_type_index_offsets: MmapOrVec::new(),
         conn_type_index_sources: MmapOrVec::new(),
@@ -1091,7 +1091,7 @@ fn seal_rejects_when_nothing_to_seal() {
 
 #[test]
 fn seal_accepts_cross_segment_edges_via_full_range() {
-    // Phase 7: cross-segment overflow no longer errors. The new
+    // Cross-segment overflow no longer errors. The new
     // segment writes full-range out_offsets (indexed by global
     // node id) so an edge from a seg_0 source into a tail target
     // — or between two seg_0 sources — is reachable after reload.
@@ -1232,7 +1232,7 @@ fn seal_round_trip_basic_reads() {
 
 #[test]
 fn seal_round_trip_auxiliary_indexes() {
-    // Phase 5: verify that conn_type_index_*, peer_count_*, and
+    // Verify that conn_type_index_*, peer_count_*, and
     // edge_properties survive the seal → reload roundtrip for edges
     // in the sealed segment.
     let tmp = TempDir::new().unwrap();
@@ -1328,7 +1328,7 @@ fn seal_round_trip_auxiliary_indexes() {
 
 #[test]
 fn save_to_dir_auto_wires_seal_when_tail_is_clean() {
-    // Phase 6: a second save after a clean-tail workload should
+    // A second save after a clean-tail workload should
     // dispatch to `seal_to_new_segment` instead of the traditional
     // compact-and-rewrite path. Verify by checking that seg_001/
     // appears on disk and that the manifest grows to 2 segments.
@@ -1374,10 +1374,10 @@ fn save_to_dir_auto_wires_seal_when_tail_is_clean() {
 
 #[test]
 fn save_to_dir_seals_cross_segment_overflow_as_full_range() {
-    // Phase 7: cross-segment overflow is now handled by the full-
-    // range seal, not the compact fallback. save_to_dir should
-    // produce seg_001/ even when the overflow has an old→new edge,
-    // and reload must see both segments' edges combined.
+    // Cross-segment overflow is handled by the full-range seal, not
+    // the compact fallback. save_to_dir should produce seg_001/
+    // even when the overflow has an old→new edge, and reload must
+    // see both segments' edges combined.
     let tmp = TempDir::new().unwrap();
     let mut interner = StringInterner::new();
     let mut dg = super::DiskGraph::new_at_path(tmp.path()).unwrap();

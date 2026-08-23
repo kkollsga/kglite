@@ -7,7 +7,7 @@
 //! resulting `ResultSet` plus the number of clauses absorbed. The
 //! driver then advances its index by that count and continues.
 //!
-//! # Phase 1 shapes
+//! # Recognized shapes
 //! - **A.** `RETURN/WITH(group, agg)` whose RETURN/WITH consists of
 //!   pure variable / property-access group keys plus inline-able
 //!   aggregates (`count`, `sum`, `avg`, `min`, `max`, with optional

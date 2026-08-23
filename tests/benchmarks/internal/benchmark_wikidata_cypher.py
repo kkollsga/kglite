@@ -81,7 +81,7 @@ BENCHMARKS = [
         "aggregation",
         "MATCH (p)-[:P27]->(c) RETURN c.title, count(p) AS citizens ORDER BY citizens DESC LIMIT 20",
     ),
-    # FusedNodeScanAggregate with WHERE (Phase 3 optimization)
+    # FusedNodeScanAggregate with WHERE
     ("agg_count_by_type_top20", "aggregation", "MATCH (n) RETURN n.type, count(n) AS c ORDER BY c DESC LIMIT 20"),
     # -- 6. PROPERTY SCANS (direct columnar access) -----------------
     # These scan large types filtering by property — tests our columnar fast path

@@ -243,18 +243,18 @@ pub(super) fn write_column_master(
     };
 
     // The rollback invariant, asserted at the exact point it matters — and it
-    // is the *inverse* of the pre-Phase-2 one. The journal used to hold the
-    // master's allocation, so the write had to fork away from it; now the
-    // journal holds only the cell's prior value, so a copy here would be a
-    // silent whole-store clone per statement (O(rows x cols) to write one cell)
-    // with nothing gained.
+    // is the *inverse* of the one this code used to carry. The journal used
+    // to hold the master's allocation, so the write had to fork away from it;
+    // now the journal holds only the cell's prior value, so a copy here
+    // would be a silent whole-store clone per statement (O(rows x cols) to
+    // write one cell) with nothing gained.
     //
     // Three holders are legitimate and only these three: a `Forked` backend
     // shares its stores with the base a reader holds; a whole-`DirGraph` clone
     // (`fork_transaction`, the clone checkpoint, a held view) shares them with
     // its twin; and nothing else, because `UndoEntry` has no variant that can
-    // hold an `Arc<ColumnStore>` at all — the property this phase's design
-    // rests on is enforced by the type, not by this line. What the assert still
+    // hold an `Arc<ColumnStore>` at all — the property this design rests on
+    // is enforced by the type, not by this line. What the assert still
     // catches is a *fourth* holder appearing where the store was uniquely
     // owned: the count is read before the write, so a copy taken from a
     // uniquely-owned master fails here loudly. The behavioural gate is the

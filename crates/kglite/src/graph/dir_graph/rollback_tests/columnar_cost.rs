@@ -21,13 +21,13 @@ use super::*;
 /// journal captured one pre-image or two hundred. The cost lives entirely
 /// inside the journal, so the counter has to as well.
 ///
-/// **Phase 2 re-point.** The `NodeData` bound above is kept (a columnar SET
-/// must still not clone node weights), and the cost oracle it was written for
-/// is now stated in the mechanism that carries the cost: one
+/// **Why there are two bounds.** The `NodeData` bound above is kept (a
+/// columnar SET must still not clone node weights), and the cost oracle it was
+/// written for is now stated in the mechanism that carries the cost: one
 /// `UndoEntry::ColumnarCell` per `(row, property)` the statement changed. The
 /// `ColumnarHandles` entry the old bound coexisted with is gone, so without the
 /// cell count this assertion would pass just as happily for a journal that
-/// captured the whole store — which is exactly what it did before Phase 2.
+/// captured the whole store — which is exactly what the pre-cell journal did.
 #[test]
 fn a_columnar_set_journals_one_pre_image_per_changed_node() {
     use crate::graph::storage::undo::{
@@ -158,10 +158,11 @@ fn an_unmapped_set_journals_one_pre_image_per_changed_node() {
 /// visible, and the second must win.
 ///
 /// The mechanism has been rewritten twice under this assertion, which is why
-/// the assertion is what got kept. Pre-D1-Phase-3: the first write forked away
+/// the assertion is what got kept. Originally: the first write forked away
 /// from `1 + N` node handles and registered an end-of-clause re-point sweep.
-/// Post-Phase-3, pre-Phase-2: the first write forked away from the undo
-/// journal's whole-store pre-image and the second mutated the fork in place.
+/// Then, once the nodes stopped holding handles: the first write forked away
+/// from the undo journal's whole-store pre-image and the second mutated the
+/// fork in place.
 /// Now: **neither write forks anything** — the journal holds one
 /// `UndoEntry::ColumnarCell` per write, both mutate the backend's own store in
 /// place, and reverse replay would restore the *first* capture if the statement
@@ -382,12 +383,13 @@ fn no_node_holds_a_column_store_handle() {
 
 /// **Replaces `fork_detection_is_a_no_op_while_nodes_hold_strong_handles`.**
 ///
-/// The reference-count invariant the whole programme turns on. Phase 2
-/// strengthened it from "uniquely owned *between* statements" to "uniquely
-/// owned *always*, on a non-forked backend": the undo journal used to hold the
-/// pre-statement store, so mid-statement the count was ≥ 2 and `Arc::make_mut`
-/// forked; it now holds cell values only, so nothing but the backend ever owns
-/// the master and the write mutates it in place.
+/// The reference-count invariant the whole columnar write path turns on, in
+/// its strong form: not "uniquely owned *between* statements" but "uniquely
+/// owned *always*, on a non-forked backend". Only the weak form held while the
+/// undo journal kept the pre-statement store — mid-statement the count was ≥ 2
+/// and `Arc::make_mut` forked. The journal holds cell values only now, so
+/// nothing but the backend ever owns the master and the write mutates it in
+/// place.
 ///
 /// The in-statement half is asserted through **allocation identity**, which is
 /// the only way to see mid-statement ownership from outside the statement: an

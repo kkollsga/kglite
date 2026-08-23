@@ -3,7 +3,7 @@
 //! `DiskGraph` (in `disk_graph.rs`) owns a CSR edge format + mmap'd
 //! column stores for out-of-core property data.
 //!
-//! Split (Phase 9):
+//! Split out:
 //! - [`csr`] — CsrEdge / EdgeEndpoints / DiskNodeSlot / MergeSortEntry `#[repr(C)]` types
 //! - [`builder`] — CSR construction (merge-sort + partitioned) + histogram rebuild
 

@@ -886,7 +886,7 @@ def test_a_held_reference_keeps_its_pre_write_values(guard_graph, holder):
 # answers the question a long-running process actually cares about: **does
 # holding a view make the graph's memory grow, and does it come back.**
 #
-# Before D2 each fork allocated a second whole graph — measured at Phase 0 as
+# A fork used to allocate a second whole graph — measured 2026-08-10 as
 # **+668.8 MB of process peak at 1M**, in the cell immediately after two
 # controls that grew it by 0.0 MB. So the acceptance bounds below are not
 # invented: they are "an order of magnitude under one graph copy", and the
@@ -917,7 +917,7 @@ def _settle() -> float:
 #: failure this detects is *per-round accumulation*, which one round cannot see.
 RSS_ROUNDS = 20
 
-#: One 1M-node graph copy, measured at Phase 0 (2026-08-10). Every bound below
+#: One 1M-node graph copy, measured 2026-08-10. Every bound below
 #: is stated as a fraction of it so the numbers keep their meaning if the
 #: fixture changes.
 ONE_GRAPH_COPY_MB = 668.8
@@ -1011,7 +1011,7 @@ def test_held_view_writes_do_not_grow_a_graph_copy_per_write(ref_graphs, holder)
         "that is per-round accumulation, not O(changes)"
     )
     # 2. Twenty writes under one held view must cost one overlay, not twenty
-    #    graphs. The pre-D2 behaviour would be a copy per write.
+    #    graphs. The earlier behaviour was a copy per write.
     assert held_peak - dropped_settled < ONE_GRAPH_COPY_MB * 0.5, (
         f"twenty writes under a held view peaked +{held_peak - dropped_settled:.1f} MB; "
         f"a graph copy is {ONE_GRAPH_COPY_MB} MB, so this is growing storage per write"

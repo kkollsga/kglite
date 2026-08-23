@@ -93,9 +93,7 @@ pub enum Clause {
     /// during parsing so the body re-binds those names from the seed row.
     /// `body` is the remaining sub-pipeline (a full `CypherQuery`).
     ///
-    /// Phase 1 ships the parser + AST node only; execution and planner
-    /// integration land in later phases. See
-    /// `dev_workfolder/dev-documentation/design/call-subqueries.md`.
+    /// See `dev_workfolder/dev-documentation/design/call-subqueries.md`.
     CallSubquery {
         import: Vec<String>,
         body: Box<CypherQuery>,
@@ -742,7 +740,7 @@ pub struct LimitClause {
 }
 
 // ============================================================================
-// UNWIND / UNION (Phase 3)
+// UNWIND / UNION
 // ============================================================================
 
 /// UNWIND clause: expand a list into rows

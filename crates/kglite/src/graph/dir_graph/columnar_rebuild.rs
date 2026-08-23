@@ -172,7 +172,7 @@ impl DirGraph {
     /// store from live nodes and re-point the nodes at their rows.
     ///
     /// Split out so the idempotence guard above reads as the decision it is,
-    /// and so the rebuild has a single entry point to count (D1 risk 1).
+    /// and so the rebuild has a single entry point to count.
     pub(super) fn rebuild_column_stores(&mut self) {
         #[cfg(test)]
         note_columnar_rebuild();

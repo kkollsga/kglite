@@ -45,9 +45,9 @@ impl DirGraph {
         copy.wkt_cache = copy_cache(&self.wkt_cache);
         // The two edge-derived caches need nothing here: they are
         // `ForkPrivateCache`, so `self.clone()` above already gave the copy its
-        // own empty one. Re-wrapping them was this method's half of the D2 R6
-        // workaround; the hazard is now closed at the type level for every
-        // clone, not just for the explicit-copy path.
+        // own empty one. Re-wrapping them here was this method's half of the
+        // old fork-shared-cache workaround; the hazard is now closed at the
+        // type level for every clone, not just for the explicit-copy path.
         copy.property_ndv_cache = copy_cache(&self.property_ndv_cache);
         copy.graph.detach_independent_copy(&self.graph);
         copy.active_write_scope = None;

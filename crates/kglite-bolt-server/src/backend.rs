@@ -1773,7 +1773,7 @@ mod tests {
         assert!(!matches(""));
     }
 
-    // ---- `CALL db.checkpoint()` (Phase 2) --------------------------------
+    // ---- `CALL db.checkpoint()` ---------------------------------------------
 
     fn unique_kgl_path(tag: &str) -> std::path::PathBuf {
         let nonce = SystemTime::now()

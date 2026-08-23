@@ -1,8 +1,7 @@
 //! Write-capture backend — [`RecordingGraph`].
 //!
-//! Introduced in Phase 6 of the 0.8.0 storage refactor as a read-logging
-//! validation wrapper; **repurposed in the Stage 1 durability work** into
-//! the production write-capture seam for the WAL. `RecordingGraph<G>`
+//! Began as a read-logging validation wrapper; **now the production
+//! write-capture seam for the WAL**. `RecordingGraph<G>`
 //! wraps any `G: GraphRead`/`GraphWrite`, forwards every call, and — on
 //! the six mutation methods only — buffers a [`RawOp`] describing the
 //! change. Reads forward with **zero overhead** (no logging), so a
@@ -1357,9 +1356,9 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// In-source parity tests — the Phase 6 "parity matrix run against
+// In-source parity tests — the parity matrix run against
 // RecordingGraph(MemoryGraph) / RecordingGraph(MappedGraph) /
-// RecordingGraph(DiskGraph)" crunch-point.
+// RecordingGraph(DiskGraph).
 //
 // Exercises the GraphBackend::Recording enum dispatcher end-to-end so
 // the new variant is not dead code.

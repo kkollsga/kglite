@@ -1,7 +1,7 @@
 //! Cypher parser — delegates MATCH patterns to
 //! `crate::graph::core::pattern_matching::parse_pattern`.
 //!
-//! Split (Phase 9):
+//! Submodules:
 //! - [`match_pattern`] — MATCH / OPTIONAL MATCH, pattern extraction, EXISTS
 //! - [`predicate`] — WHERE predicate chain (AND / OR / XOR / NOT / comparisons)
 //! - [`expression`] — expressions (arithmetic, function calls, CASE, list ops)

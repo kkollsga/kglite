@@ -59,7 +59,7 @@ SCORE_RANGE = (40.0, 60.0)  # range_filter: Persons with score in [lo, hi]
 SCORE_MIN = 50.0  # score_filtered_traversal: KNOWS neighbours with score > this
 DEGREE_MIN = 14  # degree_filter: count Persons with undirected KNOWS-degree ≥ this
 
-# Specialized-tier params (Phase 4). EMB_DIM mirrors the core generator's
+# Specialized-tier params. EMB_DIM mirrors the core generator's
 # Person `embedding` width; GEO_BBOX is the geospatial query window over City
 # latitude/longitude; VECTOR_TOPK is the vector-kNN result size.
 EMB_DIM = 16

@@ -665,9 +665,9 @@ fn cypher_pass_names() -> Vec<String> {
 
 /// Whether `graph`'s storage backend is currently a copy-on-write overlay.
 ///
-/// **A test hook, not an API.** D2 made a write taken while a `ResultView`,
-/// `freeze()`, `Session` or open transaction is alive fork to an overlay over
-/// the shared data instead of deep-copying the graph, and fold that overlay
+/// **A test hook, not an API.** A write taken while a `ResultView`,
+/// `freeze()`, `Session` or open transaction is alive forks to an overlay over
+/// the shared data instead of deep-copying the graph, and that overlay folds
 /// back once the reader drops. Both halves are invisible through every
 /// behavioural surface — which is exactly why they need an observable that is
 /// not a timing measurement: a regression to whole-graph-clone semantics leaves

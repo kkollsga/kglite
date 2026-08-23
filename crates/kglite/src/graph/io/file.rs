@@ -1003,7 +1003,7 @@ pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()
     // Iterate column stores in sorted order by type_name. The backend's map
     // is a HashMap whose per-instance RandomState would otherwise cause the
     // section order to vary across processes — breaking byte-level reproducibility
-    // that the Phase 4 golden-hash test relies on. Sorting here is free
+    // that the `test_phase4_parity` golden-hash test relies on. Sorting is free
     // (type_name count is small) and doesn't affect the format: each section
     // is self-describing and the decoder iterates column_sections_meta in order.
     let mut column_sections_meta: Vec<PortableColumnSection> = Vec::new();
@@ -1567,7 +1567,7 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
         disk_graph.prefetch_hot_regions();
         log_stage("prefetch_hot_regions", t);
     }
-    // Phase 5: this is the `.kgl` → `KnowledgeGraph` construction boundary;
+    // This is the `.kgl` → `KnowledgeGraph` construction boundary;
     // assembling the backend variant here is analogous to the PyO3 boundary
     // the storage refactor exempts. Stays as an enum literal.
     graph.graph = GraphBackend::Disk(Box::new(disk_graph));

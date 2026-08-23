@@ -19,7 +19,7 @@
 
 pub mod datatypes;
 pub mod error;
-// Engine internals — sealed behind the curated `api` facade (roadmap Piece 4).
+// Engine internals — sealed behind the curated `api` facade.
 // `pub(crate)` so no downstream crate can reach `kglite::graph::*` directly;
 // the `api` re-exports below still resolve (re-exporting a `pub` item out of a
 // `pub(crate)` module is legal). A CI grep (`scripts/check_api_chokepoint.sh`)
@@ -76,8 +76,8 @@ pub mod api {
     // different audience (`pip install kglite` users), polars-style.
     //
     // `infer_selection_node_type` infers the node type of a selection's
-    // current level; it takes `&CowSelection`, so it landed here in
-    // Piece 3b alongside the Selection api-type lift (Piece 3a).
+    // current level; it takes `&CowSelection`, so it lives here alongside
+    // the Selection api types.
     //
     // (The code-tree handle helpers `resolve_code_entity` / `CODE_TYPES` /
     // `source_location` live in `api::code_entities`.)
@@ -105,11 +105,10 @@ pub mod api {
     /// the Arc copy-on-write wrapper a binding holds as its cursor;
     /// `CurrentSelection` is the underlying level/plan state; `PlanStep`
     /// is an `explain()` plan entry. Pure core types (petgraph node
-    /// indices and hash maps), no binding coupling. Lifted in roadmap
-    /// Piece 3a as the foundation for the fluent api surface. The
-    /// high-level fluent chain operations are consolidated into core and
-    /// exposed in Piece 3c; the fine-grained `core::*` primitives stay
-    /// internal.
+    /// indices and hash maps), no binding coupling. Lifted as the
+    /// foundation for the fluent api surface. The high-level fluent chain
+    /// operations are consolidated into core and exposed in `api::fluent`;
+    /// the fine-grained `core::*` primitives stay internal.
     pub use crate::graph::schema::{
         CowSelection, CurrentSelection, PlanStep, SelectionLevel, SelectionOperation,
     };
@@ -141,7 +140,7 @@ pub mod api {
     /// The canonical graph read trait — node/edge/property accessors
     /// shared by every storage backend. Non-object-safe (GATs on the
     /// iterator-returning methods), so consumers take `&impl GraphRead`,
-    /// never `&dyn`. Lifted for cross-binding read access (roadmap Piece 1).
+    /// never `&dyn`. Lifted for cross-binding read access.
     pub use crate::graph::storage::GraphRead;
     /// The canonical graph write trait (`GraphWrite: GraphRead`) —
     /// storage-variant-routed mutation, including `set_node_property` and
@@ -166,7 +165,7 @@ pub mod api {
     pub use crate::graph::storage::NodeView;
     /// The temporal query context (`At` / `During` / `Today` / `All`) — the
     /// as-of filter a binding's cursor carries for temporal-validity
-    /// auto-filtering. Lifted in roadmap Piece 4.
+    /// auto-filtering.
     pub use crate::graph::TemporalContext;
     // `Arc<DirGraph>` → `&mut DirGraph` + version bump.
     pub use crate::graph::handle::make_dir_graph_mut;
@@ -198,9 +197,9 @@ pub mod api {
     /// does not depend on polars. `update_node_properties`,
     /// `purge_provisional_nodes`, and
     /// `extend_graph` (merge one graph into another) round out the
-    /// generic, non-Selection mutation surface. Lifted in roadmap Piece 2.
-    /// `create_connections` (edge-create between the two ends of a
-    /// selection) lifted in Piece 3b once `CurrentSelection` reached api.
+    /// generic, non-Selection mutation surface. `create_connections`
+    /// (edge-create between the two ends of a selection) is here too, since
+    /// `CurrentSelection` is itself an api type.
     pub mod mutation {
         /// Structured mutation reports — what a write touched (nodes/edges
         /// created/updated/deleted, per operation). Returned by the mutation
@@ -218,20 +217,19 @@ pub mod api {
             purge_provisional_nodes, replace_connections, update_node_properties, EdgeSpec,
             EdgeSpecReport,
         };
-        /// Validate a graph against a `SchemaDefinition` (Piece 3 cleanup).
+        /// Validate a graph against a `SchemaDefinition`.
         pub use crate::graph::mutation::validation::validate_graph;
     }
 
     /// Selection-scoped operations — selection set algebra
     /// (`union`/`intersection`/`difference`/`symmetric_difference`) and
     /// subgraph extract / expand / stats. These take `&CurrentSelection`
-    /// (now an api type, roadmap Piece 3a) and are the building blocks the
-    /// fluent chain composes.
+    /// (an api type) and are the building blocks the fluent chain composes.
     ///
-    /// The bulk of this module (Piece 3c) is the **shared selection-based
-    /// query-primitive layer** — `core::graph::core::*`, which CLAUDE.md
-    /// describes as "pattern matching, filtering, traversal … used by both
-    /// Cypher and the fluent API." Each op takes `(&DirGraph, &mut
+    /// The bulk of this module is the **shared selection-based
+    /// query-primitive layer** — `core::graph::core::*`, which CLAUDE.md describes
+    /// as "pattern matching, filtering, traversal … used by both Cypher and the
+    /// fluent API." Each op takes `(&DirGraph, &mut
     /// CurrentSelection, …already-marshalled params)` and mutates the
     /// selection in place; a binding building a fluent surface composes
     /// these directly (the wheel's `kg_fluent` / `kg_introspection` PyO3
@@ -243,7 +241,7 @@ pub mod api {
     /// — into higher-level ops, but the primitives below are already the
     /// correctly-grained shared operations, not glue to hide.)
     pub mod fluent {
-        // Selection set algebra + subgraph (Piece 3b).
+        // Selection set algebra + subgraph.
         pub use crate::graph::mutation::set_ops::{
             difference_selections, intersection_selections, symmetric_difference_selections,
             union_selections,
@@ -284,8 +282,7 @@ pub mod api {
         // Compact value formatting for fluent result shaping.
         pub use crate::graph::core::value_operations::format_value_compact;
         // Spatial predicates over a selection (geo filters / centroids /
-        // bounds). Selection-scoped — lifted in Piece 3 cleanup now that
-        // CurrentSelection is an api type.
+        // bounds). Selection-scoped over the api `CurrentSelection` type.
         pub use crate::graph::features::spatial::{
             calculate_centroid, contains_point, get_bounds, intersects_geometry, near_point,
             near_point_m, within_bounds, wkt_centroid,
@@ -326,10 +323,9 @@ pub mod api {
     /// method reaches these; they all take `&DirGraph` + plain params and
     /// return the result structs below. (Per-query algorithm access is
     /// also available through Cypher procedures; this is the typed-result
-    /// path for bindings that want structs, not result rows.) Lifted in
-    /// api-sealing roadmap Piece 2 (`vector_search` + `VectorSearchResult`
-    /// added in Piece 3b once `CurrentSelection` was lifted to api — vector
-    /// search is scoped to a selection).
+    /// path for bindings that want structs, not result rows.)
+    /// `vector_search` + `VectorSearchResult` are here too — vector search
+    /// is scoped to a selection.
     pub mod algorithms {
         pub use crate::graph::algorithms::graph_algorithms::{
             all_paths, are_connected, are_connected_with, betweenness_centrality,
@@ -355,8 +351,8 @@ pub mod api {
     /// `DatePrecision`), `expand_end`, `date_from_ymd`, `find_range`, and
     /// the validators are plain functions every binding's date handling
     /// reaches; `TimeseriesConfig` / `NodeTimeseries` are the config/data
-    /// types. Lifted in roadmap Piece 2. (The KG-construction-level
-    /// `InlineTimeseriesConfig` / `TimeSpec` live in the api root.)
+    /// types. (The KG-construction-level `InlineTimeseriesConfig` / `TimeSpec`
+    /// live in the api root.)
     pub mod timeseries {
         pub use crate::graph::features::timeseries::{
             date_from_ymd, expand_end, find_range, parse_date_query, validate_channel_length,
@@ -369,7 +365,7 @@ pub mod api {
     /// `describe()` / schema overview (connectivity, per-type stats,
     /// neighbor schema) + the detail-level enums + a bug-report writer.
     /// The typed schema-discovery surface every binding builds its
-    /// agent-facing schema from. Lifted in roadmap Piece 3 cleanup.
+    /// agent-facing schema from.
     pub mod introspection {
         pub use crate::graph::introspection::bug_report::write_bug_report;
         /// Debug-string helpers (schema / selection dumps) for diagnostics.
@@ -462,7 +458,7 @@ pub mod api {
     /// per-type lookup, and the embedding store. CLAUDE.md designates
     /// storage-backend configuration a direct-api concern; these let a
     /// binding open / inspect a graph in a specific storage mode and manage
-    /// embeddings. Lifted in roadmap Piece 4 (the hard-seal gateway).
+    /// embeddings.
     pub mod storage {
         pub use crate::graph::schema::EmbeddingStore;
         pub use crate::graph::storage::backend::GraphBackend;
@@ -500,7 +496,7 @@ pub mod api {
     /// Durable transactions — the write-ahead log (append / recover / replay)
     /// and the write-capture recording layer behind a binding's `durable()`
     /// feature. The in-process WAL mechanism (distinct from the checkpoint
-    /// save in `io`). Lifted in roadmap Piece 4.
+    /// save in `io`).
     pub mod durable {
         /// Binding-agnostic durable-open + checkpoint orchestration: the
         /// recover→replay→wrap→append ordering every owner of a log performs at

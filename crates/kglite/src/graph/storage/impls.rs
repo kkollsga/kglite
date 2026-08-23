@@ -1,17 +1,10 @@
 //! Per-backend [`GraphRead`] / [`GraphWrite`] implementations.
 //!
-//! Phase 5 landed this file. Prior phases routed every trait method
-//! through a monolithic `impl GraphRead for GraphBackend` in
-//! `schema.rs`; here each backend (`MemoryGraph`, `MappedGraph`,
-//! `DiskGraph`) owns its own trait impls so the backends can diverge
-//! without re-touching the enum dispatcher. The `impl GraphRead for
-//! GraphBackend` that survives in `schema.rs` is now a thin 3-arm
-//! dispatcher delegating to the per-backend impls below.
-//!
-//! Phase 7 relocates these impls into `storage/memory/`,
-//! `storage/mapped/`, `storage/disk/` subdirectories. This Phase 5
-//! single-file layout keeps the diff cohesive without pre-empting
-//! Phase 7's structural reorg.
+//! Each backend (`MemoryGraph`, `MappedGraph`, `DiskGraph`) owns its own
+//! trait impls here, so the backends can diverge without re-touching the
+//! enum dispatcher. The `impl GraphRead for GraphBackend` in `backend.rs`
+//! is a thin per-variant dispatcher delegating to the impls below.
+//! `ForkedGraph`'s impls live alongside it in `forked.rs`.
 
 use crate::datatypes::Value;
 use crate::graph::core::filtering::str_values_equal;

@@ -232,7 +232,7 @@ impl TypeIndexBase {
 /// directly from the mmap.
 ///
 /// `Overlay` is what an unlayered bucket hands out — a plain slice, exactly as
-/// before D2 layered this field — so the steady-state read path is unchanged.
+/// before this field was layered — so the steady-state read path is unchanged.
 /// `Layered` appears only while a fork is outstanding and is the concatenation
 /// of its levels, in order (`disk/type_index_layer.rs`).
 pub enum TypeNodesRef<'a> {
@@ -424,7 +424,7 @@ impl ExactSizeIterator for TypeNodesIter<'_> {
 
 /// HashMap-shaped wrapper around an optional mmap base + overlay.
 ///
-/// **The fork seam for `type_indices`** (D2). Each overlay bucket is a stack of
+/// **The fork seam for `type_indices`.** Each overlay bucket is a stack of
 /// shared, immutable levels ([`TypeBucket`]), so the derived `Clone` below
 /// copies `Arc`s rather than the members themselves. Before that, this field
 /// was the last O(V) term in `DirGraph::clone` on a plain graph.

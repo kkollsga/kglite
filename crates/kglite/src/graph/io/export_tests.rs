@@ -1,6 +1,6 @@
 //! Export regression tests.
 //!
-//! The columnar cases here are the red proof for D1 defect 1:
+//! The columnar cases here are the red proof for a fixed export bug:
 //! `property_iter` yields nothing for `PropertyStorage::Columnar`, so GraphML
 //! and D3-JSON export silently emitted **empty** property sets for every node
 //! of a saved (columnar) graph, while `property_count()` reported the real

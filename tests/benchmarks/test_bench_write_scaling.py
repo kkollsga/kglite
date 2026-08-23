@@ -235,10 +235,9 @@ def test_bench_id_index_invalidation_on_create(benchmark, scaled_graphs_no_pk, s
 #
 #     fresh  4.3 us  |  post-save  328 us  |  mapped ~3,020 us
 #
-# The three cells below close that gap. They are the Phase-3 verification
-# targets of the shape-convergence program (`dev-docs/plans/`): after the
-# cell-grained undo journal lands, post-save must come back within 2x of fresh
-# or the program stops for diagnosis.
+# The three cells below close that gap: with the cell-grained undo journal in
+# place, post-save must stay within 2x of fresh — anything worse is a
+# regression in the columnar write path.
 #
 # Not tracked by `make bench-check`, like everything else in this file — the
 # gate collects `test_bench_core.py` only, and on Linux it additionally runs
@@ -246,7 +245,7 @@ def test_bench_id_index_invalidation_on_create(benchmark, scaled_graphs_no_pk, s
 # absent from the baseline. New cells therefore belong here, not there, until a
 # release-boundary rebaseline promotes them.
 
-#: The Phase-0 grid's headline cell. Wide enough that the per-statement store
+#: The baseline grid's headline cell. Wide enough that the per-statement store
 #: clone is unmistakable (12 int columns x 50k rows ~ 6 MB copied to write one
 #: cell), small enough that the fixture builds in well under a second.
 SHAPE_SIZE = 50_000
