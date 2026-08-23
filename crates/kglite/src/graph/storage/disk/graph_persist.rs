@@ -2,8 +2,7 @@
 //! pipelines, multi-segment manifest building, and segment CSR
 //! reconciliation.
 //!
-//! Split out of `graph.rs` to keep the core graph file under the
-//! 2,500-line cap. Lives in a sibling `impl DiskGraph {}` block.
+//! Split out of `graph.rs` to keep that file under the 2,500-line cap.
 
 use crate::graph::schema::InternedKey;
 use crate::graph::storage::mapped::mmap_vec::MmapOrVec;
@@ -43,16 +42,14 @@ struct DiskGraphMeta {
     csr_sorted_by_type: bool,
     /// True if any node or edge has been removed since construction.
     /// Enables `count_edges_filtered` to short-circuit the per-edge
-    /// tombstone check on fresh / read-only graphs. Default false is
-    /// correct for legacy graphs only if they never saw a removal; since
-    /// we can't retroactively prove that, treat unknown (missing field)
-    /// as `true` (conservative) via a custom default.
+    /// tombstone check on fresh / read-only graphs. Legacy graphs missing
+    /// the field cannot prove they never saw a removal, so they default
+    /// to `true`.
     #[serde(default = "default_has_tombstones")]
     has_tombstones: bool,
-    /// Edge property storage format. 2 = Postcard columnar mmap base + overlay.
-    /// (edge_prop_offsets.bin + edge_prop_heap.bin). Added in PR2 of
-    /// the disk-graph-improvement-plan; defaults to 0 for backward
-    /// compat with older .kgl directories.
+    /// Edge property storage format. 2 = Postcard columnar mmap base +
+    /// overlay (edge_prop_offsets.bin + edge_prop_heap.bin). Defaults to
+    /// 0 for backward compat with older .kgl directories.
     #[serde(default)]
     edge_properties_format: u8,
     /// Lengths needed to mmap the columnar edge-property files. Zero
@@ -61,25 +58,20 @@ struct DiskGraphMeta {
     edge_properties_meta: EdgePropertyStoreMeta,
     /// CSR-layout version. 0 = legacy flat (all files at graph root).
     /// 1 = segmented (CSR / columns / per-segment indexes live under
-    /// `seg_000/`). Added in PR1 phase 4; defaults to 0 so pre-phase-4
-    /// .kgl directories still load.
+    /// `seg_000/`). Defaults to 0 so legacy flat .kgl directories still load.
     #[serde(default)]
     csr_layout_version: u8,
     /// Boundary past which nodes are in the still-mutable tail (not yet
     /// sealed into any segment). `seal_to_new_segment` flushes
-    /// `node_slots[sealed_nodes_bound..node_count]` into a new
-    /// `seg_NNN/` and advances this. Added in PR1 phase 8; zero for
-    /// pre-phase-8 graphs via serde default — their `seg_000` accounts
-    /// for everything below `node_count`, so `seal_to_new_segment`
-    /// will treat subsequent adds as the next-segment tail on first
-    /// call (after saving to bump the watermark).
+    /// `node_slots[sealed_nodes_bound..node_count]` into a new `seg_NNN/`
+    /// and advances this. Serde-defaults to zero for older graphs whose
+    /// `seg_000` already accounts for everything below `node_count`;
+    /// `load_from_dir` bumps those to `node_count` on load.
     #[serde(default)]
     sealed_nodes_bound: u32,
 }
 
 fn default_has_tombstones() -> bool {
-    // Conservative: older graphs that lack this field get the slow path
-    // (tombstone-aware). Fresh builds emit `false` explicitly.
     true
 }
 
@@ -161,12 +153,11 @@ impl DiskGraph {
             .into_inner()
             .map_err(|e| std::io::Error::other(e.to_string()))?;
         if replace_mapped {
-            // In-place replacement of the mapped file must follow the
-            // atomic-publish doctrine (io/file.rs::write_kgl_with):
-            // fsync the staged bytes, rename OVER the live target (no
+            // Atomic-publish doctrine (io/file.rs::write_kgl_with): fsync
+            // the staged bytes, rename OVER the live target (no
             // remove-first window where NO file exists), then fsync the
-            // parent directory so the rename itself is durable. A crash
-            // at any point leaves either the old file or the new one.
+            // parent dir so the rename is durable. A crash at any point
+            // leaves either the old file or the new one.
             file.sync_all()?;
             drop(file);
             // Drop the live mapping before replacing the file under it.
@@ -186,11 +177,9 @@ impl DiskGraph {
     /// `node_slot_updates`) into the mapped `node_slots.bin` backing file.
     ///
     /// Bulk loaders (ntriples) add nodes through `add_node`, which appends
-    /// to the heap-side overlay — nothing extends the mmap'd file. The full
-    /// `save_to_dir` path merges the overlay via `save_logical_node_slots`,
-    /// but a build that finalises *without* an explicit `save()` (the
-    /// ntriples disk build writes CSR + columns + metadata in place) used
-    /// to leave `node_slots.bin` at its initial 1024-slot allocation while
+    /// to the heap-side overlay without extending the mmap'd file. A build
+    /// that finalises *without* an explicit `save()` used to leave
+    /// `node_slots.bin` at its initial 1024-slot allocation while
     /// `disk_graph_meta.json` already claimed the full logical length —
     /// making the directory unloadable ("File too small") past 1024 nodes,
     /// and silently loading zeroed (dead) slots below it. Loaders call this
@@ -202,10 +191,9 @@ impl DiskGraph {
         let path = self.active_write_dir().join("node_slots.bin");
         self.save_logical_node_slots(&path)?;
         // `save_logical_node_slots` only swaps in the merged file (and
-        // clears the overlay) when node_slots was already mapped at
-        // `path`. A heap-resident node_slots (empty MmapOrVec fallback)
-        // wrote the file above but keeps its overlay; reload it so the
-        // in-memory view matches the published file either way.
+        // clears the overlay) when node_slots was already mapped at `path`.
+        // A heap-resident node_slots wrote the file above but keeps its
+        // overlay; reload so the in-memory view matches the published file.
         if self.node_slots.file_path() != Some(path.as_path()) {
             let logical_len = self.node_slot_len();
             self.node_slots = MmapOrVec::load_mapped(&path, logical_len)?;
@@ -314,7 +302,6 @@ impl DiskGraph {
         self.metadata_dirty = true;
     }
 
-    /// Record completion of the full graph-level persistence transaction.
     pub(crate) fn mark_persisted(&mut self) {
         self.metadata_dirty = false;
     }
@@ -360,35 +347,30 @@ impl DiskGraph {
             // read-only compatibility branches.
             edge_properties_format: 2,
             edge_properties_meta: edge_props_meta,
-            // PR1 phase 4: fresh saves always emit the segmented layout.
+            // Fresh saves always emit the segmented layout.
             csr_layout_version: CURRENT_CSR_LAYOUT_VERSION,
-            // PR1 phase 8: persist the watermark so reloads know which
-            // nodes already live in sealed segments vs which are tail.
+            // Persist the watermark so reloads know which nodes already
+            // live in sealed segments vs which are tail.
             sealed_nodes_bound: self.sealed_nodes_bound,
         };
         let json = serde_json::to_string_pretty(&meta).map_err(std::io::Error::other)?;
         std::fs::write(dir.join("disk_graph_meta.json"), json)
     }
 
-    /// Build a single-segment summary covering the whole graph. PR1 phase 2
-    /// — subsequent phases split the graph into multiple segments and this
-    /// helper becomes one of several per-segment builders.
+    /// Build a manifest holding one summary that covers the whole graph.
+    /// Used by the compact-rewrite save path, which consolidates every
+    /// node into `seg_000`; `seal_to_new_segment` appends its own
+    /// per-segment summaries instead.
     ///
     /// conn_types are read from the conn_type_index (built alongside the
     /// CSR), so the summary only reflects types that made it into the
-    /// index — typically all of them after a save-time compact. Node type
-    /// counts come from `column_stores` (one entry per node type); the
-    /// count is the stored row count minus any tombstone slack (which we
-    /// don't tally precisely here — the planner treats `has_node_type` as
-    /// a lower-bound predicate).
+    /// index — typically all of them after a save-time compact.
     ///
-    /// PR1 phase 5 additionally populates `indexed_prop_ranges` from the
-    /// segment's on-disk `PropertyIndex` files (which live in `data_dir`,
-    /// which under phase-4 layout is `seg_000/`). Today only string
-    /// indexes exist, so every entry uses `PropRange::StringBloomPlaceholder`
-    /// — a conservative placeholder that never prunes, but registers the
-    /// `(type_hash, prop_hash)` pair so phase 6+ can upgrade to real
-    /// bloom filters without changing the manifest schema.
+    /// `indexed_prop_ranges` comes from the segment's on-disk
+    /// `PropertyIndex` files. Only string indexes exist, so every entry
+    /// uses `PropRange::StringBloomPlaceholder` — it never prunes, but
+    /// registers the `(type_hash, prop_hash)` pair so real bloom filters
+    /// can replace it without a manifest schema change.
     fn build_single_segment_manifest(
         &self,
         index_dir: &Path,
@@ -399,7 +381,6 @@ impl DiskGraph {
         summary.node_id_hi = self.node_count as u32;
         summary.edge_count = self.edge_count as u64;
 
-        // Connection types: iterate the persisted inverted-index u64 list.
         for i in 0..self.conn_type_index_types.len() {
             summary.conn_types.insert(self.conn_type_index_types.get(i));
         }
@@ -415,18 +396,17 @@ impl DiskGraph {
             }
         }
 
-        // Node type counts: one column_store per node type.
-        // `row_count` includes tombstoned rows — conservative upper
-        // bound is fine for planner pruning (the planner uses these
-        // only as "any rows of this type?" predicates).
+        // `row_count` includes tombstoned rows — a conservative upper
+        // bound is fine because the planner uses these only as "any rows
+        // of this type?" predicates.
         for (type_key, store) in &self.column_stores {
             summary
                 .node_type_counts
                 .insert(type_key.as_u64(), store.row_count());
         }
 
-        // PR1 phase 5: record every (type, prop) index present in the
-        // segment. Prefer the in-memory cache — its keys hold the
+        // Record every (type, prop) index present in the segment.
+        // Prefer the in-memory cache — its keys hold the
         // *original* type/prop strings the user passed in, so hashes
         // round-trip cleanly through `InternedKey::from_str`. Fall back
         // to a disk scan for indexes that were persisted earlier and
@@ -495,14 +475,10 @@ impl DiskGraph {
         _interner: &crate::graph::schema::StringInterner,
     ) -> std::io::Result<()> {
         self.begin_persist();
-        // Drain mutation caches before writing:
-        //   - `edge_mut_cache` → `edge_properties` (existing behavior,
-        //     edge props have been persisting correctly because
-        //     `edge_properties` is owned by DiskGraph).
-        //   - `node_mut_cache` → `self.column_stores` via the
-        //     clone-apply-replace flush. The caller
-        //     (`DirGraph::save_disk`) mirrors the post-flush Arcs back
-        //     into its own side immediately after.
+        // Drain mutation caches: `edge_mut_cache` → `edge_properties`, and
+        // `node_mut_cache` → `self.column_stores` via clone-apply-replace.
+        // The caller (`DirGraph::save_disk`) mirrors the post-flush Arcs
+        // back into its own side immediately after.
         self.clear_arenas();
         std::fs::create_dir_all(target_dir)?;
 
@@ -513,22 +489,17 @@ impl DiskGraph {
             return Ok(());
         }
 
-        // CSR binaries live under a per-segment subdirectory. Fresh
-        // graphs already have self.data_dir pointing at their own
-        // seg_000/; save-as to a different path creates a matching
-        // subdir. The subdir name is parameterised on segment id; this
-        // compact-rewrite path always consolidates into id 0, while the
-        // seal path above is what writes higher ids.
+        // CSR binaries live under a per-segment subdirectory; save-as to a
+        // different path creates a matching subdir. This compact-rewrite
+        // path always consolidates into id 0 — the seal path above is what
+        // writes higher ids.
         let csr_target = target_dir.join(segment_subdir(0));
         std::fs::create_dir_all(&csr_target)?;
 
-        // The compact-rewrite path consolidates the full in-memory
-        // graph into seg_000. If a prior seal produced seg_NNN > 0
-        // dirs, they carried a subset of the now-consolidated state;
-        // leaving them on disk causes the next reload's
-        // `enumerate_segment_dirs` to pick them up and concat against
-        // the fresh seg_000 — double-counting nodes and edges. Remove
-        // every seg_NNN for N > 0 before rewriting seg_000.
+        // Any seg_NNN > 0 left by a prior seal carries a subset of the
+        // now-consolidated state; leaving it on disk makes the next
+        // reload's `enumerate_segment_dirs` concat it against the fresh
+        // seg_000 — double-counting nodes and edges.
         if csr_target == self.data_dir {
             for (seg_id, seg_path) in enumerate_segment_dirs(target_dir) {
                 if seg_id > 0 {
@@ -541,16 +512,14 @@ impl DiskGraph {
         // workspace indexes so the latter win without touching the snapshot.
         self.copy_persisted_indexes(&csr_target)?;
 
-        // Always persist the core CSR arrays, regardless of mmap vs
-        // heap backing. Previously this path skipped writes when
-        // `csr_target == self.data_dir` and relied on mmap file
-        // persistence. After a prior seal (`reconcile_seg0_csr`)
-        // these arrays are heap-backed, so mmap persistence doesn't
-        // apply — the on-disk file stays at the pre-seal trimmed size
-        // while the in-memory Vec carries the full state. On reload
-        // the meta → file-length mismatch fails loudly. `save_to_file`
-        // handles both backings: Heap writes bytes; Mapped-same-path
-        // truncates to logical length.
+        // Always persist the core CSR arrays, regardless of mmap vs heap
+        // backing: after a prior seal (`reconcile_seg0_csr`) they are
+        // heap-backed, so relying on mmap persistence would leave the
+        // on-disk file at its pre-seal trimmed size while the in-memory
+        // Vec carries the full state — the reload then fails loudly on the
+        // meta → file-length mismatch. `save_to_file` handles both
+        // backings: Heap writes bytes; Mapped-same-path truncates to
+        // logical length.
         self.save_logical_node_slots(&csr_target.join("node_slots.bin"))?;
         self.out_offsets
             .save_to_file(&csr_target.join("out_offsets.bin"))?;
@@ -562,7 +531,6 @@ impl DiskGraph {
             .save_to_file(&csr_target.join("in_edges.bin"))?;
         self.save_logical_edge_endpoints(&csr_target.join("edge_endpoints.bin"))?;
 
-        // Save overflow edges using the codec selected by DiskGraphMeta.
         if !self.overflow_out.is_empty() || !self.overflow_in.is_empty() {
             let overflow = (&self.overflow_out, &self.overflow_in);
             let bytes = crate::serde_codec::encode_versioned(
@@ -606,8 +574,8 @@ impl DiskGraph {
             self.conn_type_index_sources.trim_to_logical_length()?;
         }
 
-        // PR1 phase 8: trim the core CSR mmap files to their logical
-        // length when writing in-place (csr_target == self.data_dir).
+        // Trim the core CSR mmap files to their logical length when
+        // writing in place (csr_target == self.data_dir).
         // The not-in-place branch above already writes exact-sized
         // files via `save_to_file(&different_path)`. Without this trim
         // the multi-segment load path would misread the padding as
@@ -627,21 +595,16 @@ impl DiskGraph {
             self.in_edges.trim_to_logical_length()?;
         }
 
-        // PR1 phase 2: compute and persist a single-segment manifest.
-        // Subsequent phases split saves into multiple segments; today the
-        // manifest describes the whole graph as one segment so the planner
-        // hook can be wired up without changing read-path behaviour.
         let manifest = self.build_single_segment_manifest(&csr_target)?;
         manifest.save_to(target_dir)?;
         self.segment_manifest = manifest;
 
-        // Save metadata to target_dir (not data_dir)
         self.write_metadata_to(target_dir, edge_props_meta)?;
 
-        // PR1 phase 8: after a full save, everything up to node_count
-        // is accounted for in the (single-segment) on-disk state. Bump
-        // the sealed watermark so any subsequent `seal_to_new_segment`
-        // correctly treats post-save adds as the new tail.
+        // After a full save everything up to node_count is accounted for
+        // in the single-segment on-disk state, so bump the watermark: a
+        // subsequent `seal_to_new_segment` must treat only post-save adds
+        // as the new tail.
         self.sealed_nodes_bound = self.node_count as u32;
 
         Ok(())
@@ -654,32 +617,31 @@ impl DiskGraph {
     /// appends a [`SegmentSummary`] to the on-disk manifest, and
     /// rewrites `disk_graph_meta.json`.
     ///
-    /// ## Two output modes (phase 7)
+    /// ## Two output modes
     ///
     /// The new segment is written in one of two modes depending on
     /// whether the overflow contains cross-segment edges:
     ///
-    /// - **Segment-local** (phase 8 default): all overflow edges have
+    /// - **Segment-local** (the clean-tail case): all overflow edges have
     ///   both source AND target in `[tail_lo, tail_hi)`. The new
     ///   segment's `out_offsets` / `in_offsets` have length
     ///   `tail_len + 1` and index by the segment's node_slots
-    ///   positions (0..tail_len). This is what clean-tail workloads
-    ///   (phase 6's `save_to_dir` auto-wire) produce.
+    ///   positions (0..tail_len).
     ///
-    /// - **Full-range** (phase 7): at least one overflow edge has an
-    ///   endpoint below `tail_lo`. The segment's `out_offsets` /
-    ///   `in_offsets` have length `node_count + 1` and index by
-    ///   global node id — nodes without edges in this seal get
-    ///   zero-length ranges. Allows a single segment to carry edges
-    ///   whose source / target is in any prior segment's node range.
+    /// - **Full-range**: at least one overflow edge has an endpoint
+    ///   below `tail_lo`. The segment's `out_offsets` / `in_offsets`
+    ///   have length `node_count + 1` and index by global node id —
+    ///   nodes without edges in this seal get zero-length ranges. Lets a
+    ///   single segment carry edges whose source / target is in any
+    ///   prior segment's node range.
     ///
     /// `concat_segment_csrs` at load time distinguishes the two modes
     /// by comparing `out_offsets.len()` to `node_slots.len() + 1`. In
-    /// full-range mode it unions per-node contributions across
-    /// segments; in segment-local mode it preserves the phase-7
-    /// "each node's edges live in exactly one segment" invariant.
+    /// full-range mode it unions per-node contributions across segments;
+    /// in segment-local mode it preserves the "each node's edges live in
+    /// exactly one segment" invariant.
     ///
-    /// ## Auxiliary indexes (phase 5)
+    /// ## Auxiliary indexes
     ///
     /// Every seal — segment-local or full-range — writes its own
     /// `conn_type_index_*`, `peer_count_*`, and flushes the
@@ -754,9 +716,8 @@ impl DiskGraph {
                 });
             }
         }
-        // Sort by (source, conn_type) — identical to pre-phase-7
-        // behaviour for segment-local; full-range uses the same order
-        // so offsets can be built in one sweep.
+        // Sort by (source, conn_type) — both modes use this order so the
+        // offsets can be built in one sweep.
         seal_edges.sort_by_key(|e| (e.src_global, e.conn_type));
         let n_edges = seal_edges.len();
 
@@ -768,14 +729,14 @@ impl DiskGraph {
             tail_len + 1
         };
 
-        // ─── node_slots — unchanged: tail only. ───
+        // ─── node_slots: tail only. ───
         let mut node_slots: MmapOrVec<DiskNodeSlot> = MmapOrVec::with_capacity(tail_len);
         for i in 0..tail_len {
             node_slots.try_push(self.node_slot(tail_lo as usize + i))?;
         }
 
         // ─── edge_endpoints: global source/target, segment-local
-        //     edge_idx 0..n_edges (same as before). ───
+        //     edge_idx 0..n_edges. ───
         let mut edge_endpoints: MmapOrVec<EdgeEndpoints> = MmapOrVec::with_capacity(n_edges);
         for e in &seal_edges {
             edge_endpoints.try_push(EdgeEndpoints {
@@ -847,7 +808,7 @@ impl DiskGraph {
         in_edges.save_to_file(&seg_dir.join("in_edges.bin"))?;
         edge_endpoints.save_to_file(&seg_dir.join("edge_endpoints.bin"))?;
 
-        // ─── Persist auxiliary indexes (phase 5). ───
+        // ─── Persist auxiliary indexes. ───
         //
         // Without these, typed-edge matches, peer-count aggregates,
         // and `edge_weight()` all return incomplete results on the
@@ -856,10 +817,9 @@ impl DiskGraph {
         // overlay so the sealed edges' properties survive into the
         // segment's store.
         //
-        // Segment-local inputs: the just-built node_slots / out_offsets
-        // / out_edges / edge_endpoints vectors above. All are
-        // `MmapOrVec::Heap` — no file handles — so the builders don't
-        // race with anything mmap'd under `self.data_dir`.
+        // The just-built input vectors are all `MmapOrVec::Heap` — no file
+        // handles — so the builders can't race anything mmap'd under
+        // `self.data_dir`.
         // conn_type_index is keyed by offset-array index (segment-local
         // in segment-local mode, global in full-range mode). The
         // builder's `node_bound` argument must match the offsets
@@ -876,10 +836,10 @@ impl DiskGraph {
 
         // Flush the edge_properties overlay to seg_0's base store. The
         // overlay currently holds props for the sealed edges (keyed by
-        // their original global edge_idx). `save_to` absorbs the
-        // overlay into seg_0's edge_prop_* files, which after phase 7
-        // concat cover every segment's edges (since concat preserves
-        // global edge_idx). Sealed edges' properties survive reload.
+        // their original global edge_idx). `save_to` absorbs the overlay
+        // into seg_0's edge_prop_* files, which cover every segment's
+        // edges because concat preserves global edge_idx — so sealed
+        // edges' properties survive reload.
         let upper = self.next_edge_idx;
         self.edge_properties.save_to(&self.data_dir, upper)?;
 
@@ -888,11 +848,9 @@ impl DiskGraph {
         let mut summary = SegmentSummary::new(next_id, tail_lo);
         summary.node_id_hi = tail_hi;
         summary.edge_count = n_edges as u64;
-        // Connection types touched by this segment's edges.
         for e in &seal_edges {
             summary.conn_types.insert(e.conn_type);
         }
-        // Node-type counts from the tail's slots.
         for i in 0..tail_len {
             let ns = self.node_slot(tail_lo as usize + i);
             if !ns.is_alive() {
@@ -900,9 +858,8 @@ impl DiskGraph {
             }
             *summary.node_type_counts.entry(ns.node_type).or_insert(0) += 1;
         }
-        // (indexed_prop_ranges stays empty for the new segment — phase
-        // 5's cache+scan populates for seg 0's indexes only, and
-        // per-segment indexes are phase 9.)
+        // indexed_prop_ranges stays empty: the cache+scan populates seg 0's
+        // indexes only, and per-segment property indexes do not exist.
 
         self.segment_manifest.append(summary);
         self.segment_manifest.save_to(root)?;
@@ -931,9 +888,9 @@ impl DiskGraph {
 
         // ─── Clear consumed overflow + advance watermark. ───
         //
-        // All validated overflow edges belong to this seal (their
-        // source and target are both >= tail_lo). Drop them in-memory;
-        // the persisted CSR in seg_NNN/ is now the source of truth.
+        // Both modes wrote the entire overflow map into this seal, so drop
+        // it in-memory; the persisted CSR in seg_NNN/ is now the source of
+        // truth.
         self.overflow_out.clear();
         self.overflow_in.clear();
         self.sealed_nodes_bound = tail_hi;
@@ -973,19 +930,16 @@ impl DiskGraph {
         // with csr_layout_version >= 1. Legacy .kgl directories
         // (version=0, the serde default) keep the flat layout.
         //
-        // `enumerate_segment_dirs` finds the segments; for csr_layout
-        // version >= 1 this block yields either the single segment's
-        // CSR dir or the concat'd combined arrays across segments.
         // Multi-segment graphs are produced by ordinary saves:
-        // `save_to_dir` seals a clean tail into a new seg_NNN whenever
-        // a prior save exists (see `save_disposition`).
+        // `save_to_dir` seals a clean tail into a new seg_NNN whenever a
+        // prior save exists (see `save_disposition`).
         //
         // Auxiliary per-segment data is handled unevenly in the N>1
         // branch: conn_type_index_* and peer_count_* are merged across
         // segments by `concat_segment_csrs`, while edge_properties,
-        // column_stores and the per-(type,prop) property indexes are
-        // still loaded from segment 0 only — a documented limitation
-        // on `SegmentCsr`.
+        // column_stores and the per-(type,prop) property indexes are still
+        // loaded from segment 0 only — a limitation documented on
+        // `SegmentCsr`.
         // Temp dir for legacy .zst decompression (only created if needed).
         // Lives inside graph dir so no external temp space required.
         let temp_dir = dir.join("_zst_cache");
@@ -1075,7 +1029,7 @@ impl DiskGraph {
             }
         } else {
             // Legacy flat layout: load from root as one segment, using
-            // meta's *_len values. Same code as phase 6 once unwrapped.
+            // meta's *_len values.
             let csr = SegmentCsr {
                 node_slots: load_raw_or_zst(
                     &dir.join("node_slots"),
@@ -1129,8 +1083,8 @@ impl DiskGraph {
             peer_count_entries,
         } = segment_csr;
 
-        // Load Postcard columnar edge properties (format 2).
-        // In the segmented layout the files live alongside the CSR.
+        // Postcard columnar edge properties (format 2). In the segmented
+        // layout these files live alongside the CSR.
         let t = stage_timer();
         let edge_properties = EdgePropertyStore::load_from(
             &csr_dir,
@@ -1140,7 +1094,7 @@ impl DiskGraph {
         )?;
         log_stage("dg.edge_properties", t);
 
-        // Load overflow edges (kept at the graph root; orthogonal to segments)
+        // Overflow edges live at the graph root, orthogonal to segments.
         let t = stage_timer();
         let (overflow_out, overflow_in) = load_overflow_edges(dir, serde_codec)?;
         log_stage("dg.overflow_edges", t);
@@ -1149,14 +1103,13 @@ impl DiskGraph {
         let segment_manifest = SegmentManifest::load_from(dir).unwrap_or_default();
         log_stage("dg.segment_manifest", t);
 
-        // PR1 phase 8: serde-defaulted to 0 on pre-phase-8 graphs.
-        // Their `seg_000` already accounts for every node, so bump the
-        // watermark to `node_count` here. Without this, a re-save calls
-        // `seal_to_new_segment` with `tail_lo=0` and `tail_hi=node_count`,
-        // which writes a fresh empty `seg_001` AND truncates seg_000's
-        // `out_offsets.bin` / `in_offsets.bin` via `reconcile_seg0_csr`
-        // — corrupting the graph. Fresh phase-8+ graphs persist the
-        // correct watermark, so the bump is a no-op for them.
+        // Older graphs predate the persisted watermark and serde-default
+        // it to 0, but their `seg_000` already accounts for every node.
+        // Without the bump, a re-save calls `seal_to_new_segment` with
+        // `tail_lo=0` and `tail_hi=node_count`, writing a fresh empty
+        // `seg_001` AND truncating seg_000's `out_offsets.bin` /
+        // `in_offsets.bin` via `reconcile_seg0_csr` — corrupting the
+        // graph. Graphs that persist the watermark are unaffected.
         let sealed_nodes_bound = if meta.sealed_nodes_bound == 0
             && !segment_manifest.is_empty()
             && meta.node_count > 0
@@ -1201,11 +1154,6 @@ impl DiskGraph {
                 csr_sorted_by_type: meta.csr_sorted_by_type,
                 defer_csr: false,
                 edge_type_counts_raw: None,
-                // Auxiliary indexes — single-segment graphs read them
-                // from `csr_dir` directly via `SegmentCsr::load_from`
-                // (or the manual constructor in the N==1 branch above);
-                // multi-segment graphs get the merged view from
-                // `concat_segment_csrs`.
                 conn_type_index_types,
                 conn_type_index_offsets,
                 conn_type_index_sources,
@@ -1216,9 +1164,8 @@ impl DiskGraph {
                 property_indexes: std::sync::RwLock::new(HashMap::new()),
                 removed_property_indexes: HashSet::new(),
                 global_indexes: std::sync::RwLock::new(HashMap::new()),
-                // Legacy .kgl directories have no seg_manifest.json;
-                // load_from returns an empty manifest which subsequent
-                // PR1 phases treat as "pre-segmented, don't prune".
+                // Legacy .kgl directories have no seg_manifest.json; the
+                // resulting empty manifest means "pre-segmented, don't prune".
                 segment_manifest,
                 sealed_nodes_bound,
             },
@@ -1227,11 +1174,6 @@ impl DiskGraph {
     }
 }
 
-// ============================================================================
-// Compression helpers
-// ============================================================================
-
-/// Write a MmapOrVec as a zstd-compressed file.
 /// Load a binary array: try raw `.bin` first (direct mmap, no temp dir),
 /// fall back to `.bin.zst` (decompress to temp dir, then mmap).
 fn load_raw_or_zst<T: crate::graph::storage::mapped::mmap_vec::MmapPod>(
@@ -1283,7 +1225,6 @@ fn load_compressed<T: crate::graph::storage::mapped::mmap_vec::MmapPod>(
     let compressed = std::fs::read(path)?;
     let raw = zstd::decode_all(compressed.as_slice())?;
 
-    // Write decompressed data to temp file and mmap
     let file_name = path
         .file_name()
         .and_then(|s| s.to_str())
@@ -1295,37 +1236,33 @@ fn load_compressed<T: crate::graph::storage::mapped::mmap_vec::MmapPod>(
 }
 
 // ============================================================================
-// Multi-segment CSR (PR1 phase 7)
+// Multi-segment CSR
 // ============================================================================
 
 /// One segment's core CSR arrays, loaded from its subdirectory. Used
 /// only when a graph spans multiple `seg_NNN/` dirs — single-segment
-/// graphs continue on the direct mmap path in [`DiskGraph::load_from_dir`]
-/// for zero-overhead compatibility with every existing `.kgl` directory.
+/// graphs stay on the direct mmap path in [`DiskGraph::load_from_dir`].
 ///
-/// The arrays bundled here are the CSR backbone:
+/// Indexing conventions concat relies on:
 ///
-///   - `node_slots`: one `DiskNodeSlot` per node in this segment (the
-///     segment owns a disjoint node-id range reported in its
-///     `SegmentSummary`).
-///   - `out_offsets` / `in_offsets`: CSR offsets into `out_edges` /
-///     `in_edges`, indexed by local node position inside the segment.
-///     Length = `node_slots.len() + 1`.
-///   - `out_edges` / `in_edges`: `CsrEdge` arrays. Each entry's
-///     `edge_idx` is **segment-local** (`0..edge_endpoints.len()`),
-///     so concat shifts them onto combined edge_endpoints.
-///   - `edge_endpoints`: `EdgeEndpoints` array, one per edge recorded
-///     in this segment. `source` / `target` store *global* node ids
-///     (unchanged by concat).
+///   - `node_slots`: one entry per node in this segment; the segment owns
+///     a disjoint node-id range reported in its `SegmentSummary`.
+///   - `out_offsets` / `in_offsets`: indexed by local node position for a
+///     segment-local seal, by global node id for a full-range one (see
+///     [`DiskGraph::seal_to_new_segment`]).
+///   - `out_edges` / `in_edges`: each entry's `edge_idx` is
+///     **segment-local** (`0..edge_endpoints.len()`), so concat shifts
+///     them onto the combined edge_endpoints.
+///   - `edge_endpoints`: `source` / `target` store *global* node ids and
+///     are never rewritten by concat.
 ///
 /// The auxiliary inverted indexes (`conn_type_index_*`, `peer_count_*`)
-/// are bundled per segment and merged by `concat_segment_csrs`. The
-/// `edge_properties` / `column_stores` / per-(type,prop) property
-/// indexes are **not** bundled here — they are loaded from segment 0
-/// only. Sealing flushes the new segment's edge properties back into
-/// seg_0's store and concat preserves global `edge_idx`, so edge
-/// properties survive; per-segment property indexes remain a known
-/// limitation.
+/// are bundled per segment and merged by `concat_segment_csrs`.
+/// `edge_properties` / `column_stores` / per-(type,prop) property indexes
+/// are **not** bundled here — they load from segment 0 only. Sealing
+/// flushes the new segment's edge properties back into seg_0's store and
+/// concat preserves global `edge_idx`, so edge properties survive;
+/// per-segment property indexes remain a known limitation.
 pub(crate) struct SegmentCsr {
     pub(crate) node_slots: MmapOrVec<super::csr::DiskNodeSlot>,
     pub(crate) out_offsets: MmapOrVec<u64>,
@@ -1333,8 +1270,6 @@ pub(crate) struct SegmentCsr {
     pub(crate) in_offsets: MmapOrVec<u64>,
     pub(crate) in_edges: MmapOrVec<super::csr::CsrEdge>,
     pub(crate) edge_endpoints: MmapOrVec<super::csr::EdgeEndpoints>,
-    // Per-segment auxiliary indexes. Each segment carries its own
-    // inverted indexes; `concat_segment_csrs` merges them at load time.
     pub(crate) conn_type_index_types: MmapOrVec<u64>,
     pub(crate) conn_type_index_offsets: MmapOrVec<u64>,
     pub(crate) conn_type_index_sources: MmapOrVec<u32>,
@@ -1356,10 +1291,9 @@ impl SegmentCsr {
             in_offsets: load_with_inferred_len(&csr_dir.join("in_offsets"), temp_dir)?,
             in_edges: load_with_inferred_len(&csr_dir.join("in_edges"), temp_dir)?,
             edge_endpoints: load_with_inferred_len(&csr_dir.join("edge_endpoints"), temp_dir)?,
-            // Auxiliary files are optional — older segments (seg_000
-            // written before phase 5 wired auxiliary writes into seal)
-            // may lack them. `load_raw_or_zst_optional` already returns
-            // an empty MmapOrVec when the file is absent.
+            // Auxiliary files are optional: segments written before seal
+            // emitted auxiliary indexes lack them, and
+            // `load_raw_or_zst_optional` yields an empty MmapOrVec then.
             conn_type_index_types: load_raw_or_zst_optional(&csr_dir.join("conn_type_index_types")),
             conn_type_index_offsets: load_raw_or_zst_optional(
                 &csr_dir.join("conn_type_index_offsets"),
@@ -1387,10 +1321,6 @@ impl SegmentCsr {
 ///     so queries between seal and drop still see the combined graph.
 ///  3. The file handle released, so `set_len` doesn't race an
 ///     existing mmap.
-///
-/// Simplest way to get all three: snapshot the current contents into
-/// a Vec, replace `field` with a fresh heap-backed MmapOrVec holding
-/// that Vec, then reopen the file briefly just to `set_len`.
 fn reconcile_seg0_csr<T: crate::graph::storage::mapped::mmap_vec::MmapPod>(
     field: &mut MmapOrVec<T>,
     seg0_len: usize,
@@ -1426,10 +1356,8 @@ fn load_with_inferred_len<T: crate::graph::storage::mapped::mmap_vec::MmapPod>(
     }
     let zst_path = base_path.with_extension("bin.zst");
     if zst_path.exists() && elem > 0 {
-        // Legacy path: zstd stream doesn't carry the element count in
-        // metadata, so we decompress to a temp file and infer from its
-        // size. Matches `load_raw_or_zst`'s `load_compressed` flow,
-        // minus the advance length check.
+        // Legacy path: the zstd stream carries no element count, so
+        // decompress to a temp file and infer the count from its size.
         std::fs::create_dir_all(temp_dir)?;
         let compressed = std::fs::read(&zst_path)?;
         let raw = zstd::decode_all(compressed.as_slice())?;
@@ -1453,29 +1381,26 @@ fn load_with_inferred_len<T: crate::graph::storage::mapped::mmap_vec::MmapPod>(
 /// shifting each segment's `edge_idx` values onto the combined
 /// `edge_endpoints` numbering.
 ///
-/// Single-segment input is returned as-is — the `Vec<SegmentCsr>` is
-/// popped once and no allocation happens, so the N==1 case pays
-/// essentially nothing beyond the function call.
+/// Single-segment input is returned as-is, without allocating. For N > 1
+/// the combined arrays are heap-backed; nothing is written to disk, so
+/// the read path sees an in-memory combined CSR only.
 ///
-/// The returned `SegmentCsr` is always `MmapOrVec::Vec`-backed — it
-/// does not touch the filesystem. The read path sees the in-memory
-/// combined CSR; there is no graph-level concat-to-disk.
-///
-/// Assumptions on inputs (documented so the phase-8 writer obeys them):
+/// Assumptions on inputs:
 ///   1. Segments are provided in manifest order (ascending
 ///      `segment_id`), covering contiguous disjoint node-id ranges
 ///      `[0, n_0) + [n_0, n_0 + n_1) + ...`. The caller
 ///      ([`DiskGraph::load_from_dir`]) preserves `enumerate_segment_dirs`
 ///      ordering.
-///   2. Each segment's `out_offsets` / `in_offsets` is segment-local:
-///      `out_offsets[0] == 0`, `out_offsets[last] == out_edges.len()`.
+///   2. Each segment's `out_offsets` / `in_offsets` is either
+///      segment-local (`len() == node_slots.len() + 1`) or full-range
+///      (one entry per global node); concat distinguishes by length.
 ///   3. Each segment's `CsrEdge::edge_idx` values are segment-local
 ///      (`0..edge_endpoints.len()`).
 ///   4. `EdgeEndpoints::{source, target}` hold *global* node ids and
 ///      are never rewritten by concat.
 ///
-/// Violations produce a garbage combined CSR; the assumptions are
-/// phase 7's contract with phase 8's writer.
+/// Violations produce a garbage combined CSR; `seal_to_new_segment` is
+/// the writer that must honour them.
 pub(crate) fn concat_segment_csrs(mut segments: Vec<SegmentCsr>) -> std::io::Result<SegmentCsr> {
     use super::csr::{CsrEdge, DiskNodeSlot, EdgeEndpoints};
     let combined = match segments.len() {
@@ -1495,7 +1420,6 @@ pub(crate) fn concat_segment_csrs(mut segments: Vec<SegmentCsr>) -> std::io::Res
         },
         1 => segments.pop().unwrap(),
         _ => {
-            // Pre-size everything.
             let total_nodes: usize = segments.iter().map(|s| s.node_slots.len()).sum();
             let total_out_edges: usize = segments.iter().map(|s| s.out_edges.len()).sum();
             let total_in_edges: usize = segments.iter().map(|s| s.in_edges.len()).sum();
@@ -1512,8 +1436,8 @@ pub(crate) fn concat_segment_csrs(mut segments: Vec<SegmentCsr>) -> std::io::Res
             // Per-segment metadata for the per-node walk below.
             //   node_lo[k]..node_hi[k]   : combined-index range owned by segment k
             //   endpoint_base[k]         : edge_idx shift for segment k's CsrEdges
-            //   is_full_range[k]         : out_offsets covers all nodes (phase 7
-            //                              cross-segment seal) vs just its own
+            //   is_full_range[k]         : out_offsets covers all global
+            //                              nodes vs just this segment's
             let mut node_lo: Vec<usize> = Vec::with_capacity(segments.len());
             let mut node_hi: Vec<usize> = Vec::with_capacity(segments.len());
             let mut endpoint_base: Vec<u32> = Vec::with_capacity(segments.len());
@@ -1527,17 +1451,14 @@ pub(crate) fn concat_segment_csrs(mut segments: Vec<SegmentCsr>) -> std::io::Res
                 endpoint_base.push(ep_cursor);
                 ep_cursor += seg.edge_endpoints.len() as u32;
                 // Full-range segments have an offset entry per GLOBAL
-                // node (produced by phase 7's cross-segment seal). The
-                // total node count isn't known inside the writer at
-                // seal time, but it's always ≥ node_slots.len(); so
+                // node. The writer doesn't know the total node count at
+                // seal time, but it is always >= node_slots.len(), so
                 // `out_offsets.len() > node_slots.len() + 1` uniquely
-                // signals full-range here.
+                // signals full-range.
                 is_full.push(seg.out_offsets.len() > seg.node_slots.len() + 1);
             }
 
-            // Node slots + edge endpoints: straight concat (unchanged from
-            // phase 7). Segment ownership of nodes is the same; only the
-            // edge-index mapping differs under full-range.
+            // Node slots + edge endpoints: straight concat.
             for seg in &segments {
                 for i in 0..seg.node_slots.len() {
                     node_slots.try_push(seg.node_slots.get(i))?;
@@ -1605,14 +1526,7 @@ pub(crate) fn concat_segment_csrs(mut segments: Vec<SegmentCsr>) -> std::io::Res
             }
 
             // ─── Auxiliary index merge ────────────────────────────────────
-            //
-            // conn_type_index — per-type source-list union across segments.
-            // Each segment's source list is globally sorted (segments own
-            // disjoint node ranges); concatenating segments in manifest
-            // order preserves ascending global order per type.
             let (cti_types, cti_offsets, cti_sources) = merge_conn_type_index(&segments)?;
-
-            // peer_count — sum counts per (type, peer) across segments.
             let (pc_types, pc_offsets, pc_entries) = merge_peer_count_histogram(&segments)?;
 
             SegmentCsr {
@@ -1658,7 +1572,6 @@ fn merge_conn_type_index(
         is_full.push(seg.out_offsets.len() > seg.node_slots.len() + 1);
     }
 
-    // Walk each segment and accumulate: type → Vec<segment_index>.
     let mut type_to_segs: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
     for (si, seg) in segments.iter().enumerate() {
         for i in 0..seg.conn_type_index_types.len() {
@@ -1680,7 +1593,6 @@ fn merge_conn_type_index(
         for &si in seg_idxs {
             let seg = &segments[si];
             let shift = if is_full[si] { 0 } else { node_lo[si] };
-            // Find the type's [start, end) slice inside this segment.
             let n = seg.conn_type_index_types.len();
             // Linear scan — typical segment has ≤ hundreds of types,
             // so a BTreeMap-per-segment isn't worth the setup cost.
@@ -1707,7 +1619,6 @@ fn merge_peer_count_histogram(
     segments: &[SegmentCsr],
 ) -> std::io::Result<(MmapOrVec<u64>, MmapOrVec<u64>, MmapOrVec<u32>)> {
     use std::collections::BTreeMap;
-    // type → peer → summed count.
     let mut by_type: BTreeMap<u64, BTreeMap<u32, u64>> = BTreeMap::new();
     for seg in segments {
         let n = seg.peer_count_types.len();

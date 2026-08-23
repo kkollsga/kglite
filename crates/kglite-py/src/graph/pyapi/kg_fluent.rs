@@ -49,7 +49,6 @@ impl KnowledgeGraph {
             valid_to,
         };
         let graph = get_graph_mut(&mut self.inner);
-        // Auto-detect: check node types first, then connection types
         if graph.type_indices.contains_key(&type_name) {
             graph.temporal_node_configs.insert(type_name, config);
         } else if graph.connection_type_metadata.contains_key(&type_name) {
@@ -128,8 +127,6 @@ impl KnowledgeGraph {
         let _arena_guard = self.inner.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
         let mut new_kg = self.clone();
 
-        // Record plan step: estimate based on the candidate set. When
-        // include_secondary, the count is primary ∪ secondary.
         let estimated = if include_secondary {
             self.inner.nodes_with_label(&node_type).len()
         } else {
@@ -139,7 +136,7 @@ impl KnowledgeGraph {
                 .map(|v| v.len())
                 .unwrap_or(0)
         };
-        new_kg.cursor.selection.clear_execution_plan(); // Start fresh plan
+        new_kg.cursor.selection.clear_execution_plan();
 
         let sort_fields = if let Some(spec) = sort {
             match spec.extract::<String>() {
@@ -182,7 +179,6 @@ impl KnowledgeGraph {
             .map_err(to_pyerr)?;
         }
 
-        // Apply temporal filtering if configured and not disabled
         if temporal != Some(false) && !self.cursor.temporal_context.is_all() {
             if let Some(config) = self.inner.temporal_node_configs.get(&node_type) {
                 let level_idx = new_kg.cursor.selection.get_level_count().saturating_sub(1);
@@ -204,7 +200,6 @@ impl KnowledgeGraph {
             }
         }
 
-        // Record actual result
         let actual = new_kg
             .cursor
             .selection
@@ -404,7 +399,6 @@ impl KnowledgeGraph {
         date_to_field: Option<&str>,
     ) -> PyResult<Self> {
         let _arena_guard = self.inner.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
-                                                         // Auto-detect field names from temporal config if not provided
         let temporal_config = if date_from_field.is_none() || date_to_field.is_none() {
             self.infer_selection_node_type()
                 .and_then(|nt| self.inner.temporal_node_configs.get(&nt).cloned())
@@ -419,7 +413,6 @@ impl KnowledgeGraph {
             .map(|s| s.to_string())
             .or_else(|| temporal_config.as_ref().map(|c| c.valid_to.clone()))
             .unwrap_or_else(|| "date_to".to_string());
-        // Resolve the reference date
         let ref_date = match date {
             Some(d) => {
                 let (parsed, _) = kglite_core::api::timeseries::parse_date_query(d).map_err(
@@ -443,7 +436,6 @@ impl KnowledgeGraph {
 
         let mut new_kg = self.clone();
 
-        // Estimate based on current selection
         let estimated = new_kg
             .cursor
             .selection
@@ -451,7 +443,6 @@ impl KnowledgeGraph {
             .map(|l| l.node_count())
             .unwrap_or(0);
 
-        // Filter in-place using temporal validity (handles NULL as unbounded)
         let current_level = new_kg.cursor.selection.get_level_count().saturating_sub(1);
         if let Some(level) = new_kg.cursor.selection.get_level_mut(current_level) {
             for children in level.selections.values_mut() {
@@ -465,7 +456,6 @@ impl KnowledgeGraph {
             }
         }
 
-        // Record actual result
         let actual = new_kg
             .cursor
             .selection
@@ -495,7 +485,6 @@ impl KnowledgeGraph {
         date_to_field: Option<&str>,
     ) -> PyResult<Self> {
         let _arena_guard = self.inner.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
-                                                         // Auto-detect field names from temporal config if not provided
         let temporal_config = if date_from_field.is_none() || date_to_field.is_none() {
             self.infer_selection_node_type()
                 .and_then(|nt| self.inner.temporal_node_configs.get(&nt).cloned())
@@ -511,7 +500,6 @@ impl KnowledgeGraph {
             .or_else(|| temporal_config.as_ref().map(|c| c.valid_to.clone()))
             .unwrap_or_else(|| "date_to".to_string());
 
-        // Parse dates
         let (start_parsed, _) = kglite_core::api::timeseries::parse_date_query(start_date)
             .map_err(|e: String| -> PyErr {
                 crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
@@ -530,7 +518,6 @@ impl KnowledgeGraph {
 
         let mut new_kg = self.clone();
 
-        // Estimate based on current selection
         let estimated = new_kg
             .cursor
             .selection
@@ -538,7 +525,6 @@ impl KnowledgeGraph {
             .map(|l| l.node_count())
             .unwrap_or(0);
 
-        // Filter in-place using temporal overlap (handles NULL as unbounded)
         let current_level = new_kg.cursor.selection.get_level_count().saturating_sub(1);
         if let Some(level) = new_kg.cursor.selection.get_level_mut(current_level) {
             for children in level.selections.values_mut() {
@@ -557,7 +543,6 @@ impl KnowledgeGraph {
             }
         }
 
-        // Record actual result
         let actual = new_kg
             .cursor
             .selection
@@ -601,7 +586,6 @@ impl KnowledgeGraph {
         properties: &Bound<'_, PyDict>,
         keep_selection: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
-        // Get the current level's nodes
         let current_index = self.cursor.selection.get_level_count().saturating_sub(1);
         let level = self
             .cursor
@@ -666,7 +650,6 @@ impl KnowledgeGraph {
         // deliberately detached, so `self` is what owns the durability state.
         self.commit_wal()?;
 
-        // Create the result KnowledgeGraph (clone the Arc for the new graph)
         let mut new_kg = KnowledgeGraph {
             inner: self.inner.clone(),
             cursor: crate::graph::CursorState {
@@ -685,20 +668,18 @@ impl KnowledgeGraph {
             lifecycle: crate::graph::GraphLifecycle::detached_from(&self.lifecycle),
         };
 
-        // Create and add a report
         let report = kglite_core::api::mutation::NodeOperationReport {
             operation_type: "update".to_string(),
             timestamp: chrono::Utc::now(),
             nodes_created: 0,
             nodes_updated: total_updated,
             nodes_skipped: 0,
-            processing_time_ms: 0.0, // Could track this if needed
+            processing_time_ms: 0.0,
             errors,
         };
 
         let report_index = new_kg.add_report(OperationReport::NodeOperation(report));
 
-        // Return the new KnowledgeGraph and the report
         Python::attach(|py| {
             let dict = PyDict::new(py);
             dict.set_item("graph", Py::new(py, new_kg)?.into_any())?;
@@ -760,7 +741,6 @@ impl KnowledgeGraph {
     #[pyo3(signature = (*, include_type=true, include_id=true))]
     fn to_df(&self, py: Python<'_>, include_type: bool, include_id: bool) -> PyResult<Py<PyAny>> {
         let _arena_guard = self.inner.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
-                                                         // Collect nodes from the current selection
         let mut nodes_data: Vec<(&str, kglite_core::api::NodeView<'_>)> = Vec::new();
         for node_idx in self.cursor.selection.current_node_indices() {
             if let Some(node) = self.inner.node_view(node_idx) {
@@ -818,7 +798,6 @@ impl KnowledgeGraph {
             discover(&nodes_data)
         };
 
-        // Build columnar dict-of-lists
         let n = nodes_data.len();
         let title_col = PyList::empty(py);
         let type_col = if include_type {
@@ -832,7 +811,6 @@ impl KnowledgeGraph {
             None
         };
 
-        // Pre-create property column lists
         let prop_cols: Vec<pyo3::Bound<'_, PyList>> =
             prop_keys.iter().map(|_| PyList::empty(py)).collect();
 
@@ -851,7 +829,6 @@ impl KnowledgeGraph {
             }
         }
 
-        // Build the dict with ordered columns: type, title, id, ...properties
         let dict = PyDict::new(py);
         let columns = PyList::empty(py);
 
@@ -954,14 +931,12 @@ impl KnowledgeGraph {
     ///     # Discovery(123, Johan Sverdrup)
     ///     # Discovery(456, Troll)
     ///
-    /// ```text
-    /// print(graph.select("Discovery")
-    ///     .traverse("HAS_DEPOSIT_PROSPECT")
-    ///     .traverse("TESTED_BY_WELLBORE")
-    ///     .show(["id", "title"]))
-    /// # Discovery(123, Johan Sverdrup) -> Prospect(456, Alpha) -> Wellbore(789, W1)
-    /// ```
-    /// ```
+    ///     print(graph.select("Discovery")
+    ///         .traverse("HAS_DEPOSIT_PROSPECT")
+    ///         .traverse("TESTED_BY_WELLBORE")
+    ///         .show(["id", "title"]))
+    ///     # Discovery(123, Johan Sverdrup) -> Prospect(456, Alpha) -> Wellbore(789, W1)
+    ///     ```
     #[pyo3(signature = (columns=None, limit=200))]
     fn show(&self, columns: Option<Vec<String>>, limit: usize) -> PyResult<String> {
         let _arena_guard = self.inner.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
@@ -970,7 +945,6 @@ impl KnowledgeGraph {
         let columns = columns.unwrap_or_else(|| vec!["id".to_string(), "title".to_string()]);
         let level_count = self.cursor.selection.get_level_count();
 
-        // Helper: format a single node as Type(val1, val2, ...)
         let fmt_node = |idx: NodeIndex| -> String {
             let node = match self.inner.node_view(idx) {
                 Some(n) => n,
@@ -1007,7 +981,6 @@ impl KnowledgeGraph {
         };
 
         if level_count <= 1 {
-            // Single level: format each node on its own line
             let nodes: Vec<_> = self.cursor.selection.current_node_indices().collect();
             if nodes.is_empty() {
                 return Ok("(empty selection)".to_string());
@@ -1043,7 +1016,6 @@ impl KnowledgeGraph {
                     }
 
                     if level_idx >= level_count {
-                        // Reached the end — complete chain
                         chains.push(chain);
                         continue;
                     }
@@ -1181,7 +1153,6 @@ impl KnowledgeGraph {
     #[pyo3(signature = (node_type, node_id))]
     fn node(&self, node_type: &str, node_id: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
         let _arena_guard = self.inner.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
-                                                         // Convert Python value to Rust Value
         let id_value = py_in::py_value_to_value(node_id)?;
 
         // Read-only, O(1) typed lookup — same path as `exists()`.
@@ -1196,13 +1167,11 @@ impl KnowledgeGraph {
             None => return Ok(None),
         };
 
-        // Get the node data
         let node = match self.inner.node_view(node_idx) {
             Some(n) => n,
             None => return Ok(None),
         };
 
-        // Convert to Python dict
         let node_info = node.to_node_info(&self.inner.interner);
         Python::attach(|py| {
             let dict = py_out::nodeinfo_to_pydict(py, &node_info)?;
@@ -1232,10 +1201,8 @@ impl KnowledgeGraph {
     #[pyo3(signature = (node_type, unique_id))]
     fn exists(&self, node_type: &str, unique_id: &Bound<'_, PyAny>) -> PyResult<bool> {
         let id_value = py_in::py_value_to_value(unique_id)?;
-        // Read-only, O(1) typed lookup. `lookup_by_id_readonly` self-heals the
-        // id-index on a miss (interior mutability in `IdIndexStore`), so no
-        // `&mut` / `Arc::make_mut` is needed and no per-call allocation beyond
-        // the lookup key.
+        // Read-only, O(1) typed lookup — see `node()` for why this must not
+        // route through `Arc::make_mut`.
         Ok(self
             .inner
             .lookup_by_id_readonly(node_type, &id_value)
@@ -1318,7 +1285,6 @@ impl KnowledgeGraph {
     ///     ```
     #[pyo3(signature = (name, node_type=None))]
     fn source(&self, name: &Bound<'_, PyAny>, node_type: Option<&str>) -> PyResult<Py<PyAny>> {
-        // Check if name is a list/sequence of strings
         if let Ok(list) = name.cast::<PyList>() {
             let names: Vec<String> = list.extract()?;
             return Python::attach(|py| {
@@ -1331,7 +1297,6 @@ impl KnowledgeGraph {
             });
         }
 
-        // Single string
         let name_str: String = name.extract()?;
         Python::attach(|py| self.source_one(py, &name_str, node_type))
     }
@@ -1445,7 +1410,6 @@ impl KnowledgeGraph {
         let _arena_guard = self.inner.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
         let file_id = Value::String(file_path.to_string());
 
-        // Find the File node by its id (path)
         let file_idx = if let Some(indices) = self.inner.type_indices.get("File") {
             indices.iter().find(|idx| {
                 self.inner
@@ -1468,8 +1432,8 @@ impl KnowledgeGraph {
             }
         };
 
-        // Collect all entities connected via outgoing DEFINES edges
-        // (type, name, qualified_name, line_number, end_line, signature)
+        // Tuple layout: (type, name, qualified_name, line_number, end_line,
+        // signature).
         let mut entities: Vec<(String, String, String, i64, i64, Option<String>)> = Vec::new();
 
         for edge in self

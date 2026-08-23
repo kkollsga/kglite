@@ -40,13 +40,11 @@ family vetoes it any more. The only remaining way to force the clone is the
 therefore a new conjunct in a one-conjunct predicate — cheap to add by
 accident, and these cells are what would notice.
 
-*(Corrected 2026-08-10. This paragraph previously claimed ``Mapped`` returned
-``false``. It has returned ``true`` since 2026-07-30, and
-``rollback_tests.rs::mapped_statements_copy_zero_nodes`` — itself the
-inversion of an arm that used to pin the opposite — is the executable proof.
-The stale claim mattered: it named the mapped backend as a known-slow write
-path, which is exactly the kind of "already understood" that stops a
-measurement being taken.)*
+*(``Mapped`` has returned ``true`` since 2026-07-30, and
+``rollback_tests.rs::mapped_statements_copy_zero_nodes`` is the executable
+proof. This docstring claimed the opposite until 2026-08-10, which named the
+mapped backend as a known-slow write path — exactly the kind of "already
+understood" that stops a measurement being taken.)*
 
 ⚠ **The statement shape is load-bearing — see the STATEMENT SHAPE comment
 below.** A bare single-node ``CREATE`` cannot see this defect at all, in
@@ -106,8 +104,7 @@ Memory is the other half: at 1M the fork grew process peak RSS by **668.8 MB**
 in a single round — a second whole copy of the graph — while the ``none`` and
 ``dropped_view`` arms immediately before it grew it by 0.0 MB.
 
-See the measurement-trap comment above that section. It is the reason this
-defect survived a benchmark suite that already had a cell pointed at it.
+See the measurement-trap comment above that section.
 
 ────────────────────────────────────────────────────────────────────────────
 How to read these, and the scale rule that governs the sizes
@@ -157,16 +154,14 @@ from kglite import KnowledgeGraph
 # which the defect exceeds it. In the 2026-07-27 competitive run the index
 # penalty was *completely invisible* at 1k — 3.597 ms with no index vs 3.759 ms
 # with one, well inside noise — because the 3.4 ms F_FULLFSYNC floor swamped a
-# defect that is unmissable two decades up. A suite run only at small scale
-# would have certified this write path as healthy, which is exactly what
-# happened.
+# defect that is unmissable two decades up.
 #
 # 1k is kept as the *control*, not as the measurement: its job is to be the
 # denominator that makes the 100k divergence legible. Deleting it is as wrong
 # as deleting 100k.
 #
-# 1M is deliberately omitted. The defect is already unambiguous at two decades,
-# and four variants x 1M nodes is minutes of fixture build for no added signal.
+# 1M is deliberately omitted; :data:`REF_SIZES` below carries both halves of
+# that decision.
 SIZES = [1_000, 100_000]
 
 #: Sizes for the **defect-B** (held-reference) cells only.
@@ -200,10 +195,6 @@ VARIANTS = ["fresh", "saved", "indexed", "saved_indexed"]
 #:   session object's whole lifetime (``pyapi/session.rs::from_arc``).
 #: * ``transaction`` — ``g.begin()`` holds a snapshot until commit/rollback
 #:   (``kg_core.rs``, core ``session/transaction.rs``).
-#:
-#: ``session`` and ``transaction`` were unmeasured anywhere before 2026-08-10,
-#: and they are the two holders an application acquires *on purpose* — i.e. the
-#: ones a user cannot be told to simply stop doing.
 REF_HOLDERS = ["none", "dropped_view", "result_view", "frozen", "session", "transaction"]
 
 # Every cell here drives `benchmark.pedantic` with an explicit round count
@@ -326,14 +317,10 @@ def _variant_graph(size: int, variant: str, tmp_dir) -> KnowledgeGraph:
     if variant in ("saved", "saved_indexed"):
         graph.save(str(tmp_dir / f"veto-{variant}-{size}.kgl"), fsync=False)
 
-    # Vacuity guards. The 2026-07-27 run's own methodology note earned this:
-    # every harness defect it caught was found because a number was
-    # inconsistent with the configuration it *claimed* to represent, never
-    # because a number looked implausible. A cell whose fixture silently
-    # carries no column rows, or an `indexed` cell whose index didn't take,
-    # would report a healthy fast path under a label promising otherwise —
-    # indistinguishable from the fix working. These are cheap and they fail
-    # loudly. The columnar half no longer discriminates the variants (every
+    # Vacuity guards. A fixture that silently carries no column rows, or an
+    # `indexed` cell whose index didn't take, would report a healthy fast path
+    # under a label promising otherwise — indistinguishable from the fix
+    # working. The columnar half no longer discriminates the variants (every
     # graph owns stores from its first node), so it asserts the rows exist.
     assert graph.graph_info()["columnar_total_rows"] == size, (
         f"{variant} must carry its rows in the column store, or this cell "
@@ -415,8 +402,7 @@ def test_bench_checkpoint_free_create_control(benchmark, veto_graphs, size, vari
     outright. It is here for two reasons, neither of them regression-gating:
 
     1. It documents, executably, why the obvious insert benchmark cannot see
-       defect A — the next person to reach for `CREATE` here finds the answer
-       next to the code rather than re-deriving it from a null result.
+       defect A.
     2. It is the tripwire for the whitelist *narrowing*. If the checkpoint-free
        path stops covering single-node `CREATE`, this cell moves and
        `test_bench_insert_after_veto_trigger` does not, which localises the
@@ -471,8 +457,7 @@ def test_bench_update_after_veto_trigger(benchmark, veto_graphs, size, variant):
 #
 # CLAUDE.md's performance protocol says to trust `min` over `median` for
 # sub-millisecond benchmarks, because median pulls upward with system load.
-# That guidance is correct in general and WRONG HERE, and this comment exists
-# because the obvious "cleanup" silently disables the benchmark.
+# That guidance is correct in general and WRONG HERE.
 #
 # The clone fires on the FIRST write after a second `Arc<DirGraph>` appears,
 # and once only — afterwards the graph is uniquely owned again and every
@@ -542,12 +527,9 @@ EAGER_MATERIALISE_MAX_CELLS = 32
 def _acquire_reference(graph: KnowledgeGraph, holder: str):
     """Take (or deliberately decline to take) a second reference to `graph`.
 
-    **One definition, two callers**, and that is the point: the benchmark's
-    untimed `setup` and the non-benchmark guard below both go through here, so
-    the guard is testing the acquisition the benchmark performs rather than a
-    lookalike written next to it. A hoist that made the benchmark vacuous would
-    have to be made *here* to escape the guard, and here is the one place the
-    guard is looking.
+    The benchmark's untimed `setup` and the non-benchmark guard below both go
+    through here, so the guard tests the acquisition the benchmark performs
+    rather than a lookalike written next to it.
     """
     if holder == "none":
         return None
@@ -642,10 +624,8 @@ def test_bench_first_write_after_reference(benchmark, ref_graphs, size, holder):
     **Memory is recorded alongside time**, as `extra_info`. The fork's cost is
     not only latency: a copy of the whole graph is also a transient allocation
     the size of the graph, and at 1M nodes that is the difference between a
-    process that fits and one that does not. `ru_maxrss` is a process *peak*,
-    so `rss_peak_growth_mb` is a floor on the largest live footprint the cell
-    reached, not a per-round figure — read it across holders at one size, where
-    the only difference between the arms is whether a reference was held.
+    process that fits and one that does not. Read `rss_peak_growth_mb` across
+    holders at one size; `_peak_rss_mb` explains why it is not per-round.
     """
     graph = ref_graphs[size]
     ids = _FRESH_GRAPH_IDS
@@ -908,13 +888,12 @@ def _current_rss_mb() -> float:
 
 
 def _settle() -> float:
-    """Drop Python-side references and read the settled RSS."""
     gc.collect()
     return _current_rss_mb()
 
 
-#: Rounds per sequence. The plan asks for 20; the number matters because the
-#: failure this detects is *per-round accumulation*, which one round cannot see.
+#: Rounds per sequence: the failure this detects is *per-round accumulation*,
+#: which one round cannot see.
 RSS_ROUNDS = 20
 
 #: One 1M-node graph copy, measured 2026-08-10. Every bound below
@@ -949,10 +928,9 @@ def test_held_view_writes_do_not_grow_a_graph_copy_per_write(ref_graphs, holder)
     allocate the same bytes again without RSS moving. Proven, not assumed:
     under a mutation that restores whole-graph-clone semantics, `result_view`
     (which runs first) reads **+331.1 MB** settled and fails, while `frozen`
-    reads **+0.0 MB** and passes on the arena the first arm left behind. That is
-    the same hazard `_peak_rss_mb`'s docstring describes, and it has the same
-    remedy: to red-team the second arm, run one cell per process. Do not "fix"
-    it by resetting between arms — there is nothing to reset.
+    reads **+0.0 MB** and passes on the arena the first arm left behind — the
+    same hazard `_peak_rss_mb`'s docstring describes. To red-team the second
+    arm, run one cell per process; there is nothing to reset between them.
     """
     graph = ref_graphs[1_000_000]
 

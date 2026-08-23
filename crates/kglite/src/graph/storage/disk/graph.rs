@@ -1,9 +1,4 @@
-// src/graph/disk_graph.rs
-//
 // Disk-backed graph storage using CSR (Compressed Sparse Row) format.
-// Nodes are stored in memory (~40 bytes each in Columnar mode).
-// Edges are stored in mmap'd CSR arrays (8 bytes per edge per direction).
-// Edge properties are stored sparsely (only for edges that have them).
 //
 // Memory budget: ~10% of the equivalent petgraph in-memory graph, for a
 // graph *opened* from a disk directory — the edges are paged in on demand.
@@ -30,34 +25,23 @@ use super::csr::{CsrEdge, DiskNodeSlot, EdgeEndpoints, PendingEdge, TOMBSTONE_ED
 use super::edge_properties::EdgePropertyStore;
 use super::property_index;
 
-/// PR1 phase 4: CSR + column binaries live in a per-segment subdirectory
-/// of the graph root. Top-level files (disk_graph_meta.json,
-/// seg_manifest.json, interner.json, metadata.json) stay at the graph root.
-/// Legacy graphs gated by `DiskGraphMeta::csr_layout_version` == 0 use the
-/// flat layout (everything at the root) — see `load_from_dir`.
-///
-/// PR1 phase 6 parameterised the directory name on segment id so future
-/// saves can emit `seg_001/`, `seg_002/`, … next to the original
-/// `seg_000/`. Call sites format via [`segment_subdir`]; directories are
-/// discovered via [`enumerate_segment_dirs`].
+/// CSR + column binaries live in a per-segment subdirectory of the graph
+/// root. Top-level files (disk_graph_meta.json, seg_manifest.json,
+/// interner.json, metadata.json) stay at the graph root. Legacy graphs gated
+/// by `DiskGraphMeta::csr_layout_version` == 0 use the flat layout
+/// (everything at the root) — see `load_from_dir`.
 pub(crate) fn segment_subdir(id: u32) -> String {
-    // Three-digit zero-padding is enough for Wikidata-scale graphs
-    // (plan targets ~200 segments); overflow past 999 is handled by
-    // `{:03}` naturally widening without changing lexicographic ordering
-    // (seg_999 < seg_1000 still sorts as seg_1000 first, but we use the
-    // parsed u32 for ordering — see `enumerate_segment_dirs`).
+    // Past 999 `{:03}` widens naturally, which breaks lexicographic ordering;
+    // callers order by the u32 parsed in `enumerate_segment_dirs` instead.
     format!("seg_{id:03}")
 }
 
-/// Discover every `seg_NNN/` subdirectory under `root`, sorted
-/// ascending by the numeric id parsed from the name. Returns
-/// `(segment_id, path)` pairs. Non-matching directory entries and
+/// Discover every `seg_NNN/` subdirectory under `root`, sorted ascending by
+/// the numeric id parsed from the name. Non-matching directory entries and
 /// unparsable `seg_*` names are skipped silently.
 ///
-/// Used at load time to drive the CSR-load enumeration; at save time
-/// the next free id is `last().map(|(id, _)| id + 1).unwrap_or(0)`.
-/// Current graphs may contain multiple sealed `seg_NNN` generations; callers
-/// use this ordering to concatenate or compact them deterministically.
+/// Drives the CSR-load enumeration; at save time the next free id is
+/// `last().map(|(id, _)| id + 1).unwrap_or(0)`.
 pub(crate) fn enumerate_segment_dirs(root: &Path) -> Vec<(u32, PathBuf)> {
     let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
@@ -85,10 +69,6 @@ pub(crate) fn enumerate_segment_dirs(root: &Path) -> Vec<(u32, PathBuf)> {
 /// pre-phase-4 graphs).
 pub(crate) const CURRENT_CSR_LAYOUT_VERSION: u8 = 1;
 
-// ============================================================================
-// DiskGraph
-// ============================================================================
-
 /// Truly disk-backed graph. All data lives on disk via mmap.
 ///
 /// - Nodes: `MmapOrVec<DiskNodeSlot>` (16 bytes/node, mmap'd)
@@ -109,22 +89,10 @@ pub struct DiskGraph {
     // ── Node/edge materialization arenas + their reclamation epochs ──
     //
     // Disk reads have nothing in memory to borrow, so `node_weight` /
-    // `materialize_edge` build a record and park it here. The records are
-    // boxed (stable heap pointers that survive the arena's own growth) and
-    // pushed under a Mutex, because the Cypher executor's
-    // `return_clause::project_row` runs under `par_iter_mut` and any
-    // `evaluate_expression` from there can reach `node_weight` via
-    // `resolve_property` / `build_node_spatial_data`. Pre-0.9.3 this was
-    // `UnsafeCell<Vec<NodeData>>` which raced on that path: a concurrent
-    // `arena.push` realloc invalidated references already returned to sibling
-    // Rayon tasks, surfacing as silent wrong-row reads (Bug A in the disk-mode
-    // regression report — ~13% NEAREST_AFEX_HUB edges lost) or use-after-free
-    // segfaults with `BUG: InternedKey N not found in StringInterner` on
-    // stderr (Bug B in the same report).
-    //
-    // When a record may be dropped is the epoch protocol in
-    // [`super::query_arena`] — read that module before touching either
-    // materialization path.
+    // `materialize_edge` build a record and park it here. Thread-safety and
+    // the epoch protocol governing when a record may be dropped are the
+    // SAFETY block below and [`super::query_arena`] — read both before
+    // touching either materialization path.
     pub(super) arenas: std::sync::Arc<super::query_arena::QueryArenas>,
 
     // ── Column stores for node properties (Arc refs, data mmap'd) ──
@@ -149,7 +117,6 @@ pub struct DiskGraph {
     pub(crate) next_edge_idx: u32,
 
     // ── Edge properties (columnar base + mutation overlay) ──
-    // PR2: heap-only HashMap replaced by disk-backed columnar store.
     // Overlay grows with mutations, base is mmap'd. See edge_properties.rs.
     pub(super) edge_properties: EdgePropertyStore,
 
@@ -167,12 +134,9 @@ pub struct DiskGraph {
     /// would clone + diverge, losing writes).
     pub(super) node_mut_cache: HashMap<u32, NodeData>,
 
-    // ── Pending edges (UnsafeCell reserved for a planned &self CSR-build path) ──
+    // ── Pending edges ──
     // File-backed (MmapOrVec) to avoid ~14 GB heap allocation at Wikidata scale.
-    // Today every access goes through `get_mut()` in `&mut self` methods
-    // (add_edge with defer_csr, build_csr_from_pending, compact) — see the
-    // struct-level SAFETY block for the full accounting of interior-mutability
-    // fields.
+    // Interior mutability: see item 2 of the SAFETY block below.
     pub(crate) pending_edges: UnsafeCell<MmapOrVec<PendingEdge>>,
 
     // ── Mutation overflow (for incremental edges after CSR) ──
@@ -180,7 +144,6 @@ pub struct DiskGraph {
     pub(super) overflow_in: HashMap<u32, Vec<CsrEdge>>,
     pub(super) free_edge_slots: Vec<u32>,
 
-    // ── Storage directory (the graph lives here) ──
     pub(crate) data_dir: PathBuf,
     /// User-visible graph root and retained cross-process writer lease.
     pub(crate) logical_root: PathBuf,
@@ -195,10 +158,10 @@ pub struct DiskGraph {
     pub(super) metadata_dirty: bool,
     // ── CSR edges are sorted by (node, connection_type) — enables binary search
     pub(crate) csr_sorted_by_type: bool,
-    // ── Defer CSR build: when true, ensure_csr() is a no-op. Edges accumulate
-    // in pending_edges without intermediate CSR rebuilds. The CSR is built once
-    // at save time via ensure_disk_edges_built(). Set true during construction
-    // from add_nodes/add_connections, cleared after CSR build.
+    // ── Defer CSR build: edges accumulate in pending_edges without
+    // intermediate CSR rebuilds, and the CSR is built once at save time via
+    // ensure_disk_edges_built(). Set true during construction from
+    // add_nodes/add_connections, cleared after CSR build.
     pub(crate) defer_csr: bool,
     // ── Edge type counts computed during CSR build (raw InternedKey u64 → count).
     // Converted to String keys by the caller using the interner.
@@ -226,13 +189,10 @@ pub struct DiskGraph {
     pub(crate) has_tombstones: bool,
     // ── Persistent property indexes (lazy-loaded).
     //
-    // Populated in two ways:
-    //   1. `build_property_index(type, prop)` — user calls `create_index`
-    //      on a disk graph; writes 4 files to `data_dir` and caches the
-    //      handle.
-    //   2. `lookup_property_eq(type, prop, value)` on first miss — scans
-    //      `data_dir` for a `property_index_{type}_{prop}_meta.bin`; if
-    //      present, mmaps it and caches.
+    // Populated by `build_property_index(type, prop)` (the `create_index`
+    // path — writes 4 files to `data_dir`), or on the first
+    // `lookup_property_eq` miss, which scans `data_dir` for a
+    // `property_index_{type}_{prop}_meta.bin` and mmaps it.
     //
     // The `None` sentinel records "we checked and no index exists" so
     // repeat misses don't stat the filesystem. `Arc` so concurrent reads
@@ -248,33 +208,27 @@ pub struct DiskGraph {
     // — scans every alive `DiskNodeSlot` and collects one
     // `(string_value, NodeIndex)` entry per node where `prop` resolves
     // (via column slot, title alias, or id alias). Powers untyped
-    // patterns like `MATCH (n {label: 'X'})` where the agent doesn't
-    // know the node type.
+    // patterns like `MATCH (n {label: 'X'})`.
     pub(crate) global_indexes: GlobalIndexCache,
     // ── Segment manifest.
     //
     // Persisted at `seg_manifest.json` alongside the CSR files. Legacy
     // graphs that lack the file load as an empty manifest — the planner
-    // treats that as "pre-segmented, don't prune" in subsequent phases.
-    // Fresh saves always write a one-segment manifest describing the
-    // whole graph; PR1 phase 5 populates `indexed_prop_ranges` for each
-    // `PropertyIndex` discovered in the segment directory, using
-    // `StringBloomPlaceholder` until the bloom-filter variant lands.
-    // Multi-segment writes and reads update this summary as generations seal.
+    // treats that as "pre-segmented, don't prune". Fresh saves always write
+    // a one-segment manifest describing the whole graph; multi-segment
+    // writes and reads update this summary as generations seal.
     pub(crate) segment_manifest: super::segment_summary::SegmentManifest,
-    // ── Sealed-nodes watermark (PR1 phase 8).
+    // ── Sealed-nodes watermark.
     //
     // Node ids in `[0, sealed_nodes_bound)` are accounted for in a prior
-    // sealed segment's `node_slots`. Node ids in
-    // `[sealed_nodes_bound, node_count)` are either in the active
-    // (still-mutable) tail — not yet sealed into any segment — or were
-    // just added via `add_node`. `seal_to_new_segment` flushes the tail
-    // into a new `seg_NNN/` and advances this watermark.
+    // sealed segment's `node_slots`; ids in `[sealed_nodes_bound,
+    // node_count)` are in the active (still-mutable) tail, not yet sealed
+    // into any segment. `seal_to_new_segment` flushes the tail into a new
+    // `seg_NNN/` and advances this watermark.
     //
     // Zero on freshly-built / pre-phase-8 graphs; the `DiskGraphMeta`
     // serde `default` keeps old `.kgl` directories loadable.
     pub(crate) sealed_nodes_bound: u32,
-    // ── Temp dir for CSR mmap files (cleaned up on Drop) ──
 }
 
 /// Lazy-loaded cache of persistent property indexes, keyed by
@@ -361,11 +315,6 @@ impl std::fmt::Debug for DiskGraph {
 include!("graph/bootstrap.rs");
 
 impl DiskGraph {
-    // ====================================================================
-    // Node methods
-    // ====================================================================
-
-    /// Iterate `(type_key, store_arc)` pairs — read-only borrow.
     /// Backs `GraphRead::column_stores_iter` for the disk backend.
     pub fn column_stores_iter(
         &self,
@@ -379,12 +328,9 @@ impl DiskGraph {
     }
 
     /// `true` when the out-edge CSR array is memory-mapped from a file
-    /// rather than heap-resident.
-    ///
-    /// This is the structure `enable_disk_mode()` materializes, and the one
-    /// that makes a reopened disk directory cheap: the pages are the OS's to
-    /// evict. A freshly constructed disk graph whose CSR has not been built
-    /// yet (edges still in `pending_edges`/overflow) reports `false`.
+    /// rather than heap-resident. A freshly constructed disk graph whose CSR
+    /// has not been built yet (edges still in `pending_edges`/overflow)
+    /// reports `false`.
     pub fn csr_is_mapped(&self) -> bool {
         self.out_edges.is_mapped()
     }
@@ -424,13 +370,11 @@ impl DiskGraph {
         }
         let type_key = InternedKey::from_u64(slot.node_type);
         let store = self.column_stores.get(&type_key)?;
-        // Try schema column first, then fall back to special id/title columns.
-        // The id and title are stored as __id__/__title__ (separate from schema),
-        // so store.get() won't find them by their alias names (e.g., "title", "id").
+        // id and title are stored as __id__/__title__ (separate from schema),
+        // so store.get() won't find them by their alias names ("title", "id").
         if let Some(val) = store.get(slot.row_id, key) {
             return Some(val);
         }
-        // Fallback: check if this is an id/title alias
         if key == InternedKey::from_str("title") {
             return store.get_title(slot.row_id);
         }
@@ -472,7 +416,6 @@ impl DiskGraph {
         store.get_title(slot.row_id)
     }
 
-    /// Get a DiskNodeSlot by index (for rebuild_type_indices without arena).
     #[inline]
     pub fn node_slot(&self, i: usize) -> DiskNodeSlot {
         if i < self.node_slots.len() {
@@ -500,16 +443,13 @@ impl DiskGraph {
     #[inline]
     pub fn node_weight(&self, idx: NodeIndex) -> Option<&NodeData> {
         let node_data = self.materialize_node_data(idx)?;
-        // The record is boxed into the query arena, which hands back a stable
-        // heap pointer. It lives until every query that could reach it has
-        // finished — the epoch protocol in `super::query_arena` — and this
-        // read runs under a `DiskQueryGuard` (asserted in debug builds), so
-        // the pointer outlives the returned reference. The `&self` borrow
-        // alone would NOT be enough: `begin_query`/`reset_arenas` reclaim
-        // through `&self`.
+        // The record is parked in the query arena; the epoch protocol in
+        // `super::query_arena` keeps its heap pointer alive until every query
+        // that could reach it has finished. The `&self` borrow alone would NOT
+        // be enough — `begin_query`/`reset_arenas` reclaim through `&self`.
         debug_assert_arena_guard_active(self, "node_weight");
         let ptr = self.arenas.push_node(node_data);
-        // SAFETY: per the paragraph above, the arena keeps this heap pointer
+        // SAFETY: the guard asserted above plus that protocol keep the pointer
         // alive for at least the returned reference's lifetime.
         unsafe { Some(&*ptr) }
     }
@@ -539,24 +479,16 @@ impl DiskGraph {
             return None;
         }
 
-        // 0.9.0 Cluster 6 — preventative invariant. node_weight_mut
-        // stages writes in node_mut_cache; if a *Map-typed* entry
-        // exists for this index here on the read path, the staged
-        // write is about to be silently shadowed by the column_stores
-        // read (i.e. a missed flush_pending_writes call). 0.8.41's
-        // execute_mutable post-write flush should keep this empty
-        // outside of mid-mutation evaluation; firing here means a
-        // new code path needs an explicit flush.
+        // Preventative invariant (0.9.0 Cluster 6): `node_weight_mut` stages
+        // writes in `node_mut_cache`, so a *Map-typed* entry for this index on
+        // the read path means a staged write is about to be silently shadowed
+        // by the column_stores read — a missed flush_pending_writes call, i.e.
+        // a new code path that needs an explicit flush.
         //
-        // 0.9.26: filter the check to `PropertyStorage::Map` entries.
-        // `batch.rs::flush_chunk` (the `add_nodes` path) leaves
-        // `PropertyStorage::Columnar { row_id, .. }` scratch in the
-        // cache as a transient post-write artifact — that's "already
-        // persisted via full-Arc replacement, safe to discard" (see
-        // the reseed-path comment further down in this file). Those
-        // entries are not a missed-flush concern; firing the
-        // assertion on them was a false positive that made the
-        // warning noisy during normal test runs.
+        // Only Map entries count (0.9.26). `batch.rs::flush_chunk` leaves
+        // `PropertyStorage::Columnar { row_id, .. }` scratch in the cache after
+        // persisting via its own full-Arc replacement; firing on those was a
+        // false positive that made the warning noisy in normal test runs.
         #[cfg(debug_assertions)]
         if let Some(staged) = self.node_mut_cache.get(&(i as u32)) {
             use crate::graph::schema::PropertyStorage;
@@ -609,22 +541,17 @@ impl DiskGraph {
         let node_type_key = InternedKey::from_u64(slot.node_type);
         let key = i as u32;
 
-        // Stage exact-row mutations in `node_mut_cache` with
-        // `PropertyStorage::Map`, not `Columnar`. A `Columnar` variant
-        // would route `node.set_property(k, v)` through
-        // `Arc::make_mut(store)`; that clones the store when DirGraph
-        // still holds another Arc, and the mutation then lands on a
-        // detached copy. Using Map captures every write in the node's
-        // own state; `clear_arenas` groups by type, clones each
-        // ColumnStore once, applies all pending writes, and replaces
-        // the Arc — mirroring `batch.rs::flush_chunk`.
+        // Stage exact-row mutations as `PropertyStorage::Map`, not `Columnar`:
+        // a `Columnar` variant routes `node.set_property(k, v)` through
+        // `Arc::make_mut(store)`, which clones the store when DirGraph still
+        // holds another Arc and lands the mutation on a detached copy.
+        // `clear_arenas` groups by type, clones each ColumnStore once, applies
+        // all pending writes and replaces the Arc — as `flush_chunk` does.
         //
-        // Reseed path: `batch.rs::flush_chunk` (and a few similar
-        // bulk paths) assigns `node.properties = PropertyStorage::
-        // Columnar{...}` as a transient step. If the cache still holds
-        // that stale assignment next time we reach here, replace it
-        // with Map — batch already persisted via full-Arc replacement,
-        // so the stale Columnar scratch is safe to discard.
+        // Reseed path: `batch.rs::flush_chunk` (and similar bulk paths)
+        // transiently assigns `PropertyStorage::Columnar{...}`; a stale one
+        // still in the cache is replaced with Map, since batch already
+        // persisted it via full-Arc replacement.
         let needs_reseed = match self.node_mut_cache.get(&key) {
             None => true,
             Some(nd) => !matches!(nd.properties, crate::graph::schema::PropertyStorage::Map(_)),
@@ -707,7 +634,6 @@ impl DiskGraph {
         self.clear_arenas();
         self.metadata_dirty = true;
 
-        // Extract row_id from property storage if columnar, else use slot index
         let row_id = match &data.properties {
             crate::graph::schema::PropertyStorage::Columnar(row) => row.row_id(),
             _ => self.node_slot_len() as u32,
@@ -744,7 +670,6 @@ impl DiskGraph {
             return None;
         }
 
-        // Materialize the NodeData before removing
         let node_type_key = InternedKey::from_u64(slot.node_type);
         let store = self.column_stores.get(&node_type_key).cloned();
         let (id_val, title_val) = if let Some(ref s) = store {
@@ -768,7 +693,6 @@ impl DiskGraph {
             },
         };
 
-        // Mark slot as dead
         let mut dead_slot = slot;
         dead_slot.flags = 0;
         self.set_node_slot(i, dead_slot);
@@ -776,13 +700,11 @@ impl DiskGraph {
         self.free_node_slots.push(i as u32);
         self.has_tombstones = true;
 
-        // Tombstone all incident edges
         self.tombstone_edges_for_node(i);
 
         Some(data)
     }
 
-    /// Update the row_id in a node's DiskNodeSlot.
     /// Used after BuildColumnStore conversion to fix per-type row_id mapping.
     pub fn update_row_id(&mut self, node_idx: NodeIndex, row_id: u32) {
         let i = node_idx.index();
@@ -801,8 +723,8 @@ impl DiskGraph {
     // Edge methods
     // ====================================================================
 
-    /// Materialize an EdgeData into the arena. Reads conn_type from EdgeEndpoints
-    /// (O(1) lookup) and properties from edge_properties HashMap.
+    /// Materialize an EdgeData into the arena. Reads conn_type from
+    /// EdgeEndpoints (O(1) lookup) and properties from `edge_properties`.
     #[inline]
     pub(crate) fn materialize_edge(&self, edge_idx: u32) -> &EdgeData {
         let ep = self.edge_endpoint(edge_idx as usize);
@@ -823,9 +745,8 @@ impl DiskGraph {
             connection_type: ct,
             properties: props,
         });
-        // SAFETY: this read runs under a `DiskQueryGuard` (asserted in debug
-        // builds above), which keeps the record alive for the returned
-        // reference's lifetime.
+        // SAFETY: the guard asserted above keeps the record alive for the
+        // returned reference's lifetime.
         unsafe { &*ptr }
     }
 
@@ -854,7 +775,6 @@ impl DiskGraph {
             (0, 0)
         };
 
-        // Narrow range via binary search when CSR is sorted by type
         if let Some(ct) = conn_type {
             if self.csr_sorted_by_type {
                 let (lo, hi) = crate::graph::core::iterators::binary_search_conn_type(
@@ -907,7 +827,6 @@ impl DiskGraph {
             if e.edge_idx == TOMBSTONE_EDGE {
                 continue;
             }
-            // Check connection type (only needed if CSR is NOT sorted)
             if let Some(ct) = conn_type {
                 if !self.csr_sorted_by_type
                     && self.edge_endpoint(e.edge_idx as usize).connection_type != ct
@@ -915,7 +834,6 @@ impl DiskGraph {
                     continue;
                 }
             }
-            // Check peer node type (O(1) mmap read, no materialization)
             if let Some(required_type) = other_node_type {
                 let peer_idx = NodeIndex::new(e.peer as usize);
                 if let Some(nt) = self.node_type_of(peer_idx) {
@@ -929,7 +847,6 @@ impl DiskGraph {
             count += 1;
         }
 
-        // Count overflow edges too
         let overflow = match dir {
             Direction::Outgoing => self.overflow_out.get(&(idx as u32)),
             Direction::Incoming => self.overflow_in.get(&(idx as u32)),
@@ -987,7 +904,6 @@ impl DiskGraph {
             (0, 0)
         };
 
-        // Narrow range via binary search when CSR is sorted
         if let Some(ct) = conn_type {
             if self.csr_sorted_by_type {
                 let (lo, hi) = crate::graph::core::iterators::binary_search_conn_type(
@@ -1004,7 +920,6 @@ impl DiskGraph {
             if e.edge_idx == TOMBSTONE_EDGE {
                 continue;
             }
-            // When CSR is NOT sorted, must check type via edge_endpoints
             if let Some(ct) = conn_type {
                 if !self.csr_sorted_by_type
                     && self.edge_endpoint(e.edge_idx as usize).connection_type != ct
@@ -1015,7 +930,6 @@ impl DiskGraph {
             result.push((NodeIndex::new(e.peer as usize), e.edge_idx));
         }
 
-        // Include overflow edges
         let overflow = match dir {
             Direction::Outgoing => self.overflow_out.get(&(idx as u32)),
             Direction::Incoming => self.overflow_in.get(&(idx as u32)),
@@ -1036,10 +950,6 @@ impl DiskGraph {
         result
     }
 
-    /// Advise the kernel to prefetch hot mmap regions into page cache.
-    /// Called after load to warm offset arrays and node_slots, reducing
-    /// cold-cache penalty on first queries. Non-blocking — the kernel
-    /// reads pages asynchronously in the background.
     /// Count all edges of a connection type, grouped by peer (target for outgoing,
     /// source for incoming). Returns a HashMap<peer_node_idx, count>.
     /// Uses a single sequential scan of edge_endpoints — O(E) total, purely sequential
@@ -1058,9 +968,8 @@ impl DiskGraph {
         // the page cache with pages we won't revisit.
         self.edge_endpoints.advise_sequential();
 
-        // Sequential scan of edge_endpoints — each entry is (source, target, conn_type).
-        // 16 bytes per edge, purely sequential. Deadline check every 1M entries
-        // keeps the per-check cost <0.001% while bounding wall-clock overshoot to ~0.3s.
+        // Deadline check every 1M entries keeps the per-check cost <0.001%
+        // while bounding wall-clock overshoot to ~0.3s.
         let total = self.next_edge_idx as usize;
         for i in 0..total {
             if i.is_multiple_of(1 << 20) {
@@ -1079,20 +988,18 @@ impl DiskGraph {
                 continue;
             }
             let peer = match dir {
-                Direction::Outgoing => ep.target, // group by target
-                Direction::Incoming => ep.source, // group by source
+                Direction::Outgoing => ep.target,
+                Direction::Incoming => ep.source,
             };
             *counts.entry(peer).or_insert(0) += 1;
         }
 
-        // Release page cache pages after scan to reduce memory pressure.
         self.edge_endpoints.advise_dontneed();
 
         Ok(counts)
     }
 
-    /// Look up source nodes that have outgoing edges of the given connection type.
-    /// Returns an iterator-like slice of source node IDs from the inverted index.
+    /// Source nodes that have outgoing edges of the given connection type.
     /// Returns None if the inverted index is not built (older graph format).
     #[allow(dead_code)] // Test-only.
     pub fn sources_for_conn_type(&self, conn_type: u64) -> Option<Vec<u32>> {
@@ -1114,7 +1021,6 @@ impl DiskGraph {
             return None;
         }
 
-        // Read from persisted inverted index (binary search)
         let mut sources = Vec::new();
         if !self.conn_type_index_types.is_empty() {
             let num_types = self.conn_type_index_types.len();
@@ -1170,26 +1076,24 @@ impl DiskGraph {
     /// Iterate only the edges matching `conn_type`, yielding `(src, tgt, edge_idx)`
     /// per match. Never calls `materialize_edge` — no growth of `edge_arena`.
     ///
-    /// Path: persisted inverted index (`conn_type_index_*`) gives the sources with
-    /// at least one outgoing edge of that type. Each source's outgoing CSR slice
-    /// is then filtered by `conn_type` (binary-search when the CSR is sorted by
-    /// type, linear fallback otherwise). Overflow-out entries are visited for
+    /// Path: the persisted inverted index (`conn_type_index_*`) gives the sources
+    /// with at least one outgoing edge of that type; each source's outgoing CSR
+    /// slice is then filtered by `conn_type` (binary-search when the CSR is
+    /// sorted by type, linear fallback otherwise). Overflow-out entries cover
     /// sources added after the last CSR build.
     ///
     /// The callback returns `true` to continue, `false` to stop iteration —
     /// lets callers collect a bounded prefix (e.g. two sample edges) without
     /// scanning every match.
     ///
-    /// Complexity is O(matching edges) when `csr_sorted_by_type`, not O(all edges).
-    /// Designed for the introspection fast path (`describe(connections=['T'])`)
-    /// which previously did three full `edge_references()` sweeps per topic.
+    /// O(matching edges) when `csr_sorted_by_type`, not O(all edges); backs the
+    /// introspection fast path (`describe(connections=['T'])`).
     pub fn for_each_edge_of_conn_type<F>(&self, conn_type: u64, mut f: F)
     where
         F: FnMut(NodeIndex, NodeIndex, u32) -> bool,
     {
         self.ensure_csr();
 
-        // CSR-indexed sources via the inverted index.
         if !self.conn_type_index_types.is_empty() {
             let num_types = self.conn_type_index_types.len();
             let mut lo = 0usize;
@@ -1296,9 +1200,8 @@ impl DiskGraph {
         self.edge_properties.get(edge_idx)
     }
 
-    /// Edge-centric sweep: scan `edge_endpoints` linearly and invoke `f`
-    /// for every edge whose `connection_type` matches. Return `false`
-    /// from the callback to stop early.
+    /// Edge-centric sweep: scan `edge_endpoints` linearly, invoking `f` for
+    /// every match. Return `false` from the callback to stop early.
     ///
     /// Contrast with [`Self::for_each_edge_of_conn_type`], which walks
     /// the source-centric `conn_type_index` and binary-searches each
@@ -1339,6 +1242,8 @@ impl DiskGraph {
         }
     }
 
+    /// Warm hot mmap regions into page cache after load. Non-blocking — the
+    /// kernel reads the pages asynchronously.
     pub fn prefetch_hot_regions(&self) {
         // Prefetch out_offsets + in_offsets (948 MB each — always needed for traversal).
         // Skip node_slots (2 GB) — prefetching it adds too much load latency.
@@ -1347,9 +1252,6 @@ impl DiskGraph {
         self.in_offsets.advise_willneed();
     }
 
-    /// Auto-build CSR from pending edges if needed. Called from &self query methods.
-    /// Check if pending edges need to be built into CSR.
-    /// Panics with a helpful message if called with unbuilt edges.
     #[inline]
     fn ensure_csr(&self) {
         // No-op check — pending edges should be empty after build_csr_from_pending.
@@ -1359,7 +1261,6 @@ impl DiskGraph {
     /// Clear all materialization arenas. Called before any &mut self operation.
     #[inline]
     pub(crate) fn clear_arenas(&mut self) {
-        // Flush modified edge properties from edge_weight_mut cache
         for (edge_idx, edge_data) in self.edge_mut_cache.drain() {
             if edge_data.properties.is_empty() {
                 self.edge_properties.remove(edge_idx);
@@ -1367,33 +1268,21 @@ impl DiskGraph {
                 self.edge_properties.insert(edge_idx, edge_data.properties);
             }
         }
-        // Flush staged node writes via clone-apply-replace on the
-        // affected ColumnStores. Group by type_key so each store is
-        // cloned at most once per flush, regardless of how many rows
-        // were mutated.
         self.flush_node_mut_cache();
         self.arenas.clear_all();
     }
 
     /// Drain `node_mut_cache` and apply the staged writes to
-    /// `self.column_stores` using full-`Arc` replacement:
-    ///
-    ///   let mut new_store = (**current_arc).clone();  // one deep clone
-    ///   new_store.set_title(row_id, &title);
-    ///   new_store.set(row_id, key, &value, None);     // per staged mutation
-    ///   self.column_stores.insert(type_key, Arc::new(new_store));
-    ///
-    /// Dead slots (tombstoned via `remove_node`) flush a
-    /// `store.tombstone(row_id)` instead. This is the node analogue of
-    /// `batch.rs::flush_chunk`'s deferred-columnar pass — the only
-    /// pattern that's proven to survive the Arc sharing between
-    /// DirGraph and DiskGraph.
+    /// `self.column_stores`, cloning each affected store once and replacing
+    /// the whole `Arc`. Dead slots (tombstoned via `remove_node`) flush a
+    /// `store.tombstone(row_id)` instead. Node analogue of
+    /// `batch.rs::flush_chunk`'s deferred-columnar pass — the only pattern
+    /// proven to survive the Arc sharing between DirGraph and DiskGraph.
     fn flush_node_mut_cache(&mut self) {
         if self.node_mut_cache.is_empty() {
             return;
         }
         use crate::graph::schema::PropertyStorage;
-        // Group drained entries by type_key.
         let drained: Vec<(u32, NodeData)> = self.node_mut_cache.drain().collect();
         let mut by_type: HashMap<InternedKey, Vec<(u32, NodeData)>> = HashMap::new();
         for (i, nd) in drained {
@@ -1408,14 +1297,10 @@ impl DiskGraph {
             let Some(current_arc) = self.column_stores.get(&type_key) else {
                 continue;
             };
-            // Check whether any entry would actually write anything
-            // before paying the clone + Arc-replace cost. Entries from
-            // `batch.rs::flush_chunk` leave behind `PropertyStorage::
-            // Columnar` scratch in the cache (batch persists via its
-            // own full-Arc replacement); those yield nothing to flush.
-            // Dead slots still need a tombstone so they contribute
-            // work. Entries with Map-form properties or a non-null
-            // title also contribute.
+            // Skip the clone + Arc-replace unless something would actually be
+            // written. `batch.rs::flush_chunk` leaves `PropertyStorage::
+            // Columnar` scratch in the cache (batch persists via its own
+            // full-Arc replacement); those yield nothing to flush.
             let any_writes_needed = updates.iter().any(|(i, nd)| {
                 let slot = self.node_slot(*i as usize);
                 if !slot.is_alive() {
@@ -1426,10 +1311,8 @@ impl DiskGraph {
                         return true;
                     }
                 }
-                // Title write only counts when it differs from the
-                // current store — otherwise `Str::set`'s offset update
-                // would corrupt neighbouring rows and we'd skip it
-                // anyway below.
+                // Only a title differing from the store counts — see the
+                // `Str::set` offset-corruption note at the write below.
                 if !matches!(nd.title, Value::Null) {
                     let current = current_arc.get_title(slot.row_id);
                     return match (current, &nd.title) {
@@ -1456,16 +1339,11 @@ impl DiskGraph {
                     new_store.tombstone(row_id);
                     continue;
                 }
-                // Title is in its own column. Only write through the
-                // cached value when it actually differs from what's
-                // already in the store — `TypedColumn::Str::set`
-                // corrupts offsets on same-row overwrite (it only
-                // updates offsets[idx]/offsets[idx+1] rather than
-                // shifting the tail), so a naive always-write would
-                // break every other row's title on reload. The
-                // deep-clone's title column still has the original
-                // string; skip the write when cached title == stored
-                // title to avoid corrupting the column.
+                // Title is in its own column, written only when the cached
+                // value differs from the stored one: `TypedColumn::Str::set`
+                // updates just offsets[idx]/offsets[idx+1] instead of shifting
+                // the tail, so a same-row overwrite corrupts every following
+                // row's title on reload.
                 if !matches!(nd.title, Value::Null) {
                     let current = new_store.get_title(row_id);
                     let differs = match (&current, &nd.title) {
@@ -1499,20 +1377,16 @@ impl DiskGraph {
         self.arenas.begin()
     }
 
-    /// Records currently retained in the node materialization arena.
-    /// Test accessor for the arena-reclamation bound.
     #[cfg(test)]
     pub(crate) fn node_arena_len(&self) -> usize {
         self.arenas.node_len()
     }
 
-    /// Records currently retained in the edge materialization arena.
     #[cfg(test)]
     pub(crate) fn edge_arena_len(&self) -> usize {
         self.arenas.edge_len()
     }
 
-    /// Queries currently holding a read guard on this graph.
     #[cfg(test)]
     pub(crate) fn active_query_count(&self) -> usize {
         self.arenas.active_count()
@@ -1603,9 +1477,9 @@ impl DiskGraph {
             return None;
         }
         self.metadata_dirty = true;
-        // Store in dedicated cache (not the arena) so we can flush correctly.
-        // The arena is append-only and shared with edge_weight (read-only),
-        // making offset tracking fragile. The cache is keyed by edge_idx.
+        // Store in a dedicated cache, not the arena: the arena is append-only
+        // and shared with the read-only `edge_weight`, so flushing writes back
+        // out of it would need fragile offset tracking.
         let ct = InternedKey::from_u64(ep.connection_type);
         let props = self
             .edge_properties
@@ -1724,7 +1598,6 @@ impl DiskGraph {
         let tgt = ep.target as usize;
         let ei32 = ei as u32;
 
-        // Tombstone in overflow lists
         if let Some(list) = self.overflow_out.get_mut(&(src as u32)) {
             list.retain(|e| e.edge_idx != ei32);
         }
@@ -1748,7 +1621,6 @@ impl DiskGraph {
         let src = a.index();
         let tgt = b.index() as u32;
 
-        // Search CSR outgoing edges from a
         if src < self.out_offsets.len().saturating_sub(1) {
             let start = self.out_offsets.get(src) as usize;
             let end = self.out_offsets.get(src + 1) as usize;
@@ -1760,7 +1632,6 @@ impl DiskGraph {
             }
         }
 
-        // Search overflow
         if let Some(list) = self.overflow_out.get(&(src as u32)) {
             for e in list {
                 if e.edge_idx != TOMBSTONE_EDGE && e.peer == tgt {
@@ -1819,11 +1690,9 @@ impl DiskGraph {
 
     pub fn neighbors_undirected_iter(&self, a: NodeIndex) -> DiskNeighbors {
         self.ensure_csr();
-        // Collect both outgoing and incoming neighbors
         let node = a.index();
         let mut peers = Vec::new();
 
-        // Outgoing
         if node < self.out_offsets.len().saturating_sub(1) {
             let start = self.out_offsets.get(node) as usize;
             let end = self.out_offsets.get(node + 1) as usize;
@@ -1842,7 +1711,6 @@ impl DiskGraph {
             }
         }
 
-        // Incoming
         if node < self.in_offsets.len().saturating_sub(1) {
             let start = self.in_offsets.get(node) as usize;
             let end = self.in_offsets.get(node + 1) as usize;
@@ -1868,9 +1736,6 @@ impl DiskGraph {
     // CSR construction from pending edges
     // ====================================================================
 
-    /// Build CSR arrays from the pending edges log. Called lazily on first
-    /// query, or explicitly on save. Uses external merge sort — all I/O is
-    /// sequential, designed for larger-than-RAM graphs.
     /// True if any overflow edges are present (edges added after the initial
     /// CSR build). Used by `ensure_disk_edges_built` to decide whether to
     /// merge overflow back into CSR so downstream indexes stay consistent.
@@ -1894,7 +1759,7 @@ impl DiskGraph {
         } else {
             self.build_csr_partitioned(node_bound, edge_count, verbose)?;
         }
-        // After CSR is built, subsequent add_edge calls should route to overflow
+        // Subsequent add_edge calls now route to overflow.
         self.defer_csr = false;
         Ok(())
     }
@@ -1920,9 +1785,8 @@ impl DiskGraph {
 
         let node_bound = self.node_slot_len();
 
-        // Collect all live edges into a fresh pending_edges buffer.
-        // Source: edge_endpoints (covers both CSR and post-CSR overflow edges).
-        // Skip tombstoned entries.
+        // Collect live edges from edge_endpoints, which covers both CSR and
+        // post-CSR overflow edges.
         let mut live_count = 0usize;
         let total_endpoints = self.next_edge_idx as usize;
 
@@ -1950,7 +1814,6 @@ impl DiskGraph {
             }
         }
 
-        // Remap edge properties to new indices.
         // `mem::take` gives us ownership of the old store (base mmaps
         // stay live until we drop it at end of scope); we iterate every
         // potentially-populated slot and re-insert survivors into the
@@ -1967,16 +1830,13 @@ impl DiskGraph {
         }
         drop(old_props);
 
-        // Clear overflow and free slots
         self.overflow_out.clear();
         self.overflow_in.clear();
         self.free_edge_slots.clear();
 
-        // Reset edge tracking
         self.edge_count = live_count;
         self.next_edge_idx = live_count as u32;
 
-        // Replace pending_edges and rebuild CSR
         let old_pending_path = self
             .pending_edges
             .get_mut()
@@ -2012,15 +1872,11 @@ impl DiskGraph {
         Ok(overflow_count)
     }
 
-    /// [DEV] External merge sort variant — zero random reads.
-    /// Sorts pending data into chunks, merges sequentially. All I/O is sequential.
-    /// Use `KGLITE_CSR_ALGO=merge_sort` to select.
     pub fn lookup_peer_counts(&self, conn_type: u64) -> Option<HashMap<u32, i64>> {
         if self.peer_count_types.is_empty() {
             return None;
         }
         let n = self.peer_count_types.len();
-        // Binary search the types array.
         let mut lo = 0usize;
         let mut hi = n;
         while lo < hi {
@@ -2048,10 +1904,6 @@ impl DiskGraph {
         // prefer a slow but correct answer over a fast but empty one.
         None
     }
-
-    // ====================================================================
-    // Internal helpers
-    // ====================================================================
 
     fn tombstone_edges_for_node(&mut self, node: usize) {
         let mut incident = HashSet::new();
@@ -2272,11 +2124,6 @@ impl DiskGraph {
     }
 }
 
-// ============================================================================
-// Persistent property indexes
-// ============================================================================
-
-// Index implementations
 impl std::ops::Index<NodeIndex> for DiskGraph {
     type Output = NodeData;
     #[inline]
@@ -2293,11 +2140,6 @@ impl std::ops::Index<EdgeIndex> for DiskGraph {
     }
 }
 
-// ============================================================================
-// Disk persistence — the directory IS the saved graph
-// ============================================================================
-
-/// Metadata stored alongside the binary files in the disk graph directory.
 #[cfg(test)]
 #[path = "graph_tests.rs"]
 mod tests;

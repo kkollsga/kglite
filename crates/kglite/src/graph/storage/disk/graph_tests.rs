@@ -71,14 +71,13 @@ fn one_doc_frame(id: i64) -> DataFrame {
 /// Byte-for-byte contents of every *data* file under `root`, for asserting that
 /// one graph's mutations never reach another's published files.
 ///
-/// Dot-prefixed entries are skipped. They are coordination and scratch state —
-/// `.kglite.lock` (the writer lease) and `.working-*` (a mutation workspace) —
-/// not graph data, so folding them into the comparison makes it wrong on every
-/// platform: the snapshot would differ purely because a lease happened to be
-/// held. On Windows it also fails outright, because `fs2` takes that lease with
+/// Dot-prefixed entries are skipped: `.kglite.lock` (the writer lease) and
+/// `.working-*` (a mutation workspace) are coordination state, not graph data,
+/// so including them would make a snapshot differ purely because a lease was
+/// held. On Windows the read fails outright — `fs2` takes that lease with
 /// `LockFileEx`, whose byte-range locks are *mandatory* rather than advisory
-/// like `flock`, so reading the file returns ERROR_LOCK_VIOLATION (33). No
-/// disk-graph data file starts with a dot.
+/// like `flock`, so it returns ERROR_LOCK_VIOLATION (33). No disk-graph data
+/// file starts with a dot.
 fn snapshot_files(root: &std::path::Path) -> BTreeMap<String, Vec<u8>> {
     fn collect(root: &std::path::Path, dir: &std::path::Path, out: &mut BTreeMap<String, Vec<u8>>) {
         for entry in std::fs::read_dir(dir).unwrap() {
@@ -612,8 +611,6 @@ fn failed_graph_save_keeps_dirty_state_and_withholds_root_metadata() {
     }
 }
 
-// ------------- fixture helpers -------------
-
 fn seg(
     node_slots: Vec<DiskNodeSlot>,
     out_offsets: Vec<u64>,
@@ -629,9 +626,8 @@ fn seg(
         in_offsets: from_vec(in_offsets),
         in_edges: from_vec(in_edges),
         edge_endpoints: from_vec(edge_endpoints),
-        // Auxiliary index fields default to empty in these CSR-only
-        // unit tests. The auxiliary-index tests populate them
-        // explicitly.
+        // Empty in these CSR-only tests; the auxiliary-index tests
+        // populate them explicitly.
         conn_type_index_types: MmapOrVec::new(),
         conn_type_index_offsets: MmapOrVec::new(),
         conn_type_index_sources: MmapOrVec::new(),
@@ -833,7 +829,7 @@ fn concat_single_segment_returns_it_unchanged() {
     assert_eq!(c.node_slots.len(), 2);
     assert_eq!(c.out_offsets.len(), 3);
     assert_eq!(c.out_edges.len(), 1);
-    assert_eq!(c.out_edges.get(0).edge_idx, 0); // unchanged
+    assert_eq!(c.out_edges.get(0).edge_idx, 0);
     assert_eq!(c.edge_endpoints.len(), 1);
     assert_eq!(c.edge_endpoints.get(0).source, 0);
 }
@@ -901,7 +897,6 @@ fn concat_two_segments_stitches_offsets_and_shifts_edge_idx() {
 
     let c = concat_segment_csrs(vec![s0, s1]).unwrap();
 
-    // Shape.
     assert_eq!(c.node_slots.len(), 4);
     assert_eq!(c.out_offsets.len(), 5); // n+1
     assert_eq!(c.in_offsets.len(), 5);
@@ -950,8 +945,7 @@ fn concat_two_segments_stitches_offsets_and_shifts_edge_idx() {
 
 #[test]
 fn concat_three_segments_keeps_offset_chain_consistent() {
-    // Three one-node-one-self-edge segments. Verifies that the
-    // cumulative shifts carry through multiple iterations.
+    // Three one-node-one-self-edge segments.
     let mk_one_node = |global_id: u32, conn: u64| {
         seg(
             vec![slot(1, 0)],
@@ -1000,8 +994,7 @@ fn concat_three_segments_keeps_offset_chain_consistent() {
 
 #[test]
 fn concat_handles_edgeless_segment() {
-    // A segment with nodes but no edges (e.g. a freshly-created
-    // empty segment). Offsets must still stitch correctly.
+    // A segment with nodes but no edges, e.g. one freshly created.
     let s0 = seg(
         vec![slot(1, 0)],
         vec![0, 1],
@@ -1105,15 +1098,13 @@ fn seal_accepts_cross_segment_edges_via_full_range() {
     dg.build_csr_from_pending().unwrap();
     dg.save_to_dir(tmp.path(), &interner).unwrap();
 
-    // Add a new node and a cross-segment edge (seg_0's n0 → new n2).
     let n2 = dg.add_node(seal_test_node(&mut interner, 2, "A"));
     dg.add_edge(n0, n2, seal_test_edge(&mut interner, "T"));
 
     let seg_id = dg.seal_to_new_segment(tmp.path()).unwrap();
     assert_eq!(seg_id, 1);
 
-    // seg_001's out_offsets must cover every global node (4 entries
-    // for node_count=3) so concat can locate the n0→n2 edge.
+    // Full-range so concat can locate the n0→n2 edge.
     let out_offsets_size = std::fs::metadata(tmp.path().join("seg_001/out_offsets.bin"))
         .unwrap()
         .len();
@@ -1123,8 +1114,6 @@ fn seal_accepts_cross_segment_edges_via_full_range() {
         "seg_001 must be full-range (4 u64 offsets covering 3 global nodes)"
     );
 
-    // Reload and verify the combined CSR sees BOTH seg_0's n0→n1 and
-    // seg_1's n0→n2 as outgoing edges of node 0.
     drop(dg);
     let mut interner2 = StringInterner::new();
     let (reloaded, _tmp_zst) = super::DiskGraph::load_from_dir(tmp.path(), &mut interner2).unwrap();
@@ -1154,9 +1143,8 @@ fn seal_round_trip_basic_reads() {
     assert_eq!(dg.node_count, 3);
     assert_eq!(dg.sealed_nodes_bound, 3);
 
-    // Add 2 new nodes of type B + an edge between them.
-    // Both endpoints are strictly above the watermark, so the
-    // seal constraint holds.
+    // Both endpoints of the new B→B edge are strictly above the
+    // watermark, so the seal constraint holds.
     let n3 = dg.add_node(seal_test_node(&mut interner, 3, "B"));
     let n4 = dg.add_node(seal_test_node(&mut interner, 4, "B"));
     dg.add_edge(n3, n4, seal_test_edge(&mut interner, "U"));
@@ -1166,14 +1154,12 @@ fn seal_round_trip_basic_reads() {
     assert_eq!(pre_node_count, 5);
     assert_eq!(pre_edge_count, 2);
 
-    // Seal the tail to seg_001.
     let seg_id = dg.seal_to_new_segment(tmp.path()).unwrap();
     assert_eq!(seg_id, 1);
     assert_eq!(dg.sealed_nodes_bound, 5);
     assert!(dg.overflow_out.is_empty());
     assert!(dg.overflow_in.is_empty());
 
-    // Verify seg_001/ has the expected files on disk.
     let seg1 = tmp.path().join("seg_001");
     for name in [
         "node_slots.bin",
@@ -1185,7 +1171,6 @@ fn seal_round_trip_basic_reads() {
     ] {
         assert!(seg1.join(name).exists(), "missing {name}");
     }
-    // Manifest should have 2 entries now.
     let manifest = super::super::segment_summary::SegmentManifest::load_from(tmp.path()).unwrap();
     assert_eq!(manifest.len(), 2);
     assert_eq!(manifest.segments[1].segment_id, 1);
@@ -1193,15 +1178,13 @@ fn seal_round_trip_basic_reads() {
     assert_eq!(manifest.segments[1].node_id_hi, 5);
     assert_eq!(manifest.segments[1].edge_count, 1);
 
-    // Drop in-memory graph and reload — this exercises the phase-7
-    // concat read path.
+    // Reload exercises the phase-7 concat read path.
     drop(dg);
     let mut interner2 = StringInterner::new();
     let (reloaded, _tmp_zst) = super::DiskGraph::load_from_dir(tmp.path(), &mut interner2).unwrap();
 
     assert_eq!(reloaded.node_count, pre_node_count);
     assert_eq!(reloaded.edge_count, pre_edge_count);
-    // sealed_nodes_bound persists through save/load.
     assert_eq!(reloaded.sealed_nodes_bound, 5);
 
     // Untyped outgoing edges for node 3 should be exactly 1 (the
@@ -1232,9 +1215,8 @@ fn seal_round_trip_basic_reads() {
 
 #[test]
 fn seal_round_trip_auxiliary_indexes() {
-    // Verify that conn_type_index_*, peer_count_*, and
-    // edge_properties survive the seal → reload roundtrip for edges
-    // in the sealed segment.
+    // conn_type_index_*, peer_count_* and edge_properties must all
+    // survive the seal → reload round-trip.
     let tmp = TempDir::new().unwrap();
     let mut interner = StringInterner::new();
     let mut dg = super::DiskGraph::new_at_path(tmp.path()).unwrap();
@@ -1264,7 +1246,6 @@ fn seal_round_trip_auxiliary_indexes() {
 
     dg.seal_to_new_segment(tmp.path()).unwrap();
 
-    // seg_001 has its own auxiliary files now (phase 5).
     let seg1 = tmp.path().join("seg_001");
     for name in [
         "conn_type_index_types.bin",
@@ -1281,9 +1262,8 @@ fn seal_round_trip_auxiliary_indexes() {
     let mut interner2 = StringInterner::new();
     let (reloaded, _tmp_zst) = super::DiskGraph::load_from_dir(tmp.path(), &mut interner2).unwrap();
 
-    // conn_type_index should cover BOTH T (from seg_0) and U (from
-    // seg_1). Merge is what `concat_segment_csrs::merge_conn_type_index`
-    // produces.
+    // `concat_segment_csrs::merge_conn_type_index` must cover both
+    // T (from seg_0) and U (from seg_1).
     let t_key = interner2.get_or_intern("T").as_u64();
     let u_key = interner2.get_or_intern("U").as_u64();
     let cti_types: Vec<u64> = (0..reloaded.conn_type_index_types.len())
@@ -1328,10 +1308,8 @@ fn seal_round_trip_auxiliary_indexes() {
 
 #[test]
 fn save_to_dir_auto_wires_seal_when_tail_is_clean() {
-    // A second save after a clean-tail workload should
-    // dispatch to `seal_to_new_segment` instead of the traditional
-    // compact-and-rewrite path. Verify by checking that seg_001/
-    // appears on disk and that the manifest grows to 2 segments.
+    // A second save after a clean-tail workload must dispatch to
+    // `seal_to_new_segment`, not the compact-and-rewrite path.
     let tmp = TempDir::new().unwrap();
     let mut interner = StringInterner::new();
     let mut dg = super::DiskGraph::new_at_path(tmp.path()).unwrap();
@@ -1342,7 +1320,6 @@ fn save_to_dir_auto_wires_seal_when_tail_is_clean() {
     dg.build_csr_from_pending().unwrap();
     dg.save_to_dir(tmp.path(), &interner).unwrap();
 
-    // After first save: seg_000 exists, seg_001 does not.
     assert!(tmp.path().join("seg_000").exists());
     assert!(!tmp.path().join("seg_001").exists());
     assert_eq!(dg.sealed_nodes_bound, 2);
@@ -1352,7 +1329,6 @@ fn save_to_dir_auto_wires_seal_when_tail_is_clean() {
     let n3 = dg.add_node(seal_test_node(&mut interner, 3, "B"));
     dg.add_edge(n2, n3, seal_test_edge(&mut interner, "U"));
 
-    // Second save: auto-wire should trigger seal_to_new_segment.
     dg.save_to_dir(tmp.path(), &interner).unwrap();
 
     assert!(
@@ -1364,7 +1340,6 @@ fn save_to_dir_auto_wires_seal_when_tail_is_clean() {
     let manifest = super::super::segment_summary::SegmentManifest::load_from(tmp.path()).unwrap();
     assert_eq!(manifest.len(), 2, "manifest should have 2 segments");
 
-    // Reload and verify the combined view still makes sense.
     drop(dg);
     let mut interner2 = StringInterner::new();
     let (reloaded, _tmp_zst) = super::DiskGraph::load_from_dir(tmp.path(), &mut interner2).unwrap();
@@ -1374,10 +1349,8 @@ fn save_to_dir_auto_wires_seal_when_tail_is_clean() {
 
 #[test]
 fn save_to_dir_seals_cross_segment_overflow_as_full_range() {
-    // Cross-segment overflow is handled by the full-range seal, not
-    // the compact fallback. save_to_dir should produce seg_001/
-    // even when the overflow has an old→new edge, and reload must
-    // see both segments' edges combined.
+    // Cross-segment overflow (an old→new edge) is handled by the
+    // full-range seal, not the compact fallback.
     let tmp = TempDir::new().unwrap();
     let mut interner = StringInterner::new();
     let mut dg = super::DiskGraph::new_at_path(tmp.path()).unwrap();
@@ -1445,8 +1418,6 @@ fn conn_type_index_sources_are_global_after_segment_local_seal() {
     let mut interner2 = StringInterner::new();
     let (reloaded, _tmp_zst) = super::DiskGraph::load_from_dir(tmp.path(), &mut interner2).unwrap();
 
-    // The merged conn_type_index sources must be the GLOBAL ids
-    // {5, 6, 7}, not the segment-local {0, 1, 2}.
     let t_key = interner2.get_or_intern("T").as_u64();
     let sources = reloaded
         .sources_for_conn_type(t_key)

@@ -1,6 +1,6 @@
-"""Large-graph stress test for v3 columnar file format.
+"""Large-graph stress test for the columnar `.kgl` file format.
 
-Creates a graph that approaches or exceeds available RAM, saves it as a v3
+Creates a graph that approaches or exceeds available RAM, saves it as a
 .kgl file, reloads it, and measures query performance on the loaded graph.
 
 Usage (standalone — not part of normal test suite):
@@ -136,8 +136,8 @@ def build_graph(target_gb):
 def save_and_load(kg, kgl_path):
     results = {}
 
-    # -- save v3 .kgl --
-    section("Saving v3 .kgl file")
+    # -- save .kgl --
+    section("Saving .kgl file")
     t0 = time.perf_counter()
     kg.save(kgl_path)
     results["save_kgl_time"] = time.perf_counter() - t0
@@ -145,8 +145,8 @@ def save_and_load(kg, kgl_path):
     print(f"  save(): {fmt_time(results['save_kgl_time'])}")
     print(f"  File size: {fmt_mb(results['kgl_size_mb'])}")
 
-    # -- load v3 .kgl --
-    section("Loading from v3 .kgl file")
+    # -- load .kgl --
+    section("Loading from .kgl file")
     t0 = time.perf_counter()
     kg2 = kglite.load(kgl_path)
     results["load_kgl_time"] = time.perf_counter() - t0

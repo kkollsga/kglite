@@ -9,13 +9,11 @@ pub(super) fn push_where_into_match(query: &mut CypherQuery, params: &HashMap<St
     let mut i = 0;
     while i < query.clauses.len() {
         // Scoped form first: `OPTIONAL MATCH … WHERE` carries its predicate
-        // inside the clause. Pushing it into the optional pattern is not just
-        // still-legal, it is now *unconditionally* legal — the pushed matcher
-        // and the surviving predicate mean the same thing, because under
-        // clause scoping "filtered out" and "never matched" are the same
-        // outcome (both leave the row null-extended). Under the old
-        // post-filter reading they were different outcomes and the pushdown
-        // was quietly changing which rows survived.
+        // inside the clause. Pushing it into the optional pattern is
+        // unconditionally legal under clause scoping — "filtered out" and
+        // "never matched" are the same outcome (both leave the row
+        // null-extended). Under the old post-filter reading they differed, and
+        // the pushdown was quietly changing which rows survived.
         if matches!(&query.clauses[i], Clause::OptionalMatch(m) if m.where_clause.is_some()) {
             push_scoped_where(query, i, params);
             i += 1;
@@ -35,7 +33,6 @@ pub(super) fn push_where_into_match(query: &mut CypherQuery, params: &HashMap<St
             continue;
         }
 
-        // Extract the WHERE predicate
         let where_pred = if let Clause::Where(w) = &query.clauses[i + 1] {
             w.predicate.clone()
         } else {
@@ -43,7 +40,6 @@ pub(super) fn push_where_into_match(query: &mut CypherQuery, params: &HashMap<St
             continue;
         };
 
-        // Collect variables defined in the MATCH/OPTIONAL MATCH patterns
         let match_vars: Vec<(String, Option<String>)> = match &query.clauses[i] {
             Clause::Match(m) => collect_pattern_variables(&m.patterns),
             Clause::OptionalMatch(m) => collect_pattern_variables(&m.patterns),
@@ -65,7 +61,6 @@ pub(super) fn push_where_into_match(query: &mut CypherQuery, params: &HashMap<St
         let prior_node_vars = collect_prior_node_vars(&query.clauses[..i], &match_vars);
         let prior_scalar_vars = collect_prior_scalar_vars(&query.clauses[..i]);
 
-        // Split predicate into pushable conditions and remainder
         let PushableResult {
             pushable,
             pushable_in,
@@ -83,7 +78,6 @@ pub(super) fn push_where_into_match(query: &mut CypherQuery, params: &HashMap<St
             occupied_properties,
         );
 
-        // Apply pushable conditions to MATCH/OPTIONAL MATCH patterns
         if has_pushable(
             &pushable,
             &pushable_in,
@@ -110,7 +104,6 @@ pub(super) fn push_where_into_match(query: &mut CypherQuery, params: &HashMap<St
                 pushable_text,
             );
 
-            // Update WHERE clause with remaining predicates.
             // When all predicates are pushed into the pattern, keep the WHERE
             // clause as-is so it acts as a safety-net filter. The pushed
             // predicates provide fast-path filtering in the pattern matcher,
@@ -187,10 +180,8 @@ fn push_scoped_where(query: &mut CypherQuery, i: usize, params: &HashMap<String,
         pushable_nodeprop,
         pushable_text,
     );
-    // Identical rule to the adjacent form: a partially-applied push leaves the
-    // original predicate untouched, a fully-applied one narrows it to the
-    // remainder, and a fully-consumed one keeps the predicate as the
-    // safety net every non-pattern-matcher path relies on.
+    // A partially-applied push leaves the original predicate untouched; a
+    // fully-consumed one keeps it as the safety net (no `else` branch).
     if all_applied {
         if let Some(pred) = remaining {
             m.where_clause = Some(WhereClause { predicate: pred });
@@ -297,7 +288,6 @@ fn collect_pattern_property_keys(
     keys
 }
 
-/// Collect scalar names projected by WITH/UNWIND clauses.
 fn collect_prior_scalar_vars(prior_clauses: &[Clause]) -> HashSet<String> {
     let mut out = HashSet::new();
     for c in prior_clauses {
@@ -323,14 +313,6 @@ fn collect_prior_scalar_vars(prior_clauses: &[Clause]) -> HashSet<String> {
     out
 }
 
-/// Push LIMIT into MATCH when there's no ORDER BY/aggregation between them.
-/// Reverse pattern direction when a later node has a more selective filter
-/// than the first node, so the pattern executor starts from fewer candidates.
-///
-/// Example: `(d:CourtDecision)-[:CITES]->(s)-[:SECTION_OF]->(l:Law {korttittel: 'X'})`
-/// → reversed to `(l:Law {korttittel: 'X'})<-[:SECTION_OF]-(s)<-[:CITES]-(d:CourtDecision)`
-///
-/// Must run AFTER `push_where_into_match` (so equality predicates are already in the pattern).
 pub(super) fn collect_pattern_variables(
     patterns: &[crate::graph::core::pattern_matching::Pattern],
 ) -> Vec<(String, Option<String>)> {
@@ -563,7 +545,6 @@ fn extract_from_predicate(
             }
         }
         Predicate::In { expr, list } => {
-            // Push variable.property IN [literal, ...] into MATCH pattern
             if let Expression::PropertyAccess { variable, property } = expr {
                 if match_vars.iter().any(|(v, _)| v == variable) {
                     let all_literals: Option<Vec<Value>> = list
@@ -719,7 +700,6 @@ pub(super) fn try_extract_equality(
     match_vars: &[(String, Option<String>)],
     params: &HashMap<String, Value>,
 ) -> Option<(String, String, Value)> {
-    // Left is property access, right is literal
     if let (Expression::PropertyAccess { variable, property }, Expression::Literal(val)) =
         (left, right)
     {
@@ -728,7 +708,6 @@ pub(super) fn try_extract_equality(
         }
     }
 
-    // Right is property access, left is literal (commutative)
     if let (Expression::Literal(val), Expression::PropertyAccess { variable, property }) =
         (left, right)
     {
@@ -737,7 +716,6 @@ pub(super) fn try_extract_equality(
         }
     }
 
-    // Left is property access, right is parameter (resolve from params)
     if let (Expression::PropertyAccess { variable, property }, Expression::Parameter(name)) =
         (left, right)
     {
@@ -748,7 +726,6 @@ pub(super) fn try_extract_equality(
         }
     }
 
-    // Right is property access, left is parameter (commutative)
     if let (Expression::Parameter(name), Expression::PropertyAccess { variable, property }) =
         (left, right)
     {
@@ -770,7 +747,6 @@ pub(super) fn try_extract_equality(
             }
         }
     }
-    // Commutative: literal = id(variable)
     if let (Expression::Literal(val), Expression::FunctionCall { name, args, .. }) = (left, right) {
         if name == "id" {
             if let Some(Expression::Variable(var)) = args.first() {
@@ -893,7 +869,6 @@ pub(super) fn try_extract_comparison(
     match_vars: &[(String, Option<String>)],
     params: &HashMap<String, Value>,
 ) -> Option<(String, String, ComparisonOp, Value)> {
-    // Left is property access, right is literal: variable.property OP literal
     if let (Expression::PropertyAccess { variable, property }, Expression::Literal(val)) =
         (left, right)
     {
@@ -902,7 +877,6 @@ pub(super) fn try_extract_comparison(
         }
     }
 
-    // Right is property access, left is literal: literal OP variable.property → reverse
     if let (Expression::Literal(val), Expression::PropertyAccess { variable, property }) =
         (left, right)
     {
@@ -918,7 +892,6 @@ pub(super) fn try_extract_comparison(
         }
     }
 
-    // Left is property access, right is parameter
     if let (Expression::PropertyAccess { variable, property }, Expression::Parameter(name)) =
         (left, right)
     {
@@ -929,7 +902,6 @@ pub(super) fn try_extract_comparison(
         }
     }
 
-    // Right is property access, left is parameter → reverse
     if let (Expression::Parameter(name), Expression::PropertyAccess { variable, property }) =
         (left, right)
     {
@@ -965,7 +937,6 @@ pub(super) fn apply_comparison_to_patterns(
             if let PatternElement::Node(ref mut np) = element {
                 if np.variable.as_deref() == Some(var_name) {
                     let props = np.properties.get_or_insert_with(Default::default);
-                    // Check if there's already a comparison on this property to merge
                     if let Some(existing) = props.get(property) {
                         if let Some(merged) = merge_comparison(existing, op, &value) {
                             props.insert(property.to_string(), merged);
@@ -996,7 +967,6 @@ pub(super) fn merge_comparison(
     new_op: ComparisonOp,
     new_val: &Value,
 ) -> Option<PropertyMatcher> {
-    // Extract the existing bound direction
     let (existing_lower, existing_val, existing_inclusive) = match existing {
         PropertyMatcher::GreaterThan(v) => (true, v, false),
         PropertyMatcher::GreaterOrEqual(v) => (true, v, true),
@@ -1005,7 +975,6 @@ pub(super) fn merge_comparison(
         _ => return None,
     };
 
-    // Determine the new bound direction
     let (new_lower, new_inclusive) = match new_op {
         ComparisonOp::GreaterThan => (true, false),
         ComparisonOp::GreaterThanEq => (true, true),
@@ -1014,13 +983,12 @@ pub(super) fn merge_comparison(
         _ => return None,
     };
 
-    // Can only merge opposite directions (lower + upper)
+    // Only opposite directions merge cleanly; two lowers or two uppers can't.
     if existing_lower == new_lower {
-        return None; // Both are lower or both are upper — can't merge cleanly
+        return None;
     }
 
     if existing_lower {
-        // existing is lower bound, new is upper bound
         Some(PropertyMatcher::Range {
             lower: existing_val.clone(),
             lower_inclusive: existing_inclusive,
@@ -1028,7 +996,6 @@ pub(super) fn merge_comparison(
             upper_inclusive: new_inclusive,
         })
     } else {
-        // existing is upper bound, new is lower bound
         Some(PropertyMatcher::Range {
             lower: new_val.clone(),
             lower_inclusive: new_inclusive,
@@ -1038,7 +1005,6 @@ pub(super) fn merge_comparison(
     }
 }
 
-/// Apply a property equality condition to the matching node pattern in MATCH
 pub(super) fn apply_property_to_patterns(
     patterns: &mut [crate::graph::core::pattern_matching::Pattern],
     var_name: &str,
@@ -1089,7 +1055,6 @@ pub(super) fn apply_text_matcher_to_patterns(
     false
 }
 
-/// Apply an IN-list property condition to the matching node pattern in MATCH
 pub(super) fn apply_in_property_to_patterns(
     patterns: &mut [crate::graph::core::pattern_matching::Pattern],
     var_name: &str,
@@ -1220,10 +1185,8 @@ pub(super) fn where_subsumed_by_pattern(
     if remaining.is_some() {
         return false;
     }
-    // Deferred matchers resolve against bindings a fused scan does not build,
-    // and a text matcher is a candidate pre-filter whose predicate still has to
-    // run. `extract_from_predicate` never consumes a text predicate, so the
-    // last check is belt-and-braces.
+    // The never-equivalent kinds (see the doc above). `extract_from_predicate`
+    // never consumes a text predicate, so the last check is belt-and-braces.
     if !pushable_var.is_empty() || !pushable_nodeprop.is_empty() || !pushable_text.is_empty() {
         return false;
     }

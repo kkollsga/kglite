@@ -1,5 +1,3 @@
-// Embedding / Vector Search #[pymethods] — extracted from mod.rs
-
 use crate::datatypes::{py_in, py_out};
 use petgraph::graph::NodeIndex;
 use pyo3::prelude::*;
@@ -24,10 +22,6 @@ const SELECTION_ID_KEY: NodeKeyGuard<'static> = NodeKeyGuard {
 
 #[pymethods]
 impl KnowledgeGraph {
-    // ========================================================================
-    // Embedding / Vector Search Methods
-    // ========================================================================
-
     /// Store embeddings for nodes of the given type.
     ///
     /// **Replaces** any existing store for ``(node_type, "{text_column}_emb")``.
@@ -182,7 +176,6 @@ impl KnowledgeGraph {
                 })
             })
             .transpose()?;
-        // Release GIL during heavy vector similarity computation
         let inner = self.inner.clone();
         let selection = self.cursor.selection.clone();
         let results = py
@@ -205,7 +198,6 @@ impl KnowledgeGraph {
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         if to_df.unwrap_or(false) {
-            // Build DataFrame via pandas
             let pandas = py.import("pandas")?;
             let records: Vec<Py<PyAny>> = results
                 .iter()
@@ -236,7 +228,6 @@ impl KnowledgeGraph {
             return df.into_py_any(py);
         }
 
-        // Return as list of dicts
         let py_list = PyList::empty(py);
         for r in &results {
             if let Some(node) = self.inner.graph.node_view(r.node_idx) {
@@ -249,9 +240,6 @@ impl KnowledgeGraph {
                     dict.set_item("type", node.node_type_str(&self.inner.interner))?;
                 }
                 dict.set_item("score", r.score)?;
-                // properties_cloned reads from PropertyStorage::Columnar
-                // (the post-reload variant); property_iter yields nothing
-                // for that variant.
                 for (k, v) in node.properties_cloned(&self.inner.interner) {
                     if want(&k) {
                         dict.set_item(k, py_out::value_to_py(py, &v)?)?;
@@ -303,9 +291,7 @@ impl KnowledgeGraph {
                 d.set_item("model", store.model_id.clone())?;
                 // Report the *effective* metric: a store created by `embed_texts`
                 // (or imported pre-provenance) carries no explicit metric, but
-                // search falls back to cosine — so report what search actually
-                // uses rather than a bare `None` (operator note: the metric blank
-                // was confusing even though ranking was correct).
+                // search falls back to cosine — report what search uses, not `None`.
                 d.set_item("metric", store.metric.as_deref().unwrap_or("cosine"))?;
                 d.set_item("hashed", store.text_hashes.len())?;
                 d.into_py_any(py)
@@ -447,12 +433,11 @@ impl KnowledgeGraph {
         // builtin columns (id / title / type) — those are handled below
         // when an embedding store keys against them.
         //
-        // **Important**: use `properties_cloned()` (or `iter_owned()`)
-        // rather than `property_iter()` — the latter yields *nothing* for
-        // `PropertyStorage::Columnar` (the variant nodes use after a
-        // save+reload cycle), which produced `nodes_with_property=0` for
-        // every columnarised graph and flipped the status to
-        // `store_orphan` on a healthy steady-state graph.
+        // Use `properties_cloned()`, not `property_iter()`: the latter yields
+        // *nothing* for `PropertyStorage::Columnar` (the variant nodes use
+        // after a save+reload cycle), which produced `nodes_with_property=0`
+        // for every columnarised graph and flipped a healthy steady-state
+        // graph's status to `store_orphan`.
         for type_name in &types_to_scan {
             let type_indices = match self.inner.type_indices.get(type_name) {
                 Some(ix) => ix,
@@ -547,10 +532,6 @@ impl KnowledgeGraph {
                 }
             }
 
-            // length_stats: the heuristic data callers need to filter
-            // out short-string columns (timestamps, enums) and
-            // fully-unique columns (identifiers) before declaring a
-            // candidate worth embedding.
             let length_stats = PyDict::new(py);
             let distinct_count = stats.distinct.len();
             let mean_length = if stats.nodes_with_property > 0 {
@@ -662,12 +643,8 @@ impl KnowledgeGraph {
         let stats = file::import_embeddings_from_file(g, path)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))?;
 
-        // Surface silent-drop cases: if the file contained entries but none
-        // matched nodes in the current graph, the user almost always wants
-        // to know — they're importing into the wrong graph or against an
-        // ID schema that has drifted (e.g. a code-graph qualified-name format
-        // changes between releases). Emit a UserWarning that's visible by
-        // default but still suppressible via the standard `warnings` module.
+        // Surface the silent-drop cases as a UserWarning: visible by default,
+        // still suppressible via the standard `warnings` module.
         if stats.imported == 0 && stats.skipped > 0 {
             let msg = format!(
                 "import_embeddings('{}'): imported 0 embeddings, skipped {} — \
@@ -734,7 +711,6 @@ impl KnowledgeGraph {
         let _arena_guard = self.inner.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
         let result = PyDict::new(py);
 
-        // Two-arg form: embeddings(node_type, text_column)
         if let Some(col) = text_column {
             let key = kglite_core::api::embeddings::store_key(node_type_or_text_column, col);
             let store = match self.inner.embeddings.get(&key) {
@@ -939,13 +915,11 @@ impl KnowledgeGraph {
         // guard uses (`set_embeddings`' `resolve_source_column`), and read the
         // text through the field it returns. Reading `get_property` directly
         // was the bug: it excludes `id`/`title` by contract, so `('Person',
-        // 'name')` on a `title_field='name'` type — and even `('Person',
-        // 'title')` — embedded nothing and reported it as `skipped`.
-        // A type with no nodes has nothing to probe and nothing to embed, so
-        // it stays the `{'embedded': 0}` no-op it has always been. A type the
-        // graph has never *seen* is a different thing entirely — a mistake —
-        // and gets `set_embeddings`' complaint, before the model is loaded, so
-        // the two halves of the embedding surface agree on what a node type is.
+        // 'name')` on a `title_field='name'` type embedded nothing and
+        // reported it as `skipped`.
+        // A type with no nodes stays the `{'embedded': 0}` no-op it has always
+        // been; a type the graph has never *seen* is a mistake and gets
+        // `set_embeddings`' complaint, before the model is loaded.
         if !self.inner.type_indices.contains_key(node_type) {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                 "Node type '{}' does not exist in the graph",
@@ -967,7 +941,6 @@ impl KnowledgeGraph {
         };
         let source_key = kglite_core::api::InternedKey::from_str(&source_field);
 
-        // Load model if it has a load() lifecycle method
         model
             .load()
             .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
@@ -1014,7 +987,6 @@ impl KnowledgeGraph {
             return candidates.report(py, 0, dimension);
         }
 
-        // Clone existing store or create new — we'll merge new embeddings into it
         let mut store = match existing_store {
             Some(s) => s.clone(),
             None => kglite_core::api::storage::EmbeddingStore::new(dimension),
@@ -1037,12 +1009,10 @@ impl KnowledgeGraph {
             progress_bar.as_ref(),
         );
 
-        // Close progress bar
         if let Some(ref bar) = progress_bar {
             let _ = bar.call_method0("close");
         }
 
-        // Unload model after embedding is complete
         model.unload();
         outcome?;
 
@@ -1074,7 +1044,7 @@ impl KnowledgeGraph {
     ///     to_df: If True, return a pandas DataFrame.
     ///
     /// Returns:
-    ///     Same format as ``vector()`` — list of dicts or DataFrame.
+    ///     Same format as ``vector_search()`` — list of dicts or DataFrame.
     #[pyo3(signature = (text_column, query, top_k=10, metric=None, to_df=false, returning=None, exact=false))]
     #[allow(clippy::too_many_arguments)]
     fn search_text(
@@ -1090,13 +1060,11 @@ impl KnowledgeGraph {
     ) -> PyResult<Py<PyAny>> {
         let model = self.get_embedder_or_error()?;
 
-        // Load model if it has a load() lifecycle method
         model
             .load()
             .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
 
-        // Embed the query text, then unload regardless of success/failure.
-        // Release the GIL while the embedder runs.
+        // Unload regardless of success or failure — hence the `?` after it.
         let texts = vec![query.to_string()];
         let embed_result = py.detach(|| model.embed(&texts));
         model.unload();
@@ -1110,7 +1078,6 @@ impl KnowledgeGraph {
 
         let query_vector = embeddings.into_iter().next().unwrap();
 
-        // Delegate to existing vector_search
         self.vector_search(
             py,
             text_column,
@@ -1229,8 +1196,7 @@ impl KnowledgeGraph {
 /// Marshal a `{id: [floats]}` dict into the `(id, vector)` pairs the engine
 /// primitive consumes. Purely a boundary conversion — every validation rule
 /// (node type, source column, id resolution, dimension) lives in
-/// `kglite::api::embeddings`, so this is the only Python-specific part of
-/// `set_embeddings` / `add_embeddings`.
+/// `kglite::api::embeddings`.
 fn marshal_embedding_batch(
     embeddings: &Bound<'_, PyDict>,
 ) -> PyResult<Vec<(kglite_core::api::Value, Vec<f32>)>> {
@@ -1275,8 +1241,7 @@ impl EmbedCandidates {
 ///
 /// Each node's text is read through the alias-resolved matcher field, so
 /// `source_field`/`source_key` must be what `resolve_source_column` returned —
-/// the same predicate the ingest guard applies. Reading the raw property map
-/// instead is the bug that made an identity column embed nothing.
+/// the same predicate the ingest guard applies.
 ///
 /// `changed_mode` selects nodes that are missing an embedding *or* whose
 /// stored text hash is stale; otherwise a node that already has a vector in
@@ -1311,7 +1276,6 @@ fn collect_embed_candidates(
                     .map(|st| st.get_embedding(node_idx.index()).is_some())
                     .unwrap_or(false);
                 if changed_mode {
-                    // Re-embed nodes that are missing OR whose text changed.
                     let stale = existing_store
                         .map(|st| st.is_stale(node_idx.index(), hash))
                         .unwrap_or(true);
@@ -1324,7 +1288,6 @@ fn collect_embed_candidates(
                         found.skipped_existing += 1;
                     }
                 } else if has_emb {
-                    // 'missing' mode: skip nodes that already have one.
                     found.skipped_existing += 1;
                 } else {
                     found.texts.push((node_idx, s.clone(), hash));
@@ -1405,7 +1368,6 @@ fn embed_in_batches(
             store.set_text_hash(batch[i].0.index(), batch[i].2);
         }
 
-        // Update progress bar
         if let Some(bar) = progress_bar {
             let _ = bar.call_method1("update", (batch.len(),));
         }

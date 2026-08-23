@@ -11,9 +11,8 @@
 //!   with one global visited set. That is a different relation, and it only
 //!   coincides with the trail one under the conditions documented on it.
 //!
-//! Split out of `matcher.rs` (which is at its file-size ceiling) exactly like
-//! `matcher_expansion.rs`; these are inherent methods on `PatternExecutor`, so
-//! the split is a file boundary only.
+//! Split out of `matcher.rs` (at its file-size ceiling); these are inherent
+//! methods on `PatternExecutor`, so the split is a file boundary only.
 
 use super::*;
 use crate::graph::core::iterators::GraphEdgeRef;
@@ -50,10 +49,10 @@ const VISITED_DENSE_PROMOTION: usize = 128;
 ///
 /// It replaces a `vec![false; node_bound]` **per source row** — an allocation
 /// plus a zeroing pass whose cost scaled with the *graph* rather than with the
-/// work done. Measured on a 50-row EXISTS witness (part-6 phase V3): 31.5 µs at
-/// 10k nodes, 36.7 µs at 40k, 88.9 µs at 160k, against a flat ~16 µs fixed-hop
-/// control — ~7.4 ns per 1 000 nodes per row, for a BFS that stops at the first
-/// witness and touches a handful of nodes.
+/// work done. Measured on a 50-row EXISTS witness: 31.5 µs at 10k nodes,
+/// 36.7 µs at 40k, 88.9 µs at 160k, against a flat ~16 µs fixed-hop control —
+/// ~7.4 ns per 1 000 nodes per row, for a BFS that stops at the first witness
+/// and touches a handful of nodes.
 ///
 /// Two things fix that, and both are needed. **Lazy sizing:** a row whose caller
 /// capped the result count may stop after a handful of nodes, so it marks into a
@@ -61,12 +60,12 @@ const VISITED_DENSE_PROMOTION: usize = 128;
 /// That is what the EXISTS shape needs, because its pattern predicate builds one
 /// `PatternExecutor` per candidate row, so a per-executor buffer would be
 /// re-allocated just as often as the per-row one was. An *uncapped* row sweeps
-/// its whole reachable set by definition and starts dense, paying nothing for
-/// the choice. **Generation stamps:** once the array exists, the following rows
-/// of the same expansion re-use it by bumping a stamp instead of re-zeroing it.
-/// The stamp is a `u8` rather than a wider counter deliberately — the footprint
-/// then stays exactly the one byte per node the `Vec<bool>` had, and the only
-/// price is re-zeroing once every 255 rows when the generation wraps.
+/// its whole reachable set by definition and starts dense. **Generation
+/// stamps:** once the array exists, the following rows of the same expansion
+/// re-use it by bumping a stamp instead of re-zeroing it. The stamp is a `u8`
+/// deliberately — the footprint then stays exactly the one byte per node the
+/// `Vec<bool>` had, and the only price is re-zeroing once every 255 rows when
+/// the generation wraps.
 #[derive(Default)]
 pub(super) struct VisitedStamps {
     /// Live while `dense` is empty: the nodes this row has marked.
@@ -166,7 +165,6 @@ enum SourceRole {
     Probe,
 }
 
-/// Outcome of the bounded closed-trail probe.
 enum ClosedTrail {
     /// A closed trail of this many hops leaves and returns to the source.
     Found(usize),
@@ -205,7 +203,6 @@ impl ConnFilter {
         ConnFilter { any_of, one }
     }
 
-    /// The type the backend may pre-filter on, if any.
     #[inline]
     fn backend_hint(&self) -> Option<InternedKey> {
         self.one
@@ -221,13 +218,11 @@ impl ConnFilter {
     }
 }
 
-/// Whether a caller-authorised exact cap has been filled.
 #[inline]
 fn cap_reached(found: usize, max_results: Option<usize>) -> bool {
     max_results.is_some_and(|max| found >= max)
 }
 
-/// The graph directions one hop of this segment walks.
 fn segment_directions(edge_pattern: &EdgePattern) -> &'static [Direction] {
     match edge_pattern.direction {
         EdgeDirection::Outgoing => &[Direction::Outgoing],
@@ -424,7 +419,6 @@ impl<'a> PatternExecutor<'a> {
             }
     }
 
-    /// A binding whose source and target are the same node.
     #[inline]
     fn zero_length_binding(&self, node: NodeIndex, hops: usize) -> MatchBinding {
         MatchBinding::VariableLengthPath {
@@ -435,8 +429,6 @@ impl<'a> PatternExecutor<'a> {
         }
     }
 
-    /// Fast variable-length path expansion using global BFS dedup.
-    ///
     /// Answers **distance** reachability: each node is visited at most once,
     /// so hub nodes are never re-explored at deeper depths. Cypher asks for
     /// **trail** reachability, and the two relations only coincide when
@@ -496,16 +488,14 @@ impl<'a> PatternExecutor<'a> {
             return Ok(Some(results));
         }
 
-        // Global visited set — each node is explored at most once. A dense
-        // stamp array beats a HashSet for NodeIndex (no hashing, cache-friendly);
-        // `VisitedStamps` is the caller's, so this row pays for the marks it
-        // writes rather than for the graph's node count.
+        // Global visited set — each node is explored at most once. Reusing the
+        // caller's `VisitedStamps` is what keeps the cost proportional to the
+        // marks this row writes rather than to the graph's node count.
         visited.begin(self.graph.graph.node_bound(), max_results.is_some());
         if !leave_source_unvisited {
             visited.visit(source.index());
         }
 
-        // Queue: (node, depth) — no path vector needed
         let mut queue: VecDeque<(NodeIndex, usize)> = VecDeque::new();
         queue.push_back((source, 0));
 
@@ -557,7 +547,6 @@ impl<'a> PatternExecutor<'a> {
                         Direction::Incoming => edge.source(),
                     };
 
-                    // Global dedup — skip if already visited at any depth
                     let target_idx = target.index();
                     if visited.is_visited(target_idx) {
                         continue;
@@ -566,7 +555,6 @@ impl<'a> PatternExecutor<'a> {
 
                     let new_depth = depth + 1;
 
-                    // Check if target is a valid result (within hop range + matches node pattern)
                     if new_depth >= min_hops
                         && self.matches_var_length_target(target, edge_pattern, node_pattern)
                     {
@@ -587,10 +575,9 @@ impl<'a> PatternExecutor<'a> {
                         }
                     }
 
-                    // Continue exploring if we haven't reached max depth. The
-                    // source is never re-expanded: reaching it here means it
-                    // was left unvisited for the closed-trail answer, and
-                    // every relationship it has was already walked at depth 0.
+                    // The source is never re-expanded: reaching it here means it
+                    // was left unvisited for the closed-trail answer, and every
+                    // relationship it has was already walked at depth 0.
                     if new_depth < max_hops && target != source {
                         queue.push_back((target, new_depth));
                     }
@@ -615,8 +602,8 @@ impl<'a> PatternExecutor<'a> {
         Ok(Some(results))
     }
 
-    /// Expand via variable-length path (BFS within hop range)
-    /// Optimized: Only clones paths when branching (multiple valid targets from same node)
+    /// The exact expansion: a BFS over trails within the hop range, carrying
+    /// each candidate's relationship sequence.
     ///
     /// `max_results` is an exact cap: expansion stops as soon as that many
     /// rows exist. A `min_hops >= 2` segment cannot use the set-based path at
@@ -661,8 +648,6 @@ impl<'a> PatternExecutor<'a> {
 
         queue.push_back((source, 0, Vec::new()));
 
-        // Zero-hop case: if min_hops == 0, the source node itself is a valid result
-        // (matching "zero hops" means the source IS the target).
         if min_hops == 0 && self.matches_var_length_target_strictly(source, node_pattern) {
             results.push((source, self.zero_length_binding(source, 0)));
             if cap_reached(results.len(), max_results) {
@@ -689,8 +674,8 @@ impl<'a> PatternExecutor<'a> {
                 continue;
             }
 
-            // First pass: collect all valid targets to know how many branches we'll have
-            // This avoids cloning paths unnecessarily when only one target exists
+            // Collected before any is walked, so an edge yielded twice by the
+            // two directional iterators is admitted once (see below).
             let mut valid_targets: Vec<PathHop> = Vec::new();
 
             for &direction in directions {
@@ -706,7 +691,6 @@ impl<'a> PatternExecutor<'a> {
                         continue;
                     };
 
-                    // Get target node
                     let target = match direction {
                         Direction::Outgoing => edge.target(),
                         Direction::Incoming => edge.source(),
@@ -733,7 +717,6 @@ impl<'a> PatternExecutor<'a> {
                 }
             }
 
-            // Second pass: process valid targets with smart path management
             let new_depth = depth + 1;
 
             for hop in valid_targets {
@@ -743,11 +726,9 @@ impl<'a> PatternExecutor<'a> {
                 let mut new_path = path.clone();
                 new_path.push(hop);
 
-                // If we're within the valid hop range and target matches node pattern, add to results
                 if new_depth >= min_hops
                     && self.matches_var_length_target(target, edge_pattern, node_pattern)
                 {
-                    // Create binding - clone path only if we also need it for queue
                     let path_for_binding = if needs_queue {
                         new_path.clone()
                     } else {
@@ -776,7 +757,6 @@ impl<'a> PatternExecutor<'a> {
                     self.check_match_ceiling(results.len())?;
                 }
 
-                // Continue exploring if we haven't reached max depth
                 if needs_queue {
                     queue.push_back((target, new_depth, new_path));
                 }

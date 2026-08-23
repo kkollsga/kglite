@@ -10,7 +10,6 @@ mod atomic_save_tests {
     use crate::graph::storage::{GraphRead, GraphWrite};
     use petgraph::graph::NodeIndex;
 
-    /// Add `n` `Doc` nodes to an existing graph, whatever backend it is in.
     fn fill_docs(g: &mut DirGraph, n: i64) {
         let rows: Vec<Vec<Value>> = (1..=n)
             .map(|i| vec![Value::Int64(i), Value::String(format!("t{i}"))])
@@ -667,7 +666,6 @@ mod atomic_save_tests {
         pid
     }
 
-    /// Write a save temp of `graph_path` owned by `pid`, and return its path.
     fn plant_temp(graph_path: &std::path::Path, pid: u32, nonce: u64) -> std::path::PathBuf {
         let name = format!(
             "{}.tmp.{pid}.{nonce}",
@@ -761,9 +759,8 @@ mod atomic_save_tests {
 
     #[test]
     fn failed_save_to_bad_dir_leaves_dest_untouched() {
-        // Write a good file first, then attempt a save into a path whose
-        // parent doesn't exist — the temp create fails, and the existing
-        // good file must be left intact (no partial overwrite).
+        // The temp create fails before the destination is touched, so the
+        // existing good file must survive intact (no partial overwrite).
         let dir = tempfile::tempdir().unwrap();
         let good = dir.path().join("g.kgl");
         write_kgl(&tiny_graph(4), good.to_str().unwrap()).unwrap();
@@ -772,19 +769,14 @@ mod atomic_save_tests {
         let bad = dir.path().join("missing_subdir").join("g.kgl");
         assert!(write_kgl(&tiny_graph(7), bad.to_str().unwrap()).is_err());
 
-        // The original file is byte-for-byte unchanged.
         assert_eq!(std::fs::read(&good).unwrap(), before);
     }
 
     // ── user-schema version stamp ───────────────────────────────────────────
     //
     // The stamp is the caller's data-model revision, not an engine version.
-    // Two properties matter and are asserted below: it survives save/load, and
-    // it is *completely absent* from the byte stream at the baseline value — so
-    // a `.kgl` written before the field existed loads without error, and every
-    // pre-existing save stays byte-identical (the golden-digest invariant).
 
-    /// Rewrite a v5 buffer's metadata as raw JSON, so a test can delete a key
+    /// Rewrite a v6 buffer's metadata as raw JSON, so a test can delete a key
     /// outright. `rewrite_metadata` above round-trips through the typed struct
     /// and would re-add any key it knows about; this simulates a file written
     /// by a build whose `FileMetadata` never had the field at all.
@@ -868,14 +860,11 @@ mod atomic_save_tests {
     // ── recorded storage mode ───────────────────────────────────────────────
     //
     // A saved graph records the storage mode that wrote it, so a later open can
-    // tell a mapped checkpoint from a memory one. Three properties are asserted
-    // below: the mode is written for every portable-capable mode, a file that
-    // predates the field still loads (memory, the established fallback), and an
-    // unrecognised value is refused **by name** rather than quietly becoming
-    // memory — a silent fallback would hand back a graph in a mode nobody asked
-    // for, which is indistinguishable from success.
+    // tell a mapped checkpoint from a memory one. An unrecognised value is
+    // refused **by name**: quietly falling back to memory would hand back a
+    // graph in a mode nobody asked for, indistinguishable from success.
 
-    /// Parse the metadata JSON out of a v5 buffer, so a test can assert on the
+    /// Parse the metadata JSON out of a v6 buffer, so a test can assert on the
     /// bytes actually written rather than on a round-tripped struct.
     fn metadata_json_of(buf: &[u8]) -> serde_json::Value {
         assert_eq!(&buf[..4], &V6_MAGIC);
@@ -883,7 +872,6 @@ mod atomic_save_tests {
         serde_json::from_slice(&buf[13..13 + len]).expect("metadata is JSON")
     }
 
-    /// Build a tiny columnar graph in `mode`, ready for `write_kgl*`.
     fn tiny_graph_in_mode(mode: crate::graph::storage::mode::StorageMode, n: i64) -> Arc<DirGraph> {
         let mut g = crate::graph::storage::mode::new_dir_graph_in_mode(mode, None)
             .expect("portable-capable mode creates without a path");
@@ -1519,7 +1507,6 @@ mod rel_constraint_roundtrip_tests {
     use crate::graph::dir_graph::DirGraph;
     use crate::graph::property_types::DeclaredType;
 
-    /// Two `Person` nodes joined by a `KNOWS` relationship carrying `since`.
     fn knows_graph() -> DirGraph {
         let mut graph = DirGraph::new();
         let query = "CREATE (a:Person {person_id: 1})-[:KNOWS {since: 2020}]->\

@@ -59,9 +59,8 @@ pub struct GraphState {
     /// (cheap, microseconds — sets the slot, drops the lock); each
     /// MCP tool entry calls [`GraphState::ensure_graph_fresh`], which for a
     /// workspace mode dispatches to `ensure_workspace_graph_fresh` — atomically
-    /// `take()`s the slot and rebuilds. Pattern: do the actual work
-    /// lazily, never on the watcher thread. N FS events between two
-    /// tool calls → 1 rebuild with one target-bound union of accepted paths.
+    /// `take()`s the slot and rebuilds. N FS events between two tool calls →
+    /// 1 rebuild with one target-bound union of accepted paths.
     pub(crate) pending_rebuild: Arc<RwLock<Option<PendingWorkspaceRebuild>>>,
     /// Outcome bookkeeping for the lazy rebuild: the last failure (kept
     /// until the next successful build and surfaced in tool output next
@@ -89,11 +88,9 @@ pub struct GraphState {
     /// The manifest-declared embedder (`extensions.embedder`), bound once at
     /// boot and re-applied to every graph this state installs.
     ///
-    /// It lives here rather than only on the active `KnowledgeGraph` because a
-    /// handle's embedder does not survive a swap: `KnowledgeGraph::from_arc`
-    /// starts at `embedder: None`, so `load_graph` / `create_graph` / a
-    /// workspace rebuild used to leave `text_score()` dead for the rest of the
-    /// process. Interior mutability rather than a `with_*` builder field:
+    /// It lives here because a handle's embedder does not survive a swap — see
+    /// [`apply_bound_embedder`](Self::apply_bound_embedder). Interior
+    /// mutability rather than a `with_*` builder field:
     /// [`bind_embedder`](Self::bind_embedder) runs *after*
     /// `register_kglite_tools` has cloned the state into every tool closure,
     /// so a plain field would only ever reach the boot clone.
@@ -105,7 +102,6 @@ pub struct GraphState {
 }
 
 impl GraphState {
-    /// Create state for an optional workspace-graph-producing mode.
     pub fn new(workspace_mode: Option<WorkspaceGraphMode>) -> Self {
         Self {
             workspace_mode,
@@ -171,8 +167,6 @@ impl GraphState {
         (hooks.is_relevant)(WorkspaceGraphRelevance::new(p, mode))
     }
 
-    /// The configured value codecs as a slice for `ExecuteOptions::value_codecs`
-    /// (`None` when unconfigured — the common case).
     pub fn value_codecs(&self) -> Option<&[ValueCodec]> {
         self.value_codecs.as_deref().map(|v| v.as_slice())
     }
@@ -275,9 +269,7 @@ impl GraphState {
         // Take the outgoing graph *out* of the slot rather than letting the
         // assignment free it in place: dropping a large graph (petgraph arenas,
         // columnar buffers, mmap teardown) is not free, and doing it under the
-        // write lock stalls every reader for the duration. The swap itself is
-        // the only work that needs the lock — `previous` is released after the
-        // guard, off-lock, below.
+        // write lock stalls every reader for the duration.
         let previous = guard.replace(ActiveGraph {
             kg,
             source_path: Some(path.to_path_buf()),

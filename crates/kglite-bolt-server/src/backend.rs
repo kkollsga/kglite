@@ -1,13 +1,11 @@
 //! `BoltBackend` implementation for kglite.
 //!
-//! Covers handshake, session lifecycle, scalar and Node/Rel/Path
-//! RUN+PULL, parameter decoding, explicit transactions
-//! (BEGIN/COMMIT/ROLLBACK) with `--readonly` enforcement, typed
-//! `KgError` → `Neo.{Class}.{Category}.{Title}` FAILURE-code mapping
-//! (via `crate::error_map`), the `--auth basic` credential validator
-//! (wired in `main.rs`), server metadata, routing, and `db.*` schema-
-//! introspection procedures served through the standard Cypher CALL
-//! pipeline.
+//! Covers handshake, session lifecycle, RUN+PULL, parameter decoding,
+//! explicit transactions with `--readonly` enforcement, typed `KgError` →
+//! `Neo.{Class}.{Category}.{Title}` FAILURE codes (via `crate::error_map`),
+//! the `--auth basic` credential validator (wired in `main.rs`), server
+//! metadata, routing, and `db.*` schema introspection served through the
+//! standard Cypher CALL pipeline.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -32,8 +30,7 @@ use crate::value_adapter;
 ///
 /// 5.26 is the Neo4j LTS line whose Bolt 5.x surface this server targets. The
 /// number is a compatibility claim about the *wire protocol*, not an assertion
-/// that this process is Neo4j — which is exactly why the real product stays in
-/// the string alongside it.
+/// that this process is Neo4j.
 const NEO4J_COMPAT_VERSION: &str = "5.26.0";
 
 /// Driver families known to reject a server whose agent lacks a `Neo4j/`
@@ -55,12 +52,11 @@ const AGENT_GATED_DRIVER_MARKERS: &[&str] = &["neo4j-java/"];
 /// Which product identifier the server reports in the Bolt handshake's
 /// `server` field.
 ///
-/// Honest by default, compatible on request. The default tells the truth, and
-/// the truth is enough for the official Python and JavaScript drivers. The
-/// Java driver refuses to speak to a server whose agent does not start with
-/// `Neo4j/`, failing at HELLO with `UntrustedServerException` before a single
-/// query runs — so the compatible spelling exists, but an operator has to ask
-/// for it. Detection never flips this automatically; see
+/// Honest by default, compatible on request. The Java driver refuses to speak
+/// to a server whose agent does not start with `Neo4j/`, failing at HELLO with
+/// `UntrustedServerException` before a single query runs — so the compatible
+/// spelling exists, but an operator has to ask for it. Detection never flips
+/// this automatically; see
 /// `KgliteBackend::warn_if_driver_gates_on_agent`.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum ServerIdentity {
@@ -103,12 +99,9 @@ impl ServerIdentity {
     /// sibling of [`Self::product_string`], kept on the same enum so the
     /// handshake agent and the components row can never drift apart.
     ///
-    /// Honest by default, compatible on request, exactly like the agent:
     /// GUIs (Neo4j Browser, G.V()) read this row to decide feature support,
     /// so `--neo4j-compat` reports the Neo4j LTS line whose wire surface
-    /// this server targets, while the default names the real product. The
-    /// edition is always "community" — never "enterprise", which would
-    /// unlock client features this server does not have.
+    /// this server targets, while the default names the real product.
     pub(crate) fn components_row(self, version: &str) -> (String, String) {
         match self {
             Self::Kglite => ("kglite-bolt-server".to_string(), version.to_string()),
@@ -163,10 +156,7 @@ use intercepts::{
 /// surface today.
 pub struct KgliteBackend {
     /// Canonical shared graph + transaction-commit machinery, owned
-    /// by `kglite::api::session`. Sessions snapshot via
-    /// `session.snapshot()`; commits go through
-    /// `session.commit(tx, check_occ)` which handles the OCC
-    /// version bump + Arc swap atomically.
+    /// by `kglite::api::session`.
     session: Arc<kglite::api::session::Session>,
     /// The path this graph was served from — where a checkpoint writes.
     ///
@@ -175,38 +165,19 @@ pub struct KgliteBackend {
     /// graph by definition: a save destination that could differ from what
     /// the backend is serving is a footgun, not a feature.
     graph_path: std::path::PathBuf,
-    /// Server-wide `--readonly` flag. Rejects begin_transaction and
-    /// auto-commit mutations.
     readonly: bool,
-    /// Graph version at the last *successful* checkpoint in this process, or
-    /// `None` until one has run — so the first checkpoint of a process always
-    /// writes, whatever the on-disk file happens to hold.
-    ///
-    /// Shared (not owned) because two routes checkpoint the same graph: the
-    /// `db.checkpoint()` verb and `--checkpoint-interval`'s periodic task,
-    /// which holds a clone of this handle. One skip-state for both is the
-    /// point — a verb call at version N must make the next tick skip, and a
-    /// tick at version N must make the next verb call report the skip. Two
+    /// Graph version at the last *successful* checkpoint in this process.
+    /// Shared with the `--checkpoint-interval` task rather than owned: two
     /// counters would each re-save what the other just wrote.
-    ///
-    /// The mutex is held across the save itself, which serializes concurrent
-    /// checkpoints: two callers asking at once produce one write and one
-    /// skip, never two interleaved saves of the same graph.
     last_checkpoint_version: CheckpointState,
-    /// Per-transaction state. Keyed by `TransactionHandle.0`. The
-    /// outer mutex is brief-acquire-only (lookup/insert/remove); the
-    /// per-tx work happens inside the inner mutex. See struct doc on
-    /// lock ordering.
+    /// Per-transaction state, keyed by `TransactionHandle.0`. See the struct
+    /// doc for the two-mutex lock ordering.
     transactions: Arc<Mutex<HashMap<String, Arc<Mutex<TxState>>>>>,
-    /// Monotonic per-server session counter.
     session_counter: AtomicU64,
-    /// Monotonic per-server transaction counter.
     tx_counter: AtomicU64,
-    /// "host:port" string returned in `route()`'s `RoutingTable`
-    /// so cluster-aware drivers (`neo4j://` URIs) know where to
-    /// reconnect. Typically matches the bind address but can differ
-    /// when running behind a reverse proxy (`--advertise-addr` flag
-    /// on `main.rs`).
+    /// "host:port" string returned in `route()`'s `RoutingTable` so
+    /// cluster-aware drivers (`neo4j://` URIs) know where to reconnect
+    /// (`--advertise-addr` on `main.rs`).
     advertised_addr: String,
     /// LOAD CSV filesystem capability for every query on this server.
     ///
@@ -219,16 +190,13 @@ pub struct KgliteBackend {
     /// Product identifier reported in the Bolt handshake. Server-wide: the
     /// handshake happens before any per-session policy could apply.
     identity: ServerIdentity,
-    /// The `--auth-user` value, when `--auth basic` is configured.
-    /// `dbms.showCurrentUser()` answers from this server config — NOT from
-    /// per-session state, which deliberately does not exist (see
-    /// `set_session_auth`: the principal is validated at LOGON and dropped).
+    /// The `--auth-user` value, when `--auth basic` is configured;
+    /// `dbms.showCurrentUser()` answers from it.
     auth_user: Option<String>,
 }
 
-/// Per-Bolt-transaction state. Wraps the canonical
-/// [`kglite::api::session::Transaction`] (snapshot/working CoW)
-/// alongside the bolt-server's session-ownership tracking.
+/// Per-Bolt-transaction state: the canonical snapshot/working CoW
+/// [`kglite::api::session::Transaction`] plus session-ownership tracking.
 struct TxState {
     /// The canonical CoW transaction state. `None` after
     /// commit/rollback (we move the inner out for the
@@ -237,8 +205,7 @@ struct TxState {
     /// Bolt session that owns this tx — used by `close_session` to
     /// roll back any in-flight tx for a dropped connection.
     session_id: String,
-    /// kglite execution metadata parsed from the BEGIN `extra` dict
-    /// (write_scope / git_sha / modified_by). Applied to every query
+    /// Metadata parsed from the BEGIN `extra` dict, applied to every query
     /// executed inside this transaction.
     meta: TxMeta,
 }
@@ -255,10 +222,7 @@ struct TxState {
 /// `extra` are accepted as a fallback for hand-rolled Bolt clients.
 ///
 /// - `write_scope`: list of strings — the node types this transaction may
-///   write. Every node write (`CREATE`, `MERGE`, `SET`, `REMOVE`, `DELETE`,
-///   `DETACH DELETE`, node-type DDL) is judged by the node's *stored* type,
-///   and a relationship write needs at least one endpoint's type in the list;
-///   anything else is rejected by the engine. Full perimeter on
+///   write; anything else is rejected by the engine. Full perimeter on
 ///   `kglite::graph::session::execute::ExecuteOptions::write_scope`.
 /// - `git_sha` / `modified_by`: strings — freshness/actor provenance
 ///   stamped on writes to `auto_timestamp` node/edge types.
@@ -280,7 +244,6 @@ impl TxMeta {
                 )))
             }
         };
-        // Nested (driver convention) wins; top-level is the fallback.
         let lookup = |key: &str| nested.and_then(|d| d.get(key)).or_else(|| extra.get(key));
         let string_field = |key: &str| -> Result<Option<String>, BoltError> {
             match lookup(key) {
@@ -329,12 +292,10 @@ impl KgliteBackend {
     /// path — the write-ahead sidecar is recovered into the graph inside the
     /// writer lease, before any client can connect (see `startup::start_graph`).
     ///
-    /// `advertised_addr` (`host:port`, no scheme) is what `route()`
-    /// returns to cluster-aware drivers using `neo4j://` URIs —
-    /// they'll reconnect to this address for subsequent sessions,
-    /// so it must be reachable from the client's network. Usually
-    /// this matches the bind address but should differ when bound
-    /// to `0.0.0.0` behind a hostname or reverse proxy.
+    /// `advertised_addr` is `host:port` with no scheme. Drivers reconnect to
+    /// it for subsequent sessions, so it must be reachable from the client's
+    /// network — it differs from the bind address when bound to `0.0.0.0`
+    /// behind a hostname or reverse proxy.
     pub fn new(
         session: kglite::api::session::Session,
         graph_path: std::path::PathBuf,
@@ -371,11 +332,8 @@ impl KgliteBackend {
         &self.graph_path
     }
 
-    /// The checkpoint skip-state, cloned out for the periodic checkpoint task.
-    ///
-    /// The clone is the whole point: the task and the `db.checkpoint()` verb
-    /// must read and write the *same* recorded version, so whichever route
-    /// saved last suppresses the other's redundant re-save.
+    /// The checkpoint skip-state — an `Arc` clone, so the periodic task and
+    /// `db.checkpoint()` suppress each other's redundant re-saves.
     pub(crate) fn checkpoint_state(&self) -> CheckpointState {
         Arc::clone(&self.last_checkpoint_version)
     }
@@ -385,13 +343,10 @@ impl KgliteBackend {
     ///
     /// A hint, never an action: the identity is *not* switched, because
     /// identifying honestly is the default and silently impersonating Neo4j on
-    /// the strength of a client-supplied string would undo that decision. The
-    /// point is that an operator learns the fix from their own server log
-    /// instead of from a client stack trace.
+    /// the strength of a client-supplied string would undo that decision.
     ///
-    /// Fires per affected connection rather than once per process. That is not
-    /// log spam: every such connection is failing, so the message tracks a real
-    /// error, and an operator who retries sees it again next to the failure.
+    /// Fires per affected connection rather than once per process — every such
+    /// connection is failing, so the message tracks a real error.
     fn warn_if_driver_gates_on_agent(&self, user_agent: &str) {
         if !self.identity.is_rejected_by_agent_gate() {
             return;
@@ -438,7 +393,7 @@ impl BoltBackend for KgliteBackend {
     /// LOGON). Storing the principal on the session would buy nothing: this
     /// server has no per-session principal model — no RBAC, no per-user
     /// authorization — so every authenticated session sees the same graph with
-    /// the same rights. Recording it and dropping it is the shipped design.
+    /// the same rights.
     async fn set_session_auth(
         &self,
         session: &SessionHandle,
@@ -453,24 +408,18 @@ impl BoltBackend for KgliteBackend {
     }
 
     async fn close_session(&self, session: &SessionHandle) -> Result<(), BoltError> {
-        // Roll back any in-flight transactions for this session.
-        // Brief outer-mutex hold: scan the HashMap for matching
-        // session_id (requires taking the per-tx inner lock to read
-        // it), collect the handles to remove, then release the outer.
-        // We DO NOT hold the outer mutex across the inner-lock reads
-        // — that would re-introduce the head-of-line blocking the
-        // per-tx mutex split fixed.
+        // Roll back any in-flight transactions for this session. Reading
+        // session_id needs the per-tx inner lock, so the outer lock is held
+        // across brief inner acquires — outer first, never the reverse.
         let to_drop: Vec<String> = {
             let txs = self.transactions.lock().unwrap_or_else(|p| p.into_inner());
             txs.iter()
                 .filter_map(|(handle, state_arc)| {
-                    // Each per-tx mutex is brief-held to read session_id.
                     let state = state_arc.lock().unwrap_or_else(|p| p.into_inner());
                     (state.session_id == session.0).then(|| handle.clone())
                 })
                 .collect()
         };
-        // Remove drops under the outer mutex.
         {
             let mut txs = self.transactions.lock().unwrap_or_else(|p| p.into_inner());
             for handle in &to_drop {
@@ -543,18 +492,11 @@ impl BoltBackend for KgliteBackend {
         extra: &BoltDict,
         transaction: Option<&TransactionHandle>,
     ) -> Result<ResultStream, BoltError> {
-        // Input gates. These produce clear Protocol/ClientError
-        // responses so users see actionable errors instead of opaque
-        // parser failures or silent partial execution.
-
-        // Empty or whitespace-only query.
         let trimmed = query.trim();
 
-        // The one place every RUN passes through: at debug level this is the
-        // capture point for what a client actually sends — run a GUI against
-        // the server at RUST_LOG=debug and the log is the client's connect
-        // sequence, which is how the next unmet introspection verb gets
-        // found (measured, not guessed).
+        // The one place every RUN passes through: at RUST_LOG=debug this logs
+        // a client's whole connect sequence, which is how the next unmet
+        // introspection verb gets found (measured, not guessed).
         tracing::debug!(query = %trimmed, in_tx = transaction.is_some(), "execute");
         if trimmed.is_empty() {
             return Err(BoltError::Protocol(
@@ -565,12 +507,6 @@ impl BoltBackend for KgliteBackend {
         // Multi-statement query. The kglite parser handles one Cypher
         // statement per RUN; sending `MATCH ... ; MATCH ...` would
         // silently parse only the first statement. Reject explicitly.
-        //
-        // The semicolon detection is a string-level heuristic: it can
-        // false-positive on a semicolon inside a string literal (rare
-        // and arguably worth a clearer error too). The substring
-        // approach matches how cypher-shell + most drivers signal
-        // multi-statement separation.
         if _query_appears_multi_statement(trimmed) {
             return Err(BoltError::Protocol(
                 "multi-statement queries not supported — send one Cypher \
@@ -599,8 +535,7 @@ impl BoltBackend for KgliteBackend {
             return Ok(self.run_server_facts(&call));
         }
 
-        // Decode params (C.3). Errors here are genuine client errors
-        // (bad parameter type) → Protocol → ClientError.
+        // A decode failure here is a genuine client error (bad parameter type).
         let kg_params: HashMap<String, Value> = parameters
             .iter()
             .map(|(k, v)| value_adapter::from_bolt(v).map(|kv| (k.clone(), kv)))
@@ -608,9 +543,6 @@ impl BoltBackend for KgliteBackend {
 
         let elapsed_start = Instant::now();
 
-        // Branch: tx execution holds the tx mutex for the whole
-        // pipeline (parse/plan/execute against the same graph view).
-        // Auto-commit takes a momentary snapshot of the backend.
         let (result, type_str) = if let Some(handle) = transaction.map(|t| t.0.clone()) {
             // Explicit tx: metadata was parsed at BEGIN and lives on the
             // TxState (Neo4j drivers send tx metadata on BEGIN only).
@@ -641,14 +573,12 @@ impl BoltBackend for KgliteBackend {
 
         // EXPLAIN follows the Bolt contract: ZERO records, and the plan in
         // the SUCCESS metadata's `plan` key. The engine answers EXPLAIN as
-        // step rows (step/operation/estimated_rows); pre-fix those rows were
-        // forwarded as records with no `plan` metadata, so every plan-tab
-        // consumer (Neo4j Browser, G.V() — a documented ✅ feature in its
-        // support matrix) rendered blank, and drivers saw records where the
-        // contract promises none. PROFILE stays a passthrough: the engine
-        // collects no per-operator statistics, and fabricating dbHits/rows
-        // would mislead — the Memgraph precedent (plan without profiling) is
-        // an accepted shape.
+        // step rows (step/operation/estimated_rows); forwarding those as
+        // records left every plan-tab consumer (Neo4j Browser, G.V()) blank
+        // and handed drivers records where the contract promises none.
+        // PROFILE stays a passthrough: the engine collects no per-operator
+        // statistics, and fabricating dbHits/rows would mislead — the
+        // Memgraph precedent (plan without profiling) is an accepted shape.
         let mut columns = result.columns;
         if strip_keyword_ci(trimmed, "explain").is_some() {
             if let Some(plan) = plan_from_explain_rows(&columns, &result.rows) {
@@ -705,9 +635,6 @@ impl BoltBackend for KgliteBackend {
                 "server is read-only — explicit transactions rejected (--readonly flag)".into(),
             ));
         }
-        // kglite execution metadata (write_scope / git_sha / modified_by)
-        // rides on BEGIN's extra — nested under `tx_metadata` per the
-        // Neo4j driver convention, or top-level for raw clients.
         let meta = TxMeta::from_extra(extra)?;
         let id = self.tx_counter.fetch_add(1, Ordering::Relaxed);
         let handle = TransactionHandle(format!("tx-{id}"));
@@ -773,7 +700,6 @@ impl BoltBackend for KgliteBackend {
         };
 
         if state.session_id != session.0 {
-            // Ownership mismatch — re-insert and error.
             let mut txs = self.transactions.lock().unwrap_or_else(|p| p.into_inner());
             txs.insert(transaction.0.clone(), Arc::new(Mutex::new(state)));
             return Err(BoltError::Transaction(format!(
@@ -782,12 +708,8 @@ impl BoltBackend for KgliteBackend {
             )));
         }
 
-        // Delegate to session::Session::commit which handles OCC +
-        // Arc swap atomically. A concurrent writer that lost the race
-        // gets ConflictDetected -> BoltError::Query carrying the
-        // retriable `Neo.TransientError.*` status code, so
-        // driver-managed transactions re-run the unit of work by
-        // themselves.
+        // Delegate to session::Session::commit, which handles OCC + Arc swap
+        // atomically.
         let Some(tx) = state.inner.take() else {
             // Defensive fallthrough — was already consumed.
             return Ok(BoltDict::new());
@@ -898,7 +820,6 @@ impl BoltBackend for KgliteBackend {
             })?
         };
 
-        // Brief inner-mutex hold just to check ownership.
         let (session_id, had_mutations) = {
             let state = state_arc.lock().unwrap_or_else(|p| p.into_inner());
             (
@@ -908,7 +829,6 @@ impl BoltBackend for KgliteBackend {
         };
 
         if session_id != session.0 {
-            // Re-insert; tx ownership mismatch.
             let mut txs = self.transactions.lock().unwrap_or_else(|p| p.into_inner());
             txs.insert(transaction.0.clone(), state_arc);
             return Err(BoltError::Transaction(format!(
@@ -916,12 +836,9 @@ impl BoltBackend for KgliteBackend {
                 transaction.0, session.0
             )));
         }
-        // Delegate to session::Session::rollback via Arc::try_unwrap.
-        // A shared Arc means a pipelined RUN is still executing on this
-        // tx — rolling back under it would leave that query running on a
-        // zombie transaction while reporting SUCCESS. Symmetric with
-        // commit: re-insert and error; the client retries once the
-        // in-flight query completes.
+        // A shared Arc means a pipelined RUN is still executing on this tx —
+        // rolling back under it would leave that query on a zombie transaction
+        // while reporting SUCCESS. Symmetric with commit: re-insert and error.
         match Arc::try_unwrap(state_arc) {
             Ok(mutex) => {
                 let mut state = mutex.into_inner().unwrap_or_else(|p| p.into_inner());
@@ -1021,27 +938,23 @@ impl BoltBackend for KgliteBackend {
 /// in `execute()`. Returns true on `MATCH (a) RETURN a; MATCH (b)
 /// RETURN b`. Does NOT false-positive on `RETURN 'a;b' AS s`.
 ///
-/// The scan tracks the active quote (Cypher allows both `'` and `"`)
-/// and treats backslash as an escape. It does not handle block
-/// comments `/* ... */` — kglite's parser doesn't recognize those
-/// either, so a semicolon inside a comment would already be a parse
-/// error before reaching this function.
+/// Block comments `/* ... */` are not handled — kglite's parser doesn't
+/// recognize those either, so a semicolon inside a comment would already be a
+/// parse error before reaching this function.
 fn _query_appears_multi_statement(query: &str) -> bool {
     let mut in_quote: Option<char> = None;
     let mut chars = query.chars().peekable();
     while let Some(c) = chars.next() {
         match (c, in_quote) {
             ('\\', Some(_)) => {
-                // Skip the next char (escape inside a string).
                 let _ = chars.next();
             }
             ('\'', None) => in_quote = Some('\''),
             ('"', None) => in_quote = Some('"'),
             (c, Some(q)) if c == q => in_quote = None,
             (';', None) => {
-                // Found a semicolon outside any string. If the rest
-                // of the query is just whitespace, it's a trailing
-                // semicolon — allow it (common driver convention).
+                // A trailing semicolon (nothing but whitespace after) is a
+                // common driver convention — allow it.
                 let rest: String = chars.collect();
                 if !rest.trim().is_empty() {
                     return true;
@@ -1066,21 +979,18 @@ pub(crate) type CheckpointState = Arc<Mutex<Option<u64>>>;
 /// What a checkpoint did, and at which graph version.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum CheckpointOutcome {
-    /// The graph was written to the served path at this version.
     Written(u64),
-    /// The graph was unchanged since the last successful checkpoint at this
-    /// version, so nothing was written.
+    /// Unchanged since the last successful checkpoint at this version.
     Skipped(u64),
 }
 
 /// Save `session` to `path` unless it is unchanged since the last successful
 /// checkpoint recorded in `last`.
 ///
-/// The one place a checkpoint of the served graph happens. Both routes call
-/// it — the `db.checkpoint()` verb (which adds the wire refusals and result
-/// shape) and the periodic task (which adds logging) — so the skip rule, the
-/// lock discipline and the version-recording order cannot drift apart between
-/// them.
+/// The one place a checkpoint of the served graph happens: the
+/// `db.checkpoint()` verb and the periodic task both call it, so the skip
+/// rule, the lock discipline and the version-recording order cannot drift
+/// apart.
 ///
 /// **First call always writes.** `last` starts at `None` for the process, and
 /// the on-disk file may predate this process entirely (an operator's stale
@@ -1134,10 +1044,8 @@ impl KgliteBackend {
                 )
             }
             ServerFactsVerb::DbmsShowCurrentUser => {
-                // Server config, not session state: `--auth basic` is one
-                // shared credential and the principal is deliberately not
-                // stored per session. "neo4j" under `--auth none` matches
-                // what clients expect from an auth-less server.
+                // Server config, not session state. "neo4j" under `--auth
+                // none` matches what clients expect from an auth-less server.
                 let username = self
                     .auth_user
                     .clone()
@@ -1153,11 +1061,10 @@ impl KgliteBackend {
                 )
             }
             ServerFactsVerb::ShowDatabases => {
-                // One row, named "neo4j" — the same default `route()` answers
-                // (:924), so ROUTE and SHOW DATABASES cannot contradict each
-                // other. The session `database` field stays accept-anything;
-                // this row is informational. `access`/`writer` reflect
-                // `--readonly` honestly.
+                // One row, named "neo4j" — the same default `route()` answers,
+                // so ROUTE and SHOW DATABASES cannot contradict each other. The
+                // session `database` field stays accept-anything; this row is
+                // informational.
                 let access = if self.readonly {
                     "read-only"
                 } else {
@@ -1186,27 +1093,20 @@ impl KgliteBackend {
         }
     }
 
-    /// Build the canonical `ExecuteOptions` the bolt-server uses for
-    /// every query. Eager rows (`lazy_eligible: false`) — bolt-server
-    /// materializes every result into BoltRecords before handing
-    /// back to boltr; we don't have a lazy materializer at this
-    /// layer.
+    /// Build the canonical `ExecuteOptions` the bolt-server uses for every
+    /// query.
     fn execute_opts<'a>(
         &self,
         kg_params: &'a HashMap<String, Value>,
         meta: &'a TxMeta,
     ) -> kglite::api::session::ExecuteOptions<'a> {
-        // Eager rows — bolt-server materializes every result into
-        // BoltRecords before handing back to boltr; no lazy
-        // materializer at this layer.
-        //
-        // `text_score()` isn't wired here either (embedder = None
-        // in the defaults); text-score queries are rejected at the
-        // session level.
+        // Eager rows — bolt-server materializes every result into BoltRecords
+        // before handing back to boltr; no lazy materializer at this layer.
+        // `text_score()` isn't wired either (embedder = None in the defaults);
+        // text-score queries are rejected at the session level.
         let mut opts = kglite::api::session::ExecuteOptions::eager(kg_params);
-        // Transaction metadata parity with the CLI / MCP surfaces:
-        // write_scope gates mutations; git_sha / modified_by stamp
-        // write provenance. All no-ops on reads.
+        // write_scope gates mutations; git_sha / modified_by stamp write
+        // provenance. All no-ops on reads.
         opts.write_scope = meta.write_scope.as_ref();
         opts.git_sha = meta.git_sha.as_deref();
         opts.modified_by = meta.modified_by.as_deref();
@@ -1221,23 +1121,16 @@ impl KgliteBackend {
     /// path it came from, fsync'd, and report what happened.
     ///
     /// **Refusals, in order.** Inside an explicit transaction the call is a
-    /// `Protocol` error: a checkpoint saves the *session's* committed graph,
-    /// which by definition does not contain the calling transaction's
-    /// uncommitted writes — so a client that ran it inside a transaction
-    /// would get a file that silently omits the work it just did, and a
-    /// success record saying otherwise. There is no correct answer to give,
-    /// so the honest move is to refuse and name the reason. `--readonly` and
-    /// disk-mode graphs are `Forbidden`, for the same reasons `--save-on-exit`
-    /// refuses them at startup.
+    /// `Protocol` error: a checkpoint saves the session's *committed* graph, so
+    /// the client would get a file silently omitting the work it just did, plus
+    /// a success record saying otherwise. `--readonly` and disk-mode graphs are
+    /// `Forbidden`, for the same reasons `--save-on-exit` refuses them at
+    /// startup.
     ///
-    /// **Digest-skip** and the save itself are [`checkpoint_if_changed`]'s —
-    /// shared with the `--checkpoint-interval` task, against the same recorded
-    /// version, so a periodic tick and a client call never re-save each
-    /// other's work.
+    /// **Digest-skip** and the save itself are [`checkpoint_if_changed`]'s.
     ///
-    /// A failed save is `Backend` (fail-closed: the client is told the
-    /// checkpoint did not happen) and leaves the recorded version untouched,
-    /// so a later retry still writes.
+    /// A failed save is `Backend` — fail-closed: the client is told the
+    /// checkpoint did not happen.
     fn run_checkpoint(
         &self,
         call: &CheckpointCall,
@@ -1322,12 +1215,10 @@ impl KgliteBackend {
         kg_params: HashMap<String, Value>,
         meta: &TxMeta,
     ) -> Result<(cypher::CypherResult, &'static str), BoltError> {
-        // Pre-parse to decide whether this is a mutation (so we can
-        // reject auto-commit mutations with a Bolt-specific error
-        // message before session::execute_read rejects with a
-        // generic one). The parse is cached.
-        // Parse result not used after the mutation check; the
-        // executor's parse_cache hit makes the second parse free.
+        // Pre-parse to reject auto-commit mutations with a Bolt-specific error
+        // before session::execute_read rejects with a generic one. The parse
+        // result is discarded; the executor's parse_cache makes the second
+        // parse free.
         let (_, is_mutation) = cypher::parse_with_mutation_check(query).map_err(kg_to_bolt)?;
         if is_mutation {
             if self.readonly {
@@ -1376,7 +1267,6 @@ impl KgliteBackend {
         }; // outer mutex released here
 
         // Step 2: Take inner per-tx mutex for the entire pipeline.
-        // Other sessions' tx operations are now unblocked.
         let mut state = state_arc.lock().unwrap_or_else(|p| p.into_inner());
         // Clone the BEGIN-time metadata out before mutably borrowing the
         // inner tx (small: an optional set + two optional strings).
@@ -1385,9 +1275,8 @@ impl KgliteBackend {
             BoltError::Transaction(format!("tx {handle} already committed or rolled back"))
         })?;
 
-        // Pre-parse for read/mut routing.
-        // Parse result not used after the mutation check; the
-        // executor's parse_cache hit makes the second parse free.
+        // Pre-parse for read/mut routing; the result is discarded and the
+        // executor's parse_cache makes the second parse free.
         let (_, is_mutation) = cypher::parse_with_mutation_check(query).map_err(kg_to_bolt)?;
 
         if is_mutation && self.readonly {
@@ -1648,7 +1537,6 @@ mod tests {
 
     #[test]
     fn tx_meta_parses_nested_and_top_level_locations() {
-        // Nested under tx_metadata (driver convention).
         let extra = BoltDict::from([(
             "tx_metadata".to_string(),
             BoltValue::Dict(BoltDict::from([
@@ -1683,7 +1571,6 @@ mod tests {
         assert_eq!(meta.git_sha.as_deref(), Some("cafe"));
         assert_eq!(meta.write_scope, None);
 
-        // No metadata at all → all None.
         let meta = TxMeta::from_extra(&BoltDict::new()).expect("empty parse");
         assert_eq!(meta.write_scope, None);
         assert_eq!(meta.git_sha, None);
@@ -1703,7 +1590,6 @@ mod tests {
 
     // ---- Handshake identity -------------------------------------------------
 
-    /// The default identity says what this server is.
     #[test]
     fn default_identity_is_honest() {
         assert_eq!(ServerIdentity::default(), ServerIdentity::Kglite);
@@ -1736,8 +1622,6 @@ mod tests {
         assert_eq!(agent, "Neo4j/5.26.0 (kglite-bolt-server/1.2.3)");
     }
 
-    /// Only the honest identity can be rejected by an agent gate; compatibility
-    /// mode is what makes the hint unnecessary.
     #[test]
     fn only_the_honest_identity_trips_the_gate() {
         assert!(ServerIdentity::Kglite.is_rejected_by_agent_gate());
@@ -1878,8 +1762,6 @@ mod tests {
         }
     }
 
-    /// Server-facts recognizer: every spelling that must intercept, and the
-    /// columns it selects.
     #[test]
     fn server_facts_recognizes_the_verbs() {
         let cases: [(&str, ServerFactsVerb, &[&str]); 6] = [
@@ -1922,8 +1804,6 @@ mod tests {
         }
     }
 
-    /// Everything else falls through to the engine — arguments, aliases,
-    /// unknown columns, SHOW modifiers the intercept does not implement.
     #[test]
     fn server_facts_rejects_everything_else() {
         let cases = [
@@ -2044,7 +1924,6 @@ mod tests {
             "a skipped checkpoint must not rewrite the file"
         );
 
-        // Mutation check: bump the version and the next call must save.
         mutate_and_finish(&backend, &session, "CREATE (:Person {id: 2})", true).await;
         let bumped_version = backend.session.version();
         assert_ne!(
@@ -2122,7 +2001,6 @@ mod tests {
         );
     }
 
-    /// `--readonly` refuses the verb by name, the same way it refuses writes.
     #[tokio::test]
     async fn checkpoint_is_refused_on_a_readonly_server() {
         let path = unique_kgl_path("readonly");

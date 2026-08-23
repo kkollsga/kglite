@@ -1,11 +1,4 @@
 //! Cypher query optimizer.
-//!
-//! Submodules:
-//! - [`join_order`] — pattern-start node selection, selectivity-based reordering
-//! - [`index_selection`] — predicate pushdown into MATCH, equality/comparison helpers
-//! - [`cost_model`] — predicate / expression cost heuristics
-//! - [`simplification`] — fold_or_to_in, push LIMIT/DISTINCT, rewrite_text_score
-//! - [`fusion`] — multi-clause fusion (MATCH+RETURN+AGG, top-K, …)
 
 use super::ast::*;
 use crate::datatypes::values::Value;
@@ -53,10 +46,8 @@ use simplification::{
     push_limit_into_match, rewrite_count_bound_var_to_star,
 };
 
-/// Carries the per-call inputs every pass might need. Passing this once
-/// through the registry loop is cheaper than threading three positional
-/// arguments through 25+ wrapper fns, and adding a new dependency means
-/// extending this struct rather than every wrapper signature.
+/// Carries the per-call inputs every pass might need, so a new dependency
+/// extends this struct rather than 25+ wrapper signatures.
 pub struct PassCtx<'a> {
     pub graph: &'a DirGraph,
     pub params: &'a HashMap<String, Value>,
@@ -77,39 +68,28 @@ type PassFn = fn(&mut CypherQuery, &PassCtx);
 /// subquery's per-row cardinality is unknown at plan time and a
 /// correlated body depends on its seeded input — so NO pass may move a
 /// clause across it, fuse a window through it, or push a LIMIT/predicate
-/// into or past it. The audit verdict for each pass:
+/// into or past it. Correctness beats optimization: a pass that can't
+/// confidently reason about a CallSubquery bails on any query containing
+/// one. Every pass is safe today; only two are not safe purely by shape:
 ///
-/// | Pass | Verdict | Why safe |
-/// |---|---|---|
-/// | `optimize_nested_queries` | **recurses (by design)** | Owns body optimization; import-aware (disables seed-ignoring fusion for anchored correlated bodies). |
-/// | `rewrite_count_bound_var_to_star` | safe-by-shape | Rewrites a `count(v)` expression in place; never spans clauses. |
-/// | `push_where_into_match` (×2) | safe-by-shape | Matches adjacent `(Match\|OptionalMatch, Where)`, plus an `OptionalMatch` whose WHERE is the clause's own (`MatchClause::where_clause`) — that form pushes into its *own* patterns, so no window is spanned at all. A CallSubquery is neither, so it breaks the adjacency window. Prior-scope helpers under-report CALL outputs → under-push (conservative). |
-/// | `fold_or_to_in` | safe-by-shape | Rewrites a WHERE predicate in place — the standalone clause or a MATCH's own. |
-/// | `anchor_element_id` | safe-by-shape | Reads a MATCH's own WHERE plus the adjacent `Clause::Where`, and writes only a hint on that same MATCH. A CallSubquery is neither a MATCH nor a WHERE, so it enters no window; and the hint constrains the search space only (the predicate stays), so even a hint written against a body it could not see would change no answer. |
-/// | `extract_pushable_rel_predicates` | safe-by-shape | Matches `(Match, Where)` adjacency only. |
-/// | `fold_pass_through_with` | **guarded** | Folds only `WITH`. Its downstream-ref check now records a CallSubquery's import names + body refs (see `collect_clause_variables`) so a `WITH` a correlated CALL depends on is never folded away. |
-/// | `desugar_multi_match_return_aggregate` | safe-by-shape | Requires `Match, Match, Return` ADJACENT; a CallSubquery between two MATCHes breaks adjacency. |
-/// | `fuse_spatial_join` | safe-by-shape | Matches `(Match, Where)` adjacency. |
-/// | `reorder_match_clauses` | safe-by-shape | Reorders only WITHIN a contiguous span of `Clause::Match`; a CallSubquery ends the span (`_ => break`). |
-/// | `optimize_pattern_start_node` / `reorder_match_patterns` | safe-by-shape | Reorder patterns WITHIN one MATCH; never move clauses. CallSubquery hits `_ => continue`; its body vars don't enter bound_vars (heuristic-only anyway). |
-/// | `reorder_cyclic_pattern_edges` | safe-by-shape | Reorders edge elements WITHIN one MATCH pattern; never moves or spans clauses. |
-/// | `push_limit_into_match` | safe-by-shape | Matches `Match → [Where] → Return → Limit` adjacency; a CallSubquery breaks it. The `only_match` guard also bails if any MATCH is non-first. |
-/// | `push_limit_into_aggregate` | safe-by-shape | Matches `(Return\|With) → Limit` adjacency. |
-/// | `push_distinct_into_match` | safe-by-shape | Matches `Match → [Where] → Return` adjacency. |
-/// | `fuse_anchored_edge_count` / `fuse_count_short_circuits` | safe-by-shape | Fire only when the WHOLE query is exactly `[Match, Return]` (len 2); a CallSubquery makes len ≠ 2. |
-/// | `fuse_optional_match_aggregate` | safe-by-shape | Matches `(OptionalMatch, With\|Return)` adjacency, and bails when the OptionalMatch owns a WHERE (the fused counter has no per-candidate predicate hook). |
-/// | `fuse_match_return_aggregate` / `fuse_match_with_aggregate` | safe-by-shape | Match `(Match, Return\|With)` adjacency. |
-/// | `fuse_match_with_aggregate_top_k` | safe-by-shape | Absorbs into a preceding `FusedMatchWithAggregate`; a CallSubquery is never that. |
-/// | `fuse_node_scan_aggregate` / `fuse_node_scan_top_k` | safe-by-shape | Match `Match → [Where] → Return [→ OrderBy → Limit]` adjacency. |
-/// | `fuse_vector_score_order_limit` / `fuse_order_by_top_k` | safe-by-shape | Match `(Return, OrderBy, Limit)` adjacency; a CallSubquery breaks it. |
-/// | `reorder_predicates_by_cost` | safe-by-shape | Reorders predicates WITHIN one WHERE (standalone or clause-owned). |
-/// | `lower_fixed_var_length_hops` | safe-by-shape | Rewrites the element list of a MATCH's own pattern; never moves or spans clauses. A CallSubquery is not a MATCH, so it enters no window; the body is reached only through `optimize_nested_queries`, which runs the whole pipeline on it. |
-/// | `mark_disjoint_fixed_trails` / `mark_fast_var_length_paths` / `mark_skip_target_type_check` | safe-by-shape | Mark flags on edge elements WITHIN MATCH clauses; CallSubquery hits `_ => continue`. The downstream-dedup-safety scan stops at the first Return/With, which a CallSubquery is not. |
+/// - `optimize_nested_queries` — **recurses by design.** Owns body
+///   optimization; import-aware (disables seed-ignoring fusion for
+///   anchored correlated bodies).
+/// - `fold_pass_through_with` — **guarded.** Its downstream-ref check
+///   records a CallSubquery's import names + body refs (see
+///   `collect_clause_variables`), so a `WITH` a correlated CALL depends
+///   on is never folded away.
 ///
-/// When in doubt the rule is: correctness beats optimization — a pass
-/// that can't confidently reason about a CallSubquery should bail on any
-/// query containing one. None needed a hard bail; all are safe-by-shape
-/// except the two flagged above.
+/// Every other pass either matches a fixed clause-adjacency window
+/// (which a CallSubquery breaks), rewrites/reorders WITHIN one clause,
+/// or fires only on a whole-query shape (`[Match, Return]`, len 2); the
+/// clause walks hit `_ => continue` or end their span at `_ => break`,
+/// and the downstream-dedup-safety scan stops at the first Return/With,
+/// which a CallSubquery is not. Two conservative details: prior-scope
+/// helpers under-report CALL outputs, so pushdown under-pushes; and
+/// `anchor_element_id` writes only a hint while leaving its predicate
+/// standing, so a hint written against a body it could not see changes
+/// no answer.
 pub const PASSES: &[(&str, PassFn)] = &[
     ("optimize_nested_queries", pass_optimize_nested_queries),
     // `*k..k` → k explicit hops. Runs FIRST among the structural rewrites:
@@ -213,15 +193,14 @@ pub const PASSES: &[(&str, PassFn)] = &[
     ),
 ];
 
-/// Returns true iff `name` is a registered pass name. PyAPI uses this to
-/// reject typos in the `disabled_passes` kwarg before they silently
-/// suppress nothing.
+/// PyAPI uses this to reject typos in the `disabled_passes` kwarg before
+/// they silently suppress nothing.
 pub fn is_known_pass(name: &str) -> bool {
     PASSES.iter().any(|(n, _)| *n == name)
 }
 
-/// Returns every registered pass name. Used by the PyAPI's
-/// `disable_optimizer=True` shortcut, which expands to "disable everything".
+/// Backs the PyAPI's `disable_optimizer=True` shortcut, which expands to
+/// "disable everything".
 pub fn all_pass_names() -> Vec<String> {
     PASSES.iter().map(|(n, _)| n.to_string()).collect()
 }
@@ -255,18 +234,13 @@ pub fn mark_lazy_eligibility(query: &mut CypherQuery) {
     mark_return_lazy_eligible(query);
 }
 
-/// Run the optimizer pipeline. Equivalent to `optimize_with_disabled`
-/// with no passes disabled. Kept as the primary entry point so most
-/// callers (executor, transactions, mutations) don't need to think about
-/// the disable knob.
+/// Run the optimizer pipeline with no passes disabled. The entry point
+/// production callers (executor, transactions, mutations) should use.
 pub fn optimize(query: &mut CypherQuery, graph: &DirGraph, params: &HashMap<String, Value>) {
     optimize_with_disabled(query, graph, params, empty_disabled_set());
 }
 
 /// Process-lifetime empty `HashSet<String>` used as the no-knob default.
-/// Avoids a fresh `HashSet::new()` allocation on every cypher call —
-/// negligible per-call (no heap alloc on empty), but the static is
-/// clearer about intent and removes per-call stack-frame setup.
 pub fn empty_disabled_set() -> &'static HashSet<String> {
     static EMPTY: std::sync::OnceLock<HashSet<String>> = std::sync::OnceLock::new();
     EMPTY.get_or_init(HashSet::new)
@@ -301,13 +275,6 @@ pub fn optimize_with_disabled(
         debug_check_invariants(query, name);
     }
 }
-
-// ── Pass wrappers ──────────────────────────────────────────────────
-// Each wrapper is the registry-facing entry point for one optimizer
-// pass. Adding a new pass: write the impl in the appropriate
-// sub-module, add a wrapper here with a doc-comment in the standard
-// shape, register it in `PASSES`, add at least one query to
-// `tests/test_cypher_differential.py::DIFFERENTIAL_QUERIES`.
 
 /// **Pass:** `lower_fixed_var_length_hops` — **Precondition:** a
 /// `MATCH` / `OPTIONAL MATCH` with no path assignment. **Pattern
@@ -402,10 +369,6 @@ fn pass_optimize_nested_queries(query: &mut CypherQuery, ctx: &PassCtx) {
 /// Only the body's OWN clauses are scanned — a nested `CALL { }` re-binds
 /// its own imports from its own seed, so its patterns are not this body's
 /// concern.
-///
-/// Lives in the planner because the seed-ignoring-fusion decision is a
-/// plan-time concern; the executor (`call_subquery.rs`) re-uses it for
-/// per-row NULL-anchor detection.
 pub(crate) fn import_pattern_anchors(body: &CypherQuery, import: &[String]) -> Vec<String> {
     let mut anchors: Vec<String> = Vec::new();
     for clause in &body.clauses {
@@ -433,9 +396,7 @@ pub(crate) fn import_pattern_anchors(body: &CypherQuery, import: &[String]) -> V
 /// The optimizer passes that emit a graph-global / plan-time-anchored
 /// operator (`FusedCount*`, `FusedMatch*Aggregate`, `FusedNodeScan*`)
 /// which IGNORES the incoming seed row. Disabled when a correlated body
-/// anchors on an imported variable (see [`pass_optimize_nested_queries`]),
-/// so the body runs as a plain `Match`/`Return` that honours the seed.
-/// Process-lifetime set — built once.
+/// anchors on an imported variable (see [`pass_optimize_nested_queries`]).
 ///
 /// These names MUST stay in sync with `PASSES`; each is a registered pass
 /// name. A future `fuse_call_subquery_aggregate` pass (design §Q7) would
@@ -462,22 +423,18 @@ pub(crate) fn seed_ignoring_fusion_passes() -> &'static HashSet<String> {
 /// **Pass:** `push_where_into_match` — Move comparison predicates from
 /// a trailing `WHERE` clause into the preceding `MATCH`'s
 /// `PropertyMatcher`. The matcher applies them during pattern expansion
-/// instead of evaluating them per row, pruning the search early. Runs
-/// twice in the pipeline (before and after `fold_or_to_in`) so IN
-/// predicates synthesized by the OR fold also get pushed.
+/// instead of evaluating them per row, pruning the search early.
 ///
 /// Two sources of predicate, one rewrite: a trailing `Clause::Where` after
 /// a `MATCH`/`OPTIONAL MATCH`, and an `OPTIONAL MATCH`'s own
-/// `MatchClause::where_clause`. The second is the *easier* case, not a
-/// riskier one: under clause scoping a candidate the predicate rejects and a
-/// candidate the pattern never produced are the same outcome — the row is
-/// null-extended either way — so moving the test from the predicate into the
-/// pattern cannot change which rows survive. (While the predicate was read
-/// as an independent post-filter those two outcomes differed, and pushing it
-/// down was silently choosing between them.) The safety-net rule is
-/// unchanged in both homes: a partial push leaves the whole predicate
-/// standing, and a full push keeps it as the filter every non-pattern-matcher
-/// path still relies on.
+/// `MatchClause::where_clause`. The second is safe because under clause
+/// scoping a candidate the predicate rejects and a candidate the pattern
+/// never produced are the same outcome — the row is null-extended either
+/// way — so moving the test from the predicate into the pattern cannot
+/// change which rows survive. The safety-net rule is unchanged in both
+/// homes: a partial push leaves the whole predicate standing, and a full
+/// push keeps it as the filter every non-pattern-matcher path still relies
+/// on.
 fn pass_push_where_into_match(query: &mut CypherQuery, ctx: &PassCtx) {
     push_where_into_match(query, ctx.params)
 }
@@ -582,9 +539,7 @@ fn pass_fuse_spatial_join(query: &mut CypherQuery, ctx: &PassCtx) {
 
 /// **Pass:** `reorder_match_clauses` — Reorder adjacent `MATCH` clauses
 /// by connection-type total counts (O(1) cost proxy) so the smaller
-/// driver runs first. Runs BEFORE `optimize_pattern_start_node` so the
-/// reversal sees the post-reorder sequence and tracks `bound_vars`
-/// correctly.
+/// driver runs first.
 fn pass_reorder_match_clauses(query: &mut CypherQuery, ctx: &PassCtx) {
     reorder_match_clauses(query, ctx.graph)
 }
@@ -689,8 +644,7 @@ fn pass_fuse_match_with_aggregate(query: &mut CypherQuery, ctx: &PassCtx) {
 /// **Pass:** `fuse_match_with_aggregate_top_k` — Absorb a downstream
 /// `ORDER BY <agg> LIMIT k` into a preceding
 /// `FusedMatchWithAggregate`, replacing full sort with heap-pruned
-/// top-K (O(n log k) instead of O(n log n)). Must run AFTER
-/// `fuse_match_with_aggregate` and BEFORE `fuse_order_by_top_k`.
+/// top-K (O(n log k) instead of O(n log n)).
 fn pass_fuse_match_with_aggregate_top_k(query: &mut CypherQuery, _ctx: &PassCtx) {
     fuse_match_with_aggregate_top_k(query)
 }
@@ -730,15 +684,6 @@ fn pass_fuse_order_by_top_k(query: &mut CypherQuery, _ctx: &PassCtx) {
 fn pass_reorder_predicates_by_cost(query: &mut CypherQuery, _ctx: &PassCtx) {
     reorder_predicates_by_cost(query)
 }
-
-// The fusion docstrings for `FusedCountAll`, `FusedCountByType`,
-// `FusedCountEdgesByType`, and `FusedCountAnchoredEdges` live on their
-// respective fuse functions in
-// `src/graph/languages/cypher/planner/fusion.rs`.
-
-// ============================================================================
-// Tests
-// ============================================================================
 
 #[cfg(test)]
 #[path = "planner_tests.rs"]

@@ -2,9 +2,8 @@
 //! parallel and sequential expansion loops, and the small predicates they
 //! share.
 //!
-//! Split out of `matcher.rs` to keep that file under the source-quality line
-//! ceiling, matching `matcher_id_lookup_tests.rs`. These are inherent methods
-//! on `PatternExecutor`, so the split is purely a file boundary.
+//! Split out of `matcher.rs` for the source-quality line ceiling; these are
+//! inherent methods on `PatternExecutor`, so the split is a file boundary only.
 
 use super::*;
 use crate::graph::parallel::{self, ParallelInterrupt};
@@ -166,15 +165,13 @@ impl<'a> PatternExecutor<'a> {
             .map(|v| self.pre_bindings.get(v).is_some())
             .unwrap_or(false);
 
-        // Try connection-type inverted index for untyped source nodes with typed edges.
-        // Instead of iterating all 124M nodes hoping to find P31 sources, the inverted
-        // index gives us exactly which nodes have P31 outgoing edges.
+        // Untyped source with typed edges: the connection-type inverted index
+        // names the nodes with such outgoing edges, instead of scanning all 124M.
         let mut initial_nodes = if !first_is_prebound
             && has_edges
             && first_node.node_type.is_none()
             && first_node.properties.is_none()
         {
-            // Check if the first edge has connection type(s) we can look up.
             // `[:A|B]` needs the sources of EVERY branch: taking only the
             // singular `connection_type` dropped every start node whose sole
             // matching edge was on a later branch.
@@ -192,7 +189,7 @@ impl<'a> PatternExecutor<'a> {
                 } else {
                     None
                 };
-            // Check edge direction — inverted index only covers outgoing sources
+            // The inverted index only covers outgoing sources.
             let is_outgoing = if let Some(PatternElement::Edge(ep)) = pattern.elements.get(1) {
                 ep.direction == EdgeDirection::Outgoing
             } else {
@@ -280,10 +277,7 @@ impl<'a> PatternExecutor<'a> {
         Ok(matches)
     }
 
-    /// One execution of `pattern` under the given cap regime.
-    /// Build one hop's plan. Internal binding names are invariant for the whole
-    /// hop, so they are formatted once here rather than per matched
-    /// relationship on the expansion hot path.
+    /// Build one hop's [`HopPlan`].
     fn plan_hop<'p>(
         &self,
         edge_pattern: &'p EdgePattern,
@@ -324,12 +318,12 @@ impl<'a> PatternExecutor<'a> {
         }
     }
 
+    /// One execution of `pattern` under the given cap regime.
     fn execute_pass(&self, pattern: &Pattern, pass: CapPass) -> Result<Vec<PatternMatch>, String> {
         if pattern.elements.is_empty() {
             return Ok(Vec::new());
         }
 
-        // Start with the first node pattern
         let first_node = match &pattern.elements[0] {
             PatternElement::Node(np) => np,
             _ => {
@@ -340,19 +334,14 @@ impl<'a> PatternExecutor<'a> {
             }
         };
 
-        // Find all nodes matching the first pattern.
-        // For multi-hop patterns with max_matches, cap the source candidates to avoid
-        // O(N) allocation when only a small number of results are needed (e.g. LIMIT 10
-        // on an 11M-node type). The expansion loop enforces the exact max_matches.
         let has_edges = pattern.elements.len() > 1;
         let source_cap = if has_edges {
-            // Multi-hop with LIMIT: cap sources to avoid O(N) allocation + PatternMatch
-            // construction for millions of nodes. The expansion loop enforces exact
-            // max_matches via early-exit. 100x headroom handles sparse match patterns
-            // (each source needs only a 1% chance of producing a match to hit the limit).
-            // The start-node set is relationship-type-blind, so this headroom is a guess
-            // about selectivity, not a bound — a short result under it is retried
-            // uncapped by `execute`.
+            // Multi-hop with LIMIT: cap sources to avoid O(N) allocation +
+            // PatternMatch construction for millions of nodes; the expansion
+            // loop enforces exact max_matches via early-exit. The 100x headroom
+            // assumes ~1% of sources produce a match, but the start-node set is
+            // relationship-type-blind, so it is a selectivity guess, not a
+            // bound — a short result under it is retried uncapped by `execute`.
             match pass {
                 CapPass::Capped => self.max_matches.map(|m| m.saturating_mul(100).max(1000)),
                 CapPass::Uncapped => None,
@@ -365,8 +354,6 @@ impl<'a> PatternExecutor<'a> {
         };
         let initial_nodes = self.seed_start_nodes(pattern, first_node, has_edges, source_cap)?;
 
-        // Initialize matches with first node bindings.
-        //
         // Under a cap the first hop stops as soon as `max_matches` rows exist,
         // so the start nodes past that point are never read — and `source_cap`
         // is deliberately 100x the cap, to survive a sparse pattern. Seeding
@@ -387,7 +374,6 @@ impl<'a> PatternExecutor<'a> {
                 .collect()
         };
 
-        // Track current node indices for each match
         let mut current_indices: Vec<NodeIndex> = initial_nodes;
 
         // One reusable visited buffer for the whole pass: a variable-length hop
@@ -395,7 +381,6 @@ impl<'a> PatternExecutor<'a> {
         // graph-sized `Vec<bool>` for each one.
         let mut visited = VisitedStamps::default();
 
-        // Pre-allocate dedup set for distinct_target_var optimization
         let mut distinct_seen: HashSet<NodeIndex> = if self.distinct_target_var.is_some() {
             HashSet::with_capacity(current_indices.len())
         } else {
@@ -407,7 +392,6 @@ impl<'a> PatternExecutor<'a> {
         let repeats_a_node_variable = repeats_a_node_variable(pattern);
         let mut relationship_state_recorded = false;
 
-        // Process edge-node pairs
         let mut i = 1;
         while i < pattern.elements.len() {
             // max_matches is enforced DURING expansion (inner-loop checks below),
@@ -450,7 +434,6 @@ impl<'a> PatternExecutor<'a> {
                 || hop.edge.variable.is_some()
                 || hop.anonymous_path_var.is_some();
 
-            // Expand each current match.
             // `!seeds_pending` is implied by `max_matches.is_none()` — it is
             // named because the parallel branch zips `matches` against
             // `current_indices`, and a pending seed leaves `matches` empty.
@@ -470,13 +453,11 @@ impl<'a> PatternExecutor<'a> {
                 )?
             };
 
-            // Check deadline / cancellation after expansion (covers both
-            // parallel and sequential paths)
             if let Some(msg) = self.interrupt_reason() {
                 return Err(msg);
             }
 
-            // Apply hop limit truncation (for parallel path which can't early-exit)
+            // The parallel path cannot early-exit, so truncate its overflow here.
             if let Some(max) = hop.limit {
                 if new_matches.len() > max {
                     if !is_last_hop {
@@ -525,13 +506,12 @@ impl<'a> PatternExecutor<'a> {
         // published in blocks of `CEILING_PUBLISH_STRIDE`, never per row, for
         // the cost recorded on that constant.
         //
-        // What that buys, precisely: a job whose rows are wide enough to fill
-        // a block stops the region *while it is filling*, which is the
-        // runaway this ceiling exists for. A job that ends below a block keeps
-        // its remainder, so a hop made of many narrow rows is bounded at the
-        // hop boundary instead, by the `results.len()` check after the region.
-        // Both are error paths, never truncation, so neither can turn a
-        // too-large answer into a wrong one.
+        // A job whose rows are wide enough to fill a block stops the region
+        // *while it is filling*, which is the runaway this ceiling exists for.
+        // A job that ends below a block keeps its remainder, so a hop of many
+        // narrow rows is bounded at the hop boundary instead, by the
+        // `results.len()` check after the region. Both are error paths, never
+        // truncation, so neither can turn a too-large answer into a wrong one.
         let produced = std::sync::atomic::AtomicUsize::new(0);
         let results: Vec<(PatternMatch, NodeIndex)> = parallel::install(|| {
             matches
@@ -596,14 +576,12 @@ impl<'a> PatternExecutor<'a> {
                 .flatten()
                 .collect()
         });
-        // Propagate any error that occurred during parallel expansion
         interrupt.finish()?;
         // The workers' unpublished remainders never reached the counter, so
         // the authoritative total is the collected buffer itself.
         self.check_match_ceiling(results.len())?;
-        // Apply distinct-target dedup for parallel results (the sequential
-        // path does this inline, but the parallel path can't without
-        // synchronization).
+        // The sequential path dedups distinct targets inline; the parallel path
+        // cannot, without synchronization.
         let needs_dedup = hop.is_last_hop
             && self
                 .distinct_target_var
@@ -638,8 +616,6 @@ impl<'a> PatternExecutor<'a> {
         let mut new_matches = Vec::new();
         let mut new_indices = Vec::new();
         let mut expand_count: usize = 0;
-        // Exact `max_matches` at the last hop, the advisory overcommit at an
-        // intermediate one — computed once for the whole hop in `execute_pass`.
         let hop_limit = hop.limit;
         for (position, &source_idx) in current_indices.iter().enumerate() {
             if hop_limit.is_some_and(|max| new_matches.len() >= max) {
@@ -653,7 +629,6 @@ impl<'a> PatternExecutor<'a> {
                 m
             } else {
                 // Unreachable: the two vectors are pushed in lockstep.
-                // Stopping here is what the `zip` this replaced did.
                 break;
             };
             let mut remaining = hop_limit.map(|max| max.saturating_sub(new_matches.len()));
@@ -714,10 +689,9 @@ impl<'a> PatternExecutor<'a> {
         // produced exactly the limit cannot tell "that is all there was" from
         // "the rest was dropped". Either way the matches that would have
         // reached the final hop may be in the part never expanded, so the pass
-        // is not authoritative. (A hop that fills the limit *exactly* with
-        // everything there was costs one retry, and only on a pass that came
-        // back short of `max_matches`.) The last hop is exempt: there
-        // `hop.limit` IS `max_matches`, and filling it is the answer.
+        // is not authoritative; a false positive costs one retry. The last hop
+        // is exempt: there `hop.limit` IS `max_matches`, and filling it is the
+        // answer.
         if !hop.is_last_hop && hop_limit.is_some_and(|max| new_matches.len() >= max) {
             self.note_cap_truncated();
         }
@@ -756,7 +730,6 @@ impl<'a> PatternExecutor<'a> {
         already_bound.is_none_or(|bound_idx| target_idx == bound_idx)
     }
 
-    /// `current_match` plus this hop's edge and target bindings.
     #[inline]
     fn extend_match(
         &self,

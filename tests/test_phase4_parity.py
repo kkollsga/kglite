@@ -426,7 +426,7 @@ def test_kgl_golden_hash():
 
 @pytest.mark.parity
 def test_kgl_v3_file_rejected_with_clear_error(tmp_path: Path):
-    """v3 `.kgl` files must error cleanly under the v5
+    """v3 `.kgl` files must error cleanly under the current
     binary, with a message that names the format change and tells the
     user how to recover.
 
@@ -607,7 +607,7 @@ def test_save_rss_ceiling(tmp_path: Path):
 
 
 def _regenerate_golden_digest() -> str:
-    """Print the current `.kgl` v3 digest. Not a test.
+    """Print the current `.kgl` digest. Not a test.
 
     Run manually with: ``python -c 'from tests.test_phase4_parity import
     _regenerate_golden_digest as g; print(g())'`` then paste the printed

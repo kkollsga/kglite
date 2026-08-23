@@ -118,12 +118,10 @@ macro_rules! impl_heap_graph_read {
                 self.inner().node_weight(idx).map(|nd| nd.node_type)
             }
 
-            // NodeData no longer carries extra_labels — secondary
-            // labels live in `DirGraph.secondary_label_index` (the
-            // canonical store). Backend `node_labels_of` returns only
-            // the primary; callers that need the full label list go
-            // through `DirGraph::node_labels`, which has access to the
-            // inverted index.
+            // NodeData no longer carries extra_labels — secondary labels
+            // live in `DirGraph.secondary_label_index`. `node_labels_of`
+            // returns only the primary; the full list comes from
+            // `DirGraph::node_labels`.
 
             #[inline]
             fn node_weight(&self, idx: NodeIndex) -> Option<&NodeData> {
@@ -355,7 +353,6 @@ impl MemoryGraph {
         }
     }
 
-    /// Any edge incident to `idx`, in either direction.
     fn first_incident_edge(&self, idx: NodeIndex) -> Option<EdgeIndex> {
         self.inner
             .edges_directed(idx, Direction::Outgoing)
@@ -565,8 +562,6 @@ macro_rules! impl_heap_column_writes {
 
         fn set_node_property(&mut self, idx: NodeIndex, key: InternedKey, value: Value) {
             self.capture_property_pre_image(idx, ColumnarWrite::Cell(key));
-            // Disjoint field borrows: the node lives in `inner`, its store in
-            // `column_stores`.
             let Self {
                 inner,
                 column_stores,
@@ -952,7 +947,6 @@ impl GraphRead for MappedGraph {
         GraphNeighbors::InMemory(self.inner().neighbors_undirected(idx))
     }
 
-    // ─── OVERRIDE: bounded source list comes from the index's out_sources ─
     fn sources_for_conn_type_bounded(
         &self,
         conn_type: InternedKey,
@@ -966,7 +960,6 @@ impl GraphRead for MappedGraph {
         Some(slice.iter().map(|n| n.index() as u32).collect())
     }
 
-    // ─── OVERRIDE: peer-count histogram lookup ────────────────────────────
     fn lookup_peer_counts(&self, conn_type: InternedKey) -> Option<HashMap<u32, i64>> {
         let block = self.ensure_type_index(conn_type);
         // Callers use Outgoing semantics (peer = target); the disk helper
@@ -1074,12 +1067,9 @@ impl GraphRead for MappedGraph {
         Ok(count)
     }
 
-    // ─── OVERRIDE: property-index lookups ─────────────────────────────────
-    // Mirrors disk's `PropertyIndex` contract: `Some(vec)` on index hit
-    // (possibly empty), `None` if no index exists. Mapped always returns
-    // `Some` because the index builds lazily on first hit — same cost
-    // model as disk's auto-built `title` global index but triggered by
-    // the query rather than by save.
+    // The mapped property indexes build lazily on first hit — the cost model
+    // of disk's auto-built `title` global index, triggered by the query
+    // rather than by save.
     fn lookup_by_property_eq(
         &self,
         node_type: &str,
@@ -1087,12 +1077,11 @@ impl GraphRead for MappedGraph {
         value: &str,
     ) -> Option<Vec<NodeIndex>> {
         let block = self.ensure_property_index(node_type, property);
-        // Mirror disk's contract: `None` means "no index for this
-        // (type, property)" — the matcher will try the next alias
-        // or fall through to a full scan. `Some(vec)` means the
-        // index covers this pair (vec may be empty for a miss).
-        // Treat "no string values found" as "no index" so the
-        // matcher keeps trying aliases (nid→id→qid, etc.).
+        // Disk's contract: `None` means "no index for this (type, property)",
+        // and the matcher tries the next alias (nid→id→qid) or falls through
+        // to a full scan; `Some(vec)` means the index covers the pair, empty
+        // vec included. So "no string values found" has to report as "no
+        // index".
         if block.keys.is_empty() {
             return None;
         }
@@ -1156,9 +1145,7 @@ impl GraphRead for MappedGraph {
 //
 // Each method captures the inverse of the edit *if a journal is installed*,
 // then performs the edit — never at the cost of the invalidation it already
-// owed. With no journal (the steady state, and every read path) the added cost
-// is one `Option` discriminant check; the clone-the-pre-image work lives in
-// `#[cold]` helpers.
+// owed.
 // ──────────────────────────────────────────────────────────────────────────
 
 impl MappedGraph {
@@ -1181,7 +1168,6 @@ impl MappedGraph {
         }
     }
 
-    /// Any edge incident to `idx`, in either direction.
     fn first_incident_edge(&self, idx: NodeIndex) -> Option<EdgeIndex> {
         self.inner
             .edges_directed(idx, Direction::Outgoing)
@@ -1192,15 +1178,7 @@ impl MappedGraph {
 
     /// Detach `idx`'s edges one at a time, through the recorded
     /// [`GraphWrite::remove_edge`], so each gets its own journal entry.
-    ///
-    /// petgraph's `remove_node` drops incident edges in one internal sweep
-    /// whose order we neither observe nor control, which would leave reverse
-    /// replay unable to hand each edge back its own free-list slot. Doing the
-    /// detach ourselves makes the removal order the recorded order. The end
-    /// state is identical either way; the Cypher delete path already detaches
-    /// explicitly (`mutation::maintain::detach_delete_nodes`), so in practice
-    /// this loop finds nothing to do and exists for every *other* caller of
-    /// `remove_node`.
+    /// Same order argument as `MemoryGraph::detach_for_journal`.
     #[cold]
     fn detach_for_journal(&mut self, idx: NodeIndex) {
         while let Some(edge) = self.first_incident_edge(idx) {
@@ -1412,7 +1390,6 @@ impl GraphRead for DiskGraph {
     #[inline]
     fn str_prop_eq(&self, idx: NodeIndex, key: InternedKey, target: &str) -> Option<bool> {
         // Disk keeps the allocating route — the zero-alloc win is heap/mapped-specific.
-        // Equality still works correctly.
         DiskGraph::get_node_property(self, idx, key)
             .map(|v| matches!(v, Value::String(ref s) if str_values_equal(s, target)))
     }

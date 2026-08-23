@@ -34,15 +34,11 @@
 //! cannot express without reimplementing `edges_directed`,
 //! `edges_directed_filtered`, `edges_connecting`, `neighbors_*` and
 //! `edge_references` as base⊕overlay chains behind their GAT iterator types.
-//! That is a second body of work with its own correctness surface, and doing it
-//! in the same change as the ownership flip would land both untested-in-
-//! isolation.
 //!
 //! **Because no edit reaches base adjacency, the overlay needs no adjacency
 //! chaining at all** — every edge and traversal method delegates straight to
-//! the base, and only `node_indices` gains a variant. That is the whole reason
-//! this module is a few hundred lines rather than a few thousand, and it is why
-//! the read path is unchanged for everything except a node-weight probe.
+//! the base, only `node_indices` gains a variant, and the read path is
+//! unchanged apart from a node-weight probe.
 //!
 //! `materialise` is exactly today's cost — a base deep clone plus the overlay
 //! replayed — so a topology write while a reader is held is no worse than
@@ -269,8 +265,6 @@ impl ForkedGraph {
         owned
     }
 
-    // ── undo journal (mirrors MemoryGraph's, but installed on the overlay) ──
-
     #[inline]
     pub(crate) fn begin_undo(&mut self) {
         self.undo = Some(Box::new(UndoJournal::new()));
@@ -317,8 +311,6 @@ impl ForkedGraph {
         }
         self.edges.get_mut(&raw)
     }
-
-    // ── undo capture (the overlay's own, so entries reverse into the overlay) ──
 
     /// Clone `idx`'s current weight into the journal as its pre-statement
     /// state. Reads through [`GraphRead::node_weight`], i.e. overlay-then-base,
@@ -423,11 +415,7 @@ impl std::fmt::Debug for ForkedGraph {
     }
 }
 
-// ──────────────────────────────────────────────────────────────────────────
-// GraphRead — node state is overlay-then-base; everything edge-shaped is the
-// base's, because no edit in this backend can reach base adjacency.
-// ──────────────────────────────────────────────────────────────────────────
-
+// Node state is overlay-then-base; everything edge-shaped is the base's.
 impl GraphRead for ForkedGraph {
     type NodeIndicesIter<'a> = GraphNodeIndices<'a>;
     type EdgeIndicesIter<'a> = <MemoryGraph as GraphRead>::EdgeIndicesIter<'a>;
@@ -451,10 +439,8 @@ impl GraphRead for ForkedGraph {
         self.append_floor() + self.appended as usize
     }
 
-    /// The base's, unmodified — for the same reason `edge_count` is. No edit
-    /// this overlay expresses reaches base adjacency (`add_edge` /
-    /// `remove_edge` materialise first), so no edge slot is created or freed
-    /// while a fork is live.
+    /// The base's, unmodified — for the same reason `edge_count` is: no edit
+    /// this overlay expresses creates or frees an edge slot (module doc).
     #[inline]
     fn edge_bound(&self) -> usize {
         GraphRead::edge_bound(&*self.base)
@@ -498,9 +484,8 @@ impl GraphRead for ForkedGraph {
         self.node_view(idx)?.str_prop_eq(key, target)
     }
 
-    // Every method below is pure base delegation: nothing this backend can
-    // write reaches base adjacency (module doc), so an edge-shaped answer from
-    // the base is the whole answer.
+    // Pure base delegation from here down: nothing this backend writes reaches
+    // base adjacency (module doc), so the base's answer is the whole answer.
 
     #[inline]
     fn edges_directed_filtered(
@@ -630,12 +615,9 @@ impl GraphRead for ForkedGraph {
     }
 }
 
-// ──────────────────────────────────────────────────────────────────────────
-// GraphWrite — every mutation lands in the overlay. The three that cannot be
-// expressed here are intercepted one level up, in `GraphBackend`, which is the
-// only place that can replace a `Forked` with a `Memory`.
-// ──────────────────────────────────────────────────────────────────────────
-
+// Every mutation lands in the overlay. The three that cannot be expressed here
+// are intercepted one level up, in `GraphBackend` — the only place that can
+// replace a `Forked` with a `Memory`.
 impl GraphWrite for ForkedGraph {
     #[inline]
     fn node_weight_mut(&mut self, idx: NodeIndex) -> Option<&mut NodeData> {

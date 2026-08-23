@@ -1,5 +1,3 @@
-// Graph Algorithms #[pymethods] — extracted from mod.rs
-
 use crate::datatypes::values::Value;
 use crate::datatypes::{py_in, py_out};
 use pyo3::prelude::*;
@@ -115,7 +113,6 @@ impl KnowledgeGraph {
         direction: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
         let edge_dir = parse_direction(direction)?;
-        // Look up source node
         let source_lookup =
             kglite_core::api::storage::TypeLookup::new(&self.inner.graph, source_type.to_string())
                 .map_err(|e: String| {
@@ -132,7 +129,6 @@ impl KnowledgeGraph {
                 )))
             })?;
 
-        // Look up target node
         let target_lookup = if target_type == source_type {
             source_lookup
         } else {
@@ -149,8 +145,7 @@ impl KnowledgeGraph {
             )))
         })?;
 
-        // Find shortest path — Dijkstra when weight_property is set,
-        // BFS otherwise.
+        // Dijkstra when weight_property is set, BFS otherwise.
         let deadline = deadline_from(timeout_ms);
         let opts = path_options(
             connection_types.as_deref(),
@@ -208,7 +203,6 @@ impl KnowledgeGraph {
             Some(path_result) => {
                 let result_dict = PyDict::new(py);
 
-                // Build path info list
                 let path_list = PyList::empty(py);
                 for &node_idx in &path_result.path {
                     if let Some(info) =
@@ -223,7 +217,6 @@ impl KnowledgeGraph {
                 }
                 result_dict.set_item("path", path_list)?;
 
-                // Build connections list
                 let connections = kglite_core::api::algorithms::get_path_connections(
                     &self.inner,
                     &path_result.path,
@@ -278,7 +271,6 @@ impl KnowledgeGraph {
         timeout_ms: Option<u64>,
     ) -> PyResult<Py<PyAny>> {
         let edge_dir = parse_direction(direction)?;
-        // Use O(1) direct lookup from id_indices (populated during add_nodes)
         let source_value = py_in::py_value_to_value(source_id)?;
         let source_idx = self
             .inner
@@ -326,7 +318,6 @@ impl KnowledgeGraph {
             );
         }
 
-        // Find shortest path cost only (no path reconstruction — faster)
         Ok(
             match kglite_core::api::algorithms::shortest_path_cost_with(
                 &self.inner,
@@ -367,7 +358,6 @@ impl KnowledgeGraph {
         timeout_ms: Option<u64>,
     ) -> PyResult<Py<PyAny>> {
         let edge_dir = parse_direction(direction)?;
-        // Resolve all node indices up front
         let mut index_pairs = Vec::with_capacity(pairs.len());
         for (src_py, tgt_py) in &pairs {
             let src_val = py_in::py_value_to_value(src_py)?;
@@ -533,8 +523,6 @@ impl KnowledgeGraph {
 
         let result = PyDict::new(py);
         match target_ids {
-            // Explicit targets: an answer per requested id, `None` when the
-            // search never reached it.
             Some(ids) => {
                 let namespace = target_type.unwrap_or(source_type);
                 let reached: std::collections::HashMap<_, _> = costs.into_iter().collect();
@@ -555,7 +543,6 @@ impl KnowledgeGraph {
                     }
                 }
             }
-            // Discovery mode: only what was reached, absent = unreachable.
             None => {
                 for (node_idx, hops) in costs {
                     let Some(node) = self.inner.node_view(node_idx) else {
@@ -570,10 +557,8 @@ impl KnowledgeGraph {
                         continue;
                     };
                     let key = py_out::value_to_py(py, &node_id)?;
-                    // Ids are unique per type, not across types: without a
-                    // `target_type` two reached nodes can collide on one dict
-                    // key. Say so rather than silently dropping one. With one,
-                    // every key comes from that single namespace.
+                    // Without a `target_type`, ids from two node types can
+                    // collide on one key; say so rather than drop one silently.
                     match target_type {
                         None => REACHED_ID_KEY.insert(&result, key.bind(py), hops)?,
                         Some(_) => result.set_item(key, hops)?,
@@ -618,7 +603,6 @@ impl KnowledgeGraph {
     ) -> PyResult<Py<PyAny>> {
         let edge_dir = parse_direction(direction)?;
         let _arena_guard = self.inner.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
-                                                         // Use O(1) direct lookup from id_indices (populated during add_nodes)
         let source_value = py_in::py_value_to_value(source_id)?;
         let source_idx = self
             .inner
@@ -641,7 +625,6 @@ impl KnowledgeGraph {
                 )))
             })?;
 
-        // Find shortest path
         match kglite_core::api::algorithms::shortest_path(
             &self.inner,
             source_idx,
@@ -654,7 +637,6 @@ impl KnowledgeGraph {
             ),
         ) {
             Some(path_result) => {
-                // Extract just the IDs - no PyDict creation per node
                 let ids: Vec<Py<PyAny>> = path_result
                     .path
                     .iter()
@@ -703,7 +685,6 @@ impl KnowledgeGraph {
         direction: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
         let edge_dir = parse_direction(direction)?;
-        // Use O(1) direct lookup from id_indices (populated during add_nodes)
         let source_value = py_in::py_value_to_value(source_id)?;
         let source_idx = self
             .inner
@@ -726,7 +707,6 @@ impl KnowledgeGraph {
                 )))
             })?;
 
-        // Find shortest path and return raw indices
         match kglite_core::api::algorithms::shortest_path(
             &self.inner,
             source_idx,
@@ -781,7 +761,6 @@ impl KnowledgeGraph {
         let edge_dir = parse_direction(direction)?;
         let max_hops = max_hops.unwrap_or(5);
 
-        // Look up source node
         let source_lookup =
             kglite_core::api::storage::TypeLookup::new(&self.inner.graph, source_type.to_string())
                 .map_err(|e: String| {
@@ -798,7 +777,6 @@ impl KnowledgeGraph {
                 )))
             })?;
 
-        // Look up target node
         let target_lookup = if target_type == source_type {
             source_lookup
         } else {
@@ -815,7 +793,6 @@ impl KnowledgeGraph {
             )))
         })?;
 
-        // Find all paths
         let mut all_paths_opts = kglite_core::api::algorithms::AllPathsOptions::default()
             .with_max_hops(max_hops)
             .with_direction(edge_dir)
@@ -836,12 +813,10 @@ impl KnowledgeGraph {
             &all_paths_opts,
         );
 
-        // Convert to Python output
         let result_list = PyList::empty(py);
         for path in paths {
             let path_dict = PyDict::new(py);
 
-            // Build path info list
             let path_list = PyList::empty(py);
             for &node_idx in &path {
                 if let Some(info) =
@@ -856,7 +831,6 @@ impl KnowledgeGraph {
             }
             path_dict.set_item("path", path_list)?;
 
-            // Build connections list
             let connections =
                 kglite_core::api::algorithms::get_path_connections(&self.inner, &path);
             let conn_list = PyList::empty(py);
@@ -905,8 +879,7 @@ impl KnowledgeGraph {
         };
 
         if titles_only.unwrap_or(false) {
-            // Lightweight: return [[title1, title2, ...], [...], ...]
-            // Creates only string objects — no PyDicts per node
+            // Lightweight: [[title, ...], ...] — no PyDict per node.
             let result_list = PyList::empty(py);
             for component in components {
                 let comp_list = PyList::empty(py);
@@ -976,7 +949,6 @@ impl KnowledgeGraph {
         timeout_ms: Option<u64>,
     ) -> PyResult<bool> {
         let edge_dir = parse_direction(direction)?;
-        // Look up source node
         let source_lookup =
             kglite_core::api::storage::TypeLookup::new(&self.inner.graph, source_type.to_string())
                 .map_err(|e: String| {
@@ -993,7 +965,6 @@ impl KnowledgeGraph {
                 )))
             })?;
 
-        // Look up target node
         let target_lookup = if target_type == source_type {
             source_lookup
         } else {
@@ -1051,8 +1022,6 @@ impl KnowledgeGraph {
         for (title, degree) in
             kglite_core::api::fluent::get_node_degrees(&self.inner, &self.cursor.selection)
         {
-            // Titles are not a key: two same-titled nodes (even of one type)
-            // would silently collapse to a single row.
             let key = pyo3::types::PyString::new(py, &title).into_any();
             DEGREES_TITLE_KEY.insert(&result_dict, &key, degree)?;
         }
@@ -1502,7 +1471,7 @@ impl KnowledgeGraph {
     ///
     /// Equivalent to `kg.to_subgraph().save(path)` but as a single call
     /// that does not bind the intermediate in-memory graph to a local
-    /// variable. Output is a v3 binary file that reloads via
+    /// variable. Output is a `.kgl` file that reloads via
     /// ``kglite.load(path)`` (or ``kglite.open(path, storage='disk')`` for
     /// disk mode — ``load`` takes no ``storage`` argument). All edges
     /// between selected nodes are included; node and
@@ -1516,7 +1485,7 @@ impl KnowledgeGraph {
     ///     # Articles + their authors, written to disk for later use.
     ///     (
     ///         kg.select('Article')
-    ///           .expand(hops=1, type='AUTHORED_BY')
+    ///           .expand(hops=1)
     ///           .save_subset('articles_with_authors.kgl')
     ///     )
     ///     ```
@@ -1535,22 +1504,16 @@ impl KnowledgeGraph {
         .map_err(PyErr::new::<pyo3::exceptions::PyIOError, _>)
     }
 
-    /// [DEBUG] Save a subgraph filtered by edge type, bypassing the
-    /// fluent selection chain.
-    ///
-    /// Equivalent in spirit to `expand(hops=1, edge_types=...)` followed
-    /// by `save_subset` — but `expand` does not currently take an
-    /// edge-type filter, so this method drives Pass A directly to build
-    /// the kept-nodes set, then routes the resulting node set through
-    /// the existing in-memory save path.
+    /// [DEBUG] Save a subgraph filtered by edge type, bypassing the fluent
+    /// selection chain: `expand` takes no edge-type filter, so this drives
+    /// Pass A directly to build the kept-node set and streams it straight
+    /// to a disk-mode destination.
     ///
     /// Disk-backed sources only. The kept set is exactly the union of
     /// endpoints of every edge whose connection type matches one of
-    /// `edge_types` — useful for "all (a)-[:E]->(b) and just those
-    /// nodes" filters where `expand` would over-pull.
-    ///
-    /// Returns scan + save stats as a dict so callers can time the
-    /// component steps without re-loading the source.
+    /// `edge_types` — useful for "all (a)-[:E]->(b) and just those nodes"
+    /// filters where `expand` would over-pull. Returns scan + save stats
+    /// as a dict so callers can time the component steps.
     #[pyo3(signature = (path, edge_types))]
     fn _save_subset_filtered_by_edge_type(
         &self,
@@ -1594,10 +1557,9 @@ impl KnowledgeGraph {
                 let pass_a = pass_a_scan(disk, &spec);
                 let scan_secs = scan_t0.elapsed().as_secs_f64();
 
-                // Group kept nodes by source type, in source-id order.
-                // type_indices slices are already sorted, so the resulting
-                // Vec per type is sorted too — required by the streaming
-                // pipeline for sequential ColumnStore reads.
+                // type_indices slices are already sorted, so each per-type
+                // Vec comes out in source-id order — required by the
+                // streaming pipeline's sequential ColumnStore reads.
                 let group_t0 = std::time::Instant::now();
                 let mut kept_per_type: HashMap<String, Vec<u32>> = HashMap::new();
                 for (type_name, type_nodes) in inner.type_indices.iter() {
@@ -1644,22 +1606,13 @@ impl KnowledgeGraph {
         Ok(dict.into())
     }
 
-    /// Variant of `_save_subset_filtered_by_edge_type` that produces
-    /// the *induced* subgraph: the kept-node set is still computed from
-    /// edges whose connection type matches one of `edge_types` (Pass A),
-    /// but the output keeps **every** edge between any two kept nodes,
-    /// not just the filter edge type itself.
+    /// Variant of `_save_subset_filtered_by_edge_type` producing the
+    /// *induced* subgraph: the kept-node set still comes from edges matching
+    /// `edge_types` (Pass A), but the output keeps **every** edge between any
+    /// two kept nodes. `(out, ["P50"])` therefore also keeps the citations,
+    /// editor edges and coauthor relations among those nodes — often 2–5×
+    /// more edges than the simple filter.
     ///
-    /// Useful for "all relations between articles and their authors":
-    /// `_save_subset_induced_by_edge_type(out, ["P50"])` keeps all P50
-    /// author edges *and* article→article citations (P2860), authorship-
-    /// shaped edges of other types (P2093 stated-author, P98 editor),
-    /// human→human relations between coauthors, etc. — every edge in
-    /// the source whose source and target are both endpoints of some
-    /// P50 edge.
-    ///
-    /// Output is bigger than the simple filter (often 2–5× more edges)
-    /// but matches the "subgraph induced by these node-set" intuition.
     /// Disk-backed sources only.
     #[pyo3(signature = (path, edge_types))]
     fn _save_subset_induced_by_edge_type(
@@ -1714,9 +1667,8 @@ impl KnowledgeGraph {
                 }
                 let group_secs = group_t0.elapsed().as_secs_f64();
 
-                // Edge filter is None — keeps every edge whose endpoints
-                // are both in the kept-node set (the rank index drops
-                // edges whose endpoints are out of scope automatically).
+                // Edge filter None keeps every edge with both endpoints in
+                // the kept set; the rank index drops out-of-scope endpoints.
                 let save_t0 = std::time::Instant::now();
                 save_subset_streaming_disk(
                     &inner,
@@ -1727,8 +1679,7 @@ impl KnowledgeGraph {
                 .map_err(PyErr::new::<pyo3::exceptions::PyIOError, _>)?;
                 let save_secs = save_t0.elapsed().as_secs_f64();
 
-                // We don't know the written edge count without re-scanning;
-                // report 0 here. Stats consumers can ask the loaded graph.
+                // Written edge count is unknown without re-scanning.
                 Ok((
                     scan_secs,
                     pass_a.stats.kept_node_count,
@@ -1743,8 +1694,7 @@ impl KnowledgeGraph {
         dict.set_item("group_per_type_secs", group_secs)?;
         dict.set_item("save_secs", save_secs)?;
         dict.set_item("kept_node_count", kept_node_count)?;
-        // kept_edge_count for induced mode is "all edges among kept nodes" —
-        // not known without re-scanning. Caller can query the output graph.
+        // No kept_edge_count key: query the output graph for it instead.
         let _ = kept_edge_count_written;
         Ok(dict.into())
     }
@@ -1852,10 +1802,8 @@ impl KnowledgeGraph {
                     crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
                 })?;
 
-                // Build the rank index from the bitset we got back —
-                // exercises `RankIndex` end-to-end on real disk data,
-                // and surfaces kept_count for differential checks
-                // against `count_ones`.
+                // Exercises `RankIndex` end-to-end on real disk data and
+                // surfaces kept_count for checks against `count_ones`.
                 let rank = RankIndex::from_bitset(result.kept_nodes);
 
                 dict.set_item("kept_node_count", result.stats.kept_node_count)?;

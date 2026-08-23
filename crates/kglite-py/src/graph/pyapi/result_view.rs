@@ -1,8 +1,3 @@
-// src/graph/pyapi/result_view.rs
-// Lazy ResultView — Polars-style result container.
-// Data stays in Rust and converts to Python only on access.
-//
-// Holds the #[pyclass] itself, like every other definition under pyapi/.
 // The Cypher-internal preprocessing logic stays in
 // `languages/cypher/py_convert.rs`; we import it here.
 
@@ -23,6 +18,57 @@ use pyo3::IntoPyObjectExt;
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
+
+/// Cell budget (`rows × columns`) at or below which a lazy-eligible result is
+/// materialised up front instead of holding the graph open — see
+/// [`ResultView::from_cypher_result_with_graph`].
+///
+/// **This is paid by every eligible read, so it is sized to disappear into
+/// noise, not to maximise coverage.** Materialising is a win when the caller
+/// consumes the rows (one batched pass beats per-row resolution by 12–15%
+/// across every size measured) and dead loss when it does not — a query whose
+/// rows are never read, or read only via `len()`, now does work it previously
+/// skipped. Since a read is far more common than a read held across a write,
+/// the tax on the former has to be invisible before the saving on the latter
+/// counts for anything.
+///
+/// Measured on a 100k-node graph, `MATCH (n:Item) RETURN n.title, n.value
+/// LIMIT k`, release build, never consumed — the shape the tracked
+/// `test_bench_cypher_match` / `test_bench_columnar_cypher_match` benchmarks
+/// run, and the shape that caught an earlier 4096-row version of this constant
+/// as a 2× regression:
+///
+/// | cells | cost |
+/// |---|---|
+/// | 32 (k=16)  | +1.6% |
+/// | 64 (k=32)  | +8.0% |
+/// | 128 (k=64) | +18.6% |
+/// | 200 (k=100)| +28.5% |
+///
+/// 32 is the last point that stays inside run-to-run noise. Budgeting in
+/// *cells* rather than rows keeps that guarantee when a RETURN is wide: cost
+/// tracks property reads, so 16 rows × 2 columns and 1 row × 32 columns are
+/// the same work and neither should be treated as cheaper than the other.
+///
+/// The shape it covers is the read-modify-write handler: one entity, or a
+/// handful, held across the write. There the saving is the entire fork — tens
+/// of milliseconds on a large graph against well under a microsecond of eager
+/// work. Bigger results stay deferred and keep the pin.
+const EAGER_MATERIALISE_MAX_CELLS: usize = 32;
+
+/// Lazy row backing — set when the planner flagged a terminal RETURN as
+/// `lazy_eligible`. The executor stops short of evaluating per-row
+/// projection expressions; `LazyRows` carries the unresolved
+/// `ResultRow.node_bindings` plus the `RETURN` items so cells materialise
+/// on demand. The graph `Arc` keeps the storage alive for the view's lifetime.
+struct LazyRows {
+    descriptor: LazyResultDescriptor,
+    graph: Arc<DirGraph>,
+    /// Memoised materialisation. `cache[i]` is `Some(row)` once
+    /// `materialise_row(i)` has run for that row index. Mutex (rather than
+    /// RwLock or cell) keeps it Send + Sync, which #[pyclass] requires.
+    cache: Mutex<Vec<Option<Vec<PreProcessedValue>>>>,
+}
 
 /// Lazy result container — data stays in Rust until you access it.
 ///
@@ -65,61 +111,6 @@ use std::sync::{Arc, Mutex};
 /// `"columns"` / `"rows"` are valid string keys). For a single column use the
 /// explicit accessor `r.column("col")` (returns a `list`), or `r.scalar()` /
 /// `r.one()` for the first cell / first row of small results.
-/// Lazy row backing — set when the planner flagged a terminal RETURN as
-/// `lazy_eligible`. The executor stops short of evaluating per-row
-/// projection expressions; `LazyRows` carries the unresolved
-/// `ResultRow.node_bindings` plus the `RETURN` items so cells materialise
-/// on demand. The graph `Arc` keeps the storage alive for the lifetime of
-/// the view; the `Mutex<Vec<...>>` caches materialised rows so repeat
-/// access doesn't re-read from disk.
-/// Cell budget (`rows × columns`) at or below which a lazy-eligible result is
-/// materialised up front instead of holding the graph open — see
-/// [`ResultView::from_cypher_result_with_graph`].
-///
-/// **This is paid by every eligible read, so it is sized to disappear into
-/// noise, not to maximise coverage.** Materialising is a win when the caller
-/// consumes the rows (one batched pass beats per-row resolution by 12–15%
-/// across every size measured) and dead loss when it does not — a query whose
-/// rows are never read, or read only via `len()`, now does work it previously
-/// skipped. Since a read is far more common than a read held across a write,
-/// the tax on the former has to be invisible before the saving on the latter
-/// counts for anything.
-///
-/// Measured on a 100k-node graph, `MATCH (n:Item) RETURN n.title, n.value
-/// LIMIT k`, release build, never consumed — the shape the tracked
-/// `test_bench_cypher_match` / `test_bench_columnar_cypher_match` benchmarks
-/// run, and the shape that caught an earlier 4096-row version of this constant
-/// as a 2× regression:
-///
-/// | cells | cost |
-/// |---|---|
-/// | 32 (k=16)  | +1.6% |
-/// | 64 (k=32)  | +8.0% |
-/// | 128 (k=64) | +18.6% |
-/// | 200 (k=100)| +28.5% |
-///
-/// 32 is the last point that stays inside run-to-run noise. Budgeting in
-/// *cells* rather than rows keeps that guarantee when a RETURN is wide: cost
-/// tracks property reads, so 16 rows × 2 columns and 1 row × 32 columns are
-/// the same work and neither should be treated as cheaper than the other.
-///
-/// The coverage this buys is small in rows and precisely the shape that
-/// matters: a read-modify-write handler reads one entity, or a handful, and
-/// holds it across the write. For that case the saving is the entire fork —
-/// tens of milliseconds on a large graph against well under a microsecond of
-/// eager work. Bigger results stay deferred and keep the pin; that residual is
-/// documented on `ResultView` rather than paid for by every reader.
-const EAGER_MATERIALISE_MAX_CELLS: usize = 32;
-
-struct LazyRows {
-    descriptor: LazyResultDescriptor,
-    graph: Arc<DirGraph>,
-    /// Memoised materialisation. `cache[i]` is `Some(row)` once
-    /// `materialise_row(i)` has run for that row index. Mutex (rather than
-    /// RwLock or cell) keeps it Send + Sync, which #[pyclass] requires.
-    cache: Mutex<Vec<Option<Vec<PreProcessedValue>>>>,
-}
-
 #[pyclass(name = "ResultView", module = "kglite", frozen)]
 pub struct ResultView {
     columns: Vec<String>,
@@ -127,23 +118,18 @@ pub struct ResultView {
     stats: Option<MutationStats>,
     profile: Option<Vec<ClauseStats>>,
     diagnostics: Option<QueryDiagnostics>,
-    /// When `Some`, `rows` is empty and reads route through `lazy`. The
-    /// executor flagged the RETURN as `lazy_eligible` and the receiver
-    /// hands cells back row-by-row from `pending`.
+    /// When `Some`, `rows` is empty and reads route through it.
     lazy: Option<LazyRows>,
 }
 
-// ========================================================================
-// Rust-only constructors (not exposed to Python)
-// ========================================================================
+// Rust-only constructors — not exposed to Python.
 
 impl ResultView {
-    /// Cypher read path: data already preprocessed during py.detach (GIL-free).
-    /// O(1) — just moves owned data into the struct.
     /// Cypher read path: data already preprocessed during py.detach
-    /// (GIL-free). `diagnostics` attaches elapsed-time / timeout
-    /// bookkeeping for agent feedback; pass `None` when not applicable
-    /// (mutation paths, centrality results).
+    /// (GIL-free); O(1), just moves owned data into the struct.
+    /// `diagnostics` attaches elapsed-time / timeout bookkeeping for agent
+    /// feedback; pass `None` when not applicable (mutation paths, centrality
+    /// results).
     pub fn from_preprocessed(
         columns: Vec<String>,
         rows: Vec<Vec<PreProcessedValue>>,
@@ -232,7 +218,6 @@ impl ResultView {
         Self::from_cypher_result(result)
     }
 
-    /// Centrality methods: resolves node_idx → NodeData lookups, builds rows.
     /// Pure Rust, no GIL needed.
     pub fn from_centrality(
         graph: &DirGraph,
@@ -296,7 +281,6 @@ impl ResultView {
         keys
     }
 
-    /// collect / sample with graph access: nodes + connection summaries.
     pub fn from_nodes_with_graph(
         graph: &DirGraph,
         node_indices: &[petgraph::graph::NodeIndex],
@@ -307,7 +291,6 @@ impl ResultView {
             .filter_map(|&idx| graph.node_view(idx))
             .collect();
 
-        // Compute union of property keys.
         // Fast path: if all nodes share a type, use TypeSchema (O(1) key discovery).
         let prop_keys: Vec<String> = if nodes_vec.len() > 50 {
             let first_type = nodes_vec[0].node_type();
@@ -371,8 +354,7 @@ impl ResultView {
         }
     }
 
-    /// Number of rows — handles both eager (`self.rows`) and lazy
-    /// (`self.lazy.pending`) backings without forcing materialisation.
+    /// Number of rows in either backing, without forcing materialisation.
     fn effective_len(&self) -> usize {
         if let Some(lz) = &self.lazy {
             return lz.descriptor.len();
@@ -383,14 +365,12 @@ impl ResultView {
     /// Materialise row `index` for the lazy backing, evaluating each
     /// `RETURN` item against the row's stashed `node_bindings` /
     /// `edge_bindings`. Caches the result so repeat access is O(1) after
-    /// the first call. Caller already holds the cache lock; we re-lock
-    /// inside to keep the borrow scope tight.
+    /// the first call.
     fn materialise_lazy_row(&self, index: usize) -> PyResult<Vec<PreProcessedValue>> {
         let lz = self
             .lazy
             .as_ref()
             .expect("materialise_lazy_row called without lazy backing");
-        // Quick read-after-write check: if cache hit, return clone.
         if let Some(row) = lz.cache.lock().unwrap().get(index).and_then(|c| c.clone()) {
             return Ok(row);
         }
@@ -400,7 +380,6 @@ impl ResultView {
                 .into_iter()
                 .map(PreProcessedValue::Plain)
                 .collect();
-        // Cache for repeat access.
         if let Some(slot) = lz.cache.lock().unwrap().get_mut(index) {
             *slot = Some(cells.clone());
         }
@@ -458,13 +437,10 @@ impl ResultView {
         Ok(self.rows.clone())
     }
 
-    /// Owned-clone of the column names; used in DataFrame construction
-    /// where the consumer needs an owned slice.
     pub fn columns_owned(&self) -> Vec<String> {
         self.columns.clone()
     }
 
-    /// Convert a single row to a Python dict. Used by __getitem__ and __iter__.
     fn row_to_py(&self, py: Python<'_>, index: usize) -> PyResult<Py<PyAny>> {
         let owned;
         let row: &Vec<PreProcessedValue> = if self.lazy.is_some() {
@@ -522,10 +498,6 @@ impl ResultView {
     }
 }
 
-// ========================================================================
-// Python protocol
-// ========================================================================
-
 #[pymethods]
 impl ResultView {
     fn __len__(&self) -> usize {
@@ -537,7 +509,6 @@ impl ResultView {
     }
 
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        // String key access — dict-like interface for 'columns' and 'rows'
         if let Ok(skey) = key.extract::<String>() {
             match skey.as_str() {
                 "columns" => return self.columns(py),
@@ -553,7 +524,6 @@ impl ResultView {
             }
         }
         if let Ok(idx) = key.extract::<isize>() {
-            // Integer indexing — returns a single row as dict
             let len = self.effective_len() as isize;
             let actual = if idx < 0 { len + idx } else { idx };
             if actual < 0 || actual >= len {
@@ -565,10 +535,9 @@ impl ResultView {
             }
             self.row_to_py(py, actual as usize)
         } else if let Ok(slice) = key.cast::<PySlice>() {
-            // Slice indexing — returns a new ResultView. Lazy slicing
-            // materialises the K rows and returns an eager sub-view; this
-            // is intentional — the caller asked for a snapshot subset, so
-            // forcing materialisation keeps the contract simple.
+            // Lazy slicing materialises the K rows and returns an eager
+            // sub-view: the caller asked for a snapshot subset, so forcing
+            // materialisation keeps the contract simple.
             let len = self.effective_len();
             let indices = slice.indices(len as isize)?;
             let mut sliced_rows = Vec::new();
@@ -724,8 +693,6 @@ impl ResultView {
     /// ```
     fn to_list(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let list = pyo3::types::PyList::empty(py);
-        // Intern the column-name dict keys ONCE and reuse them for every row,
-        // which avoids re-creating the same Python strings per cell.
         let keys: Vec<pyo3::Bound<'_, pyo3::types::PyString>> = self
             .columns
             .iter()
@@ -956,7 +923,6 @@ impl ResultView {
         let wkt_col = df.call_method1(py, "__getitem__", (geometry_column,))?;
         let geo_series = geo_series_cls.call_method1("from_wkt", (wkt_col,))?;
 
-        // df[geometry_column] = geo_series
         df.call_method1(py, "__setitem__", (geometry_column, geo_series))?;
 
         // gpd.GeoDataFrame(df, geometry=geometry_column, crs=crs)
@@ -970,10 +936,6 @@ impl ResultView {
         Ok(gdf.unbind())
     }
 }
-
-// ========================================================================
-// ResultIter — lazy iterator over ResultView rows
-// ========================================================================
 
 /// Iterator for ResultView. Converts one row per __next__ call.
 #[pyclass(name = "ResultIter", module = "kglite")]

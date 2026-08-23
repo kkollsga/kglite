@@ -1,11 +1,10 @@
 //! Write-capture backend — [`RecordingGraph`].
 //!
-//! Began as a read-logging validation wrapper; **now the production
-//! write-capture seam for the WAL**. `RecordingGraph<G>`
-//! wraps any `G: GraphRead`/`GraphWrite`, forwards every call, and — on
-//! the six mutation methods only — buffers a [`RawOp`] describing the
-//! change. Reads forward with **zero overhead** (no logging), so a
-//! durable graph pays the wrapper cost only on writes.
+//! The production write-capture seam for the WAL. `RecordingGraph<G>` wraps
+//! any `G: GraphRead`/`GraphWrite`, forwards every call, and — on the mutation
+//! methods only — buffers a [`RawOp`] describing the change. Reads forward
+//! with **zero overhead** (no logging), so a durable graph pays the wrapper
+//! cost only on writes.
 //!
 //! It drives the [`crate::graph::schema::GraphBackend::Recording`] enum
 //! variant: a durable graph's backend is
@@ -30,10 +29,10 @@
 //!
 //! ## `Send + Sync` without a `Mutex`
 //!
-//! All six mutation methods take `&mut self`, and reads no longer record,
-//! so the op buffer is a plain `Vec<RawOp>` mutated only through `&mut`.
-//! That keeps `RecordingGraph` `Send + Sync` (required for the PyO3
-//! `KnowledgeGraph` class) with no lock on the hot path.
+//! Every mutation method takes `&mut self` and reads do not record, so the op
+//! buffer is a plain `Vec<RawOp>` mutated only through `&mut`. That keeps
+//! `RecordingGraph` `Send + Sync` (required for the PyO3 `KnowledgeGraph`
+//! class) with no lock on the hot path.
 
 use crate::datatypes::Value;
 use crate::graph::schema::{EdgeData, InternedKey, NodeData, StringInterner};
@@ -47,13 +46,13 @@ use std::time::Instant;
 /// Which `GraphWrite` method produced an upsert: the entity came into
 /// existence (`add_node` / `add_edge`) or an existing one was mutated.
 ///
-/// The WAL does not care — [`MutationOp::UpsertNode`] is add-or-replace either
-/// way, which is what makes replay idempotent — so this is **in-memory capture
-/// state only** and never reaches a [`WalFrame`](crate::graph::wal::WalFrame).
-/// Change data capture *does* care: "created" and "updated" are different
-/// events to a consumer, and the method boundary is the only place that knows
-/// which one happened. Keeping the marker here rather than in `MutationOp`
-/// is what lets CDC distinguish them without moving `WAL_FORMAT_VERSION`.
+/// **In-memory capture state only** — never reaches a
+/// [`WalFrame`](crate::graph::wal::WalFrame), because
+/// [`MutationOp::UpsertNode`] is add-or-replace either way (which is what makes
+/// replay idempotent). Change data capture *does* care — "created" and
+/// "updated" are different events, and the method boundary is the only place
+/// that knows which one happened — so keeping the marker here rather than in
+/// `MutationOp` lets CDC distinguish them without moving `WAL_FORMAT_VERSION`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureOrigin {
     /// `add_node` / `add_edge` — the entity did not exist before this op.
@@ -66,14 +65,13 @@ pub enum CaptureOrigin {
 /// capture's `before` image.
 ///
 /// **Interner-keyed, like every other `RawOp` payload**, because the backend
-/// this is captured in does not own the `StringInterner`; resolution happens
-/// where `RemoveNode`'s type key is already resolved, at drain time.
+/// capturing it does not own the `StringInterner`; resolution happens at drain
+/// time, where `RemoveNode`'s type key is already resolved.
 ///
 /// Captured **at first touch** in a batch and never overwritten, so the image
-/// is the entity's state at the *start of the commit* rather than before the
-/// most recent write. That is the correct answer for a multi-statement
-/// transaction, whose consumer wants "what did this transaction change",
-/// not "what did its last statement change".
+/// is the entity's state at the *start of the commit* — the right answer for a
+/// multi-statement transaction, whose consumer wants "what did this transaction
+/// change", not "what did its last statement change".
 #[derive(Debug, Clone, PartialEq)]
 pub struct BeforeImage {
     /// The entity's title. `Value::Null` for an edge, which has none.
@@ -109,8 +107,8 @@ enum BeforeSlot {
 ///
 /// ## Why the before-image rides inside the op
 ///
-/// It could have been a side table drained alongside the buffer. Inlining it
-/// keeps `take_ops`/`truncate_ops`/`resolve_ops` — and therefore all six drain
+/// Inlining it, rather than a side table drained alongside the buffer, keeps
+/// `take_ops`/`truncate_ops`/`resolve_ops` — and therefore all six drain
 /// sites — working on exactly one sequence: rollback truncates images with the
 /// ops that carried them, and a drain cannot hand out ops whose images it left
 /// behind. The `Box` keeps the enum small for the overwhelmingly common case
@@ -181,7 +179,6 @@ impl ImageSite {
     }
 }
 
-/// The before-image slot of an op, for the ops that carry one.
 #[inline]
 fn op_image(op: &RawOp) -> Option<&BeforeImage> {
     match op {
@@ -217,19 +214,18 @@ fn edge_slot(idx: EdgeIndex) -> u32 {
     idx.index() as u32
 }
 
-/// Wrapper that captures write invocations on `G` as [`RawOp`]s while
-/// forwarding every `GraphRead`/`GraphWrite` method to it. See the
-/// module docs.
+/// Wrapper that captures writes on `G` as [`RawOp`]s while forwarding every
+/// `GraphRead`/`GraphWrite` method to it. See the module docs.
 #[derive(Debug, Default)]
 pub struct RecordingGraph<G: GraphRead> {
     inner: G,
     ops: Vec<RawOp>,
     /// Whether a **write-ahead log owner** installed this wrapper.
     ///
-    /// The wrapper has two consumers now: durability (which drains the buffer
-    /// into WAL frames) and change data capture (which derives events from the
-    /// same buffer). Only the first claims ownership, and three decisions read
-    /// that claim rather than the mere presence of the wrapper:
+    /// The wrapper has two consumers: durability (which drains the buffer into
+    /// WAL frames) and change data capture (which derives events from it). Only
+    /// the first claims ownership, and three decisions read that claim rather
+    /// than the mere presence of the wrapper:
     ///
     /// 1. [`crate::graph::durability::open_log`] refuses a second durable
     ///    owner — the refusal must fire for another *log* owner, not for a CDC
@@ -254,10 +250,9 @@ pub struct RecordingGraph<G: GraphRead> {
     /// First touch per entity in this batch: slot -> index in `ops` of the op
     /// that carries the entity's image.
     ///
-    /// Both halves matter. It makes the image the **commit-start** state
-    /// (later writes to the same entity find an entry and capture nothing),
-    /// and it caps the read cost at one whole-entity read per changed entity
-    /// per commit rather than one per write.
+    /// Enforces [`BeforeImage`]'s first-touch rule — a later write to the same
+    /// entity finds an entry and captures nothing — which also caps the read
+    /// cost at one whole-entity read per changed entity per commit.
     before_touched: HashMap<BeforeSlot, ImageSite>,
     /// An image a side-channel choke point read *before* its write, waiting
     /// for that write's op to claim it.
@@ -314,20 +309,18 @@ impl<G: GraphRead> RecordingGraph<G> {
         self.wal_owner
     }
 
-    /// Borrow the wrapped backend.
     #[inline]
     pub fn inner(&self) -> &G {
         &self.inner
     }
 
-    /// Mutable borrow of the wrapped backend (for mode-switch / teardown
-    /// paths that need the raw inner without recording).
+    /// The raw inner backend, for mode-switch / teardown paths that must write
+    /// without recording.
     #[inline]
     pub fn inner_mut(&mut self) -> &mut G {
         &mut self.inner
     }
 
-    /// Whether this wrapper captures before-images.
     #[inline]
     pub fn captures_before(&self) -> bool {
         self.capture_before
@@ -335,9 +328,8 @@ impl<G: GraphRead> RecordingGraph<G> {
 
     /// Turn before-image capture on or off.
     ///
-    /// Takes effect from the next write; images already buffered are left
-    /// alone, which is what a consumer of the current batch expects — the
-    /// events it is about to read were captured under the old setting and
+    /// Takes effect from the next write; images already buffered are left alone
+    /// — the current batch's events were captured under the old setting and
     /// re-reading the graph now could not reconstruct them anyway.
     #[inline]
     pub(crate) fn set_capture_before(&mut self, on: bool) {
@@ -429,7 +421,6 @@ impl<G: GraphRead> RecordingGraph<G> {
             .or_insert_with(|| ImageSite::at(at));
     }
 
-    /// Push an upsert op, capturing the node's first-touch image with it.
     fn push_node_upsert(&mut self, idx: NodeIndex, origin: CaptureOrigin) {
         let before = self.take_node_image(idx);
         if before.is_some() {
@@ -438,7 +429,6 @@ impl<G: GraphRead> RecordingGraph<G> {
         self.ops.push(RawOp::UpsertNode(idx, origin, before));
     }
 
-    /// Push an edge upsert op, capturing the edge's first-touch image with it.
     fn push_edge_upsert(&mut self, idx: EdgeIndex, origin: CaptureOrigin) {
         let before = self.take_edge_image(idx);
         if before.is_some() {
@@ -525,8 +515,6 @@ impl<G: GraphRead> RecordingGraph<G> {
         }))
     }
 
-    /// The edge's current state as a before-image. Edges carry no title and
-    /// no labels, so the image is its property set.
     /// Claim an offered image if it is for `slot`.
     ///
     /// An offer for a *different* slot is dropped rather than kept: it belongs
@@ -538,6 +526,8 @@ impl<G: GraphRead> RecordingGraph<G> {
         (offered_slot == slot).then_some(image)
     }
 
+    /// The edge's current state as a before-image. Edges carry no title and
+    /// no labels, so the image is its property set.
     fn take_edge_image(&mut self, idx: EdgeIndex) -> Option<Box<BeforeImage>> {
         if !self.capture_before
             || self
@@ -579,7 +569,6 @@ impl<G: GraphRead> RecordingGraph<G> {
         std::mem::take(&mut self.ops)
     }
 
-    /// Number of buffered (undrained) raw ops.
     #[inline]
     pub fn ops_len(&self) -> usize {
         self.ops.len()
@@ -594,11 +583,10 @@ impl<G: GraphRead> RecordingGraph<G> {
     /// never committed. Truncating to the pre-statement length is precise: it
     /// discards this statement's ops and keeps any earlier unflushed ones.
     ///
-    /// Crate-internal, unlike [`ops_len`](Self::ops_len): reading the capture
-    /// depth is safe for anyone, but truncating the buffer is only correct when
-    /// paired with the matching graph-state undo, which `GraphBackend`'s
-    /// rollback path is the sole site able to guarantee. Keeping it off the
-    /// public surface means no binding can drop committed ops on the floor.
+    /// Crate-internal, unlike [`ops_len`](Self::ops_len): truncating is only
+    /// correct when paired with the matching graph-state undo, which
+    /// `GraphBackend`'s rollback path is the sole site able to guarantee, so no
+    /// binding can reach it and drop committed ops on the floor.
     #[inline]
     pub(crate) fn truncate_ops(&mut self, len: usize) {
         self.ops.truncate(len);
@@ -613,8 +601,6 @@ impl<G: GraphRead> RecordingGraph<G> {
         //   slot here instead would let the next write re-capture, recording
         //   whatever an earlier *surviving* statement had already written as
         //   though it were the commit-start state.
-        //
-        // One pass, and the map is per-batch, so rollback stays cheap.
         self.before_touched.retain(|_, site| {
             if site.first_at >= len {
                 return false;
@@ -659,15 +645,13 @@ impl<G: GraphRead + Clone> Clone for RecordingGraph<G> {
         Self {
             inner: self.inner.clone(),
             ops: Vec::new(),
-            // A fork of a full-capture graph still captures: its commit
-            // publishes into the same log through the shared `Arc`.
+            // A fork of a full-capture graph still captures.
             capture_before: self.capture_before,
             before_touched: HashMap::new(),
             pending_before: None,
             forgotten_sites: Vec::new(),
-            // Ownership follows the data: a transaction fork or a copy-on-write
-            // view of a durably-owned graph is still durably owned, and its
-            // commit drains into the same log.
+            // Ownership follows the data: a fork of a durably-owned graph
+            // commits into the same log.
             wal_owner: self.wal_owner,
         }
     }
@@ -679,14 +663,11 @@ impl<G: GraphRead + Clone> Clone for RecordingGraph<G> {
 ///
 /// Storage-mode-agnostic by construction: the wrapper wraps the
 /// [`GraphBackend`](crate::graph::storage::backend::GraphBackend) *enum* rather
-/// than a concrete backend, so one capture path
-/// covers memory and mapped alike. (Disk is refused a rung earlier, by the
-/// durable-open path, because it has no logical WAL at all.)
-///
-/// Lifted out of the wheel: `Session::open_durable` and every non-Rust binding
-/// that opens a durable graph need exactly this, byte for byte, so it is core
-/// rather than per-binding (CLAUDE.md's boundary principle — "anything two or
-/// more wrappers would write identically belongs in `kglite::api`").
+/// than a concrete backend, so one capture path covers memory and mapped alike.
+/// (Disk is refused a rung earlier, by the durable-open path, because it has no
+/// logical WAL at all.) Core rather than per-binding because
+/// `Session::open_durable` and every non-Rust binding that opens a durable
+/// graph needs exactly this, byte for byte.
 pub fn wrap_for_durability(dir: &mut crate::graph::dir_graph::DirGraph) {
     dir.graph.wrap_for_durability();
 }
@@ -697,11 +678,11 @@ pub fn wrap_for_durability(dir: &mut crate::graph::dir_graph::DirGraph) {
 /// no longer exists (removed later in the same batch) are dropped — the
 /// corresponding remove op already captures the final state.
 ///
-/// `secondary_labels` yields a node's current secondary labels by name,
-/// ordered as `DirGraph::node_labels` orders them. It is a callback rather
-/// than a field read because labels are not backend state at all: they live
-/// in `DirGraph::secondary_label_index`, one layer above the `graph` this
-/// function is given. Callers pass `DirGraph::secondary_label_names`.
+/// `secondary_labels` yields a node's current secondary labels by name, ordered
+/// as `DirGraph::node_labels` orders them. A callback rather than a field read
+/// because labels are not backend state: they live in
+/// `DirGraph::secondary_label_index`, above the `graph` given here. Callers
+/// pass `DirGraph::secondary_label_names`.
 pub fn resolve_ops(
     raw: &[RawOp],
     graph: &impl GraphRead,
@@ -780,8 +761,7 @@ pub fn resolve_ops(
     out
 }
 
-/// Resolve a node index to its logical `(node_type, id)`, or `None` if
-/// the node is gone.
+/// A node's logical `(node_type, id)`, or `None` if it is gone.
 fn logical_node(
     graph: &impl GraphRead,
     idx: NodeIndex,
@@ -810,10 +790,6 @@ where
         G::deserialize(de).map(Self::new)
     }
 }
-
-// ─────────────────────────────────────────────────────────────────────
-// GraphRead — log every call, forward to `self.inner`.
-// ─────────────────────────────────────────────────────────────────────
 
 impl<G: GraphRead> GraphRead for RecordingGraph<G> {
     type NodeIndicesIter<'a>
@@ -1106,11 +1082,8 @@ impl<G: GraphRead> GraphRead for RecordingGraph<G> {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// GraphWrite — forward to the inner backend AND buffer a RawOp. This is
-// the WAL capture seam; see the module docs.
-// ─────────────────────────────────────────────────────────────────────
-
+// GraphWrite — forward to the inner backend AND buffer a RawOp. This is the
+// WAL capture seam; see the module docs.
 impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
     // ── Column-store ownership: delegated, never recorded ──
     //
@@ -1153,6 +1126,9 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
     // resolving the node's final state at flush matches what `node_weight_mut`
     // does, and is what keeps a columnar `SET` in the WAL now that it no longer
     // passes through `node_weight_mut` at all.
+    //
+    // **Order matters in every one of them**: the push runs before the inner
+    // call, so the before-image it captures is genuinely pre-write.
     #[inline]
     fn set_node_property(
         &mut self,
@@ -1161,7 +1137,6 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
         value: Value,
     ) {
         if self.inner.node_weight(idx).is_some() {
-            // Before the inner call, so the image is genuinely pre-write.
             self.push_node_upsert(idx, CaptureOrigin::Update);
         }
         self.inner.set_node_property(idx, key, value);
@@ -1173,7 +1148,6 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
     #[inline]
     fn set_node_title(&mut self, idx: NodeIndex, value: Value) {
         if self.inner.node_weight(idx).is_some() {
-            // Before the inner call, so the image is genuinely pre-write.
             self.push_node_upsert(idx, CaptureOrigin::Update);
         }
         self.inner.set_node_title(idx, value);
@@ -1187,7 +1161,6 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
         value: Value,
     ) {
         if self.inner.node_weight(idx).is_some() {
-            // Before the inner call, so the image is genuinely pre-write.
             self.push_node_upsert(idx, CaptureOrigin::Update);
         }
         self.inner.set_node_property_if_absent(idx, key, value);
@@ -1200,7 +1173,6 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
         key: crate::graph::schema::InternedKey,
     ) -> Option<Value> {
         if self.inner.node_weight(idx).is_some() {
-            // Before the inner call, so the image is genuinely pre-write.
             self.push_node_upsert(idx, CaptureOrigin::Update);
         }
         self.inner.remove_node_property(idx, key)
@@ -1213,7 +1185,6 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
         key: crate::graph::schema::InternedKey,
     ) -> Option<Value> {
         if self.inner.node_weight(idx).is_some() {
-            // Before the inner call, so the image is genuinely pre-write.
             self.push_node_upsert(idx, CaptureOrigin::Update);
         }
         self.inner.clear_node_property(idx, key)
@@ -1226,7 +1197,6 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
         pairs: Vec<(crate::graph::schema::InternedKey, Value)>,
     ) {
         if self.inner.node_weight(idx).is_some() {
-            // Before the inner call, so the image is genuinely pre-write.
             self.push_node_upsert(idx, CaptureOrigin::Update);
         }
         self.inner.replace_node_properties(idx, pairs);
@@ -1241,7 +1211,6 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
         // would otherwise hold all of `self`). Only record when the node
         // exists (a None borrow changes nothing).
         if self.inner.node_weight(idx).is_some() {
-            // Before the inner call, so the image is genuinely pre-write.
             self.push_node_upsert(idx, CaptureOrigin::Update);
         }
         self.inner.node_weight_mut(idx)
@@ -1282,8 +1251,7 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
             .inner
             .node_type_of(idx)
             .zip(self.inner.get_node_id(idx));
-        // A delete is the one change whose *only* informative half is the
-        // before-image, so it is read here — the last moment the node exists.
+        // Read here, the last moment the node exists.
         let before = self
             .take_node_image(idx)
             .or_else(|| self.copy_node_image(idx));
@@ -1355,15 +1323,10 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// In-source parity tests — the parity matrix run against
-// RecordingGraph(MemoryGraph) / RecordingGraph(MappedGraph) /
-// RecordingGraph(DiskGraph).
-//
-// Exercises the GraphBackend::Recording enum dispatcher end-to-end so
-// the new variant is not dead code.
-// ─────────────────────────────────────────────────────────────────────
-
+// In-source parity tests, run against RecordingGraph over each of
+// MemoryGraph / MappedGraph / DiskGraph, and driving the
+// GraphBackend::Recording enum dispatcher end-to-end so that arm is not dead
+// code.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1371,8 +1334,6 @@ mod tests {
     use crate::graph::storage::disk::graph::DiskGraph;
     use std::collections::HashMap;
     use tempfile::TempDir;
-
-    // ── fixtures ─────────────────────────────────────────────────────
 
     fn make_memory_backend(interner: &mut StringInterner) -> GraphBackend {
         let mut g = MemoryGraph::new();
@@ -1432,8 +1393,6 @@ mod tests {
         let dg = DiskGraph::new_at_path(dir.path()).expect("create disk graph");
         GraphBackend::Disk(Box::new(dg))
     }
-
-    // ── helpers ──────────────────────────────────────────────────────
 
     fn collect_read_surface(g: &impl GraphRead) -> (usize, usize, usize) {
         let nc = g.node_count();
@@ -1542,7 +1501,6 @@ mod tests {
             &mut interner,
         ));
         let _ = rg.take_ops(); // drain the add
-                               // SET age = 41 via the mutable-borrow path.
         let age_key = interner.get_or_intern("age");
         rg.set_node_property(a, age_key, Value::Int64(41));
         let raw = rg.take_ops();
@@ -1718,8 +1676,6 @@ mod tests {
         assert_eq!(collect_read_surface(&backend_a), collect_read_surface(&rg));
     }
 
-    // ── GraphWrite passthrough ────────────────────────────────────────
-
     #[test]
     fn recording_write_passthrough_memory() {
         let mut interner = StringInterner::new();
@@ -1746,8 +1702,6 @@ mod tests {
         assert_eq!(rg.edge_count(), e0 + 1);
     }
 
-    // ── is_* predicates forward through the wrapper ──────────────────
-
     #[test]
     fn recording_is_predicates_forward() {
         let mut interner = StringInterner::new();
@@ -1770,8 +1724,6 @@ mod tests {
         assert!(disk.is_disk());
     }
 
-    // ── GraphBackend::Recording variant drives the dispatcher ────────
-
     #[test]
     fn enum_variant_dispatches_reads_through_recording_layer() {
         let mut interner = StringInterner::new();
@@ -1783,7 +1735,7 @@ mod tests {
 
         // Every trait call goes through:
         //   GraphBackend::Recording dispatcher arm
-        //   → RecordingGraph<GraphBackend>::node_count (logs + delegates)
+        //   → RecordingGraph<GraphBackend>::node_count
         //     → GraphBackend::Memory dispatcher arm
         //       → MemoryGraph::node_count
         assert_eq!(wrapped.node_count(), expected_nc);
@@ -1799,7 +1751,6 @@ mod tests {
             "KNOWS edge should appear through the recording layer"
         );
 
-        // Reads through the enum dispatcher capture nothing.
         let GraphBackend::Recording(rg) = wrapped else {
             unreachable!()
         };
@@ -1815,7 +1766,6 @@ mod tests {
         let mut interner = StringInterner::new();
         let mut wrapped =
             GraphBackend::Recording(Box::new(RecordingGraph::new(GraphBackend::new())));
-        // A write through the enum dispatcher reaches the recording layer.
         wrapped.add_node(NodeData::new(
             Value::Int64(1),
             Value::String("Alice".into()),
@@ -1835,29 +1785,24 @@ mod tests {
 
     #[test]
     fn enum_variant_round_trips_every_backend() {
-        // Memory
         let mut i1 = StringInterner::new();
         let wrapped_mem =
             GraphBackend::Recording(Box::new(RecordingGraph::new(make_memory_backend(&mut i1))));
         assert!(wrapped_mem.is_memory());
         assert_eq!(wrapped_mem.node_count(), 2);
 
-        // Mapped
         let mut i2 = StringInterner::new();
         let wrapped_mapped =
             GraphBackend::Recording(Box::new(RecordingGraph::new(make_mapped_backend(&mut i2))));
         assert!(wrapped_mapped.is_mapped());
         assert_eq!(wrapped_mapped.node_count(), 2);
 
-        // Disk
         let dir = TempDir::new().expect("tempdir");
         let wrapped_disk =
             GraphBackend::Recording(Box::new(RecordingGraph::new(make_disk_backend(&dir))));
         assert!(wrapped_disk.is_disk());
         assert_eq!(wrapped_disk.node_count(), 0);
     }
-
-    // ── buffer semantics: take + clone ───────────────────────────────
 
     #[test]
     fn take_ops_empties_the_buffer() {
@@ -1881,7 +1826,6 @@ mod tests {
         let mut interner = StringInterner::new();
         let mut rg: RecordingGraph<GraphBackend> =
             RecordingGraph::new(make_memory_backend(&mut interner));
-        // The recorded path captures.
         let _ = rg.node_weight_mut(NodeIndex::new(0));
         assert_eq!(rg.ops_len(), 1);
         let _ = rg.take_ops();
@@ -1908,8 +1852,6 @@ mod tests {
         assert_eq!(rg.ops_len(), 1);
         assert_eq!(rg2.ops_len(), 0, "a clone starts with a fresh op buffer");
     }
-
-    // ── Edge iterator semantics forward correctly ────────────────────
 
     #[test]
     fn edge_references_forward_through_recording() {

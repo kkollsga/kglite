@@ -458,25 +458,21 @@ impl IdIndexStore {
     /// per type until the next invalidation. Returns None when the id simply
     /// isn't present (no scan).
     ///
-    /// This is the fix for the O(node-position) linear-scan footgun: the
-    /// read path (`MATCH (n {id:X})`, `MERGE` match) used to fall back to a
-    /// full scan whenever the index was absent (after `add_nodes` /
-    /// `CREATE` / `DELETE`). Now it self-heals on first read, regardless of
-    /// how the graph was built or mutated. (issue #20)
+    /// Without this, the read path (`MATCH (n {id:X})`, `MERGE` match) falls
+    /// back to a full scan whenever the index is absent — after `add_nodes` /
+    /// `CREATE` / `DELETE`. (issue #20)
     pub fn lookup_or_build(
         &self,
         name: &str,
         id: &Value,
         build: impl FnOnce() -> TypeIdIndex,
     ) -> Option<NodeIndex> {
-        // Fast path: already cached in the overlay.
         {
             let ov = self.overlay.read().unwrap();
             if let Some(idx) = ov.get(name) {
                 return idx.get(id);
             }
         }
-        // Base (mmap) layer, unless explicitly invalidated.
         if !self.removed.contains(name) {
             if let Some(base) = self.base.as_deref() {
                 if base.contains(name) {
@@ -494,12 +490,9 @@ impl IdIndexStore {
     }
 
     /// Ensure `name` is indexed (overlay or base) — the `&self` pre-warm
-    /// counterpart of the self-healing read path. No-op when already
-    /// indexed; otherwise builds via `build` and caches it in the overlay
-    /// (idempotent under a concurrent race: the first writer wins, both
-    /// indices are equal). Lets callers pre-build id indices without
-    /// `&mut` — and therefore without `Arc::make_mut` deep-copying a
-    /// shared graph.
+    /// counterpart of the self-healing read path, so callers can pre-build an
+    /// id index without `&mut` and its `Arc::make_mut` deep copy. Racing
+    /// builders are harmless: the first writer wins and both indices are equal.
     pub fn ensure(&self, name: &str, build: impl FnOnce() -> TypeIdIndex) {
         if self.contains_key(name) {
             return;
@@ -558,8 +551,6 @@ impl IdIndexStore {
     ) -> Option<R> {
         let overlay = self.overlay.read().unwrap();
         let source_entry = overlay.get(source)?;
-        // Same type: one entry serves both ends, exactly as the materializing
-        // path shared its single map.
         let target_entry = if source == target {
             source_entry
         } else {
@@ -613,9 +604,9 @@ impl IdIndexStore {
     ///
     /// Deleting one node used to `remove()` the entire type index, so the next
     /// id lookup rebuilt it by scanning every node of the type — an O(N_type)
-    /// cost charged to a single-node delete. The create path already maintains
-    /// this index incrementally (see the `pk_id` match in the Cypher create
-    /// executor); this is the same treatment for the delete side.
+    /// cost charged to a single-node delete. The create path maintains the
+    /// index incrementally the same way (the `pk_id` match in the create
+    /// executor).
     ///
     /// Falls back to whole-type invalidation, and returns `false`, whenever the
     /// index is not overlay-resident — an unbuilt type has nothing to edit, and
@@ -691,7 +682,6 @@ impl IdIndexStore {
 
     fn snapshot(&self) -> Vec<(String, TypeIdIndex)> {
         let overlay = self.overlay.read().unwrap();
-        // Overlay entries first, then base entries that aren't shadowed.
         let mut out: Vec<(String, TypeIdIndex)> = overlay
             .iter()
             .map(|(k, v)| (k.clone(), v.materialize()))
@@ -787,10 +777,6 @@ fn coerce_to_u32(id: &Value) -> Option<u32> {
     }
 }
 
-// =============================================================================
-// Writer
-// =============================================================================
-
 /// Write `id_indices.bin` (raw mmap layout). Iterates the store's union view
 /// (overlay + base) so saves capture both fresh mutations and unchanged
 /// base entries.
@@ -817,9 +803,6 @@ pub fn write_id_indices_bin(
     store: &IdIndexStore,
     interner: &StringInterner,
 ) -> Result<(), String> {
-    // Collect (type_key, materialized) pairs sorted by type_key.
-    // `store.iter()` already returns owned, fully-materialized indices
-    // (overlay + unshadowed base).
     let mut entries: Vec<(u64, TypeIdIndex)> = Vec::new();
     for (name, materialized) in store.iter() {
         let Some(key) = interner.try_resolve_to_key(&name) else {

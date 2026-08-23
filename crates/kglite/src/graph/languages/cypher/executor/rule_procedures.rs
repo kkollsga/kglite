@@ -1,17 +1,14 @@
 //! Structural-validator rule procedures exposed via Cypher `CALL`.
 //!
-//! Six procedures replace the legacy Python rule-pack stack from 0.8.16–
-//! 0.8.18. Each walks the graph directly via [`GraphRead`] and emits
-//! [`ResultRow`]s with node bindings — no recursion through the executor,
-//! no YAML parse, no `g.cypher()` round-trip per rule. The rows flow into
-//! surrounding Cypher (`WHERE` / `ORDER BY` / `LIMIT` / `RETURN`) the
-//! same way [`super::call_clause::CypherExecutor::centrality_to_rows`]
-//! does for `pagerank`.
+//! Each walks the graph directly via [`GraphRead`] and emits [`ResultRow`]s
+//! with node bindings — no recursion through the executor, no `g.cypher()`
+//! round-trip per rule — so the rows flow into the surrounding Cypher
+//! (`WHERE` / `ORDER BY` / `LIMIT` / `RETURN`) the same way
+//! [`super::call_clause::CypherExecutor::centrality_to_rows`] does for
+//! `pagerank`.
 //!
-//! Naming follows the existing flat-name convention (`pagerank`,
-//! `cluster`, `connected_components`); this module owns their family
-//! dispatcher while `call_clause::execute_call` remains the shared CALL
-//! validation and budget choke point.
+//! This module owns the family dispatcher; `call_clause::execute_call`
+//! remains the shared CALL validation and budget choke point.
 
 use std::collections::HashMap;
 
@@ -60,7 +57,7 @@ pub(super) fn execute_rule_procedure(
 ///
 /// - **Default** (no `link_type`, no `direction`) — node has zero edges
 ///   in any direction (the historical "graph-theoretically isolated"
-///   semantics). Useful as a baseline integrity check.
+///   semantics).
 /// - **`link_type: 'CALLS'`** — restrict the edge-existence check to
 ///   that connection type only. Other edges (e.g. `DEFINES`, `HAS_METHOD`)
 ///   don't disqualify the node.
@@ -285,14 +282,12 @@ pub(super) fn execute_duplicate_title(
     let yield_var = require_node_yield(yield_items, "duplicate_title", "node")?;
     let nodes = type_indices(graph, &node_type)?;
 
-    // Pass 1 — count titles
     let mut counts: HashMap<String, u32> = HashMap::with_capacity(nodes.len());
     for nidx in nodes.iter() {
         if let Some(title) = title_of(graph, nidx) {
             *counts.entry(title).or_insert(0) += 1;
         }
     }
-    // Pass 2 — emit nodes whose title count > 1
     let mut rows = Vec::new();
     for nidx in nodes.iter() {
         if let Some(title) = title_of(graph, nidx) {
@@ -310,15 +305,8 @@ pub(super) fn execute_duplicate_title(
 /// other node of the same type. The sibling of `duplicate_title` for the
 /// identity column — useful after bulk writes, since a `CREATE` fanned out
 /// over a multi-row `MATCH` (standard Cypher: one create per row) can mint
-/// several nodes with the same id without complaint. Aggregate downstream:
-///
-/// ```cypher
-/// CALL duplicate_id({type: 'Artifact'}) YIELD node
-/// WITH node.id AS i, collect(node) AS dups
-/// WHERE size(dups) > 1
-/// RETURN i, size(dups) AS count
-/// ORDER BY count DESC LIMIT 20
-/// ```
+/// several nodes with the same id without complaint. Aggregate downstream as
+/// in [`execute_duplicate_title`].
 ///
 /// @procedure: duplicate_id
 pub(super) fn execute_duplicate_id(
@@ -330,14 +318,12 @@ pub(super) fn execute_duplicate_id(
     let yield_var = require_node_yield(yield_items, "duplicate_id", "node")?;
     let nodes = type_indices(graph, &node_type)?;
 
-    // Pass 1 — count ids
     let mut counts: HashMap<String, u32> = HashMap::with_capacity(nodes.len());
     for nidx in nodes.iter() {
         if let Some(id) = id_of(graph, nidx) {
             *counts.entry(id).or_insert(0) += 1;
         }
     }
-    // Pass 2 — emit nodes whose id count > 1
     let mut rows = Vec::new();
     for nidx in nodes.iter() {
         if let Some(id) = id_of(graph, nidx) {
@@ -352,9 +338,8 @@ pub(super) fn execute_duplicate_id(
 /// `CALL inverse_violation({rel_a: 'parent_of', rel_b: 'child_of'}) YIELD a, b`
 ///
 /// Yields one row per `(a, b)` pair where `(a)-[rel_a]->(b)` exists but
-/// the inverse `(b)-[rel_b]->(a)` does not. Useful when two relations
-/// are declared as logical inverses (parent_of/child_of, manages/works_for,
-/// cites/cited_by) and you want to find unidirectional cases.
+/// the inverse `(b)-[rel_b]->(a)` does not — the unidirectional cases where
+/// two relations are declared logical inverses (parent_of/child_of).
 ///
 /// @procedure: inverse_violation
 pub(super) fn execute_inverse_violation(
@@ -393,8 +378,8 @@ pub(super) fn execute_inverse_violation(
 /// `CALL transitivity_violation({rel: 'subClassOf'}) YIELD a, b, c`
 ///
 /// For every `(a)-[rel]->(b)-[rel]->(c)` chain, yields the triple when no
-/// direct `(a)-[rel]->(c)` edge exists. Generalizes the OCTF subclass-fold
-/// audit pattern. Pairs with `cycle_2step` for the cycle case.
+/// direct `(a)-[rel]->(c)` edge exists. Pairs with `cycle_2step` for the
+/// cycle case.
 ///
 /// @procedure: transitivity_violation
 pub(super) fn execute_transitivity_violation(
@@ -410,7 +395,6 @@ pub(super) fn execute_transitivity_violation(
 
     let mut rows = Vec::new();
     for a in graph.graph.node_indices() {
-        // Collect direct successors of a (used for the closure check).
         let direct_a: std::collections::HashSet<NodeIndex> = graph
             .graph
             .edges_directed(a, Direction::Outgoing)
@@ -484,7 +468,7 @@ pub(super) fn execute_cardinality_violation(
 /// `CALL type_domain_violation({edge: 'CITES', expected_source: 'Case'}) YIELD source, target`
 ///
 /// Yields edges of `edge` whose source node is not of `expected_source`
-/// type. Useful as a post-load schema check.
+/// type.
 ///
 /// @procedure: type_domain_violation
 pub(super) fn execute_type_domain_violation(
@@ -594,8 +578,8 @@ pub(super) fn execute_parallel_edges(
 
 /// `CALL null_property({type: 'Person', property: 'email'}) YIELD node`
 ///
-/// Yields nodes of `type` where `property` is absent or null. Pairs with
-/// `missing_required_edge` for the property side of the integrity story.
+/// Yields nodes of `type` where `property` is absent, null, or the empty
+/// string.
 ///
 /// @procedure: null_property
 pub(super) fn execute_null_property(
@@ -631,13 +615,13 @@ pub(super) fn execute_null_property(
 /// `CALL kg_knn({lat: 60.4, lon: 5.3, target_type: 'Field', k: 5}) YIELD node, distance_m`
 ///
 /// Returns the *k* nodes of `target_type` closest (geodesic) to a given
-/// `(lat, lon)` coordinate. Uses an in-memory R-tree built from each
-/// candidate's bounding box for fast spatial pre-filtering, then
-/// computes the exact geodesic distance per surviving candidate.
+/// `(lat, lon)` coordinate, by scanning every node of the type and keeping
+/// the k smallest distances.
 ///
 /// Nodes without spatial config (no `location`/`geometry` mapping) are
-/// skipped silently. For point-only configs, distance is point-to-point;
-/// for polygon-or-line geometries, distance is to the nearest edge.
+/// skipped silently. Distance is point-to-point from the configured
+/// `location`; when that is missing, it is measured to the *centroid* of the
+/// `geometry` WKT, not to its nearest edge.
 ///
 /// @procedure: kg_knn
 pub(super) fn execute_kg_knn(
@@ -964,8 +948,6 @@ fn id_of(graph: &DirGraph, nidx: NodeIndex) -> Option<String> {
     }
 }
 
-// ─────────────────────────── helpers ────────────────────────────────
-
 const OUTBOUND: bool = true;
 const INBOUND: bool = false;
 
@@ -987,9 +969,8 @@ fn require_string_param(
     }
 }
 
-/// Optional-string param. Returns `Ok(None)` when absent; `Err` when
-/// present but not a string (so misuse surfaces loudly instead of
-/// silently falling back to the default).
+/// `Err` rather than the default when the param is present but not a string,
+/// so misuse surfaces loudly.
 fn optional_string_param(
     params: &HashMap<String, Value>,
     key: &str,
@@ -1009,8 +990,6 @@ pub(super) fn require_node_yield(
     proc: &str,
     expected: &str,
 ) -> Result<String, String> {
-    // A single find() match rather than `any()` + `find().unwrap()`, so
-    // there is no unwrap surface to maintain across refactors.
     if let Some(item) = yield_items.iter().find(|y| y.name == expected) {
         // Use alias when present so the binding is reachable downstream
         // by the name the agent picked.
@@ -1037,10 +1016,8 @@ fn require_two_node_yields(
     Ok((av, bv))
 }
 
-/// Validate that `expected` appears in `yield_items` and return the alias
-/// the caller assigned (or the original name). Used for non-node yields
-/// (e.g. `count`, `values`) that flow into `row.projected` rather than
-/// `row.node_bindings`.
+/// The [`require_node_yield`] lookup, for yields that flow into
+/// `row.projected` rather than `row.node_bindings` (`count`, `distance_m`).
 fn require_scalar_yield(
     yield_items: &[YieldItem],
     proc: &str,

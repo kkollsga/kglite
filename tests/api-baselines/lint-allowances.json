@@ -527,7 +527,7 @@
       "classification": "dead-code"
     },
     {
-      "identity": "crates/kglite/src/graph/core/pattern_matching/pattern.rs::enum:RelEdgePredicate::dead_code",
+      "identity": "crates/kglite/src/graph/core/pattern_matching/pattern.rs::fn:eval:pub fn eval( &self, connection_type: InternedKey, peer_is_start: bool, edge_source: NodeIndex, edge_target: NodeIndex, get_prop: &impl Fn(&str) -> Option<Value>, ) -> bool::dead_code",
       "classification": "dead-code"
     },
     {

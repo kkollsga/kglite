@@ -22,7 +22,6 @@ pub enum OpenDisposition {
     Created,
 }
 
-/// Graph plus the lifecycle decision made while opening it.
 pub struct OpenGraphResult {
     pub graph: Arc<DirGraph>,
     pub disposition: OpenDisposition,
@@ -39,8 +38,6 @@ pub struct OpenGraphResult {
 
 /// Cross-process writer ownership for a graph path. Both sidecars are
 /// persistent; OS lock teardown, not PID-file deletion, owns liveness.
-///
-/// Ownership is split across two files on purpose:
 ///
 /// - `<path>.lock` is the lock token, and holds **no** data. It is what
 ///   [`fs2`] locks, and it is deliberately still this exact path so that a
@@ -207,8 +204,7 @@ fn writer_owner_path(graph_path: &Path) -> std::path::PathBuf {
 /// Deliberately infallible: this is naming, not locking. The caller has
 /// already won the lock at this point, and failing an acquisition because a
 /// cosmetic sidecar could not be written would trade a working guard for a
-/// better error message. A failure here costs only the pid in a message that
-/// someone else may never see.
+/// better error message.
 fn publish_owner_record(owner_path: &Path) {
     let record = format!(
         "pid={}\nsince={}\n",
@@ -223,10 +219,9 @@ fn publish_owner_record(owner_path: &Path) {
 /// the failed lock acquisition that precedes every read, so a record left
 /// behind by a crashed process is never mistaken for a live holder — nothing
 /// reads it unless someone currently holds the lock.
-/// Public because a binding that wants the pid must not have to regex it back
-/// out of [`contended_message`]'s sentence — the Java wrapper's `holder()`
-/// promised "pid, and when the lease was taken" while returning the whole
-/// paragraph, which is the shape this type exists to remove.
+///
+/// Public so a binding can take the pid as data rather than parsing prose —
+/// see [`LeaseRefusal`].
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct LeaseHolder {
     /// The holding process id, when the record could be read.
@@ -275,10 +270,9 @@ impl LeaseHolder {
         holder
     }
 
-    /// Whether the reported holder is this very process — an un-closed handle
-    /// in the caller's own code, not a deployment problem. Bindings that
-    /// render their own message need the same distinction
-    /// [`Self::describe`] makes, without parsing its prose.
+    /// Whether the reported holder is this very process. Exposed so a binding
+    /// rendering its own message gets the distinction [`Self::describe`] makes
+    /// without parsing its prose.
     pub fn is_self(&self) -> bool {
         self.pid == Some(std::process::id())
     }
@@ -556,10 +550,7 @@ fn unrecovered_sidecar_check(path: &Path, checkpoint_lsn: u64) -> io::Result<()>
 /// attaches a log at a logging level *is* the recovery — `open_durable` replays
 /// those frames before the first commit — so for it the same sidecar is the
 /// normal state after a crash, not a fault. Declaring the level rather than
-/// inferring it keeps that decision at the one place that knows the answer: a
-/// server whose `--durability` is `off` still gets the refusal, and a graph
-/// created at a logging level over an orphaned sidecar replays it instead of
-/// discarding it.
+/// inferring it keeps that decision at the one place that knows the answer.
 ///
 /// The caller must actually attach the log. Passing a logging level and then
 /// not opening one leaves exactly the hazard the refusal exists to stop.

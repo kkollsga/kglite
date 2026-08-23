@@ -2,9 +2,6 @@
 //! the first-MATCH pattern loop and the subsequent-MATCH shared-variable
 //! join, including cross-pattern relationship uniqueness (the openCypher
 //! trail rule) and pre-bound relationship-variable constraints.
-//!
-//! Split out of `executor/mod.rs` (0.12.x) — the mod file keeps the
-//! CypherExecutor struct + orchestration; the MATCH machinery lives here.
 
 use super::*;
 use crate::graph::core::membership::MembershipSet;
@@ -44,7 +41,6 @@ use crate::graph::core::membership::MembershipSet;
 /// driving row, computed once by [`CypherExecutor::subsequent_match_rows`].
 struct DrivingRowPlan<'p> {
     clause: &'p MatchClause,
-    /// One optional query-local equality index per pattern.
     transient_indexes: Vec<Option<transient_index::TransientEqIndex>>,
     limit_hint: Option<usize>,
     enforce_rel_uniqueness: bool,
@@ -54,10 +50,6 @@ struct DrivingRowPlan<'p> {
 }
 
 impl<'a> CypherExecutor<'a> {
-    // ========================================================================
-    // Variable resolution for pattern properties
-    // ========================================================================
-
     /// Resolve `EqualsVar(name)` and `EqualsNodeProp { var, prop }` references
     /// in pattern properties against the current row. Converts them to
     /// `Equals(value)` so the PatternExecutor can match them (and pick an
@@ -154,10 +146,6 @@ impl<'a> CypherExecutor<'a> {
         }
         false
     }
-
-    // ========================================================================
-    // First-pattern row construction
-    // ========================================================================
 
     /// The variable the *pattern matcher* may deduplicate by while it expands,
     /// or `None` to leave the dedup to the row loop below.
@@ -284,7 +272,7 @@ impl<'a> CypherExecutor<'a> {
                         }
                         continue;
                     }
-                    Err(e) => return Err(e), // Propagate errors (e.g. missing param)
+                    Err(e) => return Err(e),
                 }
             }
             if let Some(idx) = dedup_idx {
@@ -309,17 +297,12 @@ impl<'a> CypherExecutor<'a> {
         Ok(Some(rows))
     }
 
-    // ========================================================================
-    // MATCH
-    // ========================================================================
-
     pub(super) fn execute_match(
         &self,
         clause: &MatchClause,
         existing: ResultSet,
         inline_where: Option<&Predicate>,
     ) -> Result<ResultSet, String> {
-        // Check for shortestPath assignments
         if let Some(pa) = clause.path_assignments.first() {
             if pa.is_shortest_path {
                 return self.execute_shortest_path_match(clause, pa, existing);
@@ -402,7 +385,6 @@ impl<'a> CypherExecutor<'a> {
                         break;
                     }
                     // Subsequent patterns: use shared-variable join
-                    // Pass existing node bindings as pre-bindings to constrain the pattern
                     let has_vars = Self::pattern_has_vars(pattern);
                     // Move rows out so we can iterate by value (enables move-on-last)
                     let old_rows = std::mem::take(&mut all_rows);
@@ -410,12 +392,10 @@ impl<'a> CypherExecutor<'a> {
                     let mut new_rows = Vec::with_capacity(old_rows.len());
                     let mut new_sets: Vec<Vec<petgraph::graph::EdgeIndex>> = Vec::new();
                     for (ri, mut existing_row) in old_rows.into_iter().enumerate() {
-                        // Calculate remaining budget for this expansion
                         let remaining = limit_hint.map(|l| l.saturating_sub(new_rows.len()));
                         if remaining == Some(0) {
                             break;
                         }
-                        // Resolve EqualsVar references against current row
                         let resolved;
                         let pat = if has_vars {
                             resolved = self.resolve_pattern_vars(pattern, &existing_row);
@@ -534,7 +514,6 @@ impl<'a> CypherExecutor<'a> {
                 });
 
             for row in &mut result_rows {
-                // First try: find the VLP binding matching this pattern's edge variable
                 let path_binding = if let Some(ref vlp_var) = vlp_edge_var {
                     row.path_bindings.get(vlp_var).cloned()
                 } else {
@@ -555,7 +534,6 @@ impl<'a> CypherExecutor<'a> {
             }
         }
 
-        // Enforce max_rows limit if configured
         self.budget.check_rows(result_rows.len(), "MATCH")?;
 
         Ok(ResultSet {
@@ -564,10 +542,6 @@ impl<'a> CypherExecutor<'a> {
             lazy_return_items: None,
         })
     }
-
-    // ========================================================================
-    // Subsequent MATCH (the driving-row branch)
-    // ========================================================================
 
     /// The variable ONE seen-set may span **every driving row** of a
     /// subsequent MATCH, or `None` to leave each driving row independent.
@@ -851,9 +825,6 @@ impl<'a> CypherExecutor<'a> {
         dedup_var: Option<&str>,
         seen: &std::collections::HashSet<petgraph::graph::NodeIndex>,
     ) -> Result<Vec<crate::graph::core::pattern_matching::PatternMatch>, String> {
-        // A relationship variable re-used from a prior clause pins the pattern
-        // to that edge — seed its endpoints so the executor doesn't enumerate
-        // every edge.
         let seeded = match_clause::seed_prebound_pattern_vars(pat, cur);
         let base = seeded.as_ref().unwrap_or(&cur.node_bindings);
         let anchored = match_clause::seed_clause_node_anchors(clause, base);

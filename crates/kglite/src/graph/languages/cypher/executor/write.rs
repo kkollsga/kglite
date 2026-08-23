@@ -26,32 +26,23 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-// ============================================================================
-// Mutation Execution
-// ============================================================================
-
 /// Check if a query contains any mutation clauses.
 ///
-/// Recurses into nested sub-pipelines (`CALL { ... }` bodies and
-/// `UNION` arms) so a write buried inside one routes the *whole*
-/// query to the mutation path (`execute_mutable`) rather than
-/// slipping through `execute_read` as a read. This is a correctness
-/// requirement, not an optimisation: mis-classifying a write as a
-/// read would either run it on a read-only graph view or bypass the
-/// read-only / schema-locked guards that key on this function.
+/// Recurses into nested sub-pipelines (`CALL { ... }` bodies and `UNION` arms)
+/// so a write buried inside one routes the whole query to the mutation path —
+/// see [`clause_is_mutation`] for why mis-classifying one is a correctness bug.
 pub fn is_mutation_query(query: &CypherQuery) -> bool {
     query.clauses.iter().any(clause_is_mutation)
 }
 
-/// True if `clause` is itself a write clause or contains a write
-/// clause in a nested sub-pipeline.
+/// True if `clause` is itself a write clause or contains a write clause in a
+/// nested sub-pipeline.
 ///
-/// **Routing entry point.** This is the single classifier that decides
-/// read engine (`executor/mod.rs`) vs mutable engine (`execute_mutable`,
-/// below). A new clause that can mutate — or whose *body* can, e.g. a
-/// future `FOREACH (x IN list | <updates>)` — must add an arm here that
-/// recurses into its body. Miss it and the query is mis-routed to the
-/// read engine, where its writes are silently rejected.
+/// The single classifier deciding read engine (`executor/mod.rs`) vs mutable
+/// engine (`execute_mutable`). A new clause that can mutate — or whose *body*
+/// can — must add an arm here that recurses into its body. Miss it and the
+/// query is mis-routed to the read engine, where its writes are silently
+/// rejected.
 pub(crate) fn clause_is_mutation(clause: &Clause) -> bool {
     match clause {
         Clause::Create(_)
@@ -59,28 +50,24 @@ pub(crate) fn clause_is_mutation(clause: &Clause) -> bool {
         | Clause::Delete(_)
         | Clause::Remove(_)
         | Clause::Merge(_) => true,
-        // Nested sub-pipelines: a write inside the body makes the
-        // enclosing query a mutation.
         Clause::CallSubquery { body, .. } => is_mutation_query(body),
-        // Most `CALL`s are reads, but the change-capture lifecycle verbs
-        // (`db.cdc.enable` / `db.cdc.disable`) change graph state, so they
-        // route to the write engine and sit behind the same read-only and
-        // rollback guards as any other mutation. The registry is the
-        // classifier — a name list here would be the second one.
+        // The change-capture lifecycle verbs (`db.cdc.enable` /
+        // `db.cdc.disable`) change graph state, so they route to the write
+        // engine behind the same read-only and rollback guards as any other
+        // mutation. The registry is the classifier — a name list here would be
+        // a second one.
         Clause::Call(call) => {
             super::procedure_registry::is_mutating_procedure(&call.procedure_name.to_lowercase())
         }
         Clause::Union(u) => is_mutation_query(&u.query),
-        // FOREACH is an updating clause by nature (its body holds only
-        // update clauses), so it always routes to the mutable engine —
-        // matching Neo4j. A degenerate empty-body FOREACH is then a
-        // harmless no-op there rather than erroring on the read path.
+        // FOREACH's body holds only update clauses, so it always routes to the
+        // mutable engine (matching Neo4j); a degenerate empty-body FOREACH is a
+        // harmless no-op there rather than an error on the read path.
         Clause::Foreach { .. } => true,
-        // Schema is graph state, so `CREATE`/`DROP INDEX` and
-        // `CREATE`/`DROP CONSTRAINT` are mutations: that is what puts them
-        // behind the read-only-graph guard, the read-only-transaction guard, and
-        // the rollback checkpoint. The two `SHOW` forms are reads and stay on
-        // the read engine.
+        // Schema is graph state, so index and constraint DDL are mutations:
+        // that is what puts them behind the read-only-graph guard, the
+        // read-only-transaction guard, and the rollback checkpoint. The `SHOW`
+        // forms are reads and stay on the read engine.
         Clause::Schema(SchemaCommand::ShowIndexes)
         | Clause::Schema(SchemaCommand::ShowProcedures { .. })
         | Clause::Schema(SchemaCommand::ShowFunctions { .. })
@@ -93,9 +80,7 @@ pub(crate) fn clause_is_mutation(clause: &Clause) -> bool {
 /// Run a change-capture lifecycle procedure (`db.cdc.enable` / `db.cdc.disable`)
 /// on the write engine.
 ///
-/// Split out of the clause pipeline rather than inlined there: the pipeline is
-/// at its complexity ceiling, and this is a self-contained "evaluate the
-/// arguments, run the verb, shape the rows" step.
+/// Split out of the clause pipeline, which is at its complexity ceiling.
 fn execute_cdc_lifecycle_call(
     graph: &mut DirGraph,
     call: &crate::graph::languages::cypher::ast::CallClause,
@@ -136,8 +121,8 @@ fn execute_cdc_lifecycle_call(
     })
 }
 
-/// Execute a mutation query against a mutable graph.
-/// Called instead of CypherExecutor::execute() when the query contains CREATE/SET/DELETE.
+/// Execute a mutation query — the write-path counterpart of
+/// `CypherExecutor::execute()`.
 pub fn execute_mutable(
     graph: &mut DirGraph,
     query: &CypherQuery,
@@ -155,7 +140,6 @@ pub(super) struct MutationCtx<'a> {
     pub interrupt: &'a Interrupt,
     pub budget: &'a super::budget::ExecutionBudget,
     pub profiling: bool,
-    /// Whether `LOAD CSV` may read local files in this execution.
     pub csv_import: &'a super::load_csv::CsvImportPolicy,
     /// Clauses that precede the pipeline being run — non-empty only for the
     /// `LOAD CSV` suffix, where the stripped `LOAD CSV … AS row` still
@@ -163,15 +147,10 @@ pub(super) struct MutationCtx<'a> {
     pub leading: &'a [Clause],
 }
 
-/// The owned half of the mutation context: everything
-/// [`finalize_mutation`] needs to build the executor for a trailing `RETURN`.
-///
-/// Grouped for the same reason [`MutationCtx`] groups the *borrowed* pipeline
-/// state — these three always travel together and are only ever consumed to
-/// construct one `CypherExecutor`. Passing them individually pushed
-/// `finalize_mutation` to nine parameters as successive sprints added
-/// interrupt, budget, and profiling plumbing; grouping keeps the seam readable
-/// instead of registering a `too_many_arguments` allowance for it.
+/// The owned half of the mutation context: everything [`finalize_mutation`]
+/// needs to build the executor for a trailing `RETURN`. Grouped for the same
+/// reason [`MutationCtx`] groups the borrowed state — passed individually they
+/// push `finalize_mutation` to nine parameters.
 struct FinalizeCtx {
     params: HashMap<String, Value>,
     interrupt: Interrupt,
@@ -229,9 +208,8 @@ pub(crate) fn execute_mutable_with_csv(
     max_rows: Option<usize>,
     csv_import: &super::load_csv::CsvImportPolicy,
 ) -> Result<CypherResult, String> {
-    // Arena guard for the whole mutation: begin_query performs the same
-    // idle-arena reclamation reset_arenas did, then holds the count so every
-    // materializing read (`get_node` → `node_weight`) inside mutation clauses
+    // Arena guard for the whole mutation: holds the query count so every
+    // materializing read (`get_node` → `node_weight`) inside a mutation clause
     // is guard-covered. Owned counter handle — coexists with `&mut`.
     let _arena_guard = graph.graph.begin_query();
 
@@ -337,24 +315,19 @@ fn run_clause_pipeline(
     let profiling = ctx.profiling;
     let mut result_set = seed;
 
-    // `result_set.rows.is_empty()` means two opposite things depending on where
-    // the pipeline is. Before any clause has run it means "no binding stream
-    // exists yet", and Cypher's implicit single empty row applies — a leading
-    // `CREATE` runs once. After a clause has run it means "the stream exists and
-    // holds zero rows", and every downstream clause must produce zero rows and
-    // no side effects. Only the pipeline can tell the two apart, so it owns the
-    // distinction here; individual clauses must never re-derive it from
-    // emptiness (doing so is what made `MATCH`-finds-nothing + `CREATE`
-    // fabricate a row and create an unbound node).
-    //
-    // `leading` is non-empty only for the `LOAD CSV` driver, which strips its
-    // own clause and re-enters this pipeline once per batch — those batch rows
-    // are an already-established stream.
+    // `result_set.rows.is_empty()` means two opposite things. Before any clause
+    // has run it means "no binding stream exists yet", and Cypher's implicit
+    // single empty row applies — a leading `CREATE` runs once. After a clause
+    // has run it means "the stream exists and holds zero rows", and every
+    // downstream clause must produce zero rows and no side effects. Only the
+    // pipeline can tell the two apart; a clause re-deriving it from emptiness is
+    // what made `MATCH`-finds-nothing + `CREATE` fabricate a row and create an
+    // unbound node. `leading` is non-empty only for the `LOAD CSV` driver, whose
+    // batch rows are an already-established stream.
     let mut stream_established = !ctx.leading.is_empty();
 
     for (i, clause) in clauses.iter().enumerate() {
         if interrupt.exceeded() {
-            // Deadline passed or the caller flipped the cancel flag (Ctrl-C).
             // The mutation is atomic: aborting here discards the in-flight
             // changes, leaving the graph unchanged.
             return Err("Query interrupted".to_string());
@@ -396,18 +369,16 @@ fn run_clause_pipeline(
         }
 
         match clause {
-            // Write clauses: mutate graph directly
             Clause::Create(create) => {
                 result_set = execute_create(graph, create, result_set, params, stats, interrupt)?;
             }
             Clause::Set(set) => {
                 execute_set(graph, set, &result_set, params, stats, interrupt)?;
                 // Flush staged writes so any subsequent clause's reads
-                // (including a trailing RETURN's property projection)
-                // observe the SET. SET routes through node_weight_mut →
-                // node_mut_cache on disk; without this flush, the next
-                // `node_weight` reads through `column_stores` and
-                // returns the pre-SET values.
+                // (including a trailing RETURN's projection) observe the SET.
+                // On disk, SET stages into `node_mut_cache`; without the flush
+                // the next `node_weight` reads `column_stores` and returns the
+                // pre-SET values.
                 GraphWrite::flush_pending_writes(&mut graph.graph);
             }
             Clause::Delete(del) => {
@@ -415,20 +386,14 @@ fn run_clause_pipeline(
             }
             Clause::Remove(rem) => {
                 execute_remove(graph, rem, &result_set, stats, interrupt)?;
-                // Same rationale as SET — REMOVE goes through
-                // node_weight_mut on disk.
+                // Same rationale as SET — REMOVE stages on disk too.
                 GraphWrite::flush_pending_writes(&mut graph.graph);
             }
             Clause::Merge(merge) => {
                 result_set = execute_merge(graph, merge, result_set, params, stats, interrupt)?;
-                // MERGE may invoke ON MATCH SET / ON CREATE SET via
-                // `execute_set`; flush so any following clause sees the
-                // mutations.
+                // MERGE may run ON MATCH SET / ON CREATE SET; flush as above.
                 GraphWrite::flush_pending_writes(&mut graph.graph);
             }
-            // FOREACH: side-effect loop. Runs its body's update clauses once
-            // per list element with the loop var bound; the outer row set is
-            // left unchanged.
             Clause::Foreach {
                 variable,
                 list,
@@ -458,12 +423,9 @@ fn run_clause_pipeline(
                 let declared = ctx.declared_before(clauses, i);
                 result_set = executor.execute_call_subquery(import, body, result_set, &declared)?;
             }
-            // Change-capture lifecycle (`db.cdc.enable` / `db.cdc.disable`).
-            // Here rather than on the read engine for the same reason schema
-            // DDL is: it mutates graph state, so it must sit behind the
-            // read-only guard and the rollback checkpoint. Read CDC
-            // procedures fall through to the read executor below, like every
-            // other `CALL`.
+            // Change-capture lifecycle verbs run here, not on the read engine
+            // (see `clause_is_mutation`); read CDC procedures fall through to
+            // the read executor below like every other `CALL`.
             Clause::Call(call)
                 if super::procedure_registry::is_mutating_procedure(
                     &call.procedure_name.to_lowercase(),
@@ -471,14 +433,12 @@ fn run_clause_pipeline(
             {
                 result_set = execute_cdc_lifecycle_call(graph, call, params, interrupt, budget)?;
             }
-            // Schema DDL. Runs here — not on the read engine — because schema
-            // is graph state, so it must sit behind the same read-only /
-            // rollback guards as a data mutation. `SHOW INDEXES` classifies as
-            // a read and never reaches this arm.
+            // Schema DDL runs here, not on the read engine (see
+            // `clause_is_mutation`); the `SHOW` forms classify as reads and
+            // never reach this arm.
             Clause::Schema(command) => {
                 schema_ddl::execute_schema_mutation(graph, command, stats, interrupt)?;
             }
-            // Read clauses: create temporary immutable executor
             _ => {
                 let executor = CypherExecutor::with_params(graph, params, interrupt.deadline)
                     .with_cancel(interrupt.cancel)
@@ -518,11 +478,9 @@ fn run_clause_pipeline(
 /// Does `clause` consume Cypher's implicit single empty start row when it opens
 /// a query?
 ///
-/// These are the clauses that produce output per incoming row and therefore
-/// need one row to act on even with nothing before them: `CREATE (:T)`,
-/// `MERGE (:T)`, a standalone `FOREACH`, and a leading `WITH`/`UNWIND`. Read
-/// clauses are absent on purpose — MATCH/OPTIONAL MATCH open a query by
-/// scanning, not by extending a row.
+/// True for the clauses that produce output per incoming row and so need one to
+/// act on with nothing before them. Read clauses are absent on purpose —
+/// MATCH/OPTIONAL MATCH open a query by scanning, not by extending a row.
 ///
 /// Only ever consulted while the stream is unestablished, so it cannot
 /// resurrect a stream that a preceding clause emptied.
@@ -550,19 +508,14 @@ fn finalize_mutation(
     stats: MutationStats,
     profile: Option<Vec<ClauseStats>>,
 ) -> Result<CypherResult, String> {
-    // Flush any pending mutation state into the steady-state stores so
-    // (a) the trailing RETURN's reads observe the writes from this same
-    // query, and (b) any subsequent read-only query started by the user
-    // sees them too. No-op on memory/mapped (writes land in
-    // `StableDiGraph` directly); on disk, drains
-    // `node_mut_cache`/`edge_mut_cache` into `column_stores` /
-    // `edge_properties` via the same clone-apply-replace path
-    // `clear_arenas` runs lazily before the next `&mut self` op.
-    // Without this, Cypher SET on a disk-backed graph appeared to no-op
-    // until the next mutation/save flushed the cache — see CHANGELOG.
+    // Flush pending mutation state into the steady-state stores so both the
+    // trailing RETURN and any later read-only query observe this query's
+    // writes. No-op on memory/mapped (writes land in `StableDiGraph`
+    // directly); on disk it drains `node_mut_cache`/`edge_mut_cache` into
+    // `column_stores`/`edge_properties`. Without it, Cypher SET on a
+    // disk-backed graph appeared to no-op until the next mutation or save.
     GraphWrite::flush_pending_writes(&mut graph.graph);
 
-    // Finalize: if RETURN was in the query, finalize with column projection
     let has_return = query.clauses.iter().any(|c| matches!(c, Clause::Return(_)));
 
     if has_return || !result_set.columns.is_empty() {
@@ -579,7 +532,6 @@ fn finalize_mutation(
         result.profile = profile;
         Ok(result)
     } else {
-        // No RETURN: return empty result with stats
         Ok(CypherResult {
             columns: Vec::new(),
             rows: Vec::new(),
@@ -718,7 +670,6 @@ fn apply_foreach_body_clause(
     }
 }
 
-/// Execute a CREATE clause, creating nodes and edges in the graph.
 fn execute_create(
     graph: &mut DirGraph,
     create: &CreateClause,
@@ -727,11 +678,9 @@ fn execute_create(
     stats: &mut MutationStats,
     interrupt: &Interrupt,
 ) -> Result<ResultSet, String> {
-    // CREATE works on every storage mode. On disk, node properties are routed
-    // through the per-type ColumnStore by `DirGraph::insert_node_routed` (the
-    // same mechanism `add_nodes` uses), which writes straight into the store the
-    // backend owns — there is no second copy to sync.
-    // (SET/DELETE/REMOVE already work on disk via the staged-write path.)
+    // On disk, node properties route through the per-type ColumnStore in
+    // `DirGraph::insert_node_routed`, which writes into the store the backend
+    // owns — no second copy to sync, unlike the SET/REMOVE staged-write path.
     // One CREATE per incoming row, and nothing at all for zero rows. A leading
     // CREATE gets its single empty row from the pipeline's implicit-start-row
     // seed (`clause_needs_implicit_row`) — this function must not synthesize
@@ -753,12 +702,9 @@ fn execute_create(
             // First pass: create all new nodes.
             //
             // The variable map is `new_row.node_bindings` itself, NOT a map
-            // rebuilt per comma-separated part. It starts as a clone of the
-            // incoming row's bindings (so MATCH-bound variables are visible)
-            // and every node created here is written straight back into it, so
-            // a variable introduced in one part is a *reference* in every later
-            // part of the same CREATE. Rebuilding a per-part map from `row`
-            // made each part blind to its predecessors, and
+            // rebuilt per comma-separated part, so a variable introduced in one
+            // part is a *reference* in every later part of the same CREATE.
+            // Rebuilding it per part made each part blind to its predecessors:
             // `CREATE (a:T {id:5}), (b:T {id:7}), (b)-[:E]->(a)` silently
             // fabricated two anonymous nodes and wired the edge between those.
             element_nodes.clear();
@@ -778,11 +724,9 @@ fn execute_create(
 
                     let node_idx = create_node(graph, node_pat, &new_row, params, stats)?;
 
-                    // Record by position as well as by name: an *anonymous*
-                    // endpoint has no name to record under, and the edge pass
-                    // walks endpoints by index, so position is what makes
-                    // `CREATE (:A)-[:R]->(:B)` and `CREATE (h)-[:R]->()`
-                    // resolvable at all.
+                    // Recorded by position as well as by name: an anonymous
+                    // endpoint has no name to record under — see
+                    // `create_pattern_edges`.
                     element_nodes[pos] = Some(node_idx);
                     if let Some(var) = node_pat.variable.as_deref() {
                         new_row.node_bindings.insert(var.to_string(), node_idx);
@@ -797,7 +741,6 @@ fn execute_create(
         new_rows.push(new_row);
     }
 
-    // Invalidate edge type count cache if any edges were created
     if stats.relationships_created > 0 {
         graph.invalidate_edge_type_counts_cache();
         // Defensive: build the CSR if these edges landed in the deferred-build
@@ -836,28 +779,22 @@ fn create_pattern_edges(
             let source_idx = resolve_create_node_idx(pattern, element_nodes, i - 1)?;
             let target_idx = resolve_create_node_idx(pattern, element_nodes, i + 1)?;
 
-            // Determine actual source/target based on direction
             let (actual_source, actual_target) = match edge_pat.direction {
                 CreateEdgeDirection::Outgoing => (source_idx, target_idx),
                 CreateEdgeDirection::Incoming => (target_idx, source_idx),
             };
 
             // Edge creation is write-scoped by the ONE-ENDPOINT rule
-            // (`enforce_edge_write_scope`): at least one endpoint's
-            // stored type must be in the whitelist. Creating an edge
-            // between two *existing* (MATCH-bound) nodes does not
-            // mutate either node — it's a read of both endpoints — so
-            // the central agent-contract pattern (link a runtime
-            // `Task` to a managed `AlgorithmSpec`) is still allowed
-            // under a scope that excludes the managed type. What the
-            // rule blocks is the other half: an edge between two nodes
-            // the role owns nothing in (the `FORGED` repro). A *newly
-            // created* endpoint is in scope by construction — its node
-            // CREATE goes through `create_node`, which enforces the
-            // scope. (Whitelisting relationship types themselves is a
-            // possible future refinement.) Gated before anything is
-            // registered or written, so a refusal leaves the schema
-            // exactly as it found it.
+            // (`enforce_edge_write_scope`): at least one endpoint's stored type
+            // must be in the whitelist. Linking two *existing* (MATCH-bound)
+            // nodes mutates neither — it reads both endpoints — so the central
+            // agent-contract pattern (link a runtime `Task` to a managed
+            // `AlgorithmSpec`) stays allowed under a scope that excludes the
+            // managed type. What the rule blocks is an edge between two nodes
+            // the role owns nothing in (the `FORGED` repro). A *newly created*
+            // endpoint is in scope by construction — its `create_node` enforces
+            // the scope. Gated before anything is registered or written, so a
+            // refusal leaves the schema exactly as it found it.
             enforce_edge_write_scope(
                 graph,
                 &edge_pat.connection_type,
@@ -876,7 +813,6 @@ fn create_pattern_edges(
                 .map(|n| n.get_node_type_ref(&graph.interner).to_string())
                 .unwrap_or_default();
 
-            // Schema lock validation for edge
             if graph.schema_locked {
                 crate::graph::mutation::validation::validate_edge_creation(
                     &edge_pat.connection_type,
@@ -887,18 +823,16 @@ fn create_pattern_edges(
                 )?;
             }
 
-            // Evaluate edge properties. A property that evaluates to null is
-            // *not written*, which is what `CREATE (:N {x: null})` already
-            // does for nodes — the columnar node store skips null cells, so
-            // `keys(n)` never reports one. An edge's properties are a plain
-            // key/value vector with no such skip, so the filter has to happen
-            // here or the key lands and `keys(r)` reports a property the same
-            // literal did not create on a node. It also keeps the
-            // connection-type metadata below clean: a null value would
-            // otherwise register a phantom `"Null"`-typed property that
-            // `schema_text()`/`connection_types()` then advertise forever.
-            // Relationship constraints are unaffected — `check_rel_row` judges
-            // `Some(Value::Null)` and `None` identically.
+            // A property evaluating to null is *not written*, matching what
+            // `CREATE (:N {x: null})` does for nodes (the columnar node store
+            // skips null cells, so `keys(n)` never reports one). An edge's
+            // properties are a plain key/value vector with no such skip, so the
+            // filter has to happen here, or `keys(r)` reports a property the
+            // same literal did not create on a node and the metadata upsert
+            // below registers a phantom `"Null"`-typed property that
+            // `schema_text()`/`connection_types()` advertise forever.
+            // `check_rel_row` judges `Some(Value::Null)` and `None` identically,
+            // so relationship constraints are unaffected.
             let mut edge_props = HashMap::new();
             {
                 let executor = CypherExecutor::with_params(graph, params, None);
@@ -915,28 +849,24 @@ fn create_pattern_edges(
             graph.inject_edge_provenance(&edge_pat.connection_type, &mut edge_props);
 
             // Declared relationship constraints, gated *before* anything is
-            // registered or written. A refused CREATE must leave
-            // `connection_type_metadata` exactly as it found it: registering
-            // first would teach the schema a connection type — and a property
-            // shape — that no successful write ever produced, and would leave
-            // `describe()` advertising it. It is also what keeps the change
-            // log free of phantoms, since every capture on this path happens
-            // downstream of here.
+            // registered or written: registering first would teach the schema a
+            // connection type — and a property shape — that no successful write
+            // ever produced, and leave `describe()` advertising it. It also
+            // keeps the change log free of phantoms, since every capture on this
+            // path happens downstream of here.
             if graph.has_rel_constraints() {
                 graph.check_rel_row(&edge_pat.connection_type, |property| {
                     edge_props.get(property).cloned()
                 })?;
             }
 
-            // Register the connection type fully — both the lightweight
-            // cache (for `has_connection_type`) AND the metadata map.
-            // The metadata is what `connection_types()`, the planner's
-            // schema check, and the columnar edge-store save all read;
-            // without it a brand-new relationship type created via
-            // Cypher was treated as "unknown" (spurious warnings) and
-            // — on a columnar graph — its edges were silently dropped
-            // on `save()`, since the columnar edge store serializes by
-            // registered connection type. (SimulatoRS, 0.12.1.)
+            // Register both the lightweight cache (for `has_connection_type`)
+            // AND the metadata map: the metadata is what `connection_types()`,
+            // the planner's schema check and the columnar edge-store save read.
+            // Without it a Cypher-created relationship type was treated as
+            // "unknown" (spurious warnings) and — on a columnar graph — its
+            // edges were silently dropped on `save()`, since that store
+            // serializes by registered connection type. (SimulatoRS, 0.12.1.)
             graph.register_connection_type(edge_pat.connection_type.clone());
             let prop_types: HashMap<String, String> = edge_props
                 .iter()
@@ -958,7 +888,6 @@ fn create_pattern_edges(
             let edge_index =
                 GraphWrite::add_edge(&mut graph.graph, actual_source, actual_target, edge_data);
 
-            // Bind edge variable if named
             if let Some(ref var) = edge_pat.variable {
                 new_row.edge_bindings.insert(
                     var.clone(),
@@ -970,12 +899,11 @@ fn create_pattern_edges(
                 );
             }
         }
-        i += 2; // Skip to next edge position
+        i += 2;
     }
     Ok(())
 }
 
-/// Create a single node from a CreateNodePattern
 fn create_node(
     graph: &mut DirGraph,
     node_pat: &CreateNodePattern,
@@ -1012,9 +940,7 @@ fn create_node(
     // longer has a property key of its own, the value having been promoted.
     // The title alias answers only when the caller *supplied* the title: the
     // `<Label>_<n>` fallback is engine-minted, and a `REQUIRE … IS NOT NULL` on
-    // the type's title column is asking the caller for a value. That keeps the
-    // gate exactly as strict as it was when the alias never reached the title
-    // at all.
+    // the type's title column is asking the caller for a value.
     let constraint_read = |property: &str| -> Option<Value> {
         if aliases.id_field() == Some(property) {
             return (!matches!(id, Value::Null)).then(|| id.clone());
@@ -1051,20 +977,14 @@ fn create_node(
         return Err(graph.record_constraint_violation(*violation));
     }
 
-    // Clone the id for incremental index maintenance below (it is moved into
-    // insert_node_routed). The id-index is maintained incrementally whenever it
-    // is already cached, regardless of whether a primary key is declared:
-    // inserting into a complete index keeps it complete, whereas dropping it
-    // forces the next id lookup to rebuild the whole type. The `contains_key`
-    // guard at the maintenance site is what prevents building a *partial* index
-    // that `build_id_index` would later trust as complete.
+    // Cloned for the incremental id-index maintenance below, which cannot have
+    // it: `insert_node_routed` moves the original.
     let pk_id = Some(id.clone());
 
     // Role-scoped write guard (integrity): reject CREATE of a node type
     // outside the active write whitelist, before any storage mutation.
     enforce_write_scope(graph, &label)?;
 
-    // Schema lock validation
     if graph.schema_locked {
         crate::graph::mutation::validation::validate_node_creation(
             &label,
@@ -1074,9 +994,8 @@ fn create_node(
         )?;
     }
 
-    // Insert the node: every backend writes id/title/properties through the
-    // per-type ColumnStore — see DirGraph::insert_node_routed. The per-clause
-    // disk read-side sync happens once in execute_create, not here.
+    // Every backend writes id/title/properties through the per-type
+    // ColumnStore — see `DirGraph::insert_node_routed`.
     let node_idx = graph.insert_node_routed(id, title, &label, properties);
 
     // Update type_indices. `bucket_was_new` feeds statement rollback: undoing
@@ -1100,13 +1019,12 @@ fn create_node(
     // `contains_key` guard is what stops us building a *partial* entry that
     // `build_id_index` would later short-circuit on and trust as complete.
     //
-    // This is deliberately independent of whether a primary key is declared.
-    // The declaration governs *uniqueness enforcement*, not index freshness;
-    // gating maintenance on it meant an undeclared type dropped its entire
-    // cached id index on every single CREATE, and the only reason it did so was
-    // that `id` had already been moved into `insert_node_routed` and no clone
-    // was available. Nothing about duplicate ids is protected by invalidating:
-    // a rebuild and an incremental insert collapse a duplicate identically.
+    // Deliberately independent of whether a primary key is declared — the
+    // declaration governs *uniqueness enforcement*, not index freshness, and
+    // gating maintenance on it dropped an undeclared type's whole cached id
+    // index on every single CREATE. Nothing about duplicate ids is protected by
+    // invalidating: a rebuild and an incremental insert collapse a duplicate
+    // identically.
     match pk_id {
         Some(idv) if graph.id_indices.contains_key(&label) => {
             graph
@@ -1119,12 +1037,10 @@ fn create_node(
         }
     }
 
-    // Update property and composite indices for the new node
     graph.update_property_indices_for_add(&label, node_idx);
     // Claim the unique tuples validated above, now that the node exists.
     graph.commit_unique_claims(&unique_claims, node_idx);
 
-    // Ensure type metadata exists for this type (consistent with Python add_nodes API)
     ensure_type_metadata(graph, &label);
 
     // Apply secondary labels from `CREATE (n:A:B:C)` patterns. The
@@ -1145,33 +1061,12 @@ fn create_node(
 /// CREATE carried no property still shows up in `describe()` / the saved schema
 /// (what the Python `add_nodes` API does in maintain.rs).
 ///
-/// # This used to read the node back
-///
-/// It materialised the just-created row (`property_pairs_named` — a `Vec`, a
-/// `String` per key and a cloned `Value`, over *every column the type has*,
-/// ~12.9 ns per pre-existing column per created node) purely to ask which of its
-/// property keys the type had not registered yet.
-///
-/// `DirGraph::register_property_types` answers that question upstream, from the
-/// property map in hand, allocating nothing in the common case — and it runs
-/// inside `insert_node_routed` **after** `inject_provenance`, so it sees exactly
-/// the key set the row was written from. The read-back could therefore never
-/// find a key it had not already registered:
-///
-/// * the row's stored non-null keys are the in-hand non-null keys (a `Null`
-///   value stores no column, and `register_property_types` skips nulls for the
-///   same reason);
-/// * so the old fast path's "does the type already know every key on this node"
-///   test was, by then, always true — except when the type had *no* metadata
-///   entry at all, which is precisely the case where the node had no non-null
-///   properties for `register_property_types` to register (its early return
-///   creates no entry), and where the read-back's answer was the empty map.
-///
-/// What survived was the empty-entry creation, which is what this does. Type
-/// *inference* is `register_property_types`' job, and doing it from the in-hand
-/// values rather than a read-back is also what keeps disk correct: there the
-/// columnar store is not synced to the read side until the end of the clause, so
-/// the read-back saw no properties at all.
+/// Only the empty entry: property-type *inference* belongs to
+/// `DirGraph::register_property_types`, which runs inside `insert_node_routed`
+/// from the property map in hand. Reading the node back to infer types (what
+/// this used to do) could never find a key that call had not already registered,
+/// and was wrong on disk, where the columnar store is not synced to the read
+/// side until the end of the clause — so the read-back saw no properties at all.
 fn ensure_type_metadata(graph: &mut DirGraph, node_type: &str) {
     if graph.node_type_metadata.contains_key(node_type) {
         return;
@@ -1182,17 +1077,10 @@ fn ensure_type_metadata(graph: &mut DirGraph, node_type: &str) {
         .or_default();
 }
 
-/// Map a Value variant to its type name string (for SchemaNode property types).
-///
-/// A thin wrapper around the canonical `Value::type_name` method; kept as
-/// a free function so `value_type_name(&v)` callsites don't have to change.
-/// Future cleanup can replace each callsite with the method form and drop
-/// this.
 fn value_type_name(v: &Value) -> String {
     v.type_name().to_string()
 }
 
-/// Extract the variable name from a CreateElement::Node
 fn get_create_node_variable(element: &CreateElement) -> Option<&str> {
     match element {
         CreateElement::Node(np) => np.variable.as_deref(),
@@ -1202,13 +1090,10 @@ fn get_create_node_variable(element: &CreateElement) -> Option<&str> {
 
 /// Resolve a CREATE edge endpoint at `pos` to its NodeIndex.
 ///
-/// The node pass records *every* node element of the part at its own index —
-/// bound-from-elsewhere or freshly created, named or anonymous — so an
-/// endpoint is resolved positionally and never needs a variable name. Both
-/// error arms are structural (a non-node element at an endpoint position, or a
-/// position the node pass never visited); the parser's alternation check makes
-/// them unreachable from user input, and they stay as defensive diagnostics
-/// rather than an index panic.
+/// Both error arms are structural (a non-node element at an endpoint position,
+/// or a position the node pass never visited); the parser's alternation check
+/// makes them unreachable from user input, and they stay as defensive
+/// diagnostics rather than an index panic.
 fn resolve_create_node_idx(
     pattern: &CreatePattern,
     element_nodes: &[Option<NodeIndex>],
@@ -1258,9 +1143,6 @@ fn is_null_write_target(row: &ResultRow, variable: &str) -> bool {
 
 /// Every property key currently set on `variable`'s binding — the clear-list
 /// for `SET n = {…}` / `SET r = {…}`.
-///
-/// Extracted from `execute_set` so the accessor migration does not push that
-/// function past its size cap.
 fn existing_property_keys(
     graph: &crate::graph::dir_graph::DirGraph,
     row: &ResultRow,
@@ -1280,13 +1162,10 @@ fn existing_property_keys(
                     .collect()
             })
             .unwrap_or_default();
-        // Resolved through `NodeView::title()`, not off the inline field. The
-        // inline field is the `Null` sentinel on every columnar node — which is
-        // now every node — so reading it directly would drop `name` from the
-        // clear-list altogether and let a title survive `SET n = {…}`. Reading
-        // through the store keeps the behaviour a never-saved graph had before
-        // construction became columnar, and closes the memory-vs-mapped parity
-        // gap this comment used to record.
+        // Resolved through `NodeView::title()`, not off the inline field: that
+        // field is the `Null` sentinel on every columnar node — which is now
+        // every node — so reading it directly would drop `name` from the
+        // clear-list altogether and let a title survive `SET n = {…}`.
         if graph
             .graph
             .node_view(*node_idx)
@@ -1314,13 +1193,9 @@ fn existing_property_keys(
 /// Write one property straight onto a node, bypassing the columnar master fast
 /// path.
 ///
-/// The fall-through for row storage, for `title` / `name` (which live in the
-/// node's inline title field, not in the store), and for a columnar node whose
-/// type the backend has no store for. Returns whether the node existed.
-///
-/// Extracted from `execute_set` so routing the write through `GraphWrite` —
-/// which a columnar node requires — does not push that function past its
-/// size cap.
+/// The fall-through for row storage, for `title` / `name` (a routing detail —
+/// see [`set_via_column_master`]), and for a columnar node whose type the
+/// backend has no store for. Returns whether the node existed.
 pub(super) fn set_node_property_direct(
     graph: &mut crate::graph::dir_graph::DirGraph,
     node_idx: NodeIndex,
@@ -1360,13 +1235,6 @@ fn execute_set(
     stats: &mut MutationStats,
     interrupt: &Interrupt,
 ) -> Result<(), String> {
-    // Track which Columnar node types we wrote into so we can refresh
-    // per-node Arc<ColumnStore> handles in one O(N-per-type) sweep at
-    // the end. Without this batching, every row's `set_property` calls
-    // `Arc::make_mut(store)` which clones the entire shared columnar
-    // store (one clone per row → O(N²) work, OOM on 1k rows of a
-    // type with 6.8k+ nodes — see CHANGELOG note for SET-on-Prospect
-    // regression on the loaded Sodir graph).
     // Freshness provenance: nodes (of opted-in types) modified by this SET get a
     // single `updated_at` bump after the loop (engine-managed reserved key) —
     // collected here so multiple property writes on one node stamp it once.
@@ -1403,7 +1271,6 @@ fn execute_set(
                         continue;
                     }
 
-                    // Validate: cannot change id or type
                     if property == "id" {
                         return Err("Cannot SET node id — it is immutable".to_string());
                     }
@@ -1474,9 +1341,6 @@ fn execute_set(
                     };
 
                     if *replace {
-                        // Arena guard: node_weight/edge_weight materialize on
-                        // the disk backend (protocol in disk/graph.rs); scoped
-                        // so the borrow ends before execute_remove's &mut.
                         let existing_keys = existing_property_keys(graph, row, variable);
                         let removals: Vec<RemoveItem> = existing_keys
                             .into_iter()
@@ -1529,7 +1393,6 @@ fn execute_set(
         }
     }
 
-    // Freshness provenance for the nodes this statement modified.
     stamp_node_provenance(graph, &nodes_to_stamp);
 
     // Edge freshness provenance: bump the reserved keys (updated_at + caller
@@ -1561,11 +1424,6 @@ fn execute_set(
 }
 
 /// Apply one `SET n:Label` item to a row.
-///
-/// Its own function because it shares nothing with the property arm it sat
-/// beside: no id/type guard, no columnar routing, no index maintenance, no
-/// constraint plan — a label is a set membership, and the only bookkeeping it
-/// owes is the freshness stamp.
 fn set_node_label(
     graph: &mut DirGraph,
     row: &ResultRow,
@@ -1601,15 +1459,10 @@ fn set_node_label(
 }
 
 /// Stamp the reserved provenance keys on every node a `SET` modified.
-///
-/// Lifted out of `execute_set`, which is the only caller: it is the last of
-/// that function's four concerns (rows, map items, node stamps, edge stamps)
-/// and shares nothing with the others but the set of nodes to stamp.
 fn stamp_node_provenance(graph: &mut DirGraph, nodes_to_stamp: &HashMap<NodeIndex, String>) {
-    // Stamp the reserved provenance keys (updated_at + caller git_sha/
-    // modified_by) once per modified node of an opted-in type — one clock read
-    // for the whole SET. Writes through the in-memory columnar master (fast
-    // path) or the per-node setter, mirroring the property writes above; the
+    // updated_at + the caller's git_sha/modified_by, once per node of an
+    // opted-in type, on one clock read for the whole SET. Writes through the
+    // in-memory columnar master (fast path) or the per-node setter; the
     // type-schema slot + metadata are registered so they persist. No
     // equality-index update — provenance is range-queried, not equality-matched.
     if !nodes_to_stamp.is_empty() {
@@ -1657,8 +1510,7 @@ fn stamp_node_provenance(graph: &mut DirGraph, nodes_to_stamp: &HashMap<NodeInde
         }
         // The catalogue entry for each provenance key is a fact about the
         // *type*, not about the node — so it is recorded once per stamped type
-        // rather than once per stamped node per key, which is what the loop
-        // above used to do (a fresh `HashMap` and two `String`s each time).
+        // rather than once per stamped node per key.
         let stamped_types: std::collections::HashSet<&String> = nodes_to_stamp.values().collect();
         let prop_types: HashMap<String, String> = prov
             .iter()
@@ -1669,7 +1521,7 @@ fn stamp_node_provenance(graph: &mut DirGraph, nodes_to_stamp: &HashMap<NodeInde
         }
     }
 }
-/// Execute a DELETE clause, removing nodes and/or edges from the graph.
+
 fn execute_delete(
     graph: &mut DirGraph,
     delete: &DeleteClause,
@@ -1680,7 +1532,6 @@ fn execute_delete(
     use std::collections::HashSet;
 
     let mut nodes_to_delete: HashSet<petgraph::graph::NodeIndex> = HashSet::new();
-    // For edge deletion we store edge indices directly — O(1) lookup.
     // Collected as a set up front because the Phase-2 "node still has
     // relationships" check must see the WHOLE statement's deletions:
     // openCypher deletes are statement-atomic, so `DELETE r, n` is legal
@@ -1826,7 +1677,6 @@ fn execute_delete(
     Ok(())
 }
 
-/// Execute a REMOVE clause, removing properties from nodes.
 fn execute_remove(
     graph: &mut DirGraph,
     remove: &RemoveClause,
@@ -1834,10 +1684,6 @@ fn execute_remove(
     stats: &mut MutationStats,
     interrupt: &Interrupt,
 ) -> Result<(), String> {
-    // Same batching contract as `execute_set`: Columnar types written through
-    // the graph master get their per-node `Arc<ColumnStore>` handles refreshed
-    // in one O(N-per-type) sweep at the end, not once per row.
-
     for (row_idx, row) in result_set.rows.iter().enumerate() {
         check_interrupt_periodic(interrupt, row_idx)?;
         for item in &remove.items {
@@ -1849,7 +1695,6 @@ fn execute_remove(
                         continue;
                     }
 
-                    // Protect immutable fields
                     if property == "id" {
                         return Err("Cannot REMOVE node id — it is immutable".to_string());
                     }
@@ -1891,33 +1736,18 @@ fn execute_remove(
                         .plan_property_write(&node_type_str, *node_idx, property, None)
                         .map_err(|violation| violation.to_string())?;
 
-                    // Remove property (mutable borrow, returns old value).
-                    //
-                    // On disk-backed graphs, the staged-write flush only
-                    // persists keys *present* in the staged property Map
-                    // — a bare `remove_property` leaves the column store
-                    // unchanged and the next read returns the old value.
-                    // `clear_property` inserts Null instead so the flush
-                    // writes through, matching SET-to-null semantics
-                    // (verified working on disk).
                     let is_disk = graph.graph.is_disk();
 
                     // In-memory Columnar: clear through the graph master, the
-                    // same chokepoint `execute_set` writes through, and refresh
-                    // the per-node handles once at the end of the clause.
-                    //
-                    // Going through the node's own `Arc<ColumnStore>` instead
-                    // (what `PropertyStorage::remove` does) is both wrong and
-                    // slow. Wrong: `Arc::make_mut` forks the node's store, so
-                    // the master keeps the removed value and the next clause's
-                    // refresh sweep re-points this node at the master and
-                    // resurrects it — no save required. Slow: the fork is a
-                    // full `ColumnStore` clone per node removed, so a REMOVE
-                    // over R rows of a type with N nodes was O(R x N).
-                    //
-                    // title/name are excluded for the same reason as in
-                    // `execute_set`: they live inline on the node and are
-                    // consolidated by `enable_columnar` at save time.
+                    // same chokepoint `execute_set` writes through. Going
+                    // through the node's own `Arc<ColumnStore>` instead (what
+                    // `PropertyStorage::remove` does) is both wrong and slow:
+                    // `Arc::make_mut` forks the node's store, so the master
+                    // keeps the removed value and can resurrect it with no save
+                    // involved, and the fork is a full `ColumnStore` clone per
+                    // node removed — O(R x N) for R rows of an N-node type.
+                    // title/name are excluded as a routing detail, exactly as in
+                    // [`set_via_column_master`].
                     let mut cleared_via_master = None;
                     if !is_disk && write_field != "name" && write_field != "title" {
                         let columnar_row_id = {
@@ -1931,13 +1761,10 @@ fn execute_remove(
                             let key = graph.interner.get_or_intern(write_field);
                             // Same primitive `SET` uses, for the same reason:
                             // it captures the pre-statement store into the undo
-                            // journal *before* mutating. This path used to write
-                            // the master directly with no pre-image, which was
-                            // survivable only while `Arc::make_mut` always
-                            // forked (every node held a handle). With the
-                            // backend the sole owner the write lands in place,
-                            // so a failed statement would have had nothing to
-                            // roll back to.
+                            // journal *before* mutating. Writing the master
+                            // directly leaves a failed statement nothing to roll
+                            // back to, now that the backend is the store's sole
+                            // owner and the write lands in place.
                             cleared_via_master = write_column_master(
                                 graph,
                                 MasterCell {
@@ -1979,7 +1806,6 @@ fn execute_remove(
                         None
                     };
 
-                    // Update stats + indices (no active borrows)
                     if let Some(old_val) = removed_value {
                         stats.properties_removed += 1;
                         graph.update_property_indices_for_remove(
@@ -2019,7 +1845,6 @@ fn execute_remove(
     Ok(())
 }
 
-/// Execute a MERGE clause: match-or-create a pattern.
 fn execute_merge(
     graph: &mut DirGraph,
     merge: &MergeClause,
@@ -2028,17 +1853,12 @@ fn execute_merge(
     stats: &mut MutationStats,
     interrupt: &Interrupt,
 ) -> Result<ResultSet, String> {
-    // MERGE works on every storage mode. Its match branch is a read; its create
-    // branch routes through `execute_create` (disk-capable via
-    // `DirGraph::insert_node_routed`); ON CREATE/MATCH SET route through
-    // `execute_set` (already disk-capable). No disk guard needed.
     // As in `execute_create`: one MERGE per incoming row, none for zero rows.
     // The implicit start row for a leading MERGE is seeded by the pipeline.
     let source_rows = existing.rows;
 
     let mut new_rows = Vec::with_capacity(source_rows.len());
 
-    // Use into_iter to own rows — avoids cloning each row upfront
     for (row_idx, mut new_row) in source_rows.into_iter().enumerate() {
         check_interrupt_periodic(interrupt, row_idx)?;
         // Equality against null is undefined, so a null-bearing MERGE key
@@ -2062,11 +1882,9 @@ fn execute_merge(
                 }
             }
         }
-        // Try to match the MERGE pattern
         let matched = try_match_merge_pattern(graph, &merge.pattern, &new_row, params)?;
 
         if let Some(bound_row) = matched {
-            // Pattern matched — merge bindings into row
             for (var, idx) in &bound_row.node_bindings {
                 new_row.node_bindings.insert(var.clone(), *idx);
             }
@@ -2074,7 +1892,6 @@ fn execute_merge(
                 new_row.edge_bindings.insert(var.clone(), *binding);
             }
 
-            // Execute ON MATCH SET
             if let Some(ref set_items) = merge.on_match {
                 let set_clause = SetClause {
                     items: set_items.clone(),
@@ -2087,7 +1904,6 @@ fn execute_merge(
                 execute_set(graph, &set_clause, &temp_rs, params, stats, interrupt)?;
             }
         } else {
-            // No match — CREATE the pattern
             let create_clause = CreateClause {
                 patterns: vec![merge.pattern.clone()],
             };
@@ -2098,7 +1914,6 @@ fn execute_merge(
             };
             let created = execute_create(graph, &create_clause, temp_rs, params, stats, interrupt)?;
 
-            // Merge newly created bindings into our row
             if let Some(created_row) = created.rows.into_iter().next() {
                 for (var, idx) in created_row.node_bindings {
                     new_row.node_bindings.insert(var, idx);
@@ -2108,7 +1923,6 @@ fn execute_merge(
                 }
             }
 
-            // Execute ON CREATE SET
             if let Some(ref set_items) = merge.on_create {
                 let set_clause = SetClause {
                     items: set_items.clone(),
@@ -2132,8 +1946,8 @@ fn execute_merge(
     })
 }
 
-/// Try to match a MERGE pattern against the graph.
-/// Returns Some(ResultRow) with variable bindings if a match is found, None otherwise.
+/// Returns the bound row when the pattern already exists, `None` when it does
+/// not (the caller then CREATEs it).
 fn try_match_merge_pattern(
     graph: &DirGraph,
     pattern: &CreatePattern,
@@ -2174,7 +1988,6 @@ fn try_match_merge_pattern(
 
                 let expected_props = merge_expected_props(&executor, node_pat, row, graph)?;
 
-                // Helper: verify a candidate node matches all expected properties
                 let node_matches_all = |idx: NodeIndex, props: &[(&str, Value)]| -> bool {
                     if let Some(node) = graph.graph.node_view(idx) {
                         props.iter().all(|(key, expected)| {
@@ -2198,16 +2011,10 @@ fn try_match_merge_pattern(
                     result_row
                 };
 
-                // --- Index-accelerated matching ---
-                // Indexes are keyed by primary type; skip them entirely when
-                // `label` has secondary occurrences (their early `return
-                // Ok(None)` would falsely report "no match" for a node
-                // labelled `:label` only secondarily).
                 if !label_has_secondary {
                     // 1. If pattern contains "id" property, use O(1) id_index lookup
                     if let Some((_, id_value)) = expected_props.iter().find(|(k, _)| *k == "id") {
                         if let Some(idx) = graph.lookup_by_id_readonly(label, id_value) {
-                            // ID matched — verify remaining properties (if any)
                             if expected_props.len() == 1 || node_matches_all(idx, &expected_props) {
                                 return Ok(Some(build_result(idx)));
                             }
@@ -2218,7 +2025,6 @@ fn try_match_merge_pattern(
                     // 2. Single non-id property: try property index
                     if expected_props.len() == 1 {
                         let (key, ref value) = expected_props[0];
-                        // Map name/title aliases to the stored field name
                         let index_key = if key == "name" || key == "title" {
                             "title"
                         } else {
@@ -2296,7 +2102,6 @@ fn try_match_merge_pattern(
                     CreateEdgeDirection::Incoming => (target_idx, source_idx),
                 };
 
-                // Search for existing edge matching type
                 let interned_ct = InternedKey::from_str(&edge_pat.connection_type);
                 let matching_edge = graph
                     .graph

@@ -1,7 +1,5 @@
 //! Aggregate-fusion passes — `MATCH ... RETURN <group>, <agg>`, OPTIONAL-MATCH
 //! aggregates, node-scan aggregates, and the multi-MATCH / top-K variants.
-//!
-//! Split out of the former monolithic `fusion.rs` (0.10.10).
 
 use super::super::index_selection::where_subsumed_by_pattern;
 use super::*;
@@ -13,26 +11,20 @@ use crate::graph::languages::cypher::ast::*;
 pub(crate) fn fuse_optional_match_aggregate(query: &mut CypherQuery) {
     let mut i = 0;
     while i + 1 < query.clauses.len() {
-        // Note: unlike fuse_match_*_aggregate, this fused executor correctly
-        // iterates over existing rows from prior clauses, so no i > 0 guard needed.
+        // No `i > 0` guard: unlike fuse_match_*_aggregate, this fused executor
+        // iterates existing rows from prior clauses.
         //
         // Single-pattern only: the fused executor computes ONE per-row
         // match_count by SUMMING pattern counts, but a comma-separated
-        // multi-pattern OPTIONAL MATCH row count is the join of the
+        // multi-pattern OPTIONAL MATCH row count is the *join* of the
         // patterns' matches, and per-variable counts differ per pattern
-        // (`count(a)` vs `count(b)` over different patterns) — summing
-        // silently returns wrong counts. Multi-pattern shapes take the
-        // materialized executor.
+        // (`count(a)` vs `count(b)`) — summing silently returns wrong counts.
+        // Multi-pattern shapes take the materialized executor.
         //
-        // WHY-BAIL on a clause-owned WHERE: the fused counter counts a
-        // pattern's matches per source row through `try_count_simple_pattern`,
-        // which has no hook to evaluate a predicate per candidate — it would
-        // count candidates the scoped WHERE excludes. (Before the WHERE moved
-        // into the clause it sat between the two as a `Clause::Where` and
-        // broke this adjacency anyway, so this bail is the shape's existing
-        // plan, now stated rather than accidental. The pushdown pass has
-        // usually moved the cheap terms into the pattern by this point, so
-        // the materialized path is not starting from a full scan.)
+        // Bail on a clause-owned WHERE: the fused counter counts a pattern's
+        // matches per source row through `try_count_simple_pattern`, which has
+        // no hook to evaluate a predicate per candidate — it would count
+        // candidates the scoped WHERE excludes.
         let can_fuse = match (&query.clauses[i], &query.clauses[i + 1]) {
             (Clause::OptionalMatch(m), Clause::With(_) | Clause::Return(_)) => {
                 m.patterns.len() == 1 && m.where_clause.is_none()
@@ -45,21 +37,17 @@ pub(crate) fn fuse_optional_match_aggregate(query: &mut CypherQuery) {
             continue;
         }
 
-        // Collect variables defined *only* by this OPTIONAL MATCH —
-        // every pattern variable (node *and* edge) minus any that
-        // were already bound by a prior MATCH/WITH/UNWIND. The fused
-        // executor evaluates group keys against the *source* row
-        // (before OPTIONAL MATCH expansion), so `pet.name` where
-        // `pet` only exists post-OPTIONAL would always be NULL —
-        // silently wrong. Pre-bound anchors used inside the OPTIONAL
-        // pattern (e.g. the `(p)` in `OPTIONAL MATCH ()-[rp:P50]->(p)`
-        // after a prior `MATCH (p)…`) are fine because `p` resolves
-        // on the source row.
+        // Variables defined *only* by this OPTIONAL MATCH — every pattern
+        // variable (node *and* edge) minus any bound by a prior
+        // MATCH/WITH/UNWIND. The fused executor evaluates group keys against
+        // the *source* row (before OPTIONAL-MATCH expansion), so `pet.name`
+        // where `pet` only exists post-OPTIONAL would always be NULL —
+        // silently wrong. Pre-bound anchors used inside the OPTIONAL pattern
+        // (the `(p)` in `OPTIONAL MATCH ()-[rp:P50]->(p)` after a prior
+        // `MATCH (p)…`) are fine: `p` resolves on the source row.
         //
-        // `collect_pattern_variables` (the shared helper) returns
-        // *node* variables only — used elsewhere for type tracking
-        // — so we can't reuse it here without losing the edge var.
-        // Local closure walks Edge elements too.
+        // The shared `collect_pattern_variables` returns *node* variables
+        // only, so this local closure walks Edge elements too.
         let collect_all_pattern_vars =
             |patterns: &[crate::graph::core::pattern_matching::Pattern]| -> Vec<String> {
                 let mut vars = Vec::new();
@@ -137,7 +125,6 @@ pub(crate) fn fuse_optional_match_aggregate(query: &mut CypherQuery) {
             continue;
         }
 
-        // Check that the WITH/RETURN contains count() aggregation and simple pass-through group keys
         let fusable = match &query.clauses[i + 1] {
             Clause::With(w) => is_fusable_with_clause(w),
             Clause::Return(r) => is_fusable_return_clause(r, &opt_match_vars),
@@ -149,8 +136,6 @@ pub(crate) fn fuse_optional_match_aggregate(query: &mut CypherQuery) {
             continue;
         }
 
-        // Verify ALL count aggregate variables come from THIS OPTIONAL MATCH,
-        // and none use DISTINCT (which the fused path cannot handle)
         let items = match &query.clauses[i + 1] {
             Clause::With(w) => &w.items,
             Clause::Return(r) => &r.items,
@@ -159,12 +144,10 @@ pub(crate) fn fuse_optional_match_aggregate(query: &mut CypherQuery) {
                 continue;
             }
         };
-        // Validate every `count(...)` reachable inside each item — even
-        // when the count is wrapped in arithmetic (`total - count(rp)`).
-        // The fused executor substitutes the per-row count into every
-        // count() it finds, so each must reference an OPTIONAL-MATCH
-        // variable (or `*`) for the substitution to mean what the user
-        // wrote.
+        // Every `count(...)` reachable inside an item — including ones wrapped
+        // in arithmetic (`total - count(rp)`) — must reference an
+        // OPTIONAL-MATCH variable or `*`: the fused executor substitutes the
+        // per-row count into every count() it finds.
         let all_counts_local = items
             .iter()
             .all(|item| count_args_local_to_opt(&item.expression, &opt_match_vars));
@@ -174,8 +157,6 @@ pub(crate) fn fuse_optional_match_aggregate(query: &mut CypherQuery) {
             continue;
         }
 
-        // Extract both clauses and replace with fused variant.
-        // Convert Return → With for the fused representation.
         let with_clause = match query.clauses.remove(i + 1) {
             Clause::With(w) => w,
             Clause::Return(r) => WithClause {
@@ -204,8 +185,8 @@ pub(crate) fn fuse_optional_match_aggregate(query: &mut CypherQuery) {
     }
 }
 
-/// Check if a WITH clause is eligible for fusion with an OPTIONAL MATCH.
-/// Must have: simple variable group keys + count() aggregates only.
+/// Eligible for OPTIONAL-MATCH fusion: simple variable group keys and
+/// count() aggregates only.
 pub(crate) fn is_fusable_with_clause(with: &WithClause) -> bool {
     use crate::graph::languages::cypher::ast::is_aggregate_expression;
 
@@ -218,17 +199,16 @@ pub(crate) fn is_fusable_with_clause(with: &WithClause) -> bool {
                     has_count = true;
                 }
                 expr if aggregates_only_count(expr) => {
-                    // Derived expression whose only aggregates are
-                    // count() — e.g. `total - count(rp) AS cultural`.
-                    // The fused executor substitutes the per-row count
-                    // and evaluates the rest through the standard
-                    // expression evaluator.
+                    // Derived expression, e.g. `total - count(rp) AS cultural`:
+                    // the executor substitutes the per-row count, then evaluates
+                    // the rest normally.
                     has_count = true;
                 }
                 _ => return false,
             }
         } else {
-            // Group key must be a simple variable pass-through
+            // Bare variables only — unlike the RETURN variant, this gate does
+            // not admit PropertyAccess group keys.
             if !matches!(&item.expression, Expression::Variable(_)) {
                 return false;
             }
@@ -238,22 +218,18 @@ pub(crate) fn is_fusable_with_clause(with: &WithClause) -> bool {
     has_count
 }
 
-/// True when every aggregate function call inside `expr` is `count`.
-/// Used by the OPTIONAL-MATCH fusion gates to decide whether the
-/// fused executor's count→literal substitution covers the expression.
-/// Any other aggregate (sum/avg/min/max/collect/...) bails fusion;
-/// the materialized executor handles those via its general aggregate
-/// evaluator.
+/// True when every aggregate call inside `expr` is `count`. The
+/// OPTIONAL-MATCH fusion gates use this to decide whether the fused
+/// executor's count→literal substitution covers the expression; any other
+/// aggregate (sum/avg/min/max/collect/…) bails to the materialized executor.
 ///
-/// The recursion set must mirror `ast::is_aggregate_expression`: any
-/// wrapper this does not recurse into falls through to `_ => true` and is
-/// wrongly classified as "all aggregates are count", which lets the
-/// OPTIONAL-MATCH fusion accept it. `collect(x)[0..3]` (a `ListSlice`
-/// wrapping a `FunctionCall`) is the shape that catches — the fused
-/// executor would run `evaluate_expression` per-row on the substituted
-/// (still-containing-collect) expression and the runtime would reject the
-/// per-row aggregate call with "Aggregate function 'collect' cannot be
-/// used outside of RETURN/WITH".
+/// INVARIANT: the recursion set must mirror `ast::is_aggregate_expression`.
+/// Any wrapper this does not recurse into falls through to `_ => true`, is
+/// wrongly classified as "all aggregates are count", and gets accepted for
+/// fusion. `collect(x)[0..3]` (a `ListSlice` over a `FunctionCall`) is the
+/// shape that catches: the fused executor would evaluate the still-containing-
+/// collect expression per row, and the runtime rejects that with "Aggregate
+/// function 'collect' cannot be used outside of RETURN/WITH".
 fn aggregates_only_count(expr: &Expression) -> bool {
     use crate::graph::languages::cypher::ast::is_aggregate_expression;
     match expr {
@@ -274,9 +250,8 @@ fn aggregates_only_count(expr: &Expression) -> bool {
         | Expression::Modulo(l, r)
         | Expression::Concat(l, r) => aggregates_only_count(l) && aggregates_only_count(r),
         Expression::Negate(inner) => aggregates_only_count(inner),
-        // Wrapper expressions that pass aggregates through unchanged —
-        // a slice/index/list-comprehension/case over `collect(x)` is
-        // still aggregating `collect`, not derivable from `count`.
+        // Wrappers that pass aggregates through unchanged: a slice / index /
+        // comprehension / case over `collect(x)` still aggregates `collect`.
         Expression::IndexAccess { expr, index } => {
             aggregates_only_count(expr) && aggregates_only_count(index)
         }
@@ -306,20 +281,16 @@ fn aggregates_only_count(expr: &Expression) -> bool {
         Expression::ExprPropertyAccess { expr, .. } => aggregates_only_count(expr),
         Expression::MapLiteral(entries) => entries.iter().all(|(_, e)| aggregates_only_count(e)),
         Expression::ListLiteral(items) => items.iter().all(aggregates_only_count),
-        // Leaves / non-aggregate-bearing forms can't introduce a non-count
-        // aggregate, so they're trivially fine.
+        // Leaves and non-aggregate-bearing forms can't introduce an aggregate.
         _ => true,
     }
 }
 
-/// Check if a RETURN clause is eligible for fusion with an OPTIONAL MATCH.
-/// Same as `is_fusable_with_clause` but allows PropertyAccess group keys
-/// (RETURN items can be `l.korttittel`, not just bare `l`) — *except* when
-/// the PropertyAccess targets a variable that's only bound by the OPTIONAL
-/// MATCH itself. The fused executor evaluates group keys against the source
-/// row (pre-OPTIONAL-MATCH), so `pet.name` where `pet` only exists post-
-/// OPTIONAL would always resolve to NULL — silently merging all rows into
-/// one wrong group.
+/// Like `is_fusable_with_clause`, but allows PropertyAccess group keys
+/// (`l.korttittel`, not just bare `l`) — *except* on a variable bound only by
+/// the OPTIONAL MATCH. The fused executor evaluates group keys against the
+/// source row, so `pet.name` for a post-OPTIONAL `pet` resolves to NULL and
+/// silently merges every row into one wrong group.
 pub(crate) fn is_fusable_return_clause(
     ret: &ReturnClause,
     opt_match_vars: &std::collections::HashSet<String>,
@@ -335,11 +306,9 @@ pub(crate) fn is_fusable_return_clause(
                     has_count = true;
                 }
                 expr if aggregates_only_count(expr) => {
-                    // Derived expression — e.g. `total - count(rp)` —
-                    // the fused executor substitutes count and
-                    // evaluates the rest. The expression must not
-                    // touch a property of an OPTIONAL-MATCH-bound
-                    // variable (those evaluate to NULL pre-expansion).
+                    // Derived expression (`total - count(rp)`): count is
+                    // substituted, the rest evaluated — but it must not touch
+                    // an OPTIONAL-bound variable (NULL pre-expansion).
                     if expression_touches_vars(expr, opt_match_vars) {
                         return false;
                     }
@@ -348,8 +317,6 @@ pub(crate) fn is_fusable_return_clause(
                 _ => return false,
             }
         } else {
-            // Group key must be a simple variable or PropertyAccess on a
-            // variable bound *before* the OPTIONAL MATCH.
             match &item.expression {
                 Expression::Variable(_) => {}
                 Expression::PropertyAccess { variable, .. } => {
@@ -393,9 +360,8 @@ fn count_args_local_to_opt(
                     _ => false,
                 }
             } else {
-                // Non-count function — descend so a wrapped count gets
-                // checked, but bail if it's an aggregate that the
-                // fused path can't handle.
+                // Non-count function: descend to check a wrapped count, but
+                // bail if it is itself an aggregate the fused path can't do.
                 if crate::graph::languages::cypher::ast::is_aggregate_expression(expr) {
                     return false;
                 }
@@ -412,20 +378,15 @@ fn count_args_local_to_opt(
             count_args_local_to_opt(l, opt_match_vars) && count_args_local_to_opt(r, opt_match_vars)
         }
         Expression::Negate(inner) => count_args_local_to_opt(inner, opt_match_vars),
-        // Variables, property accesses, literals, etc. — no count
-        // inside, fall through.
         _ => true,
     }
 }
 
-/// True when `expr` (or any sub-expression *outside of* a `count(...)`
-/// argument) references a variable in `vars` via Variable or
-/// PropertyAccess. Inside `count(rp)` the reference to `rp` is fine —
-/// the fused executor substitutes count() with a per-row literal
-/// before evaluation, so the OPTIONAL-bound variable never has to
-/// resolve. Outside count(), references to OPTIONAL-MATCH-only
-/// variables would be NULL pre-expansion and produce silently-wrong
-/// results.
+/// True when `expr` references a variable in `vars` (via Variable or
+/// PropertyAccess) *outside of* a `count(...)` argument. Inside `count(rp)`
+/// the reference is fine — the fused executor substitutes count() with a
+/// per-row literal before evaluation. Outside count(), an OPTIONAL-MATCH-only
+/// variable would be NULL pre-expansion and silently produce wrong results.
 pub(crate) fn expression_touches_vars(
     expr: &Expression,
     vars: &std::collections::HashSet<String>,
@@ -434,8 +395,6 @@ pub(crate) fn expression_touches_vars(
         Expression::Variable(v) => vars.contains(v),
         Expression::PropertyAccess { variable, .. } => vars.contains(variable),
         Expression::FunctionCall { name, args, .. } => {
-            // Arguments to count() are substituted away before
-            // evaluation, so they don't count as "touching" the var.
             if name == "count" {
                 false
             } else {
@@ -456,12 +415,13 @@ pub(crate) fn expression_touches_vars(
 }
 
 // Gate for DISTINCT-count fusion. The fused executor enumerates group node
-// candidates and runs `try_count_distinct_peers` per node. That's only
-// faster than the materializing path when the group set is small —
-// otherwise the per-node random I/O dominates. The heuristic for "small"
-// is: the group node has a type filter or a non-empty property filter.
-// Unconstrained group nodes fall back to the materializing path, whose
-// single sequential edge scan wins on Wikidata-scale graphs.
+// candidates and runs `try_count_distinct_peers` per node — only faster than
+// the materializing path when the group set is small; otherwise per-node
+// random I/O dominates (an untyped group is a full-graph node scan, 124 M
+// iterations on Wikidata). The heuristic for "small": the group node has a
+// type filter or a non-empty property filter. Unconstrained groups fall back
+// to the materializing path, whose single sequential edge scan wins at
+// Wikidata scale.
 //
 // Accepts both the `MATCH … RETURN …` and `MATCH … WITH …` shapes by
 // inspecting which non-aggregate items the next clause projects.
@@ -494,9 +454,9 @@ fn distinct_fusable_3elem_with_constrained_group(
                 None
             } else {
                 match &item.expression {
-                    // The distinct fast path also accumulates by NodeIndex.
-                    // Property-valued grouping may collapse multiple nodes
-                    // into one group and therefore must use the eager path.
+                    // The distinct fast path accumulates by NodeIndex, and
+                    // property-valued grouping can collapse several nodes into
+                    // one group — that shape must take the eager path.
                     Expression::Variable(v) => Some(v.as_str()),
                     _ => None,
                 }
@@ -524,7 +484,6 @@ fn distinct_fusable_3elem_with_constrained_group(
         return false;
     };
 
-    // "Constrained" = type filter OR a non-empty property filter.
     let has_type = group_node.node_type.is_some();
     let has_props = group_node
         .properties
@@ -548,21 +507,18 @@ fn distinct_fusable_3elem_with_constrained_group(
 pub(crate) fn fuse_match_return_aggregate(query: &mut CypherQuery, has_secondary_labels: bool) {
     use crate::graph::languages::cypher::ast::is_aggregate_expression;
 
-    // This fusion's executor filters typed peer/group nodes via
-    // `binary_search` on the *sorted* primary `type_indices` slice, which
-    // can't see secondary-labelled nodes. On a multi-label graph, bail to
-    // the general MATCH→aggregate path (candidate selection there goes
-    // through the matcher's `find_matching_nodes`, which is multi-label
-    // correct). Single-label graphs are unaffected.
+    // This fusion's executor filters typed peer/group nodes via `binary_search`
+    // on the *sorted* primary `type_indices` slice, which can't see
+    // secondary-labelled nodes. On a multi-label graph bail to the general
+    // MATCH→aggregate path, whose `find_matching_nodes` is multi-label correct.
     if has_secondary_labels {
         return;
     }
 
     let mut i = 0;
     while i + 1 < query.clauses.len() {
-        // Only fuse when the MATCH is the first clause — a non-first MATCH
-        // depends on the pipeline state from prior clauses, which the fused
-        // path would ignore.
+        // First clause only — a non-first MATCH depends on pipeline state from
+        // prior clauses, which the fused path would ignore.
         if i > 0 {
             i += 1;
             continue;
@@ -576,7 +532,6 @@ pub(crate) fn fuse_match_return_aggregate(query: &mut CypherQuery, has_secondary
             continue;
         }
 
-        // Check MATCH: exactly 1 pattern with 3 or 5 elements
         let (first_var, second_var, edge_has_props, edge_var) = if let Clause::Match(m) =
             &query.clauses[i]
         {
@@ -610,7 +565,6 @@ pub(crate) fn fuse_match_return_aggregate(query: &mut CypherQuery, has_secondary
 
             if n_elems == 5 {
                 // 5-element: (a)-[e1]->(b)<-[e2]-(c)
-                // Middle node (elements[2]) must have no properties
                 let mid_has_props = match &pat.elements[2] {
                     PatternElement::Node(np) => np.properties.is_some(),
                     _ => {
@@ -682,23 +636,19 @@ pub(crate) fn fuse_match_return_aggregate(query: &mut CypherQuery, has_secondary
             continue;
         }
 
-        // At least one of first_var / second_var must be named
         if first_var.is_none() && second_var.is_none() {
             i += 1;
             continue;
         }
 
-        // Check RETURN: must have count() aggregate + group-by on one node variable.
-        // Determine which variable is the group key (first or second).
-        //
         // HAVING is allowed and carried through on the ReturnClause — the fused
         // executor applies it post-aggregation against the small group-by map
-        // instead of against the materialised edge-row set.
-        // (fusable, distinct_count) — distinct_count is true when the count
-        // aggregate uses DISTINCT on the OTHER node variable. Allowed because
-        // the executor's node-centric path can dedup peers via a per-group
-        // HashSet<NodeIndex>; the edge-centric fast path is bypassed in that
-        // mode (it counts edges, not distinct peers).
+        // instead of the materialised edge-row set.
+        //
+        // distinct_count is true when a count aggregate uses DISTINCT on the
+        // OTHER node variable: the executor's node-centric path dedups peers
+        // via a per-group HashSet<NodeIndex>, bypassing the edge-centric fast
+        // path (which counts edges, not distinct peers).
         let (fusable, distinct_count) = if let Clause::Return(r) = &query.clauses[i + 1] {
             if r.distinct {
                 (false, false)
@@ -760,7 +710,6 @@ pub(crate) fn fuse_match_return_aggregate(query: &mut CypherQuery, has_secondary
                     }
                 }
 
-                // group_var must be either first_var or second_var
                 if all_valid {
                     if let Some(gv) = group_var {
                         let is_first = first_var.as_deref() == Some(gv);
@@ -773,11 +722,10 @@ pub(crate) fn fuse_match_return_aggregate(query: &mut CypherQuery, has_secondary
                     }
                 }
 
-                // Property-valued groups are merged by their resolved Value
-                // tuple in the fused executor. Keep the first implementation
-                // deliberately narrow: a single edge pattern and additive
-                // (non-DISTINCT) counts. DISTINCT peer/edge sets cannot be
-                // summed after multiple nodes collapse to one property value.
+                // Property-valued groups merge by their resolved Value tuple.
+                // Deliberately narrow: single edge pattern, additive
+                // (non-DISTINCT) counts only — DISTINCT peer/edge sets cannot
+                // be summed after several nodes collapse to one value.
                 let property_pattern_is_three = matches!(
                     &query.clauses[i],
                     Clause::Match(m) if m.patterns[0].elements.len() == 3
@@ -801,10 +749,9 @@ pub(crate) fn fuse_match_return_aggregate(query: &mut CypherQuery, has_secondary
                                     args,
                                     distinct,
                                 } if name == "count" => {
-                                    // count(*) is fine — but DISTINCT count(*)
-                                    // would be a row-distinctness count, which
-                                    // the fused path can't produce without
-                                    // building the cross-product. Reject.
+                                    // count(*) is fine, but DISTINCT count(*) is
+                                    // a row-distinctness count the fused path
+                                    // can't produce without the cross-product.
                                     if args.len() == 1 && matches!(args[0], Expression::Star) {
                                         if *distinct {
                                             count_var_ok = false;
@@ -814,22 +761,15 @@ pub(crate) fn fuse_match_return_aggregate(query: &mut CypherQuery, has_secondary
                                         continue;
                                     }
                                     // count(var) — var must be either:
-                                    //   (a) the OTHER node variable (e.g. for
-                                    //       `MATCH (a)-[:E]->(b) RETURN b,
-                                    //       count(a)`, group=b, other=a), or
-                                    //   (b) the edge variable, since for a
-                                    //       3-element pattern there's exactly
-                                    //       one edge per (other, group) pair —
-                                    //       count(r) ≡ count(other). The edge
-                                    //       variable was bailed pre-fix, so
-                                    //       queries written as `count(r)`
-                                    //       (the natural cite-count form for
-                                    //       `(paper)<-[r:CITES]-(citing) ...
-                                    //       count(r)`) silently fell out of
-                                    //       fusion despite being structurally
-                                    //       fusable.
-                                    // DISTINCT on either is allowed: dedup
-                                    // by NodeIndex / EdgeIndex per group.
+                                    //   (a) the OTHER node variable
+                                    //       (`MATCH (a)-[:E]->(b) RETURN b,
+                                    //       count(a)`: group=b, other=a), or
+                                    //   (b) the edge variable — a 3-element
+                                    //       pattern has exactly one edge per
+                                    //       (other, group) pair, so
+                                    //       count(r) ≡ count(other).
+                                    // DISTINCT on either is allowed: dedup by
+                                    // NodeIndex / EdgeIndex per group.
                                     if let Some(Expression::Variable(var)) = args.first() {
                                         let matches_other =
                                             other_var.as_deref() == Some(var.as_str());
@@ -870,13 +810,8 @@ pub(crate) fn fuse_match_return_aggregate(query: &mut CypherQuery, has_secondary
             continue;
         }
 
-        // DISTINCT-count gating: only fuse when (a) the pattern is 3-element
-        // node-edge-node, and (b) the GROUP node is type-constrained or has
-        // properties. The fused path enumerates group node candidates and
-        // calls `try_count_distinct_peers` per node — for an untyped group
-        // that's a full-graph node scan (124 M iterations on Wikidata).
-        // Without this guard the fused path is catastrophically slower than
-        // the materializing fallback for unconstrained groups.
+        // DISTINCT-count gating: 3-element node-edge-node pattern plus a
+        // type/property-constrained group node. See the gate fn for why.
         if distinct_count
             && !distinct_fusable_3elem_with_constrained_group(
                 &query.clauses[i],
@@ -887,7 +822,6 @@ pub(crate) fn fuse_match_return_aggregate(query: &mut CypherQuery, has_secondary
             continue;
         }
 
-        // All checks passed — fuse MATCH + RETURN
         let return_clause = if let Clause::Return(r) = query.clauses.remove(i + 1) {
             r
         } else {
@@ -913,7 +847,6 @@ pub(crate) fn fuse_match_return_aggregate(query: &mut CypherQuery, has_secondary
         i += 1;
     }
 
-    // Second pass: absorb ORDER BY + LIMIT into FusedMatchReturnAggregate
     fuse_aggregate_order_limit(query);
 }
 
@@ -954,17 +887,13 @@ pub(crate) fn fuse_aggregate_order_limit(query: &mut CypherQuery) {
 
         // Extract PRIMARY ORDER BY sort key + LIMIT.
         //
-        // 0.8.12 phase-4: multi-key ORDER BY (e.g.
-        // `ORDER BY count DESC, c.title ASC LIMIT 10`) used to bail
-        // fusion outright — the executor fell through to materialising
-        // every distinct peer's title, O(seconds) at Wikidata scale.
-        // Now we handle the multi-key case via `candidate_emit`: the
-        // executor emits the threshold-qualifying superset (all
-        // candidates whose primary key is at least the Kth-largest),
-        // and the UNTOUCHED downstream OrderBy + Limit re-sort and
-        // trim those candidates using the full multi-key spec. Only
-        // K title evaluations happen in practice because the superset
-        // is ≪ |distinct peers| for typical aggregate-by-count data.
+        // Multi-key ORDER BY (`ORDER BY count DESC, c.title ASC LIMIT 10`)
+        // goes through `candidate_emit`: the executor emits the
+        // threshold-qualifying superset (candidates whose primary key is at
+        // least the Kth-largest) and the UNTOUCHED downstream OrderBy + Limit
+        // re-sort and trim it under the full multi-key spec. Only ~K title
+        // evaluations happen — the superset is ≪ |distinct peers| for typical
+        // aggregate-by-count data.
         let (sort_expr_idx, descending, multi_key) = if let Clause::OrderBy(ob) =
             &query.clauses[i + 1]
         {
@@ -974,18 +903,15 @@ pub(crate) fn fuse_aggregate_order_limit(query: &mut CypherQuery) {
             }
             let sort_item = &ob.items[0];
             if let Clause::FusedMatchReturnAggregate { return_clause, .. } = &query.clauses[i] {
-                // Match the sort key against an aggregate RETURN item via either
-                // (a) alias reference: `ORDER BY n` where the RETURN has
-                //     `count(x) AS n` — the historical form, and
-                // (b) expression duplication: `ORDER BY count(x)` where the
-                //     RETURN has `count(x)` (with or without alias) — same
-                //     semantics, but missed by the alias-only matcher and so
-                //     left ORDER BY+LIMIT in the pipeline. The downstream
-                //     materialised every distinct peer's `build_row` (245k
-                //     for `:P138` on Wikidata) and gated the entire query
-                //     on that work — 8 s for the same query a 169 ms alias
-                //     form ran. Compare via `expression_to_column_name` so
-                //     deeply-nested or unparenthesised duplicates land too.
+                // Match the sort key against an aggregate RETURN item via
+                // (a) alias reference: `ORDER BY n` for a RETURN `count(x) AS n`,
+                // (b) expression duplication: `ORDER BY count(x)` against a
+                //     RETURN `count(x)`. Missing (b) leaves ORDER BY+LIMIT in
+                //     the pipeline, which materialises every distinct peer's
+                //     `build_row` — 8 s vs 169 ms for the alias form (245k
+                //     peers, `:P138` on Wikidata). Compare via
+                //     `expression_to_column_name` so deeply-nested or
+                //     unparenthesised duplicates land too.
                 let sort_alias = match &sort_item.expression {
                     Expression::Variable(v) => Some(v.clone()),
                     _ => None,
@@ -1036,18 +962,15 @@ pub(crate) fn fuse_aggregate_order_limit(query: &mut CypherQuery) {
         };
 
         if multi_key {
-            // Leave ORDER BY + LIMIT in place — the executor's
-            // `candidate_emit` path returns the threshold-qualifying
-            // superset, and the downstream clauses finalise ordering
-            // and trim to K.
+            // Leave ORDER BY + LIMIT in place — they finalise the superset.
             if let Clause::FusedMatchReturnAggregate { candidate_emit, .. } = &mut query.clauses[i]
             {
                 *candidate_emit = Some((sort_expr_idx, descending, limit));
             }
         } else {
             // Single-key: heap alone orders correctly, drop both.
-            query.clauses.remove(i + 2); // remove LIMIT
-            query.clauses.remove(i + 1); // remove ORDER BY
+            query.clauses.remove(i + 2);
+            query.clauses.remove(i + 1);
             if let Clause::FusedMatchReturnAggregate { top_k, .. } = &mut query.clauses[i] {
                 *top_k = Some((sort_expr_idx, descending, limit));
             }
@@ -1057,11 +980,6 @@ pub(crate) fn fuse_aggregate_order_limit(query: &mut CypherQuery) {
     }
 }
 
-/// Fuse MATCH (n:Type) [WHERE pred] RETURN group_keys, agg_funcs(...)
-/// into a single-pass node scan with inline aggregation.
-///
-/// Instead of: MATCH creates 20k ResultRows → RETURN groups and aggregates them
-/// Fused: iterate nodes directly, evaluate group keys and aggregates from node properties.
 /// Whether a WHERE predicate can be anchored on the always-present `id`
 /// index — an `n.id = …` or `n.id IN …` (incl. the constant-folded
 /// `InLiteralSet` / param `InExpression` forms) at the top conjunctive
@@ -1089,6 +1007,9 @@ fn where_is_id_anchorable(pred: &Predicate) -> bool {
     }
 }
 
+/// Fuse `MATCH (n:Type) [WHERE pred] RETURN group_keys, agg_funcs(…)` into a
+/// single-pass node scan with inline aggregation, instead of materialising a
+/// ResultRow per node and grouping those afterwards.
 pub(crate) fn fuse_node_scan_aggregate(
     query: &mut CypherQuery,
     params: &std::collections::HashMap<String, Value>,
@@ -1097,21 +1018,18 @@ pub(crate) fn fuse_node_scan_aggregate(
 
     let mut i = 0;
     while i + 1 < query.clauses.len() {
-        // Only fuse when the MATCH is the first clause — a non-first MATCH
-        // depends on the pipeline state from prior clauses, which the fused
-        // path would ignore.
+        // First clause only — a non-first MATCH depends on pipeline state from
+        // prior clauses, which the fused path would ignore.
         if i > 0 {
             i += 1;
             continue;
         }
-        // Find MATCH + [WHERE] + RETURN pattern
         let match_idx = i;
         if !matches!(&query.clauses[match_idx], Clause::Match(_)) {
             i += 1;
             continue;
         }
 
-        // Check for optional WHERE clause between MATCH and RETURN
         let (where_idx, return_idx) = if i + 2 < query.clauses.len()
             && matches!(&query.clauses[i + 1], Clause::Where(_))
             && matches!(&query.clauses[i + 2], Clause::Return(_))
@@ -1124,11 +1042,9 @@ pub(crate) fn fuse_node_scan_aggregate(
             continue;
         };
 
-        // Validate MATCH: single pattern, single node element (no edges).
-        // Pushed-down properties (e.g. {city: 'Oslo'}) are allowed — the executor
-        // evaluates them inline via PatternExecutor::node_matches_properties_pub().
-        // This enables streaming aggregation for queries like:
-        //   MATCH (n:Entity) WHERE n.population > 1M RETURN n.continent, count(n)
+        // Single pattern, single node element (no edges). Pushed-down
+        // properties (`{city: 'Oslo'}`) are allowed — the executor evaluates
+        // them inline via `PatternExecutor::node_matches_properties_pub()`.
         let is_single_node = if let Clause::Match(mc) = &query.clauses[match_idx] {
             mc.patterns.len() == 1
                 && mc.patterns[0].elements.len() == 1
@@ -1142,7 +1058,6 @@ pub(crate) fn fuse_node_scan_aggregate(
             continue;
         }
 
-        // Validate RETURN: must have supported aggregation (count/sum/avg/min/max only)
         let has_supported_agg = if let Clause::Return(r) = &query.clauses[return_idx] {
             let has_any_agg = r
                 .items
@@ -1161,17 +1076,14 @@ pub(crate) fn fuse_node_scan_aggregate(
                         let n = name.to_lowercase();
                         if *distinct {
                             // Only count(DISTINCT <expr>) fuses inline (the executor
-                            // tracks a per-group value set). DISTINCT sum/avg/min/max
-                            // still falls back to the generic path.
-                            //
-                            // `count(DISTINCT *)` is excluded with them: it is a
-                            // row-distinctness count, and the inline accumulator
-                            // folds `*` as a constant "row present" marker — so its
-                            // value set held exactly that one marker and every such
-                            // query fused to `1`, whatever the row count, while the
-                            // streaming and materialized paths both answered the
-                            // number of rows. Same reason the two 3-element passes
-                            // below reject it.
+                            // tracks a per-group value set); DISTINCT sum/avg/min/max
+                            // fall back to the generic path. `count(DISTINCT *)` is
+                            // excluded too: it is a row-distinctness count, and the
+                            // inline accumulator folds `*` into one constant "row
+                            // present" marker — so every such query fused to `1`
+                            // whatever the row count, while the streaming and
+                            // materialized paths answered the number of rows. Same
+                            // reason the two 3-element passes reject it.
                             return n == "count"
                                 && !args.is_empty()
                                 && !matches!(args[0], Expression::Star);
@@ -1193,15 +1105,12 @@ pub(crate) fn fuse_node_scan_aggregate(
             continue;
         }
 
-        // Bail when the WHERE can be anchored on the always-present `id`
-        // index. This fusion full-scans the node type applying the predicate
-        // per node; for an id equality / `id IN …` that is dramatically more
-        // expensive than seeding from the id index. Leaving MATCH+WHERE+RETURN
-        // unfused lets the eq/IN anchoring passes drive the scan from the
-        // index, then count the small anchored set. Measured: `WHERE n.id IN
-        // $ids RETURN count(n)` on a 21k-node graph — ~0.6 ms anchored vs
-        // ~27 ms scanned. (Non-id predicates like `age > 30` keep fusing —
-        // they have no index to anchor on, so the streaming scan is correct.)
+        // Bail when the WHERE is id-anchorable: this fusion full-scans the node
+        // type applying the predicate per node, while leaving MATCH+WHERE+RETURN
+        // unfused lets the eq/IN anchoring passes seed from the id index and
+        // count the small anchored set. Measured on a 21k-node graph, `WHERE
+        // n.id IN $ids RETURN count(n)`: ~0.6 ms anchored vs ~27 ms scanned.
+        // (Non-id predicates like `age > 30` keep fusing — no index to anchor.)
         if let Some(wi) = where_idx {
             if let Clause::Where(w) = &query.clauses[wi] {
                 if where_is_id_anchorable(&w.predicate) {
@@ -1211,18 +1120,15 @@ pub(crate) fn fuse_node_scan_aggregate(
             }
         }
 
-        // All checks passed — fuse.
-        //
         // The safety-net WHERE that `push_where_into_match` leaves behind is
         // dropped when this operator already enforces it: candidates come from
         // `find_matching_nodes`, which applies the pattern's property matchers,
-        // so re-testing every surviving node against the same predicate is
-        // duplicate work on every row of the scan. Doing it here, rather than
-        // in the pushdown pass, is what keeps it safe — by this point every
-        // earlier fusion has already made its decision against the clause list
-        // *with* the WHERE in it, so removing it cannot reroute the query to a
-        // different operator. Anything the replay cannot prove identical keeps
-        // the net.
+        // so re-testing every surviving node duplicates work on every row.
+        // Doing it *here* rather than in the pushdown pass is what keeps it
+        // safe — by this point every earlier fusion has already decided against
+        // the clause list *with* the WHERE in it, so removing it cannot reroute
+        // the query to a different operator. Anything
+        // `where_subsumed_by_pattern` cannot prove identical keeps the net.
         let where_predicate = if let Some(wi) = where_idx {
             let subsumed = match (&query.clauses[match_idx], &query.clauses[wi]) {
                 (Clause::Match(mc), Clause::Where(w)) => {
@@ -1239,7 +1145,6 @@ pub(crate) fn fuse_node_scan_aggregate(
             None
         };
 
-        // Recalculate return_idx after potential WHERE removal
         let ret_idx = if where_idx.is_some() {
             return_idx - 1
         } else {
@@ -1270,10 +1175,6 @@ pub(crate) fn fuse_node_scan_aggregate(
     }
 }
 
-/// Fuse MATCH (node-edge-node) + WITH (group-by + count) into a single
-/// pass that counts edges directly per node. Same criteria as
-/// `fuse_match_return_aggregate` but targets WITH clauses so the pipeline
-/// can continue (e.g., out-degree histogram: WITH p, count(cited) → RETURN).
 /// Try to fold `[Match(M1), Match(M2), With(W)]` at position `i` into a
 /// single `FusedMatchWithAggregate { match_clause: M1, with_clause: W,
 /// secondary_match: Some(M2) }`. Returns true on success (clauses are
@@ -1345,8 +1246,6 @@ fn try_fuse_two_match_with_aggregate(query: &mut CypherQuery, i: usize) -> bool 
     };
 
     // ---- M2 inspection ----
-    // M2 must share a variable with M1 on its first node, and have a named
-    // edge variable that the WITH count consumes.
     let (m2_shared_var, m2_edge_var) = {
         let m2 = if let Clause::Match(m) = &query.clauses[i + 1] {
             m
@@ -1382,7 +1281,6 @@ fn try_fuse_two_match_with_aggregate(query: &mut CypherQuery, i: usize) -> bool 
         {
             return false;
         }
-        // M2's first node variable must match one of M1's bound vars.
         let shared = m2_first_var.as_ref().filter(|v| {
             m1_first_var.as_deref() == Some(v.as_str())
                 || m1_second_var.as_deref() == Some(v.as_str())
@@ -1407,7 +1305,6 @@ fn try_fuse_two_match_with_aggregate(query: &mut CypherQuery, i: usize) -> bool 
     let mut group_var: Option<String> = None;
     for item in &w.items {
         if is_aggregate_expression(&item.expression) {
-            // Allowed: count(m2_edge_var) or count(*). Anything else bails.
             match &item.expression {
                 Expression::FunctionCall {
                     name,
@@ -1432,10 +1329,9 @@ fn try_fuse_two_match_with_aggregate(query: &mut CypherQuery, i: usize) -> bool 
                 _ => return false,
             }
         } else {
-            // Non-aggregate item: must be an M1-bound node variable. This
-            // fused executor accumulates by NodeIndex, whereas property
-            // expressions group by their resolved value and can collapse
-            // multiple nodes into one group.
+            // Non-aggregate item must be an M1-bound node variable: this fused
+            // executor accumulates by NodeIndex, while property expressions
+            // group by resolved value and can collapse nodes into one group.
             let referenced = match &item.expression {
                 Expression::Variable(v) => Some(v.clone()),
                 _ => None,
@@ -1449,8 +1345,6 @@ fn try_fuse_two_match_with_aggregate(query: &mut CypherQuery, i: usize) -> bool 
             if v == m2_edge_var {
                 return false;
             }
-            // The referenced variable must be M1-bound (a group-keyable),
-            // and consistent across non-aggregate items.
             let m1_bound = m1_first_var.as_deref() == Some(v.as_str())
                 || m1_second_var.as_deref() == Some(v.as_str());
             if !m1_bound {
@@ -1476,7 +1370,6 @@ fn try_fuse_two_match_with_aggregate(query: &mut CypherQuery, i: usize) -> bool 
         return false;
     }
 
-    // ---- All checks passed: rewrite ----
     let with_clause = if let Clause::With(w) = query.clauses.remove(i + 2) {
         w
     } else {
@@ -1508,33 +1401,32 @@ fn try_fuse_two_match_with_aggregate(query: &mut CypherQuery, i: usize) -> bool 
     true
 }
 
+/// Fuse MATCH (node-edge-node) + WITH (group-by + count) into a single pass
+/// that counts edges directly per node. Same criteria as
+/// `fuse_match_return_aggregate` but targets WITH clauses so the pipeline can
+/// continue (e.g. out-degree histogram: WITH p, count(cited) → RETURN).
 pub(crate) fn fuse_match_with_aggregate(query: &mut CypherQuery, has_secondary_labels: bool) {
     use crate::graph::languages::cypher::ast::is_aggregate_expression;
 
     // Same primary-type `binary_search` peer/group filter as
-    // `fuse_match_return_aggregate` — bail to the general path on
-    // multi-label graphs. See that function for the rationale.
+    // `fuse_match_return_aggregate` — bail on multi-label graphs; see there.
     if has_secondary_labels {
         return;
     }
 
     let mut i = 0;
     while i + 1 < query.clauses.len() {
-        // Only fuse when the MATCH is the first clause — a non-first MATCH
-        // depends on the pipeline state from prior clauses, which the fused
-        // path would ignore.
+        // First clause only — a non-first MATCH depends on pipeline state from
+        // prior clauses, which the fused path would ignore.
         if i > 0 {
             i += 1;
             continue;
         }
 
-        // Two-MATCH variant: try `[Match(M1), Match(M2), With]` first. M1
-        // produces group keys (its filters apply); M2's pattern drives the
-        // per-key degree count. The shape we recognise is:
-        //   `MATCH (a)-[:T]->(b {…}) MATCH (a)-[r]-() WITH a, count(r) ...`
-        // i.e. M2 shares M1's first node variable, M2's edge variable is
-        // only consumed by `count()` in the WITH, and the WITH groups by an
-        // M1-bound variable.
+        // Two-MATCH variant first: M1 produces group keys (its filters apply),
+        // M2's pattern drives the per-key degree count —
+        //   `MATCH (a)-[:T]->(b {…}) MATCH (a)-[r]-() WITH a, count(r) …`
+        // Full preconditions in `try_fuse_two_match_with_aggregate`.
         if try_fuse_two_match_with_aggregate(query, i) {
             i += 1;
             continue;
@@ -1549,7 +1441,6 @@ pub(crate) fn fuse_match_with_aggregate(query: &mut CypherQuery, has_secondary_l
             continue;
         }
 
-        // Check MATCH: exactly 1 pattern with 3 elements (node-edge-node)
         let (first_var, second_var, edge_has_props, second_has_props, edge_var) =
             if let Clause::Match(m) = &query.clauses[i] {
                 if m.patterns.len() != 1 || m.patterns[0].elements.len() != 3 {
@@ -1602,8 +1493,7 @@ pub(crate) fn fuse_match_with_aggregate(query: &mut CypherQuery, has_secondary_l
             continue;
         }
 
-        // Check WITH: must have count() aggregate + group-by on one node
-        // variable. (fusable, distinct_count) — distinct_count tracks whether
+        // (fusable, distinct_count) — distinct_count tracks whether
         // count(DISTINCT v) was seen on the OTHER node variable.
         let (fusable, distinct_count) = if let Clause::With(w) = &query.clauses[i + 1] {
             if w.distinct {
@@ -1638,7 +1528,6 @@ pub(crate) fn fuse_match_with_aggregate(query: &mut CypherQuery, has_secondary_l
                     }
                 }
 
-                // group_var must be either first_var or second_var
                 if all_valid {
                     if let Some(gv) = group_var {
                         let is_first = first_var.as_deref() == Some(gv);
@@ -1651,7 +1540,6 @@ pub(crate) fn fuse_match_with_aggregate(query: &mut CypherQuery, has_secondary_l
                     }
                 }
 
-                // Check count() aggregates reference the OTHER node variable
                 if all_valid {
                     let other_var = if group_var == first_var.as_deref() {
                         &second_var
@@ -1675,12 +1563,10 @@ pub(crate) fn fuse_match_with_aggregate(query: &mut CypherQuery, has_secondary_l
                                         continue;
                                     }
                                     // Same gate as fuse_match_return_aggregate:
-                                    // accept count(<other-node>) OR
-                                    // count(<edge-var>). For c7-style queries
-                                    // like `MATCH (n)<-[r]-() WITH n, count(r)`
-                                    // with an anonymous endpoint, the only
-                                    // bound non-group variable IS the edge
-                                    // variable.
+                                    // count(<other-node>) or count(<edge-var>).
+                                    // With an anonymous endpoint (`MATCH
+                                    // (n)<-[r]-() WITH n, count(r)`) the only
+                                    // bound non-group variable IS the edge var.
                                     if let Some(Expression::Variable(var)) = args.first() {
                                         let matches_other =
                                             other_var.as_deref() == Some(var.as_str());
@@ -1717,9 +1603,8 @@ pub(crate) fn fuse_match_with_aggregate(query: &mut CypherQuery, has_secondary_l
             continue;
         }
 
-        // Same DISTINCT gating as fuse_match_return_aggregate: skip the fused
-        // path for unconstrained group nodes — see
-        // `distinct_fusable_3elem_with_constrained_group` for rationale.
+        // Same DISTINCT gating as fuse_match_return_aggregate — see
+        // `distinct_fusable_3elem_with_constrained_group`.
         if distinct_count
             && !distinct_fusable_3elem_with_constrained_group(
                 &query.clauses[i],
@@ -1730,7 +1615,6 @@ pub(crate) fn fuse_match_with_aggregate(query: &mut CypherQuery, has_secondary_l
             continue;
         }
 
-        // All checks passed — fuse MATCH + WITH
         let with_clause = if let Clause::With(w) = query.clauses.remove(i + 1) {
             w
         } else {
@@ -1758,63 +1642,53 @@ pub(crate) fn fuse_match_with_aggregate(query: &mut CypherQuery, has_secondary_l
 }
 
 /// Annotate a terminal `RETURN` clause with `lazy_eligible = true` when no
-/// downstream operator forces row materialisation. Subsequent stages
-/// (executor + result-view) consult the flag to skip per-row property
-/// evaluation and instead defer it until Python actually accesses cells.
+/// downstream operator forces row materialisation. The executor and
+/// result-view consult the flag to defer per-row property evaluation until
+/// Python actually accesses cells.
 ///
-/// Eligible when (conservative cut for the first iteration):
-/// - The query has exactly one MATCH (or OptionalMatch) followed by an
-///   optional WHERE and a terminal RETURN. No WITH, no UNWIND, no CALL.
-///   WITH binds projected values whose property extraction goes through a
-///   different resolver path than node_bindings; until the lazy resolver
-///   handles them too, only flat MATCH...RETURN qualifies.
+/// Eligible when (conservative cut):
+/// - The query is exactly one MATCH (or OptionalMatch) and a terminal RETURN,
+///   with no WHERE in any form (see the WART note in the body). No WITH, no
+///   UNWIND, no CALL — WITH binds projected values whose property extraction
+///   goes through a different resolver path than node_bindings.
 /// - Every RETURN item is `PropertyAccess` (single-property reads). Plain
-///   `Variable(v)` returns a whole-node value the lazy resolver doesn't
-///   currently handle.
+///   `Variable(v)` returns a whole-node value the lazy resolver doesn't handle.
 /// - `distinct == false` and `having == None`.
 /// - The RETURN may be followed only by SKIP and LIMIT (truncate without
-///   reading values). Anything else after — ORDER BY, another clause —
-///   forces eager evaluation.
+///   reading values); ORDER BY or any other clause forces eager evaluation.
 pub(crate) fn mark_return_lazy_eligible(query: &mut CypherQuery) {
     let n = query.clauses.len();
     if n == 0 {
         return;
     }
-    // Conservative shape: every clause must be one of MATCH / OPTIONAL MATCH /
+    // Conservative shape: every clause must be MATCH / OPTIONAL MATCH /
     // RETURN / SKIP / LIMIT. WITH / UNWIND / CALL / ORDER BY / fused-aggregate
     // variants all consume row values and their consumer paths haven't been
     // audited for the lazy resolver.
     //
-    // A standalone `Clause::Where` disqualifies too, and that is easy to miss:
+    // A standalone `Clause::Where` disqualifies too, which is easy to miss:
     // `optimize` keeps the WHERE as a safety net even once every predicate has
     // been pushed into the MATCH pattern (see
     // `planner_tests::test_predicate_pushdown_simple`), so it is still a clause
-    // here and falls to the catch-all below. This is the gate that decides
-    // whether a result holds an `Arc<DirGraph>` open, so the exact membership
-    // is pinned by `planner_tests::lazy_eligibility_corpus`.
+    // here and falls to the catch-all below. An `OPTIONAL MATCH … WHERE`
+    // disqualifies for the same reason — the predicate just lives in the clause
+    // now. This gate decides whether a result holds an `Arc<DirGraph>` open, so
+    // its exact membership is pinned by `planner_tests::lazy_eligibility_corpus`.
     //
-    // KNOWN WART, deliberately left alone rather than papered over. The WHERE
-    // rule splits two spellings of the same lookup:
+    // KNOWN WART, deliberately left. The WHERE rule splits two spellings of the
+    // same lookup:
     //
     //     MATCH (u:User {id: 1}) RETURN u.name        -> deferred
     //     MATCH (u:User) WHERE u.id = 1 RETURN u.name -> eager
     //
-    // They are semantically identical and a caller has no way to know which one
-    // they wrote, yet they take different paths with different performance
-    // characteristics. That unpredictability is a defect in its own right,
-    // independent of what the deferred path costs. Accepting a standalone WHERE
-    // here would be the obvious "fix" and is NOT one: the resolver has not been
-    // audited against pushed-down predicates, so widening the gate on that
-    // assumption would trade an arbitrary cliff for a correctness risk. The
-    // principled repair is to make the two spellings converge — either by
-    // folding a fully-pushed WHERE out of the clause list in `optimize`, or by
-    // auditing the resolver and admitting predicate-only WHERE — and either is a
-    // deliberate change with its own tests, not a one-line arm added here.
-    //
-    // An `OPTIONAL MATCH … WHERE` disqualifies for exactly the reason a
-    // standalone WHERE does — the predicate is still there, it just lives in
-    // the clause now. Admitting it here would silently widen the gate the
-    // note above declines to widen.
+    // Semantically identical, different paths, different performance, and no
+    // way for a caller to know which one they wrote. Accepting a standalone
+    // WHERE here is the obvious "fix" and is NOT one: the resolver has not been
+    // audited against pushed-down predicates, so widening the gate would trade
+    // an arbitrary cliff for a correctness risk. The principled repair is to
+    // make the two spellings converge — fold a fully-pushed WHERE out of the
+    // clause list in `optimize`, or audit the resolver and admit predicate-only
+    // WHERE — a deliberate change with its own tests, not an arm added here.
     let mut return_idx: Option<usize> = None;
     for (i, c) in query.clauses.iter().enumerate() {
         match c {
@@ -1837,7 +1711,6 @@ pub(crate) fn mark_return_lazy_eligible(query: &mut CypherQuery) {
         return;
     };
 
-    // Anything after RETURN must be SKIP or LIMIT.
     for c in &query.clauses[idx + 1..] {
         match c {
             Clause::Skip(_) | Clause::Limit(_) => {}
@@ -1845,7 +1718,6 @@ pub(crate) fn mark_return_lazy_eligible(query: &mut CypherQuery) {
         }
     }
 
-    // Inspect the RETURN clause itself.
     let r = match &query.clauses[idx] {
         Clause::Return(r) => r,
         _ => return,
@@ -1853,11 +1725,8 @@ pub(crate) fn mark_return_lazy_eligible(query: &mut CypherQuery) {
     if r.distinct || r.having.is_some() {
         return;
     }
-    // Conservative cut: only PropertyAccess is supported by the lazy
-    // resolver today. Plain `Variable(v)` returns a whole-node value which
-    // the eager path resolves via NodeRef → table-of-properties; the lazy
-    // resolver skips it. Aliases / projections without a binding are also
-    // rejected.
+    // Only PropertyAccess is supported by the lazy resolver; a whole-node
+    // `Variable(v)` and alias/projection forms are rejected.
     let all_simple = r
         .items
         .iter()
@@ -1866,7 +1735,6 @@ pub(crate) fn mark_return_lazy_eligible(query: &mut CypherQuery) {
         return;
     }
 
-    // All gates passed — flip the flag.
     if let Clause::Return(r) = &mut query.clauses[idx] {
         r.lazy_eligible = true;
     }
@@ -1874,28 +1742,23 @@ pub(crate) fn mark_return_lazy_eligible(query: &mut CypherQuery) {
 
 /// Push a downstream `ORDER BY <count_alias> {DESC|ASC} LIMIT k` into the
 /// preceding `FusedMatchWithAggregate` so the executor only evaluates the
-/// group-key projections (e.g. `w.nid`, `w.title`) for the K winners. This
-/// is the lazy-evaluation lever for top-K-by-degree workloads — the
-/// fused stage already emits rows row-by-row, but without the hint it
-/// builds 416 k rows on Wikidata before the downstream LIMIT throws all
-/// but 10 away.
+/// group-key projections (`w.nid`, `w.title`) for the K winners. Without the
+/// hint the fused stage builds 416 k rows on Wikidata before the downstream
+/// LIMIT throws all but 10 away.
 ///
-/// Pattern matched: `[FusedMatchWithAggregate, Return, OrderBy, Limit]`
-/// where:
-/// - Return is non-DISTINCT and every item is either a plain reference
-///   to a WITH-projected alias *or* a property access on one of the
-///   group variables (`g.name`, `g.description`, …). The latter is
-///   safe because the executor inserts `node_bindings[group_var]` on
-///   every surviving row, so property reads happen K times — never on
-///   the discarded cohort members.
-/// - OrderBy has exactly one item, and it targets a `count(...)` alias
-///   in the WITH (any other order key requires evaluating projections
-///   first to know the sort value, defeating the optimisation),
+/// Pattern matched: `[FusedMatchWithAggregate, Return, OrderBy, Limit]` where:
+/// - Return is non-DISTINCT and every item is either a plain WITH-alias
+///   reference *or* a property access on a group variable (`g.name`, …). The
+///   latter is safe because the executor inserts `node_bindings[group_var]` on
+///   every surviving row, so property reads happen K times — never on the
+///   discarded cohort members.
+/// - OrderBy has exactly one item targeting a `count(...)` alias in the WITH.
+///   Any other order key needs the projections evaluated first to know the
+///   sort value, defeating the optimisation.
 /// - Limit is a positive integer literal.
 ///
-/// On match, the absorbed clauses are *kept* in place — they'll then
-/// process at most K rows trivially. This keeps the rest of the
-/// pipeline (column shapes, downstream WHERE, etc.) unchanged.
+/// The absorbed clauses are *kept* in place — they then process at most K rows,
+/// leaving column shapes and downstream WHERE unchanged.
 pub(crate) fn fuse_match_with_aggregate_top_k(query: &mut CypherQuery) {
     use crate::graph::languages::cypher::ast::is_aggregate_expression;
 
@@ -1934,8 +1797,8 @@ pub(crate) fn fuse_match_with_aggregate_top_k(query: &mut CypherQuery) {
             continue;
         }
 
-        // Collect WITH alias set, and the alias of the (single) count() item.
-        // We need that alias to validate the ORDER BY target.
+        // Collect the WITH alias set plus the single count() alias, which is
+        // what the ORDER BY target is validated against.
         let mut count_alias: Option<String> = None;
         let mut count_count = 0usize;
         let mut aliases: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1970,11 +1833,10 @@ pub(crate) fn fuse_match_with_aggregate_top_k(query: &mut CypherQuery) {
             }
         };
 
-        // Identify the group variables — the variables underlying every
-        // non-aggregate WITH item. A downstream `g.<prop>` is safe even
-        // though it's not a literal alias because the executor preserves
-        // `node_bindings[g]` on the K-winner rows; property evaluation
-        // therefore costs K mmap reads, not |cohort| reads.
+        // Group variables — those underlying every non-aggregate WITH item.
+        // A downstream `g.<prop>` is safe though not a literal alias: the
+        // executor preserves `node_bindings[g]` on the K-winner rows, so
+        // property evaluation costs K mmap reads, not |cohort| reads.
         let mut group_vars: std::collections::HashSet<String> = std::collections::HashSet::new();
         for item in &with_items {
             if !is_aggregate_expression(&item.expression) {
@@ -1990,10 +1852,8 @@ pub(crate) fn fuse_match_with_aggregate_top_k(query: &mut CypherQuery) {
             }
         }
 
-        // RETURN must be a pure pass-through projection of WITH aliases,
-        // OR a property access on one of the group variables. Computed
-        // RETURN expressions (function calls, arithmetic, …) still bail —
-        // they may need rows we'd throw away.
+        // Computed RETURN expressions (function calls, arithmetic, …) bail —
+        // they may need rows the top-K would throw away.
         let return_ok = if let Clause::Return(r) = &query.clauses[i + 1] {
             !r.distinct
                 && r.items.iter().all(|item| match &item.expression {
@@ -2009,7 +1869,6 @@ pub(crate) fn fuse_match_with_aggregate_top_k(query: &mut CypherQuery) {
             continue;
         }
 
-        // ORDER BY must target the count alias and have a single item.
         let (target_count, descending) = if let Clause::OrderBy(o) = &query.clauses[i + 2] {
             if o.items.len() != 1 {
                 (false, false)
@@ -2028,7 +1887,6 @@ pub(crate) fn fuse_match_with_aggregate_top_k(query: &mut CypherQuery) {
             continue;
         }
 
-        // LIMIT must be a positive integer literal.
         let limit = if let Clause::Limit(l) = &query.clauses[i + 3] {
             match &l.count {
                 Expression::Literal(Value::Int64(n)) if *n > 0 => *n as usize,
@@ -2042,8 +1900,6 @@ pub(crate) fn fuse_match_with_aggregate_top_k(query: &mut CypherQuery) {
             continue;
         };
 
-        // All checks passed — set top_k on the FusedMatchWithAggregate.
-        // Leave Return/OrderBy/Limit in place; they'll process ≤k rows.
         if let Clause::FusedMatchWithAggregate { top_k, .. } = &mut query.clauses[i] {
             *top_k = Some(AggregateTopK { limit, descending });
         }

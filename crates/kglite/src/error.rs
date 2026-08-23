@@ -1,11 +1,7 @@
-//! Typed error taxonomy for KGLite.
-//!
-//! Replaces the prior "everything is a `String` then wrapped as
-//! `PyValueError` / `PyRuntimeError`" pattern with a structured
-//! [`KgError`] enum + a [`KgErrorCode`] classification. Existing
-//! per-module error types (`SchemaError`, `ValidationError`, `ExprError`)
-//! are preserved and bridged in via `From` impls — no taxonomy
-//! duplication.
+//! Typed error taxonomy for KGLite: the [`KgError`] enum plus a
+//! [`KgErrorCode`] classification. The per-module error types
+//! (`SchemaError`, `ValidationError`, `ExprError`) are bridged in via `From`
+//! impls rather than duplicated here.
 //!
 //! ## Why
 //!
@@ -53,8 +49,6 @@ use crate::graph::languages::cypher::planner::schema_check::SchemaError;
 use crate::graph::schema::ValidationError;
 use crate::graph::storage::interner::InternerCollision;
 
-// ─── KgErrorCode ─────────────────────────────────────────────────────────────
-
 /// Canonical classification of every error KGLite raises.
 ///
 /// Maps 1-to-1 with the [`KgError`] enum variants but is `Copy + Eq +
@@ -62,7 +56,6 @@ use crate::graph::storage::interner::InternerCollision;
 /// FAILURE-code lookup).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum KgErrorCode {
-    // Cypher pipeline
     CypherSyntax,
     CypherTimeout,
     CypherExecution,
@@ -72,7 +65,6 @@ pub enum KgErrorCode {
     // the Python wheel's Ctrl-C / KeyboardInterrupt handler).
     Cancelled,
 
-    // Schema / validation
     Schema,
     Validation,
     Expr,
@@ -91,21 +83,17 @@ pub enum KgErrorCode {
     // drivers route on that difference.
     TransactionConflict,
 
-    // Resource / access
     NodeNotFound,
     ConnectionNotFound,
     PropertyNotFound,
 
-    // File / I/O
     FileNotFound,
     FileFormat,
     FileIo,
 
-    // Argument validation
     InvalidArgument,
     MissingArgument,
 
-    // Internal / should-never-happen
     Internal,
 }
 
@@ -152,14 +140,11 @@ impl KgErrorCode {
     /// - `CypherExecution`, `FileFormat`, `FileIo`, `Internal` →
     ///   500 Internal Server Error
     ///
-    /// Lifted as a companion to [`Self::neo4j_status_code`] in
-    /// 2026-05-25 so the same dispatch idea is available for
-    /// HTTP-shaped bindings (REST servers, gRPC services bridging
-    /// to HTTP). Bindings still wrap the code in their own response
-    /// shape; only the code itself is shared.
+    /// Companion to [`Self::neo4j_status_code`] for HTTP-shaped bindings.
+    /// Bindings still wrap the code in their own response shape; only the code
+    /// itself is shared.
     pub fn http_status_code(&self) -> u16 {
         match self {
-            // 4xx — client mistakes
             KgErrorCode::CypherSyntax
             | KgErrorCode::CypherTypeMismatch
             | KgErrorCode::InvalidArgument
@@ -187,7 +172,6 @@ impl KgErrorCode {
             | KgErrorCode::ConstraintViolation
             | KgErrorCode::ConstraintCreationFailed => 422,
 
-            // 5xx — server-side
             KgErrorCode::CypherExecution
             | KgErrorCode::FileFormat
             | KgErrorCode::FileIo
@@ -201,11 +185,9 @@ impl KgErrorCode {
     /// class prefix (`ClientError` vs `DatabaseError` vs
     /// `TransientError`).
     ///
-    /// Lifted from `kglite-bolt-server` so any future Neo4j-wire-
-    /// compatible binding (Go driver, Java driver alternative, custom
-    /// proxy) gets the canonical mapping without re-deriving the
-    /// table. Bindings still own the wrapping in their own error
-    /// type — only the code string is shared.
+    /// Shared here so any Neo4j-wire-compatible binding gets the canonical
+    /// mapping without re-deriving the table. Bindings still own the wrapping
+    /// in their own error type — only the code string is shared.
     pub fn neo4j_status_code(&self) -> &'static str {
         match self {
             KgErrorCode::CypherSyntax => "Neo.ClientError.Statement.SyntaxError",
@@ -252,8 +234,6 @@ impl fmt::Display for KgErrorCode {
     }
 }
 
-// ─── KgError ─────────────────────────────────────────────────────────────────
-
 /// The canonical error type for KGLite. Every fallible operation
 /// reachable from the public API returns `Result<T, KgError>`
 /// (directly or via `?` from a `From`-convertible source type).
@@ -263,7 +243,6 @@ impl fmt::Display for KgErrorCode {
 /// subclass based on the variant.
 #[derive(Debug)]
 pub enum KgError {
-    // ── Cypher pipeline ──────────────────────────────────────────────
     /// Cypher syntax error from the tokenizer or parser. Carries the
     /// line and column (1-indexed) where parsing failed. Both are
     /// `Option` because some parser-internal errors aren't pinned to
@@ -304,7 +283,6 @@ pub enum KgError {
     /// (a deadline) and `CypherExecution` (a genuine failure).
     Cancelled,
 
-    // ── Schema / validation ──────────────────────────────────────────
     /// Query validation failure (unknown property, unknown node type under
     /// a locked schema, or undefined variable).
     /// Bridged from
@@ -346,7 +324,6 @@ pub enum KgError {
         message: String,
     },
 
-    // ── Concurrency ──────────────────────────────────────────────────
     /// An optimistic-concurrency commit lost its race: the graph advanced
     /// between `begin()` and `commit()`, so the transaction's working copy is
     /// stale and applying it would silently discard the newer commit.
@@ -370,7 +347,6 @@ pub enum KgError {
     /// 7-variant [`ExprError`] enum verbatim.
     Expr(ExprError),
 
-    // ── Resource / access ────────────────────────────────────────────
     /// A node identified by `(node_type, id)` doesn't exist in the
     /// graph. Used by mutation and traversal paths that expect a node.
     NodeNotFound { node_type: String, id: String },
@@ -381,7 +357,6 @@ pub enum KgError {
     /// A property is missing from a node or relationship.
     PropertyNotFound { node_type: String, property: String },
 
-    // ── File / I/O ───────────────────────────────────────────────────
     /// A file the user named doesn't exist on disk.
     FileNotFound(PathBuf),
 
@@ -395,7 +370,6 @@ pub enum KgError {
     /// downstream inspection.
     FileIo(std::io::Error),
 
-    // ── Argument validation ──────────────────────────────────────────
     /// A user-supplied argument violated a precondition with full
     /// structured context — argument name, what was expected, what
     /// was found. Used when the call site can naturally populate all
@@ -420,7 +394,6 @@ pub enum KgError {
     /// existing mapping is retained; callers must reject the operation.
     InternerCollision(InternerCollision),
 
-    // ── Internal ─────────────────────────────────────────────────────
     /// An invariant was violated. Reserved for "should never happen"
     /// — e.g. a node-binding lookup whose existence was guaranteed by
     /// an upstream pattern match. Used in place of an `unwrap()`: where
@@ -459,8 +432,6 @@ impl From<crate::graph::languages::cypher::planner::schema_check::SchemaErrorKin
         }
     }
 }
-
-// ─── Accessors ───────────────────────────────────────────────────────────────
 
 impl KgError {
     /// Canonical [`KgErrorCode`] for this error. Drives the
@@ -510,8 +481,6 @@ impl KgError {
         }
     }
 }
-
-// ─── Display + std::error::Error ─────────────────────────────────────────────
 
 impl fmt::Display for KgError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -614,8 +583,6 @@ impl std::error::Error for KgError {
     }
 }
 
-// ─── From impls ──────────────────────────────────────────────────────────────
-
 impl From<SchemaError> for KgError {
     fn from(e: SchemaError) -> Self {
         KgError::Schema {
@@ -657,8 +624,6 @@ impl From<InternerCollision> for KgError {
     }
 }
 
-// ─── Constraint bridge ───────────────────────────────────────────────────────
-
 impl From<crate::graph::constraints::ConstraintViolation> for KgError {
     /// Lift a core constraint violation to the public error type, splitting on
     /// whether a *write* or a *declaration* failed — the two carry different
@@ -696,8 +661,6 @@ impl From<crate::graph::constraints::ConstraintViolation> for KgError {
 /// where the error boundary benefits from being visible.
 #[allow(dead_code)]
 pub type KgResult<T> = std::result::Result<T, KgError>;
-
-// ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -773,27 +736,22 @@ mod tests {
 
     #[test]
     fn http_status_code_categorises_correctly() {
-        // 4xx — client errors
         assert_eq!(KgErrorCode::CypherSyntax.http_status_code(), 400);
         assert_eq!(KgErrorCode::CypherTypeMismatch.http_status_code(), 400);
         assert_eq!(KgErrorCode::InvalidArgument.http_status_code(), 400);
         assert_eq!(KgErrorCode::MissingArgument.http_status_code(), 400);
 
-        // 404 — not found
         assert_eq!(KgErrorCode::NodeNotFound.http_status_code(), 404);
         assert_eq!(KgErrorCode::ConnectionNotFound.http_status_code(), 404);
         assert_eq!(KgErrorCode::PropertyNotFound.http_status_code(), 404);
         assert_eq!(KgErrorCode::FileNotFound.http_status_code(), 404);
 
-        // 408 — timeout
         assert_eq!(KgErrorCode::CypherTimeout.http_status_code(), 408);
 
-        // 422 — validation
         assert_eq!(KgErrorCode::Schema.http_status_code(), 422);
         assert_eq!(KgErrorCode::Validation.http_status_code(), 422);
         assert_eq!(KgErrorCode::Expr.http_status_code(), 422);
 
-        // 5xx — server-side
         assert_eq!(KgErrorCode::CypherExecution.http_status_code(), 500);
         assert_eq!(KgErrorCode::FileFormat.http_status_code(), 500);
         assert_eq!(KgErrorCode::FileIo.http_status_code(), 500);
@@ -802,17 +760,23 @@ mod tests {
 
     #[test]
     fn every_error_code_has_an_http_status() {
-        // Smoke test that we exhaustively cover every variant (no
-        // panic / unreachable). If a new variant is added, this test
-        // will fail to compile because the match is exhaustive.
+        // This list is maintained BY HAND and must name every `KgErrorCode`
+        // variant. It previously omitted four of them and claimed to be
+        // compile-time exhaustive, which it is not: adding a variant breaks
+        // `http_status_code`'s match, not this loop, so a missing entry here
+        // is silently untested.
         for code in [
             KgErrorCode::CypherSyntax,
             KgErrorCode::CypherTimeout,
             KgErrorCode::CypherExecution,
             KgErrorCode::CypherTypeMismatch,
+            KgErrorCode::Cancelled,
             KgErrorCode::Schema,
             KgErrorCode::Validation,
             KgErrorCode::Expr,
+            KgErrorCode::ConstraintViolation,
+            KgErrorCode::ConstraintCreationFailed,
+            KgErrorCode::TransactionConflict,
             KgErrorCode::NodeNotFound,
             KgErrorCode::ConnectionNotFound,
             KgErrorCode::PropertyNotFound,

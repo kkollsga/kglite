@@ -1,6 +1,5 @@
 //! Storage-backend types and `GraphRead` / `GraphWrite` traits.
 //!
-//! Anchor for the 0.8.0 storage-architecture refactor.
 //! Every backend implements [`GraphRead`] / [`GraphWrite`] directly;
 //! the [`crate::graph::schema::GraphBackend`] enum is a dumb dispatcher.
 //! Per-backend trait impls live in [`crate::graph::storage::impls`].
@@ -50,10 +49,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
-// ──────────────────────────────────────────────────────────────────────────
-// StrField — a borrowed read for string-only tests
-// ──────────────────────────────────────────────────────────────────────────
-
 /// One field read in the *only* form a string predicate needs.
 ///
 /// Every columnar string read through [`ColumnStore::get`] materialises a
@@ -69,7 +64,6 @@ use std::time::Instant;
 /// overflow bag decodes a blob per read.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StrField<'a> {
-    /// The field holds a string.
     Str(std::borrow::Cow<'a, str>),
     /// The field holds a value that is not a string. No string test can pass,
     /// and no fallback applies — the field *resolved*.
@@ -90,18 +84,7 @@ impl StrField<'_> {
     }
 }
 
-// ──────────────────────────────────────────────────────────────────────────
-// GraphRead — unified read interface over storage backends
-// ──────────────────────────────────────────────────────────────────────────
-
 /// Read-side interface shared by every storage backend.
-///
-/// Covers counts and single-property reads, iteration, neighbour lookup,
-/// backend-kind predicates, and disk-only helpers. Iterator-returning
-/// methods use GATs (associated types with lifetime parameters), and the edge
-/// accessors (`edges`, `edge_references`, `edge_weight`, `edge_indices`,
-/// `find_edge`, `edges_connecting`, `edge_weights`) live on the trait rather
-/// than being inherent on any backend.
 ///
 /// Implemented for [`crate::graph::schema::GraphBackend`] and directly for
 /// the mapped and disk backends where their storage-specific iterators matter.
@@ -122,47 +105,37 @@ impl StrField<'_> {
 /// [`GraphRead::lookup_peer_counts`], and [`GraphRead::iter_peers_filtered`]
 /// have meaningful implementations only on the disk backend (they read
 /// from persistent indexes built at `.kgl` load time). Memory and mapped
-/// backends return `None` / fall back via `edges_directed`. The
-/// `Option` / fallback contract is preserved from the pre-refactor
-/// inherent methods so callers do not need to change their handling.
+/// backends return `None` / fall back via `edges_directed`.
 pub trait GraphRead {
     // ─────────────── generic associated types ───────────────
 
-    /// Iterator over all live node indices.
     type NodeIndicesIter<'a>: Iterator<Item = NodeIndex>
     where
         Self: 'a;
 
-    /// Iterator over all live edge indices.
     type EdgeIndicesIter<'a>: Iterator<Item = EdgeIndex>
     where
         Self: 'a;
 
-    /// Iterator over edges incident to a node (directed).
     type EdgesIter<'a>: Iterator<Item = GraphEdgeRef<'a>>
     where
         Self: 'a;
 
-    /// Iterator over all edges in the graph (yielded as `GraphEdgeRef`).
     type EdgeReferencesIter<'a>: Iterator<Item = GraphEdgeRef<'a>>
     where
         Self: 'a;
 
-    /// Iterator over edges connecting a given pair of nodes.
     type EdgesConnectingIter<'a>: Iterator<Item = GraphEdgeRef<'a>>
     where
         Self: 'a;
 
-    /// Iterator over neighbour node indices.
     type NeighborsIter<'a>: Iterator<Item = NodeIndex>
     where
         Self: 'a;
     // ─────────────── counts / backend identity ───────────────
 
-    /// Total live node count across all types.
     fn node_count(&self) -> usize;
 
-    /// Total live edge count.
     fn edge_count(&self) -> usize;
 
     /// Upper bound on node indices (petgraph `node_bound`). May exceed
@@ -186,12 +159,10 @@ pub trait GraphRead {
     #[allow(dead_code)]
     fn is_memory(&self) -> bool;
 
-    /// `true` for the mmap-Columnar [`GraphBackend::Mapped`] variant.
     fn is_mapped(&self) -> bool {
         false
     }
 
-    /// `true` for disk-backed [`GraphBackend::Disk`] (CSR + mmap columns).
     fn is_disk(&self) -> bool {
         false
     }
@@ -204,8 +175,7 @@ pub trait GraphRead {
     /// All labels for a node that *this backend* can see, which is the
     /// primary type alone: secondary labels are not backend state at all —
     /// they live in `DirGraph::secondary_label_index`, one layer up, and
-    /// `NodeData` carries none. No backend overrides this today, and one
-    /// that did would still be missing the secondaries.
+    /// `NodeData` carries none.
     ///
     /// **Callers wanting a node's real label set want
     /// `DirGraph::node_labels`**, which consults that index and returns
@@ -223,9 +193,6 @@ pub trait GraphRead {
     /// in hot loops. On the disk backend, materialises NodeData through
     /// the per-query arena, which is cheap per-call but accumulates if
     /// called many times without [`GraphRead::reset_arenas`].
-    ///
-    /// Named `node_weight` for consistency with petgraph's `StableDiGraph`
-    /// primitive, which is the heap-backed implementation of this method.
     fn node_weight(&self, idx: NodeIndex) -> Option<&NodeData>;
 
     /// Read a single property without full NodeData materialisation.
@@ -250,10 +217,7 @@ pub trait GraphRead {
     /// `IN` and the compiled scan predicates. A plain `==` here made a bare
     /// `n.tag = 'Oslo'` the one route that disagreed with the other seven.
     ///
-    /// Returns:
-    /// - `None` — property is missing or null for this row
-    /// - `Some(true)` — stored value equals `target`
-    /// - `Some(false)` — stored value is present but differs
+    /// `None` when the property is missing or null for this row.
     fn str_prop_eq(&self, idx: NodeIndex, key: InternedKey, target: &str) -> Option<bool>;
 
     // ─────────────── authoritative node views ───────────────
@@ -262,9 +226,6 @@ pub trait GraphRead {
     // `NodeData` / `PropertyStorage` directly reads one replica of a columnar
     // type's store rather than the store the backend owns — see
     // `storage/node_view.rs`.
-    //
-    // Every method below is complete for columnar storage; the removed
-    // `NodeData::property_iter` yielded nothing there.
 
     /// A borrowed read handle for one node, with its column store resolved
     /// once. Prefer this to [`GraphRead::node_weight`] whenever more than one
@@ -275,8 +236,6 @@ pub trait GraphRead {
     #[inline]
     fn node_view(&self, idx: NodeIndex) -> Option<NodeView<'_>> {
         let data = self.node_weight(idx)?;
-        // The node carries a row id; the store is the backend's, keyed by the
-        // node's type. This is the single resolution point for columnar reads.
         let store = data.properties.columnar_row_id().and_then(|row_id| {
             self.column_store(data.node_type)
                 .map(|store| (&**store, row_id))
@@ -325,7 +284,6 @@ pub trait GraphRead {
     /// columnar.
     fn column_store(&self, type_key: InternedKey) -> Option<&Arc<ColumnStore>>;
 
-    /// Every `(type_key, store)` this backend owns.
     fn column_stores_iter(&self)
         -> Box<dyn Iterator<Item = (InternedKey, &Arc<ColumnStore>)> + '_>;
 
@@ -337,10 +295,8 @@ pub trait GraphRead {
 
     // ─────────────── iteration ───────────────
 
-    /// Iterator over all live node indices.
     fn node_indices(&self) -> Self::NodeIndicesIter<'_>;
 
-    /// Iterator over all live edge indices.
     fn edge_indices(&self) -> Self::EdgeIndicesIter<'_>;
 
     /// Iterator over every live edge in the graph, yielding
@@ -354,7 +310,6 @@ pub trait GraphRead {
 
     // ─────────────── per-node edges / neighbours ───────────────
 
-    /// Directed edges incident to `idx` (yielded as [`GraphEdgeRef`]).
     fn edges_directed(&self, idx: NodeIndex, dir: Direction) -> Self::EdgesIter<'_>;
 
     /// Default-direction edges (outgoing) incident to `idx` — matches
@@ -371,10 +326,8 @@ pub trait GraphRead {
         conn_type_filter: Option<InternedKey>,
     ) -> Self::EdgesIter<'_>;
 
-    /// Iterator over edges directly connecting `a` → `b`.
     fn edges_connecting(&self, a: NodeIndex, b: NodeIndex) -> Self::EdgesConnectingIter<'_>;
 
-    /// Borrow a single edge's weight.
     fn edge_weight(&self, idx: EdgeIndex) -> Option<&EdgeData>;
 
     /// First edge index from `a` to `b`, if one exists.
@@ -392,10 +345,8 @@ pub trait GraphRead {
         &'a self,
     ) -> Box<dyn Iterator<Item = (NodeIndex, NodeIndex, InternedKey)> + 'a>;
 
-    /// Neighbours reached via an edge in `dir`.
     fn neighbors_directed(&self, idx: NodeIndex, dir: Direction) -> Self::NeighborsIter<'_>;
 
-    /// Neighbours reached via an edge in either direction.
     fn neighbors_undirected(&self, idx: NodeIndex) -> Self::NeighborsIter<'_>;
 
     // ─────────────── disk-only helpers (Option / fallback contract) ─────
@@ -531,22 +482,12 @@ pub trait GraphRead {
     fn reset_arenas(&self) {}
 }
 
-// ──────────────────────────────────────────────────────────────────────────
-// GraphWrite — unified mutation interface over storage backends
-// ──────────────────────────────────────────────────────────────────────────
-
 /// Write-side interface shared by every storage backend.
-///
-/// Pulls together the mutation methods that were once inherent on
-/// [`crate::graph::schema::GraphBackend`] so write-path files can
-/// dispatch through the trait instead of matching on the backend
-/// variant.
 ///
 /// Transaction bookkeeping (OCC `version`, `read_only`,
 /// `schema_locked`) lives on [`crate::graph::schema::DirGraph`], not
 /// on this trait — no backend has its own OCC state, and validation
 /// against the schema metadata sits architecturally above storage.
-/// Documented decision: keep transactions on DirGraph.
 ///
 /// Dispatch guidance: `&mut impl GraphWrite` everywhere. Because
 /// `GraphWrite: GraphRead` and `GraphRead` is non-object-safe (GAT
@@ -592,7 +533,6 @@ pub trait GraphWrite: GraphRead {
         self.node_weight_mut(idx)
     }
 
-    /// Mutable borrow of the full EdgeData.
     fn edge_weight_mut(&mut self, idx: EdgeIndex) -> Option<&mut EdgeData>;
 
     // ─────────────── column-store ownership (write side) ───────────────
@@ -603,11 +543,8 @@ pub trait GraphWrite: GraphRead {
     /// Mutable access to a type's store, for the copy-on-write master write.
     fn column_store_mut(&mut self, type_key: InternedKey) -> Option<&mut Arc<ColumnStore>>;
 
-    /// Remove and return a type's store.
     fn take_column_store(&mut self, type_key: InternedKey) -> Option<Arc<ColumnStore>>;
 
-    /// Drop every store (used by the rebuild half of `enable_columnar` and by
-    /// the mid-build page-cache reclaim in the N-Triples loader).
     fn clear_column_stores(&mut self);
 
     // ─────────────── node property writes ───────────────
@@ -641,20 +578,17 @@ pub trait GraphWrite: GraphRead {
     /// `__title__` column, not in the inline `NodeData.title` field, so a title
     /// write needs the backend's store and the node's `row_id` at once.
     ///
-    /// It used to be written inline unconditionally, with `enable_columnar`
-    /// detecting the divergence at `save()` time and rebuilding every store to
-    /// consolidate it. That single save-side chokepoint was cheap only while a
-    /// per-path master write was expensive; it is not any more, and paying an
-    /// O(N) rebuild on the next save for one title write is the opposite of a
-    /// bargain. The default below keeps the inline write for backends with no
-    /// per-type store to write through.
+    /// Writing it inline and letting `enable_columnar` consolidate the
+    /// divergence at `save()` time costs an O(N) store rebuild per title
+    /// write — a bargain only while the per-path master write was expensive,
+    /// which it no longer is. The default below keeps the inline write for
+    /// backends with no per-type store to write through.
     fn set_node_title(&mut self, idx: NodeIndex, value: Value) {
         if let Some(node) = self.node_weight_mut(idx) {
             node.title = value;
         }
     }
 
-    /// Insert a new node, returning its assigned index.
     fn add_node(&mut self, data: NodeData) -> NodeIndex;
 
     /// Remove a node, returning its NodeData if present. On the disk
@@ -662,10 +596,8 @@ pub trait GraphWrite: GraphRead {
     /// StableDiGraph entry is removed in-place.
     fn remove_node(&mut self, idx: NodeIndex) -> Option<NodeData>;
 
-    /// Insert a directed edge from `a` to `b`.
     fn add_edge(&mut self, a: NodeIndex, b: NodeIndex, data: EdgeData) -> EdgeIndex;
 
-    /// Remove an edge, returning its EdgeData if present.
     fn remove_edge(&mut self, idx: EdgeIndex) -> Option<EdgeData>;
 
     /// Disk-only: after a columnar-properties row is materialised for a
@@ -680,26 +612,18 @@ pub trait GraphWrite: GraphRead {
     /// Flush any pending mutation state into the steady-state stores so
     /// subsequent `&self` reads observe the writes.
     ///
-    /// Memory/mapped backends mutate their `StableDiGraph` in place via
-    /// `node_weight_mut` / `edge_weight_mut`, so reads see writes
-    /// immediately — default no-op.
+    /// Memory/mapped backends mutate their `StableDiGraph` in place, so reads
+    /// see writes immediately — default no-op.
     ///
-    /// Disk stages `node_weight_mut` / `edge_weight_mut` writes in
-    /// `node_mut_cache` / `edge_mut_cache` to dodge `Arc<ColumnStore>`
-    /// share-clone storms; those caches are otherwise drained lazily on
-    /// the next `&mut self` op (e.g. on save). Without an explicit
-    /// flush at end of a mutation query, a subsequent read goes through
-    /// `node_weight` which reads `column_stores` directly and misses
-    /// the staged writes — Cypher SET appears to silently no-op until
-    /// the next `add_node`/`save`. Override on disk routes through
-    /// `clear_arenas` (which already does the clone-apply-replace
-    /// flush + arena reset).
+    /// Disk drains its `node_mut_cache` / `edge_mut_cache` lazily on the next
+    /// `&mut self` op (e.g. on save), so without an explicit flush at the end
+    /// of a mutation query the next read goes through `node_weight`, reads
+    /// `column_stores` directly, and misses the staged writes — Cypher SET
+    /// appears to silently no-op until the next `add_node`/`save`. The disk
+    /// override routes through `clear_arenas` (clone-apply-replace flush +
+    /// arena reset).
     fn flush_pending_writes(&mut self) {}
 }
-
-// ──────────────────────────────────────────────────────────────────────────
-// Newtype backends
-// ──────────────────────────────────────────────────────────────────────────
 
 /// Heap-resident in-memory graph backend. Wraps `StableDiGraph` and
 /// `Deref`s to it so existing petgraph call sites compile unchanged.
@@ -741,9 +665,6 @@ pub(crate) struct MemoryPeerCounts {
 pub mod impls;
 pub mod recording;
 
-// The mapped backend's own types live with the rest of the mapped backend
-// (`storage/mapped/`); re-exported here so `storage::MappedGraph` keeps
-// resolving for every existing call site.
 pub use mapped::{MappedGraph, MappedPropertyIndex, MappedTypeIndex};
 
 #[cfg(test)]

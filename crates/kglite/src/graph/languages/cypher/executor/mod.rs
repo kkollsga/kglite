@@ -48,21 +48,17 @@ use execution_support::*;
 
 pub(super) const INTERRUPT_POLL_INTERVAL: usize = 4096;
 
-/// One shard of the executor's per-node spatial cache.
 type SpatialCacheShard = RwLock<HashMap<usize, Option<NodeSpatialData>>>;
 
 /// Executes parsed Cypher queries against a `DirGraph`.
 ///
 /// Processes a pipeline of clauses (MATCH → WHERE → RETURN, etc.) by
 /// maintaining a row-based result set that flows through each stage.
-/// Supports parameterized queries via `$param` syntax, optional deadlines
-/// for timeout enforcement, and pre-computed caches for vector similarity.
 pub struct CypherExecutor<'a> {
     pub(super) graph: &'a DirGraph,
     pub(super) params: &'a HashMap<String, Value>,
-    /// Cache for vector_score constant arguments (set once on first call, thread-safe).
+    /// Cache for vector_score constant arguments.
     vs_cache: OnceLock<VectorScoreCache>,
-    /// Optional deadline for aborting long-running queries.
     pub(super) deadline: Option<Instant>,
     /// Optional cooperative-cancellation flag, polled alongside
     /// `deadline` (and propagated to the pattern matcher). Set by a
@@ -83,7 +79,6 @@ pub struct CypherExecutor<'a> {
     /// per-clause/per-row executors the mutable engine spins up (see
     /// `executor/write.rs`) do not construct sixty-four maps each.
     spatial_node_cache: OnceLock<Vec<SpatialCacheShard>>,
-    /// Compiled regex cache — avoids recompiling the same pattern per row.
     /// FNV hashes of every registered id-/title-field-alias *name*
     /// (the values of `DirGraph::id_field_aliases` / `title_field_aliases`).
     ///
@@ -195,22 +190,19 @@ impl<'a> CypherExecutor<'a> {
             }
             s
         });
-        // Empty set (the common no-alias graph) → never an alias, so the
-        // membership probe is a single integer-set lookup that returns
-        // false without hashing the property string at all in that case.
+        // Empty set (the common no-alias graph) → never an alias, and the
+        // early return skips hashing the property string at all.
         if set.is_empty() {
             return false;
         }
         set.contains(&InternedKey::from_str(property).as_u64())
     }
 
-    /// Set the maximum number of intermediate result rows.
     pub fn with_max_rows(mut self, max_rows: Option<usize>) -> Self {
         self.budget = ExecutionBudget::new(max_rows);
         self
     }
 
-    /// Inherit an already-constructed budget in a nested executor.
     #[inline]
     pub(super) fn with_budget(mut self, budget: ExecutionBudget) -> Self {
         self.budget = budget;
@@ -288,21 +280,15 @@ impl<'a> CypherExecutor<'a> {
         }
     }
 
-    /// Set the cooperative-cancellation flag. Propagated to every
-    /// pattern matcher this executor spawns so a long scan/expansion
-    /// can be interrupted. Default `None`.
+    /// Set the cooperative-cancellation flag, propagated to every pattern
+    /// matcher this executor spawns. Default `None`.
     pub fn with_cancel(mut self, cancel: Option<&'static AtomicBool>) -> Self {
         self.cancel = cancel;
         self
     }
 
-    /// The shard of [`Self::spatial_node_cache`] that owns `idx_raw`.
-    ///
-    /// Sharding is what keeps the per-node spatial cache usable from the
-    /// rayon-parallel projection loop: every resolve takes a read lock and
-    /// every first touch of a node takes a write lock, so one global lock
-    /// would serialise the region. `NodeIndex` values are dense, so the low
-    /// bits distribute evenly.
+    /// The shard of [`Self::spatial_node_cache`] that owns `idx_raw` — see
+    /// that field for why the cache is sharded at all.
     #[inline]
     fn spatial_shard(&self, idx_raw: usize) -> &SpatialCacheShard {
         const SHARDS: usize = 64;
@@ -373,15 +359,11 @@ impl<'a> CypherExecutor<'a> {
         let result_set =
             self.execute_clauses_profiled(query, ResultSet::new(), Some(&mut profile_stats))?;
 
-        // Convert ResultSet to CypherResult
         let mut result = self.finalize_result(result_set)?;
         result.stats = None;
         if query.profile {
             result.profile = Some(profile_stats);
         }
-        // Hand the execution-time warnings (procedure scoping) out on the
-        // result; `session::execute` merges the schema warnings in front of
-        // them and fills the timing fields.
         let warnings = self.take_runtime_warnings();
         if !warnings.is_empty() {
             result
@@ -624,14 +606,12 @@ impl<'a> CypherExecutor<'a> {
             };
             let inline_where = folded_inline_where.as_ref();
 
-            // Streaming-pipeline path: when enabled, try to absorb a
-            // contiguous run of clauses (typically `WITH/RETURN(group,
-            // agg)` optionally followed by `ORDER BY → LIMIT`) into a
-            // single streaming pipeline that avoids the materialize-
-            // then-bucket cost of the generic aggregator. On match,
-            // advance `i` by the number of absorbed clauses; on no
-            // match, the function returns the input result_set
-            // unchanged so we fall through to the materialized executor.
+            // Streaming-pipeline path: absorb a contiguous run of clauses
+            // (typically `WITH/RETURN(group, agg)` optionally followed by
+            // `ORDER BY → LIMIT`) into one streaming pipeline, avoiding the
+            // materialize-then-bucket cost of the generic aggregator. A bail
+            // hands back the input result set unchanged, so the materialized
+            // executor below picks it up.
             if self.streaming
                 && !profiling
                 && inline_where.is_none()
@@ -706,7 +686,6 @@ impl<'a> CypherExecutor<'a> {
         Ok(result_set)
     }
 
-    /// Execute a single clause, transforming the result set.
     /// One row per node type: `(type, count)`. Fused form of
     /// `MATCH (n) RETURN labels(n), count(*)` and its `n.type` spellings.
     ///
@@ -1038,16 +1017,13 @@ impl<'a> CypherExecutor<'a> {
                 let declared = declared_from_rows(&result_set);
                 self.execute_call_subquery(import, body, result_set, &declared)
             }
-            // Unreachable for real queries: `is_mutation_query` (write.rs)
-            // routes any query containing these to the mutable engine
-            // (`execute_mutable`) upstream in `session::execute`, so the
-            // read engine never sees a live mutation. This arm is a
-            // defensive guard for a mutation clause reaching the read path
-            // directly (e.g. a hand-built clause list in a test). FOREACH
-            // always classifies as a mutation, so it is handled in the
-            // mutable engine and only reaches here via that same direct path.
-            // `SHOW INDEXES` is the one schema command that reads rather than
-            // writes, so it lives on this side of the engine split.
+            // Unreachable for real queries — routing sends any mutation to
+            // the mutable engine upstream (see this module's header). The arm
+            // below is a defensive guard for a mutation clause reaching the
+            // read path directly, e.g. a hand-built clause list in a test;
+            // FOREACH always classifies as a mutation and arrives the same
+            // way. `SHOW INDEXES` is the one schema command that reads rather
+            // than writes, so it lives on this side of the engine split.
             Clause::Schema(command) if schema_ddl::is_schema_read(command) => {
                 schema_ddl::execute_schema_read(self.graph, command)
             }

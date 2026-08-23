@@ -1,13 +1,8 @@
 //! Disk-to-disk streaming subgraph filter.
 //!
-//! The completed `save_subset` pipeline performs a sequential edge scan,
-//! rank-1 node-id translation, node materialization, edge/property copying,
-//! CSR construction, sidecar writes, and atomic publication.
-//!
-//! The streaming pipeline is gated to disk-backed sources. In-memory and
-//! mapped graphs route through the existing `to_subgraph().save()` path
-//! per CLAUDE.md ("in-memory wins every time"). All I/O here is
-//! sequential — no per-node random edge lookups.
+//! Gated to disk-backed sources: in-memory and mapped graphs route through
+//! the non-streaming `save_subset` path per CLAUDE.md ("in-memory wins every
+//! time"). All I/O here is sequential — no per-node random edge lookups.
 
 use crate::graph::schema::{CowSelection, DirGraph, InternedKey};
 use crate::graph::storage::disk::csr::{PendingEdge, TOMBSTONE_EDGE};
@@ -22,7 +17,6 @@ use std::path::Path;
 #[derive(Clone, Debug, Default)]
 pub struct SubsetSpec {
     /// Restrict to edges of these types. `None` means all edge types.
-    /// This is the streaming path's filter knob.
     pub edge_types: Option<Vec<InternedKey>>,
 }
 
@@ -46,7 +40,6 @@ pub struct Bitset {
 }
 
 impl Bitset {
-    /// Allocate a bitset covering `[0..len)`. All bits start cleared.
     pub fn with_len(len: usize) -> Self {
         let n_blocks = len.div_ceil(64);
         Self {
@@ -55,9 +48,8 @@ impl Bitset {
         }
     }
 
-    /// Set bit `i` to 1. Out-of-range writes are silently ignored — the
-    /// caller (Pass A) is expected to keep ids within `node_bound` but
-    /// disk graphs occasionally surface tombstone-adjacent ids.
+    /// Out-of-range writes are silently ignored: Pass A keeps ids within
+    /// `node_bound`, but disk graphs surface tombstone-adjacent ids.
     #[inline]
     pub fn set(&mut self, i: usize) {
         if i < self.len {
@@ -74,19 +66,16 @@ impl Bitset {
         (self.blocks[i / 64] >> (i % 64)) & 1 == 1
     }
 
-    /// Number of bits the bitset covers.
     #[inline]
     pub fn len(&self) -> usize {
         self.len
     }
 
-    /// Total set bits. Used to size the output graph.
     pub fn count_ones(&self) -> u64 {
         self.blocks.iter().map(|b| b.count_ones() as u64).sum()
     }
 
-    /// Raw block view — used by [`RankIndex`] to compute block-prefix
-    /// popcounts without re-scanning the bitset.
+    /// Raw block view — lets [`RankIndex`] build prefixes without re-scanning.
     #[inline]
     pub(crate) fn blocks(&self) -> &[u64] {
         &self.blocks
@@ -95,40 +84,25 @@ impl Bitset {
 
 // ── Rank-1 over the kept-nodes bitset ──────────────────────────────────────
 //
-// Build a popcount-prefix array so old→new node id translation is O(1)
-// and entirely in RAM. No 480 MB dense remap.
-//
-// `block_prefix[k]` holds `popcount(bitset[0..k*64])`. For a query
-// `old_to_new(old_id)`:
-//   block = old_id / 64
-//   bit   = old_id % 64
-//   mask  = (1 << bit) - 1
-//   rank  = block_prefix[block] + popcount(bitset_block[block] & mask)
-//
-// At Wikidata scale (120M nodes): 15 MB bitset + 15 MB prefix = 30 MB
-// total. Two `count_ones` calls per query; both compile to `popcnt` on
-// x86_64 / equivalents on ARM. No disk access.
-//
-// The new id space is contiguous `[0..kept_count)` ordered by source id —
-// matches the natural sequential walk of `node_slots.bin` in Pass B.
+// A popcount-prefix array makes old→new translation O(1) and entirely in
+// RAM: 15 MB bitset + 15 MB prefix = 30 MB at Wikidata scale (120M nodes),
+// against 480 MB for a dense remap. The new id space is contiguous
+// `[0..kept_count)` ordered by source id — matching the sequential walk of
+// `node_slots.bin` in Pass B.
 
 /// O(1) translator from source node ids to dense destination ids. Built
 /// once after Pass A; consumed by node materialization and edge translation.
-/// All RAM, zero disk reads.
 #[derive(Debug, Clone)]
 pub struct RankIndex {
     bitset: Bitset,
-    /// `block_prefix[k]` = popcount of `bitset.blocks()[0..k]`, i.e. the
-    /// rank of bit `k * 64` exclusive of itself. Length = `bitset.blocks().len() + 1`
-    /// so a 1-block bitset has prefixes `[0, popcount(block 0)]`.
+    /// `block_prefix[k]` = popcount of `bitset.blocks()[0..k]`: the rank of
+    /// bit `k * 64` exclusive of itself. Length = `blocks().len() + 1`.
     block_prefix: Vec<u32>,
-    /// Total kept count = `block_prefix.last()`.
     kept_count: u32,
 }
 
 impl RankIndex {
-    /// Build the rank-1 index from a kept-nodes bitset. Single linear
-    /// pass over the `Vec<u64>` blocks; cost is O(n_blocks).
+    /// Single linear pass over the bitset's blocks; O(n_blocks).
     pub fn from_bitset(bitset: Bitset) -> Self {
         let blocks = bitset.blocks();
         let mut block_prefix: Vec<u32> = Vec::with_capacity(blocks.len() + 1);
@@ -151,16 +125,13 @@ impl RankIndex {
         self.kept_count
     }
 
-    /// True if source id `old_id` is in the kept set.
     #[inline]
     pub fn contains(&self, old_id: u32) -> bool {
         self.bitset.get(old_id as usize)
     }
 
-    /// Map a source node id to its destination id. Returns `None` when
-    /// `old_id` is not in the kept set or is out of range.
-    ///
-    /// Cost: O(1) — two array accesses + one `popcount`.
+    /// Map a source node id to its destination id in O(1). Returns `None`
+    /// when `old_id` is not in the kept set or is out of range.
     #[inline]
     pub fn old_to_new(&self, old_id: u32) -> Option<u32> {
         let len = self.bitset.len();
@@ -171,7 +142,6 @@ impl RankIndex {
         let block_idx = i / 64;
         let bit = i % 64;
         let block = self.bitset.blocks()[block_idx];
-        // Bit must be set for `old_id` to be in the kept set.
         if (block >> bit) & 1 == 0 {
             return None;
         }
@@ -182,10 +152,9 @@ impl RankIndex {
     }
 }
 
-/// Result of [`pass_a_scan`].
 pub struct PassAResult {
-    /// Source node ids that survive the filter. Endpoints of every kept
-    /// edge. The writer consumes this bitset to build the rank-1 index.
+    /// Source node ids that survive the filter: the endpoints of every kept
+    /// edge. The writer consumes this to build the rank-1 index.
     pub kept_nodes: Bitset,
     pub stats: ScanStats,
 }
@@ -193,29 +162,23 @@ pub struct PassAResult {
 /// Pass A: sequential scan of `edge_endpoints.bin` with an edge-type
 /// filter, building a kept-nodes bitset.
 ///
-/// Memory: `Bitset` is `n_nodes / 8` bytes (~15 MB at 120M Wikidata
-/// nodes). No other allocations scale with graph size.
+/// Memory: the `Bitset` is `n_nodes / 8` bytes (~15 MB at 120M Wikidata
+/// nodes); nothing else scales with graph size.
 ///
-/// I/O: one sequential read of `edge_endpoints` (16 B per edge). Disk
-/// reads are mmap'd — the kernel prefetches sequential access. Tombstoned
-/// edges (TOMBSTONE_EDGE marker in `source`) are skipped without
+/// I/O: one sequential mmap'd read of `edge_endpoints` (16 B per edge).
+/// Tombstoned edges (TOMBSTONE_EDGE in `source`) are skipped without
 /// touching property storage.
-///
-/// The file-producing variant below writes kept-edge records in the same
-/// sequential scan when the caller is building an output graph.
 pub fn pass_a_scan(source: &DiskGraph, spec: &SubsetSpec) -> PassAResult {
     let n_nodes = source.node_slot_len();
     let mut kept_nodes = Bitset::with_len(n_nodes);
 
-    // Convert edge-type filter to a hash set keyed on the raw u64 hash —
-    // matches `EdgeEndpoints.connection_type` directly without
-    // re-interning per edge. Empty filter = "keep all".
+    // Key the filter on the raw u64 hash so it matches
+    // `EdgeEndpoints.connection_type` without re-interning per edge.
     let edge_type_set: Option<std::collections::HashSet<u64>> = spec
         .edge_types
         .as_ref()
         .map(|v| v.iter().map(|k| k.as_u64()).collect());
 
-    // Hint the kernel: we're about to scan endpoints front-to-back.
     source.edge_endpoints.advise_sequential();
 
     let scan_start = std::time::Instant::now();
@@ -238,11 +201,10 @@ pub fn pass_a_scan(source: &DiskGraph, spec: &SubsetSpec) -> PassAResult {
 
     let kept_node_count = kept_nodes.count_ones();
 
-    // Drop the source's edge_endpoints page cache now that we're done
-    // sweeping it sequentially. On Wikidata that's 9 GB of mmap pages
-    // dirty enough to dominate RSS for the rest of the pipeline if left
-    // resident — `advise_sequential` is just a hint and macOS doesn't
-    // honor it aggressively. DONTNEED forces eviction.
+    // Drop the source's edge_endpoints page cache now the sweep is done: on
+    // Wikidata that is 9 GB of mmap pages that would dominate RSS for the
+    // rest of the pipeline. `advise_sequential` is only a hint and macOS
+    // does not honor it aggressively; DONTNEED forces eviction.
     source.edge_endpoints.advise_dontneed();
 
     PassAResult {
@@ -258,27 +220,20 @@ pub fn pass_a_scan(source: &DiskGraph, spec: &SubsetSpec) -> PassAResult {
 
 // ── Pass A with file output ────────────────────────────────────────────────
 //
-// Same sequential scan as `pass_a_scan` but also spills the kept edges to
-// a `MmapOrVec<PendingEdge>` at `kept_edges_path`. The on-disk record
-// shape matches the existing CSR builder's input
-// (`csr_build::build_csr_files` consumes `&MmapOrVec<PendingEdge>`),
-// so a consumer can drive the merge sort over this file by translating
-// `(src, tgt)` via the rank index in the iterator.
+// The temp record shape matches the existing CSR builder's input
+// (`csr_build::build_csr_files` consumes `&MmapOrVec<PendingEdge>`), so a
+// consumer drives the merge sort over this file by translating `(src, tgt)`
+// through the rank index in the iterator.
 //
-// Edge property bytes are NOT inlined — inlining them would need either
-// (a) a sidecar file keyed by source edge_idx or (b) a fourth column in
-// the temp record. The temp file shape is instead kept compatible with the
-// existing builder; properties travel independently.
+// Edge property bytes are NOT inlined — that would need either (a) a sidecar
+// file keyed by source edge_idx or (b) a fourth column in the temp record.
+// Keeping the builder-compatible shape instead lets properties travel
+// independently.
 //
-// Memory: bitset (~15 MB at 120M nodes). No heap buffer scales with kept
-// edge count; appended records go straight to the mmap'd file.
-//
-// I/O: one sequential read of `edge_endpoints` + one sequential write to
-// `kept_edges_path`.
+// Memory: bitset only (~15 MB at 120M nodes); appended records go straight
+// to the mmap'd file. I/O: one sequential read of `edge_endpoints` plus one
+// sequential write to `kept_edges_path`.
 
-/// Result of [`pass_a_scan_to_file`]. The temp file path is returned so
-/// the caller can hand it to `csr_build::build_csr_files` after wrapping
-/// it with a rank-translating iterator.
 pub struct PassAFileResult {
     pub kept_nodes: Bitset,
     pub stats: ScanStats,
@@ -286,11 +241,10 @@ pub struct PassAFileResult {
     pub kept_edge_records: u64,
 }
 
-/// Pass A with file output. Identical semantics to [`pass_a_scan`] but
-/// also appends `(src, tgt, conn_type)` for each kept edge to a file at
-/// `kept_edges_path` via `MmapOrVec::mapped`. The file is sized for the
-/// total edge count up front (a safe upper bound on kept edges); the
-/// consumer reads the actual count from `kept_edge_records`.
+/// Pass A with file output. Identical semantics to [`pass_a_scan`] but also
+/// appends `(src, tgt, conn_type)` per kept edge to `kept_edges_path`. The
+/// file is sized for the total edge count up front (a safe upper bound on
+/// kept edges); the consumer reads the actual count from `kept_edge_records`.
 pub fn pass_a_scan_to_file(
     source: &DiskGraph,
     spec: &SubsetSpec,
@@ -364,61 +318,31 @@ pub fn pass_a_scan_to_file(
 // ── Streaming disk-to-disk pipeline ───────────────────────────────────────
 //
 // Eliminates the in-memory petgraph step that drove the in-memory baseline
-// to 7.1 GB peak RSS on Wikidata Articles+P50+Authors. The streaming path:
+// to 7.1 GB peak RSS on Wikidata Articles+P50+Authors: the destination is a
+// disk-mode `DirGraph` from the start, so column rows, pending edges and CSR
+// input all land in file-backed storage. The numbered steps in
+// `save_subset_streaming_disk` below carry the detail.
 //
-// 1. Determine kept node ids per type (sorted by source id).
-// 2. Create the destination as a disk-mode `DirGraph` from the start —
-//    its `pending_edges` are file-backed via `MmapOrVec`, no in-memory
-//    petgraph copy.
-// 3. For each kept type T, build the destination's `ColumnStore` for T
-//    by walking source's nodes of type T in sorted source-id order.
-//    Source row reads stay sequential within a single `ColumnStore` at
-//    a time, so the OS page cache stays warm — kills the random-I/O
-//    pattern that came from `enable_columnar`'s interleaved reads
-//    across multiple type stores.
-// 4. Walk source `node_slots` in id order; for each kept old_idx, add a
-//    single `NodeData::Columnar { store: arc(dest_store), row_id }` to
-//    the dest's disk graph. `DiskGraph::add_node` only reads `row_id`,
-//    so the dest's auto-assigned `NodeIndex` matches the global
-//    `RankIndex.old_to_new(old_idx)`.
-// 5. Walk source `edge_endpoints` in edge_idx order, applying the
-//    edge-type filter. For each kept edge, translate src/tgt via the
-//    rank index and call `dest.graph.add_edge`. With `defer_csr=true`
-//    the dest disk graph appends to its file-backed `pending_edges`
-//    (sequential write, bounded heap).
-// 6. `dest.save_disk(out_path)` triggers `build_csr_from_pending` (the
-//    external merge-sort builder, all sequential I/O).
-//
-// Memory budget at Wikidata Articles+P50+Authors scale (17.4M kept):
-//  - kept_per_type indices: ~70 MB (sorted u32 per kept type)
-//  - rank index: ~30 MB
-//  - dest column stores during push: bounded by max-type heap.
-//  - pending_edges: file-backed, ~16 B per kept edge, mmap.
-//
-// Sequential I/O strategy:
-//  - Pass A scan: 1× sequential read of source `edge_endpoints.bin`.
-//  - Per-type column-store push: sequential reads of one source store
-//    at a time (kept ids in source-id order = monotone row_ids).
-//  - Dest column-store writes: sequential append (heap during push,
-//    flushed once at save_disk).
-//  - Pending-edges write: sequential append to file-backed mmap.
-//  - CSR build: external merge sort (existing).
+// Memory at Wikidata Articles+P50+Authors scale (17.4M kept nodes): ~70 MB of
+// sorted per-type kept-id vectors, ~30 MB rank index, and file-backed pending
+// edges at ~16 B each. Every phase is sequential: one pass over source
+// `edge_endpoints.bin`, one source column store at a time (kept ids in
+// source-id order = monotone row_ids), appends to the dest writers, then the
+// existing external merge sort for the CSR.
 
 /// Save a filtered subgraph to disk.
 ///
-/// `selection` defines which nodes are kept (typically built via the
-/// fluent chain: `kg.select(...).expand(...)` returns a selection that
-/// gets handed here). All edges between kept nodes are included.
+/// `selection` defines which nodes are kept — typically from the fluent
+/// chain `kg.select(...).expand(...)`. All edges between kept nodes are
+/// included.
 ///
-/// Output is a v3 binary file (single `.kgl` file for in-memory/mapped
-/// sources, directory for disk sources via `save_disk`). The file can be
-/// reloaded into any storage mode via `kglite.open(path, storage=...)`
-/// (`kglite.load` takes no `storage` argument — it restores the mode the
-/// checkpoint recorded).
+/// The output reloads into any storage mode via `kglite.open(path,
+/// storage=...)`; `kglite.load` takes no `storage` argument and restores the
+/// mode the checkpoint recorded.
 ///
-/// `_spec` is currently unused — the selection carries the filter. The
-/// parameter exists so v2 (Cypher integration) can lower into the same
-/// entry point without an API change.
+/// `_spec` is unused — the selection carries the filter. The parameter
+/// exists so Cypher integration can lower into the same entry point without
+/// an API change.
 pub fn save_subset(
     source: &DirGraph,
     selection: &CowSelection,
@@ -428,17 +352,13 @@ pub fn save_subset(
     use crate::graph::mutation::subgraph::extract_subgraph;
 
     // 1. Materialize the filtered subgraph in-memory. `extract_subgraph`
-    //    works for every source storage mode — its reads go through the
-    //    `GraphRead` trait which is implemented for memory/mapped/disk.
-    //    For disk sources, `node_weight` returns NodeData with
-    //    `PropertyStorage::Columnar { store: Arc<source_store>, row_id }`,
-    //    so the extracted graph holds Arc references into the source's
-    //    column stores. No deep clone of property data.
+    //    reads through `GraphRead`, so it works for every source mode; for
+    //    disk sources the extracted graph holds `Arc` references into the
+    //    source's column stores rather than deep-cloning property data.
     let mut extracted = extract_subgraph(source, selection)?;
 
     // 2. Consolidate properties into self-contained column stores so the
-    //    output is independent of the source's stores. Required by both
-    //    save paths below.
+    //    output is independent of the source's stores. Both save paths need it.
     extracted.enable_columnar();
 
     let path_str = out_path.to_str().ok_or_else(|| {
@@ -448,30 +368,25 @@ pub fn save_subset(
         )
     })?;
 
-    // 3. Choose the right serializer based on graph size. The portable v5
-    //    `.kgl` path (`write_kgl`) assembles one compressed in-memory payload;
+    // 3. Choose the serializer by size: the portable `.kgl` path
+    //    (`write_kgl`) assembles one compressed in-memory payload, while
     //    Wikidata-class extracts (~17 M nodes / 35 M edges) need the bounded
-    //    disk-directory path instead. Reload works for both:
-    //    `kglite.load(path)` auto-detects file vs directory.
-    //
-    //    Threshold picked empirically: the single-file format is
-    //    comfortable below ~1 M nodes; everything above gets the
-    //    directory treatment for safety.
+    //    disk-directory path. `kglite.load(path)` auto-detects file vs
+    //    directory. The threshold is empirical — the single-file format is
+    //    comfortable below ~1 M nodes.
     const SINGLE_FILE_NODE_THRESHOLD: u64 = 1_000_000;
 
     use crate::graph::storage::GraphRead;
     let node_count = u64::try_from(extracted.graph.node_count()).unwrap_or(u64::MAX);
     if node_count <= SINGLE_FILE_NODE_THRESHOLD {
-        // Single .kgl file path — small subgraphs.
         let mut arc = std::sync::Arc::new(extracted);
         crate::graph::io::file::prepare_save(&mut arc);
         crate::graph::io::file::write_kgl(&arc, path_str)
             .map_err(|e| format!("save_subset: write_kgl failed: {}", e))
     } else {
-        // Directory format — large subgraphs. `enable_disk_mode_at` builds the
-        // CSR inside `path_str` itself and publishes it there, so a subset far
-        // too large for the single-file format never transits the system temp
-        // directory on its way to the destination the caller chose.
+        // `enable_disk_mode_at` builds the CSR inside `path_str` and publishes
+        // it there, so a large subset never transits the system temp directory
+        // on its way to the caller's destination.
         extracted.enable_disk_mode_at(path_str)
     }
 }
@@ -481,10 +396,9 @@ pub fn save_subset(
 /// alias/tier maps `describe()` and property resolution read, and the caller's
 /// user-schema version.
 ///
-/// The version carries because a subset of a graph at user-schema version N is
-/// still at version N — the data model didn't change, only which rows came
-/// along — so a migration runner pointed at the subset must not re-run
-/// migrations `1..=N`.
+/// The version carries because a subset of a graph at user-schema version N
+/// is still at version N — only which rows came along changed — so a
+/// migration runner pointed at the subset must not re-run migrations `1..=N`.
 fn clone_subset_metadata(dest: &mut DirGraph, source: &DirGraph) {
     dest.interner = source.interner.clone();
     dest.type_schemas = source.type_schemas.clone();
@@ -525,10 +439,8 @@ pub fn save_subset_streaming_disk(
     use std::sync::Arc;
     use std::time::Instant;
 
-    // Stage timers — opt-in via `KGLITE_STREAMING_TIMING=1` so we
-    // don't pollute production stderr. The 4 phases (writer setup,
-    // node walk, edge walk, finalize+save_disk) are the granularity at
-    // which we attack performance regressions in this pipeline.
+    // Stage timers — opt-in via `KGLITE_STREAMING_TIMING=1` so production
+    // stderr stays clean.
     let timing_enabled = std::env::var("KGLITE_STREAMING_TIMING")
         .map(|v| !v.is_empty() && v != "0")
         .unwrap_or(false);
@@ -571,12 +483,10 @@ pub fn save_subset_streaming_disk(
         dg.defer_csr = true;
     }
 
-    // 2. Build a global rank index over the kept node set so we can
-    //    translate source node ids to dest ids in O(1) RAM. New ids are
-    //    assigned in source-id order across all types.
-    //
-    //    The bitset is sized to the source node bound; Pass A also uses
-    //    this size, so peak together stays at ~30 MB on Wikidata.
+    // 2. Build a global rank index over the kept node set: O(1) source→dest
+    //    id translation in RAM, new ids assigned in source-id order across
+    //    all types. Sized to the source node bound like Pass A's bitset, so
+    //    peak together stays at ~30 MB on Wikidata.
     use crate::graph::storage::GraphRead;
     let n_source_nodes = source.graph.node_bound();
     let mut bitset = Bitset::with_len(n_source_nodes);
@@ -588,25 +498,17 @@ pub fn save_subset_streaming_disk(
     let rank = RankIndex::from_bitset(bitset);
 
     // 3. For each kept type T, build dest's ColumnStore by walking source
-    //    nodes of type T in source-id order. Sequential reads of one
-    //    source store at a time = warm OS page cache.
+    //    nodes of type T in source-id order — one source store at a time
+    //    keeps the OS page cache warm.
     //
-    //    NodeData with PropertyStorage::Columnar carries `row_id` directly
-    //    into DiskGraph::add_node — that's what binds the new node_slot
-    //    to the column-store row we just pushed. The store Arc is dropped
-    //    by add_node, so the per-type Arc is installed in dest.column_stores
-    //    at the end of this loop.
+    //    A per-type `TypeWriter` streams rows straight to the dest's final
+    //    column files: no heap-backed chunk buffer and no merge step, so peak
+    //    heap is bounded by `(open_buf_writers × BUF_SIZE) + Mixed-column
+    //    heap`. `subgraph_streaming_writer.rs` documents the writer protocol.
     //
-    //    Per-type "row_id within store" is the push position (0, 1, 2,
-    //    …); per-source-id mapping `(old_idx → dest_row_id)` is recorded
-    //    via the rank index so the edge phase below builds the right
-    //    `NodeIndex`.
-    //
-    // v3: per-type `TypeWriter` streams rows directly to the dest's
-    // final column files. No heap-backed chunk buffer, no merge step
-    // — each push appends to the pre-opened `BufWriter`s. peak heap is
-    // bounded by `(open_buf_writers × BUF_SIZE) + Mixed-column heap`.
-    // See `subgraph_streaming_writer.rs` for the writer protocol.
+    //    A row_id within a store is just the push position; the
+    //    `old_idx → dest_row_id` mapping comes from the rank index, so the
+    //    edge phase builds the right `NodeIndex`.
     use crate::graph::mutation::subgraph_streaming_writer::TypeWriter;
 
     let scratch_root = out_path.join(".tmp_streaming");
@@ -618,15 +520,12 @@ pub fn save_subset_streaming_disk(
         )
     })?;
 
-    // One writer per kept type. Open all up front: they hold the file
-    // handles for the type's column files. We need every writer alive
-    // simultaneously because the source walk visits types in arbitrary
-    // (source-id-determined) order — without all writers open, we'd
-    // either reorder source reads (defeating sequential-read patterns)
-    // or have to re-open files per push. macOS `kern.maxfilesperproc`
-    // is typically 61440 (verified via sysctl); 4500 types × ~5 files
-    // each = ~22500 fds, well under the limit. Linux defaults are at
-    // least as generous.
+    // One writer per kept type, all open at once: the source walk visits
+    // types in arbitrary (source-id-determined) order, so without every
+    // writer alive we would either reorder source reads — defeating the
+    // sequential pattern — or reopen files per push. macOS
+    // `kern.maxfilesperproc` is typically 61440 (verified via sysctl);
+    // 4500 types × ~5 files = ~22500 fds, and Linux defaults are as generous.
     let mut writers: HashMap<String, TypeWriter> = HashMap::new();
     for type_name in kept_per_type.keys() {
         let schema = if let Some(src_store) = source.column_store(type_name) {
@@ -643,13 +542,10 @@ pub fn save_subset_streaming_disk(
             .unwrap_or_default();
         let writer_dir = scratch_root.join(sanitize_type_name(type_name));
 
-        // Match source's id/title column types — Wikidata mixes
-        // `string` (Q-codes) and `uniqueid` ids across types, so we
-        // can't hard-code one variant. `id_type_str` / `title_type_str`
-        // return the source's stored type tag (mmap-backed or
-        // in-memory). Default to "mixed" when the source has no
-        // column store entry — TypeWriter's Mixed buffer handles
-        // anything.
+        // Match the source's id/title column types: Wikidata mixes `string`
+        // (Q-codes) and `uniqueid` ids across types, so no single variant can
+        // be hard-coded. Default to "mixed" when the source has no column
+        // store entry — TypeWriter's Mixed buffer handles anything.
         let id_type = source
             .column_store(type_name)
             .and_then(|s| s.id_type_str())
@@ -678,23 +574,16 @@ pub fn save_subset_streaming_disk(
     log_phase("setup (rank + writer creation)", phase_start);
     let phase_node_walk = Instant::now();
 
-    // 4. Single-pass node walk — bypasses `DiskGraph::node_weight` which
-    //    would allocate every read into source's `node_arena`. Direct
-    //    disk access pattern:
-    //      sdg.node_slots[old_id] → (type, src_row_id)
-    //      source.column_stores[type] → get_id / get_title / row_properties
-    //      writers[type].push_row(id, title, props)
-    //      dest.graph.add_node
+    // 4. Single-pass node walk — bypasses `DiskGraph::node_weight`, which
+    //    would allocate every read into the source's `node_arena`.
     let source_disk_for_nodes: Option<&DiskGraph> = match &source.graph {
         GraphBackend::Disk(dg) => Some(dg.as_ref()),
         _ => None,
     };
 
-    // Sub-phase timers, gated on the same KGLITE_STREAMING_TIMING flag.
-    // Each `Instant::now()` is ~50 ns on macOS so 4 calls × 17 M
-    // iterations = ~3-4 s of measurement overhead on Wikidata when
-    // enabled, which is a small fraction of the 446 s node walk.
-    // Off when the env var is unset — zero overhead.
+    // Sub-phase timers on the same KGLITE_STREAMING_TIMING flag. Each
+    // `Instant::now()` is ~50 ns on macOS, so 4 calls × 17 M iterations adds
+    // ~3-4 s on Wikidata — small against the 446 s node walk, zero when unset.
     let mut t_lookups = std::time::Duration::ZERO;
     let mut t_read_id_title = std::time::Duration::ZERO;
     let mut t_read_props = std::time::Duration::ZERO;
@@ -702,10 +591,9 @@ pub fn save_subset_streaming_disk(
     let mut t_add_node = std::time::Duration::ZERO;
     let mut row_counter: u64 = 0;
 
-    // Periodic progress: when timing is on, print per-million-row
-    // breakdown every PROGRESS_EVERY rows. Lets us assess a perf
-    // change in ~30 seconds of bench time instead of 10 minutes —
-    // if the per-million numbers don't move, the fix isn't working.
+    // Periodic per-million-row breakdown when timing is on: assesses a perf
+    // change in ~30 s of bench time instead of 10 minutes — if the
+    // per-million numbers don't move, the fix isn't working.
     const PROGRESS_EVERY: u64 = 1_000_000;
     let mut last_progress_row: u64 = 0;
     let mut last_progress_at = Instant::now();
@@ -744,22 +632,12 @@ pub fn save_subset_streaming_disk(
                 t_lookups += t.elapsed();
             }
 
-            // Borrowed-read fast path: get_id / get_title return
-            // `BorrowedValue<'_>` / `&str` slices into the source's
-            // mmap with no heap allocation. The streaming visitor
-            // forwards each property's borrowed bytes straight into
-            // dest's BufWriters via `push_row_borrowed`. This kills
-            // the `Value::String(s.to_string())` clone × ~30
-            // properties × 17 M rows = ~510 M heap allocations that
-            // dominated the v3 node walk wall time.
-            //
-            // `DiskGraph::add_node` reads only `data.node_type` and
-            // `data.properties.row_id`; the `id` and `title` fields
-            // are ignored on the disk path (verified — see the
-            // `add_node` impl). So we can pass `Value::Null` for
-            // both and skip the clone for NodeData. Reads later go
-            // through `dest.column_stores[type].get_id/title` which
-            // sees what `push_row_borrowed` wrote.
+            // Borrowed-read fast path: id/title come back as
+            // `BorrowedValue<'_>` / `&str` slices into the source's mmap, and
+            // the streaming visitor forwards each property's borrowed bytes
+            // straight into dest's BufWriters. This kills the
+            // `Value::String(s.to_string())` clone × ~30 properties × 17 M
+            // rows = ~510 M heap allocations that dominated the node walk.
             let t1 = if timing_enabled {
                 Some(Instant::now())
             } else {
@@ -807,9 +685,10 @@ pub fn save_subset_streaming_disk(
                 None
             };
             let new_node_data = NodeData {
-                // add_node ignores `id` and `title` on the disk path
-                // (only reads node_type + properties.row_id). Skip
-                // the heap allocation entirely.
+                // `add_node` reads only `node_type` and `properties.row_id`
+                // on the disk path, so `id`/`title` can be Null — later reads
+                // resolve through `dest.column_stores[type]`, which sees what
+                // `push_row_borrowed` wrote.
                 id: Value::Null,
                 title: Value::Null,
                 node_type: type_key,
@@ -854,9 +733,8 @@ pub fn save_subset_streaming_disk(
             }
         }
     } else if !writers.is_empty() {
-        // Streaming primitives only target disk sources. In-memory /
-        // mapped sources route through extract_subgraph + write_kgl
-        // earlier in the public save_subset.
+        // Streaming targets disk sources only; in-memory / mapped route
+        // through `extract_subgraph` + `write_kgl` in the public `save_subset`.
         return Err(
             "save_subset_streaming_disk currently requires a disk-backed source".to_string(),
         );
@@ -879,10 +757,9 @@ pub fn save_subset_streaming_disk(
     }
     let phase_finalize = Instant::now();
 
-    // 5. Finalize each per-type writer: flush BufWriters, mmap the
-    //    closed files, build TypedColumns, install Arc<ColumnStore>.
-    //    No merge step — the writers wrote directly to canonical
-    //    final files, so this is just a close+mmap.
+    // 5. Finalize each per-type writer: flush BufWriters, mmap the closed
+    //    files, build TypedColumns, install Arc<ColumnStore>. No merge step —
+    //    the writers wrote the canonical final files directly.
     let mut arc_dest_stores: HashMap<String, Arc<ColumnStore>> = HashMap::new();
     for (type_name, writer) in writers.into_iter() {
         let store = writer
@@ -890,7 +767,6 @@ pub fn save_subset_streaming_disk(
             .map_err(|e| format!("save_subset_streaming_disk: finalize {}: {}", type_name, e))?;
         arc_dest_stores.insert(type_name, store);
     }
-    // Install straight onto the destination backend — the only owner.
     dest.clear_column_stores();
     for (type_name, store) in arc_dest_stores {
         dest.install_column_store(&type_name, store);
@@ -910,19 +786,15 @@ pub fn save_subset_streaming_disk(
     };
 
     if let Some(sdg) = source_disk {
-        // Disk source: sequential read of edge_endpoints.bin + lockstep
-        // edge_properties_at lookups (which read source's prop heap in
-        // edge_idx order = sequential).
+        // Disk source: sequential read of edge_endpoints.bin with lockstep
+        // `edge_properties_at` lookups (source's prop heap in edge_idx order).
         sdg.edge_endpoints.advise_sequential();
-        // Re-evict source node_slots now that the node materialization
-        // pass above touched ~17 M source slots — without an explicit
-        // drop, those pages stay resident and pile on top of edge-pass
-        // page cache. Apply both madvise (region hint) and fadvise (fd-
-        // level page-cache hint) for best-effort eviction across Linux
-        // and macOS. Source column stores are mmap'd via
-        // MmapColumnStore which doesn't yet have an advise API; their
-        // pages remain resident through the edge phase — that's the
-        // next bottleneck once these levers are in place.
+        // Re-evict source node_slots: the node pass touched ~17 M slots whose
+        // pages would otherwise pile on top of the edge phase's page cache.
+        // Both madvise (region hint) and fadvise (fd-level hint) are issued
+        // for best-effort eviction across Linux and macOS. Source column
+        // stores are mmap'd via MmapColumnStore, which has no advise API yet
+        // — their pages stay resident, the next bottleneck here.
         sdg.node_slots.advise_dontneed();
         sdg.node_slots.fadvise_dontneed();
         let n_edges = sdg.next_edge_idx as usize;
@@ -958,15 +830,10 @@ pub fn save_subset_streaming_disk(
                 .map_err(|error| format!("save_subset_streaming_disk: append edge: {error}"))?;
         }
     } else {
-        // Memory / mapped source: walk via for_each_edge_endpoint_key to
-        // get the same sequential shape on a backend-agnostic surface.
-        // Properties go through `for_each_edge_of_conn_type` per kept
-        // edge type — but we don't have the edge_idx → properties path
-        // generically here, so fall back to per-edge lookup via
-        // `edge_references()`. Less optimal but correct.
+        // Memory source: per-edge lookup via `edge_references()` — there is
+        // no generic edge_idx → properties path on the backend-agnostic
+        // surface. Plain `Memory` only; every other backend errors out below.
         use petgraph::visit::IntoEdgeReferences;
-        // Plain-`Memory` fast path only; every other backend (including a
-        // copy-on-write overlay fork) takes the generic walk below.
         let backend = source.graph.plain_memory_digraph();
         if let Some(g) = backend {
             for er in g.edge_references() {
@@ -1006,13 +873,12 @@ pub fn save_subset_streaming_disk(
     log_phase("edge walk (translate + add_edge)", phase_edge_walk);
     let phase_save = Instant::now();
 
-    // 7. Rebuild type_indices from the freshly-added nodes. The streaming
+    // 7. Rebuild type_indices from the freshly-added nodes: the streaming
     //    add_node path bypasses the bulk loader's index maintenance, so
     //    dest.type_indices is empty until we walk node_weights here. The
-    //    saved `type_indices.bin` is what `MATCH (n:Type)` queries hit
-    //    after reload — without this rebuild, the subset reloads with
-    //    correct node_count and edges but every typed Cypher query
-    //    returns 0.
+    //    saved `type_indices.bin` is what `MATCH (n:Type)` hits after reload
+    //    — without this rebuild the subset reloads with correct node_count
+    //    and edges, but every typed Cypher query returns 0.
     dest.rebuild_type_indices();
 
     // 8. Save: triggers build_csr_from_pending (the external merge sort).
@@ -1020,10 +886,9 @@ pub fn save_subset_streaming_disk(
     log_phase("save_disk (CSR build + sidecars)", phase_save);
     log_phase("TOTAL", phase_start);
 
-    // 9. Drop dest before cleaning the scratch dir so the mmap files
-    //    aren't held open. dest's column_stores carry Arc handles to the
-    //    scratch mmaps; once dest is gone, the Arcs drop and the kernel
-    //    releases the file handles.
+    // 9. Drop dest before cleaning the scratch dir: its column_stores hold
+    //    Arc handles to the scratch mmaps, and the kernel only releases the
+    //    files once those Arcs are gone.
     drop(dest);
     let _ = std::fs::remove_dir_all(&scratch_root);
 
@@ -1031,23 +896,18 @@ pub fn save_subset_streaming_disk(
 }
 
 /// File-system-safe, **collision-free** slug for a node type name.
-/// Wikidata's type names include spaces, commas, accents, CJK, and
-/// many other non-ASCII characters; the obvious sanitization (replace
-/// non-ASCII with `_`) collapses distinct types onto identical paths.
-/// On real Wikidata: 10 distinct single-char types (`ग`, `झ`, `色`,
-/// `藪`, ...) all sanitize to `_`, the pair `établissement public` /
-/// `Établissement public` both collide on `_tablissement_public`,
-/// `C♯` and `C♭` collide on `C_`, and `梅林` / `連合` both collide on
-/// `__`. Two such types racing through the writer's `OpenOptions::
-/// truncate(true).open(...)` would overwrite each other's files —
-/// observed as a `slice index starts at N but ends at 0` panic far
-/// downstream during `rebuild_type_indices` (the second-to-finalize
-/// type's mmap-backed offsets file gets truncated out from under the
-/// first type's `Arc<ColumnStore>`).
+/// Wikidata type names carry spaces, accents, CJK and much more, and the
+/// obvious sanitization (non-ASCII → `_`) collapses distinct types onto
+/// identical paths: 10 distinct single-char types (`ग`, `झ`, `色`, `藪`, ...)
+/// all become `_`, and `établissement public` / `Établissement public`,
+/// `C♯` / `C♭`, `梅林` / `連合` each collide pairwise. Two colliding types
+/// racing through the writer's `OpenOptions::truncate(true).open(...)`
+/// overwrite each other's files — observed as a `slice index starts at N but
+/// ends at 0` panic far downstream in `rebuild_type_indices`, when the second
+/// type to finalize truncates the first's mmap-backed offsets file.
 ///
-/// Fix: append the InternedKey u64 hash as a hex suffix. Even when
-/// the readable prefix collapses, the hash makes each type's path
-/// globally unique.
+/// Appending the InternedKey u64 hash as a hex suffix keeps each path unique
+/// even when the readable prefix collapses.
 fn sanitize_type_name(name: &str) -> String {
     use std::fmt::Write as _;
     let mut prefix: String = name
@@ -1115,15 +975,11 @@ mod tests {
         }
     }
 
-    // Note: `pass_a_scan` requires a real `DiskGraph`. End-to-end tests
-    // live in `tests/test_subgraph_streaming.py`, where building
-    // a disk graph is straightforward via the public Python API.
+    // `pass_a_scan` needs a real `DiskGraph`; its end-to-end tests live in
+    // `tests/test_subgraph_streaming.py`.
 
-    // ── RankIndex ─────────────────────────────────────────────────────
-
-    /// Helper: brute-force rank-1 to validate the popcount-prefix
-    /// implementation against. Iterates the bitset bit-by-bit, counting
-    /// kept bits before `old_id`. O(n_bits) but trivially correct.
+    /// Brute-force rank-1 oracle for the popcount-prefix implementation:
+    /// O(n_bits) bit-by-bit count, trivially correct.
     fn brute_force_rank(bs: &Bitset, old_id: u32) -> Option<u32> {
         if !bs.get(old_id as usize) {
             return None;
@@ -1150,7 +1006,6 @@ mod tests {
         // Total kept = ceil(200 / 3) = 67.
         assert_eq!(idx.kept_count(), 67);
 
-        // Spot-check the first few mappings.
         assert_eq!(idx.old_to_new(0), Some(0));
         assert_eq!(idx.old_to_new(3), Some(1));
         assert_eq!(idx.old_to_new(6), Some(2));
@@ -1158,11 +1013,9 @@ mod tests {
         assert_eq!(idx.old_to_new(66), Some(22));
         assert_eq!(idx.old_to_new(198), Some(66));
 
-        // Not-in-set: 1, 2, 4, 5, ...
         assert_eq!(idx.old_to_new(1), None);
         assert_eq!(idx.old_to_new(64), None);
 
-        // Differential against brute force across the whole range.
         for i in 0..200u32 {
             assert_eq!(idx.old_to_new(i), brute_force_rank(&bs, i));
         }
@@ -1185,7 +1038,6 @@ mod tests {
         assert_eq!(idx.old_to_new(128), Some(2));
         assert_eq!(idx.old_to_new(192), Some(3));
 
-        // Bits before/after each set bit must report None.
         assert_eq!(idx.old_to_new(63), None);
         assert_eq!(idx.old_to_new(65), None);
         assert_eq!(idx.old_to_new(255), None);
@@ -1193,7 +1045,6 @@ mod tests {
 
     #[test]
     fn rank_index_full_pattern() {
-        // All bits set. old_to_new(i) == i for every i.
         let mut bs = Bitset::with_len(130);
         for i in 0..130 {
             bs.set(i);
@@ -1208,7 +1059,6 @@ mod tests {
 
     #[test]
     fn rank_index_empty_pattern() {
-        // Empty bitset — every query returns None, kept_count = 0.
         let bs = Bitset::with_len(200);
         let idx = RankIndex::from_bitset(bs);
 
@@ -1254,8 +1104,7 @@ mod tests {
 
     #[test]
     fn rank_index_pseudo_random_differential() {
-        // Pseudorandom-but-deterministic bitset; differential against
-        // brute-force rank across a whole 1024-bit range.
+        // Deterministic pseudorandom bitset, differential against brute force.
         let mut bs = Bitset::with_len(1024);
         let mut state: u32 = 0xDEAD_BEEF;
         for i in 0..1024 {

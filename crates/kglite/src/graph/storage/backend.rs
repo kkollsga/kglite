@@ -1,8 +1,7 @@
 //! GraphBackend enum + per-backend dispatcher + GraphRead / GraphWrite impls.
 //!
-//! The `GraphBackend` enum is the runtime variant of all storage backends
-//! (Memory / Mapped / Disk / Recording). Its trait impls forward to the
-//! inner backend via enum match. This is the central enum-dispatch boundary
+//! Trait impls forward to the inner backend (Memory / Forked / Mapped / Disk /
+//! Recording) via enum match. This is the central enum-dispatch boundary
 //! captured by the source-quality whitelist.
 
 use crate::graph::schema::{EdgeData, InternedKey, NodeData};
@@ -39,7 +38,6 @@ pub(crate) fn backend_clone_count() -> usize {
     BACKEND_CLONE_COUNT.get()
 }
 
-/// Total nodes copied by backend clones since the last reset.
 #[cfg(test)]
 pub(crate) fn backend_clone_nodes() -> usize {
     BACKEND_CLONE_NODES.get()
@@ -47,39 +45,31 @@ pub(crate) fn backend_clone_nodes() -> usize {
 
 /// Record `n` nodes genuinely copied.
 ///
-/// **Which paths call this is load-bearing.** `impl Clone for
-/// GraphBackend` used to bump this by `node_count()` on *every* clone; once the
-/// `Memory` arm started producing a shallow `Forked` overlay, that would have
-/// gone on reporting a whole-graph copy that no longer happens — the oracle
-/// becoming a liar, and `held_reader_copies_no_nodes` unable to distinguish the
-/// fix from the defect. Now only the paths that actually duplicate node storage
-/// call this: the deep-clone fallback in `Clone`, and `ForkedGraph::materialise`
-/// (the adjacency-write escape hatch, which is a genuine copy).
+/// **Which paths call this is load-bearing.** `Clone` used to bump it by
+/// `node_count()` on *every* clone; once the `Memory` arm began producing a
+/// shallow `Forked` overlay that would report a whole-graph copy that no longer
+/// happens, leaving `held_reader_copies_no_nodes` unable to tell the fix from
+/// the defect. Only the paths that actually duplicate node storage call it: the
+/// deep-clone fallback in `Clone`, and `ForkedGraph::materialise`.
 #[cfg(test)]
 pub(crate) fn note_nodes_copied(n: usize) {
     BACKEND_CLONE_NODES.set(BACKEND_CLONE_NODES.get() + n);
 }
 
-// ============================================================================
-// Graph Backend Abstraction
-// ============================================================================
-
 /// `&mut T` from a heap backend handle, copying it first if it is shared.
 ///
-/// **This was once an `expect` and had to be softened**, and the reason is
-/// worth keeping: a `Memory` handle was provably unique while the only
-/// producer was a `Clone` that deep-copied into a fresh `Arc`. The
-/// copy-on-write overlay introduced a second holder — the `base` of somebody
-/// else's overlay — so the assertion started firing on five real Python tests
-/// (`g.copy()` then writing through the *original*).
+/// **This was once an `expect` and had to be softened.** A `Memory` handle was
+/// provably unique until the copy-on-write overlay introduced a second holder —
+/// the `base` of somebody else's overlay (see
+/// [`GraphBackend::ensure_writable`], which documents the shape).
 ///
-/// [`GraphBackend::ensure_writable`] is the fix and it runs at write entry, so
-/// by the time any caller reaches here the handle is unique again and this is a
-/// plain `Arc::get_mut`. `Arc::make_mut` is the fallback for a path that
-/// somehow bypasses write entry: it deep-copies rather than mutating a backend
-/// someone is reading, i.e. it fails **slow, never wrong** — the same direction
-/// `rollback::journal_covers` and `forked::can_fork` take. A panic here would
-/// have been a user-visible crash for a cost problem.
+/// `ensure_writable` runs at write entry, so by the time any caller reaches
+/// here the handle is unique again and this is a plain `Arc::get_mut`.
+/// `Arc::make_mut` is the fallback for a path that bypasses write entry: it
+/// deep-copies rather than mutating a backend someone is reading, i.e. it fails
+/// **slow, never wrong** — the direction `rollback::journal_covers` and
+/// `forked::can_fork` also take. A panic here would have been a user-visible
+/// crash for a cost problem.
 #[inline(always)]
 pub(crate) fn unique_heap_backend<T: Clone>(handle: &mut Arc<T>) -> &mut T {
     Arc::make_mut(handle)
@@ -87,18 +77,15 @@ pub(crate) fn unique_heap_backend<T: Clone>(handle: &mut Arc<T>) -> &mut T {
 
 /// Graph storage backend. Five variants — heap-resident memory, a
 /// copy-on-write overlay over a shared memory base, mmap-columnar-spilled
-/// mapped, CSR-on-disk, and a validation wrapper that logs reads.
-/// `MappedGraph` is a distinct struct rather than a type alias, so each
-/// backend owns its own [`GraphRead`] / [`GraphWrite`] impl in
-/// [`crate::graph::storage::impls`]; [`RecordingGraph`] doubles as a live
-/// test of the trait surface. This enum is a dumb dispatcher.
+/// mapped, CSR-on-disk, and a write-capture wrapper. `MappedGraph` is a
+/// distinct struct rather than a type alias, so each backend owns its own
+/// [`GraphRead`] / [`GraphWrite`] impl in [`crate::graph::storage::impls`].
+/// This enum is a dumb dispatcher.
 ///
-/// The `Recording` variant wraps any other `GraphBackend` — including,
-/// in principle, another `Recording` — via
-/// `Box<RecordingGraph<GraphBackend>>`. Its `is_memory` / `is_mapped`
-/// / `is_disk` predicates forward to the inner backend so consumers
-/// that switch on "what's the underlying storage" keep working
-/// unchanged when wrapped.
+/// The `Recording` variant wraps any other `GraphBackend` — including, in
+/// principle, another `Recording`. Its `is_memory` / `is_mapped` / `is_disk`
+/// predicates forward to the inner backend so consumers that switch on "what's
+/// the underlying storage" keep working unchanged when wrapped.
 pub enum GraphBackend {
     /// The `Arc` indirection is the whole point: it is what lets a fork share
     /// the heap graph with a reader instead of deep-copying it. A write regains
@@ -112,25 +99,22 @@ pub enum GraphBackend {
     /// (`forked::can_fork`), and collapsed back to `Memory` by
     /// [`try_compact`](Self::try_compact) the moment the reader drops.
     ///
-    /// Every predicate below treats it as memory storage, because it *is* one —
+    /// Every predicate below treats it as memory storage, because it *is* one:
     /// `is_memory`, `supports_undo_journal` and
-    /// `supports_checkpoint_free_mutation` all answer exactly as the `Memory`
-    /// arm it was forked from would. That is not a convenience: answering
-    /// `false` to `supports_undo_journal` would send every statement taken
-    /// while a view is held to `StatementCheckpoint::Clone`, i.e. an O(V+E)
-    /// clone *per statement* — a worse cliff than the defect this variant
-    /// removes.
+    /// `supports_checkpoint_free_mutation` answer exactly as the `Memory` arm it
+    /// was forked from would. Answering `false` to `supports_undo_journal` would
+    /// send every statement taken while a view is held to
+    /// `StatementCheckpoint::Clone` — an O(V+E) clone *per statement*, a worse
+    /// cliff than the defect this variant removes.
     Forked(Box<ForkedGraph>),
     Mapped(Arc<MappedGraph>),
     Disk(Box<DiskGraph>),
-    // Write-capture wrapper for the WAL. Began as a test-only
-    // validation wrapper, now the production backend of every
-    // graph opened with `durable=True`: the binding wraps the loaded
-    // backend via `wrap_backend_for_durability`, so each mutation that
-    // passes the `GraphWrite` seam is buffered as a `RawOp` and flushed
-    // to the log. Because it wraps the enum itself, it is
-    // storage-agnostic — the capture layer is identical for a memory,
-    // mapped, or disk graph underneath.
+    // Write-capture wrapper: the production backend of every graph opened with
+    // `durable=True`. The binding wraps the loaded backend via
+    // `wrap_backend_for_durability`, so each mutation crossing the `GraphWrite`
+    // seam is buffered as a `RawOp` and flushed to the log. Because it wraps
+    // the enum itself, the capture layer is identical for a memory, mapped, or
+    // disk graph underneath.
     Recording(Box<RecordingGraph<GraphBackend>>),
 }
 
@@ -138,16 +122,14 @@ impl GraphBackend {
     /// An **owned** node record, for a caller that finishes with it inside its
     /// own frame — scans and filters, which drop each record immediately.
     ///
-    /// This exists for the disk backend, where [`GraphRead::node_weight`]
-    /// parks every record it builds in the per-query arena: a scan walking a
-    /// million nodes retains a million records until its query ends
+    /// Exists for the disk backend, where [`GraphRead::node_weight`] parks
+    /// every record it builds in the per-query arena: a scan walking a million
+    /// nodes retains a million records until its query ends
     /// (`storage/disk/query_arena.rs`). Materializing into the caller's frame
-    /// keeps such a scan flat in memory and skips the arena mutex entirely.
+    /// keeps such a scan flat in memory and skips the arena mutex.
     ///
-    /// **Gate on [`GraphRead::is_disk`] before calling.** The heap backends
-    /// already own their records and can only answer by *cloning*, which is
-    /// pure loss for them — hence the branch at the call sites rather than a
-    /// wholesale switch.
+    /// **Gate on [`GraphRead::is_disk`] before calling** — the heap backends
+    /// already own their records and can only answer by *cloning*.
     #[inline]
     pub(crate) fn owned_node_data(&self, idx: NodeIndex) -> Option<NodeData> {
         match self {
@@ -164,24 +146,17 @@ impl GraphBackend {
         GraphBackend::Memory(Arc::new(MemoryGraph::new()))
     }
 
-    /// Whether this backend is wrapped in the WAL write-capture layer, i.e.
-    /// whether some owner is logging its mutations.
-    ///
-    /// The durable machinery reads and reaches into the capture layer from
-    /// several places; those questions are answered here, on the dispatcher,
-    /// rather than by re-matching the variant at each site.
+    /// Whether this backend is wrapped in the write-capture layer.
     #[inline]
     pub(crate) fn is_recording(&self) -> bool {
         matches!(self, GraphBackend::Recording(_))
     }
 
-    /// The write-capture layer, if this backend is wrapped in one.
-    ///
-    /// Read-side only, and therefore test-only: the production durable paths
-    /// all *drain* the buffer and use [`recording_mut`](Self::recording_mut).
-    /// This exists so the durable session's replay-before-wrap ordering has an
-    /// observable — a graph wrapped before its WAL replay carries every
-    /// replayed op in this buffer, which nothing else can see.
+    /// The write-capture layer, if any. Test-only: the production durable paths
+    /// *drain* the buffer through [`recording_mut`](Self::recording_mut). This
+    /// exists so the durable session's replay-before-wrap ordering has an
+    /// observable — a graph wrapped before its WAL replay carries every replayed
+    /// op in this buffer, which nothing else can see.
     #[cfg(test)]
     #[inline]
     pub(crate) fn recording(&self) -> Option<&RecordingGraph<GraphBackend>> {
@@ -191,9 +166,8 @@ impl GraphBackend {
         }
     }
 
-    /// Mutable access to the write-capture layer, if this backend is wrapped
-    /// in one. The durable commit and checkpoint paths drain the op buffer
-    /// through this.
+    /// Mutable access to the write-capture layer; the durable commit and
+    /// checkpoint paths drain the op buffer through it.
     #[inline]
     pub(crate) fn recording_mut(&mut self) -> Option<&mut RecordingGraph<GraphBackend>> {
         match self {
@@ -214,10 +188,8 @@ impl GraphBackend {
 
     /// Wrap this backend in the write-capture layer **without** claiming
     /// write-ahead-log ownership, idempotently — the change-data-capture
-    /// entry point (`graph::cdc::enable`).
-    ///
-    /// Same seam, different consumer: CDC derives events from the buffer the
-    /// wrapper fills, but keeps no log, so it must not present itself as a
+    /// entry point (`graph::cdc::enable`). CDC derives events from the buffer
+    /// the wrapper fills but keeps no log, so it must not present itself as a
     /// durable owner. See [`RecordingGraph::is_wal_owner`].
     pub(crate) fn wrap_for_capture(&mut self) {
         if self.is_recording() {
@@ -230,17 +202,15 @@ impl GraphBackend {
     /// Remove the write-capture layer, **unless** a write-ahead log owns it.
     ///
     /// The inverse of [`wrap_for_capture`](Self::wrap_for_capture), for
-    /// `cdc::disable`: capture is not free — a wrapped backend buffers a
-    /// `RawOp` per mutation and gives up the checkpoint-free mutation fast
-    /// path ([`supports_checkpoint_free_mutation`](Self::supports_checkpoint_free_mutation))
-    /// — so turning capture off has to actually turn it off, or "disable"
-    /// would leave a permanent tax behind.
+    /// `cdc::disable`. Capture is not free — a wrapped backend buffers a
+    /// `RawOp` per mutation and gives up the checkpoint-free mutation fast path
+    /// ([`supports_checkpoint_free_mutation`](Self::supports_checkpoint_free_mutation))
+    /// — so "disable" has to actually unwrap, or it leaves a permanent tax.
     ///
-    /// Refuses on a WAL-owned wrapper because unwrapping one silently stops
-    /// logging: the graph would keep committing and the log would keep
-    /// claiming to describe it. Any ops still buffered are dropped with the
-    /// wrapper, which is correct precisely because nothing owns them — a
-    /// WAL-owned buffer is never reached here.
+    /// Refuses on a WAL-owned wrapper: unwrapping one silently stops logging,
+    /// leaving the graph committing and the log still claiming to describe it.
+    /// Buffered ops are dropped with the wrapper, which is correct precisely
+    /// because nothing owns them — a WAL-owned buffer never reaches here.
     pub(crate) fn unwrap_capture_if_unowned(&mut self) {
         let GraphBackend::Recording(recording) = self else {
             return;
@@ -266,12 +236,8 @@ impl GraphBackend {
     /// distinct boundary and keeps the conservative checkpoint path.
     #[inline]
     pub(crate) fn supports_checkpoint_free_mutation(&self) -> bool {
-        // `Forked` answers exactly as the `Memory` it forked from: before the
-        // copy-on-write overlay existed a held view produced a deep-cloned
-        // `Memory` here, which returned true, so answering false would *newly*
-        // charge a checkpoint to every single-node CREATE taken while a view
-        // is held. Pinned by
-        // `rollback_tests::forked_statements_copy_zero_nodes`.
+        // `Forked` answers as the `Memory` it forked from — see the variant
+        // doc. Pinned by `rollback_tests::forked_statements_copy_zero_nodes`.
         matches!(self, GraphBackend::Memory(_) | GraphBackend::Forked(_))
     }
 
@@ -280,42 +246,34 @@ impl GraphBackend {
     /// whole-graph clone.
     ///
     /// Every petgraph-backed backend can. `Memory` and `Mapped` both hold a
-    /// heap `StableDiGraph<NodeData, EdgeData>` as `inner`, and every
-    /// `UndoEntry` variant is keyed on the `NodeIndex`/`EdgeIndex` that graph
-    /// hands out, so the capture seam is the same one for both. "Larger than
-    /// RAM" is loose for `Mapped`: what `StorageMode::Mapped` changes is where
-    /// *properties* live (`memory_limit = Some(0)` spills the columnar store
-    /// to mmap), not the node/edge graph, which stays heap-resident.
+    /// heap `StableDiGraph<NodeData, EdgeData>` as `inner` and every
+    /// `UndoEntry` is keyed on the `NodeIndex`/`EdgeIndex` it hands out, so the
+    /// capture seam is the same for both — `StorageMode::Mapped` spills
+    /// *properties* to mmap (`memory_limit = Some(0)`), not the node/edge graph,
+    /// which stays heap-resident.
     ///
-    /// `Disk` cannot, and that is the whole of the remaining veto. It has no
-    /// petgraph at all — it mutates a CSR + mmap layout through generation
-    /// overlays and arena-staged writes, its slots carry no `NodeIndex`
-    /// identity for an entry to name, and it has no free list whose LIFO
-    /// ordering reverse replay could exploit to restore slot identity. So a
+    /// `Disk` cannot: it has no petgraph at all — it mutates a CSR + mmap layout
+    /// through generation overlays and arena-staged writes, its slots carry no
+    /// `NodeIndex` identity for an entry to name, and it has no free list whose
+    /// LIFO ordering reverse replay could exploit to restore slot identity. So a
     /// disk graph keeps the clone checkpoint (see `dir_graph/rollback.rs`):
-    /// every mutating statement on it still opens an O(V+E)
-    /// `fork_transaction()` whole-graph checkpoint, the pre-journal behaviour,
-    /// and its statement-rollback cost scales with graph size. Mirrored in the
-    /// user-facing storage-mode guide (`docs/python/core-concepts.md`).
+    /// every mutating statement opens an O(V+E) `fork_transaction()` whole-graph
+    /// checkpoint and its statement-rollback cost scales with graph size.
+    /// Mirrored in the user-facing storage-mode guide
+    /// (`docs/python/core-concepts.md`).
     ///
-    /// `Recording` forwards to whatever it wraps, so a durable graph
-    /// participates exactly when its underlying backend would:
-    /// `Recording(Memory)` and `Recording(Mapped)` journal,
-    /// `Recording(Disk)` keeps the clone. Durability and rollback strategy are
-    /// independent concerns.
+    /// `Recording` forwards to whatever it wraps — durability and rollback
+    /// strategy are independent concerns.
     ///
-    /// **This is the only remaining veto term in `journal_covers`** — every
-    /// other term was retired as the journal grew to cover saved, indexed and
-    /// columnar graphs.
+    /// **This is the only remaining veto term in `journal_covers`.**
     #[inline]
     pub(crate) fn supports_undo_journal(&self) -> bool {
         match self {
             GraphBackend::Memory(_) | GraphBackend::Mapped(_) => true,
-            // MUST be true — see the `Forked` variant doc. Every `UndoEntry`
-            // is keyed on a `NodeIndex`/`EdgeIndex`, which the overlay still
-            // hands out, and reversal goes through
-            // `ForkedGraph`'s own `GraphWrite`, so entries land in the overlay
-            // and never touch the shared base.
+            // MUST be true — see the `Forked` variant doc. `UndoEntry` keys are
+            // the `NodeIndex`/`EdgeIndex` the overlay still hands out, and
+            // reversal goes through `ForkedGraph`'s own `GraphWrite`, so entries
+            // land in the overlay and never touch the shared base.
             GraphBackend::Forked(_) => true,
             GraphBackend::Recording(rg) => rg.inner().supports_undo_journal(),
             GraphBackend::Disk(_) => false,
@@ -325,11 +283,10 @@ impl GraphBackend {
     /// `true` while this backend is a copy-on-write overlay over a base a
     /// reader still holds.
     ///
-    /// Public as a **diagnostic**: it is the one cheap, non-timing observable
-    /// that distinguishes the copy-on-write fork from the whole-graph clone it
-    /// replaced, and from a compaction that failed to fold back. Bindings
-    /// expose it for regression tests (`kglite._backend_is_forked`); nothing in
-    /// the engine's behaviour depends on a caller reading it.
+    /// Public as a **diagnostic**: the one cheap, non-timing observable that
+    /// distinguishes the fork from the whole-graph clone it replaced, and from a
+    /// compaction that failed to fold back. Bindings expose it for regression
+    /// tests (`kglite._backend_is_forked`); no engine behaviour depends on it.
     #[inline]
     pub fn is_forked(&self) -> bool {
         match self {
@@ -346,10 +303,9 @@ impl GraphBackend {
     /// **from** `g`, so the fork's `base` and `g`'s own `Memory(_)` are now the
     /// same allocation. `g` is still a uniquely-owned `Arc<DirGraph>`, so
     /// `Arc::make_mut` at the `DirGraph` level does nothing and the write would
-    /// go straight into a backend the fork is reading. Until the copy-on-write
-    /// overlay existed this could not happen — a `Memory` handle was always
-    /// unique — which is why the whole Python suite once passed with
-    /// `unique_heap_backend`'s assertion armed, and why these five tests are
+    /// go straight into a backend the fork is reading. Before the copy-on-write
+    /// overlay a `Memory` handle was always unique, so this could not happen —
+    /// which is why five `g.copy()`-then-write-the-original Python tests are
     /// what found it.
     ///
     /// The resolution is symmetric with the fork itself: `g` becomes an overlay
@@ -386,11 +342,9 @@ impl GraphBackend {
                 };
             }
             GraphBackend::Mapped(base) => {
-                // Mapped deliberately keeps the deep copy: either it gains the
-                // copy-on-write overlay together with Memory, or it stays
-                // explicitly on the deep-copy path with a named test — not
-                // ambiguously half-done. This is that choice, and
-                // `mapped_statements_copy_zero_nodes` pins its cost.
+                // Mapped deliberately keeps the deep copy rather than
+                // half-adopting the overlay; `mapped_statements_copy_zero_nodes`
+                // pins its cost.
                 #[cfg(test)]
                 note_nodes_copied(base.inner().node_count());
                 *self = GraphBackend::Mapped(Arc::new(base.deep_clone()));
@@ -402,11 +356,11 @@ impl GraphBackend {
     /// Fold an overlay back into its base when this writer is the last holder.
     ///
     /// **Called at write entry** (`handle::make_dir_graph_mut_preserving_lineage`),
-    /// which is the earliest moment a writer can observe that the reader has
-    /// gone — `Arc::get_mut` succeeding *is* that observation. So "hold a view,
-    /// write, drop the view, write again" returns to the flat representation on
-    /// the very next write, with no timer and no bookkeeping. A no-op on every
-    /// other variant, and a no-op on `Forked` while a reader is still live.
+    /// the earliest moment a writer can observe that the reader has gone —
+    /// `Arc::get_mut` succeeding *is* that observation. So "hold a view, write,
+    /// drop the view, write again" returns to the flat representation on the
+    /// next write, with no timer and no bookkeeping. A no-op on every other
+    /// variant, and on `Forked` while a reader is still live.
     pub(crate) fn try_compact(&mut self) {
         if let GraphBackend::Recording(rg) = self {
             rg.inner_mut().try_compact();
@@ -428,11 +382,12 @@ impl GraphBackend {
     /// deep-copying the base if a reader still holds it.
     ///
     /// The escape hatch for the three writes an overlay cannot express
-    /// (`add_edge` / `remove_node` / `remove_edge`, which rewrite existing
-    /// nodes' petgraph adjacency) and for the handful of whole-graph operations
-    /// that need one concrete `StableDiGraph`. Cost is the whole-graph deep
-    /// copy the overlay normally avoids, paid on that write only; every other
-    /// write stays O(changes).
+    /// (`add_edge` / `remove_node` / `remove_edge`: `StableDiGraph` threads
+    /// adjacency through per-node linked lists, so each of them rewrites
+    /// *existing* nodes) and for the handful of whole-graph operations that need
+    /// one concrete `StableDiGraph`. Cost is the whole-graph deep copy the
+    /// overlay normally avoids, paid on that write only; every other write stays
+    /// O(changes).
     pub(crate) fn flatten_fork(&mut self) {
         if let GraphBackend::Recording(rg) = self {
             rg.inner_mut().flatten_fork();
@@ -464,7 +419,6 @@ impl GraphBackend {
         }
     }
 
-    /// Uninstall and return the undo journal, ending capture.
     #[inline]
     pub(crate) fn take_undo(&mut self) -> Option<Box<UndoJournal>> {
         match self {
@@ -531,11 +485,8 @@ impl GraphBackend {
     }
 
     /// Edge-storage observability for `graph_info()`: `(edges_mapped,
-    /// edge_property_overlay_rows)`.
-    ///
-    /// Only the disk backend has a CSR or an edge-property overlay; every
-    /// other backend keeps its edges in the heap `StableDiGraph` and reports
-    /// `(false, 0)`.
+    /// edge_property_overlay_rows)`. Only the disk backend has a CSR or an
+    /// edge-property overlay; every other backend reports `(false, 0)`.
     pub(crate) fn edge_storage_info(&self) -> (bool, usize) {
         match self {
             GraphBackend::Disk(g) => (g.csr_is_mapped(), g.edge_property_overlay_len()),
@@ -556,13 +507,12 @@ impl GraphBackend {
         }
     }
 
-    /// Record that node `idx` was upserted, for the WAL capture wrapper.
-    /// No-op unless this is the [`GraphBackend::Recording`] backend. Used by
-    /// mutation paths that write through a side channel (the columnar master
+    /// Record that node `idx` was upserted, for the WAL capture wrapper. Used
+    /// by mutation paths that write through a side channel (the columnar master
     /// `ColumnStore`) and so bypass the recorded
-    /// [`GraphWrite::node_weight_mut`] — without this the mutation would not
-    /// be captured for the WAL at all (the recorded path only sees the
-    /// silent handle-refresh sweep).
+    /// [`GraphWrite::node_weight_mut`] — without this the mutation is never
+    /// captured for the WAL (the recorded path only sees the silent
+    /// handle-refresh sweep).
     #[inline]
     pub fn note_recorded_node_upsert(&mut self, idx: NodeIndex) {
         if let GraphBackend::Recording(rg) = self {
@@ -571,8 +521,6 @@ impl GraphBackend {
     }
 
     /// Turn before-image capture on or off on the write-capture wrapper.
-    /// No-op when there is no wrapper — a graph with no capture layer has
-    /// nothing to enrich.
     #[inline]
     pub(crate) fn set_capture_before(&mut self, on: bool) {
         if let GraphBackend::Recording(rg) = self {
@@ -628,16 +576,15 @@ impl GraphBackend {
         }
     }
 
-    /// Record that node `idx`'s secondary labels changed, for the WAL
-    /// capture wrapper. No-op unless this is the
-    /// [`GraphBackend::Recording`] backend.
+    /// Record that node `idx`'s secondary labels changed, for the WAL capture
+    /// wrapper.
     ///
-    /// Secondary labels live in `DirGraph::secondary_label_index`, above
-    /// this backend — `NodeData` carries none — so *no* `GraphWrite` call
-    /// describes a label change and the recorded seam cannot infer one.
-    /// `DirGraph`'s label choke points call this instead; without it a
-    /// durable graph silently lost every `CREATE (n:A:B)` / `SET n:B` on
-    /// WAL replay while keeping the node's properties.
+    /// Secondary labels live in `DirGraph::secondary_label_index`, above this
+    /// backend — `NodeData` carries none — so *no* `GraphWrite` call describes a
+    /// label change and the recorded seam cannot infer one. `DirGraph`'s label
+    /// choke points call this instead; without it a durable graph silently lost
+    /// every `CREATE (n:A:B)` / `SET n:B` on WAL replay while keeping the node's
+    /// properties.
     #[inline]
     pub fn note_recorded_node_labels(&mut self, idx: NodeIndex) {
         if let GraphBackend::Recording(rg) = self {
@@ -647,20 +594,18 @@ impl GraphBackend {
 
     /// Swap in a rebuilt heap petgraph, **preserving this backend's variant
     /// and any write-capture wrapper around it**. Returns `false` for `Disk`,
-    /// whose CSR arrays are not a `StableDiGraph` and cannot be replaced this
-    /// way; the caller must treat that as "not rebuilt".
+    /// whose CSR arrays are not a `StableDiGraph`; the caller must treat that
+    /// as "not rebuilt".
     ///
-    /// Exists because `DirGraph::vacuum` rebuilds the graph with contiguous
-    /// indices and used to assign `GraphBackend::Memory(...)` unconditionally.
-    /// That silently did two damaging things: it downgraded a `Mapped` graph
-    /// to heap storage, and — worse — it *dropped the `Recording` wrapper*, so
-    /// a durable graph stopped write-ahead logging for the rest of the
-    /// session with no error. Rebuilding through this method keeps both
-    /// properties.
+    /// Exists because `DirGraph::vacuum` used to assign
+    /// `GraphBackend::Memory(...)` unconditionally, which silently downgraded a
+    /// `Mapped` graph to heap storage and — worse — *dropped the `Recording`
+    /// wrapper*, so a durable graph stopped write-ahead logging for the rest of
+    /// the session with no error.
     ///
-    /// Note the wrapper is preserved but its op buffer is not meaningful
-    /// across a rebuild: buffered ops are keyed by `NodeIndex`, and a vacuum
-    /// remaps every index. Callers must flush the log *before* vacuuming.
+    /// The wrapper survives but its op buffer does not: buffered ops are keyed
+    /// by `NodeIndex` and a vacuum remaps every index, so callers must flush the
+    /// log *before* vacuuming.
     pub(crate) fn replace_heap_graph(&mut self, new: StableDiGraph<NodeData, EdgeData>) -> bool {
         match self {
             // The column stores are *owned* state, not a lazy index: carry
@@ -693,13 +638,10 @@ impl GraphBackend {
     /// `StableDiGraph` — the same "not rebuilt" signal
     /// [`replace_heap_graph`](Self::replace_heap_graph) returns `false` for.
     ///
-    /// Exists for `DirGraph::vacuum`, which used to deep-clone every node and
-    /// edge weight into the compacted graph and then drop the originals when
-    /// the backend was replaced. Owning the old graph lets it *relocate* the
-    /// weights instead. The backend is left holding an empty graph and its
-    /// now-stale derived caches; the sole caller replaces it with the
-    /// compacted graph a few statements later and nothing reads it in
-    /// between, exactly as during the old clone loop.
+    /// Exists so `DirGraph::vacuum` can *relocate* node and edge weights into
+    /// the compacted graph instead of deep-cloning them. The backend is left
+    /// holding an empty graph and now-stale derived caches; the sole caller
+    /// replaces it a few statements later and nothing reads it in between.
     pub(crate) fn take_heap_graph(&mut self) -> Option<StableDiGraph<NodeData, EdgeData>> {
         match self {
             GraphBackend::Memory(g) => Some(std::mem::take(&mut unique_heap_backend(g).inner)),
@@ -752,15 +694,14 @@ impl GraphBackend {
     /// `(source, target, connection_type)` per edge.
     ///
     /// Avoids the `Box<dyn Iterator>` + virtual `.next()` dispatch that
-    /// [`GraphRead::edge_endpoint_keys`] requires. Monomorphises per
-    /// backend at the call site, so the compiler fully inlines the hot
-    /// loop. Use this from any code path that walks every edge on a
-    /// large graph (e.g. `compute_type_connectivity`, cache rebuild,
-    /// bulk index builds). 863M-edge benchmarks show ~40–90 s savings
-    /// per sweep vs the boxed-iterator path on Wikidata-scale graphs.
+    /// [`GraphRead::edge_endpoint_keys`] requires: monomorphises per backend at
+    /// the call site, so the compiler fully inlines the hot loop. 863M-edge
+    /// benchmarks show ~40–90 s savings per sweep vs the boxed-iterator path, so
+    /// prefer it in any path that walks every edge of a large graph
+    /// (`compute_type_connectivity`, cache rebuild, bulk index builds).
     ///
-    /// The `Recording` variant forwards to its wrapped backend without
-    /// recording — it logs only the trait-path methods.
+    /// The `Recording` variant forwards without recording — it logs only the
+    /// trait-path methods.
     #[inline(always)]
     pub fn for_each_edge_endpoint_key<F>(&self, mut f: F)
     where
@@ -807,24 +748,18 @@ impl GraphBackend {
         }
     }
 
-    /// Iterate only edges whose connection type matches `conn_type`,
-    /// yielding `(src, tgt, edge_idx, properties)` per match.
+    /// Iterate only edges whose connection type matches `conn_type`, yielding
+    /// `(src, tgt, edge_idx, properties)` per match. The callback returns `true`
+    /// to continue or `false` to stop, so a caller collecting a bounded prefix
+    /// doesn't pay for the remaining matches; `properties` is the empty slice
+    /// when the edge has no custom ones.
     ///
-    /// The callback returns `true` to continue or `false` to stop — so
-    /// callers collecting a bounded prefix (sample edges, first match)
-    /// don't pay for the rest of the matches.
-    ///
-    /// Avoids the disk backend's per-edge `Box<EdgeData>` arena push by
-    /// reading `edge_endpoints` + `edge_properties` directly. On
-    /// Memory/Mapped the petgraph iterator already hands out `&EdgeData`
-    /// references into the resident storage, so there is no arena cost.
-    ///
-    /// On the disk backend, complexity is O(matching edges) thanks to
-    /// the persisted `conn_type_index_*` inverted index — not O(all
-    /// edges) as a filtered `edge_references()` sweep would be.
-    ///
-    /// `properties` is the empty slice when the edge has no custom
-    /// properties (common case for topology-heavy graphs).
+    /// Avoids the disk backend's per-edge `Box<EdgeData>` arena push by reading
+    /// `edge_endpoints` + `edge_properties` directly, and is O(matching edges)
+    /// there thanks to the persisted `conn_type_index_*` inverted index rather
+    /// than the O(all edges) of a filtered `edge_references()` sweep. On
+    /// Memory/Mapped the petgraph iterator already hands out `&EdgeData` into
+    /// resident storage, so there is no arena cost either way.
     #[inline(always)]
     pub fn for_each_edge_of_conn_type<F>(&self, conn_type: InternedKey, mut f: F)
     where
@@ -924,8 +859,6 @@ impl GraphBackend {
     }
 }
 
-// -- Index traits --
-
 impl std::ops::Index<NodeIndex> for GraphBackend {
     type Output = NodeData;
     #[inline]
@@ -958,20 +891,17 @@ impl std::ops::Index<EdgeIndex> for GraphBackend {
     }
 }
 
-// -- Clone --
-
 impl Clone for GraphBackend {
     fn clone(&self) -> Self {
         #[cfg(test)]
         BACKEND_CLONE_COUNT.set(BACKEND_CLONE_COUNT.get() + 1);
         match self {
             // **The fork site.** Instead of deep-copying every node and edge,
-            // hand the writer an overlay over the same base. The reader's
-            // `Arc<MemoryGraph>` is left byte-for-byte untouched.
-            //
-            // `can_fork` is the slot-identity precondition (free lists provably
-            // empty, so the fold-back reproduces the overlay's indices); a base
-            // that fails it keeps the deep copy — slower, never wrong.
+            // hand the writer an overlay over the same base; the reader's
+            // `Arc<MemoryGraph>` is left byte-for-byte untouched. `can_fork` is
+            // the slot-identity precondition (free lists provably empty, so the
+            // fold-back reproduces the overlay's indices); a base that fails it
+            // keeps the deep copy — slower, never wrong.
             //
             // ⚠ `deep_clone()` on the fallback, never `g.clone()`: `g` is an
             // `Arc` handle, so `.clone()` on it is a refcount bump — one
@@ -1006,9 +936,7 @@ impl Clone for GraphBackend {
     }
 }
 
-// -- Serialize / Deserialize --
 // Delegates to StableDiGraph so the binary format is identical to before.
-
 impl Serialize for GraphBackend {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
@@ -1022,9 +950,8 @@ impl Serialize for GraphBackend {
             GraphBackend::Disk(_) => Err(serde::ser::Error::custom(
                 "Disk backend does not support serialization",
             )),
-            // Validation wrapper is transparent — serialize as the
-            // wrapped backend. Recursively hits the Disk error arm
-            // if the wrapped backend is Disk.
+            // Capture wrapper is transparent — serialize as the wrapped
+            // backend, recursively hitting the Disk error arm if it is Disk.
             GraphBackend::Recording(rg) => rg.inner().serialize(serializer),
         }
     }
@@ -1036,8 +963,6 @@ impl<'de> Deserialize<'de> for GraphBackend {
         Ok(GraphBackend::Memory(Arc::new(MemoryGraph::from_graph(g))))
     }
 }
-
-// -- Debug --
 
 impl std::fmt::Debug for GraphBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1061,15 +986,8 @@ impl std::fmt::Debug for GraphBackend {
     }
 }
 
-// ============================================================================
-// GraphRead / GraphWrite dispatcher impls
-//
-// These are dumb per-variant dispatchers. The real impls live on each
-// backend in `src/graph/storage/impls.rs`. No inherent
-// `impl GraphBackend` method block hosts these bodies — every caller
-// either uses the trait (most of the codebase) or goes through the
-// per-backend impl directly.
-// ============================================================================
+// GraphRead / GraphWrite dispatcher impls — dumb per-variant forwarding. The
+// real impls live on each backend in `src/graph/storage/impls.rs`.
 
 use crate::datatypes::values::Value;
 use std::collections::HashMap;
@@ -1082,13 +1000,11 @@ impl GraphRead for GraphBackend {
     type EdgesConnectingIter<'a> = crate::graph::core::iterators::GraphEdgesConnecting<'a>;
     type NeighborsIter<'a> = crate::graph::core::iterators::GraphNeighbors<'a>;
 
-    /// Dispatch **once**, not twice.
-    ///
-    /// The trait default calls `self.node_weight(idx)` and
-    /// `self.column_store(..)`, each of which is a four-arm match on this enum
-    /// — so a scan paid two dispatches per node on top of the store probe.
-    /// Matching here and delegating to the concrete backend's `node_view` lets
-    /// the probe inline into the same call.
+    /// Dispatch **once**, not twice: the trait default calls
+    /// `self.node_weight(idx)` and `self.column_store(..)`, each a full match on
+    /// this five-variant enum, so a scan paid two dispatches per node. Matching
+    /// here and delegating to the concrete backend's `node_view` inlines the
+    /// store probe into the same call.
     #[inline]
     fn node_view(&self, idx: NodeIndex) -> Option<crate::graph::storage::NodeView<'_>> {
         match self {
@@ -1866,11 +1782,9 @@ impl GraphWrite for GraphBackend {
 
     #[inline]
     fn remove_node(&mut self, idx: NodeIndex) -> Option<NodeData> {
-        // An overlay cannot express an adjacency edit — `StableDiGraph` threads
-        // adjacency through per-node linked lists, so this rewrites *existing*
-        // nodes. Collapse to a plain backend first (free if the reader already
-        // dropped, a deep copy otherwise), which is why the `Forked` arm below
-        // is unreachable rather than implemented.
+        // Adjacency edits rewrite *existing* nodes' petgraph links, which an
+        // overlay cannot express — collapse first (see `flatten_fork`), hence
+        // the unreachable `Forked` arm below.
         self.flatten_fork();
         match self {
             Self::Memory(g) => GraphWrite::remove_node(unique_heap_backend(g), idx),
@@ -1883,11 +1797,9 @@ impl GraphWrite for GraphBackend {
 
     #[inline]
     fn add_edge(&mut self, a: NodeIndex, b: NodeIndex, data: EdgeData) -> EdgeIndex {
-        // An overlay cannot express an adjacency edit — `StableDiGraph` threads
-        // adjacency through per-node linked lists, so this rewrites *existing*
-        // nodes. Collapse to a plain backend first (free if the reader already
-        // dropped, a deep copy otherwise), which is why the `Forked` arm below
-        // is unreachable rather than implemented.
+        // Adjacency edits rewrite *existing* nodes' petgraph links, which an
+        // overlay cannot express — collapse first (see `flatten_fork`), hence
+        // the unreachable `Forked` arm below.
         self.flatten_fork();
         match self {
             Self::Memory(g) => GraphWrite::add_edge(unique_heap_backend(g), a, b, data),
@@ -1900,11 +1812,9 @@ impl GraphWrite for GraphBackend {
 
     #[inline]
     fn remove_edge(&mut self, idx: EdgeIndex) -> Option<EdgeData> {
-        // An overlay cannot express an adjacency edit — `StableDiGraph` threads
-        // adjacency through per-node linked lists, so this rewrites *existing*
-        // nodes. Collapse to a plain backend first (free if the reader already
-        // dropped, a deep copy otherwise), which is why the `Forked` arm below
-        // is unreachable rather than implemented.
+        // Adjacency edits rewrite *existing* nodes' petgraph links, which an
+        // overlay cannot express — collapse first (see `flatten_fork`), hence
+        // the unreachable `Forked` arm below.
         self.flatten_fork();
         match self {
             Self::Memory(g) => GraphWrite::remove_edge(unique_heap_backend(g), idx),

@@ -1,4 +1,3 @@
-// src/graph/batch.rs
 use crate::datatypes::Value;
 use crate::graph::schema::{
     DirGraph, EdgeData, InternedKey, NodeData, PropertyStorage, PROVISIONAL_KEY,
@@ -16,11 +15,10 @@ use std::time::Instant;
 /// attached once the append finishes.
 type DeferredColumnarRows = Vec<(NodeIndex, u32)>;
 
-/// Column stores held outright (refcount 1) for the duration of a mapped/disk
-/// append, keyed by node type — see `BatchProcessor::detach_columnar_stores`.
+/// Column stores held outright (refcount 1) for the duration of an append,
+/// keyed by node type — see `BatchProcessor::detach_columnar_stores`.
 type OwnedColumnStores = HashMap<String, ColumnStore>;
 
-// Constants for batch size optimization
 const SMALL_BATCH_THRESHOLD: usize = 100;
 const MEDIUM_BATCH_THRESHOLD: usize = 1000;
 const LARGE_BATCH_CHUNK_SIZE: usize = 1000;
@@ -39,19 +37,18 @@ pub struct BatchMetrics {
     pub batch_count: usize,
 }
 
-// Node Processing
 #[derive(Debug)]
 pub enum NodeAction {
     Update {
         node_idx: NodeIndex,
-        title: Option<Value>, // Changed to Option to indicate if title should be updated
+        title: Option<Value>, // None leaves the existing title untouched
         /// Pre-interned, exactly like `CreateInterned`: the ingest row builder
         /// already has the keys interned, and resolving them back to `String`
         /// here only to re-intern them in `apply_updates` cost a `String`
         /// allocation, a `SipHash` map insert and an interner probe per
         /// property per updated row.
         properties: Vec<(InternedKey, Value)>,
-        conflict_mode: ConflictHandling, // Added conflict mode
+        conflict_mode: ConflictHandling,
     },
     /// Create with pre-interned property keys (avoids re-interning per row)
     CreateInterned {
@@ -100,7 +97,7 @@ struct NodeCreationInterned {
 #[derive(Debug)]
 struct NodeUpdate {
     node_idx: NodeIndex,
-    title: Option<Value>, // Changed to Option
+    title: Option<Value>,
     properties: Vec<(InternedKey, Value)>,
     conflict_mode: ConflictHandling,
 }
@@ -125,7 +122,7 @@ pub struct BatchProcessor {
     capacity: usize,
     batch_type: BatchType,
     metrics: BatchMetrics,
-    accumulated_stats: BatchStats, // Track stats across intermediate flushes
+    accumulated_stats: BatchStats,
 }
 
 impl BatchProcessor {
@@ -171,16 +168,15 @@ impl BatchProcessor {
                     node_idx,
                     title,
                     properties,
-                    conflict_mode, // Add this field
+                    conflict_mode,
                 });
             }
         }
 
-        // For large batches, flush if we hit capacity
         if let BatchType::Large = self.batch_type {
             if self.creates_interned.len() >= self.capacity {
                 let stats = self.flush_chunk(graph)?;
-                self.accumulated_stats.combine(&stats); // Accumulate stats from intermediate flushes
+                self.accumulated_stats.combine(&stats);
             }
         }
 
@@ -211,16 +207,13 @@ impl BatchProcessor {
         // column push; a single `String` comparison replaces both.
         let mut current: Option<(String, ColumnStore)> = None;
 
-        // Process pre-interned creates (fast path — no string interning needed)
         for creation in self.creates_interned.drain(..) {
             let type_key = graph.interner.get_or_intern(&creation.node_type);
 
-            // Pass 1: push into the owned ColumnStore. The row is pushed
-            // straight from the interned pairs the caller handed us — the
-            // properties used to be folded into a `NodeData`'s `HashMap` first
-            // and drained back out into a `Vec` here, a map allocation and a
-            // round trip per node created, which cost nothing while only the
-            // mapped and disk paths took it and costs every ingest now.
+            // Pass 1: push into the owned ColumnStore, straight from the
+            // interned pairs the caller handed us — folding them into a
+            // `NodeData` `HashMap` first and draining it back out cost a map
+            // allocation and a round trip per node created.
             let row_id = {
                 if current
                     .as_ref()
@@ -269,16 +262,11 @@ impl BatchProcessor {
 
             deferred_columnar.push((node_idx, row_id));
 
-            // Statement-rollback capture. No Cypher path reaches this batch
-            // funnel today (the Cypher executor creates nodes only through
-            // `DirGraph::insert_node_routed`), so no undo journal is installed
-            // while this runs and the hook is dead weight — deliberately. It
-            // costs one `Option` check per node and means that if a future
-            // `CALL` procedure ever does route bulk ingest through here inside
-            // a mutating statement, its `type_indices` append is reversible
-            // instead of silently surviving a rollback. Capturing at the
-            // storage seam already covers the node itself; only this
-            // above-storage index edit needs its own hook.
+            // Statement-rollback capture for the `type_indices` append — the
+            // one above-storage index edit the storage seam does not already
+            // cover. Dead weight today, deliberately: no Cypher path reaches
+            // this funnel (see [`Self::detach_columnar_stores`]), so the cost
+            // is one `Option` check per node.
             let bucket_was_new = !graph.type_indices.contains_key(&creation.node_type);
             graph
                 .type_indices
@@ -311,7 +299,6 @@ impl BatchProcessor {
 
         self.apply_updates(graph, &mut stats);
 
-        // Update metrics
         self.metrics.processing_time += start.elapsed().as_secs_f64();
         self.metrics.batch_count += 1;
         self.metrics.memory_used = self.creates_interned.capacity() + self.updates.capacity();
@@ -319,48 +306,14 @@ impl BatchProcessor {
         Ok(stats)
     }
 
-    /// Pass 1 of the mapped/disk columnar append: detach every existing node
-    /// of an affected type from its shared `ColumnStore`, then take ownership
-    /// of that store.
+    /// Pass 1 of the columnar append: take each affected type's `ColumnStore`
+    /// out of the graph and own it outright for the duration of the append.
     ///
-    /// Detaching first is what keeps a bulk append linear. While nodes still
-    /// hold `Arc` refs into the store, the first `Arc::make_mut` in the append
-    /// loop clones the whole store — once per row, O(n²) overall. With every
-    /// ref dropped the refcount is 1, `try_unwrap` succeeds, and the append
-    /// mutates in place. [`Self::reattach_columnar_stores`] restores the refs.
-    ///
-    /// ## Why the detach borrow is silent
-    ///
-    /// The sweep touches *every existing node of the type*, once per chunk.
-    /// Through the recorded [`GraphWrite::node_weight_mut`] that is one
-    /// `RawOp::UpsertNode` per existing node per chunk — with
-    /// `LARGE_BATCH_CHUNK_SIZE`-sized chunks, `O(n²/chunk)` ops for an
-    /// `n`-row append, each resolving at flush to a full property-map clone.
-    /// A one-shot `add_nodes` therefore wrote a *quadratic* WAL payload and
-    /// could overflow the per-frame `u32` byte ceiling.
-    ///
-    /// Silencing it is sound because the detach/reattach pair is a logical
-    /// no-op for an already-existing node: it swaps the node's
-    /// `Arc<ColumnStore>` handle while preserving its `row_id`, and
-    /// `ColumnStore::row_properties` skips null columns, so even a
-    /// schema-growing chunk leaves `id`/`title`/`properties_cloned`
-    /// byte-identical. The rows this chunk genuinely creates are recorded by
-    /// [`GraphWrite::add_node`], and `resolve_ops` reads *final* state at
-    /// flush time — so those ops still carry the columnar values that
-    /// `reattach_columnar_stores` installs after `add_node` returns.
-    ///
-    /// The undo journal is skipped here too, and since 2026-07-30 that is a
-    /// deliberate choice rather than a vacuous one. Both columnar sweeps run
-    /// only when `is_mapped() || is_disk()`; `Disk` still journals nothing, but
-    /// `Mapped` now does, so `node_weight_mut_silent` must bypass undo capture
-    /// on `MappedGraph` exactly as it does on `MemoryGraph` — otherwise the
-    /// per-node pre-image this sweep would clone reproduces, inside the
-    /// journal, the very `O(n²/chunk)` amplification the paragraph above
-    /// removed from the WAL.
-    ///
-    /// No undo obligation is dropped by that bypass: the pair is a logical
-    /// no-op for an existing node (same argument as above), and the *created*
-    /// rows are captured structurally by [`GraphWrite::add_node`].
+    /// Taking it out is what keeps a bulk append linear. While the graph's map
+    /// still holds the `Arc`, the first `Arc::make_mut` in the append loop
+    /// clones the whole store — once per row, O(n²) overall. With that ref
+    /// removed the refcount is 1, `try_unwrap` succeeds, and the append mutates
+    /// in place. [`Self::reattach_columnar_stores`] installs the stores again.
     ///
     /// The master store's *contents* are not covered by cell entries — this
     /// funnel emits none, because it swaps stores wholesale rather than writing
@@ -374,23 +327,17 @@ impl BatchProcessor {
     /// capture is defensive rather than load-bearing — but it is what makes a
     /// future `CALL` procedure that does route bulk ingest through here
     /// reversible instead of silently surviving a rollback.
-    ///
-    /// Returns `(rows awaiting reattachment, owned stores keyed by node type)`.
     fn detach_columnar_stores(
         creates: &[NodeCreationInterned],
         graph: &mut DirGraph,
     ) -> OwnedColumnStores {
-        // Owned mutable column stores, extracted from Arc to avoid clone-on-write
         let mut owned_stores: OwnedColumnStores = HashMap::new();
         let affected_types: HashSet<String> = creates.iter().map(|c| c.node_type.clone()).collect();
         for node_type in &affected_types {
             let store_was_new = graph.column_store(node_type).is_none();
-            // No detach pass. The old code stripped every existing
-            // node's `PropertyStorage` purely so `Arc::try_unwrap` below could
-            // succeed — nodes held strong handles and would otherwise force a
-            // whole-store clone. Nodes now hold a row id and no handle, so the
-            // backend map is the sole owner and `try_unwrap` succeeds outright.
-            // Existing row ids stay valid across `materialize_for_append`.
+            // Nodes hold a row id and no store handle, so the backend map is
+            // the sole owner and `try_unwrap` succeeds outright. Existing row
+            // ids stay valid across `materialize_for_append`.
             if let Some(arc_store) = graph.take_column_store(node_type) {
                 let mut store = Arc::try_unwrap(arc_store).unwrap_or_else(|a| (*a).clone());
                 let meta = graph
@@ -440,17 +387,10 @@ impl BatchProcessor {
         }
     }
 
-    /// Pass 2 of the mapped/disk columnar append: publish the owned stores
-    /// back into the graph and point every touched node at its row — the
-    /// nodes detached in pass 1 plus the rows just created.
+    /// Pass 2 of the columnar append: publish the owned stores back into the
+    /// graph and point every row this chunk created at its store row.
     ///
-    /// No-op when pass 1 found nothing to detach and no columnar row was
-    /// appended, which is every in-memory flush.
-    ///
-    /// The handle assignment goes through
-    /// [`GraphWrite::node_weight_mut_silent`] for the same reason pass 1
-    /// does — see [`Self::detach_columnar_stores`] for the full argument.
-    /// Newly created rows are already covered by the `RawOp::UpsertNode` that
+    /// Those rows are already covered by the `RawOp::UpsertNode` that
     /// `add_node` pushed, which resolves against post-reattachment state.
     fn reattach_columnar_stores(
         graph: &mut DirGraph,
@@ -479,20 +419,9 @@ impl BatchProcessor {
     /// stats counter: it resolves each target's storage representation and
     /// dispatches to the matching writer.
     fn apply_updates(&mut self, graph: &mut DirGraph, stats: &mut BatchStats) {
-        // Process updates in current chunk.
-        //
-        // Disk vs memory/mapped split (Phase 5 xfail fix):
-        // - Memory / mapped: `node_weight_mut` returns a live `&mut NodeData`.
-        //   `node.properties.insert` does `Arc::make_mut(store)` which clones
-        //   the store onto the node and mutates the clone. Reads go through
-        //   the node's own properties Arc → see updates immediately.
-        // - Disk: `node_weight_mut` materialises NodeData into an arena that
-        //   `clear_arenas` drops on the next `&mut self` call. Mutations via
-        //   the arena never reach `dg.column_stores`, which is where
-        //   `DiskGraph::get_node_property` reads from. To fix, disk updates
-        //   mutate the backend's store directly via `Arc::make_mut` and
-        //   then re-sync to `dg.column_stores` at the end of the loop.
-        //   O(types) clones per chunk instead of the broken O(rows) pattern.
+        // Disk writes reach the backend's `ColumnStore` directly, memory and
+        // mapped go through the node — O(types) `Arc::make_mut` clones per
+        // chunk rather than O(rows). Why the split: [`Self::apply_row_update`].
         let is_disk = GraphRead::is_disk(&graph.graph);
         let mut disk_updates_applied = false;
         // Promotion: a real node-row upsert clears the `_provisional`
@@ -507,7 +436,6 @@ impl BatchProcessor {
             let interned_props = update.properties;
 
             if is_disk {
-                // Resolve (type_name, row_id) from the disk slot.
                 let (type_name, row_id) = match &graph.graph {
                     crate::graph::schema::GraphBackend::Disk(ref dg) => {
                         let slot = dg.node_slot(update.node_idx.index());
@@ -548,8 +476,7 @@ impl BatchProcessor {
             }
         }
 
-        // `disk_updates_applied` no longer needs a sync — `column_store_mut`
-        // above mutated the backend's own store.
+        // No re-sync: `column_store_mut` above mutated the backend's own store.
         let _ = disk_updates_applied;
     }
 
@@ -616,10 +543,8 @@ impl BatchProcessor {
         }
     }
 
-    /// Write one pending update into a live `NodeData` — the memory/mapped
-    /// representation, where `PropertyStorage` mutation on the node is
-    /// immediately visible to reads. Twin of [`Self::apply_row_update`].
-    /// Apply one pending update to a node, through the backend.
+    /// Write one pending update through the backend — the memory/mapped twin
+    /// of [`Self::apply_row_update`].
     ///
     /// Routed through `GraphWrite` rather than `&mut NodeData` because a
     /// columnar node's properties live in the store the backend owns; there is
@@ -679,17 +604,14 @@ impl BatchProcessor {
     }
 
     pub fn execute(mut self, graph: &mut DirGraph) -> Result<(BatchStats, BatchMetrics), String> {
-        // Start with accumulated stats from intermediate flushes (for large batches)
         let mut total_stats = self.accumulated_stats;
 
         match self.batch_type {
             BatchType::Small | BatchType::Medium => {
-                // Process in a single batch
                 let stats = self.flush_chunk(graph)?;
                 total_stats.combine(&stats);
             }
             BatchType::Large => {
-                // Process any remaining items
                 if !self.creates_interned.is_empty() || !self.updates.is_empty() {
                     let stats = self.flush_chunk(graph)?;
                     total_stats.combine(&stats);
@@ -711,8 +633,6 @@ impl BatchProcessor {
     }
 }
 
-// Connection Processing
-//
 // Properties arrive already interned. `EdgeData` stores
 // `Vec<(InternedKey, Value)>`, so a `HashMap<String, Value>` here would only
 // have been re-hashed and re-interned per row on the way out — the callers
@@ -753,8 +673,8 @@ pub struct ConnectionBatchProcessor {
     batch_type: BatchType,
     metrics: BatchMetrics,
     conflict_mode: ConflictHandling,
-    accumulated_stats: ConnectionBatchStats, // Track stats across intermediate flushes
-    skip_existence_check: bool,              // Skip find_edge() on initial load
+    accumulated_stats: ConnectionBatchStats,
+    skip_existence_check: bool,
 }
 
 impl ConnectionBatchProcessor {
@@ -778,7 +698,6 @@ impl ConnectionBatchProcessor {
         }
     }
 
-    // Add setter for conflict mode
     pub fn set_conflict_mode(&mut self, mode: ConflictHandling) {
         self.conflict_mode = mode;
     }
@@ -800,9 +719,7 @@ impl ConnectionBatchProcessor {
         // (single chokepoint for every `add_connections` route; registered into
         // `schema_properties` below so the columnar edge store gets a slot).
         graph.inject_edge_provenance_interned(connection_type, &mut properties);
-        // Skip existence check on initial load (no existing edges of this type)
         if !self.skip_existence_check {
-            // Check if an edge of the same type already exists between these nodes
             let conn_type_key = graph.interner.get_or_intern(connection_type);
             let existing_edge = graph
                 .graph
@@ -810,16 +727,14 @@ impl ConnectionBatchProcessor {
                 .find(|e| e.weight().connection_type == conn_type_key)
                 .map(|e| e.id());
 
-            // If edge exists and conflict mode is Skip, don't add it
             if existing_edge.is_some() && self.conflict_mode == ConflictHandling::Skip {
                 return Ok(());
             }
         }
 
-        // Track property keys for schema. Only keys that actually carry a value
-        // are registered — a caller that skipped its null cells (every one of
-        // them does) must not see an all-null column materialize in the
-        // connection type's property list.
+        // Only keys that actually carry a value are registered — a caller that
+        // skipped its null cells (every one of them does) must not see an
+        // all-null column materialize in the connection type's property list.
         for (key, value) in &properties {
             self.schema_properties.insert(*key);
             let type_name = value.type_name();
@@ -834,11 +749,10 @@ impl ConnectionBatchProcessor {
             properties,
         });
 
-        // For large batches, flush if we hit capacity
         if let BatchType::Large = self.batch_type {
             if self.connections.len() >= self.capacity {
                 let stats = self.flush_chunk(graph, connection_type)?;
-                self.accumulated_stats.combine(&stats); // Accumulate stats from intermediate flushes
+                self.accumulated_stats.combine(&stats);
             }
         }
 
@@ -853,7 +767,6 @@ impl ConnectionBatchProcessor {
         let start = Instant::now();
         let mut stats = ConnectionBatchStats::default();
 
-        // Pre-intern the connection type for edge type comparison
         let conn_type_key = graph.interner.get_or_intern(connection_type);
 
         // A1 fix: build a per-flush (source, target) -> edge_id map once,
@@ -862,13 +775,9 @@ impl ConnectionBatchProcessor {
         // for hub-source fan-out into an *existing* connection type, the
         // old code was O(N * max_degree); this is O(sum_of_unique_source_degrees).
         //
-        // The map is mutated as we go: newly-created edges are inserted,
-        // Replace-mode edges have their entry updated to the new id, and
-        // Update/Preserve/Sum modes leave the id untouched. This
-        // preserves the within-chunk dedup semantics of the original
-        // `edges_connecting`-per-iteration code: two chunk entries with
-        // the same (src, tgt) consolidate onto a single edge instead of
-        // creating duplicates.
+        // The map is mutated as we go, preserving the within-chunk dedup
+        // semantics of the original `edges_connecting`-per-iteration code: two
+        // chunk entries with the same (src, tgt) consolidate onto one edge.
         //
         // `skip_existence_check` (initial-load fast path) skips both the
         // build and the per-edge lookup entirely — there are no existing
@@ -887,10 +796,7 @@ impl ConnectionBatchProcessor {
             }
         }
 
-        // Create or update edges in current chunk
         for conn in self.connections.drain(..) {
-            // On initial load, skip existence check for performance (no existing edges).
-            // Otherwise consult the per-flush lookup map built above.
             let existing_edge = if self.skip_existence_check {
                 None
             } else {
@@ -906,7 +812,6 @@ impl ConnectionBatchProcessor {
                         continue;
                     }
                     ConflictHandling::Replace => {
-                        // Remove the existing edge and create a new one
                         GraphWrite::remove_edge(&mut graph.graph, edge_idx);
                         let edge_data = EdgeData::new_interned(conn_type_key, conn.properties);
                         let new_id = GraphWrite::add_edge(
@@ -922,14 +827,12 @@ impl ConnectionBatchProcessor {
                         stats.connections_created += 1;
                     }
                     ConflictHandling::Update => {
-                        // Update existing edge properties
                         let interned_props = conn.properties;
                         if let Some(EdgeData {
                             properties: edge_props,
                             ..
                         }) = GraphWrite::edge_weight_mut(&mut graph.graph, edge_idx)
                         {
-                            // Merge properties, preferring new values
                             for (k, v) in interned_props {
                                 if let Some((_, existing)) =
                                     edge_props.iter_mut().find(|(ek, _)| *ek == k)
@@ -943,14 +846,12 @@ impl ConnectionBatchProcessor {
                         }
                     }
                     ConflictHandling::Preserve => {
-                        // Update but preserve existing values
                         let interned_props = conn.properties;
                         if let Some(EdgeData {
                             properties: edge_props,
                             ..
                         }) = GraphWrite::edge_weight_mut(&mut graph.graph, edge_idx)
                         {
-                            // Merge properties, preserving existing values
                             for (k, v) in interned_props {
                                 if !edge_props.iter().any(|(ek, _)| *ek == k) {
                                     edge_props.push((k, v));
@@ -960,7 +861,6 @@ impl ConnectionBatchProcessor {
                         }
                     }
                     ConflictHandling::Sum => {
-                        // Sum numeric properties, overwrite non-numeric
                         let interned_props = conn.properties;
                         if let Some(EdgeData {
                             properties: edge_props,
@@ -981,7 +881,6 @@ impl ConnectionBatchProcessor {
                     }
                 }
             } else {
-                // Create new edge
                 let edge_data = EdgeData::new_interned(conn_type_key, conn.properties);
                 let new_id = GraphWrite::add_edge(
                     &mut graph.graph,
@@ -1000,10 +899,8 @@ impl ConnectionBatchProcessor {
             }
         }
 
-        // Invalidate edge type count cache after edge mutations
         graph.invalidate_edge_type_counts_cache();
 
-        // Update metrics
         self.metrics.processing_time += start.elapsed().as_secs_f64();
         self.metrics.batch_count += 1;
         self.metrics.memory_used = self.connections.capacity();
@@ -1017,20 +914,16 @@ impl ConnectionBatchProcessor {
         graph: &mut DirGraph,
         connection_type: String,
     ) -> Result<(ConnectionBatchStats, BatchMetrics), String> {
-        // Register connection type for O(1) lookups
         graph.register_connection_type(connection_type.clone());
 
-        // Start with accumulated stats from intermediate flushes (for large batches)
         let mut total_stats = self.accumulated_stats;
 
         match self.batch_type {
             BatchType::Small | BatchType::Medium => {
-                // Process in a single batch
                 let stats = self.flush_chunk(graph, &connection_type)?;
                 total_stats.combine(&stats);
             }
             BatchType::Large => {
-                // Process any remaining items
                 if !self.connections.is_empty() {
                     let stats = self.flush_chunk(graph, &connection_type)?;
                     total_stats.combine(&stats);
@@ -1130,10 +1023,10 @@ mod tests {
 ///
 /// Regression guard for the quadratic-amplification bug: the columnar
 /// detach/reattach sweeps in [`BatchProcessor::detach_columnar_stores`] and
-/// [`BatchProcessor::reattach_columnar_stores`] touch every existing node of
-/// the type, once per `LARGE_BATCH_CHUNK_SIZE` chunk. Through the *recorded*
-/// `node_weight_mut` that was `O(n²/chunk)` `RawOp::UpsertNode`s for an
-/// `n`-row append, each resolving to a full property-map clone in the frame.
+/// [`BatchProcessor::reattach_columnar_stores`] used to touch every existing
+/// node of the type, once per `LARGE_BATCH_CHUNK_SIZE` chunk. Through the
+/// *recorded* `node_weight_mut` that was `O(n²/chunk)` `RawOp::UpsertNode`s
+/// for an `n`-row append, each resolving to a full property-map clone.
 ///
 /// This is deliberately a **byte-count** assertion, not a timing one: it needs
 /// no idle machine, has no `min`-vs-`mean` ambiguity, and fails deterministically

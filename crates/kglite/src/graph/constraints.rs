@@ -38,25 +38,19 @@ pub fn normalize_properties(properties: &[String]) -> Vec<String> {
 /// Which kind of graph entity a constraint is declared on.
 ///
 /// Persisted as part of [`NamedConstraint`], so the variant names are part of
-/// the `.kgl` format. A file written before this field existed carries no
-/// `entity` key at all and loads as [`EntityKind::Node`] through the field's
-/// `#[serde(default)]` — which is exactly what every constraint those files can
-/// hold is.
+/// the `.kgl` format; see [`NamedConstraint::entity`] for how a file written
+/// before the field existed loads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum EntityKind {
-    /// A constraint on the nodes of a label.
     #[default]
     Node,
-    /// A constraint on the relationships of a type.
     Relationship,
 }
 
 impl EntityKind {
-    /// Whether this is the default, node side. Also the serde skip predicate
-    /// for [`NamedConstraint::entity`]: a node constraint writes exactly the
-    /// bytes it wrote before the field existed, which is the same posture
-    /// every other additive `.kgl` metadata field takes (see
-    /// [`crate::graph::io::file`]).
+    /// Also the serde skip predicate for [`NamedConstraint::entity`], so a node
+    /// constraint keeps writing the bytes it wrote before the field existed
+    /// (see [`crate::graph::io::file`]).
     pub fn is_node(&self) -> bool {
         matches!(self, EntityKind::Node)
     }
@@ -204,11 +198,10 @@ pub enum ConstraintFailure {
     },
     /// Declaring a NOT NULL / NODE KEY constraint failed because existing
     /// entities of the type have no value for the property. `nodes` counts
-    /// relationships when the violation is a relationship-side one. The uniqueness counterpart of
-    /// this is [`ConstraintFailure::Preexisting`]; presence needs its own
-    /// variant because "N nodes lack the property" is a different fact from
-    /// "N tuples collide", and reporting one as the other sends the reader
-    /// looking for duplicates that do not exist.
+    /// relationships when the violation is a relationship-side one. Distinct
+    /// from [`ConstraintFailure::Preexisting`] because "N nodes lack the
+    /// property" is a different fact from "N tuples collide", and reporting one
+    /// as the other sends the reader looking for duplicates that do not exist.
     PreexistingMissing { nodes: usize },
     /// The write would store a value whose type is not the one declared for the
     /// property. `expected` and `actual` are vocabulary names
@@ -224,12 +217,10 @@ pub enum ConstraintFailure {
         actual: String,
     },
     /// Declaring a property-type constraint failed because existing entities
-    /// hold a value of another type. Pairs with [`ConstraintFailure::TypeMismatch`]
-    /// exactly as [`ConstraintFailure::PreexistingMissing`] pairs with
-    /// [`ConstraintFailure::Missing`]: the write-time and declaration-time
-    /// facts are different facts, and reporting one as the other tells the
-    /// reader to fix the wrong thing. `actual` is one offending type, so the
-    /// message is actionable without enumerating every row.
+    /// hold a value of another type — the declaration-time counterpart of
+    /// [`ConstraintFailure::TypeMismatch`], kept separate for the same reason
+    /// [`ConstraintFailure::PreexistingMissing`] is. `actual` is one offending
+    /// type, so the message is actionable without enumerating every row.
     PreexistingTypeMismatch {
         property: String,
         expected: String,
@@ -477,8 +468,8 @@ impl ConstraintViolation {
         }
     }
 
-    /// `Person.email` / `Person.(first, last)` — the canonical descriptor,
-    /// matching the naming `SHOW INDEXES` already uses for composite indexes.
+    /// The canonical descriptor, matching the naming `SHOW INDEXES` already
+    /// uses for composite indexes.
     pub fn descriptor(&self) -> String {
         descriptor(&self.node_type, &self.properties)
     }
@@ -522,9 +513,6 @@ impl fmt::Display for ConstraintViolation {
         let entity = self.entity;
         let kind = self.kind.keyword_for(entity);
         let descriptor = self.descriptor();
-        // `a node with label 'Person'` / `a relationship of type 'KNOWS'` —
-        // the whole message's subject, since a relationship has no label to
-        // put in the node phrasing.
         let subject = entity.subject(&self.node_type);
         // Advice about the population, not one entity, always reads plural.
         let population = entity.noun(2);
@@ -673,8 +661,6 @@ mod tests {
         assert!(message.contains("Deduplicate"), "{message}");
     }
 
-    /// The write-time message has to answer three questions at once: which
-    /// property, what was required, what arrived.
     #[test]
     fn type_mismatch_message_names_property_expected_and_actual() {
         let violation = ConstraintViolation::type_mismatch("Person", "age", "INTEGER", "STRING");
@@ -768,7 +754,6 @@ mod tests {
             ConstraintKind::NodeKey.keyword_for(EntityKind::Relationship),
             "RELATIONSHIP KEY"
         );
-        // Every other kind is spelled the same on both sides.
         for kind in [
             ConstraintKind::Unique,
             ConstraintKind::NotNull,
@@ -921,7 +906,6 @@ mod tests {
         );
     }
 
-    /// Every constructor builds a node violation; only `on_entity` moves it.
     #[test]
     fn a_violation_is_a_node_one_until_told_otherwise() {
         let violation = ConstraintViolation::missing(ConstraintKind::NotNull, "Person", "email");

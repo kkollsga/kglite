@@ -78,7 +78,7 @@ is omitted and a warning goes to stderr: a blurb that is silently a different
 release's is worse than an absent one, and three shipped notes proved it.
 
 When a downstream is unaffected the run prints ``SKIP <repo>: <reason>`` and
-writes nothing. The decision *not* to notify is as much a feature as the note.
+writes nothing.
 
 USAGE
 -----
@@ -172,7 +172,6 @@ WATCHED_THIRD_PARTY: dict[str, str | None] = {
     "pyo3": None,
 }
 
-#: Files we never walk into.
 SKIP_DIRS = {
     ".git",
     "target",
@@ -343,11 +342,11 @@ def fmt_version(v: tuple[int, int, int]) -> str:
 # --------------------------------------------------------------------------
 
 
-#: Sites whose disagreement is a real build break. Prose (`docs`) is excluded
-#: deliberately: a migration guide or a README naming an old version is stale,
-#: not contradictory, and conflating the two makes the gate cry wolf.
-#: Sites that *execute* an install or are consumed by a resolver. Only these can
-#: contradict each other.
+#: Sites that *execute* an install or are consumed by a resolver, so their
+#: disagreement is a real build break. Only these can contradict each other.
+#: Prose (`docs`) is excluded deliberately: a migration guide or a README naming
+#: an old version is stale, not contradictory, and conflating the two makes the
+#: gate cry wolf.
 #:
 #: `script` and `source-string` are deliberately excluded. A version literal in
 #: a Python script or a Rust string is usually advisory — a docstring, a help
@@ -809,7 +808,6 @@ def _prose_context(lines: list[str], index: int) -> tuple[str, int]:
 
 
 def _sentence_at(text: str, index: int) -> str:
-    """The sentence of ``text`` containing offset ``index``."""
     starts = [m.end() for m in re.finditer(r"[.!?;:]\s+", text[:index])]
     start = starts[-1] if starts else 0
     m = re.search(r"[.!?;:]\s+", text[index:])
@@ -1959,12 +1957,10 @@ def run_notify(
 #: The key is load-bearing, and it replaces a flat ``DEFAULT_BREAKING_SYMBOLS``
 #: list that was the 0.15.9 set and stayed the 0.15.9 set: every release after
 #: it asserted, in a downstream's inbox, that this release touched `NodeView`.
-#: Three notes shipped that claim about releases containing no such change. A
-#: symbol set that is not tied to the version it describes cannot go stale
-#: *visibly* — it just keeps being right about one release and wrong about all
-#: the others. Keyed, a release with no entry here simply does not fire the
-#: breaking-surface criterion, which is the correct behaviour for the common
-#: case (most releases break nothing).
+#: Three notes shipped that claim about releases containing no such change.
+#: Keyed, a release with no entry here simply does not fire the breaking-surface
+#: criterion, which is the correct behaviour for the common case (most releases
+#: break nothing).
 #:
 #: Add an entry when a release removes or changes a public symbol; never edit
 #: an existing release's set to mean "the current release".

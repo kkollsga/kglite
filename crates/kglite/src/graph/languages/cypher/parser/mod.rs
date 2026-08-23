@@ -9,9 +9,6 @@
 //!   CREATE / SET / DELETE / REMOVE / MERGE / CALL
 //! - [`schema_ddl`] — CREATE/DROP/SHOW INDEX and CONSTRAINT (Neo4j 5 DDL)
 //! - [`load_csv`] — LOAD CSV (leading-position external row source)
-//!
-//! Each submodule adds another `impl CypherParser` block; PyO3-style,
-//! Rust merges them at codegen.
 
 use super::ast::*;
 use super::tokenizer::{
@@ -30,11 +27,8 @@ pub mod match_pattern;
 pub mod predicate;
 pub mod schema_ddl;
 
-/// Tokenizes and parses Cypher query strings into a `CypherQuery` AST.
-///
-/// Handles the full Cypher clause set: MATCH, WHERE, RETURN, WITH,
-/// ORDER BY, LIMIT, SKIP, CREATE, SET, DELETE, MERGE, REMOVE, UNWIND, UNION.
-/// Uses a token-based recursive descent approach.
+/// Tokenizes and parses Cypher query strings into a `CypherQuery` AST by
+/// recursive descent over the token stream.
 pub struct CypherParser {
     tokens: Vec<CypherToken>,
     pos: usize,
@@ -99,10 +93,7 @@ pub struct CypherParser {
 /// the tree it returns. Those levels are charged via [`CypherParser::deepen`]
 /// inside a [`CypherParser::chain`] scope; recursive nesting is charged by
 /// [`CypherParser::descend`]. Charging both is what makes the budget an
-/// actual bound on what the downstream walkers recurse through — the
-/// walkers themselves have neither a depth guard nor stack growth, and they
-/// run on server worker threads whose stacks are far smaller than the main
-/// thread's.
+/// actual bound on what the downstream walkers recurse through.
 pub(super) const MAX_EXPRESSION_DEPTH: usize = 512;
 
 /// Remaining-stack threshold below which [`CypherParser::descend`] allocates
@@ -130,8 +121,6 @@ impl CypherParser {
         }
     }
 
-    /// Verbatim source lexeme of the keyword token at `idx`, when the
-    /// parser was built with the tokenizer's lexeme table.
     pub(super) fn keyword_lexeme_at(&self, idx: usize) -> Option<&str> {
         self.keyword_lexemes.get(&idx).map(String::as_str)
     }
@@ -234,7 +223,6 @@ impl CypherParser {
         self.pos < self.tokens.len()
     }
 
-    /// Check if current position matches a keyword
     pub(super) fn check(&self, token: &CypherToken) -> bool {
         self.peek() == Some(token)
     }
@@ -259,7 +247,6 @@ impl CypherParser {
         }
     }
 
-    /// True when the next token is the soft keyword `word`.
     pub(super) fn peek_soft_word(&self, word: &str) -> bool {
         self.soft_word_at(0).is_some_and(|w| soft_word_eq(w, word))
     }
@@ -365,7 +352,6 @@ impl CypherParser {
         Ok((self.expect_name(context)?, None))
     }
 
-    /// Check if we're at a clause boundary (start of a new clause)
     pub(super) fn at_clause_boundary(&self) -> bool {
         match self.peek() {
             Some(CypherToken::Where)
@@ -389,14 +375,8 @@ impl CypherParser {
             | Some(CypherToken::Yield)
             | Some(CypherToken::Having) => true,
             Some(CypherToken::Match) => true,
-            Some(CypherToken::Optional) => {
-                // OPTIONAL MATCH
-                self.peek_at(1) == Some(&CypherToken::Match)
-            }
-            Some(CypherToken::Order) => {
-                // ORDER BY
-                self.peek_at(1) == Some(&CypherToken::By)
-            }
+            Some(CypherToken::Optional) => self.peek_at(1) == Some(&CypherToken::Match),
+            Some(CypherToken::Order) => self.peek_at(1) == Some(&CypherToken::By),
             None => true,
             // `LOAD CSV` is spelled with soft keywords, so it arrives as an
             // identifier and would otherwise be swallowed by the preceding
@@ -410,12 +390,7 @@ impl CypherParser {
         }
     }
 
-    // ========================================================================
-    // Top-Level Query Parser
-    // ========================================================================
-
     pub fn parse_query(&mut self) -> Result<CypherQuery, String> {
-        // Check for EXPLAIN or PROFILE prefix
         let mut explain = false;
         let mut profile = false;
         if self.check(&CypherToken::Explain) {
@@ -473,20 +448,6 @@ impl CypherParser {
         })
     }
 
-    /// Parse a sequence of clauses into the body of a query.
-    ///
-    /// When `end_at_rbrace` is `false` the loop runs until end-of-input
-    /// (the top-level query). When `true` it stops at — and leaves
-    /// unconsumed — the closing `}` of a `CALL { ... }` subquery body; the
-    /// caller (`parse_call_subquery`) is responsible for consuming that
-    /// brace. Nested `{ ... }` (map literals, nested `CALL {}`) are handled
-    /// by the per-clause parsers, which consume their own braces in
-    /// balanced pairs — so a `RBrace` seen *at clause-boundary level* here
-    /// is unambiguously the subquery terminator.
-    ///
-    /// Returns the parsed clauses plus the trailing `OutputFormat` (only a
-    /// top-level `FORMAT CSV` sets it to `Csv`; subquery bodies reject
-    /// `FORMAT`).
     /// Parse a leading `LOAD CSV`, or report the positional rule.
     ///
     /// Recognised even when misplaced, so a user who put it after a `MATCH`
@@ -518,6 +479,20 @@ impl CypherParser {
         }
     }
 
+    /// Parse a sequence of clauses into the body of a query.
+    ///
+    /// When `end_at_rbrace` is `false` the loop runs until end-of-input
+    /// (the top-level query). When `true` it stops at — and leaves
+    /// unconsumed — the closing `}` of a `CALL { ... }` subquery body; the
+    /// caller (`parse_call_subquery`) is responsible for consuming that
+    /// brace. Nested `{ ... }` (map literals, nested `CALL {}`) are handled
+    /// by the per-clause parsers, which consume their own braces in
+    /// balanced pairs — so a `RBrace` seen *at clause-boundary level* here
+    /// is unambiguously the subquery terminator.
+    ///
+    /// Returns the parsed clauses plus the trailing `OutputFormat` (only a
+    /// top-level `FORMAT CSV` sets it to `Csv`; subquery bodies reject
+    /// `FORMAT`).
     pub(super) fn parse_clause_sequence(
         &mut self,
         end_at_rbrace: bool,
@@ -525,12 +500,10 @@ impl CypherParser {
         let mut clauses = Vec::new();
 
         while self.has_tokens() {
-            // Closing brace of a CALL { ... } body — stop, leave it for the caller.
             if end_at_rbrace && self.check(&CypherToken::RBrace) {
                 break;
             }
 
-            // Skip semicolons between statements
             if self.check(&CypherToken::Semicolon) {
                 self.advance();
                 continue;
@@ -541,7 +514,6 @@ impl CypherParser {
                     clauses.push(self.parse_match_clause(false)?);
                 }
                 Some(CypherToken::Optional) => {
-                    // Check for OPTIONAL MATCH
                     if self.peek_at(1) == Some(&CypherToken::Match) {
                         self.advance(); // consume OPTIONAL
                         clauses.push(self.parse_match_clause(true)?);
@@ -576,8 +548,8 @@ impl CypherParser {
                     if end_at_rbrace =>
                 {
                     // v1: UNION / INTERSECT / EXCEPT inside a CALL { }
-                    // body are deferred (§1.4 / §6 Q2 of the design doc).
-                    // Reject here with a precise message — otherwise the
+                    // body are deferred. Reject here with a precise message
+                    // — otherwise the
                     // set-op arm parser greedily consumes to EOF and dies
                     // on the closing `}` with a confusing token error.
                     return Err(
@@ -666,46 +638,29 @@ pub(super) fn describe_with_hint_opt(token: Option<&CypherToken>) -> String {
     }
 }
 
-/// Message for a `/* ... */` block comment. Block comments are not part of
-/// this dialect; `//` line comments are.
 const BLOCK_COMMENT_UNSUPPORTED: &str =
     "Block comments (/* ... */) are not supported; use a // line comment instead";
 
-/// Case-insensitive comparison of an identifier lexeme against a canonical
-/// soft keyword. Shared by the `schema_ddl` and `load_csv` clause parsers.
 pub(super) fn soft_word_eq(candidate: &str, canonical: &str) -> bool {
     candidate.eq_ignore_ascii_case(canonical)
 }
 
-// ============================================================================
-// Public API
-// ============================================================================
-
-/// Parse a Cypher query string into a CypherQuery AST.
-///
-/// On error, enriches the bare token-level message with a source
-/// position — `line N col M` plus an excerpt of the source with a
-/// caret pointing at the failing position. 0.9.0 §1 / Cluster 3
-/// baseline UX: users distinguish "you typo'd" from "feature not
-/// yet implemented" by reading the error, not by re-running with
-/// `print()`s.
-///
-/// Position is **byte-precise** — the tokenizer attaches a char
-/// offset to every token, the parser threads them through, and
-/// `format_parse_error` walks `input.chars()` to convert to
-/// (line, col).
 /// Parse Cypher source into a typed AST.
 ///
-/// Returns [`KgError`] with structured `line` and `col` fields (when
-/// the parser knows them) rather than an opaque `Result<_, String>`
-/// whose message only embeds the position. The position survives the
-/// PyO3 boundary and reaches Python consumers via
-/// `kglite.CypherSyntaxError.args[0]` (still in the message for human
-/// display) and as dedicated `.line` / `.col` attributes.
+/// Returns [`KgError`] with structured `line` and `col` fields (when the
+/// parser knows them) rather than an opaque `Result<_, String>` whose message
+/// only embeds the position. The position survives the PyO3 boundary and
+/// reaches Python consumers via `kglite.CypherSyntaxError.args[0]` (still in
+/// the message for human display) and as dedicated `.line` / `.col`
+/// attributes. The internal tokenizer/parser still produce
+/// `Result<_, String>` for ergonomic `?` chains — only the outer boundary is
+/// typed.
 ///
-/// The internal tokenizer/parser still produce `Result<_, String>`
-/// for ergonomic `?` chains inside the parsing code — only the
-/// outer boundary is typed.
+/// On error the bare token-level message is enriched with a **byte-precise**
+/// source position — `line N col M` plus an excerpt with a caret at the
+/// failing position — so a user can tell "you typo'd" from "not implemented"
+/// by reading the error. The tokenizer attaches a char offset to every token
+/// and the parser threads them through.
 // KgError deliberately carries structured context; boxing it would change the public result type.
 #[allow(clippy::result_large_err)]
 pub fn parse_cypher(input: &str) -> Result<CypherQuery, KgError> {
@@ -743,18 +698,11 @@ pub fn parse_cypher(input: &str) -> Result<CypherQuery, KgError> {
     match parser.parse_query() {
         Ok(q) => Ok(q),
         Err(e) => {
-            // Failing char offset = position of token at parser.pos,
-            // or end-of-input if the parser ran past the end.
             let char_offset = positions
                 .get(parser.pos)
                 .copied()
                 .unwrap_or_else(|| input.chars().count());
             let (line, col) = char_offset_to_line_col(input, char_offset);
-            // Keep the human-readable excerpt formatting in the
-            // message — caret marker, source line — so error output
-            // is still informative when only the message is shown.
-            // The (line, col) struct fields enable programmatic
-            // access for the agent surface.
             let message = format_parse_error_message(input, &e, line, col);
             Err(KgError::CypherSyntax {
                 message,
@@ -785,16 +733,12 @@ fn char_offset_to_line_col(input: &str, target_char: usize) -> (usize, usize) {
     (line, col)
 }
 
-/// Recognize a small set of "feature not yet implemented" sequences
-/// and rewrite the parser error into an intent-level message.
-/// Conservative: only reframes when we're confident the original
-/// query targeted an unimplemented feature, otherwise returns None.
+/// Rewrite a parser error into an intent-level "feature not yet implemented"
+/// message. Conservative: reframes only when the original query clearly
+/// targeted an unimplemented feature.
 ///
-/// Currently a stub — no stable not-yet-implemented features to
-/// detect (the named candidates — NULLS, datetime-accessor,
-/// variable-length paths — all parse without error today). New §X
-/// work plugs in detection here as features land or ship as
-/// `not-yet-implemented`.
+/// Currently a stub — there is nothing stable to detect; the named candidates
+/// (NULLS, datetime accessors, variable-length paths) all parse today.
 fn intent_level_rewrite(_input: &str, _err: &str) -> Option<String> {
     None
 }
@@ -806,8 +750,7 @@ fn intent_level_rewrite(_input: &str, _err: &str) -> Option<String> {
 fn format_parse_error_message(input: &str, err: &str, line: usize, col: usize) -> String {
     let intent = intent_level_rewrite(input, err);
 
-    // Build a single-line excerpt of the offending line + a caret
-    // marker. Avoids dumping the whole multi-line query.
+    // A single-line excerpt + caret marker, rather than the whole query.
     let lines: Vec<&str> = input.lines().collect();
     let excerpt = if line >= 1 && line <= lines.len() {
         let src_line = lines[line - 1];
@@ -821,10 +764,6 @@ fn format_parse_error_message(input: &str, err: &str, line: usize, col: usize) -
     let body = intent.as_deref().unwrap_or(err);
     format!("{}{}", body, excerpt)
 }
-
-// ============================================================================
-// Tests
-// ============================================================================
 
 #[cfg(test)]
 #[path = "parser_tests.rs"]

@@ -11,14 +11,12 @@
 //!
 //! # Cost per write
 //!
-//! `has_unique_constraints()` is one `HashMap::is_empty` — a graph that
-//! declares no constraint (the default, and every graph saved before this
-//! feature) pays exactly that on every write and allocates nothing. A type that
-//! *does* carry constraints pays, per write: a scan of the declaration keys
-//! (a handful, and the established pattern the other index kinds use), one
-//! property read per constrained property, and one hash probe per constraint.
-//! No full scan, and no per-write allocation beyond the claim vector, which is
-//! only built when the type actually has a constraint.
+//! A graph that declares no constraint (the default, and every graph saved
+//! before this feature) pays one `HashMap::is_empty` per write and allocates
+//! nothing. A type that *does* carry constraints pays a scan of the
+//! declaration keys, one property read per constrained property, and one hash
+//! probe per constraint — no full scan, and no allocation beyond the claim
+//! vector, which is only built when the type actually has a constraint.
 //!
 //! # NULL semantics
 //!
@@ -80,12 +78,10 @@ pub(crate) struct PropertyWritePlan {
 }
 
 impl DirGraph {
-    // ========================================================================
-    // Declaration
-    // ========================================================================
+    // ── Declaration ──
 
-    /// Whether *any* unique constraint is declared on this graph. The write
-    /// path's fast-out: one `is_empty` for the overwhelmingly common case.
+    /// Whether *any* unique constraint is declared on this graph — the write
+    /// path's fast-out.
     #[inline]
     pub(crate) fn has_unique_constraints(&self) -> bool {
         !self.unique_indices.is_empty()
@@ -340,9 +336,7 @@ impl DirGraph {
         Some(values)
     }
 
-    // ========================================================================
-    // Write-path enforcement
-    // ========================================================================
+    // ── Write-path enforcement ──
 
     /// The unique tuples a node of `node_type` would occupy, given a reader for
     /// its property values. `read` is called with the **user-facing** property
@@ -596,9 +590,7 @@ impl DirGraph {
         )
     }
 
-    // ========================================================================
-    // NOT NULL (required fields)
-    // ========================================================================
+    // ── NOT NULL (required fields) ──
 
     /// The properties `node_type` declares as required, via
     /// `define_schema({"nodes": {"T": {"required": [...]}}})`. Empty when the
@@ -611,8 +603,8 @@ impl DirGraph {
             .unwrap_or(&[])
     }
 
-    /// Whether `node_type` requires any property to be present. The write-path
-    /// fast-out: a few `Option` hops, no allocation.
+    /// Whether `node_type` requires any property to be present — the
+    /// write-path fast-out.
     ///
     /// True for a declared `primary_key` as well as for `required_fields`, since
     /// a primary key is unique **and** present (NODE KEY). A key on `id` does not
@@ -687,13 +679,12 @@ impl DirGraph {
     /// satisfies the constraint, and stays visible as one:
     /// `validate_schema()` reports it as a missing required field, and
     /// `purge_provisional_nodes()` (which the blueprint builder runs
-    /// automatically) deletes it. So the incomplete state is bounded and
-    /// reportable rather than silently blessed.
+    /// automatically) deletes it.
     ///
     /// Writing `_provisional = true` by hand therefore deliberately opts a node
-    /// out of NOT NULL until it is promoted. The blueprint builder already
-    /// refuses a spec that declares `_provisional` as a user property
-    /// (`blueprint::build`), which is where a user would most plausibly do it by
+    /// out of NOT NULL until it is promoted. The blueprint builder refuses a
+    /// spec that declares `_provisional` as a user property
+    /// (`blueprint::build`), which is where that would most plausibly happen by
     /// accident.
     pub(crate) fn check_required_fields<F>(&self, node_type: &str, read: F) -> ConstraintResult<()>
     where
@@ -734,9 +725,7 @@ impl DirGraph {
         }
     }
 
-    // ========================================================================
-    // NOT NULL declaration
-    // ========================================================================
+    // ── NOT NULL declaration ──
 
     /// Declare `property` NOT NULL on `node_type` — i.e. add it to the type's
     /// `required_fields`, the list [`Self::check_required_fields`] enforces on
@@ -901,26 +890,23 @@ impl DirGraph {
             .or_default()
     }
 
-    // ========================================================================
-    // PROPERTY TYPE
-    // ========================================================================
+    // ── Property type ──
     //
     // The declaration store (`ddl_property_type_constraints`) *is* the
     // constraint, the way `unique_indices` is for uniqueness: there is no
     // second copy inside the schema, so no schema install can withdraw one and
     // no `reapply_*` pass is needed to put it back.
     //
-    // Cost per write is the same shape the other kinds pay: one
-    // `BTreeMap::is_empty` for a graph that declares nothing, one further map
-    // probe for a type that declares nothing, and one predicate call per
-    // declared property otherwise. No allocation on any of those paths.
+    // Cost per write has the same shape as the other kinds: one
+    // `BTreeMap::is_empty`, one further map probe for a declaring type, one
+    // predicate call per declared property. No allocation on any path.
     //
     // Provisional stubs need no exemption here, unlike NOT NULL. A stub carries
     // only its id, and an absent property satisfies a type constraint, so
     // enforcement never blocks auto-vivification.
 
-    /// Whether the graph declares any property-type constraint at all. The
-    /// write-path fast-out: one `BTreeMap::is_empty`, no allocation.
+    /// Whether the graph declares any property-type constraint — the
+    /// write-path fast-out.
     #[inline]
     pub(crate) fn has_property_type_constraints(&self) -> bool {
         !self.ddl_property_type_constraints.is_empty()
@@ -934,7 +920,6 @@ impl DirGraph {
         self.ddl_property_type_constraints.contains_key(node_type)
     }
 
-    /// The type declared for `node_type.property`, if one is.
     pub(crate) fn property_type_for(
         &self,
         node_type: &str,
@@ -1135,9 +1120,7 @@ impl DirGraph {
         (indices.len(), violations, sample)
     }
 
-    // ========================================================================
-    // Named constraints
-    // ========================================================================
+    // ── Named constraints ──
 
     /// Record the name its author gave a constraint, so
     /// `DROP CONSTRAINT <name>` can find it. Replaces any previous registration
@@ -1146,7 +1129,6 @@ impl DirGraph {
         self.constraint_names.insert(name.to_string(), constraint);
     }
 
-    /// The declaration registered under `name`, if any.
     pub(crate) fn constraint_by_name(&self, name: &str) -> Option<&NamedConstraint> {
         self.constraint_names.get(name)
     }
@@ -1256,9 +1238,7 @@ impl DirGraph {
         }
     }
 
-    // ========================================================================
-    // Load-time rebuild
-    // ========================================================================
+    // ── Load-time rebuild ──
 
     /// Rebuild every persisted unique constraint from live data. Returns the
     /// violations found in the loaded data, if any.
@@ -1346,10 +1326,6 @@ impl DirGraph {
     }
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
-
 #[cfg(test)]
 mod not_null_declaration_tests {
     use super::*;
@@ -1392,14 +1368,12 @@ mod not_null_declaration_tests {
         assert!(graph.has_not_null_constraint("Person", "email"));
         assert!(graph.has_required_fields("Person"));
 
-        // A write that omits the property is now rejected.
         let violation = graph
             .check_required_fields("Person", |_| None)
             .expect_err("a write with no email must be rejected");
         assert_eq!(violation.kind, ConstraintKind::NotNull);
         assert!(violation.to_string().contains("'email'"));
 
-        // A write that supplies it passes.
         graph
             .check_required_fields("Person", |name| {
                 (name == "email").then(|| Value::String("c@b.c".to_string()))

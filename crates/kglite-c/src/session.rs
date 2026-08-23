@@ -396,8 +396,8 @@ unsafe fn execute_mut_impl(
                     KgliteStatusCode::Ok
                 }
                 Err(err) => {
-                    // tx drops without commit — no mutation reaches the
-                    // session's stored Arc.
+                    // The write guard drops without committing — no mutation
+                    // reaches the session's stored Arc.
                     unsafe {
                         *out_result = std::ptr::null_mut();
                     }
@@ -634,8 +634,6 @@ pub unsafe extern "C" fn kglite_create_edges_batch(
                     KgliteStatusCode::Ok
                 }
                 Err(msg) => {
-                    // transact dropped the fork → none of the batch's
-                    // edges land.
                     unsafe {
                         *out_report_json = std::ptr::null();
                     }
@@ -801,12 +799,10 @@ fn optional_object_map(
     }
 }
 
-/// One parsed batch entry: a query string and its parameter map.
 type BatchQuery = (String, HashMap<String, Value>);
 
-/// Parse a batch `queries_json` argument into `(query, params)` pairs.
-/// Expects a JSON array of objects, each `{"query": "...", "params":
-/// {...}}` (the `params` key is optional). Any other shape →
+/// Parse a batch `queries_json` argument into `(query, params)` pairs — the
+/// shape published on [`kglite_session_execute_read_batch`]. Any other shape →
 /// `InvalidArgument`. Assumes `queries_json` is non-null (callers check).
 fn parse_batch_queries(queries_json: *const c_char) -> Result<Vec<BatchQuery>, KgliteStatusCode> {
     let s = match unsafe { CStr::from_ptr(queries_json) }.to_str() {
@@ -837,10 +833,9 @@ fn parse_batch_queries(queries_json: *const c_char) -> Result<Vec<BatchQuery>, K
     Ok(out)
 }
 
-/// Parse an `edges_json` argument into `EdgeSpec`s. Expects a JSON array
-/// of objects with `src_id`, `src_type`, `dst_id`, `dst_type`, `type`
-/// (the edge type) and optional `props`. Any other shape →
-/// `InvalidArgument`. Assumes `edges_json` is non-null (callers check).
+/// Parse an `edges_json` argument into `EdgeSpec`s — the shape published on
+/// [`kglite_create_edges_batch`]. Any other shape → `InvalidArgument`.
+/// Assumes `edges_json` is non-null (callers check).
 fn parse_edge_specs(edges_json: *const c_char) -> Result<Vec<EdgeSpec>, KgliteStatusCode> {
     let s = match unsafe { CStr::from_ptr(edges_json) }.to_str() {
         Ok(s) => s,
@@ -949,8 +944,7 @@ mod tests {
         SessionState::into_handle(Session::new(graph))
     }
 
-    /// Run one mutating Cypher statement through the C ABI, asserting
-    /// success.
+    /// Run one mutating Cypher statement through the C ABI, asserting success.
     fn exec_mut(session: *mut KgliteSession, query: &str) {
         let q = CString::new(query).unwrap();
         let mut result: *mut KgliteCypherResult = std::ptr::null_mut();
@@ -976,8 +970,6 @@ mod tests {
         }
     }
 
-    /// Call kglite_create_edges_batch and return (status, report-json,
-    /// error-msg).
     fn edges_batch(
         session: *mut KgliteSession,
         edges_json: &str,

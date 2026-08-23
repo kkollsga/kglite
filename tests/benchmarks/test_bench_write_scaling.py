@@ -46,21 +46,16 @@ SIZES = [1_000, 100_000, 1_000_000]
 LINEAR_MARKER_SIZES = [1_000, 100_000]
 
 # The two benchmarks below whose per-call cost is O(V) drive `benchmark.pedantic`
-# with an explicit round count rather than plain `benchmark(fn)`.
-#
-# This is not tidiness — plain `benchmark(fn)` hangs on these shapes. Auto-
-# calibration times the *first* call to size the round count, and for these
-# statements the first call is ~1000x cheaper than every call after it: the
-# fixture leaves the type's id index warm, the first call invalidates it, and
-# every later call pays a full rebuild. Calibration therefore concludes the
-# function is microseconds-fast and schedules thousands of rounds of a
-# multi-millisecond call. Observed while writing this file: 12,686 rounds of a
-# 24 ms call = 5 minutes, from one test. `--benchmark-min-rounds` cannot save
-# you, it only raises the floor. And a `-m benchmark` run is exempt from the
-# 120 s pytest hang ceiling, so nothing interrupts it.
-#
-# `pedantic` skips calibration entirely and honours these numbers, so runtime is
-# bounded no matter what the caller passes on the command line.
+# with an explicit round count, because plain `benchmark(fn)` hangs on these
+# shapes. Auto-calibration times the *first* call to size the round count, and
+# for these statements the first call is ~1000x cheaper than every call after
+# it: the fixture leaves the type's id index warm, the first call invalidates
+# it, and every later call pays a full rebuild. Calibration therefore schedules
+# thousands of rounds of a multi-millisecond call. Observed while writing this
+# file: 12,686 rounds of a 24 ms call = 5 minutes, from one test.
+# `--benchmark-min-rounds` only raises the floor, and a `-m benchmark` run is
+# exempt from the 120 s pytest hang ceiling, so nothing interrupts it.
+# `pedantic` skips calibration entirely and honours these numbers.
 OV_ROUNDS = 20
 OV_WARMUP_ROUNDS = 1
 
@@ -222,28 +217,19 @@ def test_bench_id_index_invalidation_on_create(benchmark, scaled_graphs_no_pk, s
 # Every fixture above builds a graph and never persists it, so every cell above
 # measures the `Compact` (row) write path. That is the gap this whole file
 # missed: `save()` consolidates each type into a columnar master
-# `Arc<ColumnStore>`, and from then on a single-row `SET` takes a completely
-# different route — one that deep-clones the touched type's whole store per
-# statement, because the undo journal holds the second `Arc` handle and
-# `Arc::make_mut` therefore forks. The cost is O(rows_of_type × cols) per
-# statement and it never amortises.
-#
-# A full write-perf program ran against this file and reported flat curves,
-# which were true and beside the point: fresh-only fixtures cannot see a cost
-# that only exists after a save. Measured on the 0.15.14 wheel, single-row SET
-# at 50k x 12:
+# `Arc<ColumnStore>`, and from then on a single-row `SET` takes a different
+# route — one that deep-clones the touched type's whole store per statement,
+# because the undo journal holds the second `Arc` handle and `Arc::make_mut`
+# therefore forks. The cost is O(rows_of_type × cols) per statement and it never
+# amortises. A write-perf program run against fresh-only fixtures reported flat
+# curves that were true and beside the point. Measured on the 0.15.14 wheel,
+# single-row SET at 50k x 12:
 #
 #     fresh  4.3 us  |  post-save  328 us  |  mapped ~3,020 us
 #
 # The three cells below close that gap: with the cell-grained undo journal in
 # place, post-save must stay within 2x of fresh — anything worse is a
 # regression in the columnar write path.
-#
-# Not tracked by `make bench-check`, like everything else in this file — the
-# gate collects `test_bench_core.py` only, and on Linux it additionally runs
-# `--require-exact-set`, which *errors* on a benchmark present in the run but
-# absent from the baseline. New cells therefore belong here, not there, until a
-# release-boundary rebaseline promotes them.
 
 #: The baseline grid's headline cell. Wide enough that the per-statement store
 #: clone is unmistakable (12 int columns x 50k rows ~ 6 MB copied to write one
@@ -364,12 +350,11 @@ def test_bench_wide_set_mapped(benchmark, tmp_path):
 #   "normal" — log written, no barrier (survives the process dying)
 #   "off"    — no log
 #
-# The point of measuring all three side by side is to attribute the cost
-# rather than assume it. Reading the code says the barrier should dominate
-# "full" and that "normal" should land near "off", because a WAL frame is one
-# postcard encode, one CRC32, and one `write` — but that is a *hypothesis
-# derived from reading*, and the whole reason these cells exist is that it has
-# to be measured before anyone quotes a number.
+# Measuring all three side by side attributes the cost rather than assuming it.
+# Reading the code says the barrier should dominate "full" and that "normal"
+# should land near "off", because a WAL frame is one postcard encode, one
+# CRC32, and one `write` — but that is a hypothesis derived from reading, and
+# these cells exist so it is measured before anyone quotes a number.
 #
 # Read `normal - off` as the true cost of logging, and `full - normal` as the
 # true cost of the barrier. Both are per-commit and neither should scale with
@@ -399,24 +384,20 @@ def test_bench_wide_set_mapped(benchmark, tmp_path):
 #     anywhere in `wal.rs`. At `off` the write is a petgraph insert and index
 #     bookkeeping, full stop.
 #
-# So the number is real. What was unsound is the FRAMING: `off` is not a
-# cheaper commit, it is **no commit at all**, and there is no per-commit
-# durable work at `off` to measure. Its durability boundary is `save()`.
-# Labelling it a "durability level" alongside two levels that do write to disk
-# invites reading 1.8 us as "what a commit costs at off".
+# So the number is real; the FRAMING was not. `off` is not a cheaper commit, it
+# is **no commit at all**, with no per-commit durable work to measure — its
+# durability boundary is `save()`. Labelling it a "durability level" alongside
+# two levels that do write to disk invites reading 1.8 us as "what a commit
+# costs at off". Two cells below hold that framing in place:
+# `test_bench_unlogged_write_control` shows a plain in-memory graph produces the
+# same number (so file-backing buys nothing at `off`), and
+# `test_durable_off_loses_unsaved_writes` proves what the 1.8 us did *not* buy.
+# The `wal_bytes` guard on the headline cell pins each level to the
+# configuration it claims.
 #
-# Two cells below now hold that framing in place rather than leaving it to a
-# comment: `test_bench_unlogged_write_control` shows a plain in-memory graph
-# produces the same number (so file-backing buys nothing at `off`), and
-# `test_durable_off_loses_unsaved_writes` is the ordinary test proving what the
-# 1.8 us did *not* buy. The `wal_bytes` guard on the headline cell pins each
-# level to the configuration it claims.
-#
-# Not in `test_bench_core.py` on purpose: everything in this file is outside
-# the `make bench-check` tracked set, so adding cells here cannot break the
-# gate. Absolute numbers are machine- and device-specific — a barrier is
-# storage-hardware latency, so these are meaningless across machines and must
-# never be compared against a number captured elsewhere.
+# Absolute numbers are machine- and device-specific — a barrier is storage-
+# hardware latency, so these are meaningless across machines and must never be
+# compared against a number captured elsewhere.
 
 #: 1k matches the scale the competitive single-insert comparison uses. The
 #: per-commit cost is independent of graph size, so a second decade would add
@@ -511,11 +492,9 @@ def test_bench_unlogged_write_control(benchmark):
     [off]`, then something about file-backing costs per-write time and the
     `off` row means something other than what it says.
 
-    It also gives the `off` number a name that cannot be misread. There is no
-    per-commit durable work at `off` to measure — the honest cost of durability
-    there is `save()` amortised over N writes, and `save()` is O(graph)
-    (tracked separately as `test_bench_columnar_save_kgl`, 300 us min at 1k and
-    `fsync=False`).
+    The honest cost of durability at `off` is `save()` amortised over N writes,
+    and `save()` is O(graph) (tracked separately as
+    `test_bench_columnar_save_kgl`, 300 us min at 1k and `fsync=False`).
     """
     graph = _graph(DURABILITY_BENCH_SIZE)
     ids = iter(range(70_000_000, 1 << 30))
@@ -559,10 +538,8 @@ def test_durable_off_loses_unsaved_writes(tmp_path):
 # ── repaired 2026-07-27: `sync()` is timed alone, not after a create ──
 #
 # This cell used to time `CREATE` + `sync()` together, and at `full` it read
-# **1439 us — below the same file's create-only cost at `full`**. Create+sync
-# cannot be cheaper than create, so the pair was reported as an impossible
-# measurement. Reading the source says the cell was not measuring an ordering
-# at all:
+# **1439 us — below the same file's create-only cost at `full`**, which is
+# impossible. The source says why it was measuring no ordering at all:
 #
 #   * `sync()` at `full` is a **hard early return** (`kg_core.rs:711-713`). It
 #     touches no state — no flush, no barrier, no flag — because every commit
@@ -574,15 +551,14 @@ def test_durable_off_loses_unsaved_writes(tmp_path):
 #     *exactly* the same work as `CREATE` alone.
 #
 # The old cell therefore duplicated `test_bench_single_create_by_durability_
-# level[full]` by construction and could never carry information — and 1439 vs
-# ~3400 us is F_FULLFSYNC variance between two runs of identical work, not an
-# ordering. A device-level barrier is the noisiest thing this suite measures.
+# level[full]` by construction, and 1439 vs ~3400 us is F_FULLFSYNC variance
+# between two runs of identical work, not an ordering. A device-level barrier is
+# the noisiest thing this suite measures.
 #
-# The repair is to move the `CREATE` into an untimed `pedantic` setup so the
-# timed region is the barrier and nothing else. `full` should now read ~0
-# (pinning the early return) and `normal` should read one barrier — which is
-# the number a caller actually needs to decide how often to call it, and was
-# previously buried under a create.
+# The repair moves the `CREATE` into an untimed `pedantic` setup so the timed
+# region is the barrier and nothing else. `full` should now read ~0 (pinning the
+# early return) and `normal` one barrier — the number a caller needs to decide
+# how often to call it, previously buried under a create.
 #
 # `off` is absent from the parametrisation because `sync()` raises `ValueError`
 # there (`kg_core.rs:693-701`) rather than silently doing nothing.
@@ -626,43 +602,30 @@ def test_bench_explicit_sync(benchmark, tmp_path, level):
 #      `Arc<DirGraph>` appears and once only — so `min`, `p50` and `p95` all
 #      saw post-clone rounds and read healthy. Only `max` could see it.
 #
-# It has been rewritten and moved to `test_bench_fast_write_path.py::
+# Rewritten as `test_bench_fast_write_path.py::
 # test_bench_first_write_after_reference`, which takes the reference in an
-# untimed per-round `setup` and runs at 1k and 100k. Consolidated rather than
-# duplicated: that file also owns the `journal_covers` cells, and both defects
-# are answers to "why did this one write cost milliseconds".
-#
-# Left here as a signpost because a null result that was believed for a while
-# is worth being able to trace.
+# untimed per-round `setup` and runs at 1k and 100k. Left here as a signpost
+# because a null result that was believed for a while is worth being able to
+# trace.
 
 
 # ---------------------------------------------------------------------------
 # Multi-row write statements: does R rows into an N-node type care about N?
 # ---------------------------------------------------------------------------
 #
-# Moved here from `test_bench_merge_columnar.py`, which is retired. That file's
-# subject was the difference between **two arrival routes** — a "fresh" graph
-# whose properties lived in node weights against a "saved"/"reloaded" graph
-# whose properties lived in column stores — and that difference no longer
-# exists: construction is columnar from the first node, so all three arms build
-# the same object. Its header also documented the whole-store pre-image clone
-# as the mechanism under test, and that clone is gone (the journal records one
-# entry per changed cell).
+# The shape nothing else here measures: **one statement writing R rows into a
+# type that already has N nodes**. `test_bench_fast_write_path.py` measures a
+# one-row `MERGE` across the `journal_covers` corners; the cells above measure
+# inserts as the graph grows. Neither varies R and N independently, and that
+# grid is what catches a per-row term coming back.
 #
-# What survived the retirement is the shape nothing else here measures: **one
-# statement writing R rows into a type that already has N nodes**.
-# `test_bench_fast_write_path.py` measures a one-row `MERGE` across the
-# `journal_covers` corners; the cells above measure inserts as the graph grows.
-# Neither varies R and N independently, and that grid is what catches a per-row
-# term coming back.
-#
-# The `fresh` / `saved` pair is kept, demoted from *subject* to **control**: it
-# is the standing guard that a `save()` has not reintroduced a cost the write
-# path pays afterwards. The ratio must stay ~1.0 (measured 0.8-1.0x across
-# every N and column count). The third arm, `reloaded`, is dropped — it
-# differed only in how the store was *built* on load, never in what a
-# subsequent write did, and with the parity guard in place it triples the cell
-# count for a ratio that is a foregone conclusion.
+# The `fresh` / `saved` pair is a **control**, not the subject: the arrival
+# route stopped mattering once construction became columnar from the first node
+# (all arms build the same object), so the pair now only guards that a `save()`
+# has not reintroduced a cost the write path pays afterwards. The ratio must
+# stay ~1.0 (measured 0.8-1.0x across every N and column count). A third
+# `reloaded` arm was dropped — it differed only in how the store was *built* on
+# load, never in what a subsequent write did.
 
 #: Existing nodes in the written type. The diagnostic axis: the cost of writing
 #: R rows must not depend on N, and two decades of N make a dependency obvious.

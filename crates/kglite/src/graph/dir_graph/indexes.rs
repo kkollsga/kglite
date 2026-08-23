@@ -2,9 +2,6 @@
 //! and B-tree range index stores, plus the incremental maintenance the Cypher
 //! mutation executor calls after each write.
 //!
-//! Split out of `mod.rs` to keep it under the god-file LoC ceiling; index
-//! management is a self-contained concern with one entry point per index kind.
-//!
 //! The live stores are `#[serde(skip)]`; `populate_index_keys` snapshots their
 //! keys before save and `rebuild_indices_from_keys` replays them on load (both
 //! in `mod.rs`, with the other serialization helpers).
@@ -42,13 +39,11 @@ pub(crate) fn reset_index_maintenance_passes() {
     INDEX_MAINTENANCE_PASSES.set(0);
 }
 
-/// Incremental index-maintenance passes on this thread since the last reset.
 #[cfg(test)]
 pub(crate) fn index_maintenance_passes() -> usize {
     INDEX_MAINTENANCE_PASSES.get()
 }
 
-/// Count one maintenance pass that got past the no-index gate.
 #[inline]
 fn note_maintenance_pass() {
     #[cfg(test)]
@@ -74,7 +69,6 @@ pub(crate) fn reset_type_index_rebuilds() {
     TYPE_INDEX_REBUILDS.set(0);
 }
 
-/// Whole-type index rebuilds on this thread since the last reset.
 #[cfg(test)]
 pub(crate) fn type_index_rebuilds() -> usize {
     TYPE_INDEX_REBUILDS.get()
@@ -122,11 +116,6 @@ pub(crate) struct PropertyReader {
 }
 
 impl DirGraph {
-    // ========================================================================
-    // Index Management Methods
-    // ========================================================================
-
-    /// Pre-resolve and pre-intern `property` for a per-node read loop.
     pub(crate) fn property_reader(&mut self, node_type: &str, property: &str) -> PropertyReader {
         let resolved = self.resolve_alias(node_type, property).to_string();
         let key = self.interner.get_or_intern(&resolved);
@@ -135,8 +124,7 @@ impl DirGraph {
 
     /// Read one property off `node_idx` **the way the matcher reads it**, so an
     /// index or constraint built from this covers the same value-space `MATCH`
-    /// consults (`core/pattern_matching/matcher.rs::
-    /// node_matches_properties_columnar`). Three concerns that
+    /// consults (`graph/core/pattern_matching/matcher.rs`). Three concerns that
     /// `NodeData::get_property` does not handle:
     ///
     /// 1. **Alias resolution.** `starId` may be an id-alias for `id`; same for
@@ -160,8 +148,7 @@ impl DirGraph {
         }
     }
 
-    /// Create an index on a property for a specific node type.
-    /// Returns the number of entries indexed.
+    /// Create a hash equality index. Returns the number of distinct values.
     ///
     /// An index on an id-alias / title-alias field (e.g. `add_nodes(df, "Star",
     /// "starId", "title")` makes `starId` the alias for the canonical id) is
@@ -175,16 +162,14 @@ impl DirGraph {
     /// `id_index`, and SET-on-id stays in sync because id mutation updates the
     /// id_index directly.
     pub fn create_index(&mut self, node_type: &str, property: &str) -> usize {
-        // Store key uses the user's `property` name verbatim — the
-        // matcher's `try_index_lookup` indexes into `property_indices`
-        // by the unresolved user-facing key (matcher.rs:850), so the
-        // auto-maintenance path keeps things in sync only when the
-        // storage key matches.
+        // Store key uses the user's `property` name verbatim — the matcher's
+        // `try_index_lookup` indexes into `property_indices` by the unresolved
+        // user-facing key, so the auto-maintenance path keeps things in sync
+        // only when the storage key matches.
         let store_key = (node_type.to_string(), property.to_string());
 
-        // Read through the shared `PropertyReader` so this index covers exactly
-        // the value-space MATCH consults — see `read_indexed` for why
-        // `NodeData::get_property` is not enough.
+        // Read through `read_indexed` so this index covers exactly the
+        // value-space MATCH consults.
         let reader = self.property_reader(node_type, property);
         let mut index: HashMap<Value, Vec<NodeIndex>> = HashMap::new();
 
@@ -217,10 +202,8 @@ impl DirGraph {
     /// the OOM this method exists to avoid. The counterpart
     /// [`Self::drop_index`] already routes internally.
     ///
-    /// Public deliberately, and it is the boundary principle that puts it here:
-    /// `kglite-py`'s `create_index` and the Cypher `CREATE INDEX` executor need
-    /// the identical backend decision, so it is exactly the shape that belongs
-    /// in `kglite::api` rather than being written twice per binding.
+    /// Public deliberately (boundary principle): `kglite-py`'s `create_index`
+    /// and the Cypher `CREATE INDEX` executor need the identical decision.
     pub fn create_property_index_routed(
         &mut self,
         node_type: &str,
@@ -235,7 +218,6 @@ impl DirGraph {
         Ok((self.create_index(node_type, property), false))
     }
 
-    /// Drop an index on a property for a specific node type.
     /// Returns true if the index existed and was removed.
     pub fn drop_index(&mut self, node_type: &str, property: &str) -> Result<bool, String> {
         if let GraphBackend::Disk(disk) = &mut self.graph {
@@ -247,7 +229,7 @@ impl DirGraph {
         Ok(self.property_indices.remove(&key).is_some())
     }
 
-    /// Check if an index exists for a given node type and property.
+    /// Whether an **in-memory** index exists — see [`Self::has_any_index`].
     pub fn has_index(&self, node_type: &str, property: &str) -> bool {
         let key = (node_type.to_string(), property.to_string());
         self.property_indices.contains_key(&key)
@@ -268,13 +250,11 @@ impl DirGraph {
         false
     }
 
-    /// Get all existing indexes as a list of (node_type, property) tuples.
     pub fn list_indexes(&self) -> Vec<(String, String)> {
         self.property_indices.keys().cloned().collect()
     }
 
-    /// Look up nodes by property value using an index.
-    /// Returns None if no index exists, otherwise returns matching node indices.
+    /// `None` when no index exists on `(node_type, property)`.
     pub fn lookup_by_index(
         &self,
         node_type: &str,
@@ -288,7 +268,6 @@ impl DirGraph {
             .cloned()
     }
 
-    /// Get statistics about an index.
     pub fn get_index_stats(&self, node_type: &str, property: &str) -> Option<IndexStats> {
         let key = (node_type.to_string(), property.to_string());
         self.property_indices.get(&key).map(|idx| {
@@ -309,8 +288,7 @@ impl DirGraph {
     // Range Index Methods (B-Tree)
     // ========================================================================
 
-    /// Create a range index (B-Tree) on a property for a specific node type.
-    /// Enables efficient range queries (>, >=, <, <=, BETWEEN).
+    /// Create a B-tree index serving `>`, `>=`, `<`, `<=` and BETWEEN.
     /// Returns the number of unique values indexed.
     pub fn create_range_index(&mut self, node_type: &str, property: &str) -> usize {
         let key = (node_type.to_string(), property.to_string());
@@ -338,7 +316,6 @@ impl DirGraph {
         self.range_indices.remove(&key).is_some()
     }
 
-    /// Range lookup: returns node indices where property value falls in the given range.
     pub fn lookup_range(
         &self,
         node_type: &str,
@@ -359,13 +336,11 @@ impl DirGraph {
     // Composite Index Methods
     // ========================================================================
 
-    /// Create a composite index on multiple properties for a specific node type.
-    /// Composite indexes enable efficient lookups on multiple fields at once.
+    /// Create a composite index. Returns the number of unique value
+    /// combinations indexed.
     ///
-    /// Returns the number of unique value combinations indexed.
-    ///
-    /// Example: create_composite_index("Person", &["city", "age"]) allows efficient
-    /// queries like filter({'city': 'Oslo', 'age': 30}).
+    /// `create_composite_index("Person", &["city", "age"])` makes
+    /// `filter({'city': 'Oslo', 'age': 30})` an index lookup.
     pub fn create_composite_index(&mut self, node_type: &str, properties: &[&str]) -> usize {
         let key = (
             node_type.to_string(),
@@ -388,7 +363,6 @@ impl DirGraph {
                     .map(|reader| self.read_indexed(reader, idx).unwrap_or(Value::Null))
                     .collect();
 
-                // Only index if at least one value is non-null
                 if values.iter().any(|v| !matches!(v, Value::Null)) {
                     index.entry(CompositeValue(values)).or_default().push(idx);
                 }
@@ -401,26 +375,22 @@ impl DirGraph {
         count
     }
 
-    /// Drop a composite index.
-    /// Returns true if the index existed and was removed.
+    /// Returns true if the composite index existed and was removed.
     pub fn drop_composite_index(&mut self, node_type: &str, properties: &[String]) -> bool {
         let key = (node_type.to_string(), properties.to_vec());
         self.composite_indices.remove(&key).is_some()
     }
 
-    /// Check if a composite index exists.
     pub fn has_composite_index(&self, node_type: &str, properties: &[String]) -> bool {
         let key = (node_type.to_string(), properties.to_vec());
         self.composite_indices.contains_key(&key)
     }
 
-    /// Get all existing composite indexes.
     pub fn list_composite_indexes(&self) -> Vec<(String, Vec<String>)> {
         self.composite_indices.keys().cloned().collect()
     }
 
-    /// Look up nodes by composite values using a composite index.
-    /// Properties must match the order used when creating the index.
+    /// `properties` must be in the order the index was created with.
     pub fn lookup_by_composite_index(
         &self,
         node_type: &str,
@@ -436,7 +406,6 @@ impl DirGraph {
             .cloned()
     }
 
-    /// Get statistics about a composite index.
     pub fn get_composite_index_stats(
         &self,
         node_type: &str,
@@ -457,14 +426,13 @@ impl DirGraph {
         })
     }
 
-    /// Find a composite index that can be used for a given set of filter properties.
-    /// Returns the index key and whether all filter properties are covered.
+    /// The composite index usable for `filter_properties`, and whether it
+    /// covers them exactly (`false` = partial, filter has extra fields).
     pub fn find_matching_composite_index(
         &self,
         node_type: &str,
         filter_properties: &[String],
     ) -> Option<(CompositeIndexKey, bool)> {
-        // Sort filter properties for comparison
         let mut sorted_filter: Vec<String> = filter_properties.to_vec();
         sorted_filter.sort();
 
@@ -473,17 +441,14 @@ impl DirGraph {
                 let mut sorted_index: Vec<String> = key.1.clone();
                 sorted_index.sort();
 
-                // Check if index properties are a subset of or equal to filter properties
-                // For exact match, the index must cover exactly the filter fields
                 if sorted_index == sorted_filter {
-                    return Some((key.clone(), true)); // Exact match
+                    return Some((key.clone(), true));
                 }
 
-                // Check if index is a prefix of filter (can be used for partial filtering)
                 if sorted_filter.starts_with(&sorted_index)
                     || sorted_index.iter().all(|p| sorted_filter.contains(p))
                 {
-                    return Some((key.clone(), false)); // Partial match
+                    return Some((key.clone(), false));
                 }
             }
         }
@@ -502,10 +467,7 @@ impl DirGraph {
     /// **Why the rebuild is not good enough.** It is O(nodes-of-type) per
     /// index, per call: measured 2026-08-14 (release), appending ten rows to a
     /// 200k-row type costs 88 µs with no index, 6.1 ms with one property index
-    /// and 29.9 ms with two. That is the same shape the id index carried until
-    /// [`fold_appended_ids_into_index`](DirGraph::fold_appended_ids_into_index)
-    /// removed it, and it would otherwise re-impose it on exactly the types a
-    /// query-heavy application indexes.
+    /// and 29.9 ms with two.
     ///
     /// **Updated rows** are folded too, from the pre-image
     /// [`Self::capture_update_pre_image`] took before the batch wrote: a row
@@ -794,8 +756,7 @@ impl DirGraph {
     /// the same order as the `build_id_index` rebuild that path already pays,
     /// instead of O(rows) incremental work.
     ///
-    /// A no-op — three `is_empty` checks — when the type carries no index,
-    /// which is the common bulk-load case.
+    /// A no-op when the type carries no index — the common bulk-load case.
     ///
     /// Disk-backed persistent `PropertyIndex` stores are deliberately out of
     /// scope here: they never land in `property_indices` (see
@@ -1075,8 +1036,7 @@ impl DirGraph {
         keys
     }
 
-    /// Update property, composite, and range indices after a new node is added.
-    /// Only updates indices that already exist for this node_type.
+    /// File a newly added node into the indexes `node_type` already carries.
     pub fn update_property_indices_for_add(&mut self, node_type: &str, node_idx: NodeIndex) {
         if !self.type_has_user_indexes(node_type) {
             return;
@@ -1180,8 +1140,8 @@ impl DirGraph {
             || self.composite_indices.keys().any(|(nt, _)| nt == node_type)
     }
 
-    /// Update property, range, and composite indices after a property value is changed.
-    /// Removes node from the old value bucket and adds to the new value bucket.
+    /// Move `node_idx` from its old value bucket to the new one, in every
+    /// index family covering `node_type`.
     pub fn update_property_indices_for_set(
         &mut self,
         node_type: &str,
@@ -1219,11 +1179,9 @@ impl DirGraph {
             }
         }
 
-        // Update any composite indices that include this property
         self.update_composite_indices_for_property_change(node_type, node_idx, property);
     }
 
-    /// Update property, range, and composite indices after a property is removed.
     pub fn update_property_indices_for_remove(
         &mut self,
         node_type: &str,
@@ -1241,12 +1199,11 @@ impl DirGraph {
             self.evict_from_single_value_indexes(&key, old_value, node_idx);
         }
 
-        // Update any composite indices that include this property
         self.update_composite_indices_for_property_change(node_type, node_idx, property);
     }
 
-    /// Re-index a single node in all composite indices that include the changed property.
-    /// Reads current node properties to build the new composite value.
+    /// Re-index one node in every composite index covering the changed
+    /// property.
     ///
     /// Membership is decided by *field*, not spelling: a composite index
     /// registered under a type's title-alias spelling holds titles, so a write

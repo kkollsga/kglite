@@ -5,11 +5,10 @@
 //!
 //! # What "divergence" means here
 //!
-//! A columnar type's `ColumnStore` was once reachable through **two** `Arc`s
-//! on a memory/mapped graph: a `DirGraph`-level master and the handle inside
-//! every node's `PropertyStorage::Columnar`. Nothing stopped those drifting
-//! apart — `Arc::make_mut` on either side forked — so one of them was deleted.
-//! The backend is the sole owner now; these tests keep asking the same
+//! A columnar type's `ColumnStore` was once reachable through **two** `Arc`s —
+//! a `DirGraph`-level master and the handle inside every node's
+//! `PropertyStorage::Columnar` — which `Arc::make_mut` on either side forked
+//! apart. The node-held handle is gone; these tests keep asking the same
 //! questions of the surviving route.
 //!
 //! Two classes of assertion live here:
@@ -17,36 +16,28 @@
 //! 1. **Cross-surface consistency** (`all_public_reads_agree_*`). Whatever a
 //!    read resolves to, *every* surface must resolve to the same thing. It is
 //!    independent of who owns the store, and it is the real gate.
-//! 2. **Which replica wins** (`*_today_*`). Pinned as an exact fact, in the
-//!    style of `handle.rs`'s `held_reader_forces_a_whole_graph_copy`. A
-//!    failure means an unintended ownership change.
+//! 2. **Which replica wins** (`*_today_*`). Pinned as an exact fact; a failure
+//!    means an unintended ownership change. The names date from when a
+//!    re-point sweep pushed master writes back onto the nodes at end-of-clause,
+//!    making master-authority a permanently red assertion — so each pin
+//!    recorded the answer of the day, and removing the handle inverted them in
+//!    place.
 //!
 //! # The mutation-proof gate
 //!
 //! Two layers make single ownership irreversible:
 //!
 //! - **Compile-time.** A columnar node carries a `ColumnarRow`, which holds a
-//!   row id and nothing else; there is no node-held store handle left for new
-//!   code to read, so a direct-route read cannot be expressed and fails to
-//!   compile. The names of the two accessors that used to expose one are
-//!   pinned against an *empty* expected set by
+//!   row id and nothing else, so a direct-route read cannot be expressed and
+//!   fails to compile. The names of the two accessors that used to expose one
+//!   are pinned against an *empty* expected set by
 //!   `no_code_reaches_a_node_held_column_store_handle`, so re-introducing
 //!   either anywhere in the crate turns that test red.
 //! - **Runtime**, for what the compiler cannot see: a caller reading a
 //!   `NodeData` it already holds, or an `Arc` of the store it captured before
 //!   a write. `poison_*` installs a *different* store behind the backend, and
 //!   one named test per caller class asserts the class observes the
-//!   authoritative value. Each was shown red by reverting that one call site;
-//!   see the commit body.
-//!
-//! # Why the divergence tests do not just assert "the master wins"
-//!
-//! While the node handle was still the read route on memory/mapped, a
-//! re-point sweep pushed master writes back onto the nodes at end-of-clause;
-//! asserting master-authority then would have been a permanently red test, so
-//! the pins recorded the answer of the day — hence the `*_today_*` names.
-//! Removing the handle inverted those pins in place rather than deleting
-//! them, and each one still names what it used to assert.
+//!   authoritative value. Each was shown red by reverting that one call site.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -154,7 +145,6 @@ fn node_row_id(graph: &DirGraph, idx: NodeIndex) -> Option<u32> {
     }
 }
 
-/// Does node `idx` still share the master's `Arc`?
 /// Is the type's master store owned by the backend alone?
 ///
 /// There is no node-held handle to compare against, so the question that
@@ -168,18 +158,11 @@ fn master_is_uniquely_owned(graph: &DirGraph) -> bool {
 
 /// Write `value` straight into the type's master store.
 ///
-/// **The name is a holdover and it no longer diverges anything**, but it is
-/// kept for continuity of the tests that call it. It used to fork the master
-/// away from the node-held handles, and `Arc::make_mut` succeeded at that
-/// precisely because the nodes held strong handles. Those handles are gone,
-/// so the store is uniquely owned (see `master_is_uniquely_owned`) and
-/// `make_mut` now mutates it in place. The callers are consequently asserting
-/// "a read returns what the backend's store holds", not "the surfaces agree
-/// despite a divergence" — which is the
-/// strongest statement still expressible, since the divergence it was built to
-/// create is no longer constructible.
-///
-/// Returns the interned key written.
+/// **The name is a holdover and it no longer diverges anything.** It used to
+/// fork the master away from the node-held handles; those are gone, so the
+/// store is uniquely owned (see `master_is_uniquely_owned`) and `make_mut`
+/// mutates it in place. Callers are therefore asserting "a read returns what
+/// the backend's store holds" — the strongest statement still expressible.
 fn diverge_master(graph: &mut DirGraph, idx: NodeIndex, key: &str, value: Value) -> InternedKey {
     let row_id = node_row_id(graph, idx).expect("columnar node");
     let ikey = graph.interner.get_or_intern(key);
@@ -312,10 +295,8 @@ fn all_public_reads_agree_under_master_node_divergence() {
              two public reads of the same property must never disagree"
         );
     }
-    // Agreement alone is satisfied by every surface returning `Null`, which is
-    // exactly what a storeless columnar node produces — unanimously, and
-    // wrongly. Pin the value the store actually holds so this cannot pass by
-    // agreeing on nothing.
+    // A storeless columnar node makes every surface answer `Null` — unanimous
+    // and wrong — so pin the value the store actually holds.
     assert_eq!(
         first,
         Value::String("MASTER".into()),
@@ -344,10 +325,9 @@ fn the_backend_store_is_the_only_read_route() {
 
 // ── 3. Writes reconverge the two replicas ──────────────────────────────────
 
-/// A columnar `SET` used to write through the master and then re-point every
-/// node of the type. There are no node handles left to re-point: the write goes
-/// into the store the backend owns, the journal releases its pre-image at
-/// commit, and every surface reads the new value.
+/// No node handles are left to re-point: the write goes into the store the
+/// backend owns, the journal releases its pre-image at commit, and every
+/// surface reads the new value.
 #[test]
 fn set_leaves_the_master_uniquely_owned() {
     let mut graph = seeded_columnar();
@@ -482,19 +462,14 @@ fn save_and_reload_round_trips_the_observed_value() {
 
 // ── 4. Defect 2 — `maybe_spill_columns` reclaims nothing ───────────────────
 
-/// **Closed, and inverted here** (was
-/// `spill_forks_the_master_and_reclaims_nothing_today`).
-///
 /// `maybe_spill_columns` calls `Arc::make_mut` on the type's store and then
-/// `materialize_to_files`. When every node still held a strong handle,
+/// `materialize_to_files`. While every node still held a strong handle,
 /// `make_mut` *forked*: the master became the file-backed copy while all N
 /// nodes kept the pre-spill in-heap store alive, and — unlike the SET path —
 /// no sweep re-pointed them. Reads stayed correct; the memory the spill exists
-/// to reclaim was never reclaimed.
-///
-/// With the backend the sole owner the store is uniquely owned, `make_mut`
-/// mutates in place, and the spilled store *is* the one every read resolves.
-/// The two assertions the old test made are inverted verbatim.
+/// to reclaim was never reclaimed. With the backend the sole owner the store
+/// is uniquely owned, `make_mut` mutates in place, and the spilled store *is*
+/// the one every read resolves.
 #[test]
 fn spill_reclaims_the_heap_it_materialises() {
     let mut graph = seeded_columnar();
@@ -520,7 +495,6 @@ fn spill_reclaims_the_heap_it_materialises() {
         master.is_mapped(),
         "the spill must have materialised the master to files, or this test proves nothing"
     );
-    // INVERTED (was: the node keeps an unmapped pre-spill copy alive).
     assert!(
         master.heap_bytes() < heap_before,
         "the spill must reclaim heap: got {} bytes, was {heap_before}. Before D1 \
@@ -533,7 +507,6 @@ fn spill_reclaims_the_heap_it_materialises() {
          here would mean the reclaimed copy is not what reads resolve"
     );
 
-    // The user-visible contract is unchanged: reads still resolve.
     assert_eq!(
         read_one(&graph, "MATCH (n:Item) WHERE n.id = 1 RETURN n.c0"),
         Value::String("c0-1".into()),
@@ -596,8 +569,7 @@ fn property_stats_count_columnar_rows() {
 }
 
 /// `property_ndv` — the planner's selectivity input — must see columnar rows.
-/// It bypasses `read_indexed` and reads the node directly, so it is one of the
-/// callers the inventory flagged as "a reader would assume it is covered".
+/// It bypasses `read_indexed` and reads the node directly.
 #[test]
 fn property_ndv_counts_columnar_rows() {
     let graph = seeded_columnar();
@@ -616,18 +588,11 @@ fn property_ndv_counts_columnar_rows() {
 
 /// Install a **different** store for `node_type`, with `edit` applied.
 ///
-/// # What this proves
-///
-/// There is no node-held replica any more, so a disagreement between two
-/// replicas is not expressible: `column_store(type)` *is* the read route, and
-/// the compile-time gate (`ColumnarRow` carries a row id and nothing else) is
-/// what rules out the class the thread-local hook used to catch.
-///
-/// What survives here is still worth having: a caller that captured an `Arc` of
-/// the store earlier — a cache, a snapshot taken across a write — keeps reading
-/// the old object, and every named class test below re-reads through the
-/// backend after this swap. The mechanism got simpler because the ownership
-/// got simpler.
+/// `column_store(type)` *is* the read route, so a disagreement between two
+/// replicas is no longer expressible. What this still catches is a caller that
+/// captured an `Arc` of the store earlier — a cache, a snapshot taken across a
+/// write — and keeps reading the old object; every named class test below
+/// re-reads through the backend after this swap.
 fn poison_row(
     graph: &mut DirGraph,
     node_type: &str,
@@ -642,11 +607,10 @@ fn poison_row(
     PoisonGuard
 }
 
-/// Kept as a unit so the call sites read unchanged; the swap is permanent
-/// for the graph under test, which is built per test.
+/// Inert: the swap is permanent for the graph under test, which is built per
+/// test.
 struct PoisonGuard;
 
-/// Poison one row's property column.
 fn poison_property(
     graph: &mut DirGraph,
     node_type: &str,
@@ -663,7 +627,6 @@ fn poison_property(
     })
 }
 
-/// Poison one row's `__title__` column.
 fn poison_title(graph: &mut DirGraph, node_type: &str, row_id: u32, value: Value) -> PoisonGuard {
     poison_row(graph, node_type, move |store| {
         assert!(
@@ -674,7 +637,7 @@ fn poison_title(graph: &mut DirGraph, node_type: &str, row_id: u32, value: Value
 }
 
 /// Fixture: a saved graph with row 0 (`id: 1`) poisoned so its authoritative
-/// `c0` is `TRUTH` while its node handle still says `c0-1`.
+/// `c0` is `TRUTH` while the replaced store still says `c0-1`.
 fn poisoned_fixture() -> (DirGraph, NodeIndex, PoisonGuard) {
     let mut graph = seeded_columnar();
     let idx = node_of(&graph, 1);
@@ -796,9 +759,9 @@ fn r8_property_index_build_reads_the_authoritative_store() {
 }
 
 /// **R9 — incremental index maintenance.** The incremental updater
-/// (`update_property_indices_for_add`) reads through `read_indexed` for exactly
-/// this reason; it gets its own arm because it is a separate call path from the
-/// rebuild above, and the two must file a row identically.
+/// (`update_property_indices_for_add`) gets its own arm because it is a
+/// separate call path from the rebuild above, and the two must file a row
+/// identically.
 #[test]
 fn r9_incremental_index_maintenance_reads_the_authoritative_store() {
     let mut graph = seeded_columnar();
@@ -945,17 +908,12 @@ fn r14_resolve_noderefs_reads_the_authoritative_store() {
 
 // ── The compile-time gate's enumerated escape list ────────────────────────
 
-/// **The escapes are gone.**
-///
-/// `ColumnarRow::node_handle` and `::repoint` were the only two ways to reach a
-/// node's own `Arc<ColumnStore>` outside `graph::storage`. The field they
-/// exposed no longer exists, so both methods and every one of their call sites
-/// are gone — the expected set is empty.
-///
-/// The test is kept rather than deleted because an empty expectation is the
-/// strongest form of the gate: re-introducing either name anywhere in the crate
-/// fails it. If a future change legitimately needs a node-held handle again, it
-/// has to say so here.
+/// **The escapes are gone.** `ColumnarRow::node_handle` and `::repoint` were
+/// the only two ways to reach a node's own `Arc<ColumnStore>` outside
+/// `graph::storage`; the field they exposed no longer exists, so the expected
+/// set is empty. An empty expectation is the strongest form of the gate:
+/// re-introducing either name anywhere in the crate fails it, and a change that
+/// legitimately needs a node-held handle again has to say so here.
 const NODE_HANDLE_ESCAPE_SITES: &[(&str, usize)] = &[];
 
 #[test]
@@ -1018,17 +976,11 @@ fn no_code_reaches_a_node_held_column_store_handle() {
 /// Saving a freshly built graph must **not** rebuild the stores — and neither
 /// must saving it again.
 ///
-/// The first half is what the always-columnar flip buys: a graph is built in
-/// the shape it is saved in, so the consolidation pass has nothing to
-/// consolidate and `save()` no longer changes the write regime. Before the
-/// flip the first `enable_columnar` rebuilt every store (the assertion here
-/// used to *require* that, as the only way to tell a skipped rebuild from a
-/// graph that had never been columnar).
-///
-/// The second half is the idempotence guard: its replacement reasoning was
-/// only *believed* sufficient, so it is counted rather than trusted —
-/// losing the fast path costs a full O(N) rebuild on every save
-/// (~257 s at wiki100m).
+/// A graph is built in the shape it is saved in, so the consolidation pass has
+/// nothing to consolidate and `save()` does not change the write regime. The
+/// second half is the idempotence guard, counted rather than trusted: losing
+/// the fast path costs a full O(N) rebuild on every save (~257 s at
+/// wiki100m).
 #[test]
 fn saving_a_freshly_built_graph_skips_the_rebuild() {
     use crate::graph::dir_graph::COLUMNAR_REBUILDS;
@@ -1071,9 +1023,8 @@ fn saving_a_freshly_built_graph_skips_the_rebuild() {
 /// the load path binds row k of a type to that type's k-th node in ascending
 /// index order. `rebuild_column_stores` sorts by node index, which is what makes
 /// the two orders agree — so the drift check has to be what decides the rebuild
-/// happens. It did not have to be, while a fresh graph rebuilt on every save
-/// regardless; the moment the fast path became the normal case, a
-/// delete-then-create pair started serializing every row against the wrong node
+/// happens. Once the fast path became the normal case, a delete-then-create
+/// pair started serializing every row against the wrong node
 /// (`test_runtime_write_bugs.py::test_recreate_after_delete_is_fresh`, which
 /// saw it as edges connecting different nodes after a reload).
 #[test]
@@ -1275,9 +1226,7 @@ fn a_forked_columnar_replace_drops_the_properties_it_omits() {
 
 // ── Backend arms: the same invariants on Mapped and on Disk ────────────────
 //
-// Every fixture above is `DirGraph::new()`, i.e. `Memory`. That was the gap
-// filed as Track E after the 0.15.9 release review: the read-route and
-// ownership pins were only ever asked of one backend, so a backend that
+// Every fixture above is `DirGraph::new()`, i.e. `Memory`, so a backend that
 // resolved a property through some other replica — or that kept a second
 // handle on the store across a write — would have gone unnoticed here.
 //

@@ -314,12 +314,9 @@ impl<'a> TypeNodesRef<'a> {
     /// sorted subsequence. `write_type_indices_bin` preserves that order
     /// across save + reload.
     ///
-    /// If a caller has mutated an `Overlay` slice with `push` (or via the
-    /// `entry_or_default` path) without re-sorting, this method may give
-    /// false negatives — see the `contains` fallback above.
-    ///
-    /// **That is a live, if currently unreachable, wrong-answer risk, and the
-    /// obvious repair is the wrong one.** A false negative here is not a slow
+    /// A caller that mutates an `Overlay` slice with `push` (or via
+    /// `entry_or_default`) without re-sorting makes this give false negatives —
+    /// **a live, if currently unreachable, wrong-answer risk.** Not a slow
     /// lookup: the fused count-by-peer route uses this as a per-peer *type
     /// filter* (`match_clause/fused_match.rs`), so a member the search cannot
     /// find is a row dropped from a result. No failing executor input has been
@@ -630,9 +627,7 @@ impl TypeIndexStore {
     /// every member of the type and probes a `HashSet` for each one — 4.0 ms to
     /// remove a single node from a 1M-row bucket, and quadratic in a delete
     /// loop. Membership is resolvable in O(k log N) instead, via the
-    /// sortedness invariant [`TypeNodesRef::binary_search_idx`] documents:
-    /// members are appended in `node_indices()` order, so a type's bucket is a
-    /// sorted subsequence.
+    /// sortedness invariant [`TypeNodesRef::binary_search_idx`] documents.
     ///
     /// Returns `None` — meaning "use the retain" — whenever that invariant does
     /// not hold for one of the members. A freed `NodeIndex` slot reused by a
@@ -714,7 +709,6 @@ impl TypeIndexStore {
         if self.removed.contains(name) {
             return;
         }
-        // Materialize base into overlay then retain.
         if let Some(base) = self.base.as_deref() {
             if let Some(mut v) = base.materialize(name) {
                 v.retain(predicate);
@@ -726,7 +720,6 @@ impl TypeIndexStore {
     /// Run `predicate.retain(...)` across every live Vec. Materializes every
     /// base entry into the overlay first — used by full-graph rebuild paths.
     pub fn retain_all<F: FnMut(&NodeIndex) -> bool + Copy>(&mut self, predicate: F) {
-        // Materialize all base entries into the overlay.
         if let Some(base) = self.base.clone() {
             for name in base.dir.keys() {
                 if !self.overlay.contains_key(name.as_str())
@@ -747,7 +740,6 @@ impl TypeIndexStore {
         }
     }
 
-    /// Replace the entire store with a fresh HashMap.
     pub fn replace_with(&mut self, map: HashMap<String, Vec<NodeIndex>>) {
         self.overlay = map
             .into_iter()
@@ -758,13 +750,8 @@ impl TypeIndexStore {
     }
 }
 
-// =============================================================================
-// Writer
-// =============================================================================
-
-/// True when `members` ascends strictly. Early-exits on the first violation,
-/// so the sorted case costs one linear compare pass and the unsorted case
-/// stops as soon as it is decided.
+/// True when `members` ascends strictly, early-exiting on the first violation:
+/// the sorted case costs one linear compare pass.
 fn strictly_increasing<I: Iterator<Item = u32>>(mut members: I) -> bool {
     let Some(mut previous) = members.next() else {
         return true;
@@ -811,7 +798,6 @@ pub fn write_type_indices_bin(
     store: &TypeIndexStore,
     interner: &StringInterner,
 ) -> Result<(), String> {
-    // Collect (type_key, slice-or-vec) sorted by type_key.
     enum Source<'a> {
         Slice(&'a [u8]),
         Vec(&'a [NodeIndex]),
@@ -924,7 +910,6 @@ pub fn write_type_indices_bin(
     let dir_size = DIR_ENTRY_BYTES * num_types;
     let data_offset = (header_size + dir_size) as u64;
 
-    // Pre-compute per-type payload offsets.
     let mut offsets: Vec<(u64, u64)> = Vec::with_capacity(num_types);
     let mut cursor = data_offset;
     for (_, src) in &entries {

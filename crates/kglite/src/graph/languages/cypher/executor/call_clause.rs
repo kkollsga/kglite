@@ -1,5 +1,3 @@
-//! Cypher executor — call_clause methods.
-
 use super::helpers::*;
 use super::*;
 use crate::datatypes::values::Value;
@@ -319,7 +317,6 @@ impl<'a> CypherExecutor<'a> {
             return Ok(None);
         }
 
-        // Candidate universe: union of the requested node types, or every node.
         let candidates: Vec<NodeIndex> = match &node_types {
             Some(types) => {
                 let mut v = Vec::new();
@@ -386,7 +383,6 @@ impl<'a> CypherExecutor<'a> {
                 _ => self.evaluate_expression(&clause.expression, &row)?,
             };
             match val {
-                // Native Value::List fast path.
                 Value::List(items) => {
                     let total = items.len();
                     self.budget.check_work(total, "UNWIND collection")?;
@@ -526,20 +522,14 @@ impl<'a> CypherExecutor<'a> {
             "louvain" | "louvain_communities" | "leiden" | "leiden_communities"
         ) && (self.graph.graph.is_disk() || self.graph.graph.is_mapped());
 
-        // Extract parameters
         let mut params = self.extract_call_params(&clause.parameters)?;
-        // Normalize scoping-key aliases (`relationship` ↔ `connection_types`,
-        // `node_types` → `node_type`) so the terminology is interchangeable
-        // across procedures, and reject genuinely-unknown config keys with a
-        // did-you-mean — so a typo or a wrong-procedure key surfaces an error
-        // instead of silently no-op'ing (operator feedback A2 / A2b 2026-06-17).
+        // Alias the scoping keys and reject unknown config keys, so a typo or a
+        // wrong-procedure key errors instead of silently no-op'ing — see
+        // `normalize_and_validate_algo_params`.
         self.validate_algo_params(proc_name.as_str(), &mut params)?;
 
-        // Optional subgraph scope for the centrality / community procedures:
-        // `{node_type: '...', where: 'n.<prop> ...'}` restricts the algorithm
-        // to a property-filtered node set (e.g. non-test, non-external
-        // functions). Built once here so the algorithms stay free of the
-        // executor / parser. None ⇒ whole-graph (unchanged behaviour).
+        // Built once here so the algorithms stay free of the executor / parser.
+        // None ⇒ whole-graph.
         let scope = if needs_scope {
             self.build_node_scope(&params)?
         } else {
@@ -561,7 +551,6 @@ impl<'a> CypherExecutor<'a> {
             }
         }
 
-        // Dispatch to algorithm
         let rows = match proc_name.as_str() {
             "pagerank"
             | "betweenness"
@@ -584,8 +573,7 @@ impl<'a> CypherExecutor<'a> {
             )?,
             "connected_components" | "weakly_connected_components" => {
                 // Optional scoping: `CALL connected_components({node_type: 'Person',
-                // relationship: 'KNOWS'})`. Each accepts a string or a list of
-                // strings. Absent → whole graph (every node, every edge type).
+                // relationship: 'KNOWS'})`. Absent → whole graph.
                 let (node_types, rel_types) = scoped_node_and_rel(&params);
                 let components =
                     crate::graph::algorithms::graph_algorithms::weakly_connected_components_scoped(
@@ -624,8 +612,7 @@ impl<'a> CypherExecutor<'a> {
                 rows
             }
             "k_core" | "coreness" => {
-                // Scoped k-core decomposition; same {node_type, relationship}
-                // scoping as connected_components. YIELD node, coreness.
+                // Same {node_type, relationship} scoping as connected_components.
                 let (node_types, rel_types) = scoped_node_and_rel(&params);
                 let scores = crate::graph::algorithms::graph_algorithms::coreness_scoped(
                     self.graph,
@@ -657,7 +644,6 @@ impl<'a> CypherExecutor<'a> {
                 // `relationship` param). A node is "done" when it matches the
                 // required `done` predicate; it is "ready" when every node it
                 // depends on (its outgoing-E neighbours) is done.
-                // YIELD node, dependency_count.
                 let (node_types, rel_types) = scoped_node_and_rel(&params);
                 let done_src = match params.get("done") {
                     Some(Value::String(s)) if !s.trim().is_empty() => s.clone(),
@@ -709,7 +695,6 @@ impl<'a> CypherExecutor<'a> {
                 rows
             }
             "clustering_coefficient" | "local_clustering_coefficient" => {
-                // Scoped local clustering coefficient. YIELD node, coefficient.
                 let (node_types, rel_types) = scoped_node_and_rel(&params);
                 let scores =
                     crate::graph::algorithms::graph_algorithms::clustering_coefficient_scoped(
@@ -739,10 +724,9 @@ impl<'a> CypherExecutor<'a> {
                 rows
             }
             "triangle_count" | "transitivity" => {
-                // Scoped global triangle count + transitivity, as a single
-                // aggregate row. YIELD triangles, transitivity. Reuses the
-                // clustering-coefficient adjacency + neighbour-intersection
-                // counting in one pass.
+                // Global triangle count + transitivity as a single aggregate
+                // row, reusing the clustering-coefficient adjacency and
+                // neighbour-intersection counting in one pass.
                 let (node_types, rel_types) = scoped_node_and_rel(&params);
                 let (triangles, transitivity) =
                     crate::graph::algorithms::graph_algorithms::triangle_count_scoped(
@@ -770,8 +754,8 @@ impl<'a> CypherExecutor<'a> {
             }
             "eccentricity" => {
                 // Per-node eccentricity (longest shortest path to any node in
-                // its component). YIELD node, eccentricity. All-pairs BFS —
-                // node-capped inside the algorithm.
+                // its component). All-pairs BFS — node-capped inside the
+                // algorithm.
                 let (node_types, rel_types) = scoped_node_and_rel(&params);
                 let eccs = crate::graph::algorithms::graph_algorithms::eccentricity_scoped(
                     self.graph,
@@ -931,8 +915,6 @@ impl<'a> CypherExecutor<'a> {
                 &params,
                 &clause.yield_items,
             )?,
-            // 2026-05-25 Batch 6 — graph + property introspection.
-            //
             // db.graph_stats() yields one row with the top-level
             // counts (node_count, edge_count, label_count,
             // relationship_type_count). Useful for an agent's first
@@ -1002,7 +984,6 @@ impl<'a> CypherExecutor<'a> {
         })
     }
 
-    /// Extract CALL parameters from {key: expr} pairs into a value map.
     pub(super) fn extract_call_params(
         &self,
         params: &[(String, Expression)],
@@ -1025,7 +1006,6 @@ impl<'a> CypherExecutor<'a> {
         yield_items: &[YieldItem],
         existing: &ResultSet,
     ) -> Result<Vec<ResultRow>, String> {
-        // Extract parameters
         let method = call_param_opt_string(params, "method")
             .unwrap_or_else(|| "dbscan".to_string())
             .to_lowercase();
@@ -1035,7 +1015,6 @@ impl<'a> CypherExecutor<'a> {
         let max_iterations = call_param_usize(params, "max_iterations", 100);
         let normalize = call_param_bool(params, "normalize", false);
 
-        // Extract property list (if given)
         let properties: Option<Vec<String>> = params.get("properties").and_then(|v| {
             let items = parse_list_value(v);
             if items.is_empty() {
@@ -1055,7 +1034,6 @@ impl<'a> CypherExecutor<'a> {
             }
         });
 
-        // Collect unique node indices from the existing result set
         let mut node_indices: Vec<NodeIndex> = Vec::new();
         let mut seen: HashSet<NodeIndex> = HashSet::new();
         for (row_idx, row) in existing.rows.iter().enumerate() {
@@ -1071,7 +1049,6 @@ impl<'a> CypherExecutor<'a> {
             return Err("cluster() requires a preceding MATCH clause that binds nodes".to_string());
         }
 
-        // Validate method
         if method != "dbscan" && method != "kmeans" {
             return Err(format!(
                 "Unknown clustering method '{}'. Available: dbscan, kmeans",
@@ -1082,7 +1059,6 @@ impl<'a> CypherExecutor<'a> {
         // Build feature vectors and run clustering
         let assignments = if let Some(ref prop_names) = properties {
             // ── Explicit property mode ──
-            // Extract numeric features from named properties
             let mut features: Vec<Vec<f64>> = Vec::new();
             let mut valid_indices: Vec<usize> = Vec::new(); // indices into node_indices
 
@@ -1159,7 +1135,6 @@ impl<'a> CypherExecutor<'a> {
             for (i, &idx) in node_indices.iter().enumerate() {
                 self.check_interrupt_periodic(i)?;
                 if let Some(node) = self.graph.graph.node_view(idx) {
-                    // Try spatial config for this node type
                     if let Some(config) = self
                         .graph
                         .get_spatial_config(node.node_type_str(&self.graph.interner))
@@ -1207,7 +1182,6 @@ impl<'a> CypherExecutor<'a> {
                     )
                 }
                 "kmeans" => {
-                    // For spatial k-means, convert to feature vectors [lat, lon]
                     let features: Vec<Vec<f64>> =
                         points.iter().map(|(lat, lon)| vec![*lat, *lon]).collect();
                     crate::graph::algorithms::clustering::kmeans(
@@ -1226,7 +1200,6 @@ impl<'a> CypherExecutor<'a> {
                 .collect::<Vec<_>>()
         };
 
-        // Build result rows
         let mut rows = Vec::with_capacity(assignments.len());
         self.check_deadline()?;
         for (row_idx, (node_idx, cluster_id)) in assignments.iter().enumerate() {
@@ -1251,7 +1224,6 @@ impl<'a> CypherExecutor<'a> {
         Ok(rows)
     }
 
-    /// Convert centrality results to ResultRows with node bindings + score.
     /// Periodic deadline check: building 124M rows can take minutes even when
     /// the algorithm itself returned within budget.
     pub(super) fn centrality_to_rows(
@@ -1340,7 +1312,6 @@ impl<'a> CypherExecutor<'a> {
         clause: &UnionClause,
         result_set: ResultSet,
     ) -> Result<ResultSet, String> {
-        // Execute the right side query
         let right_result = self.execute(&clause.query)?;
 
         // All arms of a set operation must return the same column names, in the
@@ -1362,7 +1333,6 @@ impl<'a> CypherExecutor<'a> {
             ));
         }
 
-        // Combine columns (should be compatible)
         let columns = if result_set.columns.is_empty() {
             right_result.columns.clone()
         } else {
@@ -1416,7 +1386,6 @@ impl<'a> CypherExecutor<'a> {
                 })
             }
             SetOpKind::Intersect => {
-                // Build the right-side hash set first.
                 self.budget
                     .consume_collection(right_result.rows.len(), "INTERSECT right-side hash set")?;
                 let right_columns = right_result.columns.clone();
@@ -1494,11 +1463,6 @@ impl<'a> CypherExecutor<'a> {
         }
     }
 
-    // ========================================================================
-    // Finalize
-    // ========================================================================
-
-    /// Convert the final ResultSet into a CypherResult for Python consumption
     pub fn finalize_result(&self, mut result_set: ResultSet) -> Result<CypherResult, String> {
         if result_set.columns.is_empty() {
             // No RETURN clause - infer columns from available bindings
@@ -1506,7 +1470,6 @@ impl<'a> CypherExecutor<'a> {
                 return Ok(CypherResult::empty());
             }
 
-            // Auto-detect columns: collect all variable names from first row
             let first_row = &result_set.rows[0];
             let mut columns = Vec::new();
             for name in first_row.node_bindings.keys() {
@@ -1573,7 +1536,6 @@ impl<'a> CypherExecutor<'a> {
             });
         }
 
-        // RETURN was specified - use its columns
         // Both branches **move** the cell values out of their rows, and both
         // leave the emptied rows to be dropped on *this* thread.
         //
@@ -1632,10 +1594,6 @@ impl<'a> CypherExecutor<'a> {
     }
 }
 
-// ============================================================================
-// Shared helper for single-column name-yielding procedures.
-// ============================================================================
-
 /// Build `ResultRow`s for a procedure that yields a single string
 /// column. Used by `db.labels()` (yield column: `label`) and
 /// `db.relationshipTypes()` (yield column: `relationshipType`) — both
@@ -1648,9 +1606,6 @@ pub(super) fn names_to_rows(names: &[String], yield_items: &[YieldItem]) -> Vec<
         let mut row = ResultRow::new();
         for item in yield_items {
             let alias = item.alias.as_deref().unwrap_or(&item.name);
-            // Single-column procedure: the validator already ensured
-            // `item.name` is the expected column. Project the value
-            // under the alias (or the column name if no AS clause).
             row.projected
                 .insert(alias.to_string(), Value::String(name.clone()));
         }
@@ -1658,12 +1613,7 @@ pub(super) fn names_to_rows(names: &[String], yield_items: &[YieldItem]) -> Vec<
     }
     rows
 }
-/// The YIELD columns a procedure exposes, or an unknown-procedure error.
-///
-/// A thin view over [`super::procedure_registry`] — the single table that
-/// also feeds `list_procedures` and `SHOW PROCEDURES`, so the three can
-/// never drift apart again. `display_name` is the user's spelling, for the
-/// error message.
+
 /// Validate a CALL's YIELD list against the registry and expand the bare
 /// form, returning the columns the call will actually produce.
 ///
@@ -1700,6 +1650,11 @@ pub(super) fn resolve_yield_items(
     Ok(requested.to_vec())
 }
 
+/// The YIELD columns a procedure exposes, or an unknown-procedure error.
+///
+/// A thin view over [`super::procedure_registry`] — the single table that also
+/// feeds `list_procedures` and `SHOW PROCEDURES`, so the three cannot drift
+/// apart. `display_name` is the user's spelling, for the error message.
 fn valid_yield_columns(
     proc_name: &str,
     display_name: &str,
@@ -1944,9 +1899,7 @@ mod scope_name_tests {
 
     #[test]
     fn a_graph_without_edge_metadata_is_not_second_guessed() {
-        // Nothing to compare against: an empty graph cannot tell a typo from a
-        // type that has not been created yet, and refusing there would break
-        // building a graph up incrementally.
+        // An empty graph cannot tell a typo from a type not yet created.
         let empty = DirGraph::new();
         assert!(
             validate_scope_names("ready_set", &params(&[("relationship", "ANY")]), &empty)

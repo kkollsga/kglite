@@ -2,10 +2,10 @@
 //!
 //! The WAL machinery itself lives elsewhere (`graph/wal.rs` for the frame
 //! format and recovery scan, `graph/mutation/wal_replay.rs` for replay,
-//! `graph/storage/recording.rs` for write capture). What sits here is
-//! the *orchestration* around it — the orderings that make those pieces add up
-//! to crash safety — so that a durability owner is assembled the same way
-//! whichever binding is doing the assembling.
+//! `graph/storage/recording.rs` for write capture). What sits here is the
+//! *orchestration* — the orderings that make those pieces add up to crash
+//! safety — so a durability owner is assembled the same way whichever binding
+//! is doing the assembling.
 //!
 //! Two owners exist today and neither can be expressed in terms of the other:
 //! [`Session`](crate::graph::session::Session) holds its log beside a
@@ -25,18 +25,15 @@
 //!    over newer state.
 //!
 //! 2. **Checkpoint: sync → stamp → save → reset** ([`checkpoint_prologue`],
-//!    then the binding's own save, then [`checkpoint_epilogue`]). The flush is
-//!    load-bearing under [`DurabilityLevel::Normal`], where the tail may still
-//!    be in the page cache; the stamp records how far the checkpoint consumed
-//!    the log; the truncation comes last so the `.kgl` is known to have landed
-//!    before the log describing the same commits is destroyed. `next_lsn`
+//!    then the binding's own save, then [`checkpoint_epilogue`]) — why each
+//!    step sits where it does is on those two functions. `next_lsn`
 //!    deliberately keeps climbing across the truncation: restarting it would
 //!    let a stale pre-checkpoint frame carry the same LSN as a fresh one,
 //!    making the replay gate meaningless.
 //!
-//! The third ordering — *append the frame, then publish the commit* — is not
-//! here, because it is not shared: it is a property of how each owner publishes
-//! writes. See [`Session::commit`](crate::graph::session::Session::commit).
+//! The third ordering — *append the frame, then publish the commit* — is a
+//! property of how each owner publishes writes, not something they share. See
+//! [`Session::commit`](crate::graph::session::Session::commit).
 //!
 //! ## Recovery on open is unconditional
 //!
@@ -49,24 +46,11 @@
 //! `checkpoint_lsn` are the harmless residue of a crash between the `.kgl`
 //! write and the truncation, and are not grounds to refuse.
 //!
-//! The same decision is owed by an opener that has no durability argument at
-//! all — the server-style [`open_or_create_graph`] lifecycle — because the
-//! damage is not confined to the missing reads. Such an opener writes and
-//! saves without stamping `checkpoint_lsn` or truncating the sidecar, so the
-//! stale frames outlive the newer `.kgl` and the *next* durable open replays
-//! them over it: state that was already saved is rolled back to an older
-//! commit. [`ensure_recovered`] is that refusal, shared so the two openers
-//! decide on identical terms.
-//!
-//! One route stays open even then, because [`load_file`] is deliberately
-//! unguarded (it is the primitive recovery itself is built on): load, mutate,
-//! save back. [`ensure_save_target_recovered`] closes it at the *save*, on the
-//! same predicate — a save whose outgoing `checkpoint_lsn` would leave frames
-//! in front of it is refused, which the four-step checkpoint order makes
-//! impossible for a durable owner's own checkpoint.
-//!
-//! [`open_or_create_graph`]: crate::graph::io::open::open_or_create_graph
-//! [`load_file`]: crate::graph::io::file::load_file
+//! The same predicate is owed by openers that take no durability argument
+//! ([`ensure_recovered`]) and by saves from owners that never had one
+//! ([`ensure_save_target_recovered`]) — in both cases the damage runs past the
+//! missing reads into a rollback of already-saved state; those two docs carry
+//! the mechanism.
 
 use std::io;
 use std::path::Path;
@@ -172,17 +156,16 @@ pub fn open_log(
         .expect("level.logs() is true, so sync_mode is Some");
 
     let dir = make_dir_graph_mut(graph);
-    // Replay BEFORE wrapping: the replay's own writes must not enter the
-    // capture buffer, or the next commit would log them all over again.
+    // Replay BEFORE wrapping, or the replay's own writes enter the capture
+    // buffer and the next commit logs them all over again.
     let max_lsn = apply_frames(dir, &frames, checkpoint_lsn).map_err(DurableOpenError::Replay)?;
     wrap_for_durability(dir);
-    // A graph with change data capture enabled was *already* wrapped when the
-    // replay ran, so the replayed writes are sitting in the capture buffer.
-    // They describe frames this log already holds: handing them to the WAL at
-    // the next commit would log every recovered write a second time. Drop them
-    // — and with them the CDC events for changes a consumer of this graph's
-    // stream never saw happen live. (No-op on the ordinary path, where the
-    // wrap above is what created the buffer.)
+    // With change data capture already enabled the graph was wrapped before the
+    // replay ran, so the replayed writes sit in the capture buffer describing
+    // frames this log already holds: handing them to the WAL at the next commit
+    // would log every recovered write a second time. Drop them — and with them
+    // the CDC events for changes no consumer of this stream saw happen live.
+    // (No-op on the ordinary path, where the wrap above created the buffer.)
     if let Some(rg) = dir.graph.recording_mut() {
         let _ = rg.take_ops();
     }
@@ -281,13 +264,12 @@ pub fn ensure_recovered(
 /// Refuse a **checkpoint write** to `checkpoint_path` while its sidecar holds
 /// frames that a graph stamped `checkpoint_lsn` would strand in front of it.
 ///
-/// The save-side half of the same rule, for the route [`ensure_recovered`]
-/// cannot cover: [`load_file`] is deliberately unguarded, so a non-durable
-/// owner still *reads* a path whose sidecar runs ahead — and may then save back
-/// over it. That save neither stamps `checkpoint_lsn` nor truncates the log, so
-/// the frames outlive it and the next durable open replays them over the newer
-/// state: data that was saved comes back as an older commit. Refusing the save
-/// closes that without taking the read away.
+/// The save-side half of [`ensure_recovered`]'s rule, for the route it cannot
+/// cover: [`load_file`] is deliberately unguarded, so a non-durable owner still
+/// *reads* a path whose sidecar runs ahead — and may then save back over it,
+/// stranding the frames in front of the newer `.kgl` for the next durable open
+/// to replay back over it. Refusing the save closes that without taking the
+/// read away.
 ///
 /// `checkpoint_lsn` is the stamp the *outgoing* `.kgl` will carry, so the
 /// frames this refuses on are exactly the ones a later durable open would
@@ -327,8 +309,7 @@ fn unrecovered_sidecar(
     Ok(unreplayed(&frames, checkpoint_lsn).then_some(wpath))
 }
 
-/// The exit that is the same whichever operation was refused: the frames are
-/// only discardable deliberately, by moving the sidecar out of the way.
+/// Shared tail for every refusal: the frames are discardable only deliberately.
 const DISCARD_EXIT: &str = "or move the sidecar aside first to deliberately discard those commits.";
 
 /// Read (do not truncate) whatever the last durable owner left behind. Torn
@@ -342,8 +323,6 @@ fn read_sidecar(wpath: &Path) -> Result<Vec<WalFrame>, DurableOpenError> {
     })
 }
 
-/// Whether `frames` hold anything the checkpoint at `checkpoint_lsn` has not
-/// already folded in.
 fn unreplayed(frames: &[WalFrame], checkpoint_lsn: u64) -> bool {
     frames.iter().any(|f| f.lsn > checkpoint_lsn)
 }

@@ -38,11 +38,10 @@ impl KnowledgeGraph {
     ///     ```
     #[pyo3(signature = (node_types=None))]
     fn build_id_indices(&self, py: Python<'_>, node_types: Option<Vec<String>>) {
-        // Pre-warm through the IdIndexStore's interior mutability
-        // (`ensure_id_index`, the same store the self-healing read path
-        // uses) — a cache warm is a read, so no `&mut` / `Arc::make_mut`,
-        // which would deep-copy the whole graph when any other handle
-        // (fluent clone, frozen view, session) shares the Arc. The index
+        // Warm through the IdIndexStore's interior mutability (the same store
+        // the self-healing read path uses): a cache warm is a read, so no
+        // `&mut` / `Arc::make_mut` deep-copying the whole graph when another
+        // handle (fluent clone, frozen view, session) shares the Arc. The
         // scans are pure Rust; release the GIL for their duration.
         let inner = &self.inner;
         py.detach(|| match node_types {
@@ -52,7 +51,6 @@ impl KnowledgeGraph {
                 }
             }
             None => {
-                // Build for all existing types
                 for node_type in inner.type_indices.keys() {
                     inner.ensure_id_index(node_type);
                 }
@@ -126,10 +124,9 @@ impl KnowledgeGraph {
     /// afterwards.
     #[pyo3(signature = (path=None))]
     fn enable_disk_mode(&mut self, py: Python<'_>, path: Option<&str>) -> PyResult<()> {
-        // Already converted: the second call cannot "convert" anything, and its
+        // Already converted: the second call cannot "convert" anything, and the
         // core message ("Already in disk mode") arrived through the save
-        // dispatch as a *file I/O* error, which it is not. Name the state and
-        // the operation the caller actually wants.
+        // dispatch as a *file I/O* error, which it is not.
         if kglite_core::api::storage::live_storage_mode(&self.inner)
             == kglite_core::api::storage::StorageMode::Disk
         {
@@ -141,11 +138,9 @@ impl KnowledgeGraph {
         }
         // A durable graph's backend is a `RecordingGraph` wrapper, and the
         // conversion cannot unwrap one without silently dropping the capture
-        // layer — core refuses it. Say so here in the caller's vocabulary
-        // (`kglite.open()` attaches a log by default, so this is the shape a
-        // user actually meets) instead of surfacing the internal wrapper name.
-        // This also subsumes the diverged-log check `save()` runs: a diverged
-        // log implies a durable owner, which is already refused here.
+        // layer — core refuses it, in the caller's vocabulary rather than the
+        // internal wrapper name. This also subsumes the diverged-log check
+        // `save()` runs: a diverged log implies a durable owner.
         if self.lifecycle.durable.is_some() {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "a durable graph cannot be converted to disk mode: disk mode keeps no \
@@ -156,11 +151,10 @@ impl KnowledgeGraph {
             ));
         }
         let Some(path) = path else {
-            // Naming the directory is the whole point of the warning: the
-            // pathless conversion is legitimate (scratch that dies with the
-            // process) but it silently picks the filesystem, and a conversion
-            // larger than a small or RAM-backed `/tmp` failed with no hint of
-            // where the bytes had gone.
+            // The pathless conversion is legitimate (scratch that dies with
+            // the process) but it silently picks the filesystem: one larger
+            // than a small or RAM-backed `/tmp` failed with no hint of where
+            // the bytes had gone. Hence naming the directory in the warning.
             let message = format!(
                 "enable_disk_mode() without a path materializes the edge structures into a \
                  scratch directory under {} and deletes them when this graph is dropped — they \
@@ -267,22 +261,18 @@ impl KnowledgeGraph {
         let info_before = graph.graph_info();
         let tombstones_before = info_before.node_tombstones;
         let edge_tombstones_before = info_before.edge_tombstones;
-        // "Were the columnar stores rebuilt?" used to be answered by "is this
-        // graph columnar at all?", which was a fair proxy only while a graph
-        // could be non-columnar. Every graph owns stores from its first node
-        // now, so the proxy would answer `true` for a vacuum that reclaimed
-        // nothing. Read the row count instead: a rebuild is exactly what drops
-        // the rows deleted nodes left behind.
+        // Read the row count, not "is this graph columnar at all": every graph
+        // owns stores from its first node now, so that proxy would report
+        // `true` for a vacuum that reclaimed nothing.
         let rows_before = info_before.columnar_total_rows;
         let old_to_new = graph.vacuum();
         let info_after = graph.graph_info();
         let columnar_rebuilt = info_after.columnar_total_rows != rows_before;
         let nodes_remapped = old_to_new.len();
 
-        // Carry the selection through, rather than dropping it: the indices
-        // moved, but the *set of nodes the caller chose* did not, minus
-        // whatever was deleted. The documented reset was a limitation of not
-        // having the mapping to hand, never a contract.
+        // The indices moved, but the *set of nodes the caller chose* did not,
+        // minus whatever was deleted. The documented reset was a limitation of
+        // not having the mapping to hand, never a contract.
         self.cursor.selection.remap_indices(&old_to_new);
 
         Python::attach(|py| {
@@ -388,22 +378,12 @@ impl KnowledgeGraph {
             dict.set_item("format_version", self.inner.save_metadata.format_version)?;
             dict.set_item("library_version", &self.inner.save_metadata.library_version)?;
             dict.set_item("user_schema_version", self.inner.user_schema_version)?;
-            // Which backend this graph is actually on. Load-bearing since a
-            // checkpoint records its mode: this is how a caller confirms the
-            // reopen (or a `storage=` conversion) landed where they expected.
             dict.set_item(
                 "storage_mode",
                 kglite_core::api::storage::live_storage_mode(&self.inner).as_str(),
             )?;
-            // Columnar memory info — from `graph_info()`, not from storage:
-            // the column stores belong to the backend and are not reachable
-            // from a binding.
             dict.set_item("columnar_heap_bytes", info.columnar_heap_bytes)?;
             dict.set_item("columnar_is_mapped", info.columnar_is_mapped)?;
-            // Edge-storage observability (E1). `columnar_is_mapped` answers
-            // "did the memory limit spill the property columns"; these two
-            // answer "what shape are the edges in", which is what a caller
-            // checking a disk-mode conversion actually wants.
             dict.set_item("edges_mapped", info.edges_mapped)?;
             dict.set_item(
                 "edge_property_overlay_rows",
@@ -412,9 +392,6 @@ impl KnowledgeGraph {
             dict.set_item("memory_limit", self.inner.memory_limit)?;
             dict.set_item("columnar_total_rows", info.columnar_total_rows)?;
             dict.set_item("columnar_live_rows", info.columnar_live_rows)?;
-            // Auto-vacuum's own state. `set_auto_vacuum` was write-only until
-            // now, so "is it on, and at what threshold?" had no answer, and
-            // "did it ever fire?" was only inferable from tombstone counts.
             dict.set_item("auto_vacuum_threshold", self.inner.auto_vacuum_threshold)?;
             dict.set_item("auto_vacuums_run", self.inner.auto_vacuums_run)?;
             Ok(dict.into())
@@ -751,11 +728,8 @@ impl KnowledgeGraph {
                 slf.cursor.selection.clear();
             }
 
-            // `store_as` writes node properties, which the write-ahead log can
-            // express — so it has to reach the log like every other logged
-            // mutation. It never did: the property landed in memory, the frame
-            // was never appended, and a crash before the next checkpoint lost
-            // it while every other write around it survived.
+            // Same as `collect_children`: the stored property is a
+            // node-property write and belongs in the log.
             slf.commit_wal()?;
 
             // The same handle back, not a copy of it: a copy would share the
@@ -823,7 +797,7 @@ impl KnowledgeGraph {
     ) -> PyResult<Self> {
         let mut new_kg = self.clone();
 
-        // Estimate based on current selection (source nodes) - use node_count() to avoid allocation
+        // node_count() on the level rather than materializing it: no allocation.
         let estimated = new_kg
             .cursor
             .selection
@@ -851,7 +825,6 @@ impl KnowledgeGraph {
             None
         };
 
-        // Build temporal filter for edge-based traversal
         // Priority: temporal=False > at > during > config+temporal_context
         let temporal_filter = if temporal == Some(false) {
             None
@@ -889,7 +862,6 @@ impl KnowledgeGraph {
                     )
                 })
         } else {
-            // Auto: use config + temporal_context
             match &self.cursor.temporal_context {
                 TemporalContext::All => None,
                 TemporalContext::Today => self
@@ -921,9 +893,8 @@ impl KnowledgeGraph {
             }
         };
 
-        // All inputs are converted to pure Rust by now — run the traversal
-        // itself off-GIL so other Python threads keep making progress
-        // during a large multi-level expansion.
+        // All inputs are pure Rust by now — run the traversal off-GIL so other
+        // Python threads keep making progress during a large expansion.
         {
             let inner = &self.inner;
             let selection = &mut new_kg.cursor.selection;
@@ -1083,7 +1054,6 @@ impl KnowledgeGraph {
         source_type: Option<String>,
         target_type: Option<String>,
     ) -> PyResult<Self> {
-        // Convert properties PyDict → HashMap<String, Vec<String>>
         let copy_properties = if let Some(dict) = properties {
             let mut map = HashMap::new();
             for (key, value) in dict.iter() {
@@ -1096,13 +1066,11 @@ impl KnowledgeGraph {
             None
         };
 
-        // Detect the "chain temp" case before we mutate. When the inner
-        // Arc is shared (refcount > 1), the upcoming `Arc::make_mut`
-        // will clone, and the mutation lands on the clone rather than
-        // any other handle. Users who don't capture the return value
-        // (`g.select(...).create_connections(...)` without assigning
-        // back) silently lose the mutation. Emit a Python `UserWarning`
-        // so the failure mode is at least visible in stderr.
+        // Detect the "chain temp" case before we mutate. With the inner Arc
+        // shared (refcount > 1), the upcoming `Arc::make_mut` clones and the
+        // mutation lands on that clone, so a caller who does not capture the
+        // return value (`g.select(...).create_connections(...)` without
+        // assigning back) silently loses it.
         if Arc::strong_count(&self.inner) > 1 {
             let warning_module = py.import("warnings")?;
             warning_module.call_method1(
@@ -1148,7 +1116,7 @@ impl KnowledgeGraph {
                 } else {
                     CowSelection::new()
                 },
-                reports: self.cursor.reports.clone(), // Copy over existing reports
+                reports: self.cursor.reports.clone(),
                 last_mutation_stats: None,
                 temporal_context: self.cursor.temporal_context.clone(),
             },
@@ -1158,10 +1126,8 @@ impl KnowledgeGraph {
             lifecycle: crate::graph::GraphLifecycle::detached_from(&self.lifecycle),
         };
 
-        // Store the report in the new graph
         new_kg.add_report(OperationReport::ConnectionOperation(result));
 
-        // Just return the new KnowledgeGraph
         Ok(new_kg)
     }
 
@@ -1182,12 +1148,10 @@ impl KnowledgeGraph {
     ) -> PyResult<Self> {
         use kglite_core::api::mutation::{add_properties as core_add_properties, PropertySpec};
 
-        // Convert PyDict → HashMap<String, PropertySpec>
         let mut spec_map: HashMap<String, PropertySpec> = HashMap::new();
         for (key, value) in properties.iter() {
             let source_type: String = key.extract()?;
 
-            // Try as list first
             if let Ok(list) = value.extract::<Vec<String>>() {
                 if list.is_empty() {
                     spec_map.insert(source_type, PropertySpec::CopyAll);
@@ -1195,7 +1159,6 @@ impl KnowledgeGraph {
                     spec_map.insert(source_type, PropertySpec::CopyList(list));
                 }
             } else if let Ok(dict) = value.cast::<PyDict>() {
-                // It's a dict: {target_name: source_expr}
                 let mut rename_map: HashMap<String, String> = HashMap::new();
                 for (dk, dv) in dict.iter() {
                     let target_name: String = dk.extract()?;
@@ -1238,7 +1201,6 @@ impl KnowledgeGraph {
             lifecycle: crate::graph::GraphLifecycle::detached_from(&self.lifecycle),
         };
 
-        // Record plan step
         new_kg.cursor.selection.add_plan_step(
             PlanStep::new("ADD_PROPERTIES", None, result.nodes_updated)
                 .with_actual_rows(result.properties_set),
@@ -1262,7 +1224,6 @@ impl KnowledgeGraph {
     ) -> PyResult<Py<PyAny>> {
         let property_name = property.unwrap_or("title");
 
-        // Apply filtering and sorting if needed
         let mut filtered_kg = self.clone();
 
         if let Some(where_dict) = r#where {
@@ -1315,8 +1276,7 @@ impl KnowledgeGraph {
             })?;
         }
 
-        // Generate the property lists with titles already included.
-        // Pure-Rust scan over the selection — run off-GIL.
+        // Pure-Rust scan over the selection (titles included) — run off-GIL.
         let property_groups = {
             let inner = &filtered_kg.inner;
             let selection = &filtered_kg.cursor.selection;
@@ -1325,16 +1285,13 @@ impl KnowledgeGraph {
             })
         };
 
-        // If store_as is not provided, return the properties as a dictionary
         if store_as.is_none() {
-            // Format for dictionary display
             let dict_pairs =
                 kglite_core::api::fluent::format_for_dictionary(&property_groups, max_length);
 
             return Python::attach(|py| py_out::string_pairs_to_pydict(py, &dict_pairs));
         }
 
-        // Format for storage
         let nodes = kglite_core::api::fluent::format_for_storage(&property_groups, max_length);
 
         let graph = get_graph_mut(&mut self.inner);
@@ -1368,10 +1325,8 @@ impl KnowledgeGraph {
             lifecycle: crate::graph::GraphLifecycle::detached_from(&self.lifecycle),
         };
 
-        // Store the report
         new_kg.add_report(OperationReport::NodeOperation(result));
 
-        // Return the updated graph (no report in return value)
         Python::attach(|py| Ok(Py::new(py, new_kg)?.into_any()))
     }
 
@@ -1382,7 +1337,6 @@ impl KnowledgeGraph {
         level_index: Option<usize>,
         group_by: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
-        // group_by: compute statistics grouped by a property value
         if let Some(group_prop) = group_by {
             let groups = kglite_core::api::fluent::calculate_grouped_property_stats(
                 &self.inner,
@@ -1434,7 +1388,6 @@ impl KnowledgeGraph {
         keep_selection: Option<bool>,
         aggregate_connections: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
-        // If we're storing results, we'll need a mutable graph
         if let Some(target_property) = store_as {
             let graph = get_graph_mut(&mut self.inner);
 
@@ -1464,7 +1417,7 @@ impl KnowledgeGraph {
                             } else {
                                 CowSelection::new()
                             },
-                            reports: self.cursor.reports.clone(), // Copy existing reports
+                            reports: self.cursor.reports.clone(),
                             last_mutation_stats: None,
                             temporal_context: self.cursor.temporal_context.clone(),
                         },
@@ -1474,7 +1427,6 @@ impl KnowledgeGraph {
                         lifecycle: crate::graph::GraphLifecycle::detached_from(&self.lifecycle),
                     };
 
-                    // Store the calculation report
                     new_kg.add_report(OperationReport::CalculationOperation(report));
 
                     Python::attach(|py| Ok(Py::new(py, new_kg)?.into_any()))
@@ -1492,16 +1444,15 @@ impl KnowledgeGraph {
                 }
             }
         } else {
-            // Just computing without storing - no need to modify graph.
             // The temporary whole-graph clone + evaluation are pure Rust —
             // run off-GIL. (That `process_equation` demands `&mut DirGraph`
             // even when nothing is stored — forcing this deep clone — is a
-            // pre-existing core-signature wart, out of scope here.)
+            // pre-existing core-signature wart.)
             let inner = &self.inner;
             let selection = &self.cursor.selection;
             let process_result = py.detach(|| {
                 kglite_core::api::fluent::process_equation(
-                    &mut (**inner).clone(), // Create a temporary clone just for calculation
+                    &mut (**inner).clone(),
                     selection,
                     expression,
                     level_index,
@@ -1510,10 +1461,8 @@ impl KnowledgeGraph {
                 )
             });
 
-            // Handle regular errors with descriptive messages
             match process_result {
                 Ok(kglite_core::api::fluent::EvaluationResult::Computed(results)) => {
-                    // Check for errors
                     let error_count = results.iter().filter(|r| r.error_msg.is_some()).count();
                     if error_count == results.len() && !results.is_empty() {
                         if let Some(first_error) = results.iter().find(|r| r.error_msg.is_some()) {
@@ -1528,7 +1477,6 @@ impl KnowledgeGraph {
                         }
                     }
 
-                    // Filter out results with errors
                     let valid_results: Vec<StatResult> = results
                         .into_iter()
                         .filter(|r| r.error_msg.is_none())
@@ -1570,7 +1518,6 @@ impl KnowledgeGraph {
         group_by: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
         let _arena_guard = self.inner.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
-                                                         // group_by property: count nodes grouped by a property value
         if let Some(property) = group_by {
             let nodes = kglite_core::api::fluent::collect_selected_nodes(
                 &self.cursor.selection,
@@ -1613,9 +1560,7 @@ impl KnowledgeGraph {
             });
         }
 
-        // Default to grouping by parent if we have a nested structure
         let has_multiple_levels = self.cursor.selection.get_level_count() > 1;
-        // Use the provided group_by_parent if given, otherwise default based on structure
         let use_grouping = group_by_parent.unwrap_or(has_multiple_levels);
 
         if let Some(target_property) = store_as {
@@ -1644,7 +1589,7 @@ impl KnowledgeGraph {
                     } else {
                         CowSelection::new()
                     },
-                    reports: self.cursor.reports.clone(), // Copy existing reports
+                    reports: self.cursor.reports.clone(),
                     last_mutation_stats: None,
                     temporal_context: self.cursor.temporal_context.clone(),
                 },
@@ -1654,12 +1599,10 @@ impl KnowledgeGraph {
                 lifecycle: crate::graph::GraphLifecycle::detached_from(&self.lifecycle),
             };
 
-            // Add the report
             new_kg.add_report(OperationReport::CalculationOperation(result));
 
             Python::attach(|py| Ok(Py::new(py, new_kg)?.into_any()))
         } else if use_grouping {
-            // Return counts grouped by parent
             let counts = kglite_core::api::fluent::count_nodes_by_parent(
                 &self.inner,
                 &self.cursor.selection,
@@ -1667,7 +1610,6 @@ impl KnowledgeGraph {
             );
             py_out::convert_computation_results_for_python(counts)
         } else {
-            // Simple flat count
             let count =
                 kglite_core::api::fluent::count_nodes_in_level(&self.cursor.selection, level_index);
             Python::attach(|py| count.into_py_any(py))
@@ -1872,10 +1814,6 @@ impl KnowledgeGraph {
             &self.cursor.selection,
         ))
     }
-
-    // ================================================================
-    // Copy / Clone
-    // ================================================================
 
     /// Create an independent deep copy of this graph.
     ///

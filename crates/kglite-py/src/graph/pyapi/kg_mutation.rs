@@ -1881,12 +1881,10 @@ impl KnowledgeGraph {
     ///     # Data source provides all possible connections
     ///     all_connections = data_source.get_all_connections()
     ///
-    /// ```text
-    /// # Graph only has Person and Company loaded
-    /// # This will skip connections involving other node types
-    /// stats = graph.add_connections_from_source(all_connections)
-    /// ```
-    /// ```
+    ///     # Graph only has Person and Company loaded; connections involving
+    ///     # other node types are skipped.
+    ///     stats = graph.add_connections_from_source(all_connections)
+    ///     ```
     #[pyo3(signature = (connections, *, git_sha=None, modified_by=None))]
     fn add_connections_from_source(
         &mut self,

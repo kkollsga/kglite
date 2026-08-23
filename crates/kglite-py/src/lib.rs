@@ -1,33 +1,22 @@
-// src/lib.rs
+// The engine crate is aliased as `kglite_core` in this crate's source — see
+// Cargo.toml for the `package = "kglite"` indirection.
 
-// kglite-py is the PyO3 wrapper over the kglite engine crate
-// (aliased as `kglite_core` in this crate's source — see
-// Cargo.toml for the `package = "kglite"` indirection). The
-// local modules expose only the curated engine API plus PyO3-specific
-// wrapper concerns.
-
-// mimalloc as the global allocator. samply profile of the N-Triples
-// build showed libsystem_malloc accounting for ~32% of loader-thread
-// CPU time. mimalloc is consistently faster than macOS's default
-// allocator on small-object-heavy workloads (Strings, HashMaps, Vecs
-// in the parser hot loop). Pure Rust dependency — no system dep, just
-// a slightly larger build artifact.
+// mimalloc as the global allocator: a samply profile of the N-Triples build
+// showed libsystem_malloc at ~32% of loader-thread CPU, and mimalloc is
+// consistently faster than macOS's default on the small-object-heavy
+// workloads (Strings, HashMaps, Vecs) of the parser hot loop.
 //
-// Pinned to the mimalloc v2 series (`features = ["v2"]` in Cargo.toml),
-// NOT the default v3. Why (2026-07-08): a process that co-loads
-// `pyarrow==24.0.0` and `kglite` SIGSEGVs at interpreter teardown when
-// BOTH ship mimalloc v3. A three-mimalloc census of the crashing wheel
-// found the culprit pair — kglite's own v3 (this `#[global_allocator]`,
-// statically linked) and the v3 copy CPython 3.14 vendors into libarrow;
-// their independent thread-heap teardowns
-// (`_mi_theap_collect_retired`, lldb-confirmed inside libarrow's copy)
-// collide. v2 coexists with the v3 copy cleanly (verified 0×5 both
-// import orders). Dropping mimalloc entirely also fixes the crash but
-// costs the allocator win outright, and swapping to jemalloc or the
-// system allocator measured a 30-62% in-memory regression on the tracked
-// core benchmarks (2026-07-08) — unacceptable per the in-memory-wins
-// protocol. v2 keeps nearly all the throughput (core query benches flat;
-// ~3-4% on parse-heavy loads) while resolving the teardown clash.
+// Pinned to the v2 series (`features = ["v2"]` in Cargo.toml), NOT the
+// default v3. Why (2026-07-08): a process co-loading `pyarrow==24.0.0` and
+// `kglite` SIGSEGVs at interpreter teardown when BOTH ship mimalloc v3 —
+// kglite's own statically-linked v3 and the v3 copy CPython 3.14 vendors into
+// libarrow have colliding thread-heap teardowns (`_mi_theap_collect_retired`,
+// lldb-confirmed inside libarrow's copy). v2 coexists cleanly (verified 0×5
+// both import orders) and keeps nearly all the throughput (core benches flat;
+// ~3-4% on parse-heavy loads). The other exits were measured and rejected:
+// dropping mimalloc forfeits the win, and jemalloc or the system allocator
+// cost 30-62% on the tracked core benchmarks — unacceptable per the
+// in-memory-wins protocol.
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -41,10 +30,8 @@ mod okf;
 mod util;
 mod warning_policy;
 
-// The pyo3 wrapper depends on the kglite engine for everything
-// non-Python. Re-export the engine's `error` module so existing
-// `crate::error::*` paths in pyapi/, error_py.rs, the datatypes
-// shims, etc. resolve unchanged.
+// Re-exported so `crate::error::*` paths across pyapi/, error_py.rs and the
+// datatypes shims resolve unchanged.
 pub use kglite_core::error;
 
 use graph::pyapi::blueprint::{from_blueprint_rust, from_records_rust};
@@ -55,27 +42,20 @@ use graph::{KnowledgeGraph, Transaction};
 use kglite_core::api::io::load_file;
 
 /// Curated Rust-side façade for downstream binaries (notably
-/// `kglite-mcp-server`). This module is the **only** stable Rust
-/// API the kglite-py wrapper promises to keep — the underlying
-/// `pub mod graph` is public for tooling
-/// but their internals can move between minor releases. New
-/// consumers should import from `kglite::api::*` (or
-/// `kglite_core::api::*` from inside this crate's source, where
-/// the dep is aliased); breakage there is a semver concern.
+/// `kglite-mcp-server`), and the **only** stable Rust API this wrapper
+/// promises to keep: `pub mod graph` is public for tooling, but its internals
+/// can move between minor releases. Breakage here is a semver concern.
 ///
-/// The Python API (`#[pymethods]` on `KnowledgeGraph`, etc.) is
-/// independent — it stays as the wheel's primary surface.
+/// The Python API (`#[pymethods]` on `KnowledgeGraph`, etc.) is independent
+/// and stays the wheel's primary surface.
 pub mod api {
     pub use crate::datatypes::Value;
-    // Per-variant carriers for the Value enum's compound shapes:
-    // `Value::Node` / `Relationship` / `Path` carry these struct
-    // types; downstream Rust consumers (kglite-bolt-server's value adapter,
-    // and future Arrow/Polars exporters) want to pattern-match into them
-    // without re-deriving accessors.
+    // Carriers for `Value::Node` / `Relationship` / `Path`, re-exported so
+    // downstream consumers (bolt-server's value adapter) can pattern-match
+    // into them without re-deriving accessors.
     pub use crate::datatypes::values::{NodeValue, PathValue, RelValue};
-    // Typed error surface — KgError + KgErrorCode for the Python
-    // boundary; the bolt-server consumes them to map onto Neo4j
-    // `Neo.ClientError.*` wire codes via `BoltError::Query`.
+    // The bolt-server maps these onto Neo4j `Neo.ClientError.*` wire codes
+    // via `BoltError::Query`.
     pub use crate::error::{KgError, KgErrorCode};
     #[cfg(feature = "fastembed")]
     pub use crate::graph::embedder::fastembed::FastEmbedAdapter;
@@ -90,18 +70,12 @@ pub mod api {
     pub use kglite_core::api::DirGraph;
     pub use kglite_core::api::{explore_markdown, ExploreOptions};
 
-    /// Cypher parser + planner + executor surface. Downstream Rust
-    /// consumers (notably `kglite-mcp-server`) build their own
-    /// parse → rewrite_text_score → optimize → execute pipeline using
-    /// these items; the Python boundary in
-    /// `src/graph/pyapi/kg_core.rs::cypher` is the canonical example.
+    /// Raw parse → rewrite_text_score → optimize → execute surface, for
+    /// callers that need to reach into individual passes (planner
+    /// introspection, custom disabled-pass sets).
     ///
-    /// **For new consumers, prefer [`session`]** — it bundles the
-    /// canonical pipeline + transaction CoW into a single surface
-    /// so future drift between bindings is impossible. This raw
-    /// `cypher` re-export stays public for callers that need to
-    /// reach into specific passes (planner introspection,
-    /// custom-disabled-pass sets, etc.).
+    /// **Prefer [`session`]** otherwise: it bundles the canonical pipeline and
+    /// transaction CoW into one surface, so bindings cannot drift apart.
     pub mod cypher {
         pub use crate::graph::languages::cypher::execute_mutable;
         pub use crate::graph::languages::cypher::generate_explain_result;
@@ -117,11 +91,10 @@ pub mod api {
         pub use crate::graph::languages::cypher::OutputFormat;
     }
 
-    /// Canonical query + transaction surface. Single source of truth
-    /// for the Cypher pipeline (parse → validate → rewrite → optimize
-    /// → execute) and the snapshot/working CoW transaction model.
-    /// All bindings (pyapi, mcp-server, bolt-server, future Go/TS/JVM)
-    /// wrap this module's types and free functions.
+    /// Canonical query + transaction surface: single source of truth for the
+    /// Cypher pipeline (parse → validate → rewrite → optimize → execute) and
+    /// the snapshot/working CoW transaction model. Every binding wraps this
+    /// module rather than reimplementing either half.
     ///
     /// See `docs/rust/session.md` for the operator-facing guide.
     pub mod session {
@@ -132,23 +105,21 @@ pub mod api {
     }
 }
 
-/// Read-only accessor for the underlying [`DirGraph`] of a
-/// [`api::KnowledgeGraph`]. The struct field is private; this method
-/// gives downstream Rust binaries a stable handle to plug into the
-/// planner / executor surface in [`api::cypher`].
 impl crate::graph::KnowledgeGraph {
+    /// Read-only handle on the private inner [`DirGraph`], so downstream Rust
+    /// binaries can plug it into the planner / executor surface in
+    /// [`api::cypher`].
     pub fn dir(&self) -> &std::sync::Arc<kglite_core::api::DirGraph> {
         &self.inner
     }
 }
 
-/// Map a load failure (`load_file` / `load_kgl_bytes`, which return
-/// `io::Error`) to a *classifiable* typed exception, so callers can reliably
-/// distinguish "this `.kgl` is corrupt → rebuild from source" (`FileFormatError`)
-/// from "it isn't there" (`FileError`) or a genuine IO fault (`FileIoError`),
-/// instead of catching a broad `IOError`. A load that fails for any reason
-/// other than not-found / permission is treated as a format/corruption error
-/// (bad magic, truncated section, version mismatch, compression/codec failure).
+/// Map the `io::Error` a load returns onto a *classifiable* typed exception, so
+/// a caller can tell "this `.kgl` is corrupt → rebuild from source"
+/// (`FileFormatError`) from "it isn't there" (`FileError`) and a genuine IO
+/// fault (`FileIoError`) without catching a broad `IOError`. Anything that is
+/// neither not-found nor permission is treated as corruption (bad magic,
+/// truncated section, version mismatch, codec failure).
 fn load_err_to_pyerr(e: std::io::Error, path: Option<&str>) -> PyErr {
     use std::io::ErrorKind;
     let pb = || std::path::PathBuf::from(path.unwrap_or(""));
@@ -167,26 +138,23 @@ fn load_err_to_pyerr(e: std::io::Error, path: Option<&str>) -> PyErr {
 /// checkpoint just loaded does not contain.
 ///
 /// The log-less entry points (`kglite.load`, `kglite.open_session`) read the
-/// `.kgl` alone, so on such a path they hand back a graph that is silently
-/// missing committed writes. `kglite.open` refuses this outright
-/// (`durability::ensure_recovered`, applied by `open_or_create_graph`), but
-/// these two must not: reading a checkpoint while another process writes the
-/// path durably is the documented use of `load()`, and there a sidecar ahead
-/// of the checkpoint is the steady state rather than a fault. So the answer is
-/// the same one a human reader would want and no exception can give — say what
-/// is missing, name the log, and point at the entry point that replays it.
+/// `.kgl` alone, so they hand back a graph silently missing committed writes.
+/// `kglite.open` refuses that outright, but these two must not: reading a
+/// checkpoint while another process writes the path durably is the documented
+/// use of `load()`, and there a sidecar ahead of the checkpoint is the steady
+/// state, not a fault. So the warning says what is missing, names the log, and
+/// points at the entry point that replays it.
 ///
-/// The save side of this hazard stays a hard refusal
-/// (`ensure_save_target_recovered`): reading stale data is recoverable,
-/// stranding those frames in front of a newer checkpoint is not.
+/// The save side stays a hard refusal (`ensure_save_target_recovered`):
+/// reading stale data is recoverable, stranding those frames in front of a
+/// newer checkpoint is not.
 fn warn_if_sidecar_runs_ahead(py: Python<'_>, path: &str, checkpoint_lsn: u64) {
     use kglite_core::api::durable as wal;
 
     let checkpoint = std::path::Path::new(path);
-    // Only `Refused` is this function's business. An *unreadable* sidecar says
-    // nothing about the checkpoint that was just loaded successfully, and
-    // these entry points never touch the log, so it is not their failure to
-    // report.
+    // Only `Refused` is this function's business: an unreadable sidecar says
+    // nothing about a checkpoint that just loaded fine, and these entry points
+    // never touch the log, so it is not their failure to report.
     if !matches!(
         wal::ensure_recovered(checkpoint, checkpoint_lsn),
         Err(wal::DurableOpenError::Refused(_))
@@ -194,9 +162,8 @@ fn warn_if_sidecar_runs_ahead(py: Python<'_>, path: &str, checkpoint_lsn: u64) {
         return;
     }
     let wpath = wal::wal_path(checkpoint);
-    // Re-read to count the gap. `ensure_recovered` answers refused/not, and the
-    // count is what makes the warning actionable ("2 commits behind" is a
-    // decision; "behind" is a shrug). Only ever paid on the warning path.
+    // `ensure_recovered` answers refused/not; the count is what makes the
+    // warning actionable, and is only ever paid on the warning path.
     let ahead = wal::recover(&wpath)
         .map(|frames| frames.iter().filter(|f| f.lsn > checkpoint_lsn).count())
         .unwrap_or(0);
@@ -312,46 +279,15 @@ fn from_bytes(py: Python<'_>, data: &[u8]) -> PyResult<KnowledgeGraph> {
         .map_err(|e| load_err_to_pyerr(e, None))
 }
 
-/// Open a graph at `path`, loading it if the file/directory exists or
-/// creating a fresh one if it doesn't (load-or-create) — the embedded-DB
-/// lifecycle entry point. The returned graph remembers `path`, so a later
-/// bare `save()` (or the context-manager auto-save-on-close) writes back to
-/// it without re-specifying the target.
-///
-/// `storage` (`"mapped"` / `"disk"`) selects the backend for a graph being
-/// *created*, and requests one for a graph being opened. An existing path opens
-/// in the mode its checkpoint recorded — a `.kgl` written by a mapped graph
-/// comes back mapped, one written by a memory graph (or by a kglite old enough
-/// not to record the mode) comes back `"memory"`, and a disk graph is a
-/// directory and always opens `"disk"`.
-/// Passing `storage=` on top of that *converts*: memory ⇄ mapped is an explicit
-/// backend switch on the loaded graph, and the next `save()` records the new
-/// mode. The two disk directions have no in-place conversion (a disk graph is a
-/// directory, not a file) and raise `kglite.ArgumentError` naming the
-/// alternative, rather than being ignored — a silently-downgraded mode is
-/// indistinguishable from success.
-///
-/// **Durability differs between the two ways to build a graph, and the
-/// difference is structural.** `kglite.open()` attaches a WAL sidecar next to
-/// `path` and defaults to `durable="full"`. The `KnowledgeGraph(...)`
-/// constructor has no `durable` argument at all and is never durable: it
-/// produces a *detached* graph with no `source_path`, so there is no location
-/// for a log to live. `KnowledgeGraph(storage="mapped")` is therefore
-/// mapped-and-unlogged, while `open(path, storage="mapped")` on a fresh path is
-/// mapped-and-logged.
-///
-/// The `durable=` argument: a level name, a bool, or `None`.
-///
-/// `True`/`False` are accepted *spellings* of `"full"`/`"off"`, not a second
-/// code path — every form normalises to one [`DurabilityLevel`] here, at the
-/// single point where Python vocabulary becomes engine vocabulary, and
-/// nothing downstream knows which spelling was used.
-/// Normalise the `durable=` argument into one [`DurabilityLevel`].
+/// Normalise the `durable=` argument — a level name, a bool, or `None` — into
+/// one [`DurabilityLevel`]. `True`/`False` are accepted *spellings* of
+/// `"full"`/`"off"`, not a second code path: every form converges here, at the
+/// single point where Python vocabulary becomes engine vocabulary, and nothing
+/// downstream knows which spelling was used.
 ///
 /// A plain function rather than a `FromPyObject` impl: the trait's shape has
-/// moved across PyO3 releases, and nothing here needs to participate in
-/// generic extraction — `open` is the only caller, and it wants to own the
-/// error messages anyway.
+/// moved across PyO3 releases, and `open` is the only caller — it wants to own
+/// the error messages anyway.
 fn durable_level_from_arg(
     ob: &Bound<'_, PyAny>,
 ) -> PyResult<kglite_core::api::durable::DurabilityLevel> {
@@ -382,6 +318,34 @@ fn durable_level_from_arg(
     })
 }
 
+/// Open a graph at `path`, loading it if the file/directory exists or
+/// creating a fresh one if it doesn't (load-or-create) — the embedded-DB
+/// lifecycle entry point. The returned graph remembers `path`, so a later
+/// bare `save()` (or the context-manager auto-save-on-close) writes back to
+/// it without re-specifying the target.
+///
+/// `storage` (`"mapped"` / `"disk"`) selects the backend for a graph being
+/// *created*, and requests one for a graph being opened. An existing path opens
+/// in the mode its checkpoint recorded — a `.kgl` written by a mapped graph
+/// comes back mapped, one written by a memory graph (or by a kglite old enough
+/// not to record the mode) comes back `"memory"`, and a disk graph is a
+/// directory and always opens `"disk"`.
+/// Passing `storage=` on top of that *converts*: memory ⇄ mapped is an explicit
+/// backend switch on the loaded graph, and the next `save()` records the new
+/// mode. The two disk directions have no in-place conversion (a disk graph is a
+/// directory, not a file) and raise `kglite.ArgumentError` naming the
+/// alternative, rather than being ignored — a silently-downgraded mode is
+/// indistinguishable from success.
+///
+/// **Durability differs between the two ways to build a graph, and the
+/// difference is structural.** `kglite.open()` attaches a WAL sidecar next to
+/// `path` and defaults to `durable="full"`. The `KnowledgeGraph(...)`
+/// constructor has no `durable` argument at all and is never durable: it
+/// produces a *detached* graph with no `source_path`, so there is no location
+/// for a log to live. `KnowledgeGraph(storage="mapped")` is therefore
+/// mapped-and-unlogged, while `open(path, storage="mapped")` on a fresh path is
+/// mapped-and-logged.
+///
 /// Durability is **on by default**: each committed mutation is `fsync`'d to a
 /// `<path>-wal` sidecar before the call returns, and on open any WAL frames are
 /// replayed onto the loaded checkpoint to recover work committed since the last
@@ -431,50 +395,43 @@ fn open(
     use kglite_core::api::durable::DurabilityLevel;
     use kglite_core::api::GraphRead;
 
-    // Take write ownership *before* reading a byte. The window that loses a
-    // writer's work is open-to-save, not save itself: two processes that both
-    // load, both mutate, and both save produce two full snapshots, and the
-    // second one published wins outright. Locking at save time would be too
-    // late to notice.
+    // Take write ownership *before* reading a byte: the window that loses a
+    // writer's work is open-to-save, not save itself, so locking at save time
+    // would be too late to notice.
     //
-    // Fail-fast (`Duration::ZERO`) rather than waiting: `open()` is called on
+    // Fail-fast (`Duration::ZERO`) rather than waiting: `open()` runs on
     // request paths and in worker startup, where a blocked-for-30s open is a
-    // worse failure than a clear error. A caller that genuinely wants to queue
-    // can retry around the error.
+    // worse failure than a clear error a caller can retry around.
     let writer_lease = if lock {
         Some(
             py.detach(|| {
-                // `acquire_ex`, not `acquire`: the structured refusal is what
+                // `acquire_ex`, not `acquire`: the structured refusal
                 // separates "someone else holds this path" from "the lock file
                 // could not be created at all". `acquire` flattens both into
-                // one `io::Error`, and the advice appended below was therefore
-                // appended to *every* failure — a full disk or a read-only
-                // directory came back telling the caller to use
-                // `kglite.load(path)` instead, which fails the same way and
-                // sends them hunting for a writer that does not exist.
+                // one `io::Error`, so the advice appended below went out on a
+                // full disk or a read-only directory too — telling the caller
+                // to use `kglite.load(path)`, which fails identically.
                 kglite_core::api::io::GraphWriterLease::acquire_ex(
                     std::path::Path::new(&path),
                     std::time::Duration::ZERO,
                 )
             })
             .map_err(|refusal| {
-                // `holder` is `Some` only on a contention refusal (`acquire_ex`
-                // fills it from the owner record after the lock was found
-                // taken), so it is the classification itself rather than a
-                // proxy for one.
+                // `holder` is `Some` only on a contention refusal (filled from
+                // the owner record), so it is the classification itself rather
+                // than a proxy for one.
                 let contended = refusal.holder.is_some();
                 let error = refusal.error;
                 if !contended {
-                    // A genuine I/O failure: the engine's message already says
-                    // what went wrong with which path, and there is no second
-                    // process to route around.
+                    // A genuine I/O failure: the engine's message already names
+                    // path and fault, and there is no second process to route
+                    // around.
                     return crate::error_py::kg_to_pyerr(crate::error::KgError::FileIo(error));
                 }
                 // The engine's message is binding-neutral by design, so the
                 // Python-specific way out is appended here rather than baked
-                // into core. Most callers who hit this wanted to *read* a
-                // graph someone else is writing, and naming the call that
-                // does that turns a refusal into an answer.
+                // into core: most callers who hit this wanted to *read* a graph
+                // someone else is writing.
                 crate::error_py::kg_to_pyerr(crate::error::KgError::FileIo(std::io::Error::new(
                     error.kind(),
                     format!(
@@ -508,12 +465,11 @@ fn open(
     } else {
         KnowledgeGraph::construct(storage, Some(&path))?
     };
-    // An existing path is *loaded*, and the load already honours the mode the
-    // checkpoint recorded. A `storage=` that still disagrees is an explicit
-    // request to change the mode, so convert to it — and when the conversion is
-    // structurally impossible (either disk direction), refuse rather than hand
-    // back a mode the caller did not ask for, which is indistinguishable from
-    // success and has already invalidated one mapped-vs-memory comparison.
+    // The load already honours the mode the checkpoint recorded, so a
+    // `storage=` that still disagrees is an explicit request to change it.
+    // Refuse the structurally impossible directions rather than handing back a
+    // mode the caller did not ask for — that silence already invalidated one
+    // mapped-vs-memory comparison.
     if existed {
         if let Some(requested) = requested_mode {
             let actual = kglite_core::api::storage::live_storage_mode(&kg.inner);
@@ -538,27 +494,22 @@ fn open(
     // comes from the file, not from the `storage` argument.
     let level = match durable.as_ref() {
         Some(ob) => durable_level_from_arg(ob)?,
-        // Default stays the strongest level the mode supports. Disk keeps no
-        // log at any level, so it resolves to `off` instead of raising —
-        // unchanged from when `durable` was a plain tri-state bool.
+        // Default is the strongest level the mode supports; disk keeps no log
+        // at any level, so it resolves to `off` instead of raising.
         None if kg.inner.graph.is_disk() => DurabilityLevel::Off,
         None => DurabilityLevel::Full,
     };
-    // Called at every level, including `off`: recovery on open is a decision
-    // about the path's *data*, not only about how future writes are logged, and
-    // an `off` open over an unreplayed sidecar is refused rather than silently
-    // dropping committed writes. See `setup_durable`.
+    // Called at every level, `off` included — recovery on open is a decision
+    // about the path's *data*. See `setup_durable`.
     setup_durable(&mut kg, &path, level)?;
     Ok(kg)
 }
 
 /// Switch a just-opened graph to the mode the caller asked for.
 ///
-/// Thin by design: the transition itself, and the reason a disk direction has
-/// no transition to make, both live in `kglite::api::storage`, so the
-/// bolt/mcp servers convert and refuse on exactly the same terms. What stays
-/// here is the binding's part — reaching through the `Arc`, and letting the
-/// caller's error class own the message.
+/// Thin by design: the transition, and the reason a disk direction has none,
+/// live in `kglite::api::storage`, so the bolt/mcp servers convert and refuse
+/// on the same terms. Only the `Arc` reach stays here.
 fn convert_open_graph_to_mode(
     kg: &mut KnowledgeGraph,
     requested: kglite_core::api::storage::StorageMode,
@@ -573,44 +524,30 @@ fn convert_open_graph_to_mode(
 /// committed since the last checkpoint, wrap the backend in the write-capture
 /// layer, and open the WAL for append.
 ///
-/// **Called at every level, `off` included.** The sequence itself lives in
-/// `kglite::api::durable::open_log`, shared with the engine's `Session`, and it
-/// reads the sidecar even at `off` so an open over frames the checkpoint does
+/// **Called at every level, `off` included** — `kglite::api::durable::open_log`
+/// reads the sidecar even at `off`, so an open over frames the checkpoint does
 /// not contain is refused instead of silently discarding them at the next
-/// `save()`. What stays here is the binding's half: the disk refusal (whose
-/// message names *this* API's alternative) and the mapping from refusal
-/// category to Python exception class.
+/// `save()`. Only the binding's half stays here: the disk refusal and the
+/// mapping from refusal category to Python exception class.
 ///
 /// Storage-mode-agnostic by construction: the capture wrapper wraps the
-/// `GraphBackend` enum rather than a concrete backend, and both memory and
-/// mapped graphs mutate the same heap `StableDiGraph` underneath, so one
-/// capture path covers both. Disk is refused at every logging level — see the
-/// error below.
+/// `GraphBackend` enum rather than a concrete backend, and memory and mapped
+/// graphs mutate the same heap `StableDiGraph`, so one capture path covers
+/// both. Disk is refused at every logging level — see the error below.
 fn setup_durable(
     kg: &mut KnowledgeGraph,
     path: &str,
     level: kglite_core::api::durable::DurabilityLevel,
 ) -> PyResult<()> {
-    use kglite_core::api::GraphRead;
-    // `wal` stays a below-api reach (durable-transaction internals) —
-    // deferred to a high-level durable-transaction api lift.
     use kglite_core::api::durable as wal;
+    use kglite_core::api::GraphRead;
 
     if level.logs() && kg.inner.graph.is_disk() {
-        // `ValueError`, not one of the typed `kglite.*Error` classes, and that
-        // is deliberate: `error_py`'s taxonomy reserves the typed hierarchy for
-        // *engine* failures and keeps "argument-shape" rejections in their
-        // built-in family. An unsupported `durable` + `storage` combination is
-        // rejected at the Python API boundary before any engine work starts,
-        // so it belongs in the built-in family — as the pre-existing
-        // `test_durable_rejects_disk_mode` contract already fixed.
-        //
-        // Every logging level is refused here, not just `full`. The blocker is
-        // structural rather than a matter of barrier strength: there is no WAL
-        // for disk mode at any level, so `normal` would be exactly as
-        // unimplementable as `full`. Naming the requested level keeps the
-        // message honest for a caller who reasonably assumed the rungs were
-        // uniform across storage modes.
+        // `ValueError`, not a typed `kglite.*Error`: `error_py`'s taxonomy
+        // reserves the typed hierarchy for *engine* failures and keeps
+        // argument-shape rejections — rejected at the Python boundary before
+        // any engine work starts — in the built-in family, which is what
+        // `test_durable_rejects_disk_mode` already pins.
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
             "durable={:?} is not supported for storage='disk' (only 'off' is). \
              A disk graph commits by publishing an immutable generation, so its \
@@ -624,11 +561,6 @@ fn setup_durable(
         )));
     }
 
-    // The whole recover → replay → wrap → open-for-append sequence, plus the
-    // `off`-over-unreplayed-frames refusal, in one shared call. The error
-    // classes are the binding's own: an unreadable sidecar is an `IOError`, a
-    // replay that cannot be applied is a `RuntimeError`, and a refusal joins
-    // the `durable=` rejections above in the built-in `ValueError` family.
     let opened = wal::open_log(&mut kg.inner, std::path::Path::new(path), level).map_err(|e| {
         let message = e.to_string();
         match e {
@@ -779,10 +711,8 @@ fn _run_mcp_server(
     full.extend(argv);
 
     // Bridge the Python factory into the libpython-free server library as a
-    // Rust closure producing an `Arc<dyn Embedder>`. The closure re-acquires
-    // the GIL (`Python::attach`) only when the server actually calls it — at
-    // boot, if the manifest declares a Python embedder library. The argument is
-    // the `extensions.embedder` config as JSON, so Python owns library choice.
+    // Rust closure producing an `Arc<dyn Embedder>`; it re-acquires the GIL
+    // only when the server calls it, at boot.
     let factory: Option<kglite_mcp_server::PyEmbedderFactory> = embedder_factory.map(|f| {
         Box::new(move |config_json: &str| -> Result<std::sync::Arc<dyn kglite_core::api::Embedder>, String> {
             Python::attach(|py| {
@@ -839,8 +769,6 @@ fn kglite(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Transaction>()?;
     m.add_class::<ResultView>()?;
     m.add_class::<ResultIter>()?;
-    // Typed exception class hierarchy. Every kglite error surfaces as
-    // `kglite.KgError` or a more specific subclass.
     error_py::register(py, m)?;
     graphgen::register(py, m)?;
     okf::pyapi::register(py, m)?;

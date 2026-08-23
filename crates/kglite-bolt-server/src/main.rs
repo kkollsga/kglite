@@ -246,48 +246,38 @@ struct Cli {
     tls_key: Option<PathBuf>,
 }
 
-/// Environment variable mirroring `--neo4j-compat`.
 const NEO4J_COMPAT_ENV: &str = "KGLITE_BOLT_NEO4J_COMPAT";
 
-/// Environment variable mirroring `--save-on-exit`.
 const SAVE_ON_EXIT_ENV: &str = "KGLITE_BOLT_SAVE_ON_EXIT";
 
-/// Environment variable mirroring `--checkpoint-interval`.
 const CHECKPOINT_INTERVAL_ENV: &str = "KGLITE_BOLT_CHECKPOINT_INTERVAL";
 
-/// Environment variable mirroring `--durability`.
 const DURABILITY_ENV: &str = "KGLITE_BOLT_DURABILITY";
 
 /// The level this server logs at when neither the flag nor the environment
 /// says otherwise.
 ///
 /// `normal` — a commit this server acknowledges survives the server process
-/// dying. The measurement that picked it (R3.3, `bolt_durability:*` in
-/// `dev-docs/bench/results/results.csv`): at 4 contended writers on a 10k-node
-/// graph, `normal` cost nothing measurable against `off` (the two runs
-/// straddled zero at ±8% noise) while `full` cost **88%** of committed
-/// throughput — one device barrier per commit, taken inside the session lock
-/// every Bolt commit already serializes on, which also drove p95 from 0.9 ms
-/// to 76 ms and the conflict rate from 1.5% to 17%. Power-loss safety is
-/// therefore opt-in (`--durability full`) rather than the default, and the
-/// default is the level that is free.
+/// dying. The measurement that picked it (R3.3, `bolt_durability:*`): at 4
+/// contended writers on a 10k-node graph, `normal` cost nothing measurable
+/// against `off` (the two runs straddled zero at ±8% noise) while `full` cost
+/// **88%** of committed throughput — one device barrier per commit, taken
+/// inside the session lock every Bolt commit already serializes on, which also
+/// drove p95 from 0.9 ms to 76 ms and the conflict rate from 1.5% to 17%.
+/// Power-loss safety is therefore opt-in rather than free.
 ///
-/// A **default** level is degraded rather than enforced where the
-/// configuration cannot carry a log: `--readonly` (nothing commits) and
-/// disk-mode graphs (no logical WAL exists for them) serve at `off` with a log
-/// line saying so. An explicitly requested level is still a startup error in
-/// both cases — an operator who typed `--durability full` must not be quietly
-/// given something weaker.
+/// A **default** level is degraded to `off` where the configuration cannot
+/// carry a log; an explicitly requested one is a startup error — see
+/// [`Durability::level_requested`].
 const DEFAULT_DURABILITY: DurabilityLevel = DurabilityLevel::Normal;
 
 /// Read `name` as a boolean, accepting the spellings operators actually write.
 ///
 /// Parsed here rather than through clap's `env` support because clap would
-/// require exactly `true`/`false` for a flag, and the documented, obvious thing
-/// to write in a Compose file or unit file is `=1`. Accepts `1/true/yes/on` and
-/// `0/false/no/off`, any case. An unrecognised value is reported and ignored
-/// rather than silently treated as false, so a typo cannot quietly disable a
-/// setting the operator believes is on.
+/// require exactly `true`/`false` for a flag, and the obvious thing to write in
+/// a Compose file or unit file is `=1`. An unrecognised value is reported and
+/// ignored rather than silently treated as false, so a typo cannot quietly
+/// disable a setting the operator believes is on.
 fn env_flag(name: &str) -> Option<bool> {
     let raw = std::env::var(name).ok()?;
     match raw.trim().to_ascii_lowercase().as_str() {
@@ -308,16 +298,14 @@ fn env_flag(name: &str) -> Option<bool> {
 /// Parse a checkpoint interval in whole seconds.
 ///
 /// Shared by clap's `value_parser` and the environment mirror so the two
-/// spellings cannot accept different things. Both rejections are startup
-/// errors rather than a warn-and-ignore (the treatment `env_flag` gives a
-/// malformed *boolean*): an operator who asked for periodic checkpoints and
-/// mistyped the number would otherwise get a server that silently never
-/// checkpoints, which is the exact failure the flag exists to prevent.
+/// spellings cannot accept different things. A rejection is a startup error
+/// rather than the warn-and-ignore `env_flag` gives a malformed *boolean*: an
+/// operator who mistyped the number would otherwise get a server that silently
+/// never checkpoints, the exact failure the flag exists to prevent.
 ///
 /// `0` is refused rather than treated as "disabled": tokio's `interval(0)`
-/// panics, and a zero-second interval reads as "checkpoint constantly", which
-/// would pin the session lock and stall every writer. Omitting the flag is how
-/// you disable it.
+/// panics, and a zero-second interval would pin the session lock and stall
+/// every writer. Omitting the flag is how you disable it.
 fn parse_checkpoint_interval(raw: &str) -> Result<Duration, String> {
     let trimmed = raw.trim();
     let secs: u64 = trimmed.parse().map_err(|_| {
@@ -337,11 +325,8 @@ fn parse_checkpoint_interval(raw: &str) -> Result<Duration, String> {
     Ok(Duration::from_secs(secs))
 }
 
-/// Read the checkpoint interval from the environment, if set.
-///
-/// An empty value is "unset" (a Compose file's `KGLITE_BOLT_CHECKPOINT_INTERVAL=`
-/// with nothing after it); anything else must parse, or startup fails naming
-/// the variable.
+/// An empty value is "unset" (a Compose file's `VAR=` with nothing after it);
+/// anything else must parse, or startup fails naming the variable.
 fn env_checkpoint_interval() -> Result<Option<Duration>> {
     let Ok(raw) = std::env::var(CHECKPOINT_INTERVAL_ENV) else {
         return Ok(None);
@@ -358,10 +343,8 @@ fn env_checkpoint_interval() -> Result<Option<Duration>> {
 ///
 /// Shared by clap's `value_parser` and the environment mirror, on the engine's
 /// own [`DurabilityLevel::from_name`], so the server cannot end up accepting a
-/// vocabulary the log itself does not speak. A bad value is a startup error
-/// rather than a warn-and-ignore: an operator who asked for durability and
-/// mistyped the level would otherwise get a server that silently logs nothing,
-/// which is the exact failure the flag exists to prevent.
+/// vocabulary the log itself does not speak. A bad value is a startup error,
+/// for the reason [`parse_checkpoint_interval`] gives.
 fn parse_durability_level(raw: &str) -> Result<DurabilityLevel, String> {
     let trimmed = raw.trim();
     DurabilityLevel::from_name(&trimmed.to_ascii_lowercase()).ok_or_else(|| {
@@ -372,11 +355,7 @@ fn parse_durability_level(raw: &str) -> Result<DurabilityLevel, String> {
     })
 }
 
-/// Read the durability level from the environment, if set.
-///
-/// An empty value is "unset" (a Compose file's `KGLITE_BOLT_DURABILITY=` with
-/// nothing after it); anything else must parse, or startup fails naming the
-/// variable.
+/// Empty is "unset", as in [`env_checkpoint_interval`].
 fn env_durability_level() -> Result<Option<DurabilityLevel>> {
     let Ok(raw) = std::env::var(DURABILITY_ENV) else {
         return Ok(None);
@@ -398,8 +377,7 @@ fn env_durability_level() -> Result<Option<DurabilityLevel>> {
 ///
 /// The disk-mode refusal is the engine's ([`Session::open_durable`]) and is not
 /// duplicated here: it needs the opened graph, and its message already names
-/// the reason. What this function owes the operator is the two decisions that
-/// can be made before anything is opened.
+/// the reason.
 fn ensure_durability_supported(level: DurabilityLevel, readonly: bool) -> Result<()> {
     if level.logs() && readonly {
         anyhow::bail!(
@@ -474,17 +452,14 @@ struct Durability {
 
 impl Durability {
     /// Flag OR environment for each setting, the flag winning when both are
-    /// present — the `--neo4j-compat` precedent. A malformed interval or level
-    /// is a startup error (see [`parse_checkpoint_interval`] /
-    /// [`parse_durability_level`]), never a silently disabled checkpoint or a
-    /// silently unlogged server.
+    /// present — the `--neo4j-compat` precedent.
     ///
     /// The `--readonly` refusals run here, before the graph is touched, so an
     /// impossible configuration fails fast; the storage-mode refusals need the
     /// opened graph, so [`Self::ensure_supported`] is called again with it.
     ///
-    /// A read-only server also degrades the *default* level to `off` here
-    /// rather than refusing it — see [`Durability::level_requested`].
+    /// A read-only server degrades the *default* level to `off` here rather
+    /// than refusing it — see [`Durability::level_requested`].
     fn resolve(cli: &Cli) -> Result<Self> {
         let (level, level_requested) = match cli.durability {
             Some(level) => (level, true),
@@ -573,12 +548,10 @@ fn spawn_checkpoint_task(
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
         // Delay, not tokio's default Burst. `Session::save` holds the session
-        // lock for the whole write, so a save that outruns the interval is
-        // precisely the case Burst handles worst: it answers one slow
-        // checkpoint by firing every missed tick back-to-back, stalling
-        // writers again for each. Delay re-bases the schedule on when the slow
-        // tick finished, so consecutive checkpoints stay at least `interval`
-        // apart no matter how long a save takes.
+        // lock for the whole write, and Burst answers one slow checkpoint by
+        // firing every missed tick back-to-back, stalling writers again for
+        // each. Delay re-bases the schedule on when the slow tick finished, so
+        // consecutive checkpoints stay at least `interval` apart.
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         // `interval` completes its first tick immediately; consume it so the
         // first checkpoint lands one interval in. Checkpointing at startup
@@ -618,9 +591,8 @@ fn spawn_checkpoint_task(
 /// setups the typical pattern is a reverse proxy (nginx, Caddy) terminating
 /// TLS instead.
 fn read_tls_config(cert_path: &Path, key_path: &Path) -> Result<boltr::server::TlsConfig> {
-    // rustls 0.23+ requires a process-wide crypto provider. Install `ring`
-    // once at startup; ignore the result — duplicate installation is benign
-    // (only the first wins).
+    // rustls 0.23+ requires a process-wide crypto provider. The result is
+    // ignored because a duplicate installation is benign (only the first wins).
     let _ = rustls::crypto::ring::default_provider().install_default();
     let cert_pem = std::fs::read(cert_path)
         .with_context(|| format!("reading TLS cert {}", cert_path.display()))?;
@@ -649,7 +621,6 @@ async fn shutdown_signal() {
             }
         }
         Err(e) => {
-            // Registration can only fail on a platform/permission problem.
             // Degrade to SIGINT rather than refusing to serve, but say so:
             // silently serving without the SIGTERM path is exactly the
             // failure this function exists to remove.
@@ -671,8 +642,7 @@ async fn shutdown_signal() {
 }
 
 fn init_tracing() {
-    // Match kglite-mcp-server's filter: respect RUST_LOG, default to
-    // info for our crate and warn for everything else.
+    // The same filter kglite-mcp-server uses.
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("kglite_bolt_server=info,boltr=warn,warn"));
     tracing_subscriber::fmt()
@@ -703,12 +673,8 @@ async fn serve() -> Result<()> {
 
     let cli = Cli::parse();
 
-    // Exists → load in the mode the checkpoint recorded. Absent → error by
-    // default (a missing `.kgl` is almost always a typo), unless `--storage`
-    // opts in to creating a fresh graph (serve-and-build). An explicit
-    // `--storage` on an existing graph is a conversion request, honoured or
-    // refused — never dropped. Mirrors the wheel's `kglite.open(path,
-    // storage=...)` exactly.
+    // Mirrors the wheel's `kglite.open(path, storage=...)` exactly, down to a
+    // missing path being an error unless `--storage` opts in to creating one.
     let requested_mode = cli
         .storage
         .as_deref()
@@ -733,10 +699,9 @@ async fn serve() -> Result<()> {
     // *default* level to `off` there, and the shutdown flush below must not
     // then call `sync()` on a session that has no log.
     durability.level = started.level;
-    // Bind the lease for the whole of `serve`. `_writer_lease` rather than
-    // `_`: a bare `_` drops it here, releasing write ownership before the
-    // first client connects. It is released by this binding going out of
-    // scope, i.e. after `BoltServer::serve` returns at shutdown.
+    // `_writer_lease` rather than `_`: a bare `_` drops it here, releasing
+    // write ownership before the first client connects. This binding holds it
+    // until after `BoltServer::serve` returns at shutdown.
     let _writer_lease = started.writer_lease;
     tracing::info!(
         disposition = match started.disposition {
@@ -758,21 +723,14 @@ async fn serve() -> Result<()> {
     // refusal has already fired inside `start_graph`, where the engine owns it.
     durability.ensure_supported(cli.readonly, Some(started.live_mode))?;
 
-    // Address advertised in route() responses for neo4j:// (cluster-aware)
-    // drivers. Default: format the bind
-    // address; override via --advertise-addr.
     let advertised_addr = cli
         .advertise_addr
         .clone()
         .unwrap_or_else(|| format!("{}:{}", cli.bind, cli.port));
-    // LOAD CSV filesystem access. Denied unless the operator named an import
-    // directory: a Bolt client is remote, so this capability is opt-in.
     let csv_import = match cli.allow_csv_import.clone() {
         Some(dir) => CsvImportPolicy::Directory(dir),
         None => CsvImportPolicy::Denied,
     };
-    // Flag OR environment: either turns compatibility on, and the flag wins when
-    // the two disagree.
     let neo4j_compat = cli.neo4j_compat || env_flag(NEO4J_COMPAT_ENV).unwrap_or(false);
     let identity = if neo4j_compat {
         ServerIdentity::Neo4jCompatible
@@ -793,15 +751,15 @@ async fn serve() -> Result<()> {
         identity,
         cli.auth_user.clone(),
     );
-    // Keep the served graph reachable after the backend moves into the
-    // server: `serve` consumes the builder, and the exit hook below runs once
-    // the accept loop is done — while `_writer_lease` is still held, so the
-    // save cannot race another process taking write ownership.
+    // Keep the served graph reachable after the backend moves into the server:
+    // the exit hook below runs once the accept loop is done, while
+    // `_writer_lease` is still held, so the save cannot race another process
+    // taking write ownership.
     let exit_session = backend.session_handle();
     let served_path = backend.graph_path().to_path_buf();
-    // Cloned out for the same reason: the periodic task outlives the move of
-    // the backend into the server, and must record its saves in the backend's
-    // own skip-state so the verb and the task agree on what is already on disk.
+    // Cloned out for the same reason, and it must be the backend's own
+    // skip-state so `CALL db.checkpoint()` and the task agree on what is
+    // already on disk.
     let checkpoint_state = backend.checkpoint_state();
 
     let addr = SocketAddr::new(cli.bind, cli.port);
@@ -816,9 +774,6 @@ async fn serve() -> Result<()> {
         checkpoint_interval_secs = durability.checkpoint_interval.map(|d| d.as_secs()),
         "Bolt server starting"
     );
-    // Armed before the accept loop and stopped after it, the boltr idle-reaper
-    // shape: a task that only makes sense while the server is serving is owned
-    // by the same scope that serves.
     let checkpoint_task = durability.checkpoint_interval.map(|interval| {
         tracing::info!(
             interval_secs = interval.as_secs(),
@@ -849,16 +804,14 @@ async fn serve() -> Result<()> {
     .await
 }
 
-/// Everything between `BoltServer::builder` and `serve`: session/message
-/// bounds, the SIGINT/SIGTERM shutdown future, idle timeout, TLS, and the
-/// `--auth basic` validator. Split from [`serve`] purely to keep each half
-/// readable; the ordering of these calls carries no invariants.
+/// Everything between `BoltServer::builder` and `serve`. Split from [`serve`]
+/// purely to keep each half readable; the ordering of these calls carries no
+/// invariants.
 fn configure_builder(cli: &Cli, backend: KgliteBackend) -> Result<BoltServer<KgliteBackend>> {
     let mut builder = BoltServer::builder(backend)
         .max_sessions(cli.max_sessions)
         .max_message_size(cli.max_message_size)
-        // A single SIGINT or SIGTERM triggers graceful shutdown. Subsequent
-        // signals bypass this and let the default handler abort.
+        // Subsequent signals bypass this and let the default handler abort.
         .shutdown(shutdown_signal());
 
     if let Some(secs) = cli.idle_timeout {
@@ -874,9 +827,8 @@ fn configure_builder(cli: &Cli, backend: KgliteBackend) -> Result<BoltServer<Kgl
         );
     }
 
-    // Wire `--auth basic` to a BasicAuthValidator. `--auth none` leaves the validator unset — boltr accepts any LOGON
-    // credentials in that mode (test #1 connects with default
-    // ("neo4j", "password") which is fine).
+    // `--auth none` leaves the validator unset — boltr accepts any LOGON
+    // credentials in that mode.
     if matches!(cli.auth, AuthScheme::Basic) {
         let user = cli.auth_user.clone().ok_or_else(|| {
             anyhow::anyhow!("--auth basic requires both --auth-user and --auth-pass")
@@ -950,7 +902,6 @@ async fn finish_shutdown(
 mod tests {
     use super::*;
 
-    /// A unique scratch directory for a test that writes a real `.kgl`.
     /// Process id + nanosecond clock so parallel test threads (and parallel
     /// `cargo test` invocations) cannot collide.
     fn scratch_dir(tag: &str) -> PathBuf {

@@ -7,35 +7,30 @@ use crate::graph::core::pattern_matching::{Pattern, PatternElement, PropertyMatc
 use crate::graph::schema::DirGraph;
 use std::collections::{HashMap, HashSet};
 
-/// Fold OR chains of equalities on the same `variable.property` into a
-/// single IN predicate.
-///
-/// Example: `WHERE n.name = 'A' OR n.name = 'B' OR n.name = 'C'`
-/// becomes:  `WHERE n.name IN ['A', 'B', 'C']`
+/// Fold OR chains of equalities on the same `variable.property` into a single
+/// IN predicate: `n.name = 'A' OR n.name = 'B'` → `n.name IN ['A', 'B']`.
 ///
 /// This enables predicate pushdown into MATCH patterns and index
 /// acceleration, which is why a second `push_where_into_match` pass is
 /// registered immediately after this one — the first runs before it and
 /// cannot see the IN predicates this creates.
 ///
-/// It only folds equalities on one and the same property, with a literal or
-/// parameter on the other side. A chain across *different* properties is left
-/// alone and reaches the executor as a genuine one-level-per-term predicate
-/// tree, which is the shape that costs the most stack (see
-/// `super::super::stack_probe`).
+/// Why-bail: only equalities on one and the same property, with a literal or
+/// parameter on the other side, fold. A chain across *different* properties
+/// reaches the executor as a genuine one-level-per-term predicate tree, the
+/// shape that costs the most stack (see `super::super::stack_probe`).
 ///
-/// Note this is a *planner* pass, so it cannot rescue a chain long enough to
-/// exhaust the parser's nesting budget: the parse fails first. The budget
-/// error names the `IN [...]` rewrite for exactly that reason.
+/// As a *planner* pass it cannot rescue a chain long enough to exhaust the
+/// parser's nesting budget: the parse fails first, which is why the budget
+/// error names the `IN [...]` rewrite.
 pub(super) fn fold_or_to_in(query: &mut CypherQuery) {
     for clause in &mut query.clauses {
         match clause {
             Clause::Where(ref mut w) => {
                 w.predicate = fold_or_to_in_pred(&w.predicate);
             }
-            // An `OPTIONAL MATCH … WHERE x.p = 1 OR x.p = 2` carries its
-            // predicate in-clause; folding it here keeps the two spellings of
-            // one filter on the same plan.
+            // An OPTIONAL MATCH carries its predicate in-clause; folding it
+            // here keeps both spellings of one filter on the same plan.
             Clause::Match(ref mut m) | Clause::OptionalMatch(ref mut m) => {
                 if let Some(ref mut w) = m.where_clause {
                     w.predicate = fold_or_to_in_pred(&w.predicate);
@@ -46,7 +41,6 @@ pub(super) fn fold_or_to_in(query: &mut CypherQuery) {
     }
 }
 
-/// Collect node/edge variable names bound by a MATCH pattern.
 fn collect_match_bound_vars(m: &MatchClause, out: &mut HashSet<String>) {
     for pattern in &m.patterns {
         for el in &pattern.elements {
@@ -80,9 +74,7 @@ fn collect_match_bound_vars(m: &MatchClause, out: &mut HashSet<String>) {
 /// is preserved via an explicit alias.
 pub(super) fn rewrite_count_bound_var_to_star(query: &mut CypherQuery) {
     // Bail if any clause could reference the count expression by its original
-    // form (HAVING / ORDER BY) or re-project the variable (WITH). Restricting to
-    // a single-item terminal `RETURN count(v)` keeps the rewrite trivially safe
-    // and still covers the hot shapes (deep-path / rel-type counts).
+    // form (ORDER BY) or re-project the variable (WITH).
     if query
         .clauses
         .iter()
@@ -106,9 +98,10 @@ pub(super) fn rewrite_count_bound_var_to_star(query: &mut CypherQuery) {
 
     for c in &mut query.clauses {
         if let Clause::Return(r) = c {
-            // Single, non-DISTINCT, no-HAVING RETURN of exactly `count(v)`.
-            // (Multi-item / grouped / HAVING shapes can reference the original
-            // `count(v)` elsewhere — leave those to the generic path.)
+            // Multi-item / grouped / HAVING shapes can reference the original
+            // `count(v)` elsewhere; restricting to a single-item terminal
+            // RETURN keeps the rewrite trivially safe and still covers the hot
+            // shapes (deep-path / rel-type counts).
             if r.distinct || r.having.is_some() || r.items.len() != 1 {
                 continue;
             }
@@ -142,26 +135,21 @@ pub(super) fn rewrite_count_bound_var_to_star(query: &mut CypherQuery) {
     }
 }
 
-/// Recursively fold OR chains of same-property equalities into IN predicates.
 pub(super) fn fold_or_to_in_pred(pred: &Predicate) -> Predicate {
     match pred {
         Predicate::Or(_, _) => {
-            // Collect all OR-chained equality comparisons
             let mut equalities: Vec<(String, String, Expression)> = Vec::new();
             let mut other_preds: Vec<Predicate> = Vec::new();
             collect_or_equalities(pred, &mut equalities, &mut other_preds);
 
-            // Group equalities by (variable, property)
             let mut groups: std::collections::HashMap<(String, String), Vec<Expression>> =
                 std::collections::HashMap::new();
             for (var, prop, val_expr) in equalities {
                 groups.entry((var, prop)).or_default().push(val_expr);
             }
 
-            // Build result predicates
             let mut result_preds: Vec<Predicate> = Vec::new();
 
-            // Convert groups with 2+ equalities into IN predicates
             for ((var, prop), values) in groups {
                 if values.len() >= 2 {
                     result_preds.push(Predicate::In {
@@ -172,7 +160,6 @@ pub(super) fn fold_or_to_in_pred(pred: &Predicate) -> Predicate {
                         list: values,
                     });
                 } else {
-                    // Single equality — keep as comparison
                     result_preds.push(Predicate::Comparison {
                         left: Expression::PropertyAccess {
                             variable: var,
@@ -184,12 +171,10 @@ pub(super) fn fold_or_to_in_pred(pred: &Predicate) -> Predicate {
                 }
             }
 
-            // Add back non-equality predicates (recursively folded)
             for p in other_preds {
                 result_preds.push(fold_or_to_in_pred(&p));
             }
 
-            // Combine with OR
             if result_preds.len() == 1 {
                 result_preds.pop().unwrap()
             } else {
@@ -209,7 +194,6 @@ pub(super) fn fold_or_to_in_pred(pred: &Predicate) -> Predicate {
     }
 }
 
-/// Collect equalities from an OR chain. Non-equality predicates go to `others`.
 pub(super) fn collect_or_equalities(
     pred: &Predicate,
     equalities: &mut Vec<(String, String, Expression)>,
@@ -270,17 +254,12 @@ pub(super) fn collect_or_equalities(
 ///
 /// Pre-fix the materialised path expanded all 340k :P31 inbound rows,
 /// 340k OPTIONAL P27 expansions, 309k group buckets, then truncated to
-/// 15 — 547ms warm, 64s cold. Post-fix the aggregator stops at 15
-/// distinct `x` keys and only continues processing rows whose key is
-/// already in the set (≈ a few hundred rows for the duplicate `x`s
-/// in the first 15-key window).
+/// 15 — 547ms warm, 64s cold.
 pub(super) fn push_limit_into_aggregate(query: &mut CypherQuery, _graph: &DirGraph) {
     use super::super::ast::is_aggregate_expression;
 
-    // Look for two-clause windows: aggregating projection followed by LIMIT.
     let mut i = 0;
     while i + 1 < query.clauses.len() {
-        // Extract the literal LIMIT N — must be a positive Int64.
         let limit_n = match &query.clauses[i + 1] {
             Clause::Limit(l) => match &l.count {
                 Expression::Literal(Value::Int64(n)) if *n > 0 => *n as usize,
@@ -295,10 +274,8 @@ pub(super) fn push_limit_into_aggregate(query: &mut CypherQuery, _graph: &DirGra
             }
         };
 
-        // The clause directly preceding LIMIT must be a RETURN or WITH
-        // that has at least one group key AND at least one aggregate.
-        // Pure-aggregate (no group keys) and pure-projection (no
-        // aggregates) shapes don't benefit from this rewrite.
+        // Require both a group key and an aggregate: pure-aggregate (no group
+        // keys) and pure-projection (no aggregates) shapes don't benefit.
         let (has_group_key, has_agg) = match &query.clauses[i] {
             Clause::Return(r) => {
                 if r.distinct || r.having.is_some() {
@@ -341,8 +318,7 @@ pub(super) fn push_limit_into_aggregate(query: &mut CypherQuery, _graph: &DirGra
             continue;
         }
 
-        // Stamp the hint. The aggregator reads it; the LIMIT clause
-        // stays in the plan as a final safety net.
+        // The LIMIT clause stays in the plan as a final safety net.
         match &mut query.clauses[i] {
             Clause::Return(r) => r.group_limit_hint = Some(limit_n),
             Clause::With(w) => w.group_limit_hint = Some(limit_n),
@@ -387,7 +363,6 @@ pub(super) fn push_limit_into_match(query: &mut CypherQuery, _graph: &DirGraph) 
             continue;
         };
 
-        // Safety check: RETURN must have no aggregation, no DISTINCT, no window functions
         let safe = if let Clause::Return(r) = &query.clauses[return_offset] {
             !r.distinct
                 && !r
@@ -406,7 +381,6 @@ pub(super) fn push_limit_into_match(query: &mut CypherQuery, _graph: &DirGraph) 
             continue;
         }
 
-        // Extract LIMIT value — must be a literal positive integer
         let limit_val = if let Clause::Limit(l) = &query.clauses[limit_offset] {
             match &l.count {
                 Expression::Literal(Value::Int64(n)) if *n > 0 => Some(*n as usize),
@@ -464,8 +438,7 @@ pub(super) fn push_limit_into_match(query: &mut CypherQuery, _graph: &DirGraph) 
             continue;
         }
 
-        // Safe to push: single MATCH clause with a single pattern. The
-        // executor inlines pushable WHERE predicates into the pattern
+        // The executor inlines pushable WHERE predicates into the pattern
         // (`push_where_into_match` runs earlier in the optimizer), so the
         // hint is exact in both with-WHERE and without-WHERE cases.
         if let Clause::Match(ref mut m) = query.clauses[i] {
@@ -478,18 +451,16 @@ pub(super) fn push_limit_into_match(query: &mut CypherQuery, _graph: &DirGraph) 
 /// The single node variable an *aggregate-only* projection reads, when every
 /// item is a multiplicity-invariant aggregate over that one variable.
 ///
-/// This is the escape analysis behind the aggregate route of
-/// [`push_distinct_into_match`], and it is a **whitelist on item shape**, not
-/// a variable walk: an item qualifies only as `agg(v)` or `agg(v.prop)` where
-/// `agg` is `min`/`max`/`count(DISTINCT …)`/`collect(DISTINCT …)`. So a
-/// variable "escapes to the consumer" — appears in any projection item, as a
-/// grouping key, an aggregate argument, or anywhere inside an item expression
-/// — iff it is the `v` this returns. `RETURN p.id, count(DISTINCT f)` is
-/// rejected because `p.id` is not an aggregate at all, which is what keeps its
-/// answer per-source; `RETURN count(DISTINCT f) + 1` is rejected because the
-/// item is an addition, not an aggregate call. Anything the whitelist does not
-/// recognise is rejected, so a new `Expression` variant cannot silently smuggle
-/// a second variable past it.
+/// The escape analysis behind the aggregate route of
+/// [`push_distinct_into_match`], and a **whitelist on item shape**, not a
+/// variable walk: an item qualifies only as `agg(v)` or `agg(v.prop)` where
+/// `agg` is `min`/`max`/`count(DISTINCT …)`/`collect(DISTINCT …)`, so a
+/// variable escapes to the consumer iff it is the `v` this returns.
+/// `RETURN p.id, count(DISTINCT f)` is rejected because `p.id` is not an
+/// aggregate at all, which is what keeps its answer per-source; `RETURN
+/// count(DISTINCT f) + 1` because the item is an addition, not an aggregate
+/// call. Anything the whitelist does not recognise is rejected, so a new
+/// `Expression` variant cannot silently smuggle a second variable past it.
 fn aggregate_only_dedup_var(items: &[ReturnItem]) -> Option<String> {
     if items.is_empty() {
         return None;
@@ -552,16 +523,14 @@ fn aggregate_only_dedup_var(items: &[ReturnItem]) -> Option<String> {
 /// MATCH) can reject exactly that representative while the dropped one would
 /// have survived — losing the target entirely.
 ///
-/// Detects patterns: MATCH → [WHERE] → RETURN/WITH
+/// Pattern matched: MATCH → [WHERE] → RETURN.
 pub(super) fn push_distinct_into_match(query: &mut CypherQuery) {
-    // Find MATCH + RETURN DISTINCT (with optional WHERE in between)
     for i in 0..query.clauses.len() {
         let match_idx = match &query.clauses[i] {
             Clause::Match(_) => i,
             _ => continue,
         };
 
-        // Find the RETURN clause (skip optional WHERE)
         let return_idx = if match_idx + 1 < query.clauses.len() {
             match &query.clauses[match_idx + 1] {
                 Clause::Return(_) => match_idx + 1,
@@ -597,9 +566,8 @@ pub(super) fn push_distinct_into_match(query: &mut CypherQuery) {
             continue;
         };
         let dv = &hint.var;
-        // Verify the variable is a node variable in the MATCH pattern, and
-        // that the clause has exactly one pattern (see the doc comment: with
-        // comma patterns the hint deduplicates before the join).
+        // Node variable, single-pattern MATCH only — with comma patterns the
+        // hint would deduplicate before the join (see the doc comment).
         if let Clause::Match(ref mc) = &query.clauses[match_idx] {
             if mc.patterns.len() != 1 {
                 continue;
@@ -617,7 +585,6 @@ pub(super) fn push_distinct_into_match(query: &mut CypherQuery) {
                 continue;
             }
         }
-        // Set the hint
         if let Clause::Match(ref mut mc) = query.clauses[match_idx] {
             mc.distinct_node_hint = Some(hint);
         }
@@ -702,11 +669,9 @@ struct TextScoreCollector {
 /// Classify `text_score`'s query argument: `Some(text)` to embed, or `None`
 /// when the argument is already a vector and passes through untouched.
 ///
-/// A vector query collects nothing, and `execute` gates the embedder on a
-/// non-empty collect list — so no embedder is consulted and the query runs
-/// without one. A string stays *text* even when it looks like `"[1.0, 2.0]"`;
-/// the legacy JSON-string vector form is a `vector_score` compatibility path
-/// only (see CYPHER.md).
+/// A string stays *text* even when it looks like `"[1.0, 2.0]"`; the legacy
+/// JSON-string vector form is a `vector_score` compatibility path only (see
+/// CYPHER.md).
 fn text_score_query_arg(
     arg: &Expression,
     params: &HashMap<String, Value>,
@@ -801,7 +766,6 @@ impl TextScoreCollector {
         Ok(())
     }
 
-    /// Property expressions on a CREATE / MERGE pattern's elements.
     fn rewrite_write_pattern(
         &mut self,
         pattern: &mut CreatePattern,
@@ -819,7 +783,6 @@ impl TextScoreCollector {
         Ok(())
     }
 
-    /// SET items — a `SET` clause's own, or a MERGE's `ON CREATE`/`ON MATCH`.
     fn rewrite_set_items(
         &mut self,
         items: &mut [SetItem],
@@ -836,12 +799,9 @@ impl TextScoreCollector {
         Ok(())
     }
     /// Rewrite one `text_score(node, col, query [, metric])` call in place into
-    /// `vector_score(node, '{col}_emb', query [, metric])`.
-    ///
-    /// A *text* query (string literal, or `$param` bound to a string) is
-    /// collected here and replaced by the `$__ts_N` parameter the caller
-    /// embeds into. A *vector* query (list literal, or `$param` bound to a
-    /// list) is left exactly as written — see [`text_score_query_arg`].
+    /// `vector_score(node, '{col}_emb', query [, metric])`. A text query is
+    /// replaced by the `$__ts_N` parameter the caller embeds into; a vector
+    /// query is left exactly as written — see [`text_score_query_arg`].
     fn rewrite_text_score_call(
         &mut self,
         name: &mut String,
@@ -856,7 +816,6 @@ impl TextScoreCollector {
             );
         }
 
-        // arg[1]: text column — must be a string literal
         let col_name = match &args[1] {
             Expression::Literal(Value::String(s)) => s.clone(),
             _ => {
@@ -891,7 +850,6 @@ impl TextScoreCollector {
         pname
     }
 
-    /// Rewrite an expression in-place.  Turns `text_score(...)` into `vector_score(...)`.
     fn rewrite_expr(
         &mut self,
         expr: &mut Expression,
@@ -988,7 +946,6 @@ impl TextScoreCollector {
                 }
                 Ok(())
             }
-            // Leaf nodes
             Expression::PropertyAccess { .. }
             | Expression::Variable(_)
             | Expression::Literal(_)
@@ -1041,7 +998,6 @@ impl TextScoreCollector {
         }
     }
 
-    /// Rewrite predicates in-place (for WHERE clauses).
     fn rewrite_pred(
         &mut self,
         pred: &mut Predicate,
@@ -1097,11 +1053,9 @@ impl TextScoreCollector {
 /// ```
 /// Without this rewrite, `fuse_match_return_aggregate` only handles a
 /// **single** MATCH and `fuse_match_with_aggregate` only fires on the
-/// `WITH(aggregate)` shape. The query falls off the fused-top-K path
+/// `WITH(aggregate)` shape, so the query falls off the fused-top-K path
 /// and runs ~14× slower than the equivalent
-/// `WITH p.title AS t, count(r) AS d RETURN t, d` form. After the
-/// rewrite, the existing fusion pipeline picks it up and the query
-/// collapses into a streaming heap.
+/// `WITH p.title AS t, count(r) AS d RETURN t, d` form.
 ///
 /// **Important**: the WITH groups by *each non-aggregate RETURN
 /// expression*, not by the source variable. `RETURN p.city,
@@ -1152,10 +1106,7 @@ pub(super) fn desugar_multi_match_return_aggregate(query: &mut CypherQuery) {
         None => return,
     };
 
-    // Snapshot Return contents to avoid borrow conflicts during the
-    // mutation below. We bail before any mutation if the rewrite
-    // doesn't apply, so cloning here is wasted work only on the rare
-    // path where the shape is allowed but the conditions don't hold.
+    // Snapshot the Return to avoid borrow conflicts with the mutation below.
     let (orig_items, distinct, having) = match &query.clauses[r_idx] {
         Clause::Return(r) => (r.items.clone(), r.distinct, r.having.clone()),
         _ => return,
@@ -1164,8 +1115,6 @@ pub(super) fn desugar_multi_match_return_aggregate(query: &mut CypherQuery) {
         return;
     }
 
-    // Partition into aggregate vs non-aggregate items, ensuring all
-    // non-aggregates project off the same single source variable.
     let mut group_var: Option<String> = None;
     let mut all_aggs_aliased = true;
     let mut has_agg = false;
@@ -1197,24 +1146,15 @@ pub(super) fn desugar_multi_match_return_aggregate(query: &mut CypherQuery) {
         return;
     }
 
-    // Synthesize internal aliases for non-aggregate items so the WITH
-    // can introduce them by name into the downstream scope, and the
-    // RETURN can reference them as bare Variables (which preserves the
-    // user's original column display name via the alias slot).
-    //
-    // Why do we need this layer at all? Cypher's GROUP BY semantics is
-    // "the set of non-aggregate expressions in the projection list"
-    // (the rewrite must preserve that). Pushing only the source
-    // variable into WITH groups too finely (one row per p instead of
-    // one row per p.city). Pushing the property expressions into WITH
-    // groups correctly, but then the variable goes out of scope, so
-    // the new RETURN must reference WITH outputs by alias.
+    // Non-aggregate items move into the WITH under synthetic aliases. Pushing
+    // the property expressions rather than the source variable is what
+    // preserves Cypher's grouping semantics (see the doc comment), but puts the
+    // variable out of scope, so the new RETURN must reference WITH outputs by
+    // alias, carrying the user's display name in the alias slot.
     let mut with_items: Vec<ReturnItem> = Vec::with_capacity(orig_items.len());
     let mut new_return_items: Vec<ReturnItem> = Vec::with_capacity(orig_items.len());
     for (idx, item) in orig_items.iter().enumerate() {
         if is_aggregate_expression(&item.expression) {
-            // Aggregate: stays in WITH with the user's alias; RETURN
-            // references it by alias.
             let alias = item.alias.clone().expect("aliased above");
             with_items.push(item.clone());
             new_return_items.push(ReturnItem {
@@ -1222,10 +1162,6 @@ pub(super) fn desugar_multi_match_return_aggregate(query: &mut CypherQuery) {
                 alias: Some(alias),
             });
         } else {
-            // Non-aggregate: push the user expression into WITH under a
-            // synthetic internal alias; RETURN references it as a
-            // bare Variable but with the original display name (alias
-            // if user wrote one, expression text otherwise).
             let internal = format!("__dgr_grp_{idx}");
             with_items.push(ReturnItem {
                 expression: item.expression.clone(),
@@ -1234,15 +1170,13 @@ pub(super) fn desugar_multi_match_return_aggregate(query: &mut CypherQuery) {
             new_return_items.push(ReturnItem {
                 expression: Expression::Variable(internal),
                 alias: item.alias.clone().or_else(|| {
-                    // No user alias — preserve the column name the
-                    // unfused path would have produced.
+                    // Preserve the column name the unfused path would produce.
                     Some(default_column_name(&item.expression))
                 }),
             });
         }
     }
 
-    // Splice in: replace Return at r_idx with [With, Return].
     let new_with = Clause::With(WithClause {
         items: with_items,
         distinct: false,
@@ -1260,9 +1194,7 @@ pub(super) fn desugar_multi_match_return_aggregate(query: &mut CypherQuery) {
     query.clauses.insert(r_idx + 1, new_return);
 }
 
-/// The display name an unaliased RETURN item would surface as. Used by
-/// `desugar_multi_match_return_aggregate` to preserve column naming
-/// when it has to introduce a synthetic internal alias.
+/// The display name an unaliased RETURN item would surface as.
 fn default_column_name(expr: &Expression) -> String {
     match expr {
         Expression::Variable(v) => v.clone(),
@@ -1279,8 +1211,7 @@ fn default_column_name(expr: &Expression) -> String {
 /// passes (`fuse_match_with_aggregate`, `fuse_match_return_aggregate`,
 /// the multi-MATCH desugar) can then collapse into a streaming form.
 ///
-/// The motivating case is the cohort top-K idiom users naturally
-/// reach for:
+/// Motivating case — the cohort top-K idiom:
 /// ```cypher
 /// MATCH (p)-[:P27]->({id:20}) WITH p MATCH (p)-[r]->()
 /// RETURN p.title, count(r) AS d ORDER BY d DESC LIMIT 10
@@ -1310,9 +1241,8 @@ pub(super) fn fold_pass_through_with(query: &mut CypherQuery) {
             }
         };
 
-        // ORDER BY / SKIP / LIMIT *immediately after* a WITH bind to the
-        // WITH's row context — folding the WITH would re-attach them to
-        // a different scope. Don't fold in that case.
+        // These bind to the WITH's row context; folding would re-attach them
+        // to a different scope.
         if matches!(
             query.clauses.get(i + 1),
             Some(Clause::OrderBy(_)) | Some(Clause::Skip(_)) | Some(Clause::Limit(_))
@@ -1321,12 +1251,8 @@ pub(super) fn fold_pass_through_with(query: &mut CypherQuery) {
             continue;
         }
 
-        // Variables already bound *before* this WITH. Only references to
-        // these can be hidden by the WITH — variables introduced AFTER
-        // the WITH (a later MATCH's pattern variable, a RETURN
-        // aggregate's alias) are out of scope of the question we're
-        // answering ("does removing the WITH expose a previously-hidden
-        // variable?").
+        // Only references to variables bound *before* this WITH can be hidden
+        // by it; anything introduced after the WITH is unaffected by the fold.
         let mut pre_with_bound: HashSet<String> = HashSet::new();
         for c in &query.clauses[..i] {
             collect_introduced_variables(c, &mut pre_with_bound);
@@ -1337,9 +1263,6 @@ pub(super) fn fold_pass_through_with(query: &mut CypherQuery) {
             collect_clause_variables(c, &mut downstream_refs);
         }
 
-        // Safe to fold iff every downstream reference to a pre-WITH
-        // bound variable is in the projection list. Refs to variables
-        // bound after the WITH are unaffected by the fold.
         let safe = downstream_refs
             .iter()
             .filter(|v| pre_with_bound.contains(*v))
@@ -1354,17 +1277,10 @@ pub(super) fn fold_pass_through_with(query: &mut CypherQuery) {
     }
 }
 
-/// Collect the variable names *introduced* (newly bound) by `clause`
-/// into `out`. Covers MATCH / OPTIONAL MATCH pattern variables (node /
-/// edge / path), WITH and RETURN aliases (and bare-`Variable`
-/// pass-throughs), UNWIND aliases, and a nested `CALL { }` subquery's
-/// terminal RETURN output columns.
-///
-/// Used in two places: the cohort-top-K WITH fold (which scope was a
-/// variable bound before a candidate WITH) and correlated-`CALL { }`
-/// import validation (is an imported name *declared* by some preceding
-/// clause — distinct from "present in this row", since an OPTIONAL MATCH
-/// miss leaves a declared variable absent/null in the row).
+/// Collect the variable names *introduced* (newly bound) by `clause` into
+/// `out`: MATCH / OPTIONAL MATCH pattern variables (node / edge / path), WITH
+/// and RETURN aliases (and bare-`Variable` pass-throughs), UNWIND aliases, and
+/// a nested `CALL { }` subquery's terminal RETURN output columns.
 pub(crate) fn collect_introduced_variables(clause: &Clause, out: &mut HashSet<String>) {
     match clause {
         Clause::Match(m) | Clause::OptionalMatch(m) => {
@@ -1400,10 +1316,9 @@ pub(crate) fn collect_introduced_variables(clause: &Clause, out: &mut HashSet<St
             }
         }
         Clause::Return(r) => {
-            // A RETURN can be a non-terminal clause in a subquery body, and
-            // its output columns are the declared scope for anything that
-            // follows (e.g. a CALL { } body's terminal RETURN feeds the
-            // outer scope). Mirror the WITH arm: alias, else bare variable.
+            // A RETURN can be non-terminal in a subquery body, and its output
+            // columns are the declared scope for anything that follows (a
+            // CALL { } body's terminal RETURN feeds the outer scope).
             for item in &r.items {
                 let name = item.alias.clone().or_else(|| match &item.expression {
                     Expression::Variable(v) => Some(v.clone()),
@@ -1454,9 +1369,8 @@ pub(crate) fn declared_variables(clauses: &[Clause]) -> HashSet<String> {
     out
 }
 
-/// Returns the projected variable names if `clause` is a pass-through
-/// WITH (each item is `Variable(v)` with no alias, no DISTINCT, no
-/// inline WHERE, no aggregate). Returns `None` otherwise.
+/// The projected variable names if `clause` is a pass-through WITH: each item
+/// a bare `Variable(v)`, no DISTINCT, no inline WHERE, no aggregate.
 fn pass_through_projection(clause: &Clause) -> Option<HashSet<String>> {
     let w = match clause {
         Clause::With(w) => w,
@@ -1540,19 +1454,15 @@ fn collect_clause_variables(clause: &Clause, out: &mut HashSet<String>) {
             }
         }
         Clause::CallSubquery { import, body } => {
-            // A correlated `CALL { }` REFERENCES its imported outer
-            // variables (its leading WITH was lifted into `import` at parse
-            // time, so they appear nowhere else). Recording them here is a
-            // barrier-correctness fix: `fold_pass_through_with` asks "does
-            // any downstream clause reference a pre-WITH variable not in the
-            // projection?" — without these names, a `WITH p` could be folded
-            // away even though a later `CALL { WITH q ... }` depends on `q`
-            // still being in scope (folding `WITH p` re-exposes the dropped
-            // `q`, silently changing scope). The body's own clauses are also
-            // walked so a body reference to an imported name counts too;
-            // body-internal variables (re-bound from the seed) leak into
-            // `out` harmlessly — they can't collide with a pre-WITH name the
-            // fold check cares about.
+            // A correlated `CALL { }` REFERENCES its imported outer variables
+            // (its leading WITH was lifted into `import` at parse time, so
+            // they appear nowhere else). Without them recorded,
+            // `fold_pass_through_with` would fold away a `WITH p` that a later
+            // `CALL { WITH q ... }` depends on, silently re-exposing the
+            // dropped `q`. The body's clauses are walked too, so a body
+            // reference to an imported name counts; body-internal variables
+            // leak into `out` harmlessly — they can't collide with a pre-WITH
+            // projection name.
             for name in import {
                 out.insert(name.clone());
             }
@@ -1565,10 +1475,8 @@ fn collect_clause_variables(clause: &Clause, out: &mut HashSet<String>) {
             list,
             body,
         } => {
-            // The list expression references outer variables; body clauses
-            // may too. The loop variable is body-internal but recording it
-            // is harmless (it can't collide with a pre-WITH projection name
-            // the fold check cares about).
+            // The loop variable is body-internal, but recording it is
+            // harmless — it can't collide with a pre-WITH projection name.
             collect_expression_refs(list, out);
             out.insert(variable.clone());
             for c in body {
@@ -1598,14 +1506,12 @@ fn collect_clause_variables(clause: &Clause, out: &mut HashSet<String>) {
         | Clause::FusedNodeScanAggregate { .. }
         | Clause::FusedNodeScanTopK { .. }
         | Clause::SpatialJoin { .. } => {
-            // Conservative: we run before fusion, so these shouldn't
-            // appear yet; in case they do (e.g. nested subquery already
-            // optimised), fall back to "treat as references to all
-            // variables" by inserting a sentinel that won't match any
-            // projection list. We do that by skipping — combined with
-            // the check `all in projected`, an unknown clause will
-            // contribute no refs and the fold will succeed only if it
-            // was already a no-op for the named-clause checks.
+            // These contribute no references: the write / procedure clauses
+            // read names this walk does not model, and the fused shapes are
+            // built after this pass runs. See
+            // `unwind_scope_refs_are_enumerable` for why that omission is
+            // safe for `fold_pass_through_with` and not for
+            // `narrow_unwind_source`.
         }
     }
 }
@@ -1836,10 +1742,6 @@ pub(crate) fn collect_expression_refs(expr: &Expression, out: &mut HashSet<Strin
         }
     }
 }
-
-// ===========================================================================
-// narrow_unwind_source
-// ===========================================================================
 
 /// Can the whole reference set of `clause` be enumerated by
 /// [`collect_clause_variables`]?

@@ -5105,7 +5105,7 @@ class KnowledgeGraph:
         """Save the current selection as an independent subgraph file.
 
         Equivalent to ``kg.to_subgraph().save(path)`` in a single call.
-        Output is a v3 binary file that reloads via ``kglite.load(path)``
+        Output is a ``.kgl`` file that reloads via ``kglite.load(path)``
         (or ``kglite.open(path, storage='disk')`` for disk mode — ``load``
         takes no ``storage`` argument). All edges between selected nodes are
         included; node and edge properties round-trip byte-for-byte.
@@ -5114,7 +5114,7 @@ class KnowledgeGraph:
             path: Destination path for the subgraph file.
 
         Example:
-            >>> kg.select("Article").expand(hops=1, type="AUTHORED_BY").save_subset(
+            >>> kg.select("Article").expand(hops=1).save_subset(
             ...     "articles_with_authors.kgl"
             ... )
         """

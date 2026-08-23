@@ -1,4 +1,3 @@
-// src/graph/maintain.rs
 use crate::datatypes::values::{classify_value_set, ValueSetType};
 use crate::datatypes::{DataFrame, Value};
 use crate::graph::constraints::{ConstraintResult, UniqueConstraintKey};
@@ -167,8 +166,6 @@ impl ConstraintColumns {
 /// declared constraints (and, for a primary-key type, within-batch id repeats)
 /// in one pass ahead of the build loop.
 ///
-/// # Why this is its own pass
-///
 /// Every refusal `add_nodes` can raise has to happen before the first byte of
 /// observed state lands, and the build loop is not a safe place for one: it
 /// commits the node type's metadata and columnar schema before it starts, and
@@ -245,7 +242,6 @@ fn gate_batch(
 }
 
 fn check_data_validity(df_data: &DataFrame, unique_id_field: &str) -> Result<(), String> {
-    // Remove strict UniqueId type verification to allow nulls
     if !df_data.verify_column(unique_id_field) {
         let available_cols: Vec<_> = df_data.get_column_names();
         return Err(format!(
@@ -513,7 +509,6 @@ fn install_node_type_metadata(
 ) {
     let df_column_types = get_column_types(df_data);
 
-    // Check for type mismatches if metadata already exists
     if let Some(existing_meta) = graph.get_node_type_metadata(node_type) {
         for (col_name, col_type) in &df_column_types {
             if let Some(existing_type) = existing_meta.get(col_name) {
@@ -527,7 +522,6 @@ fn install_node_type_metadata(
         }
     }
 
-    // Upsert node type metadata (merges new column types into existing)
     graph.upsert_node_type_metadata(node_type, df_column_types);
 
     // Record original field name aliases so users can query by original column name
@@ -556,7 +550,6 @@ fn install_type_schema(
     node_type: &str,
     property_columns: &[(String, usize)],
 ) -> Vec<(InternedKey, Value)> {
-    // Build TypeSchema from DataFrame columns for compact storage
     let mut schema_keys: Vec<InternedKey> = property_columns
         .iter()
         .map(|(col_name, _)| graph.interner.get_or_intern(col_name))
@@ -575,10 +568,8 @@ fn install_type_schema(
     schema_keys.extend(provenance_stamps.iter().map(|(key, _)| *key));
     let type_schema = Arc::new(TypeSchema::from_keys(schema_keys));
 
-    // Store or extend the schema for this node type
     let existing = graph.type_schemas.get(node_type).cloned();
     if let Some(existing_schema) = existing {
-        // Extend the existing schema with any new keys
         let mut merged = (*existing_schema).clone();
         for (_, key) in type_schema.iter() {
             merged.add_key(key);
@@ -618,7 +609,6 @@ pub fn add_nodes(
     let title_field = node_title_field.unwrap_or_else(|| unique_id_field.clone());
     check_data_validity(&df_data, &unique_id_field)?;
 
-    // Track errors
     let mut errors = Vec::new();
 
     // The per-row conflict check reads the type's live id index. Building it
@@ -664,8 +654,8 @@ pub fn add_nodes(
         &mut errors,
     );
 
-    // OPTIMIZATION: Pre-compute property column info (name + index) to avoid repeated lookups
-    // This avoids: 1) string comparisons in the loop, 2) HashMap lookups per property
+    // Property column (name + index) resolved once: no per-row string compares
+    // and no per-property HashMap lookup in the loop below.
     let property_columns: Vec<(String, usize)> = df_data
         .get_column_names()
         .into_iter()
@@ -680,6 +670,7 @@ pub fn add_nodes(
         })
         .collect();
 
+    // One clock read per call; every row receives the same complete stamp.
     let provenance_stamps = install_type_schema(graph, &node_type, &property_columns);
 
     // Pre-intern property column keys once (avoids re-interning per row)
@@ -688,7 +679,6 @@ pub fn add_nodes(
         .map(|(col_name, col_idx)| (graph.interner.get_or_intern(col_name), *col_idx))
         .collect();
     let property_count = property_columns.len();
-    // One clock read per call; every row receives the same complete stamp.
     let mut batch = BatchProcessor::new(df_data.row_count());
     let mut skipped_count = 0;
     let mut skipped_null_id = 0;
@@ -749,7 +739,6 @@ pub fn add_nodes(
         &unique_id_field,
     );
 
-    // Execute the batch and get the statistics
     let (stats, metrics) = batch.execute(graph)?;
 
     // Fold this call's creations into the type's id_index. The batch adds rows
@@ -777,10 +766,8 @@ pub fn add_nodes(
     // fallback (see `fold_batch_into_user_indexes` for which cases take it).
     update_fold.fold_or_rebuild(graph, &node_type, stats);
 
-    // Calculate elapsed time
-    let elapsed_ms = metrics.processing_time * 1000.0; // Convert to milliseconds
+    let elapsed_ms = metrics.processing_time * 1000.0;
 
-    // Create and return the operation report with timestamp and errors
     let mut report = NodeOperationReport::new(
         "add_nodes".to_string(),
         stats.creates,
@@ -789,7 +776,6 @@ pub fn add_nodes(
         elapsed_ms,
     );
 
-    // Add errors if we found any
     if !errors.is_empty() {
         report = report.with_errors(errors);
     }
@@ -833,9 +819,7 @@ pub struct EdgeSpecReport {
 ///
 /// Specs are grouped by `(source_type, target_type, edge_type)`; each
 /// group gets one type lookup and one batch, mirroring `add_connections`.
-/// Endpoints must already exist — an edge whose source or target id isn't
-/// found for its declared type is counted in `skipped_missing_endpoint`
-/// and skipped (no stub vivification).
+/// Endpoints must already exist (see `skipped_missing_endpoint`).
 pub fn add_edges_from_specs(
     graph: &mut DirGraph,
     specs: Vec<EdgeSpec>,
@@ -1153,7 +1137,6 @@ pub fn add_connections(
         .map_err(|e| format!("disk mutation lease failed: {e}"))?;
     let conflict_mode = parse_conflict_mode(conflict_handling.as_deref())?;
 
-    // Track errors
     let mut errors = Vec::new();
 
     let available_cols: Vec<_> = df_data.get_column_names();
@@ -1172,9 +1155,8 @@ pub fn add_connections(
         ));
     }
 
-    // A source/target type that doesn't exist yet is no longer an
-    // error: an edge to a missing endpoint vivifies a stub node (which
-    // registers the type). See Pass B below.
+    // A source/target type that doesn't exist yet is not an error: an edge to a
+    // missing endpoint vivifies a stub node, which registers the type (Pass B).
 
     let source_id_idx = df_data
         .get_column_index(&source_id_field)
@@ -1215,7 +1197,6 @@ pub fn add_connections(
         target_id_idx,
     )?;
     let mut batch = ConnectionBatchProcessor::new(df_data.row_count());
-    // Set the conflict handling mode
     batch.set_conflict_mode(conflict_mode);
     // Skip edge existence checks on initial load (no existing edges of this type)
     let is_initial_load = !graph
@@ -1351,32 +1332,26 @@ pub fn add_connections(
         batch.schema_property_types(graph),
     )?;
 
-    // Execute the batch and get the statistics
     let (stats, metrics) = batch.execute(graph, connection_type)?;
 
-    // Invalidate edge-cardinality caches whenever the batch produced
-    // edges. Pre-0.9.35 this path didn't invalidate, so a sequence of
-    // Cypher CREATE → Python add_connections → planner-cost query
-    // could read a stale edge-type-count map; the existing Cypher
-    // executor at write.rs:346 invalidated correctly but the bulk
-    // Python API did not. Fixing here covers both the new
-    // type_connectivity cache (selectivity-aware planning) and the
-    // pre-existing edge_type_counts_cache used by reorder_match_clauses.
+    // A batch that produced edges must invalidate the edge-cardinality caches,
+    // or a Cypher CREATE → add_connections → planner-cost query reads a stale
+    // edge-type-count map. Covers both the type_connectivity cache
+    // (selectivity-aware planning) and the edge_type_counts_cache used by
+    // reorder_match_clauses.
     if stats.connections_created > 0 {
         graph.invalidate_edge_type_counts_cache();
     }
 
-    // Create and return the operation report
     let mut report = ConnectionOperationReport::new(
         "add_connections".to_string(),
         stats.connections_created,
         skipped_count,
         stats.properties_tracked,
-        metrics.processing_time * 1000.0, // Convert to milliseconds
+        metrics.processing_time * 1000.0,
     );
     report.stubs_vivified = stubs_vivified;
 
-    // Add errors if we found any
     if !errors.is_empty() {
         report = report.with_errors(errors);
     }
@@ -1879,7 +1854,6 @@ pub fn replace_connections(
     }
     drop(resolved);
 
-    // --- Collect the distinct, non-null source ids present in the DataFrame ---
     let mut seen: HashSet<Value> = HashSet::new();
     let mut distinct_sources: Vec<Value> = Vec::new();
     for row in 0..df_data.row_count() {
@@ -1893,7 +1867,6 @@ pub fn replace_connections(
         }
     }
 
-    // --- Remove the existing edges of this type from those sources ---
     // Nothing to clear if the source type was never created — the add
     // below vivifies it. `lookup_by_id_readonly` self-heals the id index.
     if graph.has_node_type(&source_type) {
@@ -1922,7 +1895,6 @@ pub fn replace_connections(
         }
     }
 
-    // --- Add the edges the DataFrame describes ---
     let mut report = add_connections(
         graph,
         df_data,
@@ -2001,10 +1973,8 @@ fn update_schema_node(
         ));
     }
 
-    // The caller supplies observed types (batch.schema_property_types) —
-    // "Unknown" survives only for properties never seen with a non-null
-    // value. Pre-fix every bulk-loaded edge property registered as
-    // "Unknown" here regardless of its values.
+    // The caller supplies observed types (batch.schema_property_types), so
+    // "Unknown" survives only for properties never seen with a non-null value.
     graph.upsert_connection_type_metadata(connection_type, source_type, target_type, prop_types);
     Ok(())
 }
@@ -2047,7 +2017,6 @@ pub fn create_connections(
         ));
     }
 
-    // --- Determine which level each node type lives at ---
     let mut type_to_level: HashMap<String, usize> = HashMap::new();
     for lvl_idx in 0..level_count {
         if let Some(level) = selection.get_level(lvl_idx) {
@@ -2061,7 +2030,6 @@ pub fn create_connections(
         }
     }
 
-    // --- Resolve source and target levels ---
     let source_level = if let Some(ref st) = source_type_filter {
         *type_to_level.get(st).ok_or_else(|| {
             format!(
@@ -2093,7 +2061,6 @@ pub fn create_connections(
         ));
     }
 
-    // --- Iterate target level groups to create edges ---
     // Each group at the target level has (parent, children). For each target node,
     // walk up through group parents to find the source node at source_level.
     // A child can appear in multiple groups (different parents), producing one edge
@@ -2140,13 +2107,10 @@ pub fn create_connections(
         Vec::new()
     };
 
-    // Helper: walk from a node at `start_level` up to `source_level`, returning
-    // all possible source nodes. For a 1-step walk, this is just the immediate parent.
     let walk_to_sources = |start_node: NodeIndex, start_level: usize| -> Vec<NodeIndex> {
         if start_level == source_level {
             return vec![start_node];
         }
-        // BFS walk up through parent maps
         let mut current_nodes = vec![start_node];
         for lvl in (source_level + 1..=start_level).rev() {
             let mut next_nodes = Vec::new();
@@ -2170,7 +2134,6 @@ pub fn create_connections(
             continue;
         };
 
-        // Resolve the source node(s) for this group's parent
         let source_nodes = if target_level - source_level == 1 {
             // Direct parent IS the source
             vec![*parent_idx]
@@ -2204,7 +2167,6 @@ pub fn create_connections(
                     }
                 }
 
-                // Collect properties from nodes in the chain (source → ... → target)
                 let edge_props = if let Some(ref prop_spec) = copy_properties {
                     // Arena guard: node_weight materializes on the disk
                     // backend; scoped so the borrow ends before
@@ -2319,19 +2281,15 @@ pub fn update_node_properties(
         .prepare_disk_mutation()
         .map_err(|e| format!("disk mutation lease failed: {e}"))?;
 
-    // Track start time for the report
     let start_time = std::time::Instant::now();
 
-    // Create property string once
     let property_string = property.to_string();
 
-    // Track errors
     let mut errors = Vec::new();
 
-    // Step 1: Collect information about node types and check if schema update is needed
     let mut node_types = HashMap::new();
-    // Cache the validation result for Step 3. `node_type_of` is a granular,
-    // allocation-free liveness/type lookup on every backend; unlike
+    // Cache the validation result for the batch loop below. `node_type_of` is a
+    // granular, allocation-free liveness/type lookup on every backend; unlike
     // `get_node`, it does not materialize one full `NodeData` per row into the
     // disk query arena. Keeping the result aligned with `nodes` also avoids a
     // second backend lookup when the batch actions are assembled.
@@ -2341,7 +2299,6 @@ pub fn update_node_properties(
     for (node_idx_opt, _) in nodes {
         if let Some(node_idx) = node_idx_opt {
             if let Some(node_type) = GraphRead::node_type_of(&graph.graph, *node_idx) {
-                // Track node type and count for each node
                 *node_types
                     .entry(graph.interner.resolve(node_type).to_string())
                     .or_insert(0) += 1;
@@ -2357,11 +2314,9 @@ pub fn update_node_properties(
         }
     }
 
-    // Step 2: Update node type metadata for each affected node type
     let type_string = observed_type_string(nodes, &validated_nodes);
 
     for node_type in node_types.keys() {
-        // Check for type mismatch with existing metadata
         if let Some(existing_meta) = graph.get_node_type_metadata(node_type) {
             if let Some(existing_type) = existing_meta.get(&property_string) {
                 if existing_type != &type_string {
@@ -2378,7 +2333,6 @@ pub fn update_node_properties(
         graph.upsert_node_type_metadata(node_type, new_prop_types);
     }
 
-    // Step 3: Prepare batch updates for nodes
     let batch_size = nodes.len();
     let property_key = graph.interner.get_or_intern(&property_string);
     let mut batch = BatchProcessor::new(batch_size);
@@ -2386,10 +2340,9 @@ pub fn update_node_properties(
     for ((node_idx_opt, value), is_validated) in nodes.iter().zip(validated_nodes) {
         if let Some(node_idx) = node_idx_opt {
             if is_validated {
-                // Create update action
                 let action = NodeAction::Update {
                     node_idx: *node_idx,
-                    title: None, // Don't update title
+                    title: None,
                     properties: vec![(property_key, value.clone())],
                     conflict_mode: ConflictHandling::Update,
                 };
@@ -2407,7 +2360,6 @@ pub fn update_node_properties(
         }
     }
 
-    // Step 4: Execute batch update
     let (stats, _metrics) = match batch.execute(graph) {
         Ok(result) => result,
         Err(e) => {
@@ -2431,10 +2383,8 @@ pub fn update_node_properties(
         graph.refresh_indexes_for_type(node_type);
     }
 
-    // Calculate elapsed time
     let elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
 
-    // Create and return the operation report
     let mut report = NodeOperationReport::new(
         "update_node_properties".to_string(),
         0, // We don't create nodes in this function
@@ -2443,7 +2393,6 @@ pub fn update_node_properties(
         elapsed_ms,
     );
 
-    // Add errors if we found any
     if !errors.is_empty() {
         report = report.with_errors(errors);
     }

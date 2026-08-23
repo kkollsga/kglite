@@ -1,16 +1,8 @@
-// src/graph/cypher/ast.rs
-// Full Cypher AST definitions
-
 use crate::datatypes::values::Value;
 use crate::graph::constraints::EntityKind;
 use crate::graph::core::membership::MembershipSet;
 use crate::graph::core::pattern_matching::{ParamLabel, Pattern};
 
-// ============================================================================
-// Top-Level Query
-// ============================================================================
-
-/// Output format for query results
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum OutputFormat {
     /// Default: ResultView (lazy row-by-row access)
@@ -19,7 +11,6 @@ pub enum OutputFormat {
     Csv,
 }
 
-/// A complete Cypher query: a pipeline of clauses
 #[derive(Debug, Clone)]
 pub struct CypherQuery {
     pub clauses: Vec<Clause>,
@@ -31,16 +22,12 @@ pub struct CypherQuery {
     pub optimizer_tags: Vec<String>,
 }
 
-/// A node in the query pipeline.
-///
-/// **Deliberately overloaded** (not a mess): this one enum carries both
-/// *surface* clauses parsed from Cypher (`Match`, `With`, `Create`, …)
-/// AND the optimizer's *physical* fused nodes (`Fused*`, below). They
-/// share a type so the optimizer can rewrite in place and the SAME
-/// execution loop runs both — a deliberate perf trade-off (no
-/// logical→physical translation layer on the hot path). The cost is a
-/// wide exhaustive-`match` surface; the compiler enforces it, so adding
-/// a variant is mechanical.
+/// **Deliberately overloaded**: this one enum carries both *surface* clauses
+/// parsed from Cypher (`Match`, `With`, `Create`, …) AND the optimizer's
+/// *physical* fused nodes (`Fused*`, below). They share a type so the
+/// optimizer can rewrite in place and the SAME execution loop runs both — no
+/// logical→physical translation layer on the hot path, at the cost of a wide
+/// exhaustive-`match` surface.
 ///
 /// **Execution is split across two engines** keyed on whether a clause
 /// mutates (see `clause_is_mutation` / `is_mutation_query` in
@@ -92,8 +79,6 @@ pub enum Clause {
     /// (empty = uncorrelated); the importing `WITH` is stripped from `body`
     /// during parsing so the body re-binds those names from the seed row.
     /// `body` is the remaining sub-pipeline (a full `CypherQuery`).
-    ///
-    /// See `dev_workfolder/dev-documentation/design/call-subqueries.md`.
     CallSubquery {
         import: Vec<String>,
         body: Box<CypherQuery>,
@@ -109,18 +94,15 @@ pub enum Clause {
     /// Projects RETURN expressions only for the k surviving rows.
     FusedVectorScoreTopK {
         return_clause: ReturnClause,
-        /// Index of the vector_score item within `return_clause.items`
         score_item_index: usize,
-        /// ORDER BY direction (true = DESC, which is typical for similarity)
         descending: bool,
-        /// LIMIT k value
         limit: usize,
     },
     /// Optimizer-generated: fuse MATCH traversal + RETURN with count() into
     /// a single pass. Instead of expanding all edges then grouping, iterate
     /// group keys and count edges directly per node.
     FusedMatchReturnAggregate {
-        /// The full MATCH pattern (3 elements: node-edge-node)
+        /// The MATCH pattern — exactly 3 elements (node-edge-node).
         match_clause: MatchClause,
         /// RETURN clause (group-by items + count aggregates)
         return_clause: ReturnClause,
@@ -176,7 +158,6 @@ pub enum Clause {
         return_clause: ReturnClause,
         /// One entry per ORDER BY item, in order (see [`FusedSortKey`]).
         sort_keys: Vec<FusedSortKey>,
-        /// LIMIT k value
         limit: usize,
     },
     /// Optimizer-generated: MATCH (n) RETURN count(n) → graph.node_count() in O(1).
@@ -275,9 +256,7 @@ pub enum Clause {
 /// See `Clause::SpatialJoin` for context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpatialProbeKind {
-    /// Probe's spatial-config `location` (lat/lon properties) → Point.
     Location,
-    /// Centroid of the probe's geometry → Point.
     Centroid,
 }
 
@@ -286,21 +265,15 @@ pub enum SpatialProbeKind {
 /// this to skip projection-expression evaluation for non-winners.
 #[derive(Debug, Clone)]
 pub struct AggregateTopK {
-    /// LIMIT k.
     pub limit: usize,
     /// `true` for DESC (keep k largest counts), `false` for ASC (smallest).
     pub descending: bool,
 }
 
-// ============================================================================
-// MATCH Clause
-// ============================================================================
-
 /// A planner hint that the MATCH's consumer collapses row multiplicity down to
 /// one row per distinct binding of [`Self::var`].
 #[derive(Debug, Clone)]
 pub struct DistinctNodeHint {
-    /// The node variable rows may be deduplicated by.
     pub var: String,
     /// Whether the hint came from the *aggregate-only* route
     /// (`RETURN count(DISTINCT f)`, `min(f.age)`, …) rather than
@@ -315,7 +288,6 @@ pub struct DistinctNodeHint {
     pub aggregate_only: bool,
 }
 
-/// MATCH clause reuses the existing Pattern from pattern_matching.rs
 #[derive(Debug, Clone)]
 pub struct MatchClause {
     pub patterns: Vec<Pattern>,
@@ -339,9 +311,7 @@ pub struct MatchClause {
     /// null-extended, so filtering during or after the match is the same
     /// answer), and keeping it out of the clause leaves every MATCH+WHERE
     /// planner pass — pushdown, top-K fusion, spatial fusion, relationship
-    /// pushdown — matching on the adjacency it already understands. This
-    /// asymmetry is deliberate; see [`WithClause::where_clause`] for the same
-    /// in-clause shape on the projection side.
+    /// pushdown — matching on the adjacency it already understands.
     pub where_clause: Option<WhereClause>,
     /// Planner-resolved slot anchors from `WHERE elementId(v) = <literal|$param>`
     /// — `(variable, slot)` pairs the executor seeds as pre-bindings.
@@ -365,17 +335,11 @@ pub struct PathAssignment {
     pub all_shortest: bool,
 }
 
-// ============================================================================
-// WHERE Clause
-// ============================================================================
-
-/// WHERE clause with a predicate expression tree
 #[derive(Debug, Clone)]
 pub struct WhereClause {
     pub predicate: Predicate,
 }
 
-/// Predicate expression tree supporting AND/OR/NOT and comparisons
 #[derive(Debug, Clone)]
 pub enum Predicate {
     Comparison {
@@ -398,10 +362,9 @@ pub enum Predicate {
     /// expression resolved once before the row loop).
     ///
     /// The [`MembershipSet`] is built once and probed per row, so both the
-    /// hit *and* the miss path are one hash lookup. The predecessor here was
-    /// a `HashSet<Value>` with a `values_equal` linear scan behind it, which
-    /// made every non-matching row pay `O(|list|)` — the whole cost of a
-    /// selective `IN` over a big list.
+    /// hit *and* the miss path are one hash lookup — where a `HashSet<Value>`
+    /// needs a `values_equal` linear scan behind it, making every
+    /// non-matching row pay `O(|list|)`.
     InLiteralSet {
         expr: Expression,
         values: MembershipSet,
@@ -447,7 +410,6 @@ pub enum Predicate {
     },
 }
 
-/// Comparison operators
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ComparisonOp {
     Equals,        // =
@@ -459,10 +421,6 @@ pub enum ComparisonOp {
     RegexMatch,    // =~
 }
 
-// ============================================================================
-// Expressions
-// ============================================================================
-
 /// Expressions used in WHERE, RETURN, ORDER BY, WITH
 #[derive(Debug, Clone)]
 pub enum Expression {
@@ -471,9 +429,7 @@ pub enum Expression {
         variable: String,
         property: String,
     },
-    /// A variable reference: n, r
     Variable(String),
-    /// Literal value
     Literal(Value),
     /// Function call: count(n), sum(n.age), collect(n.name)
     FunctionCall {
@@ -481,7 +437,6 @@ pub enum Expression {
         args: Vec<Expression>,
         distinct: bool,
     },
-    /// Arithmetic operations
     Add(Box<Expression>, Box<Expression>),
     Subtract(Box<Expression>, Box<Expression>),
     Multiply(Box<Expression>, Box<Expression>),
@@ -493,7 +448,6 @@ pub enum Expression {
     Negate(Box<Expression>),
     /// Star (*) for count(*)
     Star,
-    /// List literal [1, 2, 3]
     ListLiteral(Vec<Expression>),
     /// CASE expression
     /// Generic form: CASE WHEN pred THEN result ... ELSE default END
@@ -576,18 +530,14 @@ pub enum Expression {
     CountSubquery {
         patterns: Vec<crate::graph::core::pattern_matching::Pattern>,
         /// Clause-group id per pattern (same length as `patterns`) —
-        /// identical semantics to [`Predicate::Exists::pattern_groups`]:
-        /// comma-separated patterns share a group and join under the
-        /// openCypher trail rule (no relationship reuse within a group);
-        /// each `MATCH` keyword in `COUNT { MATCH ... MATCH ... }` starts
-        /// a new group, and edges may repeat across groups exactly as
-        /// across top-level MATCH clauses.
+        /// identical semantics to [`Predicate::Exists`]'s `pattern_groups`,
+        /// with each `MATCH` keyword in `COUNT { MATCH ... MATCH ... }`
+        /// starting a new group.
         pattern_groups: Vec<usize>,
         where_clause: Option<Box<Predicate>>,
     },
 }
 
-/// Quantifier type for list predicate functions
 #[derive(Debug, Clone)]
 pub enum ListQuantifier {
     Any,
@@ -596,7 +546,6 @@ pub enum ListQuantifier {
     Single,
 }
 
-/// A single item in a map projection.
 #[derive(Debug, Clone)]
 pub enum MapProjectionItem {
     /// Shorthand property: .prop — projects node.prop as "prop"
@@ -607,7 +556,6 @@ pub enum MapProjectionItem {
     Alias { key: String, expr: Expression },
 }
 
-/// Condition in a CASE WHEN clause
 #[derive(Debug, Clone)]
 pub enum CaseCondition {
     /// Generic form: CASE WHEN predicate THEN ...
@@ -616,11 +564,6 @@ pub enum CaseCondition {
     Expression(Expression),
 }
 
-// ============================================================================
-// RETURN Clause
-// ============================================================================
-
-/// RETURN clause: list of expressions with optional aliases
 #[derive(Debug, Clone)]
 pub struct ReturnClause {
     pub items: Vec<ReturnItem>,
@@ -643,16 +586,11 @@ pub struct ReturnClause {
     pub group_limit_hint: Option<usize>,
 }
 
-/// A single item in RETURN: expression AS alias
 #[derive(Debug, Clone)]
 pub struct ReturnItem {
     pub expression: Expression,
     pub alias: Option<String>,
 }
-
-// ============================================================================
-// WITH Clause
-// ============================================================================
 
 /// WITH clause: same structure as RETURN, acts as intermediate projection
 #[derive(Debug, Clone)]
@@ -660,11 +598,9 @@ pub struct WithClause {
     pub items: Vec<ReturnItem>,
     pub distinct: bool,
     pub where_clause: Option<WhereClause>,
-    /// Mirrors `ReturnClause::group_limit_hint`. Same trigger and same
-    /// semantics: the aggregator stops creating new groups after `N`
-    /// distinct keys when `WITH ... LIMIT N` (no `ORDER BY`) is the
-    /// pipeline shape. Forwarded to the synthetic `ReturnClause` that
-    /// `execute_with` builds.
+    /// Mirrors [`ReturnClause::group_limit_hint`], triggered by
+    /// `WITH ... LIMIT N` with no `ORDER BY`. Forwarded to the synthetic
+    /// `ReturnClause` that `execute_with` builds.
     pub group_limit_hint: Option<usize>,
 }
 
@@ -672,15 +608,13 @@ pub struct WithClause {
 // ORDER BY / SKIP / LIMIT
 // ============================================================================
 
-/// ORDER BY clause
 #[derive(Debug, Clone)]
 pub struct OrderByClause {
     pub items: Vec<OrderItem>,
 }
 
-/// NULLS placement modifier for an ORDER BY item.
-/// 0.9.0 §2: explicit `NULLS FIRST` / `NULLS LAST` in the source.
-/// Default mirrors Neo4j 5+ — NULLS LAST for ASC, NULLS FIRST for DESC.
+/// Explicit `NULLS FIRST` / `NULLS LAST` on an ORDER BY item. The default
+/// (no modifier) mirrors Neo4j 5+ — NULLS LAST for ASC, NULLS FIRST for DESC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NullsPlacement {
     First,
@@ -698,8 +632,6 @@ pub struct OrderItem {
 }
 
 impl OrderItem {
-    /// Effective NULLS placement: explicit modifier wins, otherwise
-    /// ASC → Last, DESC → First (Neo4j 5+ default).
     #[inline]
     pub fn effective_nulls(&self) -> NullsPlacement {
         self.nulls.unwrap_or(if self.ascending {
@@ -727,20 +659,18 @@ pub struct FusedSortKey {
     pub return_item: Option<usize>,
 }
 
-/// SKIP clause
 #[derive(Debug, Clone)]
 pub struct SkipClause {
     pub count: Expression,
 }
 
-/// LIMIT clause
 #[derive(Debug, Clone)]
 pub struct LimitClause {
     pub count: Expression,
 }
 
 // ============================================================================
-// UNWIND / UNION
+// UNWIND / LOAD CSV / UNION
 // ============================================================================
 
 /// UNWIND clause: expand a list into rows
@@ -818,7 +748,6 @@ pub struct UnionClause {
 // Mutation Clauses
 // ============================================================================
 
-/// CREATE clause with expression-aware patterns
 #[derive(Debug, Clone)]
 pub struct CreateClause {
     pub patterns: Vec<CreatePattern>,
@@ -830,7 +759,6 @@ pub struct CreatePattern {
     pub elements: Vec<CreateElement>,
 }
 
-/// Either a node or edge in a CREATE pattern
 #[derive(Debug, Clone)]
 pub enum CreateElement {
     Node(CreateNodePattern),
@@ -867,20 +795,17 @@ pub struct CreateEdgePattern {
     pub type_param: Option<String>,
 }
 
-/// Edge direction in CREATE
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CreateEdgeDirection {
     Outgoing, // ->
     Incoming, // <-
 }
 
-/// SET clause
 #[derive(Debug, Clone)]
 pub struct SetClause {
     pub items: Vec<SetItem>,
 }
 
-/// Single SET item
 #[derive(Debug, Clone)]
 pub enum SetItem {
     Property {
@@ -903,20 +828,17 @@ pub enum SetItem {
     },
 }
 
-/// DELETE clause
 #[derive(Debug, Clone)]
 pub struct DeleteClause {
     pub detach: bool,
     pub expressions: Vec<Expression>,
 }
 
-/// REMOVE clause — removes properties or labels from nodes
 #[derive(Debug, Clone)]
 pub struct RemoveClause {
     pub items: Vec<RemoveItem>,
 }
 
-/// Single REMOVE item
 #[derive(Debug, Clone)]
 pub enum RemoveItem {
     Property {
@@ -940,11 +862,6 @@ pub struct MergeClause {
     pub on_match: Option<Vec<SetItem>>,
 }
 
-// ============================================================================
-// CALL Clause
-// ============================================================================
-
-/// CALL clause: invoke a graph algorithm procedure
 #[derive(Debug, Clone)]
 pub struct CallClause {
     pub procedure_name: String,
@@ -981,7 +898,7 @@ pub enum SchemaCommand {
     CreateIndex(CreateIndex),
     /// `CREATE <TYPE> INDEX …` for an index type KGLite has no equivalent of
     /// (`TEXT`, `POINT`, `FULLTEXT`, `VECTOR`, `LOOKUP`). The remainder of the
-    /// statement is scanned to its end without structural validation: it is
+    /// statement is scanned to its end without structural validation — it is
     /// rejected wholesale at execution, and those forms carry grammar the
     /// supported ones don't (`ON EACH [...]`, `ON EACH labels(n)`, provider
     /// `OPTIONS`) that would buy nothing to model.
@@ -1069,7 +986,6 @@ pub enum DdlTarget {
 }
 
 impl DdlTarget {
-    /// Pattern variable bound by the `FOR` clause, when one was written.
     pub fn variable(&self) -> Option<&str> {
         match self {
             DdlTarget::Node { variable, .. } | DdlTarget::Relationship { variable, .. } => {
@@ -1089,7 +1005,6 @@ impl DdlTarget {
         }
     }
 
-    /// The label or relationship type the pattern names.
     pub fn type_name(&self) -> &str {
         match self {
             DdlTarget::Node { label, .. } => label,
@@ -1190,13 +1105,10 @@ impl ConstraintRequirement {
 // Expression classification helpers
 // ============================================================================
 
-/// Check if an expression contains an aggregate function call.
-/// Function names are normalized to lowercase at parse time, so direct
-/// comparison against lowercase literals is sufficient.
-/// Is `name` one of the aggregate function names? The single source of truth
-/// for the aggregate name set — `is_aggregate_expression` classifies with it,
-/// and the nested-aggregate evaluator uses it to find the maximal aggregate
-/// calls it must evaluate over the whole row set.
+/// The single source of truth for the aggregate name set —
+/// `is_aggregate_expression` classifies with it, and the nested-aggregate
+/// evaluator uses it to find the maximal aggregate calls it must evaluate over
+/// the whole row set. Names are lowercased at parse time.
 pub fn is_aggregate_function_name(name: &str) -> bool {
     matches!(
         name,
@@ -1302,7 +1214,6 @@ pub fn is_aggregate_expression(expr: &Expression) -> bool {
     }
 }
 
-/// Check if an expression is a window function
 pub fn is_window_expression(expr: &Expression) -> bool {
     matches!(expr, Expression::WindowFunction { .. })
 }

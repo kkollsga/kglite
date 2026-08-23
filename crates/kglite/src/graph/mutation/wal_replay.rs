@@ -27,10 +27,10 @@
 //! a handful of bulk calls (one `add_nodes` per node type, one
 //! `add_connections` per edge group), rebuilding each index once.
 //!
-//! This is sound because the ops are **identity-keyed and idempotent**: the
-//! final value of an entity depends only on its last op, not on the path
-//! there. Folding then applying reaches the same final state as a
-//! frame-by-frame replay, and replaying twice is still harmless.
+//! This is sound because the ops are **identity-keyed and idempotent**: an
+//! entity's final value depends only on its last op, not on the path there —
+//! so the fold reaches the same state as a frame-by-frame replay, and
+//! replaying twice is still harmless.
 //!
 //! Apply order — node upserts → label sets → edge upserts → edge removes →
 //! node removes — respects referential integrity (endpoints exist before
@@ -86,7 +86,6 @@ enum NodeNet {
     },
     Remove,
 }
-/// Net state of an edge after folding.
 enum EdgeNet {
     Upsert { props: Vec<(String, Value)> },
     Remove,
@@ -353,9 +352,8 @@ fn apply_exact_node_props(
             match props.get(col) {
                 None | Some(Value::Null) => continue,
                 Some(value) => {
-                    // `get_or_intern`, never `InternedKey::from_str`: a
-                    // hash-only key cannot be resolved back to a string at
-                    // save time, and the property vanishes on reload.
+                    // `get_or_intern`, never `InternedKey::from_str` — see
+                    // `declare_exact_node_columns`.
                     let key = graph.interner.get_or_intern(col);
                     graph.ensure_type_schema_keys(node_type, &[key]);
                     GraphWrite::set_node_property(&mut graph.graph, idx, key, value.clone());
@@ -449,7 +447,6 @@ fn apply_edge_upserts(
     Ok(())
 }
 
-/// The `(conn, src_type, tgt_type)` an edge group is keyed by.
 #[derive(Clone, Copy)]
 struct EdgeGroup<'a> {
     conn: &'a str,
@@ -545,14 +542,9 @@ fn apply_exact_edge_props(
 /// unchanged and the ones it would retype.
 ///
 /// `DataFrame` columns are singly typed: `from_cypher_rows` promotes each
-/// column to one `ColumnType` and rewrites every cell into it. That is the
-/// documented, wanted behaviour for the load paths that share the builder —
-/// but replay is not a load, it is *recovery*, and a mixed `Int64`/`String`
-/// property replaying as two strings (or an `Int64`/`Float64` one replaying
-/// as two floats) is type loss no re-query can undo. A live graph is allowed
-/// mixed types under one property — `Value` is a sum type and the columnar
-/// store demotes such a column to `Mixed` — so recovery must be allowed them
-/// too.
+/// column to one `ColumnType` and rewrites every cell into it — wanted for the
+/// load paths that share the builder, unrecoverable type loss for replay (see
+/// the module header, "Recovery is value-faithful").
 ///
 /// A column is *faithful* when every value it carries has an exact column
 /// shape and they all share it; `Null` carries no type and is ignored (the
@@ -1572,7 +1564,7 @@ mod tests {
         )];
         let mut g = DirGraph::new();
         apply_frames(&mut g, &frames, 0).unwrap();
-        apply_frames(&mut g, &frames, 0).unwrap(); // replay again
+        apply_frames(&mut g, &frames, 0).unwrap();
         assert_eq!(g.graph.node_count(), 2, "idempotent — no duplicate nodes");
         assert_eq!(g.graph.edge_count(), 1, "idempotent — no duplicate edge");
     }

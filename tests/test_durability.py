@@ -147,7 +147,6 @@ def _sigkill_child(tmp_path, body: str, storage: str = "memory", durable: object
 
 @pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
 def test_durable_create_survives_hard_crash(tmp_path, storage):
-    # Child: create a durable graph, mutate, hard-exit WITHOUT save().
     _crash_child(
         tmp_path,
         """
@@ -235,7 +234,7 @@ def test_set_and_delete_survive_crash(tmp_path, storage):
     g = _open(tmp_path / "app.kgl", storage)
     g.cypher("CREATE (:Person {id: 1, name: 'Alice', age: 30})")
     g.cypher("CREATE (:Person {id: 2, name: 'Bob'})")
-    g.save()  # checkpoint
+    g.save()
     del g  # hand the write lease to the child; see the note at the top
 
     _crash_child(
@@ -466,7 +465,6 @@ def test_checkpoint_truncates_wal_then_recovers_post_checkpoint(tmp_path, storag
     assert (tmp_path / "app.kgl").exists()
     del g  # hand the write lease to the child; see the note at the top
 
-    # Post-checkpoint mutation in a child that crashes.
     _crash_child(
         tmp_path,
         """
@@ -483,7 +481,6 @@ def test_checkpoint_truncates_wal_then_recovers_post_checkpoint(tmp_path, storag
 
 @pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
 def test_clean_reopen_loop_accumulates(tmp_path, storage):
-    # Repeated open → mutate → (no save) → crash → reopen must accumulate.
     for i in range(3):
         _crash_child(
             tmp_path,
@@ -791,7 +788,6 @@ def test_non_durable_open_writes_no_wal(tmp_path):
     g = kglite.open(str(tmp_path / "app.kgl"), durable=False)
     g.cypher("CREATE (:Person {id: 1})")
     g.save()
-    # Non-durable mode never creates a WAL sidecar.
     assert not (tmp_path / "app.kgl-wal").exists()
 
 

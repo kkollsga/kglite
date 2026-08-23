@@ -1,5 +1,3 @@
-// src/graph/file.rs
-//
 // Versioned binary format for KnowledgeGraph persistence.
 //
 // File format v6 layout (v5 is identical apart from the magic and the
@@ -40,12 +38,9 @@ use crate::graph::schema::{
 use crate::graph::storage::column_store::ColumnStore;
 use crate::graph::storage::property_storage::ColumnarRow;
 use crate::graph::storage::{GraphRead, GraphWrite};
-// This module no longer constructs `KnowledgeGraph` directly.
-// `load_file` / `load_disk_dir` / `load_portable_container` return
-// `Arc<DirGraph>`; the binding callsites wrap that in their own
-// ergonomic type (pyapi → `KnowledgeGraph`, mcp-server → its
-// own `ActiveGraph`, future Go/TS → their binding's struct).
-// Keeps io decoupled from binding state.
+// Loaders return `Arc<DirGraph>`; each binding wraps that in its own type
+// (pyapi → `KnowledgeGraph`, mcp-server → `ActiveGraph`), which keeps io
+// decoupled from binding state.
 use memmap2::Mmap;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -107,15 +102,11 @@ const EMBED_PROVENANCE_MIN_VERSION: u32 = 3;
 // *before* this carries no digests, and `take` then verifies nothing — exactly
 // its previous behaviour.
 
-/// Canonical `section_digests` key for the topology section.
+// Canonical `section_digests` keys for the fixed sections.
 const TOPOLOGY_SECTION: &str = "topology";
-/// Canonical `section_digests` key for the embeddings section.
 const EMBEDDINGS_SECTION: &str = "embeddings";
-/// Canonical `section_digests` key for the timeseries section.
 const TIMESERIES_SECTION: &str = "timeseries";
-/// Canonical `section_digests` key for the secondary-label-index section.
 const SECONDARY_LABELS_SECTION: &str = "secondary_labels";
-/// Canonical `section_digests` key for the HNSW vector-index section.
 const VECTOR_INDEX_SECTION: &str = "vector_index";
 
 /// Canonical `section_digests` key for one node type's column section.
@@ -135,7 +126,6 @@ fn section_digest(compressed: &[u8]) -> u32 {
     crate::graph::wal::crc32(compressed)
 }
 
-/// Column-section metadata shared by the current portable format.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PortableColumnSection {
     type_name: String,
@@ -151,36 +141,29 @@ pub(crate) struct FileMetadata {
     /// Core data version at save time — must match or be migratable.
     #[serde(default)]
     core_data_version: u32,
-    /// Library version string at save time (for example, "0.14.x").
     #[serde(default)]
     library_version: String,
-    /// Optional schema definition.
     #[serde(default)]
     schema_definition: Option<SchemaDefinition>,
-    /// Property index keys to rebuild after load.
+    /// Index keys (property / composite / range) rebuilt after load.
     #[serde(default)]
     property_index_keys: Vec<IndexKey>,
-    /// Composite index keys to rebuild after load.
     #[serde(default)]
     composite_index_keys: Vec<CompositeIndexKey>,
-    /// Range index keys to rebuild after load.
     #[serde(default)]
     range_index_keys: Vec<IndexKey>,
-    /// Declared UNIQUE constraints to reinstall after load. Additive — a file
-    /// written before constraints existed deserializes to an empty list, i.e.
-    /// no constraints, which is exactly its original behaviour.
+    /// Declared UNIQUE constraints to reinstall after load.
     ///
-    /// Skipped when empty so a graph that declares no constraint writes
-    /// byte-identical output to one produced before the field existed. Without
-    /// that, the field emits `"unique_constraint_keys":[]` into *every* `.kgl`
-    /// and gratuitously shifts the format for the overwhelming majority of
-    /// graphs, which carry no constraints at all.
+    /// Canonical statement of the additive-and-skipped-when-empty posture every
+    /// `skip_serializing_if` field here shares: an older file lacking the key
+    /// deserializes to "none declared", exactly its original behaviour, and a
+    /// graph that declares none writes byte-identical output to one produced
+    /// before the field existed — which is what keeps the `test_phase4_parity`
+    /// golden digest stable.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     unique_constraint_keys: Vec<UniqueConstraintKey>,
     /// User-supplied constraint names → the declaration each names, so
-    /// `DROP CONSTRAINT <name>` survives save/load. Additive, and skipped when
-    /// empty so a graph that declares no *named* constraint writes byte-identical
-    /// output to one produced before the field existed.
+    /// `DROP CONSTRAINT <name>` survives save/load.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     constraint_names: HashMap<String, NamedConstraint>,
     /// Which `(node_type, property)` presence constraints were declared through
@@ -195,10 +178,6 @@ pub(crate) struct FileMetadata {
     /// payload, the load path builds a fresh graph and repopulates it from
     /// *this* struct — so the first unrelated `define_schema()` after a reload
     /// silently un-enforced a constraint the user had written in Cypher.
-    ///
-    /// Additive, and skipped when empty so a graph that declares no DDL
-    /// presence constraint writes byte-identical output to one produced before
-    /// the field existed.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     ddl_not_null_constraints: BTreeSet<(String, String)>,
     /// Declared property-type constraints (`CREATE CONSTRAINT ... IS :: T`), as
@@ -211,11 +190,9 @@ pub(crate) struct FileMetadata {
     /// serde derive does not persist it: the load path builds a fresh graph and
     /// repopulates it from this struct (`from_graph` / `apply_to_with`).
     ///
-    /// Additive, and skipped when empty so a graph that declares no type
-    /// constraint writes byte-identical output to one produced before the field
-    /// existed. A file that *does* carry one will not load on a build that
-    /// predates `ConstraintKind::PropertyType` — the deliberate one-way format
-    /// posture, documented in the CHANGELOG.
+    /// A file that *does* carry one will not load on a build that predates
+    /// `ConstraintKind::PropertyType` — the deliberate one-way format posture,
+    /// documented in the CHANGELOG.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     ddl_property_type_constraints: BTreeMap<String, BTreeMap<String, DeclaredType>>,
     /// Declared relationship presence constraints, as
@@ -223,20 +200,16 @@ pub(crate) struct FileMetadata {
     /// provenance record beside a schema list — a connection type has no
     /// `required_fields` — so it *is* the declaration, and a reload without it
     /// silently forgets every relationship presence constraint in the file.
-    ///
-    /// Additive, and skipped when empty so a graph declaring none writes
-    /// byte-identical output to one produced before the field existed.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     rel_ddl_not_null_constraints: BTreeSet<(String, String)>,
     /// Declared relationship property-type constraints, as
-    /// `connection_type -> property -> type`. Same enforcement-structure role,
-    /// same additive-and-skipped-when-empty posture, as the two above.
+    /// `connection_type -> property -> type`. Same enforcement-structure role
+    /// as the two above.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     rel_ddl_property_type_constraints: BTreeMap<String, BTreeMap<String, DeclaredType>>,
     /// Node type metadata: node_type → { property_name → type_string }
     #[serde(default)]
     node_type_metadata: HashMap<String, HashMap<String, String>>,
-    /// Connection type metadata: connection_type → ConnectionTypeInfo
     #[serde(default)]
     connection_type_metadata: HashMap<String, ConnectionTypeInfo>,
     /// Original ID field name per node type (for alias resolution)
@@ -249,13 +222,10 @@ pub(crate) struct FileMetadata {
     #[serde(default = "crate::graph::dir_graph::default_auto_vacuum_threshold")]
     auto_vacuum_threshold: Option<f64>,
     /// The storage mode that wrote this file, in the cross-binding vocabulary
-    /// `StorageMode::as_str` owns. Additive and *invisible at the memory
-    /// baseline*, exactly like `user_schema_version` and `checkpoint_lsn`
-    /// below: `skip_serializing_if` omits the key for a memory graph, so the
-    /// overwhelmingly common save stays byte-for-byte what it was before this
-    /// field existed — which is what keeps the `test_phase4_parity` golden
-    /// digest stable. Never read the raw value: the `storage_mode` submodule
-    /// owns what a reader may conclude from it, absent key included.
+    /// `StorageMode::as_str` owns. Omitted for a memory graph, so the common
+    /// save keeps the pre-field bytes. Never read the raw value: the
+    /// `storage_mode` submodule owns what a reader may conclude from it, absent
+    /// key included.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     storage_mode: Option<String>,
     /// Parent types: child_type → parent_type. Determines which types are
@@ -271,11 +241,7 @@ pub(crate) struct FileMetadata {
     /// ordered scripts a graph has already had applied. Not an engine version:
     /// `core_data_version` above and the `.kgl` magic own the format lifecycle.
     ///
-    /// Additive and *invisible when unset*: `skip_serializing_if` omits the key
-    /// entirely at the baseline value, so a graph that never stamps a schema
-    /// version serializes byte-for-byte as it did before this field existed —
-    /// which is what keeps the `test_phase4_parity` golden digest stable. Older
-    /// files simply lack the key and default to 0.
+    /// Omitted at the baseline value; older files lack the key and default to 0.
     #[serde(default, skip_serializing_if = "is_zero")]
     user_schema_version: u32,
     /// Highest WAL log-sequence number this checkpoint already contains (see
@@ -289,11 +255,7 @@ pub(crate) struct FileMetadata {
     /// only the checkpoint is authoritative about how much of the log it
     /// consumed.
     ///
-    /// Additive and *invisible when unset*, exactly like `user_schema_version`
-    /// above: `skip_serializing_if` omits the key entirely at the baseline, so a
-    /// graph that was never durable serializes byte-for-byte as it did before
-    /// this field existed — which is what keeps the `test_phase4_parity` golden
-    /// digest stable. Older files simply lack the key and default to 0, i.e.
+    /// Omitted at the baseline; older files lack the key and default to 0, i.e.
     /// replay everything, the pre-gate behaviour.
     #[serde(default, skip_serializing_if = "is_zero")]
     checkpoint_lsn: u64,
@@ -312,17 +274,10 @@ pub(crate) struct FileMetadata {
     /// holding a stale cursor. A save made while capture is off carries
     /// forward whatever stamp the graph already had, because "epoch 7 ended at
     /// 412" stays true after capture stops.
-    ///
-    /// Additive and *invisible when absent*, exactly like `checkpoint_lsn`
-    /// above: a graph that never enabled capture omits the key entirely and
-    /// serializes byte-for-byte as it did before this field existed, which is
-    /// what keeps the `test_phase4_parity` golden digest stable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cdc_handoff: Option<crate::graph::cdc::CdcHandoff>,
-    /// Spatial configuration per node type.
     #[serde(default)]
     spatial_configs: HashMap<String, SpatialConfig>,
-    /// Timeseries configuration per node type.
     #[serde(default)]
     timeseries_configs: HashMap<String, TimeseriesConfig>,
     /// Temporal configuration per node type (valid_from/valid_to on nodes).
@@ -334,7 +289,6 @@ pub(crate) struct FileMetadata {
     /// Timeseries data version: 1 = Vec<Vec<i64>> keys (legacy), 2 = NaiveDate keys.
     #[serde(default = "default_ts_data_version")]
     timeseries_data_version: u32,
-    /// Compressed size of the topology section.
     #[serde(default)]
     topology_compressed_size: u64,
     /// Column-section metadata (one per node type).
@@ -359,22 +313,20 @@ pub(crate) struct FileMetadata {
     /// `.kgl` files default to 0.
     #[serde(default)]
     vector_index_compressed_size: u64,
-    /// CRC32 (IEEE) of each section's **compressed** bytes, keyed by the
-    /// canonical section name — `topology`, `columns:<TypeName>`,
-    /// `embeddings`, `timeseries`, `secondary_labels`, `vector_index` (see
-    /// [`column_section_key`] and the "Section integrity" note above).
+    /// CRC32 (IEEE) of each section's **compressed** bytes, keyed by canonical
+    /// section name (see [`column_section_key`] and the "Section integrity"
+    /// note above).
     ///
     /// Keyed rather than positional so the map survives an optional section
     /// being absent, a node type being added or removed, and any change in
     /// write order: the reader looks up the one section it is about to take,
     /// and a section with no entry is simply not verified.
     ///
-    /// Additive in both directions. Older files carry no keys, so the load
-    /// path verifies nothing and behaves exactly as it did before the field
-    /// existed; older *binaries* ignore the key, because this metadata has
-    /// never denied unknown fields. `skip_serializing_if` keeps the key out of
-    /// the disk-mode `metadata.json` (whose sections live in separate files
-    /// with their own integrity story), so that file stays byte-identical.
+    /// Additive in both directions: older files carry no keys, so the load path
+    /// verifies nothing exactly as it did before the field existed, and older
+    /// *binaries* ignore the key because this metadata has never denied unknown
+    /// fields. Skipped for the disk-mode `metadata.json`, whose sections live in
+    /// separate files with their own integrity story.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     section_digests: BTreeMap<String, u32>,
     /// Cached edge type counts (connection_type → count).
@@ -399,11 +351,9 @@ fn is_zero<T: Default + PartialEq>(value: &T) -> bool {
     *value == T::default()
 }
 
-// ─── Metadata transfer helpers ───────────────────────────────────────────────
-
 impl FileMetadata {
-    /// Build metadata from a DirGraph, leaving v3 section sizes at zero
-    /// (caller fills them in after compression).
+    /// Build metadata from a DirGraph, leaving section sizes at zero (the
+    /// caller fills them in after compression).
     pub(crate) fn from_graph(graph: &DirGraph) -> Self {
         FileMetadata {
             core_data_version: CURRENT_CORE_DATA_VERSION,
@@ -441,7 +391,6 @@ impl FileMetadata {
             temporal_node_configs: graph.temporal_node_configs.clone(),
             temporal_edge_configs: graph.temporal_edge_configs.clone(),
             timeseries_data_version: 2,
-            // Section sizes filled in by caller:
             topology_compressed_size: 0,
             column_sections: Vec::new(),
             embeddings_compressed_size: 0,
@@ -455,7 +404,6 @@ impl FileMetadata {
             } else {
                 None
             },
-            // Persist type connectivity if computed.
             // 0.8.13: `DirGraph::save_disk` strips this field from the
             // disk-mode metadata.json and writes
             // `type_connectivity.bin.zst` separately (3.17 M-entry JSON
@@ -508,16 +456,14 @@ impl FileMetadata {
             format_version: 3,
             library_version: self.library_version,
         };
-        // Restore edge type counts cache if persisted
         if let Some(counts) = self.edge_type_counts {
             *graph.edge_type_counts_cache.write().unwrap() = Some(std::sync::Arc::new(counts));
         }
-        // Restore type connectivity cache if persisted
         if let Some(triples) = self.type_connectivity {
             *graph.type_connectivity_cache.write().unwrap() = Some(triples);
         } else if derive_type_connectivity && !graph.connection_type_metadata.is_empty() {
-            // Derive type connectivity from connection_type_metadata (instant, no I/O).
-            // This covers older graphs that don't have persisted type_connectivity.
+            // Older graphs persist no triples: derive them from
+            // connection_type_metadata (instant, no I/O).
             let edge_counts = graph.edge_type_counts_cache.read().unwrap();
             let mut triples = Vec::new();
             for (conn_type, info) in graph.connection_type_metadata.iter() {
@@ -543,7 +489,6 @@ impl FileMetadata {
     }
 }
 
-/// Build metadata for disk-mode save (reuses the same FileMetadata structure).
 pub(crate) fn build_disk_metadata(graph: &DirGraph) -> FileMetadata {
     FileMetadata::from_graph(graph)
 }
@@ -565,11 +510,8 @@ pub(crate) fn strip_heavy_metadata(meta: &mut FileMetadata) {
     meta.connection_type_metadata.clear();
 }
 
-// ─── node/connection type-metadata sidecars ─────────────────────────────────
-//
-// The `node_type_metadata.bin.zst` / `connection_type_metadata.bin.zst`
-// fast-load codecs live in a submodule (split out of this file for the
-// production-source file cap); re-exported here so caller paths stay stable.
+// The sidecar codec submodules below are split out of this file for the
+// production-source file cap; re-exported here so caller paths stay stable.
 mod metadata_sidecars;
 // What a save records about its own storage mode, and what a load may conclude
 // from it (`storage_mode` in the metadata above).
@@ -580,12 +522,6 @@ pub(crate) use metadata_sidecars::{
 };
 use storage_mode::recorded_storage_mode_tag;
 
-// ─── Fast-load sidecar codecs (*.bin.zst) ───────────────────────────────────
-//
-// The packed `type_indices` / `interner` / `id_indices` / `type_connectivity`
-// / `secondary_labels` codecs live in a submodule (split out of this file for
-// the production-source file cap, like `metadata_sidecars` above);
-// re-exported here so caller paths stay stable.
 mod fast_load_sidecars;
 use fast_load_sidecars::{decode_secondary_label_index, encode_secondary_label_index};
 pub(crate) use fast_load_sidecars::{
@@ -607,15 +543,10 @@ pub fn prepare_save(graph: &mut Arc<DirGraph>) {
     g.populate_index_keys();
 }
 
-/// Compress data using zstd (level 1 — fastest with good ratio), with a
-/// content checksum in the frame.
-///
-/// The checksum is layer 1 of the section-integrity story (see the "Section
-/// integrity" note near the top of this module): zstd appends an XXH64 of the
-/// uncompressed content to the frame, and `zstd::Decoder` verifies it while
-/// decoding with no cooperation from the reader — including the readers in
-/// binaries built before this flag was set, because a frame with a content
-/// checksum is an ordinary zstd frame. It costs 4 bytes per section.
+/// Compress with zstd level 1 (fastest with good ratio) and an XXH64 frame
+/// content checksum — layer 1 of the section-integrity story (see the note near
+/// the top of this module). Costs 4 bytes per section, and readers built before
+/// the flag was set still decode the frame: it is an ordinary zstd frame.
 fn zstd_compress(data: &[u8]) -> io::Result<Vec<u8>> {
     let mut encoder = zstd::Encoder::new(Vec::new(), 1)?;
     encoder.include_checksum(true)?;
@@ -623,7 +554,6 @@ fn zstd_compress(data: &[u8]) -> io::Result<Vec<u8>> {
     encoder.finish()
 }
 
-/// Decompress zstd-compressed data.
 fn zstd_decompress(data: &[u8]) -> io::Result<Vec<u8>> {
     zstd_decompress_limited(data, MAX_DECOMPRESSED_SECTION_BYTES)
 }
@@ -640,7 +570,6 @@ pub(crate) fn encode_disk_serde<T: Serialize + ?Sized>(value: &T) -> io::Result<
     Ok(framed)
 }
 
-/// Decode an explicitly framed Postcard disk sidecar.
 pub(crate) fn decode_disk_serde<'de, T: Deserialize<'de>>(
     bytes: &'de [u8],
     allocated_bytes: u64,
@@ -695,12 +624,10 @@ fn zstd_decompress_limited(data: &[u8], limit: u64) -> io::Result<Vec<u8>> {
     Ok(decoded)
 }
 
-/// Serialize one version-selected portable payload.
 fn codec_ser<T: Serialize>(codec: serde_codec::CodecVersion, val: &T) -> io::Result<Vec<u8>> {
     serde_codec::encode_versioned(codec, val, MAX_CODEC_BYTES).map_err(io::Error::other)
 }
 
-/// Deserialize one version-selected portable payload exactly.
 fn codec_deser<'a, T: Deserialize<'a>>(
     codec: serde_codec::CodecVersion,
     buf: &'a [u8],
@@ -717,17 +644,15 @@ fn codec_deser<'a, T: Deserialize<'a>>(
     decoded.map_err(|e| invalid_data(format!("binary deserialization failed: {e}")))
 }
 
-/// Verify every InternedKey in the backend's column-store schemas
-/// resolves to a string in `graph.interner`. Catches the class of bug where
-/// a writer synthesizes a key via `InternedKey::from_str()` (just hashing)
-/// and mutates a ColumnStore without first calling `interner.get_or_intern()`
-/// — `save()` would then serialize the unregistered key and `load()` would
-/// see "<unknown>" property names, silently corrupting the data.
+/// Verify every InternedKey in the backend's column-store schemas resolves to a
+/// string in `graph.interner`. Catches the class of bug where a writer
+/// synthesizes a key via `InternedKey::from_str()` (just hashing) and mutates a
+/// ColumnStore without first calling `interner.get_or_intern()` — `save()` would
+/// then serialize the unregistered key and `load()` would see "<unknown>"
+/// property names, silently corrupting the data.
 ///
-/// Surfaced by the 0.8.39 SET master-path bug (now fixed). Locked in here
-/// so any future regression of the same shape (in this or any other write
-/// path) panics loudly in debug builds rather than landing as silent data
-/// loss in release.
+/// Surfaced by the 0.8.39 SET master-path bug; any regression of the same shape,
+/// in this or any other write path, now fails the save instead.
 fn validate_column_keys_registered(graph: &DirGraph) -> io::Result<()> {
     for (type_name, store) in graph.column_stores_by_name() {
         let schema = store.schema();
@@ -774,7 +699,7 @@ const UNIDENTIFIED_TEMP_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 /// [`write_kgl_with`] removes its own temp on every error path it can see, but
 /// it cannot see the one that matters: a `SIGKILL`, an OOM-kill or a power cut
 /// part-way through a save leaves a **full-size** copy of the graph beside the
-/// real file, and nothing has ever deleted it. A crash-looping writer over a
+/// real file, and nothing else deletes it — a crash-looping writer over a
 /// multi-GB graph fills the volume with copies of itself.
 ///
 /// **Nothing a live process could still be writing is touched.** A temp is
@@ -785,9 +710,8 @@ const UNIDENTIFIED_TEMP_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 /// Pid reuse can only make the reaper *keep* a file it could have deleted,
 /// which leaks a temp rather than destroying a live save.
 ///
-/// Best-effort throughout: an unreadable directory or a failed unlink is not
-/// an error a caller should hear about, because nothing depends on the reap
-/// having happened.
+/// Best-effort: nothing depends on the reap having happened, so an unreadable
+/// directory or a failed unlink is not reported.
 pub fn reap_stale_save_temps(path: &Path) -> usize {
     let prefix = save_temp_prefix(path);
     let dir = match path.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -878,9 +802,9 @@ fn process_is_alive(_pid: u32) -> Option<bool> {
 /// per-process counter so two processes saving the same path can't
 /// clobber each other's in-flight temp (last *rename* wins, cleanly).
 /// Unlike disk-graph directories, a standalone `.kgl` path has no
-/// `GraphDirectoryLock`: callers must serialize writers if last-writer-wins is
-/// not acceptable. Atomic rename protects readers from torn files, but is not
-/// a cross-process write-ownership lock.
+/// `GraphDirectoryLock`: the atomic rename protects readers from torn files but
+/// is not a write-ownership lock, so callers must serialize writers if
+/// last-writer-wins is not acceptable.
 ///
 /// `fsync = true` (the default via [`write_kgl`]) flushes the file and
 /// its parent directory to disk before returning, so the bytes survive an
@@ -899,14 +823,12 @@ pub fn write_kgl_with(graph: &DirGraph, path: &str, fsync: bool) -> io::Result<(
         None => Path::new(&tmp_name).to_path_buf(),
     };
 
-    // Write the bytes to the temp file, then flush + (optionally) fsync.
     // Scope the writer so the File is closed before the rename.
     let write_result = (|| -> io::Result<()> {
         let file = File::create(&tmp)?;
         let mut writer = BufWriter::new(file);
         write_kgl_to(graph, &mut writer)?;
         writer.flush()?;
-        // Recover the File from the BufWriter to fsync it.
         let file = writer
             .into_inner()
             .map_err(|e| io::Error::other(e.to_string()))?;
@@ -922,8 +844,6 @@ pub fn write_kgl_with(graph: &DirGraph, path: &str, fsync: bool) -> io::Result<(
         return Err(e);
     }
 
-    // Atomic publish: rename temp → dest. On the same filesystem this is a
-    // single atomic operation; readers see either the old or the new file.
     if let Err(e) = std::fs::rename(&tmp, dest) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
@@ -998,12 +918,10 @@ pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()
     let topology_compressed = zstd_compress(&topology_raw)?;
     drop(topology_raw); // free before compressing columns
 
-    // 2. Serialize column sections (one per node type).
-    //
-    // Iterate column stores in sorted order by type_name. The backend's map
-    // is a HashMap whose per-instance RandomState would otherwise cause the
-    // section order to vary across processes — breaking byte-level reproducibility
-    // that the `test_phase4_parity` golden-hash test relies on. Sorting is free
+    // 2. Column sections, one per node type, sorted by type_name: the backend's
+    // map is a HashMap whose per-instance RandomState would otherwise vary the
+    // section order across processes, breaking the byte-level reproducibility
+    // the `test_phase4_parity` golden-hash test relies on. Sorting is free
     // (type_name count is small) and doesn't affect the format: each section
     // is self-describing and the decoder iterates column_sections_meta in order.
     let mut column_sections_meta: Vec<PortableColumnSection> = Vec::new();
@@ -1021,7 +939,6 @@ pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()
         let compressed = zstd_compress(&packed)?;
         drop(packed); // free uncompressed before next type
 
-        // Build column schema
         let mut cols = HashMap::new();
         for (slot, ik) in store.schema().iter() {
             let prop_name = graph.interner.resolve(ik);
@@ -1043,12 +960,10 @@ pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()
         column_sections_data.push(compressed);
     }
 
-    // 3. Compress embeddings if any.
-    //
-    // Serialize through a BTreeMap view: `graph.embeddings` is a HashMap whose
-    // per-process RandomState would otherwise randomize entry order — breaking
-    // the byte-reproducibility the column sections above already guarantee
-    // (same wire shape, HashMap deserializes it unchanged).
+    // 3. Embeddings, through a BTreeMap view: `graph.embeddings` is a HashMap
+    // whose per-process RandomState would otherwise randomize entry order,
+    // breaking the byte-reproducibility the column sections above already
+    // guarantee (same wire shape, HashMap deserializes it unchanged).
     let embedding_compressed = if !graph.embeddings.is_empty() {
         let ordered: std::collections::BTreeMap<_, _> = graph.embeddings.iter().collect();
         let raw = codec_ser(codec, &ordered)?;
@@ -1075,14 +990,11 @@ pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()
         None => None,
     };
 
-    // 4c. Compress the HNSW vector-index section if any store has one built.
     let vector_index_compressed = match encode_vector_indexes(graph)? {
         Some(payload) => Some(zstd_compress(&payload)?),
         None => None,
     };
 
-    // 5. Build metadata (common fields from graph, then fill in section sizes
-    //    and the per-section integrity digests).
     let section_digests = build_section_digests(
         &topology_compressed,
         &column_sections_meta,
@@ -1128,8 +1040,6 @@ pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()
     let metadata_value = serde_json::to_value(&metadata).map_err(io::Error::other)?;
     let metadata_json = serde_json::to_vec(&metadata_value).map_err(io::Error::other)?;
 
-    // 6. Write the byte stream into the caller's writer.
-
     // Header: magic (4B) + codec (1B) + core_data_version (4B) +
     // metadata_length (4B). The codec byte prevents implicit byte sniffing.
     writer.write_all(&V6_MAGIC)?;
@@ -1138,20 +1048,17 @@ pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()
     writer.write_all(&(metadata_json.len() as u32).to_le_bytes())?;
     writer.write_all(&metadata_json)?;
 
-    // Topology section
     writer.write_all(&topology_compressed)?;
 
-    // Column sections (one per node type, in metadata order)
+    // Column sections in metadata order.
     for section_data in &column_sections_data {
         writer.write_all(section_data)?;
     }
 
-    // Embeddings section
     if let Some(emb_data) = &embedding_compressed {
         writer.write_all(emb_data)?;
     }
 
-    // Timeseries section
     if let Some(ts_data) = &timeseries_compressed {
         writer.write_all(ts_data)?;
     }
@@ -1202,11 +1109,8 @@ pub fn prepare_kgl_write(graph: &mut Arc<DirGraph>) {
 /// for the canonical split. Rust-only callers (no GIL) just call
 /// this directly.
 ///
-/// `fsync = true` flushes the file + parent directory before returning so the
-/// bytes survive an OS/power crash; `fsync = false` keeps the atomic
-/// temp+rename (never a torn file) but skips the durability barrier for speed
-/// (the bench-only fast path). Callers normally use the mode-aware
-/// [`save_graph`] / [`save_graph_with`] rather than this directly.
+/// `fsync` as in [`write_kgl_with`]; `false` is the bench-only fast path.
+/// Callers normally use the mode-aware [`save_graph`] / [`save_graph_with`].
 pub fn save_inmemory_with(graph: &mut Arc<DirGraph>, path: &str, fsync: bool) -> io::Result<()> {
     prepare_kgl_write(graph);
     write_kgl_with(graph, path, fsync)
@@ -1224,8 +1128,7 @@ pub fn save_graph(graph: &mut Arc<DirGraph>, path: &str) -> Result<(), SaveError
 /// Durability-parameterized counterpart of [`save_graph`]. The `fsync`
 /// flag is threaded to the in-memory `.kgl` write ([`save_inmemory_with`]);
 /// disk-backed graphs persist through `DirGraph::save_disk`, which manages
-/// its own durability, so the flag does not apply to them. `fsync = false`
-/// is the fast, non-durable opt-out (atomic rename, no crash barrier).
+/// its own durability, so the flag does not apply to them.
 ///
 /// Being the single dispatch, this is also where the *write-ahead* rule is
 /// enforced: a save that would strand unreplayed frames in front of the
@@ -1270,8 +1173,7 @@ pub fn materialize_disk_graph(graph: &mut Arc<DirGraph>, path: &str) -> Result<(
 
 // ─── Load ────────────────────────────────────────────────────────────────────
 
-/// Minimum file size to use mmap for the initial file read.
-/// Below this threshold, `std::fs::read()` is faster (avoids mmap syscall overhead).
+/// Below this size, `std::fs::read()` beats mmap (no mmap syscall overhead).
 const FILE_MMAP_THRESHOLD: u64 = 65_536; // 64 KB
 
 const MAX_METADATA_BYTES: usize = 64 * 1024 * 1024;
@@ -1377,7 +1279,6 @@ impl<'a> SectionCursor<'a> {
 /// wants [`crate::graph::io::open::open_or_create_graph`], which adds the
 /// recovery refusal, or a durable open, which replays.
 pub fn load_file(path: &str) -> io::Result<Arc<DirGraph>> {
-    // If path is a directory, load as disk graph
     let p = std::path::Path::new(path);
     if p.is_dir() {
         return load_disk_dir(p);
@@ -1416,7 +1317,6 @@ pub fn load_file(path: &str) -> io::Result<Arc<DirGraph>> {
         return Err(unrecognized_magic_error(&mmap[..4], &format!("'{path}'")));
     }
 
-    // Small files: direct read is faster
     let buf = std::fs::read(path)?;
     if buf.len() < 4 {
         return Err(io::Error::other(
@@ -1505,7 +1405,6 @@ fn rebuild_disk_type_schemas(graph: &mut DirGraph) -> io::Result<()> {
     Ok(())
 }
 
-/// Load a disk-mode graph from a directory.
 fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
     use crate::graph::io::load_timing::{log_stage, stage_timer};
     use crate::graph::schema::GraphBackend;
@@ -1516,7 +1415,6 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
     let snapshot_dir = resolved.snapshot_dir;
     let dir = snapshot_dir.as_path();
 
-    // Verify this is a disk graph directory
     if !dir.join("disk_graph_meta.json").exists() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -1607,7 +1505,6 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
             }
         }
         if !loaded {
-            // Fallback: rebuild from node_slots scan
             let mut new_type_indices: std::collections::HashMap<
                 String,
                 Vec<petgraph::graph::NodeIndex>,
@@ -1690,15 +1587,11 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
 
     load_disk_sidecars(dir, &mut graph)?;
 
-    // Backfill the connection_types O(1)-lookup cache from the loaded
-    // metadata. The v3 / file loader does this at line 1606 of read_v3;
-    // the disk loader was the only path that left it empty and relied
-    // on `has_connection_type`'s metadata-fallback branch. The fallback
-    // is correct on a freshly-loaded graph but flips into the wrong
-    // branch the moment any code path calls `register_connection_type`
-    // (which inserts into the cache and trips the "use cache" fast
-    // path on subsequent lookups). Backfilling here keeps the cache
-    // authoritative throughout the lifetime of the loaded graph.
+    // Backfill the connection_types O(1)-lookup cache from the loaded metadata.
+    // Left empty, `has_connection_type`'s metadata-fallback branch is correct on
+    // a freshly-loaded graph but flips into the wrong branch the moment anything
+    // calls `register_connection_type` (which inserts into the cache and trips
+    // the "use cache" fast path on subsequent lookups).
     graph.build_connection_types_cache();
 
     log_stage("load_disk_dir_total", _load_t);
@@ -1713,7 +1606,7 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
 fn load_disk_column_stores(dir: &std::path::Path, graph: &mut DirGraph) -> io::Result<()> {
     use crate::graph::io::load_timing::{log_stage, stage_timer};
 
-    // Load column stores — prefer mmap-backed (columns.bin + columns_meta).
+    // Prefer the mmap-backed pair (columns.bin + columns_meta).
     // 0.8.12 phase-1: PR1 phase 4 moved these files to `seg_000/`. Check
     // both locations so post-phase-4 saves still take the fast mmap path
     // — without this the load fell through to the per-type
@@ -1796,7 +1689,6 @@ fn load_disk_column_stores(dir: &std::path::Path, graph: &mut DirGraph) -> io::R
         // check before overwriting out of caution.
         load_column_sidecars(dir, graph)?;
     } else {
-        // Per-type sidecar path: load columns/<type>/columns.zst files.
         load_column_sidecars(dir, graph)?;
     }
     log_stage("column_stores_load", t);

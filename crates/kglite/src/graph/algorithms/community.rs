@@ -10,10 +10,6 @@ use crate::graph::storage::GraphRead;
 use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, HashSet};
 
-// ============================================================================
-// Community Detection
-// ============================================================================
-
 #[derive(Debug, Clone)]
 pub struct CommunityAssignment {
     pub node_idx: NodeIndex,
@@ -67,27 +63,22 @@ impl Default for CommunityOptions<'_> {
 }
 
 impl<'a> CommunityOptions<'a> {
-    /// Read edge weights from the given property.
     pub fn with_weight_property(mut self, weight_property: &'a str) -> Self {
         self.weight_property = Some(weight_property);
         self
     }
-    /// Set the resolution parameter.
     pub fn with_resolution(mut self, resolution: f64) -> Self {
         self.resolution = resolution;
         self
     }
-    /// Restrict traversal to the given connection types.
     pub fn with_connection_types(mut self, connection_types: &'a [String]) -> Self {
         self.connection_types = Some(connection_types);
         self
     }
-    /// Restrict the community universe to the given node set.
     pub fn with_scope(mut self, scope: &'a NodeScope) -> Self {
         self.scope = Some(scope);
         self
     }
-    /// Set the deadline + cancellation bundle.
     pub fn with_interrupt(mut self, interrupt: Interrupt) -> Self {
         self.interrupt = interrupt;
         self
@@ -121,22 +112,18 @@ impl Default for LabelPropagationOptions<'_> {
 }
 
 impl<'a> LabelPropagationOptions<'a> {
-    /// Set the maximum sweep count.
     pub fn with_max_iterations(mut self, max_iterations: usize) -> Self {
         self.max_iterations = max_iterations;
         self
     }
-    /// Restrict traversal to the given connection types.
     pub fn with_connection_types(mut self, connection_types: &'a [String]) -> Self {
         self.connection_types = Some(connection_types);
         self
     }
-    /// Restrict the community universe to the given node set.
     pub fn with_scope(mut self, scope: &'a NodeScope) -> Self {
         self.scope = Some(scope);
         self
     }
-    /// Set the deadline + cancellation bundle.
     pub fn with_interrupt(mut self, interrupt: Interrupt) -> Self {
         self.interrupt = interrupt;
         self
@@ -195,7 +182,6 @@ fn build_weighted_adjacency(
         adj[tgt_i].push((src_i, w));
         total_weight += w;
     }
-    // Dedup weighted adjacency: merge duplicate neighbours by summing weights.
     for neighbors in &mut adj {
         neighbors.sort_unstable_by_key(|&(idx, _)| idx);
         neighbors.dedup_by(|a, b| {
@@ -674,7 +660,6 @@ fn louvain_levels<S: NeighborSource>(
     Ok(levels)
 }
 
-/// Empty result for a graph with no nodes.
 fn empty_community_result() -> CommunityResult {
     CommunityResult {
         assignments: Vec::new(),
@@ -739,9 +724,7 @@ fn build_community_result(
 ///
 /// Builds a weighted adjacency, then runs the full multilevel loop
 /// (`local_move` → `aggregate` → repeat), returning the best partition plus the
-/// hierarchy of levels (`CommunityResult.levels`, finest → coarsest). Unlike the
-/// prior single-level implementation this finds higher-modularity partitions and
-/// exposes a community hierarchy.
+/// hierarchy of levels (`CommunityResult.levels`, finest → coarsest).
 ///
 /// @procedure: louvain
 /// @procedure: louvain_communities
@@ -749,7 +732,7 @@ pub fn louvain_communities(
     graph: &DirGraph,
     options: &CommunityOptions,
 ) -> Result<CommunityResult, String> {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
+    let _arena_guard = graph.graph.begin_query();
     let CommunityOptions {
         weight_property,
         resolution,
@@ -831,15 +814,13 @@ fn refine_connected<S: NeighborSource>(src: &S, partition: &[usize]) -> (Vec<usi
 /// refinement step: each level's local-move partition `P` is split into
 /// connected components (`refine_connected`), aggregation is done on those
 /// components, and the next level's local move *starts from* `P` (so it can only
-/// re-merge components along real edges). The net effect is the same hierarchy
-/// shape as Louvain but with a **well-connectedness guarantee** on the merged
-/// communities — Leiden's defining property over Louvain.
+/// re-merge components along real edges). Same hierarchy shape as Louvain, with
+/// Leiden's well-connectedness guarantee on the merged communities.
 ///
-/// This is a *deterministic* Leiden variant: the refinement guarantees connected
-/// communities (the headline fix) but omits the reference implementation's
-/// randomised within-community modularity sub-refinement, keeping results
-/// reproducible — a kglite value. Returns per-level partitions in original
-/// node-index space, finest → coarsest.
+/// A *deterministic* Leiden variant: it omits the reference implementation's
+/// randomised within-community modularity sub-refinement, so results are
+/// reproducible. Returns per-level partitions in original node-index space,
+/// finest → coarsest.
 fn leiden_levels<S: NeighborSource>(
     level0: &S,
     resolution: f64,
@@ -942,7 +923,7 @@ pub fn leiden_communities(
     graph: &DirGraph,
     options: &CommunityOptions,
 ) -> Result<CommunityResult, String> {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
+    let _arena_guard = graph.graph.begin_query();
     let CommunityOptions {
         weight_property,
         resolution,
@@ -985,14 +966,13 @@ pub fn leiden_communities(
 ///
 /// Each node adopts the most frequent label among its neighbors.
 /// Converges when no node changes its label.
-/// Optimized with pre-built adjacency list and Vec-based label counting.
 ///
 /// @procedure: label_propagation
 pub fn label_propagation(
     graph: &DirGraph,
     options: &LabelPropagationOptions,
 ) -> Result<CommunityResult, String> {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
+    let _arena_guard = graph.graph.begin_query();
     let LabelPropagationOptions {
         max_iterations,
         connection_types,
@@ -1018,14 +998,12 @@ pub fn label_propagation(
         return Ok(empty_community_result());
     }
 
-    // Build compact index mapping
     let bound = graph.graph.node_bound();
     let mut node_to_idx = vec![0usize; bound];
     for (i, &node) in nodes.iter().enumerate() {
         node_to_idx[node.index()] = i;
     }
 
-    // Pre-build undirected adjacency list (both directions)
     let interned_ct = intern_connection_types(connection_types);
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
     for edge in {
@@ -1051,12 +1029,11 @@ pub fn label_propagation(
         neighbors.dedup();
     }
 
-    // Initialize: each node gets a unique label (0..n)
     let mut labels: Vec<usize> = (0..n).collect();
 
-    // Vec-based label counting (reused across iterations)
-    // label_count[label] = count for that label among neighbors
-    // We use a sparse approach: track which labels were touched and reset only those
+    // label_count[label] = that label's count among the current node's
+    // neighbours. Sparse reset: only the entries `touched_labels` names are
+    // cleared between nodes, so the O(n) array is never re-zeroed.
     let mut label_count: Vec<usize> = vec![0; n];
     let mut touched_labels: Vec<usize> = Vec::with_capacity(64);
 
@@ -1076,7 +1053,6 @@ pub fn label_propagation(
                 continue; // isolated node keeps its label
             }
 
-            // Count neighbor labels using Vec (O(1) per access)
             touched_labels.clear();
             for &neighbor in neighbors {
                 let lbl = labels[neighbor];
@@ -1086,7 +1062,6 @@ pub fn label_propagation(
                 label_count[lbl] += 1;
             }
 
-            // Find most frequent label
             let mut best_label = labels[i];
             let mut best_count = 0;
             for &lbl in &touched_labels {
@@ -1096,7 +1071,6 @@ pub fn label_propagation(
                 }
             }
 
-            // Reset counts for next node (only touched entries)
             for &lbl in &touched_labels {
                 label_count[lbl] = 0;
             }
@@ -1112,8 +1086,7 @@ pub fn label_propagation(
         }
     }
 
-    // label propagation is single-level: `levels` empty ⇒ consumers treat
-    // `assignments` as the only level.
+    // Single-level: `levels` empty ⇒ consumers read `assignments` as level 0.
     Ok(label_prop_result(graph, &nodes, &labels, connection_types))
 }
 
@@ -1181,7 +1154,6 @@ fn label_propagation_streaming(
     let src = DedupNeighborSource::new(graph, nodes, interned_ct);
     let n = src.len();
 
-    // Each node starts with a unique label (its compact index).
     let mut labels: Vec<usize> = (0..n).collect();
     let mut label_count: Vec<usize> = vec![0; n];
     let mut touched_labels: Vec<usize> = Vec::with_capacity(64);

@@ -5,16 +5,13 @@
 //!
 //! Statement atomicity used to be bought with `DirGraph::fork_transaction()`:
 //! a deep clone of the whole graph taken *before* every mutating Cypher
-//! statement, discarded on success and swapped back on failure. Correct, but
-//! it makes the cost of writing one property proportional to the size of the
-//! whole graph — a row-shaped `NodeData` clone deep-copies every
-//! `Value::String` it holds — which is disqualifying for a primary store.
-//!
-//! A journal inverts the trade: capture what changed, on the way through.
-//! Every edit pushes the state needed to reverse it, so opening a checkpoint
-//! costs O(changes) instead of O(V+E). Rollback — the exception, not the
-//! rule — replays the journal backwards and is allowed to be the expensive
-//! direction.
+//! statement. Correct, but it makes the cost of writing one property
+//! proportional to the size of the whole graph — a row-shaped `NodeData` clone
+//! deep-copies every `Value::String` it holds — which is disqualifying for a
+//! primary store. A journal inverts the trade: every edit pushes the state
+//! needed to reverse it, so opening a checkpoint costs O(changes) instead of
+//! O(V+E). Rollback — the exception, not the rule — replays backwards and is
+//! allowed to be the expensive direction.
 //!
 //! ## Two capture seams
 //!
@@ -46,7 +43,7 @@
 //! petgraph behaviour with a dedicated test so a dependency bump cannot
 //! silently break the guarantee.
 //!
-//! Two consequences for what gets recorded:
+//! Consequences for what gets recorded:
 //!
 //! - **Structural** edits (add/remove) are recorded unconditionally, because
 //!   their order is what drives free-list reuse.
@@ -54,16 +51,15 @@
 //!   touch wins, and the first touch is by definition the pre-statement
 //!   state. A five-property `SET n.a=…, n.b=…` therefore costs one
 //!   `NodeData` clone, not five.
-//! - **Columnar cell** pre-images ([`UndoEntry::ColumnarCell`]) are recorded
-//!   unconditionally, *without* the first-touch dedup above, and that is a
-//!   deliberate divergence rather than an oversight. Dedup exists to stop a
-//!   whole-entity clone being paid per property; a cell pre-image is one
-//!   `Option<Value>`, so the dedup would cost a per-(row, key) hash set to
-//!   save a pointer-sized copy. Correctness does not need it either: reverse
-//!   replay lands the *earliest* capture last, so a cell written twice in one
-//!   statement is restored to its pre-statement value regardless of how many
-//!   entries stand between. `replay_order_is_reverse_of_capture` pins the
-//!   ordering that argument rests on.
+//! - **Columnar cell** pre-images ([`UndoEntry::ColumnarCell`]) skip that
+//!   first-touch dedup, deliberately. Dedup exists to stop a whole-entity
+//!   clone being paid per property; a cell pre-image is one `Option<Value>`,
+//!   so the dedup would cost a per-(row, key) hash set to save a
+//!   pointer-sized copy. Correctness does not need it either: reverse replay
+//!   lands the *earliest* capture last, so a cell written twice in one
+//!   statement is restored to its pre-statement value regardless.
+//!   `replay_order_is_reverse_of_capture` pins the ordering that argument
+//!   rests on.
 
 use rustc_hash::FxHashSet;
 use std::collections::HashSet;
@@ -81,40 +77,35 @@ use crate::graph::storage::column_store::ColumnStore;
 
 #[cfg(test)]
 thread_local! {
-    /// Node pre-images actually cloned into an undo journal since the last
-    /// reset.
+    /// Node pre-images cloned into an undo journal since the last reset.
     ///
-    /// The complement of `BACKEND_CLONE_NODES` (`storage/backend.rs`), which
-    /// counts nodes copied by a *backend* clone and is therefore blind to the
-    /// journal path by construction: the whole point of the journal checkpoint
-    /// is that it clones no backend. A statement that captures a pre-image per
-    /// node of a type rather than per node it changed is O(type)-per-write,
-    /// which is the cost class the journal exists to remove, and this is the
-    /// only counter that can see it.
+    /// The only counter that can see them: `BACKEND_CLONE_NODES`
+    /// (`storage/backend.rs`) counts nodes copied by a *backend* clone, and a
+    /// journal checkpoint clones no backend. A statement capturing a pre-image
+    /// per node of a type rather than per node it changed is O(type)-per-write
+    /// — the cost class the journal exists to remove.
     static JOURNAL_NODE_PRE_IMAGES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 
     /// Columnar **cell** pre-images pushed into an undo journal since the last
     /// reset.
     ///
-    /// The successor of the `ColumnarHandles` cost model, and the counter that
-    /// states the new one: a columnar write must journal one entry per
-    /// `(row, key)` it changes, not one per node of the type and not one
-    /// whole-store handle. `JOURNAL_NODE_PRE_IMAGES` cannot see these (a
-    /// columnar property is not in a `NodeData`) and `COLUMN_STORE_CLONES`
-    /// (`storage/column_store.rs`) now reads zero on this path by design — so
-    /// without this counter the write path's journal cost would be
-    /// unobservable in either direction.
+    /// States the post-`ColumnarHandles` cost model: a columnar write journals
+    /// one entry per `(row, key)` it changes, not one per node of the type and
+    /// not one whole-store handle. Nothing else can see it —
+    /// `JOURNAL_NODE_PRE_IMAGES` misses it (a columnar property is not in a
+    /// `NodeData`) and `COLUMN_STORE_CLONES` (`storage/column_store/`) reads
+    /// zero on this path by design.
     static JOURNAL_COLUMNAR_CELLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 
     /// Columnar **row-append** pre-images pushed into an undo journal since the
     /// last reset.
     ///
-    /// The sibling of `JOURNAL_COLUMNAR_CELLS` for the create path, and the
-    /// only counter that can see its cost model: an append pre-image holds a
-    /// row count and an `Arc<TypeSchema>` clone, so capturing one per created
-    /// node instead of one per `(statement, type)` is invisible to the cell
-    /// counter (a `CREATE` writes no cells), to `COLUMN_STORE_CLONES` (the
-    /// schema `Arc` is not the store) and to `JOURNAL_NODE_PRE_IMAGES`.
+    /// The sibling of `JOURNAL_COLUMNAR_CELLS` for the create path: an append
+    /// pre-image holds a row count and an `Arc<TypeSchema>` clone, so capturing
+    /// one per created node instead of one per `(statement, type)` is invisible
+    /// to the cell counter (a `CREATE` writes no cells), to
+    /// `COLUMN_STORE_CLONES` (the schema `Arc` is not the store) and to
+    /// `JOURNAL_NODE_PRE_IMAGES`.
     static JOURNAL_COLUMNAR_APPENDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -123,8 +114,6 @@ pub(crate) fn reset_journal_columnar_appends() {
     JOURNAL_COLUMNAR_APPENDS.set(0);
 }
 
-/// Columnar row-append pre-images journalled on this thread since the last
-/// reset.
 #[cfg(test)]
 pub(crate) fn journal_columnar_appends() -> usize {
     JOURNAL_COLUMNAR_APPENDS.get()
@@ -135,7 +124,6 @@ pub(crate) fn reset_journal_node_pre_images() {
     JOURNAL_NODE_PRE_IMAGES.set(0);
 }
 
-/// Node pre-images cloned into an undo journal since the last reset.
 #[cfg(test)]
 pub(crate) fn journal_node_pre_images() -> usize {
     JOURNAL_NODE_PRE_IMAGES.get()
@@ -146,7 +134,6 @@ pub(crate) fn reset_journal_columnar_cells() {
     JOURNAL_COLUMNAR_CELLS.set(0);
 }
 
-/// Columnar cell pre-images journalled on this thread since the last reset.
 #[cfg(test)]
 pub(crate) fn journal_columnar_cells() -> usize {
     JOURNAL_COLUMNAR_CELLS.get()
@@ -334,10 +321,10 @@ pub enum UndoEntry {
 
 /// Which cells of a columnar row a property write is about to change.
 ///
-/// The capture seam under all three columnar write sites — the Cypher master
-/// fast path, the five `impl_heap_column_writes!` writers, and `ForkedGraph` —
-/// needs the *keys*, not just the row: a cell-grained pre-image cannot be taken
-/// without knowing which cells are at risk.
+/// All three columnar write sites — the Cypher master fast path, the five
+/// `impl_heap_column_writes!` writers, and `ForkedGraph` — need the *keys*, not
+/// just the row: a cell-grained pre-image cannot be taken without knowing which
+/// cells are at risk.
 pub(crate) enum ColumnarWrite<'a> {
     /// Exactly one cell.
     Cell(InternedKey),
@@ -363,7 +350,6 @@ pub(crate) struct ColumnarPreImages {
 }
 
 impl ColumnarPreImages {
-    /// Read what `write` is about to overwrite on `row_id` of `store`.
     pub(crate) fn capture(store: &ColumnStore, row_id: u32, write: ColumnarWrite<'_>) -> Self {
         let mut cells = Vec::new();
         let mut grows = false;
@@ -416,9 +402,8 @@ impl ColumnarPreImages {
 /// The pre-image one columnar **row append** needs, read off the store before
 /// the append and pushed into the journal after the store borrow ends.
 ///
-/// Same two-step shape as [`ColumnarPreImages`] and for the same reason: the
-/// journal and the store are sibling fields of one backend, so capture borrows
-/// the store and `record` borrows the journal, never both at once.
+/// Same two-step shape as [`ColumnarPreImages`], and for the same borrow
+/// reason.
 pub(crate) struct ColumnarAppendPreImage {
     row_count: u32,
     schema: Arc<TypeSchema>,
@@ -426,7 +411,6 @@ pub(crate) struct ColumnarAppendPreImage {
 }
 
 impl ColumnarAppendPreImage {
-    /// Read the store's length and schema as they stand before the append.
     #[inline]
     pub(crate) fn capture(store: &ColumnStore) -> Self {
         Self {
@@ -484,7 +468,6 @@ pub struct UndoJournal {
 }
 
 impl UndoJournal {
-    /// A fresh, empty journal.
     pub fn new() -> Self {
         Self::default()
     }
@@ -497,7 +480,6 @@ impl UndoJournal {
 
     // ── backend-seam capture ────────────────────────────────────────────
 
-    /// A node was created at `idx`.
     #[inline]
     pub fn note_node_added(&mut self, idx: NodeIndex, node_type: InternedKey) {
         self.entries.push(UndoEntry::NodeAdded { idx, node_type });
@@ -531,21 +513,16 @@ impl UndoJournal {
     /// names an intermediate row count that the first one then overrides. One
     /// per created node was therefore one journal entry (and one schema `Arc`
     /// clone) per node to describe a state already described.
-    ///
-    /// The dual of `note_node_weight`'s laziness: capture the pre-image on
-    /// first touch, skip it thereafter.
     #[inline]
     pub fn claim_columnar_append(&mut self, node_type: InternedKey) -> bool {
         self.appended_types.insert(node_type)
     }
 
-    /// The node at `idx` was removed, carrying `prior` out with it.
     #[inline]
     pub fn note_node_removed(&mut self, idx: NodeIndex, prior: NodeData) {
         self.entries.push(UndoEntry::NodeRemoved { idx, prior });
     }
 
-    /// An edge was created at `idx`.
     #[inline]
     pub fn note_edge_added(&mut self, idx: EdgeIndex) {
         self.entries.push(UndoEntry::EdgeAdded { idx });
@@ -564,7 +541,6 @@ impl UndoJournal {
         }
     }
 
-    /// The edge at `idx` (`src -> tgt`) was removed, carrying `prior` out.
     #[inline]
     pub fn note_edge_removed(
         &mut self,
@@ -583,8 +559,6 @@ impl UndoJournal {
 
     // ── DirGraph-seam capture ───────────────────────────────────────────
 
-    /// `idx` was appended to `bucket`. `bucket_was_new` records whether the
-    /// bucket itself came into existence with this append.
     #[inline]
     pub fn note_bucket_appended(&mut self, bucket: BucketId, idx: NodeIndex, bucket_was_new: bool) {
         self.entries.push(UndoEntry::BucketAppended {
@@ -594,14 +568,13 @@ impl UndoJournal {
         });
     }
 
-    /// `idx` was removed from position `pos` of `bucket`.
     #[inline]
     pub fn note_bucket_removed(&mut self, bucket: BucketId, idx: NodeIndex, pos: usize) {
         self.entries
             .push(UndoEntry::BucketRemoved { bucket, idx, pos });
     }
 
-    /// Journal the removal of every doomed member of `bucket_contents`.
+    /// Journal the removal of every doomed member of `members`.
     ///
     /// Positions are recorded **descending**, so reverse replay re-inserts
     /// them ascending — the only order under which each recorded position is
@@ -622,7 +595,6 @@ impl UndoJournal {
         }
     }
 
-    /// A row's reserved title cell is about to be overwritten.
     #[inline]
     pub fn note_columnar_title(
         &mut self,
@@ -637,14 +609,12 @@ impl UndoJournal {
         });
     }
 
-    /// A row of `node_type`'s master store was tombstoned by a node deletion.
     #[inline]
     pub fn note_columnar_tombstone(&mut self, node_type: InternedKey, row_id: u32) {
         self.entries
             .push(UndoEntry::ColumnarTombstone { node_type, row_id });
     }
 
-    /// A node's timeseries was dropped.
     #[inline]
     pub fn note_timeseries_removed(&mut self, node: usize, prior: NodeTimeseries) {
         self.entries.push(UndoEntry::TimeseriesRemoved {
@@ -653,7 +623,6 @@ impl UndoJournal {
         });
     }
 
-    /// A node's vector was pruned out of the store at `store_key`.
     #[inline]
     pub fn note_embedding_removed(
         &mut self,
@@ -676,7 +645,6 @@ mod tests {
     use crate::graph::schema::StringInterner;
     use std::collections::HashMap;
 
-    /// Journal contents in replay order.
     fn entries(journal: UndoJournal) -> Vec<UndoEntry> {
         journal.into_replay_order().collect()
     }
@@ -786,8 +754,6 @@ mod tests {
         );
         store.set(0, a, &Value::Int64(20), None);
 
-        // Replay them in order; the last write wins, and it is the oldest
-        // capture.
         for entry in journal.into_replay_order() {
             match entry {
                 UndoEntry::ColumnarCell {

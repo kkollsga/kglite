@@ -37,12 +37,9 @@ pub(crate) mod serde_codec;
 pub mod api {
     // ── Root prelude ──────────────────────────────────────────────────────
     // The root holds only the cross-cutting *data model* (the types every
-    // binding speaks) + a couple of standalone top-level capabilities
-    // (`graphgen`, `explore_markdown`). Everything else is clustered into a
-    // submodule by concern: `param`, `mutation`, `fluent`, `algorithms`,
-    // `timeseries`, `introspection`, `io`, `blueprint`,
-    // `cypher`, `session`. Per-cluster items live in exactly one
-    // place (no root↔submodule duplication).
+    // binding speaks) plus the standalone top-level capabilities; everything
+    // else is clustered into a submodule by concern. Each item lives in
+    // exactly one of them — no root↔submodule duplication.
     pub use crate::datatypes::values::{NodeValue, PathValue, RelValue};
     pub use crate::datatypes::Value;
     pub use crate::error::{KgError, KgErrorCode};
@@ -62,25 +59,16 @@ pub mod api {
     /// `NodeIndex` and `EdgeIndex` are the slot handles every `GraphRead` /
     /// `GraphWrite` call takes and returns; `Direction` is the in/out argument
     /// on every adjacency call (`edges_directed`, `count_edges_filtered`,
-    /// `fluent::filter_by_connection`). A consumer cannot call those without
-    /// naming them, so until now the curated surface required reaching around
-    /// itself for a direct `petgraph` dependency — and pinning *the same major*
-    /// as the engine links, since a mismatch there is a type error at the call
-    /// site rather than a version warning. Re-exported so the version coupling
-    /// is the engine's to carry.
+    /// `fluent::filter_by_connection`). Re-exported so a consumer need not add
+    /// its own `petgraph` dependency pinned to *the same major* the engine
+    /// links — a mismatch there is a type error at the call site, not a version
+    /// warning, so the coupling is the engine's to carry.
     pub use petgraph::graph::{EdgeIndex, NodeIndex};
     pub use petgraph::Direction;
-    // Thin pure-Rust graph handle for embedders + the free function
-    // backing it. The wheel crate (`kglite-py`) defines its own,
-    // Python-flavored `KnowledgeGraph` separately — same name,
-    // different audience (`pip install kglite` users), polars-style.
-    //
-    // `infer_selection_node_type` infers the node type of a selection's
-    // current level; it takes `&CowSelection`, so it lives here alongside
-    // the Selection api types.
-    //
-    // (The code-tree handle helpers `resolve_code_entity` / `CODE_TYPES` /
-    // `source_location` live in `api::code_entities`.)
+    // Thin pure-Rust graph handle for embedders + the free functions backing
+    // it. The wheel crate (`kglite-py`) defines its own, Python-flavored
+    // `KnowledgeGraph` separately — same name, different audience
+    // (`pip install kglite` users), polars-style.
     pub use crate::graph::handle::{
         discover_property_keys_excluding, discover_property_keys_from_data,
         infer_selection_node_type, is_canonical_node_column, KnowledgeGraph,
@@ -105,10 +93,9 @@ pub mod api {
     /// the Arc copy-on-write wrapper a binding holds as its cursor;
     /// `CurrentSelection` is the underlying level/plan state; `PlanStep`
     /// is an `explain()` plan entry. Pure core types (petgraph node
-    /// indices and hash maps), no binding coupling. Lifted as the
-    /// foundation for the fluent api surface. The high-level fluent chain
-    /// operations are consolidated into core and exposed in `api::fluent`;
-    /// the fine-grained `core::*` primitives stay internal.
+    /// indices and hash maps), no binding coupling. The high-level fluent
+    /// chain operations live in `api::fluent`; the fine-grained `core::*`
+    /// primitives stay internal.
     pub use crate::graph::schema::{
         CowSelection, CurrentSelection, PlanStep, SelectionLevel, SelectionOperation,
     };
@@ -143,9 +130,8 @@ pub mod api {
     /// never `&dyn`. Lifted for cross-binding read access.
     pub use crate::graph::storage::GraphRead;
     /// The canonical graph write trait (`GraphWrite: GraphRead`) —
-    /// storage-variant-routed mutation, including `set_node_property` and
-    /// its siblings, the documented replacements for the removed `NodeData`
-    /// mutators. Non-object-safe like `GraphRead`: consumers take
+    /// storage-variant-routed mutation, including `set_node_property` and its
+    /// siblings. Non-object-safe like `GraphRead`: consumers take
     /// `&mut impl GraphWrite`, never `&mut dyn`. Implemented by the storage
     /// backends — reach it as `graph.graph.set_node_property(..)` on a
     /// `DirGraph` (the `graph` field is public), the same call the Cypher
@@ -156,9 +142,7 @@ pub mod api {
     ///
     /// A `&NodeData` is one *replica* of a columnar type's column store;
     /// `NodeView` is the store the storage backend answers with, and its
-    /// enumeration methods are complete for every storage variant (the
-    /// removed `NodeData::property_iter` yielded nothing for columnar rows,
-    /// which is why it is gone).
+    /// enumeration methods are complete for every storage variant.
     /// Obtain one from `GraphRead::node_view` / `DirGraph::node_view`; do not
     /// hold it across a `Python::attach` boundary — resolve to owned values
     /// first. See `crates/kglite/src/graph/storage/node_view.rs`.
@@ -169,10 +153,6 @@ pub mod api {
     pub use crate::graph::TemporalContext;
     // `Arc<DirGraph>` → `&mut DirGraph` + version bump.
     pub use crate::graph::handle::make_dir_graph_mut;
-    // (Mutation reports → `api::mutation`; schema introspection /
-    // `SchemaOverview` / detail enums → `api::introspection`; `.kgl`
-    // load/save → `api::io`; `SourceLocation`/`SourceLookup` →
-    // `api::code_entities`.)
 
     /// Parameter-shape helpers for bindings — wire-shaped values
     /// (JSON / protobuf-map / etc.) ↔ `kglite::api::Value`. Future
@@ -227,19 +207,13 @@ pub mod api {
     /// (an api type) and are the building blocks the fluent chain composes.
     ///
     /// The bulk of this module is the **shared selection-based
-    /// query-primitive layer** — `core::graph::core::*`, which CLAUDE.md describes
-    /// as "pattern matching, filtering, traversal … used by both Cypher and the
-    /// fluent API." Each op takes `(&DirGraph, &mut
-    /// CurrentSelection, …already-marshalled params)` and mutates the
-    /// selection in place; a binding building a fluent surface composes
-    /// these directly (the wheel's `kg_fluent` / `kg_introspection` PyO3
-    /// methods marshal Python args, then call straight into here). The
-    /// primitives stay *defined* in `core::graph::core`; this is their
-    /// curated, stable re-export surface. (A future refinement could hoist
-    /// the small amount of per-method branching — `select`'s
-    /// include-secondary / temporal logic, `traverse`'s temporal precedence
-    /// — into higher-level ops, but the primitives below are already the
-    /// correctly-grained shared operations, not glue to hide.)
+    /// query-primitive layer** used by both Cypher and the fluent API. Each op
+    /// takes `(&DirGraph, &mut CurrentSelection, …already-marshalled params)`
+    /// and mutates the selection in place; a binding building a fluent surface
+    /// composes these directly (the wheel's `kg_fluent` / `kg_introspection`
+    /// PyO3 methods marshal Python args, then call straight into here). The
+    /// primitives stay *defined* in `crate::graph::core`; this is their
+    /// curated, stable re-export surface.
     pub mod fluent {
         // Selection set algebra + subgraph.
         pub use crate::graph::mutation::set_ops::{
@@ -279,10 +253,9 @@ pub mod api {
         pub use crate::graph::core::pattern_matching::{
             parse_pattern, MatchBinding, PatternExecutor, PatternMatch,
         };
-        // Compact value formatting for fluent result shaping.
         pub use crate::graph::core::value_operations::format_value_compact;
         // Spatial predicates over a selection (geo filters / centroids /
-        // bounds). Selection-scoped over the api `CurrentSelection` type.
+        // bounds).
         pub use crate::graph::features::spatial::{
             calculate_centroid, contains_point, get_bounds, intersects_geometry, near_point,
             near_point_m, within_bounds, wkt_centroid,
@@ -351,8 +324,7 @@ pub mod api {
     /// `DatePrecision`), `expand_end`, `date_from_ymd`, `find_range`, and
     /// the validators are plain functions every binding's date handling
     /// reaches; `TimeseriesConfig` / `NodeTimeseries` are the config/data
-    /// types. (The KG-construction-level `InlineTimeseriesConfig` / `TimeSpec`
-    /// live in the api root.)
+    /// types.
     pub mod timeseries {
         pub use crate::graph::features::timeseries::{
             date_from_ymd, expand_end, find_range, parse_date_query, validate_channel_length,
@@ -562,14 +534,15 @@ pub mod api {
         pub use crate::graph::languages::cypher::parameter_names;
         /// Parse a Cypher statement into a `CypherQuery`.
         ///
-        /// This is the **cached** parser (`parse_cache::parse_cypher_cached`),
-        /// the same one `session::execute` uses — a repeated statement is a
-        /// hash lookup plus an AST clone rather than a full re-parse. It used
-        /// to re-export `parser::parse_cypher` directly, so every binding that
-        /// pre-parses to classify a statement (the Python wheel does it on
-        /// `cypher` / `Session.cypher` / `Transaction.cypher` / `frozen`) paid
-        /// a second full parse per call and the cache only ever served the one
-        /// inside `prepare` — measured at 25% of a small parameterised query.
+        /// This must stay the **cached** parser
+        /// (`parse_cache::parse_cypher_cached`), the same one
+        /// `session::execute` uses: a repeated statement is a hash lookup plus
+        /// an AST clone rather than a full re-parse. Pointing it at the raw
+        /// `parser::parse_cypher` makes every binding that pre-parses to
+        /// classify a statement (the wheel does it on `cypher` /
+        /// `Session.cypher` / `Transaction.cypher` / `frozen`) pay a second
+        /// full parse per call — measured at 25% of a small parameterised
+        /// query.
         pub use crate::graph::languages::cypher::parse_cypher;
         pub use crate::graph::languages::cypher::parse_with_mutation_check;
         pub use crate::graph::languages::cypher::planner;

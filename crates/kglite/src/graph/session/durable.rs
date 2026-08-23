@@ -1,13 +1,11 @@
 //! Durable sessions — the write-ahead log wired through [`Session`].
 //!
-//! The engine carries a complete logical WAL (`graph/wal.rs`:
-//! CRC frames, torn-tail recovery, [`DurabilityLevel`], the `checkpoint_lsn`
-//! replay gate) plus the write-capture layer that feeds it
-//! (`graph/storage/recording.rs`). What lived *only* in the Python wheel was
-//! the orchestration: the open ordering, the commit-time flush, and the
-//! four-step checkpoint. This module lifts that orchestration into the engine
-//! so every binding — wheel, bolt server, C ABI, JVM — gets it from one place
-//! instead of writing it again.
+//! The logical WAL itself lives in `graph/wal.rs` (CRC frames, torn-tail
+//! recovery, [`DurabilityLevel`], the `checkpoint_lsn` replay gate), fed by the
+//! write-capture layer in `graph/storage/recording.rs`. This module holds the
+//! orchestration around them — the open ordering, the commit-time flush, the
+//! four-step checkpoint — in the engine, so every binding gets it from one
+//! place instead of writing it again.
 //!
 //! ## The three orders that are correctness, not preference
 //!
@@ -171,12 +169,10 @@ impl Session {
         }
 
         let mut graph = graph;
-        // Everything from here to the open log is the shared orchestration
-        // (`graph::durability`): recover → replay → wrap → open-for-append, plus
-        // the unconditional recovery-on-open refusal that makes `off` over an
-        // unreplayed sidecar an error rather than silent data loss. The wheel's
-        // durable `KnowledgeGraph` performs the same sequence through the same
-        // function, so the two cannot drift.
+        // The shared orchestration (module docs, order 1), including the
+        // recovery-on-open refusal. The wheel's durable `KnowledgeGraph` runs
+        // the same sequence through this same function, so the two cannot
+        // drift.
         let opened = durability::open_log(&mut graph, Path::new(checkpoint_path), level)
             .map_err(|e| e.to_string())?;
 
@@ -314,9 +310,8 @@ impl Session {
         let Some(ds) = slot.as_mut() else {
             return Ok(false);
         };
-        // Flush-then-stamp, shared with every other owner of a log; see
-        // `durability::checkpoint_prologue` for why the flush is load-bearing
-        // under `Normal` and how the stamp is derived.
+        // Flush-then-stamp, shared with every other owner of a log; the
+        // derivation and why the flush is load-bearing are in module order 3.
         durability::checkpoint_prologue(&mut ds.wal, ds.next_lsn, Arc::make_mut(graph))
             .map_err(|e| e.to_string())?;
         Ok(true)
@@ -411,10 +406,6 @@ impl Session {
         }
     }
 }
-
-// ────────────────────────────────────────────────────────────────────
-// Tests
-// ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -511,9 +502,8 @@ mod tests {
         // Replay must not have re-entered the capture buffer: the next commit
         // logs its own op and nothing else.
         assert_eq!(recovered.next_lsn(), Some(3));
-        // …which is the replay-before-wrap rule, checked at its own seam.
-        // Wrapping first would leave every replayed op sitting in the capture
-        // buffer, ready to be logged a second time.
+        // The same replay-before-wrap rule at its own seam: wrapping first
+        // would leave every replayed op sitting in the capture buffer.
         match recovered.snapshot().graph.recording() {
             Some(rg) => assert_eq!(
                 rg.ops_len(),

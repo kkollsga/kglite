@@ -17,7 +17,7 @@
 //!
 //! ## Output shape
 //!
-//! ```text
+//! ````text
 //! ## Query
 //! <query>
 //!
@@ -36,7 +36,7 @@
 //! ```rust
 //! 42  pub fn parse_query(s: &str) -> Query {
 //! 43      ...
-//! ```
+//! ````
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;

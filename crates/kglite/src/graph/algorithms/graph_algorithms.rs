@@ -1,4 +1,3 @@
-// src/graph/graph_algorithms.rs
 //! Graph algorithms module providing path finding and connectivity analysis.
 
 use super::Interrupt;
@@ -10,10 +9,8 @@ use petgraph::graph::NodeIndex;
 use petgraph::Direction;
 use std::collections::{HashMap, HashSet, VecDeque};
 
-// Centrality algorithms moved to the sibling `centrality` module to keep this
-// file under the god-file ceiling. Re-exported so existing
-// `graph_algorithms::{betweenness_centrality, pagerank, degree_centrality,
-// closeness_centrality, CentralityResult}` paths keep resolving.
+// Centrality algorithms live in the sibling `centrality` module (god-file
+// ceiling); re-exported so existing `graph_algorithms::…` paths keep resolving.
 pub use super::centrality::*;
 // Community detection lives in a sibling module, but the historical
 // `graph_algorithms::*` paths remain the public compatibility surface.
@@ -32,11 +29,6 @@ pub fn algorithm_timeout_err() -> String {
         .to_string()
 }
 
-// ============================================================================
-// Path Filtering Helpers
-// ============================================================================
-
-/// Pre-intern connection type strings into InternedKeys for fast comparison.
 pub(crate) fn intern_connection_types(
     connection_types: Option<&[String]>,
 ) -> Option<Vec<InternedKey>> {
@@ -70,9 +62,7 @@ pub(crate) fn edge_in_scope(scope: Option<&NodeScope>, src: NodeIndex, tgt: Node
     }
 }
 
-/// Get undirected neighbors filtered by edge connection type.
-/// When connection_types is None, returns all neighbors (equivalent to
-/// neighbors_undirected).
+/// Undirected neighbours filtered by connection type (`None` = every neighbour).
 ///
 /// Both branches deduplicate — petgraph's `neighbors_undirected` walks
 /// every incident edge so parallel edges and a→b/b→a pairs each appear
@@ -258,7 +248,7 @@ fn expand_neighbors_into(
     }
 }
 
-/// Check if a node passes the via_types filter.
+/// Whether a node passes the via_types filter.
 /// Source and target should be excluded from this check by the caller.
 fn node_passes_via_filter(
     graph: &DirGraph,
@@ -280,9 +270,7 @@ fn node_passes_via_filter(
 /// Result of a path finding operation
 #[derive(Debug, Clone)]
 pub struct PathResult {
-    /// The path as a sequence of node indices
     pub path: Vec<NodeIndex>,
-    /// The total cost/length of the path
     pub cost: usize,
 }
 
@@ -319,22 +307,18 @@ pub struct PathOptions<'a> {
 }
 
 impl<'a> PathOptions<'a> {
-    /// Restrict traversal to the given connection types.
     pub fn with_connection_types(mut self, connection_types: &'a [String]) -> Self {
         self.connection_types = Some(connection_types);
         self
     }
-    /// Restrict routing to the given intermediate node types.
     pub fn with_via_types(mut self, via_types: &'a [String]) -> Self {
         self.via_types = Some(via_types);
         self
     }
-    /// Walk edges in one direction only (default: both).
     pub fn with_direction(mut self, direction: EdgeDir) -> Self {
         self.direction = direction;
         self
     }
-    /// Set the deadline + cancellation bundle.
     pub fn with_interrupt(mut self, interrupt: Interrupt) -> Self {
         self.interrupt = interrupt;
         self
@@ -376,32 +360,26 @@ impl Default for AllPathsOptions<'_> {
 }
 
 impl<'a> AllPathsOptions<'a> {
-    /// Set the maximum path length (hop count).
     pub fn with_max_hops(mut self, max_hops: usize) -> Self {
         self.max_hops = max_hops;
         self
     }
-    /// Cap the number of paths returned.
     pub fn with_max_results(mut self, max_results: usize) -> Self {
         self.max_results = Some(max_results);
         self
     }
-    /// Restrict traversal to the given connection types.
     pub fn with_connection_types(mut self, connection_types: &'a [String]) -> Self {
         self.connection_types = Some(connection_types);
         self
     }
-    /// Restrict routing to the given intermediate node types.
     pub fn with_via_types(mut self, via_types: &'a [String]) -> Self {
         self.via_types = Some(via_types);
         self
     }
-    /// Walk edges in one direction only (default: both).
     pub fn with_direction(mut self, direction: EdgeDir) -> Self {
         self.direction = direction;
         self
     }
-    /// Set the deadline + cancellation bundle.
     pub fn with_interrupt(mut self, interrupt: Interrupt) -> Self {
         self.interrupt = interrupt;
         self
@@ -418,11 +396,6 @@ impl<'a> AllPathsOptions<'a> {
 /// it always was, and meeting in the middle makes a different arbitrary
 /// choice than a one-sided scan. Callers needing all of them want
 /// [`all_shortest_paths`].
-///
-/// # Arguments
-/// * `connection_types` - Only traverse edges of these types (None = all)
-/// * `via_types` - Only traverse through nodes of these types (None = all)
-/// * `direction` - Which way edges may be walked (default: both)
 pub fn shortest_path(
     graph: &DirGraph,
     source: NodeIndex,
@@ -619,10 +592,6 @@ pub fn shortest_path_cost(graph: &DirGraph, source: NodeIndex, target: NodeIndex
 /// [`shortest_path_cost`] honouring a [`PathOptions`]: connection-type and
 /// via-type filters, [`EdgeDir`], and the deadline. Answers the same question
 /// [`shortest_path`] does, without reconstructing the path.
-///
-/// Note that the `source`/`target` node *types* a binding resolves its ids
-/// through are an id namespace only — they never restrict which node types the
-/// walk may pass through. That is `via_types`.
 pub fn shortest_path_cost_with(
     graph: &DirGraph,
     source: NodeIndex,
@@ -748,7 +717,6 @@ pub fn shortest_path_cost_batch_with(
         via_ok[i] = via_unrestricted || via_ok_by_node[node.index()];
     }
 
-    // Reusable visited array — cleared between queries
     let mut visited: Vec<bool> = vec![false; n];
     let mut current_level: Vec<usize> = Vec::new();
     let mut next_level: Vec<usize> = Vec::new();
@@ -1041,10 +1009,6 @@ fn bidirectional_path(
 /// delegate over [`shortest_path`] with [`EdgeDir::Outgoing`]; kept as a
 /// named entry point because the Cypher `shortestPath()` executor dispatches
 /// on its own `EdgeDirection` and reads better naming the directed case.
-///
-/// # Arguments
-/// * `connection_types` - Only traverse edges of these types (None = all)
-/// * `via_types` - Only traverse through nodes of these types (None = all)
 pub fn shortest_path_directed(
     graph: &DirGraph,
     source: NodeIndex,
@@ -1061,11 +1025,6 @@ pub fn shortest_path_directed(
 
 /// Find all paths between two nodes up to a maximum number of hops.
 /// Warning: This can be expensive for graphs with many paths!
-///
-/// # Arguments
-/// * `max_results` - Stop after finding this many paths (prevents OOM on dense graphs)
-/// * `connection_types` - Only traverse edges of these types (None = all)
-/// * `via_types` - Only traverse through nodes of these types (None = all)
 pub fn all_paths(
     graph: &DirGraph,
     source: NodeIndex,
@@ -1125,14 +1084,12 @@ fn find_all_paths_recursive(
     direction: EdgeDir,
     deadline: Interrupt,
 ) {
-    // Early termination when result limit is hit
     if let Some(max) = max_results {
         if results.len() >= max {
             return;
         }
     }
 
-    // Timeout check at each recursive entry
     if deadline.exceeded() {
         {
             return;
@@ -1148,11 +1105,8 @@ fn find_all_paths_recursive(
         return;
     }
 
-    // Explore all neighbors (both ways when direction is Any), filtered by
-    // connection type
     let neighbors = filtered_neighbors(graph, current, direction, connection_types);
     for neighbor in neighbors {
-        // Check limit before exploring deeper
         if let Some(max) = max_results {
             if results.len() >= max {
                 return;
@@ -1160,7 +1114,6 @@ fn find_all_paths_recursive(
         }
 
         if !visited.contains(&neighbor) {
-            // Apply via_types filter (skip if not target and doesn't match)
             if neighbor != target && !node_passes_via_filter(graph, neighbor, via_types) {
                 continue;
             }
@@ -1190,7 +1143,6 @@ fn find_all_paths_recursive(
 }
 
 /// Find all strongly connected components in the graph.
-/// Returns a vector of components, each component is a vector of node indices.
 pub fn connected_components(graph: &DirGraph) -> Vec<Vec<NodeIndex>> {
     // Arena guard: disk-backed node/edge reads materialize into the query
     // arena, which must run under a DiskQueryGuard (arena protocol in
@@ -1354,7 +1306,6 @@ pub fn weakly_connected_components_scoped(
     let mut parent: Vec<usize> = (0..n).collect();
     let mut rank: Vec<u8> = vec![0; n];
 
-    // Find with path compression (iterative)
     #[inline]
     fn find(parent: &mut [usize], mut x: usize) -> usize {
         while parent[x] != x {
@@ -1364,7 +1315,6 @@ pub fn weakly_connected_components_scoped(
         x
     }
 
-    // Union by rank
     #[inline]
     fn union(parent: &mut [usize], rank: &mut [u8], a: usize, b: usize) {
         let ra = find(parent, a);
@@ -1408,7 +1358,6 @@ pub fn weakly_connected_components_scoped(
         union(&mut parent, &mut rank, src_i, tgt_i);
     }
 
-    // Collect components by root
     let mut component_map: HashMap<usize, Vec<NodeIndex>> = HashMap::new();
     for (i, &node) in nodes.iter().enumerate() {
         let root = find(&mut parent, i);
@@ -1417,7 +1366,6 @@ pub fn weakly_connected_components_scoped(
 
     let mut components: Vec<Vec<NodeIndex>> = component_map.into_values().collect();
 
-    // Sort components by size (largest first)
     components.sort_by_key(|b| std::cmp::Reverse(b.len()));
 
     Ok(components)
@@ -1742,7 +1690,6 @@ pub fn ready_set_scoped(
         if i & 0xFFFF == 0 && deadline.exceeded() {
             return Err("Query interrupted".to_string());
         }
-        // Already done → not part of the ready frontier.
         if done.contains(&node) {
             continue;
         }
@@ -1890,8 +1837,6 @@ pub fn eccentricity_scoped(
         if s & 0x3FF == 0 && deadline.exceeded() {
             return Err(algorithm_timeout_err());
         }
-        // The eccentricity of `node` is the greatest distance the search
-        // reaches; an isolated node never leaves distance 0.
         let mut ecc = 0u32;
         single_source_bfs(
             &mut scratch,
@@ -1976,14 +1921,12 @@ pub fn get_path_connections(graph: &DirGraph, path: &[NodeIndex]) -> Vec<Option<
     // arena, which must run under a DiskQueryGuard (arena protocol in
     // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
     let _arena_guard = graph.graph.begin_query();
-    // Pre-allocate with exact size (one connection per edge = path.len() - 1)
     let mut connections = Vec::with_capacity(path.len().saturating_sub(1));
 
     for window in path.windows(2) {
         let from = window[0];
         let to = window[1];
 
-        // Find edge between these nodes (either direction)
         let conn_type = graph
             .graph
             .edges(from)
@@ -2022,7 +1965,6 @@ pub fn are_connected_with(
     shortest_path_cost_with(graph, source, target, options).is_some()
 }
 
-/// Calculate the degree (number of connections) for a node
 pub fn node_degree(graph: &DirGraph, node: NodeIndex) -> usize {
     let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
     let g = &graph.graph;
@@ -2133,7 +2075,6 @@ pub fn shortest_path_weighted(
             continue;
         }
         if current_idx == target.index() {
-            // Reconstruct path
             let mut path = Vec::with_capacity(16);
             let mut idx = current_idx;
             while idx != source.index() {

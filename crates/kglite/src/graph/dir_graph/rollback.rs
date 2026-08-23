@@ -7,12 +7,9 @@
 //!
 //! ## Two ways to be atomic
 //!
-//! The original mechanism was a whole-graph clone taken before every such
-//! statement and swapped back on failure. It is unconditionally correct and
-//! unconditionally O(V+E) — writing one property to a million-node graph
-//! deep-copied a million `NodeData`s first.
-//!
-//! This module keeps that clone as a fallback and adds the cheap path:
+//! A whole-graph clone is unconditionally correct — writing one property to a
+//! million-node graph deep-copies a million `NodeData`s first. It stays as the
+//! fallback; the journal is the cheap path.
 //!
 //! | | cost to open | cost to roll back |
 //! |---|---|---|
@@ -22,32 +19,23 @@
 //!
 //! ## How the journal path splits `DirGraph`'s state
 //!
-//! `DirGraph` has ~44 fields. The split is by *clone cost*, and the
-//! bias is deliberate:
+//! `DirGraph` has ~44 fields, split by *clone cost*:
 //!
 //! - **O(schema)-sized fields are cloned** into a `shell` and restored
-//!   verbatim. That is the whole schema surface a statement can grow —
-//!   `interner`, `node_type_metadata`, `connection_type_metadata`,
-//!   `type_schemas`, `connection_types`, `has_secondary_labels`, the index
-//!   *key* lists, aliases, configs, and `version`. It is also every field
-//!   nobody has thought about yet, which is the point: **a field that is not
-//!   explicitly parked is automatically restored**.
+//!   verbatim: the whole schema surface a statement can grow, and also every
+//!   field nobody has thought about yet, which is the point — **a field that
+//!   is not explicitly parked is automatically restored**.
 //!
-//!   "Cloned" is now literal only for the small ones. The six that scale with
-//!   schema width — `node_type_metadata`, `connection_type_metadata`,
-//!   `type_schemas`, the two alias maps and `parent_types` — are `Arc`-shared
-//!   and copy-on-write, so the shell takes a pointer and the statement's first
-//!   write to each forks it once. The restore semantics are unchanged (the
-//!   shell still hands back exactly the pre-statement value); what changed is
-//!   that a 200-type × 50-column schema costs a refcount instead of 337 µs of
-//!   memcpy per statement. Contract, writer rules and measurement:
-//!   [`super::schema_cow`].
+//!   Six of them scale with schema width (`node_type_metadata`,
+//!   `connection_type_metadata`, `type_schemas`, the two alias maps and
+//!   `parent_types`) and are `Arc`-shared copy-on-write: the shell takes a
+//!   pointer and the statement's first write to each forks it once. Restore
+//!   semantics are identical; a 200-type × 50-column schema costs a refcount
+//!   instead of 337 µs of memcpy per statement. Contract, writer rules and
+//!   measurement: [`super::schema_cow`].
 //! - **O(V+E)-sized fields are parked** (moved aside so `clone()` sees them
-//!   empty) and reconstructed from the journal. This list is short, closed,
-//!   and each member has a documented undo story in [`apply`]:
-//!   `graph`, `type_indices`, `id_indices`, `property_indices`,
-//!   `composite_indices`, `range_indices`, `secondary_label_index`,
-//!   `embeddings`, `timeseries_store`, `unique_indices`.
+//!   empty) and reconstructed from the journal. [`swap_data_scale`] is that
+//!   short, closed list; each member has a documented undo story in [`apply`].
 //!
 //! Two parked fields are *rebuilt* rather than journal-reversed, because their
 //! own mutation sites record no inverse: `id_indices` (dropped per touched
@@ -57,10 +45,9 @@
 //! undo story of *either* kind is the one way to make this module wrong — see
 //! the `unique_indices` note on [`swap_data_scale`].
 //!
-//! Getting that split wrong fails in the safe direction. Forgetting to park a
-//! new large field makes the checkpoint *slower*, never wrong; only an
-//! explicit addition to [`swap_data_scale`] can introduce a correctness gap,
-//! and that is a change a reviewer is looking straight at.
+//! Getting that split wrong fails in the safe direction: forgetting to park a
+//! new large field makes the checkpoint *slower*, never wrong. Only an
+//! explicit addition to [`swap_data_scale`] can introduce a correctness gap.
 //!
 //! ## Columnar mode: one entry per changed cell, replayed into the live store
 //!
@@ -83,27 +70,31 @@
 //!   and needs no first-touch dedup. A schema-growth entry captured before its
 //!   own cells replays after them, so the cells are restored into a column that
 //!   still exists and the column is dropped afterwards.
-//! - The journal holds **no handle on the store**, which is the inversion this
-//!   phase is: the master stays uniquely owned through the statement, so
-//!   `Arc::make_mut` at the write site mutates one cell in place instead of
-//!   deep-copying every column of the type. That direction is asserted at the
-//!   write site (`columnar_write::write_column_master`), which is also where
-//!   the one legitimate exception lives — a `Forked` backend shares its stores
-//!   with the base a reader holds, so its first write per type must copy.
-//! - `CREATE` and `DELETE` **do** reach a master store, in every mode, since
-//!   construction became columnar: a create appends a row and a delete
-//!   tombstones one, both inside the statement window. Neither is a cell edit,
-//!   so each has its own entry — [`UndoEntry::ColumnarRowsAppended`] and
-//!   [`UndoEntry::ColumnarTombstone`] — and between them the store's *length*
-//!   and its *liveness bitmap* are restored as exactly as its cells are. Rows
-//!   are append-only, so the truncation also restores the next row id: a node
-//!   re-created after a rollback lands on the vacated row rather than leaking a
-//!   hole, which is the columnar half of the petgraph slot identity below.
-//!   Every *other* writer of the store map (`enable_columnar`, `vacuum`, the
-//!   spill and bulk-batch paths) still runs
-//!   outside the statement window, so those need no entry — and the bulk-batch
-//!   path, which swaps stores wholesale, journals its own append pre-image
-//!   before doing so should a caller ever run it under an open checkpoint.
+//! - The journal holds **no handle on the store**: the master stays uniquely
+//!   owned through the statement, so `Arc::make_mut` at the write site mutates
+//!   one cell in place instead of deep-copying every column of the type. That
+//!   direction is asserted at the write site
+//!   (`columnar_write::write_column_master`), which is also where the one
+//!   legitimate exception lives — a `Forked` backend shares its stores with the
+//!   base a reader holds, so its first write per type must copy.
+//! - `CREATE` and `DELETE` **do** reach a master store, in every mode: a create
+//!   appends a row and a delete tombstones one, both inside the statement
+//!   window. Neither is a cell edit, so each has its own entry —
+//!   [`UndoEntry::ColumnarRowsAppended`] and [`UndoEntry::ColumnarTombstone`] —
+//!   and between them the store's *length* and its *liveness bitmap* are
+//!   restored as exactly as its cells are. Rows are append-only, so the
+//!   truncation also restores the next row id: a node re-created after a
+//!   rollback lands on the vacated row rather than leaking a hole, the columnar
+//!   half of the petgraph slot identity below. Every *other* writer of the
+//!   store map (`enable_columnar`, `vacuum`, the spill and bulk-batch paths)
+//!   runs outside the statement window, so those need no entry — and the
+//!   bulk-batch path, which swaps stores wholesale, journals its own append
+//!   pre-image before doing so should a caller ever run it under an open
+//!   checkpoint.
+//! - A columnar `SET` writes into the master, never into a node's weight, so it
+//!   produces **no** `NodeWeight` entry for the node it changed; the columnar
+//!   entries are the only signal that the type was written at all, which is why
+//!   their replay reports it — see [`columnar_type_touched`].
 //!
 //! Two documented residues, both observational no-ops:
 //!
@@ -116,18 +107,6 @@
 //!   value back without re-narrowing it. Values and reads are identical; only
 //!   the column's storage tag differs, in memory, until the next consolidation
 //!   re-derives it.
-//!
-//! One consequence to keep in view when touching this path: a columnar `SET`
-//! writes into the master, never into a node's weight, so it produces **no**
-//! `NodeWeight` entry for the node it changed. The columnar entries are the
-//! only ones that know the type was written at all, which is why their replay
-//! is what reports the type into `stale_unique_indices`.
-//!
-//! ## When the journal is not used
-//!
-//! [`journal_covers`] is the gate. It is conservative on purpose: any shape
-//! whose derived state the journal does not yet reverse keeps the clone, so
-//! correctness never depends on the gate being generous.
 //!
 //! ## What "identical" means here
 //!
@@ -188,15 +167,14 @@ fn swap_data_scale(a: &mut DirGraph, b: &mut DirGraph) {
     // type, so cloning it would put an O(constrained-nodes) copy back on every
     // mutating statement — the cost this module exists to remove.
     //
-    // Parking alone would be a *correctness* bug, not just a cheaper one:
-    // `commit_unique_claims` / `release_unique_claims` /
-    // `evict_unique_claims_for_nodes` record nothing in the journal, and
-    // because parking keeps the live post-statement map (rather than restoring
-    // the shell's), a failed statement's claims would survive rollback — a
-    // phantom occupant (permanent spurious `ConstraintViolationError`) or a
-    // released claim (a real duplicate admitted). The paired undo story is the
-    // per-touched-type rebuild in `StatementCheckpoint::rollback`; do not park
-    // this field without it.
+    // Parking alone would be a *correctness* bug: `commit_unique_claims` /
+    // `release_unique_claims` / `evict_unique_claims_for_nodes` record nothing
+    // in the journal, and parking keeps the live post-statement map rather
+    // than the shell's, so a failed statement's claims would survive rollback
+    // — a phantom occupant (permanent spurious `ConstraintViolationError`) or
+    // a released claim (a real duplicate admitted). The paired undo story is
+    // the per-touched-type rebuild in `StatementCheckpoint::rollback`; do not
+    // park this field without it.
     std::mem::swap(&mut a.unique_indices, &mut b.unique_indices);
 }
 
@@ -218,33 +196,31 @@ fn undo_bucket_append(members: Option<&mut Vec<NodeIndex>>, idx: NodeIndex) {
 /// change. Conservative by construction — every `false` arm falls back to the
 /// clone checkpoint, so a shape that is merely *unproven* is still safe.
 ///
-/// Only the backend is a gate now. Three graph-state vetoes that used to sit
-/// here are gone, and the reasoning for each is worth keeping, because
-/// re-adding one is cheap to type and expensive to run — a veto here is not a
-/// local slowdown but a permanent, whole-graph downgrade to an O(V+E) clone
-/// per statement, for every shape, for the rest of the session.
+/// Only the backend is a gate. Do not re-add a graph-state veto: it is cheap
+/// to type and expensive to run — not a local slowdown but a permanent,
+/// whole-graph downgrade to an O(V+E) clone per statement, for every shape,
+/// for the rest of the session. The three that were tried, and why each is
+/// unnecessary:
 ///
 /// - **`column_stores`** guarded the columnar-`SET` master side channel, but
 ///   fired on every graph that had ever been saved. Covered instead by the
 ///   unparked shell restore plus the journalled cell pre-images; see the
 ///   module doc.
 /// - **`property_indices` / `range_indices` / `composite_indices`** guarded
-///   the absence of position undo for user-index buckets. That undo now
-///   exists, recorded at the incremental-maintenance choke points in
+///   the absence of position undo for user-index buckets. That undo exists,
+///   recorded at the incremental-maintenance choke points in
 ///   [`crate::graph::dir_graph::indexes`] and
 ///   [`crate::graph::mutation::maintain`] with the same `BucketAppended` /
 ///   `BucketRemoved` entries `type_indices` already used. Whole-index DDL is
 ///   still not journalled — see the note on [`swap_data_scale`].
-/// - **`unique_indices`** was never gated: it reads as doctrine-consistent,
-///   but routing every constrained graph to `fork_transaction()` is strictly
-///   worse than the journal plus a per-touched-type unique rebuild, which is
-///   that field's undo story.
+/// - **`unique_indices`**: routing every constrained graph to
+///   `fork_transaction()` is strictly worse than the journal plus the
+///   per-touched-type unique rebuild that is that field's undo story.
 fn journal_covers(graph: &DirGraph) -> bool {
-    // Only a petgraph-backed backend can express an inverse edit. That is
-    // Memory and Mapped — MappedGraph.inner is the same StableDiGraph, which
-    // is why it gained a journal in this sprint. Disk has no petgraph and no
-    // NodeIndex identity to restore, and every UndoEntry variant is keyed on
-    // one, so it still takes the whole-graph checkpoint.
+    // Only a petgraph-backed backend can express an inverse edit: Memory and
+    // Mapped, whose `MappedGraph.inner` is the same StableDiGraph. Disk has no
+    // petgraph and no NodeIndex identity to restore, and every UndoEntry
+    // variant is keyed on one, so it takes the whole-graph checkpoint.
     graph.graph.supports_undo_journal()
 }
 
@@ -339,11 +315,10 @@ impl DirGraph {
     /// what is left, and handing them straight back — so the returned shell
     /// has empty data-scale fields and a faithful copy of everything else.
     ///
-    /// The six schema-scale maps in "everything else" are `Arc`-shared, so
-    /// this is a refcount bump per map rather than a copy of the property
-    /// catalogue; the copy, if any, happens at the first writer of the
-    /// statement. See [`super::schema_cow`] — and do not reach for
-    /// `Arc::make_mut` on those fields anywhere else.
+    /// The six schema-scale maps in "everything else" are `Arc`-shared, so the
+    /// copy, if any, happens at the statement's first writer. See
+    /// [`super::schema_cow`] — and do not reach for `Arc::make_mut` on those
+    /// fields anywhere else.
     pub(super) fn schema_shell(&mut self) -> DirGraph {
         let mut husk = DirGraph::new();
         swap_data_scale(self, &mut husk);
@@ -369,8 +344,7 @@ struct ReplayFallout {
     /// invalidation, not the per-entry `evict_entries` the delete path uses:
     /// a replay restores and removes nodes in the same pass, so the surviving
     /// set is not known per entry, and the read path self-heals via
-    /// `lookup_or_build` anyway. This runs only after a statement has already
-    /// failed, so the rebuild lands on the rare path.
+    /// `lookup_or_build` anyway.
     stale_id_indices: HashSet<String>,
     /// Node types whose unique-occupancy maps must be recomputed from the
     /// restored data. Wider than `stale_id_indices`: a plain property
@@ -403,10 +377,6 @@ fn replay(graph: &mut DirGraph, journal: UndoJournal) -> ReplayFallout {
 
 /// Reverse one edit. The journal is already uninstalled, so the `GraphWrite`
 /// calls below are not re-captured.
-///
-/// A dispatcher only: each entry family owns a helper below, so an arm's undo
-/// story is read (and reviewed) next to the invariant it rests on rather than
-/// halfway down one long match.
 fn apply(graph: &mut DirGraph, entry: UndoEntry, fallout: &mut ReplayFallout) {
     match entry {
         UndoEntry::NodeAdded { idx, node_type } => undo_node_added(graph, idx, node_type, fallout),
@@ -445,12 +415,10 @@ fn apply(graph: &mut DirGraph, entry: UndoEntry, fallout: &mut ReplayFallout) {
             node,
             prior,
         } => {
-            // `embeddings` is parked (see `swap_data_scale`), so the live map
-            // is the one a rollback keeps and this entry is the only thing
-            // that puts the vector back. Pruning never drops a store, so the
-            // key is still present; a missing one would mean some other writer
-            // removed the store mid-statement, and re-creating it here from a
-            // single vector would invent a dimension.
+            // Pruning never drops a store, so the key is still present; a
+            // missing one would mean some other writer removed the store
+            // mid-statement, and re-creating it here from a single vector
+            // would invent a dimension.
             if let Some(store) = graph.embeddings.get_mut(&store_key) {
                 store.restore_embedding(node, &prior);
             }
@@ -461,16 +429,9 @@ fn apply(graph: &mut DirGraph, entry: UndoEntry, fallout: &mut ReplayFallout) {
             key,
             prior,
         } => {
-            // Write the prior value back into the live store. The backend owns
-            // the map and `swap_data_scale` swaps the backend, so nothing else
-            // restores it; these entries are the whole story for a columnar
-            // write.
-            //
-            // `prior: None` restores as `Null`: `ColumnStore::get` answers
-            // `None` for absent-and-null alike and `row_properties` skips both,
-            // so the two are indistinguishable through every read surface —
-            // including the `rollback_tests::fingerprint` oracle, which reads
-            // the master rows directly.
+            // `prior: None` restores as `Null` — indistinguishable through
+            // every read surface, including the `rollback_tests::fingerprint`
+            // oracle; see the module doc.
             edit_column_master(graph, node_type, fallout, |store| {
                 store.set(row_id, key, &prior.unwrap_or(Value::Null), None);
             });
@@ -480,11 +441,10 @@ fn apply(graph: &mut DirGraph, entry: UndoEntry, fallout: &mut ReplayFallout) {
             prior_schema,
             prior_column_count,
         } => {
-            // Replayed *after* the cell entries of the same write (they were
-            // captured later, so reverse replay runs them first): each new
-            // column is restored to its pre-statement content and only then
-            // dropped, which keeps the two entries independent of each other's
-            // internals.
+            // Replayed *after* the cell entries of the same write (captured
+            // later, so reverse replay runs them first): each new column is
+            // restored to its pre-statement content and only then dropped,
+            // which keeps the two entries independent.
             edit_column_master(graph, node_type, fallout, |store| {
                 store.restore_schema(prior_schema, prior_column_count);
             });
@@ -551,7 +511,6 @@ fn undo_node_added(
     GraphWrite::remove_node(&mut graph.graph, idx);
 }
 
-/// Restore a node's pre-statement weight.
 fn undo_node_weight(
     graph: &mut DirGraph,
     idx: NodeIndex,
@@ -694,10 +653,9 @@ fn undo_bucket_removed(graph: &mut DirGraph, bucket: BucketId, idx: NodeIndex, p
 /// Run one edit against a type's live master `ColumnStore` and report the type
 /// as touched.
 ///
-/// The shared preamble of every columnar undo entry. Both lookups fail
-/// silently, and both failures mean the same thing — the type no longer exists
-/// to restore into, because the shell restore already rolled the schema back
-/// past it — so there is nothing to write and nothing to report.
+/// Both lookups fail silently, and both failures mean the same thing — the
+/// type no longer exists to restore into, because the shell restore already
+/// rolled the schema back past it — so there is nothing to write.
 fn edit_column_master(
     graph: &mut DirGraph,
     node_type: InternedKey,
@@ -751,10 +709,9 @@ fn undo_columnar_rows_appended(
 /// A columnar `SET` lands in the master store, not in any node's weight, so it
 /// produces no `NodeWeight` entry for the node it changed — the columnar undo
 /// entries are the *only* signal that a value under a declared unique
-/// constraint may have moved. Without the report a failed columnar `SET` would
-/// leave the claim it took behind (a phantom occupant) or the claim it released
-/// free (a real duplicate admitted), which is exactly the failure mode
-/// `swap_data_scale` warns about for the parked `unique_indices`.
+/// constraint may have moved. Without the report, a failed columnar `SET` hits
+/// exactly the failure mode `swap_data_scale` warns about for the parked
+/// `unique_indices`.
 fn columnar_type_touched(fallout: &mut ReplayFallout, type_name: String) {
     fallout.stale_unique_indices.insert(type_name);
 }

@@ -33,10 +33,6 @@ impl GroupExprStrategy {
 }
 
 /// One aggregate the single-pass fused numeric aggregator can service.
-///
-/// Hoisted out of `try_fused_numeric_aggregation` (where it used to be a
-/// block-local item) so the emission step can be a named function and keep
-/// that operator under the source-quality complexity ceiling.
 #[derive(Clone, Copy)]
 enum FusedAggKind {
     CountStar,
@@ -47,8 +43,6 @@ enum FusedAggKind {
     Max,
 }
 
-/// A classified aggregate item: its output column, its kind, and the argument
-/// expression the per-row pass evaluates.
 struct FusedAggSpec<'a> {
     col_name: String,
     kind: FusedAggKind,
@@ -56,13 +50,11 @@ struct FusedAggSpec<'a> {
 }
 
 impl<'a> CypherExecutor<'a> {
-    /// RETURN with aggregation (grouping + aggregate functions)
     pub(super) fn execute_return_with_aggregation(
         &self,
         clause: &ReturnClause,
         result_set: ResultSet,
     ) -> Result<ResultSet, String> {
-        // Identify grouping keys (non-aggregate expressions) and aggregations
         let group_key_indices: Vec<usize> = clause
             .items
             .iter()
@@ -73,7 +65,7 @@ impl<'a> CypherExecutor<'a> {
 
         let columns: Vec<String> = clause.items.iter().map(return_item_column_name).collect();
 
-        // Special case: no grouping keys = aggregate over all rows
+        // No grouping keys: one aggregate over all rows.
         if group_key_indices.is_empty() {
             let mut projected = Bindings::with_capacity(clause.items.len());
             for item in &clause.items {
@@ -88,24 +80,18 @@ impl<'a> CypherExecutor<'a> {
             });
         }
 
-        // Fold constant sub-expressions in grouping key expressions
         let folded_group_exprs: Vec<Expression> = group_key_indices
             .iter()
             .map(|&i| self.fold_constants_expr(&clause.items[i].expression))
             .collect();
 
-        // Classify each grouping expression: bound-node property accesses get a
-        // cheap NodeIndex surrogate key; everything else is fully evaluated per-row.
-        // Defers expensive disk-backed property reads (e.g. `t.title`) until after
-        // the grouping pass — typically O(distinct groups) reads instead of O(rows).
+        // Bound-node property accesses get a cheap NodeIndex surrogate key;
+        // everything else is fully evaluated per row.
         let strategies: Vec<GroupExprStrategy> = folded_group_exprs
             .iter()
             .map(GroupExprStrategy::for_expr)
             .collect();
 
-        // Group rows by surrogate keys (NodeIndex for bound-node property accesses,
-        // resolved Value otherwise). The per-row pass is now O(rows) hash-of-int
-        // operations for surrogate parts, with zero disk I/O.
         self.check_deadline()?;
         let mut surrogate_groups: Vec<(Vec<GroupKeyPart>, Vec<usize>)> = Vec::new();
         let mut surrogate_index: FxHashMap<Vec<GroupKeyPart>, usize> = FxHashMap::default();
@@ -118,14 +104,11 @@ impl<'a> CypherExecutor<'a> {
         // the planner pass enforces that.
         //
         // NodeProp surrogate keys are deduped by NodeIndex *before* the
-        // value resolution pass below; under the surrogate scheme the
-        // limit overshoots harmlessly when two NodeIndexes resolve to
-        // the same property value (the re-bucket pass collapses them).
-        // We therefore allow up to `2 * limit` surrogate groups before
-        // bailing — chosen as a small safety margin so the post-resolve
-        // dedup still has enough material to land exactly `limit` final
-        // groups without false caps. The trailing `truncate(limit)` at
-        // emission time enforces the hard cap.
+        // value resolution pass below, so the limit overshoots harmlessly
+        // when two NodeIndexes resolve to the same property value (the
+        // re-bucket pass collapses them). Hence `2 * limit` surrogate
+        // groups before bailing: enough material for the post-resolve dedup
+        // to land exactly `limit` final groups without a false cap.
         let group_limit = clause.group_limit_hint;
         let surrogate_cap = group_limit.map(|n| n.saturating_mul(2).max(n + 8));
 
@@ -174,9 +157,9 @@ impl<'a> CypherExecutor<'a> {
             }
         }
 
-        // Resolve NodeProp surrogates to actual property values, deduplicating reads.
-        // For Q5-style queries (439K rows → ~50 groups), this drops 439K title reads
-        // to ~50.
+        // Resolve NodeProp surrogates to property values, deduplicating the
+        // reads: for Q5-style queries (439K rows → ~50 groups) that is 439K
+        // title reads dropped to ~50.
         let mut resolved_node_props: HashMap<(petgraph::graph::NodeIndex, usize), Value> =
             HashMap::new();
         for (group_idx, (key_parts, _)) in surrogate_groups.iter().enumerate() {
@@ -230,7 +213,6 @@ impl<'a> CypherExecutor<'a> {
             }
         }
 
-        // Compute results for each group
         let carried_vars = grouping_variables(&clause.items);
         let mut result_rows: Vec<ResultRow> =
             if self.may_fan_out_group_evaluation(result_set.rows.len(), groups.len(), &strategies) {
@@ -280,7 +262,6 @@ impl<'a> CypherExecutor<'a> {
                 rows
             };
 
-        // Handle DISTINCT
         if clause.distinct {
             let mut seen: FxHashSet<Vec<Value>> = FxHashSet::default();
             result_rows.retain(|row| {
@@ -299,9 +280,7 @@ impl<'a> CypherExecutor<'a> {
         })
     }
 
-    /// The surrogate key for one row — the whole per-row body of the grouping
-    /// pass, shared by the sequential and partitioned drivers so the two
-    /// cannot drift apart on what a group *is*.
+    /// The surrogate key for one row.
     ///
     /// Group-key evaluation errors (missing parameter, overflow, …) must
     /// propagate exactly as they would without aggregation. Legitimate null
@@ -350,13 +329,11 @@ impl<'a> CypherExecutor<'a> {
         let group_rows: Vec<&ResultRow> = row_indices.iter().map(|&i| &rows[i]).collect();
         let mut projected = Bindings::with_capacity(clause.items.len());
 
-        // Add group key values
         for (ki, &item_idx) in group_key_indices.iter().enumerate() {
             let key = return_item_column_name(&clause.items[item_idx]);
             projected.insert(key, group_key_values[ki].clone());
         }
 
-        // Compute aggregations — try single-pass fusion first
         if let Some(agg_results) =
             self.try_fused_numeric_aggregation(clause, group_key_indices, &group_rows)?
         {
@@ -366,7 +343,7 @@ impl<'a> CypherExecutor<'a> {
         } else {
             for (item_idx, item) in clause.items.iter().enumerate() {
                 if group_key_indices.contains(&item_idx) {
-                    continue; // Already added
+                    continue;
                 }
                 let key = return_item_column_name(item);
                 let val = self.evaluate_aggregate_with_rows(&item.expression, &group_rows)?;
@@ -382,12 +359,9 @@ impl<'a> CypherExecutor<'a> {
         // Also lets subsequent MATCH/OPTIONAL MATCH clauses constrain
         // patterns to the correct nodes.
         //
-        // `row_indices[0]` is the **globally** first row of the group. The
-        // partitioned grouping pass preserves that by merging partitions in
-        // partition order and concatenating each group's index list in the
-        // same order — a partition-local "first" would silently carry the
-        // wrong node here, which is what
-        // `parallel_aggregation_carries_the_global_first_row` pins.
+        // `row_indices[0]` must be the **globally** first row of the group; a
+        // locally-first one would silently carry the wrong node here, which is
+        // what `parallel_aggregation_carries_the_global_first_row` pins.
         let first_row = &rows[row_indices[0]];
         let mut row = ResultRow::from_projected(projected);
         carry_group_bindings(carried_vars, first_row, &mut row);
@@ -455,7 +429,6 @@ impl<'a> CypherExecutor<'a> {
             .unwrap_or(Value::Null)
     }
 
-    /// Evaluate aggregate function over all rows in a ResultSet
     pub(super) fn evaluate_aggregate(
         &self,
         expr: &Expression,
@@ -465,7 +438,6 @@ impl<'a> CypherExecutor<'a> {
         self.evaluate_aggregate_with_rows(expr, &refs)
     }
 
-    /// Evaluate aggregate function over a slice of row references
     pub(super) fn evaluate_aggregate_with_rows(
         &self,
         expr: &Expression,
@@ -581,17 +553,8 @@ impl<'a> CypherExecutor<'a> {
                         Ok(Value::Float64(m))
                     }
                 }
-                // mode(x) — most frequent value per group. Real query:
-                // "most common city per country":
-                //   MATCH (p:Person) RETURN p.country, mode(p.city)
-                //
-                // Works on any Value type (strings, ints, floats,
-                // dates). Nulls are skipped (don't count toward
-                // frequency). Ties: returns the first-seen winner
-                // (stable across runs because Cypher result iteration
-                // is deterministic). Empty group → Null.
-                //
-                // 2026-05-25 broad-scan lift, Batch 5.
+                // Any Value type; nulls are skipped rather than counted,
+                // and an empty group is Null.
                 "mode" => self.eval_mode_aggregate(args, rows, *distinct),
                 "percentile_cont" => {
                     if args.len() != 2 {
@@ -613,9 +576,7 @@ impl<'a> CypherExecutor<'a> {
                     if values.is_empty() {
                         Ok(Value::Null)
                     } else {
-                        // `total_cmp`, not `partial_cmp(..).unwrap_or(Equal)`:
-                        // a NaN in the column makes the latter intransitive
-                        // (NaN ties with everything) and `sort_by` aborts.
+                        // `total_cmp` — see `median` above.
                         values.sort_by(|a, b| a.total_cmp(b));
                         let n = values.len();
                         if n == 1 {
@@ -649,9 +610,7 @@ impl<'a> CypherExecutor<'a> {
                     if values.is_empty() {
                         Ok(Value::Null)
                     } else {
-                        // `total_cmp`, not `partial_cmp(..).unwrap_or(Equal)`:
-                        // a NaN in the column makes the latter intransitive
-                        // (NaN ties with everything) and `sort_by` aborts.
+                        // `total_cmp` — see `median` above.
                         values.sort_by(|a, b| a.total_cmp(b));
                         let n = values.len();
                         // Nearest-rank method: ceil(p * n), clamped to [1, n]
@@ -659,8 +618,8 @@ impl<'a> CypherExecutor<'a> {
                         Ok(Value::Float64(values[idx]))
                     }
                 }
-                // Non-aggregate function wrapping aggregate args (e.g. size(collect(...)))
-                // Evaluate args through aggregate path, then evaluate the function normally.
+                // Non-aggregate function wrapping aggregate args, e.g.
+                // `size(collect(...))`.
                 _ => {
                     let dummy = ResultRow::new();
                     let row = rows.first().copied().unwrap_or(&dummy);
@@ -672,7 +631,6 @@ impl<'a> CypherExecutor<'a> {
                             resolved_args.push(self.evaluate_expression(arg, row)?);
                         }
                     }
-                    // Build a synthetic row with the resolved values bound to placeholder keys
                     let mut synth = ResultRow::new();
                     let placeholder_exprs: Vec<Expression> = (0..resolved_args.len())
                         .map(|i| {
@@ -791,10 +749,6 @@ impl<'a> CypherExecutor<'a> {
                 let r = self.evaluate_aggregate_with_rows(right, rows)?;
                 Ok(crate::graph::core::value_operations::string_concat(&l, &r))
             }
-            // Everything else: an aggregate-bearing wrapper without a
-            // dedicated arm (routed to the nested-aggregate rewrite), or a
-            // plain non-aggregate expression (evaluated against the first
-            // row). See `evaluate_aggregation_fallback`.
             _ => self.evaluate_aggregation_fallback(expr, rows),
         }
     }
@@ -1030,7 +984,6 @@ impl<'a> CypherExecutor<'a> {
         })
     }
 
-    /// Collect numeric values from rows for aggregate computation
     pub(super) fn collect_numeric_values(
         &self,
         expr: &Expression,
@@ -1095,7 +1048,6 @@ impl<'a> CypherExecutor<'a> {
         group_key_indices: &[usize],
         group_rows: &[&ResultRow],
     ) -> Result<Option<Vec<(String, Value)>>, String> {
-        // Classify each aggregate item
         let mut specs: Vec<FusedAggSpec> = Vec::new();
 
         for (item_idx, item) in clause.items.iter().enumerate() {
@@ -1144,7 +1096,6 @@ impl<'a> CypherExecutor<'a> {
             return Ok(None);
         }
 
-        // Accumulators
         let n = specs.len();
         let mut counts = vec![0i64; n];
         let mut sums = vec![0.0f64; n];
@@ -1155,8 +1106,7 @@ impl<'a> CypherExecutor<'a> {
         let mut mins: Vec<Option<Value>> = vec![None; n];
         let mut maxs: Vec<Option<Value>> = vec![None; n];
 
-        // Deduplicate expressions to avoid evaluating the same one multiple times
-        // Map each spec to an expression index
+        // Deduplicate expressions so a shared argument is evaluated once.
         let mut unique_exprs: Vec<&Expression> = Vec::new();
         let mut spec_expr_idx: Vec<usize> = Vec::with_capacity(n);
 
@@ -1165,7 +1115,8 @@ impl<'a> CypherExecutor<'a> {
                 spec_expr_idx.push(usize::MAX); // sentinel — no expression needed
                 continue;
             }
-            // Check if this expression already exists (by pointer equality for speed)
+            // Pointer equality, not structural — this is a fast path, not a
+            // semantic requirement.
             let idx = unique_exprs
                 .iter()
                 .position(|&e| std::ptr::eq(e, spec.expr));
@@ -1179,15 +1130,12 @@ impl<'a> CypherExecutor<'a> {
 
         let mut eval_buf: Vec<Value> = vec![Value::Null; unique_exprs.len()];
 
-        // Single pass over rows
         for (row_idx, row) in group_rows.iter().enumerate() {
             self.check_interrupt_periodic(row_idx)?;
-            // Evaluate each unique expression once
             for (i, expr) in unique_exprs.iter().enumerate() {
                 eval_buf[i] = self.evaluate_expression(expr, row)?;
             }
 
-            // Update all accumulators
             for (si, spec) in specs.iter().enumerate() {
                 match spec.kind {
                     FusedAggKind::CountStar => {
@@ -1259,10 +1207,10 @@ impl<'a> CypherExecutor<'a> {
 
     /// Evaluate `count(...)` over a materialized group's rows.
     ///
-    /// Split out of `evaluate_aggregate_with_rows` to keep that dispatcher
-    /// under the source-quality complexity ceiling, as `collect` and `mode`
-    /// already were; the body is that arm verbatim. `args` is non-empty — the
-    /// dispatcher rejects an argument-less aggregate before reaching here.
+    /// One of three arms split out of `evaluate_aggregate_with_rows` to keep
+    /// that dispatcher under the source-quality complexity ceiling. `args` is
+    /// non-empty — the dispatcher rejects an argument-less aggregate before
+    /// reaching here.
     fn eval_count_aggregate(
         &self,
         args: &[Expression],
@@ -1345,10 +1293,6 @@ impl<'a> CypherExecutor<'a> {
     }
 
     /// Evaluate `collect(expr)` over a materialized group.
-    ///
-    /// Split out of `evaluate_aggregate_with_rows` to keep that dispatcher
-    /// under the source-quality complexity ceiling; the body is that arm
-    /// verbatim.
     fn eval_collect_aggregate(
         &self,
         args: &[Expression],
@@ -1382,20 +1326,15 @@ impl<'a> CypherExecutor<'a> {
 
     /// Evaluate `mode(expr)` — the most frequent non-null value in a
     /// materialized group — over that group's rows.
-    ///
-    /// Split out of `evaluate_aggregate_with_rows` to keep that dispatcher
-    /// under the source-quality complexity ceiling; the body is that arm
-    /// verbatim.
     fn eval_mode_aggregate(
         &self,
         args: &[Expression],
         rows: &[&ResultRow],
         distinct: bool,
     ) -> Result<Value, String> {
-        // Key = canonical string repr of the value (Debug
-        // distinguishes Int(1) from String("1")); first
-        // Value seen for that key is the returned winner
-        // on tie (insertion-order tiebreak).
+        // Key = canonical string repr of the value (Debug distinguishes
+        // Int(1) from String("1")); the first `Value` seen for a key is the
+        // one returned for it.
         let mut counts: FxHashMap<String, (Value, u64)> = FxHashMap::default();
         // DISTINCT keys on the `Value`, as it does for every other
         // aggregate; the Debug repr is only the counting key.
@@ -1413,16 +1352,12 @@ impl<'a> CypherExecutor<'a> {
             let entry = counts.entry(key).or_insert_with(|| (val.clone(), 0));
             entry.1 += 1;
         }
-        // Find the key with max count; on tie, the first
-        // seen wins. HashMap iteration order is non-
-        // deterministic in Rust, so we sort by (count
-        // desc, value debug ascending) for stable output.
+        // Highest count wins. HashMap iteration order is non-deterministic,
+        // so a tie breaks on the Debug repr (ascending) for a stable answer.
         let winner = counts
             .into_values()
             .max_by(|a, b| {
                 a.1.cmp(&b.1).then_with(|| {
-                    // Stable tiebreak: lexicographic on
-                    // the Debug repr (deterministic).
                     format!("{:?}", b.0).cmp(&format!("{:?}", a.0))
                 })
             })
@@ -1451,9 +1386,8 @@ fn fold_extremum(acc: Option<Value>, val: Value, keep: std::cmp::Ordering) -> Op
 /// `(column, value)` pairs.
 ///
 /// Split out of `try_fused_numeric_aggregation` to keep that operator under
-/// the source-quality complexity ceiling; the body is that operator's
-/// "produce results" loop verbatim. `mins`/`maxs` are taken by `&mut` because
-/// the winners are moved out rather than cloned.
+/// the source-quality complexity ceiling. `mins`/`maxs` are taken by `&mut`
+/// because the winners are moved out rather than cloned.
 fn emit_fused_aggregate_results(
     specs: &[FusedAggSpec<'_>],
     counts: &[i64],

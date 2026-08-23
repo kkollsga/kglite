@@ -13,31 +13,14 @@
 //! - **`CREATE (n:T {prop: v})`** and `CREATE`-style multi-element paths.
 //! - **`MERGE (n:T {prop: v})`** including the embedded `CREATE` shape.
 //!
-//! Deliberately *does not reject* (these are legal, so they are warned about
+//! Deliberately *never rejects* (these are legal, so they are warned about
 //! non-fatally instead — see below — never turned into errors):
 //! - Unknown node types in MATCH **on an open schema** (`MATCH
 //!   (n:Nonexistent)` legitimately returns zero rows and is a common
 //!   existence-check idiom). Under `lock_schema()` this *is* rejected —
-//!   see [`validate_label`] and the note below.
+//!   see [`validate_label`], which carries the rationale.
 //! - Unknown connection types (same rationale, both schema states — an
 //!   edge type is not yet part of what a schema lock covers).
-//!
-//! ## Locked schemas reject unknown labels
-//!
-//! `lock_schema()` is the opt-in "catch my typos" mechanism, and it must
-//! cover labels and properties symmetrically. Before this check, a locked
-//! schema rejected `MATCH (i:Issue {titel: 1})` (unknown property) but
-//! silently returned `[]` for `MATCH (i:Isue)` (unknown label) — and an
-//! empty result set reads as "no matching data" rather than "you made a
-//! mistake", so the typo survived review and reached production. The write
-//! path had already made this call: `CREATE (i:Isue)` under a lock has
-//! always failed with `Unknown node type 'Isue'`. [`validate_label`]
-//! applies the same rule, and the same message, to reads.
-//!
-//! The open-schema default is untouched — schemalessness is the product,
-//! and the check is gated entirely on `graph.schema_locked`.
-//!
-//! Deliberately *never rejects* (they are warned about instead, below):
 //! - Property references in WHERE / RETURN expressions (virtual columns,
 //!   timeseries sub-nodes, aliases can be legitimate `n.prop` accesses
 //!   not present in `node_type_metadata`).
@@ -81,21 +64,12 @@
 //! users) — one computation, two consumers.
 //!
 //! Both surfaces — the fatal check and these warnings — reach patterns through
-//! the single traversal in [`walk_query_patterns`], so a typo warns wherever a
-//! read pattern can appear (`CALL {}` bodies, `WHERE EXISTS {}`, `UNION`
-//! branches) rather than only at the top level. The exception is the var →
-//! label map ([`warnings::match_var_labels`]), which families 2-4 consult and which is
+//! the single traversal in [`walk_query_patterns`] (see it for the covered and
+//! uncovered nesting forms). The exception is the var → label map
+//! ([`warnings::match_var_labels`]), which families 2-4 consult and which is
 //! built from top-level MATCH patterns only, for want of a scope model: a var
 //! rebound by a projection (`WITH n AS m`) is simply absent from it, so those
 //! checks stay silent about `m` rather than guessing.
-//!
-//! ## Pipeline placement
-//!
-//! Called by three downstream Cypher consumers after `parse_cypher` and
-//! before the planner's `optimize_with_disabled`:
-//! - `src/graph/pyapi/kg_core.rs::cypher` (Python boundary)
-//! - `crates/kglite-mcp-server/src/tools.rs::cypher_query`
-//! - `crates/kglite-bolt-server/src/backend.rs::execute`
 
 use super::super::ast::*;
 use super::super::executor::helpers::expression_to_string;
@@ -114,9 +88,8 @@ pub use warnings::collect_unknown_pattern_warnings;
 pub(crate) use warnings::{collect_query_warnings, emit_query_warnings, strict_read_error};
 pub use warnings::{query_warning_sink, set_query_warning_sink, QueryWarningSink};
 
-/// Built-in fields valid on any node type — mirrors BUILTIN_FIELDS in
-/// `mutation/validation.rs`. Listed explicitly so it's obvious what's
-/// tolerated without a metadata entry.
+/// Built-in fields valid on any node type, tolerated without a metadata
+/// entry — mirrors BUILTIN_FIELDS in `mutation/validation.rs`.
 const BUILTIN_FIELDS: &[&str] = &["id", "title", "name", "type"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,9 +126,6 @@ impl std::error::Error for SchemaError {}
 pub fn validate_schema(query: &CypherQuery, graph: &DirGraph) -> Result<(), SchemaError> {
     validate_scope(query, &HashSet::new())?;
 
-    // If the graph has no declared node types at all, there is nothing to
-    // validate against — skip. This covers fresh graphs and construction
-    // before any nodes/edges exist.
     if graph.node_type_metadata.is_empty() && graph.type_indices.is_empty() {
         return Ok(());
     }
@@ -226,10 +196,9 @@ fn bind_row_source(clause: &Clause, scope: &mut HashSet<String>) -> Result<(), S
 /// so `ORDER BY c.label` has no single value to sort on.
 ///
 /// kglite splits the difference: the well-defined half sorts correctly, the
-/// ambiguous half is rejected with a message naming the fix. What it must
-/// never do — and did before this check existed — is evaluate the sort key to
-/// NULL on every row and hand back insertion order as though the clause had
-/// been honoured.
+/// ambiguous half is rejected with a message naming the fix. Before this check
+/// existed it evaluated the sort key to NULL on every row and handed back
+/// insertion order as though the clause had been honoured.
 struct AggregateOrderScope {
     /// Projected column names plus every variable the grouping keys read.
     allowed: HashSet<String>,
@@ -422,8 +391,6 @@ fn validate_write_pattern_properties(
 }
 
 /// SET items — the clause's own, or a MERGE's `ON CREATE` / `ON MATCH` list.
-/// Each names a variable that must already be bound, plus (for the value
-/// forms) an expression that must resolve in the same scope.
 fn validate_set_items(items: &[SetItem], scope: &HashSet<String>) -> Result<(), SchemaError> {
     for item in items {
         match item {
@@ -464,9 +431,8 @@ fn validate_scope(query: &CypherQuery, initial: &HashSet<String>) -> Result<(), 
                     bind_pattern(pattern, &mut scope);
                 }
                 scope.extend(m.path_assignments.iter().map(|path| path.variable.clone()));
-                // The clause's own WHERE sees this clause's pattern variables
-                // — validated after binding them, exactly as the separate
-                // `Clause::Where` arm below is reached after its MATCH.
+                // The clause's own WHERE sees this clause's pattern variables,
+                // so it is validated only after binding them.
                 if let Some(wc) = &m.where_clause {
                     validate_predicate_scope(&wc.predicate, &scope)?;
                 }
@@ -491,8 +457,6 @@ fn validate_scope(query: &CypherQuery, initial: &HashSet<String>) -> Result<(), 
             }
             Clause::Skip(skip) => validate_expression_scope(&skip.count, &scope)?,
             Clause::Limit(limit) => validate_expression_scope(&limit.count, &scope)?,
-            // The two row sources: validate the source expression, then declare
-            // the single variable it binds. See `bind_row_source`.
             Clause::Unwind(_) | Clause::LoadCsv(_) => bind_row_source(clause, &mut scope)?,
             Clause::Union(union) => validate_scope(&union.query, initial)?,
             Clause::Create(create) => {
@@ -813,13 +777,11 @@ enum PatternSite<'q> {
 ///
 /// Both schema surfaces route through it — [`validate_schema`] (fatal, locked
 /// schemas) and [`collect_unknown_pattern_warnings`] (non-fatal, open
-/// schemas) — and that is the point. The warning collector used to walk
-/// top-level `MATCH` / `OPTIONAL MATCH` itself, so a typo'd label inside
-/// `CALL {}`, `WHERE EXISTS {}` or a `UNION` branch produced no warning while
-/// the identical typo at top level did: exactly the incomplete-coverage bug
-/// the fatal path had already been extended to fix. Two walkers drift; there
-/// is now one, and a newly-covered nesting form lands on both surfaces at
-/// once.
+/// schemas). Two walkers drift: the warning collector used to walk top-level
+/// `MATCH` / `OPTIONAL MATCH` itself, so a typo'd label inside `CALL {}`,
+/// `WHERE EXISTS {}` or a `UNION` branch produced no warning while the
+/// identical typo at top level did. With one walker a newly-covered nesting
+/// form lands on both surfaces at once.
 ///
 /// Covers, recursively so nesting composes: `MATCH` / `OPTIONAL MATCH`,
 /// `EXISTS {}` at any `AND` / `OR` / `XOR` / `NOT` depth inside a `WHERE`
@@ -849,7 +811,6 @@ fn walk_clause_patterns<E>(
             for pattern in &m.patterns {
                 visit(PatternSite::Read(pattern))?;
             }
-            // Patterns nested in the clause's own WHERE (`… WHERE EXISTS { … }`).
             if let Some(wc) = &m.where_clause {
                 walk_predicate_patterns(&wc.predicate, visit)?;
             }
@@ -996,10 +957,8 @@ fn label_known(label: &str, graph: &DirGraph) -> bool {
 /// This closes the read side, where a typo'd label previously returned `[]`
 /// — indistinguishable from "no matching data".
 ///
-/// The message deliberately reuses the write path's wording so a locked
-/// schema reports the same mistake identically whether it is read or
-/// written, and enumerates the valid set exactly like the unknown-property
-/// message above it.
+/// The message deliberately reuses the write path's wording, so a locked
+/// schema reports the same mistake identically whether it is read or written.
 fn validate_label(label: &str, graph: &DirGraph) -> Result<(), SchemaError> {
     if label_known(label, graph) {
         return Ok(());
@@ -1044,9 +1003,8 @@ fn validate_label(label: &str, graph: &DirGraph) -> Result<(), SchemaError> {
 /// values that have actually been written, so a property a caller declared up
 /// front but has not stored yet is absent from it. Reading only that map made
 /// the typo-guard reject `CREATE (n:Item {p1: 1})` on a type whose schema
-/// declares `p1` — a declaration the user wrote precisely to say "this property
-/// is expected". The guard itself is deliberate for *undeclared* properties and
-/// stays; this closes the case where the answer is written down.
+/// declares `p1`. The guard itself is deliberate for *undeclared* properties
+/// and stays; this closes the case where the answer is written down.
 fn property_is_declared(node_type: &str, property: &str, graph: &DirGraph) -> bool {
     let Some(schema) = graph.schema_definition.as_ref() else {
         return false;
@@ -1116,14 +1074,11 @@ mod tests {
     }
 
     /// A property the graph's schema *declares* is not a typo, even though the
-    /// type has never carried a value for it.
+    /// type has never carried a value for it (see [`property_is_declared`]).
     ///
-    /// The unknown-property guard reads `node_type_metadata`, which is built
-    /// from values that were actually written. So the first `CREATE` naming a
-    /// declared-but-unwritten property was rejected with "Did you mean ...?" —
-    /// and since a `CREATE` is how the property would come to be written, the
-    /// rejection was self-perpetuating: a Cypher statement stream literally
-    /// could not grow a type's schema, whatever the caller declared.
+    /// The rejection was self-perpetuating: a `CREATE` is how the property
+    /// would come to be written, so a Cypher statement stream literally could
+    /// not grow a type's schema, whatever the caller declared.
     #[test]
     fn a_declared_property_is_not_a_typo() {
         use crate::graph::schema::{NodeSchemaDefinition, SchemaDefinition, SchemaInstall};
@@ -1266,7 +1221,6 @@ mod tests {
             .or_default();
         let q = parse_cypher("MATCH (n:Reviewer) RETURN n").unwrap();
         assert!(collect_unknown_pattern_warnings(&q, &g).is_empty());
-        // And it still warns on a genuine typo of the secondary label.
         let q2 = parse_cypher("MATCH (n:Reviewr) RETURN n").unwrap();
         assert_eq!(collect_unknown_pattern_warnings(&q2, &g).len(), 1);
     }
@@ -1280,7 +1234,6 @@ mod tests {
 
     #[test]
     fn no_warning_on_schemaless_graph() {
-        // A fresh graph has nothing to compare against → never warns.
         let g = DirGraph::new();
         let q = parse_cypher("MATCH (n:Anything) RETURN n").unwrap();
         assert!(collect_unknown_pattern_warnings(&q, &g).is_empty());
@@ -1359,9 +1312,8 @@ mod tests {
 
     #[test]
     fn rejects_unknown_property_in_create_pattern_literal() {
-        // CREATE typos slip through silently today: `CREATE (:Person {ttle: 'x'})`
-        // adds a node with a `ttle` property instead of `title`. Pre-flight
-        // validation surfaces the typo with a "did you mean?" hint.
+        // Without this pre-flight check `CREATE (:Person {ttle: 'x'})` silently
+        // stores a `ttle` property instead of `title`.
         let g = graph_with_schema();
         let q = parse_cypher("CREATE (:Person {agee: 30})").unwrap();
         let err = validate_schema(&q, &g).unwrap_err();
@@ -1378,8 +1330,6 @@ mod tests {
 
     #[test]
     fn rejects_unknown_property_in_create_multi_element_path() {
-        // CREATE (a:Person {age: 30})-[:KNOWS]->(b:Person {agee: 25})
-        // — typo on the second node.
         let g = graph_with_schema();
         let q =
             parse_cypher("CREATE (a:Person {age: 30})-[:KNOWS]->(b:Person {agee: 25}) RETURN a, b")
@@ -1405,8 +1355,7 @@ mod tests {
 
     #[test]
     fn create_with_untyped_node_is_permissive() {
-        // CREATE (n {anything: 1}) — no label, no type metadata to
-        // check against. Permissive (matches MATCH behavior).
+        // No label → no type metadata to check against; permissive, as MATCH is.
         let g = graph_with_schema();
         let q = parse_cypher("CREATE (n {anything_at_all: 1}) RETURN n").unwrap();
         assert!(validate_schema(&q, &g).is_ok());
@@ -1414,9 +1363,8 @@ mod tests {
 
     #[test]
     fn create_on_unknown_node_type_is_permissive() {
-        // Symmetric with `tolerates_unknown_node_type` for MATCH —
-        // unknown labels are not rejected here either (consistent
-        // rule: only validate when metadata is declared).
+        // Symmetric with `tolerates_unknown_node_type` for MATCH: only
+        // validate when metadata is declared.
         let g = graph_with_schema();
         let q = parse_cypher("CREATE (n:NewType {whatever: 1}) RETURN n").unwrap();
         assert!(validate_schema(&q, &g).is_ok());
@@ -1443,10 +1391,8 @@ mod tests {
 
     #[test]
     fn validates_labeled_pattern_literal_inside_correlated_call_body() {
-        // A correlated body that introduces a NEW labeled node with a
-        // property typo is caught (same rule as a top-level labeled
-        // pattern literal). `f:Person {agee:...}` inside the body is
-        // invalid.
+        // A correlated body introducing a NEW labeled node with a property
+        // typo is caught, same as a top-level labeled pattern literal.
         let g = graph_with_schema();
         let q = parse_cypher(
             "MATCH (p:Person) CALL { WITH p MATCH (p)-[:KNOWS]->(f:Person {agee: 1}) RETURN count(f) AS c } RETURN p.name, c",
@@ -1473,8 +1419,6 @@ mod tests {
 
     #[test]
     fn validates_property_inside_exists_nested_pattern() {
-        // Pattern literals inside EXISTS { MATCH ... } should be
-        // validated too.
         let g = graph_with_schema();
         let q = parse_cypher(
             "MATCH (a:Person) WHERE EXISTS { MATCH (a)-[:KNOWS]->(b:Person {agee: 1}) } RETURN a",
@@ -1486,11 +1430,8 @@ mod tests {
 
     // ── Locked-schema label rejection ────────────────────────────────────
     //
-    // `lock_schema()` is the "catch my typos" mechanism; it has always
-    // rejected an unknown *property*, and an unknown *node type* on the
-    // CREATE write path. These cover the read side. Every clause that can
-    // carry a label gets a case — a fix covering only MATCH would recreate
-    // the same asymmetry one level down.
+    // Every clause that can carry a label gets a case — a fix covering only
+    // MATCH would recreate the same asymmetry one level down.
 
     /// Adds an `Issue` type so `Isue` has a real near-miss to suggest —
     /// this is the scenario from the field report, verbatim.
@@ -1654,12 +1595,8 @@ mod tests {
 
     // ── Open-schema warnings reach every nested clause ───────────────────
     //
-    // The counterpart to the locked-schema block above. The warning
-    // collector once walked top-level MATCH / OPTIONAL MATCH only, so the
-    // same typo warned at top level and said nothing one level down —
-    // precisely the asymmetry the locked path had already been fixed for.
-    // Both now share [`walk_query_patterns`], so each clause form gets a
-    // case here and stays covered.
+    // Counterpart to the locked-schema block above: both surfaces share
+    // [`walk_query_patterns`], so each clause form gets a case here too.
 
     /// Open (unlocked) schema with an `Issue` type, so `Isue` has a real
     /// near-miss to suggest — the locked block's scenario, unlocked.

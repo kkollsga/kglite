@@ -96,12 +96,9 @@ impl DirGraph {
     /// Nodes stay in memory (~40 bytes each), edges are mmap'd.
     ///
     /// The scratch directory is process-scoped: it is removed when this graph
-    /// drops, so nothing here survives the process. A caller that wants the
-    /// converted graph to *land* somewhere — on a chosen filesystem, in the
-    /// published directory layout a later `kglite.open(dir)` reads — calls
-    /// [`Self::enable_disk_mode_at`] instead, which materializes inside the
-    /// destination and publishes it. Bindings surface that as
-    /// `enable_disk_mode(path=...)`.
+    /// drops, so nothing here survives the process. To *land* the converted
+    /// graph somewhere instead, see [`Self::enable_disk_mode_at`] — surfaced by
+    /// the bindings as `enable_disk_mode(path=...)`.
     pub fn enable_disk_mode(&mut self) -> Result<(), String> {
         let scratch = std::env::temp_dir().join(scratch_dir_name("kglite_disk_"));
         self.convert_to_disk_in(scratch)
@@ -149,7 +146,6 @@ impl DirGraph {
     /// entry points above, which differ only in where `data_dir` lives and what
     /// happens to it afterwards.
     fn convert_to_disk_in(&mut self, data_dir: std::path::PathBuf) -> Result<(), String> {
-        // Ensure columnar storage for compact node representation
         if self.column_store_count() == 0 {
             self.enable_columnar();
         }
@@ -176,7 +172,6 @@ impl DirGraph {
         // collapse it first. Free when the reader has already dropped.
         self.graph.flatten_fork();
 
-        // Extract the StableDiGraph and build DiskGraph
         let disk_graph = match &mut self.graph {
             GraphBackend::Memory(g) => {
                 crate::graph::storage::disk::graph::DiskGraph::from_stable_digraph(
@@ -303,7 +298,6 @@ impl DirGraph {
         };
         dg.begin_persist();
 
-        // Save DiskGraph files (CSR, nodes, edge properties, metadata).
         // `save_to_dir` runs `clear_arenas` internally, which drains
         // `node_mut_cache` via the clone-apply-replace flush, updating
         // each mutated type's Arc in `DiskGraph.column_stores`.
@@ -333,8 +327,7 @@ impl DirGraph {
         crate::graph::io::file::strip_heavy_metadata(&mut meta);
         let meta_json = serde_json::to_string_pretty(&meta)
             .map_err(|e| format!("Metadata serialization failed: {}", e))?;
-        // Emit the packed binary `type_connectivity.bin.zst` at the
-        // graph root; no-op when the cache is empty.
+        // No-op when the type-connectivity cache is empty.
         crate::graph::io::file::write_type_connectivity_bin(dir, self)?;
 
         // The framed interner sidecar stores `Vec<String>`; hashes are
@@ -362,14 +355,12 @@ impl DirGraph {
             &self.interner,
         )?;
 
-        // Save embeddings if any (matches write_kgl behavior for in-memory saves).
         // BTreeMap view for byte-determinism — same rationale as write_kgl.
         if !self.embeddings.is_empty() {
             let ordered: std::collections::BTreeMap<_, _> = self.embeddings.iter().collect();
             write_compressed_disk_serde(dir, "embeddings.bin.zst", &ordered, "embeddings")?;
         }
 
-        // Save timeseries_store if any (BTreeMap view for byte-determinism).
         if !self.timeseries_store.is_empty() {
             let ordered: std::collections::BTreeMap<_, _> = self.timeseries_store.iter().collect();
             write_compressed_disk_serde(dir, "timeseries.bin.zst", &ordered, "timeseries")?;
@@ -386,12 +377,10 @@ impl DirGraph {
     /// Bring a disk graph's CSR, overflow edges and global indexes to their
     /// final saved state before anything is written.
     fn consolidate_disk_for_save(&mut self, dir: &std::path::Path) -> Result<(), String> {
-        // Build CSR from pending edges if not yet built.
         self.ensure_disk_edges_built()?;
         // Merge overflow edges back so conn_type_index and
-        // peer_count_histogram reflect every live edge. Skipped during
-        // builds; done here as a one-shot so users only pay the cost at
-        // save time, not per add_connections batch.
+        // peer_count_histogram reflect every live edge — the one-shot the
+        // per-batch build path defers (see `ensure_disk_edges_built`).
         //
         // The seal path consumes `overflow_out` / `overflow_in` directly,
         // while a rewrite must compact first so every derived index is rebuilt
@@ -512,22 +501,17 @@ impl DirGraph {
             return 0;
         }
 
-        // One pass over the slots, copying each live row into its type's
-        // replacement store and repointing the slot at the new row. Slot order
-        // is ascending node order, so the rewritten rows keep the locality the
-        // original build gave them.
+        // Slot order is ascending node order, so the rewritten rows keep the
+        // locality the original build gave them.
         //
-        // **Cost.** Nothing here builds a whole-graph structure of its own, but
-        // two allocations are sized by the *compacted types*: the replacement
-        // stores (the live data itself, heap-resident even where the store they
-        // replace was mmap-backed) and the node-slot overlay, which takes one
-        // entry per renumbered slot because a published generation's
-        // `node_slots.bin` may be mapped by other readers and must not be
-        // written through. A rewriting save already materialises every column
-        // as bytes to write `columns.bin`, so this is a constant-factor
-        // increase on a path that was already sized by the graph — not a new
-        // order of growth. It is also skipped entirely for a type with no dead
-        // rows, which is every type of a graph that has not deleted anything.
+        // **Cost.** Two allocations are sized by the *compacted types*: the
+        // replacement stores (the live data itself, heap-resident even where
+        // the store they replace was mmap-backed) and the node-slot overlay,
+        // which takes one entry per renumbered slot because a published
+        // generation's `node_slots.bin` may be mapped by other readers and must
+        // not be written through. A rewriting save already materialises every
+        // column as bytes to write `columns.bin`, so this is a constant factor
+        // on a path already sized by the graph, not a new order of growth.
         let mut pairs: Vec<(InternedKey, Value)> = Vec::new();
         if let GraphBackend::Disk(ref mut dg) = self.graph {
             for index in 0..slot_count {

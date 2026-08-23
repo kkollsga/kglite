@@ -1,4 +1,4 @@
-//! `KgliteGraph` opaque handle — load_file, save_graph, free.
+//! `KgliteGraph` opaque handle — construction, load/save, byte round-trip.
 //!
 //! Wraps `Arc<kglite::api::DirGraph>` so the C side can hold a
 //! cheap reference-counted snapshot. Session creation takes
@@ -33,21 +33,17 @@ pub struct KgliteGraph {
     _opaque: [u8; 0],
     // Prevent C-side stack allocation: the !Send/!Sync marker isn't
     // visible across the C ABI but stops downstream Rust callers
-    // from accidentally constructing one by value. (The real state
-    // is in GraphState; this struct is never instantiated.)
+    // from accidentally constructing one by value.
     _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
 }
 
-/// Private state backing a [`KgliteGraph`] handle. Never named at
-/// the C ABI surface — the C side only knows `KgliteGraph*`. We
-/// `Box::into_raw` a `GraphState`, cast the pointer to
-/// `*mut KgliteGraph`, and reverse the cast on free / use.
+/// Private state backing a [`KgliteGraph`] handle: `Box::into_raw`'d, cast to
+/// `*mut KgliteGraph`, and cast back on free / use.
 pub(crate) struct GraphState {
     pub(crate) inner: Arc<DirGraph>,
 }
 
 impl GraphState {
-    /// Allocate a new opaque handle wrapping `arc`.
     pub(crate) fn into_handle(arc: Arc<DirGraph>) -> *mut KgliteGraph {
         let boxed = Box::new(GraphState { inner: arc });
         Box::into_raw(boxed).cast::<KgliteGraph>()
@@ -55,11 +51,7 @@ impl GraphState {
 
     /// Mutably borrow the state behind a non-null handle. Caller
     /// must uphold the C-ABI contract — the handle is valid, not
-    /// yet freed, and exclusively borrowed for the call. (A
-    /// `&mut` variant is the only borrower we need today: the
-    /// only read-only operation against a `GraphState` is
-    /// snapshot-taking, which we do by handing the graph to
-    /// `Session::from_arc` and moving ownership out via the Box.)
+    /// yet freed, and exclusively borrowed for the call.
     pub(crate) unsafe fn from_handle_mut<'a>(handle: *mut KgliteGraph) -> &'a mut GraphState {
         unsafe { &mut *handle.cast::<GraphState>() }
     }
@@ -193,8 +185,8 @@ pub unsafe extern "C" fn kglite_graph_new_in_mode(
     )
 }
 
-/// Set the out-error string (when the slot is non-null) and return `code`.
-/// Small helper so `kglite_graph_new_in_mode`'s error arms stay one-liners.
+/// Set the out-error string when the slot is non-null, so the caller's error
+/// arms stay one-liners.
 fn fail_new_in_mode(
     code: KgliteStatusCode,
     msg: &str,
@@ -345,10 +337,8 @@ pub unsafe extern "C" fn kglite_load_file(
     )
 }
 
-/// Map a `std::io::Error` from `load_file` to a `KgliteStatusCode`
-/// plus a human-readable message. `load_file` returns `io::Error`
-/// regardless of the underlying cause; we sniff the `kind` to
-/// pick the right C-side code.
+/// Map `load_file`'s `io::Error` to a C-side code plus a message: it returns
+/// `io::Error` regardless of the underlying cause, so we sniff the `kind`.
 pub(crate) fn classify_io_error(err: &std::io::Error) -> (KgliteStatusCode, String) {
     let code = match err.kind() {
         std::io::ErrorKind::NotFound => KgliteStatusCode::FileNotFound,
@@ -438,8 +428,7 @@ pub unsafe extern "C" fn kglite_load_rdf(
                 }
             };
 
-            // Borrow an optional, null-terminated UTF-8 argument. Returns
-            // `Err(())` on invalid UTF-8 so the caller can map to InvalidUtf8.
+            // `Err(())` on invalid UTF-8, so the caller maps it to InvalidUtf8.
             let cstr_opt = |p: *const c_char| -> Result<Option<&str>, ()> {
                 if p.is_null() {
                     Ok(None)
@@ -536,9 +525,8 @@ pub unsafe extern "C" fn kglite_load_rdf(
     )
 }
 
-/// Map a `load_rdf` error string to a `KgliteStatusCode`. `load_rdf`
-/// returns `Result<_, String>`; we sniff the message prefix to pick the
-/// right C-side code (file-not-found vs unsupported format vs parse error).
+/// Map `load_rdf`'s error string to a C-side code: it returns
+/// `Result<_, String>`, so we sniff the message prefix.
 #[cfg(feature = "rdf")]
 fn classify_rdf_error(msg: &str) -> KgliteStatusCode {
     if msg.starts_with("Cannot open") {

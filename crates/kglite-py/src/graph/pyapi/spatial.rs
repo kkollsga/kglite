@@ -1,5 +1,3 @@
-// Spatial/Geometry #[pymethods] — extracted from mod.rs
-
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
@@ -7,15 +5,12 @@ use crate::graph::{get_graph_mut, KnowledgeGraph};
 use kglite_core::api::SpatialConfig;
 use kglite_core::api::{CowSelection, DirGraph, PlanStep, SelectionOperation};
 
-/// Extract a WKT string from a Python argument.
-/// Accepts either a plain str or any object with a `.wkt` property
-/// (e.g. shapely.geometry.BaseGeometry).
+/// Extract a WKT string: either a plain `str`, or any object exposing a
+/// `.wkt` property (e.g. `shapely.geometry.BaseGeometry`).
 fn extract_wkt(obj: &Bound<'_, PyAny>) -> PyResult<String> {
-    // Fast path: plain string
     if let Ok(s) = obj.extract::<String>() {
         return Ok(s);
     }
-    // Duck-typing: any object with .wkt property (shapely, etc.)
     if obj.hasattr("wkt")? {
         let wkt_val = obj.getattr("wkt")?;
         return wkt_val.extract::<String>().map_err(|_| {
@@ -29,7 +24,6 @@ fn extract_wkt(obj: &Bound<'_, PyAny>) -> PyResult<String> {
     ))
 }
 
-/// Create a shapely.geometry.Point from lat/lon coordinates.
 fn make_shapely_point(py: Python<'_>, lat: f64, lon: f64) -> PyResult<Py<PyAny>> {
     let shapely = py.import("shapely.geometry").map_err(|_| {
         PyErr::new::<pyo3::exceptions::PyImportError, _>(
@@ -42,7 +36,6 @@ fn make_shapely_point(py: Python<'_>, lat: f64, lon: f64) -> PyResult<Py<PyAny>>
     Ok(point.unbind())
 }
 
-/// Create a shapely box polygon from geographic bounds.
 fn make_shapely_box(
     py: Python<'_>,
     min_lat: f64,
@@ -61,10 +54,8 @@ fn make_shapely_box(
     Ok(polygon.unbind())
 }
 
-/// Resolve lat/lon field names from spatial config, falling back to defaults.
-///
-/// When lat_field/lon_field are None and the selection's first node has a spatial config
-/// with a primary location, use those field names. Otherwise use "latitude"/"longitude".
+/// Resolve lat/lon field names: an explicit argument wins, else the first
+/// selected node's spatial config, else `"latitude"`/`"longitude"`.
 fn resolve_lat_lon_fields<'a>(
     graph: &'a DirGraph,
     selection: &CowSelection,
@@ -74,7 +65,6 @@ fn resolve_lat_lon_fields<'a>(
     if lat.is_some() || lon.is_some() {
         return (lat.unwrap_or("latitude"), lon.unwrap_or("longitude"));
     }
-    // Try to infer from spatial config
     if let Some(node_type) = selection.first_node_type(graph) {
         if let Some(config) = graph.get_spatial_config(&node_type) {
             if let Some((ref lat_f, ref lon_f)) = config.location {
@@ -85,7 +75,8 @@ fn resolve_lat_lon_fields<'a>(
     ("latitude", "longitude")
 }
 
-/// Resolve geometry field name from spatial config, falling back to default.
+/// Resolve the geometry field name: an explicit argument wins, else the first
+/// selected node's spatial config, else `"geometry"`.
 fn resolve_geometry_field<'a>(
     graph: &'a DirGraph,
     selection: &CowSelection,
@@ -94,7 +85,6 @@ fn resolve_geometry_field<'a>(
     if let Some(g) = geom {
         return g;
     }
-    // Try to infer from spatial config
     if let Some(node_type) = selection.first_node_type(graph) {
         if let Some(config) = graph.get_spatial_config(&node_type) {
             if let Some(ref geom_f) = config.geometry {
@@ -106,7 +96,6 @@ fn resolve_geometry_field<'a>(
 }
 
 /// Resolve the geometry fallback field from spatial config.
-/// Returns Some(field_name) if the node type has a geometry config, None otherwise.
 fn resolve_geom_fallback<'a>(graph: &'a DirGraph, selection: &CowSelection) -> Option<&'a str> {
     let node_type = selection.first_node_type(graph)?;
     let config = graph.get_spatial_config(&node_type)?;
@@ -115,10 +104,6 @@ fn resolve_geom_fallback<'a>(graph: &'a DirGraph, selection: &CowSelection) -> O
 
 #[pymethods]
 impl KnowledgeGraph {
-    // ========================================================================
-    // Spatial/Geometry Methods
-    // ========================================================================
-
     /// Filter nodes within a geographic bounding box.
     ///
     /// Filters nodes from the current selection that have latitude/longitude
@@ -170,7 +155,6 @@ impl KnowledgeGraph {
         )
         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
-        // Create new selection with matching nodes
         let mut new_kg = self.clone();
         new_kg.cursor.selection.clear(); // clear() already adds a fresh level
         if let Some(level) = new_kg.cursor.selection.get_level_mut(0) {
@@ -182,7 +166,6 @@ impl KnowledgeGraph {
                 .push(SelectionOperation::Custom("within_bounds".to_string()));
         }
 
-        // Record plan step
         new_kg.cursor.selection.add_plan_step(
             PlanStep::new("WITHIN_BOUNDS", None, matching_nodes.len())
                 .with_actual_rows(matching_nodes.len()),
@@ -244,7 +227,6 @@ impl KnowledgeGraph {
         )
         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
-        // Create new selection with matching nodes
         let mut new_kg = self.clone();
         new_kg.cursor.selection.clear(); // clear() already adds a fresh level
         if let Some(level) = new_kg.cursor.selection.get_level_mut(0) {
@@ -256,7 +238,6 @@ impl KnowledgeGraph {
                 .push(SelectionOperation::Custom("near_point".to_string()));
         }
 
-        // Record plan step
         new_kg.cursor.selection.add_plan_step(
             PlanStep::new("NEAR_POINT", None, matching_nodes.len())
                 .with_actual_rows(matching_nodes.len()),
@@ -314,7 +295,6 @@ impl KnowledgeGraph {
         )
         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
-        // Create new selection with matching nodes
         let mut new_kg = self.clone();
         new_kg.cursor.selection.clear();
         if let Some(level) = new_kg.cursor.selection.get_level_mut(0) {
@@ -326,7 +306,6 @@ impl KnowledgeGraph {
                 .push(SelectionOperation::Custom("near_point_m".to_string()));
         }
 
-        // Record plan step
         new_kg.cursor.selection.add_plan_step(
             PlanStep::new("NEAR_POINT_M", None, matching_nodes.len())
                 .with_actual_rows(matching_nodes.len()),
@@ -375,7 +354,6 @@ impl KnowledgeGraph {
         )
         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
-        // Create new selection with matching nodes
         let mut new_kg = self.clone();
         new_kg.cursor.selection.clear();
         if let Some(level) = new_kg.cursor.selection.get_level_mut(0) {
@@ -387,7 +365,6 @@ impl KnowledgeGraph {
                 .push(SelectionOperation::Custom("contains_point".to_string()));
         }
 
-        // Record plan step
         new_kg.cursor.selection.add_plan_step(
             PlanStep::new("CONTAINS_POINT", None, matching_nodes.len())
                 .with_actual_rows(matching_nodes.len()),
@@ -438,7 +415,6 @@ impl KnowledgeGraph {
         )
         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
-        // Create new selection with matching nodes
         let mut new_kg = self.clone();
         new_kg.cursor.selection.clear(); // clear() already adds a fresh level
         if let Some(level) = new_kg.cursor.selection.get_level_mut(0) {
@@ -450,7 +426,6 @@ impl KnowledgeGraph {
             ));
         }
 
-        // Record plan step
         new_kg.cursor.selection.add_plan_step(
             PlanStep::new("INTERSECTS_GEOMETRY", None, matching_nodes.len())
                 .with_actual_rows(matching_nodes.len()),
@@ -689,7 +664,6 @@ impl KnowledgeGraph {
     }
 }
 
-/// Convert a SpatialConfig to a Python dict.
 fn spatial_config_to_py(py: Python<'_>, config: &SpatialConfig) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
 

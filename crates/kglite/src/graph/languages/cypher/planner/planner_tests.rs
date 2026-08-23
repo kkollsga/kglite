@@ -16,7 +16,6 @@ fn test_predicate_pushdown_simple() {
     assert!(matches!(&query.clauses[0], Clause::Match(_)));
     assert!(matches!(&query.clauses[2], Clause::Return(_)));
 
-    // The MATCH pattern should now have {age: 30} as a property
     if let Clause::Match(m) = &query.clauses[0] {
         if let PatternElement::Node(np) = &m.patterns[0].elements[0] {
             assert!(np.properties.is_some());
@@ -37,7 +36,6 @@ fn test_predicate_pushdown_partial() {
     let params = HashMap::new();
     optimize(&mut query, &graph, &params);
 
-    // Both n.age = 30 and n.score > 100 should be pushed into MATCH
     // WHERE is kept as a safety net
     assert_eq!(query.clauses.len(), 3); // MATCH + WHERE + RETURN
 
@@ -390,7 +388,6 @@ fn test_predicate_pushdown_parameter() {
     // Parameter resolved and pushed; WHERE kept as safety net
     assert_eq!(query.clauses.len(), 3); // MATCH + WHERE + RETURN
 
-    // The MATCH pattern should now have {name: 'Alice'} as a property
     if let Clause::Match(m) = &query.clauses[0] {
         if let PatternElement::Node(np) = &m.patterns[0].elements[0] {
             assert!(np.properties.is_some());
@@ -418,7 +415,6 @@ fn test_predicate_pushdown_parameter_partial() {
     params.insert("min_age".to_string(), Value::Int64(25));
     optimize(&mut query, &graph, &params);
 
-    // Both should be pushed: n.name = $name (equality) and n.age > $min_age (comparison)
     // WHERE kept as safety net
     assert_eq!(query.clauses.len(), 3); // MATCH + WHERE + RETURN
 
@@ -477,7 +473,6 @@ fn test_correlated_nodeprop_pushdown() {
     let params = HashMap::new();
     optimize(&mut query, &graph, &params);
 
-    // Locate the second MATCH (matching on B)
     let b_match = query
         .clauses
         .iter()
@@ -807,8 +802,6 @@ fn test_var_length_with_path_assignment_not_reversed() {
 
 #[test]
 fn test_limit_pushdown_single_match_with_where() {
-    // Single MATCH + WHERE + RETURN + LIMIT — pushdown is safe; the LIMIT
-    // clause should be removed and the MATCH should carry limit_hint.
     let mut query =
         parse_cypher("MATCH (n:Person) WHERE n.age > 25 RETURN n.name LIMIT 10").unwrap();
 
@@ -816,7 +809,6 @@ fn test_limit_pushdown_single_match_with_where() {
     let params = HashMap::new();
     optimize(&mut query, &graph, &params);
 
-    // Limit clause should be gone (absorbed into the MATCH hint)
     let has_limit = query.clauses.iter().any(|c| matches!(c, Clause::Limit(_)));
     assert!(
         !has_limit,
@@ -896,7 +888,6 @@ fn test_multi_match_no_reverse_when_bound_var_first() {
     let params = HashMap::new();
     optimize(&mut query, &graph, &params);
 
-    // The second MATCH should still start with `p`, not `c`.
     let matches: Vec<_> = query
         .clauses
         .iter()
@@ -968,11 +959,9 @@ fn test_limit_pushdown_multi_match_safety() {
     let params = HashMap::new();
     optimize(&mut query, &graph, &params);
 
-    // Limit clause must remain — pushdown is unsafe for multi-MATCH
     let has_limit = query.clauses.iter().any(|c| matches!(c, Clause::Limit(_)));
     assert!(has_limit, "multi-MATCH query must retain its LIMIT clause");
 
-    // No MATCH clause should have a limit_hint set
     for clause in &query.clauses {
         if let Clause::Match(m) = clause {
             assert_eq!(
@@ -987,12 +976,8 @@ fn test_limit_pushdown_multi_match_safety() {
 fn test_reorder_match_clauses_picks_rare_edge_first() {
     // Two MATCH clauses share `p`, both id-anchored on the other end. The
     // planner should drive the smaller-edge-type clause first so the
-    // executor enumerates fewer rows before joining.
-    //
-    // Motivating real-world case (Wikidata):
-    //   MATCH (p)-[:P31]->({id:5})    -- 80M instance-of edges
-    //   MATCH (p)-[:P27]->({id:183})  -- 3M citizenship edges
-    // → swap so P27 drives, then per-row check P31. ~25× cheaper.
+    // executor enumerates fewer rows before joining. (The motivating Wikidata
+    // case is in `reorder_match_clauses`'s doc.)
     let mut query = parse_cypher(
         "MATCH (p)-[:VERY_COMMON]->({id: 1}) \
          MATCH (p)-[:RARE]->({id: 2}) \
@@ -1022,7 +1007,6 @@ fn test_reorder_match_clauses_picks_rare_edge_first() {
         .collect();
     assert_eq!(matches.len(), 2, "expected two MATCH clauses preserved");
 
-    // First MATCH after reorder must be the RARE one.
     let first_edge_type = matches[0].patterns[0].elements.iter().find_map(|e| {
         if let PatternElement::Edge(ep) = e {
             ep.connection_type.clone()
@@ -1134,7 +1118,6 @@ fn test_reorder_match_clauses_skips_when_cache_missing() {
     .unwrap();
 
     let graph = DirGraph::new();
-    // Confirm cache is unset to start.
     assert!(!graph.has_edge_type_counts_cache());
 
     let params = HashMap::new();
@@ -1158,7 +1141,6 @@ fn test_reorder_match_clauses_skips_when_cache_missing() {
         }
     });
     assert_eq!(first_edge_type.as_deref(), Some("VERY_COMMON"));
-    // Cache must still be empty — the planner did not force a build.
     assert!(
         !graph.has_edge_type_counts_cache(),
         "planner must not warm the edge-type-counts cache from the optimization path"
@@ -1213,8 +1195,6 @@ fn test_reorder_match_clauses_requires_id_anchor() {
 
 #[test]
 fn test_fuse_match_return_aggregate_count_distinct() {
-    // Single-MATCH + RETURN with count(DISTINCT v) on the OTHER node variable
-    // — the planner should now fuse this and set distinct_count=true.
     let mut query = parse_cypher(
         "MATCH (a:Person)-[:KNOWS]->(b:Person) \
          RETURN a, count(DISTINCT b) AS friends \
@@ -1500,7 +1480,6 @@ fn test_fold_pass_through_with_between_matches() {
         query.clauses
     );
 
-    // The node-keyed streaming aggregate must not accept p.title grouping.
     let has_fused_aggregate = query
         .clauses
         .iter()
@@ -1515,8 +1494,6 @@ fn test_fold_pass_through_with_between_matches() {
 
 #[test]
 fn test_fold_pass_through_with_keeps_useful_with() {
-    // A non-pass-through WITH (here aliasing or referencing extra
-    // variables that subsequent clauses need) must NOT be folded.
     let mut query = parse_cypher("MATCH (p)-[r]->(q) WITH p, r RETURN p, r LIMIT 10").unwrap();
 
     let graph = DirGraph::new();
@@ -1552,7 +1529,6 @@ fn test_fold_pass_through_with_skipped_when_orderby_follows() {
     let params = HashMap::new();
     optimize(&mut query, &graph, &params);
 
-    // The WITH is preserved because ORDER BY follows it.
     let has_with = query.clauses.iter().any(|c| matches!(c, Clause::With(_)));
     assert!(
         has_with,
@@ -1726,8 +1702,6 @@ fn test_desugar_skips_when_multiple_group_vars() {
     let params = HashMap::new();
     optimize(&mut query, &graph, &params);
 
-    // Should NOT have produced a FusedMatchWithAggregate — the desugar
-    // was correctly skipped, leaving the query for the slow path.
     let fused_count = query
         .clauses
         .iter()
@@ -1887,7 +1861,6 @@ fn lazy_eligibility_corpus() {
 // `"[1.0, 2.0]"` — that ambiguity is resolved in favour of text, and
 // CYPHER.md says so.
 
-/// Rewrite helper: parse, rewrite, return the query plus the collected texts.
 fn rewrite_ts(
     query: &str,
     params: &HashMap<String, Value>,
@@ -1922,7 +1895,6 @@ fn test_text_score_list_parameter_passes_through() {
     )
     .unwrap();
 
-    // Nothing to embed → execute() never asks for an embedder.
     assert!(texts.is_empty(), "a vector query must collect no text");
 
     let (name, args) = first_return_call(&query);
@@ -2252,7 +2224,6 @@ fn test_absent_property_is_no_information_not_zero_selectivity() {
 // Multi-key top-K fusion
 // ============================================================================
 
-/// Optimize a query against an empty graph and return its clauses.
 fn optimized_clauses(query: &str) -> Vec<Clause> {
     let mut parsed = parse_cypher(query).unwrap();
     let graph = DirGraph::new();

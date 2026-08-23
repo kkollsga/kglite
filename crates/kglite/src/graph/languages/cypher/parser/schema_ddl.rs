@@ -99,11 +99,8 @@ impl CypherParser {
 
     /// Parse a whole schema-DDL statement, or `None` when the token stream does
     /// not open one. Called once per query from
-    /// [`super::CypherParser::parse_query`] — never from the per-clause loop,
-    /// because a schema command is a statement rather than a pipeline stage.
-    ///
-    /// Both discriminators are peek-only, so an ordinary query pays one token
-    /// comparison for the whole parse and never a speculative re-parse.
+    /// [`super::CypherParser::parse_query`], never from the per-clause loop; the
+    /// module doc has the cost argument.
     pub(super) fn try_parse_schema_ddl_statement(&mut self) -> Result<Option<Clause>, String> {
         if self.check(&CypherToken::Create) && self.create_opens_schema_ddl() {
             return self.parse_create_schema_ddl().map(Some);
@@ -474,10 +471,8 @@ impl CypherParser {
     /// `IS NOT NULL`, `IS [NODE|RELATIONSHIP] KEY`, `IS :: <TYPE>`,
     /// `IS TYPED <TYPE>`.
     ///
-    /// `target` is taken for the same reason
-    /// [`Self::parse_constraint_properties`] takes it: the requirement half can
-    /// contradict the `FOR` pattern, and a statement that contradicts itself is
-    /// refused here rather than resolved in favour of one half downstream.
+    /// `target` is taken to refuse a requirement half that contradicts the `FOR`
+    /// pattern — see [`Self::check_constraint_scope`].
     fn parse_constraint_requirement(
         &mut self,
         target: &DdlTarget,
@@ -504,9 +499,7 @@ impl CypherParser {
         }
         // The optional `NODE` / `RELATIONSHIP` scope word before UNIQUE / KEY.
         // It restates what the `FOR` pattern already said, so it is *checked*
-        // rather than discarded: `FOR ()-[r:T]-() REQUIRE r.p IS NODE KEY` asks
-        // for two different constraints in one statement, and silently keeping
-        // the pattern's answer would install something the author did not write.
+        // rather than discarded — see [`Self::check_constraint_scope`].
         let scope = if self.eat_soft_word("NODE") {
             Some(EntityKind::Node)
         } else if self.eat_soft_word("RELATIONSHIP") {
@@ -696,9 +689,8 @@ impl CypherParser {
         }
     }
 
-    /// Require the statement to end here. A schema command is a whole
-    /// statement, so trailing tokens mean an unsupported clause rather than a
-    /// pipeline continuation.
+    /// Require the statement to end here: trailing tokens are an unsupported
+    /// clause, not a pipeline continuation.
     fn expect_statement_end(&mut self, statement: &str) -> Result<(), String> {
         if self.check(&CypherToken::Semicolon) {
             self.advance();
@@ -725,7 +717,6 @@ impl CypherParser {
 }
 
 impl DdlIndexType {
-    /// True when KGLite has an index structure that serves this index type.
     /// Drives whether the parser reads the statement structurally or scans it
     /// away for the executor to reject.
     pub(crate) fn has_kglite_equivalent(self) -> bool {
@@ -760,10 +751,6 @@ fn is_index_or_constraint_noun(word: &str) -> bool {
         .any(|noun| soft_word_eq(word, noun))
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
-
 #[cfg(test)]
 mod tests {
     use super::super::parse_cypher;
@@ -794,8 +781,6 @@ mod tests {
             .to_string()
     }
 
-    /// `SHOW FUNCTIONS` mirrors `SHOW PROCEDURES`: both spellings of the noun,
-    /// an optional YIELD projection with aliases, and everything else rejected.
     #[test]
     fn show_functions_accepts_both_spellings_and_a_yield_projection() {
         assert_eq!(
@@ -880,8 +865,6 @@ mod tests {
         assert_eq!(create.name.as_deref(), Some("r1"));
     }
 
-    /// An index *named* `range` must keep its name — the type word is only
-    /// consumed when `INDEX` follows it.
     #[test]
     fn type_word_lookahead_does_not_eat_an_index_name() {
         let create = create_index("CREATE INDEX range FOR (n:Person) ON (n.age)");
@@ -1018,10 +1001,8 @@ mod tests {
         }
     }
 
-    /// The `NODE` / `RELATIONSHIP` scope word restates what `FOR` already
-    /// said. When the two disagree the statement asks for two different
-    /// constraints at once, so all four crossings are refused by name rather
-    /// than silently resolved in favour of the pattern.
+    /// All four scope/pattern crossings are refused by name rather than
+    /// silently resolved in favour of the pattern.
     #[test]
     fn a_scope_word_contradicting_the_for_pattern_is_refused() {
         for (input, wrote, should_write, targeted) in [
@@ -1057,10 +1038,9 @@ mod tests {
         }
     }
 
-    /// The matching scope word and no scope word at all are both legal, on
-    /// both target kinds — `IS UNIQUE` / `IS KEY` mean "whatever this pattern
-    /// targets". A relationship constraint parsing is the point: the parser
-    /// accepts it and the executor decides what it can serve.
+    /// Matching and absent scope words are both legal on both target kinds. A
+    /// relationship constraint parsing is the point: the parser accepts it and
+    /// the executor decides what it can serve.
     #[test]
     fn a_matching_or_absent_scope_word_parses_for_either_target() {
         for (input, expected, entity) in [
@@ -1164,9 +1144,8 @@ mod tests {
         assert!(err.contains("db.indexes()"), "got: {err}");
     }
 
-    /// The rejection must name the procedure that lists the *same* objects.
-    /// Pointing a `SHOW CONSTRAINTS` user at `db.indexes()` sends them to a
-    /// listing of the wrong thing.
+    /// The rejection must name the procedure listing the *same* objects, never
+    /// `db.indexes()`.
     #[test]
     fn show_constraints_modifiers_point_at_db_constraints() {
         let err = parse_error("SHOW CONSTRAINTS YIELD name");

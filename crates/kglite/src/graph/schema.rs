@@ -1,4 +1,3 @@
-// src/graph/schema.rs
 use crate::datatypes::values::{FilterCondition, Value};
 pub use crate::graph::storage::interner::{InternedKey, StringInterner};
 pub(crate) use crate::graph::storage::interner::{
@@ -6,19 +5,16 @@ pub(crate) use crate::graph::storage::interner::{
 };
 use crate::graph::storage::GraphRead;
 // `PropertyStorage` lives under `graph::storage` so a columnar node's store
-// handle cannot be reached from outside the storage layer.
-// Re-exported here to preserve the `crate::graph::schema::PropertyStorage`
-// import path every caller already uses.
+// handle cannot be reached from outside the storage layer; re-exported here
+// to preserve the `crate::graph::schema::PropertyStorage` import path.
 pub(crate) use crate::graph::storage::property_storage::{ColumnarRow, PropertyStorage};
 
-// DirGraph + GraphBackend live in sibling modules.
-// Re-exported here to preserve `crate::graph::schema::X` import paths.
+// Re-exported here to preserve the `crate::graph::schema::X` import paths.
 pub use crate::graph::dir_graph::DirGraph;
 use crate::graph::dir_graph::NodeRemap;
 pub use crate::graph::storage::backend::GraphBackend;
 // MemoryGraph re-export: required by `storage/recording.rs` tests.
-// DO NOT REMOVE even if cargo fix suggests it — the test-only usage is
-// what keeps this file's API stable.
+// DO NOT REMOVE even if cargo fix suggests it.
 #[allow(unused_imports)]
 pub use crate::graph::storage::{MappedGraph, MemoryGraph};
 use petgraph::graph::NodeIndex;
@@ -31,8 +27,6 @@ use rustc_hash::FxHashMap;
 /// metadata, not user data.
 pub const RESERVED_PROVENANCE_KEYS: &[&str] = &["updated_at", "git_sha", "modified_by"];
 
-/// Whether `key` is an engine-managed provenance key (see
-/// [`RESERVED_PROVENANCE_KEYS`]).
 #[inline]
 pub fn is_reserved_provenance_key(key: &str) -> bool {
     RESERVED_PROVENANCE_KEYS.contains(&key)
@@ -50,8 +44,6 @@ use std::sync::Arc;
 /// property of this name is rejected at blueprint validation.
 pub const PROVISIONAL_KEY: &str = "_provisional";
 
-// ─── Type Schema ─────────────────────────────────────────────────────────────
-
 /// Shared schema for all nodes of one type — maps property keys to dense slot indices.
 /// All nodes of the same type share an `Arc<TypeSchema>`, keeping per-node overhead to 8 bytes.
 #[derive(Debug, Clone)]
@@ -67,7 +59,6 @@ pub struct TypeSchema {
 }
 
 impl TypeSchema {
-    /// Create an empty schema.
     pub fn new() -> Self {
         TypeSchema {
             slots: Vec::new(),
@@ -75,7 +66,6 @@ impl TypeSchema {
         }
     }
 
-    /// Build a schema from an iterator of interned keys.
     pub fn from_keys(keys: impl IntoIterator<Item = InternedKey>) -> Self {
         let mut schema = TypeSchema::new();
         for key in keys {
@@ -88,19 +78,16 @@ impl TypeSchema {
         schema
     }
 
-    /// Get the slot index for a key, or None if not in schema.
     #[inline]
     pub fn slot(&self, key: InternedKey) -> Option<u16> {
         self.key_to_slot.get(&key).copied()
     }
 
-    /// Number of slots in the schema.
     #[inline]
     pub fn len(&self) -> usize {
         self.slots.len()
     }
 
-    /// Create a new schema containing all keys from both schemas.
     pub fn merge(&self, other: &TypeSchema) -> TypeSchema {
         let mut merged = self.clone();
         for &key in &other.slots {
@@ -109,8 +96,7 @@ impl TypeSchema {
         merged
     }
 
-    /// Add a new key to the schema. Returns the new slot index.
-    /// If the key already exists, returns the existing slot index.
+    /// Returns the key's slot index, adding the key if it is not present.
     pub fn add_key(&mut self, key: InternedKey) -> u16 {
         if let Some(&slot) = self.key_to_slot.get(&key) {
             slot
@@ -122,7 +108,6 @@ impl TypeSchema {
         }
     }
 
-    /// Iterate over all (slot_index, interned_key) pairs.
     pub fn iter(&self) -> impl Iterator<Item = (u16, InternedKey)> + '_ {
         self.slots.iter().enumerate().map(|(i, &k)| (i as u16, k))
     }
@@ -168,6 +153,9 @@ pub struct SpatialConfig {
     pub shapes: HashMap<String, String>,
 }
 
+/// Result of column-type parsing: optional config + cleaned (col_name, type_str) pairs.
+pub type SpatialColumnParseResult = (Option<SpatialConfig>, Vec<(String, String)>);
+
 /// Parse spatial column-type entries from the wheel's `column_types`
 /// dict shape. Recognizes `location.lat`, `location.lon`, `geometry`,
 /// `point.<name>.lat`, `point.<name>.lon`, `shape.<name>`. Returns
@@ -179,9 +167,6 @@ pub struct SpatialConfig {
 ///
 /// The wheel keeps only the `Bound<PyDict>` → `Vec<(String, String)>`
 /// extraction wrapper.
-/// Result of column-type parsing: optional config + cleaned (col_name, type_str) pairs.
-pub type SpatialColumnParseResult = (Option<SpatialConfig>, Vec<(String, String)>);
-
 pub fn parse_spatial_column_types_from_pairs(
     pairs: Vec<(String, String)>,
 ) -> Result<SpatialColumnParseResult, String> {
@@ -189,7 +174,6 @@ pub fn parse_spatial_column_types_from_pairs(
     let mut config = SpatialConfig::default();
     let mut has_spatial = false;
 
-    // Track partial location/point entries (need both lat and lon).
     let mut location_lat: Option<String> = None;
     let mut location_lon: Option<String> = None;
     let mut point_lats: HashMap<String, String> = HashMap::new();
@@ -310,16 +294,15 @@ pub struct TemporalConfig {
     pub valid_to: String,
 }
 
+/// Result of temporal column-type parsing: optional config + cleaned pairs.
+pub type TemporalColumnParseResult = (Option<TemporalConfig>, Vec<(String, String)>);
+
 /// Parse temporal column-type entries from the wheel's `column_types`
 /// dict shape. Recognizes `validFrom` / `validTo` (case-insensitive).
 /// Returns `(Some(config), cleaned_pairs)` if BOTH validFrom and
 /// validTo are found; `(None, original_pairs)` if neither is found.
 /// Returns `Err` if exactly one is found (asymmetric config is a
 /// data-shape mistake — better to fail loudly).
-///
-/// Result of temporal column-type parsing: optional config + cleaned pairs.
-pub type TemporalColumnParseResult = (Option<TemporalConfig>, Vec<(String, String)>);
-
 pub fn parse_temporal_column_types_from_pairs(
     pairs: Vec<(String, String)>,
 ) -> Result<TemporalColumnParseResult, String> {
@@ -441,22 +424,19 @@ impl TypeIdIndex {
                         }
                         None
                     }
-                    // String ids match only by exact value (handled above);
-                    // no prefix-strip coercion. See the Integer arm.
+                    // String ids match only by exact value. See the Integer arm.
                     _ => None,
                 }
             }
         }
     }
 
-    /// Insert an ID → NodeIndex mapping.
     pub fn insert(&mut self, id: Value, idx: NodeIndex) {
         match self {
             TypeIdIndex::Integer(map) => {
                 if let Value::UniqueId(u) = id {
                     map.insert(u, idx);
                 } else {
-                    // Demote to General
                     let mut general: FxHashMap<Value, NodeIndex> =
                         map.drain().map(|(k, v)| (Value::UniqueId(k), v)).collect();
                     general.insert(id, idx);
@@ -469,7 +449,6 @@ impl TypeIdIndex {
         }
     }
 
-    /// Number of indexed ids.
     pub fn len(&self) -> usize {
         match self {
             TypeIdIndex::Integer(map) => map.len(),
@@ -477,7 +456,6 @@ impl TypeIdIndex {
         }
     }
 
-    /// Whether the index holds no entries.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -490,8 +468,6 @@ impl TypeIdIndex {
     /// goes through [`get`](Self::get), so the same `Int64`/`UniqueId`/
     /// `Float64` coercions apply — the key is removed under whichever
     /// spelling it was actually stored, not under the caller's spelling.
-    ///
-    /// Returns whether an entry was removed.
     pub fn remove_matching(&mut self, id: &Value, idx: NodeIndex) -> bool {
         if self.get(id) != Some(idx) {
             return false;
@@ -540,7 +516,6 @@ impl TypeIdIndex {
         }
     }
 
-    /// Iterate over all (Value, NodeIndex) pairs.
     pub fn iter(&self) -> Box<dyn Iterator<Item = (Value, NodeIndex)> + '_> {
         match self {
             TypeIdIndex::Integer(map) => {
@@ -557,8 +532,7 @@ impl Default for TypeIdIndex {
     }
 }
 
-/// Lightweight snapshot of a node's data: id, title, type, and properties.
-/// Used as the return type for node queries and traversals.
+/// Lightweight snapshot of a node, returned by node queries and traversals.
 #[derive(Clone, Debug)]
 pub struct NodeInfo {
     pub id: Value,
@@ -567,8 +541,7 @@ pub struct NodeInfo {
     pub properties: HashMap<String, Value>,
 }
 
-/// Records a filtering, sorting, or traversal operation applied to a selection.
-/// Used by `explain()` to show the query execution plan.
+/// A filter, sort or traversal applied to a selection; shown by `explain()`.
 #[derive(Clone, Debug)]
 pub enum SelectionOperation {
     Filter(HashMap<String, FilterCondition>),
@@ -578,7 +551,7 @@ pub enum SelectionOperation {
         direction: Option<String>,
         max_nodes: Option<usize>,
     },
-    Custom(String), // For operations that don't fit other categories
+    Custom(String),
 }
 
 /// A single level in the selection hierarchy — holds node sets grouped
@@ -618,16 +591,14 @@ impl SelectionLevel {
         self.selections.iter()
     }
 
-    /// Returns an iterator over all node indices without allocating a Vec.
-    /// Use this instead of get_all_nodes() when you only need to iterate or count.
+    /// Non-allocating alternative to `get_all_nodes()` for iterating or counting.
     pub fn iter_node_indices(&self) -> impl Iterator<Item = NodeIndex> + '_ {
         self.selections
             .values()
             .flat_map(|children| children.iter().copied())
     }
 
-    /// Returns the total count of nodes without allocating a Vec.
-    /// More efficient than get_all_nodes().len() for just getting the count.
+    /// Non-allocating node count.
     pub fn node_count(&self) -> usize {
         self.selections.values().map(|v| v.len()).sum()
     }
@@ -654,7 +625,6 @@ impl SelectionLevel {
                 None => None,
                 Some(p) => match remap.get(p) {
                     Some(new_p) => Some(new_p),
-                    // Parent gone — the whole group goes with it.
                     None => continue,
                 },
             };
@@ -667,7 +637,6 @@ impl SelectionLevel {
     }
 }
 
-/// Represents a single step in the query execution plan
 #[derive(Clone, Debug)]
 pub struct PlanStep {
     pub operation: String,
@@ -709,12 +678,11 @@ impl CurrentSelection {
             current_level: 0,
             execution_plan: Vec::new(),
         };
-        selection.add_level(); // Always start with an initial level
+        selection.add_level();
         selection
     }
 
     pub fn add_level(&mut self) {
-        // No need to pass level index
         self.levels.push(SelectionLevel::new());
         self.current_level = self.levels.len() - 1;
     }
@@ -726,17 +694,14 @@ impl CurrentSelection {
         self.add_level(); // Ensure we always have at least one level after clearing
     }
 
-    /// Add a step to the execution plan
     pub fn add_plan_step(&mut self, step: PlanStep) {
         self.execution_plan.push(step);
     }
 
-    /// Get the execution plan steps
     pub fn get_execution_plan(&self) -> &[PlanStep] {
         &self.execution_plan
     }
 
-    /// Clear just the execution plan (for fresh queries)
     pub fn clear_execution_plan(&mut self) {
         self.execution_plan.clear();
     }
@@ -753,7 +718,6 @@ impl CurrentSelection {
         self.levels.get_mut(index)
     }
 
-    /// Returns the node count for the current (most recent) level without allocation.
     pub fn current_node_count(&self) -> usize {
         self.levels.last().map(|l| l.node_count()).unwrap_or(0)
     }
@@ -783,7 +747,6 @@ impl CurrentSelection {
     }
 
     /// Returns true if any filtering/selection operation has been applied to the current level.
-    /// Used to distinguish "no filter applied" (pristine state) from "filter returned 0 results".
     pub fn has_active_selection(&self) -> bool {
         self.levels
             .last()
@@ -791,7 +754,6 @@ impl CurrentSelection {
             .unwrap_or(false)
     }
 
-    /// Returns an iterator over node indices in the current (most recent) level.
     pub fn current_node_indices(&self) -> impl Iterator<Item = NodeIndex> + '_ {
         self.levels
             .last()
@@ -802,8 +764,7 @@ impl CurrentSelection {
     /// Rewrite every held node index through a vacuum's `old → new` mapping,
     /// at every level.
     ///
-    /// **What this replaces is not a smaller behaviour, it is a wrong one.** A
-    /// selection held across a vacuum used to be *reset*, and a reset
+    /// A selection held across a vacuum used to be *reset*, and a reset
     /// `CurrentSelection` reads as "no filter has been applied" — so the same
     /// held handle answered `ids()` with `[]` (silently empty) and `len()`
     /// with the whole graph (silently widened), two contradictory answers
@@ -828,8 +789,7 @@ impl CurrentSelection {
         }
     }
 
-    /// Returns the node type of the first node in the current selection, if any.
-    /// Used by spatial auto-resolution to look up SpatialConfig.
+    /// Node type of the first selected node, for spatial `SpatialConfig` lookup.
     pub fn first_node_type(&self, graph: &DirGraph) -> Option<String> {
         // Arena guard: node_weight materializes on the disk backend
         // (protocol in disk/graph.rs); no-op on memory/mapped.
@@ -841,9 +801,8 @@ impl CurrentSelection {
     }
 }
 
-/// Copy-on-write wrapper for CurrentSelection.
-/// Avoids cloning the selection on every method call when the selection isn't modified.
-/// Implements Deref/DerefMut for transparent usage where CurrentSelection is expected.
+/// Copy-on-write wrapper for `CurrentSelection` — avoids cloning it on every
+/// method call that does not modify it.
 #[derive(Clone, Default)]
 pub struct CowSelection {
     inner: Arc<CurrentSelection>,
@@ -857,7 +816,6 @@ impl CowSelection {
     }
 }
 
-// Implement Deref for transparent read access
 impl std::ops::Deref for CowSelection {
     type Target = CurrentSelection;
 
@@ -867,7 +825,6 @@ impl std::ops::Deref for CowSelection {
     }
 }
 
-// Implement DerefMut for copy-on-write mutation
 impl std::ops::DerefMut for CowSelection {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
@@ -881,7 +838,6 @@ pub type IndexKey = (String, String);
 /// Key for composite indexes: (node_type, property_names)
 pub type CompositeIndexKey = (String, Vec<String>);
 
-/// Composite value key: tuple of values for multi-field lookup
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CompositeValue(pub Vec<Value>);
 
@@ -932,7 +888,7 @@ pub struct ConnectionTypeInfo {
 }
 
 /// Custom serializer emits sorted keys for the two HashSet<String> and the
-/// HashMap<String, String> so that `.kgl` v3 saves stay byte-deterministic
+/// HashMap<String, String> so that `.kgl` saves stay byte-deterministic
 /// regardless of per-run HashMap seed. The `test_phase4_parity` golden-hash test
 /// pins the current digest, and its fixtures deliberately carry multiple
 /// source/target types and property keys so an unsorted collection cannot slip
@@ -1002,7 +958,6 @@ impl<'de> Deserialize<'de> for ConnectionTypeInfo {
 /// The flat Vec<f32> layout enables SIMD-friendly linear scans during vector search.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EmbeddingStore {
-    /// Embedding dimensionality (e.g. 384, 768, 1536)
     pub dimension: usize,
     /// Contiguous f32 buffer: embedding i occupies data[i*dimension..(i+1)*dimension]
     pub data: Vec<f32>,
@@ -1063,7 +1018,6 @@ pub struct RemovedEmbedding {
     /// The slot the vector occupied. The restore reverses the tail swap that
     /// freed it, so slot identity survives a rollback.
     pub slot: usize,
-    /// The vector itself.
     pub vector: Vec<f32>,
     /// The node's `text_hashes` entry, if it had one (`embed_texts` stamps
     /// it; raw `add_embeddings` does not). Restoring it keeps
@@ -1166,13 +1120,11 @@ impl EmbeddingStore {
         self.index = None;
         let norm = l2_norm_sq(embedding).sqrt();
         if let Some(&slot) = self.node_to_slot.get(&node_index) {
-            // Replace existing embedding in-place
             let start = slot * self.dimension;
             self.data[start..start + self.dimension].copy_from_slice(embedding);
             self.norms[slot] = norm;
             slot
         } else {
-            // Append new embedding
             let slot = self.slot_to_node.len();
             self.node_to_slot.insert(node_index, slot);
             self.slot_to_node.push(node_index);
@@ -1284,7 +1236,6 @@ impl EmbeddingStore {
         self.index = None;
     }
 
-    /// `true` if an HNSW index is currently built over this store.
     #[inline]
     pub fn has_index(&self) -> bool {
         self.index.is_some()
@@ -1362,7 +1313,6 @@ impl EmbeddingStore {
         }
     }
 
-    /// Number of stored embeddings.
     #[inline]
     // Adding a public companion method would change the curated Rust API in a cleanup phase.
     #[allow(clippy::len_without_is_empty)]
@@ -1407,14 +1357,9 @@ pub fn soft_alias_fallback(resolved: &str) -> Option<SoftAliasFallback> {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NodeData {
-    /// **Not public, deliberately.** Since 0.16.0 every ingest path is
-    /// columnar from the first node, so on the memory and mapped backends this
-    /// field holds the `Value::Null` *sentinel* and the node's canonical id
-    /// lives in its type's `ColumnStore`. A downstream consumer reading the
-    /// field got that sentinel with nothing to warn it; the accessor
-    /// [`NodeData::id`] says so, and points at the resolving reads
-    /// (`GraphRead::get_node_id`, `NodeView::id`) that answer what the caller
-    /// actually meant. Same for [`NodeData::title`].
+    /// **Not public, deliberately.** Holds the `Value::Null` *sentinel* on the
+    /// memory and mapped backends; [`NodeData::id`] carries the full contract
+    /// and the resolving reads to use instead. Same for [`NodeData::title`].
     pub(crate) id: Value,
     pub(crate) title: Value,
     pub node_type: InternedKey,
@@ -1452,7 +1397,6 @@ impl NodeData {
         }
     }
 
-    /// Create a new NodeData with Map storage from pre-interned keys (avoids re-interning).
     pub fn new_preinterned(
         id: Value,
         title: Value,
@@ -1496,7 +1440,6 @@ impl NodeData {
         Cow::Borrowed(&self.title)
     }
 
-    /// Resolve the node type to a string. Requires the interner.
     #[inline]
     pub fn node_type_str<'a>(&self, interner: &'a StringInterner) -> &'a str {
         interner.resolve(self.node_type)
@@ -1508,9 +1451,8 @@ pub struct EdgeData {
     pub properties: Vec<(InternedKey, Value)>,
 }
 
-// Serialize EdgeData in a stable Serde struct shape:
-// connection_type as InternedKey (auto-resolves to string),
-// properties as HashMap<InternedKey, Value> (backward-compatible with old format).
+// Stable Serde struct shape: connection_type as an InternedKey (auto-resolves
+// to a string), properties as a map (backward-compatible with the old format).
 impl Serialize for EdgeData {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
@@ -1526,8 +1468,7 @@ impl Serialize for EdgeData {
     }
 }
 
-// Deserialize EdgeData: read connection_type as InternedKey (from string on disk),
-// read properties as HashMap<InternedKey, Value>, convert to Vec.
+// connection_type arrives as a string on disk, properties as a map.
 impl<'de> Deserialize<'de> for EdgeData {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
@@ -1583,7 +1524,6 @@ impl EdgeData {
         }
     }
 
-    /// Create EdgeData with pre-interned connection_type and properties.
     pub fn new_interned(
         connection_type: InternedKey,
         properties: Vec<(InternedKey, Value)>,
@@ -1594,13 +1534,11 @@ impl EdgeData {
         }
     }
 
-    /// Resolve connection_type to a string via the interner.
     #[inline]
     pub fn connection_type_str<'a>(&self, interner: &'a StringInterner) -> &'a str {
         interner.resolve(self.connection_type)
     }
 
-    /// Returns a reference to an edge property value.
     /// Uses hash-based lookup — no interner needed.
     #[inline]
     pub fn get_property(&self, key: &str) -> Option<&Value> {
@@ -1611,8 +1549,6 @@ impl EdgeData {
             .map(|(_, v)| v)
     }
 
-    /// Returns an iterator over edge property keys.
-    /// Requires interner to resolve InternedKey → &str.
     #[inline]
     pub fn property_keys<'a>(
         &'a self,
@@ -1623,8 +1559,6 @@ impl EdgeData {
             .map(move |(k, _)| interner.resolve(*k))
     }
 
-    /// Returns an iterator over (key, value) pairs.
-    /// Requires interner to resolve InternedKey → &str.
     #[inline]
     pub fn property_iter<'a>(
         &'a self,
@@ -1635,14 +1569,12 @@ impl EdgeData {
             .map(move |(k, v)| (interner.resolve(*k), v))
     }
 
-    /// Returns the number of edge properties.
     #[inline]
     pub fn property_count(&self) -> usize {
         self.properties.len()
     }
 
     /// Clone all properties into a new HashMap<String, Value> (for export/interop).
-    /// Requires interner to resolve InternedKey → String.
     #[inline]
     pub fn properties_cloned(&self, interner: &StringInterner) -> HashMap<String, Value> {
         self.properties
@@ -1656,10 +1588,8 @@ impl EdgeData {
 // Schema Definition & Validation Types
 // ============================================================================
 
-/// Defines the expected schema for a node type
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NodeSchemaDefinition {
-    /// Fields that must be present on all nodes of this type
     pub required_fields: Vec<String>,
     /// Fields that may be present (for documentation purposes)
     pub optional_fields: Vec<String>,
@@ -1718,18 +1648,13 @@ pub struct NodeSchemaDefinition {
     pub auto_timestamp: Option<bool>,
 }
 
-/// Defines the expected schema for a connection type
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionSchemaDefinition {
-    /// The source node type for this connection
     pub source_type: String,
-    /// The target node type for this connection
     pub target_type: String,
     /// Optional cardinality constraint: "one-to-one", "one-to-many", "many-to-one", "many-to-many"
     pub cardinality: Option<String>,
-    /// Required properties on the connection
     pub required_properties: Vec<String>,
-    /// Expected types for connection properties
     pub property_types: HashMap<String, String>,
     /// Opt-in freshness provenance (mirrors [`NodeSchemaDefinition::auto_timestamp`]):
     /// `Some(true)` stamps a reserved `updated_at` on every write to an edge of
@@ -1738,12 +1663,9 @@ pub struct ConnectionSchemaDefinition {
     pub auto_timestamp: Option<bool>,
 }
 
-/// Complete schema definition for the graph
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SchemaDefinition {
-    /// Schema definitions for each node type
     pub node_schemas: HashMap<String, NodeSchemaDefinition>,
-    /// Schema definitions for each connection type
     pub connection_schemas: HashMap<String, ConnectionSchemaDefinition>,
 }
 
@@ -1789,12 +1711,10 @@ impl SchemaDefinition {
         self
     }
 
-    /// Add a node type schema
     pub fn add_node_schema(&mut self, node_type: String, schema: NodeSchemaDefinition) {
         self.node_schemas.insert(node_type, schema);
     }
 
-    /// Add a connection type schema
     pub fn add_connection_schema(
         &mut self,
         connection_type: String,
@@ -1804,16 +1724,13 @@ impl SchemaDefinition {
     }
 }
 
-/// Represents a validation error found during schema validation
 #[derive(Debug, Clone)]
 pub enum ValidationError {
-    /// A required field is missing from a node
     MissingRequiredField {
         node_type: String,
         node_title: String,
         field: String,
     },
-    /// A field has the wrong type
     TypeMismatch {
         node_type: String,
         node_title: String,
@@ -1821,7 +1738,6 @@ pub enum ValidationError {
         expected_type: String,
         actual_type: String,
     },
-    /// A connection has invalid source or target type
     InvalidConnectionEndpoint {
         connection_type: String,
         expected_source: String,
@@ -1829,16 +1745,16 @@ pub enum ValidationError {
         actual_source: String,
         actual_target: String,
     },
-    /// A required property is missing from a connection
     MissingConnectionProperty {
         connection_type: String,
         source_title: String,
         target_title: String,
         property: String,
     },
-    /// A node type exists in the graph but not in the schema
-    UndefinedNodeType { node_type: String, count: usize },
-    /// A connection type exists in the graph but not in the schema
+    UndefinedNodeType {
+        node_type: String,
+        count: usize,
+    },
     UndefinedConnectionType {
         connection_type: String,
         count: usize,

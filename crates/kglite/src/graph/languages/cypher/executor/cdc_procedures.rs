@@ -34,7 +34,7 @@
 //!   of. The `enrichment` argument is named after that option and takes two of
 //!   its three values; `diff` is refused, with the reason.
 //!
-//! B3 carries these divergences into `CYPHER.md`.
+//! `CYPHER.md` carries the same divergence table for users.
 
 use std::collections::HashMap;
 
@@ -69,14 +69,14 @@ pub(super) fn encode_cursor(epoch: u64, seq: u64) -> String {
 /// Returns the exclusive `from` sequence. The three failures are distinct
 /// because a consumer's correct response differs for each: fix the call,
 /// re-acquire a cursor, or resync and accept the gap.
+///
 /// # Arithmetic on caller-controlled input
 ///
 /// Every value below the prefix check comes from the caller's string, so no
 /// arithmetic here may assume a plausible magnitude. `seq` is bounded against
 /// the log's own high-water mark *before* it is used in a sum — a cursor of
-/// `u64::MAX` reached the watermark comparison and panicked on `seq + 1` in
-/// debug (killing a Bolt worker thread rather than answering the client) and
-/// wrapped to 0 in release, where "too old" then read as "caught up".
+/// `u64::MAX` panicked on `seq + 1` in debug and wrapped to 0 in release,
+/// where "too old" then read as "caught up".
 fn decode_cursor(
     raw: &str,
     epoch: u64,
@@ -104,9 +104,7 @@ fn decode_cursor(
     }
     // A position this log never reached cannot have come from it: `current()`
     // and `earliest()` only ever hand out positions at or below the newest
-    // published change. Checked here rather than left to the reader because
-    // the alternative is arithmetic on an unbounded caller-supplied number,
-    // and because answering such a cursor with zero rows would report
+    // published change. Answering such a cursor with zero rows would report
     // "caught up" to a consumer that is holding something invalid.
     if seq > current {
         return Err(format!(
@@ -144,8 +142,7 @@ fn decode_cursor(
 ///
 /// The three cases are distinguished because the consumer's situation differs:
 /// caught up at the handoff (nothing lost up to it), behind by a known number
-/// of changes, or ahead of the stamp (the log kept running after that save, so
-/// the stamp does not describe the end of the epoch and no claim is made).
+/// of changes, or ahead of the stamp, where no claim can be made.
 fn foreign_epoch_error(
     cursor_epoch: u64,
     epoch: u64,
@@ -477,7 +474,6 @@ fn status_row(status: Option<&cdc::CdcStatus>, yield_items: &[YieldItem]) -> Res
     })
 }
 
-/// One `db.cdc.query` row.
 fn event_row(event: &CdcEvent, epoch: u64, yield_items: &[YieldItem]) -> ResultRow {
     build_row(yield_items, |column| match column {
         "id" => Some(Value::String(encode_cursor(epoch, event.seq))),
@@ -526,7 +522,7 @@ fn event_row(event: &CdcEvent, epoch: u64, yield_items: &[YieldItem]) -> ResultR
     })
 }
 
-/// The `{before, after}` state map — Neo4j's shape, and always a map.
+/// The `{before, after}` state map — Neo4j's shape.
 ///
 /// Always a map, never null, because the two questions a consumer asks are
 /// different: *did this row carry state?* is answered by the map's presence,
@@ -606,8 +602,6 @@ mod tests {
     use crate::graph::session::execute::{execute_mut, ExecuteOptions};
     use crate::graph::storage::mode::{new_dir_graph_in_mode, StorageMode};
 
-    // ── harness ──────────────────────────────────────────────────────
-
     /// Run a statement and hand back `(columns, rows)`. Everything goes
     /// through `execute_mut` because that is the routing entry point: a read
     /// procedure reaching the write engine (or the reverse) shows up here as
@@ -660,7 +654,6 @@ mod tests {
         }
     }
 
-    /// The properties of a row's after-image.
     fn after_properties(state: &Value) -> PropMap {
         match after_map(state).get("properties") {
             Some(Value::Map(properties)) => properties.clone(),
@@ -668,7 +661,6 @@ mod tests {
         }
     }
 
-    /// The cursor `db.cdc.current()` reports.
     fn current_cursor(graph: &mut DirGraph) -> String {
         let rows = rows(graph, "CALL db.cdc.current()");
         assert_eq!(rows.len(), 1, "current() is a single-row procedure");
@@ -796,7 +788,6 @@ mod tests {
         rows(graph, query)
     }
 
-    /// The whole loop a consumer runs, in Cypher only.
     #[test]
     fn the_full_lifecycle_runs_through_cypher() {
         let mut graph = enabled(None);
@@ -1343,7 +1334,6 @@ mod tests {
                 && either.iter().any(|(_, element)| element == "relationship"),
             "both selectors must contribute rows: {either:?}"
         );
-        // And each alone yields a strict subset of the union.
         let deletes = selected(&mut graph, "[{operation: 'delete'}]");
         assert!(deletes.len() < either.len());
     }
@@ -1387,7 +1377,6 @@ mod tests {
             vec![Value::Int64(1)],
             "every listed label must be present, so only node 1 qualifies"
         );
-        // The primary type is not a label here.
         assert_eq!(
             rows(
                 &mut graph,
@@ -1507,8 +1496,8 @@ mod tests {
         );
     }
 
-    /// `limit` bounds the rows the caller receives, so it is applied after
-    /// filtering — a limit applied to the pre-filter window would return
+    /// `maxRows` bounds the rows the caller receives, so it is applied after
+    /// filtering — a cap applied to the pre-filter window would return
     /// nothing whenever the matches sat past it, indistinguishable from
     /// "caught up".
     #[test]
@@ -1575,7 +1564,6 @@ mod tests {
         let mut seen: Vec<Value> = Vec::new();
 
         for round in 1..=4 {
-            // Noise every round; a wanted row only on the even ones.
             write(&mut graph, &format!("CREATE (:Noise {{id: {round}}})"));
             if round % 2 == 0 {
                 write(&mut graph, &format!("CREATE (:Wanted {{id: {round}}})"));

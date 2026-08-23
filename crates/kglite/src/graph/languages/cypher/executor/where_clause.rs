@@ -1,5 +1,3 @@
-//! Cypher executor — where_clause methods.
-
 use super::helpers::*;
 use super::*;
 use crate::datatypes::values::Value;
@@ -14,7 +12,6 @@ impl<'a> CypherExecutor<'a> {
     pub(super) fn bindings_compatible(&self, row: &ResultRow, m: &PatternMatch) -> bool {
         for (var, binding) in &m.bindings {
             if let Some(&existing_idx) = row.node_bindings.get(var) {
-                // Variable already bound - check it matches
                 match binding {
                     MatchBinding::Node { index, .. } | MatchBinding::NodeRef(index) => {
                         if *index != existing_idx {
@@ -49,12 +46,9 @@ impl<'a> CypherExecutor<'a> {
                     Some(_) => return false,
                 }
             }
-            // A relationship variable already bound on the row (carried
-            // edge binding, or a projected relationship value from
-            // `WITH r` / `UNWIND collect(r)`) constrains the pattern to
-            // exactly that edge — openCypher re-MATCH semantics. A
-            // null-valued binding matches nothing; a non-relationship
-            // projected value can never satisfy a relationship pattern.
+            // The same re-MATCH semantics for a relationship variable already
+            // bound on the row — as a carried edge binding, or as a projected
+            // value from `WITH r` / `UNWIND collect(r)`.
             if let MatchBinding::Edge { edge_index, .. } = binding {
                 if let Some(existing) = row.edge_bindings.get(var) {
                     if existing.edge_index != *edge_index {
@@ -89,8 +83,8 @@ impl<'a> CypherExecutor<'a> {
         where_clause: &Option<Box<Predicate>>,
         row: &ResultRow,
     ) -> Result<Option<bool>, String> {
-        // Fast path: single 3-element pattern with one bound node
-        // — check edge existence directly without PatternExecutor
+        // Fast path: a 3-element pattern with one bound node is an edge-
+        // existence check, done without a PatternExecutor.
         if let Some(result) = self.try_fast_exists_check(patterns, where_clause, row) {
             return result.map(Some);
         }
@@ -154,7 +148,6 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
             prev_group = Some(group);
-            // Resolve EqualsVar references against current row
             let resolved;
             let pat = if Self::pattern_has_vars(pattern) {
                 resolved = self.resolve_pattern_vars(pattern, row);
@@ -274,16 +267,11 @@ impl<'a> CypherExecutor<'a> {
         Some(1)
     }
 
-    // ========================================================================
-    // WHERE
-    // ========================================================================
-
     pub(super) fn execute_where(
         &self,
         clause: &WhereClause,
         mut result_set: ResultSet,
     ) -> Result<ResultSet, String> {
-        // Try index-accelerated filtering for simple equality predicates
         let index_filters = self.extract_indexable_predicates(&clause.predicate);
         for (variable, property, value) in &index_filters {
             if let Some(node_type) = self.infer_node_type(variable, &result_set) {
@@ -301,11 +289,9 @@ impl<'a> CypherExecutor<'a> {
             }
         }
 
-        // Try index-accelerated filtering for IN predicates
         let in_filters = Self::extract_in_indexable_predicates(&clause.predicate);
         for (variable, property, values) in &in_filters {
             if let Some(node_type) = self.infer_node_type(variable, &result_set) {
-                // Collect matching node indices from all IN values
                 let mut index_set: HashSet<petgraph::graph::NodeIndex> = HashSet::new();
                 let mut any_indexed = false;
                 for val in values {
@@ -326,13 +312,11 @@ impl<'a> CypherExecutor<'a> {
             }
         }
 
-        // Fold constant sub-expressions once before row iteration
         let folded_pred = self.fold_constants_pred(&clause.predicate);
 
         // Fast path: spatial contains() filter bypasses expression evaluator
         if let Some((spec, remainder)) = Self::try_extract_contains_filter(&folded_pred) {
             result_set.rows.retain(|row| {
-                // Get container geometry from spatial cache
                 let container_idx = match row.node_bindings.get(&spec.container_variable) {
                     Some(&idx) => idx,
                     None => return false,
@@ -488,7 +472,6 @@ impl<'a> CypherExecutor<'a> {
                 }
             });
             self.check_deadline()?;
-            // Apply remainder predicate if there were additional AND conditions
             if let Some(rest) = remainder {
                 let mut keep = Vec::with_capacity(result_set.rows.len());
                 for row in result_set.rows {
@@ -551,7 +534,6 @@ impl<'a> CypherExecutor<'a> {
             return Ok(result_set);
         }
 
-        // Apply full predicate evaluation for remaining/non-indexable conditions.
         self.check_deadline()?;
 
         let mut filtered_rows = Vec::new();
@@ -748,7 +730,6 @@ impl<'a> CypherExecutor<'a> {
     ///   on the absorbing element.
     /// - `XOR` is `None` if either side is `None`.
     /// - `NOT None` is `None`; `NOT Some(b)` is `Some(!b)`.
-    ///
     pub(super) fn evaluate_predicate_tristate(
         &self,
         pred: &Predicate,
@@ -937,14 +918,9 @@ impl<'a> CypherExecutor<'a> {
         }
     }
 
-    // ========================================================================
-    // Specialized Distance Filter (Fast Path)
-    // ========================================================================
-
-    /// Try to extract a distance filter from a (folded) predicate.
-    /// Returns (spec, optional remainder predicate for other AND conditions).
     /// Try to extract a `vector_score(n, prop, vec [, metric]) {>|>=|<|<=} threshold`
-    /// pattern from a (folded) predicate. Returns the spec and optional remainder.
+    /// pattern from a (folded) predicate. Returns the spec and optional
+    /// remainder predicate for the other AND conditions.
     pub(super) fn try_extract_vector_score_filter<'p>(
         &self,
         pred: &'p Predicate,
@@ -955,7 +931,6 @@ impl<'a> CypherExecutor<'a> {
                 operator,
                 right,
             } => {
-                // Determine which side has vector_score and which has the threshold
                 let (vs_expr, threshold_expr, greater_than, inclusive) = match operator {
                     ComparisonOp::GreaterThan => (left, right, true, false),
                     ComparisonOp::GreaterThanEq => (left, right, true, true),
@@ -964,15 +939,13 @@ impl<'a> CypherExecutor<'a> {
                     _ => return None,
                 };
 
-                // Try vs_expr as vector_score, threshold_expr as literal
                 if let Some(spec) =
                     self.extract_vector_score_spec(vs_expr, threshold_expr, greater_than, inclusive)
                 {
                     return Some((spec, None));
                 }
 
-                // Try flipped: threshold_expr as vector_score, vs_expr as literal
-                // Flip comparison direction
+                // Flipped operands, so the comparison direction flips with them.
                 if let Some(spec) = self.extract_vector_score_spec(
                     threshold_expr,
                     vs_expr,
@@ -997,7 +970,6 @@ impl<'a> CypherExecutor<'a> {
         }
     }
 
-    /// Extract a VectorScoreFilterSpec from a vector_score() function call + threshold.
     pub(super) fn extract_vector_score_spec(
         &self,
         func_expr: &Expression,
@@ -1005,7 +977,8 @@ impl<'a> CypherExecutor<'a> {
         greater_than: bool,
         inclusive: bool,
     ) -> Option<VectorScoreFilterSpec> {
-        // func_expr must be vector_score(variable, prop, query_vec [, metric])
+        // func_expr must be vector_score(variable, prop, query_vec [, metric]),
+        // with prop and query_vec already constant-folded to literals.
         let (name, args) = match func_expr {
             Expression::FunctionCall { name, args, .. } => (name, args),
             _ => return None,
@@ -1014,25 +987,21 @@ impl<'a> CypherExecutor<'a> {
             return None;
         }
 
-        // threshold must be a literal number
         let threshold = match threshold_expr {
             Expression::Literal(val) => crate::graph::core::value_operations::value_to_f64(val)?,
             _ => return None,
         };
 
-        // Arg 0: must be a variable
         let variable = match &args[0] {
             Expression::Variable(v) => v.clone(),
             _ => return None,
         };
 
-        // Arg 1: prop name (should be folded to literal string)
         let prop_name = match &args[1] {
             Expression::Literal(Value::String(s)) => s.clone(),
             _ => return None,
         };
 
-        // Arg 2: query vector (should be folded to literal)
         let query_vec = match &args[2] {
             Expression::Literal(Value::String(s)) => parse_json_float_list(s).ok()?,
             Expression::ListLiteral(items) => {
@@ -1049,8 +1018,8 @@ impl<'a> CypherExecutor<'a> {
             _ => return None,
         };
 
-        // Arg 3: optional metric (default cosine). An unrecognized name bails the
-        // fast path (None) so the general evaluator handles it.
+        // Optional metric (default cosine). An unrecognized name bails the fast
+        // path (None) so the general evaluator handles it.
         let metric = if args.len() > 3 {
             match &args[3] {
                 Expression::Literal(Value::String(s)) => vs::DistanceMetric::from_name(s)?,
@@ -1072,6 +1041,8 @@ impl<'a> CypherExecutor<'a> {
         })
     }
 
+    /// Try to extract a distance filter from a (folded) predicate. Returns the
+    /// spec and optional remainder predicate for the other AND conditions.
     pub(super) fn try_extract_distance_filter(
         pred: &Predicate,
     ) -> Option<(DistanceFilterSpec, Option<&Predicate>)> {
@@ -1090,7 +1061,6 @@ impl<'a> CypherExecutor<'a> {
                     _ => return None,
                 };
 
-                // threshold must be a literal number
                 let threshold = match threshold_expr {
                     Expression::Literal(val) => {
                         crate::graph::core::value_operations::value_to_f64(val)?
@@ -1098,16 +1068,13 @@ impl<'a> CypherExecutor<'a> {
                     _ => return None,
                 };
 
-                // dist_expr must be distance(...)
                 let spec = Self::extract_distance_call(dist_expr, threshold, less_than, inclusive)?;
                 Some((spec, None))
             }
             Predicate::And(left, right) => {
-                // Try extracting from left side
                 if let Some((spec, None)) = Self::try_extract_distance_filter(left) {
                     return Some((spec, Some(right)));
                 }
-                // Try extracting from right side
                 if let Some((spec, None)) = Self::try_extract_distance_filter(right) {
                     return Some((spec, Some(left)));
                 }
@@ -1117,7 +1084,6 @@ impl<'a> CypherExecutor<'a> {
         }
     }
 
-    /// Extract a DistanceFilterSpec from a `distance(...)` function call expression.
     pub(super) fn extract_distance_call(
         expr: &Expression,
         threshold: f64,
@@ -1191,7 +1157,6 @@ impl<'a> CypherExecutor<'a> {
     /// Extract (center_lat, center_lon) from point(Literal, Literal)
     /// or from a folded Literal(Point{lat, lon}).
     pub(super) fn extract_point_constants(expr: &Expression) -> Option<(f64, f64)> {
-        // After constant folding, point(59.91, 10.75) becomes Literal(Point{lat, lon})
         if let Expression::Literal(Value::Point { lat, lon }) = expr {
             return Some((*lat, *lon));
         }
@@ -1216,7 +1181,6 @@ impl<'a> CypherExecutor<'a> {
         }
     }
 
-    /// Extract f64 from a Literal expression
     pub(super) fn extract_literal_f64(expr: &Expression) -> Option<f64> {
         if let Expression::Literal(val) = expr {
             crate::graph::core::value_operations::value_to_f64(val)
@@ -1224,10 +1188,6 @@ impl<'a> CypherExecutor<'a> {
             None
         }
     }
-
-    // ========================================================================
-    // Contains Filter Extraction
-    // ========================================================================
 
     /// Try to extract a contains() fast-path spec from a WHERE predicate.
     /// Matches patterns like: contains(a, point(C1, C2)) or contains(a, b)
@@ -1244,7 +1204,6 @@ impl<'a> CypherExecutor<'a> {
                 let spec = Self::extract_contains_call(left, false)?;
                 Some((spec, None))
             }
-            // NOT contains(a, b) — negated
             Predicate::Not(inner) => {
                 if let Some((mut spec, None)) = Self::try_extract_contains_filter(inner) {
                     spec.negated = !spec.negated;
@@ -1253,7 +1212,6 @@ impl<'a> CypherExecutor<'a> {
                     None
                 }
             }
-            // AND extraction
             Predicate::And(left, right) => {
                 if let Some((spec, None)) = Self::try_extract_contains_filter(left) {
                     return Some((spec, Some(right)));
@@ -1267,7 +1225,6 @@ impl<'a> CypherExecutor<'a> {
         }
     }
 
-    /// Extract a ContainsFilterSpec from a contains() function call expression.
     pub(super) fn extract_contains_call(
         expr: &Expression,
         negated: bool,
@@ -1276,12 +1233,12 @@ impl<'a> CypherExecutor<'a> {
             if name != "contains" || args.len() != 2 {
                 return None;
             }
-            // Arg 1: must be a bare Variable (node with geometry config)
+            // The container must be a bare Variable (a node with geometry
+            // configured), not an expression.
             let container_variable = match &args[0] {
                 Expression::Variable(name) => name.clone(),
                 _ => return None,
             };
-            // Arg 2: constant point or variable
             let contained = match &args[1] {
                 // Folded point literal: point(59.91, 10.75) → Literal(Point{...})
                 Expression::Literal(Value::Point { lat, lon }) => {
@@ -1297,7 +1254,6 @@ impl<'a> CypherExecutor<'a> {
                     let lon = Self::extract_literal_f64(&pargs[1])?;
                     ContainsTarget::ConstantPoint(lat, lon)
                 }
-                // Variable: contains(a, b)
                 Expression::Variable(name) => ContainsTarget::Variable { name: name.clone() },
                 _ => return None,
             };
@@ -1310,10 +1266,6 @@ impl<'a> CypherExecutor<'a> {
             None
         }
     }
-
-    // ========================================================================
-    // Constant Expression Folding
-    // ========================================================================
 
     /// Check if an expression can be evaluated without any row bindings
     /// (i.e., it contains no PropertyAccess, Variable, Star, or aggregate references).
@@ -1362,14 +1314,12 @@ impl<'a> CypherExecutor<'a> {
         }
     }
 
-    /// Fold constant sub-expressions in an expression tree into Literal values.
-    /// Returns a new expression with all row-independent sub-trees pre-evaluated.
+    /// Return a copy of `expr` with every row-independent sub-tree replaced by
+    /// the `Literal` it evaluates to.
     pub(crate) fn fold_constants_expr(&self, expr: &Expression) -> Expression {
-        // Already a literal — nothing to fold
         if matches!(expr, Expression::Literal(_)) {
             return expr.clone();
         }
-        // If the whole expression is row-independent, evaluate it once
         if Self::is_row_independent(expr) {
             let dummy = ResultRow::new();
             if let Ok(val) = self.evaluate_expression(expr, &dummy) {
@@ -1378,7 +1328,6 @@ impl<'a> CypherExecutor<'a> {
             // If evaluation fails (e.g., missing parameter), keep original
             return expr.clone();
         }
-        // Recursively fold children
         match expr {
             Expression::FunctionCall {
                 name,
@@ -1447,7 +1396,6 @@ impl<'a> CypherExecutor<'a> {
         }
     }
 
-    /// Fold constant sub-expressions in a predicate tree.
     pub(super) fn fold_constants_pred(&self, pred: &Predicate) -> Predicate {
         match pred {
             Predicate::Comparison {

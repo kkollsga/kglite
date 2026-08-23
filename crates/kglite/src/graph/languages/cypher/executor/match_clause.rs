@@ -1,5 +1,3 @@
-//! Cypher executor — match_clause methods.
-
 use super::helpers::*;
 use super::ordering::{SortSpec, TopKCollector};
 use super::scan_eval::{ScanCompiler, ScanExpr, ScanPred, ScanRuntime};
@@ -602,7 +600,6 @@ impl<'a> CypherExecutor<'a> {
         Ok(row_set)
     }
 
-    /// Merge a PatternMatch's bindings into an existing ResultRow
     pub(super) fn merge_match_into_row(&self, row: &mut ResultRow, m: &PatternMatch) {
         if let Some((source, path)) = m.exact_path.as_deref() {
             row.path_bindings.insert(
@@ -650,8 +647,8 @@ impl<'a> CypherExecutor<'a> {
         }
     }
 
-    /// Synthesize a PathBinding from a multi-hop pattern.
-    /// Iterates ALL pattern elements to capture every hop, not just the first.
+    /// Synthesize a PathBinding covering every hop of the pattern, not just
+    /// the first.
     pub(super) fn synthesize_path_from_pattern(
         &self,
         pattern: &crate::graph::core::pattern_matching::Pattern,
@@ -692,7 +689,6 @@ impl<'a> CypherExecutor<'a> {
         }
         let source_idx = row.node_bindings.get(node_vars[0])?;
 
-        // Build full path: for each edge, record the target node and edge type
         let mut path = Vec::with_capacity(edge_vars.len());
         for (i, edge_var) in edge_vars.iter().enumerate() {
             let node_idx = row.node_bindings.get(node_vars[i + 1])?;
@@ -719,10 +715,6 @@ impl<'a> CypherExecutor<'a> {
             path,
         })
     }
-
-    // ========================================================================
-    // OPTIONAL MATCH
-    // ========================================================================
 
     pub(super) fn execute_optional_match(
         &self,
@@ -804,12 +796,6 @@ impl<'a> CypherExecutor<'a> {
         })
     }
 
-    /// Fast-path count for simple node-edge-node patterns when one end is pre-bound.
-    /// Returns Some(count) if the fast-path applies, None to fall back to PatternExecutor.
-    ///
-    /// For pattern `(a:Type)-[:REL]->(b)` where `b` is already bound in the row:
-    /// Instead of scanning all Type nodes and checking edges (O(|Type|)),
-    /// traverse edges directly from the bound node (O(degree)).
     /// Fast path for EXISTS / NOT EXISTS: when the subquery is a single
     /// 3-element pattern (node-edge-node) with exactly one node already bound
     /// from the outer row, we can check edge existence directly via
@@ -824,7 +810,6 @@ impl<'a> CypherExecutor<'a> {
         if patterns.len() != 1 {
             return None;
         }
-        // Shape gate (3 elements, fixed-length edge, no edge property map).
         let (node_a, edge, node_b) = simple_node_edge_node(&patterns[0])?;
 
         // A pre-bound relationship variable pins the pattern to exactly
@@ -850,7 +835,6 @@ impl<'a> CypherExecutor<'a> {
             }
         }
 
-        // Determine which node is bound from the outer row
         let a_bound = node_a
             .variable
             .as_ref()
@@ -929,12 +913,10 @@ impl<'a> CypherExecutor<'a> {
                 if let Some(nd) = self.graph.graph.node_view(other_idx) {
                     let mut all_match = true;
                     // Resolve aliases against the target node's type so
-                    // `{id: 20}` / `{nid: 'Q76'}` / `{label: 'X'}` /
-                    // `{title: 'X'}` all reach the right column.
-                    // Without this, get_property("id") misses because
-                    // id lives in the id_column, not the regular
-                    // property map — which silently dropped EXISTS
-                    // inline-property predicates before.
+                    // `{id: 20}` / `{nid: 'Q76'}` / `{title: 'X'}` all reach
+                    // the right column: `id` lives in the id_column, not the
+                    // property map, so an unresolved get_property("id")
+                    // silently dropped EXISTS inline-property predicates.
                     let tgt_type_str = nd.node_type_str(&self.graph.interner);
                     for (key, matcher) in props {
                         let resolved = self.graph.resolve_alias(tgt_type_str, key);
@@ -946,7 +928,6 @@ impl<'a> CypherExecutor<'a> {
                             // Stored property wins (KG-1).
                             Some(v)
                         } else {
-                            // Structural convenience fallback for soft aliases.
                             match crate::graph::schema::soft_alias_fallback(resolved) {
                                 Some(crate::graph::schema::SoftAliasFallback::Title) => {
                                     Some(nd.title())
@@ -982,7 +963,6 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
 
-            // Check WHERE clause — reuse pre-allocated row, just update binding
             if has_where {
                 if let Some(ref var) = other_var {
                     eval_row.node_bindings.insert(var.clone(), other_idx);
@@ -999,9 +979,9 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
 
-            return Some(Ok(true)); // Found a match
+            return Some(Ok(true));
         }
-        Some(Ok(false)) // No match found
+        Some(Ok(false))
     }
 
     /// Count matches of a simple 3-element `Node-Edge-Node` pattern from a
@@ -1044,12 +1024,10 @@ impl<'a> CypherExecutor<'a> {
         bindings: &Bindings<NodeIndex>,
         distinct_peers: bool,
     ) -> Result<Option<i64>, String> {
-        // Shape gate (3 elements, fixed-length edge, no edge property map).
         let Some((node_a, edge, node_b)) = simple_node_edge_node(pattern) else {
             return Ok(None);
         };
 
-        // Determine which end is bound
         let a_bound = node_a
             .variable
             .as_ref()
@@ -1241,7 +1219,6 @@ impl<'a> CypherExecutor<'a> {
 
     /// Count matches for a 5-element pattern (a)-[e1]->(b)<-[e2]-(c)
     /// from a bound first node, without materializing intermediate rows.
-    /// Traverses: first_node --e1--> middle_nodes --e2--> count last nodes.
     pub(super) fn count_two_hop_pattern(
         &self,
         pattern: &crate::graph::core::pattern_matching::Pattern,
@@ -1274,8 +1251,8 @@ impl<'a> CypherExecutor<'a> {
     ) -> Result<i64, String> {
         use petgraph::Direction;
 
-        // Extract pattern elements. Hop 1 leaves the anchor; hop 2 reaches
-        // the far endpoint whose type is checked per counted match.
+        // Hop 1 leaves the anchor; hop 2 reaches the far endpoint, whose type
+        // is checked per counted match.
         let (hop1_elem, hop2_elem, end_elem) = if reverse {
             (
                 &pattern.elements[3],

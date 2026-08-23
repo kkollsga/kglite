@@ -1,24 +1,14 @@
-// Pattern AST types for graph pattern matching.
-//
-// Supports patterns like: (p:Play)-[:HAS_PROSPECT]->(pr:Prospect)-[:BECAME_DISCOVERY]->(d:Discovery)
-
 use crate::datatypes::values::Value;
 use crate::graph::core::membership::MembershipSet;
 use crate::graph::schema::InternedKey;
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use std::collections::HashMap;
 
-// ============================================================================
-// AST Types
-// ============================================================================
-
-/// A complete pattern to match against the graph
 #[derive(Debug, Clone)]
 pub struct Pattern {
     pub elements: Vec<PatternElement>,
 }
 
-/// Either a node or edge pattern
 #[derive(Debug, Clone)]
 pub enum PatternElement {
     Node(NodePattern),
@@ -36,8 +26,6 @@ pub enum PatternElement {
 pub struct NodePattern {
     pub variable: Option<String>,
     pub node_type: Option<String>,
-    /// Additional labels from multi-label patterns like `(n:A:B)`. The
-    /// first label lives in `node_type`; these are the rest.
     pub extra_labels: Vec<String>,
     pub properties: Option<HashMap<String, PropertyMatcher>>,
     /// Label slots written as a parameter (`(n:$label)`), pending
@@ -48,24 +36,20 @@ pub struct NodePattern {
 }
 
 /// Pattern for matching edges: -[:TYPE {prop: value}]->
-/// Supports variable-length paths with *min..max syntax:
-/// - `*` or `*..` means 1 or more hops (default)
-/// - `*2` means exactly 2 hops
-/// - `*1..3` means 1 to 3 hops
-/// - `*..5` means 1 to 5 hops
-/// - `*2..` means 2 or more hops (up to default max)
+///
+/// `*min..max` fills `var_length`: `*` and `*..` mean 1 hop to the default
+/// max, `*2` exactly 2, `*1..3` a closed range, `*2..` 2 to the default max.
 #[derive(Debug, Clone)]
 pub struct EdgePattern {
     pub variable: Option<String>,
     pub connection_type: Option<String>,
-    /// Multiple allowed connection types from pipe syntax: `[:A|B|C]`.
-    /// When set, an edge matches if its type equals ANY of these types.
-    /// `connection_type` holds the first type for backward compatibility.
+    /// Alternation from pipe syntax `[:A|B|C]`; an edge matches ANY of them.
+    /// `connection_type` holds only the first — always read both through
+    /// [`EdgePattern::conn_filter`].
     pub connection_types: Option<Vec<String>>,
     pub direction: EdgeDirection,
     pub properties: Option<HashMap<String, PropertyMatcher>>,
-    /// Variable-length path configuration: (min_hops, max_hops)
-    /// None means exactly 1 hop (normal edge)
+    /// `(min_hops, max_hops)`; `None` means exactly one hop.
     pub var_length: Option<(usize, usize)>,
     /// Whether the matcher must retain path identity. When false,
     /// variable-length expansion may use global BFS dedup and fixed-length
@@ -77,15 +61,12 @@ pub struct EdgePattern {
     /// Set by the query planner when connection_type_metadata confirms a single
     /// target type (outgoing) or source type (incoming).
     pub skip_target_type_check: bool,
-    /// Inline filter pushed from a downstream `WHERE` predicate that
-    /// references only the edge variable (and the structural peer of
-    /// the edge in this pattern). Applied during expansion in the
-    /// matcher hot loop, *before* a row is materialized — eliminates
-    /// edges whose post-materialization WHERE would have rejected
-    /// them. The Cypher planner's
+    /// Inline filter pushed from a downstream `WHERE` that references only
+    /// the edge variable (and the edge's structural peer in this pattern),
+    /// applied in the matcher hot loop before a row is materialized.
+    /// Populated by the Cypher planner's
     /// [`super::super::languages::cypher::planner::rel_predicate_pushdown`]
-    /// pass populates this field; it stays `None` for callers that
-    /// build patterns by hand.
+    /// pass; `None` for hand-built patterns.
     pub edge_filter: Option<RelEdgeFilter>,
     /// Relationship-type slots written as a parameter (`-[:$type]->`),
     /// pending resolution. See [`ParamLabel`]; slot `i` indexes
@@ -97,23 +78,20 @@ pub struct EdgePattern {
 /// A label or relationship-type slot whose text comes from a query parameter
 /// (`(n:$label)`, `(n:$(label))`, `-[:$type]->`).
 ///
-/// **This exists only between the parser and the resolver.** The parser cannot
-/// know the parameter's value — parsed ASTs are cached by query *text*, and
-/// the same text is re-run with different parameters — so it records the
-/// reference here and leaves the string slot holding the source spelling
-/// (`"$label"`). `cypher::dynamic_labels::resolve` runs before validation,
-/// planning and execution, writes the bound name into the string slot, and
-/// clears this list. Every consumer downstream of it therefore sees the
-/// literal form and needs no knowledge of the feature at all.
+/// **This exists only between the parser and the resolver.** Parsed ASTs are
+/// cached by query *text* and re-run with different parameters, so the parser
+/// records the reference here and parks the source spelling (`"$label"`) in
+/// the string slot; `cypher::dynamic_labels::resolve` writes the bound name
+/// into that slot and clears this list before validation, planning and
+/// execution, leaving every downstream consumer only the literal form.
 ///
 /// The marker is deliberately **out of band** rather than a sentinel spelling
 /// inside the string: no literal label, however written (`` `$label` ``
 /// included), can then be mistaken for a parameter reference, and no
 /// parameter *value* can ever be re-read as a reference.
 ///
-/// If a slot were ever to reach the planner unresolved, the string slot names
-/// a type spelled `$label`, which matches nothing — an unresolved pattern
-/// under-returns rather than over-returning.
+/// A slot that somehow reached the planner unresolved names a type spelled
+/// `$label`, which matches nothing — it under-returns, never over-returns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParamLabel {
     /// Which slot the parameter fills. For [`NodePattern`], 0 is `node_type`
@@ -165,16 +143,12 @@ impl EdgePattern {
     }
 }
 
-/// Which connection types an [`EdgePattern`] accepts.
-///
-/// The single-type case carries no allocation, so the hot single-type
-/// path costs exactly what the old `Option<InternedKey>` did; only an
-/// alternation allocates.
+/// Which connection types an [`EdgePattern`] accepts. Only the alternation
+/// case allocates, so the hot single-type path stays allocation-free.
 #[derive(Debug, Clone)]
 pub enum ConnTypeFilter {
     /// Untyped edge (`-[]->`) — every connection type matches.
     Any,
-    /// Exactly one accepted type.
     One(InternedKey),
     /// Alternation (`[:A|B|C]`); deduplicated, always ≥ 2 entries.
     AnyOf(Vec<InternedKey>),
@@ -197,7 +171,6 @@ impl ConnTypeFilter {
         }
     }
 
-    /// Does an edge carrying `key` match this pattern's type constraint?
     #[inline]
     pub fn accepts(&self, key: InternedKey) -> bool {
         match self {
@@ -207,7 +180,6 @@ impl ConnTypeFilter {
         }
     }
 
-    /// True when the pattern places no connection-type constraint.
     #[inline]
     pub fn is_any(&self) -> bool {
         matches!(self, ConnTypeFilter::Any)
@@ -236,19 +208,14 @@ impl ConnTypeFilter {
 }
 
 /// Inline edge filter — evaluated during expansion to skip edges the
-/// downstream `WHERE` would have discarded. The single
-/// [`RelEdgePredicate`] is wrapped to carry the original anchor side
-/// of the edge (which determines how `startNode(r)` / `endNode(r)`
-/// map onto the matcher's `direction` parameter).
+/// downstream `WHERE` would have discarded. Wraps the [`RelEdgePredicate`]
+/// with the anchor side, which determines how `startNode(r)` / `endNode(r)`
+/// map onto the matcher's `direction` parameter.
 #[derive(Debug, Clone)]
 pub struct RelEdgeFilter {
     pub predicate: RelEdgePredicate,
-    /// Which side of the edge the matcher anchors on, so the matcher
-    /// can map `direction` back to startNode/endNode semantics.
-    /// `Source` means the matcher is expanding outward from the
-    /// pattern's left node; `Target` means from the right node.
-    /// Set by the planner when it compiles `startNode(r) = …` /
-    /// `endNode(r) = …` references.
+    /// Which endpoint the matcher expands from; see [`AnchorSide`]. Set by
+    /// the planner when it compiles `startNode(r)` / `endNode(r)` references.
     pub anchor: AnchorSide,
 }
 
@@ -292,7 +259,6 @@ pub enum RelEdgePredicate {
     /// Always-true sentinel — used as the identity for And/Or
     /// simplification at compile time.
     True,
-    /// Always-false sentinel.
     False,
     /// `type(r)` is one of these connection types.
     TypeIn(Vec<InternedKey>),
@@ -315,11 +281,8 @@ pub enum RelEdgePredicate {
     /// NodeIndex against the edge's source/target.
     StartNodeIs(NodeIndex),
     EndNodeIs(NodeIndex),
-    /// All sub-predicates must hold.
     And(Vec<RelEdgePredicate>),
-    /// At least one sub-predicate must hold.
     Or(Vec<RelEdgePredicate>),
-    /// Negated sub-predicate.
     Not(Box<RelEdgePredicate>),
 }
 
@@ -340,15 +303,12 @@ pub enum PropOp {
 impl RelEdgePredicate {
     /// Evaluate the predicate for a single edge during expansion.
     ///
-    /// `connection_type` and `get_prop` give access to the edge body
-    /// without requiring the matcher to materialize a full
-    /// `EdgeData`. `peer_dir` is the matcher's per-edge direction
-    /// translated into a consistent "is the peer on the start side?"
-    /// boolean (the matcher computes this once per edge using the
-    /// stored [`AnchorSide`]).
+    /// `connection_type` and `get_prop` expose the edge body without
+    /// materializing an `EdgeData`; `peer_is_start` is the matcher's per-edge
+    /// direction resolved once against the stored [`AnchorSide`].
     ///
-    /// Returns `true` only when the predicate evaluates to Cypher `true`.
-    /// Both `false` and `null` reject the edge in a WHERE context.
+    /// Returns `true` only for Cypher `true` — both `false` and `null` reject
+    /// the edge in a WHERE context.
     #[inline]
     pub fn eval(
         &self,
@@ -479,7 +439,6 @@ impl RelEdgePredicate {
     }
 }
 
-/// Direction of edge traversal
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EdgeDirection {
     Outgoing, // -[]->
@@ -487,7 +446,6 @@ pub enum EdgeDirection {
     Both,     // -[]-
 }
 
-/// Property value matcher
 #[derive(Debug, Clone)]
 pub enum PropertyMatcher {
     Equals(Value),
@@ -505,7 +463,6 @@ pub enum PropertyMatcher {
         var: String,
         prop: String,
     },
-    /// IN-list matching: value must be one of these values.
     /// Pushed from `WHERE n.prop IN [v1, v2, ...]` by the planner.
     ///
     /// A [`MembershipSet`] rather than a bare `Vec<Value>`: the list is
@@ -537,10 +494,6 @@ pub enum PropertyMatcher {
     EndsWith(String),
 }
 
-// ============================================================================
-// Match Results
-// ============================================================================
-
 /// A single pattern match with variable bindings.
 /// Uses Vec instead of HashMap — patterns add 1-6 unique variables,
 /// so linear search is faster than hashing and clone is a single memcpy.
@@ -567,7 +520,6 @@ pub struct PathHop {
     pub connection_type: InternedKey,
 }
 
-/// A bound value (either node, edge, or variable-length path)
 #[derive(Debug, Clone)]
 pub enum MatchBinding {
     Node {

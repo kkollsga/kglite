@@ -10,15 +10,8 @@ use crate::graph::schema::{soft_alias_fallback, DirGraph, InternedKey, SoftAlias
 use crate::graph::storage::{GraphRead, NodeView};
 use std::collections::{HashMap, HashSet};
 
-// Re-export the ast aggregate helpers so downstream code can refer to them
-// via the executor namespace (backward compatibility with pre-split code).
+// Re-exported so downstream code can name it via the executor namespace.
 pub use super::super::ast::is_aggregate_expression;
-
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
-// is_aggregate_expression and is_window_expression are re-exported above.
 
 /// True when an evaluation error reports a mistake in the *query or its
 /// parameters* rather than something about the row being tested.
@@ -124,7 +117,6 @@ pub(super) fn augment_rows_with_aggregate_keys(rows: &mut [ResultRow], items: &[
     }
 }
 
-/// Get the column name for a return item
 pub fn return_item_column_name(item: &ReturnItem) -> String {
     if let Some(ref alias) = item.alias {
         alias.clone()
@@ -133,9 +125,8 @@ pub fn return_item_column_name(item: &ReturnItem) -> String {
     }
 }
 
-/// Convert an expression to its string representation (for column naming).
-///
-/// This rendering *is* the identity the executor uses to resolve an unaliased
+/// Render an expression to the string that names its result column. This
+/// rendering *is* the identity the executor uses to resolve an unaliased
 /// projection, so `schema_check` compares ORDER BY keys against RETURN items
 /// with it — matching what the runtime can actually resolve.
 pub(crate) fn expression_to_string(expr: &Expression) -> String {
@@ -305,7 +296,6 @@ pub(crate) fn expression_to_string(expr: &Expression) -> String {
     }
 }
 
-/// Convert a predicate to its string representation (for column naming)
 pub(super) fn predicate_to_string(pred: &Predicate) -> String {
     match pred {
         Predicate::Comparison {
@@ -357,7 +347,6 @@ pub(super) fn predicate_to_string(pred: &Predicate) -> String {
     }
 }
 
-/// Evaluate a comparison using existing filtering infrastructure
 pub(super) fn evaluate_comparison(
     left: &Value,
     op: &ComparisonOp,
@@ -399,8 +388,8 @@ pub(super) fn evaluate_comparison(
     }
 }
 
-/// Resolve a node property, returning an owned Value directly.
-/// Uses `get_property_value()` to avoid Cow wrapping/unwrapping overhead.
+/// Resolve a node property to an owned `Value`, resolving id-/title-field
+/// aliases first.
 pub fn resolve_node_property(node: NodeView<'_>, property: &str, graph: &DirGraph) -> Value {
     let node_type_str = node.node_type_str(&graph.interner);
     let resolved = graph.resolve_alias(node_type_str, property);
@@ -462,15 +451,12 @@ fn resolve_node_property_resolved(
                 return val;
             }
             let node_type_str = node.node_type_str(&graph.interner);
-            // No stored property — fall back to the structural convenience
-            // for the soft aliases.
             if let Some(fb) = soft_alias_fallback(resolved) {
                 return match fb {
                     SoftAliasFallback::Title => node.title().into_owned(),
                     SoftAliasFallback::TypeString => Value::String(node_type_str.to_string()),
                 };
             }
-            // Fall through to spatial virtual properties only if not found
             if let Some(config) = graph.get_spatial_config(node_type_str) {
                 if resolved == "location" {
                     if let Some((lat_f, lon_f)) = &config.location {
@@ -514,7 +500,6 @@ fn resolve_node_property_resolved(
     }
 }
 
-/// Resolve a property from an EdgeBinding by looking up the graph
 pub fn resolve_edge_property(graph: &DirGraph, edge: &EdgeBinding, property: &str) -> Value {
     let g = &graph.graph;
     if let Some(edge_data) = g.edge_weight(edge.edge_index) {
@@ -532,7 +517,6 @@ pub fn resolve_edge_property(graph: &DirGraph, edge: &EdgeBinding, property: &st
     }
 }
 
-/// Convert a NodeData to a representative Value (title string)
 pub(super) fn node_to_map_value(node: NodeView<'_>) -> Value {
     node.title().into_owned()
 }
@@ -835,26 +819,17 @@ fn collect_node_properties<S: PropertySink>(
     // (updated_at, …) are engine metadata, not user data — omit them from the
     // materialised value so they stay out of keys()/properties()/RETURN n[.*]
     // (direct `n.updated_at` still resolves via the property path).
-    // Complete for every storage variant: `NodeView` enumeration reads the
-    // node's column store on saved graphs, where `NodeData::property_iter`
-    // used to yield nothing. The columnar completion pass
-    // further down stays — it recovers schema-declared properties that the
-    // row itself does not carry.
+    // `NodeView` enumeration reads the node's column store, so this is
+    // complete for every storage variant, saved graphs included.
     let unresolved_key = sink.absorb_stored(node, graph);
-    // Cross-backend property completion.
-    //
-    // The loop above yields every stored property on every backend. The ONE
-    // thing it cannot yield is
-    // a column the loader hoisted out of `properties` into the dedicated
-    // `id` / `title` fields: when `add_nodes` is given a `unique_id_field` /
-    // `node_title_field` whose name isn't literally "id"/"title", that
-    // original column name is recorded in `{id,title}_field_aliases` and the
-    // value lives in `node.id()` / `node.title()`, NOT in `properties`.
-    // `RETURN n` must surface it back under the original column name (e.g.
-    // `Person.name` -> title). That's at most two O(1) map lookups — far
-    // cheaper than the former per-node walk over every metadata key with a
-    // `resolve_node_property` (alias + spatial) call each, which for the
-    // in-memory backend could only ever re-discover these same two columns.
+    // The loop above yields every stored property on every backend. The one
+    // thing it cannot yield is a column the loader hoisted out of `properties`
+    // into the dedicated `id` / `title` fields: when `add_nodes` is given a
+    // `unique_id_field` / `node_title_field` whose name isn't literally
+    // "id"/"title", that original column name is recorded in
+    // `{id,title}_field_aliases` and the value lives in `node.id()` /
+    // `node.title()`, NOT in `properties`. `RETURN n` must surface it back
+    // under the original column name (e.g. `Person.name` -> title).
     insert_field_alias(sink, graph.title_field_aliases.get(node_type), || {
         node.title().into_owned()
     });
@@ -1108,13 +1083,10 @@ fn index_list_slice(items: &[Value], integer_index: i64) -> Value {
     }
 }
 
-/// Parse a list value.
-///
 /// Fast path for native `Value::List`: just clone the items, no parsing
-/// needed. The legacy `Value::String("[a, b, c]")` path stays for
-/// back-compat with any remaining JSON-string-producing sites and for
-/// parameters / literals that come in as strings. Once every producer
-/// emits native lists, this function can shrink to just the List arm.
+/// needed. The legacy `Value::String("[a, b, c]")` path stays for any
+/// remaining JSON-string-producing sites and for parameters / literals that
+/// come in as strings.
 pub(in crate::graph::languages::cypher) fn parse_list_value(val: &Value) -> Vec<Value> {
     match val {
         Value::List(items) => items.clone(),
@@ -1127,7 +1099,6 @@ pub(in crate::graph::languages::cypher) fn parse_list_value(val: &Value) -> Vec<
             if inner.is_empty() {
                 return vec![];
             }
-            // Split at top-level commas, respecting nesting
             let items = split_top_level_commas(inner);
             items.into_iter().map(parse_value_token).collect()
         }
@@ -1139,8 +1110,7 @@ pub(in crate::graph::languages::cypher) fn parse_list_value(val: &Value) -> Vec<
 /// formatted list/map). Recognizes integers, floats, booleans, null, the
 /// `__nref:N` node-reference sentinel, and quoted strings with `\\`/`\"`
 /// escapes. Anything else is returned as a `Value::String` after
-/// stripping outer quotes. Mirrors the per-item logic that
-/// [`parse_list_value`] used to inline.
+/// stripping outer quotes.
 pub(super) fn parse_value_token(s: &str) -> Value {
     let trimmed = s.trim();
     if trimmed.is_empty() {
@@ -1170,7 +1140,6 @@ pub(super) fn parse_value_token(s: &str) -> Value {
                 return Value::NodeRef(idx);
             }
         }
-        // Unescape: `\\` → `\`, `\"` → `"`
         let mut out = String::with_capacity(inner.len());
         let mut chars = inner.chars();
         while let Some(c) = chars.next() {
@@ -1278,7 +1247,6 @@ pub(super) fn split_top_level_commas(s: &str) -> Vec<&str> {
                 quote_char = ch;
             }
             c if in_quotes && c == quote_char => {
-                // Check for escaped quote
                 let bytes = s.as_bytes();
                 if i == 0 || bytes[i - 1] != b'\\' {
                     in_quotes = false;
@@ -1297,7 +1265,6 @@ pub(super) fn split_top_level_commas(s: &str) -> Vec<&str> {
     items
 }
 
-// Delegate to shared value_operations module
 pub(super) fn format_value_compact(val: &Value) -> String {
     crate::graph::core::value_operations::format_value_compact(val)
 }
@@ -1411,7 +1378,7 @@ pub(super) fn parse_value_string(s: &str) -> Value {
 /// respecting nested brackets and quoted strings. Returns inner items
 /// as string slices. Empty list "[]" returns empty vec.
 pub(super) fn split_list_top_level(s: &str) -> Vec<&str> {
-    let inner = &s[1..s.len() - 1]; // strip outer []
+    let inner = &s[1..s.len() - 1];
     if inner.trim().is_empty() {
         return Vec::new();
     }
@@ -1446,7 +1413,6 @@ pub(super) fn split_list_top_level(s: &str) -> Vec<&str> {
             _ => {}
         }
     }
-    // Last item
     let last = inner[start..].trim();
     if !last.is_empty() {
         items.push(last);
@@ -1567,8 +1533,6 @@ pub(super) fn call_param_string(params: &HashMap<String, Value>, key: &str) -> O
 /// (returns the alias if `YIELD name AS alias` was used, or the bare
 /// column name when no alias). Returns `None` if the column wasn't
 /// listed in the YIELD clause — caller can skip emitting it.
-///
-/// Consolidated 0.9.53 from `affected_tests.rs` and `refresh_stats.rs`.
 pub(super) fn yield_alias(yield_items: &[YieldItem], expected: &str) -> Option<String> {
     yield_items
         .iter()

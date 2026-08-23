@@ -31,17 +31,15 @@ impl KnowledgeGraph {
     ///
     /// Example:
     ///     ```python
-    ///     # Export entire graph to GraphML
-    ///     graph.export('output.graphml')
+    ///         # Export entire graph to GraphML
+    ///         graph.export('output.graphml')
     ///
-    /// ```text
-    /// # Export selection to D3 format
-    /// graph.select('Field').expand(hops=2).export('fields.json', format='d3')
+    ///     # Export selection to D3 format
+    ///     graph.select('Field').expand(hops=2).export('fields.json', format='d3')
     ///
-    /// # Export to GEXF for Gephi
-    /// graph.export('network.gexf', format='gexf')
-    /// ```
-    /// ```
+    ///     # Export to GEXF for Gephi
+    ///     graph.export('network.gexf', format='gexf')
+    ///     ```
     #[pyo3(signature = (path, format=None, selection_only=None))]
     fn export(
         &self,
@@ -145,17 +143,15 @@ impl KnowledgeGraph {
     ///
     /// Example:
     ///     ```python
-    ///     # Export entire graph
-    ///     result = graph.export_csv('output/')
+    ///         # Export entire graph
+    ///         result = graph.export_csv('output/')
     ///
-    /// ```text
-    /// # Export only selected nodes
-    /// result = graph.select('Person').export_csv('output/')
+    ///     # Export only selected nodes
+    ///     result = graph.select('Person').export_csv('output/')
     ///
-    /// # With progress output
-    /// result = graph.export_csv('output/', verbose=True)
-    /// ```
-    /// ```
+    ///     # With progress output
+    ///     result = graph.export_csv('output/', verbose=True)
+    ///     ```
     #[pyo3(signature = (path, selection_only=None, verbose=false))]
     fn export_csv(
         &self,

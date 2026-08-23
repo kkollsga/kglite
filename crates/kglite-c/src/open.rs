@@ -2,10 +2,9 @@
 //! binding needs before it may write to a path.
 //!
 //! Mirrors `kglite::api::io`'s `GraphWriterLease` / `open_or_create_graph_in_mode`
-//! pair. They ship together because they are two halves of one contract: the
-//! open decides *which graph and which backend*, the lease decides *who may
-//! publish to that path*. Neither implies the other — opening takes no
-//! ownership, and holding the lease loads nothing.
+//! pair: the open decides *which graph and which backend*, the lease decides
+//! *who may publish to that path*. Neither implies the other — opening takes
+//! no ownership, and holding the lease loads nothing.
 
 use crate::graph::{classify_io_error, GraphState, KgliteGraph};
 use crate::status::KgliteStatusCode;
@@ -47,9 +46,8 @@ impl LeaseState {
         }
         let state = unsafe { Box::from_raw(handle.cast::<LeaseState>()) };
         // Dropping the lease *is* the release — `GraphWriterLease::drop`
-        // unlocks the sidecar. Spelled out rather than left implicit in the
-        // Box drop, because the release point is the one thing a reader comes
-        // to this function to find.
+        // unlocks the sidecar. Spelled out rather than left to the Box drop,
+        // because the release point is what a reader comes here to find.
         drop(state.inner);
     }
 }
@@ -60,9 +58,9 @@ impl LeaseState {
 /// across the whole read-modify-save interval. Readers need none.** The
 /// window that loses a writer's work is open-to-save, not save itself — two
 /// processes that both load a graph, both mutate, and both save produce two
-/// complete snapshots, and the second one published wins outright, silently.
-/// Locking at save time is already too late to notice. Acquire before the
-/// open, free after the save.
+/// complete snapshots, and the second one published wins outright, silently —
+/// locking at save time is already too late. Acquire before the open, free
+/// after the save.
 ///
 /// The lease is a pair of sidecar files next to `path` (`<path>.lock` holds
 /// the OS lock, `<path>.lock-owner` records who has it). The OS releases the
@@ -75,11 +73,9 @@ impl LeaseState {
 /// - `path` (in, borrowed): UTF-8 graph path, null-terminated. The path need
 ///   not exist yet; a caller creating a new graph takes the lease first.
 /// - `timeout_ms` (in): how long to keep retrying a contended lease. **`0`
-///   is fail-fast** — return immediately if someone else holds it, which is
-///   what a server wants at startup and a request path wants always (a
-///   blocked-for-30s open is a worse failure than a clear error). A caller
-///   that genuinely wants to queue passes a budget, or retries around the
-///   error itself.
+///   is fail-fast** — return immediately if someone else holds it, because a
+///   blocked-for-30s open is a worse failure than a clear error. A caller that
+///   wants to queue passes a budget instead.
 /// - `out_lease` (out, owned): set to the lease handle on success; the caller
 ///   MUST free it with [`kglite_writer_lease_free`]. Null on failure.
 /// - `out_error_msg` (out, owned): owned error message on failure (free via
@@ -123,10 +119,9 @@ pub unsafe extern "C" fn kglite_writer_lease_acquire(
 /// only inside the message's prose.
 ///
 /// A binding that wants to surface the holding pid — the Java wrapper's
-/// `holder()`, an operator dashboard, a retry policy that backs off longer
-/// for a lease taken hours ago — otherwise has to regex a sentence written
-/// for humans, and re-parse it every time the wording improves. The engine
-/// already has the fields structured; this hands them over.
+/// `holder()`, an operator dashboard, a retry policy that backs off longer for
+/// a lease taken hours ago — otherwise has to regex a sentence written for
+/// humans, and re-parse it every time the wording improves.
 ///
 /// Additive: `kglite_writer_lease_acquire` is unchanged and stays supported.
 /// New callers should prefer this one.
@@ -462,7 +457,6 @@ mod tests {
         dir
     }
 
-    /// Read + free an owned out-string, or `None` when the slot is null.
     fn take_string(ptr: *const c_char) -> Option<String> {
         (!ptr.is_null()).then(|| {
             let s = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_string();
@@ -471,8 +465,6 @@ mod tests {
         })
     }
 
-    /// Call `kglite_writer_lease_acquire`, returning the status, the handle,
-    /// and the (freed) error message.
     fn acquire(
         path: &std::path::Path,
         timeout_ms: u64,
@@ -495,7 +487,6 @@ mod tests {
         error: Option<String>,
     }
 
-    /// Call `kglite_open_or_create_graph_in_mode` and collect its outputs.
     fn open_in_mode(path: &std::path::Path, mode: Option<&str>) -> Opened {
         let path_c = CString::new(path.to_str().unwrap()).unwrap();
         let mode_c = mode.map(|m| CString::new(m).unwrap());
@@ -519,8 +510,6 @@ mod tests {
         }
     }
 
-    /// Which backend a returned handle is actually in — the classification
-    /// `live_storage_mode` gives every binding, read straight off the handle.
     fn handle_mode(graph: *mut KgliteGraph) -> StorageMode {
         let state = unsafe { GraphState::from_handle_mut(graph) };
         live_storage_mode(&state.inner)
@@ -672,8 +661,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// An explicit mode converts an existing graph — and says so. A silent
-    /// conversion is as hard to notice as a silently ignored flag.
+    /// An explicit mode converts an existing graph — and says so.
     #[test]
     fn explicit_mode_converts_and_reports_converted_from() {
         let dir = case_dir("convert");

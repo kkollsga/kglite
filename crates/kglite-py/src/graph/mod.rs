@@ -1,18 +1,13 @@
-// src/graph/mod.rs
+// kglite-py's graph module. The engine is imported as `kglite_core` via a
+// `package = "kglite"` dep alias in Cargo.toml — the alias dodges the
+// extern-crate collision with this crate's own `[lib] name = "kglite_py"`.
 //
-// kglite-py's graph module — re-exports the engine's `graph::*`
-// subtree from the sibling `kglite` crate (imported here as
-// `kglite_core` via a `package = "kglite"` dep alias in
-// Cargo.toml; the alias dodges the extern-crate collision with
-// this crate's own `[lib] name = "kglite_py"`). Adds the PyO3
-// wrapper concerns (KnowledgeGraph #[pyclass], pyapi/ submodule,
-// pyo3 param-extract helpers) that only the wrapper crate needs.
-//
-// The engine subtree is NO LONGER glob-re-exported here: the wheel
-// reaches the engine exclusively through `kglite_core::api::*` (roadmap
-// Piece 4 hard seal). `kglite_core::graph` is `pub(crate)` in the engine
-// and unreachable from this crate. The wheel's own graph-namespaced
-// modules (embedder / languages / pyapi) remain below.
+// The engine subtree is not glob-re-exported: the wheel reaches the engine
+// exclusively through `kglite_core::api::*` (roadmap Piece 4 hard seal), and
+// `kglite_core::graph` is `pub(crate)` in the engine, unreachable from here.
+// This module adds the PyO3 wrapper concerns (KnowledgeGraph #[pyclass],
+// pyapi/, param-extract helpers) plus the wheel's own graph-namespaced
+// modules below.
 pub mod embedder;
 pub mod languages;
 pub mod pyapi;
@@ -37,10 +32,6 @@ use pyo3::Bound;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-// Shadow the engine's re-exports of these types with the local
-// pub(crate) versions that the pyapi closures construct directly.
-// (Same name, same underlying enum — just promotes the visibility
-// for local use without depending on the engine's pub visibility.)
 pub(crate) type EmbeddingColumnData = Vec<(String, Vec<(Value, Vec<f32>)>)>;
 
 /// Extract a Python `str | list[str] | None` parameter into `Option<Vec<String>>`.
@@ -51,10 +42,8 @@ pub(crate) type EmbeddingColumnData = Vec<(String, Vec<(Value, Vec<f32>)>)>;
 /// parameter. Mirrors the Cypher side's `call_param_string_list`, so a scalar
 /// spells the same thing whichever surface it arrives on.
 ///
-/// A plain function rather than a `FromPyObject` newtype — the same house
-/// rule `durable_level_from_arg` records in `lib.rs`: the trait's shape has
-/// moved across PyO3 releases, nothing here needs generic extraction, and the
-/// callers want the parameter name in the error.
+/// A plain function rather than a `FromPyObject` newtype, per the house rule
+/// `durable_level_from_arg` records in `lib.rs`.
 pub(crate) fn string_or_list(
     obj: Option<&Bound<'_, PyAny>>,
     param_name: &str,
@@ -155,14 +144,10 @@ pub(crate) fn extract_fluent_param(
     ))
 }
 
-/// Resolve any `Value::NodeRef` in Cypher result rows to node titles.
-/// Called just before Python conversion so that NodeRef (an internal
-/// representation used to preserve node identity through collect/WITH)
-/// is never exposed to Python.
-/// Thin delegate to `kglite_core::graph::session::resolve_noderefs` —
-/// see that function for the lookup semantics. Kept as a crate-local
-/// re-export so existing wheel callers (`graph/pyapi/*.rs`) don't have
-/// to change their imports; the engine logic lives in core.
+/// Resolve any `Value::NodeRef` in Cypher result rows to node titles, just
+/// before Python conversion, so the internal NodeRef representation (which
+/// preserves node identity through collect/WITH) never reaches Python. Lookup
+/// semantics live on the delegate.
 pub(crate) use kglite_core::api::session::resolve_noderefs;
 
 /// Per-caller query **cursor** state — the part of a `KnowledgeGraph` that is
@@ -172,13 +157,9 @@ pub(crate) use kglite_core::api::session::resolve_noderefs;
 /// accumulated operation reports.
 ///
 /// Cloned onto every derived view (O(1) — `selection`/`reports` are Arc-backed)
-/// and reset by `copy()`. Grouping these into one struct is the first step of
-/// the god-object decomposition (see `docs/history/roadmap-2026H1.md`): it is the seam the future
-/// public `Cursor` type is built on. No behaviour change — purely a field
-/// grouping.
+/// and reset by `copy()`.
 #[derive(Clone)]
 pub(crate) struct CursorState {
-    /// Cow wrapper for copy-on-write selection semantics.
     pub(crate) selection: CowSelection,
     pub(crate) reports: OperationReports,
     pub(crate) last_mutation_stats: Option<cypher::MutationStats>,
@@ -188,8 +169,8 @@ pub(crate) struct CursorState {
 }
 
 impl CursorState {
-    /// A fresh cursor: empty selection, no reports, no stats, default temporal
-    /// context. Used by `from_arc`, `copy()`, and other fresh-graph sites.
+    /// A fresh cursor. Used by `from_arc`, `copy()`, and other fresh-graph
+    /// sites.
     pub(crate) fn new() -> Self {
         CursorState {
             selection: CowSelection::new(),
@@ -236,10 +217,6 @@ pub struct KnowledgeGraph {
 /// freely: `durable` owns an OS `File` handle (the WAL) so it is `None` on
 /// every clone/derived view, and `source_path` is the graph's save identity
 /// (preserved by a true `Clone`, reset on `copy()` / derived views).
-///
-/// Grouped out of the `KnowledgeGraph` god-object alongside [`CursorState`]
-/// (per-query) and the shared `DirGraph` (storage). This is the surface a
-/// future core-`Session` lifecycle lift would target (see `docs/history/roadmap-2026H1.md`).
 pub(crate) struct GraphLifecycle {
     /// Path this graph was opened from / last associated with, if any. Set by
     /// `kglite.open(path)` / `kglite.load(path)`; lets `save()` default to the
@@ -397,18 +374,6 @@ impl std::fmt::Debug for DurableState {
     }
 }
 
-// `TemporalContext`, `SourceLocation`, and `SourceLookup` live
-// in the kglite engine crate and reach this module via the
-// `pub use kglite_core::graph::*;` re-export at the top of this
-// file (`kglite_core` is the local dep alias for the engine —
-// see Cargo.toml). The previous local definitions were
-// duplicates that confused type inference (function signatures
-// referenced the engine version while local construction sites
-// used the duplicate).
-
-// (formerly `fn value_to_string`; consolidated 0.9.53 into
-// `crate::datatypes::values::raw_string`)
-
 impl KnowledgeGraph {
     /// Wrap an `Arc<DirGraph>` in a `KnowledgeGraph` with default
     /// binding-ergonomic state (no embedder, default temporal context,
@@ -435,9 +400,8 @@ impl KnowledgeGraph {
     /// selection" operation: `f` reads the (shared, immutable) graph and
     /// mutates the freshly-cloned cursor, then the derived handle is returned.
     ///
-    /// This replaces the copy-pasted `let mut new_kg = self.clone(); …mutate
-    /// new_kg.cursor…; Ok(new_kg)` body in the fluent methods, and is the seam
-    /// the future public `Cursor` type is built on (see `docs/history/roadmap-2026H1.md`).
+    /// The seam the future public `Cursor` type is built on (see
+    /// `docs/history/roadmap-2026H1.md`).
     pub(crate) fn derive_with<F>(&self, f: F) -> PyResult<Self>
     where
         F: FnOnce(&Arc<DirGraph>, &mut CursorState) -> PyResult<()>,
@@ -457,8 +421,8 @@ impl KnowledgeGraph {
         self.embedder = Some(embedder);
     }
 
-    /// Access the active backend, if any. Returns `None` until
-    /// `set_embedder` / `set_embedder_native` has been called.
+    /// The active backend, `None` until `set_embedder` /
+    /// `set_embedder_native` has been called.
     pub fn embedder(&self) -> Option<&Arc<dyn embedder::Embedder>> {
         self.embedder.as_ref()
     }
@@ -793,14 +757,12 @@ impl KnowledgeGraph {
         })
     }
 
-    /// Thin delegate to `kglite_core::api::infer_selection_node_type`.
     pub(crate) fn infer_selection_node_type(&self) -> Option<String> {
         kglite_core::api::infer_selection_node_type(&self.cursor.selection, &self.inner)
     }
 
-    /// Get the registered embedder or return a helpful error with a skeleton.
-    /// Returns an `Arc<dyn Embedder>` — call sites can downcast or just
-    /// use the trait surface (`embed`, `dimension`, `load`, `unload`).
+    /// The registered embedder, or an error carrying the implement-this
+    /// skeleton.
     pub(crate) fn get_embedder_or_error(&self) -> PyResult<Arc<dyn embedder::Embedder>> {
         match &self.embedder {
             Some(model) => Ok(Arc::clone(model)),
@@ -811,12 +773,7 @@ impl KnowledgeGraph {
     }
 
     /// Resolve a name (or qualified_name) to a single code entity NodeIndex.
-    /// Thin delegate to the pure-Rust core impl at
-    /// `kglite_core::graph::handle::resolve_code_entity` — see that
-    /// function for the lookup-order semantics. Kept as a method on
-    /// the wheel's `KnowledgeGraph` so the existing internal callers
-    /// (`source_one`, `source_location`, `kg_fluent::find_one`) don't
-    /// each have to construct the `&self.inner` borrow.
+    /// See the core delegate for the lookup-order semantics.
     pub(crate) fn resolve_code_entity(
         &self,
         name: &str,
@@ -893,24 +850,12 @@ impl KnowledgeGraph {
     }
 
     /// Pure-Rust counterpart of `source_one` for `kglite::api` consumers
-    /// (notably the kglite-mcp-server `read_code_source` tool). Returns
-    /// an enum so callers can format ambiguous / not-found cases their
-    /// own way without unpacking a PyDict.
-    ///
-    /// Mirrors the data shape `source_one` populates but with Rust types
-    /// (Strings + i64) — see [`SourceLocation`] / [`SourceLookup`].
-    ///
-    /// Thin delegate to the pure-Rust core impl at
-    /// `kglite_core::graph::handle::source_location`. The wheel
-    /// crate keeps this method for back-compat with Python callers
-    /// via `#[pymethods]`; the engine logic lives in `kglite`.
+    /// (notably the kglite-mcp-server `read_code_source` tool): the same data
+    /// shape in Rust types, returned as a [`SourceLookup`] so callers can
+    /// format ambiguous / not-found cases without unpacking a PyDict.
     pub fn source_location(&self, name: &str, node_type: Option<&str>) -> SourceLookup {
         kglite_core::api::code_entities::source_location(&self.inner, name, node_type)
     }
-
-    // `field_contains_ci` and `field_starts_with_ci` lifted to
-    // `NodeData` methods in core (0.10.1). Call sites in pyapi/
-    // use `node.field_contains_ci(...)` directly now.
 }
 
 /// Parse spatial column_types entries and produce a SpatialConfig + cleaned column_types dict.
@@ -925,9 +870,6 @@ pub(crate) fn parse_spatial_column_types(
     py: Python<'_>,
     column_types: &Bound<'_, PyDict>,
 ) -> PyResult<(Option<kglite_core::api::SpatialConfig>, Py<PyDict>)> {
-    // PyO3-only boundary: extract dict → Vec<(String, String)>,
-    // delegate to core, repack cleaned pairs into a fresh PyDict.
-    // Engine logic in `kglite::api::parse_spatial_column_types_from_pairs`.
     let mut pairs: Vec<(String, String)> = Vec::new();
     for (key, value) in column_types.iter() {
         let col_name: String = key.extract()?;
@@ -954,8 +896,6 @@ pub(crate) fn parse_temporal_column_types(
     py: Python<'_>,
     column_types: &Bound<'_, PyDict>,
 ) -> PyResult<(Option<kglite_core::api::TemporalConfig>, Py<PyDict>)> {
-    // PyO3-only boundary; engine logic in
-    // `kglite::api::parse_temporal_column_types_from_pairs` (0.10.1).
     let mut pairs: Vec<(String, String)> = Vec::new();
     for (key, value) in column_types.iter() {
         let col_name: String = key.extract()?;
@@ -973,10 +913,6 @@ pub(crate) fn parse_temporal_column_types(
 
 // ─── Inline timeseries parsing ──────────────────────────────────────────────
 
-// `TimeSpec` and `InlineTimeseriesConfig` live in
-// `kglite_core::graph::features::timeseries`. Re-exported here so the
-// local `parse_inline_timeseries` + downstream `pyapi/*.rs` callers can
-// name them at this path.
 pub(crate) use kglite_core::api::timeseries::{InlineTimeseriesConfig, TimeSpec};
 
 /// Parse the `timeseries` PyDict parameter from `add_nodes`.
@@ -989,7 +925,6 @@ pub(crate) use kglite_core::api::timeseries::{InlineTimeseriesConfig, TimeSpec};
 pub(crate) fn parse_inline_timeseries(
     ts_dict: &Bound<'_, PyDict>,
 ) -> PyResult<InlineTimeseriesConfig> {
-    // Parse 'time' key (required)
     let time_val = ts_dict
         .get_item("time")?
         .ok_or_else(|| {
@@ -998,10 +933,6 @@ pub(crate) fn parse_inline_timeseries(
             )
         })?;
 
-    // PyO3-only step: extract the heterogeneous `time` value into either
-    // a String (Variant A) or a HashMap (Variant B). Engine logic in
-    // core's `InlineTimeseriesConfig::from_components` validates the
-    // shape and assembles the config.
     let (time_col, time_components) = if let Ok(col_name) = time_val.extract::<String>() {
         (Some(col_name), None)
     } else if let Ok(dict) = time_val.cast::<PyDict>() {
@@ -1042,18 +973,13 @@ pub(crate) fn parse_inline_timeseries(
         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
 }
 
-/// Helper function to get a mutable DirGraph from Arc.
-/// Uses Arc::make_mut which clones only if there are other references,
-/// otherwise gives a mutable reference in place. Callers mutate the graph
-/// through the returned reference — no extraction/replacement needed.
+/// Get a mutable `DirGraph` out of the `Arc`. `Arc::make_mut` hands back a
+/// mutable reference in place when this is the only reference.
 ///
-/// WARNING: If other Arc references exist (e.g., a ResultView still in Python
-/// scope, or a cloned KnowledgeGraph), this will deep-clone the entire DirGraph
-/// including all nodes, edges, and indices. In read-heavy workloads this is fine,
-/// but be aware that a lingering reference can cause unexpected memory spikes on mutation.
-/// Thin delegate to `kglite_core::graph::dir_graph::make_dir_graph_mut` —
-/// renamed in the lift; this `use` alias keeps the wheel's existing
-/// `get_graph_mut` callers compiling unchanged.
+/// WARNING: if other `Arc` references exist (a `ResultView` still in Python
+/// scope, a cloned `KnowledgeGraph`), this deep-clones the entire `DirGraph`
+/// — nodes, edges and indices. Fine in read-heavy workloads, but a lingering
+/// reference causes unexpected memory spikes on mutation.
 pub(crate) use kglite_core::api::make_dir_graph_mut as get_graph_mut;
 
 /// Resolve the `selection_only` argument shared by every export entry point
@@ -1107,9 +1033,7 @@ fn selection_has_nodes(kg: &KnowledgeGraph) -> bool {
 /// Which node field a flat dict is keyed by — picks the "why" clause.
 #[derive(Clone, Copy)]
 pub(crate) enum NodeKeyKind {
-    /// Node `id`: unique within a type, reused across types.
     Id,
-    /// Node `title`: not unique anywhere.
     Title,
 }
 
@@ -1227,12 +1151,10 @@ pub(crate) fn community_results_to_py(
     let _arena_guard = graph.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
     let dict = PyDict::new(py);
 
-    // Pre-intern keys
     let key_type = pyo3::intern!(py, "type");
     let key_title = pyo3::intern!(py, "title");
     let key_id = pyo3::intern!(py, "id");
 
-    // Group nodes by community
     let communities = PyDict::new(py);
     let mut grouped: HashMap<usize, Vec<NodeIndex>> = HashMap::new();
     for a in &result.assignments {
@@ -1274,21 +1196,16 @@ pub(crate) fn parse_method_param(
 ) -> PyResult<kglite_core::api::fluent::MethodConfig> {
     use kglite_core::api::fluent::MethodConfig;
 
-    // Try string first
     if let Ok(s) = val.extract::<String>() {
         return Ok(MethodConfig::from_string(s));
     }
 
-    // Try dict
     let dict = val.cast::<PyDict>().map_err(|_| {
         pyo3::exceptions::PyTypeError::new_err(
             "method= must be a string (e.g. 'contains') or a dict (e.g. {'type': 'distance', 'max_m': 5000})"
         )
     })?;
 
-    // PyO3-only boundary: extract each dict field, then hand off to
-    // `MethodConfig::from_components`, which validates the resolve
-    // string and assembles the struct.
     let method_type: String = dict
         .get_item("type")?
         .ok_or_else(|| {

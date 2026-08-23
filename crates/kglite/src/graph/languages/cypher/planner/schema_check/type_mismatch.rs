@@ -13,10 +13,9 @@
 //!    property cannot come to hold a string and "this comparison is cross-type"
 //!    is a guarantee rather than an observation.
 //! 2. **`define_schema()`'s `field_types`** — declared intent, checked only by
-//!    the offline `validate_schema()`. Its claim is therefore conditional on
-//!    the stored data honouring the declaration, which is why the message names
-//!    the weaker source ("schema-defined") instead of borrowing the
-//!    constraint's word, and why `lock_schema()` must never promote it.
+//!    the offline `validate_schema()`. Its claim is conditional on the stored
+//!    data honouring the declaration, which is why the message names the weaker
+//!    source ("schema-defined") instead of borrowing the constraint's word.
 //!
 //! Where both cover a property the **declaration wins**, matching the
 //! precedence CYPHER.md already states for constraint-vs-lock error messages:
@@ -38,9 +37,8 @@
 //!
 //! - **Numeric** — `INTEGER`/`FLOAT`, i.e. `Int64`/`Float64`/`UniqueId`. All
 //!   nine pairs are intercomparable (`core/filtering.rs`), so a numeric
-//!   property against a numeric literal never warns whatever the two are.
-//! - **Text** — `STRING`.
-//! - **Boolean** — `BOOLEAN`.
+//!   property against a numeric literal never warns.
+//! - **Text** — `STRING`. **Boolean** — `BOOLEAN`.
 //! - **Temporal** — `DATE`/`LOCAL DATETIME`, intercomparable with each other
 //!   *and*, value-dependently, with strings (the string is parsed). A
 //!   temporal-vs-string comparison therefore never warns: whether it is null
@@ -54,11 +52,10 @@
 //! A message quotes the declaration **in the words it was written in** —
 //! `declared INTEGER` for an `IS :: T` constraint, `schema-defined integer`
 //! for a `define_schema()` field type — and renders every *other* type name in
-//! the message (the literal's, the parameter's, the `STRING` of the
-//! string-predicate rule) in the engine's own [`DeclaredType`] vocabulary. So
-//! the casing tells the reader which half of the sentence is theirs, and the
-//! parenthetical says which declaration was read. A property pair names both
-//! sides, each in its own source's words.
+//! the message in the engine's own [`DeclaredType`] vocabulary. So the casing
+//! tells the reader which half of the sentence is theirs, and the parenthetical
+//! says which declaration was read. A property pair names both sides, each in
+//! its own source's words.
 //!
 //! ## Scope
 //!
@@ -69,11 +66,6 @@
 //! `ENDS WITH` / `CONTAINS` / `=~` — `=~` answers `false` for every
 //! non-`String` value whatever the pattern is (`core/filtering.rs`), so it is a
 //! string predicate wearing a comparison's clothes and gets that voice.
-//!
-//! Parameter-derived findings are plan-cache-safe by construction: a statement
-//! with bound parameters is never cached (`session::execute::prepare`), and the
-//! empty-map invocation that *is* cacheable binds nothing and therefore says
-//! nothing about a `$name`.
 //!
 //! ## Disposition — what `lock_schema()` promotes
 //!
@@ -86,8 +78,7 @@
 //! behind it is an `IS :: T` constraint — the write path enforces those, so
 //! "no row can satisfy this predicate" is a guarantee about the stored data
 //! rather than a claim about a declaration nothing checks. A `field_types`
-//! source therefore never promotes, in any schema state (the reason is above:
-//! its claim is conditional on data it does not police), and a property pair
+//! source therefore never promotes, in any schema state, and a property pair
 //! promotes only when both of its sides are declared.
 //!
 //! A **bound parameter** does not weaken the guarantee, so it does not block
@@ -97,15 +88,12 @@
 //! spelling of it, and rather more deserving of an error, since the mistake is
 //! invisible in the query text. The verdict is therefore per call rather than
 //! per statement: the same text raises with a string bound and runs with an
-//! integer bound. That is sound because a parameterized statement is never
-//! cached, so every call re-classifies its own bindings from scratch; and a
-//! *cacheable* statement that earns a promotable finding is excluded from the
-//! cache outright, so a plan primed before the lock cannot outrun the
-//! promotion. A `field_types`-sourced finding promotes nowhere and stays
-//! cacheable, warning on every hit.
-//!
-//! Runtime three-valued logic is untouched by this module; it only describes
-//! what the runtime will do.
+//! integer bound. That is sound because a statement with bound parameters is
+//! never cached (`session::execute::prepare`), so every call re-classifies its
+//! own bindings; the cacheable empty-map invocation binds nothing and says
+//! nothing about a `$name`; and a *cacheable* statement that earns a promotable
+//! finding is excluded from the cache outright, so a plan primed before the
+//! lock cannot outrun the promotion.
 
 use std::collections::{HashMap, HashSet};
 
@@ -140,16 +128,10 @@ impl TypeFamily {
         }
     }
 
-    /// The family a `define_schema()` field type names.
-    ///
-    /// The vocabulary is the caller's — the lowercase `"string"` / `"integer"`
-    /// / `"float"` / `"boolean"` / `"datetime"` this project documents, plus
-    /// the aliases
+    /// The family a `define_schema()` field type names, in the caller's own
+    /// lowercase vocabulary plus the aliases
     /// [`value_matches_type`](crate::graph::mutation::validation::value_matches_type)
-    /// accepts, since that is the function deciding what the declaration
-    /// *means*. `"float"` lands in `Numeric` beside `"integer"` for the same
-    /// reason `FLOAT` does: a family describes what `compare_values` can
-    /// relate, not what the declaration accepts.
+    /// accepts — that is the function deciding what the declaration *means*.
     ///
     /// An unrecognised name resolves to `None`, mirroring `value_matches_type`'s
     /// permissive `_` arm: a name neither side understands is not knowledge.
@@ -211,9 +193,8 @@ impl<'a> TypeSource<'a> {
         }
     }
 
-    /// Whether the type came from the **write-enforced** source. The one
-    /// question the promotion asks: a constraint's claim holds over the stored
-    /// data, a `field_types` declaration's does not.
+    /// Whether the type came from the **write-enforced** source — the one
+    /// question the promotion asks.
     fn is_declared(self) -> bool {
         matches!(self, Self::Declared(_))
     }
@@ -227,8 +208,7 @@ impl<'a> TypeSource<'a> {
     }
 
     /// The `(…)` that follows a property name: the type, and which declaration
-    /// said so. A reader who sees `schema-defined` knows the claim rests on an
-    /// unenforced declaration.
+    /// said so.
     fn parenthetical(self) -> String {
         match self {
             Self::Declared(declared) => format!("declared {}", declared.name()),
@@ -457,9 +437,8 @@ impl<'a, 'q> TypeMismatchScan<'a, 'q> {
     }
 
     fn comparison(&mut self, left: &Expression, operator: ComparisonOp, right: &Expression) {
-        // `=~` is a string predicate wearing a comparison's clothes: its answer
-        // is `false` for every non-`String` value whatever the pattern is, so
-        // it is decided by the matched operand alone and never by the pair.
+        // `=~` is decided by the matched operand alone, never by the pair: it
+        // answers `false` for every non-`String` value whatever the pattern is.
         if operator == ComparisonOp::RegexMatch {
             self.string_predicate(left, "=~");
             return;
@@ -522,9 +501,8 @@ impl<'a, 'q> TypeMismatchScan<'a, 'q> {
                 operand.phrase(),
                 consequence(operator, "the property")?,
             ),
-            // The operand's own type is a plain fact — a literal in the text,
-            // or the value this call bound — so the declaration is the only
-            // side whose strength is in question.
+            // The operand's own type is a plain fact, so only the
+            // declaration's strength is in question.
             promotable: source.is_declared(),
         })
     }
@@ -774,7 +752,6 @@ mod tests {
         g
     }
 
-    /// Every warning `graph` produces for `query` under `params`.
     fn warnings_on(graph: &DirGraph, query: &str, params: &Map<String, Value>) -> Vec<String> {
         let parsed = parse_cypher(query).expect("parses");
         collect_query_warnings(&parsed, graph, params).into_messages()
@@ -1179,8 +1156,6 @@ mod tests {
         );
     }
 
-    /// Two property accesses, both typed, in incompatible families: the same
-    /// guarantee as a literal operand, named on both sides.
     #[test]
     fn a_property_pair_in_two_families_warns() {
         let w = one_warning("MATCH (p:Person) WHERE p.age > p.email RETURN p");
@@ -1237,9 +1212,8 @@ mod tests {
         );
     }
 
-    /// `=~` answers `false` for every non-`String` value whatever the pattern
-    /// is (`core/filtering.rs`), so it is a string predicate wearing a
-    /// comparison's clothes and gets that family's voice.
+    /// `=~` is a string predicate wearing a comparison's clothes, so it gets
+    /// that family's voice.
     #[test]
     fn the_regex_operator_warns_on_a_non_string_declaration() {
         let w = one_warning("MATCH (p:Person) WHERE p.age =~ '4.*' RETURN p");
@@ -1316,8 +1290,7 @@ mod tests {
     }
 
     /// Both vocabularies in one query: the parenthetical quotes the
-    /// declaration, everything else is the engine's own type name, so the
-    /// casing tells the reader which half of the sentence is theirs.
+    /// declaration, everything else is the engine's own type name.
     #[test]
     fn each_source_renders_its_own_vocabulary() {
         let g = defined_graph();

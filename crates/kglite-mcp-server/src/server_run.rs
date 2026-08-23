@@ -62,9 +62,8 @@ fn boot_value_codecs(
 /// decision. When on, an external rewrite of the file marks the graph for
 /// reload and the next graph tool call re-reads it (`tools::graph_reload`).
 /// Applies only to `--graph` mode; `resolve_graph_watch_target` warns and
-/// declines everywhere else. A non-boolean value is a boot error rather than a
-/// silently ignored key — that is the "parsed and then dropped" shape this
-/// crate has already had to fix twice.
+/// declines everywhere else. A non-boolean value is a boot error, never a
+/// silently ignored key (see [`boot_tools_allow`]).
 fn boot_graph_watch(manifest: Option<&mcp_methods::server::Manifest>) -> Result<bool> {
     let Some(raw) = manifest.and_then(|m| m.extensions.get("graph_watch")) else {
         return Ok(false);
@@ -115,8 +114,7 @@ fn boot_tools_allow(
 /// to close.
 ///
 /// A non-list value, or a non-string element, is a boot error rather than a
-/// dropped key, for the same reason `tools_allow` fails that way: an allowlist
-/// that silently fails open is worse than no allowlist.
+/// dropped key, for the same reason [`boot_tools_allow`] fails that way.
 fn boot_manifest_write_scope(
     manifest: Option<&mcp_methods::server::Manifest>,
 ) -> Result<Option<Vec<String>>> {
@@ -140,11 +138,10 @@ fn boot_manifest_write_scope(
 /// `--write-scope` flag.
 ///
 /// Both set is not an error: the two are **intersected**, the same rule the
-/// agent's own scope obeys, so neither surface can widen what the other
-/// pinned. That choice is the safer of the two candidates (the alternative was
-/// refusing the ambiguity at boot, which would only push the operator into
-/// deleting one of them), and it is logged so the effective scope is visible in
-/// the boot output rather than inferred.
+/// agent's own scope obeys, so neither surface can widen what the other pinned.
+/// Refusing the ambiguity at boot would only push the operator into deleting
+/// one of them. The intersection is logged, so the effective scope shows in the
+/// boot output rather than having to be inferred.
 fn boot_write_scope(
     manifest: Option<&mcp_methods::server::Manifest>,
     cli: &Cli,
@@ -242,11 +239,11 @@ fn writer_lease_policy(
     }
 }
 
-/// P4 + P5 (operator feedback): builtin toggles from the manifest.
-///   - P5 `save_graph`: gate registration on `builtins.save_graph: true`.
+/// Builtin toggles from the manifest.
+///   - `save_graph`: gate registration on `builtins.save_graph: true`.
 ///     Historically always-on, exposing a destructive operation to the agent on
 ///     every graph regardless of intent.
-///   - P4 `temp_cleanup: on_overview`: wipe `temp/` on every bare
+///   - `temp_cleanup: on_overview`: wipe `temp/` on every bare
 ///     `graph_overview()`. Historically parsed-but-ignored.
 fn boot_builtins(
     manifest: Option<&mcp_methods::server::Manifest>,
@@ -267,11 +264,10 @@ fn boot_builtins(
                 )
             })
             .unwrap_or(false),
-        // The temp_cleanup target resolves against the manifest base, not
-        // the cwd — the server's cwd need not match the manifest's parent.
-        // Reuse the csv_http_server directory when configured so both
-        // sides of the CSV pipeline agree on what counts as "the temp
-        // dir".
+        // Resolved against the manifest base, not the cwd — the server's cwd
+        // need not match the manifest's parent. Reuse the csv_http_server
+        // directory when configured, so both sides of the CSV pipeline agree
+        // on what counts as "the temp dir".
         temp_dir: Some(
             csv_http_cfg
                 .map(|c| c.dir.clone())
@@ -280,8 +276,6 @@ fn boot_builtins(
     }
 }
 
-/// Register KGLite's own routes: the graph/Cypher tools plus the two
-/// source-reading tools that follow the dynamic source-roots provider.
 fn register_kglite_tools(
     server: &mut McpServer,
     graph_state: &GraphState,
@@ -310,17 +304,15 @@ fn register_kglite_tools(
 
 /// Whether `explore` and `read_code_source` should be hidden for this boot.
 ///
-/// Both tools are code-graph tools. `explore` pins its entry types and its
-/// traversal edge whitelist to code node types, so on a graph without
-/// `Function`/`Class` it can only ever return "no match" — it is structurally
-/// dead, and its presence in `tools/list` is pure misdirection. Worse,
-/// `read_code_source`'s optional `node_type` argument makes it a
-/// general-purpose reader of whatever `file_path` properties the graph
-/// happens to carry, so on a non-code graph it is a way to pull arbitrary
-/// files off disk with no code-graph purpose to justify it.
+/// `explore` pins its entry types and its traversal edge whitelist to code node
+/// types, so on a graph without `Function`/`Class` it can only ever return "no
+/// match" — it is structurally dead, and its presence in `tools/list` is pure
+/// misdirection. Worse, `read_code_source`'s optional `node_type` argument makes
+/// it a general-purpose reader of whatever `file_path` properties the graph
+/// happens to carry, so on a non-code graph it is a way to pull arbitrary files
+/// off disk with no code-graph purpose to justify it.
 ///
-/// Three constraints are deliberate and settled — do not "improve" them
-/// without revisiting the reasoning:
+/// Three constraints are deliberate and settled:
 ///
 /// 1. **This is a boot-time snapshot of a runtime property.** Every other
 ///    `has_node_type` consumer (skill `applies_when:` predicates, the result
@@ -394,12 +386,12 @@ pub(crate) async fn run_async(
     // mode-specific binding so the rest of boot sees `Mode::LocalWorkspace`.
     let mode = promote_local_workspace(mode, manifest.as_ref())?;
 
-    // Load `.env` before anything reads env vars (notably the GitHub
-    // tools' `GITHUB_TOKEN` auth check). Walk-up start point matches
-    // the framework binary's choice in `mcp-server`'s own main: the
-    // mode's directory for source-aware modes, cwd for bare. Explicit
-    // `env_file:` in the manifest overrides walk-up. Returns the path
-    // actually loaded so the boot summary can name it.
+    // Load `.env` before anything reads env vars (notably the GitHub tools'
+    // `GITHUB_TOKEN` auth check). The walk-up start point matches the framework
+    // binary's choice in `mcp-server`'s own main: the mode's directory for
+    // source-aware modes, cwd for bare. An explicit manifest `env_file:`
+    // overrides walk-up. Returns the path actually loaded, so the boot summary
+    // can name it.
     let env_start_dir = resolve_env_start_dir(&mode);
     let env_file_loaded = load_env_for_mode(manifest.as_ref(), &env_start_dir)
         .context("manifest env_file load failed")?;
@@ -423,8 +415,7 @@ pub(crate) async fn run_async(
         .with_writer_lease_policy(writer_lease_policy(manifest.as_ref(), &cli));
 
     // Mode-specific bindings: source roots, workspace handle, initial graph
-    // build. Extracted to `bind_mode` so this boot fn reads as a sequence of
-    // named phases.
+    // build.
     let options = bind_mode(&mode, &cli, manifest.as_ref(), &graph_state, options)?;
 
     // Runtime graph-over-grep steering (mcp-methods 0.3.46 result-postprocess
@@ -444,10 +435,9 @@ pub(crate) async fn run_async(
         ))
     };
 
-    // Snapshot the dynamic source-roots provider before we move
-    // `options` into the McpServer. The `read_code_source` tool
-    // queries it on every call so workspace-mode active-repo swaps
-    // immediately re-target file resolution.
+    // Snapshot the dynamic source-roots provider before `options` moves into
+    // the McpServer. `read_code_source` queries it on every call, so
+    // workspace-mode active-repo swaps immediately re-target file resolution.
     let source_roots_provider = options.source_roots.clone();
 
     let manifest_base = manifest_base_dir(manifest.as_ref());
@@ -476,9 +466,7 @@ pub(crate) async fn run_async(
         // rejected on call) while leaving overrides resolvable.
         server.tool_router_mut().disable_route("repo_management");
     }
-    // Whether the two code-graph tools are structurally applicable to what
-    // this server actually serves. Read before `builtins` moves into
-    // `register_kglite_tools` below.
+    // Read before `builtins` moves into `register_kglite_tools` below.
     let gate_code_tools = code_tools_are_dead(&mode, &builtins, &graph_state);
     register_kglite_tools(
         &mut server,
@@ -492,16 +480,13 @@ pub(crate) async fn run_async(
     if matches!(mode, Mode::Graph { .. }) {
         // `reload_graph` is graph-mode-only: it re-reads *the* served file, an
         // identity no other mode has. Registered from here rather than inside
-        // `tools::register` because the mode is not otherwise visible there —
-        // same shape as the `repo_management` and code-tool decisions above.
+        // `tools::register`, because the mode is not otherwise visible there.
         tools::register_graph_mode_tools(&mut server, graph_state.clone());
     }
     if gate_code_tools {
-        // Disable, never skip registration: an unregistered name is absent
-        // from `router.map`, and `apply_bundled_tool_overrides` hard-errors on
-        // any manifest override naming a route that is not in that map (see
-        // the `repo_management` comment above). Disabling keeps overrides
-        // resolvable while producing the same user-visible effect.
+        // Disable, never skip registration: an unregistered name is absent from
+        // `router.map`, which hard-errors any manifest override naming it (see
+        // the `repo_management` comment above for the full mechanism).
         server.tool_router_mut().disable_route("explore");
         server.tool_router_mut().disable_route("read_code_source");
     }
@@ -535,9 +520,8 @@ pub(crate) async fn run_async(
 
     let _watch_handle = spawn_mode_watcher(&mode, &graph_state, graph_watch)?;
 
-    // Bare-mode (no manifest) deployments don't get skills — the
-    // `skills:` declaration lives in the manifest. Operators who want
-    // skills must declare them in YAML.
+    // Bare-mode (no manifest) deployments get no skills — the `skills:`
+    // declaration lives in the manifest.
     if let Some(m) = manifest.as_ref() {
         install_skills(&mut server, m, &graph_state, recipe_catalog_summary);
     }
@@ -597,8 +581,7 @@ mod boot_manifest_tests {
     /// Boot wiring for the writer-lease policy: which deployments own the
     /// served path. The state-level consequences (lease taken or not, disk
     /// directories exempt) are pinned in `tools::tests::lifecycle`; this pins
-    /// the mapping from CLI/manifest to policy, since a knob that is computed
-    /// and then dropped is this crate's recurring defect shape.
+    /// only the mapping from CLI/manifest to policy.
     #[test]
     fn only_write_enabled_deployments_take_the_writer_lease() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -630,10 +613,7 @@ mod boot_manifest_tests {
         );
     }
 
-    /// Same chain, same reasoning as `graph_watch`: spelled in YAML, passed
-    /// through mcp-methods' loader (which validates nothing inside
-    /// `extensions:`), read back here as a list of names. The absent-key arm is
-    /// what makes the present-key arm mean anything.
+    /// The absent-key arm is what makes the present-key arm mean anything.
     #[test]
     fn tools_allow_defaults_to_absent_and_reads_the_manifest_list() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -699,9 +679,6 @@ mod boot_manifest_tests {
         assert!(error.contains("must be tool names"), "{error}");
     }
 
-    /// The operator pin's boot parse, key by key. Same chain and same
-    /// fail-closed reasoning as `tools_allow`: an allowlist that silently
-    /// fails open is worse than no allowlist.
     #[test]
     fn write_scope_reads_the_flag_the_manifest_and_their_intersection() {
         let tmp = tempfile::tempdir().expect("tempdir");

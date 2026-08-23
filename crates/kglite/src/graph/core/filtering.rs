@@ -1,4 +1,3 @@
-// src/graph/filtering.rs
 use crate::datatypes::values::{FilterCondition, Value};
 use crate::graph::schema::{CurrentSelection, DirGraph, InternedKey, SelectionOperation};
 use crate::graph::storage::GraphRead;
@@ -6,7 +5,6 @@ use petgraph::graph::NodeIndex;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
-/// Constant for the "type" field key used in type filtering
 const TYPE_FIELD: &str = "type";
 
 pub fn matches_condition(value: &Value, condition: &FilterCondition) -> bool {
@@ -41,7 +39,6 @@ pub fn matches_condition_cached(
         }
         FilterCondition::In(targets) => targets.iter().any(|t| values_equal(value, t)),
         FilterCondition::Between(min, max) => {
-            // Inclusive range: min <= value <= max
             matches!(
                 compare_values(value, min),
                 Some(std::cmp::Ordering::Greater) | Some(std::cmp::Ordering::Equal)
@@ -103,27 +100,23 @@ fn collect_regex_patterns(condition: &FilterCondition, cache: &mut HashMap<Strin
     }
 }
 
-/// Check equality with cross-type numeric comparison support.
-/// Handles Int64 <-> Float64 <-> UniqueId conversions to match Python's loose typing.
+/// Equality with Int64/Float64/UniqueId cross-type conversion, matching
+/// Python's loose typing.
 pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
     // Cypher three-valued logic: NULL ≠ anything (including NULL).
     // Grouping/DISTINCT use Value's PartialEq directly, which is unaffected.
     if matches!(a, Value::Null) || matches!(b, Value::Null) {
         return false;
     }
-    // Direct equality check first
     if a == b {
         return true;
     }
-    // Handle numeric cross-type comparison
     match (a, b) {
-        // Int64 <-> Float64
         (Value::Int64(i), Value::Float64(f)) => (*i as f64) == *f,
         (Value::Float64(f), Value::Int64(i)) => *f == (*i as f64),
-        // UniqueId <-> Int64 (Python int may come as Int64 but be stored as UniqueId)
+        // A Python int may arrive as Int64 but be stored as UniqueId.
         (Value::UniqueId(u), Value::Int64(i)) => *i >= 0 && *u as i64 == *i,
         (Value::Int64(i), Value::UniqueId(u)) => *i >= 0 && *i == *u as i64,
-        // UniqueId <-> Float64 (for completeness)
         (Value::UniqueId(u), Value::Float64(f)) => f.fract() == 0.0 && *u as f64 == *f,
         (Value::Float64(f), Value::UniqueId(u)) => f.fract() == 0.0 && *f == *u as f64,
         // Single-element JSON list compared to plain string (`["Oslo"]` = 'Oslo').
@@ -136,17 +129,15 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
 /// [`values_equal`] restricted to two strings: byte equality **plus** its
 /// single-element-JSON-list equivalence (`["Oslo"] = 'Oslo'`).
 ///
-/// The single implementation of that rule, and deliberately so — it is
-/// reachable through several independent routes (`values_equal` itself, the
-/// pattern matcher's borrowed `str_field_test`, the compiled scan's `StrOp`
-/// predicates, and the storage layer's `str_prop_eq` byte fast path), and
-/// each one that spelled it out for itself was one that could drift. One did:
-/// `str_prop_eq` answered a bare `n.tag = 'Oslo'` with a plain `==`, so a row
-/// storing `'["Oslo"]'` satisfied neither `=` nor `<>` while `IN ['Oslo']`
-/// matched it.
+/// The one implementation of that rule, deliberately: it is reachable through
+/// `values_equal`, the pattern matcher's `str_field_test`, the compiled scan's
+/// `StrOp` predicates and the storage layer's `str_prop_eq` byte fast path, and
+/// a copy drifted — `str_prop_eq` answered a bare `n.tag = 'Oslo'` with a plain
+/// `==`, so a row storing `'["Oslo"]'` satisfied neither `=` nor `<>` while
+/// `IN ['Oslo']` matched it.
 ///
-/// The JSON arm needs a `[` on one side or the other, so one byte test rules
-/// it out for every ordinary string — this runs on every row of a scan.
+/// The JSON arm needs a `[` on one side, so one byte test rules it out for
+/// every ordinary string — this runs on every row of a scan.
 #[inline]
 pub(crate) fn str_values_equal(a: &str, b: &str) -> bool {
     a == b
@@ -180,27 +171,22 @@ pub fn compare_values(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
         (Value::Int64(a), Value::Float64(b)) => (*a as f64).partial_cmp(b),
         (Value::Float64(a), Value::Int64(b)) => a.partial_cmp(&(*b as f64)),
         (Value::UniqueId(a), Value::UniqueId(b)) => Some(a.cmp(b)),
-        // UniqueId <-> Int64 cross-type comparison
         (Value::UniqueId(u), Value::Int64(i)) => (*u as i64).partial_cmp(i),
         (Value::Int64(i), Value::UniqueId(u)) => i.partial_cmp(&(*u as i64)),
-        // UniqueId <-> Float64 cross-type comparison
         (Value::UniqueId(u), Value::Float64(f)) => (*u as f64).partial_cmp(f),
         (Value::Float64(f), Value::UniqueId(u)) => f.partial_cmp(&(*u as f64)),
         (Value::DateTime(a), Value::DateTime(b)) => Some(a.cmp(b)),
         (Value::Boolean(a), Value::Boolean(b)) => Some(a.cmp(b)),
-        // Handle DateTime vs String comparison by parsing the string
         (Value::DateTime(date), Value::String(s)) => {
             parse_date_string(s).map(|parsed| date.cmp(&parsed))
         }
         (Value::String(s), Value::DateTime(date)) => {
             parse_date_string(s).map(|parsed| parsed.cmp(date))
         }
-        // Timestamp comparisons (0.12 Cluster 1).
         (Value::Timestamp(a), Value::Timestamp(b)) => Some(a.cmp(b)),
-        // Mixed with date-only DateTime: treat the date as midnight.
+        // A date-only value compares as midnight on that date.
         (Value::Timestamp(a), Value::DateTime(b)) => b.and_hms_opt(0, 0, 0).map(|bt| a.cmp(&bt)),
         (Value::DateTime(a), Value::Timestamp(b)) => a.and_hms_opt(0, 0, 0).map(|at| at.cmp(b)),
-        // Timestamp vs String: parse ISO datetime (or a bare date at midnight).
         (Value::Timestamp(ts), Value::String(s)) => parse_datetime_string(s).map(|p| ts.cmp(&p)),
         (Value::String(s), Value::Timestamp(ts)) => parse_datetime_string(s).map(|p| p.cmp(ts)),
         _ => None,
@@ -209,25 +195,19 @@ pub fn compare_values(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
 
 // ── Total ordering ──────────────────────────────────────────────────────────
 //
-// `compare_values` above answers *comparison*; `total_order` below answers
-// *ordering*. They are deliberately different functions with different return
-// types, and the boundary between them is load-bearing:
+// Filtering calls `compare_values`; sorting calls `total_order`. Nothing calls
+// both for the same decision, and the split is load-bearing:
 //
 // * **Comparison is partial.** `WHERE n.a < n.b` with a string on one side and
 //   a number on the other must produce **no row** — Cypher's three-valued
-//   logic, where a cross-type `<` is `null`, not `false` and not `true`.
-//   `compare_values` encodes that by returning `None`, and every filter,
-//   `WHERE` predicate, index probe and `Between` bound goes through it. That
-//   behaviour is correct and does not change.
-// * **Ordering is total.** `ORDER BY` must place *every* pair of values, and
-//   Rust's sorts (and any heap) require a total order — an intransitive
-//   comparator makes `slice::sort_by` abort the process with "user-provided
-//   comparison function does not correctly implement a total order".
-//   `total_order` therefore never says "unknown": values of different type
-//   families are ordered by their *type*, following Neo4j 5.
-//
-// Sorting calls `total_order`. Filtering calls `compare_values`. Nothing calls
-// both for the same decision.
+//   logic, where a cross-type `<` is `null`. `compare_values` encodes that by
+//   returning `None`, and every filter, `WHERE` predicate, index probe and
+//   `Between` bound goes through it.
+// * **Ordering is total.** `ORDER BY` must place *every* pair, and an
+//   intransitive comparator makes `slice::sort_by` abort the process with
+//   "user-provided comparison function does not correctly implement a total
+//   order". `total_order` therefore never says "unknown": values of different
+//   type families are ordered by their *type*, following Neo4j 5.
 
 /// Ascending cross-type rank — every value of a lower rank sorts before every
 /// value of a higher rank, and values of the same rank are ordered by
@@ -280,10 +260,8 @@ fn type_rank(v: &Value) -> u8 {
 /// The total order over `Value` — the single definition of ORDER BY's row
 /// order and of which value `min()` / `max()` keep.
 ///
-/// Total means: reflexive, antisymmetric and **transitive over every pair of
-/// values**, including pairs of different types. See the module note above for
-/// why this is a separate function from [`compare_values`] and why filtering
-/// must keep using that one.
+/// Total over every pair, including pairs of different types — see the module
+/// note above for why filtering must keep using [`compare_values`] instead.
 pub fn total_order(a: &Value, b: &Value) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     let rank = type_rank(a);
@@ -296,7 +274,6 @@ pub fn total_order(a: &Value, b: &Value) -> std::cmp::Ordering {
         (Value::Boolean(x), Value::Boolean(y)) => x.cmp(y),
         (Value::Null, Value::Null) => Ordering::Equal,
         (Value::NodeRef(x), Value::NodeRef(y)) => x.cmp(y),
-        // Same rank, mixed date/timestamp: compare on the common instant.
         (Value::DateTime(_) | Value::Timestamp(_), Value::DateTime(_) | Value::Timestamp(_)) => {
             as_datetime(a).cmp(&as_datetime(b))
         }
@@ -367,7 +344,6 @@ pub(crate) fn cmp_f64_total(a: f64, b: f64) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     match a.partial_cmp(&b) {
         Some(ordering) => ordering,
-        // Only reachable when at least one side is NaN.
         None => match (a.is_nan(), b.is_nan()) {
             (true, true) => Ordering::Equal,
             (true, false) => Ordering::Greater,
@@ -418,7 +394,6 @@ pub(crate) fn cmp_i64_f64(i: i64, f: f64) -> std::cmp::Ordering {
 #[inline]
 fn cmp_numeric(a: &Value, b: &Value) -> std::cmp::Ordering {
     use std::cmp::Ordering;
-    /// `None` for the float side; `Some` for the two integral variants.
     #[inline]
     fn as_int(v: &Value) -> Option<i64> {
         match v {
@@ -476,18 +451,15 @@ fn cmp_map(a: &crate::datatypes::PropMap, b: &crate::datatypes::PropMap) -> std:
     }
 }
 
-/// Parse a datetime string: full ISO `YYYY-MM-DDTHH:MM:SS`, falling back
-/// to a bare date (midnight). Mirrors `parse_date_string` for timestamps.
+/// Full ISO `YYYY-MM-DDTHH:MM:SS`, falling back to a bare date at midnight.
 fn parse_datetime_string(s: &str) -> Option<chrono::NaiveDateTime> {
     chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
         .ok()
         .or_else(|| parse_date_string(s).and_then(|d| d.and_hms_opt(0, 0, 0)))
 }
 
-/// Parse a date string in common formats (ISO YYYY-MM-DD preferred)
 fn parse_date_string(s: &str) -> Option<chrono::NaiveDate> {
     use chrono::NaiveDate;
-    // ISO format (YYYY-MM-DD)
     NaiveDate::parse_from_str(s, "%Y-%m-%d")
         .or_else(|_| NaiveDate::parse_from_str(s, "%Y/%m/%d"))
         .or_else(|_| NaiveDate::parse_from_str(s, "%d-%m-%Y"))
@@ -495,20 +467,17 @@ fn parse_date_string(s: &str) -> Option<chrono::NaiveDate> {
         .ok()
 }
 
-// Optimized core operations
 fn filter_nodes_by_conditions(
     graph: &DirGraph,
     nodes: Vec<NodeIndex>,
     conditions: &HashMap<String, FilterCondition>,
 ) -> Vec<NodeIndex> {
-    // Special case for type filter which we can optimize
     if conditions.len() == 1 {
         if let Some((key, FilterCondition::Equals(Value::String(type_value)))) =
             conditions.iter().next()
         {
             if key == TYPE_FIELD {
                 if let Some(type_nodes) = graph.type_indices.get(type_value) {
-                    // Use HashSet for O(1) lookups
                     let type_set: HashSet<NodeIndex> = type_nodes.iter().collect();
                     return nodes
                         .into_iter()
@@ -520,8 +489,6 @@ fn filter_nodes_by_conditions(
         }
     }
 
-    // Try to use property indexes for equality conditions (O(1) lookup)
-    // Find nodes by their node_type first, then check for indexed properties.
     // Borrow the type string from the interner — no per-node allocation (this
     // runs for every `where()`, even when no index ultimately applies).
     let node_types: HashSet<&str> = nodes
@@ -547,7 +514,6 @@ fn filter_nodes_by_conditions(
         None
     };
 
-    // Collect equality conditions that could use a composite index
     let equality_conditions: Vec<(&String, &crate::datatypes::values::Value)> = conditions
         .iter()
         .filter_map(|(k, v)| {
@@ -559,7 +525,6 @@ fn filter_nodes_by_conditions(
         })
         .collect();
 
-    // Try composite index first (if we have 2+ equality conditions)
     if equality_conditions.len() >= 2 {
         let eq_properties: Vec<String> = equality_conditions
             .iter()
@@ -571,8 +536,7 @@ fn filter_nodes_by_conditions(
                 graph.find_matching_composite_index(node_type, &eq_properties)
             {
                 if is_exact {
-                    // Exact match - we can use the composite index directly
-                    // Build values in the same order as the index
+                    // Values must be built in the index's own property order.
                     let index_properties = &index_key.1;
                     let values: Vec<crate::datatypes::values::Value> = index_properties
                         .iter()
@@ -588,15 +552,12 @@ fn filter_nodes_by_conditions(
                     if let Some(matching_nodes) =
                         graph.lookup_by_composite_index(node_type, index_properties, &values)
                     {
-                        // Found composite index match!
                         let indexed_set: HashSet<_> = matching_nodes.iter().copied().collect();
                         let original_set: HashSet<_> = nodes.iter().copied().collect();
 
-                        // Intersection of indexed results with input nodes
                         let candidates: Vec<_> =
                             indexed_set.intersection(&original_set).copied().collect();
 
-                        // Filter remaining non-equality conditions
                         let remaining_conditions: HashMap<_, _> = conditions
                             .iter()
                             .filter(|(k, v)| {
@@ -621,15 +582,12 @@ fn filter_nodes_by_conditions(
         }
     }
 
-    // Fall back to single-property index check
     for (property, condition) in conditions {
         if let FilterCondition::Equals(target_value) = condition {
-            // Check if any of our node types has an index on this property
             for node_type in &node_types {
                 if let Some(matching_nodes) =
                     graph.lookup_by_index(node_type, property, target_value)
                 {
-                    // Found an index! Narrow down to candidates in the input.
                     let candidates: Vec<_> = if full_single_type == Some(*node_type) {
                         // Input is the full type set → index result is a subset
                         // already; skip the O(N) membership intersection.
@@ -640,7 +598,6 @@ fn filter_nodes_by_conditions(
                         indexed_set.intersection(&original_set).copied().collect()
                     };
 
-                    // If there are remaining conditions, filter further
                     let remaining_conditions: HashMap<_, _> = conditions
                         .iter()
                         .filter(|(k, _)| *k != property)
@@ -650,7 +607,6 @@ fn filter_nodes_by_conditions(
                     if remaining_conditions.is_empty() {
                         return candidates;
                     } else {
-                        // Recursively filter with remaining conditions
                         return filter_nodes_by_conditions(
                             graph,
                             candidates,
@@ -662,7 +618,6 @@ fn filter_nodes_by_conditions(
         }
     }
 
-    // Try range index for comparison conditions (GT, GTE, LT, LTE, Between)
     for (property, condition) in conditions {
         let bounds: Option<(std::ops::Bound<&Value>, std::ops::Bound<&Value>)> = match condition {
             FilterCondition::GreaterThan(v) => {
@@ -711,10 +666,8 @@ fn filter_nodes_by_conditions(
         }
     }
 
-    // Pre-compile regex patterns once for the entire filter pass
     let regex_cache = precompile_regex_patterns(conditions);
 
-    // Cache field lookups for frequently accessed fields
     let estimated_cache_size = nodes.len() * conditions.len();
     let mut field_cache: HashMap<(NodeIndex, &str), Option<Value>> =
         HashMap::with_capacity(estimated_cache_size);
@@ -725,7 +678,6 @@ fn filter_nodes_by_conditions(
             if let Some(node) = graph.node_view(idx) {
                 conditions.iter().all(|(key, condition)| {
                     let value = field_cache.entry((idx, key.as_str())).or_insert_with(|| {
-                        // Resolve alias: original column name → canonical field
                         let resolved =
                             graph.resolve_alias(node.node_type_str(&graph.interner), key);
                         node.get_field_ref(resolved).map(Cow::into_owned)
@@ -822,14 +774,12 @@ fn top_k_nodes_by_fields(
         return sort_nodes_by_fields(graph, nodes, sort_fields);
     }
     let mut keyed = build_sort_keys(graph, &nodes, sort_fields);
-    // Partition so the k smallest-by-order occupy [0, k); then sort just those.
     keyed.select_nth_unstable_by(k - 1, |(a, _), (b, _)| cmp_sort_keys(a, b, sort_fields));
     keyed.truncate(k);
     keyed.sort_by(|(a, _), (b, _)| cmp_sort_keys(a, b, sort_fields));
     keyed.into_iter().map(|(_, idx)| idx).collect()
 }
 
-// Optimized processing function
 pub fn process_nodes(
     graph: &DirGraph,
     nodes: Vec<NodeIndex>,
@@ -853,7 +803,6 @@ pub fn process_nodes(
     }
 
     match (sort_fields, max_nodes) {
-        // ORDER BY + LIMIT k with k < N: bounded top-K, not a full sort.
         (Some(fields), Some(max)) if max < result.len() => {
             result = top_k_nodes_by_fields(graph, result, fields, max);
         }
@@ -870,7 +819,6 @@ pub fn process_nodes(
     result
 }
 
-// Optimized public interface functions
 /// Seed a fresh selection level with every node carrying `label` as its
 /// primary type OR a secondary label (`DirGraph::nodes_with_label`) — the
 /// label-aware counterpart to the `type`-equals fast path in `filter_nodes`.
@@ -878,7 +826,6 @@ pub fn process_nodes(
 ///
 /// On a single-label graph this selects exactly the same nodes as the
 /// primary `type == label` filter, so it is a strict additive extension.
-/// Chained `.filter()`/`.where()` operate on the seeded set as usual.
 pub fn filter_nodes_by_label(
     graph: &DirGraph,
     selection: &mut CurrentSelection,
@@ -920,11 +867,10 @@ pub fn filter_nodes(
         .get_level_mut(current_index)
         .ok_or_else(|| "No active selection level".to_string())?;
 
-    // Note: We don't clear selections here to allow chaining filters.
-    // Each filter operation builds on the previous selection.
+    // Selections are deliberately not cleared here: each filter builds on the
+    // previous selection, which is what makes filters chainable.
 
     if level.selections.is_empty() {
-        // Optimized type-only filter handling
         if conditions.len() == 1 {
             if let Some((key, FilterCondition::Equals(Value::String(type_value)))) =
                 conditions.iter().next()
@@ -952,7 +898,6 @@ pub fn filter_nodes(
             }
         }
 
-        // Regular processing with capacity hint
         let g = &graph.graph;
         let estimated_capacity = g.node_count() / 2;
         let mut all_nodes = Vec::with_capacity(estimated_capacity);
@@ -970,7 +915,6 @@ pub fn filter_nodes(
             level.add_selection(None, processed);
         }
     } else {
-        // Process existing selections with HashMap
         let mut new_selections = HashMap::new();
 
         for (parent, children) in level.selections.iter() {
@@ -1000,7 +944,6 @@ pub fn filter_nodes(
     Ok(())
 }
 
-// Other public functions remain the same but use the optimized process_nodes
 pub fn sort_nodes(
     graph: &DirGraph,
     selection: &mut CurrentSelection,
@@ -1078,8 +1021,7 @@ pub fn limit_nodes_per_group(
     Ok(())
 }
 
-/// Filter nodes matching ANY of the given condition sets (OR logic).
-/// A node is kept if it matches at least one condition set.
+/// Keep nodes matching at least one of the condition sets (OR logic).
 pub fn filter_nodes_any(
     graph: &DirGraph,
     selection: &mut CurrentSelection,
@@ -1095,7 +1037,6 @@ pub fn filter_nodes_any(
         .get_level_mut(current_index)
         .ok_or_else(|| "No active selection level".to_string())?;
 
-    // Pre-compile regex patterns from all condition sets
     let mut regex_cache = HashMap::new();
     for conditions in condition_sets {
         for condition in conditions.values() {
@@ -1168,7 +1109,6 @@ pub fn offset_nodes(
         .ok_or_else(|| "No active selection level".to_string())?;
 
     if level.selections.is_empty() {
-        // Skip first n nodes from the whole graph
         let g = &graph.graph;
         let all_nodes: Vec<NodeIndex> = g.node_indices().skip(n).collect();
         if !all_nodes.is_empty() {
@@ -1277,7 +1217,7 @@ pub fn filter_by_connection(
 pub fn filter_orphan_nodes(
     graph: &DirGraph,
     selection: &mut CurrentSelection,
-    include_orphans: bool, // true to include orphans, false to exclude them
+    include_orphans: bool,
     sort_fields: Option<&Vec<(String, bool)>>,
     max_nodes: Option<usize>,
 ) -> Result<(), String> {
@@ -1289,9 +1229,7 @@ pub fn filter_orphan_nodes(
         .get_level_mut(current_index)
         .ok_or_else(|| "No active selection level".to_string())?;
 
-    // Function to check if a node is an orphan (no connections)
     let is_orphan = |node_idx: NodeIndex| {
-        // Check both incoming and outgoing edges
         graph
             .graph
             .neighbors_directed(node_idx, petgraph::Direction::Outgoing)
@@ -1305,32 +1243,27 @@ pub fn filter_orphan_nodes(
     };
 
     if level.selections.is_empty() {
-        // Start with all nodes
         let nodes = graph
             .graph
             .node_indices()
             .filter(|&idx| include_orphans == is_orphan(idx))
             .collect::<Vec<_>>();
 
-        // Apply sorting and max limit
         let processed = process_nodes(graph, nodes, None, sort_fields, max_nodes);
 
         if !processed.is_empty() {
             level.add_selection(None, processed);
         }
     } else {
-        // Process existing selections
         let mut new_selections = HashMap::new();
 
         for (parent, children) in level.selections.iter() {
-            // Filter children based on orphan status
             let filtered = children
                 .iter()
                 .filter(|&&idx| include_orphans == is_orphan(idx))
                 .copied()
                 .collect::<Vec<_>>();
 
-            // Apply sorting and max limit
             let processed = process_nodes(graph, filtered, None, sort_fields, max_nodes);
 
             if !processed.is_empty() {
@@ -1341,7 +1274,6 @@ pub fn filter_orphan_nodes(
         level.selections = new_selections;
     }
 
-    // Record the operation in the selection history
     level.operations.push(SelectionOperation::Custom(format!(
         "filter_orphans(include={})",
         include_orphans
@@ -1362,9 +1294,7 @@ mod tests {
     use crate::datatypes::values::{FilterCondition, Value};
     use chrono::NaiveDate;
 
-    // ========================================================================
-    // values_equal — cross-type numeric comparisons
-    // ========================================================================
+    // ── values_equal: cross-type numeric comparisons ──
 
     #[test]
     fn test_values_equal_same_type() {
@@ -1406,9 +1336,7 @@ mod tests {
         assert!(!values_equal(&Value::Boolean(true), &Value::Int64(1)));
     }
 
-    // ========================================================================
-    // compare_values — ordering
-    // ========================================================================
+    // ── compare_values: ordering ──
 
     #[test]
     fn test_compare_values_integers() {
@@ -1460,7 +1388,6 @@ mod tests {
 
     #[test]
     fn test_compare_values_null_ordering() {
-        // Null < any non-null
         assert_eq!(
             compare_values(&Value::Null, &Value::Int64(0)),
             Some(std::cmp::Ordering::Less)
@@ -1497,9 +1424,7 @@ mod tests {
         assert_eq!(result, Some(std::cmp::Ordering::Greater));
     }
 
-    // ========================================================================
-    // matches_condition — filter operators
-    // ========================================================================
+    // ── matches_condition: filter operators ──
 
     #[test]
     fn test_matches_condition_equals() {
@@ -1607,11 +1532,11 @@ mod tests {
         assert!(matches_condition(
             &Value::Int64(1),
             &FilterCondition::Between(Value::Int64(1), Value::Int64(10))
-        )); // inclusive
+        ));
         assert!(matches_condition(
             &Value::Int64(10),
             &FilterCondition::Between(Value::Int64(1), Value::Int64(10))
-        )); // inclusive
+        ));
         assert!(!matches_condition(
             &Value::Int64(0),
             &FilterCondition::Between(Value::Int64(1), Value::Int64(10))
@@ -1643,13 +1568,7 @@ mod tests {
         ));
     }
 
-    // ========================================================================
-    // parse_date_string
-    // ========================================================================
-
-    // ========================================================================
-    // matches_condition — string predicates
-    // ========================================================================
+    // ── matches_condition: string predicates ──
 
     #[test]
     fn test_matches_condition_contains() {
@@ -1665,7 +1584,6 @@ mod tests {
             &Value::String("hello".into()),
             &FilterCondition::Contains(Value::String("world".into()))
         ));
-        // Non-string values return false
         assert!(!matches_condition(
             &Value::Int64(42),
             &FilterCondition::Contains(Value::String("4".into()))
@@ -1704,9 +1622,7 @@ mod tests {
         ));
     }
 
-    // ========================================================================
-    // parse_date_string
-    // ========================================================================
+    // ── parse_date_string ──
 
     #[test]
     fn test_parse_date_string_iso() {

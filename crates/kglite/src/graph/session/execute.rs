@@ -1,8 +1,5 @@
 //! Cypher pipeline orchestration — single source of truth.
 //!
-//! Mirrors the canonical pipeline that previously lived inline at
-//! `src/graph/pyapi/kg_core.rs::cypher`:
-//!
 //! ```text
 //! parse_cypher → validate_schema → rewrite_text_score (+embed if needed)
 //!   → optimize_with_disabled → [mark_lazy_eligibility] → is_mutation_query
@@ -33,41 +30,30 @@ use crate::graph::languages::cypher::result::CypherResult;
 use crate::graph::languages::cypher::value_codec::ValueCodec;
 
 /// Per-query knobs. Borrowed for the duration of one execute call.
-/// Default values match the kg_core.rs Python boundary's defaults
-/// (lazy_eligible=true, no deadline, no max_rows, no disabled passes,
-/// no embedder).
 pub struct ExecuteOptions<'a> {
-    /// Parameter bindings (`$x` references). Empty map = no params.
+    /// Parameter bindings (`$x` references).
     pub params: &'a HashMap<String, Value>,
-    /// Optional execution deadline. Past this, the executor returns
-    /// `CypherTimeout`. None = no deadline.
+    /// Past this, the executor returns `CypherTimeout`.
     pub deadline: Option<Instant>,
-    /// Optional row cap. None = no cap.
     pub max_rows: Option<usize>,
     /// Lazy-projection mode.
     ///
-    /// - `true` (Python default): call `mark_lazy_eligibility` after
-    ///   optimize + pass `streaming=true` to the executor. The
-    ///   `CypherResult.lazy` field may be `Some(LazyResultDescriptor)`;
-    ///   callers that want eager rows must materialize via the lazy
-    ///   helper in `src/graph/pyapi/result_view.rs`.
-    /// - `false` (bolt-server, mcp-server): skip
-    ///   `mark_lazy_eligibility` + pass `streaming=false`. The
-    ///   executor materializes every row into `CypherResult.rows`.
+    /// - `true` (Python): `mark_lazy_eligibility` runs after optimize and the
+    ///   executor gets `streaming=true`, so `CypherResult.lazy` may be
+    ///   `Some(LazyResultDescriptor)` and `rows` empty; the caller must
+    ///   materialize via the lazy helper in `pyapi/result_view.rs`.
+    /// - `false` (bolt-server, mcp-server): the executor materializes every
+    ///   row into `CypherResult.rows`.
     ///
-    /// **Important:** setting `lazy_eligible=true` without having a
-    /// lazy-materializer to consume `result.lazy` results in
-    /// silently empty row sets — exactly the bolt-server bug fixed
-    /// during the robustness pass. Default to `false` for safety;
-    /// the Python boundary flips it to `true` to benefit from the
-    /// lazy path in interactive use.
+    /// **Important:** setting `true` without a lazy-materializer to consume
+    /// `result.lazy` yields silently empty row sets — the bolt-server bug
+    /// fixed during the robustness pass. Default `false` for safety.
     pub lazy_eligible: bool,
-    /// Optional set of planner passes to disable. None means "use
-    /// the static empty set" (no allocation; the common case).
+    /// Planner passes to disable. `None` uses the static empty set — no
+    /// allocation, and the common case.
     pub disabled_passes: Option<&'a HashSet<String>>,
-    /// Optional embedder for `text_score()` queries. If a query
-    /// uses `text_score()` and this is `None`, execute returns
-    /// `KgError::Argument("text_score requires embedder ...")`.
+    /// Embedder for `text_score()` queries. A `text_score()` query with `None`
+    /// here fails with `KgError::Argument("text_score requires embedder ...")`.
     pub embedder: Option<Arc<dyn Embedder>>,
     /// Optional operator-declared value codecs. When set, query-side
     /// literals bound to a codec'd property are decoded before
@@ -76,20 +62,17 @@ pub struct ExecuteOptions<'a> {
     /// back (`42` → `'Q42'`). `None`/empty = no transform (the common
     /// case; zero hot-path cost). See `cypher::value_codec`.
     pub value_codecs: Option<&'a [ValueCodec]>,
-    /// Optional cooperative-cancellation flag. The executor and pattern
-    /// matcher poll it at the same checkpoints they poll `deadline`
-    /// (one relaxed atomic load per ~4K comparisons); once set, the
-    /// run aborts with [`KgError::Cancelled`]. `None` = never cancelled
-    /// (zero hot-path cost). This is the engine-agnostic primitive each
-    /// binding flips from its own signal model — the Python wheel wires
-    /// it to a scoped SIGINT handler so Ctrl-C interrupts long queries;
-    /// servers leave it `None` and use their own deadline/teardown.
+    /// Cooperative-cancellation flag. The executor and pattern matcher poll it
+    /// at the same checkpoints they poll `deadline` (one relaxed atomic load
+    /// per ~4K comparisons); once set, the run aborts with
+    /// [`KgError::Cancelled`]. `None` = never cancelled, zero hot-path cost.
+    /// Each binding flips it from its own signal model — the Python wheel
+    /// points it at a `static AtomicBool` a scoped SIGINT handler sets, so
+    /// Ctrl-C interrupts long queries; servers pass `None` and use their own
+    /// deadline/teardown.
     ///
-    /// A `&'static` flag (not an owned `Arc`) because the only setter is
-    /// a process-global signal handler, which can't capture state — the
-    /// Python wheel points this at a `static AtomicBool` its SIGINT
-    /// handler flips. Bindings that need this provide a `'static` flag;
-    /// the rest pass `None`.
+    /// `&'static` rather than an owned `Arc` because the only setter is a
+    /// process-global signal handler, which cannot capture state.
     pub cancel: Option<&'static AtomicBool>,
     /// Optional role-scoped write whitelist (integrity, not secrecy — e.g. a
     /// coding role may write `Plan`/`Task` but not `Algorithm`). `None` =
@@ -115,9 +98,7 @@ pub struct ExecuteOptions<'a> {
     pub git_sha: Option<&'a str>,
     pub modified_by: Option<&'a str>,
     /// Whether this execution may read local files through `LOAD CSV`, and
-    /// from where.
-    ///
-    /// Defaults to [`CsvImportPolicy::Denied`], and deliberately so: `file://`
+    /// from where. Defaults to [`CsvImportPolicy::Denied`], deliberately: `file://`
     /// means the server's filesystem, so a binding that never considered
     /// `LOAD CSV` must not hand its callers a file-read primitive by omission.
     /// In-process bindings (the Python wheel, the CLI) grant
@@ -135,38 +116,23 @@ pub struct ExecuteOptions<'a> {
     /// ([`crate::graph::parallel::should_fan_out`]) — `true` is a permission,
     /// not an instruction.
     ///
-    /// The Bolt and MCP servers deliberately never set it (v1); the Python
-    /// wheel exposes it as `kg.cypher(parallel=True)` and the CLI as
-    /// `--parallel`.
+    /// The Bolt and MCP servers deliberately never set it; the Python wheel
+    /// exposes it as `kg.cypher(parallel=True)` and the CLI as `--parallel`.
     pub parallel: bool,
 }
 
 impl<'a> ExecuteOptions<'a> {
-    /// Conservative defaults: `lazy_eligible: false` (safe for
-    /// every consumer that doesn't have a lazy materializer), no
-    /// deadline, no max_rows, no disabled passes, no embedder.
-    /// Caller is expected to override at least `params`.
-    ///
-    /// Same as [`Self::eager`] — the two are synonyms. `new` is
-    /// kept for Rust-convention API discovery; `eager` is the
-    /// intent-named factory call-sites prefer.
+    /// Synonym for [`Self::eager`], kept for Rust-convention API discovery;
+    /// `eager` is the intent-named factory call-sites prefer.
     pub fn new(params: &'a HashMap<String, Value>) -> Self {
         Self::eager(params)
     }
 
-    /// Eager-execution defaults — the safe default for any binding
-    /// that doesn't have a lazy result materializer.
-    ///
-    /// This is the constructor non-Python bindings should reach for:
-    /// `lazy_eligible: false`, no deadline, no max_rows, no disabled
-    /// passes, no embedder. Override individual fields after
-    /// construction if needed (deadline for timeouts, embedder when
-    /// `text_score()` queries are expected).
-    ///
-    /// Lifted in 2026-05-25 to give the call-site the intent-named
-    /// shape — previously mcp-server / bolt-server constructed the
-    /// struct manually with identical defaults; now they call
-    /// `ExecuteOptions::eager(params)` for self-documenting code.
+    /// Eager-execution defaults — the constructor for any binding without a
+    /// lazy result materializer: `lazy_eligible: false`, no deadline, no
+    /// max_rows, no disabled passes, no embedder. Override individual fields
+    /// after construction (deadline for timeouts, embedder when `text_score()`
+    /// queries are expected).
     pub fn eager(params: &'a HashMap<String, Value>) -> Self {
         Self {
             params,
@@ -194,30 +160,26 @@ impl<'a> ExecuteOptions<'a> {
         self
     }
 
-    /// Opt this execution in to the parallel runtime.
-    ///
-    /// Builder form for the same reason [`Self::with_csv_import`] has one: a
-    /// call-site reads as an explicit grant rather than a field assignment
-    /// buried among defaults.
+    /// Opt this execution in to the parallel runtime. Builder form for the
+    /// same reason [`Self::with_csv_import`] has one.
     pub fn with_parallel(mut self, parallel: bool) -> Self {
         self.parallel = parallel;
         self
     }
 }
 
-/// Map an executor error string to a typed [`KgError`]. When the
-/// caller's cooperative-cancellation flag is set, an aborted run is
-/// reported as [`KgError::Cancelled`] (the binding maps that to its
-/// interrupt type — `KeyboardInterrupt` in the Python wheel) rather
-/// than a misleading `CypherExecution`. Otherwise it's a plain
-/// execution error. `cancel == None` (every server binding) always
-/// takes the `CypherExecution` branch, so behaviour is unchanged there.
 #[inline]
 fn is_cancelled(opts: &ExecuteOptions<'_>) -> bool {
     opts.cancel
         .is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
 }
 
+/// Map an executor error string to a typed [`KgError`]. When the caller's
+/// cooperative-cancellation flag is set, an aborted run is reported as
+/// [`KgError::Cancelled`] (the binding maps that to its interrupt type —
+/// `KeyboardInterrupt` in the Python wheel) rather than a misleading
+/// `CypherExecution`. `cancel == None`, every server binding, always takes
+/// the `CypherExecution` branch.
 #[inline]
 fn exec_err(opts: &ExecuteOptions<'_>, message: String) -> KgError {
     if is_cancelled(opts) {
@@ -256,16 +218,13 @@ fn mutation_err(graph: &mut DirGraph, opts: &ExecuteOptions<'_>, message: String
 pub struct ExecuteOutcome {
     pub result: CypherResult,
     /// `true` when the query was a CREATE/SET/DELETE/REMOVE/MERGE.
-    /// Read-only callers can pre-reject by checking this on a
-    /// dry-run; in practice `execute_read` rejects mutations
-    /// upfront via `KgError::Argument`.
+    /// `execute_read` rejects those upfront via `KgError::Argument`.
     pub is_mutation: bool,
     /// Set when the user passes `RETURN ... FORMAT CSV` (kglite
     /// extension); pyapi + mcp-server format the result accordingly.
     pub output_format: OutputFormat,
-    /// Set when the user prefixed the query with `EXPLAIN`. The
-    /// `result` contains the rendered plan rows rather than real
-    /// data; callers may want to format / display differently.
+    /// Set when the user prefixed the query with `EXPLAIN`, in which case
+    /// `result` holds rendered plan rows rather than data.
     pub explain: bool,
 }
 
@@ -298,7 +257,6 @@ pub fn execute_read(
     #[cfg(test)]
     cypher::plan_cache::instrumentation::classify_pending(is_mutation);
 
-    // EXPLAIN: render plan rows, skip execution.
     if parsed.explain {
         let mut result = cypher::generate_explain_result(&parsed, graph);
         attach_diagnostics(&mut result, &warnings, started, opts);
@@ -326,10 +284,10 @@ pub fn execute_read(
         .with_csv_import(opts.csv_import.clone())
         .execute(&parsed)
         .map_err(|message| exec_err(opts, message))?;
-    // value_codecs: encode codec'd-property result columns back to the typed
-    // form (`42` → `'Q42'`). Applies to eager rows; lazy results (Python's
-    // streaming path) materialize later and aren't covered — the configured
-    // consumer (mcp-server) runs eager.
+    // Encode codec'd-property result columns back to the typed form
+    // (`42` → `'Q42'`). Eager rows only; lazy results (Python's streaming
+    // path) materialize later and aren't covered — the configured consumer
+    // (mcp-server) runs eager.
     cypher::value_codec::apply_encode(&mut result, &encode_plan);
     attach_diagnostics(&mut result, &warnings, started, opts);
 
@@ -385,14 +343,11 @@ fn can_skip_rollback_checkpoint(
     }
 }
 
-/// Mutating execution. Caller passes `&mut DirGraph` (typically
-/// from `Transaction::working_mut()`). For pure reads, use
-/// [`execute_read`] instead.
+/// Mutating execution. Caller passes `&mut DirGraph` (typically from
+/// `Transaction::working_mut()`). For pure reads, use [`execute_read`].
 ///
-/// Note: a read query passed to `execute_mut` runs against the
-/// mutable graph view as a read. The function returns
-/// `is_mutation: false` in that case so the caller knows nothing
-/// was changed.
+/// A read query passed here runs against the mutable graph view as a read and
+/// returns `is_mutation: false`, so the caller knows nothing was changed.
 // KgError deliberately carries structured context; boxing it would change the public result type.
 #[allow(clippy::result_large_err)]
 pub fn execute_mut(
@@ -437,15 +392,14 @@ pub fn execute_mut(
 
     // A statement is atomic even when the caller supplied an already-
     // materialized transaction working copy. Open a checkpoint whenever the
-    // executor can still fail after its first write. A deliberately narrow
-    // in-memory fast path covers two shapes whose executors finish all
-    // fallible work before mutating; see `can_skip_rollback_checkpoint`.
+    // executor can still fail after its first write; the narrow in-memory
+    // exemptions are proved in `can_skip_rollback_checkpoint`.
     //
     // The checkpoint is an undo journal (O(changes)) wherever the journal can
     // reverse everything the statement may touch, and a whole-graph clone
-    // (O(V+E)) otherwise; `dir_graph::rollback` owns that decision and
-    // documents it. Either way it MUST be closed on every exit path —
-    // `commit` is what uninstalls the capture journal.
+    // (O(V+E)) otherwise; `dir_graph::rollback` owns that decision. Either way
+    // it MUST be closed on every exit path — `commit` is what uninstalls the
+    // capture journal.
     let checkpoint = if is_mutation && !can_skip_rollback_checkpoint(graph, &parsed, opts) {
         StatementCheckpoint::open(graph)
     } else {
@@ -502,12 +456,11 @@ pub fn execute_mut(
         graph.bump_version();
         // Re-enforce `set_memory_limit` over what the statement just wrote.
         // A write that *creates* a column — a SET for a property the type has
-        // never carried — puts O(rows) of fresh heap behind a limit that was
-        // last checked at consolidation time, and before this nothing looked
-        // again: the only bound a caller can place on the columnar heap could
-        // be escaped by writing one new property, permanently. A no-op (one
-        // `Option` test) when no limit is set, and an O(columns) heap sum when
-        // one is; the materialisation only runs when the sum is over.
+        // never carried — puts O(rows) of fresh heap behind a limit last
+        // checked at consolidation time; without this, writing one new
+        // property permanently escapes the only bound a caller can place on
+        // the columnar heap. A no-op (one `Option` test) with no limit set, an
+        // O(columns) heap sum with one; materialisation runs only when over.
         graph.maybe_spill_columns();
         r
     } else {
@@ -596,22 +549,6 @@ fn collect_clause_names<'a>(clauses: &'a [Clause], out: &mut Vec<&'a str>) {
     }
 }
 
-/// Shared preparation: parse → validate → rewrite_text_score → embed
-/// (if needed) → optimize → optional mark_lazy. Returns the
-/// parsed+optimized AST + the (possibly-augmented-with-embeddings)
-/// param map.
-///
-/// The params map is borrowed from `opts.params` in the common case
-/// (no text_score). When text_score() is present, we clone-on-write
-/// to inject the embedding result vectors into the map — the
-/// returned `HashMap<String, Value>` is owned in that case.
-///
-/// **GIL note for binding implementers.** If `opts.embedder` is a
-/// Python-backed embedder (PyEmbedderAdapter), the binding MUST
-/// release the GIL before calling `execute_read`/`execute_mut`
-/// (Python's `py.detach`). The embed call inside this fn will then
-/// re-acquire the GIL briefly to invoke Python; if you forget to
-/// release first, it deadlocks.
 /// Output of [`prepare`]: the parsed+optimized query, the (possibly
 /// embedding-augmented) param map, the column-indexed value-codec encode plan
 /// (empty when no codecs apply), and the non-fatal schema warnings this
@@ -620,21 +557,15 @@ struct PreparedQuery {
     plan: Arc<CypherQuery>,
     params: HashMap<String, Value>,
     encode_plan: Vec<Option<ValueCodec>>,
-    /// Unknown-label / unknown-relationship-type / absent-property warnings,
-    /// computed **once** here and then used twice: emitted to stderr for
-    /// interactive users, and attached to `QueryDiagnostics.warnings` for every
-    /// programmatic surface. Behind an `Arc` because the plan cache stores them
-    /// alongside the plan — see the note at the cache lookup below.
+    /// Unknown-label / unknown-relationship-type / absent-property warnings.
+    /// Behind an `Arc` because the plan cache stores them alongside the plan.
     warnings: Arc<[String]>,
 }
 
-/// The plan-cache hit path, lifted out of [`prepare`] because it is a complete
-/// answer rather than a step: everything below the lookup in `prepare` — parse,
-/// validate, the schema pass, optimize — is precisely what a hit skips.
-///
-/// **Caller gates on the `cacheable` predicate.** Stored post lazy-marking for
-/// this `lazy_eligible`, so a hit is a pure `Arc` clone: no parse / validate /
-/// optimize / mutation.
+/// The plan-cache hit path: a hit skips everything below the lookup in
+/// [`prepare`] — parse, validate, the schema pass, optimize. Entries are
+/// stored post lazy-marking for this `lazy_eligible`, so a hit is a pure `Arc`
+/// clone. The caller gates on the `cacheable` predicate.
 ///
 /// A hit also skips `dynamic_labels::resolve`, which is where an unbound
 /// `$parameter` — a label position or an inline property-map value — is
@@ -663,6 +594,17 @@ fn cached_plan(graph: &DirGraph, query: &str, opts: &ExecuteOptions<'_>) -> Opti
     })
 }
 
+/// Shared preparation for both execution paths (the pipeline is in the module
+/// header).
+///
+/// The returned param map is borrowed from `opts.params` in the common case;
+/// a `text_score()` query clones-on-write to inject the embedding vectors.
+///
+/// **GIL note for binding implementers.** If `opts.embedder` is a
+/// Python-backed embedder (PyEmbedderAdapter), the binding MUST release the
+/// GIL before calling `execute_read`/`execute_mut` (Python's `py.detach`).
+/// The embed call below re-acquires it briefly to invoke Python; failing to
+/// release first deadlocks.
 // KgError carries query context; boxing it would only burden an error path.
 #[allow(clippy::result_large_err)]
 fn prepare(
@@ -711,8 +653,8 @@ fn prepare(
     // not the output schema). Column-indexed; empty when no codecs / no RETURN.
     let encode_plan = cypher::value_codec::build_encode_plan(&parsed, codecs);
 
-    // Schema validation — property typos in pattern literals
-    // (`{ttle: 'Alice'}`) get caught with a "did you mean?" hint.
+    // Property typos in pattern literals (`{ttle: 'Alice'}`) are rejected
+    // here, with a "did you mean?" hint.
     cypher::validate_schema(&parsed, graph).map_err(KgError::from)?;
 
     // Non-fatal: a MATCH that references an unknown node label or relationship
@@ -753,8 +695,7 @@ fn prepare(
     let warnings: Arc<[String]> = collected.into_messages().into();
     cypher::emit_query_warnings(&warnings);
 
-    // text_score() rewrite. Scans for `text_score(...)` calls in the
-    // AST and rewrites them to `vector_score(...)`, collecting the
+    // Rewrites `text_score(...)` calls to `vector_score(...)`, collecting the
     // texts to embed alongside.
     let rewrite = cypher::rewrite_text_score(&mut parsed, opts.params).map_err(|message| {
         KgError::CypherExecution {
@@ -763,10 +704,7 @@ fn prepare(
         }
     })?;
 
-    // If text_score(...) was used (and we're NOT in EXPLAIN mode —
-    // EXPLAIN renders plan rows without executing, so no embedding
-    // needed), run the embedder and inject the result vectors into
-    // the param map. Otherwise pass the caller's params through.
+    // EXPLAIN renders plan rows without executing, so it needs no embedding.
     let params: Cow<'_, HashMap<String, Value>> =
         if !rewrite.texts_to_embed.is_empty() && !parsed.explain {
             Cow::Owned(embed_into_params(opts, &rewrite)?)
@@ -774,8 +712,7 @@ fn prepare(
             Cow::Borrowed(opts.params)
         };
 
-    // Optimize. Empty disabled-set is the common case; avoid the
-    // HashSet allocation when no passes are disabled.
+    // The static empty set avoids a HashSet allocation in the common case.
     let disabled_default = cypher::planner::empty_disabled_set();
     let disabled_ref = opts.disabled_passes.unwrap_or(disabled_default);
     cypher::planner::optimize_with_disabled(&mut parsed, graph, &params, disabled_ref);
@@ -804,12 +741,11 @@ fn prepare(
     // writer nothing and stops a write loop evicting every *other* graph's
     // live read plans out of a process-global cache.
     //
-    // Two shapes did reuse a cached mutation plan and deliberately no longer
-    // do: transactions forked from one base version (same `graph_id` +
-    // `version`), and a retry of a mutation that errored before
-    // `bump_version`. Both are same-version replays — a narrow window traded
-    // for a per-write cost every serial writer pays. See
-    // `session::plan_cache_cost_tests`, which pins both directions.
+    // Two same-version replays lose their reuse, deliberately: transactions
+    // forked from one base version (same `graph_id` + `version`), and a retry
+    // of a mutation that errored before `bump_version`. A narrow window traded
+    // for a per-write cost every serial writer pays; pinned in both directions
+    // by `session::plan_cache_cost_tests`.
     //
     // The **lookup** above deliberately stays. `prepare` runs before anything
     // has parsed the query, so this classification does not exist yet there,
@@ -817,23 +753,22 @@ fn prepare(
     // its own module docs) on the read-hit path that the plan cache exists to
     // keep at ~1.9 us. With no mutation ever inserted, a mutation's lookup is
     // a guaranteed miss: one shared read lock and one hash, and nothing more.
-    // ...and never for a statement carrying findings a lock would promote,
-    // which is what makes the promotions above independent of the cache. A hit
-    // returns before the schema pass runs, so it cannot re-decide anything; by
-    // refusing to store such a plan, a hit *proves* there was nothing to
-    // promote, and "prime unlocked → lock_schema() → rerun the same text"
+    //
+    // And never for a statement carrying findings a lock would promote, which
+    // is what makes the promotions above independent of the cache: a hit
+    // returns before the schema pass runs and cannot re-decide anything, so
+    // refusing to store such a plan makes a hit *prove* there was nothing to
+    // promote. "Prime unlocked → lock_schema() → rerun the same text" then
     // raises whether or not locking bumped the graph version (through the
     // Python/`api` surface it does — `make_dir_graph_mut`; a core caller
     // flipping the flag on an owned `DirGraph` does not).
     //
-    // The exclusion tracks the promotable subset exactly, so it costs nothing
-    // it does not have to: every absent-property statement (the family is
-    // promoted wholesale), but only the *declared*-type mismatches — a
-    // `define_schema()`-sourced one can never become an error, so its plan
-    // stays cached and its warning rides the entry as any other family's does.
-    // What remains excluded is confined to statements the engine has already
-    // diagnosed as reading an all-null column or asking a question no row can
-    // answer, which no hot loop should contain.
+    // The exclusion tracks the promotable subset exactly: every
+    // absent-property statement (that family promotes wholesale), but only the
+    // *declared*-type mismatches — a `define_schema()`-sourced one can never
+    // become an error, so its plan stays cached and its warning rides the
+    // entry. What stays excluded reads an all-null column or asks a question
+    // no row can answer, which no hot loop should contain.
     if cacheable
         && params.is_empty()
         && !strict_absent
@@ -889,9 +824,8 @@ fn attach_diagnostics(
     result.diagnostics = Some(diagnostics);
 }
 
-/// Run the embedder on collected texts; inject the JSON-encoded
-/// vectors into a clone of the param map. Caller-supplied params
-/// are not mutated. Returns the augmented map.
+/// Run the embedder on collected texts; inject the vectors into a clone of
+/// the param map. Caller-supplied params are not mutated.
 // KgError carries query context; boxing it would only burden an error path.
 #[allow(clippy::result_large_err)]
 fn embed_into_params(

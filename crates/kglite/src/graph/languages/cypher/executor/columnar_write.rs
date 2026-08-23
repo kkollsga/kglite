@@ -1,12 +1,8 @@
 //! The in-memory columnar master-store write path.
 //!
-//! Extracted from `write.rs` rather than left in place: `write.rs` reached its
-//! 2500-line ceiling, and project doctrine is to split a file that outgrows it
-//! rather than raise the allowlist. These three items are the natural seam --
-//! they are the only ones that reach the per-type master `Arc<ColumnStore>`,
-//! and `execute_set` / `execute_remove` must agree on all of them (a property
-//! removed on a node's forked store while the master keeps the value is
-//! resurrected by the next clause's handle sweep).
+//! Split out of `write.rs` at its size ceiling along the natural seam: these
+//! are the only items that reach the per-type master `Arc<ColumnStore>`, and
+//! `execute_set` / `execute_remove` must agree on all of them.
 
 use crate::datatypes::values::Value;
 use crate::graph::schema::{DirGraph, InternedKey};
@@ -55,55 +51,46 @@ pub(super) enum PriorCell {
 /// whether it landed there.
 ///
 /// The fast path for `Columnar` storage: route the write through the per-type
-/// master `Arc<ColumnStore>` once, instead of through each node's own handle.
-/// Every node of the type points at the same allocation, so `Arc::make_mut` on
-/// a *node's* handle would clone the whole store on every write — O(N²) for a
-/// batch `SET`. Going through the master forks once; the per-node handles are
-/// re-pointed in a single sweep at the end of the clause.
+/// master `Arc<ColumnStore>`, which the storage backend solely owns. A node
+/// carries a row id and no store handle (`storage/property_storage.rs`), so
+/// there is nothing per-node to fork: a node-held handle would make
+/// `Arc::make_mut` clone the whole store on every write — O(N²) for a batch
+/// `SET`.
 ///
 /// Returns `false` — leaving the caller to fall through to the per-node setter
 /// — for disk-backed graphs (which have their own write path), for non-
 /// `Columnar` nodes, for a `Columnar` node whose type is absent from
 /// `column_stores`, and for `title`/`name`.
 ///
-/// `title`/`name` are still excluded, but no longer because the title lives
-/// somewhere else: the fallthrough now writes it through
+/// The `title`/`name` exclusion is a routing detail: a title is not a schema
+/// slot, so it cannot go through the cell writer below. The fallthrough writes
+/// it through
 /// [`GraphWrite::set_node_title`](crate::graph::storage::GraphWrite::set_node_title),
 /// which lands in the store's reserved `__title__` column for every title-write
-/// path (Cypher `SET`, `add_nodes` update/replace, connection titles). The
-/// save-side consolidation chokepoint that used to reconcile an inline override
-/// against a stale column — and rebuilt every store to do it (petekSuite bug 2)
-/// — has nothing left to reconcile. The exclusion here is a routing detail: a
-/// title is not a schema slot, so it cannot go through the cell writer below.
+/// path (Cypher `SET`, `add_nodes` update/replace, connection titles).
 ///
-/// The property name is interned into the graph's `StringInterner` *before*
-/// `column_stores` is borrowed. The per-node path gets this free via
-/// `node.set_property(…, &mut graph.interner)`; the master path once used
-/// `InternedKey::from_str()`, which only hashes, leaving `save()` unable to
-/// resolve the key back to a string at serialize time. Symptom: every
-/// Cypher-`SET` property on a 0.8.39 in-memory Sodir-scale graph survived
-/// in-memory but vanished after save+load, with
+/// The property name must reach here already interned into the graph's
+/// `StringInterner` (see [`ColumnMasterWrite::key`]); `InternedKey::from_str`
+/// only hashes, leaving `save()` unable to resolve the key back to a string at
+/// serialize time. Symptom: every Cypher-`SET` property on a 0.8.39 in-memory
+/// Sodir-scale graph survived in-memory but vanished after save+load, with
 /// `BUG: InternedKey N not found in StringInterner`.
 ///
 /// # Journals, and why the capture must come first
 ///
 /// - **WAL**: the write bypasses the recorded `GraphWrite` path, so the one
-///   mutated node is captured explicitly. Exactly one node — there is no
-///   end-of-clause sweep any more, because no node holds a store handle to
-///   re-point.
+///   mutated node is captured explicitly — exactly one, since no other node's
+///   state changes.
 /// - **Undo**: the cell's prior value is captured, **before** the write, as
-///   [`UndoEntry::ColumnarCell`]. That ordering is load-bearing — after the
-///   write the prior value is gone — but it no longer forces a copy of
-///   anything: the journal holds an `Option<Value>`, never a handle on the
-///   store, so the master stays uniquely owned and `Arc::make_mut` below
-///   mutates one cell in place whether or not a checkpoint is open.
+///   [`UndoEntry::ColumnarCell`]; after the write it is gone. The journal
+///   holds an `Option<Value>`, never a handle on the store, so the master
+///   stays uniquely owned and `Arc::make_mut` below mutates one cell in place
+///   whether or not a checkpoint is open.
 ///
 /// The uniquely-owned half is asserted rather than argued — see the
 /// `debug_assert!` at the write itself and
 /// `dir_graph::rollback_tests::the_master_is_uniquely_owned_between_statements`.
 pub(super) fn set_via_column_master(graph: &mut DirGraph, write: ColumnMasterWrite<'_>) -> bool {
-    // Disk-backed graphs use a separate write path; the master `column_stores`
-    // Arc is for the in-memory Columnar mode only.
     let Some(row_id) = write.row_id else {
         return false;
     };
@@ -172,16 +159,14 @@ pub(super) struct MasterCell<'a> {
 ///
 /// # What is resolved once per statement, and what per row
 ///
-/// The store handle, the type key, the property key and the key's column slot
-/// are all facts about the `(type, property)` pair. The row loop used to
-/// re-derive all four — a type-name hash, a `column_stores` probe for the
-/// declared-type check, a second probe for the write, and two `TypeSchema`
-/// lookups — so a 100k-row `SET` paid them 100k times to write one column.
-/// What is left per row is the journal capture, one `column_stores` probe, one
-/// slot lookup answered through a *shared* borrow, and the cell write. The two
-/// `Arc::make_mut` uniqueness checks (store, then column) stay: they are the
-/// price of the copy-on-write sharing a fork and a held view rely on, and
-/// nothing safe removes them.
+/// The type key and the property key are facts about the `(type, property)`
+/// pair and are resolved by the caller once per statement; re-deriving them
+/// per row made a 100k-row `SET` pay a type-name hash and extra store probes
+/// 100k times to write one column. What is left per row is the journal
+/// capture, one `column_stores` probe, one slot lookup answered through a
+/// *shared* borrow, and the cell write. The two `Arc::make_mut` uniqueness
+/// checks (store, then column) stay: they are the price of the copy-on-write
+/// sharing a fork and a held view rely on, and nothing safe removes them.
 pub(super) fn write_column_master(
     graph: &mut DirGraph,
     cell: MasterCell<'_>,
@@ -242,23 +227,20 @@ pub(super) fn write_column_master(
         PriorCell::Skip => None,
     };
 
-    // The rollback invariant, asserted at the exact point it matters — and it
-    // is the *inverse* of the one this code used to carry. The journal used
-    // to hold the master's allocation, so the write had to fork away from it;
-    // now the journal holds only the cell's prior value, so a copy here
-    // would be a silent whole-store clone per statement (O(rows x cols) to
-    // write one cell) with nothing gained.
+    // The rollback invariant, asserted at the exact point it matters: a copy
+    // here would be a silent whole-store clone per statement (O(rows x cols)
+    // to write one cell) with nothing gained.
     //
-    // Three holders are legitimate and only these three: a `Forked` backend
-    // shares its stores with the base a reader holds; a whole-`DirGraph` clone
+    // Exactly two holders are legitimate: a `Forked` backend shares its stores
+    // with the base a reader holds, and a whole-`DirGraph` clone
     // (`fork_transaction`, the clone checkpoint, a held view) shares them with
-    // its twin; and nothing else, because `UndoEntry` has no variant that can
-    // hold an `Arc<ColumnStore>` at all — the property this design rests on
-    // is enforced by the type, not by this line. What the assert still
-    // catches is a *fourth* holder appearing where the store was uniquely
-    // owned: the count is read before the write, so a copy taken from a
-    // uniquely-owned master fails here loudly. The behavioural gate is the
-    // clone counter (`rollback_tests::a_columnar_statement_clones_no_store`).
+    // its twin. The journal is not one of them — `UndoEntry` has no variant
+    // that can hold an `Arc<ColumnStore>`, so the type enforces that, not this
+    // line. What the assert catches is a *third* holder appearing where the
+    // store was uniquely owned: the count is read before the write, so a copy
+    // taken from a uniquely-owned master fails here loudly. The behavioural
+    // gate is the clone counter
+    // (`rollback_tests::a_columnar_statement_clones_no_store`).
     let shared = Arc::strong_count(master) > 1;
     let before = Arc::as_ptr(master);
     Arc::make_mut(master).set_at_slot(row_id, slot, value); // (3)
@@ -274,9 +256,8 @@ pub(super) fn write_column_master(
 /// Hand the node's pre-write state to the change-capture seam, before this
 /// write destroys it.
 ///
-/// **This is a choke point, not a hook, and the difference is the whole
-/// point.** A columnar write goes straight into the master `ColumnStore`, so
-/// no recorded `GraphWrite` call describes it and the seam is told after the
+/// A columnar write goes straight into the master `ColumnStore`, so no
+/// recorded `GraphWrite` call describes it and the seam is told after the
 /// fact, by the `note_recorded_node_upsert` at the end of
 /// [`write_column_master`]. A before-image read *there* is read after
 /// `set_at_slot` has already replaced the value it claims to describe: the

@@ -17,7 +17,6 @@ mod type_id_index_tests {
     #[test]
     fn numeric_coercions_retained() {
         let idx = integer_index();
-        // UniqueId / Int64 / Float all hit the integer key.
         assert_eq!(idx.get(&Value::UniqueId(42)), Some(NodeIndex::new(20)));
         assert_eq!(idx.get(&Value::Int64(42)), Some(NodeIndex::new(20)));
         assert_eq!(idx.get(&Value::Float64(42.0)), Some(NodeIndex::new(20)));
@@ -138,11 +137,10 @@ mod maintenance_tests {
     #[test]
     fn test_graph_info_after_deletion() {
         let mut g = make_test_graph(5, false);
-        // Delete node 2 — leaves a tombstone
         g.graph.remove_node(NodeIndex::new(2));
         let info = g.graph_info();
         assert_eq!(info.node_count, 4);
-        assert_eq!(info.node_capacity, 5); // Still 5 slots
+        assert_eq!(info.node_capacity, 5);
         assert_eq!(info.node_tombstones, 1);
         assert!(info.fragmentation_ratio > 0.19 && info.fragmentation_ratio < 0.21);
     }
@@ -166,7 +164,6 @@ mod maintenance_tests {
 
         g.reindex();
 
-        // type_indices should be rebuilt
         assert_eq!(g.type_indices.len(), 1);
         assert_eq!(g.type_indices.get("Person").unwrap().len(), 5);
     }
@@ -175,7 +172,6 @@ mod maintenance_tests {
     fn test_reindex_rebuilds_property_indices() {
         let mut g = make_test_graph(5, false);
 
-        // Create a property index
         g.create_index("Person", "age");
         assert!(g.has_index("Person", "age"));
 
@@ -187,7 +183,6 @@ mod maintenance_tests {
 
         g.reindex();
 
-        // Property index should be rebuilt with correct data
         let stats = g.get_index_stats("Person", "age").unwrap();
         assert_eq!(stats.unique_values, 5); // ages 20..24
         assert_eq!(stats.total_entries, 5);
@@ -225,16 +220,13 @@ mod maintenance_tests {
     #[test]
     fn test_reindex_after_deletion() {
         let mut g = make_test_graph(5, false);
-        // Delete node 2
         g.graph.remove_node(NodeIndex::new(2));
         // type_indices still has the stale entry
         assert_eq!(g.type_indices.get("Person").unwrap().len(), 5);
 
         g.reindex();
 
-        // Now type_indices should reflect only 4 live nodes
         assert_eq!(g.type_indices.get("Person").unwrap().len(), 4);
-        // And none of them should be index 2
         assert!(!g
             .type_indices
             .get("Person")
@@ -246,7 +238,7 @@ mod maintenance_tests {
     fn test_vacuum_noop_when_clean() {
         let mut g = make_test_graph(5, true);
         let mapping = g.vacuum();
-        assert!(mapping.is_empty()); // No remapping needed
+        assert!(mapping.is_empty());
         assert_eq!(g.graph.node_count(), 5);
         assert_eq!(g.graph_info().node_tombstones, 0);
     }
@@ -335,19 +327,16 @@ mod maintenance_tests {
     #[test]
     fn test_vacuum_compacts_after_deletion() {
         let mut g = make_test_graph(5, true);
-        // Delete middle node (creates tombstone)
         g.graph.remove_node(NodeIndex::new(2));
         assert_eq!(g.graph.node_count(), 4);
         assert_eq!(g.graph_info().node_tombstones, 1);
 
         let mapping = g.vacuum();
 
-        // After vacuum: no tombstones, indices are contiguous
         assert_eq!(g.graph.node_count(), 4);
         assert_eq!(g.graph_info().node_tombstones, 0);
         assert_eq!(g.graph_info().node_capacity, 4);
 
-        // Mapping should have 4 entries (one for each surviving node)
         assert_eq!(mapping.len(), 4);
     }
 
@@ -358,8 +347,6 @@ mod maintenance_tests {
 
         let mapping = g.vacuum();
 
-        // Verify all surviving nodes are present with correct data.
-        //
         // Read through `node_view`, not `node_weight`: an ingested node's
         // inline `title` is the `Value::Null` sentinel and its real title lives
         // in the type's `ColumnStore`. Off `node_weight` this loop matches no
@@ -383,9 +370,7 @@ mod maintenance_tests {
     fn test_vacuum_preserves_edges() {
         let mut g = make_test_graph(4, true);
         // Edges: 0→1, 1→2, 2→3
-        // Delete node 0 (and its edge to 1)
         g.graph.remove_node(NodeIndex::new(0));
-        // Remaining edges should be 1→2, 2→3
 
         let _mapping = g.vacuum();
 
@@ -436,7 +421,6 @@ mod maintenance_tests {
 
         g.vacuum();
 
-        // type_indices should point to valid, contiguous indices
         assert_eq!(g.type_indices.get("Person").unwrap().len(), 4);
         for idx in g.type_indices.get("Person").unwrap().iter() {
             assert!(g.graph.node_weight(idx).is_some());
@@ -451,7 +435,6 @@ mod maintenance_tests {
 
         g.vacuum();
 
-        // Property index should still exist with correct entries
         assert!(g.has_index("Person", "age"));
         let stats = g.get_index_stats("Person", "age").unwrap();
         assert_eq!(stats.total_entries, 4); // 5 - 1 deleted
@@ -476,14 +459,11 @@ mod maintenance_tests {
         assert_eq!(g.graph_info().fragmentation_ratio, 0.0);
     }
 
-    // ========================================================================
-    // Incremental Index Update Tests
-    // ========================================================================
+    // ─── Incremental index update tests ──────────────────────────────────
 
     #[test]
     fn test_update_property_indices_for_add() {
         let mut g = DirGraph::new();
-        // Add a node and create an index
         let mut props = HashMap::new();
         props.insert("city".to_string(), Value::String("Oslo".to_string()));
         let n0 = g.graph.add_node(NodeData::new(
@@ -498,7 +478,6 @@ mod maintenance_tests {
             .push(n0);
         g.create_index("Person", "city");
 
-        // Add a second node and call the helper
         let mut props2 = HashMap::new();
         props2.insert("city".to_string(), Value::String("Bergen".to_string()));
         let n1 = g.graph.add_node(NodeData::new(
@@ -513,7 +492,6 @@ mod maintenance_tests {
             .push(n1);
         g.update_property_indices_for_add("Person", n1);
 
-        // Verify index was updated
         let oslo = g.lookup_by_index("Person", "city", &Value::String("Oslo".to_string()));
         assert_eq!(oslo.unwrap().len(), 1);
         let bergen = g.lookup_by_index("Person", "city", &Value::String("Bergen".to_string()));
@@ -542,12 +520,10 @@ mod maintenance_tests {
         // Simulate SET n.city = 'Bergen'
         let old_val = Value::String("Oslo".to_string());
         let new_val = Value::String("Bergen".to_string());
-        // Actually change the property on the node
         let city_key = g.interner.get_or_intern("city");
         GraphWrite::set_node_property(&mut g.graph, n0, city_key, new_val.clone());
         g.update_property_indices_for_set("Person", n0, "city", Some(&old_val), &new_val);
 
-        // Verify: Oslo bucket should be empty, Bergen should have the node
         let oslo = g.lookup_by_index("Person", "city", &Value::String("Oslo".to_string()));
         assert!(oslo.is_none() || oslo.unwrap().is_empty());
         let bergen = g.lookup_by_index("Person", "city", &Value::String("Bergen".to_string()));
@@ -577,7 +553,6 @@ mod maintenance_tests {
         GraphWrite::remove_node_property(&mut g.graph, n0, city_key);
         g.update_property_indices_for_remove("Person", n0, "city", &old_val);
 
-        // Verify: Oslo bucket should be empty
         let oslo = g.lookup_by_index("Person", "city", &Value::String("Oslo".to_string()));
         assert!(oslo.is_none() || oslo.unwrap().is_empty());
     }
@@ -600,21 +575,18 @@ mod maintenance_tests {
             .push(n0);
         g.create_composite_index("Person", &["city", "age"]);
 
-        // Verify initial state
         let key = (
             "Person".to_string(),
             vec!["city".to_string(), "age".to_string()],
         );
         assert!(g.composite_indices.get(&key).unwrap().len() == 1);
 
-        // Change city to Bergen
         let old_val = Value::String("Oslo".to_string());
         let new_val = Value::String("Bergen".to_string());
         let city_key = g.interner.get_or_intern("city");
         GraphWrite::set_node_property(&mut g.graph, n0, city_key, new_val.clone());
         g.update_property_indices_for_set("Person", n0, "city", Some(&old_val), &new_val);
 
-        // Verify: old composite value gone, new one present
         let comp_map = g.composite_indices.get(&key).unwrap();
         let old_comp = CompositeValue(vec![Value::String("Oslo".to_string()), Value::Int64(30)]);
         let new_comp = CompositeValue(vec![Value::String("Bergen".to_string()), Value::Int64(30)]);
@@ -732,7 +704,6 @@ mod maintenance_tests {
             Some(vec![person])
         );
 
-        // The same write on the index-free type in the same graph: no pass.
         reset_index_maintenance_passes();
         GraphWrite::set_node_property(&mut g.graph, ghost, city, new.clone());
         g.update_property_indices_for_set("Ghost", ghost, "city", Some(&old), &new);
@@ -756,7 +727,6 @@ mod maintenance_tests {
             .insert("Person".to_string(), meta);
         g.rebuild_type_schemas();
 
-        // Snapshot properties before
         let before: Vec<(Value, Value, i64)> = g
             .type_indices
             .get("Person")
@@ -778,7 +748,6 @@ mod maintenance_tests {
         g.enable_columnar();
         assert!(g.column_store_count() > 0);
 
-        // Verify properties match
         let after: Vec<(Value, Value, i64)> = g
             .type_indices
             .get("Person")
@@ -1010,15 +979,12 @@ mod embedding_store_tests {
         let mut store = EmbeddingStore::new(2);
         let h = EmbeddingStore::text_hash("v1");
 
-        // No embedding yet → stale.
         assert!(store.is_stale(7, h));
 
-        // Embedding present + matching hash → not stale.
         store.set_embedding(7, &[1.0, 2.0]);
         store.set_text_hash(7, h);
         assert!(!store.is_stale(7, h));
 
-        // Text changed (different hash) → stale.
         assert!(store.is_stale(7, EmbeddingStore::text_hash("v2")));
 
         // Embedding present but no recorded hash (e.g. add_embeddings) → stale,
@@ -1277,7 +1243,6 @@ mod alias_index_maintenance_tests {
         result.result.rows.len()
     }
 
-    /// A graph carrying `index_on`, mutated by `mutations`.
     fn mutated(index_on: &str, mutations: &[&str]) -> DirGraph {
         let mut graph = aliased_graph();
         graph.create_index("Term", index_on);

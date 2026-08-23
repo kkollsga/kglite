@@ -1,5 +1,4 @@
-// Vector search module for embedding-based similarity queries.
-// Operates on the current graph selection for filtered vector search.
+// Embedding similarity search over the current graph selection.
 
 use super::hnsw::{HnswIndex, HnswMetric};
 use crate::graph::schema::{CurrentSelection, DirGraph, EmbeddingStore};
@@ -8,7 +7,6 @@ use petgraph::graph::NodeIndex;
 use std::borrow::Cow;
 use std::collections::{BTreeSet, BinaryHeap, HashSet};
 
-/// Distance metric for vector similarity search.
 #[derive(Clone, Copy, Debug)]
 pub enum DistanceMetric {
     Cosine,
@@ -18,9 +16,8 @@ pub enum DistanceMetric {
 }
 
 impl DistanceMetric {
-    /// Parse the Cypher-facing metric name (`'cosine'`, `'dot_product'`,
-    /// `'euclidean'`, `'poincare'`). Single source of truth so every
-    /// `vector_score` / `text_score` call site agrees on the spelling.
+    /// Single source of truth for the Cypher-facing metric spelling, so
+    /// every `vector_score` / `text_score` call site agrees on it.
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
             "cosine" => Some(DistanceMetric::Cosine),
@@ -32,17 +29,15 @@ impl DistanceMetric {
     }
 }
 
-/// A single vector search result: node index + similarity score.
 #[derive(Clone, Debug)]
 pub struct VectorSearchResult {
     pub node_idx: NodeIndex,
     pub score: f32,
 }
 
-/// Tunable options for [`vector_search`]. The selection, embedding property,
-/// and query vector are positional (primary inputs); the ranking knobs live
-/// here. Construct via [`VectorSearchOptions::default`] then the `with_*`
-/// builders, e.g. `VectorSearchOptions::default().with_top_k(20)`.
+/// Ranking knobs for [`vector_search`]. Construct via
+/// [`VectorSearchOptions::default`] then the `with_*` builders, e.g.
+/// `VectorSearchOptions::default().with_top_k(20)`.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct VectorSearchOptions {
@@ -70,12 +65,10 @@ impl Default for VectorSearchOptions {
 }
 
 impl VectorSearchOptions {
-    /// Set the number of results to return.
     pub fn with_top_k(mut self, top_k: usize) -> Self {
         self.top_k = top_k;
         self
     }
-    /// Set the distance metric.
     pub fn with_metric(mut self, metric: DistanceMetric) -> Self {
         self.metric = metric;
         self.use_stored_metric = false;
@@ -88,14 +81,13 @@ impl VectorSearchOptions {
         self.use_stored_metric = true;
         self
     }
-    /// Force an exact full scan (bypass HNSW).
     pub fn with_exact(mut self, exact: bool) -> Self {
         self.exact = exact;
         self
     }
 }
 
-/// Threshold for switching to parallel search via rayon.
+/// Candidate count above which the scan fans out over rayon.
 const PARALLEL_THRESHOLD: usize = 10_000;
 
 /// Minimum candidate count before an HNSW index is auto-used. Below this a
@@ -178,8 +170,6 @@ fn resolve_metric_from_nodes(
     parse_stored_metric(metrics.into_iter().next().unwrap_or("cosine"))
 }
 
-/// The candidate nodes a search runs over, for a given selection.
-///
 /// A selection that was narrowed contributes its current level. A selection
 /// that was **never** narrowed ([`CurrentSelection::never_selected`]) means
 /// "the whole graph" — the same rule `get_nodes()` applies — so a caller who
@@ -363,29 +353,21 @@ fn hnsw_covered_slots(
     (covered >= HNSW_AUTO_MIN && covered.saturating_mul(2) >= store.len()).then_some(covered)
 }
 
-/// Perform vector search over the current selection.
+/// Top-k similarity over the candidates of `selection` (see
+/// [`selection_candidates`]), scored highest-first.
 ///
-/// Gets candidate nodes from the selection's current level, computes similarity
-/// for each candidate that has an embedding, and returns top-k results sorted
-/// by score (descending for cosine/dot, ascending for euclidean).
-///
-/// A selection that was never narrowed searches the whole graph (see
-/// [`selection_candidates`]); one that a query emptied returns no results.
-///
-/// When `exact` is false and the store carries an HNSW index whose metric
-/// supports it (cosine/dot/euclidean) and the selection covers enough of the
-/// store, search dispatches through the index (approximate, much faster on large
-/// stores). `exact = true` always forces the full linear scan. The Poincaré
-/// metric, small/heavily-filtered selections, and stores without an index all
-/// fall back to the (norm-accelerated) exact scan.
+/// The HNSW index serves the search when `exact` is false, its metric matches
+/// the request (cosine/dot/euclidean), and the selection covers enough of the
+/// store — "enough" measured in store slots the selection actually contains,
+/// not in candidates (see [`hnsw_covered_slots`]). The Poincaré metric,
+/// `exact = true`, small or heavily-filtered selections, and stores without an
+/// index all fall back to the (norm-accelerated) exact scan.
 ///
 /// The index is reachable whenever *one* node type carries
 /// `embedding_property` — the selection may span any number of other types (see
 /// [`route_stores`]) — or, when two or more types carry it, whenever the
 /// selection is that single type. A selection spanning two embedded types is
-/// scored by scan, so no type's rows can be dropped. "Covers enough" is
-/// measured in store slots the selection actually contains, not in candidates
-/// (see [`hnsw_covered_slots`]).
+/// scored by scan, so no type's rows can be dropped.
 pub fn vector_search(
     graph: &DirGraph,
     selection: &CurrentSelection,
@@ -428,7 +410,6 @@ pub fn vector_search(
     };
 
     let results = if let Some((node_type, store)) = single_type {
-        // Validate query vector dimension
         if query_vector.len() != store.dimension {
             return Err(format!(
                 "Query vector dimension {} does not match embedding dimension {} for '{}.{}'",
@@ -479,9 +460,9 @@ pub fn vector_search(
             None => sequential_search(&candidates, store, query_vector, top_k, &scorer),
         };
         // The single-store path admits candidates of any type, so it inherits
-        // the multi-type branch's duty to tell "nothing is similar" apart from
-        // "no selected type carries this store". Only an empty result can be
-        // the latter, so the type walk never costs a populated search anything.
+        // the multi-store scan's duty to raise the caller mistake
+        // `missing_store_error` describes. Only an empty result can be one, so
+        // the type walk never costs a populated search anything.
         if rows.is_empty() {
             if let Some(err) =
                 unmatched_store_error(graph, candidates.as_ref(), node_type, embedding_property)
@@ -497,10 +478,9 @@ pub fn vector_search(
         let mut cached_type = None;
         let mut cached_store = None;
         // A selection spanning embedded and un-embedded types is a supported
-        // partial result, so a per-type miss only skips. "No type matched at
-        // all" is a different animal — a wrong column or an un-embedded type —
-        // and used to come back as a silent empty list, so it is recorded here
-        // and raised below. Both are computed on the cache-miss branch only.
+        // partial result, so a per-type miss only skips; "no type matched at
+        // all" is the caller mistake `missing_store_error` raises. Both are
+        // computed on the cache-miss branch only.
         let mut matched_a_store = false;
         let mut unmatched_types: Vec<&str> = Vec::new();
 
@@ -698,9 +678,8 @@ fn hnsw_search(
     }
 
     let results = heap.into_sorted_results();
-    // Whole-store: the index's recall is the only limiter and that's the ANN
-    // contract — accept it. Filtered: if the over-fetch didn't survive the
-    // filter down to top_k, bail to an exact scan for a correct result.
+    // Whole-store recall is the ANN contract and is accepted; a filtered
+    // shortfall is not.
     if !whole_store && results.len() < top_k {
         return None;
     }
@@ -725,9 +704,11 @@ pub(crate) fn store_is_fully_selected(
 
 type SimilarityFn = fn(&[f32], &[f32]) -> f32;
 
-/// A query-bound scorer. Built once per search (the query vector is constant
-/// across all candidates), then applied to each candidate alongside its cached
-/// L2 norm.
+/// A query-bound scorer: built once per query via [`Scorer::new`] (the query
+/// vector is constant across all candidates), then [`Scorer::score`] per
+/// candidate alongside its cached L2 norm. Shared by the fluent
+/// `vector_search` path and the Cypher `vector_score` / `text_score` scalar
+/// function so all cosine scoring benefits from the cached norm.
 ///
 /// Cosine is special-cased: with the query's norm precomputed once and each
 /// stored vector's norm cached in the `EmbeddingStore`, the per-candidate work
@@ -735,11 +716,6 @@ type SimilarityFn = fn(&[f32], &[f32]) -> f32;
 /// divide. Every other metric needs the raw vectors (dot, euclidean) or their
 /// magnitudes recomputed per pair (Poincaré is non-linear in the norms), so
 /// they fall through to the plain kernel and the cached norm is ignored.
-///
-/// Build once per query via [`Scorer::new`] (the query vector is constant across
-/// all candidates), then call [`Scorer::score`] per candidate. Shared by the
-/// fluent `vector_search` path and the Cypher `vector_score` / `text_score`
-/// scalar function so all cosine scoring benefits from the cached norm.
 #[derive(Clone, Copy)]
 pub struct Scorer {
     kind: ScorerKind,
@@ -796,8 +772,6 @@ impl Scorer {
 #[allow(dead_code)]
 #[inline]
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    // 4 independent accumulators break the loop-carried dependency chain,
-    // allowing the CPU to pipeline multiply-add operations.
     let (mut dot0, mut dot1, mut dot2, mut dot3) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
     let (mut na0, mut na1, mut na2, mut na3) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
     let (mut nb0, mut nb1, mut nb2, mut nb3) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
@@ -982,10 +956,9 @@ pub fn neg_poincare_distance(a: &[f32], b: &[f32]) -> f32 {
 
     // Clamp norms to stay inside the Poincaré ball (||x|| < 1).
     // Embeddings exactly on the boundary would produce infinite distance.
-    let alpha = (1.0 - norm_a_sq).max(1e-7); // 1 - ||a||²
-    let beta = (1.0 - norm_b_sq).max(1e-7); // 1 - ||b||²
+    let alpha = (1.0 - norm_a_sq).max(1e-7);
+    let beta = (1.0 - norm_b_sq).max(1e-7);
 
-    // γ = 1 + 2 * ||a-b||² / ((1-||a||²)(1-||b||²))
     let gamma = 1.0 + 2.0 * diff_sq / (alpha * beta);
 
     // Clamp γ ≥ 1 for numerical stability (acosh domain).
@@ -1026,7 +999,6 @@ impl PartialOrd for ScoredNode {
 
 impl Ord for ScoredNode {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Reversed: lower score = higher priority in the heap (min-heap)
         other
             .score
             .partial_cmp(&self.score)
@@ -1063,7 +1035,6 @@ impl MinHeap {
                 score: sn.score,
             })
             .collect();
-        // Sort descending by score
         results.sort_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)
@@ -1110,7 +1081,6 @@ fn parallel_search(
         .map(|chunk| sequential_search(chunk, store, query, top_k, scorer))
         .collect();
 
-    // Merge per-thread top-k results
     let mut heap = MinHeap::with_capacity(top_k);
     for thread_results in per_thread_results {
         for result in thread_results {
@@ -1120,8 +1090,6 @@ fn parallel_search(
 
     heap.into_sorted_results()
 }
-
-// ─── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -1944,7 +1912,7 @@ mod tests {
         let a: Vec<f32> = (0..100).map(|i| i as f32).collect();
         let b: Vec<f32> = (0..100).map(|i| (i * 2) as f32).collect();
         let sim = cosine_similarity(&a, &b);
-        assert!(sim > 0.99); // Nearly parallel vectors
+        assert!(sim > 0.99);
     }
 
     #[test]
@@ -2187,7 +2155,6 @@ mod tests {
 
     #[test]
     fn test_poincare_numerical_stability_near_boundary() {
-        // Vectors very close to boundary (norm ~0.999)
         let a = vec![0.999, 0.0, 0.0];
         let b = vec![0.0, 0.999, 0.0];
         let score = neg_poincare_distance(&a, &b);

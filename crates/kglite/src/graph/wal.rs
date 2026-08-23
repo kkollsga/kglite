@@ -17,8 +17,8 @@
 //! `KnowledgeGraph::flush_wal`). It is monotonic for the life of the log
 //! and survives checkpoint truncation, which is what lets the stamped
 //! `checkpoint_lsn` distinguish a frame the snapshot already contains
-//! from one committed after it. Graph `version` is a different quantity —
-//! it advances on work that is never logged — and is not a log position.
+//! from one committed after it. Graph `version` advances on work that is
+//! never logged, and is not a log position.
 //!
 //! This module owns only the **on-disk format**: the op schema, the
 //! frame envelope, and crash-safe read/write. Capture (translating
@@ -48,27 +48,17 @@
 //! it. A torn frame is therefore *discarded*, never half-applied — the
 //! atomic unit of durability is the whole frame.
 //!
-//! Torn-tail handling does **not** depend on `fsync`. `fsync` controls
+//! Torn-tail handling does **not** depend on `fsync`: `fsync` controls
 //! *when* bytes reach stable storage, not whether a write is atomic, so a
 //! torn frame has always been possible and has always been discarded. That
-//! is what lets the barrier become a per-level choice below without
-//! touching recovery.
+//! is what lets the barrier be a per-level choice without touching recovery.
 //!
 //! ## Durability levels
 //!
 //! [`DurabilityLevel`] names what a committed mutation survives; the WAL
-//! itself only cares about the derived [`SyncMode`]:
-//!
-//! - [`DurabilityLevel::Full`] → [`SyncMode::Barrier`]. Every frame is
-//!   flushed to stable storage before [`Wal::append`] returns, so an
-//!   acknowledged commit survives **power loss**.
-//! - [`DurabilityLevel::Normal`] → [`SyncMode::PageCache`]. The frame is
-//!   handed to the OS with `write(2)` and no barrier. The page cache
-//!   belongs to the kernel, not the process, so an acknowledged commit
-//!   survives the **process** dying (`SIGKILL`, panic, OOM-kill) but not an
-//!   OS crash or power loss.
-//! - [`DurabilityLevel::Off`] → no WAL at all; durability is whatever the
-//!   caller's `save()` checkpoints provide.
+//! itself only cares about the derived [`SyncMode`] — `Full` barriers every
+//! frame, `Normal` hands it to the page cache without one, `Off` keeps no log
+//! at all. The per-level guarantees are on [`DurabilityLevel`]'s variants.
 //!
 //! Under `Normal` an OS crash can lose an arbitrary suffix of the log, but
 //! never a *hole*: [`read_frames`] stops at the first frame it cannot
@@ -278,9 +268,7 @@ pub enum MutationOp {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WalFrame {
     /// Log-sequence number, issued by the writer's own monotonic counter —
-    /// **not** the graph `version`. Frames replay in ascending `lsn`; on
-    /// recovery, frames with `lsn <= DirGraph::checkpoint_lsn` are already
-    /// folded into the snapshot and skipped.
+    /// **not** the graph `version` (see the module docs for the replay rule).
     ///
     /// The counter must never restart at a checkpoint: a restarted LSN would
     /// be reused by a post-checkpoint frame, making a stale pre-checkpoint
@@ -290,12 +278,9 @@ pub struct WalFrame {
     pub ops: Vec<MutationOp>,
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// CRC32 (IEEE 802.3, polynomial 0xEDB88320) — dependency-free, table-
-// backed. Deterministic across processes/builds (unlike DefaultHasher),
-// which the torn-frame check relies on.
-// ─────────────────────────────────────────────────────────────────────
-
+// CRC32 (IEEE 802.3, polynomial 0xEDB88320), dependency-free and table-backed.
+// Deterministic across processes/builds (unlike DefaultHasher), which the
+// torn-frame check relies on.
 fn crc32_table() -> &'static [u32; 256] {
     static TABLE: OnceLock<[u32; 256]> = OnceLock::new();
     TABLE.get_or_init(|| {
@@ -329,10 +314,6 @@ pub fn crc32(data: &[u8]) -> u32 {
     crc ^ 0xFFFF_FFFF
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// Write side
-// ─────────────────────────────────────────────────────────────────────
-
 /// Write the WAL file header (magic + format version) to a freshly
 /// created/truncated WAL. Call once before any [`append_frame`].
 pub fn write_header(w: &mut impl Write) -> io::Result<()> {
@@ -351,14 +332,13 @@ fn write_header_version(w: &mut impl Write, version: u8) -> io::Result<()> {
 /// the caller wants).
 ///
 /// The prefix and payload are assembled into one buffer and emitted with a
-/// **single** `write_all`, rather than three. That removes two syscalls from
-/// the per-commit path, and — more importantly for
-/// [`DurabilityLevel::Normal`] — it shrinks the window in which a process
-/// death can leave a torn frame: a `write(2)` cannot be interrupted partway
-/// by `SIGKILL`, so a frame that fits in one write is either wholly in the
-/// page cache or wholly absent. A short write is still possible in
-/// principle, which is why the length/CRC torn-tail check remains the
-/// authority rather than an optimisation.
+/// **single** `write_all`. That removes two syscalls from the per-commit
+/// path and — more importantly for [`DurabilityLevel::Normal`] — shrinks the
+/// window in which a process death can leave a torn frame: a `write(2)`
+/// cannot be interrupted partway by `SIGKILL`, so a frame that fits in one
+/// write is either wholly in the page cache or wholly absent. A short write
+/// is still possible in principle, so the length/CRC torn-tail check remains
+/// the authority rather than an optimisation.
 pub fn append_frame(w: &mut impl Write, frame: &WalFrame) -> io::Result<()> {
     append_frame_with_codec(w, frame, crate::serde_codec::CURRENT_CODEC)
 }
@@ -380,10 +360,6 @@ fn append_frame_with_codec(
     w.write_all(&framed)?;
     Ok(())
 }
-
-// ─────────────────────────────────────────────────────────────────────
-// Read side
-// ─────────────────────────────────────────────────────────────────────
 
 /// Read a fixed-size buffer, mapping a clean OR partial EOF to `None`
 /// (both end the frame stream). Any other I/O error propagates.
@@ -426,18 +402,11 @@ pub fn read_header(r: &mut impl Read) -> io::Result<u8> {
 /// stream is provably torn/corrupt and stops recovery without
 /// allocating.
 ///
-/// When recovery stops before consuming the whole stream (a torn tail
-/// after a crash, or garbage mid-file), a one-line warning reporting
-/// how many frames were recovered and the byte offset of the bad frame
-/// is printed to stderr — the frames before it are still returned, so
-/// the contract (recover everything up to the first bad frame) is
-/// unchanged; the failure is just no longer silent.
-///
-/// The warning distinguishes the two shapes, because they call for opposite
-/// responses (see [`recovery_diagnostic`]): a torn tail is the expected
-/// aftermath of a crash mid-commit and costs nothing, while intact frames
-/// found *after* the stop point mean the file was damaged in its middle and
-/// committed work is being discarded.
+/// When recovery stops before consuming the whole stream, a one-line
+/// warning naming how many frames were recovered and the byte offset of
+/// the bad frame goes to stderr, so the loss is not silent. It
+/// distinguishes a torn tail from mid-file damage, which call for opposite
+/// responses — see [`recovery_diagnostic`].
 pub fn read_frames(r: impl Read, stream_len: u64) -> io::Result<Vec<WalFrame>> {
     let (frames, diagnostic) = read_frames_diagnosed(r, stream_len)?;
     if let Some(message) = diagnostic {
@@ -591,14 +560,10 @@ fn count_intact_frames(
 ///
 /// Two failures wear the same stop: a **torn tail**, which is what a crash
 /// mid-commit leaves and costs nothing, and **mid-file damage**, where frames
-/// the writer completed sit after the bad one and are being thrown away. The
-/// original wording asserted the first unconditionally, so the expensive case
-/// was reported as routine — "expected after a crash mid-commit" printed over
-/// silently discarded committed work. `trailing` (frames that still decode
-/// after the corrupt one) is what separates them.
-///
-/// A pure function so the wording is testable: nothing else in this module can
-/// capture the process's stderr.
+/// the writer completed sit after the bad one and are being thrown away.
+/// `trailing` (frames that still decode after the corrupt one) is what
+/// separates them; reporting the second as routine would file silently
+/// discarded committed work as expected.
 fn recovery_diagnostic(offset: u64, stream_len: u64, recovered: usize, trailing: usize) -> String {
     if trailing == 0 {
         return format!(
@@ -645,10 +610,6 @@ fn wal_codec(version: u8) -> io::Result<crate::serde_codec::CodecVersion> {
         )),
     }
 }
-
-// ─────────────────────────────────────────────────────────────────────
-// File handle — session-scoped append log
-// ─────────────────────────────────────────────────────────────────────
 
 /// The sidecar WAL path for a `.kgl` checkpoint file: `<path>-wal`. Keeps
 /// the WAL adjacent to its checkpoint so one is never found without the
@@ -710,16 +671,11 @@ fn truncate_to_header(file: &mut File) -> io::Result<()> {
 /// general-purpose write handle.** Rust maps `OpenOptions::append(true)` to
 /// `FILE_GENERIC_WRITE & !FILE_WRITE_DATA` on Windows — deliberately dropping
 /// the very right that truncation and in-place rewrites require — and an
-/// append handle ignores seeks on write on every platform. The previous code
-/// repaired torn headers through the append handle, which POSIX tolerates and
-/// Windows does not; `upgrade_header_version` had already been forced to open
-/// its own handle for the same reason, and its job is now folded in here.
+/// append handle ignores seeks on write on every platform. Repairing a torn
+/// header through the append handle is what POSIX tolerates and Windows does
+/// not.
 ///
-/// Classification is unchanged: a file too short for a header, or exactly
-/// header-sized with the wrong magic, is crash residue that can hold no frame
-/// and is repaired in place; a *longer* file with a bad magic could be
-/// somebody's data and is refused; an unreadable version is rejected and a
-/// readable older one is upgraded.
+/// The classification rules applied below are documented on [`Wal::open`].
 fn prepare_wal_file(path: &Path) -> io::Result<()> {
     use std::io::{Seek, SeekFrom};
     let header_len = (WAL_MAGIC.len() + 1) as u64;
@@ -821,9 +777,8 @@ impl Wal {
     /// crash could not be recovered at all, and it is paid once per open
     /// rather than once per commit.
     pub fn open(path: PathBuf, sync: SyncMode) -> io::Result<Self> {
-        // Create/validate/repair the header first, on an ordinary handle. By
-        // the time the append handle below exists the file is well-formed, so
-        // that handle only ever has to do what append handles can portably do.
+        // Header maintenance first, on an ordinary handle: the append handle
+        // below cannot portably truncate or seek-write (see `prepare_wal_file`).
         prepare_wal_file(&path)?;
         let file = OpenOptions::new().read(true).append(true).open(&path)?;
         Ok(Self { file, path, sync })
@@ -832,11 +787,8 @@ impl Wal {
     /// Append one frame — the commit point.
     ///
     /// Under [`SyncMode::Barrier`] this returns only after the bytes are on
-    /// stable storage. Under [`SyncMode::PageCache`] it returns once the
-    /// kernel has the bytes, which is the whole of
-    /// [`DurabilityLevel::Normal`]'s guarantee: the page cache is the
-    /// kernel's, so it survives this process dying but not the kernel
-    /// dying.
+    /// stable storage; under [`SyncMode::PageCache`] once the kernel has
+    /// them.
     pub fn append(&mut self, frame: &WalFrame) -> io::Result<()> {
         append_frame(&mut self.file, frame)?;
         self.file.flush()?;
@@ -871,25 +823,18 @@ impl Wal {
     /// Called after a checkpoint (a full `.kgl` save) has folded every
     /// frame into the snapshot, so the log can start fresh.
     pub fn reset(&mut self) -> io::Result<()> {
-        // Truncation and header rewrite go through a dedicated read/write
-        // handle for the same reason `prepare_wal_file` does: the append
-        // handle lacks the write-data right on Windows and ignores seeks on
-        // write everywhere. `self.file` stays usable afterwards — append mode
-        // resolves the end of the file at write time, so the next frame lands
-        // straight after the fresh header.
+        // Truncation and header rewrite need a dedicated read/write handle
+        // (see `prepare_wal_file`). `self.file` stays usable afterwards —
+        // append mode resolves the end of the file at write time, so the next
+        // frame lands straight after the fresh header.
         let mut file = OpenOptions::new().read(true).write(true).open(&self.path)?;
         truncate_to_header(&mut file)
     }
 
-    /// The WAL's filesystem path.
     pub fn path(&self) -> &Path {
         &self.path
     }
 }
-
-// ─────────────────────────────────────────────────────────────────────
-// Tests
-// ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -940,9 +885,8 @@ mod tests {
         buf
     }
 
-    /// Test shim: run [`read_frames`] over an in-memory byte buffer,
-    /// supplying its length as the stream length (as `recover` does
-    /// with the file size).
+    /// Test shim: [`read_frames`] over an in-memory buffer, passing its
+    /// length as the stream length (as `recover` passes the file size).
     fn read_frames_all(bytes: Vec<u8>) -> io::Result<Vec<WalFrame>> {
         let len = bytes.len() as u64;
         read_frames(Cursor::new(bytes), len)
@@ -1015,7 +959,6 @@ mod tests {
         // final frame's payload.
         bytes.truncate(bytes.len() - 5);
         let got = read_frames_all(bytes).unwrap();
-        // Only the first, fully-written frame survives.
         assert_eq!(got, vec![frames[0].clone()]);
     }
 
@@ -1040,8 +983,7 @@ mod tests {
             ops: sample_ops(),
         };
         let mut bytes = write_wal(std::slice::from_ref(&frame));
-        // Flip a byte in the payload (after the 5-byte header + 8-byte
-        // len/crc prefix) — CRC must catch it and drop the frame.
+        // Flip a payload byte — the CRC must catch it and drop the frame.
         let last = bytes.len() - 1;
         bytes[last] ^= 0xFF;
         let got = read_frames_all(bytes).unwrap();
@@ -1257,8 +1199,8 @@ mod tests {
             let mut wal = open_wal(p.clone()).unwrap();
             wal.append(&frame(1)).unwrap();
             wal.append(&frame(2)).unwrap();
-        } // drop closes the file
-          // Reopen for append (must NOT clobber existing frames)...
+        }
+        // Reopen for append (must NOT clobber existing frames)...
         {
             let mut wal = open_wal(p.clone()).unwrap();
             wal.append(&frame(3)).unwrap();
@@ -1360,7 +1302,6 @@ mod tests {
         std::fs::write(&p, b"not a wal file at all").unwrap();
         let err = open_wal(p.clone()).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-        // The file is untouched.
         assert_eq!(std::fs::read(&p).unwrap(), b"not a wal file at all");
     }
 
@@ -1487,7 +1428,7 @@ mod tests {
     /// extended but its data block never landed — reachable only once the
     /// per-commit barrier is optional. `crc32(b"") == 0`, so without the
     /// explicit guard a zero prefix passes the CRC check as a "valid" empty
-    /// frame, and only the decoder's failure stops recovery. Stop by intent.
+    /// frame and only the decoder's failure stops recovery.
     #[test]
     fn zero_filled_hole_is_treated_as_a_torn_tail() {
         let good = vec![frame(1), frame(2)];
@@ -1661,7 +1602,6 @@ mod tests {
         append_frame(&mut w, &frame(1)).unwrap();
         assert_eq!(w.writes, 1, "a frame must not be split across writes");
 
-        // …and the bytes are still exactly what the reader expects.
         let mut bytes = Vec::new();
         write_header(&mut bytes).unwrap();
         bytes.extend_from_slice(&w.inner);

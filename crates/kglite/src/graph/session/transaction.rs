@@ -1,11 +1,9 @@
 //! `Session` and `Transaction` — canonical snapshot/working CoW
 //! transaction model.
 //!
-//! Mirrors the pattern that previously lived inline in
-//! `src/graph/pyapi/transaction.rs` (Python-bound) and was mirrored
-//! again in `crates/kglite-bolt-server/src/backend.rs::TxState`
-//! (per-Bolt-session). Extracted once here so future bindings
-//! (Go, TypeScript, JVM) don't multiply the drift.
+//! The Python binding and the bolt-server (`backend.rs::TxState`) each grew
+//! their own copy of this pattern; it lives here once so future bindings
+//! don't multiply the drift.
 //!
 //! ## Shape
 //!
@@ -64,18 +62,15 @@ impl DirGraph {
 ///
 /// **Concurrency model.** The outer `Mutex` is brief-acquire-only:
 /// - [`snapshot`](Self::snapshot) takes the lock, `Arc::clone`s the
-///   inner, releases. Readers see a stable graph view via their
-///   Arc<DirGraph> handle that survives subsequent commits.
+///   inner, releases.
 /// - [`commit`](Self::commit) takes the lock to swap the inner Arc
-///   with the new (post-mutation) DirGraph. Readers holding old
-///   Arc clones keep their stable view.
+///   with the new (post-mutation) DirGraph. Readers holding old Arc
+///   clones keep their stable view across the swap.
 ///
 /// Bindings that need cross-session coordination (bolt-server's
 /// per-session tx state) layer their own `Arc<Mutex<...>>` over
 /// the Session. The Session itself is `Send + Sync`.
 pub struct Session {
-    /// Inner Arc allows cheap reader snapshots; outer Mutex allows
-    /// atomic commit-swap.
     pub(super) graph: Mutex<Arc<DirGraph>>,
     /// Write-ahead-log state for a session opened via
     /// [`Session::open_durable`]; `None` for every ordinary session.
@@ -115,13 +110,11 @@ impl DerefMut for SessionWriteGuard<'_> {
 }
 
 impl Session {
-    /// Construct from an owned DirGraph.
     pub fn new(graph: DirGraph) -> Self {
         Self::from_arc(Arc::new(graph))
     }
 
-    /// Construct from an existing Arc<DirGraph>. Used when the
-    /// caller already shares the graph via Arc (e.g. wrapping
+    /// Construct from a graph already shared by Arc (e.g. wrapping
     /// `KnowledgeGraph.inner`).
     ///
     /// The session is **not** durable; see [`Session::open_durable`] for the
@@ -133,12 +126,10 @@ impl Session {
         }
     }
 
-    /// Take a snapshot of the current graph. Wait-free apart from
-    /// the momentary mutex acquire. Poison-recovers — a panic in
-    /// another thread that left the mutex poisoned doesn't cascade
-    /// here; we accept the inconsistent state and continue. (The
-    /// snapshot itself is just an Arc clone; consistency is about
-    /// the next reader's Arc value, not the inner DirGraph.)
+    /// Take a snapshot of the current graph. Wait-free apart from the momentary
+    /// mutex acquire, and poison-recovering rather than cascading another
+    /// thread's panic: the snapshot is just an Arc clone, so consistency is
+    /// about the next reader's Arc value, not the inner DirGraph.
     pub fn snapshot(&self) -> Arc<DirGraph> {
         Arc::clone(&self.graph.lock().unwrap_or_else(|p| p.into_inner()))
     }
@@ -165,16 +156,14 @@ impl Session {
     /// an error channel check [`Session::check_direct_write_allowed`] first.
     ///
     /// This signature has none: it returns a guard, and a guard cannot carry a
-    /// refusal. Panicking is not an option and silently dropping the write is
-    /// the very hazard being closed, so the refusal is **latched** instead —
-    /// the durable session records that the log no longer describes the graph,
-    /// and every subsequent durability operation fails loudly:
-    /// [`commit`](Self::commit) returns [`CommitOutcome::DurabilityFailed`]
-    /// and [`sync`](Session::sync) errors, until a [`save`](Self::save)
-    /// checkpoint folds the direct write in and starts a fresh log. The
-    /// mutation is never lost, and it is never mistaken for a logged one.
-    /// (Giving this method a fallible signature would ripple through the C ABI
-    /// and wheel call sites; that is the rung where it belongs, not this one.)
+    /// refusal. Silently dropping the write is the very hazard being closed, so
+    /// the refusal is **latched** instead — the durable session records that the
+    /// log no longer describes the graph, and every subsequent durability
+    /// operation fails loudly: [`commit`](Self::commit) returns
+    /// [`CommitOutcome::DurabilityFailed`] and [`sync`](Session::sync) errors,
+    /// until a [`save`](Self::save) checkpoint folds the direct write in and
+    /// starts a fresh log. The mutation is never lost and never mistaken for a
+    /// logged one.
     pub fn write(&self) -> SessionWriteGuard<'_> {
         self.mark_diverged();
         SessionWriteGuard {
@@ -188,14 +177,10 @@ impl Session {
     ///
     /// **A batch that wrote nothing is a no-op**, mirroring
     /// [`CommitOutcome::NoWritesNoOp`] on the [`commit`](Self::commit) path:
-    /// no version bump, no Arc swap, the fork is dropped. This used to bump
-    /// and swap unconditionally, so an *empty* mutation batch — or one made
-    /// only of read statements, both reachable through the C ABI's
-    /// `kglite_session_execute_mut_batch` and `kglite_create_edges_batch` —
-    /// advanced the graph version with zero writes. An unnecessary bump is
-    /// exactly what makes a concurrent OCC committer lose a race it should
-    /// win: the other transaction's `base_version` no longer matches, and it
-    /// is told to retry against a graph that never changed.
+    /// no version bump, no Arc swap, the fork is dropped. An unnecessary bump
+    /// is exactly what makes a concurrent OCC committer lose a race it should
+    /// win: the other transaction's `base_version` no longer matches, and it is
+    /// told to retry against a graph that never changed.
     ///
     /// The write test is the version delta on the fork, because
     /// [`DirGraph::bump_version`] is the canonical "this graph just mutated"
@@ -236,8 +221,7 @@ impl Session {
     /// Routes through the shared [`save_graph_with`](crate::graph::io::file::save_graph_with)
     /// dispatch, so mode-aware save (disk directory vs `.kgl`), atomic
     /// temp+rename, the recorded storage mode, and the `fsync` barrier behave
-    /// exactly as they do for a binding that owns its `Arc<DirGraph>`
-    /// directly.
+    /// exactly as for a binding that owns its `Arc<DirGraph>` directly.
     ///
     /// **This exists because saving through [`snapshot`](Self::snapshot)
     /// cannot be done cheaply.** A save *mutates* the graph it writes — save
@@ -258,6 +242,7 @@ impl Session {
     /// that may publish to `path` must hold its own
     /// [`GraphWriterLease`](crate::graph::io::open::GraphWriterLease) across
     /// the whole open/mutate/save interval.
+    ///
     /// # Durable sessions
     ///
     /// For a session opened via [`Session::open_durable`] this method is the
@@ -306,17 +291,8 @@ impl Session {
         tx
     }
 
-    /// Commit a transaction. Returns the outcome so the binding
-    /// can map to its error type:
-    /// - [`CommitOutcome::NoWritesNoOp`] — tx didn't mutate; no
-    ///   Arc swap, no version bump. Cheap.
-    /// - [`CommitOutcome::Committed { new_version }`] — working
-    ///   was swapped into the shared graph. `new_version` reflects
-    ///   the bumped value (`base_version + 1`).
-    /// - [`CommitOutcome::ConflictDetected`] — another writer
-    ///   committed between this tx's `begin` and `commit` (the
-    ///   shared graph's version > `tx.base_version`). Binding
-    ///   typically surfaces this as a typed retry-suggesting error.
+    /// Commit a transaction. Returns a [`CommitOutcome`] so the binding can
+    /// map it to its own error type.
     ///
     /// OCC is opt-in: pass `true` for `check_occ` to enforce. Pass
     /// `false` for last-writer-wins semantics (current bolt-server
@@ -324,8 +300,6 @@ impl Session {
     pub fn commit(&self, tx: Transaction, check_occ: bool) -> CommitOutcome {
         let (working_opt, base_version) = tx.take_working();
         let Some(mut working) = working_opt else {
-            // Read-only-then-commit / no mutations — Arc swap not
-            // needed.
             return CommitOutcome::NoWritesNoOp;
         };
 
@@ -370,14 +344,13 @@ impl Session {
     /// Roll back a transaction. The working copy (if materialized)
     /// is dropped; no Arc swap. Cannot fail.
     pub fn rollback(&self, _tx: Transaction) {
-        // Drop _tx → snapshot Arc count decrements; working
-        // DirGraph (if Some) is freed. Nothing else to do.
+        // Drop `_tx`: the snapshot Arc decrements and the working copy is freed.
     }
 }
 
 /// Snapshot/working CoW transaction state.
 ///
-/// **State machine** (mirrors `src/graph/pyapi/transaction.rs`):
+/// **State machine**:
 ///
 /// - **Initial / read-only-after-begin**: `snapshot: Some, working:
 ///   None`. Reads route through `snapshot`. No clone cost.
@@ -396,22 +369,18 @@ pub struct Transaction {
 }
 
 impl Transaction {
-    /// Whether this tx was opened read-only via
-    /// [`Session::begin_read`]. Read-only txs reject
-    /// [`working_mut`](Self::working_mut) calls.
+    /// Whether this tx was opened read-only via [`Session::begin_read`].
     pub fn is_read_only(&self) -> bool {
         self.read_only
     }
 
-    /// Graph version at BEGIN time. Used by the binding for its
-    /// own OCC checks if it wants to do them outside
-    /// [`Session::commit`].
+    /// Graph version at BEGIN time, for a binding that runs its own OCC check
+    /// outside [`Session::commit`].
     pub fn base_version(&self) -> u64 {
         self.base_version
     }
 
-    /// Whether this tx has materialized a working copy (first
-    /// mutation has fired).
+    /// Whether this tx has materialized a working copy (a mutation has fired).
     pub fn has_writes(&self) -> bool {
         self.working.is_some()
     }
@@ -502,10 +471,6 @@ pub enum CommitOutcome {
     DurabilityFailed { error: String },
 }
 
-// ────────────────────────────────────────────────────────────────────
-// Tests
-// ────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -525,7 +490,6 @@ mod tests {
         let s = Session::new(empty_graph());
         let snap1 = s.snapshot();
         let snap2 = s.snapshot();
-        // Both Arcs point at the same inner DirGraph.
         assert!(Arc::ptr_eq(&snap1, &snap2));
     }
 
@@ -796,7 +760,6 @@ mod tests {
         let tx = s.begin();
         let outcome = s.commit(tx, /* check_occ = */ true);
         assert!(matches!(outcome, CommitOutcome::NoWritesNoOp));
-        // Version unchanged.
         assert_eq!(s.version(), 0);
     }
 
@@ -814,7 +777,6 @@ mod tests {
         let mut tx = s.begin();
         assert!(!tx.has_writes());
         assert!(tx.current().is_some());
-        // First working_mut materializes.
         let _ = tx.working_mut().unwrap();
         assert!(tx.has_writes());
         assert!(tx.snapshot.is_none());
@@ -826,7 +788,6 @@ mod tests {
         let s = Session::new(empty_graph());
         let mut tx = s.begin();
         let _ = tx.working_mut().unwrap();
-        // current() now returns &working, not &snapshot.
         let _: &DirGraph = tx.current().unwrap();
     }
 
@@ -868,7 +829,6 @@ mod tests {
     fn occ_conflict_detected_when_other_writer_commits() {
         let s = Arc::new(Session::new(empty_graph()));
 
-        // Tx A: begins, mutates, doesn't commit yet.
         let mut tx_a = s.begin();
         let _ = tx_a.working_mut().unwrap();
 
@@ -881,7 +841,6 @@ mod tests {
             CommitOutcome::Committed { new_version: 1 }
         ));
 
-        // Tx A: commits → conflict (base_version=0, current=1).
         let outcome_a = s.commit(tx_a, true);
         match outcome_a {
             CommitOutcome::ConflictDetected {
@@ -933,23 +892,17 @@ mod tests {
 
         let post = s.snapshot();
         assert_eq!(post.version(), 1);
-        // The two snapshots are different Arcs (commit replaced
-        // the inner).
         assert!(!Arc::ptr_eq(&pre, &post));
     }
 
     #[test]
     fn double_commit_via_take_working_drops_state() {
         // The current API takes Transaction by value in commit, so
-        // double-commit is statically impossible (the second call
-        // doesn't have a tx to pass). Pin this invariant via a
-        // compile-time check by-construction. (A previous Python
-        // boundary used an Option<...> field and raised at runtime;
-        // the value-take API improves on that.)
+        // double-commit is statically impossible (the second call doesn't have
+        // a tx to pass). Pinned by construction: there is nothing to assert.
         let s = Session::new(empty_graph());
         let tx = s.begin();
         let _ = s.commit(tx, true);
-        // Cannot call s.commit(tx, true) again — tx was moved.
     }
 
     // ── True-parallel concurrency tests ─────────────────────────────────
@@ -1006,8 +959,6 @@ mod tests {
 
     #[test]
     fn occ_detects_conflict_between_overlapping_txs() {
-        // Two txs from the same base version: the first commits, the second
-        // must be told it conflicts (its base is now stale).
         let s = Session::new(empty_graph());
         let mut tx1 = s.begin();
         tx1.working_mut().unwrap();

@@ -30,8 +30,6 @@ import pytest
 
 import kglite
 
-# ── Corpus ───────────────────────────────────────────────────────────
-#
 # Each entry is `(name, fixture, query, params)`. The corpus aims to
 # exercise:
 #
@@ -47,7 +45,6 @@ import kglite
 # don't exist in the shared fixtures. They warrant a separate harness
 # that builds purpose-specific fixtures.
 DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
-    # ── basic shapes ──
     ("simple_match", "small_graph", "MATCH (p:Person) RETURN p.name AS n", None),
     ("simple_match_param", "small_graph", "MATCH (p:Person) WHERE p.age > $min RETURN p.name AS n", {"min": 30}),
     # Dynamic label / relationship type: the parameter is bound before the
@@ -1515,7 +1512,6 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "UNION MATCH (p:Person) WHERE p.age > 40 RETURN p.name AS n",
         None,
     ),
-    # ── edge cases ──
     (
         "optional_no_match",
         "social_graph",
@@ -1530,14 +1526,12 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
     ),
     ("empty_typed_match", "social_graph", "MATCH (n:NoSuchType) RETURN count(n) AS n", None),
     ("skip_and_limit", "social_graph", "MATCH (p:Person) RETURN p.name AS n ORDER BY p.person_id SKIP 5 LIMIT 3", None),
-    # ── UNION ALL ──
     (
         "union_all",
         "small_graph",
         "MATCH (p:Person) RETURN p.name AS n UNION ALL MATCH (p:Person) RETURN p.name AS n",
         None,
     ),
-    # ── expression shapes ──
     (
         "case_simple",
         "social_graph",
@@ -1617,7 +1611,6 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (p:Person) WHERE NOT (p.email ENDS WITH 'test.com') RETURN count(p) AS n",
         None,
     ),
-    # ── Kleene AND/OR with NULL operand ──
     (
         "kleene_or_null_lhs",
         "social_graph",
@@ -1701,7 +1694,6 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (p:Person) RETURN p.name AS n, p.salary AS s ORDER BY p.salary - p.age * 1000 DESC LIMIT 5",
         None,
     ),
-    # ── EXISTS / NOT EXISTS subqueries ──
     (
         "exists_inline",
         "social_graph",
@@ -1721,7 +1713,6 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (p:Person) WHERE NOT EXISTS { (p)-[:KNOWS]->() } RETURN p.name AS n ORDER BY n",
         None,
     ),
-    # ── HAVING / multi-WITH ──
     (
         "having_basic",
         "social_graph",
@@ -1755,7 +1746,6 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "ORDER BY p.name, q.name, r.name LIMIT 5",
         None,
     ),
-    # ── shortest path ──
     (
         "shortest_typed",
         "social_graph",
@@ -1868,7 +1858,6 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "WITH p, f WHERE p.age < 25 RETURN p.name AS n, f.name AS fn ORDER BY n, fn",
         None,
     ),
-    # ── multiple OPTIONAL MATCH ──
     (
         "two_optional_match",
         "social_graph",
@@ -1877,7 +1866,6 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "ORDER BY n LIMIT 5",
         None,
     ),
-    # ── arithmetic + collect ──
     (
         "arithmetic_agg",
         "social_graph",
@@ -1890,26 +1878,21 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (p:Person) WITH p.city AS c, collect(p.name) AS names RETURN c, size(names) AS n ORDER BY c",
         None,
     ),
-    # ── label check / id() function ──
     ("label_check", "social_graph", "MATCH (n) WHERE n:Person RETURN count(n) AS n", None),
     ("id_function", "social_graph", "MATCH (p:Person) WHERE id(p) IS NOT NULL RETURN count(p) AS n", None),
-    # ── inline pattern + WHERE ──
     (
         "inline_and_where",
         "social_graph",
         "MATCH (p:Person {city: 'Oslo'}) WHERE p.age > 25 RETURN p.name AS n ORDER BY n",
         None,
     ),
-    # ── 3-hop chain ──
     (
         "three_hop_count",
         "social_graph",
         "MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person)-[:KNOWS]->(d:Person) RETURN count(*) AS n",
         None,
     ),
-    # ── WITH * project everything ──
     ("with_star", "social_graph", "MATCH (p:Person) WITH * WHERE p.age > 35 RETURN p.name AS n ORDER BY n", None),
-    # ── count{...} subquery + ORDER BY + LIMIT ──
     (
         "count_subquery_top_k",
         "social_graph",
@@ -1917,14 +1900,12 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "WHERE deg > 0 RETURN p.name AS n, deg ORDER BY deg DESC, n LIMIT 5",
         None,
     ),
-    # ── List comprehension after collect aggregate ──
     (
         "list_comp_after_collect",
         "social_graph",
         "MATCH (p:Person) WITH collect(p.age) AS ages RETURN [a IN ages WHERE a > 30 | a + 1] AS bumped",
         None,
     ),
-    # ── Path operations (length / nodes / relationships) ──
     (
         "shortest_with_length",
         "social_graph",
@@ -1932,7 +1913,6 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "RETURN length(p) AS L, size(nodes(p)) AS hops",
         None,
     ),
-    # ── Parameterized list in IN ──
     (
         "list_param_in",
         "social_graph",
@@ -2088,7 +2068,6 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (p:Person) WITH p.age AS a WHERE a IN [22, 24, 26, 28, 30, 32, 34, 36, 38, 40, 99] RETURN count(a) AS n",
         None,
     ),
-    # ── Parameterized scalar with arithmetic ──
     (
         "param_arithmetic",
         "social_graph",
@@ -2103,14 +2082,12 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "WHERE s > 80000 WITH p, s ORDER BY s DESC RETURN p.name AS n, s LIMIT 5",
         None,
     ),
-    # ── DISTINCT + ORDER BY same expression ──
     (
         "distinct_order_same_expr",
         "social_graph",
         "MATCH (p:Person) RETURN DISTINCT p.city AS c ORDER BY p.city",
         None,
     ),
-    # ── OPTIONAL MATCH + count(*) + GROUP BY ──
     (
         "optional_count_star_group",
         "social_graph",
@@ -2118,7 +2095,6 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "WITH p.city AS city, count(c) AS jobs RETURN city, jobs ORDER BY city",
         None,
     ),
-    # ── HAVING expression with multi-key GROUP ──
     (
         "having_multi_key",
         "social_graph",
@@ -2134,7 +2110,6 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (p:Person) RETURN p.name AS n, p.age * 2 AS bumped ORDER BY bumped DESC LIMIT 5",
         None,
     ),
-    # ── COUNT(*) with multi-MATCH ──
     (
         "multi_match_count_star",
         "social_graph",
@@ -2148,14 +2123,12 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (p:Person), (c:Company) RETURN p.name AS p, c.name AS c LIMIT 100",
         None,
     ),
-    # ── String operations + WHERE + ORDER BY ──
     (
         "string_op_filter_order",
         "social_graph",
         "MATCH (p:Person) WHERE p.name STARTS WITH 'Person_' RETURN p.name AS n ORDER BY size(p.name) DESC, n LIMIT 5",
         None,
     ),
-    # ── coalesce / IS NOT NULL filter ──
     (
         "coalesce_email",
         "social_graph",
@@ -2169,35 +2142,30 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (p:Person) WITH p.city AS city, count(*) AS n RETURN city, n ORDER BY n DESC, city LIMIT 3",
         None,
     ),
-    # ── CASE inside aggregate ──
     (
         "case_in_agg",
         "social_graph",
         "MATCH (p:Person) RETURN p.city AS c, sum(CASE WHEN p.age > 30 THEN 1 ELSE 0 END) AS olders ORDER BY c",
         None,
     ),
-    # ── nested function calls ──
     (
         "nested_func_calls",
         "social_graph",
         "MATCH (p:Person) RETURN p.name AS n, toUpper(p.city) AS c ORDER BY n LIMIT 5",
         None,
     ),
-    # ── NOT predicate ──
     (
         "not_predicate",
         "social_graph",
         "MATCH (p:Person) WHERE NOT p.city = 'Oslo' RETURN count(p) AS n",
         None,
     ),
-    # ── WHERE with edge property AND node property ──
     (
         "where_edge_node_mix",
         "social_graph",
         "MATCH (p:Person)-[r:KNOWS]->(q:Person) WHERE r.since > 2017 AND q.age > 25 RETURN count(*) AS n",
         None,
     ),
-    # ── count{} subquery in WHERE ──
     (
         "count_subq_in_where",
         "social_graph",
@@ -2210,14 +2178,12 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
     # absolute goldens in `executor::tests::semantics` own that contract.
     ("div_at_boundary", "small_graph", "RETURN (-9223372036854775807 - 1) / 2 AS n", None),
     ("mod_at_boundary", "small_graph", "RETURN (-9223372036854775807 - 1) % 7 AS n", None),
-    # ── arithmetic expression in WHERE ──
     (
         "expr_filter",
         "social_graph",
         "MATCH (p:Person) WHERE p.salary / p.age > 2000 RETURN p.name AS n ORDER BY n LIMIT 5",
         None,
     ),
-    # ── WITH expression alias as filter then sort ──
     (
         "with_expr_filter_sort",
         "social_graph",
@@ -2225,7 +2191,6 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "WHERE net > 50000 RETURN p.name AS n, net ORDER BY net DESC, n LIMIT 5",
         None,
     ),
-    # ── multi-OPTIONAL with HAVING-style filter ──
     (
         "multi_optional_having",
         "social_graph",
@@ -2235,7 +2200,6 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "WHERE friends > 0 RETURN p.name AS n, friends, jobs ORDER BY n LIMIT 5",
         None,
     ),
-    # ── WITH chain with re-entered MATCH (cohort then expansion) ──
     (
         "cohort_then_match",
         "social_graph",
@@ -2248,13 +2212,6 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "multi_match_count_star",
         "social_graph",
         "MATCH (p:Person) MATCH (q:Person) WHERE p.person_id < q.person_id AND p.city = q.city RETURN count(*) AS n",
-        None,
-    ),
-    # ── String op + ORDER BY ──
-    (
-        "string_op_filter_order",
-        "social_graph",
-        "MATCH (p:Person) WHERE p.name STARTS WITH 'Person_' RETURN p.name AS n ORDER BY size(p.name) DESC, n LIMIT 5",
         None,
     ),
     # ── affected_tests procedure (0.9.34) ──
@@ -2295,14 +2252,12 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "RETURN edge_type, count ORDER BY edge_type, count",
         None,
     ),
-    # ── multi-pattern MATCH after a seeded pipeline must cross-join ──
     (
         "with_then_multi_pattern_cross_join",
         "social_graph",
         "WITH 1 AS x MATCH (a:Person), (c:Company) RETURN a.name AS a, c.name AS c ORDER BY a, c LIMIT 5",
         None,
     ),
-    # ── inline pattern referencing an UNWIND map member (`{id: x.id}`) ──
     # Regression: `MATCH (n {id: x.id})` where x is an UNWIND'd map must resolve
     # the member per row (previously matched nothing).
     (
@@ -4050,8 +4005,7 @@ def json_list_props_graph() -> kglite.KnowledgeGraph:
 # Mutation queries: each test gets its own fresh fixture so state-bleed
 # between mutations is impossible. The harness's identity for mutations
 # is "optimized result on a fresh fixture == naive result on a fresh
-# fixture." Lives separate from DIFFERENTIAL_QUERIES because of the
-# fresh-fixture-per-test requirement.
+# fixture."
 MUTATION_QUERIES: list[tuple[str, str]] = [
     ("create_node", "CREATE (p:Person {person_id: 99, name: 'X', age: 50}) RETURN p.person_id AS pid"),
     ("set_property", "MATCH (p:Person {person_id: 1}) SET p.age = 99 RETURN p.age AS age"),
@@ -4144,9 +4098,7 @@ MUTATION_QUERIES: list[tuple[str, str]] = [
     # would leave only one half enforced — which this harness sees as diverging
     # post-state once a later write is rejected on one path and not the other.
     # Both orders, because the merge is order-sensitive code.
-    # Multi-statement constraint shapes live in CONSTRAINT_DDL_SEQUENCES below:
-    # a schema command is a standalone statement, so a merge (declaring one half
-    # of a node key over the other) cannot be expressed as one query here.
+    # Multi-statement merge/drop sequences live in CONSTRAINT_DDL_SEQUENCES below.
     # ── Shapes whose rollback checkpoint is an undo journal ──────────────
     #
     # Statement atomicity is bought with an inverse-op journal rather than a
@@ -4503,7 +4455,6 @@ def test_known_divergences(
 # Mutations write to graph state, so each mode needs its own freshly-
 # built graph (we can't reuse a pytest fixture — within one test
 # invocation it caches and returns the same instance on every call).
-# Building the graph inline is verbose but gives us isolation.
 
 
 def _build_mutation_graph() -> kglite.KnowledgeGraph:
@@ -4746,8 +4697,8 @@ def test_columnar_mutation_matches_row_storage(name: str, query: str, probe: str
 # Constraint DDL sequences
 # ---------------------------------------------------------------------------
 #
-# A fourth corpus, separate for one mechanical reason: a schema command is a
-# standalone statement, so the shapes that matter here — declaring one half of a
+# Separate for one mechanical reason: a schema command is a standalone
+# statement, so the shapes that matter here — declaring one half of a
 # node key on a property that already carries the other, then dropping one half
 # again — need *several* statements, which MUTATION_QUERIES cannot express.
 #
@@ -4846,8 +4797,8 @@ def _run_constraint_sequence(statements: list[str], *, disable_optimizer: bool):
 # LOAD CSV
 # ---------------------------------------------------------------------------
 #
-# A third corpus, separate from the two above for one mechanical reason: every
-# LOAD CSV query needs a real file, so the query text carries a `{csv}`
+# Separate from the corpora above for one mechanical reason: every LOAD CSV
+# query needs a real file, so the query text carries a `{csv}`
 # placeholder the runner substitutes with a per-test `tmp_path` file. It cannot
 # live in DIFFERENTIAL_QUERIES because that list is also consumed verbatim by
 # `scripts/bolt_conformance.py`, where LOAD CSV is denied by design (a Bolt

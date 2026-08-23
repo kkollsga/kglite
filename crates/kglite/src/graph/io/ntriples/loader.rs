@@ -154,16 +154,13 @@ fn emit(sink: Option<&dyn ProgressSink>, event: ProgressEvent<'_>) -> Result<(),
 /// sequential pass — O(nodes), not O(renames × nodes). Used after Q-code type
 /// resolution promotes placeholder types to their resolved names.
 ///
-/// Recurses through the `Recording` write-capture wrapper rather than treating
-/// it as impossible. It used to `unreachable!()` there on the grounds that the
-/// wrapper was test-only, which stopped being true when `durable=True` shipped:
-/// `load_ntriples` on a durable graph panicked outright.
+/// The `Recording` write-capture wrapper must be recursed through, not treated
+/// as impossible: it stopped being test-only when `durable=True` shipped, and
+/// an `unreachable!()` there panicked `load_ntriples` on a durable graph.
 ///
 /// The rename deliberately reaches the wrapped backend directly, so it is not
-/// captured as a logical mutation. Retyping here is the tail end of resolving
-/// names the loader itself invented — the nodes' final types are what the
-/// load's own captured writes will resolve to at flush, so logging a second
-/// per-node op would be redundant.
+/// captured as a logical mutation: the nodes' final types are what the load's
+/// own captured writes already resolve to at flush.
 fn apply_type_renames(
     backend: &mut crate::graph::schema::GraphBackend,
     rename_map: &HashMap<u64, u64>,
@@ -202,7 +199,7 @@ fn apply_type_renames(
 }
 
 /// The heap half of [`apply_type_renames`], shared by the memory and mapped
-/// backends (identical loops before this was factored out).
+/// backends.
 fn retype_heap_nodes(g: &mut impl GraphWrite, rename_map: &HashMap<u64, u64>) {
     for i in 0..g.node_bound() {
         let idx = petgraph::graph::NodeIndex::new(i);
@@ -302,7 +299,6 @@ fn finalize_disk_graph(
         }
     }
 
-    // Reload column stores by re-opening the mmap file + reading saved metadata.
     if graph.graph.is_disk() {
         let data_dir = if let crate::graph::schema::GraphBackend::Disk(ref dg) = graph.graph {
             dg.active_write_dir().to_path_buf()
@@ -431,8 +427,7 @@ fn finalize_disk_graph(
 /// Publish the finished build as the graph at `root_dir`.
 ///
 /// Root metadata goes last: readers must never observe a new completion marker
-/// before the sidecars it names exist. Then any generation pointer over the
-/// directory is dropped.
+/// before the sidecars it names exist.
 ///
 /// A flat root build and a `CURRENT` pointer are mutually exclusive ways of
 /// naming the same directory's graph, and `resolve_snapshot` prefers the
@@ -440,16 +435,15 @@ fn finalize_disk_graph(
 /// before the first `save()` still leaves a loadable path
 /// (`storage::mode::publish_initial_generation`), and that pointer would
 /// otherwise shadow the build just written to `root_dir` — a reload would
-/// return the empty graph instead of it, silently, in the one case documented
-/// as needing no `save()`.
+/// silently return the empty graph in the one case documented as needing no
+/// `save()`.
 ///
-/// Dropping the pointer is the completing half of the flat publish, and it is a
-/// single atomic unlink: until it happens a reader sees the previously
-/// published generation, after it the build. It does something only when
-/// `root_dir` really is the graph root, because that is the only directory
-/// `CURRENT` ever lives in — a build staged into a mutation workspace or into a
-/// generation finds nothing to remove. Published generations themselves are
-/// left in place; the next `save()` numbers past them.
+/// So dropping the pointer is the completing half of the flat publish, a single
+/// atomic unlink: until it happens a reader sees the previously published
+/// generation, after it the build. It finds nothing to remove when the build
+/// was staged into a mutation workspace or a generation, because `CURRENT`
+/// only ever lives in the graph root. Published generations keep their bytes;
+/// the next `save()` numbers past them.
 fn publish_flat_root(root_dir: &Path, metadata_json: &str) -> Result<(), String> {
     std::fs::write(root_dir.join("metadata.json"), metadata_json)
         .map_err(|e| format!("Failed to publish graph metadata: {e}"))?;
@@ -520,22 +514,18 @@ fn publish_build_in_place(graph: &DirGraph) -> Result<(), String> {
         return Ok(());
     };
     let data_dir = dg.active_write_dir().to_path_buf();
-    // DirGraph-level sidecars (interner, metadata, id/type
-    // indexes) belong at the graph ROOT, next to
-    // disk_graph_meta.json — that's where `load_disk_dir`
-    // reads them (only columns.bin has a seg_000 fallback).
-    // `data_dir` is the segment dir (`root/seg_000/`, PR1
-    // phase 4); writing the sidecars there made a fresh
-    // ntriples disk build unreadable — the reloaded graph had
-    // an empty interner and no type indexes, so every typed
-    // MATCH returned zero rows until an explicit save()
-    // rewrote the sidecars at the root.
+    // DirGraph-level sidecars (interner, metadata, id/type indexes) belong at
+    // the graph ROOT next to disk_graph_meta.json — that's where
+    // `load_disk_dir` reads them (only columns.bin has a seg_000 fallback).
+    // `data_dir` is the segment dir (`root/seg_000/`); writing the sidecars
+    // there made a fresh ntriples disk build reload with an empty interner and
+    // no type indexes, so every typed MATCH returned zero rows until an
+    // explicit save() rewrote them at the root.
     let root_dir = data_dir
         .parent()
         .map(std::path::Path::to_path_buf)
         .unwrap_or_else(|| data_dir.clone());
 
-    // Save interner
     let save_step = Instant::now();
     let interner_map: HashMap<String, String> = graph
         .interner
@@ -647,8 +637,8 @@ fn build_columns(
     type_rename_map: &HashMap<String, String>,
 ) -> Result<(), String> {
     // Phase 1b: Convert to columnar storage.
-    // For Disk mode: pre-allocate columns from metadata, then direct-write from log.
-    // For Mapped mode: bulk convert from HashMap properties.
+    // Disk and mapped modes pre-allocate columns from metadata, then
+    // direct-write from the property log.
     if let Some(log_writer) = prop_log.take() {
         let phase1b_total = log_writer.count();
         let phase1b_label = format!(
@@ -706,16 +696,12 @@ fn build_columns(
             },
         )?;
     } else {
-        // Mapped mode now goes through the `Some(log_writer)` arm above
-        // (the disk path). The prior `enable_columnar()` *per-entity* loop was
-        // the 7× bottleneck vs disk builds and has been retired for N-Triples
-        // builds. Memory mode lands here, and consolidates once: this is the
-        // bulk O(N) pass, run at the end of the build rather than per entity,
-        // and it is the same pass the first `save()` would otherwise run. It is
-        // here because a loaded graph must come out in the shape every other
-        // construction path produces — leaving these nodes row-shaped would
-        // make an N-Triples graph the one graph whose write regime still
-        // changed the first time it was saved.
+        // Memory mode only; mapped now takes the `Some(log_writer)` arm above,
+        // since the per-entity `enable_columnar()` loop was the 7× bottleneck
+        // vs disk builds. One bulk O(N) pass at the end of the build — the same
+        // pass the first `save()` would otherwise run, moved here so a loaded
+        // graph comes out in the shape every other construction path produces
+        // instead of changing write regime on its first save.
         debug_assert!(
             !graph.graph.is_mapped(),
             "mapped load_ntriples must populate prop_log and use build_columns_direct"
@@ -866,13 +852,10 @@ fn resolve_type_labels(
     mut label_writer: Option<super::label_spill::LabelSpillWriter>,
     type_meta: &mut HashMap<String, TypeBuildMeta>,
 ) -> Result<HashMap<String, String>, String> {
-    // Post-Phase-1: resolve Q-code type names using the label journal.
-    // During Phase 1 every entity's type stayed as its raw Q-code (e.g.
-    // "Q5") because the old HashMap cache was removed to avoid the ~10
-    // GB heap spike. Now we read the journal ONCE and pull labels only
-    // for the small set of Q-codes that actually became type names —
-    // typically tens of thousands on Wikidata, not the 124M entries
-    // the in-memory cache held.
+    // Post-Phase-1: resolve the raw Q-codes Phase 1 left as type names
+    // (e.g. "Q5") against the label journal — one read, and only for the
+    // Q-codes that actually became type names. See `initialize_spills` for
+    // why the journal replaced an in-memory cache.
     let mut type_rename_map: HashMap<String, String> = HashMap::new();
 
     // Flush + close the label journal before reading it back.
@@ -896,16 +879,13 @@ fn resolve_type_labels(
     };
 
     if config.auto_type {
-        // Collect the Q-numbers that actually need label resolution —
-        // only those that appear as type names in `type_indices`.
         let wanted: std::collections::HashSet<u32> = graph
             .type_indices
             .keys()
             .filter_map(parse_qcode_number)
             .collect();
 
-        // Pull those labels (and only those) from the journal. One
-        // forward scan; skips unwanted records without allocating.
+        // One forward scan; skips unwanted records without allocating.
         let label_lookup: HashMap<u32, String> = if let Some(ref path) = label_journal_path {
             super::label_spill::read_labels_for(path, &wanted).unwrap_or_else(|e| {
                 eplog!("  WARN: failed to read label journal: {}", e);
@@ -950,14 +930,12 @@ fn resolve_type_labels(
                 })
                 .collect();
             for (old_name, new_name) in &renames {
-                // Merge type_indices: if target name already exists, append indices
                 if let Some(indices) = graph.type_indices.remove(old_name) {
                     graph
                         .type_indices
                         .entry_or_default(new_name.clone())
                         .extend(indices);
                 }
-                // Merge node_type_metadata: keep the richer entry (more property keys)
                 if let Some(old_meta) = graph.node_type_metadata_mut().remove(old_name) {
                     let entry = graph
                         .node_type_metadata_mut()
@@ -967,7 +945,6 @@ fn resolve_type_labels(
                         entry.entry(k).or_insert(v);
                     }
                 }
-                // Merge type_schemas: union property keys
                 if let Some(old_schema) = graph.type_schemas_mut().remove(old_name) {
                     if let Some(existing) = graph.type_schemas.get(new_name) {
                         let merged = existing.merge(&old_schema);
@@ -980,7 +957,6 @@ fn resolve_type_labels(
                             .insert(new_name.clone(), old_schema);
                     }
                 }
-                // Merge type_build_meta: combine row counts and column info
                 if let Some(old_build) = type_meta.remove(old_name) {
                     let entry = type_meta
                         .entry(new_name.clone())
@@ -993,9 +969,6 @@ fn resolve_type_labels(
                 type_rename_map.insert(old_name.clone(), new_name.clone());
             }
 
-            // Update node_type InternedKey on affected nodes.
-            // Build lookup map first, then ONE sequential pass over all nodes.
-            // This is O(nodes) not O(renames × nodes).
             let rename_map: HashMap<u64, u64> = old_key_to_new_key
                 .iter()
                 .map(|(old, new)| (old.as_u64(), new.as_u64()))
@@ -1038,12 +1011,9 @@ fn initialize_spills(graph: &mut DirGraph, config: &NTriplesConfig) -> Result<Lo
             // Safe for concurrent runs: only delete directories whose
             // contents haven't been modified in the last hour. A running
             // build writes to its `properties.log.zst` continuously, so
-            // active spill dirs always look "fresh" and won't be touched.
-            // This matters because a parallel `load_ntriples` call (e.g.
-            // `api_benchmark.py` spawning multiple loaders, or a long
-            // Wikidata rebuild running alongside a small test) would
-            // otherwise wipe out the log file of the *other* run.
-            const STALE_AFTER_SECS: u64 = 3600; // 1 hour
+            // active spill dirs always look "fresh". Without the age gate a
+            // parallel `load_ntriples` would wipe the *other* run's log.
+            const STALE_AFTER_SECS: u64 = 3600;
             if let Some(parent) = spill_dir.parent() {
                 if let Ok(entries) = std::fs::read_dir(parent) {
                     let now = std::time::SystemTime::now();
@@ -1113,15 +1083,12 @@ fn initialize_spills(graph: &mut DirGraph, config: &NTriplesConfig) -> Result<Lo
         EdgeBuffer::Strings(Vec::new())
     };
 
-    // Label journal for auto-typing. Previously a `HashMap<u32, String>`
-    // that grew to ~10 GB of heap at Wikidata scale (124M entities),
-    // pushing 16 GB machines into swap and collapsing the Phase 1
-    // rate from 1.8M to 450K triples/s. Now a buffered sequential
-    // write to `{spill_dir}/labels.bin` — zero heap growth during
-    // Phase 1. The post-Phase-1 rename pass reads the journal once,
-    // keeping only the ~88K labels that actually appear as type names.
-    // In-Phase-1 `get` is gone entirely (it was best-effort anyway —
-    // misses always fell through to post-Phase-1 rename).
+    // Label journal for auto-typing. As a `HashMap<u32, String>` this grew to
+    // ~10 GB of heap at Wikidata scale (124M entities), pushing 16 GB machines
+    // into swap and collapsing the Phase 1 rate from 1.8M to 450K triples/s.
+    // Now a buffered sequential write to `{spill_dir}/labels.bin` — zero heap
+    // growth during Phase 1; the post-Phase-1 rename pass reads it once and
+    // keeps only the ~88K labels that appear as type names.
     let label_writer: Option<super::label_spill::LabelSpillWriter> = if config.auto_type {
         let spill_dir = graph.spill_dir.clone().unwrap_or_else(|| {
             std::env::temp_dir().join(format!("kglite_build_{}", std::process::id()))
@@ -1148,7 +1115,6 @@ fn initialize_spills(graph: &mut DirGraph, config: &NTriplesConfig) -> Result<Lo
         });
         std::fs::create_dir_all(&spill_dir)
             .map_err(|e| format!("Failed to create id spill directory: {e}"))?;
-        // 150M covers all Wikidata Q-numbers. OS allocates pages lazily.
         Some(
             MmapOrVec::mapped_prefilled(&spill_dir.join("qnum_to_idx.bin"), 150_000_000)
                 .unwrap_or_else(|_| MmapOrVec::from_vec(vec![0u32; 150_000_000])),
@@ -1207,8 +1173,8 @@ fn ingest_phase1(context: Phase1Ingest<'_>) -> Result<(), String> {
     // under samply).
     let mut scratch_props: Vec<(InternedKey, Value)> = Vec::with_capacity(64);
     // Cheap bucket counter (decrement in the hot loop); every 5M triples we
-    // check wall time and only log a `[Phase 1]` progress line if at least
-    // PROGRESS_INTERVAL_SECS have elapsed since the last line.
+    // check wall time and only log a `[Phase 1]` line if PROGRESS_INTERVAL_SECS
+    // have elapsed since the last one, so the terminal isn't spammed.
     let mut progress_countdown: u64 = 5_000_000;
     let mut last_progress_log = Instant::now();
     const PROGRESS_BUCKET: u64 = 5_000_000;
@@ -1251,8 +1217,7 @@ fn ingest_phase1(context: Phase1Ingest<'_>) -> Result<(), String> {
         let n_lines = batch.offsets.len();
         for i in 0..n_lines {
             // Slice into the batch's contiguous buffer — pointer math,
-            // no per-line heap dereference. Validation happens only after
-            // the reader's byte-level entity-prefix filter accepted the line.
+            // no per-line heap dereference.
             let line = match validated_line(batch.line(i)) {
                 Ok(line) => line,
                 Err(error) => {
@@ -1298,7 +1263,6 @@ fn ingest_phase1(context: Phase1Ingest<'_>) -> Result<(), String> {
                         ],
                     },
                 )?;
-                // eplog stays on the 60s gate so terminal output isn't spammed.
                 if config.verbose
                     && last_progress_log.elapsed().as_secs_f64() >= PROGRESS_INTERVAL_SECS
                 {
@@ -1315,9 +1279,8 @@ fn ingest_phase1(context: Phase1Ingest<'_>) -> Result<(), String> {
                 }
             }
 
-            // Note: the reader thread already filters out non-entity
-            // lines via `starts_with(ENTITY_PREFIX)` before they reach
-            // the channel, so no redundant prefix check is needed here.
+            // No prefix check here: the reader thread already dropped
+            // non-entity lines before they reached the channel.
             let (subject, predicate, object) = match parse_line(line) {
                 Some(parsed) => parsed,
                 None => continue,
@@ -1328,7 +1291,6 @@ fn ingest_phase1(context: Phase1Ingest<'_>) -> Result<(), String> {
                 Subject::Other => continue,
             };
 
-            // Subject changed → flush previous entity
             if current.as_ref().is_some_and(|c| c.id != subj_id) {
                 if let Some(acc) = current.take() {
                     flush_entity(
@@ -1362,7 +1324,6 @@ fn ingest_phase1(context: Phase1Ingest<'_>) -> Result<(), String> {
 
             let acc = current.as_mut().unwrap();
 
-            // Process triple based on predicate type
             match predicate {
                 Predicate::Label => {
                     if include_labels {
@@ -1432,7 +1393,6 @@ fn ingest_phase1(context: Phase1Ingest<'_>) -> Result<(), String> {
     }
     join_result?;
 
-    // Flush last entity
     if let Some(acc) = current.take() {
         flush_entity(
             graph,
@@ -1501,15 +1461,10 @@ pub fn load_ntriples(
         seconds: 0.0,
     };
 
-    // Phase 1: Parse and ingest.
-    // For Disk mode: serialize properties to a compressed log file (fast, ~100 ns/entity).
-    // Phase 1b replays the log to build ColumnStores in bulk.
-    // For other modes: use fast non-mapped insertion (HashMap properties, then Phase 1b).
-    // Mapped mode reuses the disk path's Phase 1 streaming: a spill-backed
-    // property log + packed `EdgeBuffer::Compact` in place of the slow
-    // per-entity `PropertyStorage::Map` + `EdgeBuffer::Strings` path.
-    // Phase 1b then routes through `build_columns_direct`, writing a single
-    // `columns.bin` instead of the per-entity `enable_columnar()` loop.
+    // Phase 1: Parse and ingest. Disk and mapped modes stream properties into
+    // a compressed log (~100 ns/entity) plus a packed `EdgeBuffer::Compact`,
+    // which Phase 1b replays into ColumnStores in bulk; memory mode inserts
+    // `PropertyStorage::Map` rows and converts at the end of Phase 1b.
     let LoadSpills {
         mut prop_log,
         mut edge_buffer,
@@ -1581,7 +1536,6 @@ pub fn load_ntriples(
     Ok(stats)
 }
 
-/// Flush an accumulated entity into the graph as a node.
 #[allow(clippy::too_many_arguments)]
 fn flush_entity(
     graph: &mut DirGraph,
@@ -1594,9 +1548,7 @@ fn flush_entity(
     label_writer: &mut Option<super::label_spill::LabelSpillWriter>,
     type_meta: &mut HashMap<String, TypeBuildMeta>,
     qnum_to_idx: &mut Option<MmapOrVec<u32>>,
-    // Reusable buffer for the property-log key/value pairs. Hoisted out
-    // of this function so the alloc cost is paid once instead of per
-    // entity (showed up at ~2% of loader CPU under samply).
+    // Reusable property-log buffer, hoisted to the caller (see `ingest_phase1`).
     scratch_props: &mut Vec<(InternedKey, Value)>,
 ) -> Result<(), String> {
     // Disk/mapped mode requires a `u32` Q-number. A `Value::String` id
@@ -1614,10 +1566,8 @@ fn flush_entity(
 
     let title = acc.label.unwrap_or_else(|| acc.id.clone());
 
-    // Append to the label journal for post-Phase-1 type resolution.
-    // Sequential write only — zero heap pressure during the streaming
-    // phase. The previous HashMap-based cache grew to ~10 GB at
-    // Wikidata scale and caused swap thrash on 16 GB machines.
+    // Append to the label journal for post-Phase-1 type resolution: a
+    // sequential write, so zero heap pressure during the streaming phase.
     if let Some(ref mut w) = label_writer {
         if let Some(qnum) = parse_qcode_number(&acc.id) {
             w.append(qnum, &title)
@@ -1625,15 +1575,13 @@ fn flush_entity(
         }
     }
 
-    // Determine node type from P31 value. During Phase 1 we always use
-    // the raw Q-code when auto_type is on — the post-Phase-1 rename
-    // pass resolves it to the human-readable label using the journal.
-    // This avoids the old in-loop HashMap lookup on a 124M-entry map.
+    // With auto_type on, Phase 1 keeps the raw P31 Q-code as the type name —
+    // the post-Phase-1 rename pass resolves it against the label journal,
+    // avoiding an in-loop lookup on a 124M-entry map.
     let node_type = if let Some(ref tq) = acc.type_qcode {
         if let Some(mapped_name) = config.node_types.get(tq) {
             mapped_name.clone()
         } else if config.auto_type {
-            // Raw Q-code; post-Phase-1 rename will resolve to label.
             tq.clone()
         } else {
             "Entity".to_string()
@@ -1655,7 +1603,6 @@ fn flush_entity(
         .map_err(|e| e.to_string())?;
 
     let mut properties = acc.properties;
-    // Store nid as a queryable string property (e.g., "Q42") so Cypher {nid: 'Q42'} works
     properties.insert("nid".to_string(), Value::String(acc.id.clone()));
     if let Some(desc) = acc.description {
         properties.insert("description".to_string(), Value::String(desc));
@@ -1685,7 +1632,7 @@ fn flush_entity(
         &mut graph.interner,
     );
 
-    // Mapped mode: push properties into ColumnStore (existing path).
+    // Mapped mode: push properties into ColumnStore.
     if mapped {
         let interned_props = node_data
             .properties
@@ -1701,15 +1648,11 @@ fn flush_entity(
         node_data.title = Value::Null;
     }
 
-    // For disk mode: serialize properties to the log file BEFORE clearing them.
-    // We need node_data properties to still be present for the log write,
-    // then clear them before add_node (DiskGraph discards them anyway).
+    // Properties must reach the log BEFORE they are cleared for `add_node`
+    // (which discards them anyway on disk).
     let saved_id = node_data.id.clone();
     let saved_title = node_data.title.clone();
     if prop_log.is_some() {
-        // Reuse `scratch_props` instead of allocating a fresh Vec per
-        // flush. `clear()` preserves capacity so subsequent entities
-        // skip the alloc + grow.
         scratch_props.clear();
         scratch_props.extend(
             node_data
@@ -1735,21 +1678,19 @@ fn flush_entity(
         )
         .map_err(|e| format!("Property log write failed: {e}"))?;
 
-        // Collect per-type metadata for Phase 1b pre-allocation
         type_meta
             .entry(node_type.clone())
             .or_insert_with(TypeBuildMeta::new)
             .record_entity(&saved_id, &saved_title, scratch_props);
     }
 
-    // Update type_indices
     graph
         .type_indices
         .entry_or_default(node_type.clone())
         .push(node_idx);
 
-    // For disk mode: write directly to qnum_to_idx mmap (skip id_indices to save ~11 GB RAM).
-    // For other modes: use id_indices HashMap as before.
+    // Disk mode writes qnum_to_idx directly and keeps no id_indices at all
+    // (see `initialize_spills`); every other mode fills id_indices.
     if let Some(ref mut qt) = qnum_to_idx {
         if let Some(qnum) = parse_qcode_number(&acc.id) {
             if (qnum as usize) < qt.len() {
@@ -1765,12 +1706,10 @@ fn flush_entity(
 
     stats.entities_created += 1;
 
-    // Periodic spill: every 100K entities, check if columns should be spilled to disk
     if mapped && stats.entities_created.is_multiple_of(100_000) {
         graph.maybe_spill_columns();
     }
 
-    // Buffer outgoing edges
     match edge_buffer {
         EdgeBuffer::Compact(buf) => {
             if let Some(src_num) = parse_qcode_number(&acc.id) {
@@ -1796,9 +1735,6 @@ fn flush_entity(
     Ok(())
 }
 
-/// Create edges from the buffer. Looks up source/target by Q-code across all types.
-/// Fast edge creation using pre-built qnum_to_idx from Phase 1 (disk mode).
-/// Avoids rebuilding the lookup table from id_indices (saves ~11 GB RAM at full scale).
 pub(super) fn format_count(n: u64) -> String {
     if n >= 1_000_000 {
         format!("{:.1}M", n as f64 / 1_000_000.0)

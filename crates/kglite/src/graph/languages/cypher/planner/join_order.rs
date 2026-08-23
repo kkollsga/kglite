@@ -56,7 +56,6 @@ pub(super) fn optimize_pattern_start_node(query: &mut CypherQuery, graph: &DirGr
             //   is `(b)-[*1..3]-(a)` and `(a)-[*1..3]->(b)` reversed yields
             //   `(b)<-[*1..3]-(a)` (same edges traversed in reverse). Path-bound
             //   patterns are protected by the `path_assignments` check above.
-            // No early-exit needed for direction/var-length anymore.
 
             let first_sel = estimate_node_selectivity_in_context(first_node, graph, &bound_vars);
             let last_sel = estimate_node_selectivity_in_context(last_node, graph, &bound_vars);
@@ -69,7 +68,6 @@ pub(super) fn optimize_pattern_start_node(query: &mut CypherQuery, graph: &DirGr
                 continue;
             }
 
-            // Reverse: flip element order and flip each edge direction
             pattern.elements.reverse();
             for elem in &mut pattern.elements {
                 if let PatternElement::Edge(ep) = elem {
@@ -82,8 +80,7 @@ pub(super) fn optimize_pattern_start_node(query: &mut CypherQuery, graph: &DirGr
             }
         }
 
-        // Accumulate node variables introduced by this clause's patterns so
-        // subsequent clauses see them as bound.
+        // Accumulate this clause's node vars so later clauses see them bound.
         for pattern in patterns.iter() {
             for elem in &pattern.elements {
                 if let PatternElement::Node(np) = elem {
@@ -145,12 +142,10 @@ pub(super) fn estimate_node_selectivity(
         },
     );
 
-    // Unconstrained nodes (no type, no properties) match every node in the
-    // graph — they represent the *worst* possible start node. Returning
-    // `usize::MAX` ensures the optimizer never picks an unconstrained node
-    // over a constrained one, regardless of how the graph is populated.
-    // (On a freshly-created graph, `type_count = 0`, which would otherwise
-    // make unconstrained nodes look maximally selective.)
+    // Unconstrained nodes (no type, no properties) match every node — the
+    // *worst* possible start node. `usize::MAX` stops the optimizer ever
+    // preferring one over a constrained node: on a freshly-created graph
+    // `type_count = 0`, which would make unconstrained look maximally selective.
     let unconstrained = np.node_type.is_none();
     // Floor typed-no-property and empty-property branches at 1 so they never
     // beat a legitimately-anchored node (`{id: X}` returns 1, pre-bound vars
@@ -190,7 +185,6 @@ pub(super) fn estimate_node_selectivity(
                     }
                 }
             }
-            // Check if any property has equality on an indexed field
             if let Some(ref nt) = np.node_type {
                 for (prop, matcher) in props {
                     match matcher {
@@ -326,8 +320,7 @@ pub(super) fn reorder_match_clauses(query: &mut CypherQuery, graph: &DirGraph) {
     // the cost-estimate error on label-asymmetric patterns from "all
     // edges of type R" to "only edges of type R between the matched
     // labels" — typically 10–100× tighter on Wikidata-shaped graphs.
-    // Gating on `has_type_connectivity_cache()` mirrors the existing
-    // `has_edge_type_counts_cache()` gate so plan-time stays O(1).
+    // Gated on a warm cache so plan-time stays O(1).
     let triple_counts: Option<HashMap<(String, String, String), usize>> =
         if edge_counts.is_some() && graph.has_type_connectivity_cache() {
             graph.get_type_connectivity().map(|triples| {
@@ -444,13 +437,9 @@ fn estimate_match_edge_cost(
         if !is_id_anchored(first) && !is_id_anchored(last) {
             return None;
         }
-        // Sum the edge count for every typed edge in the pattern.
-        // Prefer the label-pair triple count (src_type, edge, tgt_type)
-        // when both endpoints are labelled AND triple_counts is
-        // populated — this drops the cost estimate from "all R edges"
-        // to "R edges only between (T1, T2)", which on label-skewed
-        // graphs (humans-in-Germany style queries) is the difference
-        // between picking the right driving side and not.
+        // Sum the edge count for every typed edge, preferring the label-pair
+        // triple count when both endpoints are labelled and `triple_counts` is
+        // populated (see the cache gate in `reorder_match_clauses`).
         let elems = &pattern.elements;
         for idx in 0..elems.len() {
             let ep = match &elems[idx] {
@@ -476,10 +465,9 @@ fn estimate_match_edge_cost(
             for ct in conn_types {
                 let mut count: Option<usize> = None;
                 if let Some(triples) = triple_counts {
-                    // Lookup neighbouring node-type labels. Pattern shape
-                    // is always (node, edge, node, edge, ...) so the
-                    // surrounding nodes are at idx-1 and idx+1. Fall back
-                    // to per-edge total when either side is untyped or the
+                    // Pattern shape is always (node, edge, node, edge, …), so
+                    // the surrounding nodes sit at idx-1 and idx+1. Falls back
+                    // to the per-edge total when either side is untyped or the
                     // (src, edge, tgt) triple isn't in the cache.
                     let src_label = idx
                         .checked_sub(1)
@@ -509,9 +497,6 @@ fn estimate_match_edge_cost(
     Some(total)
 }
 
-/// Extract the node-type label (e.g. `Person`) from a NodePattern
-/// element. Returns `None` for edges, anonymous nodes, or nodes
-/// without a label.
 fn node_label(elem: &PatternElement) -> Option<String> {
     let np = match elem {
         PatternElement::Node(np) => np,
@@ -608,8 +593,6 @@ pub(super) fn reorder_match_patterns(query: &mut CypherQuery, graph: &DirGraph) 
             }
             continue;
         }
-        // Estimate selectivity for each pattern based on its start node,
-        // accounting for variables already bound by prior clauses.
         let mut pattern_scores: Vec<(usize, usize)> = mc
             .patterns
             .iter()
@@ -624,10 +607,8 @@ pub(super) fn reorder_match_patterns(query: &mut CypherQuery, graph: &DirGraph) 
             })
             .collect();
 
-        // Sort by selectivity (lower = more selective = should go first)
         pattern_scores.sort_by_key(|&(_, sel)| sel);
 
-        // Only reorder if the order actually changes
         let already_ordered = pattern_scores
             .iter()
             .enumerate()
@@ -640,7 +621,6 @@ pub(super) fn reorder_match_patterns(query: &mut CypherQuery, graph: &DirGraph) 
                 .collect();
         }
 
-        // Accumulate vars from this clause's (possibly reordered) patterns.
         for pat in mc.patterns.iter() {
             for elem in &pat.elements {
                 if let PatternElement::Node(np) = elem {
@@ -799,11 +779,10 @@ impl SimpleCycle {
 /// (`bound_target` → `expand_from_node`'s `target_hint`) rather than a full
 /// expansion.
 ///
-/// **Shape-gated for zero acyclic regression.** Fires ONLY on a simple ring of
-/// clean single-typed edges whose start variable repeats exactly once, and only
-/// re-roots when the new root is ≥`ROOT_GAIN`× more selective than the written
-/// one (and only when that root isn't already `elements[0]`). Every other
-/// pattern is left byte-identical, so acyclic queries are provably unaffected.
+/// **Shape-gated for zero acyclic regression.** Fires only on the ring shape
+/// `SimpleCycle::detect` proves, and only when the new root is ≥`ROOT_GAIN`×
+/// more selective than the written one. Every other pattern is left
+/// byte-identical, so acyclic queries are provably unaffected.
 pub(super) fn reorder_cyclic_pattern_edges(query: &mut CypherQuery, graph: &DirGraph) {
     /// Re-root only on a clear selectivity win, to avoid churn on marginal
     /// cases where the cost proxy could mislead.

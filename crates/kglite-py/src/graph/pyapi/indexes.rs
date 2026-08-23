@@ -1,5 +1,3 @@
-// Index Management #[pymethods] — extracted from mod.rs
-
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
@@ -7,10 +5,6 @@ use crate::graph::{get_graph_mut, KnowledgeGraph};
 
 #[pymethods]
 impl KnowledgeGraph {
-    // ========================================================================
-    // Index Management Methods
-    // ========================================================================
-
     /// Create an index on a property for a specific node type.
     ///
     /// Indexes dramatically speed up equality filters on the indexed property.
@@ -35,11 +29,9 @@ impl KnowledgeGraph {
     ///     # Create an index for faster lookups
     ///     graph.create_index('Prospect', 'geoprovince')
     ///
-    /// ```text
-    /// # Now this filter will use the index (O(1) instead of O(n))
-    /// graph.select('Prospect').where({'geoprovince': 'North Sea'})
-    /// ```
-    /// ```
+    ///     # Now this filter will use the index (O(1) instead of O(n))
+    ///     graph.select('Prospect').where({'geoprovince': 'North Sea'})
+    ///     ```
     fn create_index(
         &mut self,
         py: Python<'_>,
@@ -47,10 +39,8 @@ impl KnowledgeGraph {
         property: &str,
     ) -> PyResult<Py<PyAny>> {
         let graph = get_graph_mut(&mut self.inner);
-        // Idempotent: re-creating an existing index is not an error, but the
-        // report says so honestly — `created=false` when the index was
-        // already present (checked before the rebuild below mutates it),
-        // so callers can distinguish "I made it" from "it was already there".
+        // Checked before the rebuild below mutates the index — that ordering
+        // is what makes the returned `created` flag honest.
         let already_existed = graph.has_any_index(node_type, property);
         // Backend routing lives in the core (`create_property_index_routed`)
         // because the Cypher `CREATE INDEX` executor needs the identical
@@ -149,7 +139,7 @@ impl KnowledgeGraph {
     /// Returns an empty list if no global index exists for any alias
     /// of ``property``.
     ///
-    /// Example::
+    /// Example:
     ///
     /// ```text
     /// graph.create_global_index('label')   # or 'title'
@@ -171,9 +161,8 @@ impl KnowledgeGraph {
         // borrowed node weights live (arena protocol; no-op in memory/mapped).
         let _arena_guard = self.inner.begin_read_pass();
 
-        // Alias-aware lookup. Mirrors the matcher's cross-type fast
-        // path so `g.search(...)` and `MATCH (n {title: ...})` resolve
-        // through the same candidate list.
+        // Mirrors the matcher's cross-type fast path, so `g.search(...)` and
+        // `MATCH (n {title: ...})` resolve through the same candidate list.
         let candidates: Vec<&str> = match property {
             "title" => vec!["title", "label", "name"],
             "label" => vec!["label", "title", "name"],
@@ -184,8 +173,6 @@ impl KnowledgeGraph {
             other => vec![other],
         };
 
-        // Exact match across every candidate name, then prefix
-        // fallback on the same names.
         let mut hits: Vec<petgraph::graph::NodeIndex> = Vec::new();
         for name in &candidates {
             if let Some(v) = backend.lookup_by_property_eq_any_type(name, text) {
@@ -369,10 +356,6 @@ impl KnowledgeGraph {
         Ok(index_keys.len())
     }
 
-    // ========================================================================
-    // Composite Index Methods
-    // ========================================================================
-
     /// Create a composite index on multiple properties for efficient multi-field queries.
     ///
     /// Composite indexes are useful when you frequently filter on the same combination
@@ -390,14 +373,12 @@ impl KnowledgeGraph {
     ///     # Create an index for queries filtering on both 'geoprovince' and 'status'
     ///     graph.create_composite_index('Prospect', ['geoprovince', 'status'])
     ///
-    /// ```text
-    /// # Now this filter is very fast:
-    /// graph.select('Prospect').where({
-    ///     'geoprovince': 'N3',
-    ///     'status': 'Active'
-    /// })
-    /// ```
-    /// ```
+    ///     # Now this filter is very fast:
+    ///     graph.select('Prospect').where({
+    ///         'geoprovince': 'N3',
+    ///         'status': 'Active'
+    ///     })
+    ///     ```
     fn create_composite_index(
         &mut self,
         py: Python<'_>,

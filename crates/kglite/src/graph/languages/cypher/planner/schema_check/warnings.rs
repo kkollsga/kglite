@@ -1,12 +1,8 @@
 //! Non-fatal query warnings — the "why did this return nothing?" family.
 //!
-//! Split out of [`super`] when the combined file passed the god-file ceiling.
-//! The fatal schema check stays there; everything here *only ever appends to a
-//! `Vec<String>`*, and that separation is the point: a bug in this file can
-//! make a message wrong or missing, never a valid query rejected.
-//!
-//! The families and their conservatism rules are documented on the module
-//! doc-comment of [`super`] and on the individual functions.
+//! The fatal schema check stays in [`super`]; everything here *only ever
+//! appends to a `Vec<String>`*, and that separation is the point: a bug in this
+//! file can make a message wrong or missing, never a valid query rejected.
 
 use super::super::super::ast::*;
 use super::type_mismatch::TypeMismatch;
@@ -505,10 +501,8 @@ pub(crate) struct QueryWarnings {
 
 impl QueryWarnings {
     /// Flatten to the wire form every consumer sees. The order is
-    /// user-visible (`ResultView.warnings`) and unchanged since before either
-    /// split: absent-property, then the always-warning families, then the
-    /// declared-type mismatches that used to be appended to the end of
-    /// `other`.
+    /// user-visible (`ResultView.warnings`): absent-property, then the
+    /// always-warning families, then the declared-type mismatches.
     pub(crate) fn into_messages(self) -> Vec<String> {
         let mut out: Vec<String> = self
             .absent_property
@@ -565,8 +559,7 @@ pub(crate) fn collect_query_warnings(
     // [`walk_query_patterns`]) — checking each label/relationship against the
     // schema directly. The all-valid path (the overwhelming common case)
     // allocates nothing: only confirmed-unknown, not-yet-seen names are
-    // recorded, and the candidate lists for "did you mean?" are built lazily
-    // only if there's at least one unknown.
+    // recorded, and "did you mean?" candidates are built lazily.
     let mut seen: HashSet<String> = HashSet::new();
     let mut unknown_labels: Vec<String> = Vec::new();
     // Shared with the absent-property walk below: a bare endpoint var
@@ -791,8 +784,8 @@ const SINK_SILENT: u8 = 1;
 /// setting no caller varies per query.
 static SINK: AtomicU8 = AtomicU8::new(SINK_STDERR);
 
-/// Select where query-warning echoes go, process-wide. Returns nothing; read
-/// the current value back with [`query_warning_sink`].
+/// Select where query-warning echoes go, process-wide. Read the current value
+/// back with [`query_warning_sink`].
 pub fn set_query_warning_sink(sink: QueryWarningSink) {
     SINK.store(
         match sink {
@@ -819,11 +812,8 @@ pub fn query_warning_sink() -> QueryWarningSink {
 /// programmatic surface, and passes the same slice through here for the
 /// interactive one (CLI/REPL users read stderr). Anything that computes a
 /// query warning of its own — `executor::call_clause`'s procedure-scope
-/// checks — emits through here too, so the prefix never drifts.
-///
-/// Being the one emitter is also what makes [`set_query_warning_sink`] a
-/// single-point switch: silencing the echo is a check here, not a flag
-/// threaded through four call sites.
+/// checks — emits through here too, so the prefix never drifts, and
+/// [`set_query_warning_sink`] stays a single-point switch.
 ///
 /// [`QueryDiagnostics::warnings`]: crate::graph::languages::cypher::result::QueryDiagnostics::warnings
 pub(crate) fn emit_query_warnings(warnings: &[String]) {
@@ -889,7 +879,6 @@ mod tests {
             "{}",
             w[0]
         );
-        // A near-miss still gets a suggestion.
         let q2 = parse_cypher("MATCH (p:Person) WHERE p.agee = 1 RETURN p").unwrap();
         let w2 = collect_unknown_pattern_warnings(&q2, &g);
         assert!(
@@ -901,7 +890,6 @@ mod tests {
     #[test]
     fn no_warning_on_present_or_builtin_property() {
         let g = graph_with_schema();
-        // Declared property → no warning.
         let q = parse_cypher("MATCH (p:Person) WHERE p.age = 30 RETURN p").unwrap();
         assert!(collect_unknown_pattern_warnings(&q, &g).is_empty());
         // Built-in field → no warning.
@@ -919,11 +907,6 @@ mod tests {
     }
 
     // ── D2p §3a: projection absent-property warnings ───────────────────────
-    //
-    // The WHERE walk above answers "why did my filter drop every row?". The
-    // projection walk answers the quieter twin: `RETURN v.imo` on a type that
-    // has no `imo` yields a full column of nulls, and because the sibling
-    // `v.name` title-aliases to a real value the rows read as half-correct.
 
     #[test]
     fn warns_on_return_projection_of_absent_property() {
@@ -989,8 +972,6 @@ mod tests {
         let g = graph_with_schema();
         let q = parse_cypher("MATCH (n:Person) WITH n AS m RETURN m.badprop").unwrap();
         assert!(collect_unknown_pattern_warnings(&q, &g).is_empty());
-        // …and the same is true on the WHERE side, which is the behaviour
-        // being mirrored.
         let q2 = parse_cypher("MATCH (n:Person) WITH n AS m WHERE m.badprop = 1 RETURN m").unwrap();
         assert!(collect_unknown_pattern_warnings(&q2, &g).is_empty());
     }
@@ -1018,8 +999,7 @@ mod tests {
         let q = parse_cypher("MATCH (p:Person) WHERE p.imo = 1 RETURN p.imo").unwrap();
         let w = collect_unknown_pattern_warnings(&q, &g);
         assert_eq!(w.len(), 1, "{w:?}");
-        // The filter is the more consequential of the two, and it comes first
-        // in the query, so it is the one reported.
+        // First site wins, and the filter is the more consequential of the two.
         assert!(
             w[0].starts_with("WHERE references property 'imo'"),
             "{}",
@@ -1181,12 +1161,8 @@ mod tests {
 
     #[test]
     fn no_direction_warning_when_both_orientations_are_recorded() {
-        // `source_types`/`target_types` are unions over every observed pair, so
-        // a type seen as both Person→Paper and Paper→Person reports both labels
-        // in both sets and the forward test passes. That is the documented
-        // imprecision: a multi-pair relationship type can hide a genuinely
-        // reversed arrow (false negative), and never invents one (the check
-        // only fires when the forward union has no support at all).
+        // Both orientations recorded → the forward test passes. This is the
+        // accepted false negative documented on `reversed_direction_warnings`.
         let g = graph_with_directed_schema();
         for query in [
             "MATCH (p:Person)-[:LINKS]->(a:Paper) RETURN p",

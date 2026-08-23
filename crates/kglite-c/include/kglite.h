@@ -926,9 +926,9 @@ KgliteStatusCode kglite_compute_schema_json(struct KgliteGraph *graph,
  * across the whole read-modify-save interval. Readers need none.** The
  * window that loses a writer's work is open-to-save, not save itself — two
  * processes that both load a graph, both mutate, and both save produce two
- * complete snapshots, and the second one published wins outright, silently.
- * Locking at save time is already too late to notice. Acquire before the
- * open, free after the save.
+ * complete snapshots, and the second one published wins outright, silently —
+ * locking at save time is already too late. Acquire before the open, free
+ * after the save.
  *
  * The lease is a pair of sidecar files next to `path` (`<path>.lock` holds
  * the OS lock, `<path>.lock-owner` records who has it). The OS releases the
@@ -941,11 +941,9 @@ KgliteStatusCode kglite_compute_schema_json(struct KgliteGraph *graph,
  * - `path` (in, borrowed): UTF-8 graph path, null-terminated. The path need
  *   not exist yet; a caller creating a new graph takes the lease first.
  * - `timeout_ms` (in): how long to keep retrying a contended lease. **`0`
- *   is fail-fast** — return immediately if someone else holds it, which is
- *   what a server wants at startup and a request path wants always (a
- *   blocked-for-30s open is a worse failure than a clear error). A caller
- *   that genuinely wants to queue passes a budget, or retries around the
- *   error itself.
+ *   is fail-fast** — return immediately if someone else holds it, because a
+ *   blocked-for-30s open is a worse failure than a clear error. A caller that
+ *   wants to queue passes a budget instead.
  * - `out_lease` (out, owned): set to the lease handle on success; the caller
  *   MUST free it with [`kglite_writer_lease_free`]. Null on failure.
  * - `out_error_msg` (out, owned): owned error message on failure (free via
@@ -979,10 +977,9 @@ KgliteStatusCode kglite_writer_lease_acquire(const char *path,
  * only inside the message's prose.
  *
  * A binding that wants to surface the holding pid — the Java wrapper's
- * `holder()`, an operator dashboard, a retry policy that backs off longer
- * for a lease taken hours ago — otherwise has to regex a sentence written
- * for humans, and re-parse it every time the wording improves. The engine
- * already has the fields structured; this hands them over.
+ * `holder()`, an operator dashboard, a retry policy that backs off longer for
+ * a lease taken hours ago — otherwise has to regex a sentence written for
+ * humans, and re-parse it every time the wording improves.
  *
  * Additive: `kglite_writer_lease_acquire` is unchanged and stays supported.
  * New callers should prefer this one.

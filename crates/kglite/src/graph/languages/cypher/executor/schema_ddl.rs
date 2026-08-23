@@ -1,7 +1,7 @@
 //! Schema DDL execution — `CREATE`/`DROP INDEX`, `SHOW INDEXES`,
 //! `CREATE`/`DROP CONSTRAINT`, `SHOW CONSTRAINTS`.
 //!
-//! # Taxonomy mapping (the honest version)
+//! # Taxonomy mapping
 //!
 //! Neo4j and KGLite do not have the same indexes. Neo4j 5 has one general
 //! `RANGE` index that serves equality, range, and ordering; KGLite has three
@@ -43,20 +43,16 @@
 //!
 //! # Constraint names *are* stored — a deliberate divergence from index names
 //!
-//! Constraints take the opposite decision to indexes above, for two reasons.
-//!
-//! First, the usage pattern differs. A ported Neo4j schema script almost always
-//! names its constraints and drops them by name (`CREATE CONSTRAINT
-//! person_email_unique …; DROP CONSTRAINT person_email_unique`), whereas index
-//! DDL has the `DROP INDEX FOR (n:L) ON (n.p)` descriptor form as a natural
-//! escape hatch. Refusing `DROP CONSTRAINT <name>` would break the dominant
-//! shape, and silently no-opping it would be worse still.
-//!
-//! Second, the cost turned out to be nil. The `.kgl` metadata section is
-//! **JSON**, not postcard (`io/file.rs` writes it with `serde_json`), so a new
-//! `#[serde(default, skip_serializing_if = …)]` field is forward- and
-//! backward-compatible and, being skipped when empty, leaves the golden-digest
-//! fixture byte-identical.
+//! A ported Neo4j schema script almost always names its constraints and drops
+//! them by name (`CREATE CONSTRAINT person_email_unique …; DROP CONSTRAINT
+//! person_email_unique`), whereas index DDL has the
+//! `DROP INDEX FOR (n:L) ON (n.p)` descriptor form as a natural escape hatch.
+//! Refusing `DROP CONSTRAINT <name>` would break the dominant shape, and
+//! silently no-opping it would be worse still. The cost is nil: the `.kgl`
+//! metadata section is **JSON**, not postcard (`io/file.rs` writes it with
+//! `serde_json`), so a new `#[serde(default, skip_serializing_if = …)]` field
+//! is forward- and backward-compatible and, being skipped when empty, leaves
+//! the golden-digest fixture byte-identical.
 //!
 //! So `DirGraph::constraint_names` persists `name -> declaration`, and
 //! `SHOW CONSTRAINTS` reports the author's name when there is one, falling back
@@ -141,9 +137,6 @@ fn index_info_to_row(info: &IndexInfo) -> ResultRow {
     row
 }
 
-/// Whether `command` is one of the schema *reads* (`SHOW INDEXES` /
-/// `SHOW CONSTRAINTS`) rather than a schema mutation.
-///
 /// The read/mutation split for schema commands lives here, next to both
 /// implementations, so the engine-routing arm in `executor/mod.rs` stays a single
 /// case and `clause_is_mutation` has one place to agree with.
@@ -167,7 +160,6 @@ pub(crate) fn is_schema_read(command: &SchemaCommand) -> bool {
 const SHOW_PROCEDURES_COLUMNS: [&str; 5] =
     ["name", "description", "mode", "worksOnSystem", "signature"];
 
-/// Columns in Neo4j's *default* (no-YIELD) SHOW PROCEDURES output.
 const SHOW_PROCEDURES_DEFAULT: [&str; 4] = ["name", "description", "mode", "worksOnSystem"];
 
 /// `SHOW PROCEDURES [YIELD …]` — a read over the procedure registry, the
@@ -244,7 +236,6 @@ fn show_procedures_result_set(yield_items: &[YieldItem]) -> Result<ResultSet, St
 const SHOW_FUNCTIONS_COLUMNS: [&str; 5] =
     ["name", "category", "description", "signature", "aliases"];
 
-/// Columns in Neo4j's *default* (no-YIELD) SHOW FUNCTIONS output.
 const SHOW_FUNCTIONS_DEFAULT: [&str; 3] = ["name", "category", "description"];
 
 /// `SHOW FUNCTIONS [YIELD …]` — a read over the function registry, whose every
@@ -328,8 +319,6 @@ pub(crate) fn execute_schema_read(
     }
 }
 
-/// Execute a schema DDL statement that mutates schema state.
-///
 /// Called from the mutable engine (`executor/write.rs`) because schema is graph
 /// state: the read-only-graph guard, the per-transaction read-only guard, and
 /// the rollback checkpoint all key on `is_mutation_query`, so DDL has to
@@ -664,10 +653,6 @@ fn resolve_index_name(graph: &DirGraph, name: &str) -> Option<(String, Vec<Strin
         })
 }
 
-// ============================================================================
-// Shared helpers
-// ============================================================================
-
 /// The canonical KGLite name for an index, matching
 /// `collect_indexes_structured`'s spelling.
 fn index_name(label: &str, properties: &[String]) -> String {
@@ -980,7 +965,6 @@ fn declare_property_type(
     Ok(())
 }
 
-/// Whether the graph already carries everything `plan` would install.
 fn constraint_is_declared(
     graph: &DirGraph,
     plan: ConstraintPlan,
@@ -1387,10 +1371,6 @@ fn constraints_removed(count: usize) -> MutationStats {
         ..MutationStats::default()
     }
 }
-
-// ============================================================================
-// Tests
-// ============================================================================
 
 #[cfg(test)]
 mod tests {

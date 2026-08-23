@@ -48,7 +48,6 @@ impl<'a> CypherExecutor<'a> {
             if scan_count.is_multiple_of(2048) {
                 self.check_deadline()?;
             }
-            // Count compatible matches for each pattern without materializing rows
             let mut match_count: i64 = 0;
 
             for pattern in &match_clause.patterns {
@@ -58,7 +57,6 @@ impl<'a> CypherExecutor<'a> {
                 {
                     match_count += fast_count;
                 } else {
-                    // Fall back to full PatternExecutor
                     // Fusing the count away does not stop the expansion
                     // from materializing: this branch holds the whole match
                     // vector for one driving row before counting it, and
@@ -87,7 +85,6 @@ impl<'a> CypherExecutor<'a> {
             // which is exactly match_count.
             let star_count = match_count.max(1);
 
-            // Build projected values for this row
             let mut projected = Bindings::with_capacity(
                 group_key_indices.len() + count_items.len() + derived_items.len(),
             );
@@ -113,7 +110,7 @@ impl<'a> CypherExecutor<'a> {
                 projected.insert(key, val);
             }
 
-            // Count aggregates: count(*) vs count(var) per item (see above)
+            // Count aggregates: count(*) vs count(var) per item.
             for &(_, item) in &count_items {
                 let key = return_item_column_name(item);
                 let value = match &item.expression {
@@ -273,7 +270,6 @@ impl<'a> CypherExecutor<'a> {
         } = fused_aggregate_shape(pattern, return_clause)?;
         let last_elem_idx = pattern.elements.len() - 1;
 
-        // Helper: extract node index from a match binding
         let extract_node_idx = |m: &crate::graph::core::pattern_matching::PatternMatch| -> Option<petgraph::graph::NodeIndex> {
             m.bindings.iter().find_map(|(name, binding)| {
                 if name == group_var {
@@ -288,10 +284,9 @@ impl<'a> CypherExecutor<'a> {
             })
         };
 
-        // Helper: count edges (or distinct peers, when `distinct_count` is set)
-        // for a node. Returns Result so the deadline surfaced by the inner
-        // counters can propagate through the surrounding heap/loop and
-        // terminate the query cleanly.
+        // Counts edges, or distinct peers when `distinct_count` is set.
+        // Returns Result so a deadline surfaced by the inner counters
+        // propagates through the surrounding heap/loop and ends the query.
         let count_for_node = |node_idx: petgraph::graph::NodeIndex| -> Result<i64, String> {
             if pattern.elements.len() == 5 {
                 // 5-element patterns aren't supported with DISTINCT yet; the
@@ -317,7 +312,6 @@ impl<'a> CypherExecutor<'a> {
             }
         };
 
-        // Helper: build a result row for a (node_idx, count) pair
         let build_row =
             |node_idx: petgraph::graph::NodeIndex, match_count: i64| -> Result<ResultRow, String> {
                 let mut tmp_row = ResultRow::new();
@@ -674,7 +668,6 @@ impl<'a> CypherExecutor<'a> {
                                 .binary_search_idx(petgraph::graph::NodeIndex::new(peer as usize)),
                         }
                     };
-                    // Top-K from the counts HashMap
                     let heap: BinaryHeap<Reverse<(i64, u32)>> = if descending {
                         let mut h = BinaryHeap::with_capacity(limit + 1);
                         for (&peer, &count) in &counts {
@@ -812,8 +805,8 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
 
-            // Node-centric top-K path (for typed group nodes or group=source patterns)
-            // Get group node candidates directly from type_indices (streaming, no alloc)
+            // Node-centric top-K path (for typed group nodes or group=source
+            // patterns).
             let group_node_type = match &pattern.elements[group_elem_idx] {
                 PatternElement::Node(np) => np.node_type.as_deref(),
                 _ => None,
@@ -835,7 +828,6 @@ impl<'a> CypherExecutor<'a> {
                 }
             };
 
-            // Property filter executor (if group node has inline properties)
             let prop_executor = group_node_props.as_ref().map(|_| {
                 PatternExecutor::new_lightweight_with_params(self.graph, None, self.params)
             });
@@ -847,7 +839,6 @@ impl<'a> CypherExecutor<'a> {
                     if scan_count.is_multiple_of(10000) {
                         self.check_deadline()?;
                     }
-                    // Property filter on group node
                     if let Some(ref props) = group_node_props {
                         if !prop_executor
                             .as_ref()
@@ -913,12 +904,10 @@ impl<'a> CypherExecutor<'a> {
                 rows
             }
         } else {
-            // Non-top-k: use edge-centric aggregation when the pattern is a
-            // 3-element typed edge and the group key is the target node. This
-            // replaces an O(|target-nodes| * avg-degree) per-node scan with a
-            // single O(|edges-of-type|) sequential pass — essential when the
-            // group variable has no type filter (124 M target candidates on
-            // Wikidata would OOM or time out).
+            // Non-top-k twin of the edge-centric aggregation above: one
+            // O(|edges-of-type|) sequential pass instead of the
+            // O(|target-nodes| × avg-degree) per-node scan — essential when
+            // the group variable is untyped (124 M candidates on Wikidata).
             let edge_conn_type = match &pattern.elements[1] {
                 PatternElement::Edge(ep) => ep.connection_type.as_ref(),
                 _ => None,
@@ -955,9 +944,7 @@ impl<'a> CypherExecutor<'a> {
             // Same direction-aware "group is target" predicate as the top-K
             // branch (see comment there for the post-reversal case). Pre-fix
             // this read `, 2` against group_elem_idx, which silently bailed
-            // typed-target queries to the slow node-centric scan. The fast
-            // path's `lookup_peer_counts` is keyed by edge target, so it
-            // serves both AST shapes.
+            // typed-target queries to the slow node-centric scan.
             let group_is_target_nontopk = matches!(
                 (group_elem_idx, edge_direction_nontopk),
                 (2, Some(EdgeDirection::Outgoing)) | (0, Some(EdgeDirection::Incoming))
@@ -1156,7 +1143,6 @@ impl<'a> CypherExecutor<'a> {
     ) -> Result<ResultSet, String> {
         use crate::graph::core::pattern_matching::PatternElement;
 
-        // Extract node variable and type from the single-element pattern
         let pattern = &match_clause.patterns[0];
         let node_pattern = match &pattern.elements[0] {
             PatternElement::Node(np) => np,
@@ -1164,10 +1150,8 @@ impl<'a> CypherExecutor<'a> {
         };
         let node_var = node_pattern.variable.as_deref().unwrap_or("_n");
 
-        // Get candidate node indices (multi-label aware).
         let node_indices = self.fused_scan_candidates(node_pattern)?;
 
-        // Classify RETURN items into group keys and aggregates
         let mut group_key_indices = Vec::new();
         let mut agg_indices = Vec::new();
         for (i, item) in return_clause.items.iter().enumerate() {
@@ -1178,7 +1162,6 @@ impl<'a> CypherExecutor<'a> {
             }
         }
 
-        // Pre-fold group key and aggregate expressions
         let folded_group_exprs: Vec<Expression> = group_key_indices
             .iter()
             .map(|&i| self.fold_constants_expr(&return_clause.items[i].expression))
@@ -1219,9 +1202,6 @@ impl<'a> CypherExecutor<'a> {
                     args,
                     distinct,
                 } => {
-                    // `count(*)`, and `count(<bound var>)` — whose binding is
-                    // always present, so materialising the node value only to
-                    // test it for null is pure waste.
                     let is_row_marker = args.is_empty()
                         || matches!(args[0], Expression::Star)
                         || (!*distinct
@@ -1278,7 +1258,6 @@ impl<'a> CypherExecutor<'a> {
             self.scan_partition(&node_indices, &ctx, &mut runtime, &interrupt)?
         };
 
-        // Build result rows from groups
         let columns: Vec<String> = return_clause
             .items
             .iter()
@@ -1308,13 +1287,11 @@ impl<'a> CypherExecutor<'a> {
         for (gi, (group_key_values, first_node_idx)) in groups.iter().enumerate() {
             let mut projected = Bindings::with_capacity(return_clause.items.len());
 
-            // Add group key values
             for (ki, &item_idx) in group_key_indices.iter().enumerate() {
                 let key = return_item_column_name(&return_clause.items[item_idx]);
                 projected.insert(key, group_key_values[ki].clone());
             }
 
-            // Emit aggregate values from accumulators
             let acc = &group_accumulators[gi];
             for (ai, &item_idx) in agg_indices.iter().enumerate() {
                 let item = &return_clause.items[item_idx];
@@ -1330,13 +1307,11 @@ impl<'a> CypherExecutor<'a> {
             result_rows.push(row);
         }
 
-        // Handle HAVING
         if let Some(ref having) = return_clause.having {
             augment_rows_with_aggregate_keys(&mut result_rows, &return_clause.items);
             self.retain_rows_matching(&mut result_rows, having)?;
         }
 
-        // Handle DISTINCT
         if return_clause.distinct {
             let mut seen = HashSet::new();
             result_rows.retain(|row| {
@@ -1381,10 +1356,8 @@ impl<'a> CypherExecutor<'a> {
         };
         let node_var = node_pattern.variable.as_deref().unwrap_or("_n");
 
-        // Get candidate node indices (multi-label aware).
         let node_indices = self.fused_scan_candidates(node_pattern)?;
 
-        // Pre-fold expressions
         let folded_keys: Vec<Expression> = sort_keys
             .iter()
             .map(|key| self.fold_constants_expr(&key.expression))
@@ -1399,7 +1372,6 @@ impl<'a> CypherExecutor<'a> {
         let folded_where = where_predicate.map(|p| self.fold_constants_pred(p));
         let folded_where_ref = folded_where.as_ref();
 
-        // Single reusable eval row
         let mut eval_row = ResultRow::new();
         eval_row
             .node_bindings
@@ -1420,12 +1392,10 @@ impl<'a> CypherExecutor<'a> {
         let needs_node = !runtime.is_empty();
 
         for (scan_count, &node_idx) in node_indices.iter().enumerate() {
-            // Periodic deadline check
             if scan_count.is_multiple_of(10000) {
                 self.check_deadline()?;
             }
 
-            // Set node binding for expression evaluation
             *eval_row
                 .node_bindings
                 .get_mut(node_var)
@@ -1570,7 +1540,6 @@ impl<'a> CypherExecutor<'a> {
             return Err("FusedMatchWithAggregate: group variable not in pattern".into());
         };
 
-        // Identify group key and count items
         let mut group_key_indices = Vec::new();
         let mut count_indices = Vec::new();
         for (i, item) in with_clause.items.iter().enumerate() {
@@ -1591,15 +1560,12 @@ impl<'a> CypherExecutor<'a> {
             })
             .collect();
 
-        // 0.8.12 phase-3: edge-centric aggregation via peer_count_histogram.
-        // Pattern must be 3 elements, group on the target (element 2),
-        // target has no property constraints, edge has a typed connection.
-        // Source may have a node-type constraint if a cheap uniformity
-        // check proves every source of the edge type already has that
-        // type. For wiki-style queries like
+        // 0.8.12 phase-3: edge-centric aggregation via peer_count_histogram
+        // (shape preconditions on `try_fast_with_aggregate_via_histogram`).
+        // For wiki-style queries like
         //   MATCH (h:Q5)-[:P27]->(c) WITH c, count(h) AS k
         // this drops wall time from O(|tgt nodes| × avg in-degree) to
-        // O(|distinct peers|) by consulting the pre-built histogram.
+        // O(|distinct peers|).
         //
         // The fast path is tried BEFORE computing `group_matches`
         // because `group_matches = executor.execute(&MATCH (c))` for
@@ -1746,7 +1712,6 @@ impl<'a> CypherExecutor<'a> {
             &count_indices,
         )?;
 
-        // Apply WITH WHERE filter if present
         if let Some(ref where_clause) = with_clause.where_clause {
             let folded = self.fold_constants_pred(&where_clause.predicate);
             self.retain_rows_matching(&mut result_rows, &folded)?;
@@ -1822,10 +1787,9 @@ impl<'a> CypherExecutor<'a> {
         }
         // Same direction-aware "group is target" predicate as the RETURN-
         // aggregate fast paths above. Pre-fix this only matched the user-
-        // written shape (group_elem_idx == 2 with Outgoing edge), so the
-        // post-`optimize_pattern_start_node` form (group_elem_idx == 0
-        // with Incoming) silently bailed even though `lookup_peer_counts`
-        // (target-keyed) serves both shapes.
+        // written shape (index 2 with Outgoing), so the
+        // post-`optimize_pattern_start_node` form (index 0 with Incoming)
+        // silently bailed.
         let group_is_target = matches!(
             (group_elem_idx, edge_pat.direction),
             (2, EdgeDirection::Outgoing) | (0, EdgeDirection::Incoming)

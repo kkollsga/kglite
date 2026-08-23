@@ -1,5 +1,3 @@
-// src/graph/mmap_vec.rs
-//
 // MmapOrVec<T>: a contiguous buffer of Copy+Pod values backed by either
 // a heap Vec<T> or a memory-mapped file. Provides transparent read/write
 // access regardless of backing. When mmap-backed, grow operations
@@ -141,9 +139,6 @@ impl_mmap_pod_primitive!(u8, u32, u64, i32, i64, f64);
 
 /// A resizable buffer of [`MmapPod`] values, optionally file-backed.
 ///
-/// - `Heap` variant: plain `Vec<T>` — default, no file I/O.
-/// - `Mapped` variant: memory-mapped file — data lives on disk, OS pages in/out.
-///
 /// Switching from Heap to Mapped writes current data to a file and mmaps it.
 /// Growing a Mapped buffer requires unmap → ftruncate → remap (invalidates
 /// old pointers, which is safe because `PropertyStorage::Columnar` returns
@@ -200,7 +195,7 @@ impl<T: MmapPod> MmapOrVec<T> {
         let mmap = unsafe { MmapOptions::new().len(byte_len).map_mut(&file)? };
         Ok(MmapOrVec::Mapped {
             mmap: Some(mmap),
-            len: count, // exactly the requested positions are addressable via set()
+            len: count,
             capacity: cap,
             file,
             path: path.to_path_buf(),
@@ -212,7 +207,7 @@ impl<T: MmapPod> MmapOrVec<T> {
     /// The file is created/truncated with initial capacity for `initial_cap` elements.
     /// `len` starts at 0 — use `push()` to add elements.
     pub fn mapped(path: &Path, initial_cap: usize) -> io::Result<Self> {
-        let cap = initial_cap.max(64); // minimum 64 elements
+        let cap = initial_cap.max(64);
         let byte_len = capacity_bytes::<T>(cap)?;
 
         let file = OpenOptions::new()
@@ -237,9 +232,8 @@ impl<T: MmapPod> MmapOrVec<T> {
     }
 
     /// Create a file-backed buffer pre-sized to `count` elements.
-    /// Elements are zero-initialized by the OS (lazy page-fault zero-fill).
-    /// Allows immediate `set(index, value)` without prior `push()`.
-    /// No pre-fill I/O — pages are only allocated when first written.
+    /// Elements are zero-initialized by the OS (lazy page-fault zero-fill), so
+    /// `set(index, value)` works immediately and no pre-fill I/O is performed.
     pub fn mapped_prefilled(path: &Path, count: usize) -> io::Result<Self> {
         let cap = count.max(64);
         let byte_len = capacity_bytes::<T>(cap)?;
@@ -257,7 +251,7 @@ impl<T: MmapPod> MmapOrVec<T> {
 
         Ok(MmapOrVec::Mapped {
             mmap: Some(mmap),
-            len: count, // pre-sized — set() works immediately
+            len: count,
             capacity: cap,
             file,
             path: path.to_path_buf(),
@@ -312,7 +306,6 @@ impl<T: MmapPod> MmapOrVec<T> {
         })
     }
 
-    /// Number of elements.
     pub fn len(&self) -> usize {
         match self {
             MmapOrVec::Heap { data } => data.len(),
@@ -320,7 +313,6 @@ impl<T: MmapPod> MmapOrVec<T> {
         }
     }
 
-    /// Check if empty.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -330,14 +322,12 @@ impl<T: MmapPod> MmapOrVec<T> {
     #[cfg(unix)]
     pub fn advise_willneed(&self) {
         if let MmapOrVec::Mapped { mmap, .. } = self {
-            // memmap2's advise method handles the madvise syscall
             if let Some(mmap) = mmap.as_ref() {
                 let _ = mmap.advise(memmap2::Advice::WillNeed);
             }
         }
     }
 
-    /// No-op on non-Unix platforms.
     #[cfg(not(unix))]
     pub fn advise_willneed(&self) {}
 
@@ -379,17 +369,15 @@ impl<T: MmapPod> MmapOrVec<T> {
     #[cfg(not(unix))]
     pub fn advise_dontneed(&self) {}
 
-    /// Tell the kernel the file's page-cache contents are no longer
-    /// needed via `posix_fadvise(POSIX_FADV_DONTNEED)` on Linux, or
-    /// `fcntl(F_NOCACHE, 1)` on macOS to discourage further caching of
-    /// future reads (the closest macOS equivalent — no retroactive-
-    /// eviction primitive exists in the macOS API surface).
+    /// Tell the kernel the file's page-cache contents are no longer needed via
+    /// `posix_fadvise(POSIX_FADV_DONTNEED)` on Linux. macOS exposes no
+    /// retroactive-eviction primitive, so it gets `fcntl(F_NOCACHE, 1)`, which
+    /// only discourages caching of future reads and may have no observable
+    /// impact — recorded so future kernel improvements pick it up automatically.
     ///
-    /// This is the targeted complement to [`Self::advise_dontneed`]
-    /// (which uses `madvise` on the mmap region): the file-descriptor-
-    /// level hint reaches the page cache directly on Linux. On macOS
-    /// the call is best-effort and may have no observable impact —
-    /// recorded so future kernel improvements pick it up automatically.
+    /// The targeted complement to [`Self::advise_dontneed`] (which uses
+    /// `madvise` on the mmap region): the file-descriptor-level hint reaches
+    /// the page cache directly on Linux.
     ///
     /// No-op for heap-backed storage and on non-Unix platforms.
     #[cfg(target_os = "linux")]
@@ -417,12 +405,8 @@ impl<T: MmapPod> MmapOrVec<T> {
     pub fn fadvise_dontneed(&self) {
         if let MmapOrVec::Mapped { file, .. } = self {
             use std::os::unix::io::AsRawFd;
-            // F_NOCACHE: 1 disables data caching for future reads/writes
-            // on this fd. macOS doesn't expose a retroactive-evict
-            // primitive comparable to Linux's POSIX_FADV_DONTNEED; this
-            // at least keeps subsequent reads from re-pinning more
-            // pages. Errors are intentionally ignored — the call is a
-            // hint and unprivileged fcntl flags vary across versions.
+            // Errors are intentionally ignored — the call is a hint and
+            // unprivileged fcntl flags vary across versions.
             // SAFETY: `file.as_raw_fd()` is owned by `self` for the
             // duration of the call; `libc::fcntl` with `F_NOCACHE` is
             // safe to invoke on any valid fd — it does not mutate the
@@ -446,11 +430,10 @@ impl<T: MmapPod> MmapOrVec<T> {
     /// kernel doesn't discard un-persisted writes. Heap-backed and empty
     /// regions are no-ops.
     ///
-    /// As of v2 the streaming subgraph filter no longer calls this in
-    /// the hot loop — chunk-and-spill drops file handles between chunks
-    /// which is what actually evicts on macOS. This method is retained
-    /// as a Linux-friendly explicit-flush primitive for future callers
-    /// (CSR build, periodic flushes during long mutations).
+    /// Retained as a Linux-friendly explicit-flush primitive for future
+    /// callers: the streaming subgraph filter no longer calls it, because
+    /// chunk-and-spill dropping file handles between chunks is what actually
+    /// evicts on macOS.
     #[allow(dead_code)]
     #[cfg(unix)]
     pub fn flush_and_release_pages(&self) -> std::io::Result<()> {
@@ -537,24 +520,20 @@ impl<T: MmapPod> MmapOrVec<T> {
                 })?;
                 if needed > *capacity {
                     let (new_capacity, new_byte_len) = grown_capacity::<T>(*capacity, needed)?;
-                    // Windows refuses to change the size of a file that still
-                    // has a mapped view (`ERROR_USER_MAPPED_FILE`), so there the
-                    // old mapping must be released before `set_len`.
+                    // Windows refuses to resize a file that still has a mapped
+                    // view (`ERROR_USER_MAPPED_FILE`), so it releases the view,
+                    // resizes, then re-maps; either step can fail with the view
+                    // already gone, so both failure paths restore a mapping of
+                    // the previous length — leaving the buffer readable and the
+                    // retry path working, the same guarantee POSIX gets.
                     //
-                    // POSIX deliberately keeps the opposite order: mapping the
-                    // replacement *before* dropping the original is what makes a
-                    // failed remap leave the buffer completely intact (see
-                    // `mapped_growth_remap_failure_keeps_state_and_retry_succeeds`).
+                    // POSIX maps the replacement *before* dropping the original,
+                    // which is what makes a failed remap leave the buffer intact
+                    // (see `mapped_growth_remap_failure_keeps_state_and_retry_succeeds`).
                     // Unmapping first everywhere would trade a Windows bug for a
-                    // POSIX atomicity regression, and would add an unmap/remap
-                    // round trip to every capacity doubling in the bulk-build
-                    // path. The two orders therefore stay split on purpose —
-                    // please do not "simplify" this into one branch.
-                    // Windows: release the view, resize, re-map. Both the resize
-                    // and the re-map can fail with the view already gone, so
-                    // either failure restores a mapping of the previous length.
-                    // That leaves the buffer readable and the retry path working
-                    // — the same observable guarantee the POSIX order provides.
+                    // POSIX atomicity regression and add an unmap/remap round trip
+                    // to every capacity doubling in the bulk-build path, so the
+                    // two orders stay split on purpose — do not merge them.
                     #[cfg(windows)]
                     {
                         let previous_byte_len = capacity_bytes::<T>(*capacity)?;
@@ -675,7 +654,7 @@ impl<T: MmapPod> MmapOrVec<T> {
     /// Convert from Heap to Mapped (file-backed). No-op if already mapped.
     pub fn materialize_to_file(&mut self, path: &Path) -> io::Result<()> {
         if matches!(self, MmapOrVec::Mapped { .. }) {
-            return Ok(()); // already mapped
+            return Ok(());
         }
         let MmapOrVec::Heap { data } = self else {
             unreachable!()
@@ -699,7 +678,6 @@ impl<T: MmapPod> MmapOrVec<T> {
         // SAFETY: `data` is a Vec<T> where `T: MmapPod`; contiguous
         // layout means reinterpreting as a u8 slice of the same byte count
         // is well-defined.
-        // Copy data into mmap
         let src_bytes = unsafe {
             std::slice::from_raw_parts(data.as_ptr() as *const u8, len * std::mem::size_of::<T>())
         };
@@ -739,7 +717,6 @@ impl<T: MmapPod> MmapOrVec<T> {
         *self = MmapOrVec::Heap { data };
     }
 
-    /// Whether this buffer is file-backed.
     pub fn is_mapped(&self) -> bool {
         matches!(self, MmapOrVec::Mapped { .. })
     }
@@ -788,7 +765,6 @@ impl<T: MmapPod> MmapOrVec<T> {
         }
     }
 
-    /// Return the raw bytes of the data (without copying for heap).
     pub fn as_raw_bytes(&self) -> &[u8] {
         match self {
             // SAFETY: Vec<T> with `T: MmapPod` is contiguous and has no
@@ -937,7 +913,6 @@ impl<T: MmapPod> MmapOrVec<T> {
                 std::fs::write(path, bytes)
             }
             MmapOrVec::Mapped { mmap, len, .. } => {
-                // Flush first
                 if let Some(mmap) = mmap.as_ref() {
                     mmap.flush()?;
                 }
@@ -952,7 +927,6 @@ impl<T: MmapPod> MmapOrVec<T> {
         }
     }
 
-    /// The file path for a mapped buffer.
     pub fn file_path(&self) -> Option<&Path> {
         match self {
             MmapOrVec::Heap { .. } => None,
@@ -960,8 +934,6 @@ impl<T: MmapPod> MmapOrVec<T> {
         }
     }
 
-    /// Iterate over elements. Returns a Vec for simplicity (avoids lifetime issues
-    /// with mmap slices).
     pub fn to_vec(&self) -> Vec<T> {
         match self {
             MmapOrVec::Heap { data } => data.clone(),
@@ -1017,7 +989,7 @@ impl MmapBytes {
     }
 
     pub fn mapped(path: &Path, initial_cap: usize) -> io::Result<Self> {
-        let cap = initial_cap.max(4096); // minimum 4KB
+        let cap = initial_cap.max(4096);
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -1113,7 +1085,6 @@ impl MmapBytes {
         Ok(start)
     }
 
-    /// Read a byte range.
     pub fn slice(&self, start: usize, end: usize) -> &[u8] {
         match self {
             MmapBytes::Heap { data } => &data[start..end],
@@ -1246,7 +1217,6 @@ impl MmapBytes {
         }
     }
 
-    /// Return the raw bytes.
     pub fn as_raw_bytes(&self) -> &[u8] {
         match self {
             MmapBytes::Heap { data } => data,
@@ -1304,8 +1274,6 @@ impl Default for MmapBytes {
         MmapBytes::new()
     }
 }
-
-// ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

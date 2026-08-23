@@ -1,8 +1,4 @@
 // Matcher — executes parsed Pattern against a DirGraph.
-//
-// PatternExecutor implements a BFS expansion state machine with
-// variable bindings, property filters, edge direction, variable-length
-// paths, and Rayon-parallelised expansion for large match sets.
 
 use crate::datatypes::values::Value;
 use crate::graph::core::filtering::{compare_values, str_values_equal, values_equal};
@@ -47,14 +43,13 @@ struct ResolvedMatcher<'a> {
 }
 
 /// Everything a candidate scan can resolve once per node **type** instead of
-/// once per candidate: the alias-resolved matchers, the type's name, and the
-/// column store the type's rows live in.
+/// once per candidate — all of it a function of the node's type alone.
 ///
-/// All three are functions of the node's type alone. Resolving them per node
-/// cost a full-type text-filter scan roughly 40% of its runtime — two
-/// `String`-keyed hash probes in `DirGraph::resolve_alias`, one interner probe
-/// for the type name, one FNV hash per property, and one store probe inside
-/// `GraphRead::node_view` — all recomputing the same answer 10 000 times.
+/// Resolving them per node cost a full-type text-filter scan roughly 40% of its
+/// runtime: two `String`-keyed hash probes in `DirGraph::resolve_alias`, one
+/// interner probe for the type name, one FNV hash per property, and one store
+/// probe inside `GraphRead::node_view`, all recomputing the same answer 10 000
+/// times.
 struct TypeScanMemo<'a> {
     /// The type this memo is valid for. A mixed candidate stream (primary
     /// `type_indices` ∪ secondary-label hits) rebuilds when this changes, so
@@ -107,7 +102,6 @@ fn reuses_bound_relationship(current: &PatternMatch, candidate: &MatchBinding) -
     })
 }
 
-/// Append a fixed-length edge to the match's compact internal trail.
 fn extend_fixed_trail(current: &mut PatternMatch, candidate: &MatchBinding) {
     let MatchBinding::Edge {
         source,
@@ -137,15 +131,10 @@ fn extend_fixed_trail(current: &mut PatternMatch, candidate: &MatchBinding) {
 /// cross-type fast path sees a query for `prop`. The first entry is
 /// always `prop` itself.
 ///
-/// Two sources of aliases:
-///   1. Hardcoded families — `title ↔ label ↔ name` and `id ↔ nid ↔
-///      qid`. Covers the common KGLite conventions without any
-///      per-graph config.
-///   2. Per-type `title_field_aliases` / `id_field_aliases` on
-///      `DirGraph`. If any node type registered `'original_name'` as
-///      its title alias, a query for `{title: 'X'}` falls back to the
-///      `original_name` index too. Derived automatically from the
-///      graph's existing schema — no new config API.
+/// Two sources of aliases: the hardcoded `title ↔ label ↔ name` family, and the
+/// per-type `title_field_aliases` / `id_field_aliases` registered on `DirGraph`
+/// — so a type that registered `'original_name'` as its title alias also serves
+/// `{title: 'X'}` from the `original_name` index, with no new config API.
 fn global_alias_candidates(prop: &str, graph: &DirGraph) -> Vec<String> {
     let mut out: Vec<String> = vec![prop.to_string()];
     let (family, per_type_map): (&[&str], &FxHashMap<String, String>) = match prop {
@@ -228,10 +217,8 @@ fn str_starts_with(s: &str, prefix: &str) -> bool {
 /// [`PatternExecutor::value_matches`] decides by looking at a `Value::String`
 /// and nothing else — every other value shape answers `false` there, which is
 /// what [`crate::graph::storage::StrField::is`] returns for
-/// `NotString`/`Absent`. Keeping this
-/// function beside `value_matches` is the whole safety argument: they must
-/// agree row for row, so the borrowed read can never see a different answer
-/// than the materialising one.
+/// `NotString`/`Absent`. Keeping this function beside `value_matches` is the
+/// whole safety argument: they must agree row for row.
 ///
 /// `Equals` is [`str_values_equal`] — `values_equal`'s string arm,
 /// JSON-single-element unwrapping included — because on the identity fields
@@ -262,8 +249,9 @@ pub(super) fn str_field_test(matcher: &PropertyMatcher) -> Option<impl Fn(&str) 
 ///
 /// Cross-type numeric comparison throughout (Int64 <-> UniqueId <-> Float64).
 /// Free rather than a `PatternExecutor` method because the column-major scan
-/// filter needs it and holds no executor; `PatternExecutor::value_matches` is
-/// this, with `self.params` supplied.
+/// filter needs it and holds no executor — a scan carrying its own copy of
+/// these comparisons is a scan that can disagree with the row route about what
+/// a query means.
 pub(super) fn value_matches(
     params: &HashMap<String, Value>,
     value: &Value,
@@ -350,10 +338,6 @@ pub(super) fn value_matches(
     }
 }
 
-// ============================================================================
-// Executor
-// ============================================================================
-
 /// Executes graph pattern matching against a `DirGraph`.
 ///
 /// Takes a parsed `Pattern` and finds all subgraph matches using
@@ -369,7 +353,6 @@ pub struct PatternExecutor<'a> {
     lightweight: bool,
     /// Query parameters for resolving $param references in inline properties
     params: &'a HashMap<String, Value>,
-    /// Optional deadline for aborting long-running pattern execution.
     deadline: Option<Instant>,
     /// Optional cooperative-cancellation flag, polled at the same
     /// checkpoints as `deadline` (one relaxed atomic load). Set by a
@@ -424,11 +407,9 @@ pub struct PatternExecutor<'a> {
     _arena_guard: Option<crate::graph::storage::disk::graph::DiskQueryGuard>,
 }
 
-/// Static empty params for constructors that don't take parameters.
 static EMPTY_PARAMS: std::sync::LazyLock<HashMap<String, Value>> =
     std::sync::LazyLock::new(HashMap::new);
 
-/// Static empty bindings for constructors that don't take pre-bindings.
 static EMPTY_BINDINGS: std::sync::LazyLock<Bindings<NodeIndex>> =
     std::sync::LazyLock::new(Bindings::new);
 
@@ -451,7 +432,6 @@ impl<'a> PatternExecutor<'a> {
         }
     }
 
-    /// Lightweight executor with query parameters for resolving $param in inline properties
     pub fn new_lightweight_with_params(
         graph: &'a DirGraph,
         max_matches: Option<usize>,
@@ -497,31 +477,25 @@ impl<'a> PatternExecutor<'a> {
         }
     }
 
-    /// Set a deadline for pattern execution. Returns self for chaining.
     pub fn set_deadline(mut self, deadline: Option<Instant>) -> Self {
         self.deadline = deadline;
         self
     }
 
-    /// Set the cooperative-cancellation flag. Returns self for chaining.
     pub fn set_cancel(mut self, cancel: Option<&'static AtomicBool>) -> Self {
         self.cancel = cancel;
         self
     }
 
-    /// Opt this execution in to the parallel runtime. Returns self for
-    /// chaining, mirroring [`Self::set_cancel`] — both are per-query
-    /// properties the Cypher executor threads down from `ExecuteOptions`.
+    /// Opt this execution in to the parallel runtime — a per-query property the
+    /// Cypher executor threads down from `ExecuteOptions`, like `cancel`.
     pub fn set_parallel(mut self, parallel: bool) -> Self {
         self.parallel = parallel;
         self
     }
 
-    /// Combined deadline + cancellation poll. Returns `Some(message)`
-    /// when the run should abort (deadline exceeded or cancel flag set),
-    /// else `None`. The String is allocated only on the (rare) abort
-    /// path; the steady-state cost is the `Instant::now()` already done
-    /// for the deadline plus one relaxed atomic load when a flag is set.
+    /// Combined deadline + cancellation poll; `Some(message)` aborts the run.
+    /// The String is allocated only on the (rare) abort path.
     #[inline]
     fn interrupt_reason(&self) -> Option<String> {
         if let Some(dl) = self.deadline {
@@ -537,24 +511,22 @@ impl<'a> PatternExecutor<'a> {
         None
     }
 
-    /// Record that an advisory candidate cap discarded candidates on this
-    /// pass. See [`PatternExecutor::cap_truncated`].
+    /// Record that an advisory candidate cap discarded candidates — see
+    /// [`PatternExecutor::cap_truncated`].
     #[inline]
     fn note_cap_truncated(&self) {
         self.cap_truncated
             .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// Read and clear the advisory-cap bit.
     #[inline]
     fn take_cap_truncated(&self) -> bool {
         self.cap_truncated
             .swap(false, std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Set a distinct target variable for deduplication during pattern matching.
-    /// At the last hop, paths leading to already-seen target NodeIndex values
-    /// are skipped, avoiding PatternMatch cloning overhead.
+    /// Deduplicate results by the named variable — see
+    /// [`PatternExecutor::distinct_target_var`].
     pub fn set_distinct_target(mut self, var: Option<String>) -> Self {
         self.distinct_target_var = var;
         self
@@ -592,7 +564,6 @@ impl<'a> PatternExecutor<'a> {
         self.find_matching_nodes(pattern)
     }
 
-    /// Find all nodes matching a node pattern
     fn find_matching_nodes(&self, pattern: &NodePattern) -> Result<Vec<NodeIndex>, String> {
         let extra_keys: Vec<InternedKey> = pattern
             .extra_labels
@@ -600,7 +571,6 @@ impl<'a> PatternExecutor<'a> {
             .map(|label| InternedKey::from_str(label))
             .collect();
 
-        // If variable is pre-bound, return only that node (if it matches filters)
         if let Some(ref var) = pattern.variable {
             if let Some(&idx) = self.pre_bindings.get(var) {
                 if let Some(node) = self.graph.graph.node_view(idx) {
@@ -693,10 +663,9 @@ impl<'a> PatternExecutor<'a> {
             // Tries lookup_by_id_readonly on each type. When id_indices are built,
             // each lookup is O(1). Total: O(types) which is fast even for 132K types.
             //
-            // Only `{id: N}` routes to the id-index here. `{nid: 'Q76'}` is a
-            // plain string property now (0.11.0) — it falls through to the
-            // cross-type global-property-index path below, which serves the
-            // `nid` index in O(log N) (built on save_disk / lazily in memory).
+            // Only `{id: N}` routes to the id-index here; `{nid: 'Q76'}` is a
+            // plain string property (0.11.0) served by the cross-type
+            // global-property-index path below in O(log N).
             // Params resolve here exactly as the typed path does
             // (try_index_lookup's EqualsParam arm) — pre-fix `{id: $x}` fell
             // past this anchor into the full scan, so the literal and the
@@ -729,12 +698,8 @@ impl<'a> PatternExecutor<'a> {
             // StartsWith(String), consult the persistent global index
             // if one exists for that property. Turns `MATCH (n {label:
             // 'Norway'})` into O(log N) without requiring a type label.
-            //
-            // Alias-aware: if the literal property name misses, also
-            // try common title/id aliases (title↔label↔name,
-            // id↔nid↔qid). That way an agent who built the index as
-            // `create_global_index('label')` but queries with
-            // `{title: 'X'}` still hits the fast path.
+            // Alias-aware via `global_alias_candidates`, so an index built as
+            // `create_global_index('label')` still serves `{title: 'X'}`.
             for (prop, matcher) in props {
                 let alias_candidates = global_alias_candidates(prop, self.graph);
                 match matcher {
@@ -807,8 +772,7 @@ impl<'a> PatternExecutor<'a> {
     ///
     /// This is the one place a *stream* of candidates is property-filtered, so
     /// it is where per-type resolution is hoisted out of the per-node work —
-    /// see [`TypeScanMemo`]. A typed scan builds the memo once; a mixed stream
-    /// rebuilds it whenever the primary type changes.
+    /// see [`TypeScanMemo`].
     fn filter_node_candidates<'p>(
         &'p self,
         candidates: &[NodeIndex],
@@ -833,13 +797,12 @@ impl<'a> PatternExecutor<'a> {
     /// pre-warm and no spatial exclusion to make: the per-node spatial cache
     /// belongs to the Cypher executor and is unreachable from here.
     ///
-    /// **Disk stays excluded.** The arena hazard the rest of the engine has on
-    /// disk is genuinely bypassed on this path (`owned_node_data` materialises
-    /// into the caller's frame rather than parking a record in the shared query
-    /// arena), so this loop is closer to safe than most — but D7 defers disk
-    /// mode wholesale to its own phase, and "closer to safe" is not the
-    /// standard. Keeping the exclusion uniform with the Q2 operators also means
-    /// one rule to state to users: disk ignores `parallel`.
+    /// **Disk stays excluded** even though the arena hazard the rest of the
+    /// engine has on disk is genuinely bypassed here (`owned_node_data`
+    /// materialises into the caller's frame rather than parking a record in the
+    /// shared query arena): D7 defers disk mode wholesale to its own phase, and
+    /// an exclusion uniform with the Q2 operators is one rule to state to
+    /// users — disk ignores `parallel`.
     fn may_fan_out_candidate_scan(
         &self,
         candidates: &[NodeIndex],
@@ -1050,18 +1013,14 @@ impl<'a> PatternExecutor<'a> {
     /// executor falls through to a full-type scan (10–14s, usually a
     /// timeout).
     ///
-    /// Strategy: consult the cross-type global index (built once at
-    /// save-time, covering every node type), then filter by
-    /// `node_type_of(idx)`. For a query that hits a handful of rows
-    /// across the whole graph, the filter is O(hits) — microseconds —
-    /// and avoids the 13M-row scan entirely.
+    /// So: consult the cross-type global index (built once at save-time,
+    /// covering every node type), then filter its hits by `node_type_of(idx)` —
+    /// O(hits), microseconds, for a query hitting a handful of rows. Alias-aware
+    /// via `global_alias_candidates`, so an index built as `global_index_label_*`
+    /// still serves `{title: 'X'}`.
     ///
-    /// Alias-aware via `global_alias_candidates` so an index built as
-    /// `global_index_label_*` still serves `{title: 'X'}` queries.
-    ///
-    /// Returns `None` if no global index matches any alias for any
-    /// pushable predicate in `props`, leaving the caller to fall
-    /// through to the existing type-scan path.
+    /// `None` = no global index covered any pushable predicate in `props`; the
+    /// caller falls through to the type-scan path.
     fn try_global_index_lookup_typed(
         &self,
         node_type: &str,
@@ -1147,7 +1106,6 @@ impl<'a> PatternExecutor<'a> {
                 }
             }
             dedup_candidates(&mut result);
-            // Apply remaining property filters if any (e.g. {id: IN [...], status: "active"})
             if props.len() > 1 {
                 result.retain(|&idx| self.node_matches_properties(idx, props));
             }
@@ -1182,7 +1140,6 @@ impl<'a> PatternExecutor<'a> {
     }
 
     /// Try to use property indexes for faster node lookup.
-    /// Returns None if no indexes cover the requested properties.
     ///
     /// `Some(v)` and `None` are not interchangeable: `None` sends
     /// [`Self::find_matching_nodes`] into a scan of every node of the type,
@@ -1224,7 +1181,6 @@ impl<'a> PatternExecutor<'a> {
             return Some(result);
         }
 
-        // Extract equality values from PropertyMatcher (resolve params)
         let mut equality_props: Vec<(&String, &Value)> = props
             .iter()
             .filter_map(|(k, v)| match v {
@@ -1237,7 +1193,6 @@ impl<'a> PatternExecutor<'a> {
             })
             .collect();
 
-        // Check if any comparison/range matchers exist (for range index path below)
         let has_comparison = props.values().any(|m| {
             matches!(
                 m,
@@ -1256,13 +1211,10 @@ impl<'a> PatternExecutor<'a> {
             return None;
         }
 
-        // Try ID index for {id: value} patterns — O(1) lookup.
-        //
-        // `nid`/`qid` are NOT id-aliases (0.11.0) — they're plain string
-        // properties served by the global property index below. Only the
+        // Try ID index for {id: value} patterns — O(1) lookup. Only the
         // canonical `id` and the user-declared per-type ID alias route here
-        // (e.g. `add_nodes(df, "Star", "starId", "title")` makes `starId`
-        // the id alias for :Star).
+        // (`add_nodes(df, "Star", "starId", "title")` makes `starId` the id
+        // alias for :Star); `nid`/`qid` are plain string properties (0.11.0).
         if equality_props.len() == 1 {
             let (prop_name, value) = equality_props[0];
             let is_id_alias = prop_name.as_str() == "id"
@@ -1280,7 +1232,6 @@ impl<'a> PatternExecutor<'a> {
             }
         }
 
-        // Try composite index for multi-property patterns
         if equality_props.len() >= 2 {
             // Sort in-place — equality_props is a local vec of references, cheap to reorder
             equality_props.sort_by(|a, b| a.0.cmp(b.0));
@@ -1291,10 +1242,8 @@ impl<'a> PatternExecutor<'a> {
                 .lookup_by_composite_index(node_type, &names, &values)
             {
                 if equality_props.len() == props.len() {
-                    // Composite index covers all properties
                     return Some(results);
                 }
-                // Filter remaining non-indexed properties
                 let filtered = results
                     .into_iter()
                     .filter(|&idx| self.node_matches_properties(idx, props))
@@ -1303,14 +1252,11 @@ impl<'a> PatternExecutor<'a> {
             }
         }
 
-        // Try single property index
         for (prop, value) in &equality_props {
             if let Some(results) = self.graph.lookup_by_index(node_type, prop, value) {
                 if equality_props.len() == 1 && props.len() == 1 {
-                    // Index covers all properties — return directly
                     return Some(results);
                 } else {
-                    // Index covers one property — filter remaining manually
                     let filtered = results
                         .into_iter()
                         .filter(|&idx| self.node_matches_properties(idx, props))
@@ -1340,11 +1286,9 @@ impl<'a> PatternExecutor<'a> {
             }
         }
 
-        // Persistent disk-backed prefix index (STARTS WITH). Same
-        // `None` / `Some` semantics as the equality path — `None` means
-        // no index and the caller falls through to scan. Uses
-        // `usize::MAX` as the cap; outer LIMIT pushdown is not wired
-        // into matcher state yet.
+        // Persistent disk-backed prefix index (STARTS WITH). Same `None` /
+        // `Some` semantics as the equality path. Uses `usize::MAX` as the cap;
+        // outer LIMIT pushdown is not wired into matcher state yet.
         for (prop, matcher) in props {
             if let PropertyMatcher::StartsWith(prefix) = matcher {
                 if let Some(results) =
@@ -1364,7 +1308,6 @@ impl<'a> PatternExecutor<'a> {
             }
         }
 
-        // Try range index for comparison/range matchers
         for (prop, matcher) in props {
             use std::ops::Bound;
             let bounds: Option<(Bound<&Value>, Bound<&Value>)> = match matcher {
@@ -1397,7 +1340,6 @@ impl<'a> PatternExecutor<'a> {
                     if props.len() == 1 {
                         return Some(results);
                     }
-                    // Filter remaining non-indexed properties
                     let filtered = results
                         .into_iter()
                         .filter(|&idx| self.node_matches_properties(idx, props))
@@ -1419,18 +1361,15 @@ impl<'a> PatternExecutor<'a> {
         self.node_matches_properties(idx, props)
     }
 
-    /// Check if a node matches property filters.
-    ///
     /// The single-node entry point: everything in [`TypeScanMemo`] is resolved
     /// inline here because a lone node cannot amortise it. Scans over a
     /// candidate stream must go through [`Self::filter_node_candidates`], which
     /// resolves per *type* instead of per node.
     ///
-    /// One implementation for every backend. The disk backend used to take a
-    /// separate "columnar fast path" whose distinguishing property was
-    /// resolving the node's column store once per node rather than once per
-    /// property read; that is now what `NodeView` does for every backend, so
-    /// the two bodies had become identical.
+    /// One implementation for every backend: the disk-only "columnar fast path"
+    /// that used to live here — resolving the node's column store once per node
+    /// rather than once per property read — is now what `NodeView` does for all
+    /// of them.
     fn node_matches_properties(
         &self,
         idx: NodeIndex,
@@ -1583,27 +1522,19 @@ impl<'a> PatternExecutor<'a> {
         })
     }
 
-    /// Check if a value matches a property matcher.
-    ///
-    /// Delegates to the free [`value_matches`] so the column-major scan filter
-    /// ([`super::column_filter`]), which has no `PatternExecutor` to call a
-    /// method on, evaluates the *same* body. A scan carrying its own copy of
-    /// these comparisons is a scan that can disagree with the row route about
-    /// what a query means.
+    /// The free [`value_matches`], with `self.params` supplied — the same body
+    /// the column-major scan filter ([`super::column_filter`]) evaluates.
     #[inline]
     fn value_matches(&self, value: &Value, matcher: &PropertyMatcher) -> bool {
         value_matches(self.params, value, matcher)
     }
 
-    /// Expand from a source node via an edge pattern to nodes matching node pattern
     /// Whether `idx` satisfies a node pattern's label constraints — its
     /// `node_type` (matched as primary OR secondary label) and every
     /// `extra_label` — multi-label aware via `DirGraph::node_has_label`.
     /// Properties are matched separately. Used by edge-expansion target
     /// filtering so a typed endpoint like `(b:VIP)` matches nodes carrying
-    /// `VIP` as a secondary label, not only as their primary type. On a
-    /// single-label graph `node_has_label` reduces to the primary-type
-    /// equality this replaced, so behavior is unchanged.
+    /// `VIP` as a secondary label, not only as their primary type.
     fn node_matches_pattern_labels(&self, idx: NodeIndex, node_pattern: &NodePattern) -> bool {
         if let Some(ref nt) = node_pattern.node_type {
             if !self.graph.node_has_label(idx, InternedKey::from_str(nt)) {
@@ -1726,7 +1657,6 @@ impl<'a> PatternExecutor<'a> {
     ) -> Result<Vec<(NodeIndex, MatchBinding)>, String> {
         // Early exit: if the specified connection type doesn't exist in the graph, skip all iteration
         if let Some(ref types) = edge_pattern.connection_types {
-            // Multi-type: at least one must exist
             if !types.iter().any(|t| self.graph.has_connection_type(t)) {
                 return Ok(Vec::new());
             }
@@ -1736,10 +1666,9 @@ impl<'a> PatternExecutor<'a> {
             }
         }
 
-        // Check for variable-length path. `max_results` reaches the expansion
-        // here: the caller only passes one when every row it returns survives
-        // the post-expansion filters (`HopPlan::var_length_cap_safe`), so the
-        // BFS may stop the moment it is filled.
+        // `max_results` reaches a variable-length expansion only when every row
+        // it returns survives the post-expansion filters
+        // (`HopPlan::var_length_cap_safe`), so the BFS may stop once filled.
         if let Some((min_hops, max_hops)) = edge_pattern.var_length {
             return self.expand_var_length(
                 source,
@@ -1766,7 +1695,7 @@ impl<'a> PatternExecutor<'a> {
 
         let mut results = Vec::new();
 
-        // Determine which directions to check (static slice, no heap alloc)
+        // Static slice, no heap alloc.
         let directions: &[Direction] = match edge_pattern.direction {
             EdgeDirection::Outgoing => &[Direction::Outgoing],
             EdgeDirection::Incoming => &[Direction::Incoming],
@@ -1811,13 +1740,10 @@ impl<'a> PatternExecutor<'a> {
                     }
                 }
 
-                // Inline edge filter pushed from a downstream WHERE.
-                // Skip if the predicate rejects this edge — eliminates
-                // rows the post-expansion WHERE would have discarded
-                // anyway, so the dominant cost (binding allocation +
-                // node-property reads below) never happens. The
-                // `if let Some` guards the no-filter hot path with a
-                // single branch-predicted check. Reads edge properties, so it
+                // Inline edge filter pushed from a downstream WHERE: eliminates
+                // rows the post-expansion WHERE would have discarded anyway, so
+                // the dominant cost (binding allocation + node-property reads
+                // below) never happens. Reads edge properties, so it
                 // materialises the edge (lazy on disk) only when a filter exists.
                 if let Some(ref filter) = edge_pattern.edge_filter {
                     let edge_data = edge.weight();
@@ -1858,7 +1784,6 @@ impl<'a> PatternExecutor<'a> {
                     }
                 }
 
-                // Get target node
                 let target = match direction {
                     Direction::Outgoing => edge.target(),
                     Direction::Incoming => edge.source(),
@@ -1870,26 +1795,25 @@ impl<'a> PatternExecutor<'a> {
                     continue;
                 }
 
-                // Check if target matches node pattern labels (primary +
-                // secondary; skip when edge type guarantees it)
+                // Primary + secondary labels; skipped when the edge type
+                // guarantees the target's type.
                 if !edge_pattern.skip_target_type_check
                     && !self.node_matches_pattern_labels(target, node_pattern)
                 {
                     continue;
                 }
 
-                // Check node properties if specified
                 if let Some(ref props) = node_pattern.properties {
                     if !self.node_matches_properties(target, props) {
                         continue;
                     }
                 }
 
-                // Create edge binding. Index-only — `conn_type` was already
-                // read via the cheap accessor above, and consumers resolve
-                // edge properties from the graph on demand, so no edge
-                // materialisation or property-map clone happens here even
-                // when the edge variable is named.
+                // Index-only binding: `conn_type` was already read via the
+                // cheap accessor above, and consumers resolve edge properties
+                // from the graph on demand, so no edge materialisation or
+                // property-map clone happens here even when the edge variable
+                // is named.
                 let edge_binding = MatchBinding::Edge {
                     source,
                     target,
@@ -1907,7 +1831,6 @@ impl<'a> PatternExecutor<'a> {
         Ok(results)
     }
 
-    /// Convert a node to a binding.
     /// In lightweight mode (Cypher executor path), only `index` is populated
     /// since the executor resolves node data on demand via graph lookups.
     fn node_to_binding(&self, idx: NodeIndex) -> MatchBinding {
@@ -1961,5 +1884,3 @@ mod limit_seed_tests;
 #[cfg(test)]
 #[path = "matcher_ceiling_tests.rs"]
 mod ceiling_tests;
-
-// ============================================================================

@@ -19,10 +19,8 @@ use crate::graph::storage::disk::id_index::IdIndexStore;
 use crate::graph::storage::disk::type_index::TypeIndexStore;
 
 // Counts full `enable_columnar` rebuilds, so the save fast path can be pinned
-// by measurement rather than by argument. Test-only.
-//
-// Thread-local: `cargo test` runs tests in parallel, and a global counter would
-// make the rebuild count depend on what else happened to be running.
+// by measurement rather than by argument. Thread-local because `cargo test`
+// runs in parallel and a global would count other tests' rebuilds.
 #[cfg(test)]
 thread_local! {
     pub(crate) static COLUMNAR_REBUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -41,12 +39,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
-/// Core graph storage: a directed graph (petgraph `StableDiGraph`) with fast
-/// type-based indexing and optional property/composite/range/spatial indexes.
-///
-/// Fields include `type_indices` for O(1) node-type lookup, `property_indices`
-/// for indexed equality filters, connection-type metadata, schema definitions,
-/// and optional embedding stores for vector similarity search.
 /// Source of process-unique graph ids. Starts at 1 (0 is never handed out, so
 /// it can serve as a sentinel); monotonic and never reused so a dropped graph's
 /// plan-cache entries can't be served to a later graph that reuses an address.
@@ -80,10 +72,11 @@ mod schema_ops;
 pub use node_remap::NodeRemap;
 
 /// Version-keyed cache of per-`(type, property)` distinct-value counts (NDV)
-/// for the planner's selectivity estimator. The `u64` is the graph `version`
-/// the map was built at; a mismatch triggers a recompute (auto-invalidation).
+/// — see the [`DirGraph::property_ndv_cache`] field.
 type PropertyNdvCache = Arc<RwLock<(u64, HashMap<(String, String), usize>)>>;
 
+/// Core graph storage: a directed graph (petgraph `StableDiGraph`) with fast
+/// type-based indexing and optional property/composite/range/spatial indexes.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct DirGraph {
     pub graph: GraphBackend,
@@ -92,7 +85,6 @@ pub struct DirGraph {
     /// mutations land in an in-memory overlay.
     #[serde(skip)]
     pub type_indices: TypeIndexStore,
-    /// Optional schema definition for validation
     #[serde(default)]
     pub schema_definition: Option<SchemaDefinition>,
     /// Single-property indexes for fast lookups: (node_type, property) -> value -> [node_indices]
@@ -192,13 +184,10 @@ pub struct DirGraph {
     /// well as postcard (a tuple key is not a JSON object key). Ordered, so the
     /// bytes are deterministic once it is persisted.
     ///
-    /// **Persisted through `FileMetadata`, not through this derive.** A `.kgl`
-    /// load builds a fresh `DirGraph` and repopulates it from that struct
-    /// (`io::file`: `from_graph` / `apply_to_with`), so the `serde` attribute
-    /// here carries nothing across a save on its own. This map *is* the
-    /// enforcement structure — nothing else remembers the declared type — so
-    /// losing it across a save would silently stop enforcing every declaration
-    /// in the file.
+    /// **Persisted through `FileMetadata`, not through this derive** — see
+    /// [`Self::ddl_not_null_constraints`]. This map *is* the enforcement
+    /// structure — nothing else remembers the declared type — so losing it
+    /// across a save would silently stop enforcing every declaration.
     #[serde(default)]
     pub(crate) ddl_property_type_constraints:
         std::collections::BTreeMap<String, std::collections::BTreeMap<String, DeclaredType>>,
@@ -322,10 +311,9 @@ pub struct DirGraph {
     /// load; this is a diagnostic about a log that is gone, never a means of
     /// resuming it.
     ///
-    /// `#[serde(default)]` for the same vestigial reason as its neighbours:
-    /// `DirGraph`'s own derive is not the `.kgl` payload — the load path
-    /// rebuilds the graph and repopulates it from `FileMetadata` — so the
-    /// attribute only keeps in-memory clones and older payloads working.
+    /// `#[serde(default)]` is vestigial here as for its neighbours — the load
+    /// path repopulates from `FileMetadata`, so it only keeps in-memory clones
+    /// and older payloads working.
     #[serde(default)]
     pub cdc_handoff: Option<crate::graph::cdc::CdcHandoff>,
     /// Auto-vacuum threshold: if Some(t), vacuum() is triggered automatically after
@@ -335,11 +323,6 @@ pub struct DirGraph {
     pub auto_vacuum_threshold: Option<f64>,
     /// How many times [`Self::check_auto_vacuum`] has fired a vacuum on this
     /// in-memory graph.
-    ///
-    /// The observability half of auto-vacuum: without it, "did the threshold I
-    /// set actually do anything?" was only answerable by inference from
-    /// tombstone counts, and a vacuum that fired and reclaimed nothing (the
-    /// disk backend) was indistinguishable from one that never fired.
     ///
     /// Counts *fired* vacuums, not reclaimed slots — a fired vacuum that found
     /// nothing still increments, because the trigger arithmetic is what this
@@ -458,11 +441,9 @@ pub struct DirGraph {
     /// [`Self::record_constraint_violation`] at the moment it is stringified
     /// and drained by the adapter that builds the typed error.
     ///
-    /// Stored **with the exact message it produced**, and the drain only
-    /// accepts it when the string that arrived is byte-identical: if any
-    /// intermediate frame wrapped or rewrote the message, the pair is
-    /// discarded and the caller falls back to the untyped error. That makes a
-    /// desync fail *safe* rather than fail *wrong*.
+    /// Stored **with the exact message it produced**; the drain
+    /// ([`Self::take_constraint_violation_for`]) only accepts a byte-identical
+    /// string, so a desync fails *safe* rather than *wrong*.
     ///
     /// Same lifecycle as `active_write_scope`: installed for one execution,
     /// cleared unconditionally, never serialized, never copied (see
@@ -560,7 +541,6 @@ impl Drop for DirGraph {
         // Clean up temp directories created during load or columnar spill.
         // Only the last Arc holder actually removes the dirs.
         if let Ok(dirs) = self.temp_dirs.lock() {
-            // Only clean up if we're the sole owner (no other clones alive)
             if Arc::strong_count(&self.temp_dirs) <= 1 {
                 for dir in dirs.iter() {
                     let _ = std::fs::remove_dir_all(dir);
@@ -581,19 +561,6 @@ impl Default for DirGraph {
 /// Detected here (at index build) rather than per-mutation so bulk
 /// `UNWIND … CREATE` and `add_nodes` stay O(n), not O(n²). `id` is meant to
 /// be unique (like `add_nodes(unique_id_field=…)`); use MERGE or dedupe input.
-///
-/// **Uniqueness is detective-by-design — preventive constraints are a
-/// deliberate non-feature, not a gap.** Per-write `UNIQUE` / `NOT NULL` /
-/// PRIMARY KEY constraints (à la Neo4j/Kùzu) are intentionally NOT
-/// supported: they validate data-quality, which for an embedded
-/// exploration/analytical engine belongs at load time (this batch O(n)
-/// warning), not on the in-memory write hot path. The realistic needs are
-/// already covered — `MERGE` (don't-duplicate upsert), this warning
-/// (dirty-load signal), and the `db.duplicate_title` / `parallel_edges`
-/// rule procedures (on-demand audit). Re-evaluate only for a concrete
-/// interactive-write / untrusted-input workflow; even then, scope to
-/// opt-in `id`-uniqueness (cheap — piggybacks `id_indices`), never an
-/// arbitrary-property index maintained per write.
 fn warn_on_duplicate_ids(node_type: &str, entry_count: usize, unique_count: usize) {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static WARN_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -614,13 +581,10 @@ fn warn_on_duplicate_ids(node_type: &str, entry_count: usize, unique_count: usiz
 }
 
 impl DirGraph {
-    /// Current monotonic version counter. Incremented on every
-    /// mutation (via the kglite mutation paths). Used for optimistic
-    /// concurrency control (OCC) by [`crate::graph::session`] and
-    /// downstream consumers (the Python `Transaction` class, the
-    /// `kglite-bolt-server` per-tx commit path).
-    ///
-    /// Exposed publicly via `kglite::api::DirGraph::version`.
+    /// Current monotonic version counter, bumped by every mutation path. The
+    /// OCC token for [`crate::graph::session`] and downstream consumers (the
+    /// Python `Transaction` class, the `kglite-bolt-server` per-tx commit
+    /// path). Exposed publicly via `kglite::api::DirGraph::version`.
     pub fn version(&self) -> u64 {
         self.version
     }
@@ -703,7 +667,7 @@ impl DirGraph {
     /// signal. Every mutation path routes through this (Cypher writes via
     /// `execute_mut`, bulk ingest, and the `make_dir_graph_mut` handle) so
     /// version-keyed caches (the Cypher plan cache) and OCC observe every
-    /// change. Monotonic; wraps only after 2^64 mutations (never in practice).
+    /// change.
     pub fn bump_version(&mut self) {
         self.version = self.version.wrapping_add(1);
     }
@@ -889,12 +853,10 @@ impl DirGraph {
         }
     }
 
-    /// Look up spatial config for a node type.
     pub fn get_spatial_config(&self, node_type: &str) -> Option<&SpatialConfig> {
         self.spatial_configs.get(node_type)
     }
 
-    /// Look up timeseries data for a specific node by its index.
     pub fn get_node_timeseries(
         &self,
         node_index: usize,
@@ -906,7 +868,6 @@ impl DirGraph {
     /// Falls back to a linear scan of the embeddings map (typically 1-3 entries).
     #[inline]
     pub fn embedding_store(&self, node_type: &str, prop_name: &str) -> Option<&EmbeddingStore> {
-        // Embedding maps are tiny (usually 1-5 entries), so linear scan beats allocation
         self.embeddings
             .iter()
             .find(|((nt, pn), _)| nt == node_type && pn == prop_name)
@@ -994,9 +955,7 @@ impl DirGraph {
     /// disagree and nothing derived from it can be trusted.
     ///
     /// The batch appends exactly one member per creation and nothing else
-    /// writes the bucket while it runs, so the tail *is* the delta. Every
-    /// post-append index fold reads it rather than carrying a side vector of
-    /// its own through the batch engine.
+    /// writes the bucket while it runs, so the tail *is* the delta.
     pub(crate) fn appended_tail(&self, node_type: &str, created: usize) -> Option<Vec<NodeIndex>> {
         let members = self.type_indices.get(node_type)?;
         if members.len() < created {
@@ -1101,18 +1060,15 @@ impl DirGraph {
         }
     }
 
-    /// Look up a node by type and ID value. O(1) after index is built.
-    /// Builds the index lazily if not already built.
-    /// Handles type normalization: Python int may come as Int64 but be stored as UniqueId.
+    /// Look up a node by type and ID value. Delegates to
+    /// [`Self::lookup_by_id_normalized`], which self-heals the index on a
+    /// miss, so the `&mut` buys nothing here.
     pub fn lookup_by_id(&mut self, node_type: &str, id: &Value) -> Option<NodeIndex> {
-        // The normalized path self-heals: it builds + caches the index on a
-        // miss, so no separate build step is needed here.
         self.lookup_by_id_normalized(node_type, id)
     }
 
-    /// Look up a node by type and ID value without building index.
-    /// Use this for read-only access when index already exists.
-    /// Handles type normalization for integer types.
+    /// `&self` counterpart of [`Self::lookup_by_id`]; both delegate to
+    /// [`Self::lookup_by_id_normalized`].
     pub fn lookup_by_id_readonly(&self, node_type: &str, id: &Value) -> Option<NodeIndex> {
         self.lookup_by_id_normalized(node_type, id)
     }
@@ -1134,13 +1090,11 @@ impl DirGraph {
     }
 
     pub fn has_connection_type(&self, connection_type: &str) -> bool {
-        // Fast path: check the interned connection_types cache (O(1))
         if !self.connection_types.is_empty() {
             return self
                 .connection_types
                 .contains(&InternedKey::from_str(connection_type));
         }
-        // Check metadata
         if self.connection_type_metadata.contains_key(connection_type) {
             return true;
         }
@@ -1154,14 +1108,12 @@ impl DirGraph {
                 .try_resolve(InternedKey::from_str(connection_type))
                 .is_some();
         }
-        // Disk-side fall-through: even when the in-memory metadata
-        // looks complete-but-stale (Cypher DETACH DELETE clears the
+        // Disk-side fall-through: when the in-memory metadata looks
+        // complete-but-stale (Cypher DETACH DELETE clears the
         // `connection_types` set but leaves `connection_type_metadata`
-        // alone), the disk backend's `conn_type_index_*` mmap arrays
-        // are authoritative for the live edge set. Asking the trait
-        // for any source via the bounded helper is O(1) on disk —
-        // returns `Some(non-empty)` if the conn type has at least
-        // one live edge, `None` if no index for this name. 0.8.16.
+        // alone), the disk backend's `conn_type_index_*` mmap arrays are
+        // authoritative for the live edge set. O(1) on disk: `Some(non-empty)`
+        // iff the conn type has at least one live edge. 0.8.16.
         let key = InternedKey::from_str(connection_type);
         matches!(
             self.graph.sources_for_conn_type_bounded(key, Some(1)),
@@ -1189,10 +1141,8 @@ impl DirGraph {
         self.connection_types.insert(key);
     }
 
-    /// Build the connection types cache.
-    /// Called after deserialization or when cache is needed.
-    /// Fast path: populate from connection_type_metadata (O(types), no edge scan).
-    /// Fallback: scan all edges (O(edges)) if metadata is empty.
+    /// Build the connection types cache. Called after deserialization or when
+    /// the cache is needed.
     pub fn build_connection_types_cache(&mut self) {
         if !self.connection_types.is_empty() {
             return; // Already built
@@ -1217,12 +1167,10 @@ impl DirGraph {
         }
     }
 
-    /// Get the type connectivity triples (if cached).
     pub fn get_type_connectivity(&self) -> Option<Vec<ConnectivityTriple>> {
         self.type_connectivity_cache.read().unwrap().clone()
     }
 
-    /// Set the type connectivity cache.
     pub fn set_type_connectivity(&self, triples: Vec<ConnectivityTriple>) {
         *self.type_connectivity_cache.write().unwrap() = Some(triples);
     }
@@ -1231,18 +1179,11 @@ impl DirGraph {
     /// `(src_type, edge_type, tgt_type) → count` cardinality cache
     /// used by the Cypher planner for selectivity-aware cost estimation.
     ///
-    /// Lazy: on cold cache, walks every edge once via
-    /// `edge_endpoint_keys()` and groups by `(src.node_type, conn_key,
-    /// tgt.node_type)`. Identical shape to the n-triples loader's
-    /// existing `set_type_connectivity(...)` output, so consumers can
-    /// uniformly treat both as authoritative.
-    ///
-    /// On cache hit (common case after the first query), returns the
-    /// cached `Vec` clone in O(triples) — typically <100 entries on
-    /// real graphs, so essentially free.
-    ///
-    /// Invalidated alongside `edge_type_counts_cache` on every edge
-    /// mutation.
+    /// Lazy: an O(E) walk on a cold cache, an O(triples) clone (typically <100
+    /// entries) on a hit. Same shape as the n-triples loader's
+    /// `set_type_connectivity(...)` output, so consumers can treat both as
+    /// authoritative. Invalidated alongside `edge_type_counts_cache` on every
+    /// edge mutation.
     pub fn get_or_compute_type_connectivity(&self) -> Vec<ConnectivityTriple> {
         {
             let read = self.type_connectivity_cache.read().unwrap();
@@ -1250,7 +1191,6 @@ impl DirGraph {
                 return cached.clone();
             }
         }
-        // Cold: O(E) walk grouping by (src_type, conn_type, tgt_type).
         // Arena guard: node_weight materializes on the disk backend
         // (protocol in disk/graph.rs); no-op on memory/mapped.
         let _guard = self.graph.begin_query();
@@ -1279,9 +1219,7 @@ impl DirGraph {
         triples
     }
 
-    // ========================================================================
-    // Type Metadata Methods (replaces SchemaNode graph nodes)
-    // ========================================================================
+    // ── Type metadata (replaces SchemaNode graph nodes) ──
 
     /// Get metadata for a node type (property names → type strings).
     pub fn get_node_type_metadata(&self, node_type: &str) -> Option<&HashMap<String, String>> {
@@ -1381,12 +1319,11 @@ impl DirGraph {
     pub fn get_node_types(&self) -> Vec<String> {
         let mut types: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-        // Get types from type_indices
         for node_type in self.type_indices.keys() {
             types.insert(node_type.to_string());
         }
 
-        // Also include types from metadata (may have metadata but no live nodes)
+        // Types that have metadata but no live nodes.
         for node_type in self.node_type_metadata.keys() {
             types.insert(node_type.clone());
         }
@@ -1451,13 +1388,12 @@ impl DirGraph {
 
     // ── Column stores: DirGraph is the access point, the backend is the owner ──
     //
-    // The per-type `ColumnStore` map lives on the storage backend
-    // (`MemoryGraph` / `MappedGraph` / `DiskGraph` all carry one): there is no
-    // `DirGraph.column_stores` field and no DirGraph↔DiskGraph mirror keeping
-    // two copies in step. DirGraph keeps every lifecycle entry point —
-    // `enable_columnar`, `save`, spill, vacuum — and reaches the stores
-    // through these delegates, which translate the type *name* callers use
-    // into the `InternedKey` the backend keys by.
+    // The per-type `ColumnStore` map lives on the storage backend: there is no
+    // `DirGraph.column_stores` field and no mirror keeping two copies in step.
+    // DirGraph keeps every lifecycle entry point — `enable_columnar`, `save`,
+    // spill, vacuum — and reaches the stores through these delegates, which
+    // translate the type *name* callers use into the `InternedKey` the backend
+    // keys by.
 
     /// The store for `node_type`, if that type is columnar.
     #[inline]
@@ -1472,21 +1408,18 @@ impl DirGraph {
             .column_store_mut(InternedKey::from_str(node_type))
     }
 
-    /// Install (or replace) `node_type`'s store.
     #[inline]
     pub fn install_column_store(&mut self, node_type: &str, store: Arc<ColumnStore>) {
         self.graph
             .install_column_store(InternedKey::from_str(node_type), store);
     }
 
-    /// Remove and return `node_type`'s store.
     #[inline]
     pub fn take_column_store(&mut self, node_type: &str) -> Option<Arc<ColumnStore>> {
         self.graph
             .take_column_store(InternedKey::from_str(node_type))
     }
 
-    /// Drop every column store this graph owns.
     #[inline]
     pub fn clear_column_stores(&mut self) {
         self.graph.clear_column_stores();
@@ -1501,7 +1434,6 @@ impl DirGraph {
             .collect()
     }
 
-    /// Number of types with a column store.
     #[inline]
     pub fn column_store_count(&self) -> usize {
         self.graph.column_stores_iter().count()
@@ -1563,15 +1495,10 @@ impl DirGraph {
         self.graph.edge_weight_mut(index)
     }
 
-    // ========================================================================
-    // Serialization helpers
-    // ========================================================================
+    // ── Serialization helpers ──
 
-    /// Snapshot which property/composite indexes exist so they survive serialization.
-    /// Called automatically before save.
-    /// Sync node_type_metadata to match actual column store contents.
-    /// Removes properties from metadata that have no data in any column store.
-    /// Called before save to ensure metadata consistency.
+    /// Snapshot which property/composite indexes exist so they survive
+    /// serialization. Called automatically before save.
     pub fn populate_index_keys(&mut self) {
         self.property_index_keys = self.property_indices.keys().cloned().collect();
         self.composite_index_keys = self.composite_indices.keys().cloned().collect();
@@ -1627,20 +1554,10 @@ impl DirGraph {
         let _preexisting_violations = self.rebuild_unique_indices_from_keys();
     }
 
-    // ========================================================================
-    // Graph Maintenance: reindex, vacuum, graph_info
-    // ========================================================================
+    // ── Graph maintenance: reindex, vacuum, graph_info ──
 
-    /// Rebuild all indexes from the current graph state.
-    ///
-    /// Reconstructs type_indices, property_indices, and composite_indices by
-    /// scanning all live nodes. Clears lazy caches (id_indices, connection_types)
-    /// so they rebuild on next access.
-    ///
-    /// Use after bulk mutations to ensure index consistency, or when you suspect
-    /// indexes have drifted from the actual graph state.
-    /// Rebuild type_indices from the live graph.
-    /// Called after deserialization (type_indices is `#[serde(skip)]`) and by `reindex()`.
+    /// Rebuild type_indices from the live graph. Called after deserialization
+    /// (type_indices is `#[serde(skip)]`) and by [`Self::reindex`].
     pub fn rebuild_type_indices(&mut self) {
         let type_count = self.node_type_metadata.len().max(4);
         let avg_per_type = self.graph.node_count() / type_count.max(1);
@@ -1680,16 +1597,9 @@ impl DirGraph {
 
     /// Rebuild `self.type_schemas` — one shared [`TypeSchema`] per node type,
     /// derived from `node_type_metadata` (O(types)) or, for a graph that
-    /// carries none, by scanning the staged property maps.
-    ///
-    /// This used to also rewrite every node's properties into the deleted
-    /// `PropertyStorage::Compact` row shape. Nothing does that any more: the
-    /// staging `Map` either reaches a `ColumnStore` (the load path's column
-    /// sections, `enable_columnar`) or stays inline until it does. What
-    /// survives is the schema derivation, which the store constructors and the
-    /// planner's type metadata both read.
+    /// carries none, by scanning the staged property maps. Read by the column
+    /// store constructors and by the planner's type metadata.
     pub fn rebuild_type_schemas(&mut self) {
-        // Phase 1: Build TypeSchemas from node_type_metadata (O(types), not O(N×P))
         let mut schemas: HashMap<String, TypeSchema> = HashMap::new();
         for (node_type, props) in self.node_type_metadata.iter() {
             // SLOT-ORDER RULE: sorted by property name.
@@ -1739,7 +1649,6 @@ impl DirGraph {
             }
         }
 
-        // Phase 2: Wrap in Arc and store
         self.type_schemas = Arc::new(schemas.into_iter().map(|(t, s)| (t, Arc::new(s))).collect());
     }
 
@@ -1747,22 +1656,10 @@ impl DirGraph {
     /// in a single pass over the nodes. Used after deserialization, where both
     /// need to run.
     pub fn rebuild_type_indices_and_schemas(&mut self) {
-        // Build TypeSchemas from metadata (O(types))
         let mut schemas: HashMap<String, TypeSchema> = HashMap::new();
         for (node_type, props) in self.node_type_metadata.iter() {
-            // SLOT-ORDER RULE: sorted by property name.
-            //
-            // `props` is a `HashMap`, so iterating it directly made a type's
-            // slot order a per-process `RandomState` artefact. Slot order is
-            // observable — it is the order columns are written into a `.kgl`
-            // payload — so a random order meant re-saving a loaded graph
-            // produced different bytes on every run.
-            //
-            // Nothing here records an intended order (unlike a packed column
-            // payload, which carries one positionally and is honoured by
-            // `io::file::load_portable_column_section`), so sorted-by-name is
-            // the canonical choice: deterministic, independent of insertion
-            // history, and stable across processes and platforms.
+            // SLOT-ORDER RULE: sorted by property name — see
+            // `rebuild_type_schemas` for why the order is observable.
             let mut names: Vec<&String> = props.keys().collect();
             names.sort();
             let keys = names
@@ -1782,11 +1679,9 @@ impl DirGraph {
                     let type_str = node.node_type_str(&self.interner).to_string();
                     let schema = schemas.entry(type_str).or_insert_with(TypeSchema::new);
                     if let PropertyStorage::Map(map) = &node.properties {
-                        // Same slot-order rule: `map` is a `HashMap`, so sort
-                        // before adding. Sorting the interned keys (a stable
-                        // FNV `u64` of the name) is deterministic and avoids
-                        // resolving every key back to a string in this
-                        // per-node loop.
+                        // Same slot-order rule; sorting the interned keys (a
+                        // stable FNV `u64`) avoids resolving every key back to
+                        // a string in this per-node loop.
                         let mut keys: Vec<InternedKey> = map.keys().copied().collect();
                         keys.sort();
                         for key in keys {
@@ -1864,12 +1759,8 @@ impl DirGraph {
         // alongside a live mmap base every appended id/title lands `row_count`
         // rows too early — the overlay then shadows the mapped originals on
         // every read, and a save serializes a title column shorter than the
-        // rows it advertises. `BatchProcessor::detach_columnar_stores` makes
-        // the same call for the bulk funnel; this funnel (Cypher CREATE and
-        // the N-Triples loader) never did, and was covered for it only by the
-        // unified disk-column writer skipping any type whose id column was
-        // `Mixed` — which every store's was, until they were typed.
-        // O(rows) once per store: afterwards there is no mmap base to check.
+        // rows it advertises. O(rows) once per store: afterwards there is no
+        // mmap base to check.
         if self
             .column_store(node_type)
             .is_some_and(|store| store.has_mmap_base())
@@ -1966,7 +1857,6 @@ impl DirGraph {
                     .as_nanos()
             ))
         });
-        // Cache spill_dir for future calls
         if self.spill_dir.is_none() {
             self.spill_dir = Some(spill_dir.clone());
         }
@@ -1977,7 +1867,7 @@ impl DirGraph {
             }
         }
 
-        // Spill largest stores first until under limit
+        // Spill largest stores first until under limit.
         let mut by_size: Vec<(String, usize)> = self
             .column_stores_by_name()
             .into_iter()
@@ -2011,20 +1901,18 @@ impl DirGraph {
     }
 
     pub fn reindex(&mut self) {
-        // 1. Rebuild type_indices from scratch
         self.rebuild_type_indices();
 
-        // 2. Clear lazy caches — they'll rebuild on next access
+        // Lazy caches rebuild on next access.
         self.id_indices.clear();
         self.connection_types.clear();
 
-        // 3. Rebuild existing property_indices (preserve which indexes exist)
+        // Rebuild each index that exists, preserving *which* ones exist.
         let property_keys: Vec<IndexKey> = self.property_indices.keys().cloned().collect();
         for (node_type, property) in property_keys {
             self.create_index(&node_type, &property);
         }
 
-        // 4. Rebuild existing composite_indices (preserve which indexes exist)
         let composite_keys: Vec<CompositeIndexKey> =
             self.composite_indices.keys().cloned().collect();
         for (node_type, properties) in composite_keys {
@@ -2032,7 +1920,6 @@ impl DirGraph {
             self.create_composite_index(&node_type, &prop_refs);
         }
 
-        // 5. Rebuild existing range_indices (preserve which indexes exist)
         let range_keys: Vec<IndexKey> = self.range_indices.keys().cloned().collect();
         for (node_type, property) in range_keys {
             self.create_range_index(&node_type, &property);
@@ -2105,7 +1992,6 @@ impl DirGraph {
             return NodeRemap::default();
         };
 
-        // Build new graph with contiguous indices
         let mut new_graph = StableDiGraph::with_capacity(old_node_count, old.edge_count());
         // Dense old→new lookup, for the edge pass *and* for the caller.
         // Endpoint remapping is two probes per edge, and running them through a
@@ -2117,9 +2003,8 @@ impl DirGraph {
         // (`NodeRemap`).
         let mut old_to_new = NodeRemap::with_bound(old_node_bound);
 
-        // Move all live nodes over, recording the index mapping. Ascending
-        // raw order reproduces `node_indices()` exactly, so the compacted
-        // indices are the same ones the clone loop produced.
+        // Ascending raw order reproduces `node_indices()` exactly, so the
+        // compacted indices are the same ones the clone loop produced.
         for raw in 0..old_node_bound {
             let old_idx = NodeIndex::new(raw);
             let Some(slot) = old.node_weight_mut(old_idx) else {
@@ -2138,9 +2023,8 @@ impl DirGraph {
             old_to_new.set(raw, new_idx);
         }
 
-        // Move all live edges over with remapped endpoints. The ids are
-        // collected because relocating a weight needs `&mut old` while
-        // `edge_indices()` borrows it.
+        // The edge ids are collected because relocating a weight needs
+        // `&mut old` while `edge_indices()` borrows it.
         let old_edge_ids: Vec<EdgeIndex> = old.edge_indices().collect();
         for old_edge_idx in old_edge_ids {
             let Some((src, tgt)) = old.edge_endpoints(old_edge_idx) else {
@@ -2176,10 +2060,7 @@ impl DirGraph {
             return NodeRemap::default();
         }
 
-        // Remap embedding stores to use new node indices (see embedding_carry.rs).
         self.remap_embedding_slots(&old_to_new);
-
-        // Rebuild all indexes from the compacted graph
         self.reindex();
 
         // Rebuild the columnar stores: the old ones carry orphaned rows from
@@ -2334,12 +2215,9 @@ impl DirGraph {
         }
     }
 
-    /// Return diagnostic information about graph storage health.
-    ///
-    /// Useful for deciding when to call vacuum():
-    /// - `tombstones` > 0 means deleted nodes left holes
-    /// - `fragmentation_ratio` approaching 1.0 means most storage is wasted
-    /// - A ratio above 0.3 is a good threshold for calling vacuum()
+    /// Return diagnostic information about graph storage health. A
+    /// `fragmentation_ratio` above 0.3 (the auto-vacuum default) is a good
+    /// point to call [`Self::vacuum`].
     pub fn graph_info(&self) -> GraphInfo {
         let (columnar_total, columnar_live) = self.columnar_row_census();
         let (edges_mapped, edge_property_overlay_rows) = self.graph.edge_storage_info();
@@ -2378,7 +2256,6 @@ impl DirGraph {
     }
 }
 
-/// Statistics about a property index
 #[derive(Debug, Clone)]
 pub struct IndexStats {
     pub unique_values: usize,
@@ -2389,13 +2266,11 @@ pub struct IndexStats {
 /// Diagnostic information about graph storage health.
 #[derive(Debug, Clone)]
 pub struct GraphInfo {
-    /// Number of live nodes in the graph
     pub node_count: usize,
     /// Upper bound of node indices (includes tombstones from deletions)
     pub node_capacity: usize,
     /// Number of tombstone slots (node_capacity - node_count)
     pub node_tombstones: usize,
-    /// Number of live edges in the graph
     pub edge_count: usize,
     /// Upper bound of edge indices (includes slots freed by `DELETE r`).
     ///
@@ -2415,21 +2290,16 @@ pub struct GraphInfo {
     /// fragmented). Node slots only — see [`Self::edge_tombstones`] and
     /// [`Self::columnar_total_rows`] for the other two populations.
     pub fragmentation_ratio: f64,
-    /// Number of distinct node types
     pub type_count: usize,
     /// Number of single-property indexes
     pub property_index_count: usize,
-    /// Number of composite indexes
     pub composite_index_count: usize,
     /// Total rows across all columnar stores (including orphaned from deletions)
     pub columnar_total_rows: usize,
     /// Rows backed by live nodes (columnar_total_rows - columnar_live_rows = orphaned)
     pub columnar_live_rows: usize,
-    /// Heap bytes held by the column stores the backend owns.
-    ///
-    /// Exposed here so a binding can report columnar memory without reaching
-    /// into storage: the stores are backend-owned and there is no
-    /// `DirGraph.column_stores` field to read.
+    /// Heap bytes held by the column stores the backend owns. Exposed here so
+    /// a binding can report columnar memory without reaching into storage.
     pub columnar_heap_bytes: usize,
     /// `true` when at least one column store has been spilled to mmap.
     ///

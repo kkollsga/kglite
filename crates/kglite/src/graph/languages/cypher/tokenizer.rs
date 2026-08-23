@@ -1,10 +1,3 @@
-// src/graph/cypher/tokenizer.rs
-// Cypher-level tokenizer handling keywords, operators, dot notation, and comparisons
-
-// ============================================================================
-// Token Types
-// ============================================================================
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum CypherToken {
     // Keywords (case-insensitive)
@@ -73,7 +66,6 @@ pub enum CypherToken {
     // only; the general `$(<expression>)` form is not implemented.
     Parameter(String), // $param_name / $(param_name)
 
-    // Symbols
     LParen,      // (
     RParen,      // )
     LBracket,    // [
@@ -90,23 +82,19 @@ pub enum CypherToken {
     Star,        // *
     DotDot,      // ..
 
-    // Comparison operators
     Equals,            // =
     NotEquals,         // <>
     LessThanEquals,    // <=
     GreaterThanEquals, // >=
 
-    // Regex
     RegexMatch, // =~
 
-    // Arithmetic
     Plus,       // +
     Slash,      // /
     Percent,    // %
     Pipe,       // |
     DoublePipe, // ||
 
-    // Literals and identifiers
     Identifier(String),
     StringLit(String),
     IntLit(i64),
@@ -158,8 +146,7 @@ pub fn tokenize_cypher(input: &str) -> Result<Vec<CypherToken>, String> {
 /// Lex one parameter reference starting at the `$` in `chars[at]`.
 ///
 /// Accepts both spellings — `$name` and the Neo4j 5 parenthesised `$(name)` —
-/// and returns `(name, name_start, index_after)`. The two forms are the same
-/// reference, so they produce the same token; `$(...)` takes a parameter
+/// and returns `(name, name_start, index_after)`. `$(...)` takes a parameter
 /// *name*, not a general expression, and says so when handed one.
 fn lex_parameter(chars: &[char], at: usize) -> Result<(String, usize, usize), String> {
     let len = chars.len();
@@ -211,18 +198,13 @@ pub fn tokenize_cypher_with_positions(input: &str) -> Result<TokenizedCypher, St
 
     while i < len {
         let ch = chars[i];
-        // Position at the start of this token. Captured once per
-        // loop iteration; tokens.push(...) callers below pair their
-        // CypherToken with `start`. (0.9.0 Cluster 3.)
         let start = i;
 
-        // Skip whitespace
         if ch.is_ascii_whitespace() {
             i += 1;
             continue;
         }
 
-        // Comments — `//` skipped, `/*` marked. See `take_comment`.
         if let Some(next) = take_comment(&chars, i, start, &mut tokens) {
             i = next;
             continue;
@@ -349,7 +331,7 @@ pub fn tokenize_cypher_with_positions(input: &str) -> Result<TokenizedCypher, St
                 } else if i + 1 < len && chars[i + 1].is_ascii_digit() {
                     // Float starting with dot: .5
                     let start = i;
-                    i += 1; // skip the dot
+                    i += 1;
                     while i < len && chars[i].is_ascii_digit() {
                         i += 1;
                     }
@@ -364,7 +346,6 @@ pub fn tokenize_cypher_with_positions(input: &str) -> Result<TokenizedCypher, St
                 }
             }
 
-            // String literals
             '"' | '\'' => {
                 let quote = ch;
                 i += 1; // consume opening quote
@@ -438,7 +419,6 @@ pub fn tokenize_cypher_with_positions(input: &str) -> Result<TokenizedCypher, St
                 tokens.push((CypherToken::StringLit(s), start));
             }
 
-            // Numbers
             c if c.is_ascii_digit() => {
                 let start = i;
                 let mut has_dot = false;
@@ -502,14 +482,12 @@ pub fn tokenize_cypher_with_positions(input: &str) -> Result<TokenizedCypher, St
                 }
             }
 
-            // Parameter: $name, or the Neo4j 5 parenthesised form $(name)
             '$' => {
                 let (name, start, next) = lex_parameter(&chars, i)?;
                 i = next;
                 tokens.push((CypherToken::Parameter(name), start));
             }
 
-            // Identifiers and keywords
             c if c.is_ascii_alphabetic() || c == '_' => {
                 let start = i;
                 while i < len && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
@@ -518,9 +496,6 @@ pub fn tokenize_cypher_with_positions(input: &str) -> Result<TokenizedCypher, St
                 let ident: String = chars[start..i].iter().collect();
                 match keyword_token(&ident) {
                     Some(tok) => {
-                        // Keyword tokens are unit variants; record the
-                        // verbatim source lexeme so name-position
-                        // consumers can recover the exact spelling.
                         keyword_lexemes.push((tokens.len(), ident));
                         tokens.push((tok, start));
                     }
@@ -528,9 +503,9 @@ pub fn tokenize_cypher_with_positions(input: &str) -> Result<TokenizedCypher, St
                 }
             }
 
-            // Backtick-quoted identifiers: `My Identifier`. The escaping
-            // rules, and the injection the doubled-backtick escape closes,
-            // are on `scan_backtick_identifier`.
+            // Backtick-quoted identifiers: `My Identifier`. The escaping rules,
+            // and the injection the doubled backtick closes, are on
+            // `scan_backtick_identifier`.
             '`' => {
                 i += 1; // consume opening backtick
                 let start = i;
@@ -577,8 +552,6 @@ fn scan_backtick_identifier(chars: &[char], mut i: usize) -> Result<(String, usi
     let mut ident = String::new();
     while i < len {
         if chars[i] == '`' {
-            // A second backtick escapes the first; anything else ends the
-            // identifier.
             if i + 1 < len && chars[i + 1] == '`' {
                 ident.push('`');
                 i += 2;
@@ -781,14 +754,13 @@ pub fn keyword_name_token(token: &CypherToken) -> Option<&'static str> {
     Some(name)
 }
 
-/// Handle a comment opener at `i`, reporting the index to resume from.
+/// Handle a comment opener at `i`, reporting the index to resume from, or
+/// `None` when `i` is not a comment opener.
 ///
 /// A `//` line comment is skipped to end of line. A `/*` block comment is
-/// **not** this dialect's syntax; rather than failing here — a tokenizer
-/// error carries no line/col, so the caller could not draw a caret — the
-/// opener is marked with [`CypherToken::BlockCommentOpen`] and
-/// `parse_cypher` rejects the stream by name, with a position. Returns
-/// `None` when `i` is not a comment opener.
+/// **not** this dialect's syntax, and is marked with
+/// [`CypherToken::BlockCommentOpen`] rather than failing here — see that
+/// variant for why the tokenizer does not raise the error itself.
 fn take_comment(
     chars: &[char],
     i: usize,
@@ -899,10 +871,9 @@ fn token_symbol(token: &CypherToken) -> Option<&'static str> {
 /// [`super::parser::CypherParser::expect_name`] (label, relationship type,
 /// property key, map key) and the MATCH-pattern re-serializer's name arm. A
 /// value position never consults this and keeps reading the literal
-/// (`{x: true}`, `WHERE n.x = true`, `RETURN null`). As with the soft
-/// keywords, the NAME actually stored is the verbatim source lexeme; the
-/// uppercase word here is only the fallback for parsers built without a lexeme
-/// table (unit tests).
+/// (`{x: true}`, `WHERE n.x = true`, `RETURN null`). As with the soft keywords
+/// the stored NAME is the verbatim lexeme; this word is only the fallback for
+/// parsers built without a lexeme table (unit tests).
 pub fn reserved_literal_name_token(token: &CypherToken) -> Option<&'static str> {
     match token {
         CypherToken::True => Some("TRUE"),
@@ -912,10 +883,7 @@ pub fn reserved_literal_name_token(token: &CypherToken) -> Option<&'static str> 
     }
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
-
+// Literal test inputs like `3.14` trip approx_constant.
 #[cfg(test)]
 #[allow(clippy::approx_constant)]
 mod tests {
@@ -1120,8 +1088,6 @@ mod tests {
         assert!(tokens.contains(&CypherToken::Parameter("city".to_string())));
     }
 
-    /// The Neo4j 5 `$(name)` spelling is the same reference as `$name`, so it
-    /// produces the same token — every downstream consumer inherits it.
     #[test]
     fn parenthesised_parameter_is_the_same_token_as_the_bare_form() {
         assert_eq!(

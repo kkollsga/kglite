@@ -1,8 +1,6 @@
-// src/graph/storage/disk/edge_properties.rs
-//
 // Disk-backed edge property storage. Replaces the heap-only
 // `HashMap<u32, Vec<(InternedKey, Value)>>` that blew RAM at Wikidata
-// scale (30–60 GB). PR2 of the disk-graph-improvement-plan.
+// scale (30–60 GB).
 //
 // Layout: per-edge columnar slots indexed by edge_idx.
 //
@@ -23,7 +21,7 @@
 // Sequential access pattern: iterating edges in edge_idx order reads
 // offsets and heap linearly. Random single-edge lookups incur one
 // page fault per file, which is unavoidable and still cheaper than
-// the current zstd-decode-whole-HashMap-at-load path.
+// the retired zstd-decode-whole-HashMap-at-load path.
 //
 // Pre-0.14 format 0/1 graphs are rejected before payload decoding.
 // Current columnar reads store raw hashes and never touch the interner.
@@ -91,9 +89,8 @@ impl ColumnarBase {
 
     /// Upper bound on edge_idx values covered by this base (exclusive).
     fn len(&self) -> u32 {
-        // (upper_bound + 1) offsets written; final trailing offset is
-        // the total heap length. So the number of edges covered is
-        // offsets.len().saturating_sub(1).
+        // (upper_bound + 1) offsets written; the final trailing offset is
+        // the total heap length.
         self.offsets.len().saturating_sub(1) as u32
     }
 }
@@ -152,7 +149,6 @@ pub struct EdgePropertyStore {
 }
 
 impl EdgePropertyStore {
-    /// Empty store — no base, empty overlay. Used by fresh in-memory builds.
     pub fn new() -> Self {
         Self::default()
     }
@@ -229,7 +225,7 @@ impl EdgePropertyStore {
     /// Smallest exclusive upper bound on edge_idx values that *might*
     /// have properties in this store. Used by callers (like `compact_edges`)
     /// that need to iterate every potentially-populated slot to remap
-    /// indices. The returned value is `max(base.len(), max_overlay_idx + 1)`.
+    /// indices.
     pub fn upper_bound(&self) -> u32 {
         let base_upper = self.base.as_ref().map(|b| b.len()).unwrap_or(0);
         let overlay_upper = self
@@ -317,7 +313,6 @@ impl EdgePropertyStore {
         }
 
         let mut offsets: Vec<u64> = Vec::with_capacity(upper_bound as usize + 1);
-        // Pre-size heap based on overlay content — avoids repeated realloc.
         let heap_hint: usize = self
             .overlay
             .values()
@@ -513,7 +508,6 @@ impl EdgePropertyWriter {
         Ok(())
     }
 
-    /// Emit empty slots until `slots == edge_idx`.
     fn pad_to(&mut self, edge_idx: u32) -> io::Result<()> {
         while self.slots < edge_idx {
             self.offsets.write_all(&self.heap_len.to_ne_bytes())?;
@@ -624,7 +618,6 @@ mod tests {
         assert_eq!(meta.offsets_len, 5);
         assert!(meta.heap_len > 0);
 
-        // Reload and verify each edge.
         let reloaded = EdgePropertyStore::load_from(tmp.path(), 2, meta, &mut interner).unwrap();
         assert_eq!(reloaded.get(0).unwrap().as_ref(), p0.as_slice());
         assert!(reloaded.get(1).is_none());

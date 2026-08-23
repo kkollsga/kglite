@@ -889,7 +889,6 @@ class TestCreateClause:
         """)
         assert cypher_graph.last_mutation_stats["relationships_created"] == 1
 
-        # Verify the edge exists
         check = cypher_graph.cypher("""
             MATCH (a:Person)-[:FRIENDS]->(b:Person)
             RETURN a.name AS src, b.name AS tgt
@@ -1073,7 +1072,6 @@ class TestDeleteClause:
         """)
         assert cypher_graph.last_mutation_stats["relationships_deleted"] > 0
 
-        # Nodes should still be there
         after_persons = cypher_graph.cypher("MATCH (n:Person) RETURN count(*) AS cnt")[0]["cnt"]
         assert after_persons == before_persons
 
@@ -1165,11 +1163,6 @@ class TestMergeClause:
         assert cypher_graph.last_mutation_stats["relationships_created"] == 1
 
 
-# ============================================================================
-# Mutation stats return format
-# ============================================================================
-
-
 class TestMutationStatsReturn:
     """Mutation queries return stats directly (not just via last_mutation_stats)."""
 
@@ -1224,11 +1217,6 @@ class TestMutationStatsReturn:
         assert stats["nodes_created"] == 1
 
 
-# ============================================================================
-# Parameter in MATCH inline properties
-# ============================================================================
-
-
 class TestParamInMatchPatterns:
     """$param in MATCH (n:Type {prop: $param}) inline properties."""
 
@@ -1270,11 +1258,6 @@ class TestParamInMatchPatterns:
         )
         assert len(result) == 1
         assert result[0] == {"name": "Alice"}
-
-
-# ============================================================================
-# WITH clause property access regression (v0.4.17)
-# ============================================================================
 
 
 class TestWithPropertyAccess:
@@ -1373,9 +1356,6 @@ class TestWithPropertyAccess:
         assert result[0]["friends"] == 2
 
 
-# ── range() function ─────────────────────────────────────────────────────
-
-
 class TestRange:
     def test_range_basic(self, cypher_graph):
         result = cypher_graph.cypher("UNWIND range(1, 5) AS x RETURN x")
@@ -1405,11 +1385,6 @@ class TestRange:
     def test_range_step_zero_errors(self, cypher_graph):
         with pytest.raises(kglite.KgError, match="step must not be zero"):
             cypher_graph.cypher("UNWIND range(1, 5, 0) AS x RETURN x")
-
-
-# ============================================================================
-# Variable binding in MATCH pattern properties
-# ============================================================================
 
 
 class TestVariableBindingInPatterns:
@@ -1467,11 +1442,6 @@ class TestVariableBindingInPatterns:
         )
         assert len(result) == 1
         assert result[0] == {"country": "Norway"}
-
-
-# ============================================================================
-# Map literals in expressions
-# ============================================================================
 
 
 class TestMapLiterals:
@@ -2043,8 +2013,6 @@ class TestThreeValuedNullSemantics:
     CONTAINS x)` evaluated to true, keeping the missing-property rows.
     """
 
-    # B1: comparison operators propagate NULL
-
     def test_b1_ne_with_null_excludes_missing(self, cypher_graph):
         rows = cypher_graph.cypher("MATCH (p:Person) WHERE p.email <> 'alice@test.com' RETURN p.title AS n ORDER BY n")
         # Bob, Diana excluded (NULL <> 'alice' is NULL); Alice excluded by inequality.
@@ -2065,8 +2033,6 @@ class TestThreeValuedNullSemantics:
         # Bob and Diana: NULL < 'z' is NULL → NOT NULL is NULL → drop.
         # Nobody matches.
         assert len(rows) == 0
-
-    # B2: string predicates propagate NULL, NOT preserves it
 
     def test_b2_not_contains_with_null_excludes_missing(self, cypher_graph):
         rows = cypher_graph.cypher(
@@ -2094,8 +2060,6 @@ class TestThreeValuedNullSemantics:
         # Bare positive CONTAINS — the existing collapse already gave the
         # right answer here, but lock it in alongside the fix.
         assert [r["n"] for r in rows] == ["Alice"]
-
-    # Kleene composition: AND / OR with NULL operand
 
     def test_kleene_or_null_absorbs_when_other_is_true(self, cypher_graph):
         rows = cypher_graph.cypher(
@@ -2405,7 +2369,6 @@ class TestAggregateNullHandling:
         Memgraph agree on this."""
         g = self._fixture()
         rows = g.cypher("MATCH (n:T) RETURN collect(n.val) AS r").to_list()
-        # Order-insensitive: just check the multiset.
         assert sorted(rows[0]["r"]) == [10, 30] or sorted(rows[0]["r"]) == [10.0, 30.0]
 
 
@@ -2461,7 +2424,6 @@ class TestBugOrderByIntToFloat:
             RETURN a.title, friends
             ORDER BY friends DESC LIMIT 3
         """)
-        # friends must be int, not float
         assert rows[0]["friends"] == 2
         assert isinstance(rows[0]["friends"], int)
 
@@ -2490,7 +2452,6 @@ class TestBugOrderByIntToFloat:
             RETURN city, total_age
             ORDER BY total_age DESC LIMIT 2
         """)
-        # sum of ages should be int
         assert isinstance(rows[0]["total_age"], int)
 
 
@@ -2503,7 +2464,6 @@ class TestBugReturnStar:
         """)
         assert len(rows) == 1
         row = rows[0]
-        # Should have node data, not {'*': 1}
         assert "*" not in row
         assert "n" in row or "n.name" in row or "n.title" in row
 
@@ -2516,7 +2476,6 @@ class TestBugReturnStar:
         assert len(rows) == 2
         row = rows[0]
         assert "*" not in row
-        # Should contain info about a, r, b
 
     def test_return_star_after_with(self, cypher_graph):
         """RETURN * after WITH should return WITH-scoped variables."""
@@ -2985,17 +2944,13 @@ class TestOptionalMatchJoinSemantics:
 
     def test_one_empty_pattern_null_pads_all_vars(self):
         g = self._graph()
-        # pid 2 has no X and no Y edges outgoing? n2 has none of either —
-        # use pid 2 for the all-empty case and pid 1 with a Z-less pattern
-        # for the half-empty case below.
+        # n2 (pid 2) has no outgoing X or Y edge, so both patterns are empty.
         rows = g.cypher(
             "MATCH (n:P {pid: 2}) OPTIONAL MATCH (n)-[:X]->(a), (n)-[:Y]->(b) RETURN a.name AS an, b.name AS bn"
         ).to_list()
         assert rows == [{"an": None, "bn": None}]
 
     def test_half_empty_join_null_pads_all_vars(self):
-        # X matches from pid 1 twice, Y from pid 1... both match; instead
-        # anchor a pattern that cannot match: (n)-[:X]->(a), (a)-[:X]->(b).
         g = self._graph()
         rows = g.cypher(
             "MATCH (n:P {pid: 1}) OPTIONAL MATCH (n)-[:X]->(a), (a)-[:X]->(b) RETURN a.name AS an, b.name AS bn"

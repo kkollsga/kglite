@@ -1,4 +1,3 @@
-// src/datatypes/values.rs
 use super::prop_map::PropMap;
 use chrono::{NaiveDate, NaiveDateTime};
 use serde::{Deserialize, Serialize};
@@ -43,14 +42,12 @@ pub enum Value {
     /// Never persisted — only exists during Cypher execution.
     NodeRef(u32),
     /// Calendar duration: months + days + seconds (Neo4j shape).
-    /// 0.9.0 Cluster 2 — replaces the soft-duration Int64-as-days
-    /// hack from §3 v1. Calendar units (months, years) and clock
-    /// units (days, hours, minutes, seconds) are kept separate so
+    /// Calendar units (months, years) and clock units (days, hours,
+    /// minutes, seconds) are kept separate so
     /// `duration({months: 1, days: 5}).months` returns 1, not 35.
-    /// Sub-day precision (hours/minutes/seconds) is wired in seconds
-    /// — Value::DateTime is still NaiveDate (Cluster 1, deferred),
-    /// so DateTime + Duration discards the seconds component for
-    /// now.
+    /// Sub-day precision is wired in seconds, but `Value::DateTime` is
+    /// still a `NaiveDate`, so DateTime + Duration discards the seconds
+    /// component.
     ///
     /// Field widths (months/days as i32) sized to keep the enum
     /// payload at 16 bytes (matches Point's 2×f64). months/days are
@@ -70,8 +67,7 @@ pub enum Value {
     },
     /// A materialised graph node — the projection result for `RETURN n`.
     /// Boxed because [`NodeValue`] is large (id + labels + props map)
-    /// and Node values are rarer than scalars; the indirection cost is
-    /// amortised over typical query workloads.
+    /// and Node values are rarer than scalars.
     ///
     /// `Value::NodeRef(u32)` (variant 8) stays as the *transient*
     /// internal handle used during WITH/UNWIND chains. NodeRef is
@@ -137,8 +133,8 @@ pub struct NodeValue {
     /// fallback derived from the petgraph NodeIndex.
     pub id: u32,
     /// Type labels. KGLite is single-label (one entry today), but the
-    /// list shape matches Neo4j/Bolt's `labels` field and forward-
-    /// compatible-with-multi-label work (ROADMAP §5).
+    /// list shape matches Neo4j/Bolt's `labels` field and stays
+    /// forward-compatible with multi-label work.
     pub labels: Vec<String>,
     /// Properties as a string-keyed map. Key order is stable (sorted), so
     /// equality/hash/serialisation are deterministic — and cloning the node
@@ -228,14 +224,11 @@ impl<'a> BorrowedValue<'a> {
     }
 }
 
-// Implement Eq for Value
 impl Eq for Value {
-    // We need this empty impl because we already have PartialEq
-    // and all variants can be exactly equal except Float64,
-    // which we handle specially in PartialEq
+    // Empty: every variant compares exactly except Float64, whose NaN /
+    // -0.0 handling lives in PartialEq.
 }
 
-// Manual PartialOrd + Ord for Value.
 // NaN sorts after all other floats; cross-variant ordering uses discriminant index.
 impl PartialOrd for Value {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
@@ -246,12 +239,10 @@ impl PartialOrd for Value {
 impl Ord for Value {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         use std::cmp::Ordering;
-        // Helper to get discriminant order. Independent of the enum's
-        // serde discriminant — this is the ordering used for
-        // cross-variant comparisons in Ord, where Null sorts first
-        // and Duration last (mirrors Neo4j-ish "values < types <
-        // structured types"). The serde discriminant is positional
-        // (see enum doc).
+        // Cross-variant sort order, deliberately independent of the
+        // positional serde discriminant (see the enum doc): Null first,
+        // structured types last, mirroring Neo4j's
+        // "values < types < structured types".
         fn disc(v: &Value) -> u8 {
             match v {
                 Value::Null => 0,
@@ -279,21 +270,18 @@ impl Ord for Value {
             }
         }
         match (self, other) {
-            // Same variant comparisons
             (Value::Null, Value::Null) => Ordering::Equal,
             (Value::Boolean(a), Value::Boolean(b)) => a.cmp(b),
             (Value::UniqueId(a), Value::UniqueId(b)) => a.cmp(b),
             (Value::Int64(a), Value::Int64(b)) => a.cmp(b),
             (Value::Float64(a), Value::Float64(b)) => {
-                a.partial_cmp(b).unwrap_or_else(|| {
-                    // NaN handling: NaN sorts last
-                    match (a.is_nan(), b.is_nan()) {
+                a.partial_cmp(b)
+                    .unwrap_or_else(|| match (a.is_nan(), b.is_nan()) {
                         (true, true) => Ordering::Equal,
                         (true, false) => Ordering::Greater,
                         (false, true) => Ordering::Less,
                         _ => unreachable!(),
-                    }
-                })
+                    })
             }
             (Value::String(a), Value::String(b)) => a.cmp(b),
             (Value::DateTime(a), Value::DateTime(b)) => a.cmp(b),
@@ -324,38 +312,28 @@ impl Ord for Value {
                     seconds: bs,
                 },
             ) => am.cmp(bm).then(ad.cmp(bd)).then(as_.cmp(bs)),
-            // Same-variant arms — defer to the derived Ord on the
-            // contained payload types (NodeValue, RelValue, PathValue
-            // all `#[derive(Ord)]`; Vec/BTreeMap do too).
             (Value::List(a), Value::List(b)) => a.cmp(b),
             (Value::Map(a), Value::Map(b)) => a.cmp(b),
             (Value::Node(a), Value::Node(b)) => a.cmp(b),
             (Value::Relationship(a), Value::Relationship(b)) => a.cmp(b),
             (Value::Path(a), Value::Path(b)) => a.cmp(b),
             (Value::Timestamp(a), Value::Timestamp(b)) => a.cmp(b),
-            // Cross-variant: order by discriminant
             _ => disc(self).cmp(&disc(other)),
         }
     }
 }
 
-// Implement Hash for Value
 impl Hash for Value {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        // First hash discriminant to differentiate variants
         std::mem::discriminant(self).hash(state);
-
-        // Then hash the contained value
         match self {
             Value::UniqueId(v) => v.hash(state),
             Value::Int64(v) => v.hash(state),
             Value::Float64(v) => {
-                // Special handling for NaN and -0.0
                 if v.is_nan() {
-                    // Hash all NaN values the same
                     f64::NAN.to_bits().hash(state)
                 } else {
-                    // Handle -0.0 == 0.0
+                    // -0.0 == 0.0, so they must hash alike.
                     if *v == 0.0 {
                         0.0f64.to_bits().hash(state)
                     } else {
@@ -381,10 +359,6 @@ impl Hash for Value {
             }
             Value::Null => 0.hash(state),
             Value::NodeRef(v) => v.hash(state),
-            // Defer to derived Hash on payload types.
-            // BTreeMap<String, Value> implements Hash (iterates in
-            // key order); Vec<Value> implements Hash; NodeValue/
-            // RelValue/PathValue all derive Hash.
             Value::List(v) => v.hash(state),
             Value::Map(v) => {
                 // Length then each (key, value) pair in sorted key order —
@@ -412,13 +386,11 @@ impl Value {
         }
     }
 
-    /// Canonical PascalCase variant name — the single source of truth
-    /// for the (formerly duplicated) `value_type_name` / `value_kind`
-    /// helpers across executor/write.rs and mutation/subgraph_streaming_
-    /// writer.rs. Other classifiers (introspection/schema_overview.rs
-    /// `str`/`int`/..., validation.rs `string`/`integer`/..., export.rs
-    /// blueprint shape) use consumer-specific conventions and keep their
-    /// own tables.
+    /// Canonical PascalCase variant name. Other classifiers
+    /// (introspection/schema_overview.rs `str`/`int`/…, validation.rs
+    /// `string`/`integer`/…, export.rs's blueprint shape) use
+    /// consumer-specific vocabularies and keep their own tables — do not
+    /// fold them into this one.
     pub fn type_name(&self) -> &'static str {
         match self {
             Value::Null => "Null",
@@ -441,10 +413,8 @@ impl Value {
     }
 }
 
-/// Display impl delegating to the existing `format_value` free function.
-/// Lets `format!("{}", value)` and `to_string()` work directly on `Value`,
-/// replacing the need to import + call `format_value` everywhere. The free
-/// function stays because some callers explicitly import it.
+/// Delegates to [`format_value`], which stays public because callers
+/// import it directly.
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", format_value(self))
@@ -647,7 +617,6 @@ impl DataFrame {
             return Err(format!("Column {} already exists", name));
         }
 
-        // Validate that the provided data matches the column type
         match (&col_type, &data) {
             (ColumnType::UniqueId, ColumnData::UniqueId(_))
             | (ColumnType::Int64, ColumnData::Int64(_))
@@ -661,8 +630,7 @@ impl DataFrame {
             _ => return Err(format!("Data type mismatch for column {}", name)),
         }
 
-        // Enforce rectangularity: every column must have the same length.
-        // (The first column defines the frame's row count.)
+        // Rectangularity: the first column defines the frame's row count.
         if !self.columns.is_empty() {
             let expected = self.row_count();
             if data.len() != expected {
@@ -702,7 +670,6 @@ impl DataFrame {
         let num_cols = columns.len();
         let num_rows = rows.len();
 
-        // Validate row width
         for (i, row) in rows.iter().enumerate() {
             if row.len() != num_cols {
                 return Err(format!(
@@ -736,7 +703,6 @@ impl DataFrame {
             .map(|(&k, &fits)| resolve_column_type(k, fits))
             .collect();
 
-        // Build columnar data by transposing rows
         let mut col_data: Vec<ColumnData> = col_types
             .iter()
             .map(|ct| match ct {
@@ -812,7 +778,6 @@ impl DataFrame {
             }
         }
 
-        // Assemble DataFrame
         let mut column_indices = HashMap::with_capacity(num_cols);
         let built_columns: Vec<Column> = columns
             .into_iter()
@@ -1055,7 +1020,6 @@ fn value_to_text(val: Value) -> Option<String> {
         Value::Timestamp(v) => Some(v.format("%Y-%m-%dT%H:%M:%S").to_string()),
         // WKT, matching add_constant_column's Point form.
         Value::Point { lat, lon } => Some(format!("POINT({} {})", lon, lat)),
-        // Display forms for the query-time-only / structural variants.
         other => Some(format_value(&other)),
     }
 }
@@ -1065,16 +1029,11 @@ impl std::fmt::Display for DataFrame {
         let row_limit = 10.min(self.row_count());
         let columns = self.get_column_names();
 
-        // Determine max width for each column
         let mut col_widths: Vec<usize> = columns.iter().map(|col| col.len()).collect();
-
-        // Adjust widths based on values and column types
         for (col_idx, col) in self.columns.iter().enumerate() {
-            // Include column type width
             let type_width = format_col_type(&col.col_type).len();
             col_widths[col_idx] = col_widths[col_idx].max(type_width);
 
-            // Include value widths
             for row_idx in 0..row_limit {
                 if let Some(value) = col.get_value(row_idx) {
                     col_widths[col_idx] = col_widths[col_idx].max(format_value(&value).len());
@@ -1082,7 +1041,6 @@ impl std::fmt::Display for DataFrame {
             }
         }
 
-        // Format helper
         let format_row = |values: Vec<String>| -> String {
             values
                 .into_iter()
@@ -1092,10 +1050,8 @@ impl std::fmt::Display for DataFrame {
                 .join("|")
         };
 
-        // Print headers
         writeln!(f, "\n| #  |{}|", format_row(columns))?;
 
-        // Print column types
         let type_row: Vec<String> = self
             .columns
             .iter()
@@ -1103,7 +1059,6 @@ impl std::fmt::Display for DataFrame {
             .collect();
         writeln!(f, "|    |{}|", format_row(type_row))?;
 
-        // Print separator
         let separator = col_widths
             .iter()
             .map(|w| format!("{:-^width$}", "-", width = w + 2))
@@ -1111,7 +1066,6 @@ impl std::fmt::Display for DataFrame {
             .join("|");
         writeln!(f, "|----|{}|", separator)?;
 
-        // Print data rows
         for row_idx in 0..row_limit {
             let row_data: Vec<String> = (0..self.column_count())
                 .map(|col_idx| {
@@ -1125,7 +1079,6 @@ impl std::fmt::Display for DataFrame {
             writeln!(f, "| {:^2} |{}|", row_idx, format_row(row_data))?;
         }
 
-        // Show if there are more rows
         if self.row_count() > row_limit {
             let more_row = format_row(col_widths.iter().map(|_| "...".to_string()).collect());
             writeln!(f, "| .. |{}|", more_row)?;
@@ -1143,9 +1096,6 @@ impl std::fmt::Display for DataFrame {
 /// `Null` → empty string. The collection / graph-entity variants delegate
 /// to [`format_value`] (their multi-line shapes are the same in both
 /// contexts).
-///
-/// Consolidated 0.9.53 from three nearly-identical copies in
-/// `graph/mod.rs`, `graph/explore.rs`, `graph/io/export.rs`.
 pub fn raw_string(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
@@ -1246,10 +1196,6 @@ fn format_col_type(col_type: &ColumnType) -> String {
 mod tests {
     use super::*;
 
-    // ========================================================================
-    // Value::as_string
-    // ========================================================================
-
     #[test]
     fn test_as_string_with_string_value() {
         let v = Value::String("hello".to_string());
@@ -1265,7 +1211,6 @@ mod tests {
             .unwrap();
         let v = Value::Timestamp(dt);
 
-        // type_name + display carry the time component.
         assert_eq!(v.type_name(), "Timestamp");
         assert_eq!(format_value(&v), "\"2024-03-15T10:30:45\"");
 
@@ -1289,7 +1234,6 @@ mod tests {
         let date = Value::DateTime(NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
         assert!(date < v);
 
-        // Same-variant ordering is chronological.
         let later = Value::Timestamp(
             NaiveDate::from_ymd_opt(2024, 3, 15)
                 .unwrap()
@@ -1307,10 +1251,6 @@ mod tests {
         assert_eq!(Value::Null.as_string(), None);
         assert_eq!(Value::UniqueId(1).as_string(), None);
     }
-
-    // ========================================================================
-    // Value equality and hash
-    // ========================================================================
 
     #[test]
     fn test_value_equality_same_types() {
@@ -1340,14 +1280,14 @@ mod tests {
         use std::collections::HashSet;
         let mut set = HashSet::new();
         set.insert(Value::Int64(42));
-        set.insert(Value::Int64(42)); // duplicate
+        set.insert(Value::Int64(42));
         assert_eq!(set.len(), 1);
 
         set.insert(Value::String("test".to_string()));
         assert_eq!(set.len(), 2);
 
         set.insert(Value::Null);
-        set.insert(Value::Null); // duplicate
+        set.insert(Value::Null);
         assert_eq!(set.len(), 3);
     }
 
@@ -1360,10 +1300,6 @@ mod tests {
         // 0.0 and -0.0 should hash the same
         assert_eq!(set.len(), 1);
     }
-
-    // ========================================================================
-    // format_value
-    // ========================================================================
 
     #[test]
     fn test_format_value_types() {
@@ -1380,10 +1316,6 @@ mod tests {
         assert_eq!(format_value(&Value::Float64(f64::NAN)), "NULL");
     }
 
-    // ========================================================================
-    // ColumnType Display
-    // ========================================================================
-
     #[test]
     fn test_column_type_display() {
         assert_eq!(format!("{}", ColumnType::UniqueId), "UniqueId");
@@ -1393,10 +1325,6 @@ mod tests {
         assert_eq!(format!("{}", ColumnType::Boolean), "Boolean");
         assert_eq!(format!("{}", ColumnType::DateTime), "DateTime");
     }
-
-    // ========================================================================
-    // DataFrame
-    // ========================================================================
 
     #[test]
     fn test_dataframe_new_empty() {
@@ -1475,7 +1403,6 @@ mod tests {
             ColumnData::Int64(vec![Some(1), Some(2)]),
         )
         .unwrap();
-        // Wrong length → rejected.
         let result = df.add_column(
             "b".to_string(),
             ColumnType::String,
@@ -1483,7 +1410,6 @@ mod tests {
         );
         assert!(result.is_err(), "non-rectangular add must fail");
         assert_eq!(df.column_count(), 1);
-        // Matching length → accepted.
         df.add_column(
             "b".to_string(),
             ColumnType::String,
@@ -1492,10 +1418,6 @@ mod tests {
         .unwrap();
         assert_eq!(df.row_count(), 2);
     }
-
-    // ========================================================================
-    // from_cypher_rows — whole-column type promotion
-    // ========================================================================
 
     fn one_col(rows: Vec<Value>) -> DataFrame {
         DataFrame::from_cypher_rows(

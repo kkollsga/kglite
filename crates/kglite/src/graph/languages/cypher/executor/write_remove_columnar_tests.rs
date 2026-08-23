@@ -3,14 +3,14 @@
 //! Split into its own file to keep `write.rs` under the source-quality line
 //! ceiling.
 //!
-//! Each node of a columnar type holds its own `Arc<ColumnStore>` clone for
-//! cheap property reads, and the backend holds the store. Writing
-//! through the node's handle calls `Arc::make_mut`, which **forks** it: the
-//! node sees the write and the master does not. `execute_set` avoids this by
-//! writing through the master and refreshing the per-node handles in one sweep
-//! at the end of the clause; `execute_remove` did not, so a removed property
-//! survived in the master and came back the moment any later clause ran that
-//! sweep.
+//! The regression these defend: a node of a columnar type once held its own
+//! `Arc<ColumnStore>` clone, which `Arc::make_mut` **forked** away from the
+//! master on write. `execute_set` compensated by writing through the master
+//! and re-pointing the per-node handles in one sweep at the end of the clause;
+//! `execute_remove` did not, so a removed property survived in the master and
+//! came back the moment any later clause ran that sweep. Node-held handles are
+//! gone — a columnar node carries a row id only — so both reads below resolve
+//! through the one store, and these assertions pin that they agree.
 
 use crate::datatypes::Value;
 use crate::graph::schema::{DirGraph, InternedKey, PropertyStorage};
@@ -60,7 +60,7 @@ fn node_qty(graph: &DirGraph) -> Option<Value> {
         .map(|v| v.into_owned())
 }
 
-/// The removal must reach the master, not just the node's forked handle.
+/// The removal must reach the master store — it is what `save()` persists.
 #[test]
 fn remove_clears_the_master_column_store() {
     let mut graph = columnar_item();
@@ -77,18 +77,15 @@ fn remove_clears_the_master_column_store() {
     );
 }
 
-/// The user-visible symptom: a removed property comes back.
-///
-/// No save is involved. `SET a.other = 5` writes through the master and then
-/// refreshes every node handle of the type, which re-points the node at a
-/// master that still carried `qty`.
+/// The user-visible symptom the original bug produced: a removed property
+/// comes back. No save is involved — a later `SET` on the same type sufficed,
+/// because it re-pointed the node at a master that still carried `qty`.
 #[test]
 fn removed_columnar_property_does_not_resurrect_on_the_next_set() {
     let mut graph = columnar_item();
     run(&mut graph, "MATCH (a:Item {id: 1}) REMOVE a.qty");
     assert_eq!(node_qty(&graph), None);
 
-    // Any later master-routed write on the same type triggers the sweep.
     run(&mut graph, "MATCH (a:Item {id: 1}) SET a.other = 5");
 
     assert_eq!(
@@ -99,9 +96,8 @@ fn removed_columnar_property_does_not_resurrect_on_the_next_set() {
     assert_eq!(master_qty(&graph), None);
 }
 
-/// REMOVE over several rows must still be correct per node — the batched
-/// handle refresh happens once at the end of the clause, so a bug there shows
-/// up as one node keeping its value.
+/// REMOVE over several rows must clear every row, not just the one the
+/// clause happened to visit first.
 #[test]
 fn remove_over_many_rows_clears_every_node() {
     let mut graph = DirGraph::new();

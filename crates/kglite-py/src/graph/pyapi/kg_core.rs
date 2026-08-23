@@ -56,10 +56,8 @@ struct PyProgressSink {
 impl ProgressSink for PyProgressSink {
     fn emit(&self, event: ProgressEvent<'_>) -> Result<(), Cancelled> {
         Python::attach(|py| {
-            // Briefly reacquiring the GIL inside `py.detach()` lets
-            // Python observe a pending SIGINT (Ctrl+C). check_signals
-            // returns Err if the user pressed Ctrl+C; we surface that
-            // up as `Cancelled` so the loader can stop cleanly.
+            // Briefly reacquiring the GIL inside `py.detach()` lets Python
+            // observe a pending SIGINT (Ctrl+C) and stop the loader cleanly.
             if py.check_signals().is_err() {
                 return Err(Cancelled);
             }
@@ -107,9 +105,6 @@ impl ProgressSink for PyProgressSink {
     }
 }
 
-/// Format an integer with comma thousands separators ("1234567" → "1,234,567").
-/// Used by `KnowledgeGraph::__repr__` — keeps large-graph summaries legible
-/// without pulling a dep just for `num-format`.
 /// Clear, actionable error for a cross-thread borrow conflict on a shared
 /// `KnowledgeGraph`. PyO3's `#[pyclass]` is `RefCell`-guarded: while one
 /// thread mutates the graph (`add_nodes` / `embed_texts` / a `CREATE`
@@ -136,6 +131,9 @@ fn concurrent_access_pyerr() -> PyErr {
     )
 }
 
+/// Format an integer with comma thousands separators ("1234567" → "1,234,567").
+/// Used by `KnowledgeGraph::__repr__` — keeps large-graph summaries legible
+/// without pulling a dep just for `num-format`.
 fn fmt_with_commas(n: usize) -> String {
     let s = n.to_string();
     let bytes = s.as_bytes();
@@ -188,8 +186,8 @@ impl KnowledgeGraph {
         // run under `py.detach()` — a rebuild that takes minutes on
         // Wikidata-scale graphs must not wedge every other Python thread.
 
-        // Single O(E) pass: compute type connectivity triples
-        // Uses edge_endpoint_keys() — mmap reads only, no heap allocation per edge.
+        // Single O(E) pass over edge_endpoint_keys() — mmap reads only, no
+        // heap allocation per edge.
         let triples = {
             let inner = &self.inner;
             py.detach(|| introspection::compute_type_connectivity(inner))
@@ -207,7 +205,6 @@ impl KnowledgeGraph {
             }
         }
 
-        // Derive edge type counts + endpoint types from triples (no extra scan)
         let derived = introspection::derive_edge_counts_from_triples(&triples);
 
         // Populate edge type counts cache. Poison-recovering: the guarded
@@ -220,7 +217,6 @@ impl KnowledgeGraph {
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
             Some(std::sync::Arc::new(derived.counts));
 
-        // Backfill connection_type_metadata with discovered endpoint types
         let graph = get_graph_mut(&mut self.inner);
         for (conn_type, (src_types, tgt_types)) in derived.endpoints {
             let info = graph
@@ -235,7 +231,6 @@ impl KnowledgeGraph {
             }
         }
 
-        // Store type connectivity triples
         self.inner.set_type_connectivity(triples);
         Ok(())
     }
@@ -269,7 +264,6 @@ impl KnowledgeGraph {
         Python::attach(|py| {
             let result = PyDict::new(py);
 
-            // node_types
             let node_types_dict = PyDict::new(py);
             for (nt, info) in &overview.node_types {
                 let type_dict = PyDict::new(py);
@@ -283,7 +277,6 @@ impl KnowledgeGraph {
             }
             result.set_item("node_types", node_types_dict)?;
 
-            // connection_types
             let conn_dict = PyDict::new(py);
             for ct in &overview.connection_types {
                 let ct_dict = PyDict::new(py);
@@ -409,7 +402,6 @@ impl KnowledgeGraph {
     ) -> PyResult<Py<PyAny>> {
         let default_n = 5usize;
 
-        // Parse first arg: could be str (node_type) or int (n)
         let (node_type, count) = match node_type_or_n {
             Some(arg) => {
                 if let Ok(s) = arg.extract::<String>() {
@@ -442,7 +434,6 @@ impl KnowledgeGraph {
             return Python::attach(|py| Py::new(py, view).map(|v| v.into_any()));
         }
 
-        // Selection-based: sample from current selection
         let level_count = self.cursor.selection.get_level_count();
         if level_count == 0 {
             return Err(crate::error_py::kg_to_pyerr(
@@ -670,19 +661,16 @@ impl KnowledgeGraph {
         }
 
         // Mode-aware durable save lives in core (`save_graph_with`): disk dir
-        // vs in-memory `.kgl`, columnar consolidation (v3 requires columnar;
-        // handles fresh / mixed / mapped), atomic temp+rename, and file +
-        // directory fsync (when `fsync`). Routing through the one shared
-        // dispatch keeps the wheel / MCP server / C ABI from drifting. Release
-        // the GIL for the heavy serialize+write.
+        // vs in-memory `.kgl`, columnar consolidation, atomic temp+rename,
+        // file + directory fsync. Routing through the one shared dispatch
+        // keeps the wheel / MCP server / C ABI from drifting.
         //
         // The dispatch also enforces the write-ahead rule: a save that would
         // strand committed frames in front of the checkpoint it writes is
-        // refused before the file is touched. That is a `ValueError` — the
-        // class every other durability refusal raises (`kglite.open` at
-        // `durable='off'` over a live sidecar), and the one a caller catches
-        // to mean "this path is not a safe target as it stands" — while a
-        // genuine write failure stays an `IOError`.
+        // refused before the file is touched. That refusal is a `ValueError`
+        // — the class every other durability refusal raises, and the one a
+        // caller catches to mean "this path is not a safe target as it
+        // stands" — while a genuine write failure stays an `IOError`.
         let inner = &mut self.inner;
         py.detach(move || io::save_graph_with(inner, path, fsync))
             .map_err(|error| match error {
@@ -798,7 +786,6 @@ impl KnowledgeGraph {
         // `.kgl` producers cannot drift: stamp metadata + consolidate the
         // property columns.
         io::prepare_kgl_write(&mut self.inner);
-        // Serialize off the GIL into an owned buffer.
         let inner = self.inner.clone();
         let bytes = py
             .detach(move || -> std::io::Result<Vec<u8>> {
@@ -973,7 +960,6 @@ impl KnowledgeGraph {
                         report_dict
                             .set_item("processing_time_ms", node_report.processing_time_ms)?;
 
-                        // Add errors array if there are any
                         if !node_report.errors.is_empty() {
                             report_dict.set_item("errors", &node_report.errors)?;
                             report_dict.set_item("has_errors", true)?;
@@ -998,7 +984,6 @@ impl KnowledgeGraph {
                         report_dict
                             .set_item("processing_time_ms", conn_report.processing_time_ms)?;
 
-                        // Add errors array if there are any
                         if !conn_report.errors.is_empty() {
                             report_dict.set_item("errors", &conn_report.errors)?;
                             report_dict.set_item("has_errors", true)?;
@@ -1020,7 +1005,6 @@ impl KnowledgeGraph {
                             .set_item("processing_time_ms", calc_report.processing_time_ms)?;
                         report_dict.set_item("is_aggregation", calc_report.is_aggregation)?;
 
-                        // Add errors array if there are any
                         if !calc_report.errors.is_empty() {
                             report_dict.set_item("errors", &calc_report.errors)?;
                             report_dict.set_item("has_errors", true)?;
@@ -1046,7 +1030,6 @@ impl KnowledgeGraph {
     /// Get all report history as a list of dictionaries
     fn report_history(&self) -> PyResult<Py<PyAny>> {
         Python::attach(|py| {
-            // Create an empty list with PyList::empty
             let report_list = PyList::empty(py);
 
             for report in self.cursor.reports.get_all_reports() {
@@ -1060,7 +1043,6 @@ impl KnowledgeGraph {
                         dict.set_item("nodes_skipped", node_report.nodes_skipped)?;
                         dict.set_item("processing_time_ms", node_report.processing_time_ms)?;
 
-                        // Add errors array if there are any
                         if !node_report.errors.is_empty() {
                             dict.set_item("errors", &node_report.errors)?;
                             dict.set_item("has_errors", true)?;
@@ -1082,7 +1064,6 @@ impl KnowledgeGraph {
                         )?;
                         dict.set_item("processing_time_ms", conn_report.processing_time_ms)?;
 
-                        // Add errors array if there are any
                         if !conn_report.errors.is_empty() {
                             dict.set_item("errors", &conn_report.errors)?;
                             dict.set_item("has_errors", true)?;
@@ -1103,7 +1084,6 @@ impl KnowledgeGraph {
                         dict.set_item("processing_time_ms", calc_report.processing_time_ms)?;
                         dict.set_item("is_aggregation", calc_report.is_aggregation)?;
 
-                        // Add errors array if there are any
                         if !calc_report.errors.is_empty() {
                             dict.set_item("errors", &calc_report.errors)?;
                             dict.set_item("has_errors", true)?;
@@ -1266,7 +1246,6 @@ impl KnowledgeGraph {
             strict.unwrap_or(false),
         );
 
-        // Convert errors to Python list of dicts
         let result = PyList::empty(py);
         for error in errors {
             let error_dict = PyDict::new(py);
@@ -1431,7 +1410,6 @@ impl KnowledgeGraph {
 
         let result = PyDict::new(py);
 
-        // Convert node schemas
         let nodes_dict = PyDict::new(py);
         for (node_type, node_schema) in &schema.node_schemas {
             let schema_dict = PyDict::new(py);
@@ -1458,7 +1436,6 @@ impl KnowledgeGraph {
         }
         result.set_item("nodes", nodes_dict)?;
 
-        // Convert connection schemas
         let connections_dict = PyDict::new(py);
         for (conn_type, conn_schema) in &schema.connection_schemas {
             let schema_dict = PyDict::new(py);
@@ -1528,16 +1505,14 @@ impl KnowledgeGraph {
     ///     for m in matches:
     ///         print(f"Play: {m['p']['title']}, Prospect: {m['pr']['title']}")
     ///
-    /// ```text
-    /// # Find discoveries from specific prospects
-    /// matches = graph.match_pattern(
-    ///     '(pr:Prospect {status: "Active"})-[:BECAME_DISCOVERY]->(d:Discovery)'
-    /// )
+    ///     # Find discoveries from specific prospects
+    ///     matches = graph.match_pattern(
+    ///         '(pr:Prospect {status: "Active"})-[:BECAME_DISCOVERY]->(d:Discovery)'
+    ///     )
     ///
-    /// # Limit results
-    /// top_10 = graph.match_pattern('(p:Person)-[:KNOWS]->(f:Person)', max_matches=10)
-    /// ```
-    /// ```
+    ///     # Limit results
+    ///     top_10 = graph.match_pattern('(p:Person)-[:KNOWS]->(f:Person)', max_matches=10)
+    ///     ```
     #[pyo3(signature = (pattern, max_matches=None))]
     fn match_pattern(
         &self,
@@ -1545,12 +1520,10 @@ impl KnowledgeGraph {
         pattern: &str,
         max_matches: Option<usize>,
     ) -> PyResult<Py<PyAny>> {
-        // Parse the pattern
         let parsed = kglite_core::api::fluent::parse_pattern(pattern).map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Pattern syntax error: {}", e))
         })?;
 
-        // Execute the pattern
         let executor = kglite_core::api::fluent::PatternExecutor::new(&self.inner, max_matches);
         let matches = executor.execute(&parsed).map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
@@ -1559,7 +1532,6 @@ impl KnowledgeGraph {
             ))
         })?;
 
-        // Convert matches to Python
         py_out::pattern_matches_to_pylist(py, &matches, &self.inner)
     }
 
@@ -1644,7 +1616,6 @@ impl KnowledgeGraph {
         git_sha: Option<String>,
         modified_by: Option<String>,
     ) -> PyResult<Py<PyAny>> {
-        // Role-scoped write whitelist (mutation path only). Build the set once.
         let write_scope_set: Option<std::collections::HashSet<String>> =
             write_scope.map(|v| v.into_iter().collect());
         let self_ref = slf.try_borrow().map_err(|_| concurrent_access_pyerr())?;
@@ -1659,7 +1630,6 @@ impl KnowledgeGraph {
             Some(ms) => Some(std::time::Instant::now() + std::time::Duration::from_millis(ms)),
         };
 
-        // Decode params (PyDict → HashMap<String, Value>).
         let param_map = if let Some(params_dict) = params {
             let mut map = std::collections::HashMap::new();
             for (key, val) in params_dict.iter() {
@@ -1672,9 +1642,8 @@ impl KnowledgeGraph {
             std::collections::HashMap::new()
         };
 
-        // Build the planner's disabled-passes set. Hot path: when
-        // both kwargs are at defaults, use the static empty-set
-        // reference and skip the HashSet allocation.
+        // Hot path: with both kwargs at their defaults, skip building the
+        // disabled-passes HashSet entirely.
         let disabled_owned: Option<std::collections::HashSet<String>> =
             if disable_optimizer || disabled_passes.is_some() {
                 Some(build_disabled_passes(disable_optimizer, disabled_passes)?)
@@ -1682,17 +1651,14 @@ impl KnowledgeGraph {
                 None
             };
 
-        // Pre-parse to decide whether this is a mutation
-        // (routes to execute_mut against &mut DirGraph) or a read
-        // (routes to execute_read against &DirGraph via Arc snapshot).
-        // The parser is cached so this second parse inside
-        // session::execute is a hit, ~0 µs overhead.
+        // Pre-parse only to route: mutation → execute_mut (&mut DirGraph),
+        // read → execute_read (&DirGraph via Arc snapshot). The parser is
+        // cached, so the re-parse inside session::execute is a hit, ~0 µs.
         let pre_parsed = cypher::parse_cypher(query).map_err(crate::error_py::kg_to_pyerr)?;
         let is_mutation = cypher::is_mutation_query(&pre_parsed);
 
-        // Read-only graph guard: reject mutations on a read-only kg.
-        // (Separate from per-transaction read_only — this is a
-        // graph-wide flag set via kg.read_only(True).)
+        // The graph-wide flag set via kg.read_only(True), separate from a
+        // transaction's per-tx read_only.
         if is_mutation {
             let this = slf.try_borrow().map_err(|_| concurrent_access_pyerr())?;
             if this.inner.read_only {
@@ -1711,15 +1677,11 @@ impl KnowledgeGraph {
         let query_started = std::time::Instant::now();
 
         if is_mutation {
-            // Mutation path: needs exclusive borrow of the graph.
             let mut this = slf
                 .try_borrow_mut()
                 .map_err(|_| concurrent_access_pyerr())?;
             let graph = get_graph_mut(&mut this.inner);
 
-            // Embedder snapshot for text_score() — borrow ends before
-            // session::execute_mut so the embed call inside can grab
-            // the GIL again if needed.
             let embedder_for_opts: Option<std::sync::Arc<dyn crate::graph::embedder::Embedder>> =
                 None; // mutations don't typically use text_score; skip the embedder snapshot
 
@@ -1762,7 +1724,6 @@ impl KnowledgeGraph {
 
             this.after_mutation(result.stats.as_ref())?;
 
-            // Resolve NodeRef values to node titles before Python conversion.
             resolve_noderefs(&this.inner.graph, &mut result.rows);
 
             return if output_csv {
@@ -1780,10 +1741,9 @@ impl KnowledgeGraph {
             };
         }
 
-        // Read path: clone Arc for the shared snapshot, release the
-        // pyclass borrow, then route through session::execute_read
-        // inside py.detach so the GIL is free during parse / optimize
-        // / execute / resolve_noderefs.
+        // Read path: an Arc snapshot with the pyclass borrow released, so
+        // parse / optimize / execute / resolve_noderefs all run inside
+        // py.detach with the GIL free.
         let inner = {
             let this = slf.try_borrow().map_err(|_| concurrent_access_pyerr())?;
             this.inner.clone()
@@ -1833,33 +1793,24 @@ impl KnowledgeGraph {
         // string and a DataFrame cannot carry diagnostics, so for those two
         // return shapes this is the caller's only channel.
         crate::warning_policy::announce(py, result.diagnostics.as_ref())?;
-        // EXPLAIN: session::execute_read renders the plan into
-        // result.rows — wrap in ResultView and return.
-        // (Detect via lack of regular execution markers: explain
-        // results have specific column names; simpler to re-parse
-        // the flag from the cache.)
-        let output_csv = {
-            // Use the cache-hit pre_parsed AST for output_format /
-            // explain detection without re-parsing inside py.detach.
-            pre_parsed.output_format == cypher::OutputFormat::Csv
-        };
+        // EXPLAIN: session::execute_read renders the plan into result.rows.
+        // Both flags come from the cache-hit pre_parsed AST rather than a
+        // re-parse inside py.detach.
+        let output_csv = { pre_parsed.output_format == cypher::OutputFormat::Csv };
         if pre_parsed.explain {
             let view = crate::graph::pyapi::result_view::ResultView::from_cypher_result(result);
             return Py::new(py, view).map(|v| v.into_any());
         }
 
-        // `Some(0)` is the documented "disable deadline" escape hatch.
-        // Report it as "no deadline" (None) in diagnostics.
+        // The `Some(0)` escape hatch again, reported as "no deadline".
         let reported_timeout_ms = match effective_timeout {
             Some(0) | None => None,
             other => other,
         };
         // The engine populates diagnostics (including the schema "did you
-        // mean?" warnings, on plan-cache hits too) — this boundary only
-        // refines the two fields core cannot know: the wall-clock span the
-        // wheel actually measured, and the caller's configured timeout with
-        // its `Some(0)` escape hatch. The wheel used to re-derive the warnings
-        // here from its own pre-parsed AST; that duplicate is gone.
+        // mean?" warnings, on plan-cache hits too); this boundary only
+        // refines the two fields core cannot know — the wall-clock span the
+        // wheel measured, and the caller's configured timeout.
         let mut diagnostics = result.diagnostics.take().unwrap_or_default();
         diagnostics.elapsed_ms = elapsed_ms;
         diagnostics.timeout_ms = reported_timeout_ms;
@@ -1917,21 +1868,17 @@ impl KnowledgeGraph {
     ///     ```
     #[pyo3(signature = (timeout_ms=None))]
     fn begin(slf: Py<Self>, timeout_ms: Option<u64>) -> PyResult<Transaction> {
-        // Deferred clone.
-        //
-        // Previously this call deep-cloned the entire DirGraph up front,
-        // costing O(graph_size) per begin(). For a 100k-node graph that's
-        // ~3 ms; for 1M-node Bolt deployments that's tens of ms PER
-        // SESSION. Now we take an Arc snapshot (O(1)) and defer the clone
-        // until the first mutation actually lands. Read-only-then-commit
-        // transactions pay zero clone cost; mutating transactions pay
-        // the clone only when needed (and skip it entirely if
-        // Arc::try_unwrap succeeds in the materialization path).
+        // Deferred clone: an O(1) Arc snapshot, with the deep clone deferred
+        // until the first mutation lands. Cloning up front cost O(graph_size)
+        // per begin() — ~3 ms on a 100k-node graph, tens of ms per session on
+        // 1M-node Bolt deployments. Read-only-then-commit transactions now pay
+        // nothing, and a mutating one skips the clone entirely when
+        // Arc::try_unwrap succeeds in the materialization path.
         let core_tx = Python::attach(|py| {
             let kg = slf.borrow(py);
-            // Seed a core Transaction from the KG's current Arc. The throwaway
-            // Session is dropped immediately; the Transaction owns its snapshot
-            // Arc + base version. The CoW/OCC state machine now lives in core.
+            // The throwaway Session is dropped immediately; the Transaction
+            // owns its snapshot Arc + base version. The CoW/OCC state machine
+            // lives in core.
             kglite_core::api::session::Session::from_arc(Arc::clone(&kg.inner)).begin()
         });
         let deadline =
@@ -1975,11 +1922,6 @@ impl KnowledgeGraph {
     }
 }
 
-/// Resolve the `disable_optimizer` / `disabled_passes` kwargs into the
-/// set passed to `optimize_with_disabled`. `disable_optimizer=True`
-/// expands to all registered pass names; `disabled_passes` adds named
-/// passes on top, validated against the registry so typos surface as a
-/// `ValueError` instead of a silent no-op.
 /// One line describing a unique-constraint violation found by *auditing* stored
 /// data: which constraint, on what, how badly, and one value to go looking for.
 ///
@@ -2083,11 +2025,9 @@ fn marshal_read_result(
     // resolve_noderefs already happened inside the py.detach block above.
     let rows = result.rows;
     if output_csv {
-        // CSV consumes every cell — if the executor handed us a
-        // lazy descriptor (RETURN was flagged `lazy_eligible`),
-        // materialise it through ResultView first so to_csv()
-        // sees the actual values rather than the empty rows
-        // placeholder.
+        // CSV consumes every cell, so a lazy descriptor has to be materialised
+        // through ResultView first — otherwise to_csv() serialises the empty
+        // rows placeholder instead of the values.
         if let Some(lazy_desc) = result.lazy {
             let lazy_result = cypher::CypherResult {
                 columns: columns.clone(),
@@ -2133,9 +2073,8 @@ fn marshal_read_result(
         };
         csv_result.to_csv().into_py_any(py)
     } else if let Some(lazy_desc) = result.lazy {
-        // Lazy path: planner flagged the terminal RETURN as eligible
-        // and the executor skipped per-row property evaluation.
-        // Hand the pending rows + return items to ResultView, which
+        // Lazy path: the planner flagged the terminal RETURN as eligible and
+        // the executor skipped per-row property evaluation, so ResultView
         // materialises cells on Python access.
         let lazy_result = cypher::CypherResult {
             columns,
@@ -2150,11 +2089,8 @@ fn marshal_read_result(
             std::sync::Arc::clone(inner),
         );
         if to_df {
-            // DataFrame consumes every row — let the view materialise
-            // its lazy rows via to_df_inner (which handles both
-            // backings). For now, route through to_list-style
-            // materialisation by triggering the lazy resolver per
-            // row and rebuilding the eager form.
+            // DataFrame consumes every row, so materialise the lazy view and
+            // build the frame from the eager form.
             let preprocessed = view.materialise_all()?;
             let cols = view.columns_owned();
             cypher::py_convert::preprocessed_result_to_dataframe(py, &cols, &preprocessed)
@@ -2192,6 +2128,11 @@ fn schema_parse_to_pyerr(e: SchemaParseError) -> PyErr {
     }
 }
 
+/// Resolve the `disable_optimizer` / `disabled_passes` kwargs into the
+/// set passed to `optimize_with_disabled`. `disable_optimizer=True`
+/// expands to all registered pass names; `disabled_passes` adds named
+/// passes on top, validated against the registry so typos surface as a
+/// `ValueError` instead of a silent no-op.
 fn build_disabled_passes(
     disable_optimizer: bool,
     disabled_passes: Option<Vec<String>>,

@@ -295,7 +295,6 @@ pub fn resolve_code_entity(
         None => CODE_TYPES.to_vec(),
     };
 
-    // Try qualified_name (stored as "id") exact match first
     for nt in &types_to_search {
         if let Some(indices) = dir.type_indices.get(nt) {
             for idx in indices.iter() {
@@ -308,8 +307,7 @@ pub fn resolve_code_entity(
         }
     }
 
-    // Try qualified_name suffix match (e.g. "CypherExecutor::execute_single_clause"
-    // matches "crate::graph::languages::cypher::executor::CypherExecutor::execute_single_clause")
+    // Suffix match on the qualified name (lookup step 2).
     if name.contains("::") {
         let suffix = format!("::{}", name);
         let mut matches: Vec<(NodeIndex, schema::NodeInfo)> = Vec::new();
@@ -333,7 +331,6 @@ pub fn resolve_code_entity(
         }
     }
 
-    // Fall back to name/title search
     let mut matches: Vec<(NodeIndex, schema::NodeInfo)> = Vec::new();
     for nt in &types_to_search {
         if let Some(indices) = dir.type_indices.get(nt) {
@@ -365,15 +362,6 @@ pub fn resolve_code_entity(
 /// Infer the node type of the current (latest level) selection by
 /// sampling the first node. Returns `None` if the selection is empty
 /// or the node disappeared.
-///
-/// **Not re-exported through `kglite::api`** — it takes a
-/// `&CowSelection`, which is currently only used externally by the
-/// Python wheel's fluent-API surface. A future binding cannot
-/// meaningfully call this without first lifting the `Selection`
-/// concept to be a stable api type. When that happens, both should
-/// move to api together. The wheel reaches this directly via
-/// `kglite_core::graph::handle::infer_selection_node_type` for now
-/// (see `crates/kglite-py/src/graph/mod.rs`).
 pub fn infer_selection_node_type(
     selection: &crate::graph::schema::CowSelection,
     dir: &Arc<DirGraph>,
@@ -400,27 +388,21 @@ pub fn infer_selection_node_type(
 /// twice. See [`is_canonical_node_column`].
 pub const CANONICAL_NODE_COLUMNS: [&str; 3] = ["id", "title", "type"];
 
-/// Whether `key` names a column a row-oriented exporter already emits from
-/// the node's canonical identity.
+/// Whether `key` collides with a canonical identity column.
 ///
-/// Property keys that collide with a canonical column are dropped from the
-/// discovered property set: the canonical value wins. This is the rule the
-/// SQL-dump, d3/JSON, and `to_text` exporters have always applied, and the
-/// only rule that keeps a header unique. Emitting the column twice is not a
-/// lossless alternative — a name-keyed column map silently overwrites the
-/// canonical value with the property, so the duplicate *destroys* the
-/// identity it appears to preserve.
+/// Colliding property keys are dropped from the discovered property set: the
+/// canonical value wins. This is the rule the SQL-dump, d3/JSON, and `to_text`
+/// exporters have always applied, and the only rule that keeps a header unique.
+/// Emitting the column twice is not a lossless alternative — a name-keyed
+/// column map silently overwrites the canonical value with the property, so the
+/// duplicate *destroys* the identity it appears to preserve.
 pub fn is_canonical_node_column(key: &str) -> bool {
     CANONICAL_NODE_COLUMNS.contains(&key)
 }
 
-/// Discover all unique property keys across a slice of typed nodes.
-/// Returns sorted, de-duplicated key names — useful for any
-/// row-oriented exporter (CSV, Parquet, DataFrame, JSON-lines) that
-/// needs a stable column-name set without scanning the entire graph
-/// schema. The function takes only core types (`NodeData`,
-/// `StringInterner`) so every binding's table-export path can call
-/// it directly.
+/// Sorted, de-duplicated property keys across a slice of typed nodes — a
+/// stable column-name set for any row-oriented exporter (CSV, Parquet,
+/// DataFrame, JSON-lines) without scanning the whole graph schema.
 ///
 /// Keys naming a canonical identity column ([`CANONICAL_NODE_COLUMNS`]) are
 /// excluded, so appending the result to the exporter's leading identity
@@ -526,13 +508,8 @@ pub fn source_location(dir: &Arc<DirGraph>, name: &str, node_type: Option<&str>)
 /// Thin pure-Rust graph handle. Holds an `Arc<DirGraph>` plus an
 /// optional [`Embedder`] for `text_score()` queries. For Rust
 /// embedders (mcp-server, bolt-server, third-party binaries) that
-/// don't need the Python wheel's full state.
-///
-/// The Python wheel's `KnowledgeGraph` (in `kglite-py`) has the
-/// same name but adds wheel-API state (selection, reports,
-/// mutation stats, temporal context, default timeout / max-rows).
-/// The two types don't share a definition; pick whichever fits
-/// your audience.
+/// don't need the Python wheel's full state — see the module docs
+/// for the two same-named types.
 pub struct KnowledgeGraph {
     inner: Arc<DirGraph>,
     embedder: Option<Arc<dyn Embedder>>,
@@ -578,48 +555,17 @@ impl KnowledgeGraph {
         self.embedder = Some(embedder);
     }
 
-    /// Access the active embedder, if any. Returns `None` until
-    /// [`set_embedder_native`](Self::set_embedder_native) has been
-    /// called.
     pub fn embedder(&self) -> Option<&Arc<dyn Embedder>> {
         self.embedder.as_ref()
     }
 
     /// Look up the source-file location for a code-entity node by
-    /// name (or qualified-name suffix). Delegates to the
-    /// [`source_location`] free function so the wheel crate's
-    /// `KnowledgeGraph` can share the same implementation.
+    /// name (or qualified-name suffix).
     pub fn source_location(&self, name: &str, node_type: Option<&str>) -> SourceLookup {
         source_location(&self.inner, name, node_type)
     }
 }
 
-/// Get a `&mut DirGraph` from an `Arc<DirGraph>` and bump the version
-/// counter. Wraps [`Arc::make_mut`] (which clones the inner `DirGraph`
-/// if other strong refs exist) plus the canonical post-mutation version
-/// increment that downstream OCC commit-checks + the plan cache rely on.
-///
-/// The single, consistent entry point for bindings + embedders that hold
-/// an `Arc<DirGraph>` and want to mutate it. Re-exported as
-/// `kglite::api::make_dir_graph_mut`.
-/// (Homed here rather than in `dir_graph.rs` to keep that file under the
-/// god-file ceiling.)
-///
-/// **Cost when other `Arc<DirGraph>` references exist** (a snapshot held by an
-/// open transaction, a clone held by a still-alive `ResultView`, a `freeze()`):
-///
-/// * **Memory mode — a copy-on-write fork, not a copy.** Instead of the
-///   whole-graph clone this warning used to describe, the backend forks to an
-///   overlay over the shared data and the indexes layer over shared levels, so
-///   the write is O(write) and the overlay folds back on the first write after
-///   the last reader drops. See `docs/rust/structural-sharing.md`, and
-///   `held_reference_clone_tests` below for the executable form.
-/// * **Mapped and disk modes still deep-copy**, so a lingering reference there
-///   does cost a full copy — every node, edge and index — on the first write.
-/// * An adjacency edit (adding or removing an edge, deleting a node) is not
-///   overlay-expressible and **flattens** the fork: one copy, paid once per
-///   fork rather than once per statement.
-///
 /// Copy-on-write access that preserves disk writer authority when a shared
 /// snapshot forces a clone. Does not change the graph version; callers that
 /// perform semantic mutations should use [`make_dir_graph_mut`].
@@ -647,17 +593,15 @@ pub(crate) fn make_dir_graph_mut_preserving_lineage(arc: &mut Arc<DirGraph>) -> 
     // shared, which is the steady state.
     graph.graph.ensure_writable();
     // The same fold for `id_indices`, whose entries layer over a shared base of
-    // their own. Per entry this is `Arc::get_mut` + an O(delta) merge, so it
-    // is a probe when nothing is shared.
+    // their own: `Arc::get_mut` plus an O(delta) merge per entry, so a bare
+    // probe when nothing is shared.
     graph.id_indices.try_compact();
     // ...and for `type_indices`, whose buckets are stacks of shared levels.
-    // Per bucket this is an `Arc::get_mut` probe plus an O(delta) merge.
     graph.type_indices.try_compact();
-    // ...and the three user index families, same mechanism over their
-    // `value -> members` maps (`dir_graph/index_layer.rs`, and
-    // `dir_graph/range_index_layer.rs` for the ordered one). One probe per
-    // declared index, and the loops do not run at all on the overwhelmingly
-    // common graph that has no user index.
+    // ...and the three user index families, over their `value -> members` maps
+    // (`dir_graph/index_layer.rs`, and `dir_graph/range_index_layer.rs` for the
+    // ordered one). The loops do not run at all on the overwhelmingly common
+    // graph that has no user index.
     for index in graph.property_indices.values_mut() {
         index.try_compact();
     }
@@ -670,6 +614,26 @@ pub(crate) fn make_dir_graph_mut_preserving_lineage(arc: &mut Arc<DirGraph>) -> 
     graph
 }
 
+/// Get a `&mut DirGraph` from an `Arc<DirGraph>` and bump the version
+/// counter. Wraps [`Arc::make_mut`] plus the canonical post-mutation version
+/// increment that downstream OCC commit-checks + the plan cache rely on. The
+/// single entry point for bindings + embedders that hold an `Arc<DirGraph>`
+/// and want to mutate it. (Homed here rather than in `dir_graph.rs` to keep
+/// that file under the god-file ceiling.)
+///
+/// **Cost when other `Arc<DirGraph>` references exist** (a snapshot held by an
+/// open transaction, a clone held by a still-alive `ResultView`, a `freeze()`):
+///
+/// * **Memory mode — a copy-on-write fork, not a copy.** The backend forks to
+///   an overlay over the shared data and the indexes layer over shared levels,
+///   so the write is O(write) and the overlay folds back on the first write
+///   after the last reader drops. See `docs/rust/structural-sharing.md`, and
+///   `held_reference_clone_tests` below for the executable form.
+/// * **Mapped and disk modes still deep-copy**, so a lingering reference there
+///   does cost a full copy — every node, edge and index — on the first write.
+/// * An adjacency edit (adding or removing an edge, deleting a node) is not
+///   overlay-expressible and **flattens** the fork: one copy, paid once per
+///   fork rather than once per statement.
 pub fn make_dir_graph_mut(arc: &mut Arc<DirGraph>) -> &mut DirGraph {
     let graph = make_dir_graph_mut_preserving_lineage(arc);
     graph.bump_version();
@@ -834,45 +798,33 @@ mod boundary_lift_tests {
 /// The cost of holding a reader across a write — pinned as a *count*, not a
 /// timing.
 ///
-/// [`make_dir_graph_mut`] deep-clones the whole graph whenever a second
-/// `Arc<DirGraph>` is alive, which the doc on
-/// [`make_dir_graph_mut_preserving_lineage`] warns about. The reachable-from-
-/// ordinary-code shape is mundane: a request handler keeps a query result in a
-/// local, then writes. No snapshot API, no threading, no `freeze()`.
+/// The reachable-from-ordinary-code shape is mundane: a request handler keeps a
+/// query result in a local, then writes. No snapshot API, no threading, no
+/// `freeze()`.
 ///
-/// This is measured elsewhere as wall time — and that measurement is
-/// structurally hard to gate on. `min`-of-N and p95 both *hide* it, because
-/// only the first write after acquiring the reference pays; the Python
-/// benchmark that does see it (`test_bench_first_write_after_reference`) has to
-/// re-acquire the reference in an untimed `pedantic` setup before every round,
-/// and even then it asserts no threshold, and lives behind a marker the default
-/// suite deselects. Meanwhile `bench-check` and `bench-anchor` both run
-/// `--metric min`, so neither can ever see this.
+/// Wall time cannot gate it. Only the first write after acquiring the reference
+/// pays, so `min`-of-N and p95 both *hide* it — and `bench-check` and
+/// `bench-anchor` both run `--metric min`. `BACKEND_CLONE_NODES` counts nodes
+/// copied instead: the intentional O(1) clone of an emptied backend registers
+/// zero while a real fork registers the node count, turning a ~28 ms cliff at
+/// 1M nodes into an exact integer at ten.
 ///
-/// `BACKEND_CLONE_NODES` sidesteps all of it. It counts nodes copied, so the
-/// intentional O(1) clone of an emptied backend registers zero while a real
-/// fork registers the node count. That turns a ~28 ms cliff at 1M nodes into an
-/// exact integer at ten — no idle machine, no statistics, no marker.
+/// The contract: a held reader makes the writer fork to a copy-on-write overlay
+/// (`storage/forked.rs`) and copy **zero** nodes. The two arms around
+/// [`held_reader_copies_no_nodes`] — `unique_handle_copies_nothing` and
+/// `dropping_the_reader_restores_in_place_mutation` — are what keep this a
+/// statement about *sharing* rather than about `make_dir_graph_mut` having
+/// become unconditionally cheap.
 ///
-/// **Inverted 2026-08-10**, exactly as the previous version of
-/// this paragraph instructed. `held_reader_forces_a_whole_graph_copy` is now
-/// [`held_reader_copies_no_nodes`]: a held reader makes the writer fork to a
-/// copy-on-write overlay (`storage/forked.rs`) and copies **zero** nodes. The
-/// two arms around it — `unique_handle_copies_nothing` and
-/// `dropping_the_reader_restores_in_place_mutation` — are unchanged and still
-/// green, which is what keeps this a statement about *sharing* rather than
-/// about `make_dir_graph_mut` having become unconditionally cheap.
+/// The oracle has to move with the code, or it passes for the wrong reason:
+/// `impl Clone for GraphBackend` used to bump `BACKEND_CLONE_NODES` by
+/// `node_count()` on *every* clone, including the shallow one. It now bumps
+/// only where node storage is genuinely duplicated
+/// (`backend::note_nodes_copied`). A test that cannot tell the fix from the
+/// defect is worse than no test.
 ///
-/// The oracle itself had to be re-pointed in the same change, or it would have
-/// gone on passing for the wrong reason: `impl Clone for GraphBackend` used to
-/// bump `BACKEND_CLONE_NODES` by `node_count()` on *every* clone, including the
-/// new shallow one. It now bumps only where node storage is genuinely
-/// duplicated (`backend::note_nodes_copied`). A test that cannot tell the fix
-/// from the defect is worse than no test.
-///
-/// What must **not** be relaxed here: these still pin behaviour in both
-/// directions. If a later phase makes the fork copy nodes again, this file is
-/// what says so.
+/// These pin behaviour in both directions and must not be relaxed: if a later
+/// phase makes the fork copy nodes again, this file is what says so.
 #[cfg(test)]
 mod held_reference_clone_tests {
     use super::*;
@@ -937,12 +889,9 @@ mod held_reference_clone_tests {
         );
     }
 
-    /// The fix, as an exact integer — the inversion of
-    /// `held_reader_forces_a_whole_graph_copy`.
-    ///
     /// Holding one extra `Arc` — what a live `ResultView`, a `freeze()`, a
-    /// `Session` or an open transaction snapshot does — used to copy every
-    /// node. It now forks to an overlay and copies none.
+    /// `Session` or an open transaction snapshot does — must fork to an overlay
+    /// and copy no nodes.
     #[test]
     fn held_reader_copies_no_nodes() {
         let mut arc = seeded_arc();
@@ -973,9 +922,9 @@ mod held_reference_clone_tests {
     /// post-write one, with the writer's edits landing nowhere the reader can
     /// see them.
     ///
-    /// This is the semantic contract copy-on-write forking exists to preserve.
-    /// It used to hold for the *expensive* reason (the reader owned a private
-    /// deep copy); it must now hold for the cheap one.
+    /// This is the semantic contract copy-on-write forking exists to preserve:
+    /// it used to hold because the reader owned a private deep copy, and must
+    /// now hold without one.
     #[test]
     fn a_held_reader_never_observes_the_writers_edits() {
         let mut arc = seeded_arc();
