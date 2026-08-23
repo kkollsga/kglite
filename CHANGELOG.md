@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.8] - 2026-08-23
+
 ### Fixed
 
 - **An edge-property write taken while a second reference to the graph was live
