@@ -54,27 +54,27 @@ fn make_shapely_box(
     Ok(polygon.unbind())
 }
 
-/// Resolve lat/lon field names. Passing *either* argument takes the pair from
-/// the arguments alone — the omitted side falls back to `"latitude"`/
-/// `"longitude"`, not to spatial config. With neither given, the first selected
-/// node's spatial config wins, else `"latitude"`/`"longitude"`.
+/// Resolve lat/lon field names, each side independently: an explicit argument
+/// wins for its own side, else the first selected node's spatial config, else
+/// `"latitude"`/`"longitude"`. Naming one coordinate never discards the
+/// configured name of the other.
 fn resolve_lat_lon_fields<'a>(
     graph: &'a DirGraph,
     selection: &CowSelection,
     lat: Option<&'a str>,
     lon: Option<&'a str>,
 ) -> (&'a str, &'a str) {
-    if lat.is_some() || lon.is_some() {
-        return (lat.unwrap_or("latitude"), lon.unwrap_or("longitude"));
-    }
-    if let Some(node_type) = selection.first_node_type(graph) {
-        if let Some(config) = graph.get_spatial_config(&node_type) {
-            if let Some((ref lat_f, ref lon_f)) = config.location {
-                return (lat_f.as_str(), lon_f.as_str());
-            }
-        }
-    }
-    ("latitude", "longitude")
+    let configured = selection
+        .first_node_type(graph)
+        .and_then(|node_type| graph.get_spatial_config(&node_type))
+        .and_then(|config| config.location.as_ref())
+        .map(|(lat_f, lon_f)| (lat_f.as_str(), lon_f.as_str()));
+    (
+        lat.or(configured.map(|(lat_f, _)| lat_f))
+            .unwrap_or("latitude"),
+        lon.or(configured.map(|(_, lon_f)| lon_f))
+            .unwrap_or("longitude"),
+    )
 }
 
 /// Resolve the geometry field name: an explicit argument wins, else the first

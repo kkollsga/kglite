@@ -203,8 +203,11 @@ class TestDescribeAnnotations:
         g.add_nodes(nodes, "Country", "nid", "label")
         g.create_index("Country", "continent")
         d = g.describe()
-        # String columns get both equality and prefix indexing.
-        assert 'indexed="eq,prefix"' in d
+        # The in-memory index is a hash: equality only. Prefix acceleration is
+        # the sorted disk index's, and claiming it here would send an agent
+        # into a STARTS WITH that full-scans.
+        assert 'indexed="eq"' in d
+        assert 'indexed="eq,prefix"' not in d
 
     def test_indexing_hint_in_extensions(self, disk_dir):
         g = _build_disk_graph(disk_dir)

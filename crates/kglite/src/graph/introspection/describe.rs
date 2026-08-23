@@ -361,17 +361,10 @@ fn accumulate_connection_topic(
         .map(|info| !info.property_types.is_empty())
         .unwrap_or(true); // conservative: scan if metadata missing
 
-    // Samples — always need at least one pass to pick 1–2 concrete edges.
-    let need_samples = true;
-    let need_pair_scan = !pair_counts_from_cache;
-    let need_property_scan = has_properties;
-
-    if !need_pair_scan && !need_property_scan && !need_samples {
-        return acc;
-    }
-
-    let collect_pairs = need_pair_scan;
-    let collect_props = need_property_scan;
+    // The scan runs unconditionally: samples need at least one pass to pick
+    // 1–2 concrete edges, whatever the pair/property caches already hold.
+    let collect_pairs = !pair_counts_from_cache;
+    let collect_props = has_properties;
     let sample_cap: usize = 2;
 
     graph
@@ -664,6 +657,11 @@ fn write_connections_detail(
     Ok(())
 }
 
+/// The legend for every `indexed=` attribute [`index_kinds`] emits. Emitted by
+/// both `<extensions>` writers, so it lives here rather than as two literals
+/// that can disagree about what the vocabulary means.
+const INDEXING_HINT: &str = "    <indexing hint=\"Properties annotated indexed='eq' are O(log N) via MATCH (n:T {prop: value}); indexed='eq,prefix' also accelerates WHERE n.prop STARTS WITH 'x' (the sorted disk-backed string index only); indexed='range' accelerates &lt;, &lt;=, &gt;, &gt;= and ORDER BY. Prefer anchored queries over unanchored scans; the default Cypher deadline is 3 minutes (override per-call with timeout_ms or globally with set_default_timeout).\"/>\n";
+
 /// Write the `<extensions>` element. The timeseries, spatial, semantic and
 /// connections sections appear only when the graph carries that feature; the
 /// language-surface sections are unconditional.
@@ -698,7 +696,7 @@ fn write_extensions(xml: &mut String, graph: &DirGraph) {
     }
     xml.push_str("    <temporal hint=\"valid_at(entity, date, 'from', 'to'), valid_during(entity, start, end, 'from', 'to') — temporal filtering on nodes/edges. NULL = open-ended.\"/>\n");
     xml.push_str("    <bug_report hint=\"bug_report(query, result, expected, description) — file a Cypher bug report to reported_bugs.md.\"/>\n");
-    xml.push_str("    <indexing hint=\"Properties annotated indexed='eq' are O(log N) via MATCH (n:T {prop: value}); indexed='eq,prefix' also accelerate WHERE n.prop STARTS WITH 'x'. Prefer anchored queries over unanchored scans; the default Cypher deadline is 3 minutes (override per-call with timeout_ms or globally with set_default_timeout).\"/>\n");
+    xml.push_str(INDEXING_HINT);
     xml.push_str("  </extensions>\n");
 }
 
@@ -784,6 +782,33 @@ fn is_uninformative_false_bool(p: &PropertyStatInfo) -> bool {
             .is_some_and(|vs| vs.iter().all(|v| matches!(v, Value::Boolean(false))))
 }
 
+/// The predicate shapes an index on this property actually serves, as the
+/// comma list the `indexed=` attribute carries — `None` when none is declared.
+/// The vocabulary is [`INDEXING_HINT`]'s, which is what tells an agent how to
+/// read it.
+///
+/// `prefix` is the *sorted disk-backed* index's own capability: it range-scans
+/// its key array between `lower_bound(prefix)` and `lower_bound(next_prefix)`.
+/// The in-memory hash answers equality alone, and the memory/mapped backends
+/// inherit `GraphRead::lookup_by_property_prefix`'s `None` default on the
+/// declared-index path — so a `STARTS WITH` there is a full scan, and claiming
+/// `prefix` for it sends an agent down a path the engine does not have.
+fn index_kinds(graph: &DirGraph, node_type: &str, prop: &PropertyStatInfo) -> Option<String> {
+    let mut kinds: Vec<&str> = Vec::new();
+    if graph.has_any_index(node_type, &prop.property_name) {
+        kinds.push("eq");
+        let is_string = matches!(prop.type_string.as_str(), "str" | "String" | "string");
+        if is_string && graph.has_persistent_property_index(node_type, &prop.property_name) {
+            kinds.push("prefix");
+        }
+    }
+    let range_key = (node_type.to_string(), prop.property_name.clone());
+    if graph.range_indices.contains_key(&range_key) {
+        kinds.push("range");
+    }
+    (!kinds.is_empty()).then(|| kinds.join(","))
+}
+
 /// Render a sampled property value as a Cypher literal for the self-documenting
 /// per-type example query in the schema overview. Strings are quoted + escaped;
 /// numeric / boolean scalars are bare; structural values fall back to a quoted
@@ -864,16 +889,8 @@ fn property_attrs(
         attrs.push_str(" approx=\"true\"");
     }
     attrs.push_str(&coverage_attr(prop.non_null, type_count));
-    if graph.has_any_index(node_type, &prop.property_name) {
-        // The persistent string index is a sorted array, so it
-        // serves prefix (STARTS WITH) as well as equality; every
-        // other value type is equality-only.
-        let kind = if matches!(prop.type_string.as_str(), "String" | "string") {
-            "eq,prefix"
-        } else {
-            "eq"
-        };
-        attrs.push_str(&format!(" indexed=\"{}\"", kind));
+    if let Some(kinds) = index_kinds(graph, node_type, prop) {
+        attrs.push_str(&format!(" indexed=\"{kinds}\""));
     }
     // Declared constraints, so an agent knows a write will be
     // rejected *before* attempting it. `SHOW CONSTRAINTS` gives the
@@ -1482,7 +1499,7 @@ fn build_extreme_inventory(graph: &DirGraph) -> String {
     xml.push_str("    <cypher hint=\"Standard openCypher is supported — MATCH/WHERE/WITH/RETURN, ORDER BY/SKIP/LIMIT, variable-length paths and the usual aggregates all work; write ordinary Cypher, not a dialect. KGLite adds documented extensions on top. graph_overview(cypher=True) for reference, graph_overview(cypher=['topic']) for detailed docs.\"/>\n");
     xml.push_str("    <fluent_api hint=\"Method-chaining API: select/where/traverse/collect. graph_overview(fluent=True) for reference.\"/>\n");
     xml.push_str("    <bug_report hint=\"bug_report(query, result, expected, description) — file a Cypher bug report.\"/>\n");
-    xml.push_str("    <indexing hint=\"Properties annotated indexed='eq' are O(log N) via MATCH (n:T {prop: value}); indexed='eq,prefix' also accelerate WHERE n.prop STARTS WITH 'x'. Prefer anchored queries over unanchored scans; the default Cypher deadline is 3 minutes (override per-call with timeout_ms or globally with set_default_timeout).\"/>\n");
+    xml.push_str(INDEXING_HINT);
     xml.push_str("  </extensions>\n");
 
     xml.push_str(&format!(
@@ -2363,5 +2380,146 @@ mod focused_detail_error_tests {
         let error = build_focused_detail(&graph, &["Xyzzy".to_string()], None)
             .expect_err("unknown type must error");
         assert!(!error.contains("Did you mean"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod index_annotation_tests {
+    use super::*;
+    use crate::datatypes::values::Value;
+    use crate::graph::storage::backend::GraphBackend;
+    use tempfile::TempDir;
+
+    /// Built through `add_nodes` so the type carries column metadata: the disk
+    /// property index reads the `Str` column, and `describe()`'s `type_string`
+    /// comes from that metadata.
+    fn city_graph() -> DirGraph {
+        let frame = crate::datatypes::DataFrame::from_cypher_rows(
+            vec!["id".into(), "title".into(), "city".into(), "pop".into()],
+            vec![
+                vec![
+                    Value::Int64(1),
+                    Value::String("p1".into()),
+                    Value::String("Oslo".into()),
+                    Value::Int64(700),
+                ],
+                vec![
+                    Value::Int64(2),
+                    Value::String("p2".into()),
+                    Value::String("Bergen".into()),
+                    Value::Int64(280),
+                ],
+            ],
+        )
+        .unwrap();
+        let mut graph = DirGraph::new();
+        crate::graph::mutation::maintain::add_nodes(
+            &mut graph,
+            frame,
+            "Person".to_string(),
+            "id".to_string(),
+            Some("title".to_string()),
+            None,
+        )
+        .unwrap();
+        graph
+    }
+
+    fn describe(graph: &DirGraph) -> String {
+        compute_description(
+            graph,
+            None,
+            &ConnectionDetail::Off,
+            &CypherDetail::Off,
+            &FluentDetail::Off,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+    }
+
+    fn attr_of(described: &str, property: &str) -> String {
+        let needle = format!("name=\"{property}\"");
+        let line = described
+            .lines()
+            .find(|l| l.contains(&needle))
+            .unwrap_or_else(|| panic!("no <prop {needle}> in: {described}"));
+        line.trim().to_string()
+    }
+
+    /// The in-memory index is a value→members hash, and the memory backends
+    /// inherit `lookup_by_property_prefix`'s `None` default — a `STARTS WITH`
+    /// here full-scans, so advertising `prefix` points an agent at a path the
+    /// engine does not have.
+    #[test]
+    fn a_memory_hash_index_advertises_equality_only() {
+        let mut graph = city_graph();
+        graph.create_index("Person", "city");
+        let line = attr_of(&describe(&graph), "city");
+        assert!(line.contains("indexed=\"eq\""), "got: {line}");
+    }
+
+    /// A range index serves ordered predicates, not equality — folding it into
+    /// `eq` would promise an O(log N) point lookup that does not exist.
+    #[test]
+    fn a_range_index_is_reported_under_its_own_name() {
+        let mut graph = city_graph();
+        graph.create_range_index("Person", "pop");
+        let line = attr_of(&describe(&graph), "pop");
+        assert!(line.contains("indexed=\"range\""), "got: {line}");
+    }
+
+    /// Both structures on one property — what `CREATE RANGE INDEX` builds.
+    #[test]
+    fn equality_and_range_on_one_property_report_both() {
+        let mut graph = city_graph();
+        graph.create_index("Person", "pop");
+        graph.create_range_index("Person", "pop");
+        let line = attr_of(&describe(&graph), "pop");
+        assert!(line.contains("indexed=\"eq,range\""), "got: {line}");
+    }
+
+    /// The disk index *is* a sorted key array, so prefix is real there — the
+    /// one place `eq,prefix` is true.
+    #[test]
+    fn a_disk_string_index_advertises_prefix() {
+        let dir = TempDir::new().unwrap();
+        let mut graph = city_graph();
+        graph.enable_disk_mode().unwrap();
+        graph.save_disk(dir.path().to_str().unwrap()).unwrap();
+        match &mut graph.graph {
+            GraphBackend::Disk(disk) => {
+                assert_eq!(disk.build_property_index("Person", "city").unwrap(), 2);
+            }
+            _ => panic!("expected disk backend"),
+        }
+        let line = attr_of(&describe(&graph), "city");
+        assert!(line.contains("indexed=\"eq,prefix\""), "got: {line}");
+    }
+
+    /// `durable=True` and `cdc::enable` wrap the backend, and the index is
+    /// still there underneath: a graph that loses its `indexed=` annotations
+    /// the moment capture is switched on tells an agent to stop using an index
+    /// it still has.
+    #[test]
+    fn capture_wrapping_does_not_hide_the_disk_index() {
+        let dir = TempDir::new().unwrap();
+        let mut graph = city_graph();
+        graph.enable_disk_mode().unwrap();
+        graph.save_disk(dir.path().to_str().unwrap()).unwrap();
+        match &mut graph.graph {
+            GraphBackend::Disk(disk) => {
+                assert_eq!(disk.build_property_index("Person", "city").unwrap(), 2);
+            }
+            _ => panic!("expected disk backend"),
+        }
+        graph.graph.wrap_for_capture();
+        assert!(
+            graph.has_any_index("Person", "city"),
+            "a wrapped disk graph still has its persistent index"
+        );
+        let line = attr_of(&describe(&graph), "city");
+        assert!(line.contains("indexed=\"eq,prefix\""), "got: {line}");
     }
 }

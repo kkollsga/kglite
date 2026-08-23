@@ -235,19 +235,34 @@ impl DirGraph {
         self.property_indices.contains_key(&key)
     }
 
-    /// Check if **any** index exists for `(node_type, property)` — the
-    /// in-memory `property_indices` HashMap *or* a persistent
-    /// disk-backed `PropertyIndex`. Used by `describe()` to annotate
-    /// schema output with `indexed=…` attributes so agents can tell
-    /// which properties hit an O(log N) path.
+    /// Check if **any** equality index exists for `(node_type, property)` —
+    /// the in-memory `property_indices` HashMap *or* a persistent disk-backed
+    /// `PropertyIndex`. Range and composite stores answer other predicate
+    /// shapes and are deliberately not counted: callers use this to decide
+    /// whether a *point lookup* is already served.
     pub fn has_any_index(&self, node_type: &str, property: &str) -> bool {
-        if self.has_index(node_type, property) {
-            return true;
+        self.has_index(node_type, property)
+            || self.has_persistent_property_index(node_type, property)
+    }
+
+    /// Whether the **sorted, disk-backed** `PropertyIndex` covers
+    /// `(node_type, property)`. Distinct from [`Self::has_index`] because the
+    /// two structures serve different predicates: this one is a sorted key
+    /// array and range-scans a prefix, the in-memory hash cannot.
+    ///
+    /// Looks *through* the write-capture wrapper: `durable=True` and
+    /// `cdc::enable` both replace the backend with `GraphBackend::Recording`,
+    /// and a bare `Disk` match answers "no index" for every such graph.
+    pub fn has_persistent_property_index(&self, node_type: &str, property: &str) -> bool {
+        use crate::graph::storage::backend::GraphBackend;
+        let mut backend = &self.graph;
+        if let GraphBackend::Recording(rg) = backend {
+            backend = rg.inner();
         }
-        if let crate::graph::storage::backend::GraphBackend::Disk(dg) = &self.graph {
-            return dg.has_property_index(node_type, property);
+        match backend {
+            GraphBackend::Disk(dg) => dg.has_property_index(node_type, property),
+            _ => false,
         }
-        false
     }
 
     pub fn list_indexes(&self) -> Vec<(String, String)> {

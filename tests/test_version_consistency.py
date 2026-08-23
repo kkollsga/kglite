@@ -57,12 +57,44 @@ _spec.loader.exec_module(vc)
         ("<0.14", "0.15.0", False),
         (">=0.3.4, <0.4", "0.3.9", True),
         (">=0.3.4, <0.4", "0.4.0", False),
+        # 0.0.z: Cargo holds the *patch* fixed, so 0.0.4 is a breaking bump.
+        ("^0.0.3", "0.0.3", True),
+        ("^0.0.3", "0.0.4", False),
+        ("0.0.3", "0.1.0", False),
+        # A wildcard/partial-exact fixes the components it names and varies
+        # the rest — never the caret's left-most-non-zero rule.
+        ("==0.0.*", "0.0.9", True),
+        ("==0.0.*", "0.1.0", False),
+        ("==1.2.*", "1.2.9", True),
+        ("==1.2.*", "1.3.0", False),
+        ("=1.2", "1.2.9", True),
+        ("=1.2", "1.3.0", False),
     ],
 )
 def test_requirement_admission(spec: str, version: str, admits: bool) -> None:
     interval = vc.parse_requirement(spec)
     assert interval is not None, f"failed to parse {spec!r}"
     assert interval.contains(vc.parse_version(version)) is admits
+
+
+@pytest.mark.parametrize(
+    ("spec", "hi"),
+    [
+        ("^1.2.3", (2, 0, 0)),
+        ("^0.14.4", (0, 15, 0)),
+        ("^0.0.3", (0, 0, 4)),
+        ("^0.14", (0, 15, 0)),
+        ("^0.0", (0, 1, 0)),
+        ("^0", (1, 0, 0)),
+        ("^5", (6, 0, 0)),
+    ],
+)
+def test_caret_upper_bounds(spec: str, hi: tuple[int, int, int]) -> None:
+    """Caret bounds are Cargo's, exactly — an over-wide `hi` suppresses the
+    staleness findings the checker exists to report."""
+    interval = vc.parse_requirement(spec)
+    assert interval is not None, f"failed to parse {spec!r}"
+    assert interval.hi == hi
 
 
 def test_unparseable_requirements_are_declined_not_guessed() -> None:

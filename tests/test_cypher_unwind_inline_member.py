@@ -85,3 +85,20 @@ def test_bulk_edge_merge_via_unwind():
     )
     assert kg.cypher("MATCH (n) RETURN count(n) AS c").to_dicts()[0]["c"] == 2
     assert kg.cypher("MATCH (:A)-[:R]->(:B) RETURN count(*) AS c").to_dicts()[0]["c"] == 1
+
+
+def test_legacy_string_list_splits_on_the_matching_quote_only():
+    """`UNWIND '["a,b\'", 2]'` is two items, not one.
+
+    The legacy JSON-string list path (a string parameter, not a list) scans for
+    quote characters to know which commas are separators. It used to flip that
+    state on *either* quote character, so an apostrophe inside a double-quoted
+    item closed the string and the following comma stopped being top-level —
+    the two items came back glued into one.
+    """
+    kg = kglite.KnowledgeGraph()
+    rows = kg.cypher(
+        "UNWIND $items AS x RETURN x",
+        params={"items": '["a,b\'", 2]'},
+    ).to_dicts()
+    assert [r["x"] for r in rows] == ["a,b'", 2]

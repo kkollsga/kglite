@@ -226,14 +226,30 @@ def _next_caret(v: tuple[int, int, int], parts: int) -> tuple[int, int, int]:
     Cargo semantics, which PEP 440's ``~=`` matches closely enough for our use:
     the left-most non-zero component is the one held fixed.
     ``^1.2.3`` -> 2.0.0, ``^0.14.4`` -> 0.15.0, ``^0.0.3`` -> 0.0.4.
-    A partial requirement widens: ``^0.14`` -> 0.15.0, ``^5`` -> 6.0.0.
+    A partial requirement widens only as far as the components it omits:
+    ``^0.14`` -> 0.15.0, ``^0.0`` -> 0.1.0, ``^0`` -> 1.0.0, ``^5`` -> 6.0.0.
     """
     major, minor, patch = v
-    if major != 0:
+    if major != 0 or parts == 1:
         return (major + 1, 0, 0)
-    if minor != 0 or parts >= 2:
+    if minor != 0 or parts == 2:
         return (0, minor + 1, 0)
     return (0, 0, patch + 1)
+
+
+def _next_prefix(v: tuple[int, int, int], parts: int) -> tuple[int, int, int]:
+    """Upper bound (exclusive) of a requirement that fixes a version *prefix*.
+
+    ``==1.2.*`` and Cargo's ``=1.2`` admit everything sharing the components
+    they name — 1.2.0 through 1.2.x — which is not caret's left-most-non-zero
+    rule: ``==1.2.*`` stops at 1.3.0 where ``^1.2`` runs to 2.0.0.
+    """
+    major, minor, patch = v
+    if parts >= 3:
+        return (major, minor, patch + 1)
+    if parts == 2:
+        return (major, minor + 1, 0)
+    return (major + 1, 0, 0)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -288,7 +304,7 @@ def parse_requirement(spec: str) -> Interval | None:
             if base is None:
                 return None
             parts = len(m.group(2).split("."))
-            clause = Interval(base, _next_caret(base, parts + 1))
+            clause = Interval(base, _next_prefix(base, parts))
             result = result.intersect(clause)
             saw_clause = True
             continue
@@ -312,10 +328,7 @@ def parse_requirement(spec: str) -> Interval | None:
             else:
                 clause = Interval(base, (base[0] + 1, 0, 0))
         elif op in {"=", "=="}:
-            if parts >= 3:
-                clause = Interval(base, (base[0], base[1], base[2] + 1))
-            else:
-                clause = Interval(base, _next_caret(base, parts + 1))
+            clause = Interval(base, _next_prefix(base, parts))
         elif op == ">=":
             clause = Interval(base, INF)
         elif op == ">":

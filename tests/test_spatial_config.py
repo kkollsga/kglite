@@ -665,3 +665,63 @@ class TestGeometryAwareDistance:
             RETURN distance(a.geometry, b.geometry) AS dist
         """)
         assert rv[0]["dist"] == 0.0
+
+
+# ── One-sided lat_field / lon_field overrides ────────────────────────
+
+
+class TestOneSidedCoordinateOverride:
+    """Naming one coordinate field must not discard the config for the other."""
+
+    @pytest.fixture
+    def renamed_graph(self):
+        """Sites whose coordinate properties are named nothing like the literals."""
+        graph = KnowledgeGraph()
+        df = pd.DataFrame(
+            {
+                "id": [1, 2],
+                "name": ["Near", "Far"],
+                "lat_wgs84": [60.5, 10.0],
+                "lon_wgs84": [3.5, 40.0],
+            }
+        )
+        graph.add_nodes(df, "Site", "id", "name")
+        graph.set_spatial("Site", location=("lat_wgs84", "lon_wgs84"))
+        return graph
+
+    def test_near_point_m_explicit_lat_keeps_configured_lon(self, renamed_graph):
+        result = renamed_graph.select("Site").near_point_m(
+            center_lat=60.5,
+            center_lon=3.5,
+            max_distance_m=50_000.0,
+            lat_field="lat_wgs84",
+        )
+        assert result.len() == 1
+        assert result.collect()[0]["title"] == "Near"
+
+    def test_within_bounds_explicit_lon_keeps_configured_lat(self, renamed_graph):
+        result = renamed_graph.select("Site").within_bounds(
+            min_lat=59.0,
+            max_lat=62.0,
+            min_lon=2.0,
+            max_lon=5.0,
+            lon_field="lon_wgs84",
+        )
+        assert result.len() == 1
+        assert result.collect()[0]["title"] == "Near"
+
+    def test_bounds_explicit_lat_keeps_configured_lon(self, renamed_graph):
+        bounds = renamed_graph.select("Site").bounds(lat_field="lat_wgs84")
+        assert bounds is not None
+        assert bounds["min_lon"] == pytest.approx(3.5)
+        assert bounds["max_lon"] == pytest.approx(40.0)
+
+    def test_explicit_argument_still_overrides_the_config(self, renamed_graph):
+        """An explicit name wins over the config for its own side."""
+        result = renamed_graph.select("Site").near_point_m(
+            center_lat=60.5,
+            center_lon=3.5,
+            max_distance_m=50_000.0,
+            lat_field="not_a_property",
+        )
+        assert result.len() == 0

@@ -1807,4 +1807,61 @@ mod constraint_row_vocabulary_tests {
         assert_eq!(rows[0].neo4j_type(), "RELATIONSHIP_PROPERTY_EXISTENCE");
         assert_eq!(rows[0].entity_type(), "RELATIONSHIP");
     }
+
+    /// A declared primary key is unique *and* present whichever property it
+    /// names, so it reports as `NODE_KEY` for `id` exactly as it does for any
+    /// other property. `id` reaches the presence pass rather than the unique
+    /// one — its uniqueness lives in the per-type id-index, not in
+    /// `unique_indices` — and reporting the pass it arrived through labelled it
+    /// `NODE_PROPERTY_EXISTENCE`, contradicting the `NODE KEY` its own
+    /// violation message names.
+    #[test]
+    fn a_primary_key_reports_as_a_node_key_for_every_property_including_id() {
+        use crate::graph::schema::{NodeSchemaDefinition, SchemaDefinition, SchemaInstall};
+
+        for pk in ["id", "email"] {
+            let mut graph = DirGraph::new();
+            let mut schema = SchemaDefinition::new();
+            schema.add_node_schema(
+                "Person".to_string(),
+                NodeSchemaDefinition {
+                    primary_key: Some(pk.to_string()),
+                    ..Default::default()
+                },
+            );
+            graph
+                .set_schema(schema, SchemaInstall::Merge)
+                .expect("schema install");
+
+            let rows = collect_constraints_structured(&graph);
+            let row = rows
+                .iter()
+                .find(|row| row.properties == vec![pk.to_string()])
+                .unwrap_or_else(|| panic!("pk = {pk}: no row for the primary key"));
+            assert_eq!(row.neo4j_type(), "NODE_KEY", "pk = {pk}");
+            assert_eq!(row.kind, ConstraintKind::NodeKey, "pk = {pk}");
+            assert_eq!(row.labels_or_types, vec!["Person".to_string()], "pk = {pk}");
+            // One row, not a NODE_KEY plus a leftover presence row.
+            assert_eq!(
+                rows.iter()
+                    .filter(|row| row.properties == vec![pk.to_string()])
+                    .count(),
+                1,
+                "pk = {pk}"
+            );
+        }
+    }
+
+    /// The fold is keyed on the *declared primary key*, not on "any required
+    /// property": a plain NOT NULL declaration still reports presence only.
+    #[test]
+    fn a_bare_presence_constraint_stays_a_presence_row() {
+        let mut graph = DirGraph::new();
+        graph
+            .create_not_null_constraint("Person", "email")
+            .expect("declaration");
+        let rows = collect_constraints_structured(&graph);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].neo4j_type(), "NODE_PROPERTY_EXISTENCE");
+    }
 }

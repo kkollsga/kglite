@@ -1373,16 +1373,21 @@ pub(super) fn parse_value_string(s: &str) -> Value {
 }
 
 /// Split a list string like "[1, 2, [3, 4], 5]" into top-level items,
-/// respecting nested brackets and quoted strings. The outer brackets are
-/// assumed present and are stripped; "[]" yields an empty vec.
+/// respecting nested brackets and quoted strings. Input that is not wrapped
+/// in `[` … `]` yields an empty vec, as does "[]".
 pub(super) fn split_list_top_level(s: &str) -> Vec<&str> {
-    let inner = &s[1..s.len() - 1];
+    let trimmed = s.trim();
+    if !trimmed.starts_with('[') || !trimmed.ends_with(']') || trimmed.len() < 2 {
+        return Vec::new();
+    }
+    let inner = &trimmed[1..trimmed.len() - 1];
     if inner.trim().is_empty() {
         return Vec::new();
     }
     let mut items = Vec::new();
     let mut depth = 0i32;
     let mut in_string = false;
+    let mut quote_char = '"';
     let mut escape = false;
     let mut start = 0;
 
@@ -1395,8 +1400,12 @@ pub(super) fn split_list_top_level(s: &str) -> Vec<&str> {
             '\\' if in_string => {
                 escape = true;
             }
-            '"' | '\'' => {
-                in_string = !in_string;
+            '"' | '\'' if !in_string => {
+                in_string = true;
+                quote_char = ch;
+            }
+            c if in_string && c == quote_char => {
+                in_string = false;
             }
             '[' | '{' if !in_string => {
                 depth += 1;
@@ -1576,5 +1585,38 @@ mod user_input_error_tests {
         ] {
             assert!(!is_user_input_error(message), "{message}");
         }
+    }
+}
+
+#[cfg(test)]
+mod split_list_top_level_tests {
+    use super::split_list_top_level;
+
+    #[test]
+    fn a_quote_of_the_other_kind_does_not_close_the_string() {
+        // The apostrophe is data inside a double-quoted item; only a matching
+        // `"` ends it, so the following comma is a top-level separator.
+        assert_eq!(split_list_top_level("[\"a,b'\", 2]"), vec!["\"a,b'\"", "2"]);
+        assert_eq!(split_list_top_level("['a\"b', 2]"), vec!["'a\"b'", "2"]);
+    }
+
+    #[test]
+    fn input_that_is_not_bracket_wrapped_yields_nothing() {
+        assert_eq!(split_list_top_level(""), Vec::<&str>::new());
+        assert_eq!(split_list_top_level("["), Vec::<&str>::new());
+        assert_eq!(split_list_top_level("1, 2"), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn the_wrapped_cases_still_split_as_before() {
+        assert_eq!(split_list_top_level("[]"), Vec::<&str>::new());
+        assert_eq!(
+            split_list_top_level("[1, 2, [3, 4], 5]"),
+            vec!["1", "2", "[3, 4]", "5"]
+        );
+        assert_eq!(
+            split_list_top_level("[\"a\\\",b\", 2]"),
+            vec!["\"a\\\",b\"", "2"]
+        );
     }
 }
