@@ -1538,12 +1538,16 @@ impl DirGraph {
         }
         self.property_index_keys = prop_keys;
 
+        // A `.kgl` written before composite keys were canonicalized carries the
+        // declaration order; `create_composite_index` sorts it, so re-deriving
+        // the list from the rebuilt map keeps the snapshot and the live index
+        // agreeing on one spelling instead of persisting the old one again.
         let comp_keys: Vec<CompositeIndexKey> = std::mem::take(&mut self.composite_index_keys);
         for (node_type, properties) in &comp_keys {
             let prop_refs: Vec<&str> = properties.iter().map(|s| s.as_str()).collect();
             self.create_composite_index(node_type, &prop_refs);
         }
-        self.composite_index_keys = comp_keys;
+        self.composite_index_keys = self.composite_indices.keys().cloned().collect();
 
         let range_keys: Vec<IndexKey> = std::mem::take(&mut self.range_index_keys);
         for (node_type, property) in &range_keys {

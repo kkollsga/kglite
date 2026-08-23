@@ -345,15 +345,28 @@ impl DirGraph {
     ///
     /// `create_composite_index("Person", &["city", "age"])` makes
     /// `filter({'city': 'Oslo', 'age': 30})` an index lookup.
+    ///
+    /// **Declaration order is not stored.** The key is canonicalized by sorting
+    /// the property names, and every value tuple is built in that same order,
+    /// because the readers come from the sorted list too. The pattern matcher
+    /// probes with its equality properties sorted alphabetically and looks the
+    /// key up exactly (`pattern_matching::matcher::try_index_lookup`), so a
+    /// caller-ordered key was simply never found: an index declared
+    /// `ON (n.city, n.age)` was unreachable from every MATCH and the type was
+    /// scanned instead. Order-insensitivity is the contract for the whole
+    /// family — `has_`/`drop_`/`lookup_by_`/`get_composite_index_stats`
+    /// canonicalize the same way.
     pub fn create_composite_index(&mut self, node_type: &str, properties: &[&str]) -> usize {
+        let mut sorted_properties: Vec<&str> = properties.to_vec();
+        sorted_properties.sort_unstable();
         let key = (
             node_type.to_string(),
-            properties.iter().map(|s| s.to_string()).collect(),
+            sorted_properties.iter().map(|s| s.to_string()).collect(),
         );
 
         // Pre-resolve + pre-intern each property so the per-node loop is
         // store-lookup only. See `read_indexed` for the read-path rationale.
-        let readers: Vec<PropertyReader> = properties
+        let readers: Vec<PropertyReader> = sorted_properties
             .iter()
             .map(|p| self.property_reader(node_type, p))
             .collect();
@@ -379,28 +392,53 @@ impl DirGraph {
         count
     }
 
+    /// The stored key for a composite index over `properties`: the names
+    /// sorted, as [`Self::create_composite_index`] stores them.
+    fn composite_key(node_type: &str, properties: &[String]) -> CompositeIndexKey {
+        let mut sorted = properties.to_vec();
+        sorted.sort_unstable();
+        (node_type.to_string(), sorted)
+    }
+
     /// Returns true if the composite index existed and was removed.
+    /// Property order is not significant.
     pub fn drop_composite_index(&mut self, node_type: &str, properties: &[String]) -> bool {
-        let key = (node_type.to_string(), properties.to_vec());
+        let key = Self::composite_key(node_type, properties);
         self.composite_indices.remove(&key).is_some()
     }
 
+    /// Property order is not significant — both spellings name one index.
     pub fn has_composite_index(&self, node_type: &str, properties: &[String]) -> bool {
-        let key = (node_type.to_string(), properties.to_vec());
+        let key = Self::composite_key(node_type, properties);
         self.composite_indices.contains_key(&key)
     }
 
+    /// Property names come back in the canonical (sorted) order, not the order
+    /// they were declared in.
     pub fn list_composite_indexes(&self) -> Vec<(String, Vec<String>)> {
         self.composite_indices.keys().cloned().collect()
     }
 
-    /// `properties` must be in the order the index was created with.
+    /// `values[i]` is the value of `properties[i]`; the pair is reordered into
+    /// the stored key's canonical (sorted) order here, so callers may probe in
+    /// any order. The sorted spelling — what the matcher and the MERGE probe
+    /// already build — skips the reordering entirely.
     pub fn lookup_by_composite_index(
         &self,
         node_type: &str,
         properties: &[String],
         values: &[Value],
     ) -> Option<Vec<NodeIndex>> {
+        let needs_reorder =
+            properties.len() == values.len() && properties.windows(2).any(|w| w[0] > w[1]);
+        if needs_reorder {
+            let mut pairs: Vec<(&String, &Value)> = properties.iter().zip(values).collect();
+            pairs.sort_by(|a, b| a.0.cmp(b.0));
+            let names: Vec<String> = pairs.iter().map(|(p, _)| (*p).clone()).collect();
+            let sorted_values: Vec<Value> = pairs.iter().map(|(_, v)| (*v).clone()).collect();
+            return self.lookup_by_composite_index(node_type, &names, &sorted_values);
+        }
+
         let key = (node_type.to_string(), properties.to_vec());
         let composite_value = CompositeValue(values.to_vec());
 
@@ -410,12 +448,13 @@ impl DirGraph {
             .cloned()
     }
 
+    /// Property order is not significant.
     pub fn get_composite_index_stats(
         &self,
         node_type: &str,
         properties: &[String],
     ) -> Option<IndexStats> {
-        let key = (node_type.to_string(), properties.to_vec());
+        let key = Self::composite_key(node_type, properties);
         self.composite_indices.get(&key).map(|idx| {
             let total_entries: usize = idx.iter().map(|(_, v)| v.len()).sum();
             IndexStats {

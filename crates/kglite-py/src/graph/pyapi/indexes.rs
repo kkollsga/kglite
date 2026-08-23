@@ -366,6 +366,10 @@ impl KnowledgeGraph {
     /// Composite indexes are useful when you frequently filter on the same combination
     /// of fields together. They provide O(1) lookup for exact matches on all indexed fields.
     ///
+    /// The order of ``properties`` is not significant: the index is stored under
+    /// its property names sorted, and ``list_composite_indexes()`` and
+    /// ``SHOW INDEXES`` report that spelling.
+    ///
     /// Args:
     ///     node_type: The type of nodes to index
     ///     properties: A list of property names to include in the composite index

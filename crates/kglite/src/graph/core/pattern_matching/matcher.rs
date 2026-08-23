@@ -1230,7 +1230,10 @@ impl<'a> PatternExecutor<'a> {
         }
 
         if equality_props.len() >= 2 {
-            // Sort in-place — equality_props is a local vec of references, cheap to reorder
+            // Composite keys are stored under their property names sorted
+            // (`create_composite_index`), so probing in the pattern's own
+            // order would miss. Sort in-place — equality_props is a local vec
+            // of references, cheap to reorder.
             equality_props.sort_by(|a, b| a.0.cmp(b.0));
             let names: Vec<String> = equality_props.iter().map(|(k, _)| (*k).clone()).collect();
             let values: Vec<Value> = equality_props.iter().map(|(_, v)| (*v).clone()).collect();
@@ -1872,6 +1875,10 @@ use var_length::{VarLengthSegment, VisitedStamps};
 #[cfg(test)]
 #[path = "matcher_id_lookup_tests.rs"]
 mod id_lookup_tests;
+
+#[cfg(test)]
+#[path = "matcher_composite_index_tests.rs"]
+mod composite_index_tests;
 
 #[cfg(test)]
 #[path = "matcher_limit_seed_tests.rs"]

@@ -161,7 +161,7 @@ s = graph.schema()
 #     'KNOWS': {'count': 1200, 'source_types': ['Person'], 'target_types': ['Person']},
 #     'WORKS_AT': {'count': 500, 'source_types': ['Person'], 'target_types': ['Company']},
 #   },
-#   'indexes': ['Person.city', 'Person.(city, age)'],
+#   'indexes': ['Person.city', 'Person.(age, city)'],
 #   'node_count': 550,
 #   'edge_count': 1700,
 # }

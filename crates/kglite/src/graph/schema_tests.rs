@@ -572,9 +572,11 @@ mod maintenance_tests {
             .push(n0);
         g.create_composite_index("Person", &["city", "age"]);
 
+        // Declared `city, age`; stored — and read back — in the canonical
+        // sorted order, values following their names.
         let key = (
             "Person".to_string(),
-            vec!["city".to_string(), "age".to_string()],
+            vec!["age".to_string(), "city".to_string()],
         );
         assert!(g.composite_indices.get(&key).unwrap().len() == 1);
 
@@ -585,8 +587,8 @@ mod maintenance_tests {
         g.update_property_indices_for_set("Person", n0, "city", Some(&old_val), &new_val);
 
         let comp_map = g.composite_indices.get(&key).unwrap();
-        let old_comp = CompositeValue(vec![Value::String("Oslo".to_string()), Value::Int64(30)]);
-        let new_comp = CompositeValue(vec![Value::String("Bergen".to_string()), Value::Int64(30)]);
+        let old_comp = CompositeValue(vec![Value::Int64(30), Value::String("Oslo".to_string())]);
+        let new_comp = CompositeValue(vec![Value::Int64(30), Value::String("Bergen".to_string())]);
         assert!(!comp_map.contains_key(&old_comp) || comp_map.get(&old_comp).unwrap().is_empty());
         assert_eq!(comp_map.get(&new_comp).unwrap(), &vec![n0]);
     }

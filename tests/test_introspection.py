@@ -293,7 +293,8 @@ class TestIndexes:
         comp_idxs = [i for i in idxs if i["type"] == "composite"]
         assert len(comp_idxs) == 1
         assert comp_idxs[0]["node_type"] == "Person"
-        assert comp_idxs[0]["properties"] == ["city", "age"]
+        # Stored — and reported — under the canonical sorted spelling.
+        assert comp_idxs[0]["properties"] == ["age", "city"]
 
     def test_mixed_indexes(self, small_graph):
         small_graph.create_index("Person", "city")

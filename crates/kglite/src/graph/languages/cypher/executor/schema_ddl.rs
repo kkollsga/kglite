@@ -457,7 +457,11 @@ fn create_composite_index(
         if create.if_not_exists {
             return Ok(MutationStats::default());
         }
-        return Err(already_exists_message(&index_name(label, properties)));
+        // Name the index the way `SHOW INDEXES` does — the store keys it by
+        // its sorted property names, not by this statement's order.
+        let mut canonical = properties.to_vec();
+        canonical.sort();
+        return Err(already_exists_message(&index_name(label, &canonical)));
     }
 
     let property_refs: Vec<&str> = properties.iter().map(String::as_str).collect();
@@ -2393,11 +2397,13 @@ mod tests {
             graph.range_index_keys,
             vec![("Person".to_string(), "age".to_string())]
         );
+        // Canonical (sorted) spelling, not the `(n.name, n.age)` declaration
+        // order — see `DirGraph::create_composite_index`.
         assert_eq!(
             graph.composite_index_keys,
             vec![(
                 "Person".to_string(),
-                vec!["name".to_string(), "age".to_string()]
+                vec!["age".to_string(), "name".to_string()]
             )]
         );
     }

@@ -80,7 +80,21 @@ def test_create_index_matches_the_python_api_result(graph) -> None:
 def test_composite_create_index_builds_a_composite_index(graph) -> None:
     graph.cypher("CREATE INDEX FOR (p:Person) ON (p.city, p.age)")
     assert graph.has_composite_index("Person", ["city", "age"])
-    assert "Person.(city,age)" in _names(graph)
+    # A composite index is stored under its property names sorted, so the
+    # canonical name reports that spelling rather than the declaration order.
+    assert "Person.(age,city)" in _names(graph)
+
+
+def test_composite_index_identity_ignores_property_order(graph) -> None:
+    """One index, two spellings. Declaration order used to key the store, which
+    put every non-alphabetical composite index out of reach of MATCH."""
+    graph.cypher("CREATE INDEX FOR (p:Person) ON (p.city, p.age)")
+    assert graph.has_composite_index("Person", ["age", "city"])
+    assert graph.composite_index_stats("Person", ["age", "city"]) is not None
+    assert graph.list_composite_indexes() == [{"node_type": "Person", "properties": ["age", "city"]}]
+    graph.cypher("CREATE INDEX IF NOT EXISTS FOR (p:Person) ON (p.age, p.city)")
+    assert len([n for n in _names(graph) if n.startswith("Person.(")]) == 1
+    assert graph.drop_composite_index("Person", ["city", "age"])
 
 
 def test_range_index_builds_both_structures(graph) -> None:
@@ -255,7 +269,7 @@ def test_drop_index_accepts_a_backticked_name(graph) -> None:
 
 def test_drop_index_accepts_the_composite_canonical_name(graph) -> None:
     graph.cypher("CREATE INDEX FOR (p:Person) ON (p.city, p.age)")
-    graph.cypher("DROP INDEX Person.(city,age)")
+    graph.cypher("DROP INDEX Person.(age,city)")
     assert not graph.has_composite_index("Person", ["city", "age"])
 
 

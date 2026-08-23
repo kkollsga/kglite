@@ -835,9 +835,13 @@ impl std::ops::DerefMut for CowSelection {
 /// Key for single-property indexes: (node_type, property_name)
 pub type IndexKey = (String, String);
 
-/// Key for composite indexes: (node_type, property_names)
+/// Key for composite indexes: (node_type, property_names **sorted**). Sorting
+/// is what makes the key independent of declaration order — see
+/// `DirGraph::create_composite_index`.
 pub type CompositeIndexKey = (String, Vec<String>);
 
+/// One tuple of a composite index or unique constraint, its values in the same
+/// order as the names of the key it is filed under.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CompositeValue(pub Vec<Value>);
 

@@ -5452,6 +5452,10 @@ class KnowledgeGraph:
     ) -> dict[str, Any]:
         """Create a composite index on multiple properties.
 
+        The order of ``properties`` is not significant: the index is stored
+        under its property names sorted, and ``list_composite_indexes()`` and
+        ``SHOW INDEXES`` report that spelling.
+
         Args:
             node_type: Node type to index.
             properties: List of property names for the composite key.

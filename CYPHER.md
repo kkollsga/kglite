@@ -2680,6 +2680,10 @@ KGLite derives index names from what they index — `Label.property`, or
 **accepted but not stored**: the persisted `.kgl` index state is a list of
 `(label, property)` key tuples, so there is nowhere to keep it.
 
+A composite index is keyed by its property names **sorted**, so declaration
+order is not part of its identity: `ON (n.city, n.age)` and `ON (n.age, n.city)`
+are one index, named `L.(age,city)`, and either spelling drops it.
+
 ```cypher
 CREATE INDEX person_email FOR (p:Person) ON (p.email);   -- index is created
 SHOW INDEXES;                                            -- name is 'Person.email'
@@ -2711,7 +2715,7 @@ A read, so it works on a read-only graph. Returns the same rows and columns as
 | `type` | `PROPERTY` (hash equality or composite) or `RANGE` (B-tree) |
 | `entityType` | always `NODE` |
 | `labelsOrTypes` | single-element list holding the node type |
-| `properties` | indexed property names in declaration order |
+| `properties` | indexed property names, sorted for a composite |
 | `state` | always `ONLINE` — KGLite builds indexes atomically |
 
 Neo4j 5 also returns `id`, `populationPercent`, `indexProvider`,
