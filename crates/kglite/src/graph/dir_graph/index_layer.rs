@@ -210,8 +210,9 @@ impl<K: Eq + Hash + Clone> LayeredIndex<K> {
     /// so the base a forked reader is using stays untouched.
     pub fn remove(&mut self, key: &K) -> Option<Vec<NodeIndex>> {
         if self.is_flat() {
-            // Nothing below to mask, so drop the entry outright rather than
-            // leaving a tombstone with nothing under it.
+            // Nothing below to mask, so drop the entry outright and keep the
+            // invariant that an unshared index carries no tombstones — which is
+            // what lets `len` and `iter` take their single-level fast paths.
             return Arc::get_mut(&mut self.levels[0])
                 .expect("is_flat proved sole ownership")
                 .remove(key)
@@ -279,6 +280,9 @@ impl<K: Eq + Hash + Clone> LayeredIndex<K> {
         if first_owned + 1 >= self.levels.len() {
             return;
         }
+        // Whether the fold reaches the bottom decides what happens to the
+        // tombstones it merges (below).
+        let folds_to_one = first_owned == 0;
         let mut tail = self.levels.split_off(first_owned).into_iter();
         let first = tail.next().expect("split_off yields at least one level");
         // The leading owned level is **moved** out of its `Arc`, never copied:
@@ -294,6 +298,14 @@ impl<K: Eq + Hash + Clone> LayeredIndex<K> {
                     merged.extend(shared.iter().map(|(k, v)| (k.clone(), v.clone())));
                 }
             }
+        }
+        if folds_to_one {
+            // Nothing is left below for a tombstone to mask, so drop them and
+            // keep the invariant `remove` states: a single level carries no
+            // tombstones, which is what lets `len` and `iter` take their
+            // single-level fast paths. A *partial* fold must keep them — they
+            // are the only thing masking the shared levels underneath.
+            merged.retain(|_, entry| entry.is_some());
         }
         self.levels.push(Arc::new(merged));
     }
@@ -362,8 +374,8 @@ impl<K: Eq + Hash + Clone> LayeredIndex<K> {
             .get_or_insert_with(Vec::new)
     }
 
-    /// Merge the levels into one uniquely-owned level, dropping tombstones. A
-    /// lone level is only made unique — its tombstones, if any, survive.
+    /// Merge every level into one uniquely-owned level, dropping tombstones.
+    /// A lone level is only made unique: it carries none to drop.
     fn flatten(&mut self) {
         if self.levels.len() <= 1 {
             if self.levels.len() == 1 && Arc::get_mut(&mut self.levels[0]).is_none() {
@@ -407,8 +419,10 @@ impl<'a, K> Iterator for IndexIter<'a, K> {
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             IndexIter::Empty => None,
-            // Any level may hold tombstones — one shared with a fork until it
-            // folds, and `try_compact` merges them into the level it folds to.
+            // A single level carries no tombstones — `remove` drops the entry
+            // outright when there is nothing below to mask, and a fold that
+            // reaches the bottom drops the ones it merged. Filtered anyway:
+            // the level type is the same `Option` map at every depth.
             IndexIter::Flat(it) => it.find_map(|(key, entry)| Some((key, entry.as_ref()?))),
             IndexIter::Merged(it) => it.next(),
         }
@@ -652,6 +666,62 @@ mod tests {
         writer.try_compact();
         assert_eq!(writer.depth(), 1);
         assert_eq!(writer.len(), MAX_LAYER_DEPTH * 3 + 1);
+    }
+
+    /// **The tombstone-free single level.** `remove` keeps that invariant when
+    /// it is the only level, and a fold that reaches the bottom must keep it
+    /// too — `len`'s single-level arm is the map's own `len`, so a tombstone
+    /// folded into that level makes `len` disagree with `iter`, and the index
+    /// statistics (`unique_values`, the `avg_entries` divisor, the worst-bucket
+    /// rebuild heuristic) all read `len`.
+    #[test]
+    fn a_full_fold_drops_the_tombstones_it_merged() {
+        let mut writer = index(&[("a", &[1]), ("b", &[2])]);
+        let reader = writer.clone();
+
+        // The base still holds "a", so the removal can only tombstone it.
+        writer.remove(&"a".to_string());
+        assert_eq!(writer.depth(), 2);
+
+        drop(reader);
+        writer.try_compact();
+
+        assert_eq!(writer.depth(), 1);
+        assert_eq!(writer.iter().count(), 1);
+        assert_eq!(writer.len(), 1, "len counted a folded tombstone");
+        assert!(!writer.is_empty());
+        assert_eq!(sorted(&writer), vec![("b".into(), vec![2])]);
+    }
+
+    /// The complement: a **partial** fold still has shared levels under it, and
+    /// its tombstones are the only thing masking their live entries. Dropping
+    /// them there resurrects removed values.
+    #[test]
+    fn a_partial_fold_keeps_the_tombstones_masking_a_shared_level() {
+        let mut writer = index(&[("a", &[1]), ("b", &[2])]);
+        let base_reader = writer.clone();
+
+        writer.remove(&"a".to_string());
+        let mid_reader = writer.clone();
+        writer.remove(&"b".to_string());
+        assert_eq!(writer.depth(), 3);
+
+        // Only the two overlay levels are the writer's; the base is still read.
+        drop(mid_reader);
+        writer.try_compact();
+
+        assert_eq!(writer.depth(), 2, "the shared base must survive the fold");
+        assert_eq!(
+            writer.get(&"a".to_string()),
+            None,
+            "the fold resurrected a removed value"
+        );
+        assert_eq!(writer.get(&"b".to_string()), None);
+        assert!(writer.is_empty());
+        assert_eq!(
+            sorted(&base_reader),
+            vec![("a".into(), vec![1]), ("b".into(), vec![2])]
+        );
     }
 
     /// The delete sweep flattens, and must leave the reader's buckets alone.

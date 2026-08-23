@@ -435,3 +435,44 @@ class TestGILReleaseBatchPaths:
         # Two-hop traversal over 200k edges; repeat to widen the window.
         ticks, _ = _ticks_during(lambda: [sel.traverse("LINKS").traverse("LINKS") for _ in range(5)])
         assert ticks >= 3, f"traverse held the GIL (ticks={ticks})"
+
+
+def test_begin_under_a_held_borrow_raises_instead_of_panicking():
+    """`begin()` / `begin_read()` must map a borrow conflict to the same
+    classifiable ``RuntimeError`` ``cypher()`` raises, not panic through the
+    FFI boundary.
+
+    Deterministic stand-in for the cross-thread race: a Python embedder runs
+    *inside* ``embed_texts``' ``&mut self``, so re-entering the same graph from
+    the callback hits exactly the borrow guard a second thread would.
+    """
+    g = kglite.KnowledgeGraph()
+    g.add_nodes(
+        pd.DataFrame({"id": [1], "title": ["Doc 1"], "summary": ["hello world"]}),
+        "Doc",
+        "id",
+        "title",
+    )
+
+    caught: list[BaseException | None] = []
+
+    class _ReentrantEmbedder:
+        dimension = 4
+
+        def embed(self, texts):
+            for call in (g.begin, g.begin_read):
+                try:
+                    call()
+                except BaseException as e:  # noqa: BLE001 — a panic is the bug under test
+                    caught.append(e)
+                else:
+                    caught.append(None)
+            return [[0.0, 0.0, 0.0, 0.0] for _ in texts]
+
+    g.set_embedder(_ReentrantEmbedder())
+    g.embed_texts("Doc", "summary", show_progress=False)
+
+    assert len(caught) == 2, "the embedder callback never ran"
+    for outcome in caught:
+        assert isinstance(outcome, RuntimeError), f"expected RuntimeError, got {outcome!r}"
+        assert "concurrently" in str(outcome)

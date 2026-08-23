@@ -105,7 +105,8 @@ impl ProgressSink for PyProgressSink {
 /// query / `save`) it holds the exclusive borrow, and a second thread
 /// touching the *same* instance hits the guard. The raw symptom is a cryptic
 /// `RuntimeError: Already borrowed`, or a panic where the borrow is taken by
-/// hand; the `try_borrow` sites in `cypher()` map it to this one message.
+/// hand; the `try_borrow` sites — `cypher()`, `begin()`, `begin_read()` — map
+/// it to this one message.
 ///
 /// Kept in the Python wrapper (not core `KgError`): the borrow guard is a
 /// PyO3/GIL concern, so a non-Python binding never raises it. Raised as a
@@ -1867,12 +1868,17 @@ impl KnowledgeGraph {
         // nothing, and a mutating one skips the clone entirely when
         // Arc::try_unwrap succeeds in the materialization path.
         let core_tx = Python::attach(|py| {
-            let kg = slf.borrow(py);
+            // `try_borrow`, not `borrow`: another thread mid-mutation holds the
+            // exclusive borrow, and a bare `borrow` panics out through the FFI
+            // boundary instead of raising what `cypher()` raises there.
+            let kg = slf.try_borrow(py).map_err(|_| concurrent_access_pyerr())?;
             // The throwaway Session is dropped immediately; the Transaction
             // owns its snapshot Arc + base version. The CoW/OCC state machine
             // lives in core.
-            kglite_core::api::session::Session::from_arc(Arc::clone(&kg.inner)).begin()
-        });
+            Ok::<_, PyErr>(
+                kglite_core::api::session::Session::from_arc(Arc::clone(&kg.inner)).begin(),
+            )
+        })?;
         let deadline =
             timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
         Ok(Transaction {
@@ -1901,9 +1907,13 @@ impl KnowledgeGraph {
     #[pyo3(signature = (timeout_ms=None))]
     fn begin_read(slf: Py<Self>, timeout_ms: Option<u64>) -> PyResult<Transaction> {
         let core_tx = Python::attach(|py| {
-            let kg = slf.borrow(py);
-            kglite_core::api::session::Session::from_arc(Arc::clone(&kg.inner)).begin_read()
-        });
+            // `try_borrow` for the same reason as `begin` — a concurrent
+            // mutation must raise, not panic.
+            let kg = slf.try_borrow(py).map_err(|_| concurrent_access_pyerr())?;
+            Ok::<_, PyErr>(
+                kglite_core::api::session::Session::from_arc(Arc::clone(&kg.inner)).begin_read(),
+            )
+        })?;
         let deadline =
             timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
         Ok(Transaction {

@@ -242,6 +242,9 @@ impl<K: Ord + Clone> LayeredRangeIndex<K> {
         if first_owned + 1 >= self.levels.len() {
             return;
         }
+        // Whether the fold reaches the bottom decides what happens to the
+        // tombstones it merges (below).
+        let folds_to_one = first_owned == 0;
         let mut tail = self.levels.split_off(first_owned).into_iter();
         let first = tail.next().expect("split_off yields at least one level");
         // The leading owned level is **moved** out of its `Arc`, never copied —
@@ -255,6 +258,14 @@ impl<K: Ord + Clone> LayeredRangeIndex<K> {
                     merged.extend(shared.iter().map(|(k, v)| (k.clone(), v.clone())));
                 }
             }
+        }
+        if folds_to_one {
+            // Nothing is left below for a tombstone to mask, so drop them and
+            // keep the invariant `remove` states: a single level carries no
+            // tombstones, which is what lets `len` and the flat `range` arm
+            // skip the filtering. A *partial* fold must keep them — they are
+            // the only thing masking the shared levels underneath.
+            merged.retain(|_, entry| entry.is_some());
         }
         self.levels.push(Arc::new(merged));
     }
@@ -357,8 +368,10 @@ impl<'a, K> Iterator for RangeIter<'a, K> {
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             RangeIter::Empty => None,
-            // A single owned level carries no tombstones (see `remove`), but
-            // filter anyway: a level shared with a fork can, until it folds.
+            // A single level carries no tombstones — `remove` drops the entry
+            // outright when there is nothing below to mask, and a fold that
+            // reaches the bottom drops the ones it merged. Filtered anyway:
+            // the level type is the same `Option` map at every depth.
             RangeIter::Flat(it) => it.find_map(|(key, entry)| Some((key, entry.as_ref()?))),
             RangeIter::Merged(it) => it.next(),
         }
@@ -566,6 +579,52 @@ mod tests {
         writer.try_compact();
         assert_eq!(writer.depth(), 1);
         assert_eq!(writer.len(), MAX_LAYER_DEPTH * 3 + 1);
+    }
+
+    /// **The tombstone-free single level.** `len`'s single-level arm is the
+    /// B-tree's own `len` and the flat `range` arm skips the merge, so a fold
+    /// that reaches the bottom level must not leave a tombstone in it — `len`
+    /// would then disagree with `iter`.
+    #[test]
+    fn a_full_fold_drops_the_tombstones_it_merged() {
+        let mut writer = index(&[(1, &[1]), (2, &[2])]);
+        let reader = writer.clone();
+
+        // The base still holds 1, so the removal can only tombstone it.
+        writer.remove(&1);
+        assert_eq!(writer.depth(), 2);
+
+        drop(reader);
+        writer.try_compact();
+
+        assert_eq!(writer.depth(), 1);
+        assert_eq!(writer.iter().count(), 1);
+        assert_eq!(writer.len(), 1, "len counted a folded tombstone");
+        assert!(!writer.is_empty());
+        assert_eq!(listed(&writer), vec![(2, vec![2])]);
+    }
+
+    /// The complement: a **partial** fold still has shared levels under it, and
+    /// its tombstones are the only thing masking their live entries.
+    #[test]
+    fn a_partial_fold_keeps_the_tombstones_masking_a_shared_level() {
+        let mut writer = index(&[(1, &[1]), (2, &[2])]);
+        let base_reader = writer.clone();
+
+        writer.remove(&1);
+        let mid_reader = writer.clone();
+        writer.remove(&2);
+        assert_eq!(writer.depth(), 3);
+
+        // Only the two overlay levels are the writer's; the base is still read.
+        drop(mid_reader);
+        writer.try_compact();
+
+        assert_eq!(writer.depth(), 2, "the shared base must survive the fold");
+        assert_eq!(writer.get(&1), None, "the fold resurrected a removed value");
+        assert_eq!(writer.get(&2), None);
+        assert!(writer.is_empty());
+        assert_eq!(listed(&base_reader), vec![(1, vec![1]), (2, vec![2])]);
     }
 
     /// The delete sweep prunes the buckets it empties — what the plain-map
