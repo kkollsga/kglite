@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.9] - 2026-08-23
+
 ### Fixed
 
 - **Loading a `.kgl` written by 0.16.6 took twice as long, and the 0.16.6 entry
