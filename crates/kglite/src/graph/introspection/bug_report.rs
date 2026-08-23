@@ -1,5 +1,3 @@
-// src/graph/bug_report.rs
-//
 // Bug report generation — sanitizes user input and writes structured
 // markdown reports to a `reported_bugs.md` file.
 
@@ -12,8 +10,6 @@ const BUG_REPORT_FILE: &str = "reported_bugs.md";
 const MAX_FIELD_LEN: usize = 10_000;
 
 static HTML_TAG_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"</?[a-zA-Z!][^>]*>").unwrap());
-
-// ── Sanitization ────────────────────────────────────────────────────────────
 
 /// Sanitize user input for safe markdown inclusion.
 ///
@@ -33,32 +29,48 @@ fn sanitize(input: &str) -> String {
         input
     };
 
-    // Strip HTML tags.
     let no_html = HTML_TAG_RE.replace_all(truncated, "");
 
     let mut result = String::with_capacity(no_html.len());
     for ch in no_html.chars() {
-        // Drop control chars except whitespace.
         if ch.is_control() && ch != '\n' && ch != '\r' && ch != '\t' {
             continue;
         }
         result.push(ch);
     }
 
-    // Escape triple backticks → prevent breaking out of fenced code blocks.
     result = result.replace("```", r"\`\`\`");
 
-    // Strip javascript: protocol (case-insensitive).
-    result = result.replace("javascript:", "");
-    result = result.replace("JAVASCRIPT:", "");
-    result = result.replace("Javascript:", "");
+    result = strip_ascii_ci(&result, "javascript:");
 
     result
 }
 
-// ── Formatting ──────────────────────────────────────────────────────────────
+/// Remove every ASCII-case variant of `needle` from `haystack`.
+///
+/// Three literal `replace` calls covered `javascript:`, `JAVASCRIPT:` and
+/// `Javascript:` and let `JavaScript:` — the spelling in most copy-pasted
+/// markup — straight through.
+fn strip_ascii_ci(haystack: &str, needle: &str) -> String {
+    let needle_lower = needle.to_ascii_lowercase();
+    let mut out = String::with_capacity(haystack.len());
+    let mut rest = haystack;
+    loop {
+        // `to_ascii_lowercase` is byte-length preserving, so an index found in
+        // the lowered copy is valid in `rest`.
+        match rest.to_ascii_lowercase().find(&needle_lower) {
+            Some(at) => {
+                out.push_str(&rest[..at]);
+                rest = &rest[at + needle.len()..];
+            }
+            None => {
+                out.push_str(rest);
+                return out;
+            }
+        }
+    }
+}
 
-/// Format a single bug report entry as markdown.
 fn format_report(query: &str, result: &str, expected: &str, description: &str) -> String {
     let now = Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
     let version = env!("CARGO_PKG_VERSION");
@@ -96,12 +108,9 @@ fn format_report(query: &str, result: &str, expected: &str, description: &str) -
     )
 }
 
-// ── File I/O ────────────────────────────────────────────────────────────────
-
 /// Write a bug report to `reported_bugs.md`, prepending new entries to the top.
-///
-/// Creates the file (with a header) if it doesn't exist. Returns a confirmation
-/// message on success.
+/// Creates the file with a header if it doesn't exist; `Ok` carries a
+/// confirmation message.
 pub fn write_bug_report(
     query: &str,
     result: &str,
@@ -115,7 +124,6 @@ pub fn write_bug_report(
     let existing = fs::read_to_string(file_path).unwrap_or_default();
 
     let new_content = if existing.is_empty() {
-        // New file — add header + report.
         format!("# KGLite Bug Reports\n\n{report}")
     } else if let Some(pos) = existing.find("\n\n") {
         // Existing file — insert after the `# KGLite Bug Reports` header line.
@@ -150,8 +158,21 @@ mod tests {
 
     #[test]
     fn sanitize_strips_javascript_protocol() {
-        let input = "click [here](javascript:alert(1))";
-        assert!(!sanitize(input).contains("javascript:"));
+        // Case-insensitively, and asserted case-insensitively: the previous
+        // `!contains("javascript:")` check passed for any input this function
+        // failed to strip, so it could not fail for `JavaScript:`.
+        for input in [
+            "click [here](javascript:alert(1))",
+            "click [here](JavaScript:alert(1))",
+            "click [here](JAVASCRIPT:alert(1))",
+            "click [here](jAvAsCrIpT:alert(1))",
+        ] {
+            let out = sanitize(input);
+            assert!(
+                !out.to_ascii_lowercase().contains("javascript:"),
+                "protocol survived sanitization: {input} -> {out}"
+            );
+        }
     }
 
     #[test]
@@ -209,13 +230,10 @@ mod tests {
         let _ = fs::create_dir_all(&dir);
         let path = dir.join("test_prepend.md");
 
-        // Write first report.
         write_bug_report("q1", "r1", "e1", "first", Some(path.to_str().unwrap())).unwrap();
-        // Write second report.
         write_bug_report("q2", "r2", "e2", "second", Some(path.to_str().unwrap())).unwrap();
 
         let content = fs::read_to_string(&path).unwrap();
-        // "second" should appear before "first".
         let pos_second = content.find("second").unwrap();
         let pos_first = content.find("first").unwrap();
         assert!(pos_second < pos_first, "new report should be prepended");

@@ -1,4 +1,3 @@
-// src/graph/debugging.rs
 use crate::datatypes::values::Value;
 use crate::graph::schema::{CurrentSelection, DirGraph, SelectionOperation};
 
@@ -9,7 +8,6 @@ pub fn get_schema_string(graph: &DirGraph) -> String {
     let mut schema_string = String::from("Graph Schema:\n");
     let mut has_metadata = false;
 
-    // ── Node type metadata ──────────────────────────────────────────────
     let mut node_types: Vec<&String> = graph.node_type_metadata.keys().collect();
     node_types.sort();
 
@@ -32,7 +30,6 @@ pub fn get_schema_string(graph: &DirGraph) -> String {
         schema_string.push('\n');
     }
 
-    // ── Connection type metadata ────────────────────────────────────────
     let mut conn_types: Vec<&String> = graph.connection_type_metadata.keys().collect();
     conn_types.sort();
 
@@ -87,7 +84,6 @@ pub fn get_selection_string(graph: &DirGraph, selection: &CurrentSelection) -> S
         return output;
     }
 
-    // Iterate through levels using level count and get_level
     for level_idx in 0..selection.get_level_count() {
         let level = selection
             .get_level(level_idx)
@@ -95,7 +91,6 @@ pub fn get_selection_string(graph: &DirGraph, selection: &CurrentSelection) -> S
 
         output.push_str(&format!("\nLevel {}:\n", level_idx));
 
-        // Print operations that created this level
         if !level.operations.is_empty() {
             output.push_str("    Operations:\n");
             for op in &level.operations {
@@ -145,7 +140,6 @@ pub fn get_selection_string(graph: &DirGraph, selection: &CurrentSelection) -> S
             }
         }
 
-        // Print selection structure
         output.push_str("    Selections:\n");
         for (parent, children) in level.iter_groups() {
             match parent {
@@ -167,7 +161,6 @@ pub fn get_selection_string(graph: &DirGraph, selection: &CurrentSelection) -> S
                 None => output.push_str("        Root Selection\n"),
             }
 
-            // Add children info with node type if available
             if !children.is_empty() {
                 let first_child = graph.node_view(children[0]);
                 let child_type = first_child.map(|node| node.node_type_str(&graph.interner));

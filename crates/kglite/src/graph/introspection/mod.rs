@@ -27,9 +27,6 @@ use std::collections::HashMap;
 
 pub use connectivity::{compute_type_connectivity, derive_edge_counts_from_triples};
 
-// ── Return types ────────────────────────────────────────────────────────────
-
-/// Statistics about a connection type: count, source/target node types, property names.
 pub struct ConnectionTypeStats {
     pub connection_type: String,
     pub count: usize,
@@ -38,13 +35,11 @@ pub struct ConnectionTypeStats {
     pub property_names: Vec<String>,
 }
 
-/// Summary of a node type: count and property schemas with types.
 pub struct NodeTypeOverview {
     pub count: usize,
     pub properties: HashMap<String, String>,
 }
 
-/// Complete schema summary: all node types, connection types, indexes, and totals.
 pub struct SchemaOverview {
     pub node_types: Vec<(String, NodeTypeOverview)>,
     pub connection_types: Vec<ConnectionTypeStats>,
@@ -92,18 +87,15 @@ pub fn schema_overview_to_json(schema: &SchemaOverview) -> serde_json::Value {
     })
 }
 
-/// Per-property statistics: data type, non-null count, unique count, and optional value list.
 pub struct PropertyStatInfo {
     pub property_name: String,
     pub type_string: String,
     pub non_null: usize,
     pub unique: usize,
     pub values: Option<Vec<Value>>,
-    /// One example value when `values` is None (high-cardinality property).
-    /// Lets the schema output show what a property *looks like* even when
-    /// the full set is too large to enumerate — without it an agent has to
-    /// guess the value shape of properties like `file_path` from the name
-    /// alone.
+    /// One example value when `values` is None (high-cardinality property), so
+    /// the schema still shows what a property like `file_path` *looks like*
+    /// instead of leaving an agent to guess from the name.
     pub sample: Option<Value>,
     /// `true` when `unique` / `values` are NOT exhaustive — the population was
     /// sampled (only some nodes scanned) or the distinct-value set hit its cap.
@@ -118,7 +110,6 @@ pub struct PropertyStatInfo {
 /// Sampling exists for Wikidata-scale types, not ordinary code/data graphs.
 pub const EXACT_PROPERTY_STATS_MAX_NODES: usize = 200_000;
 
-/// A single neighbor connection: edge type, connected node type, and count.
 #[derive(Clone)]
 pub struct NeighborConnection {
     pub connection_type: String,
@@ -126,7 +117,6 @@ pub struct NeighborConnection {
     pub count: usize,
 }
 
-/// Grouped neighbor connections for a node type: incoming and outgoing edges.
 #[derive(Clone)]
 pub struct NeighborsSchema {
     pub outgoing: Vec<NeighborConnection>,

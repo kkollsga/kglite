@@ -1,7 +1,6 @@
 //! Type capabilities + endpoint-type discovery helpers.
 //!
-//! Used by describe() to show what each node type supports (how many
-//! properties, which connection types, neighbor types, etc.).
+//! Used by describe() to show what each node type supports.
 
 use crate::graph::schema::{DirGraph, InternedKey};
 use crate::graph::storage::GraphRead;
@@ -12,9 +11,6 @@ use super::describe::xml_escape;
 use super::schema_overview::compute_neighbors_schema;
 use super::{NeighborConnection, NeighborsSchema};
 
-// ── Describe helpers ────────────────────────────────────────────────────────
-
-/// Capability flags for a node type (used by `describe()`).
 pub(super) struct TypeCapabilities {
     pub(super) has_timeseries: bool,
     pub(super) has_location: bool,
@@ -23,7 +19,6 @@ pub(super) struct TypeCapabilities {
 }
 
 impl TypeCapabilities {
-    /// Format inline capability flags: "ts", "geo", "loc", "vec".
     pub(super) fn flags_csv(&self) -> String {
         let mut flags = Vec::new();
         if self.has_timeseries {
@@ -41,7 +36,6 @@ impl TypeCapabilities {
         flags.join(",")
     }
 
-    /// Merge another type's capabilities into this one (for bubbling up).
     fn merge(&mut self, other: &TypeCapabilities) {
         self.has_timeseries |= other.has_timeseries;
         self.has_location |= other.has_location;
@@ -50,7 +44,6 @@ impl TypeCapabilities {
     }
 }
 
-/// Property complexity marker based on property count.
 pub(super) fn property_complexity(count: usize) -> &'static str {
     match count {
         0..=3 => "vl",
@@ -61,7 +54,6 @@ pub(super) fn property_complexity(count: usize) -> &'static str {
     }
 }
 
-/// Size tier for node count: vs (<10), s (10-99), m (100-999), l (1K-9999), vl (10K+).
 pub(super) fn size_tier(count: usize) -> &'static str {
     match count {
         0..=9 => "vs",
@@ -127,7 +119,6 @@ pub(super) fn children_counts(parent_types: &HashMap<String, String>) -> HashMap
     counts
 }
 
-/// Detect capabilities for all node types in the graph.
 pub(super) fn compute_type_capabilities(graph: &DirGraph) -> HashMap<String, TypeCapabilities> {
     let mut caps: HashMap<String, TypeCapabilities> = HashMap::new();
 
@@ -139,10 +130,8 @@ pub(super) fn compute_type_capabilities(graph: &DirGraph) -> HashMap<String, Typ
             has_embeddings: false,
         };
 
-        // Timeseries
         tc.has_timeseries = graph.timeseries_configs.contains_key(node_type);
 
-        // Spatial
         if let Some(sc) = graph.spatial_configs.get(node_type) {
             tc.has_location = sc.location.is_some() || !sc.points.is_empty();
             tc.has_geometry = sc.geometry.is_some() || !sc.shapes.is_empty();
@@ -155,7 +144,6 @@ pub(super) fn compute_type_capabilities(graph: &DirGraph) -> HashMap<String, Typ
             }
         }
 
-        // Embeddings
         tc.has_embeddings = graph.embeddings.keys().any(|(nt, _)| nt == node_type);
 
         caps.insert(node_type.to_string(), tc);
@@ -200,8 +188,8 @@ pub(super) fn compute_type_capabilities_for(
     caps
 }
 
-/// Compute neighbor schema by sampling first `max_nodes` nodes of a type.
-/// Extrapolates counts to full population. Used for types too large to scan fully.
+/// Neighbor schema from the first `max_nodes` nodes of a type, with counts
+/// extrapolated to the full population.
 pub(super) fn compute_neighbors_schema_sampled(
     graph: &DirGraph,
     node_type: &str,
@@ -252,7 +240,6 @@ pub(super) fn compute_neighbors_schema_sampled(
         }
     }
 
-    // Extrapolate counts to full population
     let scale = if sample_count < total_nodes {
         total_nodes as f64 / sample_count as f64
     } else {
@@ -311,8 +298,8 @@ pub(super) fn compute_neighbors_schema_bounded(
     }
 }
 
-/// Bounded single-pass endpoint type discovery for connection types with empty metadata.
-/// Scans up to `max_total_scan` edges total, collecting source/target node types per connection type.
+/// Endpoint-type discovery for connection types with empty metadata: one pass,
+/// bounded at `max_total_scan` edges across all connection types.
 pub(super) fn discover_endpoint_types_batch(
     graph: &DirGraph,
     max_total_scan: usize,
@@ -336,7 +323,6 @@ pub(super) fn discover_endpoint_types_batch(
         }
     }
 
-    // Resolve interned keys to strings
     result
         .into_iter()
         .map(|(ck, (srcs, tgts))| {

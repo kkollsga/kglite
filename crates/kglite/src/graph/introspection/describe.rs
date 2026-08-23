@@ -33,7 +33,6 @@ use super::{
 
 // ── Describe: shared XML writers ────────────────────────────────────────────
 
-/// Write the `<conventions>` element.
 fn write_conventions(xml: &mut String, caps: &HashMap<String, TypeCapabilities>) {
     let mut specials: Vec<&str> = Vec::new();
     if caps.values().any(|c| c.has_location) {
@@ -58,7 +57,6 @@ fn write_conventions(xml: &mut String, caps: &HashMap<String, TypeCapabilities>)
     }
 }
 
-/// Write a `<read-only>` element when the graph is in read-only mode.
 fn write_read_only_notice(xml: &mut String, graph: &DirGraph) {
     if graph.read_only {
         xml.push_str(
@@ -133,7 +131,6 @@ fn connection_props_attr(graph: &DirGraph, ct: &ConnectionTypeStats) -> String {
     format!(" properties=\"{}\"", xml_escape(&rendered.join(",")))
 }
 
-/// Write the `<connections>` element from global edge stats.
 /// When `parent_types` is non-empty, filter out connections where ALL source types
 /// are supporting children of the target type (the implicit OF_* pattern).
 fn write_connection_map(xml: &mut String, graph: &DirGraph, conn_stats: &[ConnectionTypeStats]) {
@@ -145,7 +142,6 @@ fn write_connection_map(xml: &mut String, graph: &DirGraph, conn_stats: &[Connec
             if !has_tiers {
                 return true;
             }
-            // Filter out connections where ALL sources are children of the single target
             if ct.target_types.len() == 1 {
                 let target = &ct.target_types[0];
                 let all_sources_are_children = ct.source_types.iter().all(|src| {
@@ -184,7 +180,6 @@ fn write_connection_map(xml: &mut String, graph: &DirGraph, conn_stats: &[Connec
             xml.push_str("  <connections>\n");
         }
         for ct in &filtered {
-            // When tiers are active, filter supporting types from source/target lists
             let sources: Vec<&str> = if has_tiers {
                 ct.source_types
                     .iter()
@@ -257,12 +252,10 @@ fn write_connection_map(xml: &mut String, graph: &DirGraph, conn_stats: &[Connec
 /// available, falling back to a single pass over edges matching the
 /// topic's connection type.
 ///
-/// Pre-rewrite, this path did three full `edge_references()` sweeps per
-/// topic (pair counts + property names + per-property values). On a
-/// multi-billion-edge disk graph that was unusable — every edge in the
-/// graph was iterated three times and each iteration materialised an
-/// `EdgeData` into a per-query arena that was never cleared within the
-/// call.
+/// Never go back to a sweep per statistic: the pre-rewrite path made three
+/// full `edge_references()` passes per topic and materialised an `EdgeData`
+/// per edge into an arena never cleared within the call — unusable on a
+/// multi-billion-edge disk graph.
 struct ConnectionTopicAccum {
     /// (src_type, tgt_type) → edge count. Strings, not `InternedKey`s,
     /// because the cache path already resolved them and we need strings
@@ -350,7 +343,6 @@ fn accumulate_connection_topic(
     let mut acc = ConnectionTopicAccum::new();
     let value_cap = max_values.saturating_add(1);
 
-    // Pair counts — prefer cached connectivity triples.
     let mut pair_counts_from_cache = false;
     if let Some(triples) = validated_type_connectivity_cache(graph) {
         for t in &triples {
@@ -362,7 +354,6 @@ fn accumulate_connection_topic(
         pair_counts_from_cache = true;
     }
 
-    // Property stats — skip when metadata declares no properties.
     let has_properties = graph
         .connection_type_metadata
         .get(topic)
@@ -426,13 +417,11 @@ fn accumulate_connection_topic(
                 });
             }
 
-            // Continue iterating if any collector still needs more work.
             // Pair counts and property stats must see every matching edge;
             // samples stop at `sample_cap`. When pairs come from the
-            // connectivity cache and the connection has no properties,
-            // both `collect_pairs` and `collect_props` are false, so this
-            // short-circuits after the first two matches — avoiding
-            // O(matching edges) I/O on topology-heavy types like `P31`.
+            // connectivity cache and the connection has no properties, both
+            // flags are false and this short-circuits after the first two
+            // matches — no O(matching edges) I/O on types like `P31`.
             collect_pairs || collect_props || acc.samples.len() < sample_cap
         });
 
@@ -447,7 +436,6 @@ fn write_connections_overview(xml: &mut String, graph: &DirGraph) {
         return;
     }
 
-    // At extreme scale (>500 connection types), sort by count and cap at 50
     let total_conn = conn_stats.len();
     let capped = total_conn > 500;
     if capped {
@@ -523,7 +511,6 @@ fn write_connections_detail(
     max_pairs: usize,
     truncate_at: Option<usize>,
 ) -> Result<(), String> {
-    // Validate all connection types exist
     let conn_stats = compute_connection_type_stats(graph);
     let valid_types: HashSet<&str> = conn_stats
         .iter()
@@ -559,7 +546,6 @@ fn write_connections_detail(
         let conn_key = InternedKey::from_str(topic);
         let acc = accumulate_connection_topic(graph, conn_key, topic, MAX_PROP_VALUES);
 
-        // Pair counts — already keyed by (src_type, tgt_type) strings.
         let mut pairs: Vec<((String, String), usize)> = acc.pair_counts.into_iter().collect();
         pairs.sort_by_key(|p| std::cmp::Reverse(p.1));
 
@@ -591,7 +577,6 @@ fn write_connections_detail(
         }
         xml.push_str("    </endpoints>\n");
 
-        // Edge property stats
         if !acc.props.is_empty() {
             // Sort property names alphabetically for stable output.
             let mut prop_entries: Vec<(String, EdgePropertyAccum)> = acc
@@ -626,7 +611,6 @@ fn write_connections_detail(
             }
         }
 
-        // Sample edges (first 2 encountered during the pass).
         xml.push_str("    <samples>\n");
         for sample in &acc.samples {
             let src_label = graph
@@ -655,7 +639,6 @@ fn write_connections_detail(
                 xml_escape(&src_label),
                 xml_escape(&tgt_label),
             );
-            // Up to 4 non-null edge properties, alphabetically by key.
             let mut prop_refs: Vec<(&str, &Value)> = sample
                 .properties
                 .iter()
@@ -737,7 +720,6 @@ fn write_exploration_hints(xml: &mut String, graph: &DirGraph, conn_stats: &[Con
     let connected_types = compute_connected_types(conn_stats);
     let connected_pairs = compute_connected_type_pairs(conn_stats);
 
-    // Find disconnected types (core types with zero connections)
     let mut disconnected: Vec<(&str, usize)> = graph
         .type_indices
         .iter()
@@ -747,10 +729,8 @@ fn write_exploration_hints(xml: &mut String, graph: &DirGraph, conn_stats: &[Con
     disconnected.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
     disconnected.truncate(10);
 
-    // Compute join candidates
     let join_candidates = compute_join_candidates(graph, &connected_pairs, 5, 100);
 
-    // Nothing to report
     if disconnected.is_empty() && join_candidates.is_empty() {
         return;
     }
@@ -790,13 +770,11 @@ fn write_exploration_hints(xml: &mut String, graph: &DirGraph, conn_stats: &[Con
 }
 
 /// True when a property is a boolean whose every observed value is `false`.
-/// Such columns carry no signal for the type — on a single-language code graph
-/// they are the other frontends' flags (`flutter_build`, `is_ffi`,
-/// `is_pymethod`, `is_factory`, …) emitted uniformly false — so they are
-/// suppressed from the schema-overview display. A boolean that is genuinely
-/// mixed (`unique > 1`) or whose value set isn't `{false}` is kept. The column
-/// remains present in the graph and queryable via Cypher; only the display
-/// drops it.
+/// On a single-language code graph those are the other frontends' flags
+/// (`flutter_build`, `is_ffi`, `is_pymethod`, …), carrying no signal for the
+/// type, so the schema-overview display drops them. A genuinely mixed boolean
+/// (`unique > 1`) is kept, and the column stays queryable via Cypher either
+/// way — the suppression is display-only.
 fn is_uninformative_false_bool(p: &PropertyStatInfo) -> bool {
     matches!(p.type_string.as_str(), "bool" | "Boolean" | "boolean")
         && p.unique == 1
@@ -823,12 +801,6 @@ fn cypher_literal(v: &Value) -> String {
     }
 }
 
-/// Build the `<prop .../>` attribute string for one property.
-///
-/// Extracted from `write_type_detail`, which was well past the size a single
-/// function should carry: this is a self-contained rendering step needing only
-/// the property's stats plus the graph's index/constraint state, and every new
-/// annotation grew the caller.
 /// Render a value list for a `vals=` attribute: truncate first, then drop the
 /// duplicates truncation just created, order preserved.
 ///
@@ -911,11 +883,9 @@ fn property_attrs(
     if let Some(constraint) = describe_property_constraint(graph, node_type, &prop.property_name) {
         attrs.push_str(&format!(" constraint=\"{constraint}\""));
     }
-    // A declared property type is a separate fact from uniqueness/presence — a
-    // property can carry both — and a separate fact from the `type` attribute
-    // above, which reports what the stored values *are* rather than what a
-    // write *must* be. Two attributes rather than one overloaded string, which
-    // is the idiom every other fact here follows.
+    // A declared property type is a separate fact from uniqueness/presence (a
+    // property can carry both) and from the `type` attribute above, which
+    // reports what the stored values *are* rather than what a write *must* be.
     if let Some(declared) = graph.property_type_for(node_type, &prop.property_name) {
         attrs.push_str(&format!(" declared_type=\"{}\"", declared.name()));
     }
@@ -925,9 +895,9 @@ fn property_attrs(
             attrs.push_str(&format!(" vals=\"{}\"", xml_escape(&val_strs.join("|"))));
         }
     } else if let Some(ref s) = prop.sample {
-        // 0.9.30: high-cardinality props show one example
-        // value so the agent can see what the property
-        // looks like instead of guessing from the name.
+        // High-cardinality props show one example value so the
+        // agent sees the value shape instead of guessing it
+        // from the property name.
         attrs.push_str(&format!(
             " sample=\"{}\"",
             xml_escape(&value_display_compact(s, prop_truncate))
@@ -977,7 +947,6 @@ fn write_type_detail(
         alias_attrs
     ));
 
-    // Properties (exclude builtins: type, title, id)
     // For very large types (>1M nodes), skip property sampling and use metadata-only
     // property names. This avoids cold-cache page faults on multi-GB column files.
     if count > 1_000_000 {
@@ -1029,29 +998,22 @@ fn write_type_detail(
             // user data — keep them out of the schema's property listing.
             .filter(|p| !crate::graph::schema::is_reserved_provenance_key(&p.property_name))
             .filter(|p| p.non_null > 0)
-            // Suppress uniformly-`false` boolean columns: these are the
-            // cross-language frontend flags (`flutter_build`, `is_ffi`,
-            // `is_pymethod`, `is_factory`, …) emitted false on every node of a
-            // single-language graph. They carry no signal for the type and only
-            // pad the schema the agent has to read. Display-only — the column
-            // stays present and queryable; a boolean that is actually mixed
-            // (e.g. `is_external` once internal nodes are false and external
-            // stubs true) keeps showing.
+            // Display-only suppression (rationale on
+            // `is_uninformative_false_bool`): the column stays present and
+            // queryable, and a genuinely mixed boolean keeps showing.
             .filter(|p| !is_uninformative_false_bool(p))
             .collect();
         if !filtered.is_empty() {
             xml.push_str(&format!("{}  <properties>\n", indent));
             for prop in &filtered {
-                // Identifier columns are the copy-into-tool-call join key —
-                // never truncate them.
+                // Never truncate the identifier column — see `id_alias` above.
                 let prop_truncate = if id_alias == Some(prop.property_name.as_str()) {
                     None
                 } else {
                     truncate_at
                 };
-                // When stats are approximate (sampled or the distinct set hit
-                // its cap), `unique` is a lower bound — render `N+` and flag
-                // `approx="true"` so any listed `vals` reads as non-exhaustive.
+                // Approximate stats render `unique` as `N+` with
+                // `approx="true"`, so any listed `vals` reads as non-exhaustive.
                 let attrs = property_attrs(graph, node_type, prop, prop_truncate, count);
                 xml.push_str(&format!("{}    <prop {}/>\n", indent, attrs));
             }
@@ -1062,8 +1024,7 @@ fn write_type_detail(
         // property (its id_alias, else the builtin `id`) with a concrete sampled
         // value, so a discovery client copies a query matching THIS type's key
         // shape instead of guessing a wrong property (e.g. File keys on `id`
-        // while code entities key on `qualified_name`). (mcp-servers inbox
-        // 2026-07-01 — Codex/code_mode on-ramp.)
+        // while code entities key on `qualified_name`).
         let anchor = id_alias.unwrap_or("id");
         // The identifier's sampled values live under the canonical "id" key in
         // compute_property_stats regardless of its display alias, so look there
@@ -1100,7 +1061,6 @@ fn write_type_detail(
     let neighbors_opt = if let Some(cache) = neighbors_cache {
         cache.get(node_type)
     } else {
-        // Try type connectivity triples first (instant), then bounded edge scan
         let triples = validated_type_connectivity_cache(graph);
         computed = if let Some(triples) = triples.as_ref() {
             Some(neighbors_from_triples(triples, node_type))
@@ -1147,7 +1107,6 @@ fn write_type_detail(
         }
     }
 
-    // Timeseries config
     if caps.has_timeseries {
         if let Some(config) = graph.timeseries_configs.get(node_type) {
             let mut attrs = format!("resolution=\"{}\"", xml_escape(&config.resolution));
@@ -1174,7 +1133,6 @@ fn write_type_detail(
         }
     }
 
-    // Spatial config
     if caps.has_location || caps.has_geometry {
         if let Some(config) = graph.spatial_configs.get(node_type) {
             let mut attrs = String::new();
@@ -1197,7 +1155,6 @@ fn write_type_detail(
         }
     }
 
-    // Embedding config
     if caps.has_embeddings {
         for ((nt, prop_name), store) in &graph.embeddings {
             if nt == node_type {
@@ -1213,7 +1170,6 @@ fn write_type_detail(
         }
     }
 
-    // Supporting children (if this is a core type with children)
     {
         let children: Vec<&String> = graph
             .parent_types
@@ -1253,7 +1209,6 @@ fn write_type_detail(
         }
     }
 
-    // Sample nodes (2 samples)
     if let Ok(samples) = compute_sample(graph, node_type, 2) {
         if !samples.is_empty() {
             xml.push_str(&format!("{}  <samples>\n", indent));
@@ -1265,18 +1220,14 @@ fn write_type_detail(
                     xml_escape(&value_display_compact(&node.id(), None)),
                     xml_escape(&value_display_compact(&node.title(), truncate_at))
                 );
-                // Include up to 4 non-null custom properties
                 let mut prop_count = 0;
                 // NodeView enumeration is complete for columnar rows.
                 let mut sorted_props = node.property_pairs_named(&graph.interner);
                 sorted_props.sort_by(|a, b| a.0.cmp(&b.0));
                 for (k, v) in sorted_props.iter().map(|(k, v)| (k.as_str(), v)) {
-                    // Skip nulls and uninformative `false` booleans: the latter
-                    // are mostly the cross-language frontend flags
-                    // (flutter_build, is_ffi, …) that would otherwise crowd the
-                    // 4-property preview with no signal. A `true` boolean still
-                    // shows. (Consistent with the all-false suppression in the
-                    // <properties> block above.)
+                    // Skip nulls and `false` booleans — the same suppression the
+                    // <properties> block applies, so the 4-property preview is
+                    // not crowded by uniformly-false frontend flags.
                     if is_null_value(v)
                         || matches!(v, Value::Boolean(false))
                         || crate::graph::schema::is_reserved_provenance_key(k)
@@ -1314,7 +1265,6 @@ fn build_large_inventory(graph: &DirGraph) -> String {
     build_inventory_capped(graph, Some(50))
 }
 
-/// Build compact inventory with optional type cap.
 /// When `max_types` is None, all types are listed (Medium tier).
 /// When Some(n), only top-n types by count are listed (Large tier).
 fn build_inventory_capped(graph: &DirGraph, max_types: Option<usize>) -> String {
@@ -1343,7 +1293,6 @@ fn build_inventory_capped(graph: &DirGraph, max_types: Option<usize>) -> String 
     write_read_only_notice(&mut xml, graph);
     write_user_schema_version(&mut xml, graph);
 
-    // Collect types: if tiers active, only core types; otherwise all types
     let mut entries: Vec<(String, usize, usize)> = graph
         .type_indices
         .iter()
@@ -1357,7 +1306,6 @@ fn build_inventory_capped(graph: &DirGraph, max_types: Option<usize>) -> String 
             (nt.to_string(), indices.len(), prop_count)
         })
         .collect();
-    // Sort by count descending, then alphabetically
     entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
     let core_count = entries.len();
@@ -1542,7 +1490,6 @@ fn build_extreme_inventory(graph: &DirGraph) -> String {
     xml.push_str("    <indexing hint=\"Properties annotated indexed='eq' are O(log N) via MATCH (n:T {prop: value}); indexed='eq,prefix' also accelerate WHERE n.prop STARTS WITH 'x'. Prefer anchored queries over unanchored scans; the default Cypher deadline is 3 minutes (override per-call with timeout_ms or globally with set_default_timeout).\"/>\n");
     xml.push_str("  </extensions>\n");
 
-    // Search hint — teach the agent how to explore
     xml.push_str(&format!(
         "  <search_hint>{} types — too many to list. Progressive discovery:\n",
         type_count
@@ -1578,7 +1525,6 @@ fn build_inventory_with_detail(graph: &DirGraph, truncate_at: Option<usize>) -> 
     write_read_only_notice(&mut xml, graph);
     write_user_schema_version(&mut xml, graph);
 
-    // Full detail for each type (core only if tiers active)
     let has_tiers = !graph.parent_types.is_empty();
     let mut type_names: Vec<&str> = graph
         .type_indices
@@ -1594,7 +1540,6 @@ fn build_inventory_with_detail(graph: &DirGraph, truncate_at: Option<usize>) -> 
         has_geometry: false,
         has_embeddings: false,
     };
-    // Pre-compute all neighbor schemas in a single edge pass
     let all_neighbors = compute_all_neighbors_schemas(graph);
     for nt in type_names {
         let tc = caps.get(nt).unwrap_or(&empty_caps);
@@ -1619,13 +1564,11 @@ fn build_inventory_with_detail(graph: &DirGraph, truncate_at: Option<usize>) -> 
     xml
 }
 
-/// Build focused detail for specific requested types.
 fn build_focused_detail(
     graph: &DirGraph,
     types: &[String],
     truncate_at: Option<usize>,
 ) -> Result<String, String> {
-    // Validate all types exist
     for t in types {
         if !graph.type_indices.contains_key(t) {
             // Bounded error message: list types only for small graphs, suggest
@@ -1656,7 +1599,6 @@ fn build_focused_detail(
         }
     }
 
-    // Targeted capability scan — only for requested types, not all types
     let type_refs: Vec<&str> = types.iter().map(|s| s.as_str()).collect();
     let caps = compute_type_capabilities_for(graph, &type_refs);
     let empty_caps = TypeCapabilities {
@@ -1696,13 +1638,11 @@ fn build_type_search_results(graph: &DirGraph, pattern: &str) -> String {
     let scale = graph_scale(graph);
     let is_extreme = matches!(scale, GraphScale::Large | GraphScale::Extreme);
 
-    // Adaptive caps (#6): reduce for extreme-scale graphs
     let max_matches: usize = if is_extreme { 20 } else { 50 };
     let conns_per_match: usize = if is_extreme { 5 } else { 10 };
     let max_layer1: usize = if is_extreme { 15 } else { 30 };
     let conns_per_layer1: usize = if is_extreme { 3 } else { 5 };
 
-    // Find matching types (exclude supporting types).
     // Case-insensitive substring match without per-type allocation.
     let pattern_bytes = pattern_lower.as_bytes();
     let mut matches: Vec<(&str, usize)> = graph
@@ -1750,14 +1690,11 @@ fn build_type_search_results(graph: &DirGraph, pattern: &str) -> String {
         return xml;
     }
 
-    // #4: Build O(1) index from cached triples (one-time cost, then instant per lookup),
-    // #5: otherwise fall back to bounded edge scan
     let triples = validated_type_connectivity_cache(graph);
     let conn_index = triples
         .as_ref()
         .map(|t| TypeConnectivityIndex::from_triples(t));
 
-    // Helper: O(1) lookup from index, or bounded edge scan fallback
     let get_neighbors = |node_type: &str| -> NeighborsSchema {
         if let Some(ref idx) = conn_index {
             idx.get(node_type)
@@ -1769,11 +1706,9 @@ fn build_type_search_results(graph: &DirGraph, pattern: &str) -> String {
         }
     };
 
-    // Collect connected types across all matches for layer 1
     let mut connected_types: HashMap<String, usize> = HashMap::new();
     let match_names: HashSet<&str> = matches.iter().map(|(nt, _)| *nt).collect();
 
-    // Write matching types with their connections
     for &(nt, count) in &matches {
         xml.push_str(&format!(
             "  <match name=\"{}\" count=\"{}\">\n",
@@ -1884,19 +1819,17 @@ pub fn compute_description(
     // Arena guard: disk-backed node/edge reads materialize into the query
     // arena (protocol in disk/graph.rs); no-op on memory/mapped.
     let _arena_guard = graph.graph.begin_query();
-    // Default cap matches pre-parameter behavior — 50 pairs is enough
-    // to cover the dominant (src_type, tgt_type) relationships while
+    // 50 pairs covers the dominant (src_type, tgt_type) relationships while
     // staying well under typical MCP response budgets.
     let max_pairs = max_pairs.unwrap_or(50);
-    // If type_search, connections, cypher, or fluent is requested, return only those tracks
     let standalone = type_search.is_some()
         || !matches!(connections, ConnectionDetail::Off)
         || !matches!(cypher, CypherDetail::Off)
         || !matches!(fluent, FluentDetail::Off);
 
     if standalone {
-        // #10: Lazy type connectivity — compute on first describe that needs it
-        // for Large/Extreme graphs. Amortizes O(E) across the session.
+        // Lazy type connectivity — computed on the first describe that needs
+        // it, amortizing the O(E) pass across the session.
         let needs_connectivity = type_search.is_some();
         if needs_connectivity && !graph.has_type_connectivity_cache() {
             let scale = graph_scale(graph);
@@ -1940,7 +1873,6 @@ pub fn compute_description(
         return Ok(result);
     }
 
-    // Normal describe — inventory or focused detail
     let result = match types {
         Some(requested) if !requested.is_empty() => {
             build_focused_detail(graph, requested, sample_truncate)?
@@ -1958,7 +1890,6 @@ pub fn compute_description(
     Ok(result)
 }
 
-/// Case-insensitive substring check without allocation.
 /// `pattern` must already be lowercase ASCII bytes.
 #[inline]
 pub(super) fn contains_case_insensitive(haystack: &[u8], pattern: &[u8]) -> bool {
@@ -1979,7 +1910,6 @@ pub(super) fn contains_case_insensitive(haystack: &[u8], pattern: &[u8]) -> bool
     false
 }
 
-/// Minimal XML escaping for attribute values.
 pub(super) fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -1989,9 +1919,8 @@ pub(super) fn xml_escape(s: &str) -> String {
 
 // ── MCP quickstart ──────────────────────────────────────────────────────────
 
-/// Return a self-contained XML quickstart for setting up a KGLite MCP server.
-///
-/// Static content — no graph instance needed.
+/// XML quickstart for setting up a KGLite MCP server. Static content — no
+/// graph instance needed.
 pub fn mcp_quickstart() -> String {
     format!(
         r##"<mcp_quickstart version="{version}">
@@ -2160,11 +2089,6 @@ fn describe_property_constraint(
 }
 
 /// Emit one `<prop .../>` line for an edge property.
-///
-/// Split out of the connections walk so that walk stays a walk: value-set
-/// rendering, the high-cardinality sample fallback and the declared-constraint
-/// annotations are three separate decisions about one line, and none of them
-/// is about which connection type comes next.
 // lint-allowance reason: transitional — extraction artifact of the R4
 // ceiling split; the argument bundle is the walk's loop state, and folding
 // it into a struct is describe-refactor material, not a review blocker.
@@ -2186,16 +2110,11 @@ fn write_connection_property(
         let vals_str = truncated_value_displays(&vals, truncate_at);
         format!(" vals=\"{}\"", xml_escape(&vals_str.join("|")))
     } else if unique > 0 {
-        // 0.9.30: when cardinality exceeds max_prop_values we
-        // can't list every distinct value, but the agent
-        // still benefits from seeing ONE concrete example.
-        // Catches the operator-reported friction where
-        // properties like `file_path` had hundreds of values
-        // (no `vals=` attr), forcing the agent to guess
-        // value shape from the property name alone. A
-        // sample="..." attribute means the prop line always
-        // self-documents whether it's a low-cardinality enum
-        // (vals) or a high-cardinality field (sample).
+        // Above `max_prop_values` the distinct values can't be
+        // listed, so emit one concrete example instead: the
+        // prop line then always self-documents whether it is a
+        // low-cardinality enum (`vals`) or a high-cardinality
+        // field (`sample`).
         let sample = stats
             .value_set
             .iter()

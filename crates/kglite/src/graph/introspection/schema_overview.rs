@@ -17,17 +17,12 @@ use super::{
     SchemaOverview,
 };
 
-// ── Core functions ──────────────────────────────────────────────────────────
-
-/// Compute per-connection-type stats.
-///
 /// Fast path: uses connection_type_metadata + cached edge counts (O(types)).
 /// Fallback: scans all edges (O(edges)) for pre-metadata graphs.
 pub fn compute_connection_type_stats(graph: &DirGraph) -> Vec<ConnectionTypeStats> {
     // Arena guard: disk-backed node/edge reads materialize into the query
     // arena (protocol in disk/graph.rs); no-op on memory/mapped.
     let _arena_guard = graph.graph.begin_query();
-    // Fast path: use metadata (already has source/target types) + cached counts
     if !graph.connection_type_metadata.is_empty() {
         let counts = graph.get_edge_type_counts();
         let mut result: Vec<ConnectionTypeStats> = graph
@@ -79,7 +74,6 @@ pub fn compute_connection_type_stats(graph: &DirGraph) -> Vec<ConnectionTypeStat
                     }
                 }
             } else {
-                // No cached triples — fall back to bounded edge scan
                 let discovered = discover_endpoint_types_batch(graph, 1_000_000);
                 for ct in &mut result {
                     if ct.source_types.is_empty() && ct.target_types.is_empty() {
@@ -99,7 +93,6 @@ pub fn compute_connection_type_stats(graph: &DirGraph) -> Vec<ConnectionTypeStat
         return result;
     }
 
-    // Fallback: scan all edges (pre-metadata graphs)
     struct Accum {
         count: usize,
         sources: HashSet<String>,
@@ -204,7 +197,6 @@ pub(super) struct JoinCandidate {
     pub(super) overlap: usize,
 }
 
-/// Check whether two property type strings are compatible for join candidate comparison.
 /// Metadata types use Rust names: "String", "Int64", "Float64", "UniqueId", etc.
 pub(super) fn types_compatible(left: &str, right: &str) -> bool {
     let is_str = |t: &str| {
@@ -221,7 +213,6 @@ pub(super) fn types_compatible(left: &str, right: &str) -> bool {
     (is_str(left) && is_str(right)) || (is_num(left) && is_num(right))
 }
 
-/// Sample up to `max` unique non-null values from a type's property.
 pub(super) fn sample_unique_values(
     graph: &DirGraph,
     node_type: &str,
@@ -254,7 +245,6 @@ pub(super) fn sample_unique_values(
     unique
 }
 
-/// Insert a `(type, prop)` sample into the cache if not already present.
 /// Stores `None` for empty results to avoid resampling.
 pub(super) fn populate_sample(
     cache: &mut HashMap<(String, String), Option<HashSet<String>>>,
@@ -273,17 +263,16 @@ pub(super) fn populate_sample(
 
 /// Find join candidates between disconnected core type pairs.
 ///
-/// Performance note: samples each (type, property) at most once by memoising
-/// into `sample_cache`. Without this, a property shared across N types gets
-/// resampled O(N²) times — which was 6× slower on columnar-backed graphs
-/// (where each property read clones through the column store).
+/// Samples each (type, property) at most once by memoising into
+/// `sample_cache`. Without it a property shared across N types is resampled
+/// O(N²) times — 6× slower on columnar-backed graphs, where each property read
+/// clones through the column store.
 pub(super) fn compute_join_candidates(
     graph: &DirGraph,
     connected_pairs: &HashSet<(String, String)>,
     max_candidates: usize,
     max_sample: usize,
 ) -> Vec<JoinCandidate> {
-    // Collect core types (exclude supporting types)
     let mut core_types: Vec<&str> = graph
         .type_indices
         .keys()
@@ -292,11 +281,9 @@ pub(super) fn compute_join_candidates(
     core_types.sort();
 
     let mut candidates: Vec<JoinCandidate> = Vec::new();
-    // Memoise sampled values per (type, property). `None` means "already sampled
-    // and found empty" so we don't resample.
+    // `None` means "already sampled and found empty" — do not resample.
     let mut sample_cache: HashMap<(String, String), Option<HashSet<String>>> = HashMap::new();
 
-    // Check all unordered pairs of disconnected core types
     'outer: for i in 0..core_types.len() {
         if candidates.len() >= max_candidates * 3 {
             break; // Early exit: we have enough raw candidates
@@ -308,7 +295,6 @@ pub(super) fn compute_join_candidates(
             let left = core_types[i];
             let right = core_types[j];
 
-            // Skip already-connected pairs
             if connected_pairs.contains(&(left.to_string(), right.to_string())) {
                 continue;
             }
@@ -322,7 +308,6 @@ pub(super) fn compute_join_candidates(
                 None => continue,
             };
 
-            // Find shared property names with compatible types.
             // Sort by property name for deterministic candidate ordering — HashMap
             // iteration order otherwise depends on RandomState seed and changes
             // describe() output between processes.
@@ -447,10 +432,9 @@ pub(crate) struct IndexInfo {
 
 /// All indexes installed on the graph, in deterministic order.
 ///
-/// The single source of truth for `db.indexes()` and the
-/// `compute_schema()` formatted string list. Walks all three index
-/// stores (`property_indices`, `composite_indices`, `range_indices`)
-/// and produces structured rows. Sorted by `name` so the output is
+/// The single source of truth for `db.indexes()` and the `compute_schema()`
+/// formatted string list, over all three index stores (`property_indices`,
+/// `composite_indices`, `range_indices`). Sorted by `name` so the output is
 /// stable across runs and storage modes.
 pub(crate) fn collect_indexes_structured(graph: &DirGraph) -> Vec<IndexInfo> {
     let mut out: Vec<IndexInfo> = Vec::new();
@@ -507,12 +491,9 @@ pub(crate) struct ConstraintInfo {
     /// `Label.(a, b)` descriptor when it was declared without one.
     pub name: String,
     pub kind: ConstraintKind,
-    /// Whether the row describes a node constraint or a relationship one.
-    /// Every row the collector below emits is a node row today — the
-    /// relationship stores do not exist yet — but the `type` and `entityType`
-    /// columns are rendered from this rather than from a hard-coded `"NODE"`,
-    /// so the relationship half is a matter of building the row, not of
-    /// rewriting the vocabulary.
+    /// Whether the row describes a node constraint or a relationship one — the
+    /// `type` and `entityType` columns render from this rather than from a
+    /// hard-coded `"NODE"`.
     pub entity: EntityKind,
     pub labels_or_types: Vec<String>,
     /// Constrained property names, in declaration order.
@@ -704,12 +685,10 @@ pub(crate) fn collect_property_keys(graph: &DirGraph) -> Vec<String> {
     out
 }
 
-/// Full schema overview: node types, connection types, indexes, totals.
 pub fn compute_schema(graph: &DirGraph) -> SchemaOverview {
     // Arena guard: disk-backed node/edge reads materialize into the query
     // arena (protocol in disk/graph.rs); no-op on memory/mapped.
     let _arena_guard = graph.graph.begin_query();
-    // Node types from type_indices
     let mut node_types: Vec<(String, NodeTypeOverview)> = graph
         .type_indices
         .iter()
@@ -730,7 +709,6 @@ pub fn compute_schema(graph: &DirGraph) -> SchemaOverview {
         .collect();
     node_types.sort_by(|a, b| a.0.cmp(&b.0));
 
-    // Connection types via edge scan
     let connection_types = compute_connection_type_stats(graph);
 
     // Indexes — formatted from the structured helper that also feeds
@@ -836,10 +814,6 @@ pub(super) fn value_display_compact(v: &Value, truncate_at: Option<usize>) -> St
     }
 }
 
-/// Property stats for one node type.
-/// `max_values`: include `values` list when unique count ≤ this threshold (0 = never).
-/// `sample_size`: when Some(n), sample n evenly-spaced nodes instead of scanning all.
-///   Sampled non_null counts are scaled to the full population.
 /// Per-property accumulator for [`compute_property_stats`].
 ///
 /// `value_set` is capped at `value_cap` so a high-cardinality property does not
@@ -878,11 +852,10 @@ impl PropAccum {
     /// whether the row holds one.
     ///
     /// Once the distinct set is capped and the first non-null value has named
-    /// the property's type, the only thing left to learn from a row is that it
-    /// is non-null — which every column shape can answer from its null byte,
-    /// without building the `Value` the row loop had to build. On a
-    /// high-cardinality string column that is the difference between one heap
-    /// allocation per row and none.
+    /// the property's type, a row's only remaining fact is that it is non-null
+    /// — which every column shape answers from its null byte, without building
+    /// a `Value`. On a high-cardinality string column that is one heap
+    /// allocation per row versus none.
     #[inline]
     fn needs_value(&self) -> bool {
         self.value_set.len() < self.value_cap || self.first_type.is_none()
@@ -891,12 +864,10 @@ impl PropAccum {
     /// Fold one whole column into this accumulator, in `rows` order.
     ///
     /// The column-major half of the scan: `rows` is visited once per property
-    /// instead of every property being visited once per row, so the per-`(row,
-    /// property)` map probe of the row loop is hoisted to one probe per
-    /// property and the column's dispatch is resolved once for the whole walk.
-    /// Visit order within a property is `rows` order — the same order the row
-    /// loop saw them in — so `first_type` (the only order-sensitive field here)
-    /// is unchanged.
+    /// rather than every property once per row, hoisting the row loop's
+    /// per-`(row, property)` map probe to one probe per property and resolving
+    /// the column's dispatch once for the whole walk. Visit order stays `rows`
+    /// order, so `first_type` (the only order-sensitive field) is unchanged.
     ///
     /// The arms differ only in how cheaply they can answer "non-null":
     /// `Mixed` lends its `Value`, `Float64` must be *read* because a NaN counts
@@ -1024,20 +995,16 @@ fn columnar_scan_rows(
 /// type). Names are resolved once, after the scan, in
 /// [`compute_property_stats`].
 ///
-/// **Column-major where the store allows it** ([`columnar_scan_rows`]): the
-/// stored properties are folded one whole column at a time
-/// ([`PropAccum::add_column`]), which turns the row loop's per-`(row, property)`
-/// accumulator probe into one probe per property and lets a capped property
-/// answer from its null byte instead of materialising a `Value` per row. The
+/// **Column-major where the store allows it** ([`columnar_scan_rows`]): stored
+/// properties fold one whole column at a time ([`PropAccum::add_column`]). The
 /// identity fields still come from the node walk — they resolve through
 /// `NodeView`, which prefers an inline value over the store's column.
 ///
-/// Reads through [`NodeView`](crate::graph::storage::NodeView): the previous
-/// `NodeData::property_iter` route yielded **nothing** for columnar storage, so
-/// on a saved graph this pass contributed no values at all and the stats
-/// degraded to whatever the `type_schemas` pre-seed supplied — keys with a zero
-/// non-null count. `property_pairs` is the same complete route as
-/// `property_pairs_named`, minus the per-key `String`.
+/// The row route reads through [`NodeView`](crate::graph::storage::NodeView),
+/// never `NodeData::property_iter`: that one yielded **nothing** for columnar
+/// storage, so on a saved graph the pass contributed no values at all and the
+/// stats degraded to the `type_schemas` pre-seed — keys with a zero non-null
+/// count.
 fn accumulate_property_values(
     graph: &DirGraph,
     node_type: &str,
@@ -1126,6 +1093,12 @@ fn resolve_accum_names(
     out
 }
 
+/// Property stats for one node type.
+///
+/// `max_values`: include the `values` list when the unique count is ≤ this
+/// threshold (0 = never). `sample_size`: when `Some(n)`, sample n
+/// evenly-spaced nodes instead of scanning all, and scale the resulting
+/// non-null counts to the full population.
 pub fn compute_property_stats(
     graph: &DirGraph,
     node_type: &str,
@@ -1142,18 +1115,15 @@ pub fn compute_property_stats(
 
     let total_nodes = node_indices.len();
 
-    // Per-property accumulator
-    // Cap value_set at max_values+1 to avoid cloning every value when there are
-    // thousands of unique values. We only need the set for small-cardinality props.
-    // Cap at max_values+1: we need one extra to detect "too many unique values".
-    // When capped, unique count is a lower bound (max_values+1) and values = None.
+    // Cap `value_set` at max_values+1 — one extra to detect "too many unique
+    // values" without cloning every value of a high-cardinality property. When
+    // capped, `unique` is a lower bound and `values` is None.
     let value_cap = if max_values > 0 {
         max_values + 1
     } else {
         usize::MAX // still need unique counts even when not reporting values
     };
 
-    // Determine which nodes to scan (all or sampled)
     let (scan_indices, sample_count): (Vec<petgraph::graph::NodeIndex>, usize) = match sample_size {
         Some(n) if n > 0 && n < total_nodes => {
             let step = total_nodes / n;
@@ -1161,14 +1131,9 @@ pub fn compute_property_stats(
             let count = sampled.len();
             (sampled, count)
         }
-        _ => {
-            // No sampling — scan all nodes
-            (node_indices.to_vec(), total_nodes)
-        }
+        _ => (node_indices.to_vec(), total_nodes),
     };
 
-    // Single pass: accumulate stats for all properties simultaneously.
-    // Interned keys throughout — names are resolved once, after the scan.
     let (id_key, title_key) = builtin_accum_keys();
     let mut interned_accum: FxHashMap<InternedKey, PropAccum> = FxHashMap::default();
     // Pre-insert built-in fields so they appear even when all null
@@ -1220,7 +1185,6 @@ pub fn compute_property_stats(
     // over the sample, never a proven exhaustive count.
     let sampled = sample_count < total_nodes;
 
-    // Canonical order for remaining: title, id first, then sorted discovered
     let builtins = ["title", "id"];
     let mut discovered: Vec<String> = accum
         .keys()
@@ -1256,17 +1220,11 @@ pub fn compute_property_stats(
                 vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                 (Some(vals), None)
             } else if unique > 0 {
-                // 0.9.30: too many distinct values to enumerate, but
-                // pick one as a sample so the schema XML can still
-                // show what the property *looks like*. Closes the
-                // operator-reported friction where high-cardinality
-                // properties (file_path with hundreds of values,
-                // docstring with thousands) showed only `unique=N`
-                // and forced the agent to guess value shape from the
-                // property name. HashSet iteration order isn't
-                // deterministic, but for a sample value this is
-                // acceptable — the contract is "one real value",
-                // not "the same value every time."
+                // Too many distinct values to enumerate — keep one as
+                // a sample so the schema still shows the value shape.
+                // `HashSet` order is not deterministic; the contract
+                // is "one real value", not "the same value every
+                // time".
                 let sample = pa.value_set.into_iter().next();
                 (None, sample)
             } else {
@@ -1392,7 +1350,6 @@ pub fn compute_all_neighbors_schemas(graph: &DirGraph) -> HashMap<String, Neighb
 
     let mut result: HashMap<String, NeighborsSchema> = HashMap::new();
     for ((src_type, conn_type, tgt_type), count) in &edge_counts {
-        // Outgoing for src_type
         let schema = result
             .entry(src_type.clone())
             .or_insert_with(|| NeighborsSchema {
@@ -1405,7 +1362,6 @@ pub fn compute_all_neighbors_schemas(graph: &DirGraph) -> HashMap<String, Neighb
             count: *count,
         });
 
-        // Incoming for tgt_type
         let schema = result
             .entry(tgt_type.clone())
             .or_insert_with(|| NeighborsSchema {

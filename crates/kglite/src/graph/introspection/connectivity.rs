@@ -7,33 +7,24 @@ use std::collections::{HashMap, HashSet};
 
 use super::{NeighborConnection, NeighborsSchema};
 
-// ── Type connectivity ──────────────────────────────────────────────────────
-
 type CountMap = HashMap<(InternedKey, InternedKey, InternedKey), usize>;
 
-/// Compute type connectivity triples via a single O(E) pass.
+/// Compute type connectivity triples in a single O(E) pass, aggregating on
+/// `InternedKey` tuples (no string allocation during the scan) and resolving
+/// to strings only at the end.
 ///
-/// Uses InternedKey-based aggregation (no string allocation during scan)
-/// and sequential iteration for cache-friendly I/O on disk graphs.
-/// Resolves keys to strings only at the end.
-///
-/// **Hot path (861M+ edges on Wikidata).** Disk-backed graphs use a
-/// Rayon shard-and-merge parallel scan over `edge_endpoints` directly
-/// (same pattern as `DiskGraph::build_peer_count_histogram`). This gives
-/// an 8–10× wall-clock win on multi-core machines for billion-edge graphs.
-/// Memory and Mapped modes keep the single-threaded closure path —
-/// they're either small enough that overhead dominates, or their edge
-/// iteration isn't trivially parallelisable through petgraph.
+/// **Hot path (861M+ edges on Wikidata).** Disk-backed graphs take a Rayon
+/// shard-and-merge scan over `edge_endpoints` — an 8–10× wall-clock win on
+/// multi-core machines for billion-edge graphs. Memory and Mapped keep the
+/// single-threaded path (see [`compute_serial`]).
 pub fn compute_type_connectivity(graph: &DirGraph) -> Vec<ConnectivityTriple> {
     let backend = &graph.graph;
 
-    // Aggregate with InternedKey tuples — no string allocation per edge.
     let counts: CountMap = match backend {
         GraphBackend::Disk(dg) => compute_disk_parallel(dg),
         _ => compute_serial(backend),
     };
 
-    // Resolve to strings once at the end
     let mut triples: Vec<ConnectivityTriple> = counts
         .into_iter()
         .map(|((sk, ck, tk), count)| ConnectivityTriple {
@@ -123,7 +114,6 @@ fn compute_serial(backend: &GraphBackend) -> CountMap {
     counts
 }
 
-/// Build NeighborsSchema for a specific type from pre-computed triples.
 /// O(triples) linear scan — use `TypeConnectivityIndex` for O(1) lookups.
 pub fn neighbors_from_triples(triples: &[ConnectivityTriple], node_type: &str) -> NeighborsSchema {
     let mut outgoing: Vec<NeighborConnection> = Vec::new();
@@ -184,7 +174,6 @@ impl TypeConnectivityIndex {
                 });
         }
 
-        // Merge into NeighborsSchema per type, sort by count desc.
         // Collect all type names first (owned) to avoid borrow conflicts.
         let all_types: HashSet<String> = out_map.keys().chain(in_map.keys()).cloned().collect();
 
@@ -212,7 +201,6 @@ impl TypeConnectivityIndex {
     }
 }
 
-/// Derived edge statistics from type connectivity triples.
 pub struct DerivedEdgeStats {
     /// Edge type → count.
     pub counts: HashMap<String, usize>,
@@ -220,8 +208,8 @@ pub struct DerivedEdgeStats {
     pub endpoints: HashMap<String, (HashSet<String>, HashSet<String>)>,
 }
 
-/// Derive edge type counts + endpoint types from type connectivity triples.
-/// Avoids separate O(E) scans for these derived data.
+/// Derive edge type counts + endpoint types from connectivity triples, instead
+/// of a separate O(E) scan each.
 pub fn derive_edge_counts_from_triples(triples: &[ConnectivityTriple]) -> DerivedEdgeStats {
     let mut counts: HashMap<String, usize> = HashMap::new();
     let mut endpoints: HashMap<String, (HashSet<String>, HashSet<String>)> = HashMap::new();

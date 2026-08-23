@@ -1,7 +1,5 @@
-// src/graph/reporting.rs
 use std::collections::VecDeque;
 
-// Maximum number of reports to keep in history
 const MAX_REPORT_HISTORY: usize = 10;
 
 #[derive(Debug, Clone)]
@@ -22,7 +20,7 @@ pub struct CalculationOperationReport {
     pub processing_time_ms: f64,
     pub is_aggregation: bool,
     pub timestamp: chrono::DateTime<chrono::Utc>,
-    pub errors: Vec<String>, // Add error collection
+    pub errors: Vec<String>,
 }
 
 impl CalculationOperationReport {
@@ -62,7 +60,7 @@ pub struct NodeOperationReport {
     pub nodes_skipped: usize,
     pub processing_time_ms: f64,
     pub timestamp: chrono::DateTime<chrono::Utc>,
-    pub errors: Vec<String>, // Add error collection
+    pub errors: Vec<String>,
 }
 
 impl NodeOperationReport {
@@ -101,7 +99,7 @@ pub struct ConnectionOperationReport {
     pub property_fields_tracked: usize,
     pub processing_time_ms: f64,
     pub timestamp: chrono::DateTime<chrono::Utc>,
-    pub errors: Vec<String>, // Add error collection
+    pub errors: Vec<String>,
 }
 
 impl ConnectionOperationReport {
@@ -130,7 +128,6 @@ impl ConnectionOperationReport {
     }
 }
 
-// Create a reports container that we'll store in the KnowledgeGraph
 #[derive(Debug, Clone, Default)]
 pub struct OperationReports {
     reports: VecDeque<OperationReport>,
@@ -146,18 +143,14 @@ impl OperationReports {
     }
 
     pub fn add_report(&mut self, report: OperationReport) -> usize {
-        // Increment the operation index
         self.last_operation_index += 1;
 
-        // Add to the reports queue
         self.reports.push_back(report);
 
-        // Remove oldest if we exceed the max history
         if self.reports.len() > MAX_REPORT_HISTORY {
             self.reports.pop_front();
         }
 
-        // Return the operation index
         self.last_operation_index
     }
 

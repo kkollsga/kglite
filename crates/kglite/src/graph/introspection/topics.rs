@@ -15,7 +15,6 @@ const CYPHER_TOPIC_LIST: &str = "MATCH, WHERE, RETURN, WITH, HAVING, ORDER BY, U
 
 /// Tier 3: detailed Cypher docs for specific topics with params and examples.
 pub(super) fn write_cypher_topics(xml: &mut String, topics: &[String]) -> Result<(), String> {
-    // Empty list → tier 2 overview
     if topics.is_empty() {
         write_cypher_overview(xml);
         return Ok(());
@@ -771,7 +770,6 @@ pub(super) fn write_fluent_overview(xml: &mut String) {
     xml.push_str("<fluent_api>\n");
     xml.push_str("  <note>Selection model: most methods return a new KnowledgeGraph with updated selection. Data is materialised only on retrieval (collect, to_df, etc.).</note>\n");
 
-    // Selection & filtering
     xml.push_str("  <group name=\"selection\">\n");
     xml.push_str("    <method sig=\"select(node_type, sort=None, limit=None, temporal=None, include_secondary=False)\">Select all nodes of a type. include_secondary=True also selects nodes carrying type as a secondary label. Returns lazy selection.</method>\n");
     xml.push_str("    <method sig=\"where({prop: value})\">Filter by property: exact, comparison (&gt;,&lt;,&gt;=,&lt;=), string (contains, starts_with, ends_with, regex), in, is_null, is_not_null, negated variants.</method>\n");
@@ -786,7 +784,6 @@ pub(super) fn write_fluent_overview(xml: &mut String) {
     xml.push_str("    <method sig=\"expand(hops=1)\">BFS expansion — include all nodes within n hops.</method>\n");
     xml.push_str("  </group>\n");
 
-    // Traversal
     xml.push_str("  <group name=\"traversal\">\n");
     xml.push_str("    <method sig=\"traverse(connection_type, direction=None, target_type=None, where=None, where_connection=None, sort_target=None, limit=None)\">Follow graph edges. Returns target nodes as new selection level.</method>\n");
     xml.push_str("    <method sig=\"compare(target_type, method, filter=None, sort=None, limit=None)\">Spatial, semantic, or clustering comparison against a target type.</method>\n");
@@ -794,7 +791,6 @@ pub(super) fn write_fluent_overview(xml: &mut String) {
     xml.push_str("    <method sig=\"create_connections(connection_type)\">Materialise direct edges from traversal chain.</method>\n");
     xml.push_str("  </group>\n");
 
-    // Spatial
     xml.push_str("  <group name=\"spatial\">\n");
     xml.push_str("    <method sig=\"set_spatial(node_type, *, location=None, geometry=None, points=None, shapes=None)\">Declare spatial fields for a node type. Keyword-only after node_type: location is a (lat_field, lon_field) tuple, geometry a WKT field name, points/shapes are named-variant maps.</method>\n");
     xml.push_str("    <method sig=\"near_point(center_lat, center_lon, max_distance)\">Filter by distance in degrees (fast, approximate).</method>\n");
@@ -808,13 +804,11 @@ pub(super) fn write_fluent_overview(xml: &mut String) {
     xml.push_str("    <method sig=\"centroid()\">Average lat/lon of selection.</method>\n");
     xml.push_str("  </group>\n");
 
-    // Temporal
     xml.push_str("  <group name=\"temporal\">\n");
     xml.push_str("    <method sig=\"valid_at(date, date_from_field=None, date_to_field=None)\">Point-in-time filter: keep nodes valid at a specific date.</method>\n");
     xml.push_str("    <method sig=\"valid_during(start_date, end_date, date_from_field=None, date_to_field=None)\">Range overlap filter: keep nodes valid during a period.</method>\n");
     xml.push_str("  </group>\n");
 
-    // Retrieval
     xml.push_str("  <group name=\"retrieval\">\n");
     xml.push_str("    <method sig=\"collect(limit=None)\">Materialise selected nodes as a flat ResultView.</method>\n");
     xml.push_str("    <method sig=\"collect_grouped(group_by, parent_info=False)\">Materialise nodes grouped by parent type as dict.</method>\n");
@@ -833,7 +827,6 @@ pub(super) fn write_fluent_overview(xml: &mut String) {
     xml.push_str("    <method sig=\"get_properties(properties)\">Specific properties as list of tuples.</method>\n");
     xml.push_str("  </group>\n");
 
-    // Statistics
     xml.push_str("  <group name=\"statistics\">\n");
     xml.push_str("    <method sig=\"statistics(property, group_by=None)\">Descriptive stats: count, mean, std, min, max, sum.</method>\n");
     xml.push_str("    <method sig=\"calculate(expression, store_as=None)\">Math expressions on properties. store_as saves result as new property.</method>\n");
@@ -843,7 +836,6 @@ pub(super) fn write_fluent_overview(xml: &mut String) {
     );
     xml.push_str("  </group>\n");
 
-    // Graph algorithms
     xml.push_str("  <group name=\"algorithms\">\n");
     xml.push_str("    <method sig=\"shortest_path(source_type, source_id, target_type, target_id, connection_types=None, via_types=None, weight_property=None, timeout_ms=None, direction=None)\">Full path with node details. source_type/target_type are an ID NAMESPACE, not a traversal restriction — use via_types for that.</method>\n");
     xml.push_str("    <method sig=\"shortest_path_length(source_type, source_id, target_type, target_id, weight_property=None, connection_types=None, via_types=None, direction=None, timeout_ms=None)\">Hop count only; same filters and direction as shortest_path().</method>\n");
@@ -857,7 +849,6 @@ pub(super) fn write_fluent_overview(xml: &mut String) {
     xml.push_str("    <method sig=\"connected_components(weak=None, titles_only=None)\">Connected component analysis (weak defaults to True).</method>\n");
     xml.push_str("  </group>\n");
 
-    // Vector search
     xml.push_str("  <group name=\"vectors\">\n");
     xml.push_str("    <method sig=\"set_embedder(model)\">Register embedding model for text search.</method>\n");
     xml.push_str("    <method sig=\"embed_texts(node_type, text_column)\">Compute and store embeddings for a text column.</method>\n");
@@ -865,19 +856,16 @@ pub(super) fn write_fluent_overview(xml: &mut String) {
     xml.push_str("    <method sig=\"vector_search(text_column, query_vector, top_k=10, metric=None, returning=None, exact=False)\">Search with a pre-computed query vector.</method>\n");
     xml.push_str("  </group>\n");
 
-    // Timeseries
     xml.push_str("  <group name=\"timeseries\">\n");
     xml.push_str("    <method sig=\"set_timeseries(node_type, *, resolution, channels=None, units=None, bin_type=None)\">Declare timeseries schema for a node type (everything after node_type is keyword-only).</method>\n");
     xml.push_str("    <method sig=\"add_timeseries(node_type, *, data, fk, time_key, channels, resolution=None, units=None)\">Bulk load timeseries data from a DataFrame (keyword-only after node_type).</method>\n");
     xml.push_str("    <method sig=\"timeseries(node_id, channel=None, start=None, end=None)\">Retrieve timeseries for one node id (all channels, or one).</method>\n");
     xml.push_str("  </group>\n");
 
-    // Mutation
     xml.push_str("  <group name=\"mutation\">\n");
     xml.push_str("    <method sig=\"update(properties, keep_selection=None)\">Batch property update on selected nodes; properties is a {prop: value} dict.</method>\n");
     xml.push_str("  </group>\n");
 
-    // Data loading
     xml.push_str("  <group name=\"loading\">\n");
     xml.push_str("    <method sig=\"add_nodes(data, node_type, unique_id_field, node_title_field=None, columns=None, column_types=None, timeseries=None, git_sha=None, modified_by=None)\">Load nodes from DataFrame with optional write provenance.</method>\n");
     xml.push_str("    <method sig=\"add_connections(data, connection_type, source_type, source_id_field, target_type, target_id_field)\">Load edges from DataFrame.</method>\n");
@@ -886,7 +874,6 @@ pub(super) fn write_fluent_overview(xml: &mut String) {
     xml.push_str("    <method sig=\"kglite.from_records(spec, on_missing_endpoint='vivify')\">Build graph from inline JSON records; endpoint policy: vivify, drop, or atomic error.</method>\n");
     xml.push_str("  </group>\n");
 
-    // Export & persistence
     xml.push_str("  <group name=\"export\">\n");
     xml.push_str("    <method sig=\"export(path, format='graphml')\">Export as GraphML, GEXF, JSON (D3), or CSV.</method>\n");
     xml.push_str("    <method sig=\"export_csv(path)\">CSV tree + blueprint.json (round-trips with from_blueprint).</method>\n");
@@ -894,21 +881,18 @@ pub(super) fn write_fluent_overview(xml: &mut String) {
     xml.push_str("    <method sig=\"kglite.load(path)\">Restore from .kgl file.</method>\n");
     xml.push_str("  </group>\n");
 
-    // Set operations
     xml.push_str("  <group name=\"set_ops\">\n");
     xml.push_str("    <method sig=\"union(other)\">Nodes in either selection.</method>\n");
     xml.push_str("    <method sig=\"intersection(other)\">Nodes in both selections.</method>\n");
     xml.push_str("    <method sig=\"difference(other)\">Nodes in first but not second.</method>\n");
     xml.push_str("  </group>\n");
 
-    // Indexes
     xml.push_str("  <group name=\"indexes\">\n");
     xml.push_str("    <method sig=\"create_index(node_type, property)\">Equality index for fast lookup.</method>\n");
     xml.push_str("    <method sig=\"create_range_index(node_type, property)\">B-tree for range queries.</method>\n");
     xml.push_str("    <method sig=\"create_composite_index(node_type, [prop1, prop2])\">Multi-column index.</method>\n");
     xml.push_str("  </group>\n");
 
-    // Transactions
     xml.push_str("  <group name=\"transactions\">\n");
     xml.push_str(
         "    <method sig=\"begin()\">Read-write transaction (context manager).</method>\n",
@@ -1373,7 +1357,6 @@ pub(super) fn write_fluent_topic_transactions(xml: &mut String) {
 pub(super) fn write_cypher_overview(xml: &mut String) {
     xml.push_str("<cypher>\n");
 
-    // Clauses
     xml.push_str("  <clauses>\n");
     xml.push_str("    <clause name=\"MATCH\">Pattern-match nodes and relationships. OPTIONAL MATCH for left-join semantics.</clause>\n");
     xml.push_str("    <clause name=\"WHERE\">Filter by predicate (comparison, null check, regex, string predicates).</clause>\n");
@@ -1405,7 +1388,6 @@ pub(super) fn write_cypher_overview(xml: &mut String) {
     xml.push_str("    <clause name=\"PROFILE\">Prefix to execute and collect per-clause stats. Result has .profile with [clause, rows_in, rows_out, elapsed_us].</clause>\n");
     xml.push_str("  </clauses>\n");
 
-    // Operators
     xml.push_str("  <operators>\n");
     xml.push_str("    <group name=\"math\">+ - * /</group>\n");
     xml.push_str("    <group name=\"string\">|| (concatenation)</group>\n");
@@ -1416,7 +1398,6 @@ pub(super) fn write_cypher_overview(xml: &mut String) {
     xml.push_str("    <group name=\"predicates\">CONTAINS, STARTS WITH, ENDS WITH</group>\n");
     xml.push_str("  </operators>\n");
 
-    // Functions
     xml.push_str("  <functions>\n");
     xml.push_str("    <group name=\"math\">abs, ceil, floor, round(x [,decimals]), sqrt, sign, log, log10, exp, pow(x,y), pi, rand, randomUUID, toInteger, toFloat</group>\n");
     xml.push_str("    <group name=\"trig\">sin, cos, tan, asin, acos, atan, atan2(y,x), cot, haversin, degrees, radians (radians; NULL/non-numeric → NULL)</group>\n");
@@ -1432,7 +1413,6 @@ pub(super) fn write_cypher_overview(xml: &mut String) {
     xml.push_str("    <group name=\"window\">row_number() OVER (...), rank() OVER (...), dense_rank() OVER (...). OVER (PARTITION BY expr ORDER BY expr [DESC])</group>\n");
     xml.push_str("  </functions>\n");
 
-    // Procedures
     xml.push_str("  <procedures>\n");
     xml.push_str("    <proc name=\"pagerank\" yields=\"node, score\">PageRank centrality for all nodes.</proc>\n");
     xml.push_str("    <proc name=\"betweenness\" yields=\"node, score\">Betweenness centrality for all nodes.</proc>\n");
@@ -1447,7 +1427,6 @@ pub(super) fn write_cypher_overview(xml: &mut String) {
     xml.push_str("    <proc name=\"db.cdc.*\" yields=\"id, seq, operation, elementType, nodeType, nodeId, relationshipType, srcType, srcId, tgtType, tgtId, state\">Change data capture, opt-in and off by default. CALL db.cdc.enable({capacity, enrichment}) starts it; every committed node/relationship change then lands in a bounded in-memory ring that CALL db.cdc.query({from}) reads back oldest-first. Cursors are opaque strings from db.cdc.current() (newest change - poll from here for what happens next) and db.cdc.earliest() (oldest retained); they are exclusive, so passing a row's own id back never re-delivers it. state is the pair {before, after}: after is {title, labels, properties} for a node and {properties} for a relationship, null for a delete; before is the same shape under enrichment:'full' (the state at the start of the commit), and null for a create and throughout under the default enrichment:'off'. CALL db.cdc.query({from, selectors, maxRows}) filters at read time: selectors is a list of maps, any one matching is enough, keyed elementType/operation/nodeType/relationshipType/srcType/tgtType/nodeId/srcId/tgtId/labels/changesTo with the same strings the columns report; labels needs all listed, changesTo needs enrichment:'full'; maxRows caps rows after filtering. Filtered rows keep their unfiltered cursor ids, so a selective consumer takes db.cdc.current() before querying and adopts it after - a filtered poll can legitimately return nothing. CALL db.cdc.status() reports the configuration and watermarks, and answers with enabled=false rather than failing when capture is off. Nothing rolled back is ever published. db.cdc.disable() stops it and discards the log; the log is process-local, never saved, so a reloaded graph starts with capture off. Refused for storage='disk'.</proc>\n");
     xml.push_str("  </procedures>\n");
 
-    // Patterns
     xml.push_str("  <patterns>(n:Label), (n {prop: val}), (a)-[:TYPE]-&gt;(b), (a)-[:T*1..3]-&gt;(b), [x IN list WHERE pred | expr], n {.p1, .p2}</patterns>\n");
 
     xml.push_str("  <limitations>\n");
