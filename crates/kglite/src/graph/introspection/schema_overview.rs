@@ -539,7 +539,9 @@ impl ConstraintInfo {
 /// A unique constraint reports as `NODE_KEY` when every property in its tuple is
 /// also required — that is what a node key is — and the presence half is then
 /// *not* listed again as a separate `NODE_PROPERTY_EXISTENCE` row, matching
-/// Neo4j, where a node key is one constraint rather than two.
+/// Neo4j, where a node key is one constraint rather than two. A primary key on
+/// `id` reports `NODE_KEY` from the presence pass instead, since the id-index
+/// rather than `unique_indices` holds its uniqueness half.
 pub(crate) fn collect_constraints_structured(graph: &DirGraph) -> Vec<ConstraintInfo> {
     let mut out: Vec<ConstraintInfo> = Vec::new();
     // Properties already accounted for by a NODE_KEY row, so the presence pass
@@ -567,10 +569,20 @@ pub(crate) fn collect_constraints_structured(graph: &DirGraph) -> Vec<Constraint
         if covered.contains(&(node_type.clone(), property.clone())) {
             continue;
         }
+        // A declared primary key is unique *and* present whichever property it
+        // names. A key on `id` reaches this pass rather than the fold above
+        // because its uniqueness lives in the per-type id-index instead of
+        // `unique_indices`, so the kind is decided by the declaration, not by
+        // which pass the row arrived through.
+        let kind = if graph.primary_key_for(&node_type) == Some(property.as_str()) {
+            ConstraintKind::NodeKey
+        } else {
+            ConstraintKind::NotNull
+        };
         let properties = vec![property];
         out.push(ConstraintInfo {
             name: constraint_name(graph, EntityKind::Node, &node_type, &properties),
-            kind: ConstraintKind::NotNull,
+            kind,
             entity: EntityKind::Node,
             labels_or_types: vec![node_type.clone()],
             properties,

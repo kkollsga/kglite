@@ -49,16 +49,10 @@ pub fn to_graphml(
         if let Some(level) = sel.get_level(level_idx) {
             level.get_all_nodes()
         } else {
-            {
-                let g = &graph.graph;
-                g.node_indices().collect()
-            }
+            graph.graph.node_indices().collect()
         }
     } else {
-        {
-            let g = &graph.graph;
-            g.node_indices().collect()
-        }
+        graph.graph.node_indices().collect()
     };
 
     let node_set: std::collections::HashSet<_> = node_indices.iter().copied().collect();
@@ -159,16 +153,10 @@ pub fn to_d3_json(
         if let Some(level) = sel.get_level(level_idx) {
             level.get_all_nodes()
         } else {
-            {
-                let g = &graph.graph;
-                g.node_indices().collect()
-            }
+            graph.graph.node_indices().collect()
         }
     } else {
-        {
-            let g = &graph.graph;
-            g.node_indices().collect()
-        }
+        graph.graph.node_indices().collect()
     };
 
     let node_set: std::collections::HashSet<_> = node_indices.iter().copied().collect();
@@ -289,16 +277,10 @@ pub fn to_gexf(graph: &DirGraph, selection: Option<&CurrentSelection>) -> Result
         if let Some(level) = sel.get_level(level_idx) {
             level.get_all_nodes()
         } else {
-            {
-                let g = &graph.graph;
-                g.node_indices().collect()
-            }
+            graph.graph.node_indices().collect()
         }
     } else {
-        {
-            let g = &graph.graph;
-            g.node_indices().collect()
-        }
+        graph.graph.node_indices().collect()
     };
 
     let node_set: std::collections::HashSet<_> = node_indices.iter().copied().collect();
@@ -494,16 +476,10 @@ pub fn to_csv(
         if let Some(level) = sel.get_level(level_idx) {
             level.get_all_nodes()
         } else {
-            {
-                let g = &graph.graph;
-                g.node_indices().collect()
-            }
+            graph.graph.node_indices().collect()
         }
     } else {
-        {
-            let g = &graph.graph;
-            g.node_indices().collect()
-        }
+        graph.graph.node_indices().collect()
     };
 
     let node_set: std::collections::HashSet<_> = node_indices.iter().copied().collect();
