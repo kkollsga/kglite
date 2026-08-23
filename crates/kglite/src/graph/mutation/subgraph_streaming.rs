@@ -269,8 +269,18 @@ pub fn pass_a_scan_to_file(
         }
     }
 
+    // No heap fallback: `with_capacity(n_edges)` would allocate 16 B × the
+    // source's *total* edge count — 2 GB at Wikidata scale — in the one path
+    // whose stated memory bound is "bitset only". A path we cannot map is a
+    // failed scan, not a quietly more expensive one.
     let mut kept_edges: MmapOrVec<PendingEdge> = MmapOrVec::mapped(kept_edges_path, n_edges)
-        .unwrap_or_else(|_| MmapOrVec::with_capacity(n_edges));
+        .map_err(|error| {
+            format!(
+                "save_subset: failed to create the kept edge buffer at {}: {}",
+                kept_edges_path.display(),
+                error
+            )
+        })?;
 
     source.edge_endpoints.advise_sequential();
     let scan_start = std::time::Instant::now();
@@ -926,6 +936,36 @@ fn sanitize_type_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `kept_edges_path` is caller-supplied (`_scan_edges_filtered(kept_edges_out=…)`),
+    /// so an unusable path is reachable. The scan's contract is "memory: bitset
+    /// only (~15 MB at 120M nodes)"; falling back to a heap `Vec<PendingEdge>`
+    /// would silently allocate 16 B × the source's *total* edge count, turning a
+    /// bad path into an OOM at Wikidata scale instead of a returned error.
+    #[test]
+    fn an_unusable_kept_edges_path_is_an_error_not_a_heap_fallback() {
+        use crate::graph::storage::mode::{new_dir_graph_in_mode, StorageMode};
+
+        let root = tempfile::tempdir().unwrap();
+        let graph =
+            new_dir_graph_in_mode(StorageMode::Disk, Some(root.path())).expect("disk graph");
+        let crate::graph::schema::GraphBackend::Disk(ref disk) = graph.graph else {
+            panic!("expected a disk backend");
+        };
+
+        // An existing directory: its parent is creatable, but the file is not.
+        let occupied = root.path().join("kept_edges_dir");
+        std::fs::create_dir_all(&occupied).unwrap();
+
+        let error = match pass_a_scan_to_file(disk, &SubsetSpec::default(), &occupied) {
+            Ok(_) => panic!("an unusable kept-edges path must fail the scan"),
+            Err(error) => error,
+        };
+        assert!(
+            error.contains("kept edge buffer"),
+            "unexpected error text: {error}"
+        );
+    }
 
     #[test]
     fn bitset_set_count_across_block_boundaries() {

@@ -469,42 +469,34 @@ fn publish_flat_root(root_dir: &Path, metadata_json: &str) -> Result<(), String>
 /// Makes `describe(types=[...])` instant instead of a 10K-node scan. Runs
 /// before publication because both routes persist it.
 fn build_type_connectivity_cache(graph: &mut DirGraph) {
-    {
-        let mut triples = Vec::new();
-        for (conn_type, info) in graph.connection_type_metadata.iter() {
-            let edge_count = graph
-                .edge_type_counts_cache
-                .read()
-                .unwrap()
-                .as_ref()
-                .and_then(|counts| counts.get(conn_type).copied())
-                .unwrap_or(0);
-            for src in &info.source_types {
-                for tgt in &info.target_types {
-                    triples.push(crate::graph::schema::ConnectivityTriple {
-                        src: src.clone(),
-                        conn: conn_type.clone(),
-                        tgt: tgt.clone(),
-                        count: edge_count,
-                    });
-                }
+    let mut triples = Vec::new();
+    for (conn_type, info) in graph.connection_type_metadata.iter() {
+        let edge_count = graph
+            .edge_type_counts_cache
+            .read()
+            .unwrap()
+            .as_ref()
+            .and_then(|counts| counts.get(conn_type).copied())
+            .unwrap_or(0);
+        for src in &info.source_types {
+            for tgt in &info.target_types {
+                triples.push(crate::graph::schema::ConnectivityTriple {
+                    src: src.clone(),
+                    conn: conn_type.clone(),
+                    tgt: tgt.clone(),
+                    count: edge_count,
+                });
             }
         }
-        if !triples.is_empty() {
-            *graph.type_connectivity_cache.write().unwrap() = Some(triples);
-            if build_debug() {
-                eplog!(
-                    "  Built type connectivity cache ({} triples)",
-                    graph
-                        .type_connectivity_cache
-                        .read()
-                        .unwrap()
-                        .as_ref()
-                        .map(|t| t.len())
-                        .unwrap_or(0),
-                );
-            }
+    }
+    if !triples.is_empty() {
+        if build_debug() {
+            eplog!(
+                "  Built type connectivity cache ({} triples)",
+                triples.len()
+            );
         }
+        *graph.type_connectivity_cache.write().unwrap() = Some(triples);
     }
 }
 
@@ -1160,7 +1152,6 @@ fn ingest_phase1(context: Phase1Ingest<'_>) -> Result<(), String> {
         reader_handle,
         started: start,
     } = context;
-    let mapped = false;
     let mut current: Option<EntityAccumulator> = None;
     let mut entity_limit_reached = false;
     // Reusable scratch buffer for `flush_entity`'s property-log
@@ -1175,7 +1166,6 @@ fn ingest_phase1(context: Phase1Ingest<'_>) -> Result<(), String> {
     let mut last_progress_log = Instant::now();
     const PROGRESS_BUCKET: u64 = 5_000_000;
     const PROGRESS_INTERVAL_SECS: f64 = 60.0;
-    let include_labels = true;
 
     if config.verbose {
         eplog!("[Phase 1] Streaming and parsing N-triples ({})", path);
@@ -1294,7 +1284,6 @@ fn ingest_phase1(context: Phase1Ingest<'_>) -> Result<(), String> {
                         config,
                         edge_buffer,
                         stats,
-                        mapped,
                         prop_log,
                         label_writer,
                         type_meta,
@@ -1321,10 +1310,8 @@ fn ingest_phase1(context: Phase1Ingest<'_>) -> Result<(), String> {
 
             match predicate {
                 Predicate::Label => {
-                    if include_labels {
-                        if let Some(text) = extract_lang_text(&object, &config.languages) {
-                            acc.label = Some(text);
-                        }
+                    if let Some(text) = extract_lang_text(&object, &config.languages) {
+                        acc.label = Some(text);
                     }
                 }
                 Predicate::Description => {
@@ -1395,7 +1382,6 @@ fn ingest_phase1(context: Phase1Ingest<'_>) -> Result<(), String> {
             config,
             edge_buffer,
             stats,
-            mapped,
             prop_log,
             label_writer,
             type_meta,
@@ -1535,7 +1521,6 @@ fn flush_entity(
     config: &NTriplesConfig,
     edge_buffer: &mut EdgeBuffer,
     stats: &mut NTriplesStats,
-    mapped: bool,
     prop_log: &mut Option<crate::graph::storage::memory::property_log::PropertyLogWriter>,
     label_writer: &mut Option<super::label_spill::LabelSpillWriter>,
     type_meta: &mut HashMap<String, TypeBuildMeta>,
@@ -1543,15 +1528,19 @@ fn flush_entity(
     // Reusable property-log buffer, hoisted to the caller (see `ingest_phase1`).
     scratch_props: &mut Vec<(InternedKey, Value)>,
 ) -> Result<(), String> {
-    // Disk mode requires a `u32` Q-number. A `Value::String` id
-    // would flip `id_is_string=true` on the type's columnar metadata,
-    // and `flush_type_entries` would then leave the *other* (UniqueId)
-    // rows' offsets at zero — which makes `MmapColumnStore::read_str`
-    // panic on reload (`offsets[row-1] > offsets[row]`). Wikidata's
-    // truthy dump has a small number of non-parseable Q-codes (e.g.,
-    // entries with trailing suffixes that slip past the entity-prefix
-    // filter). They're not legitimate data — drop them.
-    let use_compact_ids = mapped || graph.graph.is_disk();
+    // The streaming columnar build requires a `u32` Q-number. `plan_layout`
+    // picks ONE id representation per type from `TypeBuildMeta::id_is_string`,
+    // so a single `Value::String` id flips the whole type to the string layout
+    // and `flush_type_entries` then skips every sibling `UniqueId` row, leaving
+    // it in the all-null bitmap: `n.id` reads back `Null` for entities that had
+    // a perfectly good compact id. Wikidata's truthy dump has a small number of
+    // non-parseable Q-codes (e.g. entries with trailing suffixes that slip past
+    // the entity-prefix filter). They're not legitimate data — drop them rather
+    // than let one of them null out its type's id column.
+    //
+    // Memory mode is exempt: it builds columns in one bulk pass at the end of
+    // the load and keeps string ids via the General id-index.
+    let use_compact_ids = graph.graph.is_disk() || graph.graph.is_mapped();
     if use_compact_ids && parse_qcode_number(&acc.id).is_none() {
         return Ok(());
     }
@@ -1609,8 +1598,9 @@ fn flush_entity(
     // `n.id` is the same integer and `{id: N}` matches identically in memory,
     // mapped, and disk. The human-readable string form (`"Q42"`) lives in the
     // `nid` property (stored above) — query `{nid: 'Q42'}`, not `{id: 'Q42'}`.
-    // Non-parseable ids fall back to `String` (memory and mapped keep them
-    // via the General id-index; disk dropped them at the guard above).
+    // Non-parseable ids fall back to `String`, which only memory mode reaches:
+    // it keeps them via the General id-index, and the streaming modes dropped
+    // them at the guard above.
     let id_value = parse_qcode_number(&acc.id)
         .map(Value::UniqueId)
         .unwrap_or_else(|| Value::String(acc.id.clone()));
@@ -1623,22 +1613,6 @@ fn flush_entity(
         properties,
         &mut graph.interner,
     );
-
-    // Mapped mode: push properties into ColumnStore.
-    if mapped {
-        let interned_props = node_data
-            .properties
-            .drain_to_interned_pairs(&graph.interner);
-        let keys: Vec<_> = interned_props.iter().map(|(k, _)| *k).collect();
-        graph.ensure_type_schema_keys(&node_type, &keys);
-        let store = graph.ensure_column_store_for_push(&node_type);
-        store.push_id(&node_data.id);
-        store.push_title(&node_data.title);
-        store.push_row(&interned_props);
-        node_data.properties = PropertyStorage::Map(HashMap::new());
-        node_data.id = Value::Null;
-        node_data.title = Value::Null;
-    }
 
     // Properties must reach the log BEFORE they are cleared for `add_node`
     // (which discards them anyway on disk).
@@ -1697,10 +1671,6 @@ fn flush_entity(
     }
 
     stats.entities_created += 1;
-
-    if mapped && stats.entities_created.is_multiple_of(100_000) {
-        graph.maybe_spill_columns();
-    }
 
     match edge_buffer {
         EdgeBuffer::Compact(buf) => {

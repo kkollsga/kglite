@@ -841,3 +841,51 @@ fn truncated_bzip2_after_valid_triple_is_not_clean_eof() {
         "{error}"
     );
 }
+
+/// A subject whose Q-code does not parse (`Q7x`) must not reach a streaming
+/// columnar build. Both disk and mapped replay the property log through
+/// `plan_layout`, which picks ONE id representation per type from
+/// `TypeBuildMeta::id_is_string`: a single string id flips the whole type to
+/// the string layout, and every sibling row's `UniqueId` is then left in the
+/// all-null bitmap — `n.id` comes back `Null` and the id index no longer
+/// resolves the entity.
+#[test]
+fn a_streaming_build_drops_ids_that_are_not_parseable_q_codes() {
+    let mut fixture_text = String::new();
+    for qid in ["1", "2", "7x"] {
+        fixture_text.push_str(&format!(
+            "<http://www.wikidata.org/entity/Q{qid}> <http://www.wikidata.org/prop/direct/P31> <http://www.wikidata.org/entity/Q5> .\n"
+        ));
+        fixture_text.push_str(&format!(
+            "<http://www.wikidata.org/entity/Q{qid}> <http://www.w3.org/2000/01/rdf-schema#label> \"name-{qid}\"@en .\n"
+        ));
+    }
+    let fixture = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(fixture.path(), &fixture_text).unwrap();
+
+    for mode in [StorageMode::Mapped, StorageMode::Disk] {
+        let root = tempfile::tempdir().unwrap();
+        let mut graph = graph_for_mode(mode, root.path());
+        let stats = load_ntriples(
+            &mut graph,
+            fixture.path().to_str().unwrap(),
+            &boundary_config(),
+        )
+        .unwrap();
+
+        for qnum in [1u32, 2] {
+            let node = graph
+                .lookup_by_id_normalized("Human", &Value::UniqueId(qnum))
+                .unwrap_or_else(|| panic!("{mode:?}: Q{qnum} lost its id index entry"));
+            assert_eq!(
+                graph.graph.get_node_id(node),
+                Some(Value::UniqueId(qnum)),
+                "{mode:?}: Q{qnum} lost its compact id"
+            );
+        }
+        assert_eq!(
+            stats.entities_created, 2,
+            "{mode:?} kept the unparseable id"
+        );
+    }
+}

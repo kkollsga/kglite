@@ -321,7 +321,7 @@
       "classification": "transitional"
     },
     {
-      "identity": "crates/kglite/src/graph/io/ntriples/loader.rs::fn:flush_entity:fn flush_entity( graph: &mut DirGraph, acc: EntityAccumulator, config: &NTriplesConfig, edge_buffer: &mut EdgeBuffer, stats: &mut NTriplesStats, mapped: bool, prop_log: &mut Option<crate::graph::storage::memory::property_log::PropertyLogWriter>, label_writer: &mut Option<super::label_spill::LabelSpi::clippy::too_many_arguments",
+      "identity": "crates/kglite/src/graph/io/ntriples/loader.rs::fn:flush_entity:fn flush_entity( graph: &mut DirGraph, acc: EntityAccumulator, config: &NTriplesConfig, edge_buffer: &mut EdgeBuffer, stats: &mut NTriplesStats, prop_log: &mut Option<crate::graph::storage::memory::property_log::PropertyLogWriter>, label_writer: &mut Option<super::label_spill::LabelSpillWriter>, typ::clippy::too_many_arguments",
       "classification": "transitional"
     },
     {
