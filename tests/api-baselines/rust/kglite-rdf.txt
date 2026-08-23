@@ -2500,7 +2500,7 @@ impl core::cmp::Eq for kglite::datatypes::values::Value
 impl core::cmp::Ord for kglite::datatypes::values::Value
 pub fn kglite::datatypes::values::Value::cmp(&self, other: &Self) -> core::cmp::Ordering
 impl core::cmp::PartialEq for kglite::datatypes::values::Value
-pub fn kglite::datatypes::values::Value::eq(&self, other: &kglite::datatypes::values::Value) -> bool
+pub fn kglite::datatypes::values::Value::eq(&self, other: &Self) -> bool
 impl core::cmp::PartialOrd for kglite::datatypes::values::Value
 pub fn kglite::datatypes::values::Value::partial_cmp(&self, other: &Self) -> core::option::Option<core::cmp::Ordering>
 impl core::fmt::Debug for kglite::datatypes::values::Value
@@ -2509,7 +2509,6 @@ impl core::fmt::Display for kglite::datatypes::values::Value
 pub fn kglite::datatypes::values::Value::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::hash::Hash for kglite::datatypes::values::Value
 pub fn kglite::datatypes::values::Value::hash<H: core::hash::Hasher>(&self, state: &mut H)
-impl core::marker::StructuralPartialEq for kglite::datatypes::values::Value
 impl serde_core::ser::Serialize for kglite::datatypes::values::Value
 pub fn kglite::datatypes::values::Value::serialize<__S>(&self, __serializer: __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl<'de> serde_core::de::Deserialize<'de> for kglite::datatypes::values::Value
@@ -2713,6 +2712,7 @@ pub fn kglite::api::DirGraph::get_index_stats(&self, node_type: &str, property: 
 pub fn kglite::api::DirGraph::has_any_index(&self, node_type: &str, property: &str) -> bool
 pub fn kglite::api::DirGraph::has_composite_index(&self, node_type: &str, properties: &[alloc::string::String]) -> bool
 pub fn kglite::api::DirGraph::has_index(&self, node_type: &str, property: &str) -> bool
+pub fn kglite::api::DirGraph::has_persistent_property_index(&self, node_type: &str, property: &str) -> bool
 pub fn kglite::api::DirGraph::list_composite_indexes(&self) -> alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<alloc::string::String>)>
 pub fn kglite::api::DirGraph::list_indexes(&self) -> alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub fn kglite::api::DirGraph::lookup_by_composite_index(&self, node_type: &str, properties: &[alloc::string::String], values: &[kglite::datatypes::values::Value]) -> core::option::Option<alloc::vec::Vec<petgraph::graph_impl::NodeIndex>>
@@ -3631,7 +3631,7 @@ impl core::cmp::Eq for kglite::datatypes::values::Value
 impl core::cmp::Ord for kglite::datatypes::values::Value
 pub fn kglite::datatypes::values::Value::cmp(&self, other: &Self) -> core::cmp::Ordering
 impl core::cmp::PartialEq for kglite::datatypes::values::Value
-pub fn kglite::datatypes::values::Value::eq(&self, other: &kglite::datatypes::values::Value) -> bool
+pub fn kglite::datatypes::values::Value::eq(&self, other: &Self) -> bool
 impl core::cmp::PartialOrd for kglite::datatypes::values::Value
 pub fn kglite::datatypes::values::Value::partial_cmp(&self, other: &Self) -> core::option::Option<core::cmp::Ordering>
 impl core::fmt::Debug for kglite::datatypes::values::Value
@@ -3640,7 +3640,6 @@ impl core::fmt::Display for kglite::datatypes::values::Value
 pub fn kglite::datatypes::values::Value::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::hash::Hash for kglite::datatypes::values::Value
 pub fn kglite::datatypes::values::Value::hash<H: core::hash::Hasher>(&self, state: &mut H)
-impl core::marker::StructuralPartialEq for kglite::datatypes::values::Value
 impl serde_core::ser::Serialize for kglite::datatypes::values::Value
 pub fn kglite::datatypes::values::Value::serialize<__S>(&self, __serializer: __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl<'de> serde_core::de::Deserialize<'de> for kglite::datatypes::values::Value
@@ -3766,7 +3765,7 @@ impl core::cmp::Eq for kglite::datatypes::values::Value
 impl core::cmp::Ord for kglite::datatypes::values::Value
 pub fn kglite::datatypes::values::Value::cmp(&self, other: &Self) -> core::cmp::Ordering
 impl core::cmp::PartialEq for kglite::datatypes::values::Value
-pub fn kglite::datatypes::values::Value::eq(&self, other: &kglite::datatypes::values::Value) -> bool
+pub fn kglite::datatypes::values::Value::eq(&self, other: &Self) -> bool
 impl core::cmp::PartialOrd for kglite::datatypes::values::Value
 pub fn kglite::datatypes::values::Value::partial_cmp(&self, other: &Self) -> core::option::Option<core::cmp::Ordering>
 impl core::fmt::Debug for kglite::datatypes::values::Value
@@ -3775,7 +3774,6 @@ impl core::fmt::Display for kglite::datatypes::values::Value
 pub fn kglite::datatypes::values::Value::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::hash::Hash for kglite::datatypes::values::Value
 pub fn kglite::datatypes::values::Value::hash<H: core::hash::Hasher>(&self, state: &mut H)
-impl core::marker::StructuralPartialEq for kglite::datatypes::values::Value
 impl serde_core::ser::Serialize for kglite::datatypes::values::Value
 pub fn kglite::datatypes::values::Value::serialize<__S>(&self, __serializer: __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl<'de> serde_core::de::Deserialize<'de> for kglite::datatypes::values::Value
