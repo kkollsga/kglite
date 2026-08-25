@@ -516,9 +516,15 @@ pub(super) fn encode_secondary_label_index(graph: &DirGraph) -> Option<Vec<u8>> 
         let name_bytes = name.as_bytes();
         payload.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
         payload.extend_from_slice(name_bytes);
-        payload.extend_from_slice(&(nodes.len() as u32).to_le_bytes());
-        for idx in nodes {
-            payload.extend_from_slice(&(idx.index() as u32).to_le_bytes());
+        // Written ascending: live buckets hold the sorted invariant
+        // (labels.rs), and normalizing here besides keeps the byte layout
+        // canonical even for a state that predates it — the same posture
+        // write_type_indices_bin takes.
+        let mut raws: Vec<u32> = nodes.iter().map(|idx| idx.index() as u32).collect();
+        raws.sort_unstable();
+        payload.extend_from_slice(&(raws.len() as u32).to_le_bytes());
+        for raw in raws {
+            payload.extend_from_slice(&raw.to_le_bytes());
         }
     }
     Some(payload)
@@ -602,6 +608,14 @@ pub(super) fn decode_secondary_label_index(
         }
     }
     index.retain(|_, bucket| !bucket.is_empty());
+    // Restore the bucket invariant (sorted + deduped, labels.rs): every
+    // binary-search consumer depends on it, and files written before the
+    // invariant existed carry buckets in historical insertion order —
+    // loading one verbatim would make labels silently unfindable.
+    for bucket in index.values_mut() {
+        bucket.sort_unstable();
+        bucket.dedup();
+    }
     if !index.is_empty() {
         graph.secondary_label_index = index;
         graph.has_secondary_labels = true;
@@ -647,6 +661,86 @@ pub(crate) fn read_secondary_labels_bin(
         false => Err(invalid_data(
             "secondary_labels.bin.zst decompressed but its header is unrecognised",
         )),
+    }
+}
+
+#[cfg(test)]
+mod secondary_label_codec_tests {
+    use super::*;
+    use crate::graph::storage::GraphWrite;
+
+    fn add_p_nodes(graph: &mut DirGraph, n: usize) -> Vec<petgraph::graph::NodeIndex> {
+        (0..n)
+            .map(|i| {
+                let nd = crate::graph::schema::NodeData::new(
+                    crate::datatypes::values::Value::Int64(i as i64),
+                    crate::datatypes::values::Value::String(format!("p{i}")),
+                    "P".to_string(),
+                    std::collections::HashMap::new(),
+                    &mut graph.interner,
+                );
+                GraphWrite::add_node(&mut graph.graph, nd)
+            })
+            .collect()
+    }
+
+    /// Hand-build a v1 payload with a deliberately UNSORTED node list —
+    /// the shape any file written before the sorted-bucket invariant
+    /// (labels.rs) can carry. Decode must restore the invariant, or every
+    /// binary-search consumer silently misses labels.
+    #[test]
+    fn decode_sorts_and_dedups_legacy_unsorted_buckets() {
+        let mut graph = DirGraph::new();
+        let indices = add_p_nodes(&mut graph, 4);
+
+        let mut payload: Vec<u8> = Vec::new();
+        payload.extend_from_slice(SECONDARY_LABELS_MAGIC);
+        payload.extend_from_slice(&SECONDARY_LABELS_VERSION.to_le_bytes());
+        payload.extend_from_slice(&1u32.to_le_bytes());
+        let name = b"VIP";
+        payload.extend_from_slice(&(name.len() as u32).to_le_bytes());
+        payload.extend_from_slice(name);
+        // Unsorted, with a duplicate: [3, 1, 3, 0].
+        let raws: [u32; 4] = [3, 1, 3, 0];
+        payload.extend_from_slice(&(raws.len() as u32).to_le_bytes());
+        for raw in raws {
+            payload.extend_from_slice(&raw.to_le_bytes());
+        }
+
+        assert!(decode_secondary_label_index(&payload, &mut graph).unwrap());
+        let key = crate::graph::schema::InternedKey::from_str("VIP");
+        let bucket = &graph.secondary_label_index[&key];
+        let got: Vec<usize> = bucket.iter().map(|idx| idx.index()).collect();
+        assert_eq!(got, vec![0, 1, 3]);
+        // And the binary-search consumers see every member.
+        for raw in [0usize, 1, 3] {
+            assert!(graph.node_has_label(indices[raw], key));
+        }
+        assert!(!graph.node_has_label(indices[2], key));
+    }
+
+    #[test]
+    fn encode_writes_ascending_node_lists() {
+        let mut graph = DirGraph::new();
+        let indices = add_p_nodes(&mut graph, 3);
+        let vip = graph.interner.get_or_intern("VIP");
+        // Insert in reverse to prove the writer normalizes regardless.
+        for idx in indices.iter().rev() {
+            graph
+                .secondary_label_index
+                .entry(vip)
+                .or_default()
+                .push(*idx);
+        }
+        graph.has_secondary_labels = true;
+        let payload = encode_secondary_label_index(&graph).unwrap();
+        // Node list starts after magic(8)+version(4)+count(4)+namelen(4)+name(3)+len(4).
+        let list_start = 8 + 4 + 4 + 4 + 3 + 4;
+        let raws: Vec<u32> = payload[list_start..]
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(raws, vec![0, 1, 2]);
     }
 }
 

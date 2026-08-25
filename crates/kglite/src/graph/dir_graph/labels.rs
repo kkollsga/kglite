@@ -20,6 +20,20 @@ use petgraph::graph::NodeIndex;
 use super::node_remap::NodeRemap;
 use crate::graph::schema::{DirGraph, InternedKey};
 
+/// Bucket invariant: every `secondary_label_index` bucket is sorted by
+/// `NodeIndex` and deduped. `add_node_label` inserts positionally,
+/// `remove_node_label` removes positionally, the vacuum remap is monotonic,
+/// rollback restores the exact prior state, and the persistence codecs sort
+/// on decode (legacy files may carry unsorted buckets). Everything that
+/// probes a bucket may therefore `binary_search`.
+#[inline]
+fn debug_assert_bucket_sorted(bucket: &[NodeIndex]) {
+    debug_assert!(
+        bucket.windows(2).all(|w| w[0] < w[1]),
+        "secondary-label bucket must stay sorted and deduped"
+    );
+}
+
 impl DirGraph {
     /// Rewrite every label bucket through a vacuum's `NodeRemap`, dropping
     /// entries whose node did not survive and buckets that end up empty.
@@ -45,6 +59,7 @@ impl DirGraph {
                     kept.push(new_idx);
                 }
             }
+            debug_assert_bucket_sorted(&kept);
             *bucket = kept;
             !bucket.is_empty()
         });
@@ -113,22 +128,28 @@ impl DirGraph {
             return false;
         }
         let bucket_was_new = !self.secondary_label_index.contains_key(&label);
-        if self
+        // Buckets hold a sorted, deduped Vec<NodeIndex> (module doc), so one
+        // binary search serves both the idempotence check and the insertion
+        // point.
+        let insert_at = match self
             .secondary_label_index
             .get(&label)
-            .is_some_and(|bucket| bucket.contains(&idx))
+            .map(|bucket| bucket.binary_search(&idx))
         {
-            // Idempotent: the node already carries the label, so nothing is
-            // written and nothing may be captured.
-            return false;
-        }
+            Some(Ok(_)) => {
+                // Idempotent: the node already carries the label, so nothing
+                // is written and nothing may be captured.
+                return false;
+            }
+            Some(Err(pos)) => pos,
+            None => 0,
+        };
         // Before the edit, and only now that one is certain: the label set
         // this write is about to change is what a `before` image must report.
         self.capture_label_before_image(idx);
-        self.secondary_label_index
-            .entry(label)
-            .or_default()
-            .push(idx);
+        let bucket = self.secondary_label_index.entry(label).or_default();
+        bucket.insert(insert_at, idx);
+        debug_assert_bucket_sorted(bucket);
         self.has_secondary_labels = true;
         // Statement-rollback capture: the label index lives above storage, so
         // the backend's `GraphWrite` seam cannot see this edit.
@@ -171,10 +192,10 @@ impl DirGraph {
         let Some(bucket) = self.secondary_label_index.get(&label) else {
             return Ok(false);
         };
-        // Positional removal rather than `retain`: `add_node_label` rejects
-        // duplicates, so there is at most one match, and the position is what
-        // statement rollback needs to restore the bucket's original order.
-        let position = bucket.iter().position(|&i| i == idx);
+        // Positional removal rather than `retain`: the bucket is sorted and
+        // deduped, so binary search finds the single match, and the position
+        // is what statement rollback needs to restore the bucket exactly.
+        let position = bucket.binary_search(&idx).ok();
         if position.is_some() {
             // Before the edit, and only when there is one to make: a REMOVE of
             // a label the node never had changes nothing, so it must capture
@@ -253,7 +274,7 @@ impl DirGraph {
         let mut extras: Vec<InternedKey> = self
             .secondary_label_index
             .iter()
-            .filter(|(_, bucket)| bucket.contains(&idx))
+            .filter(|(_, bucket)| bucket.binary_search(&idx).is_ok())
             .map(|(&key, _)| key)
             .collect();
         extras.sort_unstable_by(|a, b| self.interner.resolve(*a).cmp(self.interner.resolve(*b)));
@@ -314,6 +335,6 @@ impl DirGraph {
             && self
                 .secondary_label_index
                 .get(&key)
-                .is_some_and(|bucket| bucket.contains(&idx))
+                .is_some_and(|bucket| bucket.binary_search(&idx).is_ok())
     }
 }

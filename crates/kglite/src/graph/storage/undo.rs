@@ -145,11 +145,14 @@ pub(crate) fn journal_columnar_cells() -> usize {
 }
 
 /// A `Vec<NodeIndex>` bucket in one of `DirGraph`'s inverted indexes.
-/// Bucket *removals* are journalled with the vacated *position* (appends go
-/// to the tail and need none), so a rollback restores the original ordering
-/// and not merely the original membership — scan order is what an
-/// un-`ORDER BY`'d `MATCH` returns, and a failed statement must not perturb
-/// it.
+/// Bucket *removals* are journalled with the vacated *position*; additions
+/// need none because their undo is membership erasure (`retain`), which is
+/// position-independent — true both for `NodeType`'s tail appends and for
+/// `SecondaryLabel`'s sorted positional inserts (labels.rs bucket
+/// invariant). The journalled position is what lets a rollback restore the
+/// original ordering and not merely the original membership — scan order is
+/// what an un-`ORDER BY`'d `MATCH` returns, and a failed statement must not
+/// perturb it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BucketId {
     /// `DirGraph::type_indices`, keyed by node-type name.

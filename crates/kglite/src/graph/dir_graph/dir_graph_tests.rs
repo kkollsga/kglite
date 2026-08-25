@@ -50,6 +50,43 @@ mod multi_label_tests {
     }
 
     #[test]
+    fn bucket_invariant_survives_arbitrary_sequences() {
+        // Sorted + deduped must hold through shuffled adds, interleaved
+        // removes, and re-adds — the invariant every binary-search consumer
+        // (node_has_label, secondary_labels, the fused paths) relies on.
+        let mut g = DirGraph::new();
+        let idxs: Vec<NodeIndex> = (0..20)
+            .map(|i| add_node(&mut g, &format!("n{i}"), "Person"))
+            .collect();
+        let vip = g.interner.get_or_intern("Vip");
+        for idx in idxs.iter().rev() {
+            assert!(g.add_node_label(*idx, vip));
+        }
+        let sorted = |b: &[NodeIndex]| b.windows(2).all(|w| w[0] < w[1]);
+        assert!(sorted(&g.secondary_label_index[&vip]));
+        assert_eq!(g.secondary_label_index[&vip].len(), 20);
+
+        for idx in idxs.iter().step_by(3) {
+            assert!(g.remove_node_label(*idx, vip).unwrap());
+        }
+        assert!(sorted(&g.secondary_label_index[&vip]));
+        for idx in idxs.iter().step_by(3) {
+            assert!(g.add_node_label(*idx, vip));
+        }
+        assert!(sorted(&g.secondary_label_index[&vip]));
+        assert_eq!(g.secondary_label_index[&vip].len(), 20);
+
+        // Idempotent re-adds change nothing.
+        for idx in &idxs {
+            assert!(!g.add_node_label(*idx, vip));
+        }
+        assert_eq!(g.secondary_label_index[&vip].len(), 20);
+        for idx in &idxs {
+            assert!(g.node_has_label(*idx, vip));
+        }
+    }
+
+    #[test]
     fn create_index_refused_on_secondary_only_label() {
         let mut g = DirGraph::new();
         let idx = add_node(&mut g, "n1", "Person");
