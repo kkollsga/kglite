@@ -139,6 +139,12 @@ parsed codebase.
   Scale to large corpora with an opt-in HNSW index
   (`build_vector_index()`).
   **→ [Semantic Search guide](https://kglite.readthedocs.io/en/latest/python/guides/semantic-search.html).**
+- 🔎 **Keyword and meaning in one ranking.** An opt-in BM25 lexical index
+  (`build_text_index()` + `text_bm25()`) finds the exact term an
+  embedding blurs away, and `score_fuse()` blends it with the vector
+  lane in a single Cypher query — no second search service, no merge
+  step in your code.
+  **→ [Text Search & Hybrid Retrieval guide](https://kglite.readthedocs.io/en/latest/python/guides/text-search.html).**
 - 📂 **Codebase analysis.** The [codingest](https://github.com/kkollsga/codingest) builder parses 14
   languages into Function / Class / Module / Route nodes with
   web-framework route detection (Flask, FastAPI, Django). Build from

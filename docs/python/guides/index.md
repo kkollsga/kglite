@@ -33,6 +33,7 @@ Domain-specific surfaces — pull them in when your data has the shape:
 | {doc}`spatial` | …your nodes have coordinates. R-tree indexing, distance-based filters, GeoJSON I/O. |
 | {doc}`timeseries` | …property values change over time. Snapshot history, valid_at / valid_during temporal filters. |
 | {doc}`semantic-search` | …you want fuzzy / meaning-based lookup. `text_score()` in Cypher, embedding model registration. |
+| {doc}`text-search` | …you want keyword search, or keyword *and* meaning in one ranking. BM25 via `build_text_index()` + `text_bm25()`, the index-freshness contract, and hybrid retrieval with `score_fuse()`. |
 | {doc}`graph-algorithms` | …you need PageRank, community detection, shortest paths, centrality. |
 | {doc}`traversal-hierarchy` | …your graph has parent-child / ancestor structure. `set_parent_type`, `*` walks, hierarchical Cypher. |
 

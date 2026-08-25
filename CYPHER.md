@@ -1882,10 +1882,10 @@ for row in graph.cypher("CALL db.schema() YIELD nodeType, properties RETURN node
 | Column | KGLite value |
 |--------|--------------|
 | `name` | `"<NodeType>.<property>"` (equality / range / text) or `"<NodeType>.(p1,p2,...)"` (composite) |
-| `type` | `"PROPERTY"` for equality + composite indexes; `"RANGE"` for B-tree range indexes; `"FULLTEXT"` for a BM25 text index built by `build_text_index()` |
+| `type` | `"PROPERTY"` for equality + composite indexes; `"RANGE"` for B-tree range indexes; `"FULLTEXT"` for a BM25 text index built by `build_text_index()`; `"VECTOR"` for an HNSW index built by `build_vector_index()` |
 | `entityType` | Always `"NODE"` — relationship indexes are not yet supported |
 | `labelsOrTypes` | `[node_type]` — single-element list |
-| `properties` | `[property]` for equality/range/text; `[p1, p2, ...]` for composite |
+| `properties` | `[property]` for equality/range/text/vector; `[p1, p2, ...]` for composite |
 | `state` | Always `"ONLINE"` — KGLite indexes are atomic, no `POPULATING` state |
 
 **KGLite extension.** Neo4j collapses equality + range under a single
@@ -1896,10 +1896,12 @@ that branch on `type` get the information they need without parsing
 the `name` string. A BM25 text index reports Neo4j's `"FULLTEXT"`,
 which is what it is for a client reading the column — KGLite's is
 single-label and single-property, so `CREATE FULLTEXT INDEX` still
-refuses; build one with `build_text_index(node_type, property)`.
-Vector indexes are the one kind this listing does not carry: they hang
-off an embedding store rather than a property, and `list_embeddings()`
-reports those.
+refuses; build one with `build_text_index(node_type, property)`. A
+built HNSW index reports `"VECTOR"` and is named for the *source
+column* it was built over, not the `_emb` store key, so a type carrying
+both a text and a vector index over `body` lists two rows under the same
+name and different types. Embedding stores with no index built over them
+are not indexes and are reported by `list_embeddings()` instead.
 
 ### Cross-reference with the Python API
 

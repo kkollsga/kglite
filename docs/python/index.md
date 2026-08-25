@@ -42,6 +42,7 @@ guides/blueprints
 guides/querying
 guides/traversal-hierarchy
 guides/semantic-search
+guides/text-search
 guides/spatial
 guides/timeseries
 guides/graph-algorithms

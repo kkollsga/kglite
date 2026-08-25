@@ -1452,6 +1452,9 @@ graph.report_history()    # all reports
 | **Vector — load** | `set_embeddings`, `embed_texts`, `set_embedder` | N/A (load via fluent) |
 | **Vector — search** | `vector_search()`, `search_text()` (`exact=` to force brute) | `text_score()` in RETURN/WHERE |
 | **Vector — index (HNSW)** | `build_vector_index()`, `drop_vector_index()`, `has_vector_index()` | N/A (auto-used by fluent search) |
+| **Text — index (BM25)** | `build_text_index()`, `drop_text_index()`, `has_text_index()` | `DROP INDEX Label.prop` removes one; `CREATE FULLTEXT INDEX` refuses (build it here) |
+| **Text — lexical search** | N/A (use Cypher) | `text_bm25()` in RETURN/WHERE |
+| **Hybrid retrieval** | N/A (use Cypher) | `score_fuse()` over `text_bm25()` + `vector_score()` |
 | **Path finding** | `shortest_path`, `all_paths` + 3 variants | `shortestPath()` in MATCH |
 | **Centrality** | `betweenness_centrality`, `pagerank`, `degree_centrality`, `closeness_centrality` | `CALL pagerank() YIELD ...` etc. |
 | **Community** | `louvain_communities`, `label_propagation` | `CALL louvain() YIELD ...` etc. |

@@ -118,6 +118,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   earlier version loads normally and rebuilds its index on demand, which is the
   rebuildable-cache contract that section has always had.
 
+- **New guide: *Text Search and Hybrid Retrieval*** (`docs/python/guides/text-search.md`)
+  — which lane answers which question, `build_text_index()` and what the
+  analyzer does to your text, the top-k shape that reads the index's postings
+  instead of every row, the freshness contract end to end (inline catch-up, the
+  over-limit warning, `SHOW INDEXES`, rebuild after `vacuum()`), and the
+  one-query hybrid recipe with `score_fuse()` including RRF from window ranks.
+  Every code example in it was executed against the build that ships it.
+  `FLUENT.md`'s fluent-vs-Cypher matrix gains the text-index triple, and
+  `db.indexes()`' column reference in CYPHER.md no longer claims vector indexes
+  are absent from that listing — they have been rows in it since this release's
+  vector-index work.
+
 - **MCP server operators can let queries use the engine's parallel runtime**,
   via `--parallel` or `extensions.parallel: true` in the manifest (either
   surface alone turns it on; a malformed manifest value fails the boot rather
