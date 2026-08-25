@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`size()` / `length()` on a bracket-delimited string returned an element
+  count instead of the character count.** A string whose text happened to
+  start with `[` and end with `]` was parsed as a JSON list and measured by
+  its elements, so `size('[redacted]')` answered `1`, `size('[]')` answered
+  `0`, and `size('[1,2,3]')` answered `3` — none of them the characters (or
+  the bytes) of anything the caller wrote, and no error to say so. Every
+  string is now measured in characters, brackets included:
+  `size('[redacted]')` is `10`, `size('[]')` is `2`, `size('[1,2,3]')` is `7`.
+  This matches Neo4j's `size(STRING)` and completes the "characters, not
+  bytes" rule 0.16.6 established for the rest of the string surface. Only the
+  argument's type decides — a real list still reports its element count — and
+  KGLite's other list-coercions on strings (`UNWIND`, indexing,
+  `head`/`last`/`reverse`, `IN`) are unchanged. Documented as a dialect note
+  in `CYPHER.md`.
+
 ## [0.16.9] - 2026-08-23
 
 ### Fixed

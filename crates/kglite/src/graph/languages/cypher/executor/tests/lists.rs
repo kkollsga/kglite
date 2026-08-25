@@ -319,26 +319,32 @@ fn size_and_length_count_characters_not_utf8_bytes() {
     );
 }
 
-/// A string that *looks* like a JSON list keeps reporting its element
-/// count. Deliberate and parked — the whole legacy collect-as-JSON family
-/// coerces the same shape, so changing size() alone would make the surface
-/// less consistent. Pinned so the behaviour is not "fixed" piecemeal.
+/// A string that *looks* like a JSON list is still a string, and is measured
+/// in characters like every other — matching Neo4j's `size(STRING)`. It used
+/// to report the element count of the list it parsed to, which made
+/// `size('[redacted]')` 1 and `size('[]')` 0: neither the characters nor the
+/// bytes of anything the caller wrote, and no error to say so. Only the
+/// argument's *type* decides; the rest of the legacy collect-as-JSON family
+/// (`UNWIND`, indexing, `head`/`last`/`reverse`, `IN`) still coerces this
+/// shape and is tracked separately.
 #[test]
-fn size_of_a_bracketed_string_is_still_its_element_count() {
+fn size_of_a_bracketed_string_counts_characters() {
     let graph = DirGraph::new();
     let no_params = HashMap::new();
     let executor = CypherExecutor::with_params(&graph, &no_params, None);
 
-    let q = parser::parse_cypher("RETURN size('[1,2,3]')").unwrap();
-    assert_eq!(
-        executor.execute(&q).unwrap().rows[0].first(),
-        Some(&Value::Int64(3))
-    );
-    let q = parser::parse_cypher("RETURN length('[1,2,3]')").unwrap();
-    assert_eq!(
-        executor.execute(&q).unwrap().rows[0].first(),
-        Some(&Value::Int64(3))
-    );
+    let eval = |query: &str| {
+        let q = parser::parse_cypher(query).unwrap();
+        executor.execute(&q).unwrap().rows[0].first().cloned()
+    };
+
+    assert_eq!(eval("RETURN size('[1,2,3]')"), Some(Value::Int64(7)));
+    assert_eq!(eval("RETURN length('[1,2,3]')"), Some(Value::Int64(7)));
+    // Ordinary text that merely starts with '[' — the silent wrong answer.
+    assert_eq!(eval("RETURN size('[redacted]')"), Some(Value::Int64(10)));
+    assert_eq!(eval("RETURN size('[]')"), Some(Value::Int64(2)));
+    // A real list still reports its element count: the type decides.
+    assert_eq!(eval("RETURN size([1,2,3])"), Some(Value::Int64(3)));
 }
 
 #[test]

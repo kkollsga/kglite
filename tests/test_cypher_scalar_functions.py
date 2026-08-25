@@ -76,12 +76,19 @@ SCALAR_CASES: list[tuple[str, str, object]] = [
     ("col_size_substring", "RETURN substring('Tromsø', size('Tromsø')-1) AS x", "ø"),
     ("col_size_left", "RETURN left('Tromsø', size('Tromsø')) AS x", "Tromsø"),
     ("col_size_right", "RETURN right('Tromsø', size('Tromsø')-5) AS x", "ø"),
-    # Deliberate and parked: a string that looks like a JSON list still
-    # reports its ELEMENT count, because the whole legacy collect-as-JSON
-    # family (UNWIND, indexing, head/last/reverse, IN) coerces the same
-    # shape. Pinned so it is not "fixed" piecemeal.
-    ("col_size_bracketed_string", "RETURN size('[1,2,3]') AS x", 3),
-    ("col_length_bracketed_string", "RETURN length('[1,2,3]') AS x", 3),
+    # A STRING is a string: bracket-delimited text counts characters like any
+    # other, matching Neo4j's size(STRING). It used to report the element
+    # count of the list it parsed to, so '[redacted]' was 1 — neither the
+    # character count nor the byte count of anything the caller wrote, and a
+    # silent wrong answer for ordinary text that happens to start with '['.
+    # 0.16.6 settled size(STRING) = characters for the Tromsø cases above;
+    # these pin the same rule with no exception. The rest of the legacy
+    # collect-as-JSON family (UNWIND, indexing, head/last/reverse, IN) still
+    # coerces bracket strings and is tracked separately.
+    ("col_size_bracketed_string", "RETURN size('[1,2,3]') AS x", 7),
+    ("col_length_bracketed_string", "RETURN length('[1,2,3]') AS x", 7),
+    ("col_size_bracketed_text", "RETURN size('[redacted]') AS x", 10),
+    ("col_size_bracketed_empty", "RETURN size('[]') AS x", 2),
     ("col_head", "RETURN head([10,20]) AS x", 10),
     ("col_last", "RETURN last([10,20]) AS x", 20),
     ("col_range", "RETURN range(1,5) AS x", [1, 2, 3, 4, 5]),

@@ -1,5 +1,5 @@
 //! Shared constants and free helpers for the scalar-function modules.
-use super::super::helpers::{format_value_compact, parse_list_value};
+use super::super::helpers::format_value_compact;
 use crate::datatypes::values::Value;
 
 /// Length of a string argument to `size()` / `length()`.
@@ -10,18 +10,15 @@ use crate::datatypes::values::Value;
 /// `'ø'`. Counting bytes made the two families disagree on every
 /// non-ASCII string.
 ///
-/// The bracketed-string branch is **deliberate**, not an oversight, and is
-/// parked pending a coordinated cutover: a string that looks like a JSON
-/// list reports its element count, because the whole legacy
-/// collect-as-JSON family (`UNWIND`, indexing, `head`/`last`/`reverse`,
-/// `IN`) coerces the same shape. Dropping it here alone would make the
-/// surface less consistent, not more.
+/// **Every** string is measured this way, including bracket-delimited text,
+/// which matches Neo4j's `size(STRING)`. Reporting the element count of the
+/// list a `'[...]'` string parses to made `size('[redacted]')` 1 and
+/// `size('[]')` 0 — neither the characters nor the bytes of anything the
+/// caller wrote. The rest of the legacy collect-as-JSON family (`UNWIND`,
+/// indexing, `head`/`last`/`reverse`, `IN`) still coerces that shape; that
+/// cutover is tracked separately and does not reach this function.
 pub(super) fn string_scalar_length(s: String) -> i64 {
-    if s.starts_with('[') && s.ends_with(']') {
-        parse_list_value(&Value::String(s)).len() as i64
-    } else {
-        s.chars().count() as i64
-    }
+    s.chars().count() as i64
 }
 
 /// `toString(value)` — the compact string form, with **null in, null out**.

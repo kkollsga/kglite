@@ -16,10 +16,9 @@ impl<'a> CypherExecutor<'a> {
     ) -> Result<Option<Value>, String> {
         let result: Result<Value, String> = match name {
             "size" => {
-                // Native Value::List fast path;
-                // string fallback stays for legacy collect-as-JSON
-                // and parameter-passed lists. Plain strings count
-                // characters — see `string_scalar_length`.
+                // Native Value::List fast path; a string is a string and
+                // counts characters, brackets included — see
+                // `string_scalar_length`.
                 let val = self.evaluate_expression(super::first_arg(name, args)?, row)?;
                 match val {
                     Value::List(items) => Ok(Value::Int64(items.len() as i64)),

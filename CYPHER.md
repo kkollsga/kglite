@@ -626,8 +626,10 @@ differs from `vector_score`, which answers `0.0` there because a top-k ranking
 needs a total order over every candidate.
 
 A property whose value is a *bracketed string* (`'[3.0, 4.0]'`) is read as a
-list here, exactly as `size()` / `head()` / `last()` read it, so a graph that
-stored its vectors as text answers too.
+list here, exactly as `head()` / `last()` / `UNWIND` read it, so a graph that
+stored its vectors as text answers too. (`size()` / `length()` are the
+exception — they measure a string as a string; see the dialect note under
+[String Functions](#string-functions).)
 
 ## Spatial Functions
 
@@ -944,6 +946,13 @@ RETURN degrees(pi())             // → 180.0
 > **Characters, not bytes.** Every string function here is indexed by
 > character, and so are `size()` / `length()` — `size('Tromsø')` is `6`, so
 > `substring('Tromsø', size('Tromsø') - 1)` is `'ø'`.
+>
+> That holds for **every** string, including one delimited by brackets:
+> `size('[1,2,3]')` is `7` and `size('[redacted]')` is `10`, matching Neo4j's
+> `size(STRING)`. Only the argument's *type* decides — pass a real list and
+> you get its element count. KGLite's other list-coercions on strings
+> (`UNWIND`, indexing, `head`/`last`/`reverse`, `IN`) are unchanged and still
+> read `'[1,2,3]'` as a three-element list.
 
 > **Divergence — `split` with an empty delimiter.** openCypher does not define
 > this case. KGLite splits into characters: `split('abc', '')` is
