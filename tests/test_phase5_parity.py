@@ -373,7 +373,10 @@ def test_binary_size_regression():
         crc32fast dependency edge is the only growth; no feature changes.
 
 
-      - 0.16.10:       21,060,032 bytes (≈20.1 MB). 0.16.9 -> 0.16.10: the lexical retrieval lane (TextIndex + BM25 kernel + analyzer + FusedTextBm25TopK operator), the IndexFreshness framework, KGLTIDX1 persistence, text_bm25/score_fuse scalars, and the vector-index catch-up path.
+      - 0.16.10:       21,060,032 bytes (≈20.1 MB). 0.16.9 -> 0.16.10: the lexical retrieval lane (TextIndex + BM25
+        kernel + analyzer + FusedTextBm25TopK operator), the IndexFreshness
+        framework, KGLTIDX1 persistence, text_bm25/score_fuse scalars, and
+        the vector-index catch-up path.
 
     Raising the baseline is a deliberate act — every bump should
     be accompanied by an updated growth note above. For a precise

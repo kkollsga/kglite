@@ -475,15 +475,18 @@ fn kgl_fixture_bytes() -> Vec<u8> {
 /// bump turned this golden red with zero code changes.
 fn mask_version_bytes(bytes: &[u8]) -> Vec<u8> {
     let version = env!("CARGO_PKG_VERSION").as_bytes();
-    let mut out = bytes.to_vec();
+    // Splice the version bytes OUT rather than overwriting in place: an
+    // in-place mask is length-preserving, so the digest still moved whenever
+    // the version string changed length (0.16.9 -> 0.16.10 was the first
+    // such boundary and it broke every CI leg on main, 2026-08-25).
+    let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
-    while i + version.len() <= out.len() {
-        if &out[i..i + version.len()] == version {
-            for b in &mut out[i..i + version.len()] {
-                *b = b'#';
-            }
+    while i < bytes.len() {
+        if i + version.len() <= bytes.len() && &bytes[i..i + version.len()] == version {
+            out.push(b'#');
             i += version.len();
         } else {
+            out.push(bytes[i]);
             i += 1;
         }
     }
@@ -793,4 +796,4 @@ fn kgl_reload_preserves_column_slot_order() {
 
 /// sha256 of the `.kgl` bytes for [`kgl_fixture_bytes`]. Regenerate only via
 /// `KGLITE_REGEN_VALUE_BYTE_GOLDEN=1`, and only for a deliberate format change.
-const KGL_FIXTURE_DIGEST: &str = "f2129119daa99d75e8cfb1301872160bc5dd50cdeeea71ba241aed7d42ce1d86";
+const KGL_FIXTURE_DIGEST: &str = "86ddc120d72b865caf3f2c3be1959b7e852f16bf27145f3f745016747d3d7f56";
