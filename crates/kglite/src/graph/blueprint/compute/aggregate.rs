@@ -298,15 +298,12 @@ pub fn run_aggregate(
         }
         into_spec.connections.junction_edges.insert(
             edge.edge.clone(),
-            JunctionEdge {
-                csv: format!("computed/aggregate_{}.csv", into_safe),
-                source_fk: pk_col.clone(),
-                target: edge.to.clone(),
-                target_fk: edge.fk.clone(),
-                properties: vec![],
-                property_types: IndexMap::new(),
-                rename: Default::default(),
-            },
+            JunctionEdge::computed(
+                format!("computed/aggregate_{}.csv", into_safe),
+                pk_col.clone(),
+                edge.to.clone(),
+                edge.fk.clone(),
+            ),
         );
     }
 

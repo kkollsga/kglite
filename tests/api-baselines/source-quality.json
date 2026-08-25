@@ -80,7 +80,7 @@
     {
       "path": "crates/kglite/src/graph/blueprint/compute/aggregate.rs",
       "qualified_name": "crate::run_aggregate",
-      "lines": 227,
+      "lines": 225,
       "branches": 32,
       "nesting": 3
     },
@@ -269,14 +269,14 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/planner/fusion/aggregate.rs",
       "qualified_name": "crate::fuse_match_return_aggregate",
-      "lines": 354,
+      "lines": 356,
       "branches": 58,
       "nesting": 11
     },
     {
       "path": "crates/kglite/src/graph/languages/cypher/planner/fusion/aggregate.rs",
       "qualified_name": "crate::fuse_match_with_aggregate",
-      "lines": 241,
+      "lines": 243,
       "branches": 44,
       "nesting": 10
     },

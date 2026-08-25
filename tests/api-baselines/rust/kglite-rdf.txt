@@ -354,9 +354,12 @@ pub struct kglite::api::blueprint::JunctionEdge
 pub kglite::api::blueprint::JunctionEdge::csv: alloc::string::String
 pub kglite::api::blueprint::JunctionEdge::properties: alloc::vec::Vec<alloc::string::String>
 pub kglite::api::blueprint::JunctionEdge::property_types: indexmap::map::IndexMap<alloc::string::String, alloc::string::String>
+pub kglite::api::blueprint::JunctionEdge::rename: indexmap::map::IndexMap<alloc::string::String, alloc::string::String>
 pub kglite::api::blueprint::JunctionEdge::source_fk: alloc::string::String
 pub kglite::api::blueprint::JunctionEdge::target: alloc::string::String
 pub kglite::api::blueprint::JunctionEdge::target_fk: alloc::string::String
+impl kglite::api::blueprint::JunctionEdge
+pub fn kglite::api::blueprint::JunctionEdge::computed(csv: alloc::string::String, source_fk: alloc::string::String, target: alloc::string::String, target_fk: alloc::string::String) -> Self
 impl core::clone::Clone for kglite::api::blueprint::JunctionEdge
 pub fn kglite::api::blueprint::JunctionEdge::clone(&self) -> kglite::api::blueprint::JunctionEdge
 impl core::fmt::Debug for kglite::api::blueprint::JunctionEdge
@@ -2765,6 +2768,7 @@ pub fn kglite::api::DirGraph::vacuum(&mut self) -> kglite::api::NodeRemap
 pub fn kglite::api::DirGraph::version(&self) -> u64
 impl kglite::api::DirGraph
 pub fn kglite::api::DirGraph::add_node_label(&mut self, idx: petgraph::graph_impl::NodeIndex, label: kglite::api::InternedKey) -> bool
+pub fn kglite::api::DirGraph::add_node_labels_bulk(&mut self, indices: &[petgraph::graph_impl::NodeIndex], label: kglite::api::InternedKey) -> (usize, usize)
 pub fn kglite::api::DirGraph::node_has_label(&self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey) -> bool
 pub fn kglite::api::DirGraph::node_labels(&self, idx: petgraph::graph_impl::NodeIndex) -> alloc::vec::Vec<kglite::api::InternedKey>
 pub fn kglite::api::DirGraph::nodes_with_label(&self, label: &str) -> alloc::vec::Vec<petgraph::graph_impl::NodeIndex>
@@ -2817,6 +2821,7 @@ pub fn kglite::api::DirGraph::list_indexes(&self) -> alloc::vec::Vec<(alloc::str
 pub fn kglite::api::DirGraph::lookup_by_composite_index(&self, node_type: &str, properties: &[alloc::string::String], values: &[kglite::datatypes::values::Value]) -> core::option::Option<alloc::vec::Vec<petgraph::graph_impl::NodeIndex>>
 pub fn kglite::api::DirGraph::lookup_by_index(&self, node_type: &str, property: &str, value: &kglite::datatypes::values::Value) -> core::option::Option<alloc::vec::Vec<petgraph::graph_impl::NodeIndex>>
 pub fn kglite::api::DirGraph::lookup_range(&self, node_type: &str, property: &str, lower: core::ops::range::Bound<&kglite::datatypes::values::Value>, upper: core::ops::range::Bound<&kglite::datatypes::values::Value>) -> core::option::Option<alloc::vec::Vec<petgraph::graph_impl::NodeIndex>>
+pub fn kglite::api::DirGraph::reject_secondary_only_index_type(&self, node_type: &str) -> core::result::Result<(), alloc::string::String>
 pub fn kglite::api::DirGraph::update_property_indices_for_add(&mut self, node_type: &str, node_idx: petgraph::graph_impl::NodeIndex)
 pub fn kglite::api::DirGraph::update_property_indices_for_remove(&mut self, node_type: &str, node_idx: petgraph::graph_impl::NodeIndex, property: &str, old_value: &kglite::datatypes::values::Value)
 pub fn kglite::api::DirGraph::update_property_indices_for_set(&mut self, node_type: &str, node_idx: petgraph::graph_impl::NodeIndex, property: &str, old_value: core::option::Option<&kglite::datatypes::values::Value>, new_value: &kglite::datatypes::values::Value)

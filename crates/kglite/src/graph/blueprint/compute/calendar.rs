@@ -143,19 +143,16 @@ pub fn run_calendar(
     }
     date_spec.connections.junction_edges.insert(
         next_edge.to_string(),
-        JunctionEdge {
-            csv: format!(
+        JunctionEdge::computed(
+            format!(
                 "computed/calendar_{}_{}.csv",
                 sanitize(node_type),
                 sanitize(next_edge)
             ),
-            source_fk: "iso".to_string(),
-            target: node_type.to_string(),
-            target_fk: "next_iso".to_string(),
-            properties: vec![],
-            property_types: IndexMap::new(),
-            rename: Default::default(),
-        },
+            "iso".to_string(),
+            node_type.to_string(),
+            "next_iso".to_string(),
+        ),
     );
 
     // 4. Hierarchy nodes — only when the corresponding edge is
@@ -399,15 +396,12 @@ fn write_link(
         .expect("calendar link source spec disappeared between resolve and mutate");
     src_mut.connections.junction_edges.insert(
         link.edge.clone(),
-        JunctionEdge {
-            csv: computed_rel,
-            source_fk: src_pk,
-            target: date_type.to_string(),
-            target_fk: "iso".to_string(),
-            properties: vec![],
-            property_types: IndexMap::new(),
-            rename: Default::default(),
-        },
+        JunctionEdge::computed(
+            computed_rel,
+            src_pk,
+            date_type.to_string(),
+            "iso".to_string(),
+        ),
     );
     Ok(())
 }

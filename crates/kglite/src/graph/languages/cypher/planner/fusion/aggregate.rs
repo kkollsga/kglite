@@ -504,6 +504,19 @@ fn distinct_fusable_3elem_with_constrained_group(
 /// 5. `count(DISTINCT v)` is allowed when `v` is the OTHER node variable or the
 ///    edge variable, AND the group node is type/property constrained (see
 ///    `distinct_fusable_3elem_with_constrained_group`).
+/// Per-pattern arm of [`super::multi_label_fuse_unsafe`] for the two
+/// edge-aggregate fusions: any node element that is multi-label-unsafe
+/// disqualifies the whole pattern.
+fn pattern_multi_label_unsafe(
+    graph: &DirGraph,
+    pat: &crate::graph::core::pattern_matching::Pattern,
+) -> bool {
+    pat.elements.iter().any(|el| match el {
+        PatternElement::Node(np) => super::multi_label_fuse_unsafe(graph, np),
+        _ => false,
+    })
+}
+
 pub(crate) fn fuse_match_return_aggregate(query: &mut CypherQuery, graph: &DirGraph) {
     use crate::graph::languages::cypher::ast::is_aggregate_expression;
 
@@ -543,10 +556,7 @@ pub(crate) fn fuse_match_return_aggregate(query: &mut CypherQuery, graph: &DirGr
                 continue;
             }
             let pat = &m.patterns[0];
-            if pat.elements.iter().any(|el| match el {
-                PatternElement::Node(np) => super::multi_label_fuse_unsafe(graph, np),
-                _ => false,
-            }) {
+            if pattern_multi_label_unsafe(graph, pat) {
                 i += 1;
                 continue;
             }
@@ -1458,10 +1468,7 @@ pub(crate) fn fuse_match_with_aggregate(query: &mut CypherQuery, graph: &DirGrap
                     continue;
                 }
                 let pat = &m.patterns[0];
-                if pat.elements.iter().any(|el| match el {
-                    PatternElement::Node(np) => super::multi_label_fuse_unsafe(graph, np),
-                    _ => false,
-                }) {
+                if pattern_multi_label_unsafe(graph, pat) {
                     i += 1;
                     continue;
                 }

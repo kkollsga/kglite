@@ -114,6 +114,21 @@ pub struct JunctionEdge {
     pub rename: IndexMap<String, String>,
 }
 
+impl JunctionEdge {
+    /// Property-less edge over a compute-pipeline output CSV.
+    pub fn computed(csv: String, source_fk: String, target: String, target_fk: String) -> Self {
+        JunctionEdge {
+            csv,
+            source_fk,
+            target,
+            target_fk,
+            properties: vec![],
+            property_types: IndexMap::new(),
+            rename: IndexMap::new(),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub enum TimeKey {
