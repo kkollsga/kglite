@@ -1754,11 +1754,11 @@ for row in graph.cypher("CALL db.schema() YIELD nodeType, properties RETURN node
 
 | Column | KGLite value |
 |--------|--------------|
-| `name` | `"<NodeType>.<property>"` (equality / range) or `"<NodeType>.(p1,p2,...)"` (composite) |
-| `type` | `"PROPERTY"` for equality + composite indexes; `"RANGE"` for B-tree range indexes |
+| `name` | `"<NodeType>.<property>"` (equality / range / text) or `"<NodeType>.(p1,p2,...)"` (composite) |
+| `type` | `"PROPERTY"` for equality + composite indexes; `"RANGE"` for B-tree range indexes; `"FULLTEXT"` for a BM25 text index built by `build_text_index()` |
 | `entityType` | Always `"NODE"` — relationship indexes are not yet supported |
 | `labelsOrTypes` | `[node_type]` — single-element list |
-| `properties` | `[property]` for equality/range; `[p1, p2, ...]` for composite |
+| `properties` | `[property]` for equality/range/text; `[p1, p2, ...]` for composite |
 | `state` | Always `"ONLINE"` — KGLite indexes are atomic, no `POPULATING` state |
 
 **KGLite extension.** Neo4j collapses equality + range under a single
@@ -1766,7 +1766,13 @@ for row in graph.cypher("CALL db.schema() YIELD nodeType, properties RETURN node
 (`type = "RANGE"`) because the planner uses the distinction — an
 equality index can't serve a range query. Index advisors and tooling
 that branch on `type` get the information they need without parsing
-the `name` string.
+the `name` string. A BM25 text index reports Neo4j's `"FULLTEXT"`,
+which is what it is for a client reading the column — KGLite's is
+single-label and single-property, so `CREATE FULLTEXT INDEX` still
+refuses; build one with `build_text_index(node_type, property)`.
+Vector indexes are the one kind this listing does not carry: they hang
+off an embedding store rather than a property, and `list_embeddings()`
+reports those.
 
 ### Cross-reference with the Python API
 
@@ -2708,10 +2714,10 @@ spells the naming rule out, because "person_email doesn't exist" is baffling to
 someone who just created it under that name. The descriptor form
 (`DROP INDEX FOR …`) is a KGLite extension that sidesteps naming entirely.
 
-One canonical name can cover two structures: a property carrying both a hash
-and a B-tree index shows two `SHOW INDEXES` rows sharing a `name`,
-distinguished by `type` (`PROPERTY` vs `RANGE`). `DROP INDEX <name>` removes
-every structure under that name.
+One canonical name can cover several structures: a property carrying a hash
+index, a B-tree index and a BM25 text index shows three `SHOW INDEXES` rows
+sharing a `name`, distinguished by `type` (`PROPERTY`, `RANGE`, `FULLTEXT`).
+`DROP INDEX <name>` removes every structure under that name.
 
 #### `SHOW INDEXES`
 
@@ -2721,7 +2727,7 @@ A read, so it works on a read-only graph. Returns the same rows and columns as
 | Column | Value |
 |---|---|
 | `name` | canonical name — `Label.property` or `Label.(a,b)` |
-| `type` | `PROPERTY` (hash equality or composite) or `RANGE` (B-tree) |
+| `type` | `PROPERTY` (hash equality or composite), `RANGE` (B-tree), or `FULLTEXT` (BM25 text index — see `build_text_index()`) |
 | `entityType` | always `NODE` |
 | `labelsOrTypes` | single-element list holding the node type |
 | `properties` | indexed property names, sorted for a composite |

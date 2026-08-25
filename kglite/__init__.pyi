@@ -6809,6 +6809,85 @@ class KnowledgeGraph:
         ``(node_type, text_column)`` embedding store."""
         ...
 
+    def build_text_index(self, node_type: str, property: str) -> dict[str, Any]:
+        """Build a BM25 lexical index over a node type's string property, for
+        keyword/full-text ranking.
+
+        Opt-in and explicit, like :meth:`create_index`: nothing builds one for
+        you, and the index does **not** follow later writes. A node created or
+        edited after the build is simply unindexed until you call this again —
+        calling it again is the rebuild, and it replaces the index wholesale.
+        Deletion is the one exception: deleting a node prunes its document
+        immediately, because the freed node slot is handed to the next node
+        created and an orphaned document would be inherited by it.
+
+        The property is read through the same alias resolution a Cypher
+        ``MATCH`` filter uses, so a type's id/title column can be indexed under
+        the name the loader gave it (``add_nodes(df, "Person", "npdid",
+        "name")`` makes ``build_text_index("Person", "name")`` index titles).
+        The index is keyed by the spelling you pass, not by what it resolves
+        to.
+
+        **What is indexed.** Every node of the type whose property holds a
+        string. An **empty string is a document** — one with no terms, counted
+        in the corpus statistics. A node whose property is absent or holds a
+        non-string (a number, a list) is **skipped**: BM25 indexes text, and a
+        stringified number is not text. Skipped nodes are counted in the
+        return value.
+
+        Tokenization is the character rule ``text_normalize()`` exposes:
+        alphanumeric runs are terms, everything else separates, and terms are
+        lowercased per character. Unicode letters are term content (``Tromsø``
+        is one token), there is no stemming and no stopword list, and there is
+        no CJK segmentation.
+
+        The index is heap-resident and is **dropped** by :meth:`vacuum`, which
+        renumbers every node — rebuild after vacuuming. It appears in ``SHOW
+        INDEXES`` / :meth:`schema` under the canonical name
+        ``'{node_type}.{property}'`` with type ``FULLTEXT``, alongside any
+        equality or range index on the same property, and ``DROP INDEX
+        {node_type}.{property}`` removes all of them.
+
+        Storage modes: the default (in-memory) and ``'mapped'`` backends build;
+        the ``'disk'`` backend refuses, because a heap-resident inverted index
+        over a graph sized for disk mode is the memory cliff that backend
+        exists to avoid.
+
+        Args:
+            node_type: The node type to index (e.g. ``'Article'``).
+            property: The string property to index (e.g. ``'body'``).
+
+        Returns:
+            dict: ``{'indexed': int, 'skipped': int, 'terms': int}`` —
+            documents indexed, nodes skipped as absent/non-string, and the size
+            of the resulting vocabulary.
+
+        Raises:
+            ValueError: if the node type is unknown, the graph is disk-backed,
+                or the type has nodes but not one of them carries a string for
+                ``property`` (what a misspelled property name looks like). A
+                type with no nodes yet builds an empty index instead, so an
+                index can be declared before ingest.
+
+        Example::
+
+            g.build_text_index("Article", "body")
+            # {'indexed': 1200, 'skipped': 3, 'terms': 18422}
+        """
+        ...
+
+    def drop_text_index(self, node_type: str, property: str) -> bool:
+        """Drop the BM25 text index for ``(node_type, property)``.
+
+        Returns ``True`` if an index was dropped, ``False`` if none existed.
+        """
+        ...
+
+    def has_text_index(self, node_type: str, property: str) -> bool:
+        """Whether a BM25 text index is currently built over
+        ``(node_type, property)``."""
+        ...
+
     def begin(self, timeout_ms: Optional[int] = None) -> Transaction:
         """Begin a read-write transaction with a lazy copy-on-write snapshot.
 

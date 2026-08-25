@@ -31,6 +31,7 @@ pub mod schema;
 pub mod schema_json;
 pub mod session;
 pub mod storage;
+pub mod text_indexes;
 pub mod wal;
 
 #[cfg(test)]

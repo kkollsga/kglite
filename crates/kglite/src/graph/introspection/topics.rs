@@ -1270,6 +1270,8 @@ pub(super) fn write_fluent_topic_indexes(xml: &mut String) {
     xml.push_str(
         "      <m sig=\"index_stats(node_type, property)\">Index metadata and hit count.</m>\n",
     );
+    xml.push_str("      <m sig=\"build_text_index(node_type, property)\">BM25 lexical index over a string property. Opt-in and explicit: rebuild by calling again after writes; deletes prune, vacuum drops.</m>\n");
+    xml.push_str("      <m sig=\"drop_text_index(node_type, property) / has_text_index\">Remove or probe a text index.</m>\n");
     xml.push_str("    </methods>\n");
     xml.push_str("    <examples>\n");
     xml.push_str("      <ex desc=\"equality\">graph.create_index('Person', 'email')</ex>\n");

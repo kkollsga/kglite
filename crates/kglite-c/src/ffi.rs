@@ -56,6 +56,22 @@ pub(crate) fn void_boundary(body: impl FnOnce()) {
     let _ = catch_unwind(AssertUnwindSafe(body));
 }
 
+/// Read a required, non-null UTF-8 C string. Callers null-check first; this
+/// only validates UTF-8.
+///
+/// # Safety
+///
+/// `ptr` must be non-null and point at a null-terminated byte string that
+/// outlives the returned borrow.
+pub(crate) unsafe fn required_str<'a>(
+    ptr: *const std::ffi::c_char,
+) -> Result<&'a str, crate::status::KgliteStatusCode> {
+    match unsafe { std::ffi::CStr::from_ptr(ptr) }.to_str() {
+        Ok(s) => Ok(s),
+        Err(_) => Err(crate::status::KgliteStatusCode::InvalidUtf8),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

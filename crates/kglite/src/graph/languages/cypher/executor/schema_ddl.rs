@@ -580,15 +580,19 @@ fn execute_drop_index(graph: &mut DirGraph, drop: &DropIndex) -> Result<Mutation
     super::write_scope::enforce_write_scope(graph, &label)?;
 
     // One canonical name can cover several KGLite structures — a single
-    // property may carry both a hash equality index and a B-tree range index,
-    // and `collect_indexes_structured` names them identically. `DROP INDEX
-    // Label.prop` means "remove the index on that property", so every
-    // structure registered under it goes.
+    // property may carry a hash equality index, a B-tree range index and a
+    // BM25 text index at once, and `collect_indexes_structured` names all
+    // three identically. `DROP INDEX Label.prop` means "remove the index on
+    // that property", so every structure registered under it goes; a name
+    // `SHOW INDEXES` just printed must never come back as "no index named".
     let mut dropped = 0usize;
     match properties.as_slice() {
         [property] => {
             dropped += usize::from(graph.drop_index(&label, property)?);
             dropped += usize::from(graph.drop_range_index(&label, property));
+            dropped += usize::from(crate::graph::text_indexes::drop_text_index(
+                graph, &label, property,
+            ));
         }
         many => dropped += usize::from(graph.drop_composite_index(&label, many)),
     }

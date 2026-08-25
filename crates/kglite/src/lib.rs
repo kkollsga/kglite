@@ -288,6 +288,28 @@ pub mod api {
         };
     }
 
+    /// Lexical (BM25) text-index lifecycle — how a binding gets a text index
+    /// *built*. `build_text_index` indexes one node type's string property,
+    /// `drop_text_index` removes it, `has_text_index` / `list_text_indexes`
+    /// report what exists, and `index_key` is the one place the
+    /// `(node_type, property)` key is minted. Building is explicit and
+    /// idempotent: a rebuild is the same call again.
+    ///
+    /// Querying needs no surface here — ranking is a Cypher function, so every
+    /// binding reaches it through `cypher_query`. `TextIndexStore`'s own
+    /// `prepare_query` / `score` / `top_k` are the direct-call companions for a
+    /// Rust embedder that would rather not go through Cypher; `PreparedQuery`
+    /// is exported because those signatures name it (with `QueryTerm` /
+    /// `TermId`, which its own accessor names in turn).
+    pub mod text_indexes {
+        pub use crate::graph::algorithms::text_index::bm25::{PreparedQuery, QueryTerm};
+        pub use crate::graph::algorithms::text_index::TermId;
+        pub use crate::graph::text_indexes::{
+            build_text_index, drop_text_index, has_text_index, index_key, list_text_indexes,
+            TextIndexReport, TextIndexStore,
+        };
+    }
+
     /// Graph algorithms — pathfinding, components, centrality, community
     /// detection. The typed, direct-call surface: each takes `&DirGraph` +
     /// plain params and returns a result struct, for bindings that want

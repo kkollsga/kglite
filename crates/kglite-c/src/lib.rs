@@ -44,6 +44,7 @@ pub mod schema;
 pub mod session;
 pub mod status;
 pub mod strings;
+pub mod text_indexes;
 
 // Re-export every C-ABI item at the crate root. cbindgen picks
 // items up from any module reachable via this crate, but the
@@ -60,3 +61,4 @@ pub use schema::*;
 pub use session::*;
 pub use status::*;
 pub use strings::*;
+pub use text_indexes::*;

@@ -395,6 +395,12 @@ pub struct DirGraph {
     /// Persisted as a separate section in v2 .kgl files.
     #[serde(skip)]
     pub embeddings: HashMap<(String, String), EmbeddingStore>,
+    /// Lexical (BM25) text indexes: (node_type, property) -> TextIndexStore.
+    /// Opt-in, built explicitly via `build_text_index`, and heap-resident like
+    /// the embedding stores beside them — see [`crate::graph::text_indexes`]
+    /// for the slot convention and the invalidation rules.
+    #[serde(skip)]
+    pub text_indexes: HashMap<(String, String), crate::graph::text_indexes::TextIndexStore>,
     /// Timeseries configuration per node type: type_name → TimeseriesConfig.
     /// Declares composite key labels and known channels for auto-resolution.
     #[serde(default)]
@@ -799,6 +805,7 @@ impl DirGraph {
             type_connectivity_cache: Default::default(),
             property_ndv_cache: Arc::new(RwLock::new((0, HashMap::new()))),
             embeddings: HashMap::new(),
+            text_indexes: HashMap::new(),
             timeseries_configs: HashMap::new(),
             timeseries_store: HashMap::new(),
             temporal_node_configs: HashMap::new(),
@@ -864,6 +871,7 @@ impl DirGraph {
             type_connectivity_cache: Default::default(),
             property_ndv_cache: Arc::new(RwLock::new((0, HashMap::new()))),
             embeddings: HashMap::new(),
+            text_indexes: HashMap::new(),
             timeseries_configs: HashMap::new(),
             timeseries_store: HashMap::new(),
             temporal_node_configs: HashMap::new(),
@@ -2094,6 +2102,13 @@ impl DirGraph {
         }
 
         self.remap_embedding_slots(&old_to_new);
+        // Text indexes are dropped, not remapped. A document's slot *is* its
+        // node index (`graph::text_indexes`), so after a wholesale remap every
+        // document would be attached to whatever node inherited its number —
+        // and rebuilding them here would hide a full corpus re-index inside a
+        // maintenance call. Same call the HNSW index gets one line above, for
+        // the same reason: rebuild after a vacuum.
+        self.text_indexes.clear();
         self.reindex();
 
         // Rebuild the columnar stores: the old ones carry orphaned rows from

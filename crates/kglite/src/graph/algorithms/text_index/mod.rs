@@ -62,13 +62,6 @@
 //! map per document, a term string stored once per occurrence) fails here
 //! rather than on someone's million-document build.
 
-// P9 lands this module as the self-contained retrieval core: its first
-// production caller is the DirGraph text-index store in P10, so on the plain
-// lib target every item here is reachable only from the test module and the
-// whole file reads as dead. This allowance is scoped to that gap and is
-// deleted by P10's wiring — it must not outlive the integration.
-#![allow(dead_code)]
-
 pub mod analyzer;
 pub mod bm25;
 
@@ -171,6 +164,8 @@ impl TextIndex {
     /// as documents arrive, so a document's score legitimately changes when
     /// *other* documents are added — that is BM25 working, not drift. Scores
     /// are comparable only within one query against one corpus state.
+    // P10b's incremental-refresh primitive; the randomized-CRUD oracle is its only caller today.
+    #[allow(dead_code)]
     pub fn add_doc(&mut self, slot: u32, text: &str) {
         self.remove_doc(slot);
         let doc = self.intern_document(text);
@@ -264,6 +259,8 @@ impl TextIndex {
         self.docs.len()
     }
 
+    // P12's query-side short circuit; no production caller until the scalar lands.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.docs.is_empty()
     }
@@ -278,6 +275,8 @@ impl TextIndex {
     }
 
     /// Token count of an indexed document, or `None` if the slot is unindexed.
+    // P11 serializes the forward view through this; no production caller yet.
+    #[allow(dead_code)]
     pub fn doc_len(&self, slot: u32) -> Option<u32> {
         self.docs.get(&slot).map(|doc| doc.len)
     }
@@ -296,6 +295,8 @@ impl TextIndex {
     /// counter: removal is exact, so a posting list never holds a dead entry
     /// and its length *is* the document frequency. A second copy of the number
     /// could only ever disagree with this one.
+    // P12 reports term statistics through this; no production caller yet.
+    #[allow(dead_code)]
     pub fn df(&self, term: &str) -> usize {
         self.postings_for(term).len()
     }
@@ -307,6 +308,8 @@ impl TextIndex {
     }
 
     /// Postings for `term`, sorted by slot; empty when the term is unknown.
+    // P12's by-name posting lookup; the id-keyed `postings_of` is what scoring uses today.
+    #[allow(dead_code)]
     pub fn postings_for(&self, term: &str) -> &[Posting] {
         match self.ids.get(term) {
             Some(&id) => &self.postings[id as usize],
@@ -320,11 +323,15 @@ impl TextIndex {
     }
 
     /// Occurrences of `term` in `slot`; `0` if either is absent.
+    // P11 serializes the forward view through this; no production caller yet.
+    #[allow(dead_code)]
     pub fn term_freq(&self, slot: u32, term: TermId) -> u32 {
         self.docs.get(&slot).map_or(0, |doc| doc.term_freq(term))
     }
 
     /// Every indexed slot, in arbitrary order.
+    // P11 enumerates documents through this when writing the `.kgl` section.
+    #[allow(dead_code)]
     pub fn doc_slots(&self) -> impl Iterator<Item = u32> + '_ {
         self.docs.keys().copied()
     }
@@ -332,6 +339,8 @@ impl TextIndex {
     /// Every live term with its postings, in id order. This is the logical
     /// content of the index — id-independent, so it is the right basis for
     /// comparing two indexes and for serializing one.
+    // P11 writes the `.kgl` section from this id-independent view.
+    #[allow(dead_code)]
     pub fn iter_terms(&self) -> impl Iterator<Item = (&str, &[Posting])> + '_ {
         self.names
             .iter()

@@ -2198,6 +2198,60 @@ pub fn kglite::api::storage::TypeLookup::deserialize<__D>(__deserializer: __D) -
 pub fn kglite::api::storage::convert_dir_graph_to_mode(graph: &mut kglite::api::DirGraph, requested: kglite::api::storage::StorageMode) -> core::result::Result<(), alloc::string::String>
 pub fn kglite::api::storage::live_storage_mode(graph: &kglite::api::DirGraph) -> kglite::api::storage::StorageMode
 pub fn kglite::api::storage::new_dir_graph_in_mode(mode: kglite::api::storage::StorageMode, path: core::option::Option<&std::path::Path>) -> core::result::Result<kglite::api::DirGraph, alloc::string::String>
+pub mod kglite::api::text_indexes
+pub struct kglite::api::text_indexes::PreparedQuery
+impl kglite::api::text_indexes::PreparedQuery
+pub fn kglite::api::text_indexes::PreparedQuery::is_empty(&self) -> bool
+pub fn kglite::api::text_indexes::PreparedQuery::terms(&self) -> &[kglite::api::text_indexes::QueryTerm]
+impl core::clone::Clone for kglite::api::text_indexes::PreparedQuery
+pub fn kglite::api::text_indexes::PreparedQuery::clone(&self) -> kglite::api::text_indexes::PreparedQuery
+impl core::default::Default for kglite::api::text_indexes::PreparedQuery
+pub fn kglite::api::text_indexes::PreparedQuery::default() -> kglite::api::text_indexes::PreparedQuery
+impl core::fmt::Debug for kglite::api::text_indexes::PreparedQuery
+pub fn kglite::api::text_indexes::PreparedQuery::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct kglite::api::text_indexes::QueryTerm
+pub kglite::api::text_indexes::QueryTerm::idf: f64
+pub kglite::api::text_indexes::QueryTerm::term: kglite::api::text_indexes::TermId
+impl core::clone::Clone for kglite::api::text_indexes::QueryTerm
+pub fn kglite::api::text_indexes::QueryTerm::clone(&self) -> kglite::api::text_indexes::QueryTerm
+impl core::fmt::Debug for kglite::api::text_indexes::QueryTerm
+pub fn kglite::api::text_indexes::QueryTerm::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for kglite::api::text_indexes::QueryTerm
+pub struct kglite::api::text_indexes::TextIndexReport
+pub kglite::api::text_indexes::TextIndexReport::indexed: usize
+pub kglite::api::text_indexes::TextIndexReport::skipped: usize
+pub kglite::api::text_indexes::TextIndexReport::terms: usize
+impl core::clone::Clone for kglite::api::text_indexes::TextIndexReport
+pub fn kglite::api::text_indexes::TextIndexReport::clone(&self) -> kglite::api::text_indexes::TextIndexReport
+impl core::cmp::Eq for kglite::api::text_indexes::TextIndexReport
+impl core::cmp::PartialEq for kglite::api::text_indexes::TextIndexReport
+pub fn kglite::api::text_indexes::TextIndexReport::eq(&self, other: &kglite::api::text_indexes::TextIndexReport) -> bool
+impl core::fmt::Debug for kglite::api::text_indexes::TextIndexReport
+pub fn kglite::api::text_indexes::TextIndexReport::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for kglite::api::text_indexes::TextIndexReport
+pub struct kglite::api::text_indexes::TextIndexStore
+impl kglite::api::text_indexes::TextIndexStore
+pub fn kglite::api::text_indexes::TextIndexStore::contains_node(&self, node: petgraph::graph_impl::NodeIndex) -> bool
+pub fn kglite::api::text_indexes::TextIndexStore::documents(&self) -> usize
+pub fn kglite::api::text_indexes::TextIndexStore::estimated_bytes(&self) -> usize
+pub fn kglite::api::text_indexes::TextIndexStore::prepare_query(&self, query: &str) -> kglite::api::text_indexes::PreparedQuery
+pub fn kglite::api::text_indexes::TextIndexStore::remove_node(&mut self, node: petgraph::graph_impl::NodeIndex) -> bool
+pub fn kglite::api::text_indexes::TextIndexStore::resolved_field(&self) -> &str
+pub fn kglite::api::text_indexes::TextIndexStore::score(&self, node: petgraph::graph_impl::NodeIndex, query: &kglite::api::text_indexes::PreparedQuery) -> core::option::Option<f64>
+pub fn kglite::api::text_indexes::TextIndexStore::skipped(&self) -> usize
+pub fn kglite::api::text_indexes::TextIndexStore::terms(&self) -> usize
+pub fn kglite::api::text_indexes::TextIndexStore::top_k(&self, query: &kglite::api::text_indexes::PreparedQuery, k: usize) -> alloc::vec::Vec<(petgraph::graph_impl::NodeIndex, f64)>
+pub fn kglite::api::text_indexes::TextIndexStore::validate(&self) -> core::result::Result<(), alloc::string::String>
+impl core::clone::Clone for kglite::api::text_indexes::TextIndexStore
+pub fn kglite::api::text_indexes::TextIndexStore::clone(&self) -> kglite::api::text_indexes::TextIndexStore
+impl core::fmt::Debug for kglite::api::text_indexes::TextIndexStore
+pub fn kglite::api::text_indexes::TextIndexStore::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn kglite::api::text_indexes::build_text_index(graph: &mut kglite::api::DirGraph, node_type: &str, property: &str) -> core::result::Result<kglite::api::text_indexes::TextIndexReport, alloc::string::String>
+pub fn kglite::api::text_indexes::drop_text_index(graph: &mut kglite::api::DirGraph, node_type: &str, property: &str) -> bool
+pub fn kglite::api::text_indexes::has_text_index(graph: &kglite::api::DirGraph, node_type: &str, property: &str) -> bool
+pub fn kglite::api::text_indexes::index_key(node_type: &str, property: &str) -> (alloc::string::String, alloc::string::String)
+pub fn kglite::api::text_indexes::list_text_indexes(graph: &kglite::api::DirGraph) -> alloc::vec::Vec<(&str, &str, &kglite::api::text_indexes::TextIndexStore)>
+pub type kglite::api::text_indexes::TermId = u32
 pub mod kglite::api::timeseries
 pub enum kglite::api::timeseries::DatePrecision
 pub kglite::api::timeseries::DatePrecision::Day
@@ -2596,6 +2650,7 @@ pub kglite::api::DirGraph::spatial_configs: std::collections::hash::map::HashMap
 pub kglite::api::DirGraph::spill_dir: core::option::Option<std::path::PathBuf>
 pub kglite::api::DirGraph::temporal_edge_configs: std::collections::hash::map::HashMap<alloc::string::String, alloc::vec::Vec<kglite::api::TemporalConfig>>
 pub kglite::api::DirGraph::temporal_node_configs: std::collections::hash::map::HashMap<alloc::string::String, kglite::api::TemporalConfig>
+pub kglite::api::DirGraph::text_indexes: std::collections::hash::map::HashMap<(alloc::string::String, alloc::string::String), kglite::api::text_indexes::TextIndexStore>
 pub kglite::api::DirGraph::timeseries_configs: std::collections::hash::map::HashMap<alloc::string::String, kglite::api::timeseries::TimeseriesConfig>
 pub kglite::api::DirGraph::timeseries_store: std::collections::hash::map::HashMap<usize, kglite::api::timeseries::NodeTimeseries>
 pub kglite::api::DirGraph::title_field_aliases: alloc::sync::Arc<rustc_hash::FxHashMap<alloc::string::String, alloc::string::String>>

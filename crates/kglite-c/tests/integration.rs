@@ -1644,6 +1644,108 @@ fn build_vector_index_without_a_store_errors() {
     unsafe { kglite_session_free(session) };
 }
 
+// ── text index (kglite_session_build_text_index) ─────────────────────
+
+/// Call the symbol, returning (status, report JSON, error message).
+fn build_text_index(
+    session: *mut KgliteSession,
+    node_type: &str,
+    property: &str,
+) -> (KgliteStatusCode, Option<serde_json::Value>, Option<String>) {
+    let nt = CString::new(node_type).unwrap();
+    let prop = CString::new(property).unwrap();
+    let mut report: *const c_char = std::ptr::null();
+    let mut err: *const c_char = std::ptr::null();
+    let rc = unsafe {
+        kglite_c::kglite_session_build_text_index(
+            session,
+            nt.as_ptr(),
+            prop.as_ptr(),
+            &mut report as *mut _,
+            &mut err as *mut _,
+        )
+    };
+    let parsed = (!report.is_null()).then(|| {
+        let json: serde_json::Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(report) }.to_str().unwrap()).unwrap();
+        unsafe { kglite_free_string(report) };
+        json
+    });
+    let message = (!err.is_null()).then(|| {
+        let text = unsafe { CStr::from_ptr(err) }.to_str().unwrap().to_string();
+        unsafe { kglite_free_string(err) };
+        text
+    });
+    (rc, parsed, message)
+}
+
+/// The build reports what it indexed and the index becomes visible to
+/// `SHOW INDEXES` — the only query surface it has in this release.
+#[test]
+fn build_text_index_reports_and_registers() {
+    let session = seed_notes(
+        "CREATE (:Note {id: 1, body: 'the quick brown fox'}) \
+         CREATE (:Note {id: 2, body: 'a quick brown marmoset'}) \
+         CREATE (:Note {id: 3, body: 42})",
+    );
+
+    let (rc, report, err) = build_text_index(session, "Note", "body");
+
+    assert_eq!(rc, KgliteStatusCode::Ok, "build_text_index failed: {err:?}");
+    let report = report.expect("a successful build reports");
+    assert_eq!(report["indexed"], 2);
+    assert_eq!(report["skipped"], 1, "the numeric body is not text");
+    assert_eq!(report["terms"], 6);
+
+    let rows = query_rows(session, "SHOW INDEXES", "{}");
+    let text: Vec<&serde_json::Value> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["type"] == "FULLTEXT")
+        .collect();
+    assert_eq!(text.len(), 1);
+    assert_eq!(text[0]["name"], "Note.body");
+
+    unsafe { kglite_session_free(session) };
+}
+
+/// A misspelled property is a clean `InvalidArgument` with an explanatory
+/// message, not a panic and not an empty index that silently never matches.
+#[test]
+fn build_text_index_on_an_unindexable_property_errors() {
+    let session = seed_notes("CREATE (:Note {id: 1, body: 'a'})");
+
+    let (rc, report, err) = build_text_index(session, "Note", "bdoy");
+
+    assert_eq!(rc, KgliteStatusCode::InvalidArgument);
+    assert!(report.is_none());
+    let err = err.expect("a rejected build must explain itself");
+    assert!(err.contains("bdoy"), "{err}");
+
+    unsafe { kglite_session_free(session) };
+}
+
+/// A null required argument is refused before anything is read.
+#[test]
+fn build_text_index_null_arguments_are_refused() {
+    let session = seed_notes("CREATE (:Note {id: 1, body: 'a'})");
+    let nt = CString::new("Note").unwrap();
+    let mut report: *const c_char = std::ptr::null();
+    let rc = unsafe {
+        kglite_c::kglite_session_build_text_index(
+            session,
+            nt.as_ptr(),
+            std::ptr::null(),
+            &mut report as *mut _,
+            std::ptr::null_mut(),
+        )
+    };
+    assert_eq!(rc, KgliteStatusCode::NullPointer);
+    assert!(report.is_null());
+    unsafe { kglite_session_free(session) };
+}
+
 // ── declarative schema (kglite_define_schema) ────────────────────────
 
 /// Call `kglite_define_schema`, returning (status, error-msg).

@@ -477,4 +477,41 @@ impl KnowledgeGraph {
             None => Ok(py.None()),
         }
     }
+
+    /// Build a BM25 lexical index over a node type's string property.
+    #[pyo3(signature = (node_type, property))]
+    fn build_text_index(
+        &mut self,
+        py: Python<'_>,
+        node_type: &str,
+        property: &str,
+    ) -> PyResult<Py<PyAny>> {
+        let graph = get_graph_mut(&mut self.inner);
+        // Built off the GIL — tokenizing a corpus is pure CPU over graph memory.
+        let report = py
+            .detach(|| kglite_core::api::text_indexes::build_text_index(graph, node_type, property))
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+
+        let result = PyDict::new(py);
+        result.set_item("indexed", report.indexed)?;
+        result.set_item("skipped", report.skipped)?;
+        result.set_item("terms", report.terms)?;
+        Ok(result.into())
+    }
+
+    /// Drop the BM25 text index for a property; True if one existed.
+    #[pyo3(signature = (node_type, property))]
+    fn drop_text_index(&mut self, node_type: &str, property: &str) -> bool {
+        kglite_core::api::text_indexes::drop_text_index(
+            get_graph_mut(&mut self.inner),
+            node_type,
+            property,
+        )
+    }
+
+    /// Whether a BM25 text index is built over a property.
+    #[pyo3(signature = (node_type, property))]
+    fn has_text_index(&self, node_type: &str, property: &str) -> bool {
+        kglite_core::api::text_indexes::has_text_index(&self.inner, node_type, property)
+    }
 }

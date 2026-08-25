@@ -390,17 +390,25 @@ pub(crate) enum IndexKind {
     Composite,
     /// B-Tree range lookup (supports comparison operators).
     Range,
+    /// BM25 lexical index over one string property, built by
+    /// `build_text_index`. Reported as Neo4j's `FULLTEXT` because that is what
+    /// it is for a client reading the column — but KGLite's is single-label,
+    /// single-property and canonically named, where Neo4j's is multi-label and
+    /// user-named, so `CREATE FULLTEXT INDEX` still refuses.
+    Text,
 }
 
 impl IndexKind {
     /// Neo4j-compatible `type` column value for `db.indexes()`.
     ///
     /// Equality + Composite both map to `"PROPERTY"` (Neo4j convention);
-    /// `Range` is a KGLite-specific value documented in CYPHER.md.
+    /// `Range` is a KGLite-specific value documented in CYPHER.md; `Text` maps
+    /// to Neo4j's `"FULLTEXT"`.
     pub(crate) fn neo4j_type(self) -> &'static str {
         match self {
             IndexKind::Equality | IndexKind::Composite => "PROPERTY",
             IndexKind::Range => "RANGE",
+            IndexKind::Text => "FULLTEXT",
         }
     }
 }
@@ -430,9 +438,15 @@ pub(crate) struct IndexInfo {
 /// All indexes installed on the graph, in deterministic order.
 ///
 /// The single source of truth for `db.indexes()` and the `compute_schema()`
-/// formatted string list, over all three index stores (`property_indices`,
-/// `composite_indices`, `range_indices`). Sorted by `name` so the output is
-/// stable across runs and storage modes.
+/// formatted string list, over all four index stores (`property_indices`,
+/// `composite_indices`, `range_indices`, `text_indexes`). Sorted by `name` so
+/// the output is stable across runs and storage modes.
+///
+/// One canonical name can therefore carry several rows — a property with a
+/// hash index, a range index and a BM25 index is three entries under
+/// `Label.property`, distinguished by `type`. Vector indexes are the one index
+/// kind that is *not* here; they hang off an embedding store rather than a
+/// property and are reported through `list_embeddings()` instead.
 pub(crate) fn collect_indexes_structured(graph: &DirGraph) -> Vec<IndexInfo> {
     let mut out: Vec<IndexInfo> = Vec::new();
 
@@ -463,6 +477,16 @@ pub(crate) fn collect_indexes_structured(graph: &DirGraph) -> Vec<IndexInfo> {
             entity_type: "NODE",
             labels_or_types: vec![node_type.clone()],
             properties: vec![property.clone()],
+            state: "ONLINE",
+        });
+    }
+    for (node_type, property, _) in crate::graph::text_indexes::list_text_indexes(graph) {
+        out.push(IndexInfo {
+            name: format!("{node_type}.{property}"),
+            kind: IndexKind::Text,
+            entity_type: "NODE",
+            labels_or_types: vec![node_type.to_string()],
+            properties: vec![property.to_string()],
             state: "ONLINE",
         });
     }
@@ -729,6 +753,7 @@ pub fn compute_schema(graph: &DirGraph) -> SchemaOverview {
                 format!("{}.({})", idx.labels_or_types[0], idx.properties.join(", "))
             }
             IndexKind::Range => format!("{}.{} [range]", idx.labels_or_types[0], idx.properties[0]),
+            IndexKind::Text => format!("{}.{} [text]", idx.labels_or_types[0], idx.properties[0]),
         })
         .collect();
     indexes.sort();

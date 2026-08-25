@@ -25,6 +25,7 @@
 //! nothing, and it avoids `transact()`'s deep-copy of the whole vector corpus on
 //! every call.
 
+use crate::ffi::required_str;
 use crate::session::{KgliteSession, SessionState};
 use crate::status::KgliteStatusCode;
 use crate::strings::alloc_c_string;
@@ -43,15 +44,6 @@ unsafe fn optional_str<'a>(ptr: *const c_char) -> Result<Option<&'a str>, Kglite
     }
     match unsafe { CStr::from_ptr(ptr) }.to_str() {
         Ok(s) => Ok(Some(s)),
-        Err(_) => Err(KgliteStatusCode::InvalidUtf8),
-    }
-}
-
-/// Read a required, non-null UTF-8 C string. Callers null-check first; this
-/// only validates UTF-8.
-unsafe fn required_str<'a>(ptr: *const c_char) -> Result<&'a str, KgliteStatusCode> {
-    match unsafe { CStr::from_ptr(ptr) }.to_str() {
-        Ok(s) => Ok(s),
         Err(_) => Err(KgliteStatusCode::InvalidUtf8),
     }
 }

@@ -1611,4 +1611,45 @@ KgliteStatusCode kglite_session_save(struct KgliteSession *session,
  */
  void kglite_free_string(const char *s);
 
+/**
+ * Build a BM25 lexical index over `node_type`'s `property`, for keyword
+ * ranking in Cypher.
+ *
+ * Wraps [`kglite::api::text_indexes::build_text_index`]. Opt-in and explicit:
+ * the index does not follow later writes, so call this again to rebuild after
+ * a batch of changes. Deleting a node prunes its document immediately (a freed
+ * node slot is reused, and an orphaned document would be inherited by its next
+ * owner); `vacuum` renumbers every node and therefore drops text indexes
+ * wholesale. An empty string indexes as an empty document; a property that is
+ * absent or holds a non-string is skipped and counted in the report. The
+ * property is read through the same alias resolution a `MATCH` filter uses.
+ *
+ * On success `out_report_json` is an owned JSON object
+ * `{"indexed": N, "skipped": S, "terms": T}`; free it with
+ * [`kglite_free_string`](crate::kglite_free_string).
+ *
+ * # Errors
+ *
+ * - `KGLITE_ERR_NULL_POINTER` — `session`, `node_type`, `property`, or
+ *   `out_report_json` is null.
+ * - `KGLITE_ERR_INVALID_UTF8` — a string argument is not valid UTF-8.
+ * - `KGLITE_ERR_INVALID_ARGUMENT` — the node type is unknown, the graph is
+ *   disk-backed (the index is heap-resident, so disk mode refuses), or the
+ *   type has nodes and none of them carries a string for `property`; the
+ *   message explains which.
+ *
+ * # Safety
+ *
+ * `session` must be a valid handle from
+ * [`kglite_session_new`](crate::kglite_session_new). `node_type` and
+ * `property` must be null-terminated UTF-8 strings. `out_report_json` must be
+ * a valid writable slot; `out_error_msg` null or a valid writable slot.
+ */
+
+KgliteStatusCode kglite_session_build_text_index(struct KgliteSession *session,
+                                                 const char *node_type,
+                                                 const char *property,
+                                                 const char **out_report_json,
+                                                 const char **out_error_msg);
+
 #endif  /* KGLITE_H_INCLUDED */

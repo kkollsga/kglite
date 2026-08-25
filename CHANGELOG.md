@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`build_text_index(node_type, property)` — an opt-in BM25 lexical index
+  over a string property**, alongside `drop_text_index` and
+  `has_text_index` (Python) and `kglite_session_build_text_index` (C ABI).
+  Explicit, like `create_index` and `build_vector_index`: nothing builds one
+  for you, and the index does not follow later writes — calling it again is
+  the rebuild. Deletion is the exception and prunes the deleted node's
+  document immediately, because the freed node slot is handed to the next node
+  created and an orphaned document would be inherited by it; `vacuum()`
+  renumbers every node and so drops text indexes wholesale (rebuild after).
+  Empty strings index as empty documents; a property that is absent or holds a
+  non-string is skipped and counted in the report. The property is read
+  through the same alias resolution a `MATCH` filter uses, so a type's
+  id/title column can be indexed under the loader's name for it. Available in
+  the default (in-memory) and `mapped` storage modes; `disk` refuses, naming
+  the modes that work. Text indexes appear in `SHOW INDEXES` / `db.indexes()`
+  as type `FULLTEXT` under the canonical `Label.property` name, and
+  `DROP INDEX Label.property` removes them along with any equality or range
+  index on the same property.
+
 - **MCP server operators can let queries use the engine's parallel runtime**,
   via `--parallel` or `extensions.parallel: true` in the manifest (either
   surface alone turns it on; a malformed manifest value fails the boot rather

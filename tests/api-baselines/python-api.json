@@ -482,6 +482,10 @@
           "kind": "method",
           "signature": "(self, /, node_types=None)"
         },
+        "build_text_index": {
+          "kind": "method",
+          "signature": "(self, /, node_type, property)"
+        },
         "build_vector_index": {
           "kind": "method",
           "signature": "(self, /, node_type, text_column, m=None, ef_construction=None, ef_search=None, metric=None)"
@@ -626,6 +630,10 @@
           "kind": "method",
           "signature": "(self, /, node_type, property)"
         },
+        "drop_text_index": {
+          "kind": "method",
+          "signature": "(self, /, node_type, property)"
+        },
         "drop_vector_index": {
           "kind": "method",
           "signature": "(self, /, node_type, text_column)"
@@ -733,6 +741,10 @@
         "has_schema": {
           "kind": "method",
           "signature": "(self, /)"
+        },
+        "has_text_index": {
+          "kind": "method",
+          "signature": "(self, /, node_type, property)"
         },
         "has_vector_index": {
           "kind": "method",
