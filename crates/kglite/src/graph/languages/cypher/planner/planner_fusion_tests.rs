@@ -218,6 +218,56 @@ fn test_text_score_json_shaped_string_stays_text() {
     assert_eq!(texts[0].1, "[1.0, 0.0]");
 }
 
+/// Every `text_score(...)` call in the RETURN items, in order.
+fn return_calls(query: &CypherQuery) -> Vec<(&String, &Vec<Expression>)> {
+    let mut calls = Vec::new();
+    for clause in &query.clauses {
+        if let Clause::Return(r) = clause {
+            for item in &r.items {
+                if let Expression::FunctionCall { name, args, .. } = &item.expression {
+                    calls.push((name, args));
+                }
+            }
+        }
+    }
+    calls
+}
+
+#[test]
+fn test_two_text_queries_rewrite_to_two_parameters() {
+    // Why this is asserted here: the rewritten calls land on `vector_score`,
+    // whose per-query cache keys entries by their arguments — a parameter by
+    // its *name* (`executor::execution_support::ArgKey`). Two texts sharing one
+    // parameter name would therefore share one prepared query vector, which is
+    // the silent wrong answer that cache carried before 0.16.10. Distinct texts
+    // must mint distinct parameters, and one text reused must not mint two (the
+    // embedder sees each distinct query once).
+    let params = HashMap::new();
+    let (query, texts) = rewrite_ts(
+        "MATCH (n:Doc) RETURN text_score(n, 'summary', 'alpha') AS a, \
+         text_score(n, 'summary', 'beta') AS b, \
+         text_score(n, 'summary', 'alpha') AS c",
+        &params,
+    )
+    .unwrap();
+
+    assert_eq!(
+        texts,
+        vec![
+            ("__ts_0".to_string(), "alpha".to_string()),
+            ("__ts_1".to_string(), "beta".to_string()),
+        ]
+    );
+    let names: Vec<&str> = return_calls(&query)
+        .iter()
+        .map(|(_, args)| match &args[2] {
+            Expression::Parameter(p) => p.as_str(),
+            other => panic!("expected a parameter argument, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(names, vec!["__ts_0", "__ts_1", "__ts_0"]);
+}
+
 #[test]
 fn test_text_score_rejects_non_string_non_list_parameter() {
     let mut params = HashMap::new();

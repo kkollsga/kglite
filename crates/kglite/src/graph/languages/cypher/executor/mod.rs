@@ -58,8 +58,10 @@ type SpatialCacheShard = RwLock<HashMap<usize, Option<NodeSpatialData>>>;
 pub struct CypherExecutor<'a> {
     pub(super) graph: &'a DirGraph,
     pub(super) params: &'a HashMap<String, Value>,
-    /// Cache for vector_score constant arguments.
-    vs_cache: OnceLock<VectorScoreCache>,
+    /// Caches for `vector_score()`'s constant arguments — one slot per call
+    /// site, keyed by the arguments themselves. See [`VectorScoreCache`] for
+    /// the wrong answer an unkeyed slot returned before 0.16.10.
+    vs_cache: VectorScoreCaches,
     /// Cache for the first `text_bm25()` call site's constant arguments, its
     /// tokenized query and the index generation that query resolved against.
     /// See [`TextBm25Cache`] for why one slot is enough and what a second call
@@ -157,7 +159,7 @@ impl<'a> CypherExecutor<'a> {
         CypherExecutor {
             graph,
             params,
-            vs_cache: OnceLock::new(),
+            vs_cache: VectorScoreCaches::default(),
             tb_cache: OnceLock::new(),
             deadline,
             cancel: None,

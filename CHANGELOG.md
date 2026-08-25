@@ -119,6 +119,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A second `vector_score()` in one query returned the first call's score.**
+  The per-query cache that parses the property name, query vector and metric
+  once had no record of *which* call it was prepared for, so the first
+  `vector_score` in a query answered every later one:
+  `RETURN vector_score(d, 'summary_emb', [1.0, 0.0]) AS a,
+  vector_score(d, 'summary_emb', [0.0, 1.0]) AS c` returned `a == c`, and so
+  did a query scoring two embedding columns, or the same column under two
+  metrics. Wrong silently — the scores were well-formed numbers. `text_score`
+  was affected through the same cache (it rewrites to `vector_score`), so two
+  differently-worded semantic scores in one query collided too. Each call site
+  now caches under its own arguments, and a query vector read out of the row
+  (`vector_score(d, 'summary_emb', d.vec)`) is scored per row as written.
+
 - **`size()` / `length()` on a bracket-delimited string returned an element
   count instead of the character count.** A string whose text happened to
   start with `[` and end with `]` was parsed as a JSON list and measured by

@@ -4,7 +4,7 @@ use super::super::ast::{Clause, ConstraintCommand, Expression, SchemaCommand};
 use crate::datatypes::values::Value;
 use crate::graph::core::pattern_matching::PatternElement;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 // ============================================================================
 // Specialized Distance Filter Types
@@ -129,17 +129,115 @@ impl Ord for ScoredRowRef {
 // Executor
 // ============================================================================
 
-/// Cache for pre-computed `vector_score()` function arguments.
-/// Initialized lazily via `OnceLock` on first use within a query.
-/// The query vector, property name, and similarity function are identical for
-/// every row, so we parse them once and reuse thereafter.
+/// Pre-computed `vector_score()` arguments for one call site.
+///
+/// The property, query vector and metric are the same for every row of one
+/// call, so they are parsed once and reused — but *only* by a call that asked
+/// the same question. Until 0.16.9 this was a single unkeyed slot and the
+/// first call site's answer was served to every later `vector_score` in the
+/// query, so `RETURN vector_score(d, 'e', [1,0]), vector_score(d, 'e', [0,1])`
+/// returned the same number twice. [`ArgKey`] is that identity;
+/// [`VectorScoreCaches`] is why a second call site still gets a cache.
 pub(super) struct VectorScoreCache {
+    /// Keys for `args[1..]` — property, query vector, and the metric when it
+    /// was written. `None` when at least one of them is row-dependent: such an
+    /// entry scores the row that prepared it and is never parked, because the
+    /// next row's answer may differ.
+    pub(super) keys: Option<Vec<ArgKey>>,
     pub(super) prop_name: String,
     pub(super) query_vec: Vec<f32>,
     pub(super) scorer: crate::graph::algorithms::vector::Scorer,
 }
 
-/// The cheap identity of one row-independent `text_bm25()` argument.
+impl VectorScoreCache {
+    /// The keys for a call's constant arguments, or `None` when any of them is
+    /// row-dependent.
+    pub(super) fn key_for(args: &[Expression]) -> Option<Vec<ArgKey>> {
+        args[1..].iter().map(ArgKey::of).collect()
+    }
+
+    /// Whether this entry was prepared for exactly this call's arguments. A
+    /// keyless entry matches nothing — including the call that produced it.
+    pub(super) fn matches(&self, args: &[Expression]) -> bool {
+        self.keys.as_ref().is_some_and(|keys| {
+            keys.len() + 1 == args.len()
+                && keys
+                    .iter()
+                    .zip(&args[1..])
+                    .all(|(key, arg)| key.matches(arg))
+        })
+    }
+}
+
+/// How many distinct `vector_score()` call sites one query caches. A hybrid
+/// retrieval query scores a handful of columns at most; beyond this the extra
+/// call sites re-prepare per row (correct, just slower) rather than evicting
+/// an entry another call site is reading.
+const VECTOR_SCORE_CACHE_SLOTS: usize = 4;
+
+/// The `vector_score()` caches for one execution — one slot per call site.
+///
+/// Lock-free by construction: each slot is written once, and a row that finds
+/// no matching slot prepares its own answer instead of waiting for one. That
+/// matters because the projection loop runs inside a rayon region above
+/// `parallel::PROJECTION_MIN_ROWS`, where a shared lock would be one contended
+/// cache line per row.
+#[derive(Default)]
+pub(super) struct VectorScoreCaches {
+    slots: [OnceLock<VectorScoreCache>; VECTOR_SCORE_CACHE_SLOTS],
+}
+
+impl VectorScoreCaches {
+    /// The entry prepared for exactly these arguments, if one is parked.
+    pub(super) fn get(&self, args: &[Expression]) -> Option<&VectorScoreCache> {
+        self.slots
+            .iter()
+            .filter_map(OnceLock::get)
+            .find(|entry| entry.matches(args))
+    }
+
+    /// Park `entry` in the first free slot and hand back the parked reference.
+    ///
+    /// `Err(entry)` returns it unparked — every slot is taken, or the entry has
+    /// no key and must not be reused at all. The caller scores its own row with
+    /// it and drops it.
+    pub(super) fn park(
+        &self,
+        entry: VectorScoreCache,
+    ) -> Result<&VectorScoreCache, VectorScoreCache> {
+        if entry.keys.is_none() {
+            return Err(entry);
+        }
+        let mut entry = entry;
+        for slot in &self.slots {
+            match slot.set(entry) {
+                Ok(()) => {
+                    return Ok(slot.get().expect("this thread just filled the slot"));
+                }
+                // Another thread filled it first (or an earlier call site did);
+                // the entry comes back untouched, so try the next slot.
+                Err(returned) => entry = returned,
+            }
+        }
+        Err(entry)
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: how many times `vector_score()` parsed its constant
+    /// arguments. The cache's promise is "once per call site, not once per
+    /// row", and nothing in a query's *result* distinguishes a hit from a
+    /// miss — the cached and uncached paths compute the same number — so the
+    /// tests read this counter instead. Rows are projected on the calling
+    /// thread below `parallel::PROJECTION_MIN_ROWS`, which the tests stay
+    /// under.
+    pub(super) static VECTOR_SCORE_PREPARES: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// The cheap identity of one row-independent `text_bm25()` / `vector_score()`
+/// argument.
 ///
 /// A cached entry has to be able to say "this row's call is the *same* call" —
 /// and it has to say it without evaluating the argument, because evaluating a
@@ -151,6 +249,16 @@ pub(super) struct VectorScoreCache {
 pub(super) enum ArgKey {
     Literal(Value),
     Param(String),
+    /// A bracketed list of literals — `vector_score(d, 'e', [1.0, 0.0])`. The
+    /// parser keeps it as a `ListLiteral` of `Literal` elements; only the
+    /// clause-level constant folding collapses it into one
+    /// `Literal(Value::List)` (`fold_constants_expr`), and folding steps over
+    /// the shapes it treats conservatively — a call inside a `CASE`, for one —
+    /// so this is a form the scalar really receives. Without this arm such a
+    /// call has no key at all and re-parses its vector on every row.
+    /// A list holding anything else (a property, an expression) stays keyless:
+    /// its value belongs to one row.
+    LiteralList(Vec<Value>),
 }
 
 impl ArgKey {
@@ -161,6 +269,14 @@ impl ArgKey {
         match expr {
             Expression::Literal(value) => Some(ArgKey::Literal(value.clone())),
             Expression::Parameter(name) => Some(ArgKey::Param(name.clone())),
+            Expression::ListLiteral(items) => items
+                .iter()
+                .map(|item| match item {
+                    Expression::Literal(value) => Some(value.clone()),
+                    _ => None,
+                })
+                .collect::<Option<Vec<Value>>>()
+                .map(ArgKey::LiteralList),
             _ => None,
         }
     }
@@ -169,6 +285,13 @@ impl ArgKey {
         match (self, expr) {
             (ArgKey::Literal(value), Expression::Literal(other)) => value == other,
             (ArgKey::Param(name), Expression::Parameter(other)) => name == other,
+            // Compared element-wise against the expression, so a hit costs no
+            // allocation — the per-row path this cache exists to avoid.
+            (ArgKey::LiteralList(values), Expression::ListLiteral(items)) => values.len()
+                == items.len()
+                && values.iter().zip(items).all(
+                    |(value, item)| matches!(item, Expression::Literal(other) if value == other),
+                ),
             _ => false,
         }
     }
@@ -176,10 +299,11 @@ impl ArgKey {
 
 /// Pre-computed `text_bm25()` arguments for one call.
 ///
-/// **Why the arguments are the key, and not "the query".** `vector_score`'s
-/// cache is one `OnceLock` for the whole query, which is wrong the moment a
-/// query scores two different things — and a hybrid retrieval query
-/// (`text_bm25` over a title and over a body, fused) is exactly that shape.
+/// **Why the arguments are the key, and not "the query".** A per-query cache
+/// with no argument identity is wrong the moment a query scores two different
+/// things — and a hybrid retrieval query (`text_bm25` over a title and over a
+/// body, fused) is exactly that shape. That was `vector_score`'s bug through
+/// 0.16.9; see [`VectorScoreCache`].
 /// Two calls that agree on node type, property and query text legitimately
 /// share one prepared query; a call that disagrees on any of them re-prepares
 /// per row rather than reading an answer that is not its own.

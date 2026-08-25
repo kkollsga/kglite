@@ -13,6 +13,7 @@
 //!   result columns, `datetime()` time/zone, integer overflow and div-by-zero)
 //! - [`strings`] — string functions and procedure list arguments
 //! - [`text_bm25`] — the BM25 scalar's null/zero split, freshness policy, cache
+//! - [`vector_score`] — the embedding-store scalar's per-query argument cache
 //! - [`vectors`] — `dot` / `cosine` / `norm` over list-valued data
 //! - [`parallel`] — deadline/cancel polling inside the rayon-parallel regions
 #![allow(clippy::approx_constant)]
@@ -37,6 +38,7 @@ mod parallel;
 mod semantics;
 mod strings;
 mod text_bm25;
+mod vector_score;
 mod vectors;
 
 /// Test helper: unwraps evaluate_comparison Result for use in assert!()

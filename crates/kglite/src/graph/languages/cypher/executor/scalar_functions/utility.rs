@@ -37,47 +37,19 @@ impl<'a> CypherExecutor<'a> {
                     }
                 };
 
-                // Get or initialize cache — constant args parsed once, reused for all rows
-                let c = match self.vs_cache.get() {
-                    Some(c) => c,
-                    None => {
-                        let prop_name = match self.evaluate_expression(&args[1], row)? {
-                            Value::String(s) => s,
-                            _ => return Err(
-                                "vector_score(): second argument must be a string property name"
-                                    .into(),
-                            ),
-                        };
-                        let query_vec = self.extract_float_list(&args[2], row)?;
-                        // Resolve metric: explicit arg > stored metric > cosine default
-                        let metric_name = if args.len() > 3 {
-                            match self.evaluate_expression(&args[3], row)? {
-                                Value::String(s) => s,
-                                _ => "cosine".to_string(),
-                            }
-                        } else {
-                            // Look up stored metric from the embedding store
-                            self.graph
-                                .embeddings
-                                .iter()
-                                .find(|((_, pn), _)| pn == &prop_name)
-                                .and_then(|(_, store)| store.metric.clone())
-                                .unwrap_or_else(|| "cosine".to_string())
-                        };
-                        let metric = vs::DistanceMetric::from_name(&metric_name).ok_or_else(|| {
-                            format!(
-                                "vector_score(): unknown metric '{}'. Use 'cosine', 'dot_product', 'euclidean', or 'poincare'.",
-                                metric_name
-                            )
-                        })?;
-                        let scorer = vs::Scorer::new(metric, &query_vec);
-                        let _ = self.vs_cache.set(VectorScoreCache {
-                            prop_name,
-                            query_vec,
-                            scorer,
-                        });
-                        self.vs_cache.get().unwrap()
-                    }
+                // The constant arguments, parsed once per call site — or per
+                // row when this call's arguments are row-dependent, or when
+                // every cache slot already belongs to another call site.
+                let uncached;
+                let c = match self.vs_cache.get(args) {
+                    Some(cached) => cached,
+                    None => match self.vs_cache.park(self.prepare_vector_score(args, row)?) {
+                        Ok(parked) => parked,
+                        Err(entry) => {
+                            uncached = entry;
+                            &uncached
+                        }
+                    },
                 };
 
                 // Per-row: look up node type → embedding store → compute similarity
@@ -363,6 +335,56 @@ impl CypherExecutor<'_> {
             let _ = self.tb_cache.set(cache);
         }
         scored
+    }
+
+    /// Parse `vector_score()`'s constant arguments — property name, query
+    /// vector, and the metric (explicit argument, else the store's own, else
+    /// cosine).
+    ///
+    /// The returned entry carries the key it was prepared under, so the caller
+    /// can park it for the rest of the scan; a row-dependent argument yields a
+    /// keyless entry that scores this row only.
+    fn prepare_vector_score(
+        &self,
+        args: &[Expression],
+        row: &ResultRow,
+    ) -> Result<VectorScoreCache, String> {
+        #[cfg(test)]
+        VECTOR_SCORE_PREPARES.with(|count| count.set(count.get() + 1));
+
+        let prop_name = match self.evaluate_expression(&args[1], row)? {
+            Value::String(s) => s,
+            _ => {
+                return Err("vector_score(): second argument must be a string property name".into())
+            }
+        };
+        let query_vec = self.extract_float_list(&args[2], row)?;
+        let metric_name = if args.len() > 3 {
+            match self.evaluate_expression(&args[3], row)? {
+                Value::String(s) => s,
+                _ => "cosine".to_string(),
+            }
+        } else {
+            self.graph
+                .embeddings
+                .iter()
+                .find(|((_, pn), _)| pn == &prop_name)
+                .and_then(|(_, store)| store.metric.clone())
+                .unwrap_or_else(|| "cosine".to_string())
+        };
+        let metric = vs::DistanceMetric::from_name(&metric_name).ok_or_else(|| {
+            format!(
+                "vector_score(): unknown metric '{}'. Use 'cosine', 'dot_product', 'euclidean', or 'poincare'.",
+                metric_name
+            )
+        })?;
+        let scorer = vs::Scorer::new(metric, &query_vec);
+        Ok(VectorScoreCache {
+            keys: VectorScoreCache::key_for(args),
+            prop_name,
+            query_vec,
+            scorer,
+        })
     }
 
     /// Score one row against an already-prepared query.
