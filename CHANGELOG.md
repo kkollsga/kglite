@@ -98,6 +98,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no compatibility promise; `save_subset(path)` covers the documented use. The
   underlying scan remains available to Rust embedders as
   `kglite::api::io::pass_a_scan` and friends.
+- **The `spec` parameter of `kglite::api::io::save_subset` (Rust API).** It
+  was accepted and then ignored: a Rust embedder passing
+  `Some(&SubsetSpec { edge_types: Some(...) })` got the *unfiltered* subset
+  back, with no error and nothing in the output to say the edge-type filter
+  had not been applied — a silent wrong answer for the one caller shape the
+  parameter existed to serve. Nothing in-tree ever passed anything but `None`
+  (the Python `save_subset(path)` route included), so the argument is dropped
+  rather than given meaning it never had; the node selection is, and always
+  was, what decides a subset's contents. `SubsetSpec` itself is unchanged and
+  still filters the disk Pass A scans (`pass_a_scan`, `pass_a_scan_to_file`),
+  where it has always been honored. Rust callers drop the trailing `None`;
+  the Python API is untouched.
 
 ## [0.16.9] - 2026-08-23
 

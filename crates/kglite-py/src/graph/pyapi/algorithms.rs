@@ -1478,12 +1478,7 @@ impl KnowledgeGraph {
         let selection = self.cursor.selection.clone();
         let path_owned = path.to_string();
         py.detach(move || {
-            kglite_core::api::io::save_subset(
-                &inner,
-                &selection,
-                std::path::Path::new(&path_owned),
-                None,
-            )
+            kglite_core::api::io::save_subset(&inner, &selection, std::path::Path::new(&path_owned))
         })
         .map_err(PyErr::new::<pyo3::exceptions::PyIOError, _>)
     }

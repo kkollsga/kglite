@@ -11,8 +11,9 @@ use crate::graph::storage::mapped::mmap_vec::MmapOrVec;
 use crate::graph::storage::property_storage::ColumnarRow;
 use std::path::Path;
 
-/// Canonical streaming-filter spec. The fluent chain
-/// (`select().expand().save_subset()`) lowers into this.
+/// Edge-type filter for the disk Pass A scans ([`pass_a_scan`],
+/// [`pass_a_scan_to_file`]). Node-selection-driven saves do not take one —
+/// the selection carries the filter there.
 #[derive(Clone, Debug, Default)]
 pub struct SubsetSpec {
     /// Restrict to edges of these types. `None` means all edge types.
@@ -347,15 +348,10 @@ pub fn pass_a_scan_to_file(
 /// The output reloads into any storage mode via `kglite.open(path,
 /// storage=...)`; `kglite.load` takes no `storage` argument and restores the
 /// mode the checkpoint recorded.
-///
-/// `_spec` is unused — the selection carries the filter. The parameter
-/// exists so Cypher integration can lower into the same entry point without
-/// an API change.
 pub fn save_subset(
     source: &DirGraph,
     selection: &CowSelection,
     out_path: &Path,
-    _spec: Option<&SubsetSpec>,
 ) -> Result<(), String> {
     use crate::graph::mutation::subgraph::extract_subgraph;
 
