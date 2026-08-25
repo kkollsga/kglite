@@ -50,6 +50,33 @@ mod multi_label_tests {
     }
 
     #[test]
+    fn create_index_refused_on_secondary_only_label() {
+        let mut g = DirGraph::new();
+        let idx = add_node(&mut g, "n1", "Person");
+        let reviewer = g.interner.get_or_intern("Reviewer");
+        g.add_node_label(idx, reviewer);
+
+        // Secondary-only label: the index would never be consulted — refuse.
+        let err = g
+            .create_property_index_routed("Reviewer", "name")
+            .unwrap_err();
+        assert!(err.contains("secondary label"), "got: {err}");
+        assert!(g.reject_secondary_only_index_type("Reviewer").is_err());
+
+        // Primary type stays indexable, secondary label or not.
+        assert!(g.create_property_index_routed("Person", "name").is_ok());
+
+        // A label unknown to the graph stays allowed (pre-declaration).
+        assert!(g.reject_secondary_only_index_type("Unknown").is_ok());
+
+        // A label that is BOTH a primary type and a secondary label serves
+        // the primary side of the union — allowed.
+        let other = add_node(&mut g, "n2", "Reviewer");
+        let _ = other;
+        assert!(g.reject_secondary_only_index_type("Reviewer").is_ok());
+    }
+
+    #[test]
     fn remove_node_label_errors_on_primary() {
         let mut g = DirGraph::new();
         let idx = add_node(&mut g, "n1", "Person");

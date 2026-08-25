@@ -39,6 +39,11 @@ impl KnowledgeGraph {
         property: &str,
     ) -> PyResult<Py<PyAny>> {
         let graph = get_graph_mut(&mut self.inner);
+        // Raised here as ValueError so the refusal isn't wrapped in the
+        // IOError below, whose message assumes a disk build failure.
+        graph
+            .reject_secondary_only_index_type(node_type)
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
         // Checked before the rebuild below mutates the index — that ordering
         // is what makes the returned `created` flag honest.
         let already_existed = graph.has_any_index(node_type, property);
@@ -318,6 +323,9 @@ impl KnowledgeGraph {
         property: &str,
     ) -> PyResult<Py<PyAny>> {
         let graph = get_graph_mut(&mut self.inner);
+        graph
+            .reject_secondary_only_index_type(node_type)
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
         let unique_values = graph.create_range_index(node_type, property);
 
         let result_dict = PyDict::new(py);
@@ -396,7 +404,9 @@ impl KnowledgeGraph {
         properties: Vec<String>,
     ) -> PyResult<Py<PyAny>> {
         let graph = get_graph_mut(&mut self.inner);
-
+        graph
+            .reject_secondary_only_index_type(node_type)
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
         let props_refs: Vec<&str> = properties.iter().map(|s| s.as_str()).collect();
         let unique_values = graph.create_composite_index(node_type, &props_refs);
         let result_dict = PyDict::new(py);

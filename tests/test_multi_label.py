@@ -623,3 +623,36 @@ def test_return_node_carries_secondary_labels(g):
     g.add_label("Assessment", ["a1"], "Verified")
     rows = g.cypher("MATCH (a:Assessment {id:'a1'}) RETURN a").to_list()
     assert set(rows[0]["a"]["labels"]) == {"Assessment", "Verified"}
+
+
+# ─── CREATE INDEX on a secondary-only label is refused ─────────────────────
+# Property/range/composite indexes are keyed by primary type; an index on a
+# label that exists only as a secondary label would never be consulted, and
+# 0.16.10 built it silently. Now it errors, naming the reason.
+
+
+def test_create_index_refused_on_secondary_only_label(g):
+    g.cypher("CREATE (n:Person:Reviewer {name: 'Alice'})")
+    with pytest.raises(Exception, match="secondary label"):
+        g.cypher("CREATE INDEX FOR (n:Reviewer) ON (n.name)")
+    with pytest.raises(ValueError, match="secondary label"):
+        g.create_index("Reviewer", "name")
+    with pytest.raises(ValueError, match="secondary label"):
+        g.create_range_index("Reviewer", "name")
+    with pytest.raises(ValueError, match="secondary label"):
+        g.create_composite_index("Reviewer", ["name", "age"])
+
+
+def test_create_index_allowed_when_label_also_primary(g):
+    g.cypher("CREATE (n:Person:Reviewer {name: 'Alice'})")
+    g.cypher("CREATE (n:Reviewer {name: 'Bob'})")  # Reviewer now a primary type
+    result = g.create_index("Reviewer", "name")
+    assert result["created"] is True
+    g.cypher("CREATE INDEX FOR (n:Person) ON (n.name)")  # primary unaffected
+
+
+def test_create_index_on_unknown_label_still_allowed(g):
+    # Pre-declaring an index for a type with no nodes yet stays legal.
+    g.cypher("CREATE (n:Person {name: 'Alice'})")
+    result = g.create_index("FutureType", "name")
+    assert result["unique_values"] == 0

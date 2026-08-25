@@ -405,6 +405,7 @@ fn create_composite_index(
         return Err(already_exists_message(&index_name(label, &canonical)));
     }
 
+    graph.reject_secondary_only_index_type(label)?;
     let property_refs: Vec<&str> = properties.iter().map(String::as_str).collect();
     graph.create_composite_index(label, &property_refs);
     Ok(indexes_added(1))

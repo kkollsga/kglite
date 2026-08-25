@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `CREATE INDEX` (Cypher) and `create_index` / `create_range_index` /
+  `create_composite_index` (Python) on a label that exists only as a
+  *secondary* label now fail with a clear error instead of silently building
+  an index no lookup ever consults — property indexes are keyed by primary
+  type. A label that is also a live or schema-declared primary type stays
+  indexable.
+
 - The `REMOVE n:PrimaryType` error (and two `add_label`/`remove_label`
   docstrings) advised retyping via `SET n.type = 'NewType'` — an operation
   that does not exist (`SET n.type` is itself rejected). The message now says

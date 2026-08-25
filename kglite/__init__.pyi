@@ -5330,6 +5330,11 @@ class KnowledgeGraph:
         Returns:
             Dict with ``node_type``, ``property``, ``unique_values``,
             ``persistent``, and ``created`` (``False`` if the index already existed).
+
+        Raises:
+            ValueError: If ``node_type`` exists only as a secondary label —
+                property indexes are keyed by primary type, so such an index
+                would never be consulted. Index the nodes' primary type.
         """
         ...
 
@@ -5434,6 +5439,10 @@ class KnowledgeGraph:
             Dict with ``node_type``, ``property``, ``unique_values``,
             ``created``.
 
+        Raises:
+            ValueError: If ``node_type`` exists only as a secondary label
+                (indexes are keyed by primary type; see ``create_index``).
+
         Example::
 
             graph.create_range_index('Person', 'age')
@@ -5467,6 +5476,10 @@ class KnowledgeGraph:
         Returns:
             Dict with ``node_type``, ``properties``, and
             ``unique_combinations``.
+
+        Raises:
+            ValueError: If ``node_type`` exists only as a secondary label
+                (indexes are keyed by primary type; see ``create_index``).
         """
         ...
 

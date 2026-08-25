@@ -210,6 +210,7 @@ impl DirGraph {
         node_type: &str,
         property: &str,
     ) -> Result<(usize, bool), String> {
+        self.reject_secondary_only_index_type(node_type)?;
         if let Some(disk) = self.graph.as_disk_mut() {
             let count = disk
                 .build_property_index(node_type, property)
@@ -217,6 +218,40 @@ impl DirGraph {
             return Ok((count, true));
         }
         Ok((self.create_index(node_type, property), false))
+    }
+
+    /// Property, range, and composite indexes are keyed by **primary type**
+    /// (`create_index` iterates `type_indices`; the matcher's lookup paths
+    /// filter on `node_type_of`), so indexing a label that exists only as a
+    /// secondary label installs an index no lookup will ever consult, and
+    /// reporting success for that is worse than failing (the
+    /// `reject_empty_disk_index` doctrine). A label that is also a live or
+    /// schema-declared primary type stays indexable — the primary side of the
+    /// union is served. Callers: `create_property_index_routed` (single +
+    /// range via the Cypher path), plus the composite/range entry points that
+    /// don't route through it.
+    pub fn reject_secondary_only_index_type(&self, node_type: &str) -> Result<(), String> {
+        let is_secondary = self.has_secondary_labels
+            && self
+                .secondary_label_index
+                .contains_key(&InternedKey::from_str(node_type));
+        if !is_secondary {
+            return Ok(());
+        }
+        let is_primary = self.type_indices.contains_key(node_type)
+            || self
+                .schema_definition
+                .as_ref()
+                .is_some_and(|schema| schema.node_schemas.contains_key(node_type));
+        if is_primary {
+            return Ok(());
+        }
+        Err(format!(
+            "'{node_type}' is a secondary label, not a node type: property indexes are keyed \
+             by primary type, so this index would never be consulted. MATCH (n:{node_type}) \
+             already resolves through the secondary-label candidate index; create property \
+             indexes on the nodes' primary type instead."
+        ))
     }
 
     /// Returns true if the index existed and was removed. Routes by backend
