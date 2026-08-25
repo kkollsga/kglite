@@ -1,6 +1,6 @@
 //! GeoJSON → WKT + centroid conversion for blueprint node CSVs.
 //!
-//! Two modes, both matching the old Python loader at `loader.py:660`:
+//! Two modes:
 //! - If the CSV already has a WKT column (e.g. Sodir's `wkt_geometry`),
 //!   we do nothing — the value passes through as a string property.
 //! - If the CSV has a `_geometry` column containing GeoJSON strings, we

@@ -3,7 +3,7 @@
 // extern-crate collision with this crate's own `[lib] name = "kglite_py"`.
 //
 // The engine subtree is not glob-re-exported: the wheel reaches the engine
-// exclusively through `kglite_core::api::*` (roadmap Piece 4 hard seal), and
+// exclusively through `kglite_core::api::*` (the hard seal), and
 // `kglite_core::graph` is `pub(crate)` in the engine, unreachable from here.
 pub mod embedder;
 pub mod languages;

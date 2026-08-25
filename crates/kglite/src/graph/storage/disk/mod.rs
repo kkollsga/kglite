@@ -1,6 +1,6 @@
 //! CSR + mmap disk storage backend (Wikidata-scale).
 //!
-//! `DiskGraph` (in `disk_graph.rs`) owns a CSR edge format + mmap'd
+//! `DiskGraph` (in `graph.rs`) owns a CSR edge format + mmap'd
 //! column stores for out-of-core property data.
 //!
 //! Split out:

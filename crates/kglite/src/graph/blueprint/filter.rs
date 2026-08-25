@@ -2,7 +2,7 @@
 //! filtering.
 //!
 //! Filters operate on raw CSV strings so ordering is preserved: filter,
-//! then type-coerce — same as the Python loader at `loader.py:604`.
+//! then type-coerce.
 
 use super::csv_loader::RawCsv;
 use serde_json::Value as Json;
@@ -81,7 +81,7 @@ fn eval_op(op: &str, cell_null: bool, cell: &str, operand: &Json) -> bool {
         "<=" => cmp(cell_null, cell, operand)
             .map(|o| !o.is_gt())
             .unwrap_or(false),
-        _ => true, // unknown op — be permissive (matches loader.py which just skips)
+        _ => true, // unknown op — be permissive and skip the predicate
     }
 }
 

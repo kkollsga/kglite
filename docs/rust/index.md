@@ -133,8 +133,8 @@ Both examples are pyo3-free; `cargo tree -p kglite | rg pyo3` returns empty.
   the C ABI crate that non-Rust bindings (Go, JS, JVM, .NET, …)
   consume. Naming rules, opaque-handle pattern, errno-style
   errors, JSON-at-boundary, sync-only ABI, versioning.
-- **[API reference](api-reference.md)** — manifest of the stable
-  `kglite::api::*` items + semver guarantees. Full per-symbol
+- **[API reference](api-reference.md)** — manifest of the curated
+  `kglite::api::*` items + the pre-1.0 stability policy. Full per-symbol
   docs (post-publish) at [docs.rs/kglite](https://docs.rs/kglite).
 - **[Cypher reference](../reference/cypher-reference.md)** —
   the Cypher subset kglite supports. Same syntax across all

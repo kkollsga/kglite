@@ -1051,7 +1051,7 @@ fn build_fk_columns(
     pk_idx: usize,
     fk_idx: usize,
 ) -> (String, Vec<Option<String>>, Vec<Option<String>>) {
-    // Keep only rows with a non-null target id (matches Python at loader.py:468).
+    // Keep only rows with a non-null target id.
     if pk == fk {
         // Self-reference: synthesise _target_{fk} so source/target column names differ.
         let target_col = format!("_target_{}", fk);

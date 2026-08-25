@@ -11,9 +11,12 @@
 //!
 //! Downstream Rust consumers (the Python wheel, the C ABI, the
 //! CLI, the bolt and mcp server binaries) should depend on the
-//! curated [`api`] module — those items get semver guarantees.
-//! Anything else is an implementation detail. Non-Rust bindings
-//! (Java today) reach that same surface through the C ABI.
+//! curated [`api`] module — it is the documented surface, locked
+//! against accidental drift by a CI API baseline. Pre-1.0 that is
+//! not a no-break promise: any release, **including a patch**, may
+//! ship a documented breaking change, announced in `CHANGELOG.md`.
+//! Anything outside [`api`] is an implementation detail. Non-Rust
+//! bindings (Java today) reach that same surface through the C ABI.
 //!
 //! See `docs/rust/embedding.md` for the embedder guide.
 

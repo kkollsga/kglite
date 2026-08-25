@@ -1,9 +1,9 @@
 # API reference
 
-The stable surface — `kglite::api::*` — that gets semver
-guarantees. Items outside this surface (`kglite::graph::*`,
-`kglite::datatypes::*`, etc.) are implementation details and may
-move between minor releases.
+The curated, documented surface — `kglite::api::*`. Items outside
+this surface (`kglite::graph::*`, `kglite::datatypes::*`, etc.) are
+implementation details and may move in any release. See
+[Stability policy](#stability-policy) for what pre-1.0 guarantees.
 
 For per-symbol API docs (function signatures, struct fields,
 trait method docs), use **[docs.rs/kglite](https://docs.rs/kglite)**.
@@ -37,7 +37,7 @@ Pre-1.0, the policy is:
 **1.0 criterion:** the 0.14 surface — after the options-struct pass on
 `api::algorithms` — soaks across releases without needing a breaking correction.
 When the curated facade proves stable in the field, we cut 1.0 and the pre-1.0
-"minor may break" latitude ends.
+"any release may break" latitude ends.
 
 ## Engine types
 
@@ -122,15 +122,17 @@ loaders.
 
 ## Semver
 
-`kglite::api::*` items above get semver guarantees within a minor
-release. Anything outside that surface — `kglite::graph::*`,
-`kglite::datatypes::*`, raw module paths — is internal and may
-move freely between minor releases.
+`kglite::api::*` items above are the documented surface: locked against
+accidental drift by the CI API baseline, and every intentional break is
+announced in `CHANGELOG.md`. Pre-1.0 that break may arrive in **any** release,
+including a patch — see [Stability policy](#stability-policy). Anything outside
+that surface — `kglite::graph::*`, `kglite::datatypes::*`, raw module paths —
+is internal and may move freely in any release.
 
 | Change kind | Bumps |
 |---|---|
 | Additive item/options field in `api::*` | Patch or minor, with API baseline update |
-| Intentional breaking change before 1.0 | Minor plus changelog/migration guidance |
+| Intentional breaking change before 1.0 | Any release, patch included, plus changelog/migration guidance |
 | Internal rearrangement (non-api items) | Patch |
 
 The `.kgl` format is versioned separately from the source API. The current

@@ -1,4 +1,3 @@
-// src/graph/export.rs
 //! Export graph data to various visualization formats
 
 use crate::datatypes::values::Value;
@@ -43,17 +42,7 @@ pub fn to_graphml(
 
     xml.push_str("  <graph id=\"G\" edgedefault=\"directed\">\n");
 
-    // Determine which nodes to export
-    let node_indices: Vec<_> = if let Some(sel) = selection {
-        let level_idx = sel.get_level_count().saturating_sub(1);
-        if let Some(level) = sel.get_level(level_idx) {
-            level.get_all_nodes()
-        } else {
-            graph.graph.node_indices().collect()
-        }
-    } else {
-        graph.graph.node_indices().collect()
-    };
+    let node_indices = selected_node_indices(graph, selection);
 
     let node_set: std::collections::HashSet<_> = node_indices.iter().copied().collect();
 
@@ -147,17 +136,7 @@ pub fn to_d3_json(
     // Arena guard: disk-backed node/edge reads materialize into the query
     // arena (protocol in disk/graph.rs); no-op on memory/mapped.
     let _arena_guard = graph.graph.begin_query();
-    // Determine which nodes to export
-    let node_indices: Vec<_> = if let Some(sel) = selection {
-        let level_idx = sel.get_level_count().saturating_sub(1);
-        if let Some(level) = sel.get_level(level_idx) {
-            level.get_all_nodes()
-        } else {
-            graph.graph.node_indices().collect()
-        }
-    } else {
-        graph.graph.node_indices().collect()
-    };
+    let node_indices = selected_node_indices(graph, selection);
 
     let node_set: std::collections::HashSet<_> = node_indices.iter().copied().collect();
 
@@ -271,17 +250,7 @@ pub fn to_gexf(graph: &DirGraph, selection: Option<&CurrentSelection>) -> Result
     xml.push_str("      <attribute id=\"0\" title=\"connection_type\" type=\"string\"/>\n");
     xml.push_str("    </attributes>\n");
 
-    // Determine which nodes to export
-    let node_indices: Vec<_> = if let Some(sel) = selection {
-        let level_idx = sel.get_level_count().saturating_sub(1);
-        if let Some(level) = sel.get_level(level_idx) {
-            level.get_all_nodes()
-        } else {
-            graph.graph.node_indices().collect()
-        }
-    } else {
-        graph.graph.node_indices().collect()
-    };
+    let node_indices = selected_node_indices(graph, selection);
 
     let node_set: std::collections::HashSet<_> = node_indices.iter().copied().collect();
 
@@ -470,17 +439,7 @@ pub fn to_csv(
     // Arena guard: disk-backed node/edge reads materialize into the query
     // arena (protocol in disk/graph.rs); no-op on memory/mapped.
     let _arena_guard = graph.graph.begin_query();
-    // Determine which nodes to export
-    let node_indices: Vec<_> = if let Some(sel) = selection {
-        let level_idx = sel.get_level_count().saturating_sub(1);
-        if let Some(level) = sel.get_level(level_idx) {
-            level.get_all_nodes()
-        } else {
-            graph.graph.node_indices().collect()
-        }
-    } else {
-        graph.graph.node_indices().collect()
-    };
+    let node_indices = selected_node_indices(graph, selection);
 
     let node_set: std::collections::HashSet<_> = node_indices.iter().copied().collect();
 

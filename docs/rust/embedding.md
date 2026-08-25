@@ -78,10 +78,13 @@ construction lives in the separate `codingest` crate.
 
 ## The stable API surface
 
-`kglite::api::*` is the curated surface that gets semver
-guarantees. Everything else (`kglite::graph::*`,
+`kglite::api::*` is the curated, documented surface. Pre-1.0 that
+is not a no-break promise: any release, including a patch, may ship
+a documented breaking change, announced in `CHANGELOG.md`. Pin an
+exact version (`kglite = "=X.Y.Z"`) and upgrade against the
+changelog. Everything else (`kglite::graph::*`,
 `kglite::datatypes::*`, etc.) is an implementation detail
-that may move between minor releases.
+that may move in any release.
 
 ### Engine types
 
@@ -253,14 +256,14 @@ development needed per binding.
 
 | Item | Stability |
 |---|---|
-| `kglite::api::*` | **Semver-stable** within a minor. Breaking changes are announced + version-bumped. |
-| `kglite::error::*` | Patch-stable within a 0.x minor; minor releases may make documented breaking changes. |
+| `kglite::api::*` | **The documented surface**, CI-baseline-locked. Pre-1.0, any release — patch included — may ship a documented break, announced in `CHANGELOG.md`. |
+| `kglite::error::*` | Same policy as `api::*`: documented breaks may land in any pre-1.0 release. |
 | `kglite::graph::*` (raw module path) | **Internal**. Subject to reorganization. Always go through `api::*` re-exports. |
 | `kglite::datatypes::*` (raw module path) | Internal — use `api::{Value, NodeValue, PathValue, RelValue}`. |
 | Public items outside the curated `api::*` boundary | **Unstable** implementation detail; do not bind them. |
 
 If you depend on something outside `api::*`, you're on your own
-for minor-version compatibility.
+for compatibility across every release.
 
 ## See also
 

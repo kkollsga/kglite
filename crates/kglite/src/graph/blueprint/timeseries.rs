@@ -1,8 +1,7 @@
 //! Blueprint timeseries preparation.
 //!
 //! Translates a `TimeseriesSpec` into the columnar data that the graph's
-//! `timeseries_store` and `timeseries_configs` expect. Mirrors the Python
-//! loader's `_prepare_timeseries` (`loader.py:737`) plus the per-node
+//! `timeseries_store` and `timeseries_configs` expect, plus the per-node
 //! grouping done by `add_nodes`'s PyO3 wrapper.
 
 use super::csv_loader::RawCsv;
@@ -120,9 +119,9 @@ pub fn resolve(spec: &TimeseriesSpec, _raw: &RawCsv) -> Result<ResolvedTimeserie
     })
 }
 
-/// Drop rows where any time component below `year` is zero — pandas loader
-/// does this at `loader.py:634`. These are aggregate rows (e.g. month=0
-/// annual totals) that would otherwise create spurious node entries.
+/// Drop rows where any time component below `year` is zero. These are
+/// aggregate rows (e.g. month=0 annual totals) that would otherwise create
+/// spurious node entries.
 pub fn drop_zero_time_components(raw: &mut RawCsv, spec: &TimeseriesSpec) {
     let TimeKey::Composite(map) = &spec.time_key else {
         return;

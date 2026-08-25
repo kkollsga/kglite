@@ -50,7 +50,7 @@ pub struct InternedKey(u64);
 impl InternedKey {
     /// Compute the interned key from a string. **Must be deterministic across
     /// processes and library versions** — `DiskNodeSlot.node_type` persists
-    /// this as raw u64 on disk (`disk_graph.rs`), and the loader resolves it
+    /// this as raw u64 on disk (`disk/csr.rs`), and the loader resolves it
     /// via the freshly-built interner's hashes. A per-process random seed
     /// (e.g. `DefaultHasher`) would break cross-process disk loads.
     ///
