@@ -1063,19 +1063,37 @@ impl DiskGraph {
     /// sorted by type, linear fallback otherwise). Overflow-out entries cover
     /// sources added after the last CSR build.
     ///
+    /// **When no index exists at all, every CSR source is swept instead.**
+    /// `enable_disk_mode` converts a populated petgraph straight into the CSR
+    /// and builds no `conn_type_index_*`; `save_disk` writes none either, so a
+    /// reload does not repair it. Skipping the CSR in that state reports "no
+    /// edges of this type" for a graph that has them — a silent wrong answer
+    /// with no signal for the caller to fall back on (unlike
+    /// [`Self::sources_for_conn_type_bounded`], whose `None` says "ask
+    /// elsewhere"). A *populated* index is authoritative: a type absent from it
+    /// genuinely has no CSR sources.
+    ///
     /// The callback returns `true` to continue, `false` to stop iteration —
     /// lets callers collect a bounded prefix (e.g. two sample edges) without
     /// scanning every match.
     ///
-    /// O(matching edges) when `csr_sorted_by_type`, not O(all edges); backs the
-    /// introspection fast path (`describe(connections=['T'])`).
+    /// O(matching edges) when indexed and `csr_sorted_by_type`, not O(all
+    /// edges); backs the introspection fast path
+    /// (`describe(connections=['T'])`). The index-less sweep is O(CSR edges).
     pub fn for_each_edge_of_conn_type<F>(&self, conn_type: u64, mut f: F)
     where
         F: FnMut(NodeIndex, NodeIndex, u32) -> bool,
     {
         self.ensure_csr();
 
-        if !self.conn_type_index_types.is_empty() {
+        let out_offsets_len = self.out_offsets.len().saturating_sub(1);
+        if self.conn_type_index_types.is_empty() {
+            for src_idx in 0..out_offsets_len {
+                if !self.visit_csr_source_of_conn_type(src_idx as u32, conn_type, &mut f) {
+                    return;
+                }
+            }
+        } else {
             let num_types = self.conn_type_index_types.len();
             let mut lo = 0usize;
             let mut hi = num_types;
@@ -1096,54 +1114,10 @@ impl DiskGraph {
             }
 
             if let Some((src_start, src_end)) = range {
-                let out_offsets_len = self.out_offsets.len().saturating_sub(1);
                 for i in src_start..src_end {
                     let src_u32 = self.conn_type_index_sources.get(i);
-                    let src_idx = src_u32 as usize;
-                    if src_idx >= out_offsets_len {
-                        continue;
-                    }
-                    let csr_start = self.out_offsets.get(src_idx) as usize;
-                    let csr_end = self.out_offsets.get(src_idx + 1) as usize;
-
-                    if self.csr_sorted_by_type {
-                        let (lo_p, hi_p) = crate::graph::core::iterators::binary_search_conn_type(
-                            &self.out_edges,
-                            self,
-                            csr_start,
-                            csr_end,
-                            conn_type,
-                        );
-                        for p in lo_p..hi_p {
-                            let e = self.out_edges.get(p);
-                            if e.edge_idx == TOMBSTONE_EDGE {
-                                continue;
-                            }
-                            if !f(
-                                NodeIndex::new(src_u32 as usize),
-                                NodeIndex::new(e.peer as usize),
-                                e.edge_idx,
-                            ) {
-                                return;
-                            }
-                        }
-                    } else {
-                        for p in csr_start..csr_end {
-                            let e = self.out_edges.get(p);
-                            if e.edge_idx == TOMBSTONE_EDGE {
-                                continue;
-                            }
-                            let ep = self.edge_endpoint(e.edge_idx as usize);
-                            if ep.connection_type == conn_type
-                                && !f(
-                                    NodeIndex::new(src_u32 as usize),
-                                    NodeIndex::new(e.peer as usize),
-                                    e.edge_idx,
-                                )
-                            {
-                                return;
-                            }
-                        }
+                    if !self.visit_csr_source_of_conn_type(src_u32, conn_type, &mut f) {
+                        return;
                     }
                 }
             }
@@ -1167,6 +1141,67 @@ impl DiskGraph {
                 }
             }
         }
+    }
+
+    /// Feed `f` every live outgoing CSR edge of `src_u32` whose connection type
+    /// is `conn_type`. Returns `false` once the callback asks to stop, so the
+    /// caller aborts its own source loop.
+    ///
+    /// Out-of-range sources are skipped rather than clamped: the conn-type
+    /// index is persisted independently of the CSR, so a stale index can name a
+    /// source past `out_offsets`.
+    #[inline]
+    fn visit_csr_source_of_conn_type<F>(&self, src_u32: u32, conn_type: u64, f: &mut F) -> bool
+    where
+        F: FnMut(NodeIndex, NodeIndex, u32) -> bool,
+    {
+        let src_idx = src_u32 as usize;
+        if src_idx + 1 >= self.out_offsets.len() {
+            return true;
+        }
+        let csr_start = self.out_offsets.get(src_idx) as usize;
+        let csr_end = self.out_offsets.get(src_idx + 1) as usize;
+
+        if self.csr_sorted_by_type {
+            let (lo_p, hi_p) = crate::graph::core::iterators::binary_search_conn_type(
+                &self.out_edges,
+                self,
+                csr_start,
+                csr_end,
+                conn_type,
+            );
+            for p in lo_p..hi_p {
+                let e = self.out_edges.get(p);
+                if e.edge_idx == TOMBSTONE_EDGE {
+                    continue;
+                }
+                if !f(
+                    NodeIndex::new(src_idx),
+                    NodeIndex::new(e.peer as usize),
+                    e.edge_idx,
+                ) {
+                    return false;
+                }
+            }
+        } else {
+            for p in csr_start..csr_end {
+                let e = self.out_edges.get(p);
+                if e.edge_idx == TOMBSTONE_EDGE {
+                    continue;
+                }
+                let ep = self.edge_endpoint(e.edge_idx as usize);
+                if ep.connection_type == conn_type
+                    && !f(
+                        NodeIndex::new(src_idx),
+                        NodeIndex::new(e.peer as usize),
+                        e.edge_idx,
+                    )
+                {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     /// Borrow an edge's property slice without materializing `EdgeData`.

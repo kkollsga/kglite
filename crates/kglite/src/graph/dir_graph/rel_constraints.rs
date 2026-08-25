@@ -411,8 +411,10 @@ impl DirGraph {
     /// `edge_properties` directly instead of materialising a `Box<EdgeData>`
     /// per edge into the per-query arena, which is the same rule
     /// `owned_node_data` follows on the node side. On disk it is also
-    /// O(matching edges) rather than O(all edges), through the persisted
-    /// `conn_type_index_*` inverted index.
+    /// O(matching edges) rather than O(all edges) whenever the persisted
+    /// `conn_type_index_*` inverted index exists; without one it sweeps the
+    /// CSR, which still visits every relationship of the type — a scan that
+    /// silently found none would install a constraint the data violates.
     ///
     /// Interrupt-checked every [`SCAN_POLL_INTERVAL`] relationships: a
     /// declaration on a large graph is an O(E) read, and the node-side scans'

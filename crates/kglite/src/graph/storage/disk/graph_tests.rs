@@ -1684,3 +1684,80 @@ fn a_failed_publish_registers_its_scratch_for_cleanup() {
         "the conversion scratch must stay registered for drop-time cleanup: {registered:?}"
     );
 }
+
+/// `enable_disk_mode` converts a petgraph whose edges are already present, so
+/// the whole edge set lands in the CSR with no `conn_type_index_*` and no
+/// overflow. `for_each_edge_of_conn_type` must still visit those edges —
+/// treating the absent index as "no sources of this type" makes every
+/// consumer (fused aggregates, `describe` connection sampling) silently
+/// report an empty edge set.
+#[test]
+fn for_each_edge_of_conn_type_visits_csr_edges_without_a_conn_type_index() {
+    let mut graph = DirGraph::new();
+    add_docs(&mut graph, &[1, 2, 3]);
+    let links = DataFrame::from_cypher_rows(
+        vec!["src".to_string(), "tgt".to_string()],
+        vec![
+            vec![Value::Int64(1), Value::Int64(3)],
+            vec![Value::Int64(2), Value::Int64(3)],
+        ],
+    )
+    .unwrap();
+    crate::graph::mutation::maintain::add_connections(
+        &mut graph,
+        links,
+        "LINKS".to_string(),
+        "Doc".to_string(),
+        "src".to_string(),
+        "Doc".to_string(),
+        "tgt".to_string(),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    graph.enable_disk_mode().unwrap();
+
+    let disk = graph.graph.as_disk().expect("disk mode");
+    assert!(
+        disk.conn_type_index_types.is_empty(),
+        "the conversion builds no conn-type index, or this test asserts nothing"
+    );
+    assert!(
+        disk.overflow_out.is_empty(),
+        "converted edges live in the CSR, not overflow, or this test asserts nothing"
+    );
+
+    let conn = InternedKey::from_str("LINKS").as_u64();
+    let mut seen: Vec<(usize, usize)> = Vec::new();
+    disk.for_each_edge_of_conn_type(conn, |src, tgt, _edge_idx| {
+        seen.push((src.index(), tgt.index()));
+        true
+    });
+    seen.sort_unstable();
+    assert_eq!(
+        seen.len(),
+        2,
+        "both LINKS edges must be visited without a conn-type index, got {seen:?}"
+    );
+
+    // A non-existent type must still yield nothing.
+    let absent = InternedKey::from_str("NO_SUCH_TYPE").as_u64();
+    let mut count = 0usize;
+    disk.for_each_edge_of_conn_type(absent, |_, _, _| {
+        count += 1;
+        true
+    });
+    assert_eq!(count, 0, "an unmatched conn type must visit no edges");
+
+    // Early stop still works.
+    let mut visited = 0usize;
+    disk.for_each_edge_of_conn_type(conn, |_, _, _| {
+        visited += 1;
+        false
+    });
+    assert_eq!(
+        visited, 1,
+        "returning false must stop after the first match"
+    );
+}

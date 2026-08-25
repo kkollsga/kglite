@@ -346,3 +346,85 @@ mod index_annotation_tests {
         assert!(line.contains("indexed=\"eq,prefix\""), "got: {line}");
     }
 }
+
+/// `describe(connections=['LINKS'])` samples edges through
+/// `for_each_edge_of_conn_type`. A disk graph converted by `enable_disk_mode`
+/// has its edges in the CSR with no `conn_type_index_*`, and an empty sweep
+/// there reports a connection type that exists with no endpoints and no
+/// samples — a wrong answer an agent plans against.
+#[cfg(test)]
+mod disk_connection_sampling_tests {
+    use super::*;
+    use crate::datatypes::{DataFrame, Value};
+
+    fn linked_docs() -> DirGraph {
+        let nodes = DataFrame::from_cypher_rows(
+            vec!["id".into(), "title".into()],
+            vec![
+                vec![Value::Int64(1), Value::String("a".into())],
+                vec![Value::Int64(2), Value::String("b".into())],
+                vec![Value::Int64(3), Value::String("c".into())],
+            ],
+        )
+        .unwrap();
+        let links = DataFrame::from_cypher_rows(
+            vec!["src".into(), "tgt".into()],
+            vec![
+                vec![Value::Int64(1), Value::Int64(3)],
+                vec![Value::Int64(2), Value::Int64(3)],
+            ],
+        )
+        .unwrap();
+        let mut graph = DirGraph::new();
+        crate::graph::mutation::maintain::add_nodes(
+            &mut graph,
+            nodes,
+            "Doc".to_string(),
+            "id".to_string(),
+            Some("title".to_string()),
+            None,
+        )
+        .unwrap();
+        crate::graph::mutation::maintain::add_connections(
+            &mut graph,
+            links,
+            "LINKS".to_string(),
+            "Doc".to_string(),
+            "src".to_string(),
+            "Doc".to_string(),
+            "tgt".to_string(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        graph
+    }
+
+    #[test]
+    fn a_converted_disk_graph_still_samples_its_connections() {
+        let mut graph = linked_docs();
+        graph.enable_disk_mode().unwrap();
+        assert!(
+            graph
+                .graph
+                .as_disk()
+                .expect("disk mode")
+                .conn_type_index_types
+                .is_empty(),
+            "the conversion builds no conn-type index, or this test asserts nothing"
+        );
+
+        let acc = accumulate_connection_topic(&graph, InternedKey::from_str("LINKS"), "LINKS", 5);
+        assert!(
+            !acc.samples.is_empty(),
+            "an index-less disk graph must still yield sample edges"
+        );
+        assert_eq!(
+            acc.pair_counts.get(&("Doc".to_string(), "Doc".to_string())),
+            Some(&2),
+            "both Doc→Doc edges must be counted, got {:?}",
+            acc.pair_counts
+        );
+    }
+}

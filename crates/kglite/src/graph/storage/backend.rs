@@ -782,8 +782,9 @@ impl GraphBackend {
     ///
     /// Avoids the disk backend's per-edge `Box<EdgeData>` arena push by reading
     /// `edge_endpoints` + `edge_properties` directly, and is O(matching edges)
-    /// there thanks to the persisted `conn_type_index_*` inverted index rather
-    /// than the O(all edges) of a filtered `edge_references()` sweep. On
+    /// there when the persisted `conn_type_index_*` inverted index is present
+    /// (a graph converted by `enable_disk_mode` has none and falls back to an
+    /// O(CSR edges) sweep — still every matching edge, just not indexed). On
     /// Memory/Mapped the petgraph iterator already hands out `&EdgeData` into
     /// resident storage, so there is no arena cost either way.
     #[inline(always)]

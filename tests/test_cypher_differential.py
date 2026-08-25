@@ -1761,6 +1761,22 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "WHERE hires >= 4 RETURN c.name AS n, hires ORDER BY n",
         None,
     ),
+    (
+        # Typed source, **untyped** group target — the shape that routes to
+        # `try_fast_with_aggregate_via_histogram`'s typed-source branch, which
+        # reads the disk backend's conn-type edge scan. On a disk graph built by
+        # `enable_disk_mode` that scan found nothing (no `conn_type_index_*` is
+        # ever written for a converted graph) and the fused path returned zero
+        # rows while the naive path returned the right ones. This corpus is
+        # in-memory only, so the disk half is pinned by the golden test
+        # `test_disk_mutation_roundtrip.py::
+        # test_converted_disk_graph_fused_aggregate_golden`; the entry here
+        # keeps the *shape* under differential watch.
+        "typed_source_untyped_group_count",
+        "social_graph",
+        "MATCH (p:Person)-[:WORKS_AT]->(c) WITH c, count(p) AS hires RETURN hires ORDER BY hires",
+        None,
+    ),
     # ── multi-pattern within a single MATCH (regression for self-join + LIMIT bug) ──
     # Before the fix, push_limit_into_match accepted single-MATCH queries
     # but didn't check single-pattern, so multi-pattern + WHERE + LIMIT

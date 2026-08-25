@@ -72,6 +72,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   aggregate**, because both routed on a bare `GraphBackend::Disk` match rather
   than through the write-capture-transparent `as_disk()`; results were
   unchanged, the disk fast paths were not.
+- **A disk graph created by `enable_disk_mode()` answered edge-type queries as
+  if it had no edges of any type.** The conversion builds the CSR straight from
+  the in-memory graph and writes no connection-type index; `save()` writes none
+  either, so `kglite.open()` on the published directory inherits the same
+  state. The disk edge-type scan read that missing index as "no source has an
+  edge of this type" and stopped, so on a converted graph
+  `MATCH (p:Person)-[:VISITED]->(c) WITH c, count(p) AS n RETURN n` returned
+  **no rows** where the same query with `disable_optimizer=True` returned the
+  right ones; `describe(connections=[...])` reported a type with `count="2"`
+  and no endpoints and no sample edges; and declaring a relationship constraint
+  verified itself against zero existing relationships, installing a constraint
+  the stored data violates. The scan now sweeps the CSR when no index exists —
+  every matching edge, O(CSR edges) instead of O(matching edges) until one is
+  built — and a graph that *has* an index is unchanged, index lookups and all.
+  Graphs built with `KnowledgeGraph(storage="disk", path=...)` were never
+  affected.
 
 ## [0.16.9] - 2026-08-23
 

@@ -1227,3 +1227,62 @@ def test_disk_string_set_survives_a_third_save(tmp_path):
     reloaded = kglite.load(graph_path)
     titles = [r["v"] for r in _rows(reloaded.cypher("MATCH (n:Person) RETURN n.title AS v ORDER BY n.id"))]
     assert titles == ["P0", "P1", "renamed", "again", "P4"]
+
+
+def _converted_disk_graph(path: str) -> KnowledgeGraph:
+    """An in-memory graph with edges, converted by ``enable_disk_mode(path)``.
+
+    The conversion builds the CSR straight from the petgraph and writes no
+    ``conn_type_index_*`` sidecar — a state no reload repairs, since ``save``
+    writes none either. It is the state every ``enable_disk_mode`` /
+    ``kglite.open`` user is in, and the disk edge scan used to read it as
+    "this connection type has no edges".
+    """
+    kg = KnowledgeGraph()
+    kg.add_nodes(pd.DataFrame({"id": [1, 2], "title": ["a", "b"]}), "Person", "id", "title")
+    kg.add_nodes(pd.DataFrame({"id": [10], "title": ["Oslo"]}), "City", "id", "title")
+    kg.add_connections(
+        pd.DataFrame({"src": [1, 2], "tgt": [10, 10]}),
+        "VISITED",
+        "Person",
+        "src",
+        "City",
+        "tgt",
+    )
+    kg.enable_disk_mode(path)
+    return kg
+
+
+_FUSED_AGGREGATE = "MATCH (p:Person)-[:VISITED]->(c) WITH c, count(p) AS n RETURN n"
+
+
+def test_converted_disk_graph_fused_aggregate_golden(tmp_path):
+    """Absolute expected value, not just optimizer-vs-naive agreement.
+
+    The optimizer's typed-source fast path returned ``[]`` here while the
+    unoptimised path returned the right row, so both halves are pinned: the
+    differential corpus is in-memory only and could never see this.
+    """
+    graph_path = str(tmp_path / "converted")
+    kg = _converted_disk_graph(graph_path)
+
+    assert _rows(kg.cypher(_FUSED_AGGREGATE)) == [{"n": 2}]
+    assert _rows(kg.cypher(_FUSED_AGGREGATE, disable_optimizer=True)) == [{"n": 2}]
+
+    del kg
+    reloaded = kglite.load(graph_path)
+    assert _rows(reloaded.cypher(_FUSED_AGGREGATE)) == [{"n": 2}]
+    assert _rows(reloaded.cypher(_FUSED_AGGREGATE, disable_optimizer=True)) == [{"n": 2}]
+
+
+def test_converted_disk_graph_describes_its_connection_endpoints(tmp_path):
+    """``describe`` samples through the same scan; empty endpoints under a
+    non-zero ``count`` is the shape of the bug, and an agent plans against it.
+    """
+    graph_path = str(tmp_path / "converted_describe")
+    kg = _converted_disk_graph(graph_path)
+
+    description = kg.describe(connections=["VISITED"])
+    assert 'count="2"' in description
+    assert '<pair from="Person" to="City" count="2"/>' in description
+    assert "<edge from=" in description, f"no sample edges in: {description}"
