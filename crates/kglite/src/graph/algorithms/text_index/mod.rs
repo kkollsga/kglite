@@ -156,6 +156,65 @@ impl TextIndex {
         index
     }
 
+    /// Rebuild an index from the id-independent view [`TextIndex::iter_terms`]
+    /// produces, plus the slots whose document holds no terms.
+    ///
+    /// The inverse of that view, and the only constructor that does not
+    /// tokenize — which is what makes it the right shape for persistence: term
+    /// ids are internal, so a `.kgl` section records terms by *name* and this
+    /// re-assigns ids in arrival order. The result is logically the index that
+    /// was written and scores identically to it, and it is *compacted*: the
+    /// free list a churned index accumulates does not survive the round-trip,
+    /// because nothing outside the index can observe an id.
+    ///
+    /// Empty documents have to be named separately: they appear in no posting
+    /// list, and losing them would change BM25's `N` and therefore every score
+    /// in the corpus.
+    ///
+    /// **Trusts nothing.** A caller reconstructing from bytes runs
+    /// [`TextIndex::validate`] on the result and discards a payload that does
+    /// not describe a coherent index — duplicate terms, a posting list out of
+    /// order, or a document length that overflowed all surface there.
+    pub fn from_terms<S: AsRef<str>>(
+        terms: impl IntoIterator<Item = (S, Vec<Posting>)>,
+        empty_docs: &[u32],
+    ) -> Self {
+        let mut index = Self::new();
+        for (name, postings) in terms {
+            // A term with no postings is not live — `release_term` retires one
+            // the moment its last posting goes — so interning it here would
+            // break the id-space invariant `validate` checks.
+            if postings.is_empty() {
+                continue;
+            }
+            let name: Arc<str> = Arc::from(name.as_ref());
+            let id = index.names.len() as TermId;
+            index.names.push(Some(Arc::clone(&name)));
+            index.ids.insert(name, id);
+            index.postings.push(postings);
+        }
+        // The forward view is derived rather than carried: it is exactly the
+        // transpose of the postings, so persisting it too would store every
+        // (term, document) pair twice and let the two copies disagree.
+        let mut docs: FxHashMap<u32, Doc> = FxHashMap::default();
+        for (id, list) in index.postings.iter().enumerate() {
+            for posting in list {
+                let doc = docs.entry(posting.slot).or_default();
+                doc.terms.push((id as TermId, posting.tf));
+                // Saturating rather than wrapping: a corrupt length has to stay
+                // *visibly* wrong so `validate` refuses it, and a wrapped one
+                // could coincide with the true sum.
+                doc.len = doc.len.saturating_add(posting.tf);
+            }
+        }
+        for &slot in empty_docs {
+            docs.entry(slot).or_default();
+        }
+        index.total_len = docs.values().map(|doc| u64::from(doc.len)).sum();
+        index.docs = docs;
+        index
+    }
+
     /// Index `text` under `slot`, replacing whatever that slot held.
     ///
     /// This is the whole refresh surface: a node created after the build and a
@@ -272,8 +331,6 @@ impl TextIndex {
     }
 
     /// Token count of an indexed document, or `None` if the slot is unindexed.
-    // P11 serializes the forward view through this; no production caller yet.
-    #[allow(dead_code)]
     pub fn doc_len(&self, slot: u32) -> Option<u32> {
         self.docs.get(&slot).map(|doc| doc.len)
     }
@@ -327,8 +384,6 @@ impl TextIndex {
     }
 
     /// Every indexed slot, in arbitrary order.
-    // P11 enumerates documents through this when writing the `.kgl` section.
-    #[allow(dead_code)]
     pub fn doc_slots(&self) -> impl Iterator<Item = u32> + '_ {
         self.docs.keys().copied()
     }
@@ -336,8 +391,6 @@ impl TextIndex {
     /// Every live term with its postings, in id order. This is the logical
     /// content of the index — id-independent, so it is the right basis for
     /// comparing two indexes and for serializing one.
-    // P11 writes the `.kgl` section from this id-independent view.
-    #[allow(dead_code)]
     pub fn iter_terms(&self) -> impl Iterator<Item = (&str, &[Posting])> + '_ {
         self.names
             .iter()

@@ -138,6 +138,14 @@ impl Clone for TextIndexStore {
 pub struct TextIndexRead<'a>(RwLockReadGuard<'a, TextIndex>);
 
 impl TextIndexRead<'_> {
+    /// The whole index behind this view — what persistence writes. Everything
+    /// else here is a query-shaped question; this is the one caller that wants
+    /// the structure itself, and it wants it under the same guard so a
+    /// concurrent refresh cannot renumber the dictionary mid-encode.
+    pub(crate) fn index(&self) -> &TextIndex {
+        &self.0
+    }
+
     /// Tokenize and resolve a query string against this index's dictionary.
     pub fn prepare_query(&self, query: &str) -> PreparedQuery {
         self.0.prepare_query(query)
@@ -202,6 +210,13 @@ impl TextIndexStore {
     /// The alias-resolved field this index reads.
     pub fn resolved_field(&self) -> &str {
         &self.resolved_field
+    }
+
+    /// The catch-up state to persist beside the index. An index that covers a
+    /// prefix of its type has to record what it has yet to cover, or a reload
+    /// presents a stale index as a current one.
+    pub(crate) fn freshness_state(&self) -> &IndexFreshness {
+        &self.freshness
     }
 
     /// Documents in the index.
@@ -507,6 +522,38 @@ pub fn build_text_index(
     graph.text_indexes.insert(key_pair, store);
     graph.bump_version();
     Ok(report)
+}
+
+/// Install an index restored from a `.kgl` section, with the freshness state,
+/// resolved field and skipped count it was saved with.
+///
+/// Persistence-only. Every other route into `graph.text_indexes` goes through
+/// [`build_text_index`], which reads the graph and therefore covers it by
+/// construction; this one is handed an index it must take on trust, so the
+/// decoder validates the payload before calling in here.
+///
+/// `skipped` is carried rather than recomputed on purpose: it is a *build-time*
+/// count of nodes that produced no document, and nothing short of a rebuild can
+/// restate it — resetting it to zero would turn "100 of your nodes are
+/// invisible to search" into a claim that none are.
+pub(crate) fn attach_persisted_text_index(
+    graph: &mut DirGraph,
+    node_type: &str,
+    property: &str,
+    index: TextIndex,
+    freshness: IndexFreshness,
+    resolved_field: String,
+    skipped: usize,
+) {
+    graph.text_indexes.insert(
+        index_key(node_type, property),
+        TextIndexStore {
+            index: RwLock::new(index),
+            freshness,
+            resolved_field,
+            skipped,
+        },
+    );
 }
 
 /// Fold every outstanding change into the text index over

@@ -115,6 +115,7 @@ const EMBEDDINGS_SECTION: &str = "embeddings";
 const TIMESERIES_SECTION: &str = "timeseries";
 const SECONDARY_LABELS_SECTION: &str = "secondary_labels";
 const VECTOR_INDEX_SECTION: &str = "vector_index";
+const TEXT_INDEX_SECTION: &str = "text_index";
 
 /// Canonical `section_digests` key for one node type's column section.
 ///
@@ -334,6 +335,17 @@ pub(crate) struct FileMetadata {
     /// `.kgl` files default to 0.
     #[serde(default)]
     vector_index_compressed_size: u64,
+    /// 0.16.10: compressed size of the BM25 text-index section (0 if none).
+    /// Self-describing like the vector section above — its own magic and its
+    /// own payload version — so a reader that does not recognise the payload
+    /// skips it and the (rebuildable) index is simply absent.
+    ///
+    /// Skipped when zero, unlike `vector_index_compressed_size`: this field
+    /// arrived after the byte-level golden digests, so a graph with no text
+    /// index has to write exactly the bytes it wrote before the field existed
+    /// (`unique_constraint_keys` above states the posture in full).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    text_index_compressed_size: u64,
     /// CRC32 (IEEE) of each section's **compressed** bytes, keyed by canonical
     /// section name (see [`column_section_key`] and the "Section integrity"
     /// note above).
@@ -417,6 +429,7 @@ impl FileMetadata {
             timeseries_compressed_size: 0,
             secondary_labels_compressed_size: 0,
             vector_index_compressed_size: 0,
+            text_index_compressed_size: 0,
             section_digests: BTreeMap::new(),
             // Persist edge type counts if cache is warm (no O(E) scan if cold)
             edge_type_counts: if graph.has_edge_type_counts_cache() {
@@ -908,7 +921,7 @@ fn build_section_digests(
     topology: &[u8],
     column_meta: &[PortableColumnSection],
     column_data: &[Vec<u8>],
-    optional: [(&str, Option<&[u8]>); 4],
+    optional: [(&str, Option<&[u8]>); 5],
 ) -> BTreeMap<String, u32> {
     let mut digests = BTreeMap::new();
     digests.insert(TOPOLOGY_SECTION.to_string(), section_digest(topology));
@@ -1018,6 +1031,11 @@ pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()
         None => None,
     };
 
+    let text_index_compressed = match encode_text_indexes(graph)? {
+        Some(payload) => Some(zstd_compress(&payload)?),
+        None => None,
+    };
+
     let section_digests = build_section_digests(
         &topology_compressed,
         &column_sections_meta,
@@ -1030,6 +1048,7 @@ pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()
                 secondary_labels_compressed.as_deref(),
             ),
             (VECTOR_INDEX_SECTION, vector_index_compressed.as_deref()),
+            (TEXT_INDEX_SECTION, text_index_compressed.as_deref()),
         ],
     );
     let mut metadata = FileMetadata::from_graph(graph);
@@ -1049,6 +1068,10 @@ pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()
         .map(|b| b.len() as u64)
         .unwrap_or(0);
     metadata.vector_index_compressed_size = vector_index_compressed
+        .as_ref()
+        .map(|b| b.len() as u64)
+        .unwrap_or(0);
+    metadata.text_index_compressed_size = text_index_compressed
         .as_ref()
         .map(|b| b.len() as u64)
         .unwrap_or(0);
@@ -1095,6 +1118,13 @@ pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()
     // HNSW vector-index section (0.11.0+). Omitted when no store is indexed.
     if let Some(vi_data) = &vector_index_compressed {
         writer.write_all(vi_data)?;
+    }
+
+    // BM25 text-index section (0.16.10+). Omitted when no type is indexed —
+    // which is also why its metadata key is skipped at zero: a graph with no
+    // text index writes pre-0.16.10 bytes.
+    if let Some(ti_data) = &text_index_compressed {
+        writer.write_all(ti_data)?;
     }
 
     // Flush the writer's own buffer. The atomic-save wrapper additionally
@@ -1824,6 +1854,7 @@ struct PortableSectionPlan {
     timeseries: u64,
     secondary_labels: u64,
     vector_index: u64,
+    text_index: u64,
 }
 
 fn parse_portable_metadata<'a>(
@@ -1869,6 +1900,7 @@ fn decode_portable_topology(
         timeseries: metadata.timeseries_compressed_size,
         secondary_labels: metadata.secondary_labels_compressed_size,
         vector_index: metadata.vector_index_compressed_size,
+        text_index: metadata.text_index_compressed_size,
     };
     let mut dir_graph = DirGraph::from_graph(graph);
     dir_graph.interner = interner;
@@ -2028,6 +2060,15 @@ fn load_portable_optional_sections(
             decode_vector_indexes(&raw, dir_graph);
         }
     }
+    if plan.text_index > 0 {
+        // Same split as the vector section above: framing failures are file
+        // damage and propagate; the payload itself is a rebuildable cache and
+        // an unreadable one is skipped silently (see `decode_text_indexes`).
+        let compressed = sections.take(plan.text_index, TEXT_INDEX_SECTION)?;
+        if let Ok(raw) = zstd_decompress(compressed) {
+            decode_text_indexes(&raw, dir_graph);
+        }
+    }
     Ok(())
 }
 
@@ -2077,6 +2118,9 @@ use columns::{attach_portable_column_stores, load_column_sidecars};
 
 mod save_guard;
 pub use save_guard::SaveError;
+
+mod text_index_persistence;
+use text_index_persistence::{decode_text_indexes, encode_text_indexes};
 
 mod vector_persistence;
 

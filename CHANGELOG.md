@@ -41,6 +41,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   created and an orphaned document would be inherited by it — and a *rolled
   back* delete marks the slot so the next catch-up restores the document.
 
+  **A text index is saved with the graph.** `save()` writes it into the `.kgl`
+  as its own self-describing section, carrying its resolved column, its
+  auto-refresh ceiling and its staleness, and `load()` restores all of it — a
+  reloaded index that was stale is still stale by the same delta, and catching
+  it up produces exactly what a rebuild would. The section is a rebuildable
+  cache, not a format break: a graph with no text index writes byte-identical
+  files to before, older files load unchanged, and a section this build cannot
+  read is skipped rather than refused (rebuild the index in that case).
+
 - **Vector indexes adopt the same catch-up contract as the new text ones.**
   Writing vectors after `build_vector_index` no longer drops the index. Neither
   arm of a vector write moves an existing store slot — an append lands past the

@@ -519,18 +519,6 @@
       "classification": "dead-code"
     },
     {
-      "identity": "crates/kglite/src/graph/algorithms/text_index/mod.rs::fn:doc_len:pub fn doc_len(&self, slot: u32) -> Option<u32>::dead_code",
-      "classification": "dead-code"
-    },
-    {
-      "identity": "crates/kglite/src/graph/algorithms/text_index/mod.rs::fn:doc_slots:pub fn doc_slots(&self) -> impl Iterator<Item = u32> + '_::dead_code",
-      "classification": "dead-code"
-    },
-    {
-      "identity": "crates/kglite/src/graph/algorithms/text_index/mod.rs::fn:iter_terms:pub fn iter_terms(&self) -> impl Iterator<Item = (&str, &[Posting])> + '_::dead_code",
-      "classification": "dead-code"
-    },
-    {
       "identity": "crates/kglite/src/graph/algorithms/text_index/mod.rs::fn:postings_for:pub fn postings_for(&self, term: &str) -> &[Posting]::dead_code",
       "classification": "dead-code"
     },

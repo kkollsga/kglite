@@ -6889,7 +6889,13 @@ class KnowledgeGraph:
         no CJK segmentation.
 
         The index is heap-resident and is **dropped** by :meth:`vacuum`, which
-        renumbers every node — rebuild after vacuuming. It appears in ``SHOW
+        renumbers every node — rebuild after vacuuming. It is **saved with the
+        graph**: :meth:`save` writes it into the ``.kgl`` as its own section,
+        carrying its staleness, and :func:`kglite.load` restores both — a
+        reloaded index that was stale is still stale by the same delta. The
+        section is a rebuildable cache, so a file whose index format this build
+        does not recognise loads *without* the index rather than failing;
+        rebuild it in that case. It appears in ``SHOW
         INDEXES`` / :meth:`schema` under the canonical name
         ``'{node_type}.{property}'`` with type ``FULLTEXT``, alongside any
         equality or range index on the same property, and ``DROP INDEX

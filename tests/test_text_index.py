@@ -287,3 +287,65 @@ def test_the_auto_refresh_limit_is_accepted_as_a_keyword(graph) -> None:
     delta, not the ceiling), so what this pins is the call shape."""
     assert graph.build_text_index("Doc", "body", auto_refresh_limit=5)["indexed"] == 3
     assert graph.build_text_index("Doc", "body", 5)["indexed"] == 3
+
+
+# ── persistence ──────────────────────────────────────────────────────
+
+
+def test_a_saved_graph_reloads_with_its_text_index(graph, tmp_path) -> None:
+    """The index rides in the `.kgl` as its own skippable section, so a reload
+    does not silently drop search off a graph that had it."""
+    graph.build_text_index("Doc", "body")
+    path = tmp_path / "g.kgl"
+    graph.save(str(path))
+
+    loaded = kglite.load(str(path))
+
+    assert loaded.has_text_index("Doc", "body")
+    row = _text_row(loaded)
+    assert row["name"] == "Doc.body"
+    assert row["type"] == "FULLTEXT"
+    assert row["state"] == "ONLINE"
+    assert row["stale"] is False
+    assert row["delta"] == 0
+    assert "Doc.body [text]" in loaded.schema()["indexes"]
+
+
+def test_a_reloaded_index_remembers_what_it_has_yet_to_cover(graph, tmp_path) -> None:
+    """A stale index must come back stale. Restoring the corpus alone would
+    present it as current, and every document written before the save but
+    after the build would be silently unsearchable."""
+    graph.build_text_index("Doc", "body")
+    graph.cypher("CREATE (:Doc {doc_id: 4, name: 'd', body: 'a later document'})")
+    assert _text_row(graph)["delta"] == 1
+
+    path = tmp_path / "g.kgl"
+    graph.save(str(path))
+    loaded = kglite.load(str(path))
+
+    row = _text_row(loaded)
+    assert row["stale"] is True
+    assert row["delta"] == 1
+
+
+def test_a_graph_with_no_text_index_reloads_without_one(graph, tmp_path) -> None:
+    """The pre-0.16.10 file shape: no section written, nothing to read."""
+    path = tmp_path / "g.kgl"
+    graph.save(str(path))
+
+    loaded = kglite.load(str(path))
+
+    assert not loaded.has_text_index("Doc", "body")
+    assert loaded.cypher("SHOW INDEXES").to_list() == []
+    assert loaded.select("Doc").len() == 3
+
+
+def test_a_reloaded_index_can_still_be_dropped_and_rebuilt(graph, tmp_path) -> None:
+    graph.build_text_index("Doc", "body")
+    path = tmp_path / "g.kgl"
+    graph.save(str(path))
+    loaded = kglite.load(str(path))
+
+    assert loaded.drop_text_index("Doc", "body")
+    assert not loaded.has_text_index("Doc", "body")
+    assert loaded.build_text_index("Doc", "body")["indexed"] == 3
