@@ -98,7 +98,7 @@ def test_graph_copy_cow_correctness_mapped():
 #: (run on each platform; the script writes whichever entry matches the
 #: current host).
 BINARY_SIZE_BASELINES = {
-    "darwin": 20_977_248,  # 0.16.9 darwin baseline
+    "darwin": 21_060_032,  # 0.16.10 darwin baseline
     "linux": 28_810_000,  # estimate: the post-code_tree Linux estimate (30.2 MB)
     # scaled by the same −4.6% the macOS loader removal measured. Both
     # removals deliberately recaptured DOWNWARD so the +10% budget guards
@@ -372,6 +372,9 @@ def test_binary_size_regression():
         (hardware CRC dispatch) and the load-throughput cells landed — the
         crc32fast dependency edge is the only growth; no feature changes.
 
+
+      - 0.16.10:       21,060,032 bytes (≈20.1 MB). 0.16.9 -> 0.16.10: the lexical retrieval lane (TextIndex + BM25 kernel + analyzer + FusedTextBm25TopK operator), the IndexFreshness framework, KGLTIDX1 persistence, text_bm25/score_fuse scalars, and the vector-index catch-up path.
+
     Raising the baseline is a deliberate act — every bump should
     be accompanied by an updated growth note above. For a precise
     drilldown, run `cargo bloat --release --crates --filter kglite`.
@@ -403,7 +406,7 @@ def test_binary_size_regression():
     gate = int(baseline * 1.10)
     assert size <= gate, (
         f"{bin_path.name} = {size:,} bytes > gate {gate:,} "
-        f"(+10% over 0.16.9 {platform_key} baseline {baseline:,}). "
+        f"(+10% over 0.16.10 {platform_key} baseline {baseline:,}). "
         "Investigate what grew before raising the gate — see the "
         "growth note in this test's docstring for the breakdown shape."
     )

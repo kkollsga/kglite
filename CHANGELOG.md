@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.10] - 2026-08-25
+
 ### Added
 
 - **`build_text_index(node_type, property)` — an opt-in BM25 lexical index
