@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 
 import kglite
@@ -521,6 +522,16 @@ class KgliteBolt(KgliteCypher):
             import neo4j  # noqa
         except Exception as e:
             return False, f"neo4j driver missing: {e}"
+        # Pay the OS's first-exec cost here, where nothing is timed. macOS
+        # assesses a binary's code signature the first time that *inode* is
+        # executed: measured 2026-08-25, a freshly linked kglite-bolt-server
+        # spawns in 332-540 ms and in 110-112 ms on every later exec. `build`
+        # is the only group that spawns the server and `run_library` refuses
+        # to repeat it for bolt keys (reps=1), so without this the assessment
+        # lands whole inside a published number — it is what turned the 0.16.9
+        # capture's Bulk load into 530.9 ms against a true ~246 ms. Any exec of
+        # the same file clears it; `--help` is the cheapest one that exits 0.
+        subprocess.run([str(_BOLT_BINARY), "--help"], capture_output=True, timeout=60, check=False)
         return True, ""
 
     def build(self, ds: Dataset) -> None:

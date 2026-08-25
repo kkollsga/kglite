@@ -6,18 +6,18 @@ Wall-to-wall time per topic (each topic sums several individual queries), lower 
 
 | Topic | **kglite** | DuckDB | igraph | Kùzu | Neo4j | NetworkX | rustworkx |
 |---|---|---|---|---|---|---|---|
-| Bulk load | 40.7ms | 106.7ms | 17.7ms | 627.0ms | 4.91s | 227.5ms | **14.5ms** |
-| Scan & lookup | 2.5ms | 1.7ms | **15µs** | 4.5ms | 4.7ms | 2.7ms | 250µs |
-| Filter & aggregate | 3.8ms | **1.4ms** | 4.1ms | 3.4ms | 64.2ms | 5.4ms | 3.8ms |
-| Traversal (1–3 hop, filtered, deep) | 16.8ms | 13.2ms | **2.9ms** | 3.66s (5/6) | 272.0ms | 8.0ms | 8.8ms |
-| Pathfinding | **300µs** | — | 22.7ms | 38.9ms | 12.3ms | 472µs | 89.6ms |
-| Multi-type queries | 7.4ms | **1.9ms** | — | 3.5ms | 25.8ms | 117.0ms | — |
-| Graph algorithms | 23.3ms | 6.0ms (2/3) | **3.1ms** | 13.2ms (2/3) | 43.9ms (2/3) | 9.7ms | 8.5ms |
-| Community detection | **139.2ms** | — | 1.07s | — | — | ⏱ timeout | — |
-| Mutations | 4.5ms | 2.4ms | 6.7ms | 145.1ms | 63.6ms | 675µs | **154µs** |
+| Bulk load | 39.7ms | 104.5ms | 17.5ms | 640.8ms | 4.91s | 221.4ms | **13.7ms** |
+| Scan & lookup | 2.4ms | 1.7ms | **14µs** | 4.5ms | 4.7ms | 2.5ms | 241µs |
+| Filter & aggregate | 3.7ms | **1.4ms** | 4.2ms | 3.4ms | 64.2ms | 5.4ms | 3.6ms |
+| Traversal (1–3 hop, filtered, deep) | 16.8ms | 12.9ms | **2.9ms** | 3.51s (5/6) | 272.0ms | 8.0ms | 8.5ms |
+| Pathfinding | **261µs** | — | 22.5ms | 38.3ms | 12.3ms | 482µs | 88.1ms |
+| Multi-type queries | 7.3ms | **1.9ms** | — | 3.4ms | 25.8ms | 117.5ms | — |
+| Graph algorithms | 23.0ms | 5.7ms (2/3) | **2.0ms** | 13.1ms (2/3) | 43.7ms (2/3) | 9.1ms | 8.6ms |
+| Community detection | **133.9ms** | — | 1.41s | — | — | ⏱ timeout | — |
+| Mutations | 4.3ms | 2.4ms | 6.8ms | 143.6ms | 63.6ms | 673µs | **149µs** |
 | Vector search | **4.2ms** | — | — | — | — | — | — |
-| Geospatial | **18µs** | 78µs | — | 277µs | 647µs | — | — |
-| **Total** | **242.8ms** | 133.4ms (22/26) | 1.13s (21/26) | 4.50s (22/26) | 5.40s (23/26) | 371.4ms (24/26) | 125.6ms (20/26) |
+| Geospatial | **17µs** | 73µs | — | 252µs | 647µs | — | — |
+| **Total** | **235.4ms** | 130.7ms (22/26) | 1.46s (21/26) | 4.36s (22/26) | 5.39s (23/26) | 365.1ms (24/26) | 122.8ms (20/26) |
 
 **Bold** marks the fastest engine in each category (among those that fully ran it). Each topic sums its sub-benchmarks. A **`—`** means the engine can't do that category *at all* (e.g. no vector index, no shortest-path query, no Louvain) — a real capability gap, shown rather than hidden, and never estimated. **`(ran/total)`** marks a *partial* topic — the engine does the category but missed a sub-benchmark; rather than drop it (which would flatter the total), the missing one is **estimated** at the engine's average percentile standing across the benchmarks it *did* run. A **`⏱`** marks a sub-bench slower than 10s — too slow to be a useful comparison point, so it's excluded from the time total (the capability still counts). No mark ⇒ it ran the whole category. The **Total's `(ran/26)`** is coverage — how many of the 26 sub-benchmarks the engine can do at all.
 
@@ -65,18 +65,18 @@ Same engine, same results — pick in-memory for speed, mapped/disk for larger-t
 
 | Topic | kglite | kglite (mapped) | kglite (disk) | kglite (fluent) | kglite (Bolt) |
 |---|---|---|---|---|---|
-| Bulk load | 40.7ms | 46.7ms | 88.9ms | 39.8ms | 530.9ms |
-| Scan & lookup | 2.5ms | 2.5ms | 3.7ms | 509µs (2/3) | 171.3ms |
-| Filter & aggregate | 3.8ms | 3.7ms | 6.9ms | 6.5ms | 28.6ms |
-| Traversal (1–3 hop, filtered, deep) | 16.8ms | 17.7ms | 18.0ms | 49.0ms | 218.3ms |
-| Pathfinding | 300µs | 278µs | 328µs | 22.2ms | 3.3ms |
-| Multi-type queries | 7.4ms | 7.4ms | 10.4ms | 49.3ms (2/3) | 10.1ms |
-| Graph algorithms | 23.3ms | 23.5ms | 70.1ms | 8.6ms (2/3) | 37.7ms |
-| Community detection | 139.2ms | 139.4ms | 139.9ms | — | 140.5ms |
-| Mutations | 4.5ms | 4.7ms | 10.7ms | 87.2ms | 20.6ms |
-| Vector search | 4.2ms | 4.2ms | 11.2ms | 134µs | 5.9ms |
-| Geospatial | 18µs | 18µs | 23µs | 21µs | 302µs |
-| **Total** | 242.8ms | 250.2ms | 360.3ms | 263.3ms (22/26) | 1.17s |
+| Bulk load | 39.7ms | 44.2ms | 88.3ms | 38.2ms | 221.5ms |
+| Scan & lookup | 2.4ms | 2.4ms | 3.7ms | 445µs (2/3) | 171.9ms |
+| Filter & aggregate | 3.7ms | 3.6ms | 6.9ms | 6.2ms | 28.6ms |
+| Traversal (1–3 hop, filtered, deep) | 16.8ms | 17.4ms | 18.0ms | 46.6ms | 219.1ms |
+| Pathfinding | 261µs | 273µs | 319µs | 22.0ms | 3.0ms |
+| Multi-type queries | 7.3ms | 8.0ms | 10.1ms | 48.0ms (2/3) | 9.8ms |
+| Graph algorithms | 23.0ms | 23.3ms | 70.4ms | 8.3ms (2/3) | 37.2ms |
+| Community detection | 133.9ms | 134.6ms | 134.3ms | — | 137.8ms |
+| Mutations | 4.3ms | 4.6ms | 10.2ms | 82.3ms | 20.8ms |
+| Vector search | 4.2ms | 4.3ms | 11.5ms | 129µs | 5.7ms |
+| Geospatial | 17µs | 17µs | 22µs | 21µs | 329µs |
+| **Total** | 235.4ms | 242.7ms | 353.7ms | 252.1ms (22/26) | 855.7ms |
 
 ### Scaling
 
@@ -103,9 +103,9 @@ Run on macOS-26.3-arm64-arm-64bit-Mach-O · Python 3.14.3. Numbers are min wall-
 - Results schema: `2`
 - Harness: `graphsuite` v2
 - Dataset signature: `medium-s1234-n25333-e280774`
-- Selected run timestamps: `2026-08-25T18:19:49+02:00` through `2026-08-25T18:21:09+02:00`
+- Selected run timestamps: `2026-08-25T18:21:09+02:00` through `2026-08-25T18:41:06+02:00`
 - Capture origin: `manual`
-- Source commit: `e2df280492ef7d5e6de8673047823784bb5c2458` (dirty: `true`)
+- Source commit: `4822c840edb8aa3c5ea3761172f2d1a26f19e859, e2df280492ef7d5e6de8673047823784bb5c2458` (dirty: `true`)
 - Base repeat policy: `5`
 - Dataset seed: `1234`
 - Raw metadata authority: `benchmarks/competitive/graphsuite/results.json`.

@@ -23,6 +23,7 @@ from benchmarks.competitive.graphsuite import canonical
 from benchmarks.competitive.graphsuite import dataset as dm
 from benchmarks.competitive.graphsuite.ad_kglite import KgliteCypher, KgliteDisk, KgliteFluent, KgliteMapped
 from benchmarks.competitive.graphsuite.base import GROUPS, Skip
+import pytest
 
 
 def _group_digests(adapter_cls, ds) -> dict[str, str]:
@@ -100,3 +101,41 @@ def test_fluent_matches_cypher_on_the_groups_it_claims():
             f"KgliteFluent diverges from KgliteCypher on group '{gid}' "
             f"({fluent[gid]} != {cypher[gid]}) — the benchmark's fluent column would publish a different result"
         )
+
+
+def test_bolt_adapter_pays_the_first_exec_assessment_before_anything_is_timed(monkeypatch):
+    """`KgliteBolt.available()` must execute the server binary once, untimed.
+
+    macOS assesses a binary's code signature the first time that *inode* runs.
+    Measured 2026-08-25: a freshly linked `kglite-bolt-server` spawns in
+    332-540 ms and in 110-112 ms on every exec after; `build` is the only
+    group that spawns it, and `run_library` refuses to repeat `build` for bolt
+    keys, so the whole assessment lands inside a single published number. It
+    is what made the 0.16.9 capture's Bolt "Bulk load" read 530.9 ms against a
+    true ~246 ms. Deleting the pre-warm republishes that inflation silently,
+    which is what this test exists to prevent.
+    """
+    import subprocess
+
+    from benchmarks.competitive.graphsuite import ad_kglite
+
+    pytest.importorskip("neo4j", reason="the bolt adapter reports unavailable without the driver")
+    from tests.conftest import _BOLT_BINARY
+
+    if not _BOLT_BINARY.exists():
+        pytest.skip(f"bolt binary not built at {_BOLT_BINARY}")
+
+    execed: list[str] = []
+    real_run = subprocess.run
+
+    def spy(cmd, *args, **kwargs):
+        execed.append(str(cmd[0]))
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(ad_kglite.subprocess, "run", spy)
+    ok, reason = ad_kglite.KgliteBolt().available()
+    assert ok, reason
+    assert str(_BOLT_BINARY) in execed, (
+        "KgliteBolt.available() no longer execs the server binary — the first-exec "
+        "code-signature assessment will be billed to the timed 'build' group"
+    )
