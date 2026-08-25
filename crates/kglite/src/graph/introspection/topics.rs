@@ -1159,7 +1159,8 @@ pub(super) fn write_fluent_topic_vectors(xml: &mut String) {
     xml.push_str("      <m sig=\"add_embeddings(node_type, text_column, embeddings, metric=None)\">Same, upserting into the existing store so batches coexist. Call save() to persist either.</m>\n");
     xml.push_str("      <m sig=\"search_text(text_column, query, top_k=10, metric=None, returning=None, exact=False)\">Semantic search — auto-embeds the query string. Column first, then the query.</m>\n");
     xml.push_str("      <m sig=\"vector_search(text_column, query_vector, top_k=10, metric=None, returning=None, exact=False)\">Search with an explicit query vector.</m>\n");
-    xml.push_str("      <m sig=\"build_vector_index(node_type, text_column, m=None, ef_construction=None, ef_search=None, metric=None)\">Build an HNSW index so search scales on large stores (opt-in; auto-used; exact=True bypasses). Dropped when vectors change.</m>\n");
+    xml.push_str("      <m sig=\"build_vector_index(node_type, text_column, m=None, ef_construction=None, ef_search=None, metric=None, auto_refresh_limit=None)\">Build an HNSW index so search scales on large stores (opt-in; auto-used; exact=True bypasses). Later vector writes are folded in at query entry while the delta stays under auto_refresh_limit; deletes and vacuum() drop it.</m>\n");
+    xml.push_str("      <m sig=\"refresh_vector_index(node_type, text_column) / drop_vector_index / has_vector_index\">Fold outstanding vectors in now, remove the index (the vectors stay), or probe one. SHOW INDEXES reports stale/delta/unembedded.</m>\n");
     xml.push_str("    </methods>\n");
     xml.push_str("    <examples>\n");
     xml.push_str("      <ex desc=\"setup\">graph.set_embedder('all-MiniLM-L6-v2')</ex>\n");

@@ -1087,10 +1087,18 @@ impl KnowledgeGraph {
     /// Opt-in (like ``create_index``): without it, search is an exact brute-force
     /// scan. Once built, ``vector_search`` / ``search_text`` auto-use the index
     /// for queries covering most of a large store; pass ``exact=True`` to force
-    /// an exact scan. The index is dropped automatically whenever the store's
-    /// vectors change (``add_embeddings`` / ``embed_texts`` / ``compact``) or an
-    /// embedded node is deleted (the delete prunes its vector, which moves a
-    /// slot) — rebuild it afterwards.
+    /// an exact scan.
+    ///
+    /// Later vector writes (``add_embeddings`` / ``embed_texts`` /
+    /// ``set_embeddings``) do **not** drop the index: they are recorded, and the
+    /// next vector query folds them in — while the outstanding delta stays at or
+    /// under ``auto_refresh_limit``. A larger delta is served by the exact scan,
+    /// which is correct and slower, until you rebuild. Catch-up only ever
+    /// indexes vectors that exist; a node with no embedding is reported by
+    /// ``SHOW INDEXES`` as ``unembedded`` and is never embedded by a query.
+    /// Deleting an embedded node, ``compact()`` and a rolled-back delete still
+    /// drop the index outright — each of them moves the slot layout the index
+    /// addresses — so rebuild after those.
     ///
     /// The selection does **not** have to be that one node type: as long as
     /// only one type carries ``text_column``, a whole-graph search (or any
@@ -1113,13 +1121,16 @@ impl KnowledgeGraph {
     ///         ``'dot_product'``, or ``'euclidean'``. ``'poincare'`` is not
     ///         supported (it stays on the exact path). If omitted, uses the
     ///         store's metric, else ``'cosine'``.
+    ///     auto_refresh_limit: How many outstanding vectors a query will fold
+    ///         into the index inline before it serves the exact scan instead
+    ///         (default 1000). Omit on a rebuild to keep the current value.
     ///
     /// Returns:
     ///     dict: ``{'indexed': int, 'metric': str, 'm': int}`` — vectors indexed.
     ///
     /// Raises:
     ///     ValueError: if the store doesn't exist or the metric is unsupported.
-    #[pyo3(signature = (node_type, text_column, m=None, ef_construction=None, ef_search=None, metric=None))]
+    #[pyo3(signature = (node_type, text_column, m=None, ef_construction=None, ef_search=None, metric=None, auto_refresh_limit=None))]
     #[allow(clippy::too_many_arguments)]
     fn build_vector_index(
         &mut self,
@@ -1130,6 +1141,7 @@ impl KnowledgeGraph {
         ef_construction: Option<usize>,
         ef_search: Option<usize>,
         metric: Option<&str>,
+        auto_refresh_limit: Option<usize>,
     ) -> PyResult<Py<PyAny>> {
         let g = get_graph_mut(&mut self.inner);
         // Build off the GIL — pure CPU over the contiguous vector buffer.
@@ -1143,6 +1155,7 @@ impl KnowledgeGraph {
                     ef_construction,
                     ef_search,
                     metric,
+                    auto_refresh_limit,
                 )
             })
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
@@ -1155,32 +1168,42 @@ impl KnowledgeGraph {
     }
 
     /// Drop the HNSW index for an embedding store (search reverts to exact
-    /// brute-force). No-op if no index exists. Returns ``True`` if one was
-    /// dropped.
+    /// brute-force). The vectors are untouched. No-op if no index exists.
+    /// Returns ``True`` if one was dropped.
     #[pyo3(signature = (node_type, text_column))]
     fn drop_vector_index(&mut self, node_type: &str, text_column: &str) -> PyResult<bool> {
-        let key = kglite_core::api::embeddings::store_key(node_type, text_column);
-        let g = get_graph_mut(&mut self.inner);
-        match g.embeddings.get_mut(&key) {
-            Some(store) => {
-                let had = store.has_index();
-                store.invalidate_index();
-                Ok(had)
-            }
-            None => Ok(false),
-        }
+        Ok(kglite_core::api::embeddings::drop_vector_index(
+            get_graph_mut(&mut self.inner),
+            node_type,
+            text_column,
+        ))
     }
 
     /// Whether an HNSW index is currently built over an embedding store.
     #[pyo3(signature = (node_type, text_column))]
     fn has_vector_index(&self, node_type: &str, text_column: &str) -> PyResult<bool> {
-        let key = kglite_core::api::embeddings::store_key(node_type, text_column);
-        Ok(self
-            .inner
-            .embeddings
-            .get(&key)
-            .map(|s| s.has_index())
-            .unwrap_or(false))
+        Ok(kglite_core::api::embeddings::has_vector_index(
+            &self.inner,
+            node_type,
+            text_column,
+        ))
+    }
+
+    /// Fold every outstanding vector into the HNSW index now, instead of
+    /// waiting for a query to do it.
+    ///
+    /// Returns the number of vectors folded in — ``0`` when the index is
+    /// already current, when none is built (catch-up never builds one), or on
+    /// a read-only graph. Queries do this on their own while the delta stays
+    /// under ``auto_refresh_limit``; call it explicitly to pay the cost at a
+    /// moment of your choosing, or to bring an over-limit delta back in one
+    /// step without a rebuild.
+    #[pyo3(signature = (node_type, text_column))]
+    fn refresh_vector_index(&self, node_type: &str, text_column: &str) -> PyResult<usize> {
+        Ok(
+            kglite_core::api::embeddings::refresh_vector_index(&self.inner, node_type, text_column)
+                .unwrap_or(0),
+        )
     }
 }
 

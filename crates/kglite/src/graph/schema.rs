@@ -1,4 +1,5 @@
 use crate::datatypes::values::{FilterCondition, Value};
+use crate::graph::index_freshness::IndexFreshness;
 pub use crate::graph::storage::interner::{InternedKey, StringInterner};
 pub(crate) use crate::graph::storage::interner::{
     SerdeDeserializeGuard, SerdeSerializeGuard, StripPropertiesGuard,
@@ -34,7 +35,7 @@ pub fn is_reserved_provenance_key(key: &str) -> bool {
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock, RwLockReadGuard};
 
 /// Reserved property name marking an auto-vivified stub node — one
 /// created to satisfy an edge whose endpoint had no row of its own.
@@ -970,7 +971,7 @@ impl<'de> Deserialize<'de> for ConnectionTypeInfo {
 /// Contiguous columnar storage for f32 embeddings associated with a (node_type, property_name).
 /// All vectors in one store share the same dimensionality.
 /// The flat Vec<f32> layout enables SIMD-friendly linear scans during vector search.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct EmbeddingStore {
     pub dimension: usize,
     /// Contiguous f32 buffer: embedding i occupies data[i*dimension..(i+1)*dimension]
@@ -1011,15 +1012,82 @@ pub struct EmbeddingStore {
     /// Optional HNSW approximate-nearest-neighbour index over this store's
     /// vectors, built on demand via `build_vector_index`. When present (and the
     /// query isn't `exact`), top-k vector search dispatches through it instead of
-    /// a full linear scan. Indexes nodes by *slot*, so any change to the slot
-    /// layout (in-place vector replacement, `add_embeddings`, compaction, the
-    /// pruning a node deletion does via `remove_embedding`)
-    /// invalidates it — callers drop it via `invalidate_index`. NOT serialized
-    /// here (`#[serde(skip)]`): it rides in a dedicated versioned, skippable
-    /// sub-section of the `.kgl` so the on-disk format can evolve independently;
-    /// absent that section it's simply rebuilt.
+    /// a full linear scan.
+    ///
+    /// The index addresses **store slots**, not node indices, so it survives
+    /// exactly the writes that leave the slot layout alone: appending a vector
+    /// (a new slot above its coverage) and replacing one in place (same slot,
+    /// new content) are tracked as freshness deltas and folded in
+    /// incrementally, while anything that *remaps* slots — a node deletion's
+    /// `remove_embedding` tail swap, its rollback, compaction — drops the index
+    /// outright through [`Self::invalidate_index`].
+    ///
+    /// **Behind a lock** for the same reason the text index is (see
+    /// [`crate::graph::text_indexes`]): catch-up happens at query entry, where
+    /// the caller holds `&DirGraph` and cannot reach a `&mut` store. Lock order
+    /// is this lock first, [`IndexFreshness`] second, never the reverse.
+    ///
+    /// NOT serialized here (`#[serde(skip)]`): it rides in a dedicated
+    /// versioned, skippable sub-section of the `.kgl` so the on-disk format can
+    /// evolve independently; absent that section it's simply rebuilt.
     #[serde(skip)]
-    pub index: Option<crate::graph::algorithms::hnsw::HnswIndex>,
+    index: RwLock<Option<crate::graph::algorithms::hnsw::HnswIndex>>,
+    /// Which store slots the index has yet to cover — the vector lane's half of
+    /// the shared catch-up framework.
+    ///
+    /// Tracked in **store-slot space**, not the graph's node-slot space the
+    /// text lane uses: an embedding store's documents *are* its slots, and a
+    /// node that has never been embedded is not a delta at all (catch-up never
+    /// embeds — decision 11c). That is also why no write hook reaches this
+    /// field: vectors arrive only through the embedding APIs, so bulk node
+    /// ingest cannot make a vector index stale and pays nothing for its
+    /// existence.
+    #[serde(skip, default = "empty_vector_freshness")]
+    freshness: IndexFreshness,
+}
+
+/// Freshness state for a deserialized store, which carries no index yet — the
+/// vector-index section attaches one (with its own state) afterwards, and a
+/// file without that section rebuilds.
+fn empty_vector_freshness() -> IndexFreshness {
+    IndexFreshness::covering(0, None)
+}
+
+impl Clone for EmbeddingStore {
+    /// Deep, never shared — including the HNSW index and its freshness state.
+    /// `Clone` backs snapshots, transactions and `independent_copy`, and each
+    /// of those must be able to catch its index up without touching the other's.
+    fn clone(&self) -> Self {
+        EmbeddingStore {
+            dimension: self.dimension,
+            data: self.data.clone(),
+            node_to_slot: self.node_to_slot.clone(),
+            slot_to_node: self.slot_to_node.clone(),
+            metric: self.metric.clone(),
+            model_id: self.model_id.clone(),
+            text_hashes: self.text_hashes.clone(),
+            norms: self.norms.clone(),
+            index: RwLock::new(self.index_guard().clone()),
+            freshness: self.freshness.clone(),
+        }
+    }
+}
+
+/// A borrowed HNSW index, held for the duration of one query's use of it.
+///
+/// Holding the read guard is what keeps a concurrent catch-up from renumbering
+/// the topology under a search that is walking it — the same reason the text
+/// lane hands out a guard rather than a reference.
+pub struct HnswRead<'a>(RwLockReadGuard<'a, Option<crate::graph::algorithms::hnsw::HnswIndex>>);
+
+impl std::ops::Deref for HnswRead<'_> {
+    type Target = crate::graph::algorithms::hnsw::HnswIndex;
+
+    fn deref(&self) -> &Self::Target {
+        self.0
+            .as_ref()
+            .expect("HnswRead is only constructed over a present index")
+    }
 }
 
 /// One vector lifted out of an [`EmbeddingStore`] by
@@ -1075,21 +1143,15 @@ impl EmbeddingStore {
             model_id: None,
             text_hashes: HashMap::new(),
             norms: Vec::new(),
-            index: None,
+            index: RwLock::new(None),
+            freshness: empty_vector_freshness(),
         }
     }
 
     pub fn with_metric(dimension: usize, metric: &str) -> Self {
         EmbeddingStore {
-            dimension,
-            data: Vec::new(),
-            node_to_slot: HashMap::new(),
-            slot_to_node: Vec::new(),
             metric: Some(metric.to_string()),
-            model_id: None,
-            text_hashes: HashMap::new(),
-            norms: Vec::new(),
-            index: None,
+            ..EmbeddingStore::new(dimension)
         }
     }
 
@@ -1127,16 +1189,21 @@ impl EmbeddingStore {
     }
 
     /// Add or replace an embedding for a node. Returns the slot index.
-    /// Keeps the cached L2 norm (`norms[slot]`) in sync with `data`, and drops
-    /// any HNSW index — mutating the vectors/slot layout would invalidate its
-    /// topology (rebuild via `build_index` after a batch of edits).
+    /// Keeps the cached L2 norm (`norms[slot]`) in sync with `data`.
+    ///
+    /// **Does not drop the HNSW index.** Neither arm moves an existing slot:
+    /// an append lands above the index's coverage and a replacement rewrites
+    /// one slot's content, so both are recorded as freshness deltas and folded
+    /// in by [`Self::refresh_index`] at query entry. Until they are, the index
+    /// is *incomplete*, never wrong — it stores no vectors, so every distance
+    /// it reports is computed from the buffer written here.
     pub fn set_embedding(&mut self, node_index: usize, embedding: &[f32]) -> usize {
-        self.index = None;
         let norm = l2_norm_sq(embedding).sqrt();
         if let Some(&slot) = self.node_to_slot.get(&node_index) {
             let start = slot * self.dimension;
             self.data[start..start + self.dimension].copy_from_slice(embedding);
             self.norms[slot] = norm;
+            self.freshness.note_changed(slot as u32);
             slot
         } else {
             let slot = self.slot_to_node.len();
@@ -1144,6 +1211,7 @@ impl EmbeddingStore {
             self.slot_to_node.push(node_index);
             self.data.extend_from_slice(embedding);
             self.norms.push(norm);
+            self.freshness.note_created(slot as u32, true);
             slot
         }
     }
@@ -1163,7 +1231,7 @@ impl EmbeddingStore {
     /// index is dropped.
     pub fn remove_embedding(&mut self, node_index: usize) -> Option<RemovedEmbedding> {
         let slot = self.node_to_slot.remove(&node_index)?;
-        self.index = None;
+        self.invalidate_index();
         let text_hash = self.text_hashes.remove(&node_index);
         let dim = self.dimension;
         let vector = self.data[slot * dim..(slot + 1) * dim].to_vec();
@@ -1197,7 +1265,7 @@ impl EmbeddingStore {
     /// matters because slot order is scan order, and scan order decides
     /// score ties.
     pub fn restore_embedding(&mut self, node_index: usize, removed: &RemovedEmbedding) {
-        self.index = None;
+        self.invalidate_index();
         let dim = self.dimension;
         let slot = removed.slot;
         let len = self.slot_to_node.len();
@@ -1244,15 +1312,178 @@ impl EmbeddingStore {
         })
     }
 
-    /// Drop any HNSW index (it must be rebuilt after the vectors change).
+    /// Drop any HNSW index. The whole store becomes the outstanding delta —
+    /// which is what it is: nothing is accelerated until a build covers it.
     #[inline]
     pub fn invalidate_index(&mut self) {
-        self.index = None;
+        *self.index.get_mut().unwrap_or_else(|e| e.into_inner()) = None;
+        self.freshness = IndexFreshness::covering(0, Some(self.freshness.limit()));
     }
 
     #[inline]
     pub fn has_index(&self) -> bool {
-        self.index.is_some()
+        self.index_guard().is_some()
+    }
+
+    fn index_guard(
+        &self,
+    ) -> RwLockReadGuard<'_, Option<crate::graph::algorithms::hnsw::HnswIndex>> {
+        // The state behind this lock is a rebuildable cache, so a poisoned
+        // lock is recovered rather than propagated into a query.
+        self.index.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Store slots the HNSW index currently covers; `0` when none is built.
+    pub fn indexed_slots(&self) -> usize {
+        self.index_guard().as_ref().map_or(0, |idx| idx.len())
+    }
+
+    /// Vectors the next catch-up would (re-)read: the slots appended since the
+    /// last build plus the ones replaced in place. An upper bound, O(1) — see
+    /// [`crate::graph::index_freshness`]. Equals the store's size when no index
+    /// is built, since none of it is covered.
+    pub fn delta_size(&self) -> usize {
+        self.freshness.delta_size(self.len() as u32)
+    }
+
+    /// Whether the vectors have moved past what the index covers.
+    pub fn index_is_stale(&self) -> bool {
+        self.freshness.is_stale(self.len() as u32)
+    }
+
+    /// The inline-refresh ceiling in vectors.
+    pub fn auto_refresh_limit(&self) -> usize {
+        self.freshness.limit()
+    }
+
+    /// Whether the outstanding delta is small enough to fold in at query entry.
+    /// `false` for a current index — there is nothing to fold in.
+    pub fn can_auto_refresh(&self) -> bool {
+        self.freshness.within_limit(self.len() as u32)
+    }
+
+    /// Fold every outstanding vector into the HNSW index, returning how many
+    /// slots it touched. `0` when nothing is outstanding — or when no index is
+    /// built, because **catch-up never builds one**: the index is opt-in, and a
+    /// query that quietly constructed one would spend a corpus-sized build the
+    /// caller never asked for.
+    ///
+    /// O(delta): appended slots go in through the incremental insert, replaced
+    /// ones through [`HnswIndex::relink`]. A failure at any point drops the
+    /// index rather than leaving topology whose coverage no longer matches the
+    /// watermark — the store still answers by exact scan, and `build_vector_index`
+    /// restores acceleration.
+    pub fn refresh_index(&self) -> usize {
+        // The index lock is taken *before* the delta is claimed: that ordering
+        // is what makes a second reader either wait for this refresh or find
+        // nothing left to do (`index_freshness`'s lock-order note).
+        let mut guard = self.index.write().unwrap_or_else(|e| e.into_inner());
+        if guard.is_none() {
+            return 0;
+        }
+        let Some(delta) = self.freshness.take_delta(self.len() as u32) else {
+            return 0;
+        };
+        let index = guard.as_mut().expect("presence checked above");
+        let mut seen = 0usize;
+        let mut failed = false;
+        // Ascending, and appends after replacements: `insert` only accepts the
+        // next contiguous slot, so the walk order is a correctness condition,
+        // not a preference. `FreshnessDelta::slots` yields the replaced slots
+        // (all below the old watermark) before the appended run.
+        let mut slots: Vec<u32> = delta.slots().collect();
+        slots.sort_unstable();
+        for slot in slots {
+            seen += 1;
+            let outcome = if (slot as usize) < index.len() {
+                index.relink(slot, &self.data, &self.norms, self.dimension)
+            } else {
+                index.insert(slot, &self.data, &self.norms, self.dimension)
+            };
+            if outcome.is_err() {
+                failed = true;
+                break;
+            }
+        }
+        if failed {
+            *guard = None;
+            return seen;
+        }
+        debug_assert!(
+            index
+                .validate_for_store(&self.data, &self.norms, self.dimension)
+                .is_ok(),
+            "a caught-up HNSW index must still validate against its store: {:?}",
+            index.validate_for_store(&self.data, &self.norms, self.dimension)
+        );
+        seen
+    }
+
+    /// The index to serve a query with, catching it up first when the
+    /// outstanding delta is small enough to fold in inline.
+    ///
+    /// `None` means "score by exact scan": no index, a read-only graph that may
+    /// not write one, or a delta over the ceiling. All three are *correct*
+    /// answers rather than degraded ones — the exact path is the oracle the
+    /// approximate one is measured against — so a stale vector index costs
+    /// speed, never accuracy. That is why this lane serves stale-but-right
+    /// where the text lane has to serve nulls.
+    pub fn index_for_query(&self, read_only: bool) -> Option<HnswRead<'_>> {
+        if self.index_is_stale() {
+            if read_only || !self.can_auto_refresh() {
+                return None;
+            }
+            self.refresh_index();
+            if self.index_is_stale() {
+                return None;
+            }
+        }
+        let guard = self.index_guard();
+        guard.is_some().then(|| HnswRead(guard))
+    }
+
+    /// The index as it stands, without catching it up — what persistence
+    /// writes. Distinct from [`Self::index_for_query`], which exists to catch
+    /// up: saving must record what is actually there, not perform a refresh as
+    /// a side effect of `save_graph`.
+    pub(crate) fn index_read(&self) -> Option<HnswRead<'_>> {
+        let guard = self.index_guard();
+        guard.is_some().then(|| HnswRead(guard))
+    }
+
+    /// Mutable access to the index for tests that need to corrupt it — the
+    /// persistence validators can only be shown to work against topology that
+    /// is actually broken.
+    #[cfg(test)]
+    pub(crate) fn index_mut_for_test(
+        &mut self,
+    ) -> Option<&mut crate::graph::algorithms::hnsw::HnswIndex> {
+        self.index
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+    }
+
+    /// Move the inline-refresh ceiling.
+    pub fn set_auto_refresh_limit(&mut self, limit: usize) {
+        self.freshness = IndexFreshness::covering(self.freshness.watermark(), Some(limit));
+    }
+
+    /// Attach a persisted index that already covers `covered` slots, with the
+    /// freshness state it was saved with. Persistence-only: an index arriving
+    /// any other way is built here and covers everything by construction.
+    pub(crate) fn attach_persisted_index(
+        &mut self,
+        index: crate::graph::algorithms::hnsw::HnswIndex,
+        freshness: IndexFreshness,
+    ) {
+        *self.index.get_mut().unwrap_or_else(|e| e.into_inner()) = Some(index);
+        self.freshness = freshness;
+    }
+
+    /// The freshness state to persist alongside the index.
+    pub(crate) fn freshness_state(&self) -> &IndexFreshness {
+        &self.freshness
     }
 
     /// Build (or rebuild) an HNSW index over this store's vectors for `metric`.
@@ -1277,14 +1508,17 @@ impl EmbeddingStore {
         if self.norms.len() != self.slot_to_node.len() {
             self.rebuild_norms();
         }
-        self.index = Some(crate::graph::algorithms::hnsw::HnswIndex::build(
+        let built = crate::graph::algorithms::hnsw::HnswIndex::build(
             &self.data,
             &self.norms,
             self.dimension,
             hm,
             params,
             seed,
-        ));
+        );
+        let limit = self.freshness.limit();
+        *self.index.get_mut().unwrap_or_else(|e| e.into_inner()) = Some(built);
+        self.freshness = IndexFreshness::covering(self.len() as u32, Some(limit));
         Ok(())
     }
 

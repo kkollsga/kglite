@@ -536,9 +536,29 @@ impl<'a> CypherExecutor<'a> {
             None => return Ok(None),
         };
 
-        let index = match store.index.as_ref() {
+        let index = match store.index_for_query(self.graph.read_only) {
             Some(i) => i,
-            None => return Ok(None), // no index → exact path
+            None => {
+                // No index, a read-only graph, or a delta too large to fold in
+                // inline — all three fall through to the exact scan, which is
+                // the *oracle* the approximate path is measured against. A
+                // stale vector index therefore costs latency and nothing else,
+                // which is why this arm serves rows rather than nulls. The
+                // warning is for the one case the caller can act on: an index
+                // exists and has fallen behind what a query will catch up.
+                if store.has_index() && store.index_is_stale() {
+                    self.warn(format!(
+                        "vector index '{}.{}' is behind its store by {} vectors, over its \
+                         auto_refresh_limit of {} — this query was served by exact scan. \
+                         Rebuild with build_vector_index() to restore the index path.",
+                        node_type,
+                        args.property,
+                        store.delta_size(),
+                        store.auto_refresh_limit(),
+                    ));
+                }
+                return Ok(None);
+            }
         };
         if args.query.len() != store.dimension {
             return Ok(None); // let the exact path raise the dimension error

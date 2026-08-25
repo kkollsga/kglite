@@ -41,6 +41,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   created and an orphaned document would be inherited by it — and a *rolled
   back* delete marks the slot so the next catch-up restores the document.
 
+- **Vector indexes adopt the same catch-up contract as the new text ones.**
+  Writing vectors after `build_vector_index` no longer drops the index. Neither
+  arm of a vector write moves an existing store slot — an append lands past the
+  index's coverage, a re-embed rewrites one slot's contents — so both are
+  recorded and folded into the HNSW graph at query entry while the outstanding
+  delta stays at or under `auto_refresh_limit` (a new `build_vector_index`
+  keyword, default 1000 vectors; a rebuild that omits it keeps the value you
+  set). `embed_texts(mode='changed')` over five documents of a million
+  therefore costs five incremental inserts instead of a corpus-sized rebuild.
+  A larger delta is **served by the exact scan** rather than by a stale index:
+  the exact path is the oracle the approximate one is measured against, so a
+  stale vector index costs latency and never accuracy — and the fused Cypher
+  top-k emits a diagnostic naming the delta and the ceiling. Catch-up never
+  embeds: a node with no vector is not part of the delta.
+
+  Vector indexes are also **visible** now. `SHOW INDEXES` / `db.indexes()` list
+  a built one as type `VECTOR` under its source column (`Doc.summary`, not the
+  `Doc.summary_emb` store), with the `stale` / `delta` columns and a new
+  `unembedded` column counting nodes of the type that carry no vector at all.
+  `DROP INDEX Doc.summary` removes it along with any equality, range or text
+  index on the same property — the accelerator only; the vectors are data and
+  stay. New: `refresh_vector_index(node_type, text_column)` folds the
+  outstanding delta in on demand. Node creation cannot make a vector index
+  stale (a node with no embedding is not a document), so bulk ingest into a
+  graph with vector indexes is untouched by construction.
+
+  Deleting an embedded node, rolling that delete back, and `vacuum()` still
+  drop the index outright: each moves the slot layout the index addresses.
+  The `.kgl` vector-index section carries the catch-up state alongside the
+  topology and its payload version bumps to 3 accordingly; a graph saved by an
+  earlier version loads normally and rebuilds its index on demand, which is the
+  rebuildable-cache contract that section has always had.
+
 - **MCP server operators can let queries use the engine's parallel runtime**,
   via `--parallel` or `extensions.parallel: true` in the manifest (either
   surface alone turns it on; a malformed manifest value fails the boot rather
@@ -158,6 +191,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no compatibility promise; `save_subset(path)` covers the documented use. The
   underlying scan remains available to Rust embedders as
   `kglite::api::io::pass_a_scan` and friends.
+- **`EmbeddingStore::index` as a public field (Rust API).** The HNSW index now
+  sits behind a lock, because catch-up happens at *query* entry where the
+  caller holds `&DirGraph` and cannot reach a `&mut` store. Rust embedders
+  reading it directly use `has_index()` / `indexed_slots()` /
+  `index_for_query(read_only)`, and the ones that wrote `store.index = None`
+  use the `invalidate_index()` that was always the documented route.
+  `build_vector_index` also takes a trailing `auto_refresh_limit:
+  Option<usize>`; pass `None` for the previous behaviour. The C ABI's
+  `kglite_session_build_vector_index` is unchanged — its signature is fixed
+  within an ABI major.
 - **The `spec` parameter of `kglite::api::io::save_subset` (Rust API).** It
   was accepted and then ignored: a Rust embedder passing
   `Some(&SubsetSpec { edge_types: Some(...) })` got the *unfiltered* subset

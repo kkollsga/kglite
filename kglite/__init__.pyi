@@ -6738,6 +6738,7 @@ class KnowledgeGraph:
         ef_construction: int | None = None,
         ef_search: int | None = None,
         metric: str | None = None,
+        auto_refresh_limit: int | None = None,
     ) -> dict[str, Any]:
         """Build an HNSW approximate-nearest-neighbour index over an embedding
         store so vector search scales sub-linearly on large stores.
@@ -6745,11 +6746,24 @@ class KnowledgeGraph:
         Opt-in, like :meth:`create_index`: without it, vector search is an exact
         brute-force scan. Once built, :meth:`vector_search` / :meth:`search_text`
         auto-use the index for queries covering most of a large store; pass
-        ``exact=True`` to force an exact scan. The index is **dropped
-        automatically** whenever the store's vectors change (``add_embeddings`` /
-        ``embed_texts``), slots are remapped (``vacuum``), or an embedded node
-        is deleted (the delete prunes its vector, which moves a slot) — rebuild
-        it after.
+        ``exact=True`` to force an exact scan.
+
+        **Later vector writes do not drop the index.** ``add_embeddings`` /
+        ``embed_texts`` / ``set_embeddings`` leave the slot layout alone, so
+        they are recorded and folded in at query entry while the outstanding
+        delta stays at or under ``auto_refresh_limit``; a larger delta is served
+        by the exact scan — correct, and slower — until you rebuild or call
+        :meth:`refresh_vector_index`. ``SHOW INDEXES`` reports both facts, in
+        its ``stale`` and ``delta`` columns.
+
+        **Catch-up never embeds.** A node with no vector is not part of the
+        delta: it is counted in ``SHOW INDEXES``' ``unembedded`` column and
+        stays invisible to vector search until you embed it. No query turns
+        into an embedding run.
+
+        What *does* drop the index is a change to the slot layout the index
+        addresses: deleting an embedded node (the delete prunes its vector),
+        rolling that delete back, and ``vacuum()``. Rebuild after those.
 
         The selection does not have to be ``node_type``: while only one node
         type carries ``text_column``, a whole-graph search on a multi-type
@@ -6779,6 +6793,9 @@ class KnowledgeGraph:
             metric: ``'cosine'`` (default), ``'dot_product'``, or ``'euclidean'``.
                 ``'poincare'`` is unsupported (stays exact). If omitted, uses the
                 store's metric, else ``'cosine'``.
+            auto_refresh_limit: How many outstanding vectors a query folds into
+                the index inline before it serves the exact scan instead
+                (default 1000). Omit on a rebuild to keep the current value.
 
         Returns:
             dict: ``{'indexed': int, 'metric': str, 'm': int}``.
@@ -6800,7 +6817,20 @@ class KnowledgeGraph:
     def drop_vector_index(self, node_type: str, text_column: str) -> bool:
         """Drop the HNSW index for an embedding store (search reverts to exact).
 
+        The vectors are untouched — this drops the accelerator, not the data.
         Returns ``True`` if an index was dropped, ``False`` if none existed.
+        """
+        ...
+
+    def refresh_vector_index(self, node_type: str, text_column: str) -> int:
+        """Fold every outstanding vector into the HNSW index now.
+
+        Returns how many vectors were folded in — ``0`` when the index is
+        already current, when none is built (catch-up never builds one), or on a
+        read-only graph. Queries do this on their own while the outstanding
+        delta stays under ``auto_refresh_limit``; call this to pay the cost at a
+        moment of your choosing, or to bring a larger delta back in one
+        incremental step instead of rebuilding the whole index.
         """
         ...
 

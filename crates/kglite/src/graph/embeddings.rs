@@ -325,6 +325,16 @@ where
 /// on the exact path. The build is deterministic in level assignment but not
 /// in link topology (it is parallel), so assert retrieval behaviour rather
 /// than index bytes.
+///
+/// `auto_refresh_limit` bounds the vectors a *query* will fold into the index
+/// inline before it falls back to the exact scan instead; `None` keeps whatever
+/// the existing index used, or
+/// [`DEFAULT_AUTO_REFRESH_LIMIT`](crate::graph::index_freshness::DEFAULT_AUTO_REFRESH_LIMIT)
+/// for a first build. **Catch-up never embeds**: a node with no vector is not
+/// in the delta, it is in the unembedded count [`list_vector_indexes`] reports.
+// Every argument is one HNSW tuning knob or the catch-up ceiling; grouping them
+// into a struct would move the same names one level down for no reader gain.
+#[allow(clippy::too_many_arguments)]
 pub fn build_vector_index(
     graph: &mut DirGraph,
     node_type: &str,
@@ -333,6 +343,7 @@ pub fn build_vector_index(
     ef_construction: Option<usize>,
     ef_search: Option<usize>,
     metric: Option<&str>,
+    auto_refresh_limit: Option<usize>,
 ) -> Result<VectorIndexReport, String> {
     let key = store_key(node_type, text_column);
 
@@ -385,6 +396,11 @@ pub fn build_vector_index(
         .get_mut(&key)
         .expect("store presence checked immediately above");
     let indexed = store.len();
+    // A rebuild keeps the ceiling its author set; only an explicit argument
+    // moves it, so rebuilding an index does not quietly restore the default.
+    if let Some(limit) = auto_refresh_limit {
+        store.set_auto_refresh_limit(limit);
+    }
     // A deterministic seed keeps level assignment reproducible.
     let seed = 0x9E37_79B9_7F4A_7C15 ^ (indexed as u64);
     store.build_index(distance, params, seed)?;
@@ -394,6 +410,94 @@ pub fn build_vector_index(
         metric: metric_name,
         m: params.m,
     })
+}
+
+/// Drop the HNSW index over `(node_type, "{text_column}_emb")`, returning
+/// whether one existed. Search reverts to the exact scan; the vectors stay.
+pub fn drop_vector_index(graph: &mut DirGraph, node_type: &str, text_column: &str) -> bool {
+    match graph.embeddings.get_mut(&store_key(node_type, text_column)) {
+        Some(store) => {
+            let had = store.has_index();
+            store.invalidate_index();
+            had
+        }
+        None => false,
+    }
+}
+
+/// Whether an HNSW index is currently built over `(node_type, text_column)`.
+pub fn has_vector_index(graph: &DirGraph, node_type: &str, text_column: &str) -> bool {
+    graph
+        .embeddings
+        .get(&store_key(node_type, text_column))
+        .is_some_and(|store| store.has_index())
+}
+
+/// Fold every outstanding vector into the HNSW index over
+/// `(node_type, text_column)`, returning how many slots it touched.
+///
+/// `None` when no store exists. This is the explicit form of the catch-up a
+/// query performs on its own when the delta is under the index's ceiling; the
+/// decision itself is `EmbeddingStore::can_auto_refresh`.
+pub fn refresh_vector_index(graph: &DirGraph, node_type: &str, text_column: &str) -> Option<usize> {
+    let store = graph.embeddings.get(&store_key(node_type, text_column))?;
+    if graph.read_only {
+        return Some(0);
+    }
+    Some(store.refresh_index())
+}
+
+/// What `SHOW INDEXES` reports about one embedding store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VectorIndexStatus {
+    /// The node type the store is keyed on.
+    pub node_type: String,
+    /// The source column, as [`EmbeddingStoreInfo::text_column`] spells it.
+    pub text_column: String,
+    /// Whether an HNSW index is built. `false` still answers queries — by
+    /// exact scan — which is why it is not an error state.
+    pub built: bool,
+    /// Whether the index covers fewer vectors than the store holds.
+    pub stale: bool,
+    /// Vectors the next catch-up would insert or re-link. Equals the store
+    /// size when nothing is built, since none of it is covered.
+    pub delta: usize,
+    /// Nodes of the type that carry **no vector at all**. Never part of
+    /// `delta`: catch-up indexes vectors, it does not create them, so these
+    /// stay invisible to search until `embed_texts`/`set_embeddings` runs.
+    pub unembedded: usize,
+}
+
+/// Every embedding store on the graph with its index-freshness status, sorted
+/// by `(node_type, text_column)`.
+///
+/// The one enumeration order, so `SHOW INDEXES` and any binding-side listing
+/// cannot disagree about it.
+pub fn list_vector_indexes(graph: &DirGraph) -> Vec<VectorIndexStatus> {
+    let mut out: Vec<VectorIndexStatus> = graph
+        .embeddings
+        .iter()
+        .map(|((node_type, name), store)| {
+            let nodes = graph
+                .type_indices
+                .get(node_type)
+                .map_or(0, |members| members.len());
+            VectorIndexStatus {
+                node_type: node_type.clone(),
+                text_column: text_column_of(name).unwrap_or(name).to_string(),
+                built: store.has_index(),
+                stale: store.index_is_stale(),
+                delta: store.delta_size(),
+                unembedded: nodes.saturating_sub(store.len()),
+            }
+        })
+        .collect();
+    out.sort_unstable_by(|a, b| {
+        a.node_type
+            .cmp(&b.node_type)
+            .then_with(|| a.text_column.cmp(&b.text_column))
+    });
+    out
 }
 
 /// Resolved, dimension-checked entries — everything that can fail, done

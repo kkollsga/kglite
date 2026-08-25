@@ -173,7 +173,7 @@
       "classification": "boundary"
     },
     {
-      "identity": "crates/kglite-py/src/graph/pyapi/vector.rs::fn:build_vector_index:fn build_vector_index( &mut self, py: Python<'_>, node_type: &str, text_column: &str, m: Option<usize>, ef_construction: Option<usize>, ef_search: Option<usize>, metric: Option<&str>, ) -> PyResult<Py<PyAny>>::clippy::too_many_arguments",
+      "identity": "crates/kglite-py/src/graph/pyapi/vector.rs::fn:build_vector_index:fn build_vector_index( &mut self, py: Python<'_>, node_type: &str, text_column: &str, m: Option<usize>, ef_construction: Option<usize>, ef_search: Option<usize>, metric: Option<&str>, auto_refresh_limit: Option<usize>, ) -> PyResult<Py<PyAny>>::clippy::too_many_arguments",
       "classification": "boundary"
     },
     {
@@ -275,6 +275,10 @@
     {
       "identity": "crates/kglite/src/graph/dir_graph/schema_ops.rs::fn:set_schema:pub fn set_schema( &mut self, schema: SchemaDefinition, mode: SchemaInstall, ) -> Result<(), KgError>::clippy::result_large_err",
       "classification": "api-shape"
+    },
+    {
+      "identity": "crates/kglite/src/graph/embeddings.rs::fn:build_vector_index:pub fn build_vector_index( graph: &mut DirGraph, node_type: &str, text_column: &str, m: Option<usize>, ef_construction: Option<usize>, ef_search: Option<usize>, metric: Option<&str>, auto_refresh_limit: Option<usize>, ) -> Result<VectorIndexReport, String>::clippy::too_many_arguments",
+      "classification": "transitional"
     },
     {
       "identity": "crates/kglite/src/graph/features/spatial.rs::fn:near_point:pub fn near_point( graph: &DirGraph, selection: &CurrentSelection, lat_field: &str, lon_field: &str, center_lat: f64, center_lon: f64, max_distance: f64, geom_fallback: Option<&str>, ) -> Result<Vec<NodeIndex>, String>::clippy::too_many_arguments",

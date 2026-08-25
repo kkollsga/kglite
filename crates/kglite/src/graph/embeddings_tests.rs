@@ -262,7 +262,8 @@ fn index_build_reports_defaults_and_the_resolved_metric() {
     )
     .unwrap();
 
-    let report = build_vector_index(&mut g, "Doc", "summary", None, None, None, None).unwrap();
+    let report =
+        build_vector_index(&mut g, "Doc", "summary", None, None, None, None, None).unwrap();
     assert_eq!(report.indexed, 3);
     assert_eq!(
         report.metric, "euclidean",
@@ -283,14 +284,27 @@ fn index_build_clamps_out_of_range_tuning() {
         batch(&[(1, [1.0, 0.0]), (2, [0.0, 1.0])]),
     )
     .unwrap();
-    let report =
-        build_vector_index(&mut g, "Doc", "summary", Some(0), Some(0), Some(0), None).unwrap();
+    let report = build_vector_index(
+        &mut g,
+        "Doc",
+        "summary",
+        Some(0),
+        Some(0),
+        Some(0),
+        None,
+        None,
+    )
+    .unwrap();
     assert_eq!(report.m, 2);
 }
 
+/// A vector write no longer costs the index: neither arm of `set_embedding`
+/// moves an existing slot, so the write is recorded as a catch-up delta and
+/// the index stays. (Before 0.16.10 every write dropped it, which made
+/// `embed_texts(mode='changed')` on five documents cost a corpus rebuild.)
 #[test]
-fn a_vector_write_drops_the_index() {
-    let mut g = docs(&[1, 2]);
+fn a_vector_write_becomes_a_catch_up_delta() {
+    let mut g = docs(&[1, 2, 3]);
     set_embeddings(
         &mut g,
         "Doc",
@@ -299,20 +313,96 @@ fn a_vector_write_drops_the_index() {
         batch(&[(1, [1.0, 0.0]), (2, [0.0, 1.0])]),
     )
     .unwrap();
-    build_vector_index(&mut g, "Doc", "summary", None, None, None, None).unwrap();
+    build_vector_index(&mut g, "Doc", "summary", None, None, None, None, None).unwrap();
     assert!(store_of(&g).has_index());
-
-    add_embeddings(&mut g, "Doc", "summary", None, batch(&[(2, [0.3, 0.7])])).unwrap();
     assert!(
-        !store_of(&g).has_index(),
-        "an index over stale slots must not survive a vector write"
+        !store_of(&g).index_is_stale(),
+        "a fresh build covers itself"
+    );
+
+    // Replaced in place: same slot, new content.
+    add_embeddings(&mut g, "Doc", "summary", None, batch(&[(2, [0.3, 0.7])])).unwrap();
+    assert!(store_of(&g).has_index(), "the slot layout did not move");
+    assert_eq!(store_of(&g).delta_size(), 1);
+
+    // Appended: a slot above the index's coverage.
+    add_embeddings(&mut g, "Doc", "summary", None, batch(&[(3, [0.9, 0.1])])).unwrap();
+    assert_eq!(store_of(&g).delta_size(), 2);
+    assert_eq!(store_of(&g).indexed_slots(), 2, "not yet caught up");
+
+    assert_eq!(refresh_vector_index(&g, "Doc", "summary"), Some(2));
+    assert!(!store_of(&g).index_is_stale());
+    assert_eq!(store_of(&g).indexed_slots(), 3);
+}
+
+/// Catch-up indexes vectors; it never creates them. A node with no embedding
+/// is reported as unembedded and stays out of the delta, so no query can turn
+/// into an embedding run.
+#[test]
+fn catch_up_never_embeds_an_unembedded_node() {
+    let mut g = docs(&[1, 2, 3]);
+    set_embeddings(
+        &mut g,
+        "Doc",
+        "summary",
+        None,
+        batch(&[(1, [1.0, 0.0]), (2, [0.0, 1.0])]),
+    )
+    .unwrap();
+    build_vector_index(&mut g, "Doc", "summary", None, None, None, None, None).unwrap();
+
+    let status = list_vector_indexes(&g);
+    assert_eq!(status.len(), 1);
+    assert_eq!(status[0].unembedded, 1, "Doc 3 has no vector");
+    assert_eq!(status[0].delta, 0, "and is therefore not a delta");
+    assert!(!status[0].stale);
+
+    refresh_vector_index(&g, "Doc", "summary");
+    assert_eq!(store_of(&g).len(), 2, "the refresh embedded nothing");
+    assert_eq!(list_vector_indexes(&g)[0].unembedded, 1);
+}
+
+/// The ceiling is the caller's, and a rebuild keeps it.
+#[test]
+fn the_auto_refresh_limit_bounds_inline_catch_up() {
+    let mut g = docs(&[1, 2, 3, 4]);
+    set_embeddings(
+        &mut g,
+        "Doc",
+        "summary",
+        None,
+        batch(&[(1, [1.0, 0.0]), (2, [0.0, 1.0])]),
+    )
+    .unwrap();
+    build_vector_index(&mut g, "Doc", "summary", None, None, None, None, Some(1)).unwrap();
+    assert_eq!(store_of(&g).auto_refresh_limit(), 1);
+
+    add_embeddings(&mut g, "Doc", "summary", None, batch(&[(3, [0.9, 0.1])])).unwrap();
+    assert!(
+        store_of(&g).can_auto_refresh(),
+        "one vector is at the limit"
+    );
+
+    add_embeddings(&mut g, "Doc", "summary", None, batch(&[(4, [0.1, 0.9])])).unwrap();
+    assert!(
+        !store_of(&g).can_auto_refresh(),
+        "two is over it — the query serves an exact scan instead"
+    );
+    assert!(store_of(&g).index_is_stale());
+
+    build_vector_index(&mut g, "Doc", "summary", None, None, None, None, None).unwrap();
+    assert_eq!(
+        store_of(&g).auto_refresh_limit(),
+        1,
+        "a rebuild keeps the ceiling its author set"
     );
 }
 
 #[test]
 fn index_build_requires_a_store() {
     let mut g = docs(&[1]);
-    let err = build_vector_index(&mut g, "Doc", "summary", None, None, None, None).unwrap_err();
+    let err =
+        build_vector_index(&mut g, "Doc", "summary", None, None, None, None, None).unwrap_err();
     assert!(
         err.contains("No embedding store 'Doc.summary_emb'"),
         "{err}"
@@ -328,7 +418,8 @@ fn index_build_on_a_store_name_names_the_text_column() {
     let mut g = docs(&[1]);
     set_embeddings(&mut g, "Doc", "summary", None, batch(&[(1, [1.0, 0.0])])).unwrap();
 
-    let err = build_vector_index(&mut g, "Doc", "summary_emb", None, None, None, None).unwrap_err();
+    let err =
+        build_vector_index(&mut g, "Doc", "summary_emb", None, None, None, None, None).unwrap_err();
     assert!(
         err.contains("No embedding store 'Doc.summary_emb_emb'"),
         "{err}"
@@ -347,7 +438,7 @@ fn index_build_on_an_unknown_column_lists_the_embedded_columns() {
     let mut g = docs(&[1]);
     set_embeddings(&mut g, "Doc", "summary", None, batch(&[(1, [1.0, 0.0])])).unwrap();
 
-    let err = build_vector_index(&mut g, "Doc", "nope", None, None, None, None).unwrap_err();
+    let err = build_vector_index(&mut g, "Doc", "nope", None, None, None, None, None).unwrap_err();
     assert!(err.contains("No embedding store 'Doc.nope_emb'"), "{err}");
     assert!(err.contains("summary"), "{err}");
 }
@@ -363,7 +454,8 @@ fn poincare_stays_on_the_exact_path() {
         batch(&[(1, [0.1, 0.2])]),
     )
     .unwrap();
-    let err = build_vector_index(&mut g, "Doc", "summary", None, None, None, None).unwrap_err();
+    let err =
+        build_vector_index(&mut g, "Doc", "summary", None, None, None, None, None).unwrap_err();
     assert!(err.contains("poincare"), "{err}");
 }
 
@@ -644,4 +736,359 @@ fn deleting_an_unembedded_node_leaves_every_store_intact() {
         store_of(&g).norms.clone(),
     );
     assert_eq!(after, before);
+}
+
+// ─── Catch-up soundness: the recall gate (decision 11c, G5) ────────────────
+//
+// HNSW is approximate, so "the caught-up index returns exactly what a rebuilt
+// one returns" is the wrong oracle — two builds over the same vectors already
+// disagree at the margin, and the concurrent build is not even reproducible
+// run to run. What must hold is that catching up does not *degrade* the index:
+// its recall against the exact scan stays at the recall a batch build over the
+// same N+M vectors achieves, less a tolerance.
+
+/// Deterministic pseudo-random unit-ish vectors — no rng dependency, and the
+/// same corpus on every run, so a recall number is comparable across runs.
+fn corpus(n: usize, dim: usize, seed: u64) -> Vec<Vec<f32>> {
+    let mut state = seed | 1;
+    let mut next = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        ((state >> 11) as f64 / ((1u64 << 53) as f64)) as f32 - 0.5
+    };
+    (0..n).map(|_| (0..dim).map(|_| next()).collect()).collect()
+}
+
+fn graph_with_vectors(vectors: &[Vec<f32>], embedded: usize) -> DirGraph {
+    let ids: Vec<i64> = (1..=vectors.len() as i64).collect();
+    let mut g = docs(&ids);
+    let entries: Vec<(Value, Vec<f32>)> = ids
+        .iter()
+        .take(embedded)
+        .map(|&id| (Value::Int64(id), vectors[(id - 1) as usize].clone()))
+        .collect();
+    set_embeddings(&mut g, "Doc", "summary", Some("cosine"), entries).unwrap();
+    g
+}
+
+/// Fraction of the exact top-k the index returns, averaged over `queries`.
+fn recall_at_k(g: &DirGraph, vectors: &[Vec<f32>], queries: &[Vec<f32>], k: usize) -> f64 {
+    use crate::graph::algorithms::vector::{vector_search, DistanceMetric, VectorSearchOptions};
+    use crate::graph::schema::CurrentSelection;
+
+    let selection = CurrentSelection::new();
+    let mut hits = 0usize;
+    for query in queries {
+        let exact = vector_search(
+            g,
+            &selection,
+            "summary_emb",
+            query,
+            &VectorSearchOptions::default()
+                .with_top_k(k)
+                .with_metric(DistanceMetric::Cosine)
+                .with_exact(true),
+        )
+        .unwrap();
+        let approx = vector_search(
+            g,
+            &selection,
+            "summary_emb",
+            query,
+            &VectorSearchOptions::default()
+                .with_top_k(k)
+                .with_metric(DistanceMetric::Cosine)
+                .with_exact(false),
+        )
+        .unwrap();
+        let approx_ids: Vec<_> = approx.iter().map(|r| r.node_idx).collect();
+        hits += exact
+            .iter()
+            .filter(|r| approx_ids.contains(&r.node_idx))
+            .count();
+    }
+    let _ = vectors;
+    hits as f64 / (queries.len() * k) as f64
+}
+
+#[test]
+fn incremental_catch_up_holds_the_recall_a_batch_build_achieves() {
+    const N: usize = 400;
+    const M: usize = 100;
+    const DIM: usize = 16;
+    const K: usize = 10;
+    const EPSILON: f64 = 0.05;
+
+    let vectors = corpus(N + M, DIM, 0xA11CE);
+    let queries = corpus(40, DIM, 0xB0B);
+
+    // Reference: the *worse* of two batch builds over all N+M vectors. HNSW's
+    // link graph is built concurrently and is not identical run to run, so a
+    // single build is a sample, not a constant — comparing against one made
+    // this gate fail roughly once in twelve runs on its own noise. Two builds
+    // measure the band a plain rebuild already moves within, and the epsilon
+    // is then a real tolerance rather than a stand-in for that band.
+    let mut batched = graph_with_vectors(&vectors, N + M);
+    build_vector_index(&mut batched, "Doc", "summary", None, None, None, None, None).unwrap();
+    let first = recall_at_k(&batched, &vectors, &queries, K);
+    build_vector_index(&mut batched, "Doc", "summary", None, None, None, None, None).unwrap();
+    let second = recall_at_k(&batched, &vectors, &queries, K);
+    let batch_recall = first.min(second);
+    assert!(
+        batch_recall > 0.5,
+        "the reference index must actually retrieve: {first} / {second}"
+    );
+
+    // Candidate: build over N, then add M and let the query fold them in.
+    let mut incremental = graph_with_vectors(&vectors, N);
+    build_vector_index(
+        &mut incremental,
+        "Doc",
+        "summary",
+        None,
+        None,
+        None,
+        None,
+        Some(M),
+    )
+    .unwrap();
+    let added: Vec<(Value, Vec<f32>)> = (N..N + M)
+        .map(|i| (Value::Int64(i as i64 + 1), vectors[i].clone()))
+        .collect();
+    add_embeddings(&mut incremental, "Doc", "summary", None, added).unwrap();
+    assert_eq!(store_of(&incremental).delta_size(), M);
+    assert_eq!(store_of(&incremental).indexed_slots(), N);
+
+    let caught_up_recall = recall_at_k(&incremental, &vectors, &queries, K);
+    assert!(
+        !store_of(&incremental).index_is_stale(),
+        "the query must have folded the delta in on its way through"
+    );
+    assert_eq!(store_of(&incremental).indexed_slots(), N + M);
+    assert!(
+        caught_up_recall >= batch_recall - EPSILON,
+        "catch-up recall {caught_up_recall} fell below the batch build's \
+         {batch_recall} by more than {EPSILON}"
+    );
+}
+
+/// The mutation control for the gate above: an index that skips part of its
+/// delta must be *caught*. Here the delta is left unindexed entirely (over the
+/// ceiling), which is exactly what a refresh that dropped slots would look
+/// like to the index — and the coverage assertion goes red.
+#[test]
+fn an_uncaught_delta_is_visible_as_missing_coverage() {
+    // Above `HNSW_AUTO_MIN`, so a query would genuinely reach the index path:
+    // the staleness below is the ceiling refusing, not the corpus being too
+    // small for the index to be consulted at all.
+    const N: usize = 400;
+    const M: usize = 50;
+    let vectors = corpus(N + M, 16, 0xA11CE);
+
+    let mut g = graph_with_vectors(&vectors, N);
+    // A ceiling below the delta: no query will fold it in.
+    build_vector_index(&mut g, "Doc", "summary", None, None, None, None, Some(1)).unwrap();
+    let added: Vec<(Value, Vec<f32>)> = (N..N + M)
+        .map(|i| (Value::Int64(i as i64 + 1), vectors[i].clone()))
+        .collect();
+    add_embeddings(&mut g, "Doc", "summary", None, added).unwrap();
+
+    let queries = corpus(5, 16, 0xB0B);
+    let _ = recall_at_k(&g, &vectors, &queries, 10);
+    assert!(
+        g.embeddings[&("Doc".to_string(), "summary_emb".to_string())].index_is_stale(),
+        "an over-ceiling delta must stay outstanding, not be silently absorbed"
+    );
+    assert_eq!(store_of(&g).indexed_slots(), N, "and stay uncovered");
+
+    // …and the results are still right, because the query fell back to the
+    // exact scan rather than searching an index that does not cover them.
+    let one_uncovered = &vectors[N + M - 1];
+    let found = {
+        use crate::graph::algorithms::vector::{
+            vector_search, DistanceMetric, VectorSearchOptions,
+        };
+        use crate::graph::schema::CurrentSelection;
+        vector_search(
+            &g,
+            &CurrentSelection::new(),
+            "summary_emb",
+            one_uncovered,
+            &VectorSearchOptions::default()
+                .with_top_k(1)
+                .with_metric(DistanceMetric::Cosine)
+                .with_exact(false),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        found[0].node_idx.index(),
+        N + M - 1,
+        "a stale vector index costs speed, never the right answer"
+    );
+}
+
+/// A read-only graph may not write an index, so it serves the exact scan and
+/// leaves the delta outstanding for a writable handle to fold in.
+#[test]
+fn a_read_only_graph_serves_the_exact_scan_instead_of_catching_up() {
+    // Above `HNSW_AUTO_MIN` for the same reason as the test above.
+    let vectors = corpus(450, 8, 7);
+    let mut g = graph_with_vectors(&vectors, 400);
+    build_vector_index(&mut g, "Doc", "summary", None, None, None, None, None).unwrap();
+    let added: Vec<(Value, Vec<f32>)> = (400..450)
+        .map(|i| (Value::Int64(i as i64 + 1), vectors[i].clone()))
+        .collect();
+    add_embeddings(&mut g, "Doc", "summary", None, added).unwrap();
+    g.read_only = true;
+
+    assert_eq!(refresh_vector_index(&g, "Doc", "summary"), Some(0));
+    let queries = corpus(3, 8, 11);
+    let _ = recall_at_k(&g, &vectors, &queries, 5);
+    assert!(
+        store_of(&g).index_is_stale(),
+        "a read-only handle must not perform the one write catch-up would be"
+    );
+}
+
+// ─── SHOW INDEXES / db.indexes ────────────────────────────────────────────
+
+#[test]
+fn show_indexes_reports_a_vector_index_under_its_source_column() {
+    use crate::graph::introspection::schema_overview::{collect_indexes_structured, IndexKind};
+
+    let mut g = docs(&[1, 2, 3]);
+    g.create_index("Doc", "summary");
+    set_embeddings(
+        &mut g,
+        "Doc",
+        "summary",
+        None,
+        batch(&[(1, [1.0, 0.0]), (2, [0.0, 1.0])]),
+    )
+    .unwrap();
+
+    assert!(
+        !collect_indexes_structured(&g)
+            .iter()
+            .any(|info| info.kind == IndexKind::Vector),
+        "vectors alone are not an installed index — list_embeddings() reports those"
+    );
+
+    build_vector_index(&mut g, "Doc", "summary", None, None, None, None, None).unwrap();
+    let rows = collect_indexes_structured(&g);
+    let vector: Vec<_> = rows
+        .iter()
+        .filter(|info| info.kind == IndexKind::Vector)
+        .collect();
+
+    assert_eq!(vector.len(), 1);
+    assert_eq!(
+        vector[0].name, "Doc.summary",
+        "keyed on the source column, not the 'summary_emb' store"
+    );
+    assert_eq!(vector[0].kind.neo4j_type(), "VECTOR");
+    assert_eq!(vector[0].stale, Some(false));
+    assert_eq!(vector[0].delta, Some(0));
+    assert_eq!(vector[0].unembedded, Some(1), "Doc 3 carries no vector");
+    assert_eq!(
+        rows.iter()
+            .filter(|info| info.name == "Doc.summary")
+            .count(),
+        2,
+        "the equality index and the vector index share one canonical name"
+    );
+
+    add_embeddings(&mut g, "Doc", "summary", None, batch(&[(3, [0.5, 0.5])])).unwrap();
+    let rows = collect_indexes_structured(&g);
+    let vector = rows
+        .iter()
+        .find(|info| info.kind == IndexKind::Vector)
+        .unwrap();
+    assert_eq!(vector.stale, Some(true));
+    assert_eq!(vector.delta, Some(1));
+    assert_eq!(vector.unembedded, Some(0), "and now every Doc is embedded");
+}
+
+// ─── Cypher index DDL over a vector index ──────────────────────────────────
+
+/// Run one DDL statement, returning its mutation stats. (These cases live here
+/// rather than in `schema_ddl.rs`'s own test module because that file sits at
+/// the repository's god-file line ceiling.)
+fn run_ddl(
+    graph: &mut DirGraph,
+    query: &str,
+) -> Result<crate::graph::languages::cypher::result::MutationStats, String> {
+    let parsed =
+        crate::graph::languages::cypher::parser::parse_cypher(query).map_err(|e| e.to_string())?;
+    let result = crate::graph::languages::cypher::executor::write::execute_mutable(
+        graph,
+        &parsed,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )?;
+    Ok(result.stats.unwrap_or_default())
+}
+
+/// `DROP INDEX Label.prop` removes every structure registered under that
+/// name, and `SHOW INDEXES` prints a built vector index under exactly that
+/// name — so it has to go too. The vectors stay: dropping an accelerator is
+/// not a data verb.
+#[test]
+fn drop_index_by_canonical_name_takes_the_vector_index_with_it() {
+    use crate::graph::embeddings::{build_vector_index, has_vector_index, set_embeddings};
+
+    let mut graph = docs(&[1, 2]);
+    set_embeddings(
+        &mut graph,
+        "Doc",
+        "summary",
+        None,
+        vec![
+            (Value::Int64(1), vec![1.0f32, 0.0]),
+            (Value::Int64(2), vec![0.0f32, 1.0]),
+        ],
+    )
+    .expect("embed");
+    build_vector_index(&mut graph, "Doc", "summary", None, None, None, None, None).expect("build");
+    assert!(has_vector_index(&graph, "Doc", "summary"));
+
+    let stats = run_ddl(&mut graph, "DROP INDEX Doc.summary").expect("drop");
+    assert_eq!(stats.indexes_removed, 1);
+    assert!(!has_vector_index(&graph, "Doc", "summary"));
+    assert_eq!(
+        graph.embeddings[&("Doc".to_string(), "summary_emb".to_string())].len(),
+        2,
+        "the vectors survive — DROP INDEX drops the accelerator, not the data"
+    );
+}
+
+/// …and a name that `SHOW INDEXES` prints must never come back as "no
+/// index named", which is why the vector row exists only once one is built.
+#[test]
+fn every_listed_index_name_is_droppable() {
+    use crate::graph::embeddings::{build_vector_index, set_embeddings};
+    use crate::graph::introspection::schema_overview::collect_indexes_structured;
+
+    let mut graph = docs(&[1, 2]);
+    set_embeddings(
+        &mut graph,
+        "Doc",
+        "summary",
+        None,
+        vec![(Value::Int64(1), vec![1.0f32, 0.0])],
+    )
+    .expect("embed");
+    build_vector_index(&mut graph, "Doc", "summary", None, None, None, None, None).expect("build");
+
+    let names: Vec<String> = collect_indexes_structured(&graph)
+        .iter()
+        .map(|info| info.name.clone())
+        .collect();
+    assert!(names.contains(&"Doc.summary".to_string()));
+    for name in names {
+        run_ddl(&mut graph, &format!("DROP INDEX {name}"))
+            .unwrap_or_else(|e| panic!("SHOW INDEXES listed '{name}' but DROP refused: {e}"));
+    }
 }

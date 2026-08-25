@@ -1,10 +1,12 @@
 """HNSW vector-index lifecycle + auto-use tests.
 
 The index is opt-in (``build_vector_index``), auto-used by ``vector_search`` /
-``search_text`` for whole-corpus queries on large stores, overridable with
-``exact=True``, and dropped automatically whenever the store's vectors change.
-These tests pin recall vs the exact path, the auto-use/exact dispatch, and the
-invalidation lifecycle.
+``search_text`` for whole-corpus queries on large stores, and overridable with
+``exact=True``. Later vector writes do not drop it: they are recorded and folded
+in at query entry while the outstanding delta stays under ``auto_refresh_limit``
+(0.16.10). Only a change to the *slot layout* — a delete's prune, ``vacuum()`` —
+drops it. These tests pin recall vs the exact path, the auto-use/exact dispatch,
+and the catch-up/invalidation lifecycle.
 """
 
 import os
@@ -62,6 +64,14 @@ def _ids(rows):
     return [r["id"] for r in rows]
 
 
+def _vector_row(g, name="Doc.summary"):
+    """The ``SHOW INDEXES`` row for a built vector index, or ``None``."""
+    for row in g.cypher("SHOW INDEXES"):
+        if row["name"] == name and row["type"] == "VECTOR":
+            return row
+    return None
+
+
 def _two_type_metric_selection(node_order, store_order, metrics):
     graph = kglite.KnowledgeGraph()
     vectors = {"A": {"a": [100.0, 0.0]}, "B": {"b": [1.0, 1.0]}}
@@ -101,13 +111,18 @@ class TestIndexLifecycle:
         with pytest.raises(ValueError):
             g.build_vector_index("Doc", "summary", metric="poincare")
 
-    def test_mutation_invalidates_index(self):
+    def test_vector_write_is_a_catch_up_delta_not_an_invalidation(self):
+        # Neither arm of a vector write moves an existing slot, so the index
+        # survives and the write becomes a delta the next query folds in.
         g, _ = _build_graph(n=500)
         g.build_vector_index("Doc", "summary")
         assert g.has_vector_index("Doc", "summary")
-        # add_embeddings touches the store -> index drops.
         g.add_embeddings("Doc", "summary", {0: [0.0] * 64})
-        assert g.has_vector_index("Doc", "summary") is False
+        assert g.has_vector_index("Doc", "summary") is True
+        assert _vector_row(g)["stale"] is True
+        assert _vector_row(g)["delta"] == 1
+        assert g.refresh_vector_index("Doc", "summary") == 1
+        assert _vector_row(g)["stale"] is False
 
     def test_vacuum_invalidates_index(self):
         # vacuum() remaps embedding slots -> the index's slot ids go stale, so
@@ -119,9 +134,10 @@ class TestIndexLifecycle:
         assert g.has_vector_index("Doc", "summary") is False
 
     def test_delete_without_vacuum_excludes_dead_node(self):
-        # A plain DELETE keeps the index (slots unchanged); the dead node is
-        # excluded from results via the selection membership filter, so results
-        # stay correct even with a stale-but-valid index.
+        # A plain DELETE prunes the deleted node's vector, which tail-swaps the
+        # store's slot layout and therefore drops the index. Results stay
+        # correct because the exact scan takes over — the point of the test is
+        # that the dead node never comes back, index or no index.
         g, _ = _build_graph(n=2000)
         g.build_vector_index("Doc", "summary")
         q = _query(64)
@@ -566,3 +582,117 @@ class TestHnswInCypher:
         assert len(approx) == 10
         recall = len(set(exact) & set(approx)) / 10.0
         assert recall >= 0.8
+
+
+class TestFreshnessUx:
+    """0.16.10: vector indexes adopt the shared catch-up framework — the same
+    stale/delta reporting and threshold-bounded inline refresh the BM25 lane
+    uses, with one deliberate difference: a stale *vector* index falls back to
+    the exact scan, which is the oracle the approximate path is measured
+    against, so staleness costs latency and never accuracy."""
+
+    def test_show_indexes_lists_a_built_vector_index(self):
+        g, _ = _build_graph(n=500)
+        assert _vector_row(g) is None, "vectors alone are not an installed index"
+        g.build_vector_index("Doc", "summary")
+        row = _vector_row(g)
+        assert row is not None
+        assert row["type"] == "VECTOR"
+        assert row["entityType"] == "NODE"
+        assert row["labelsOrTypes"] == ["Doc"]
+        assert row["properties"] == ["summary"], "keyed on the source column"
+        assert row["stale"] is False
+        assert row["delta"] == 0
+        assert row["unembedded"] == 0
+        g.drop_vector_index("Doc", "summary")
+        assert _vector_row(g) is None
+
+    def test_unembedded_nodes_are_counted_and_never_embedded(self):
+        g, _ = _build_graph(n=500)
+        g.build_vector_index("Doc", "summary")
+        g.cypher("CREATE (:Doc {id: 9001, title: 'fresh', summary: 'never embedded'})")
+        row = _vector_row(g)
+        assert row["unembedded"] == 1
+        assert row["delta"] == 0, "a node with no vector is not a catch-up delta"
+        assert row["stale"] is False
+        # Running a query must not change that: catch-up indexes, it never embeds.
+        g.select("Doc").vector_search("summary", _query(64), top_k=5)
+        assert _vector_row(g)["unembedded"] == 1
+
+    def test_a_query_catches_up_an_under_limit_delta(self):
+        g, emb = _build_graph(n=600)
+        g.build_vector_index("Doc", "summary")
+        g.add_embeddings("Doc", "summary", {600: [0.0] * 64, 0: [1.0] * 64})
+        # id 600 matches no node, so only the in-place replacement lands.
+        assert _vector_row(g)["stale"] is True
+        g.select("Doc").vector_search("summary", _query(64), top_k=10)
+        assert _vector_row(g)["stale"] is False, "the query folded the delta in"
+        assert _vector_row(g)["delta"] == 0
+
+    def test_an_over_limit_delta_stays_stale_and_serves_the_exact_answer(self):
+        g, emb = _build_graph(n=600)
+        g.build_vector_index("Doc", "summary", auto_refresh_limit=2)
+        rewritten = {i: [float(i % 7), 1.0] + [0.0] * 62 for i in range(10)}
+        g.add_embeddings("Doc", "summary", rewritten)
+        assert _vector_row(g)["delta"] == 10
+
+        # Doc 3's rewritten vector is the query itself, so the exact answer is
+        # unambiguous — and it is the answer we must get, from a scan the stale
+        # index stepped aside for.
+        target = rewritten[3]
+        rows = g.select("Doc").vector_search("summary", target, top_k=1)
+        assert _vector_row(g)["stale"] is True, "over the ceiling, nothing is folded in"
+        assert rows[0]["id"] == 3
+        assert rows[0]["score"] == pytest.approx(1.0, abs=1e-6)
+
+    def test_refresh_is_available_explicitly(self):
+        g, _ = _build_graph(n=600)
+        g.build_vector_index("Doc", "summary", auto_refresh_limit=1)
+        g.add_embeddings("Doc", "summary", {i: [0.5] * 64 for i in range(5)})
+        assert g.refresh_vector_index("Doc", "summary") == 5
+        assert _vector_row(g)["stale"] is False
+        assert g.refresh_vector_index("Doc", "summary") == 0
+        assert g.refresh_vector_index("Doc", "nope") == 0
+
+    def test_a_partly_covered_index_survives_save_and_load(self):
+        g, _ = _build_graph(n=600)
+        g.build_vector_index("Doc", "summary", auto_refresh_limit=2)
+        g.add_embeddings("Doc", "summary", {i: [0.25] * 64 for i in range(5)})
+        assert _vector_row(g)["delta"] == 5
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "g.kgl")
+            g.save(p)
+            g2 = kglite.load(p)
+        assert g2.has_vector_index("Doc", "summary") is True
+        assert _vector_row(g2)["delta"] == 5, "the outstanding delta rides along"
+        assert g2.refresh_vector_index("Doc", "summary") == 5
+        assert _vector_row(g2)["stale"] is False
+
+    def test_the_fused_cypher_top_k_regains_the_index_path_after_catch_up(self):
+        g, _ = _build_graph(n=800)
+        g.build_vector_index("Doc", "summary")
+        g.add_embeddings("Doc", "summary", {5: [0.75] * 64})
+        assert _vector_row(g)["stale"] is True
+        rows = g.cypher(
+            "MATCH (d:Doc) RETURN d.id AS id, vector_score(d, 'summary_emb', $q) AS s ORDER BY s DESC LIMIT 5",
+            params={"q": _query(64)},
+        )
+        assert len(rows) == 5
+        assert _vector_row(g)["stale"] is False, "the fused top-k's coverage seam is where the catch-up happens"
+
+    def test_bulk_node_ingest_never_dirties_a_vector_index(self):
+        # The design promise behind putting freshness in *store*-slot space:
+        # creating nodes cannot make a vector index stale, because a node with
+        # no vector is not a document. Bulk ingest therefore pays nothing.
+        g, _ = _build_graph(n=500)
+        g.build_vector_index("Doc", "summary")
+        g.add_nodes(
+            pd.DataFrame({"id": list(range(5000, 9000)), "title": [f"x{i}" for i in range(4000)]}),
+            "Doc",
+            "id",
+            "title",
+        )
+        row = _vector_row(g)
+        assert row["stale"] is False
+        assert row["delta"] == 0
+        assert row["unembedded"] == 4000

@@ -192,6 +192,31 @@ impl IndexFreshness {
         self.dirty_len.store(dirty.len(), Ordering::Relaxed);
     }
 
+    /// Rebuild freshness state from what persistence recorded — the exact
+    /// inverse of [`Self::persisted_parts`].
+    ///
+    /// An index that persists a *prefix* of its store has to persist what it
+    /// has yet to cover with it; restoring only the topology would present a
+    /// stale index as a current one.
+    pub fn restored(watermark: u32, limit: usize, dirty: &[u32]) -> Self {
+        let dirty: FxHashSet<u32> = dirty.iter().copied().collect();
+        Self {
+            watermark: AtomicU32::new(watermark),
+            dirty_len: AtomicUsize::new(dirty.len()),
+            limit: AtomicUsize::new(limit),
+            dirty: Mutex::new(dirty),
+        }
+    }
+
+    /// The state to persist: watermark, ceiling, and the dirty slots sorted so
+    /// two equivalent indexes serialize byte-identically (the set's own
+    /// iteration order is per-process).
+    pub(crate) fn persisted_parts(&self) -> (u32, usize, Vec<u32>) {
+        let mut dirty: Vec<u32> = self.dirty_set().iter().copied().collect();
+        dirty.sort_unstable();
+        (self.watermark(), self.limit(), dirty)
+    }
+
     /// Claim the outstanding delta and mark the index current up to
     /// `node_bound`. `None` when there is nothing to do.
     ///

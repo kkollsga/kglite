@@ -396,6 +396,12 @@ pub(crate) enum IndexKind {
     /// single-property and canonically named, where Neo4j's is multi-label and
     /// user-named, so `CREATE FULLTEXT INDEX` still refuses.
     Text,
+    /// HNSW approximate-nearest-neighbour index over one embedding store, built
+    /// by `build_vector_index`. Reported as Neo4j's `VECTOR`. A store *without*
+    /// one is not listed: it still answers vector queries, by exact scan, and
+    /// belongs to `list_embeddings()` rather than to a listing of installed
+    /// indexes whose every name `DROP INDEX` must accept.
+    Vector,
 }
 
 impl IndexKind {
@@ -403,12 +409,13 @@ impl IndexKind {
     ///
     /// Equality + Composite both map to `"PROPERTY"` (Neo4j convention);
     /// `Range` is a KGLite-specific value documented in CYPHER.md; `Text` maps
-    /// to Neo4j's `"FULLTEXT"`.
+    /// to Neo4j's `"FULLTEXT"` and `Vector` to its `"VECTOR"`.
     pub(crate) fn neo4j_type(self) -> &'static str {
         match self {
             IndexKind::Equality | IndexKind::Composite => "PROPERTY",
             IndexKind::Range => "RANGE",
             IndexKind::Text => "FULLTEXT",
+            IndexKind::Vector => "VECTOR",
         }
     }
 }
@@ -444,20 +451,28 @@ pub(crate) struct IndexInfo {
     /// An upper bound (`crate::graph::index_freshness`), and `None` alongside a
     /// `None` `stale`.
     pub delta: Option<usize>,
+    /// Nodes of the type that carry no vector at all — `VECTOR` rows only,
+    /// `None` everywhere else. Deliberately not folded into `delta`: catch-up
+    /// indexes vectors that exist, it never creates them, so these two numbers
+    /// answer different questions ("what will a query fix by itself?" versus
+    /// "what needs `embed_texts`?") and adding them would misreport both.
+    pub unembedded: Option<usize>,
 }
 
 /// All indexes installed on the graph, in deterministic order.
 ///
 /// The single source of truth for `db.indexes()` and the `compute_schema()`
-/// formatted string list, over all four index stores (`property_indices`,
-/// `composite_indices`, `range_indices`, `text_indexes`). Sorted by `name` so
-/// the output is stable across runs and storage modes.
+/// formatted string list, over all five index stores (`property_indices`,
+/// `composite_indices`, `range_indices`, `text_indexes`, `embeddings`). Sorted
+/// by `name` so the output is stable across runs and storage modes.
 ///
 /// One canonical name can therefore carry several rows — a property with a
-/// hash index, a range index and a BM25 index is three entries under
-/// `Label.property`, distinguished by `type`. Vector indexes are the one index
-/// kind that is *not* here; they hang off an embedding store rather than a
-/// property and are reported through `list_embeddings()` instead.
+/// hash index, a range index, a BM25 index and an embedding store is four
+/// entries under `Label.property`, distinguished by `type`. A `VECTOR` row is
+/// keyed on the *source column* (`summary`), not the store name
+/// (`summary_emb`), so it shares its name with the property's other indexes and
+/// `DROP INDEX Label.summary` reaches all of them; `list_embeddings()` remains
+/// the place to read a store's dimension, metric and model.
 pub(crate) fn collect_indexes_structured(graph: &DirGraph) -> Vec<IndexInfo> {
     let mut out: Vec<IndexInfo> = Vec::new();
 
@@ -471,6 +486,7 @@ pub(crate) fn collect_indexes_structured(graph: &DirGraph) -> Vec<IndexInfo> {
             state: "ONLINE",
             stale: None,
             delta: None,
+            unembedded: None,
         });
     }
     for (node_type, properties) in graph.composite_indices.keys() {
@@ -483,6 +499,7 @@ pub(crate) fn collect_indexes_structured(graph: &DirGraph) -> Vec<IndexInfo> {
             state: "ONLINE",
             stale: None,
             delta: None,
+            unembedded: None,
         });
     }
     for (node_type, property) in graph.range_indices.keys() {
@@ -495,6 +512,7 @@ pub(crate) fn collect_indexes_structured(graph: &DirGraph) -> Vec<IndexInfo> {
             state: "ONLINE",
             stale: None,
             delta: None,
+            unembedded: None,
         });
     }
     for (node_type, property, store) in crate::graph::text_indexes::list_text_indexes(graph) {
@@ -507,6 +525,27 @@ pub(crate) fn collect_indexes_structured(graph: &DirGraph) -> Vec<IndexInfo> {
             state: "ONLINE",
             stale: Some(store.is_stale(graph)),
             delta: Some(store.delta_size(graph)),
+            unembedded: None,
+        });
+    }
+    // Only stores that actually carry an HNSW index get a row. A store without
+    // one is not an installed index — it is vectors, answered by exact scan and
+    // listed by `list_embeddings()` — and listing it here would print a name
+    // that `DROP INDEX` then refuses as nonexistent.
+    for status in crate::graph::embeddings::list_vector_indexes(graph)
+        .into_iter()
+        .filter(|status| status.built)
+    {
+        out.push(IndexInfo {
+            name: format!("{}.{}", status.node_type, status.text_column),
+            kind: IndexKind::Vector,
+            entity_type: "NODE",
+            labels_or_types: vec![status.node_type.clone()],
+            properties: vec![status.text_column.clone()],
+            state: "ONLINE",
+            stale: Some(status.stale),
+            delta: Some(status.delta),
+            unembedded: Some(status.unembedded),
         });
     }
 
@@ -773,6 +812,9 @@ pub fn compute_schema(graph: &DirGraph) -> SchemaOverview {
             }
             IndexKind::Range => format!("{}.{} [range]", idx.labels_or_types[0], idx.properties[0]),
             IndexKind::Text => format!("{}.{} [text]", idx.labels_or_types[0], idx.properties[0]),
+            IndexKind::Vector => {
+                format!("{}.{} [vector]", idx.labels_or_types[0], idx.properties[0])
+            }
         })
         .collect();
     indexes.sort();

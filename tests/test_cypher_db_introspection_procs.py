@@ -243,6 +243,7 @@ def test_zero_row_call_keeps_declared_columns(small_graph):
         "state",
         "stale",
         "delta",
+        "unembedded",
     ]
 
 

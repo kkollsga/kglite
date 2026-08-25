@@ -248,10 +248,16 @@ automatically. Key points:
   > true nearest neighbour) rather than fresh random ones.
 - **Metrics.** cosine / dot_product / euclidean are indexable; `poincare` always
   uses the exact path.
-- **Lifecycle.** The index is **dropped automatically** whenever the store's
-  vectors change (`add_embeddings`, `embed_texts`), slots are remapped
-  (`vacuum`), or an embedded node is deleted (the delete prunes its vector,
-  which moves a slot) — rebuild it after such changes. Check with
+- **Lifecycle.** Writing vectors (`add_embeddings`, `embed_texts`,
+  `set_embeddings`) does **not** drop the index: the write is recorded, and the
+  next vector query folds it in while the outstanding delta stays at or under
+  `auto_refresh_limit` (default 1000). A larger delta is served by the exact
+  scan — correct, and slower — until you rebuild or call
+  `refresh_vector_index(...)`. What *does* drop the index is a change to the
+  slot layout it addresses: deleting an embedded node (the delete prunes its
+  vector), rolling that delete back, and `vacuum()`. Rebuild after those.
+  `SHOW INDEXES` reports `stale` / `delta`, plus `unembedded` — the nodes with
+  no vector at all, which catch-up never embeds. Check with
   `has_vector_index(...)`, remove with `drop_vector_index(...)`.
 - **Persisted.** The index is saved inside the `.kgl` (and `to_bytes()`), so a
   reloaded graph keeps it — no rebuild on load.

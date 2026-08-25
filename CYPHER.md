@@ -1693,7 +1693,7 @@ sidebars; `SHOW PROCEDURES` feeds autocomplete.
 |-----------|---------------|---------|
 | `CALL db.labels()` | `label` | One row per node-type ("label") in the graph, sorted alphabetically |
 | `CALL db.relationshipTypes()` | `relationshipType` | One row per connection-type ("relationship type") in the graph, sorted alphabetically |
-| `CALL db.indexes()` | `name`, `type`, `entityType`, `labelsOrTypes`, `properties`, `state`, `stale`, `delta` | One row per index installed on the graph, sorted by `name`. `stale`/`delta` are non-null only on `FULLTEXT` rows. `SHOW INDEXES` returns the same rows — see [Cypher index DDL](#cypher-index-ddl) |
+| `CALL db.indexes()` | `name`, `type`, `entityType`, `labelsOrTypes`, `properties`, `state`, `stale`, `delta`, `unembedded` | One row per index installed on the graph, sorted by `name`. `stale`/`delta` are non-null on the opt-in kinds (`FULLTEXT`, `VECTOR`); `unembedded` on `VECTOR` alone. `SHOW INDEXES` returns the same rows — see [Cypher index DDL](#cypher-index-ddl) |
 | `CALL db.constraints()` | `name`, `type`, `entityType`, `labelsOrTypes`, `properties`, `propertyType` | One row per declared constraint, sorted by `name`. `SHOW CONSTRAINTS` returns the same rows — see [Cypher constraint DDL](#cypher-constraint-ddl) |
 | `CALL db.propertyKeys()` | `propertyKey` | One row per declared property name (node + relationship), sorted alphabetically |
 | `CALL db.schema()` | `nodeType`, `properties` | One row per node-type with its sorted list of property names — the in-language counterpart of Python `describe()` |
@@ -2727,19 +2727,37 @@ A read, so it works on a read-only graph. Returns the same rows and columns as
 | Column | Value |
 |---|---|
 | `name` | canonical name — `Label.property` or `Label.(a,b)` |
-| `type` | `PROPERTY` (hash equality or composite), `RANGE` (B-tree), or `FULLTEXT` (BM25 text index — see `build_text_index()`) |
+| `type` | `PROPERTY` (hash equality or composite), `RANGE` (B-tree), `FULLTEXT` (BM25 text index — see `build_text_index()`), or `VECTOR` (HNSW index over an embedding store — see `build_vector_index()`) |
 | `entityType` | always `NODE` |
 | `labelsOrTypes` | single-element list holding the node type |
 | `properties` | indexed property names, sorted for a composite |
 | `state` | always `ONLINE` — KGLite builds indexes atomically |
 | `stale` | whether the index is behind the graph. `null` on `PROPERTY` / `RANGE` rows, which are maintained on every write and have no staleness to report |
-| `delta` | how many documents the index would re-read to catch up — an upper bound. `null` alongside a `null` `stale` |
+| `delta` | how many documents (or vectors) the index would re-read to catch up — an upper bound. `null` alongside a `null` `stale` |
+| `unembedded` | `VECTOR` rows only: nodes of the type carrying no vector at all. `null` on every other row |
 
-`stale` / `delta` are KGLite-specific and describe the BM25 catch-up contract:
-a text index does not follow writes eagerly, it records that they happened and
-folds them in at query entry while the delta stays under the index's
-`auto_refresh_limit`. A `delta` above that limit is the signal to rebuild with
-`build_text_index(...)`.
+`stale` / `delta` are KGLite-specific and describe the catch-up contract both
+opt-in index kinds share: the index does not follow writes eagerly, it records
+that they happened and folds them in at query entry while the delta stays under
+that index's `auto_refresh_limit`. A `delta` above that limit is the signal to
+rebuild — with `build_text_index(...)`, or for a vector index with
+`build_vector_index(...)` / `refresh_vector_index(...)`.
+
+The two kinds differ in what an over-limit delta *serves*. A stale text index
+returns `null` for the rows it has no document for, and warns. A stale **vector**
+index is simply stepped over: the query falls back to the exact scan, which is
+the oracle the approximate index is measured against, so a stale vector index
+costs latency and never accuracy. `unembedded` is deliberately not folded into
+`delta`, because catch-up indexes vectors that exist and never creates them: a
+node with no embedding stays invisible to vector search until `embed_texts` /
+`set_embeddings` runs. A `VECTOR` row appears only once an index is built —
+embeddings on their own are reported by `list_embeddings()`.
+
+A vector index is listed under its **source column** (`Doc.summary`), not the
+store name (`Doc.summary_emb`), so it shares one canonical name with that
+property's other indexes and `DROP INDEX Doc.summary` removes it along with
+them. That drops the accelerator only: the vectors are data, and DDL does not
+delete them.
 
 Neo4j 5 also returns `id`, `populationPercent`, `indexProvider`,
 `owningConstraint`, `lastRead`, and `readCount`. KGLite has no equivalent
@@ -2758,7 +2776,7 @@ that works — never a syntax error, and never a no-op that reports success.
 | `CREATE TEXT INDEX` | No text index. `CONTAINS` / `STARTS WITH` / `ENDS WITH` work unindexed (a string index already gives prefix pushdown — see above) |
 | `CREATE FULLTEXT INDEX` | No full-text index. Use `build_vector_index` + `vector_score()` for ranked text retrieval |
 | `CREATE POINT INDEX` | No point index. Spatial predicates and the spatial-join optimiser work on geometry properties without one |
-| `CREATE VECTOR INDEX` | Vector indexes exist, but need an existing embedding store and HNSW build parameters, so they are created through `build_vector_index(...)` |
+| `CREATE VECTOR INDEX` | Vector indexes exist, but need an existing embedding store and HNSW build parameters, so they are created through `build_vector_index(...)`. A built one *is* listed by `SHOW INDEXES` as type `VECTOR`, and `DROP INDEX Label.column` removes it |
 | `CREATE LOOKUP INDEX` | Label and relationship-type lookup is always indexed automatically (`type_indices`) |
 | `CREATE INDEX FOR ()-[r:T]-() ON (r.p)` | KGLite indexes node properties only. Relationship properties are queryable, just scanned |
 | `... OPTIONS { ... }` | No index providers or per-index configuration to apply |

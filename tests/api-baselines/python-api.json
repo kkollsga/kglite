@@ -488,7 +488,7 @@
         },
         "build_vector_index": {
           "kind": "method",
-          "signature": "(self, /, node_type, text_column, m=None, ef_construction=None, ef_search=None, metric=None)"
+          "signature": "(self, /, node_type, text_column, m=None, ef_construction=None, ef_search=None, metric=None, auto_refresh_limit=None)"
         },
         "calculate": {
           "kind": "method",
@@ -885,6 +885,10 @@
         "rebuild_indexes": {
           "kind": "method",
           "signature": "(self, /)"
+        },
+        "refresh_vector_index": {
+          "kind": "method",
+          "signature": "(self, /, node_type, text_column)"
         },
         "reindex": {
           "kind": "method",

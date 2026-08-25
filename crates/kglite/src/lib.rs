@@ -282,9 +282,10 @@ pub mod api {
     /// `cypher_query`.
     pub mod embeddings {
         pub use crate::graph::embeddings::{
-            add_embeddings, build_vector_index, list_embeddings, resolve_source_column,
+            add_embeddings, build_vector_index, drop_vector_index, has_vector_index,
+            list_embeddings, list_vector_indexes, refresh_vector_index, resolve_source_column,
             set_embeddings, store_key, store_name, EmbeddingIngestReport, EmbeddingStoreInfo,
-            VectorIndexReport,
+            VectorIndexReport, VectorIndexStatus,
         };
     }
 

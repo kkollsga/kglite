@@ -1687,6 +1687,9 @@ pub(super) fn indexes_to_rows(
                 "delta" => info
                     .delta
                     .map_or(Value::Null, |delta| Value::Int64(delta as i64)),
+                "unembedded" => info
+                    .unembedded
+                    .map_or(Value::Null, |count| Value::Int64(count as i64)),
                 _ => continue, // unreachable in practice (validator gate)
             };
             row.projected.insert(alias.to_string(), val);

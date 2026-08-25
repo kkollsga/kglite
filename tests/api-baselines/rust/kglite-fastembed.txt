@@ -1221,9 +1221,28 @@ pub fn kglite::api::embeddings::VectorIndexReport::eq(&self, other: &kglite::api
 impl core::fmt::Debug for kglite::api::embeddings::VectorIndexReport
 pub fn kglite::api::embeddings::VectorIndexReport::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for kglite::api::embeddings::VectorIndexReport
+pub struct kglite::api::embeddings::VectorIndexStatus
+pub kglite::api::embeddings::VectorIndexStatus::built: bool
+pub kglite::api::embeddings::VectorIndexStatus::delta: usize
+pub kglite::api::embeddings::VectorIndexStatus::node_type: alloc::string::String
+pub kglite::api::embeddings::VectorIndexStatus::stale: bool
+pub kglite::api::embeddings::VectorIndexStatus::text_column: alloc::string::String
+pub kglite::api::embeddings::VectorIndexStatus::unembedded: usize
+impl core::clone::Clone for kglite::api::embeddings::VectorIndexStatus
+pub fn kglite::api::embeddings::VectorIndexStatus::clone(&self) -> kglite::api::embeddings::VectorIndexStatus
+impl core::cmp::Eq for kglite::api::embeddings::VectorIndexStatus
+impl core::cmp::PartialEq for kglite::api::embeddings::VectorIndexStatus
+pub fn kglite::api::embeddings::VectorIndexStatus::eq(&self, other: &kglite::api::embeddings::VectorIndexStatus) -> bool
+impl core::fmt::Debug for kglite::api::embeddings::VectorIndexStatus
+pub fn kglite::api::embeddings::VectorIndexStatus::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for kglite::api::embeddings::VectorIndexStatus
 pub fn kglite::api::embeddings::add_embeddings<I, V>(graph: &mut kglite::api::DirGraph, node_type: &str, text_column: &str, metric: core::option::Option<&str>, entries: I) -> core::result::Result<kglite::api::embeddings::EmbeddingIngestReport, alloc::string::String> where I: core::iter::traits::collect::IntoIterator<Item = (kglite::datatypes::values::Value, V)>, V: core::convert::AsRef<[f32]>
-pub fn kglite::api::embeddings::build_vector_index(graph: &mut kglite::api::DirGraph, node_type: &str, text_column: &str, m: core::option::Option<usize>, ef_construction: core::option::Option<usize>, ef_search: core::option::Option<usize>, metric: core::option::Option<&str>) -> core::result::Result<kglite::api::embeddings::VectorIndexReport, alloc::string::String>
+pub fn kglite::api::embeddings::build_vector_index(graph: &mut kglite::api::DirGraph, node_type: &str, text_column: &str, m: core::option::Option<usize>, ef_construction: core::option::Option<usize>, ef_search: core::option::Option<usize>, metric: core::option::Option<&str>, auto_refresh_limit: core::option::Option<usize>) -> core::result::Result<kglite::api::embeddings::VectorIndexReport, alloc::string::String>
+pub fn kglite::api::embeddings::drop_vector_index(graph: &mut kglite::api::DirGraph, node_type: &str, text_column: &str) -> bool
+pub fn kglite::api::embeddings::has_vector_index(graph: &kglite::api::DirGraph, node_type: &str, text_column: &str) -> bool
 pub fn kglite::api::embeddings::list_embeddings(graph: &kglite::api::DirGraph) -> alloc::vec::Vec<kglite::api::embeddings::EmbeddingStoreInfo>
+pub fn kglite::api::embeddings::list_vector_indexes(graph: &kglite::api::DirGraph) -> alloc::vec::Vec<kglite::api::embeddings::VectorIndexStatus>
+pub fn kglite::api::embeddings::refresh_vector_index(graph: &kglite::api::DirGraph, node_type: &str, text_column: &str) -> core::option::Option<usize>
 pub fn kglite::api::embeddings::resolve_source_column<'a>(graph: &'a kglite::api::DirGraph, node_type: &str, text_column: &'a str) -> core::result::Result<&'a str, alloc::string::String>
 pub fn kglite::api::embeddings::set_embeddings<I, V>(graph: &mut kglite::api::DirGraph, node_type: &str, text_column: &str, metric: core::option::Option<&str>, entries: I) -> core::result::Result<kglite::api::embeddings::EmbeddingIngestReport, alloc::string::String> where I: core::iter::traits::collect::IntoIterator<Item = (kglite::datatypes::values::Value, V)>, V: core::convert::AsRef<[f32]>
 pub fn kglite::api::embeddings::store_key(node_type: &str, text_column: &str) -> (alloc::string::String, alloc::string::String)
@@ -2056,7 +2075,6 @@ pub fn kglite::api::storage::DiskGraph::update_row_id(&mut self, node_idx: petgr
 pub struct kglite::api::storage::EmbeddingStore
 pub kglite::api::storage::EmbeddingStore::data: alloc::vec::Vec<f32>
 pub kglite::api::storage::EmbeddingStore::dimension: usize
-pub kglite::api::storage::EmbeddingStore::index: core::option::Option<kglite::graph::algorithms::hnsw::HnswIndex>
 pub kglite::api::storage::EmbeddingStore::metric: core::option::Option<alloc::string::String>
 pub kglite::api::storage::EmbeddingStore::model_id: core::option::Option<alloc::string::String>
 pub kglite::api::storage::EmbeddingStore::node_to_slot: std::collections::hash::map::HashMap<usize, usize>
@@ -2064,23 +2082,31 @@ pub kglite::api::storage::EmbeddingStore::norms: alloc::vec::Vec<f32>
 pub kglite::api::storage::EmbeddingStore::slot_to_node: alloc::vec::Vec<usize>
 pub kglite::api::storage::EmbeddingStore::text_hashes: std::collections::hash::map::HashMap<usize, u64>
 impl kglite::api::storage::EmbeddingStore
+pub fn kglite::api::storage::EmbeddingStore::auto_refresh_limit(&self) -> usize
 pub fn kglite::api::storage::EmbeddingStore::build_index(&mut self, metric: kglite::api::algorithms::DistanceMetric, params: kglite::api::algorithms::HnswParams, seed: u64) -> core::result::Result<(), alloc::string::String>
+pub fn kglite::api::storage::EmbeddingStore::can_auto_refresh(&self) -> bool
+pub fn kglite::api::storage::EmbeddingStore::delta_size(&self) -> usize
 pub fn kglite::api::storage::EmbeddingStore::get_embedding(&self, node_index: usize) -> core::option::Option<&[f32]>
 pub fn kglite::api::storage::EmbeddingStore::get_embedding_with_norm(&self, node_index: usize) -> core::option::Option<(&[f32], f32)>
 pub fn kglite::api::storage::EmbeddingStore::has_index(&self) -> bool
+pub fn kglite::api::storage::EmbeddingStore::index_for_query(&self, read_only: bool) -> core::option::Option<kglite::graph::schema::HnswRead<'_>>
+pub fn kglite::api::storage::EmbeddingStore::index_is_stale(&self) -> bool
+pub fn kglite::api::storage::EmbeddingStore::indexed_slots(&self) -> usize
 pub fn kglite::api::storage::EmbeddingStore::invalidate_index(&mut self)
 pub fn kglite::api::storage::EmbeddingStore::is_stale(&self, node_index: usize, current_hash: u64) -> bool
 pub fn kglite::api::storage::EmbeddingStore::len(&self) -> usize
 pub fn kglite::api::storage::EmbeddingStore::new(dimension: usize) -> Self
 pub fn kglite::api::storage::EmbeddingStore::rebuild_norms(&mut self)
+pub fn kglite::api::storage::EmbeddingStore::refresh_index(&self) -> usize
 pub fn kglite::api::storage::EmbeddingStore::remove_embedding(&mut self, node_index: usize) -> core::option::Option<kglite::graph::schema::RemovedEmbedding>
 pub fn kglite::api::storage::EmbeddingStore::restore_embedding(&mut self, node_index: usize, removed: &kglite::graph::schema::RemovedEmbedding)
+pub fn kglite::api::storage::EmbeddingStore::set_auto_refresh_limit(&mut self, limit: usize)
 pub fn kglite::api::storage::EmbeddingStore::set_embedding(&mut self, node_index: usize, embedding: &[f32]) -> usize
 pub fn kglite::api::storage::EmbeddingStore::set_text_hash(&mut self, node_index: usize, hash: u64)
 pub fn kglite::api::storage::EmbeddingStore::text_hash(text: &str) -> u64
 pub fn kglite::api::storage::EmbeddingStore::with_metric(dimension: usize, metric: &str) -> Self
 impl core::clone::Clone for kglite::api::storage::EmbeddingStore
-pub fn kglite::api::storage::EmbeddingStore::clone(&self) -> kglite::api::storage::EmbeddingStore
+pub fn kglite::api::storage::EmbeddingStore::clone(&self) -> Self
 impl core::fmt::Debug for kglite::api::storage::EmbeddingStore
 pub fn kglite::api::storage::EmbeddingStore::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl serde_core::ser::Serialize for kglite::api::storage::EmbeddingStore

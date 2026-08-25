@@ -3,6 +3,7 @@
 use super::{codec_deser, codec_ser, MAX_CODEC_BYTES};
 use crate::datatypes::values::Value;
 use crate::graph::algorithms::hnsw::HnswIndex;
+use crate::graph::index_freshness::IndexFreshness;
 use crate::graph::schema::DirGraph;
 use crate::graph::storage::GraphRead;
 use crate::serde_codec;
@@ -27,21 +28,94 @@ use std::io::{self, BufReader, BufWriter, Read, Write};
 //
 //   [0..8]   magic = b"KGLVIDX1"
 //   [8..12]  format_version: u32 LE
-//   [12..]   codec payload for Vec<(node_type, embedding_property, HnswIndex)>
+//   [12..]   codec payload for Vec<PersistedVectorIndex>
+//
+// v3 (0.16.10) adds the catch-up state beside the topology. An index no longer
+// has to cover its whole store — it covers a prefix and remembers the rest —
+// so a file that carried only the topology can no longer be interpreted: a v2
+// payload would restore an index while its outstanding delta was lost, and the
+// vectors written after the save would look indexed. v2 files therefore drop
+// their index and rebuild, which is exactly the rebuildable-cache contract this
+// section was designed around.
 pub(super) const VECTOR_INDEX_MAGIC: &[u8; 8] = b"KGLVIDX1";
-const VECTOR_INDEX_FORMAT_VERSION: u32 = 2;
+const VECTOR_INDEX_FORMAT_VERSION: u32 = 3;
+
+/// One store's index held open for the duration of an encode. The read guard
+/// is what keeps a concurrent catch-up from renumbering topology mid-write.
+struct HeldIndex<'a> {
+    node_type: &'a String,
+    embedding_property: &'a String,
+    guard: crate::graph::schema::HnswRead<'a>,
+    watermark: u32,
+    limit: usize,
+    dirty: Vec<u32>,
+}
+
+/// One store's persisted index, as written — borrowed so a save does not clone
+/// a corpus-sized topology. Postcard encodes struct fields positionally, so
+/// this and [`PersistedVectorIndex`] are the same bytes.
+#[derive(Serialize)]
+struct PersistedVectorIndexRef<'a> {
+    node_type: &'a str,
+    embedding_property: &'a str,
+    index: &'a HnswIndex,
+    watermark: u32,
+    limit: usize,
+    dirty: Vec<u32>,
+}
+
+/// One store's persisted index: the topology plus what it has yet to cover.
+#[derive(Serialize, Deserialize)]
+struct PersistedVectorIndex {
+    node_type: String,
+    embedding_property: String,
+    index: HnswIndex,
+    /// Store slots the index covers.
+    watermark: u32,
+    /// The inline-refresh ceiling this index was built with.
+    limit: usize,
+    /// Slots replaced in place since the last catch-up. Sorted on write so
+    /// equivalent graphs serialize byte-identically.
+    dirty: Vec<u32>,
+}
 
 /// Encode every built HNSW index into a self-describing payload. Returns `None`
 /// when no store carries an index (the section is then omitted entirely).
 pub(super) fn encode_vector_indexes(graph: &DirGraph) -> io::Result<Option<Vec<u8>>> {
-    let entries: Vec<(&String, &String, &HnswIndex)> = graph
-        .embeddings
-        .iter()
-        .filter_map(|((nt, prop), s)| s.index.as_ref().map(|idx| (nt, prop, idx)))
+    // Key-sorted so a multi-store graph serializes byte-identically; the
+    // underlying map's iteration order is per-process.
+    let mut stores: Vec<_> = graph.embeddings.iter().collect();
+    stores.sort_unstable_by(|a, b| a.0.cmp(b.0));
+    // The read guards are held for the encode: they are what keeps a
+    // concurrent catch-up from renumbering topology mid-serialization.
+    let held: Vec<HeldIndex<'_>> = stores
+        .into_iter()
+        .filter_map(|((nt, prop), store)| {
+            let (watermark, limit, dirty) = store.freshness_state().persisted_parts();
+            Some(HeldIndex {
+                node_type: nt,
+                embedding_property: prop,
+                guard: store.index_read()?,
+                watermark,
+                limit,
+                dirty,
+            })
+        })
         .collect();
-    if entries.is_empty() {
+    if held.is_empty() {
         return Ok(None);
     }
+    let entries: Vec<PersistedVectorIndexRef<'_>> = held
+        .iter()
+        .map(|held| PersistedVectorIndexRef {
+            node_type: held.node_type.as_str(),
+            embedding_property: held.embedding_property.as_str(),
+            index: &held.guard,
+            watermark: held.watermark,
+            limit: held.limit,
+            dirty: held.dirty.clone(),
+        })
+        .collect();
     let body = codec_ser(serde_codec::CodecVersion::PostcardV1, &entries)?;
     let mut payload = Vec::with_capacity(12 + body.len());
     payload.extend_from_slice(VECTOR_INDEX_MAGIC);
@@ -61,25 +135,36 @@ pub(super) fn decode_vector_indexes(payload: &[u8], graph: &mut DirGraph) {
     }
     let ver = u32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]);
     if ver != VECTOR_INDEX_FORMAT_VERSION {
-        return; // rebuildable cache: skip unknown and pre-0.14 versions
+        return; // rebuildable cache: skip unknown and pre-0.16.10 versions
     }
     let codec = serde_codec::CodecVersion::PostcardV1;
-    let entries: Vec<(String, String, HnswIndex)> =
+    let entries: Vec<PersistedVectorIndex> =
         match codec_deser(codec, &payload[12..], (payload.len() - 12) as u64) {
             Ok(e) => e,
             Err(_) => return,
         };
-    for (node_type, prop, idx) in entries {
-        if let Some(store) = graph.embeddings.get_mut(&(node_type, prop)) {
-            // Defensive: only attach an index whose shape still matches the
-            // store it was built over (dimension + vector count).
-            if idx
-                .validate_for_store(&store.data, &store.norms, store.dimension)
-                .is_ok()
-            {
-                store.index = Some(idx);
-            }
+    for entry in entries {
+        let key = (entry.node_type, entry.embedding_property);
+        let Some(store) = graph.embeddings.get_mut(&key) else {
+            continue;
+        };
+        // Defensive: only attach an index whose shape still matches the store
+        // it was built over (dimension + a coverage that the store's vectors
+        // actually contain), and whose recorded coverage agrees with the
+        // topology's own length — a watermark ahead of the index would silence
+        // a delta that was never folded in.
+        let shape_ok = entry
+            .index
+            .validate_for_store(&store.data, &store.norms, store.dimension)
+            .is_ok();
+        if !shape_ok
+            || entry.watermark as usize != entry.index.len()
+            || entry.dirty.iter().any(|slot| *slot >= entry.watermark)
+        {
+            continue;
         }
+        let freshness = IndexFreshness::restored(entry.watermark, entry.limit, &entry.dirty);
+        store.attach_persisted_index(entry.index, freshness);
     }
 }
 
@@ -366,6 +451,54 @@ mod tests {
         }
         bytes.extend_from_slice(&compressed);
         bytes
+    }
+
+    /// A payload whose recorded coverage disagrees with the topology it ships
+    /// is refused. A watermark *ahead* of the index would silence a delta that
+    /// was never folded in — an index reporting itself current over vectors it
+    /// has never seen, which is a wrong answer nothing later notices.
+    #[test]
+    fn a_payload_whose_watermark_disagrees_with_its_topology_is_skipped() {
+        use crate::graph::algorithms::hnsw::{HnswMetric, HnswParams};
+        use crate::graph::schema::EmbeddingStore;
+
+        let mut store = EmbeddingStore::new(2);
+        for slot in 0..4 {
+            store.set_embedding(slot, &[slot as f32, 1.0]);
+        }
+        let index = HnswIndex::build(
+            &store.data,
+            &store.norms,
+            2,
+            HnswMetric::Cosine,
+            HnswParams::default(),
+            3,
+        );
+        // `store.norms` is populated by `set_embedding`, so the shape is valid;
+        // only the watermark lies.
+        let entry = PersistedVectorIndexRef {
+            node_type: "Doc",
+            embedding_property: "vec_emb",
+            index: &index,
+            watermark: 4 + 1,
+            limit: 1000,
+            dirty: Vec::new(),
+        };
+        let body = codec_ser(serde_codec::CodecVersion::PostcardV1, &vec![entry]).unwrap();
+        let mut payload = Vec::new();
+        payload.extend_from_slice(VECTOR_INDEX_MAGIC);
+        payload.extend_from_slice(&VECTOR_INDEX_FORMAT_VERSION.to_le_bytes());
+        payload.extend_from_slice(&body);
+
+        let mut graph = DirGraph::new();
+        graph
+            .embeddings
+            .insert(("Doc".to_string(), "vec_emb".to_string()), store);
+        decode_vector_indexes(&payload, &mut graph);
+        assert!(
+            !graph.embeddings[&("Doc".to_string(), "vec_emb".to_string())].has_index(),
+            "a watermark ahead of the topology must be refused"
+        );
     }
 
     #[test]

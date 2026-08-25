@@ -428,7 +428,10 @@ pub fn vector_search(
         let hnsw_result = if exact {
             None
         } else {
-            store.index.as_ref().and_then(|idx| {
+            // Catches the index up on the way in when the outstanding delta
+            // is small enough; hands back `None` — the exact scan below — when
+            // it is not. See `EmbeddingStore::index_for_query`.
+            store.index_for_query(graph.read_only).and_then(|idx| {
                 if HnswMetric::from_distance(metric) != Some(idx.metric()) {
                     return None;
                 }
@@ -436,7 +439,7 @@ pub fn vector_search(
                 debug_assert!(covered >= HNSW_AUTO_MIN);
                 hnsw_search(
                     store,
-                    idx,
+                    &idx,
                     candidates.as_ref(),
                     coverage_proven,
                     query_vector,

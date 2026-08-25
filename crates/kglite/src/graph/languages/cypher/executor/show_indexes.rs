@@ -32,6 +32,9 @@ pub(crate) const SHOW_INDEXES_COLUMNS: &[&str] = &[
     // behind, and by how much" is a real question about it.
     "stale",
     "delta",
+    // VECTOR rows only: nodes with no vector at all, which no catch-up will
+    // ever index because catch-up does not embed.
+    "unembedded",
 ];
 
 /// `SHOW INDEXES` — a read, over the shared collector named above.
@@ -81,6 +84,11 @@ fn index_info_to_row(info: &IndexInfo) -> ResultRow {
         "delta".to_string(),
         info.delta
             .map_or(Value::Null, |delta| Value::Int64(delta as i64)),
+    );
+    row.projected.insert(
+        "unembedded".to_string(),
+        info.unembedded
+            .map_or(Value::Null, |count| Value::Int64(count as i64)),
     );
     row
 }

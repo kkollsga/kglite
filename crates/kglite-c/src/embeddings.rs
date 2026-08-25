@@ -338,10 +338,11 @@ unsafe fn ingest_impl(
 /// Build an HNSW index over the store for `(node_type, "{text_column}_emb")`,
 /// accelerating whole-corpus top-k vector search.
 ///
-/// Wraps [`kglite::api::embeddings::build_vector_index`]. Any later vector write
-/// drops the index, so build it after ingest. `m`, `ef_construction` and
-/// `ef_search` use the engine default when passed `0` and are clamped to their
-/// valid range otherwise. `metric` (may be null) resolves as explicit argument,
+/// Wraps [`kglite::api::embeddings::build_vector_index`]. Later vector writes
+/// are folded into the index at query entry while the outstanding delta stays
+/// under the engine default ceiling; a larger one serves the exact scan until
+/// the index is rebuilt. `m`, `ef_construction` and `ef_search` use the engine
+/// default when passed `0` and are clamped to their valid range otherwise. `metric` (may be null) resolves as explicit argument,
 /// then the store's own metric, then cosine; `"cosine"`, `"dot_product"` and
 /// `"euclidean"` are indexable, and `"poincare"` is rejected (its search stays
 /// on the exact path).
@@ -414,6 +415,10 @@ pub unsafe extern "C" fn kglite_session_build_vector_index(
                 opt(ef_construction),
                 opt(ef_search),
                 metric,
+                // The published signature is fixed within an ABI major, so the
+                // catch-up ceiling stays at its default here; a C consumer that
+                // needs to move it gets a new symbol, never a changed one.
+                None,
             );
             match result {
                 Ok(report) => {

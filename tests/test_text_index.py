@@ -130,10 +130,13 @@ def test_show_indexes_reports_the_text_index_as_fulltext(graph) -> None:
     assert text["delta"] == 0
     assert by_type["PROPERTY"]["stale"] is None
     assert by_type["PROPERTY"]["delta"] is None
+    # `unembedded` is the vector lane's column and is null on every other row.
+    assert text["unembedded"] is None
+    assert by_type["PROPERTY"]["unembedded"] is None
     # db.indexes() is the same collector, so the two must agree.
     assert (
         graph.cypher(
-            "CALL db.indexes() YIELD name, type, entityType, labelsOrTypes, properties, state, stale, delta"
+            "CALL db.indexes() YIELD name, type, entityType, labelsOrTypes, properties, state, stale, delta, unembedded"
         ).to_list()
         == rows
     )

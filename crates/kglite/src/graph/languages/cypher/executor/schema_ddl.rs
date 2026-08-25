@@ -521,17 +521,23 @@ fn execute_drop_index(graph: &mut DirGraph, drop: &DropIndex) -> Result<Mutation
     super::write_scope::enforce_write_scope(graph, &label)?;
 
     // One canonical name can cover several KGLite structures — a single
-    // property may carry a hash equality index, a B-tree range index and a
-    // BM25 text index at once, and `collect_indexes_structured` names all
-    // three identically. `DROP INDEX Label.prop` means "remove the index on
-    // that property", so every structure registered under it goes; a name
-    // `SHOW INDEXES` just printed must never come back as "no index named".
+    // property may carry a hash equality index, a B-tree range index, a
+    // BM25 text index and an HNSW vector index at once, and
+    // `collect_indexes_structured` names all four identically. `DROP INDEX
+    // Label.prop` means "remove the index on that property", so every structure
+    // registered under it goes; a name `SHOW INDEXES` just printed must never
+    // come back as "no index named". The vector arm drops the *accelerator*,
+    // never the vectors: an embedding store is data a user produced, and DDL
+    // that silently deleted it would be a data-loss verb wearing an index name.
     let mut dropped = 0usize;
     match properties.as_slice() {
         [property] => {
             dropped += usize::from(graph.drop_index(&label, property)?);
             dropped += usize::from(graph.drop_range_index(&label, property));
             dropped += usize::from(crate::graph::text_indexes::drop_text_index(
+                graph, &label, property,
+            ));
+            dropped += usize::from(crate::graph::embeddings::drop_vector_index(
                 graph, &label, property,
             ));
         }

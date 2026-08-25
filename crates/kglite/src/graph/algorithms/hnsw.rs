@@ -279,15 +279,19 @@ impl HnswIndex {
         if self.len > u32::MAX as usize {
             return Err("HNSW topology has more slots than its u32 identifiers can address");
         }
-        let expected_data_len = self
+        let covered_data_len = self
             .len
             .checked_mul(self.dim)
             .ok_or("HNSW vector cardinality overflows usize")?;
-        if data.len() != expected_data_len {
-            return Err("HNSW vector cardinality does not match its embedding store");
+        // A **prefix**, not an equality: an index covers slots `0..len` of a
+        // store that may have grown past it since the build (the catch-up
+        // delta). What is never sound is topology addressing slots the store
+        // does not hold — that is a vector read out of bounds.
+        if data.len() < covered_data_len {
+            return Err("HNSW topology covers more vectors than its embedding store holds");
         }
-        if norms.len() != self.len {
-            return Err("HNSW norm cardinality does not match its embedding store");
+        if norms.len() < self.len {
+            return Err("HNSW topology covers more norms than its embedding store holds");
         }
         if self.node_levels.len() != self.len {
             return Err("HNSW node-level cardinality does not match its length");
@@ -541,6 +545,78 @@ impl HnswIndex {
             }
         };
 
+        self.link_slot(slot, level, entry, ctx);
+
+        // New top layer → this node becomes the entry point.
+        if level > self.max_level {
+            self.max_level = level;
+            self.entry_point = Some(slot);
+        }
+    }
+
+    /// Recompute one slot's outgoing links for the vector currently at that
+    /// slot — the in-place-update half of catch-up.
+    ///
+    /// HNSW has no update primitive: a vector replaced in place leaves
+    /// topology that was built for the *old* vector, so the node stays
+    /// findable but through the wrong neighbourhood. Scores never go wrong
+    /// (this index stores no vectors — every distance is read from the
+    /// caller's live buffer), so the damage is bounded to recall, which is why
+    /// re-linking is a legitimate repair where a rebuild is not affordable.
+    ///
+    /// **The node's level and the index's length do not move**, so back-links
+    /// pointing at it from other nodes' lists stay valid — and they are
+    /// deliberately *not* swept out, which is what keeps this O(one insert)
+    /// instead of O(corpus): a stale back-link is an extra edge into a node
+    /// that is still there, never a dangling reference. Its old outgoing links
+    /// are likewise left in place until each layer overwrites them, so the
+    /// search that computes the replacement still has a navigable graph.
+    pub fn relink(
+        &mut self,
+        slot: u32,
+        data: &[f32],
+        norms: &[f32],
+        dim: usize,
+    ) -> Result<(), String> {
+        self.validate_incremental_state().map_err(str::to_string)?;
+        if dim != self.dim {
+            return Err("dimension mismatch on relink".to_string());
+        }
+        if dim == 0 {
+            return Err("relink requires a non-zero dimension".to_string());
+        }
+        if (slot as usize) >= self.len {
+            return Err("relink slot is outside the topology".to_string());
+        }
+        if !data.len().is_multiple_of(dim) {
+            return Err("relink vector buffer has a partial vector".to_string());
+        }
+        let vector_count = data.len() / dim;
+        if norms.len() != vector_count {
+            return Err("relink vector and norm cardinalities differ".to_string());
+        }
+        if self.len > vector_count {
+            return Err("relink buffers do not cover the topology".to_string());
+        }
+        let ctx = DistCtx {
+            data,
+            norms,
+            dim,
+            metric: self.metric,
+        };
+        let level = self.node_levels[slot as usize] as usize;
+        let entry = self
+            .entry_point
+            .ok_or("relink on a topology with no entry point")?;
+        self.link_slot(slot, level, entry, &ctx);
+        Ok(())
+    }
+
+    /// Connect `slot` — whose level and per-layer link storage are already
+    /// sized — into the graph, descending from `entry`. Shared by the
+    /// sequential insert and by [`Self::relink`], so the two cannot drift on
+    /// neighbour selection or degree pruning.
+    fn link_slot(&mut self, slot: u32, level: usize, entry: u32, ctx: &DistCtx) {
         let df = |id: u32| ctx.dist_ids(slot, id);
 
         // Phase 1: greedy-descend from the top layer down to `level+1` with ef=1.
@@ -565,7 +641,12 @@ impl HnswIndex {
             // Bidirectional links.
             self.links[slot as usize][lc] = selected.clone();
             for &e in &selected {
-                self.links[e as usize][lc].push(slot);
+                // Guarded because `relink` re-runs this over a slot some
+                // neighbours already point at; a duplicate neighbour is a
+                // topology-validation failure, not a harmless repeat.
+                if !self.links[e as usize][lc].contains(&slot) {
+                    self.links[e as usize][lc].push(slot);
+                }
                 // Prune the neighbour if it now exceeds m_max.
                 if self.links[e as usize][lc].len() > m_max {
                     let cands: Vec<Cand> = self.links[e as usize][lc]
@@ -585,12 +666,6 @@ impl HnswIndex {
             if ep.is_empty() {
                 ep = vec![entry];
             }
-        }
-
-        // New top layer → this node becomes the entry point.
-        if level > self.max_level {
-            self.max_level = level;
-            self.entry_point = Some(slot);
         }
     }
 
@@ -954,6 +1029,81 @@ mod tests {
                 "attempt {attempt}"
             );
         }
+    }
+
+    /// An index may cover a *prefix* of its store — that is the whole
+    /// catch-up delta — so extra vectors past its length are not a mismatch.
+    #[test]
+    fn persisted_validation_accepts_a_store_that_has_grown_past_the_index() {
+        let (index, data, norms) = valid_index();
+        let (extra_data, extra_norms) = make_data(5, 8, 0xBEEF);
+        let mut data = data;
+        let mut norms = norms;
+        data.extend_from_slice(&extra_data);
+        norms.extend_from_slice(&extra_norms);
+        assert_eq!(index.validate_for_store(&data, &norms, 8), Ok(()));
+    }
+
+    #[test]
+    fn incremental_insert_extends_the_topology_and_keeps_it_valid() {
+        let (mut index, data, norms) = valid_index();
+        let (extra_data, extra_norms) = make_data(3, 8, 0x5EED);
+        let mut data = data;
+        let mut norms = norms;
+        data.extend_from_slice(&extra_data);
+        norms.extend_from_slice(&extra_norms);
+
+        for slot in 40..43u32 {
+            index.insert(slot, &data, &norms, 8).expect("append");
+        }
+        assert_eq!(index.len(), 43);
+        assert_eq!(index.validate_for_store(&data, &norms, 8), Ok(()));
+
+        // The appended vectors are findable, which is what catch-up buys.
+        let query = &data[42 * 8..43 * 8];
+        let hits = index.search(query, norms[42], 1, None, &data, &norms);
+        assert_eq!(hits[0].0, 42);
+    }
+
+    /// Re-linking a slot whose vector was replaced in place must leave a
+    /// topology that still satisfies every invariant — no duplicate
+    /// neighbours, no degree-bound violation, no orphaned level — and must find
+    /// the *new* vector where the stale topology would have hidden it.
+    #[test]
+    fn relink_repairs_an_in_place_replacement_without_breaking_the_topology() {
+        let (mut index, mut data, mut norms) = valid_index();
+        let (replacement, replacement_norms) = make_data(1, 8, 0xC0FFEE);
+        data[7 * 8..8 * 8].copy_from_slice(&replacement);
+        norms[7] = replacement_norms[0];
+
+        index.relink(7, &data, &norms, 8).expect("relink");
+        assert_eq!(index.len(), 40, "re-linking adds no slot");
+        assert_eq!(index.validate_for_store(&data, &norms, 8), Ok(()));
+
+        let hits = index.search(&replacement, norms[7], 1, None, &data, &norms);
+        assert_eq!(hits[0].0, 7, "the replaced vector is found at its own slot");
+    }
+
+    /// Re-linking is idempotent: running it twice must not double a back-link
+    /// (a duplicate neighbour is a validation failure, not a harmless repeat).
+    #[test]
+    fn repeated_relink_never_duplicates_a_neighbour() {
+        let (mut index, data, norms) = valid_index();
+        for _ in 0..3 {
+            index.relink(11, &data, &norms, 8).expect("relink");
+        }
+        assert_eq!(index.validate_for_store(&data, &norms, 8), Ok(()));
+    }
+
+    #[test]
+    fn relink_rejects_arguments_it_cannot_honour() {
+        let (mut index, data, norms) = valid_index();
+        assert!(index.relink(40, &data, &norms, 8).is_err(), "outside");
+        assert!(index.relink(0, &data, &norms, 4).is_err(), "dimension");
+        assert!(
+            index.relink(0, &data[..8], &norms[..1], 8).is_err(),
+            "buffers do not cover the topology"
+        );
     }
 
     #[test]

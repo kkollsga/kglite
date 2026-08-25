@@ -210,7 +210,7 @@ mod atomic_save_tests {
             .get(&("Doc".to_string(), "vec_emb".to_string()))
             .expect("embedding store survives round-trip");
         assert!(store.has_index(), "HNSW index must persist in the .kgl");
-        assert_eq!(store.index.as_ref().unwrap().len(), 40);
+        assert_eq!(store.indexed_slots(), 40);
     }
 
     /// Save-after-delete must not persist a ghost. The prune happens in
@@ -244,6 +244,90 @@ mod atomic_save_tests {
         assert_eq!(store.norms.len(), 39, "norms rebuilt over the pruned store");
     }
 
+    /// An index that covers a prefix of its store must persist *what it has
+    /// yet to cover* with it. Restoring only the topology would present a
+    /// half-covered index as a current one, and the vectors written after the
+    /// build would be silently unsearchable through it.
+    #[test]
+    fn a_partly_covered_vector_index_roundtrips_with_its_delta() {
+        let mut graph = tiny_indexed_graph();
+        let key = ("Doc".to_string(), "vec_emb".to_string());
+        {
+            let store = Arc::make_mut(&mut graph).embeddings.get_mut(&key).unwrap();
+            store.set_embedding(40, &[40.0, 1.0, 1.0, 2.0]); // appended
+            store.set_embedding(3, &[9.0, 9.0, 9.0, 9.0]); // replaced in place
+        }
+        assert_eq!(graph.embeddings[&key].delta_size(), 2);
+        assert_eq!(graph.embeddings[&key].indexed_slots(), 40);
+
+        let mut buf: Vec<u8> = Vec::new();
+        write_kgl_to(&graph, &mut buf).unwrap();
+        let loaded = load_kgl_bytes(&buf).unwrap();
+        let store = &loaded.embeddings[&key];
+        assert!(store.has_index(), "the index survives");
+        assert_eq!(store.indexed_slots(), 40, "covering the same prefix");
+        assert_eq!(
+            store.delta_size(),
+            2,
+            "and still owing the same two vectors"
+        );
+
+        assert_eq!(store.refresh_index(), 2);
+        assert_eq!(store.indexed_slots(), 41);
+        assert!(!store.index_is_stale());
+    }
+
+    /// The payload version bump is a hard break for the older shape: a v2
+    /// section carried topology with no record of what it had yet to cover, so
+    /// attaching it would restore a half-covered index as a current one. The
+    /// index is a rebuildable cache, so the file loads and the index is simply
+    /// gone.
+    #[test]
+    fn a_v2_vector_index_payload_is_dropped_rather_than_attached() {
+        let graph = tiny_indexed_graph();
+        let mut payload = encode_vector_indexes(&graph).unwrap().unwrap();
+        payload[8] = 2; // stamp the previous payload version
+
+        let mut destination = tiny_indexed_graph();
+        Arc::make_mut(&mut destination)
+            .embeddings
+            .values_mut()
+            .for_each(|store| store.invalidate_index());
+        decode_vector_indexes(&payload, Arc::make_mut(&mut destination));
+        assert!(
+            !destination.embeddings[&("Doc".to_string(), "vec_emb".to_string())].has_index(),
+            "a v2 payload must be skipped, not attached"
+        );
+    }
+
+    /// A persisted index attaching to a store that has grown since must not
+    /// report itself current: the delta is derived from the store's size, so
+    /// the extra vector is owed, not hidden.
+    #[test]
+    fn a_persisted_index_attaches_to_a_store_that_grew_after_it() {
+        let graph = tiny_indexed_graph();
+        let payload = encode_vector_indexes(&graph).unwrap().unwrap();
+        // The watermark is a u32 in the postcard body; rather than patch bytes,
+        // assert the guard through the store it would have to lie about.
+        let mut destination = tiny_indexed_graph();
+        {
+            let dir = Arc::make_mut(&mut destination);
+            let store = dir
+                .embeddings
+                .get_mut(&("Doc".to_string(), "vec_emb".to_string()))
+                .unwrap();
+            store.invalidate_index();
+            store.set_embedding(40, &[1.0, 1.0, 1.0, 1.0]);
+            // The store now holds 41 vectors; the payload's index covers 40,
+            // which is a legal prefix and must attach…
+        }
+        decode_vector_indexes(&payload, Arc::make_mut(&mut destination));
+        let store = &destination.embeddings[&("Doc".to_string(), "vec_emb".to_string())];
+        assert!(store.has_index());
+        assert_eq!(store.indexed_slots(), 40);
+        assert_eq!(store.delta_size(), 1, "…owing the vector it never covered");
+    }
+
     #[test]
     fn non_default_vector_index_parameters_roundtrip() {
         use crate::graph::algorithms::hnsw::HnswParams;
@@ -269,13 +353,9 @@ mod atomic_save_tests {
             .embeddings
             .get_mut(&key)
             .unwrap()
-            .index = None;
+            .invalidate_index();
         decode_vector_indexes(&payload, Arc::make_mut(&mut destination));
-        let restored = destination.embeddings[&key]
-            .index
-            .as_ref()
-            .unwrap()
-            .params();
+        let restored = destination.embeddings[&key].index_read().unwrap().params();
         assert_eq!(restored.m, params.m);
         assert_eq!(restored.ef_construction, params.ef_construction);
         assert_eq!(restored.ef_search, params.ef_search);
@@ -316,8 +396,7 @@ mod atomic_save_tests {
             .embeddings
             .get_mut(&key)
             .unwrap()
-            .index
-            .as_mut()
+            .index_mut_for_test()
             .unwrap()
             .corrupt_entry_point_for_test();
         let payload = encode_vector_indexes(&source).unwrap().unwrap();
@@ -327,7 +406,7 @@ mod atomic_save_tests {
             .embeddings
             .get_mut(&key)
             .unwrap()
-            .index = None;
+            .invalidate_index();
         decode_vector_indexes(&payload, Arc::make_mut(&mut destination));
         let store = destination.embeddings.get(&key).unwrap();
         assert!(
@@ -369,7 +448,7 @@ mod atomic_save_tests {
 
         let mut destination = tiny_indexed_graph();
         for store in Arc::make_mut(&mut destination).embeddings.values_mut() {
-            store.index = None;
+            store.invalidate_index();
         }
         decode_vector_indexes(&payload, Arc::make_mut(&mut destination));
         assert!(!destination
