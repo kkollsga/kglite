@@ -350,3 +350,84 @@ def test_a_failed_define_schema_changes_nothing():
     with warnings.catch_warnings():
         warnings.simplefilter("error")  # a merge must never warn
         g.define_schema({"nodes": {"Other": {"required": ["z"]}}})
+
+
+# ── 6. A schema primary key is not droppable through Cypher DDL ──
+
+
+@pytest.mark.parametrize("suffix", ["", " IF EXISTS"], ids=["plain", "if_exists"])
+@pytest.mark.parametrize("prop", ["id", "email"], ids=["key_on_id", "key_on_property"])
+def test_dropping_a_schema_primary_key_is_refused(prop: str, suffix: str):
+    """A primary key is one declaration `define_schema` owns, and `DROP
+    CONSTRAINT` reached only half of it — differently, and wrongly, per shape:
+
+    * a key on a stored property deleted the unique index and reported
+      `constraints_removed: 1`, admitting duplicates while the row still read
+      `NODE_KEY`;
+    * a key on `id` reached no store and failed with "no constraint named
+      'User.id' exists ... declared: User.id" — a message enumerating the very
+      constraint it denied;
+    * `IF EXISTS` turned both into a silent no-op against a row that stayed
+      listed.
+
+    Refusing is the fix. `IF EXISTS` does not silence it: that clause tolerates
+    an *absent* constraint, and this one is present — it is listed and enforced,
+    just not droppable here.
+
+    A key has only the canonical spelling: `CREATE CONSTRAINT <name> ... IS
+    UNIQUE` on the key property is already refused as a duplicate, so no author
+    name can point at it.
+    """
+    g = KnowledgeGraph()
+    g.define_schema({"nodes": {"User": {"primary_key": prop}}})
+    g.cypher("CREATE (:User {id: 1, email:'a@x.com'})")
+    before = constraints(g)
+    assert before == [(f"User.{prop}", "NODE_KEY")]
+
+    with pytest.raises(Exception) as excinfo:
+        g.cypher(f"DROP CONSTRAINT `User.{prop}`{suffix}")
+    message = str(excinfo.value)
+    assert "define_schema" in message, message
+    assert "PRIMARY KEY" in message, message
+    assert "no constraint named" not in message, message
+
+    assert constraints(g) == before, "the listing must be unchanged by a refusal"
+    assert rejects(g, "CREATE (:User {id: 1, email:'a@x.com'})"), "the key stays enforced"
+
+
+def test_a_primary_key_also_declared_not_null_is_refused_whole():
+    """The asymmetry the refusal removes: with the key property *also* in
+    `required_fields`, the drop found something to withdraw and reported success
+    while withdrawing only the presence entry — and the key required the
+    property anyway, so `constraints_removed: 1` described nothing that
+    happened. Either the drop takes both halves or it takes neither."""
+    g = KnowledgeGraph()
+    g.define_schema({"nodes": {"User": {"primary_key": "email", "required": ["email"]}}})
+    g.cypher("CREATE (:User {email:'a@x.com'})")
+    before = constraints(g)
+
+    with pytest.raises(Exception) as excinfo:
+        g.cypher("DROP CONSTRAINT `User.email`")
+    assert "define_schema" in str(excinfo.value), str(excinfo.value)
+
+    assert constraints(g) == before
+    assert rejects(g, "CREATE (:User {email:'a@x.com'})"), "uniqueness half"
+    assert rejects(g, "CREATE (:User {email: null})"), "presence half"
+
+
+def test_only_the_keys_own_row_is_refused():
+    """The control. A DDL constraint on a keyed type — including a composite
+    tuple that *contains* the key property — is its own declaration with its own
+    index, so it still drops, and dropping it leaves the key alone."""
+    g = KnowledgeGraph()
+    g.define_schema({"nodes": {"User": {"primary_key": "email"}}})
+    g.cypher("CREATE CONSTRAINT tenant_u FOR (u:User) REQUIRE u.tenant IS UNIQUE")
+    g.cypher("CREATE CONSTRAINT pair_u FOR (u:User) REQUIRE (u.email, u.region) IS UNIQUE")
+
+    g.cypher("DROP CONSTRAINT tenant_u")
+    g.cypher("DROP CONSTRAINT pair_u")
+
+    assert constraints(g) == [("User.email", "NODE_KEY")]
+    g.cypher("CREATE (:User {email:'a@x.com', tenant:'t'})")
+    assert not rejects(g, "CREATE (:User {email:'b@x.com', tenant:'t'})"), "dropped half"
+    assert rejects(g, "CREATE (:User {email:'a@x.com'})"), "the key stays enforced"

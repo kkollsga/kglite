@@ -1201,6 +1201,7 @@ fn execute_drop_constraint(
     // reason declaring a relationship constraint does not consult them.
     if entity == EntityKind::Node {
         super::write_scope::enforce_write_scope(graph, &label)?;
+        reject_primary_key_drop(graph, &label, &properties)?;
     }
 
     // Withdraw exactly what the declaration installed, so dropping a NODE KEY
@@ -1229,9 +1230,72 @@ fn execute_drop_constraint(
     graph.forget_constraint_name(name);
 
     if !dropped && !if_exists {
-        return Err(unknown_constraint_message(graph, name));
+        // Not "unknown": the name resolved a moment ago, so denying it exists
+        // here would contradict the resolution — and `unknown_constraint_message`
+        // could then enumerate the very name it denied. Reaching this branch
+        // means the name outlived its declaration (the registry is a lookup aid,
+        // and a withdrawal elsewhere does not consult it), which is what it says.
+        return Err(format!(
+            "DROP CONSTRAINT '{name}' found nothing to withdraw: it resolves to {}, but no \
+             declaration backs that any more — a name outlives the constraint it pointed at when \
+             the declaration was withdrawn another way. Run `SHOW CONSTRAINTS` for what is \
+             declared now, or add IF EXISTS to make this statement a no-op.",
+            descriptor(&label, &properties)
+        ));
     }
     Ok(constraints_removed(usize::from(dropped)))
+}
+
+/// Refuse `DROP CONSTRAINT` against a node type's declared primary key.
+///
+/// The key is listed like any other constraint — the presence pass synthesizes
+/// its `NODE_KEY` row from `required_property_names` — so it resolves here, but
+/// no DDL store holds it: the declaration lives in the `SchemaDefinition`
+/// `define_schema` installed. Dropping it reached at most half of what it
+/// enforces, differently per shape, all three measured before this guard:
+///
+/// * a key on a stored property deleted the unique index `set_schema` built and
+///   reported `constraints_removed: 1`, admitting duplicates while the row kept
+///   reading `NODE_KEY`;
+/// * a key on `id` reached no store at all — its uniqueness is the per-type id
+///   index — and failed with [`unknown_constraint_message`], whose text then
+///   enumerated the very constraint it had just said did not exist;
+/// * a key whose property is *also* in `required_fields` withdrew that entry,
+///   reported success, and changed nothing observable, because the key requires
+///   the property regardless.
+///
+/// Refusing beats repairing the drop: the key is one declaration owned by the
+/// binding call that installed it, and Cypher DDL withdrawing part of a schema
+/// it does not own is the silent-enforcement-loss failure this module refuses
+/// everywhere else (cf. [`reject_structural_uniqueness`]).
+///
+/// `IF EXISTS` does not silence it: that clause tolerates an *absent*
+/// constraint, and this one is present — listed and enforced — so reporting
+/// zero removals would be the same silent no-op against a row that stays listed.
+fn reject_primary_key_drop(
+    graph: &DirGraph,
+    label: &str,
+    properties: &[String],
+) -> Result<(), String> {
+    let Some(key) = graph.primary_key_for(label) else {
+        return Ok(());
+    };
+    // The key's own row only. A composite tuple that happens to contain the key
+    // property is a separate declaration with its own index, and dropping it
+    // withdraws exactly what it installed.
+    if properties.len() != 1 || properties[0] != key {
+        return Ok(());
+    }
+    Err(format!(
+        "DROP CONSTRAINT on '{label}.{key}' is not supported: it is the node type's declared \
+         PRIMARY KEY, which `define_schema` owns rather than constraint DDL. The key is a single \
+         declaration enforcing uniqueness and presence together, and no DDL store holds it, so \
+         dropping it here would withdraw part of what it enforces while `SHOW CONSTRAINTS` kept \
+         reporting it as NODE_KEY. Re-declare the type without a key instead — \
+         `define_schema({{'nodes': {{'{label}': {{}}}}}})` — or `clear_schema()` to withdraw the \
+         whole schema. IF EXISTS does not apply: the constraint exists, it is not droppable \
+         through Cypher DDL."
+    ))
 }
 
 /// Map a `DROP CONSTRAINT` name onto the declaration it identifies.
@@ -1269,11 +1333,23 @@ fn resolve_constraint_name(
         })
 }
 
+/// The message for a name that resolved to nothing.
+///
+/// Reachable only from the unresolved branch of [`execute_drop_constraint`],
+/// which is what makes enumerating the declared names safe: resolution searches
+/// this same collector, so a name that failed it cannot appear in the listing
+/// printed here. The assertion pins that call-site invariant — denying a name
+/// while printing it in the list of what exists is the contradiction the other
+/// branch was split out to make impossible.
 fn unknown_constraint_message(graph: &DirGraph, name: &str) -> String {
     let declared: Vec<String> = collect_constraints_structured(graph)
         .iter()
         .map(|info| info.name.clone())
         .collect();
+    debug_assert!(
+        !declared.iter().any(|declared_name| declared_name == name),
+        "unknown-constraint message would enumerate '{name}', the name it denies"
+    );
     let available = if declared.is_empty() {
         "no constraints are declared".to_string()
     } else {

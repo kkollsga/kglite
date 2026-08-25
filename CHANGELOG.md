@@ -35,6 +35,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `where_any()`, and the `where` / `where_connection` / `filter` arguments of
   `traverse()`, `compare()` and `collect_children()`. The engine gained a `FilterCondition::All`
   conjunction to carry it (public Rust API addition).
+- **`DROP CONSTRAINT` against a schema primary key withdrew half of it and
+  reported success.** A key declared through `define_schema` is listed by
+  `SHOW CONSTRAINTS` as a `NODE_KEY` row, so it resolved like any other
+  constraint — but nothing in the DDL stores holds it, and the drop reached at
+  most half of what it enforces. A key on a stored property deleted the unique
+  index and answered `constraints_removed: 1`, after which duplicates were
+  admitted while the row still read `NODE_KEY`; a key on `id` reached no store
+  and failed with *"no constraint named 'Person.id' exists … declared:
+  Person.id"* — a message enumerating the very constraint it denied; `IF
+  EXISTS` turned both into a silent no-op against a row that stayed listed; and
+  a key whose property was also declared `NOT NULL` reported success for
+  withdrawing an entry the key required anyway. The key is now refused, with
+  both spellings and with `IF EXISTS`, by an error naming `define_schema` as
+  its owner and the calls that do withdraw it (re-declaring the type without a
+  key, or `clear_schema()`). Every other constraint on a keyed type — including
+  a composite tuple containing the key property — still drops normally.
 
 ## [0.16.9] - 2026-08-23
 

@@ -2836,6 +2836,17 @@ two halves are installed **atomically** — if the presence half cannot be decla
 the uniqueness half is rolled back, so a statement that reported failure has
 changed nothing. `DROP CONSTRAINT` on a node key likewise withdraws both halves.
 
+A node type's **declared primary key is not droppable through DDL.**
+`define_schema({"nodes": {"User": {"primary_key": "email"}}})` shows up in
+`SHOW CONSTRAINTS` as a `NODE_KEY` row, but it is one declaration owned by the
+schema rather than a DDL constraint with a store of its own, so a
+`DROP CONSTRAINT` naming `User.email` is refused — `IF EXISTS` included, because
+the key exists and is enforced; it is simply not droppable here. Withdraw it by
+re-declaring the type without a key (`define_schema({"nodes": {"User": {}}})`)
+or with `clear_schema()`. Every other constraint on a keyed type — including a
+composite tuple that contains the key property — is its own declaration and
+drops normally.
+
 #### Relationship constraints
 
 A constraint on a relationship is written against a relationship pattern, and
