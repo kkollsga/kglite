@@ -355,3 +355,130 @@ fn a_row_dependent_query_argument_is_prepared_per_row() {
     .rows;
     assert_eq!(cross[0][0], Value::Float64(0.0));
 }
+
+// ── The postings-driven top-k operator ──────────────────────────────────────
+//
+// `fuse_text_bm25_order_limit` replaces `RETURN text_bm25(...) AS s ORDER BY s
+// DESC LIMIT k` with `FusedTextBm25TopK`, which asks the index for its own
+// top-k instead of scoring every row. These pin what the differential corpus
+// structurally cannot see: it normalises row *order* away before comparing, and
+// tie order is exactly where an index-driven ranking and a row-driven one come
+// apart.
+
+/// `(title, score)` per row, in row order — what `scored` returns.
+type Ranking = Vec<(String, Value)>;
+
+/// The same query's rows from the fully optimised plan and from the
+/// unoptimised one, in row order.
+fn ranked_both_ways(graph: &DirGraph, query: &str) -> (Ranking, Ranking) {
+    let params = HashMap::new();
+    let unoptimized = parser::parse_cypher(query).expect("parses");
+    let mut optimized = unoptimized.clone();
+    crate::graph::languages::cypher::planner::optimize(&mut optimized, graph, &params);
+    assert!(
+        optimized.clauses.iter().any(|c| matches!(
+            c,
+            crate::graph::languages::cypher::ast::Clause::FusedTextBm25TopK { .. }
+        )),
+        "the pass did not claim this shape, so the comparison would be vacuous: {query}"
+    );
+    let rows = |query: &_| -> Ranking {
+        CypherExecutor::with_params(graph, &params, None)
+            .execute(query)
+            .unwrap_or_else(|e| panic!("query failed: {e}"))
+            .rows
+            .iter()
+            .map(|row| match (&row[0], &row[1]) {
+                (Value::String(title), score) => (title.clone(), score.clone()),
+                other => panic!("unexpected row shape: {other:?}"),
+            })
+            .collect()
+    };
+    (rows(&optimized), rows(&unoptimized))
+}
+
+#[test]
+fn the_fused_top_k_returns_the_same_rows_in_the_same_order_as_the_scan() {
+    // Two documents share a body, so two scores are equal to the last bit and
+    // the tie-break is what decides their order.
+    let mut graph = docs(&[
+        ("a", "alpha beta gamma"),
+        ("b", "alpha alpha beta"),
+        ("c", "beta gamma delta"),
+        ("d", "alpha"),
+        ("e", "epsilon"),
+        ("f", "alpha beta"),
+        ("g", "alpha beta"),
+    ]);
+    build_text_index(&mut graph, "Doc", "body", None).unwrap();
+    for limit in [1, 2, 3, 5, 7] {
+        let query = format!(
+            "MATCH (d:Doc) RETURN d.title AS t, text_bm25(d, 'body', 'alpha beta') AS s \
+             ORDER BY s DESC LIMIT {limit}"
+        );
+        let (fused, scan) = ranked_both_ways(&graph, &query);
+        assert_eq!(fused, scan, "LIMIT {limit}");
+    }
+}
+
+#[test]
+fn the_fused_top_k_declines_when_fewer_documents_match_than_the_limit_asks_for() {
+    // Only one document shares a term with the query. The scan fills the rest
+    // of the top-5 with documents scoring exactly 0.0; the postings never yield
+    // those, so answering from the index alone would return one row where the
+    // unoptimised pipeline returns five.
+    let mut graph = docs(&[
+        ("a", "alpha"),
+        ("b", "beta"),
+        ("c", "gamma"),
+        ("d", "delta"),
+        ("e", "epsilon"),
+    ]);
+    build_text_index(&mut graph, "Doc", "body", None).unwrap();
+    let (fused, scan) = ranked_both_ways(
+        &graph,
+        "MATCH (d:Doc) RETURN d.title AS t, text_bm25(d, 'body', 'alpha') AS s \
+         ORDER BY s DESC LIMIT 5",
+    );
+    assert_eq!(
+        fused.len(),
+        5,
+        "the zero-scoring documents must still be returned"
+    );
+    assert_eq!(fused, scan);
+}
+
+#[test]
+fn a_stale_index_ranks_its_unindexed_rows_the_way_the_unoptimised_plan_does() {
+    // The regression this operator shipped with: an over-limit delta scores the
+    // un-caught-up rows null, `ORDER BY ... DESC` places nulls *first*, and the
+    // first fallback written for this path dropped null rows instead — so the
+    // fused plan answered with scored documents where the unoptimised one
+    // answered with nulls.
+    let mut graph = docs(&[("a", "alpha beta"), ("b", "alpha"), ("c", "beta")]);
+    build_text_index(&mut graph, "Doc", "body", Some(1)).unwrap();
+    for title in ["d", "e"] {
+        let create = parser::parse_cypher(&format!(
+            "CREATE (:Doc {{title: '{title}', body: 'alpha alpha'}})"
+        ))
+        .unwrap();
+        execute_mutable(
+            &mut graph,
+            &create,
+            HashMap::new(),
+            crate::graph::algorithms::Interrupt::default(),
+        )
+        .unwrap();
+    }
+
+    let (fused, scan) = ranked_both_ways(
+        &graph,
+        "MATCH (d:Doc) RETURN d.title AS t, text_bm25(d, 'body', 'alpha beta') AS s \
+         ORDER BY s DESC LIMIT 3",
+    );
+    assert!(
+        fused.iter().any(|(_, score)| *score == Value::Null),
+        "the stale rows must reach the answer as nulls: {fused:?}"
+    );
+    assert_eq!(fused, scan);
+}

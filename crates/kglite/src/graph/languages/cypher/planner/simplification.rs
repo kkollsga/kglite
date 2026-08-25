@@ -1501,6 +1501,7 @@ fn collect_clause_variables(clause: &Clause, out: &mut HashSet<String>) {
         | Clause::Schema(_)
         | Clause::FusedOptionalMatchAggregate { .. }
         | Clause::FusedVectorScoreTopK { .. }
+        | Clause::FusedTextBm25TopK { .. }
         | Clause::FusedMatchReturnAggregate { .. }
         | Clause::FusedMatchWithAggregate { .. }
         | Clause::FusedOrderByTopK { .. }

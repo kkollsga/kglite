@@ -239,116 +239,150 @@ pub(crate) fn fuse_node_scan_top_k(
 /// and replace with a fused clause that uses a min-heap (O(n log k) vs O(n log n))
 /// and projects RETURN expressions only for the k surviving rows.
 pub(crate) fn fuse_vector_score_order_limit(query: &mut CypherQuery) {
-    use crate::graph::languages::cypher::ast::is_aggregate_expression;
-
-    if query.clauses.len() < 3 {
-        return;
-    }
-
     let mut i = 0;
     while i + 2 < query.clauses.len() {
-        // Check for RETURN + ORDER BY + LIMIT pattern
-        let is_pattern = matches!(
-            (
-                &query.clauses[i],
-                &query.clauses[i + 1],
-                &query.clauses[i + 2]
-            ),
-            (Clause::Return(_), Clause::OrderBy(_), Clause::Limit(_))
-        );
-        if !is_pattern {
-            i += 1;
-            continue;
-        }
-
-        // Extract references for analysis (before removing)
-        let (score_idx, alias) = if let Clause::Return(r) = &query.clauses[i] {
-            // Don't fuse if RETURN has aggregation or DISTINCT
-            if r.distinct
-                || r.items
-                    .iter()
-                    .any(|item| is_aggregate_expression(&item.expression))
-            {
-                i += 1;
-                continue;
-            }
-            // Find the vector_score item
-            let found = r.items.iter().enumerate().find(|(_, item)| {
-                matches!(
-                    &item.expression,
-                    Expression::FunctionCall { name, .. }
-                        if name == "vector_score"
-                )
-            });
-            match found {
-                Some((idx, item)) => {
-                    let col = return_item_column_name(item);
-                    (idx, col)
-                }
-                None => {
-                    i += 1;
-                    continue;
-                }
-            }
-        } else {
+        let Some(shape) = match_scored_order_limit(&query.clauses, i, "vector_score") else {
             i += 1;
             continue;
         };
-
-        // Check ORDER BY references the score alias and has exactly one item
-        let descending = if let Clause::OrderBy(o) = &query.clauses[i + 1] {
-            if o.items.len() != 1 {
-                i += 1;
-                continue;
-            }
-            let sort_name = match &o.items[0].expression {
-                Expression::Variable(v) => v.clone(),
-                other => expression_to_column_name(other),
-            };
-            if sort_name != alias {
-                i += 1;
-                continue;
-            }
-            !o.items[0].ascending
-        } else {
-            i += 1;
-            continue;
-        };
-
-        // Extract LIMIT value (must be a literal non-negative integer)
-        let limit = if let Clause::Limit(l) = &query.clauses[i + 2] {
-            match &l.count {
-                Expression::Literal(Value::Int64(n)) if *n > 0 => *n as usize,
-                _ => {
-                    i += 1;
-                    continue;
-                }
-            }
-        } else {
-            i += 1;
-            continue;
-        };
-
-        // All checks passed — fuse the three clauses
-        query.clauses.remove(i + 2); // LIMIT
-        query.clauses.remove(i + 1); // ORDER BY
-        let return_clause = if let Clause::Return(r) = query.clauses.remove(i) {
-            r
-        } else {
-            unreachable!()
-        };
-
+        let return_clause = take_fused_shape(query, i);
         query.clauses.insert(
             i,
             Clause::FusedVectorScoreTopK {
                 return_clause,
-                score_item_index: score_idx,
-                descending,
-                limit,
+                score_item_index: shape.score_index,
+                descending: shape.descending,
+                limit: shape.limit,
             },
         );
-
         i += 1;
+    }
+}
+
+/// Detect `RETURN ... text_bm25(...) AS s ... ORDER BY s DESC LIMIT k` and
+/// replace with a fused clause the executor can serve from the text index's
+/// postings instead of scoring every row.
+///
+/// **Precondition:** adjacent `RETURN`, `ORDER BY`, `LIMIT`, the ORDER BY
+/// naming the `text_bm25` item's alias, and a positive integer literal limit —
+/// [`match_scored_order_limit`] carries the whole set.
+///
+/// **Rewrite:** one [`Clause::FusedTextBm25TopK`].
+///
+/// **Why-bail:** [`match_scored_order_limit`]'s set, plus an ORDER BY whose
+/// keys do not resolve in the pre-projection scope. Every bail leaves the three
+/// clauses for `fuse_order_by_top_k`, which is what claimed this shape before
+/// this pass existed.
+///
+/// The resolved sort keys ride along *because* of that: when the executor's
+/// index path declines a query it hands the clause to the generic top-k
+/// operator, and it can only do that with the keys the generic pass would have
+/// computed. Registered before `fuse_order_by_top_k` for the same reason — the
+/// generic pass matches these three clauses too and would take them first.
+pub(crate) fn fuse_text_bm25_order_limit(query: &mut CypherQuery) {
+    let mut i = 0;
+    while i + 2 < query.clauses.len() {
+        let Some(shape) = match_scored_order_limit(&query.clauses, i, "text_bm25") else {
+            i += 1;
+            continue;
+        };
+        let sort_keys = match (&query.clauses[i], &query.clauses[i + 1]) {
+            (Clause::Return(r), Clause::OrderBy(o)) => resolve_fused_sort_keys(o, &r.items),
+            _ => None,
+        };
+        let Some(sort_keys) = sort_keys else {
+            i += 1;
+            continue;
+        };
+        let return_clause = take_fused_shape(query, i);
+        query.clauses.insert(
+            i,
+            Clause::FusedTextBm25TopK {
+                return_clause,
+                score_item_index: shape.score_index,
+                sort_keys,
+                limit: shape.limit,
+            },
+        );
+        i += 1;
+    }
+}
+
+/// What [`match_scored_order_limit`] extracts from a fusable three-clause span.
+struct ScoredShape {
+    /// Index of the RETURN item holding the scoring call.
+    score_index: usize,
+    descending: bool,
+    limit: usize,
+}
+
+/// The `RETURN <scored item> + ORDER BY <its alias> + LIMIT k` shape test both
+/// retrieval-lane fusions run, over `clauses[i..i + 3]`.
+///
+/// Written once rather than twice because the *bail set* is the delicate part
+/// and two copies of it would drift: RETURN uses DISTINCT or contains an
+/// aggregate; no item calls `function`; ORDER BY has other than exactly one
+/// item, or sorts by something that is not the scored item's column name;
+/// LIMIT is not a positive integer literal.
+///
+/// Read-only — the caller rewrites only after every check has passed.
+fn match_scored_order_limit(clauses: &[Clause], i: usize, function: &str) -> Option<ScoredShape> {
+    use crate::graph::languages::cypher::ast::is_aggregate_expression;
+
+    let (Clause::Return(r), Clause::OrderBy(o), Clause::Limit(l)) =
+        (&clauses[i], &clauses[i + 1], &clauses[i + 2])
+    else {
+        return None;
+    };
+    if r.distinct
+        || r.items
+            .iter()
+            .any(|item| is_aggregate_expression(&item.expression))
+    {
+        return None;
+    }
+    let (score_index, alias) = r
+        .items
+        .iter()
+        .enumerate()
+        .find(|(_, item)| {
+            matches!(
+                &item.expression,
+                Expression::FunctionCall { name, .. } if name == function
+            )
+        })
+        .map(|(index, item)| (index, return_item_column_name(item)))?;
+
+    if o.items.len() != 1 {
+        return None;
+    }
+    let sort_name = match &o.items[0].expression {
+        Expression::Variable(v) => v.clone(),
+        other => expression_to_column_name(other),
+    };
+    if sort_name != alias {
+        return None;
+    }
+    let limit = match &l.count {
+        Expression::Literal(Value::Int64(n)) if *n > 0 => *n as usize,
+        _ => return None,
+    };
+    Some(ScoredShape {
+        score_index,
+        descending: !o.items[0].ascending,
+        limit,
+    })
+}
+
+/// Remove the matched LIMIT, ORDER BY and RETURN at `i`, returning the RETURN
+/// for the fused clause that replaces them. Call only after a successful
+/// [`match_scored_order_limit`], which is what makes the shape unreachable.
+fn take_fused_shape(query: &mut CypherQuery, i: usize) -> ReturnClause {
+    query.clauses.remove(i + 2); // LIMIT
+    query.clauses.remove(i + 1); // ORDER BY
+    match query.clauses.remove(i) {
+        Clause::Return(r) => r,
+        _ => unreachable!("match_scored_order_limit proved this is a RETURN"),
     }
 }
 

@@ -29,7 +29,7 @@ use fusion::{
     fuse_anchored_edge_count, fuse_count_short_circuits, fuse_match_return_aggregate,
     fuse_match_with_aggregate, fuse_match_with_aggregate_top_k, fuse_node_scan_aggregate,
     fuse_node_scan_top_k, fuse_optional_match_aggregate, fuse_order_by_top_k, fuse_spatial_join,
-    fuse_vector_score_order_limit, mark_return_lazy_eligible,
+    fuse_text_bm25_order_limit, fuse_vector_score_order_limit, mark_return_lazy_eligible,
 };
 use index_selection::push_where_into_match;
 use join_order::{
@@ -172,6 +172,13 @@ pub const PASSES: &[(&str, PassFn)] = &[
     (
         "fuse_vector_score_order_limit",
         pass_fuse_vector_score_order_limit,
+    ),
+    // Same three-clause shape as fuse_order_by_top_k, so it must run first or
+    // the generic pass takes it: a bail here is a fall-through to that pass,
+    // never a lost answer.
+    (
+        "fuse_text_bm25_order_limit",
+        pass_fuse_text_bm25_order_limit,
     ),
     ("fuse_order_by_top_k", pass_fuse_order_by_top_k),
     (
@@ -679,6 +686,12 @@ fn pass_fuse_node_scan_top_k(query: &mut CypherQuery, ctx: &PassCtx) {
 /// rows.
 fn pass_fuse_vector_score_order_limit(query: &mut CypherQuery, _ctx: &PassCtx) {
     fuse_vector_score_order_limit(query)
+}
+
+/// **Pass:** `fuse_text_bm25_order_limit` — `RETURN ... text_bm25(...) AS s
+/// ORDER BY s DESC LIMIT k` → one postings-driven top-k operator.
+fn pass_fuse_text_bm25_order_limit(query: &mut CypherQuery, _ctx: &PassCtx) {
+    fuse_text_bm25_order_limit(query)
 }
 
 /// **Pass:** `fuse_order_by_top_k` — Generic ORDER BY + LIMIT fusion

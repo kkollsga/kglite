@@ -886,6 +886,18 @@ impl<'a> CypherExecutor<'a> {
                 *limit,
                 result_set,
             ),
+            Clause::FusedTextBm25TopK {
+                return_clause,
+                score_item_index,
+                sort_keys,
+                limit,
+            } => self.execute_fused_text_bm25_top_k(
+                return_clause,
+                *score_item_index,
+                sort_keys,
+                *limit,
+                result_set,
+            ),
             Clause::FusedOrderByTopK {
                 return_clause,
                 sort_keys,

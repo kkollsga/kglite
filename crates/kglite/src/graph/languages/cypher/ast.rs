@@ -98,6 +98,25 @@ pub enum Clause {
         descending: bool,
         limit: usize,
     },
+    /// Optimizer-generated: fuse RETURN (with `text_bm25`) + ORDER BY + LIMIT
+    /// into one pass the executor can serve from the text index's postings.
+    ///
+    /// The win is not the heap — `FusedOrderByTopK` already gives that. It is
+    /// the *candidate set*: scoring a row at a time is O(corpus) for every
+    /// query however selective, while the postings lists of the query's own
+    /// terms name the only documents that can score above zero. Measured on a
+    /// 100k-document corpus, a query whose rarest term appears in 27 documents
+    /// still cost the same as one containing a near-stopword.
+    FusedTextBm25TopK {
+        return_clause: ReturnClause,
+        score_item_index: usize,
+        /// The keys [`FusedOrderByTopK`](Clause::FusedOrderByTopK) would have
+        /// carried. They travel with this clause because the executor's index
+        /// path is allowed to decline — a filtered subset, a stale index — and
+        /// its fallback is that operator, which needs them.
+        sort_keys: Vec<FusedSortKey>,
+        limit: usize,
+    },
     /// Optimizer-generated: fuse MATCH traversal + RETURN with count() into
     /// a single pass. Instead of expanding all edges then grouping, iterate
     /// group keys and count edges directly per node.

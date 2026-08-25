@@ -449,7 +449,7 @@ impl CypherExecutor<'_> {
     /// for score null, and the query carries a warning naming the delta and the
     /// call that fixes it. A query never silently absorbs a post-bulk-ingest
     /// rebuild.
-    fn prepare_text_bm25(
+    pub(in crate::graph::languages::cypher::executor) fn prepare_text_bm25(
         &self,
         args: &[Expression],
         row: &ResultRow,

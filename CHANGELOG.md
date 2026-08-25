@@ -129,6 +129,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`text_bm25()` top-k reads the index's postings instead of scoring every
+  row.** `RETURN ... text_bm25(n, p, q) AS s ORDER BY s DESC LIMIT k` now
+  plans as one `FusedTextBm25TopK` operator (optimizer pass
+  `fuse_text_bm25_order_limit`), which asks the index for its own best `k`
+  documents. Row-at-a-time scoring cost the same for *every* query however
+  selective; this cost follows the query. Measured on a 100,000-document
+  synthetic corpus (release, Apple Silicon): a two-term query whose rarer term
+  appears in ~30 documents went **30.8 ms -> 7.5 ms** (4.1x), and a query
+  opening with a near-stopword — whose postings name almost the whole corpus,
+  so there is nothing to prune — went 25.2 ms -> 21.4 ms. Both are exact: each
+  candidate is scored through the same kernel the per-row scalar uses, in the
+  same summation order, so the rows and their order are identical to the
+  unfused pipeline's.
+
+  The operator hands the query back to the ordinary ranked top-k whenever the
+  index cannot answer it on its own — a `WHERE` that makes the rows a subset
+  of the corpus, an index that has fallen behind (its un-caught-up rows score
+  null, and `ORDER BY ... DESC` places nulls first), `ORDER BY ... ASC`, or
+  fewer matching documents than the `LIMIT` asks for. Those queries answer
+  exactly as before.
+
 - **`CREATE TEXT INDEX` and `CREATE FULLTEXT INDEX` now point at
   `build_text_index` + `text_bm25()`** instead of at the vector-search API.
   Both messages predate the BM25 index and claimed ranked text retrieval was

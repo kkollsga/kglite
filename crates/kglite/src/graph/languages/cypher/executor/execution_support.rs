@@ -423,6 +423,7 @@ pub fn clause_display_name(clause: &Clause) -> String {
         Clause::CallSubquery { .. } => "CallSubquery".into(),
         Clause::FusedOptionalMatchAggregate { .. } => "FusedOptionalMatchAggregate".into(),
         Clause::FusedVectorScoreTopK { .. } => "FusedVectorScoreTopK".into(),
+        Clause::FusedTextBm25TopK { .. } => "FusedTextBm25TopK".into(),
         Clause::FusedMatchReturnAggregate { .. } => "FusedMatchReturnAggregate".into(),
         Clause::FusedMatchWithAggregate { .. } => "FusedMatchWithAggregate".into(),
         Clause::FusedOrderByTopK { .. } => "FusedOrderByTopK".into(),

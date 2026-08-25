@@ -300,6 +300,7 @@ pub fn generate_explain_result(query: &CypherQuery, graph: &DirGraph) -> result:
             }
             Clause::FusedCountByType { .. } => Value::Int64(graph.type_indices.len() as i64),
             Clause::FusedVectorScoreTopK { limit, .. }
+            | Clause::FusedTextBm25TopK { limit, .. }
             | Clause::FusedOrderByTopK { limit, .. }
             | Clause::FusedNodeScanTopK { limit, .. } => Value::Int64(*limit as i64),
             _ => Value::Null,

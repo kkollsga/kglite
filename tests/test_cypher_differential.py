@@ -45,6 +45,10 @@ import kglite
 # fusion — those depend on registered embedders or geometry data the shared
 # fixtures do not carry. They live in
 # tests/test_cypher_specialized_optimizer.py, which builds its own.
+#: The fused shape itself, shared by the clean and the stale fixtures so those
+#: two entries differ only in the index state they run against.
+TEXT_BM25_TOP_K = "MATCH (d:Doc) RETURN d.id AS id, text_bm25(d, 'body', 'alpha beta') AS s ORDER BY s DESC LIMIT 3"
+
 DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
     ("simple_match", "small_graph", "MATCH (p:Person) RETURN p.name AS n", None),
     ("simple_match_param", "small_graph", "MATCH (p:Person) WHERE p.age > $min RETURN p.name AS n", {"min": 30}),
@@ -3309,6 +3313,36 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (n:Sample) RETURN n.site AS site, avg(n.w) AS a, sum(n.w) AS s ORDER BY site",
         None,
     ),
+    # ── text_bm25 top-k fusion (`fuse_text_bm25_order_limit`) ──
+    #
+    # The pass claims `RETURN text_bm25(...) AS s ORDER BY s LIMIT k` from the
+    # generic top-k operator and serves it from the index's postings. All four
+    # shapes below were run against the unoptimized path while the operator was
+    # being written; the last two were *divergent* and are here because of it.
+    ("text_bm25_top_k", "text_index_graph", TEXT_BM25_TOP_K, None),
+    # A `WHERE` makes the rows a subset of the corpus, which the postings path
+    # cannot answer from (the index ranks documents the subset may not contain)
+    # — it declines, and this pins that the decline is still the right answer.
+    (
+        "text_bm25_top_k_filtered",
+        "text_index_graph",
+        "MATCH (d:Doc) WHERE d.id > 2 RETURN d.id AS id, text_bm25(d, 'body', 'alpha beta') AS s "
+        "ORDER BY s DESC LIMIT 3",
+        None,
+    ),
+    # ASC: least-relevant-first has no postings shortcut. Divergent while the
+    # decline fell through to the `vector_score` scan, which *drops*
+    # null-scoring rows instead of placing them.
+    (
+        "text_bm25_top_k_ascending",
+        "text_index_graph",
+        "MATCH (d:Doc) RETURN d.id AS id, text_bm25(d, 'body', 'alpha') AS s ORDER BY s ASC LIMIT 3",
+        None,
+    ),
+    # A stale index past its auto-refresh limit scores the un-caught-up rows
+    # null, and `ORDER BY ... DESC` puts nulls *first* — so the honest answer to
+    # this query is mostly nulls. Divergent for the same reason as the ASC case.
+    ("text_bm25_top_k_stale_over_limit", "stale_text_index_graph", TEXT_BM25_TOP_K, None),
 ]
 
 
@@ -3406,6 +3440,97 @@ def _build_cap_threshold_graph() -> kglite.KnowledgeGraph:
 @pytest.fixture
 def cap_threshold_graph() -> kglite.KnowledgeGraph:
     return _build_cap_threshold_graph()
+
+
+def _build_text_index_graph(auto_refresh_limit: int | None = None) -> kglite.KnowledgeGraph:
+    """Nine documents over a five-word vocabulary, with a BM25 index.
+
+    Deliberately tie-heavy: a vocabulary that small makes identical scores the
+    normal case, which is what makes the two paths' tie-breaks comparable at
+    all. It also carries the two rows that are not simply "some text" — one
+    whose property is absent (never indexed, always null) and one holding the
+    empty string (indexed, scores 0.0) — because those are the rows a ranking
+    places differently depending on which operator did the placing.
+    """
+    import pandas as pd
+
+    bodies = [
+        "alpha beta gamma",
+        "alpha alpha beta",
+        "beta gamma delta",
+        "alpha",
+        "epsilon",
+        "alpha beta",
+        "gamma gamma",
+        # An exact duplicate of doc-6, so two documents tie to the last bit.
+        # Tie order is the one thing the two paths break differently if the
+        # index's slot ordering ever stops tracking row order.
+        "alpha beta",
+        "",
+    ]
+    graph = kglite.KnowledgeGraph()
+    graph.add_nodes(
+        pd.DataFrame(
+            {
+                "id": list(range(1, len(bodies) + 1)),
+                "title": [f"doc-{i}" for i in range(1, len(bodies) + 1)],
+                "body": bodies,
+            }
+        ),
+        "Doc",
+        "id",
+        "title",
+        columns=["body"],
+    )
+    # No `body` at all: this one scores null, not zero.
+    graph.cypher("CREATE (:Doc {id: 10, title: 'doc-10'})")
+    graph.build_text_index("Doc", "body", auto_refresh_limit=auto_refresh_limit)
+    return graph
+
+
+def _staled_text_index_graph() -> kglite.KnowledgeGraph:
+    """The same corpus, then two creations against a limit of one.
+
+    The delta is over the auto-refresh limit, so a query serves what the index
+    has and scores the two new rows null instead of quietly rebuilding.
+    """
+    graph = _build_text_index_graph(auto_refresh_limit=1)
+    graph.cypher("CREATE (:Doc {id: 11, title: 'doc-11', body: 'alpha beta gamma delta'})")
+    graph.cypher("CREATE (:Doc {id: 12, title: 'doc-12', body: 'alpha alpha alpha'})")
+    return graph
+
+
+@pytest.fixture
+def text_index_graph() -> kglite.KnowledgeGraph:
+    return _build_text_index_graph()
+
+
+@pytest.fixture
+def stale_text_index_graph() -> kglite.KnowledgeGraph:
+    return _staled_text_index_graph()
+
+
+@pytest.mark.differential
+def test_text_index_fixtures_reach_the_shapes_their_entries_assume() -> None:
+    """Non-vacuity guard for the four `text_bm25` corpus entries.
+
+    Each one exists for a specific row class — a null score, a zero score, a
+    stale delta the query must not fold in. If a fixture stops producing them
+    the entries keep passing while testing nothing.
+    """
+    scores = {
+        row["id"]: row["s"]
+        for row in _build_text_index_graph()
+        .cypher("MATCH (d:Doc) RETURN d.id AS id, text_bm25(d, 'body', 'alpha beta') AS s")
+        .to_list()
+    }
+    assert scores[10] is None, "the property-less doc must score null"
+    assert scores[9] == 0.0, "the empty-string doc must be indexed and score zero"
+    scored = [s for s in scores.values() if s]
+    assert len(set(scored)) < len(scored), "the corpus must produce tied scores"
+
+    row = next(r for r in _staled_text_index_graph().cypher("SHOW INDEXES").to_list() if r["type"] == "FULLTEXT")
+    assert row["stale"] and row["delta"] > 1, "the stale fixture must be past its refresh limit"
 
 
 @pytest.mark.differential
@@ -4369,6 +4494,7 @@ KNOWN_DIVERGENT: list[tuple[str, str, str, str]] = [
 # corpus above. The applied-pass trace makes this stronger than comment-only
 # coverage: a gate regression that silently stops firing fails CI.
 PASS_TRIGGER_CASES: dict[str, tuple[str, str]] = {
+    "fuse_text_bm25_order_limit": ("differential", "text_bm25_top_k"),
     "optimize_nested_queries": ("differential", "call_uncorrelated_body_fusion_then_limit"),
     "lower_fixed_var_length_hops": ("differential", "lower_two_hop_unanchored_count"),
     "rewrite_count_bound_var_to_star": ("differential", "count_all_typed"),
