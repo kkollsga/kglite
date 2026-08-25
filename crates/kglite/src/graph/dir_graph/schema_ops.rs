@@ -49,12 +49,15 @@ impl DirGraph {
     /// [`SchemaInstall::Replace`] applies it to every type in the graph.
     ///
     /// Constraints declared directly through DDL (`CREATE CONSTRAINT`) rather
-    /// than through a schema survive either mode — the unique half because the
-    /// withdrawal is computed from the outgoing *schema* rather than from the
-    /// live indexes, and the presence half because
-    /// [`Self::reapply_ddl_not_null`] reinstates it. Without that second half a
-    /// schema call would wipe a DDL NOT NULL, since `required_fields` live
-    /// inside the schema being replaced.
+    /// than through a schema survive either mode, through a different mechanism
+    /// per half. The presence half is reinstated by
+    /// [`Self::reapply_ddl_not_null`], because `required_fields` live inside the
+    /// schema being replaced. The unique half is *retained* by
+    /// [`Self::withdraw_schema_unique`]: computing the withdrawal from the
+    /// outgoing schema is not enough on its own, since a DDL declaration and a
+    /// schema key on the same `(type, property)` share one entry in
+    /// `unique_indices` — withdrawing the key's declaration used to delete the
+    /// DDL one with it.
     // `KgError` is a rich by-value error type across the whole public surface;
     // every other `Result<_, KgError>` signature in the engine carries the same
     // allow rather than boxing one variant in isolation.
@@ -75,7 +78,7 @@ impl DirGraph {
         let previous_schema = self.schema_definition.take();
         let withdrawn = Self::declared_unique_tuples(previous_schema.as_ref());
         for (node_type, properties) in &withdrawn {
-            self.drop_unique_constraint(node_type, properties);
+            self.withdraw_schema_unique(node_type, properties);
         }
 
         // Install with the new schema already in place, so a violation reports
@@ -93,7 +96,7 @@ impl DirGraph {
                 // Roll back to the outgoing schema and its constraints so a
                 // rejected declaration is a no-op.
                 for (rollback_type, rollback_props) in incoming.iter().take(index) {
-                    self.drop_unique_constraint(rollback_type, rollback_props);
+                    self.withdraw_schema_unique(rollback_type, rollback_props);
                 }
                 self.schema_definition = previous_schema;
                 for (node_type, properties) in &withdrawn {

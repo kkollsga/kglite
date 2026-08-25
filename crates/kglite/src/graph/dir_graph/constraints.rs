@@ -36,6 +36,11 @@
 //! persist-keys/rebuild-on-load pattern the property, range, and composite
 //! indexes use. The rebuild re-verifies the constraint for free, since building
 //! a single-occupant map *is* the duplicate check.
+//!
+//! `DirGraph::ddl_unique_constraints` is persisted beside it: one index may be
+//! declared twice — once by `CREATE CONSTRAINT`, once by a schema `primary_key`
+//! or `unique` — and only that record says a schema withdrawal must leave the
+//! index standing.
 
 use std::collections::{HashMap, HashSet};
 
@@ -216,12 +221,71 @@ impl DirGraph {
         Ok(count)
     }
 
+    /// Declare a UNIQUE constraint through DDL, recording that it came from
+    /// `CREATE CONSTRAINT` rather than from a schema.
+    ///
+    /// The DDL entry point for [`Self::create_unique_constraint`]: same
+    /// installation, plus the provenance a later `define_schema` reads before
+    /// withdrawing anything ([`Self::withdraw_schema_unique`]). A schema install
+    /// on the same tuple shares the one index this builds, so without the record
+    /// withdrawing the schema's half withdrew the DDL declaration with it.
+    ///
+    /// Nothing is recorded when the declaration is refused, so a rejected
+    /// statement leaves no provenance behind.
+    pub(crate) fn declare_ddl_unique_constraint(
+        &mut self,
+        node_type: &str,
+        properties: &[&str],
+    ) -> ConstraintResult<usize> {
+        let owned: Vec<String> = properties.iter().map(|p| (*p).to_string()).collect();
+        let count = self.create_unique_constraint(node_type, properties)?;
+        self.ddl_unique_constraints
+            .insert((node_type.to_string(), normalize_properties(&owned)));
+        Ok(count)
+    }
+
+    /// Whether a DDL statement declared uniqueness on `(node_type, properties)`.
+    pub(crate) fn has_ddl_unique_declaration(
+        &self,
+        node_type: &str,
+        properties: &[String],
+    ) -> bool {
+        self.ddl_unique_constraints
+            .contains(&(node_type.to_string(), normalize_properties(properties)))
+    }
+
+    /// Withdraw the uniqueness a *schema* declared on `(node_type, properties)`.
+    ///
+    /// Keeps the index when a DDL declaration also backs the tuple: the two
+    /// declarations share one entry in `unique_indices`, so dropping it here
+    /// would withdraw a `CREATE CONSTRAINT` the schema call never mentioned —
+    /// enforcement disappearing without a statement asking for it, which is the
+    /// failure this whole module is arranged to prevent. Reports whether the
+    /// index was removed.
+    pub(crate) fn withdraw_schema_unique(
+        &mut self,
+        node_type: &str,
+        properties: &[String],
+    ) -> bool {
+        if self.has_ddl_unique_declaration(node_type, properties) {
+            return false;
+        }
+        self.drop_unique_constraint(node_type, properties)
+    }
+
     /// Drop a declared unique constraint. Returns whether one was removed.
+    ///
+    /// The `DROP CONSTRAINT` side: it forgets the DDL provenance too, so the
+    /// declaration does not survive its own withdrawal. Schema withdrawal goes
+    /// through [`Self::withdraw_schema_unique`] instead, which leaves both alone
+    /// when a DDL declaration still backs the tuple.
     pub(crate) fn drop_unique_constraint(
         &mut self,
         node_type: &str,
         properties: &[String],
     ) -> bool {
+        self.ddl_unique_constraints
+            .remove(&(node_type.to_string(), normalize_properties(properties)));
         match self.find_unique_key(node_type, properties).cloned() {
             Some(key) => {
                 self.remove_unique_declaration(&key);
@@ -249,6 +313,12 @@ impl DirGraph {
             .collect();
         for key in &keys {
             self.remove_unique_declaration(key);
+            // The DDL provenance goes with the type: a later type of the same
+            // name must not inherit a declaration whose index is gone, which
+            // would make `withdraw_schema_unique` retain an index nothing
+            // declared any more.
+            self.ddl_unique_constraints
+                .remove(&(key.0.clone(), normalize_properties(&key.1)));
         }
         keys.len()
     }

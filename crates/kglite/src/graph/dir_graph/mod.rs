@@ -137,6 +137,33 @@ pub struct DirGraph {
     /// list, i.e. no constraints, which is the pre-existing behaviour.
     #[serde(default)]
     pub(crate) unique_constraint_keys: Vec<UniqueConstraintKey>,
+    /// Which declared unique constraints came from DDL
+    /// (`CREATE CONSTRAINT ... IS UNIQUE` / `... IS NODE KEY`) rather than from
+    /// a schema, with the property tuple normalised (sorted, deduped) so a
+    /// re-spelling of the same constraint hits the same entry.
+    ///
+    /// A DDL declaration and a schema `primary_key`/`unique` on the same
+    /// `(node_type, properties)` share **one** entry in `unique_indices` — the
+    /// index *is* the constraint, so there is no second copy to withdraw
+    /// independently. Without this record, withdrawing the schema half took the
+    /// whole index with it: `define_schema` naming the type without its key
+    /// deleted a `CREATE CONSTRAINT` the caller never touched, and duplicates
+    /// were admitted. `set_schema` consults it (`withdraw_schema_unique`) and
+    /// retains an index a DDL declaration still backs.
+    ///
+    /// Written only by the DDL entry points, so a schema install cannot forge
+    /// provenance: [`Self::declare_ddl_unique_constraint`] records,
+    /// [`Self::drop_unique_constraint`] and
+    /// [`Self::drop_unique_constraints_for_type`] forget.
+    ///
+    /// **Persisted through `FileMetadata`, not through this derive** — see
+    /// [`Self::ddl_not_null_constraints`], which carries the same provenance
+    /// role for the presence half and the same additive-field posture: a file
+    /// written before this field loads with an empty set, leaving its
+    /// DDL-declared uniqueness indistinguishable from a schema-declared one,
+    /// exactly as it was.
+    #[serde(default)]
+    pub(crate) ddl_unique_constraints: std::collections::BTreeSet<UniqueConstraintKey>,
     /// User-supplied constraint names → the declaration each one names, so
     /// `DROP CONSTRAINT <name>` resolves. KGLite's enforcement structures are
     /// keyed by `(node_type, properties)`, so a Neo4j-style constraint name has
@@ -745,6 +772,7 @@ impl DirGraph {
             range_indices: HashMap::new(),
             range_index_keys: Vec::new(),
             unique_indices: HashMap::new(),
+            ddl_unique_constraints: std::collections::BTreeSet::new(),
             unique_constraint_keys: Vec::new(),
             constraint_names: HashMap::new(),
             ddl_not_null_constraints: std::collections::BTreeSet::new(),
@@ -809,6 +837,7 @@ impl DirGraph {
             range_indices: HashMap::new(),
             range_index_keys: Vec::new(),
             unique_indices: HashMap::new(),
+            ddl_unique_constraints: std::collections::BTreeSet::new(),
             unique_constraint_keys: Vec::new(),
             constraint_names: HashMap::new(),
             ddl_not_null_constraints: std::collections::BTreeSet::new(),

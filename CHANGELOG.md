@@ -51,6 +51,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its owner and the calls that do withdraw it (re-declaring the type without a
   key, or `clear_schema()`). Every other constraint on a keyed type — including
   a composite tuple containing the key property — still drops normally.
+- **Withdrawing a schema primary key deleted a `CREATE CONSTRAINT ... IS
+  UNIQUE` declared on the same property.** The two declarations share one
+  entry in the engine's unique index — the index *is* the constraint — and
+  nothing recorded that a DDL statement had also declared it, so
+  `define_schema({'nodes': {'User': {}}})` after
+  `CREATE CONSTRAINT cu FOR (u:User) REQUIRE u.email IS UNIQUE` plus a
+  `primary_key: 'email'` removed `cu` from `SHOW CONSTRAINTS` and admitted
+  duplicates, without an error and without the caller ever naming `cu`. This is
+  the uniqueness twin of the NOT NULL provenance bug fixed in 0.15.0 and
+  persisted in 0.16.4.
+  DDL-declared uniqueness now carries its own provenance record, persisted in
+  the `.kgl` metadata (an additive field: a file written by an older version
+  loads unchanged, and a graph declaring none writes byte-identical output), so
+  a schema install withdraws only what the schema declared and `cu` keeps
+  reporting as `UNIQUENESS` until `DROP CONSTRAINT` withdraws it. A key with no
+  DDL declaration behind it is withdrawn by the schema as before.
 
 ## [0.16.9] - 2026-08-23
 

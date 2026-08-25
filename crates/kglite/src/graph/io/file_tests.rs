@@ -1287,11 +1287,11 @@ mod save_while_forked_tests {
     }
 }
 
-/// A DDL-declared NOT NULL constraint lives in two places: the enforced list
-/// (`SchemaDefinition::required_fields`) and the provenance record
-/// (`DirGraph::ddl_not_null_constraints`) that says *who* declared it. Only the
-/// provenance record distinguishes a constraint the user wrote in Cypher from
-/// one an incoming `define_schema` may replace, so it has to survive a save.
+/// A DDL-declared constraint carries a provenance record beside its
+/// enforcement — `ddl_not_null_constraints` for the presence half,
+/// `ddl_unique_constraints` for the uniqueness half. Only that record
+/// distinguishes a constraint the user wrote in Cypher from one an incoming
+/// `define_schema` may withdraw, so both have to survive a save.
 #[cfg(test)]
 mod ddl_provenance_roundtrip_tests {
     use super::*;
@@ -1327,6 +1327,20 @@ mod ddl_provenance_roundtrip_tests {
         )
         .unwrap();
         graph
+    }
+
+    /// A schema that keys `Person` on `email`, so its install declares the same
+    /// unique tuple a DDL statement declares.
+    fn schema_keyed_on_email() -> SchemaDefinition {
+        let mut schema = SchemaDefinition::new();
+        schema.node_schemas.insert(
+            "Person".to_string(),
+            NodeSchemaDefinition {
+                primary_key: Some("email".to_string()),
+                ..NodeSchemaDefinition::default()
+            },
+        );
+        schema
     }
 
     /// A schema that declares `Person` but says nothing about `email` — the
@@ -1399,6 +1413,81 @@ mod ddl_provenance_roundtrip_tests {
         );
     }
 
+    /// A schema primary key and a `CREATE CONSTRAINT ... IS UNIQUE` on the same
+    /// property share **one** entry in `unique_indices`, so withdrawing the key
+    /// used to delete the DDL declaration with it. The uniqueness twin of the
+    /// in-memory pin above.
+    #[test]
+    fn a_ddl_unique_declaration_survives_the_withdrawal_of_an_overlapping_key() {
+        let mut graph = person_graph();
+        graph
+            .declare_ddl_unique_constraint("Person", &["email"])
+            .unwrap();
+
+        graph
+            .set_schema(schema_keyed_on_email(), SchemaInstall::Replace)
+            .unwrap();
+        graph
+            .set_schema(schema_without_email(), SchemaInstall::Replace)
+            .unwrap();
+
+        assert!(
+            graph.has_unique_constraint("Person", &["email".to_string()]),
+            "withdrawing the key must not withdraw the DDL declaration under it"
+        );
+    }
+
+    /// The same regression the presence half had: the provenance is rebuilt from
+    /// `FileMetadata`, so a field missing there comes back empty and the *next*
+    /// `define_schema()` deletes a `CREATE CONSTRAINT` it never named.
+    #[test]
+    fn a_unique_declaration_keeps_its_provenance_across_a_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut graph = person_graph();
+        graph
+            .declare_ddl_unique_constraint("Person", &["email"])
+            .unwrap();
+        graph
+            .set_schema(schema_keyed_on_email(), SchemaInstall::Replace)
+            .unwrap();
+
+        let mut loaded = save_and_load(graph, dir.path());
+        assert!(
+            loaded
+                .ddl_unique_constraints
+                .contains(&("Person".to_string(), vec!["email".to_string()])),
+            "the DDL provenance record must survive the round-trip"
+        );
+
+        loaded
+            .set_schema(schema_without_email(), SchemaInstall::Replace)
+            .unwrap();
+        assert!(
+            loaded.has_unique_constraint("Person", &["email".to_string()]),
+            "after a reload, withdrawing the key silently un-enforced a \
+             DDL-declared UNIQUE"
+        );
+    }
+
+    /// The control for the retention rule: with no DDL declaration behind it, a
+    /// withdrawn key takes its index with it, as it always has.
+    #[test]
+    fn a_key_with_no_declaration_behind_it_still_withdraws_its_index() {
+        let mut graph = person_graph();
+        graph
+            .set_schema(schema_keyed_on_email(), SchemaInstall::Replace)
+            .unwrap();
+        assert!(graph.has_unique_constraint("Person", &["email".to_string()]));
+
+        graph
+            .set_schema(schema_without_email(), SchemaInstall::Replace)
+            .unwrap();
+        assert!(
+            !graph.has_unique_constraint("Person", &["email".to_string()]),
+            "a schema-only declaration is withdrawn by the schema that declared it"
+        );
+    }
+
     /// A graph that declares nothing must write the same bytes it wrote before
     /// the provenance field existed, or every `.kgl` in the world shifts format
     /// for a feature almost no graph uses.
@@ -1419,6 +1508,21 @@ mod ddl_provenance_roundtrip_tests {
         assert!(
             json.contains("ddl_not_null_constraints"),
             "a declared constraint must be written: {json}"
+        );
+
+        let json = serde_json::to_string(&FileMetadata::from_graph(&person_graph())).unwrap();
+        assert!(
+            !json.contains("ddl_unique_constraints"),
+            "the empty uniqueness provenance must be skipped too: {json}"
+        );
+        let mut declared = person_graph();
+        declared
+            .declare_ddl_unique_constraint("Person", &["email"])
+            .unwrap();
+        let json = serde_json::to_string(&FileMetadata::from_graph(&declared)).unwrap();
+        assert!(
+            json.contains("ddl_unique_constraints"),
+            "a declared unique constraint must be written: {json}"
         );
     }
 }

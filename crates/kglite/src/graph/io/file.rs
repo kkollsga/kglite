@@ -174,6 +174,19 @@ pub(crate) struct FileMetadata {
     /// `DROP CONSTRAINT <name>` survives save/load.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     constraint_names: HashMap<String, NamedConstraint>,
+    /// Which declared unique constraints came from DDL
+    /// (`CREATE CONSTRAINT ... IS UNIQUE` / `... IS NODE KEY`) rather than from
+    /// a schema, with each property tuple normalised.
+    ///
+    /// `unique_constraint_keys` above rebuilds the enforcement; this says *who
+    /// declared it*, which is what a schema withdrawal consults before deleting
+    /// an index (`DirGraph::withdraw_schema_unique`, called from `set_schema`).
+    /// A declaration and a schema primary key on the same `(type, property)`
+    /// share one index, so without this field the first `define_schema()` after
+    /// a reload deleted a `CREATE CONSTRAINT` it never named — the uniqueness
+    /// twin of the presence bug the field below fixes.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    ddl_unique_constraints: BTreeSet<UniqueConstraintKey>,
     /// Which `(node_type, property)` presence constraints were declared through
     /// DDL (`CREATE CONSTRAINT ... IS NOT NULL`) rather than through a schema.
     ///
@@ -370,6 +383,7 @@ impl FileMetadata {
             range_index_keys: graph.range_index_keys.clone(),
             unique_constraint_keys: graph.unique_constraint_keys.clone(),
             constraint_names: graph.constraint_names.clone(),
+            ddl_unique_constraints: graph.ddl_unique_constraints.clone(),
             ddl_not_null_constraints: graph.ddl_not_null_constraints.clone(),
             ddl_property_type_constraints: graph.ddl_property_type_constraints.clone(),
             rel_ddl_not_null_constraints: graph.rel_ddl_not_null_constraints.clone(),
@@ -439,6 +453,7 @@ impl FileMetadata {
         graph.range_index_keys = self.range_index_keys;
         graph.unique_constraint_keys = self.unique_constraint_keys;
         graph.constraint_names = self.constraint_names;
+        graph.ddl_unique_constraints = self.ddl_unique_constraints;
         graph.ddl_not_null_constraints = self.ddl_not_null_constraints;
         graph.ddl_property_type_constraints = self.ddl_property_type_constraints;
         graph.rel_ddl_not_null_constraints = self.rel_ddl_not_null_constraints;

@@ -753,7 +753,7 @@ fn unsupported_index_type_message(index_type: DdlIndexType) -> String {
 /// unsupported forms from partially applying.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConstraintPlan {
-    /// Uniqueness only, via `DirGraph::create_unique_constraint`.
+    /// Uniqueness only, via `DirGraph::declare_ddl_unique_constraint`.
     Unique,
     /// Presence only, via `DirGraph::create_not_null_constraint`.
     NotNull,
@@ -911,7 +911,7 @@ fn install_constraint(
 
 fn declare_unique(graph: &mut DirGraph, label: &str, properties: &[String]) -> Result<(), String> {
     let refs: Vec<&str> = properties.iter().map(String::as_str).collect();
-    let declared = graph.create_unique_constraint(label, &refs);
+    let declared = graph.declare_ddl_unique_constraint(label, &refs);
     match declared {
         Ok(_) => Ok(()),
         Err(violation) => Err(graph.record_constraint_violation(*violation)),

@@ -431,3 +431,104 @@ def test_only_the_keys_own_row_is_refused():
     g.cypher("CREATE (:User {email:'a@x.com', tenant:'t'})")
     assert not rejects(g, "CREATE (:User {email:'b@x.com', tenant:'t'})"), "dropped half"
     assert rejects(g, "CREATE (:User {email:'a@x.com'})"), "the key stays enforced"
+
+
+# ── 7. A primary key overlapping a DDL declaration withdraws only its own half ──
+
+
+def test_withdrawing_a_primary_key_leaves_an_overlapping_ddl_constraint():
+    """The audit reproducer for the fifth instance of the failure mode.
+
+    A DDL `IS UNIQUE` and a schema primary key on the *same* `(type, property)`
+    share one index in `unique_indices`. Withdrawing the key withdrew that index
+    — the whole declaration, not the key's share of it — so `cu` vanished from
+    `SHOW CONSTRAINTS` and duplicates were admitted, while the user had never
+    touched the `CREATE CONSTRAINT` statement that declared it.
+    """
+    g = KnowledgeGraph()
+    g.cypher("CREATE CONSTRAINT cu FOR (u:User) REQUIRE u.email IS UNIQUE")
+    assert constraints(g) == [("cu", "UNIQUENESS")]
+
+    g.define_schema({"nodes": {"User": {"primary_key": "email"}}})
+    assert constraints(g) == [("cu", "NODE_KEY")], "the key folds into the same row"
+
+    g.define_schema({"nodes": {"User": {}}})  # withdraws the key, not the DDL declaration
+
+    assert constraints(g) == [("cu", "UNIQUENESS")], "cu is withdrawn only by DROP CONSTRAINT"
+    g.cypher("CREATE (:User {email:'a@x.com'})")
+    assert rejects(g, "CREATE (:User {email:'a@x.com'})"), "and must still be enforced"
+
+    g.cypher("DROP CONSTRAINT cu")
+    assert constraints(g) == [], "keeping provenance must not make it undroppable"
+    assert not rejects(g, "CREATE (:User {email:'a@x.com'})")
+
+
+def test_a_ddl_unique_constraint_on_a_key_property_is_refused_not_absorbed():
+    """Ordering (a): the key first. The declaration is already in force, so the
+    duplicate is refused by name — the outcome must be an error, never a silent
+    no-op that leaves the user believing a separate `cu` exists.
+    """
+    g = KnowledgeGraph()
+    g.define_schema({"nodes": {"User": {"primary_key": "email"}}})
+
+    with pytest.raises(Exception) as excinfo:
+        g.cypher("CREATE CONSTRAINT cu FOR (u:User) REQUIRE u.email IS UNIQUE")
+    assert "already exists" in str(excinfo.value), str(excinfo.value)
+
+    assert constraints(g) == [("User.email", "NODE_KEY")], "no second declaration was recorded"
+
+
+def test_dropping_a_key_backed_by_a_ddl_declaration_is_still_refused():
+    """Ordering (b): `DROP CONSTRAINT cu` while the key stands. The name resolves
+    to the key's own tuple, which `define_schema` owns, so the drop is refused —
+    and both halves of the folded row stay enforced.
+    """
+    g = KnowledgeGraph()
+    g.cypher("CREATE CONSTRAINT cu FOR (u:User) REQUIRE u.email IS UNIQUE")
+    g.define_schema({"nodes": {"User": {"primary_key": "email"}}})
+    g.cypher("CREATE (:User {email:'a@x.com'})")
+
+    with pytest.raises(Exception) as excinfo:
+        g.cypher("DROP CONSTRAINT cu")
+    assert "PRIMARY KEY" in str(excinfo.value), str(excinfo.value)
+
+    assert constraints(g) == [("cu", "NODE_KEY")]
+    assert rejects(g, "CREATE (:User {email:'a@x.com'})"), "uniqueness half"
+    assert rejects(g, "CREATE (:User {email: null})"), "presence half"
+
+
+def test_a_key_with_no_ddl_declaration_behind_it_still_withdraws():
+    """The non-vacuity control. Retaining a DDL-backed index must not become
+    "never withdraw a key's index": with nothing declared through DDL, removing
+    the key from the schema stops enforcing uniqueness, as it always has.
+    """
+    g = KnowledgeGraph()
+    g.define_schema({"nodes": {"User": {"primary_key": "email"}}})
+    g.cypher("CREATE (:User {email:'a@x.com'})")
+    assert rejects(g, "CREATE (:User {email:'a@x.com'})")
+
+    g.define_schema({"nodes": {"User": {}}})
+
+    assert constraints(g) == []
+    assert not rejects(g, "CREATE (:User {email:'a@x.com'})")
+
+
+def test_ddl_unique_provenance_survives_save_load(tmp_path):
+    """The provenance is what tells a later `define_schema` it may not withdraw
+    the declaration, so a reload that loses it re-opens the bug on the *next*
+    schema call — with nothing in the file to show what went missing.
+    """
+    path = str(tmp_path / "provenance.kgl")
+    g = KnowledgeGraph()
+    g.cypher("CREATE CONSTRAINT cu FOR (u:User) REQUIRE u.email IS UNIQUE")
+    g.define_schema({"nodes": {"User": {"primary_key": "email"}}})
+    g.cypher("CREATE (:User {email:'a@x.com'})")
+    g.save(path)
+
+    reloaded = kglite.load(path)
+    assert constraints(reloaded) == [("cu", "NODE_KEY")]
+
+    reloaded.define_schema({"nodes": {"User": {}}})
+
+    assert constraints(reloaded) == [("cu", "UNIQUENESS")]
+    assert rejects(reloaded, "CREATE (:User {email:'a@x.com'})")

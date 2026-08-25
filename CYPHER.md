@@ -2847,6 +2847,14 @@ or with `clear_schema()`. Every other constraint on a keyed type — including a
 composite tuple that contains the key property — is its own declaration and
 drops normally.
 
+Withdrawing the key withdraws **only** the key. A `CREATE CONSTRAINT … IS
+UNIQUE` declared on the same property is a separate declaration that happens to
+share the key's index: while both stand the row reads `NODE_KEY` under the DDL
+name, and re-declaring the type without a key leaves that row in force as
+`UNIQUENESS` until `DROP CONSTRAINT` withdraws it. Declaring it the other way
+round is refused as a duplicate — the key already enforces it — so a property
+never carries two live uniqueness declarations.
+
 #### Relationship constraints
 
 A constraint on a relationship is written against a relationship pattern, and
