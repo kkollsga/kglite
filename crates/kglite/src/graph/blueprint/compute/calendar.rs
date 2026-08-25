@@ -12,7 +12,6 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use chrono::{Datelike, Duration, NaiveDate};
-use indexmap::IndexMap;
 
 use super::super::schema::{Blueprint, CalendarLink, JunctionEdge, NodeSpec};
 use super::{csv_cell_to_value, resolve_csv_path, resolve_source_spec, resolve_source_spec_mut};

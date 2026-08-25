@@ -17,6 +17,10 @@ import pytest
 
 from kglite import KnowledgeGraph
 
+# Default addopts deselect '-m benchmark'; CI's Python matrix installs no
+# pytest-benchmark, so unmarked cells error at collection there.
+pytestmark = pytest.mark.benchmark
+
 BULK_SMALL = 10_000
 BULK_LARGE = 50_000
 BUCKET_NODES = 20_000

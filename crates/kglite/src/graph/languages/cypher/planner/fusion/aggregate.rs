@@ -492,18 +492,6 @@ fn distinct_fusable_3elem_with_constrained_group(
     has_type || has_props
 }
 
-/// Fuse MATCH (node-edge-node) + RETURN (optional group-by + count) into a
-/// single pass that counts edges directly instead of materializing all rows.
-///
-/// Criteria for fusion:
-/// 1. `clauses[i]` is `Match` with exactly 1 pattern of 3 elements (node-edge-node)
-/// 2. `clauses[i+1]` is `Return` with at least one `count()` aggregate
-/// 3. The RETURN is either a lone `count(*)`, or all non-aggregate items group
-///    by one endpoint node variable or direct properties of that variable
-/// 4. All `count()` args reference the second node variable (or `*`)
-/// 5. `count(DISTINCT v)` is allowed when `v` is the OTHER node variable or the
-///    edge variable, AND the group node is type/property constrained (see
-///    `distinct_fusable_3elem_with_constrained_group`).
 /// Per-pattern arm of [`super::multi_label_fuse_unsafe`] for the two
 /// edge-aggregate fusions: any node element that is multi-label-unsafe
 /// disqualifies the whole pattern.
@@ -517,6 +505,18 @@ fn pattern_multi_label_unsafe(
     })
 }
 
+/// Fuse MATCH (node-edge-node) + RETURN (optional group-by + count) into a
+/// single pass that counts edges directly instead of materializing all rows.
+///
+/// Criteria for fusion:
+/// 1. `clauses[i]` is `Match` with exactly 1 pattern of 3 elements (node-edge-node)
+/// 2. `clauses[i+1]` is `Return` with at least one `count()` aggregate
+/// 3. The RETURN is either a lone `count(*)`, or all non-aggregate items group
+///    by one endpoint node variable or direct properties of that variable
+/// 4. All `count()` args reference the second node variable (or `*`)
+/// 5. `count(DISTINCT v)` is allowed when `v` is the OTHER node variable or the
+///    edge variable, AND the group node is type/property constrained (see
+///    `distinct_fusable_3elem_with_constrained_group`).
 pub(crate) fn fuse_match_return_aggregate(query: &mut CypherQuery, graph: &DirGraph) {
     use crate::graph::languages::cypher::ast::is_aggregate_expression;
 
