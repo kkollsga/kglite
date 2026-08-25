@@ -24,6 +24,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`vacuum()` corrupted secondary labels** — the compaction remapped every
+  index except `secondary_label_index` (it lives above the storage backend,
+  so `reindex()` cannot see it), leaving label buckets pointing at stale
+  node indices after any vacuum on a labelled graph: `MATCH (:Label)`
+  returned phantom all-null rows, `count()` over-reported, and surviving
+  nodes lost their labels. Auto-vacuum (on by default, threshold 0.3)
+  triggered this without an explicit call. The vacuum now remaps the label
+  buckets alongside the embedding slots.
 - `CREATE INDEX` (Cypher) and `create_index` / `create_range_index` /
   `create_composite_index` (Python) on a label that exists only as a
   *secondary* label now fail with a clear error instead of silently building

@@ -17,9 +17,42 @@
 
 use petgraph::graph::NodeIndex;
 
+use super::node_remap::NodeRemap;
 use crate::graph::schema::{DirGraph, InternedKey};
 
 impl DirGraph {
+    /// Rewrite every label bucket through a vacuum's `NodeRemap`, dropping
+    /// entries whose node did not survive and buckets that end up empty.
+    ///
+    /// `vacuum()` compacts `NodeIndex` values and `reindex()` rebuilds every
+    /// index it can see — but `NodeData` carries no labels (module doc), so
+    /// this index is invisible to it and must be remapped explicitly. Before
+    /// this existed, any vacuum on a labelled graph left the buckets pointing
+    /// at stale indices: phantom rows, over-counted labels, survivors losing
+    /// their labels.
+    ///
+    /// The remap assigns new indices in ascending old-raw order, so it is
+    /// monotonic on survivors: a bucket processed in order keeps whatever
+    /// ordering invariant it had.
+    pub(super) fn remap_secondary_labels(&mut self, remap: &NodeRemap) {
+        if !self.has_secondary_labels {
+            return;
+        }
+        self.secondary_label_index.retain(|_, bucket| {
+            let mut kept = Vec::with_capacity(bucket.len());
+            for idx in bucket.iter() {
+                if let Some(new_idx) = remap.get(*idx) {
+                    kept.push(new_idx);
+                }
+            }
+            *bucket = kept;
+            !bucket.is_empty()
+        });
+        if self.secondary_label_index.is_empty() {
+            self.has_secondary_labels = false;
+        }
+    }
+
     /// Capture a node's pre-edit state for change data capture, **before** a
     /// label edit lands.
     ///

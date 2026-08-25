@@ -656,3 +656,61 @@ def test_create_index_on_unknown_label_still_allowed(g):
     g.cypher("CREATE (n:Person {name: 'Alice'})")
     result = g.create_index("FutureType", "name")
     assert result["unique_values"] == 0
+
+
+# ─── vacuum() must remap the secondary-label index ─────────────────────────
+# Before 0.16.11, vacuum() rebuilt every index EXCEPT secondary_label_index
+# (reindex() cannot see it — NodeData carries no labels), so after any vacuum
+# on a labelled graph the buckets pointed at stale NodeIndex values: phantom
+# all-null MATCH rows, over-reported counts, survivors losing their labels.
+# Auto-vacuum is on by default, so this fired without the user asking.
+
+
+@pytest.mark.parametrize("storage", ["default", "mapped"])
+def test_vacuum_remaps_secondary_labels(tmp_path, storage):
+    g = KnowledgeGraph(storage=storage)
+    df = pd.DataFrame({"id": range(200), "title": [f"p{i}" for i in range(200)]})
+    g.add_nodes(df, "P", "id", node_title_field="title")
+    g.add_label("P", list(range(100, 200)), "VIP")
+    g.cypher("MATCH (n:P) WHERE n.id < 100 DETACH DELETE n")
+    g.vacuum()
+
+    rows = g.cypher("MATCH (n:VIP) RETURN n.id AS id").to_list()
+    ids = sorted(r["id"] for r in rows)
+    assert ids == list(range(100, 200)), f"got {len(ids)} rows, sample {ids[:5]}"
+    assert g.cypher("MATCH (n:VIP) RETURN count(n) AS c").to_list()[0]["c"] == 100
+    labels = g.cypher("MATCH (n:P) WHERE n.id = 150 RETURN labels(n) AS l").to_list()[0]["l"]
+    assert labels == ["P", "VIP"]
+
+
+def test_vacuum_drops_bucket_when_no_labelled_survivors(g):
+    g.cypher("CREATE (a:P {id: 1}), (b:P {id: 2})")
+    g.cypher("MATCH (n:P) WHERE n.id = 1 SET n:VIP")
+    g.cypher("MATCH (n:P) WHERE n.id = 1 DETACH DELETE n")
+    g.vacuum()
+    assert g.cypher("MATCH (n:VIP) RETURN count(n) AS c").to_list()[0]["c"] == 0
+    # The survivor keeps its (label-free) integrity.
+    assert g.cypher("MATCH (n:P) RETURN labels(n) AS l").to_list()[0]["l"] == ["P"]
+
+
+def test_auto_vacuum_preserves_secondary_labels():
+    # Auto-vacuum (default threshold 0.3, >100-tombstone floor) fires inside
+    # the delete path — the same remap must run there.
+    g = KnowledgeGraph()
+    df = pd.DataFrame({"id": range(300), "title": [f"p{i}" for i in range(300)]})
+    g.add_nodes(df, "P", "id", node_title_field="title")
+    g.add_label("P", list(range(200, 300)), "VIP")
+    g.cypher("MATCH (n:P) WHERE n.id < 200 DETACH DELETE n")  # 200 tombstones
+    rows = g.cypher("MATCH (n:VIP) RETURN n.id AS id").to_list()
+    assert sorted(r["id"] for r in rows) == list(range(200, 300))
+
+
+def test_disk_vacuum_is_noop_and_keeps_labels(tmp_path):
+    # vacuum() early-returns on the disk backend; labels must be untouched.
+    disk_dir = tmp_path / "disk_v"
+    g = kglite.KnowledgeGraph(storage="disk", path=str(disk_dir))
+    g.cypher("CREATE (a:P {id: 1}), (b:P {id: 2})")
+    g.cypher("MATCH (n:P) WHERE n.id = 2 SET n:VIP")
+    g.vacuum()
+    rows = g.cypher("MATCH (n:VIP) RETURN n.id AS id").to_list()
+    assert [r["id"] for r in rows] == [2]

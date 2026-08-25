@@ -2107,6 +2107,9 @@ impl DirGraph {
         }
 
         self.remap_embedding_slots(&old_to_new);
+        // Secondary labels live above the backend (labels.rs module doc), so
+        // neither the clone loop nor reindex() below can carry them over.
+        self.remap_secondary_labels(&old_to_new);
         // Text indexes are dropped, not remapped. A document's slot *is* its
         // node index (`graph::text_indexes`), so after a wholesale remap every
         // document would be attached to whatever node inherited its number —
