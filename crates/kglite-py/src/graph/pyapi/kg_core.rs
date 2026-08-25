@@ -1721,12 +1721,7 @@ impl KnowledgeGraph {
             return if output_csv {
                 result.to_csv().into_py_any(py)
             } else if to_df {
-                let preprocessed = cypher::py_convert::preprocess_values_owned(result.rows);
-                cypher::py_convert::preprocessed_result_to_dataframe(
-                    py,
-                    &result.columns,
-                    &preprocessed,
-                )
+                cypher::py_convert::rows_to_dataframe(py, &result.columns, &result.rows)
             } else {
                 let view = crate::graph::pyapi::result_view::ResultView::from_cypher_result(result);
                 Py::new(py, view).map(|v| v.into_any())
@@ -2043,18 +2038,7 @@ fn marshal_read_result(
                 lazy_result,
                 std::sync::Arc::clone(inner),
             );
-            let materialised = view
-                .materialise_all()?
-                .into_iter()
-                .map(|row| {
-                    row.into_iter()
-                        // `Plain` is PreProcessedValue's only variant.
-                        .map(|pv| match pv {
-                            cypher::py_convert::PreProcessedValue::Plain(v) => v,
-                        })
-                        .collect()
-                })
-                .collect();
+            let materialised = view.materialise_all()?;
             let csv_result = cypher::CypherResult {
                 columns,
                 rows: materialised,
@@ -2093,20 +2077,19 @@ fn marshal_read_result(
         if to_df {
             // DataFrame consumes every row, so materialise the lazy view and
             // build the frame from the eager form.
-            let preprocessed = view.materialise_all()?;
+            let materialised = view.materialise_all()?;
             let cols = view.columns_owned();
-            cypher::py_convert::preprocessed_result_to_dataframe(py, &cols, &preprocessed)
+            cypher::py_convert::rows_to_dataframe(py, &cols, &materialised)
         } else {
             Py::new(py, view).map(|v| v.into_any())
         }
     } else {
-        let preprocessed = cypher::py_convert::preprocess_values_owned(rows);
         if to_df {
-            cypher::py_convert::preprocessed_result_to_dataframe(py, &columns, &preprocessed)
+            cypher::py_convert::rows_to_dataframe(py, &columns, &rows)
         } else {
-            let view = crate::graph::pyapi::result_view::ResultView::from_preprocessed(
+            let view = crate::graph::pyapi::result_view::ResultView::from_rows(
                 columns,
-                preprocessed,
+                rows,
                 stats,
                 profile,
                 Some(diagnostics),

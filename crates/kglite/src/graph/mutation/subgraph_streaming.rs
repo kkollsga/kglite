@@ -937,8 +937,8 @@ fn sanitize_type_name(name: &str) -> String {
 mod tests {
     use super::*;
 
-    /// `kept_edges_path` is caller-supplied (`_scan_edges_filtered(kept_edges_out=…)`),
-    /// so an unusable path is reachable. The scan's contract is "memory: bitset
+    /// `kept_edges_path` is caller-supplied by every [`pass_a_scan_to_file`]
+    /// caller, so an unusable path is reachable. The scan's contract is "memory: bitset
     /// only (~15 MB at 120M nodes)"; falling back to a heap `Vec<PendingEdge>`
     /// would silently allocate 16 B × the source's *total* edge count, turning a
     /// bad path into an OOM at Wikidata scale instead of a returned error.
@@ -1011,8 +1011,122 @@ mod tests {
         }
     }
 
-    // `pass_a_scan` needs a real `DiskGraph`; its end-to-end tests live in
-    // `tests/test_subgraph_streaming.py`.
+    /// A miniature 'Wikidata-shape' disk graph: Articles, Authors and Venues
+    /// joined by two edge types, so an edge-type filter has to discriminate.
+    /// AUTHORED_BY covers 5 edges over 4 Articles + 3 Authors; PUBLISHED_IN
+    /// covers 4 edges over the same 4 Articles + 2 Venues.
+    fn articles_and_authors_on_disk(root: &Path) -> DirGraph {
+        use crate::graph::session::execute::{execute_mut, ExecuteOptions};
+        use crate::graph::storage::mode::{new_dir_graph_in_mode, StorageMode};
+
+        let mut graph = new_dir_graph_in_mode(StorageMode::Disk, Some(root)).expect("disk graph");
+        let params = std::collections::HashMap::new();
+        let mut run = |query: &str| {
+            let opts = ExecuteOptions::eager(&params);
+            execute_mut(&mut graph, query, &opts)
+                .unwrap_or_else(|e| panic!("query failed: {query}: {e}"));
+        };
+
+        run("CREATE (:Article {id: 'a1'}), (:Article {id: 'a2'}), \
+             (:Article {id: 'a3'}), (:Article {id: 'a4'})");
+        run("CREATE (:Author {id: 'p1'}), (:Author {id: 'p2'}), (:Author {id: 'p3'})");
+        run("CREATE (:Venue {id: 'v1'}), (:Venue {id: 'v2'})");
+        for (article, author) in [
+            ("a1", "p1"),
+            ("a1", "p2"),
+            ("a2", "p2"),
+            ("a3", "p3"),
+            ("a4", "p3"),
+        ] {
+            run(&format!(
+                "MATCH (a:Article {{id: '{article}'}}), (p:Author {{id: '{author}'}}) \
+                 CREATE (a)-[:AUTHORED_BY]->(p)"
+            ));
+        }
+        for (article, venue) in [("a1", "v1"), ("a2", "v1"), ("a3", "v2"), ("a4", "v2")] {
+            run(&format!(
+                "MATCH (a:Article {{id: '{article}'}}), (v:Venue {{id: '{venue}'}}) \
+                 CREATE (a)-[:PUBLISHED_IN]->(v)"
+            ));
+        }
+        graph
+    }
+
+    fn spec_for(edge_types: &[&str]) -> SubsetSpec {
+        SubsetSpec {
+            edge_types: Some(
+                edge_types
+                    .iter()
+                    .map(|s| InternedKey::from_str(s))
+                    .collect(),
+            ),
+        }
+    }
+
+    fn disk_of(graph: &DirGraph) -> &DiskGraph {
+        let crate::graph::schema::GraphBackend::Disk(ref disk) = graph.graph else {
+            panic!("expected a disk backend");
+        };
+        disk
+    }
+
+    /// The kept set is exactly the endpoints of the matching edges — the
+    /// property `save_subset_streaming_disk` builds its rank index from, and
+    /// the one no unit test on `Bitset`/`RankIndex` alone can reach: it needs
+    /// a real `DiskGraph`'s `edge_endpoints.bin`.
+    #[test]
+    fn pass_a_keeps_exactly_the_endpoints_of_the_filtered_edge_types() {
+        let root = tempfile::tempdir().unwrap();
+        let graph = articles_and_authors_on_disk(root.path());
+        let disk = disk_of(&graph);
+
+        let authored = pass_a_scan(disk, &spec_for(&["AUTHORED_BY"]));
+        assert_eq!(authored.stats.total_edge_count, 9);
+        assert_eq!(authored.stats.kept_edge_count, 5);
+        assert_eq!(authored.stats.kept_node_count, 7, "4 Articles + 3 Authors");
+
+        let published = pass_a_scan(disk, &spec_for(&["PUBLISHED_IN"]));
+        assert_eq!(published.stats.kept_edge_count, 4);
+        assert_eq!(published.stats.kept_node_count, 6, "4 Articles + 2 Venues");
+
+        let both = pass_a_scan(disk, &spec_for(&["AUTHORED_BY", "PUBLISHED_IN"]));
+        assert_eq!(both.stats.kept_edge_count, 9);
+        assert_eq!(both.stats.kept_node_count, 9);
+
+        // No filter is not the same code path as "every type named": it skips
+        // the per-edge set lookup entirely, so it gets its own assertion.
+        let unfiltered = pass_a_scan(disk, &SubsetSpec::default());
+        assert_eq!(unfiltered.stats.kept_edge_count, 9);
+        assert_eq!(unfiltered.stats.kept_node_count, 9);
+
+        // An unknown type must keep nothing rather than degrade to "keep all".
+        let unknown = pass_a_scan(disk, &spec_for(&["NOT_A_REAL_EDGE_TYPE"]));
+        assert_eq!(unknown.stats.kept_edge_count, 0);
+        assert_eq!(unknown.stats.kept_node_count, 0);
+    }
+
+    /// The file variant must agree with the in-memory one on every stat, and
+    /// the `RankIndex` built from its bitset must agree with `count_ones` —
+    /// a disagreement means the writer would renumber nodes it did not keep.
+    #[test]
+    fn pass_a_to_file_agrees_with_the_in_memory_scan_and_its_rank_index() {
+        let root = tempfile::tempdir().unwrap();
+        let graph = articles_and_authors_on_disk(root.path());
+        let disk = disk_of(&graph);
+        let out = root.path().join("kept_edges.tmp");
+
+        let spec = spec_for(&["AUTHORED_BY"]);
+        let filed = pass_a_scan_to_file(disk, &spec, &out).expect("scan to file");
+
+        assert_eq!(filed.stats.kept_edge_count, 5);
+        assert_eq!(filed.stats.kept_node_count, 7);
+        assert_eq!(filed.kept_edge_records, 5);
+        assert!(out.exists());
+        assert!(std::fs::metadata(&out).unwrap().len() >= 5 * 16);
+
+        let rank = RankIndex::from_bitset(filed.kept_nodes);
+        assert_eq!(rank.kept_count() as u64, filed.stats.kept_node_count);
+    }
 
     /// Brute-force rank-1 oracle for the popcount-prefix implementation:
     /// O(n_bits) bit-by-bit count, trivially correct.

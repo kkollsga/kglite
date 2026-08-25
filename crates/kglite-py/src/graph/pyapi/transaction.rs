@@ -258,8 +258,7 @@ impl Transaction {
         if output_csv {
             result.to_csv().into_py_any(py)
         } else if to_df {
-            let preprocessed = cypher::py_convert::preprocess_values_owned(result.rows);
-            cypher::py_convert::preprocessed_result_to_dataframe(py, &result.columns, &preprocessed)
+            cypher::py_convert::rows_to_dataframe(py, &result.columns, &result.rows)
         } else {
             let view = crate::graph::pyapi::result_view::ResultView::from_cypher_result(result);
             Py::new(py, view).map(|v| v.into_any())

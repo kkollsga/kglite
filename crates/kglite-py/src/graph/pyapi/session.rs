@@ -276,8 +276,7 @@ fn marshal_result(
         return result.to_csv().into_py_any(py);
     }
     if to_df {
-        let preprocessed = cypher::py_convert::preprocess_values_owned(result.rows);
-        cypher::py_convert::preprocessed_result_to_dataframe(py, &result.columns, &preprocessed)
+        cypher::py_convert::rows_to_dataframe(py, &result.columns, &result.rows)
     } else {
         let view = ResultView::from_cypher_result(result);
         Py::new(py, view).map(|v| v.into_any())

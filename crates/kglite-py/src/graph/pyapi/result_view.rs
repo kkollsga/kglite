@@ -1,8 +1,6 @@
+use crate::datatypes::py_out;
 use crate::datatypes::values::Value;
-use crate::graph::languages::cypher::py_convert::{
-    preprocess_values_owned, preprocessed_result_to_dataframe, preprocessed_value_to_py,
-    stats_to_py, PreProcessedValue,
-};
+use crate::graph::languages::cypher::py_convert::{rows_to_dataframe, stats_to_py};
 use crate::graph::languages::cypher::{
     ClauseStats, CypherResult, LazyResultDescriptor, MutationStats, QueryDiagnostics,
 };
@@ -62,7 +60,7 @@ struct LazyRows {
     /// Memoised materialisation. `cache[i]` is `Some(row)` once row `i` has
     /// been materialised. Mutex (rather than RwLock or cell) keeps it
     /// Send + Sync, which #[pyclass] requires.
-    cache: Mutex<Vec<Option<Vec<PreProcessedValue>>>>,
+    cache: Mutex<Vec<Option<Vec<Value>>>>,
 }
 
 /// Lazy result container — data stays in Rust until you access it.
@@ -109,7 +107,7 @@ struct LazyRows {
 #[pyclass(name = "ResultView", module = "kglite", frozen)]
 pub struct ResultView {
     columns: Vec<String>,
-    rows: Vec<Vec<PreProcessedValue>>,
+    rows: Vec<Vec<Value>>,
     stats: Option<MutationStats>,
     profile: Option<Vec<ClauseStats>>,
     diagnostics: Option<QueryDiagnostics>,
@@ -118,13 +116,13 @@ pub struct ResultView {
 }
 
 impl ResultView {
-    /// Cypher read path: data already preprocessed during py.detach
+    /// Cypher read path: rows already produced during py.detach
     /// (GIL-free). `diagnostics` attaches elapsed-time / timeout bookkeeping
     /// for agent feedback; pass `None` when not applicable (mutation paths,
     /// centrality results).
-    pub fn from_preprocessed(
+    pub fn from_rows(
         columns: Vec<String>,
-        rows: Vec<Vec<PreProcessedValue>>,
+        rows: Vec<Vec<Value>>,
         stats: Option<MutationStats>,
         profile: Option<Vec<ClauseStats>>,
         diagnostics: Option<QueryDiagnostics>,
@@ -139,12 +137,11 @@ impl ResultView {
         }
     }
 
-    /// Cypher mutation path + Transaction: takes a CypherResult and preprocesses values.
+    /// Cypher mutation path + Transaction: takes a whole `CypherResult`.
     pub fn from_cypher_result(result: CypherResult) -> Self {
-        let rows = preprocess_values_owned(result.rows);
         ResultView {
             columns: result.columns,
-            rows,
+            rows: result.rows,
             stats: result.stats,
             profile: result.profile,
             diagnostics: result.diagnostics,
@@ -186,7 +183,7 @@ impl ResultView {
                 {
                     return ResultView {
                         columns: result.columns,
-                        rows: preprocess_values_owned(rows),
+                        rows,
                         stats: result.stats,
                         profile: result.profile,
                         diagnostics: result.diagnostics,
@@ -221,18 +218,16 @@ impl ResultView {
         let limit = top_k.unwrap_or(results.len());
         let columns = vec!["type".into(), "title".into(), "id".into(), "score".into()];
 
-        let rows: Vec<Vec<PreProcessedValue>> = results
+        let rows: Vec<Vec<Value>> = results
             .into_iter()
             .take(limit)
             .filter_map(|r| {
                 graph.node_view(r.node_idx).map(|node| {
                     vec![
-                        PreProcessedValue::Plain(Value::String(
-                            node.node_type_str(&graph.interner).to_string(),
-                        )),
-                        PreProcessedValue::Plain(node.title().into_owned()),
-                        PreProcessedValue::Plain(node.id().into_owned()),
-                        PreProcessedValue::Plain(Value::Float64(r.score)),
+                        Value::String(node.node_type_str(&graph.interner).to_string()),
+                        node.title().into_owned(),
+                        node.id().into_owned(),
+                        Value::Float64(r.score),
                     ]
                 })
             })
@@ -316,22 +311,20 @@ impl ResultView {
         let mut columns = vec!["type".into(), "title".into(), "id".into()];
         columns.extend(prop_keys.iter().cloned());
 
-        let rows: Vec<Vec<PreProcessedValue>> = nodes_vec
+        let rows: Vec<Vec<Value>> = nodes_vec
             .iter()
             .map(|node| {
                 let mut row = vec![
-                    PreProcessedValue::Plain(Value::String(
-                        node.node_type_str(&graph.interner).to_string(),
-                    )),
-                    PreProcessedValue::Plain(node.title().into_owned()),
-                    PreProcessedValue::Plain(node.id().into_owned()),
+                    Value::String(node.node_type_str(&graph.interner).to_string()),
+                    node.title().into_owned(),
+                    node.id().into_owned(),
                 ];
                 for key in &prop_keys {
-                    row.push(PreProcessedValue::Plain(
+                    row.push(
                         node.get_property(key)
                             .map(Cow::into_owned)
                             .unwrap_or(Value::Null),
-                    ));
+                    );
                 }
                 row
             })
@@ -359,7 +352,7 @@ impl ResultView {
     /// `RETURN` item against the row's stashed `node_bindings` /
     /// `edge_bindings`. Caches the result so repeat access is O(1) after
     /// the first call.
-    fn materialise_lazy_row(&self, index: usize) -> PyResult<Vec<PreProcessedValue>> {
+    fn materialise_lazy_row(&self, index: usize) -> PyResult<Vec<Value>> {
         let lz = self
             .lazy
             .as_ref()
@@ -367,11 +360,10 @@ impl ResultView {
         if let Some(row) = lz.cache.lock().unwrap().get(index).and_then(|c| c.clone()) {
             return Ok(row);
         }
-        let cells: Vec<PreProcessedValue> =
+        let cells: Vec<Value> =
             kglite_core::api::cypher::materialise_lazy_row(&lz.descriptor, &lz.graph, index)
                 .map_err(crate::error_py::kg_to_pyerr)?
                 .into_iter()
-                .map(PreProcessedValue::Plain)
                 .collect();
         if let Some(slot) = lz.cache.lock().unwrap().get_mut(index) {
             *slot = Some(cells.clone());
@@ -382,10 +374,7 @@ impl ResultView {
     /// Materialise a contiguous lazy range with one provenance check per batch
     /// instead of one per row. The core still holds a separate disk arena guard
     /// for every row, preserving bounded arena lifetime under large reads.
-    fn materialise_lazy_range(
-        &self,
-        range: std::ops::Range<usize>,
-    ) -> PyResult<Vec<Vec<PreProcessedValue>>> {
+    fn materialise_lazy_range(&self, range: std::ops::Range<usize>) -> PyResult<Vec<Vec<Value>>> {
         let lz = self
             .lazy
             .as_ref()
@@ -404,13 +393,8 @@ impl ResultView {
             range.clone(),
         )
         .map_err(crate::error_py::kg_to_pyerr)?;
-        let processed: Vec<Vec<PreProcessedValue>> = cells
-            .into_iter()
-            .map(|row| row.into_iter().map(PreProcessedValue::Plain).collect())
-            .collect();
-
         let mut cache = lz.cache.lock().unwrap();
-        for (offset, row) in processed.into_iter().enumerate() {
+        for (offset, row) in cells.into_iter().enumerate() {
             let slot = &mut cache[start + offset];
             if slot.is_none() {
                 *slot = Some(row);
@@ -423,7 +407,7 @@ impl ResultView {
     /// eager rows) — used by `to_df` which consumes every cell. Public to
     /// the crate so `kg_core::cypher` can build a DataFrame from a lazy
     /// result without re-implementing the resolver.
-    pub fn materialise_all(&self) -> PyResult<Vec<Vec<PreProcessedValue>>> {
+    pub fn materialise_all(&self) -> PyResult<Vec<Vec<Value>>> {
         if self.lazy.is_some() {
             return self.materialise_lazy_range(0..self.effective_len());
         }
@@ -436,7 +420,7 @@ impl ResultView {
 
     fn row_to_py(&self, py: Python<'_>, index: usize) -> PyResult<Py<PyAny>> {
         let owned;
-        let row: &Vec<PreProcessedValue> = if self.lazy.is_some() {
+        let row: &Vec<Value> = if self.lazy.is_some() {
             owned = self.materialise_lazy_row(index)?;
             &owned
         } else {
@@ -445,7 +429,7 @@ impl ResultView {
         let dict = PyDict::new(py);
         for (i, col) in self.columns.iter().enumerate() {
             if let Some(pv) = row.get(i) {
-                dict.set_item(col, preprocessed_value_to_py(py, pv)?)?;
+                dict.set_item(col, py_out::value_to_py(py, pv)?)?;
             } else {
                 dict.set_item(col, py.None())?;
             }
@@ -464,7 +448,7 @@ impl ResultView {
         keys: &[pyo3::Bound<'_, pyo3::types::PyString>],
     ) -> PyResult<Py<PyAny>> {
         let owned;
-        let row: &Vec<PreProcessedValue> = if self.lazy.is_some() {
+        let row: &Vec<Value> = if self.lazy.is_some() {
             owned = self.materialise_lazy_row(index)?;
             &owned
         } else {
@@ -475,13 +459,13 @@ impl ResultView {
 
     fn row_values_to_py_keyed(
         py: Python<'_>,
-        row: &[PreProcessedValue],
+        row: &[Value],
         keys: &[pyo3::Bound<'_, pyo3::types::PyString>],
     ) -> PyResult<Py<PyAny>> {
         let dict = PyDict::new(py);
         for (i, key) in keys.iter().enumerate() {
             if let Some(pv) = row.get(i) {
-                dict.set_item(key, preprocessed_value_to_py(py, pv)?)?;
+                dict.set_item(key, py_out::value_to_py(py, pv)?)?;
             } else {
                 dict.set_item(key, py.None())?;
             }
@@ -572,8 +556,8 @@ impl ResultView {
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         // Materialise lazy rows for printing; format_table needs concrete
-        // PreProcessedValues. For very large lazy results, callers should
-        // use head()/tail() instead of repr.
+        // values. For very large lazy results, callers should use
+        // head()/tail() instead of repr.
         if self.lazy.is_some() {
             let rows = self.materialise_all()?;
             return Ok(format_table(py, &self.columns, &rows));
@@ -745,14 +729,14 @@ impl ResultView {
             return Ok(py.None());
         }
         let owned;
-        let row: &Vec<PreProcessedValue> = if self.lazy.is_some() {
+        let row: &Vec<Value> = if self.lazy.is_some() {
             owned = self.materialise_lazy_row(0)?;
             &owned
         } else {
             &self.rows[0]
         };
         match row.first() {
-            Some(pv) => preprocessed_value_to_py(py, pv),
+            Some(pv) => py_out::value_to_py(py, pv),
             None => Ok(py.None()),
         }
     }
@@ -791,13 +775,13 @@ impl ResultView {
             .then(|| self.materialise_all())
             .transpose()?;
         for i in 0..self.effective_len() {
-            let row: &Vec<PreProcessedValue> = if let Some(rows) = &lazy_rows {
+            let row: &Vec<Value> = if let Some(rows) = &lazy_rows {
                 &rows[i]
             } else {
                 &self.rows[i]
             };
             match row.get(col_idx) {
-                Some(pv) => list.append(preprocessed_value_to_py(py, pv)?)?,
+                Some(pv) => list.append(py_out::value_to_py(py, pv)?)?,
                 None => list.append(py.None())?,
             }
         }
@@ -819,7 +803,7 @@ impl ResultView {
         // For lazy results we materialise the first `take` rows so the
         // returned view is concrete (head() callers commonly print or
         // sample). The lazy → eager conversion is paid once.
-        let rows: Vec<Vec<PreProcessedValue>> = if self.lazy.is_some() {
+        let rows: Vec<Vec<Value>> = if self.lazy.is_some() {
             self.materialise_lazy_range(0..take)?
         } else {
             self.rows[..take].to_vec()
@@ -846,7 +830,7 @@ impl ResultView {
     fn tail(&self, n: usize) -> PyResult<Self> {
         let len = self.effective_len();
         let start = len.saturating_sub(n);
-        let rows: Vec<Vec<PreProcessedValue>> = if self.lazy.is_some() {
+        let rows: Vec<Vec<Value>> = if self.lazy.is_some() {
             self.materialise_lazy_range(start..len)?
         } else {
             self.rows[start..].to_vec()
@@ -873,9 +857,9 @@ impl ResultView {
         if self.lazy.is_some() {
             // DataFrame consumes every cell — force lazy materialisation.
             let materialised = self.materialise_all()?;
-            return preprocessed_result_to_dataframe(py, &self.columns, &materialised);
+            return rows_to_dataframe(py, &self.columns, &materialised);
         }
-        preprocessed_result_to_dataframe(py, &self.columns, &self.rows)
+        rows_to_dataframe(py, &self.columns, &self.rows)
     }
 
     /// Convert to a GeoDataFrame with a geometry column parsed from WKT.
@@ -899,9 +883,9 @@ impl ResultView {
     ) -> PyResult<Py<PyAny>> {
         let df = if self.lazy.is_some() {
             let materialised = self.materialise_all()?;
-            preprocessed_result_to_dataframe(py, &self.columns, &materialised)?
+            rows_to_dataframe(py, &self.columns, &materialised)?
         } else {
-            preprocessed_result_to_dataframe(py, &self.columns, &self.rows)?
+            rows_to_dataframe(py, &self.columns, &self.rows)?
         };
 
         let gpd = py.import("geopandas").map_err(|_| {

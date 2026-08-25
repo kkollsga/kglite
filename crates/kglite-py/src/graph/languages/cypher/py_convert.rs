@@ -1,5 +1,5 @@
 // src/graph/cypher/py_convert.rs
-// Convert pre-processed result data to Python objects.
+// Convert result data to Python objects.
 // Used by ResultView for lazy conversion and by to_df=True direct paths.
 
 use crate::datatypes::py_out;
@@ -9,52 +9,15 @@ use pyo3::types::{PyDict, PyList};
 use pyo3::IntoPyObjectExt;
 
 // ========================================================================
-// PreProcessedValue — the core data type for ResultView rows
+// Row values reach Python as bare `Value`s
 // ========================================================================
 //
-// There is no `serde_json::Value` → Python conversion helper here, and
-// no JSON-string inference to serve it. Native `Value::List` /
-// `Value::Map` / `Value::Node` / ... flow straight through
+// No JSON-string inference happens on the way: a `Value::String("[...]")`
+// or `Value::String("{...}")` is never re-parsed via `serde_json::from_str`,
+// so a user-set property value of `"[shopping list]"` is not silently
+// re-typed as a list. Native `Value::List` / `Value::Map` / `Value::Node` /
+// `Value::Relationship` / `Value::Path` flow straight through
 // `py_out::value_to_py`.
-
-/// Wraps a Value for the Python conversion boundary.
-///
-/// A single `Plain(Value)` variant. Kept as a newtype-style enum (rather
-/// than a `pub struct(Value)` or just `Value`) because the existing
-/// public API surface in `result_view.rs` and `kg_core.rs` consumes
-/// `PreProcessedValue` by pattern match — a later cleanup can collapse
-/// this enum entirely once those sites migrate to bare `Value`.
-#[derive(Clone)]
-pub enum PreProcessedValue {
-    /// The only variant. Convert via py_out::value_to_py.
-    Plain(Value),
-}
-
-/// Convert a pre-processed value to a Python object.
-pub fn preprocessed_value_to_py(py: Python<'_>, pv: &PreProcessedValue) -> PyResult<Py<PyAny>> {
-    match pv {
-        PreProcessedValue::Plain(v) => py_out::value_to_py(py, v),
-    }
-}
-
-// ========================================================================
-// Pre-processing: Value → PreProcessedValue (runs without GIL)
-// ========================================================================
-
-/// Wrap owned Value rows for the Python conversion boundary.
-///
-/// No JSON-string inference happens here: a `Value::String("[...]")` or
-/// `Value::String("{...}")` is never re-parsed via `serde_json::from_str`.
-/// Native `Value::List` / `Value::Map` / `Value::Node` /
-/// `Value::Relationship` / `Value::Path` flow through
-/// `py_out::value_to_py` directly — no mis-parse risk (a user-set
-/// property value of `"[shopping list]"` is not silently re-typed as a
-/// list).
-pub fn preprocess_values_owned(rows: Vec<Vec<Value>>) -> Vec<Vec<PreProcessedValue>> {
-    rows.into_iter()
-        .map(|row| row.into_iter().map(PreProcessedValue::Plain).collect())
-        .collect()
-}
 
 // ========================================================================
 // Stats conversion
@@ -83,11 +46,11 @@ pub fn stats_to_py<'py>(
 // DataFrame conversion (used by to_df=True shortcut and ResultView::to_df)
 // ========================================================================
 
-/// Convert pre-processed rows to a pandas DataFrame.
-pub fn preprocessed_result_to_dataframe(
+/// Convert result rows to a pandas DataFrame.
+pub fn rows_to_dataframe(
     py: Python<'_>,
     columns: &[String],
-    rows: &[Vec<PreProcessedValue>],
+    rows: &[Vec<Value>],
 ) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
     let col_order = PyList::empty(py);
@@ -101,7 +64,7 @@ pub fn preprocessed_result_to_dataframe(
         let col_list = PyList::empty(py);
         for row in rows {
             if let Some(pv) = row.get(i) {
-                col_list.append(preprocessed_value_to_py(py, pv)?)?;
+                col_list.append(py_out::value_to_py(py, pv)?)?;
             } else {
                 col_list.append(py.None())?;
             }

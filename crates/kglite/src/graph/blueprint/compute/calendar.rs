@@ -1,7 +1,8 @@
-//! `calendar` primitive: synthesise `:Date` (+ optional `:Month`,
-//! `:Quarter`, `:Year`) nodes spanning a date range, plus chain +
-//! hierarchy edges between them, plus `ON_DATE`-style links from
-//! existing source-type date columns to the new Date nodes.
+//! `calendar` primitive: synthesise `:Date` (+ optional `:Month` and
+//! `:Quarter`) nodes spanning a date range, plus chain + hierarchy edges
+//! between them, plus `ON_DATE`-style links from existing source-type date
+//! columns to the new Date nodes. The `:Year` rung of the hierarchy is not
+//! implemented and `in_year_edge` is refused rather than ignored.
 //!
 //! No source CSV needed — the calendar is generated. Each linked
 //! source type gets a junction CSV that connects its rows to the
@@ -29,6 +30,20 @@ pub fn run_calendar(
     in_year_edge: Option<&str>,
     links: &[CalendarLink],
 ) -> Result<(), String> {
+    // Refused before anything is written: nothing generates :Year nodes or the
+    // hierarchy junction, so accepting the field would load a blueprint whose
+    // declared `(:Date)-[:IN_YEAR]->(:Year)` shape is simply absent from the
+    // graph, with no error to say so.
+    if let Some(edge_name) = in_year_edge {
+        return Err(format!(
+            "calendar: 'in_year_edge' (requested '{edge_name}') is not implemented — \
+             no :Year nodes and no '{edge_name}' edges would be generated. \
+             Use 'in_month_edge' / 'in_quarter_edge', which are implemented, or \
+             group on the Date node's own 'year' property (MATCH (d:{node_type}) \
+             RETURN d.year)."
+        ));
+    }
+
     let start_d = NaiveDate::parse_from_str(start, "%Y-%m-%d")
         .map_err(|e| format!("calendar: invalid start '{}': {}", start, e))?;
     let end_d = NaiveDate::parse_from_str(end, "%Y-%m-%d")
@@ -55,7 +70,6 @@ pub fn run_calendar(
 
     let mut months: HashSet<String> = HashSet::new();
     let mut quarters: HashSet<String> = HashSet::new();
-    let mut years: HashSet<i32> = HashSet::new();
 
     let mut d = start_d;
     while d <= end_d {
@@ -76,7 +90,6 @@ pub fn run_calendar(
             .map_err(|e| format!("calendar: write Date row: {}", e))?;
         months.insert(month_iso);
         quarters.insert(quarter_iso);
-        years.insert(d.year());
         d += Duration::days(1);
     }
     date_writer
@@ -175,9 +188,6 @@ pub fn run_calendar(
                 format!("{}-Q{}", iso.get(..4).unwrap_or(""), q)
             },
         )?;
-    }
-    if let Some(edge_name) = in_year_edge {
-        write_hierarchy_year(blueprint, input_root, years, node_type, edge_name)?;
     }
 
     blueprint.nodes.insert(node_type.to_string(), date_spec);
@@ -291,20 +301,6 @@ where
     // confusing). Cleanest fix: caller passes us a mutable ref to
     // the date_spec being built. Refactor below.
     let _ = junc_csv_path; // silence unused warning if branch skipped
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn write_hierarchy_year(
-    _blueprint: &mut Blueprint,
-    _input_root: &Path,
-    _years: HashSet<i32>,
-    _date_type: &str,
-    _edge_name: &str,
-) -> Result<(), String> {
-    // Placeholder — Year hierarchy follows the same pattern as
-    // Month/Quarter but with an int pk. Deferred to follow-up
-    // since the existing K7 SEC blueprint doesn't request it.
     Ok(())
 }
 
@@ -491,6 +487,38 @@ mod tests {
             .connections
             .junction_edges
             .contains_key("NEXT_DAY"));
+    }
+
+    /// `in_year_edge` was accepted and then did nothing: no `Year` CSV, no
+    /// hierarchy junction, and `Ok(())`. A blueprint asking for the Year
+    /// hierarchy loaded "successfully" and produced a graph with neither the
+    /// nodes nor the edges it declared, which only shows up as an empty
+    /// `MATCH (:Year)` later. It must refuse instead.
+    #[test]
+    fn calendar_refuses_the_unimplemented_year_hierarchy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut bp = Blueprint::default();
+        let err = run_calendar(
+            &mut bp,
+            tmp.path(),
+            "Date",
+            "2025-01-01",
+            "2025-01-05",
+            "NEXT_DAY",
+            None,
+            None,
+            Some("IN_YEAR"),
+            &[],
+        )
+        .expect_err("the Year hierarchy is unimplemented and must not report success");
+        assert!(
+            err.contains("in_year_edge") && err.contains("in_month_edge"),
+            "the refusal must name the field it rejects and the ones that work: {err}"
+        );
+        assert!(
+            !bp.nodes.contains_key("Year"),
+            "no Year NodeSpec may be registered by a refused run"
+        );
     }
 
     #[test]

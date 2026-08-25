@@ -56,8 +56,7 @@ pub fn value_to_py(py: Python, value: &Value) -> PyResult<Py<PyAny>> {
             Ok(dict.into_any().unbind())
         }
         // Native conversion of the collection / graph-entity variants —
-        // no JSON-string inference (see PreProcessedValue in
-        // py_convert.rs).
+        // no JSON-string inference (see py_convert.rs).
         Value::List(items) => {
             let py_items: PyResult<Vec<Py<PyAny>>> =
                 items.iter().map(|v| value_to_py(py, v)).collect();

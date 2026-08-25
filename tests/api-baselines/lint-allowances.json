@@ -213,10 +213,6 @@
       "classification": "transitional"
     },
     {
-      "identity": "crates/kglite/src/graph/blueprint/compute/calendar.rs::fn:write_hierarchy_year:fn write_hierarchy_year( _blueprint: &mut Blueprint, _input_root: &Path, _years: HashSet<i32>, _date_type: &str, _edge_name: &str, ) -> Result<(), String>::clippy::too_many_arguments",
-      "classification": "transitional"
-    },
-    {
       "identity": "crates/kglite/src/graph/blueprint/expr.rs::fn:ctx:fn ctx(pairs: &[(&str, Value)]) -> HashMap<String, Value>::clippy::approx_constant",
       "classification": "test"
     },

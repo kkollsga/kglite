@@ -89,6 +89,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Graphs built with `KnowledgeGraph(storage="disk", path=...)` were never
   affected.
 
+### Removed
+
+- **The three unstable `_`-prefixed subgraph methods on `KnowledgeGraph`** —
+  `_scan_edges_filtered`, `_save_subset_filtered_by_edge_type` and
+  `_save_subset_induced_by_edge_type`. They were a `[DEBUG]`-labelled spike
+  that shipped alongside the public `save_subset(path)` in 0.9.12 and carried
+  no compatibility promise; `save_subset(path)` covers the documented use. The
+  underlying scan remains available to Rust embedders as
+  `kglite::api::io::pass_a_scan` and friends.
+
 ## [0.16.9] - 2026-08-23
 
 ### Fixed

@@ -11,7 +11,7 @@
 //! CLI's `render_table` (`crates/kglite-cli/src/format.rs`): `|` separators
 //! and `-` rules, transliterating the box corners to `+`.
 
-use crate::graph::languages::cypher::py_convert::PreProcessedValue;
+use crate::datatypes::values::Value;
 use pyo3::prelude::*;
 use pyo3::types::PyString;
 
@@ -150,7 +150,7 @@ const FIXED_POINT_FLOOR: f64 = 0.01;
 /// `format_value` itself is deliberately left alone: it has sixteen callers,
 /// including `Display for Value` and `format_unique_values_for_storage`, whose
 /// output is pinned. Only the `ResultView` table changes.
-fn format_cell_value(value: &crate::datatypes::values::Value) -> String {
+fn format_cell_value(value: &Value) -> String {
     use crate::datatypes::values::Value;
     match value {
         Value::Float64(v) if v.is_finite() && *v != 0.0 && v.abs() < FIXED_POINT_FLOOR => {
@@ -162,19 +162,12 @@ fn format_cell_value(value: &crate::datatypes::values::Value) -> String {
     }
 }
 
-fn format_preprocessed_value(pv: &PreProcessedValue) -> String {
-    // `Plain` is PreProcessedValue's only variant.
-    match pv {
-        PreProcessedValue::Plain(v) => format_cell_value(v),
-    }
-}
-
 /// Format a `ResultView` as a Polars-style table, choosing the glyph set from
 /// the interpreter's output encoding.
 ///
 /// Shows a `shape: (rows, cols)` header, a bordered table with column names,
 /// and for large results the first and last rows with an ellipsis row between.
-pub fn format_table(py: Python<'_>, columns: &[String], rows: &[Vec<PreProcessedValue>]) -> String {
+pub fn format_table(py: Python<'_>, columns: &[String], rows: &[Vec<Value>]) -> String {
     let style = if use_ascii(py) {
         &ASCII_STYLE
     } else {
@@ -183,7 +176,7 @@ pub fn format_table(py: Python<'_>, columns: &[String], rows: &[Vec<PreProcessed
     render(style, columns, rows)
 }
 
-fn render(style: &TableStyle, columns: &[String], rows: &[Vec<PreProcessedValue>]) -> String {
+fn render(style: &TableStyle, columns: &[String], rows: &[Vec<Value>]) -> String {
     if rows.is_empty() {
         return format!("shape: (0, {})\n(empty)", columns.len());
     }
@@ -207,7 +200,7 @@ fn render(style: &TableStyle, columns: &[String], rows: &[Vec<PreProcessedValue>
         .chain(rows.iter().skip(tail_start))
         .map(|row| {
             row.iter()
-                .map(|v| truncate_middle(&format_preprocessed_value(v), max_col_width))
+                .map(|v| truncate_middle(&format_cell_value(v), max_col_width))
                 .collect()
         })
         .collect();
@@ -334,14 +327,13 @@ fn truncate_middle(s: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::datatypes::values::Value;
 
-    fn plain(v: &str) -> PreProcessedValue {
-        PreProcessedValue::Plain(Value::String(v.to_string()))
+    fn plain(v: &str) -> Value {
+        Value::String(v.to_string())
     }
 
-    fn float(v: f64) -> PreProcessedValue {
-        PreProcessedValue::Plain(Value::Float64(v))
+    fn float(v: f64) -> Value {
+        Value::Float64(v)
     }
 
     #[test]
@@ -400,7 +392,7 @@ mod tests {
     #[test]
     fn ascii_style_emits_only_ascii() {
         let cols = vec!["name".to_string(), "age".to_string()];
-        let rows: Vec<Vec<PreProcessedValue>> = (0..30)
+        let rows: Vec<Vec<Value>> = (0..30)
             .map(|i| vec![plain(&format!("n{i}")), plain(&i.to_string())])
             .collect();
         let out = render(&ASCII_STYLE, &cols, &rows);

@@ -1,9 +1,10 @@
 """Tests for the streaming disk-to-disk subgraph filter.
 
-Pass A primitives are exposed via the debug ``_scan_edges_filtered``
-method. The public API is ``KnowledgeGraph.save_subset(path)`` on the
-fluent chain, which produces an independent on-disk graph file that
-reloads via ``kglite.load(path)``.
+The public API is ``KnowledgeGraph.save_subset(path)`` on the fluent
+chain, which produces an independent on-disk graph file that reloads via
+``kglite.load(path)``. The Pass A scan underneath it has no Python route;
+its end-to-end tests live in
+``crates/kglite/src/graph/mutation/subgraph_streaming.rs``.
 """
 
 import os
@@ -63,110 +64,6 @@ def build_disk_graph_with_articles_and_authors(path: str) -> KnowledgeGraph:
     g.add_connections(published, "PUBLISHED_IN", "Article", "from_id", "Venue", "to_id")
 
     return g
-
-
-class TestPassAFilters:
-    """Pass A correctness: filter only AUTHORED_BY → 4 articles + 3 authors."""
-
-    def test_authored_by_filter_only(self, disk_dir):
-        g = build_disk_graph_with_articles_and_authors(disk_dir)
-        stats = g._scan_edges_filtered(edge_types=["AUTHORED_BY"])
-
-        assert stats["total_edge_count"] == 9  # 5 AUTHORED_BY + 4 PUBLISHED_IN
-        assert stats["kept_edge_count"] == 5
-        assert stats["kept_node_count"] == 7  # 4 articles + 3 authors
-        assert stats["scan_duration_secs"] >= 0.0
-
-    def test_published_in_filter_only(self, disk_dir):
-        g = build_disk_graph_with_articles_and_authors(disk_dir)
-        stats = g._scan_edges_filtered(edge_types=["PUBLISHED_IN"])
-
-        assert stats["kept_edge_count"] == 4
-        # 4 articles + 2 venues = 6 nodes (no authors)
-        assert stats["kept_node_count"] == 6
-
-    def test_multiple_edge_types(self, disk_dir):
-        g = build_disk_graph_with_articles_and_authors(disk_dir)
-        stats = g._scan_edges_filtered(edge_types=["AUTHORED_BY", "PUBLISHED_IN"])
-        assert stats["kept_edge_count"] == 9
-        # Every node has at least one edge → all 9 nodes kept
-        assert stats["kept_node_count"] == 9
-
-    def test_no_filter_keeps_all(self, disk_dir):
-        g = build_disk_graph_with_articles_and_authors(disk_dir)
-        stats = g._scan_edges_filtered(edge_types=None)
-        assert stats["kept_edge_count"] == stats["total_edge_count"] == 9
-        assert stats["kept_node_count"] == 9
-
-    def test_unknown_edge_type_keeps_nothing(self, disk_dir):
-        g = build_disk_graph_with_articles_and_authors(disk_dir)
-        stats = g._scan_edges_filtered(edge_types=["NOT_A_REAL_EDGE_TYPE"])
-        assert stats["kept_edge_count"] == 0
-        assert stats["kept_node_count"] == 0
-
-
-class TestPassAGating:
-    """The streaming pipeline is disk-only; in-memory graphs must error
-    out so users land on the existing fast `to_subgraph().save()` path.
-    """
-
-    def test_in_memory_graph_rejected(self):
-        g = KnowledgeGraph()  # default = in-memory
-        nodes = pd.DataFrame({"nid": ["A", "B"], "name": ["Alice", "Bob"]})
-        g.add_nodes(nodes, "Person", "nid", "name")
-
-        with pytest.raises(ValueError, match="disk-backed"):
-            g._scan_edges_filtered(edge_types=["KNOWS"])
-
-
-class TestPassAFileOutput:
-    """Phase 4: Pass A also spills kept edges to a temp file. The file
-    is the input handed to the merge-sort builder in subsequent phases.
-    """
-
-    def test_kept_edges_file_written_with_correct_count(self, disk_dir):
-        import os
-
-        g = build_disk_graph_with_articles_and_authors(disk_dir)
-        out_path = os.path.join(disk_dir, "kept_edges.tmp")
-
-        stats = g._scan_edges_filtered(edge_types=["AUTHORED_BY"], kept_edges_out=out_path)
-
-        # Same logical kept counts as the no-file variant.
-        assert stats["kept_edge_count"] == 5
-        assert stats["kept_node_count"] == 7
-        assert stats["kept_edge_records"] == 5
-
-        # File exists and is sized for at least 5 records (the file is
-        # pre-allocated for the worst case of all source edges, but the
-        # logical record count is what matters).
-        assert os.path.exists(out_path)
-        # Each record is (u32, u32, u64) = 16 bytes; mmap'd file has
-        # capacity ≥ kept_edge_records × 16. Smaller graphs may pad to
-        # the OS page size, so just check non-empty.
-        assert os.path.getsize(out_path) >= 5 * 16
-
-    def test_rank_index_kept_count_matches_bitset(self, disk_dir):
-        import os
-
-        g = build_disk_graph_with_articles_and_authors(disk_dir)
-        out_path = os.path.join(disk_dir, "kept_edges.tmp")
-        stats = g._scan_edges_filtered(edge_types=["AUTHORED_BY"], kept_edges_out=out_path)
-
-        # The RankIndex built from Pass A's bitset must produce the
-        # same kept count as Bitset::count_ones — sanity check the rank
-        # primitive end-to-end on real disk data.
-        assert stats["rank_kept_count"] == stats["kept_node_count"]
-
-    def test_no_filter_writes_all_edges(self, disk_dir):
-        g = build_disk_graph_with_articles_and_authors(disk_dir)
-        out_path = os.path.join(disk_dir, "kept_edges_all.tmp")
-
-        stats = g._scan_edges_filtered(edge_types=None, kept_edges_out=out_path)
-
-        assert stats["kept_edge_records"] == 9
-        assert stats["kept_edge_count"] == 9
-        assert os.path.exists(out_path)
 
 
 class TestSaveSubsetRoundTrip:
