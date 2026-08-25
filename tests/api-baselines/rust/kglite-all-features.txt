@@ -2271,6 +2271,7 @@ pub fn kglite::api::text_indexes::TextIndexStore::contains_node(&self, node: pet
 pub fn kglite::api::text_indexes::TextIndexStore::delta_size(&self, graph: &kglite::api::DirGraph) -> usize
 pub fn kglite::api::text_indexes::TextIndexStore::documents(&self) -> usize
 pub fn kglite::api::text_indexes::TextIndexStore::estimated_bytes(&self) -> usize
+pub fn kglite::api::text_indexes::TextIndexStore::generation(&self) -> u64
 pub fn kglite::api::text_indexes::TextIndexStore::is_stale(&self, graph: &kglite::api::DirGraph) -> bool
 pub fn kglite::api::text_indexes::TextIndexStore::prepare_query(&self, query: &str) -> kglite::api::text_indexes::PreparedQuery
 pub fn kglite::api::text_indexes::TextIndexStore::read(&self) -> kglite::api::text_indexes::TextIndexRead<'_>
@@ -2293,6 +2294,7 @@ pub fn kglite::api::text_indexes::has_text_index(graph: &kglite::api::DirGraph, 
 pub fn kglite::api::text_indexes::index_key(node_type: &str, property: &str) -> (alloc::string::String, alloc::string::String)
 pub fn kglite::api::text_indexes::list_text_indexes(graph: &kglite::api::DirGraph) -> alloc::vec::Vec<(&str, &str, &kglite::api::text_indexes::TextIndexStore)>
 pub fn kglite::api::text_indexes::refresh_text_index(graph: &kglite::api::DirGraph, node_type: &str, property: &str) -> core::option::Option<usize>
+pub fn kglite::api::text_indexes::text_index_store<'a>(graph: &'a kglite::api::DirGraph, node_type: &str, property: &str) -> core::option::Option<&'a kglite::api::text_indexes::TextIndexStore>
 pub type kglite::api::text_indexes::TermId = u32
 pub mod kglite::api::timeseries
 pub enum kglite::api::timeseries::DatePrecision

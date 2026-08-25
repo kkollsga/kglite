@@ -545,52 +545,8 @@ pub fn apply<'q>(
         }
     }
 
-    // Resolve NodeProp surrogates and re-bucket. Mirrors the second
-    // half of `execute_return_with_aggregation` (~lines 279-316). One
-    // disk read per (NodeIndex, slot) pair, deduplicated.
-    let mut resolved_node_props: HashMap<(NodeIndex, usize), Value> = HashMap::new();
-    for (group_idx, (key_parts, _)) in surrogate_groups.iter().enumerate() {
-        executor.check_interrupt_periodic(group_idx)?;
-        for (slot, part) in key_parts.iter().enumerate() {
-            if let GroupKeyPart::NodeProp(idx) = part {
-                resolved_node_props.entry((*idx, slot)).or_insert_with(|| {
-                    executor.resolve_node_prop_for_group(*idx, &folded_group_exprs[slot])
-                });
-            }
-        }
-    }
-
-    let mut groups: Vec<(Vec<Value>, GroupAcc)> = Vec::new();
-    let mut group_index_map: FxHashMap<Vec<Value>, usize> = FxHashMap::default();
-
-    for (group_idx, (key_parts, acc)) in surrogate_groups.into_iter().enumerate() {
-        executor.check_interrupt_periodic(group_idx)?;
-        let resolved: Vec<Value> = key_parts
-            .iter()
-            .enumerate()
-            .map(|(slot, part)| match part {
-                GroupKeyPart::NodeProp(idx) => resolved_node_props
-                    .get(&(*idx, slot))
-                    .cloned()
-                    .unwrap_or(Value::Null),
-                GroupKeyPart::Resolved(v) => v.clone(),
-            })
-            .collect();
-
-        match group_index_map.get(&resolved) {
-            Some(&idx) => {
-                // Merge accumulators (count two NodeIndexes-with-same-name into one group).
-                let existing = std::mem::replace(&mut groups[idx].1, GroupAcc::new(specs));
-                let merged = merge_group_accs(existing, acc);
-                groups[idx].1 = merged;
-            }
-            None => {
-                let idx = groups.len();
-                group_index_map.insert(resolved.clone(), idx);
-                groups.push((resolved, acc));
-            }
-        }
-    }
+    let groups =
+        resolve_and_rebucket_groups(executor, surrogate_groups, &folded_group_exprs, specs)?;
 
     // Build output rows.
     let columns: Vec<String> = return_clause
@@ -645,6 +601,63 @@ pub fn apply<'q>(
     }
 
     Ok(RowStream::from_vec(output_rows, columns))
+}
+
+/// Resolve `NodeProp` surrogates to property values and re-bucket the
+/// surrogate groups by the resolved key, merging the accumulators of any two
+/// surrogates that resolve to the same key. Mirrors the second half of
+/// `execute_return_with_aggregation`; one disk read per (NodeIndex, slot)
+/// pair, deduplicated.
+fn resolve_and_rebucket_groups(
+    executor: &CypherExecutor<'_>,
+    surrogate_groups: Vec<(Vec<GroupKeyPart>, GroupAcc)>,
+    folded_group_exprs: &[Expression],
+    specs: &[AggSpec],
+) -> Result<Vec<(Vec<Value>, GroupAcc)>, String> {
+    let mut resolved_node_props: HashMap<(NodeIndex, usize), Value> = HashMap::new();
+    for (group_idx, (key_parts, _)) in surrogate_groups.iter().enumerate() {
+        executor.check_interrupt_periodic(group_idx)?;
+        for (slot, part) in key_parts.iter().enumerate() {
+            if let GroupKeyPart::NodeProp(idx) = part {
+                resolved_node_props.entry((*idx, slot)).or_insert_with(|| {
+                    executor.resolve_node_prop_for_group(*idx, &folded_group_exprs[slot])
+                });
+            }
+        }
+    }
+
+    let mut groups: Vec<(Vec<Value>, GroupAcc)> = Vec::new();
+    let mut group_index_map: FxHashMap<Vec<Value>, usize> = FxHashMap::default();
+
+    for (group_idx, (key_parts, acc)) in surrogate_groups.into_iter().enumerate() {
+        executor.check_interrupt_periodic(group_idx)?;
+        let resolved: Vec<Value> = key_parts
+            .iter()
+            .enumerate()
+            .map(|(slot, part)| match part {
+                GroupKeyPart::NodeProp(idx) => resolved_node_props
+                    .get(&(*idx, slot))
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                GroupKeyPart::Resolved(v) => v.clone(),
+            })
+            .collect();
+
+        match group_index_map.get(&resolved) {
+            Some(&idx) => {
+                // Merge accumulators (count two NodeIndexes-with-same-name into one group).
+                let existing = std::mem::replace(&mut groups[idx].1, GroupAcc::new(specs));
+                let merged = merge_group_accs(existing, acc);
+                groups[idx].1 = merged;
+            }
+            None => {
+                let idx = groups.len();
+                group_index_map.insert(resolved.clone(), idx);
+                groups.push((resolved, acc));
+            }
+        }
+    }
+    Ok(groups)
 }
 
 /// Fold one row into an aggregate's running state. Argument-evaluation

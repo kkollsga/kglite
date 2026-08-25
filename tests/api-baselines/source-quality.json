@@ -162,13 +162,6 @@
       "nesting": 5
     },
     {
-      "path": "crates/kglite/src/graph/languages/cypher/executor/aggregation/materialized.rs",
-      "qualified_name": "crate::CypherExecutor<'a>::execute_return_with_aggregation",
-      "lines": 224,
-      "branches": 25,
-      "nesting": 4
-    },
-    {
       "path": "crates/kglite/src/graph/languages/cypher/executor/call_clause.rs",
       "qualified_name": "crate::CypherExecutor<'a>::execute_call",
       "lines": 536,
@@ -202,13 +195,6 @@
       "lines": 245,
       "branches": 34,
       "nesting": 7
-    },
-    {
-      "path": "crates/kglite/src/graph/languages/cypher/executor/mod.rs",
-      "qualified_name": "crate::CypherExecutor<'a>::execute_single_clause",
-      "lines": 202,
-      "branches": 38,
-      "nesting": 2
     },
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/scalar_functions/collection.rs",

@@ -43,6 +43,10 @@ enum FusedAggKind {
     Max,
 }
 
+/// One grouping bucket: its surrogate key and the indices, into the incoming
+/// result set, of the rows that fell into it.
+type SurrogateGroups = Vec<(Vec<GroupKeyPart>, Vec<usize>)>;
+
 struct FusedAggSpec<'a> {
     col_name: String,
     kind: FusedAggKind,
@@ -90,79 +94,8 @@ impl<'a> CypherExecutor<'a> {
             .map(GroupExprStrategy::for_expr)
             .collect();
 
-        self.check_deadline()?;
-        let mut surrogate_groups: Vec<(Vec<GroupKeyPart>, Vec<usize>)> = Vec::new();
-        let mut surrogate_index: FxHashMap<Vec<GroupKeyPart>, usize> = FxHashMap::default();
-
-        // Group-limit hint set by `push_limit_into_aggregate`. When `Some(N)`
-        // and we already have `N` distinct groups, skip rows whose key
-        // would create an `N+1`th group. Rows for already-collected keys
-        // still feed the aggregate (so `collect()` etc. complete
-        // correctly for the kept groups). Safe only without ORDER BY —
-        // the planner pass enforces that.
-        //
-        // **The cap requires the surrogate key to *be* the final group key.**
-        // A `NodeProp` surrogate is keyed by `NodeIndex`, and any number of
-        // distinct nodes can resolve to one property value, so freezing the
-        // surrogate set drops rows belonging to groups that were already
-        // collected — not just rows that would open a new one. 30 `:Person`
-        // nodes across 2 cities answered `count(*) = 5` for Oslo where 15 was
-        // the truth, and `collect(p.name)` returned 5 of the 15 names; the
-        // earlier `2 * limit` overshoot only moved the cardinality at which
-        // that started, because the number of surrogates needed to cover
-        // `limit` resolved groups is unbounded. When every group key resolves
-        // inline the surrogate set and the resolved set are in bijection, the
-        // re-bucket pass below cannot merge two of them, and the cap is
-        // exactly `N`.
-        let group_limit = clause.group_limit_hint;
-        let cap_is_exact = !strategies
-            .iter()
-            .any(|s| matches!(s, GroupExprStrategy::NodeProp { .. }));
-        let surrogate_cap = group_limit.filter(|_| cap_is_exact);
-
-        // The grouping pass stays **sequential, on measurement.** It was
-        // implemented partitioned — order-preserving, so first-seen group order
-        // and every group's globally-ascending row-index list survived — and
-        // removed, because it is a net drag at every cardinality. Release,
-        // 1M-node graphgen fixture, min of 15, `collect`-grouped queries —
-        // parallel against the sequential path, with the across-group
-        // evaluation held constant:
-        //
-        //   cell        grouping-pass only   across-group only   both
-        //   low_card    0.94x                1.29x               1.17x
-        //   mid_card    0.98x                1.41x               1.30x
-        //   high_card   0.96x                1.09x               1.06x
-        //   percentile  0.93x                1.47x               1.42x
-        //
-        // Per-partition hash maps have to be allocated and then re-hashed into
-        // one on merge, and the per-row work they parallelise is a binding
-        // lookup and an integer hash — there is nothing there to win back. The
-        // across-group evaluation below is where the whole benefit is.
-        //
-        // A `group_limit_hint` would have excluded it anyway: a capped pass
-        // freezes its group set once the cap is reached and drops later rows
-        // that would open a new group, a decision that depends on how many
-        // groups the rows *before* them opened. A partition sees only its own
-        // prefix, so partitions would freeze at different points and keep
-        // different groups — a wrong answer, not a slower one.
-        for (row_idx, row) in result_set.rows.iter().enumerate() {
-            self.check_interrupt_periodic(row_idx)?;
-            let key_parts = self.surrogate_key_for_row(row, &strategies, &folded_group_exprs)?;
-            if let Some(&idx) = surrogate_index.get(&key_parts) {
-                surrogate_groups[idx].1.push(row_idx);
-            } else {
-                if let Some(cap) = surrogate_cap {
-                    if surrogate_groups.len() >= cap {
-                        // Group set is "frozen" — drop rows that would
-                        // open a new group. Existing groups keep filling.
-                        continue;
-                    }
-                }
-                let idx = surrogate_groups.len();
-                surrogate_index.insert(key_parts.clone(), idx);
-                surrogate_groups.push((key_parts, vec![row_idx]));
-            }
-        }
+        let surrogate_groups =
+            self.build_surrogate_groups(clause, &result_set.rows, &strategies, &folded_group_exprs)?;
 
         // Resolve NodeProp surrogates to property values, deduplicating the
         // reads: for Q5-style queries (439K rows → ~50 groups) that is 439K
@@ -208,12 +141,12 @@ impl<'a> CypherExecutor<'a> {
             }
         }
 
-        // The cap above declines whenever a group key is a `NodeProp`
-        // surrogate, and the planner pass declines on ORDER BY / DISTINCT /
-        // HAVING, so this truncate is what enforces the user's literal LIMIT N
-        // in every case the cap did not already land on exactly N groups. The
-        // trailing Limit clause stays in the plan behind it.
-        if let Some(n) = group_limit {
+        // The cap in `build_surrogate_groups` declines whenever a group key is a
+        // `NodeProp` surrogate, and the planner pass declines on ORDER BY /
+        // DISTINCT / HAVING, so this truncate is what enforces the user's literal
+        // LIMIT N in every case the cap did not already land on exactly N groups.
+        // The trailing Limit clause stays in the plan behind it.
+        if let Some(n) = clause.group_limit_hint {
             if groups.len() > n {
                 groups.truncate(n);
             }
@@ -284,6 +217,92 @@ impl<'a> CypherExecutor<'a> {
             columns,
             lazy_return_items: None,
         })
+    }
+
+    /// Bucket rows into surrogate groups, honouring `push_limit_into_aggregate`'s
+    /// group cap. Returns each group's surrogate key paired with the indices of
+    /// its rows in `rows`, in first-seen group order.
+    fn build_surrogate_groups(
+        &self,
+        clause: &ReturnClause,
+        rows: &[ResultRow],
+        strategies: &[GroupExprStrategy],
+        folded_group_exprs: &[Expression],
+    ) -> Result<SurrogateGroups, String> {
+        self.check_deadline()?;
+        let mut surrogate_groups: SurrogateGroups = Vec::new();
+        let mut surrogate_index: FxHashMap<Vec<GroupKeyPart>, usize> = FxHashMap::default();
+
+        // Group-limit hint set by `push_limit_into_aggregate`. When `Some(N)`
+        // and we already have `N` distinct groups, skip rows whose key
+        // would create an `N+1`th group. Rows for already-collected keys
+        // still feed the aggregate (so `collect()` etc. complete
+        // correctly for the kept groups). Safe only without ORDER BY —
+        // the planner pass enforces that.
+        //
+        // **The cap requires the surrogate key to *be* the final group key.**
+        // A `NodeProp` surrogate is keyed by `NodeIndex`, and any number of
+        // distinct nodes can resolve to one property value, so freezing the
+        // surrogate set drops rows belonging to groups that were already
+        // collected — not just rows that would open a new one. 30 `:Person`
+        // nodes across 2 cities answered `count(*) = 5` for Oslo where 15 was
+        // the truth, and `collect(p.name)` returned 5 of the 15 names; the
+        // earlier `2 * limit` overshoot only moved the cardinality at which
+        // that started, because the number of surrogates needed to cover
+        // `limit` resolved groups is unbounded. When every group key resolves
+        // inline the surrogate set and the resolved set are in bijection, the
+        // re-bucket pass in the caller cannot merge two of them, and the cap
+        // is exactly `N`.
+        let group_limit = clause.group_limit_hint;
+        let cap_is_exact = !strategies
+            .iter()
+            .any(|s| matches!(s, GroupExprStrategy::NodeProp { .. }));
+        let surrogate_cap = group_limit.filter(|_| cap_is_exact);
+
+        // The grouping pass stays **sequential, on measurement.** It was
+        // implemented partitioned — order-preserving, so first-seen group order
+        // and every group's globally-ascending row-index list survived — and
+        // removed, because it is a net drag at every cardinality. Release,
+        // 1M-node graphgen fixture, min of 15, `collect`-grouped queries —
+        // parallel against the sequential path, with the across-group
+        // evaluation held constant:
+        //
+        //   cell        grouping-pass only   across-group only   both
+        //   low_card    0.94x                1.29x               1.17x
+        //   mid_card    0.98x                1.41x               1.30x
+        //   high_card   0.96x                1.09x               1.06x
+        //   percentile  0.93x                1.47x               1.42x
+        //
+        // Per-partition hash maps have to be allocated and then re-hashed into
+        // one on merge, and the per-row work they parallelise is a binding
+        // lookup and an integer hash — there is nothing there to win back. The
+        // across-group evaluation in the caller is where the whole benefit is.
+        //
+        // A `group_limit_hint` would have excluded it anyway: a capped pass
+        // freezes its group set once the cap is reached and drops later rows
+        // that would open a new group, a decision that depends on how many
+        // groups the rows *before* them opened. A partition sees only its own
+        // prefix, so partitions would freeze at different points and keep
+        // different groups — a wrong answer, not a slower one.
+        for (row_idx, row) in rows.iter().enumerate() {
+            self.check_interrupt_periodic(row_idx)?;
+            let key_parts = self.surrogate_key_for_row(row, strategies, folded_group_exprs)?;
+            if let Some(&idx) = surrogate_index.get(&key_parts) {
+                surrogate_groups[idx].1.push(row_idx);
+            } else {
+                if let Some(cap) = surrogate_cap {
+                    if surrogate_groups.len() >= cap {
+                        // Group set is "frozen" — drop rows that would
+                        // open a new group. Existing groups keep filling.
+                        continue;
+                    }
+                }
+                let idx = surrogate_groups.len();
+                surrogate_index.insert(key_parts.clone(), idx);
+                surrogate_groups.push((key_parts, vec![row_idx]));
+            }
+        }
+        Ok(surrogate_groups)
     }
 
     /// The surrogate key for one row.

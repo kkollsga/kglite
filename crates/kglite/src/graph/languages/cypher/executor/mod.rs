@@ -844,6 +844,54 @@ impl<'a> CypherExecutor<'a> {
         Ok(single_count_result(alias, count))
     }
 
+    /// Dispatch the fused count-only clauses. Split out of
+    /// `execute_single_clause`, which routes every `Fused*Count*` variant here
+    /// as one arm.
+    fn execute_fused_count_clause(&self, clause: &Clause) -> Result<ResultSet, String> {
+        match clause {
+            Clause::FusedCountAll { alias } => {
+                self.budget
+                    .check_work(self.graph.graph.node_count(), "fused node count")?;
+                let count = self.graph.graph.node_count() as i64;
+                Ok(single_count_result(alias, count))
+            }
+            Clause::FusedCountAllEdges { alias } => {
+                let edge_count = self.graph.graph.edge_count();
+                self.budget.check_work(edge_count, "fused all-edge count")?;
+                let count = i64::try_from(edge_count)
+                    .map_err(|_| "edge count exceeds Cypher integer range".to_string())?;
+                Ok(single_count_result(alias, count))
+            }
+            Clause::FusedCountByType {
+                type_alias,
+                count_alias,
+                type_as_list,
+            } => self.execute_fused_count_by_type(type_alias, count_alias, *type_as_list),
+            Clause::FusedCountEdgesByType {
+                type_alias,
+                count_alias,
+            } => self.execute_fused_count_edges_by_type(type_alias, count_alias),
+            Clause::FusedCountTypedNode { node_type, alias } => {
+                self.execute_fused_count_typed_node(node_type, alias)
+            }
+            Clause::FusedCountTypedEdge { edge_type, alias } => {
+                self.execute_fused_count_typed_edge(edge_type, alias)
+            }
+            Clause::FusedCountAnchoredEdges {
+                anchor_idx,
+                anchor_direction,
+                edge_types,
+                alias,
+            } => self.execute_fused_count_anchored_edges(
+                *anchor_idx,
+                *anchor_direction,
+                edge_types.as_deref(),
+                alias,
+            ),
+            _ => unreachable!("non-count clause routed to fused-count dispatcher"),
+        }
+    }
+
     /// Public so execute_mutable can call it for read clauses.
     pub fn execute_single_clause(
         &self,
@@ -941,45 +989,13 @@ impl<'a> CypherExecutor<'a> {
                     result_set,
                 )
             }
-            Clause::FusedCountAll { alias } => {
-                self.budget
-                    .check_work(self.graph.graph.node_count(), "fused node count")?;
-                let count = self.graph.graph.node_count() as i64;
-                Ok(single_count_result(alias, count))
-            }
-            Clause::FusedCountAllEdges { alias } => {
-                let edge_count = self.graph.graph.edge_count();
-                self.budget.check_work(edge_count, "fused all-edge count")?;
-                let count = i64::try_from(edge_count)
-                    .map_err(|_| "edge count exceeds Cypher integer range".to_string())?;
-                Ok(single_count_result(alias, count))
-            }
-            Clause::FusedCountByType {
-                type_alias,
-                count_alias,
-                type_as_list,
-            } => self.execute_fused_count_by_type(type_alias, count_alias, *type_as_list),
-            Clause::FusedCountEdgesByType {
-                type_alias,
-                count_alias,
-            } => self.execute_fused_count_edges_by_type(type_alias, count_alias),
-            Clause::FusedCountTypedNode { node_type, alias } => {
-                self.execute_fused_count_typed_node(node_type, alias)
-            }
-            Clause::FusedCountTypedEdge { edge_type, alias } => {
-                self.execute_fused_count_typed_edge(edge_type, alias)
-            }
-            Clause::FusedCountAnchoredEdges {
-                anchor_idx,
-                anchor_direction,
-                edge_types,
-                alias,
-            } => self.execute_fused_count_anchored_edges(
-                *anchor_idx,
-                *anchor_direction,
-                edge_types.as_deref(),
-                alias,
-            ),
+            Clause::FusedCountAll { .. }
+            | Clause::FusedCountAllEdges { .. }
+            | Clause::FusedCountByType { .. }
+            | Clause::FusedCountEdgesByType { .. }
+            | Clause::FusedCountTypedNode { .. }
+            | Clause::FusedCountTypedEdge { .. }
+            | Clause::FusedCountAnchoredEdges { .. } => self.execute_fused_count_clause(clause),
             Clause::FusedNodeScanAggregate {
                 match_clause,
                 where_predicate,
