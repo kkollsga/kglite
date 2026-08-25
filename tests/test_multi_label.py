@@ -567,11 +567,34 @@ def test_fluent_select_include_secondary(multi_label_graph):
 
 
 def test_gate_suppresses_fusion_on_multilabel(multi_label_graph):
-    """Plan-shape: the aggregate fusion must NOT fire when the graph has
-    secondary labels (it would mis-filter); it falls to the general path."""
+    """Plan-shape: the aggregate fusion must NOT fire when a pattern names a
+    type that exists as a secondary label (:VIP here) — the fused executor's
+    primary-type filter cannot see the bucket; it falls to the general path."""
     g = multi_label_graph
     ops = [r["operation"] for r in g.cypher("EXPLAIN MATCH (a:Person)-[:KNOWS]->(b:VIP) RETURN a, count(b)").to_list()]
     assert not any("FusedMatch" in o for o in ops), ops
+
+
+def test_extra_label_pattern_suppresses_fusion(multi_label_graph):
+    """An extra label on a pattern node also bails — the fused executor
+    drops extra_labels, so fusing would over-count peers."""
+    g = multi_label_graph
+    ops = [
+        r["operation"]
+        for r in g.cypher("EXPLAIN MATCH (a:Person)-[:KNOWS]->(b:Person:VIP) RETURN a, count(b)").to_list()
+    ]
+    assert not any("FusedMatch" in o for o in ops), ops
+
+
+def test_safe_types_fuse_on_multilabel_graph(multi_label_graph):
+    """The finer gate's whole point: pattern types that are NOT secondary
+    labels fuse even when the graph carries labels elsewhere (the old
+    global has_secondary_labels bail cost a measured 71x here)."""
+    g = multi_label_graph
+    ops = [
+        r["operation"] for r in g.cypher("EXPLAIN MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a, count(b)").to_list()
+    ]
+    assert any("Fused" in o for o in ops), ops
 
 
 def test_single_label_still_fuses(social_graph):

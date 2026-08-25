@@ -6,6 +6,7 @@ use super::*;
 use crate::datatypes::values::Value;
 use crate::graph::core::pattern_matching::PatternElement;
 use crate::graph::languages::cypher::ast::*;
+use crate::graph::schema::DirGraph;
 
 /// Fuse `OPTIONAL MATCH` followed by an aggregate into a single pass.
 pub(crate) fn fuse_optional_match_aggregate(query: &mut CypherQuery) {
@@ -503,16 +504,14 @@ fn distinct_fusable_3elem_with_constrained_group(
 /// 5. `count(DISTINCT v)` is allowed when `v` is the OTHER node variable or the
 ///    edge variable, AND the group node is type/property constrained (see
 ///    `distinct_fusable_3elem_with_constrained_group`).
-pub(crate) fn fuse_match_return_aggregate(query: &mut CypherQuery, has_secondary_labels: bool) {
+pub(crate) fn fuse_match_return_aggregate(query: &mut CypherQuery, graph: &DirGraph) {
     use crate::graph::languages::cypher::ast::is_aggregate_expression;
 
     // This fusion's executor filters typed peer/group nodes via `binary_search`
-    // on the *sorted* primary `type_indices` slice, which can't see
-    // secondary-labelled nodes. On a multi-label graph bail to the general
-    // MATCH→aggregate path, whose `find_matching_nodes` is multi-label correct.
-    if has_secondary_labels {
-        return;
-    }
+    // on the primary `type_indices` slice and drops `extra_labels`, so
+    // per-pattern multi-label safety is checked below via
+    // `multi_label_fuse_unsafe` once the pattern is bound (finer than the
+    // global has_secondary_labels bail this replaces — measured 71x).
 
     let mut i = 0;
     while i + 1 < query.clauses.len() {
@@ -544,6 +543,13 @@ pub(crate) fn fuse_match_return_aggregate(query: &mut CypherQuery, has_secondary
                 continue;
             }
             let pat = &m.patterns[0];
+            if pat.elements.iter().any(|el| match el {
+                PatternElement::Node(np) => super::multi_label_fuse_unsafe(graph, np),
+                _ => false,
+            }) {
+                i += 1;
+                continue;
+            }
             let first_var = match &pat.elements[0] {
                 PatternElement::Node(np) => np.variable.clone(),
                 _ => {
@@ -1411,14 +1417,12 @@ fn try_fuse_two_match_with_aggregate(query: &mut CypherQuery, i: usize) -> bool 
 /// histogram: WITH p, count(cited) → RETURN). Narrower than that pass: no
 /// 5-element patterns, no property group keys, and a property filter on the
 /// second node bails.
-pub(crate) fn fuse_match_with_aggregate(query: &mut CypherQuery, has_secondary_labels: bool) {
+pub(crate) fn fuse_match_with_aggregate(query: &mut CypherQuery, graph: &DirGraph) {
     use crate::graph::languages::cypher::ast::is_aggregate_expression;
 
     // Same primary-type `binary_search` peer/group filter as
-    // `fuse_match_return_aggregate` — bail on multi-label graphs; see there.
-    if has_secondary_labels {
-        return;
-    }
+    // `fuse_match_return_aggregate` — the per-pattern multi-label gate below
+    // applies identically; see there.
 
     let mut i = 0;
     while i + 1 < query.clauses.len() {
@@ -1454,6 +1458,13 @@ pub(crate) fn fuse_match_with_aggregate(query: &mut CypherQuery, has_secondary_l
                     continue;
                 }
                 let pat = &m.patterns[0];
+                if pat.elements.iter().any(|el| match el {
+                    PatternElement::Node(np) => super::multi_label_fuse_unsafe(graph, np),
+                    _ => false,
+                }) {
+                    i += 1;
+                    continue;
+                }
                 let first_var = match &pat.elements[0] {
                     PatternElement::Node(np) => np.variable.clone(),
                     _ => {

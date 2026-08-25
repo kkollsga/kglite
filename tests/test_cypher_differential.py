@@ -2445,6 +2445,30 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (n:Person) WHERE n:VIP RETURN n.id AS id ORDER BY id",
         None,
     ),
+    # Finer fusion gate (label-hardening P9): patterns whose types are not
+    # themselves secondary labels FUSE on a multi-label graph — these pin
+    # the newly-fused paths against the general path.
+    (
+        "ml_edge_aggregate_safe_types_fuse",
+        "multi_label_graph",
+        "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.id AS a, count(b) AS c ORDER BY a",
+        None,
+    ),
+    (
+        "ml_with_aggregate_safe_types_fuse",
+        "multi_label_graph",
+        "MATCH (a:Person)-[:KNOWS]->(b:Person) WITH a, count(b) AS c RETURN a.id AS id, c ORDER BY id",
+        None,
+    ),
+    # And the case the gate must still refuse: an extra label on a pattern
+    # node (the fused executor drops extra_labels — fusing this would count
+    # every Person peer, not just the :VIP ones).
+    (
+        "ml_edge_aggregate_extra_label_bails",
+        "multi_label_graph",
+        "MATCH (a:Person)-[:KNOWS]->(b:Person:VIP) RETURN a.id AS a, count(b) AS c ORDER BY a",
+        None,
+    ),
     # KG-2 soft keywords as names — these don't match the social_graph
     # fixture (no CONTAINS edges / labels), but they must PARSE, plan, and
     # execute consistently under optimised vs naive passes (the optimiser

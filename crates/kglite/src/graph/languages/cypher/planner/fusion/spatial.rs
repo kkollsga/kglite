@@ -121,15 +121,10 @@ fn extract_contains_call_vars(
 ///   clauses is folded into the SpatialJoin's residual `remainder` so
 ///   per-probe filters (e.g. `p.wkt_geometry IS NOT NULL`) survive.
 pub(crate) fn fuse_spatial_join(query: &mut CypherQuery, graph: &DirGraph) {
-    // The spatial-join executor builds its R-tree from the primary
-    // `type_indices` of the container/probe types and silently drops any
-    // `extra_labels` on those patterns. On a multi-label graph that misses
-    // secondary-labelled nodes, so bail to the general `MATCH (a:T1),(b:T2)
-    // WHERE contains(...)` path (two matcher scans + predicate), which is
-    // multi-label correct. Single-label graphs are unaffected.
-    if graph.has_secondary_labels {
-        return;
-    }
+    // Multi-label safety is enforced per pattern inside
+    // `extract_single_typed_node` (finer than the global
+    // `has_secondary_labels` bail this replaces — measured 33x penalty for
+    // every spatial join once any label existed anywhere).
     let mut i = 0;
     while i < query.clauses.len() {
         if try_fuse_spatial_single_match(query, graph, i)
@@ -167,11 +162,11 @@ fn try_fuse_spatial_single_match(query: &mut CypherQuery, graph: &DirGraph, i: u
         {
             return false;
         }
-        let (v0, t0) = match extract_single_typed_node(&mc.patterns[0]) {
+        let (v0, t0) = match extract_single_typed_node(&mc.patterns[0], graph) {
             Some(x) => x,
             None => return false,
         };
-        let (v1, t1) = match extract_single_typed_node(&mc.patterns[1]) {
+        let (v1, t1) = match extract_single_typed_node(&mc.patterns[1], graph) {
             Some(x) => x,
             None => return false,
         };
@@ -254,7 +249,7 @@ fn try_fuse_spatial_multi_match(query: &mut CypherQuery, graph: &DirGraph, i: us
         {
             return None;
         }
-        extract_single_typed_node(&mc.patterns[0])
+        extract_single_typed_node(&mc.patterns[0], graph)
     };
     let (m0_var, m0_type) = match extract_single(&query.clauses[i]) {
         Some(x) => x,
@@ -345,8 +340,15 @@ fn try_fuse_spatial_multi_match(query: &mut CypherQuery, graph: &DirGraph, i: us
 }
 
 /// Extract `(variable, node_type)` from a 1-element Node pattern.
+/// Both fuse forms route through here, so this is also the multi-label
+/// gate: the fused executor builds its R-tree from primary `type_indices`
+/// and drops `extra_labels`, so a pattern carrying extra labels — or naming
+/// a type that also exists as a secondary label, whose bucket members the
+/// R-tree would miss — must not fuse. Any other pattern on a multi-label
+/// graph fuses safely.
 fn extract_single_typed_node(
     pat: &crate::graph::core::pattern_matching::Pattern,
+    graph: &DirGraph,
 ) -> Option<(String, String)> {
     if pat.elements.len() != 1 {
         return None;
@@ -355,6 +357,9 @@ fn extract_single_typed_node(
         PatternElement::Node(np) => {
             let v = np.variable.as_ref()?.clone();
             let t = np.node_type.as_ref()?.clone();
+            if super::multi_label_fuse_unsafe(graph, np) {
+                return None;
+            }
             Some((v, t))
         }
         _ => None,

@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The edge-aggregate and spatial-join query fusions no longer switch off
+  for the whole graph the moment any secondary label exists. The gate is
+  now per pattern: only a pattern that carries an extra label, or names a
+  type that also exists as a secondary label, falls back to the general
+  path (its fused executor cannot see secondary-labelled nodes). Measured
+  on the old global bail: 71× (edge aggregate) and 33× (spatial join)
+  slower for unrelated queries on multi-label graphs.
 - Blueprint builds now warn (in the build report / `verbose=True` output)
   for every `properties` / `property_types` value that is neither a type
   keyword nor a spatial target. Such values were silently ignored — the

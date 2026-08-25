@@ -19,3 +19,30 @@ pub(super) use aggregate::*;
 pub(super) use count::*;
 pub(super) use spatial::*;
 pub(super) use topk::*;
+
+/// Finer multi-label fusion gate, shared by the fusions whose executors
+/// filter typed nodes via `binary_search` on the primary `type_indices`
+/// slice (edge aggregates) or build an R-tree from it (spatial join), and
+/// which drop `extra_labels` from the pattern. Such an executor is blind to
+/// secondary-labelled nodes, so a pattern is unsafe to fuse iff it carries
+/// extra labels, or names a type that also exists as a secondary label —
+/// every other pattern on a multi-label graph fuses with full correctness.
+/// This replaces the global `has_secondary_labels` bail, which cost 71x /
+/// 33x (aggregate / spatial, measured) on every such query the moment one
+/// label existed anywhere in the graph.
+pub(super) fn multi_label_fuse_unsafe(
+    graph: &crate::graph::schema::DirGraph,
+    np: &crate::graph::core::pattern_matching::NodePattern,
+) -> bool {
+    if !graph.has_secondary_labels {
+        return false;
+    }
+    if !np.extra_labels.is_empty() {
+        return true;
+    }
+    np.node_type.as_deref().is_some_and(|node_type| {
+        graph
+            .secondary_label_index
+            .contains_key(&crate::graph::schema::InternedKey::from_str(node_type))
+    })
+}
