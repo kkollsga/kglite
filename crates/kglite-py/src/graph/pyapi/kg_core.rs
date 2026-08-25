@@ -1214,6 +1214,48 @@ impl KnowledgeGraph {
         Ok(slf)
     }
 
+    /// Install the declared semantic layer (classes + relationship semantics).
+    #[pyo3(signature = (ontology_dict))]
+    fn define_ontology(
+        &mut self,
+        py: Python<'_>,
+        ontology_dict: &Bound<'_, PyDict>,
+    ) -> PyResult<Py<PyAny>> {
+        // One grammar, in core — the same chokepoint posture as
+        // define_schema above (the C ABI would parse the identical dialect).
+        let store = kglite_core::api::ontology_from_value(&py_in::py_value_to_value(
+            ontology_dict.as_any(),
+        )?)
+        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        let warnings = get_graph_mut(&mut self.inner)
+            .define_ontology(store)
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        let out = pyo3::types::PyList::empty(py);
+        for w in warnings {
+            out.append(w)?;
+        }
+        Ok(out.into())
+    }
+
+    /// The declared semantic layer as a dict, or None when none is declared.
+    fn ontology(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if self.inner.ontology.is_empty() {
+            return Ok(py.None());
+        }
+        let json = serde_json::to_value(&*self.inner.ontology).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "ontology serialization failed: {e}"
+            ))
+        })?;
+        let value = kglite_core::api::param::json_value_to_kglite_value(&json);
+        py_out::value_to_py(py, &value)
+    }
+
+    /// Remove the declared semantic layer entirely.
+    fn clear_ontology(&mut self) {
+        get_graph_mut(&mut self.inner).clear_ontology();
+    }
+
     /// Validate the graph against the defined schema
     ///
     /// Args:

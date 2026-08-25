@@ -4346,6 +4346,65 @@ class KnowledgeGraph:
     # Schema Definition & Validation
     # ====================================================================
 
+    def define_ontology(self, ontology_dict: dict[str, Any]) -> list[str]:
+        """Install the declared semantic layer (classes + relationship semantics).
+
+        Annotations, not axioms — SKOS in spirit, never OWL: the ontology
+        never changes what a query matches. It feeds ``describe()``, provides
+        defaults for the rule-procedure validators (a no-argument
+        ``CALL type_domain_violation()`` checks every declaration), and acts
+        as a data-quality contract for blueprint builds.
+
+        Document shape (all keys optional)::
+
+            g.define_ontology({
+                "classes": {
+                    "Licensable": {"abstract": True, "description": "..."},
+                    "Licence": {"is_a": "Licensable"},
+                },
+                "relationships": {
+                    "HAS_OPERATOR": {
+                        "domain": "Licensable", "range": "Company",
+                        "required_properties": ["validFrom"],
+                        "cardinality": {"min": 0, "max": 1},
+                        "required": True, "enforcement": "warn",
+                    },
+                },
+            })
+
+        Semantics: ``is_a`` is a forest (single parent, no cycles);
+        ``cardinality``/``required`` describe outgoing edges of the domain
+        type; ``enforcement`` (``advisory``/``warn``/``error``) is consumed
+        by the blueprint gate and ``ontology_audit()``; ``by`` names a
+        discriminator property and is documentation only. Class names share
+        the label namespace: an abstract class may not shadow a live node
+        type. This is deliberately separate from ``set_parent_type`` —
+        that map is presentation ownership, this one is semantic "kind of".
+
+        Replaces any previously declared ontology. Persisted by ``save()``.
+
+        Args:
+            ontology_dict: The declaration document.
+
+        Returns:
+            List of warnings (e.g. a concrete class naming no live node
+            type). Empty when clean.
+
+        Raises:
+            ValueError: Malformed document (unknown key, cycle, dangling
+                ``is_a`` target, class cap exceeded), or an abstract class
+                shadowing a live node type.
+        """
+        ...
+
+    def ontology(self) -> dict[str, Any] | None:
+        """The declared semantic layer as a dict, or None if none declared."""
+        ...
+
+    def clear_ontology(self) -> None:
+        """Remove the declared semantic layer entirely."""
+        ...
+
     def define_schema(self, schema_dict: dict[str, Any], *, replace: bool = False) -> KnowledgeGraph:
         """Define the expected schema for the graph.
 
