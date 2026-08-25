@@ -101,14 +101,24 @@ impl<'a> CypherExecutor<'a> {
         // correctly for the kept groups). Safe only without ORDER BY —
         // the planner pass enforces that.
         //
-        // NodeProp surrogate keys are deduped by NodeIndex *before* the
-        // value resolution pass below, so the limit overshoots harmlessly
-        // when two NodeIndexes resolve to the same property value (the
-        // re-bucket pass collapses them). Hence `2 * limit` surrogate
-        // groups before bailing: enough material for the post-resolve dedup
-        // to land exactly `limit` final groups without a false cap.
+        // **The cap requires the surrogate key to *be* the final group key.**
+        // A `NodeProp` surrogate is keyed by `NodeIndex`, and any number of
+        // distinct nodes can resolve to one property value, so freezing the
+        // surrogate set drops rows belonging to groups that were already
+        // collected — not just rows that would open a new one. 30 `:Person`
+        // nodes across 2 cities answered `count(*) = 5` for Oslo where 15 was
+        // the truth, and `collect(p.name)` returned 5 of the 15 names; the
+        // earlier `2 * limit` overshoot only moved the cardinality at which
+        // that started, because the number of surrogates needed to cover
+        // `limit` resolved groups is unbounded. When every group key resolves
+        // inline the surrogate set and the resolved set are in bijection, the
+        // re-bucket pass below cannot merge two of them, and the cap is
+        // exactly `N`.
         let group_limit = clause.group_limit_hint;
-        let surrogate_cap = group_limit.map(|n| n.saturating_mul(2).max(n + 8));
+        let cap_is_exact = !strategies
+            .iter()
+            .any(|s| matches!(s, GroupExprStrategy::NodeProp { .. }));
+        let surrogate_cap = group_limit.filter(|_| cap_is_exact);
 
         // The grouping pass stays **sequential, on measurement.** It was
         // implemented partitioned — order-preserving, so first-seen group order
@@ -198,10 +208,11 @@ impl<'a> CypherExecutor<'a> {
             }
         }
 
-        // `surrogate_cap` above deliberately overshoots, so the
-        // user's literal LIMIT N is enforced here. The trailing Limit clause
-        // is retained for the case where the planner pass declines (e.g.
-        // ORDER BY present), making this belt-and-braces.
+        // The cap above declines whenever a group key is a `NodeProp`
+        // surrogate, and the planner pass declines on ORDER BY / DISTINCT /
+        // HAVING, so this truncate is what enforces the user's literal LIMIT N
+        // in every case the cap did not already land on exactly N groups. The
+        // trailing Limit clause stays in the plan behind it.
         if let Some(n) = group_limit {
             if groups.len() > n {
                 groups.truncate(n);

@@ -146,6 +146,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The streaming aggregate honours the group cap `LIMIT N` puts on it.**
+  `push_limit_into_aggregate` stamped its hint on the projection, the
+  materialized aggregator read it, and the streaming pipeline — which serves
+  the common `count`/`sum`/`min`/`max` shapes — copied it forward and never
+  looked at it. On 200,000 rows over 100,000 distinct groups,
+  `MATCH (n:Ev) WITH n.g AS gg, n.w AS w RETURN gg AS g, count(*) AS c LIMIT 5`
+  built all 100,000 groups to return 5: **56 ms -> 26 ms** (2.0x, release,
+  Apple Silicon, min of 7, two agreeing runs), now level with the materialized
+  path on the same query. Same rows, same order — the cap only skips rows that
+  would open a group past the limit, and it declines on the node-property
+  grouping keys where skipping them would change the answer.
+
+- **A mapped graph's first property probe no longer walks the node list.**
+  `MATCH (n:T {p: v})` on `storage="mapped"` builds a lazy per-`(type,
+  property)` index on first use, and turns it off for any type whose rows live
+  in a column store — which is every type built by `add_nodes`, Cypher
+  `CREATE`/`MERGE` or a `.kgl` load. It was rediscovering that by scanning the
+  graph as far as the type's first node, once per `(type, property)` pair: 0.82
+  ms on a 401k-node graph whose queried type was loaded after a bulk one. The
+  store map now answers directly (0.065 ms, level with the same query in memory
+  mode). Steady-state lookup cost is unchanged.
+
 - **`text_bm25()` top-k reads the index's postings instead of scoring every
   row.** `RETURN ... text_bm25(n, p, q) AS s ORDER BY s DESC LIMIT k` now
   plans as one `FusedTextBm25TopK` operator (optimizer pass
@@ -173,6 +195,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only available through embeddings, which is no longer true.
 
 ### Fixed
+
+- **A `LIMIT` on an aggregating `RETURN`/`WITH` grouped by a node property
+  silently dropped rows from the groups it kept.** `push_limit_into_aggregate`
+  lets the aggregator stop opening new groups once `LIMIT N` distinct keys are
+  in hand; rows for a group already collected are supposed to keep feeding its
+  aggregate. But the group set is keyed by a *surrogate* — a key of the form
+  `p.city` is held as the bound node and resolved to a value only after the row
+  pass — and any number of distinct nodes can resolve to one value, so freezing
+  the surrogate set discarded rows belonging to groups that were already
+  collected. On 30 `:Person` nodes across 3 cities,
+  `MATCH (p:Person) WITH p, p.name AS nm RETURN p.city AS city, count(*) AS n,
+  collect(p.name) AS names LIMIT 1` answered `n = 5` where 10 was the truth and
+  returned 5 of the 10 names — no error, no warning, a plausible number. A
+  `LIMIT` larger than the number of groups was affected too. The cap now runs
+  only when every grouping key resolves to its value inline, which is exactly
+  when the surrogate set and the final group set are in bijection; the shape
+  above answers `10` on every path. Queries the cap now declines are slower and
+  correct (a 200k-row, 100k-group `count(*) ... LIMIT 5` went 53 ms -> 99 ms);
+  queries it still serves are unchanged.
 
 - **A second `vector_score()` in one query returned the first call's score.**
   The per-query cache that parses the property name, query vector and metric

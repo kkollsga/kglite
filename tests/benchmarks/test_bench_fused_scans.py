@@ -146,3 +146,114 @@ def test_bench_fused_typed_property_filtered_node_top_k(benchmark, fused_typed_s
     _assert_fused_typed_node_rows(rows)
     benchmark.extra_info["typed_candidates"] = FUSED_TYPED_SOURCE_COUNT
     benchmark.extra_info["target_materialization"] = "TypeNodesRef::to_vec node top-k"
+
+
+# ---------------------------------------------------------------------------
+# Streaming aggregate group cap — `push_limit_into_aggregate`'s
+# `group_limit_hint`, read by the streaming pipeline since 0.16.10.
+# ---------------------------------------------------------------------------
+
+GROUP_CAP_NODES = 200_000
+GROUP_CAP_DISTINCT = 100_000
+GROUP_CAP_LIMIT = 5
+
+#: The cap has to keep *firing* on the streaming path. Measured 0.51x
+#: (release, macOS arm64, 2026-08-25, two agreeing runs); before the fix the
+#: streaming aggregate stamped the hint and never read it, which reads as
+#: 1.00x. The bound sits between the two, so the cell goes red when the
+#: streaming aggregate stops honouring the cap — not when the machine drifts,
+#: since both arms are the same query on the same graph, interleaved.
+GROUP_CAP_MAX_RATIO = 0.75
+
+#: The projecting `WITH` is load-bearing twice over. It keeps the query off
+#: `fuse_node_scan_aggregate`, which absorbs `MATCH (n:Ev) RETURN n.g,
+#: count(*) LIMIT 5` whole and consults no hint; and it makes the group key a
+#: plain variable, so the group set is keyed by resolved value rather than by
+#: `NodeIndex` — the only shape where capping the group set is sound (see
+#: `stream::aggregate::apply`).
+GROUP_CAP_QUERY = f"MATCH (n:Ev) WITH n.g AS gg, n.w AS w RETURN gg AS g, count(*) AS c LIMIT {GROUP_CAP_LIMIT}"
+GROUP_CAP_NOHINT = ["push_limit_into_aggregate"]
+
+
+def _build_group_cap_graph(nodes: int, distinct: int) -> KnowledgeGraph:
+    graph = KnowledgeGraph()
+    graph.add_nodes(
+        pd.DataFrame(
+            {
+                "nid": range(nodes),
+                "name": [f"E{i}" for i in range(nodes)],
+                "g": [f"g_{i % distinct}" for i in range(nodes)],
+                "w": [i % 7 for i in range(nodes)],
+            }
+        ),
+        "Ev",
+        "nid",
+        "name",
+        columns=["g", "w"],
+    )
+    return graph
+
+
+@pytest.fixture(scope="module")
+def group_cap_graph() -> KnowledgeGraph:
+    return _build_group_cap_graph(GROUP_CAP_NODES, GROUP_CAP_DISTINCT)
+
+
+def _interleaved_mins(first, second, rounds: int, warmup: int) -> tuple[float, float]:
+    """Min of `rounds` alternating samples of each arm.
+
+    Alternating rather than running one arm to completion first: a thermal or
+    scheduler excursion then lands on both arms instead of on whichever one
+    happened to be running, which is what the ratio below depends on.
+    """
+    import time
+
+    for _ in range(warmup):
+        first()
+        second()
+    first_best = float("inf")
+    second_best = float("inf")
+    for _ in range(rounds):
+        start = time.perf_counter()
+        first()
+        first_best = min(first_best, time.perf_counter() - start)
+        start = time.perf_counter()
+        second()
+        second_best = min(second_best, time.perf_counter() - start)
+    return first_best, second_best
+
+
+@pytest.mark.benchmark
+def test_bench_streaming_group_cap(benchmark, group_cap_graph):
+    """The streaming aggregate must stop opening groups once the LIMIT is met."""
+    operations = [row["operation"] for row in group_cap_graph.cypher(f"EXPLAIN {GROUP_CAP_QUERY}").to_list()]
+    assert not any(operation.startswith("Fused") for operation in operations), operations
+
+    def capped():
+        return group_cap_graph.cypher(GROUP_CAP_QUERY).to_list()
+
+    def uncapped():
+        return group_cap_graph.cypher(GROUP_CAP_QUERY, disabled_passes=GROUP_CAP_NOHINT).to_list()
+
+    expected = uncapped()
+    rows_per_group = GROUP_CAP_NODES // GROUP_CAP_DISTINCT
+    assert len(expected) == GROUP_CAP_LIMIT
+    assert {row["c"] for row in expected} == {rows_per_group}
+    assert capped() == expected, "the cap changed the answer"
+
+    capped_s, uncapped_s = _interleaved_mins(capped, uncapped, rounds=9, warmup=2)
+    ratio = capped_s / uncapped_s
+
+    rows = benchmark(capped)
+    assert rows == expected
+
+    assert ratio <= GROUP_CAP_MAX_RATIO, (
+        f"the streaming group cap is not firing: capped {capped_s * 1e3:.2f} ms "
+        f"vs uncapped {uncapped_s * 1e3:.2f} ms = {ratio:.3f}x"
+    )
+    benchmark.extra_info["statistic"] = "min (both arms, interleaved)"
+    benchmark.extra_info["nodes"] = GROUP_CAP_NODES
+    benchmark.extra_info["distinct_groups"] = GROUP_CAP_DISTINCT
+    benchmark.extra_info["capped_over_uncapped"] = ratio
+    benchmark.extra_info["capped_ms"] = capped_s * 1e3
+    benchmark.extra_info["uncapped_ms"] = uncapped_s * 1e3

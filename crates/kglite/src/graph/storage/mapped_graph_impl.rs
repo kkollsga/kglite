@@ -258,6 +258,23 @@ impl MappedGraph {
     /// need no invalidation hook: a *live* block for a type implies the type
     /// has no columnar rows, and a live global block implies the graph has
     /// none, so no store cell a write can reach is inside one.
+    ///
+    /// **The store map answers the bail without a walk.** Every node-creating
+    /// funnel — `add_nodes`, Cypher `CREATE`/`MERGE`, `.kgl` load — goes
+    /// through `DirGraph::insert_node_routed`, which pushes the row into the
+    /// type's `ColumnStore`; the RDF loaders (`io/rdf`, `io/ntriples`) are the
+    /// only producers of row storage left. So a store for the type is proof
+    /// the type has columnar rows, and the loop below can only rediscover
+    /// that by walking `node_indices()` as far as the type's first node —
+    /// 0.82 ms on a 401k-node mapped graph whose probed type was loaded after
+    /// a bulk one (release, 2026-08-25), paid once per (type, property) and
+    /// then cached as an empty block. Checking the map first spends a hash
+    /// lookup instead.
+    ///
+    /// Conservative in one corner: a type whose columnar rows were all deleted
+    /// while row-storage nodes remain still has a store, so this reports "no
+    /// index" where the walk would have built one. That is the same answer the
+    /// bail gives for every mixed type — a scan, not a wrong row.
     fn build_property_index_block(
         &self,
         node_type: Option<&str>,
@@ -265,6 +282,15 @@ impl MappedGraph {
     ) -> MappedPropertyIndex {
         use crate::graph::schema::InternedKey;
         let type_key = node_type.map(InternedKey::from_str);
+        let has_columnar_rows = match type_key {
+            Some(tk) => self.column_stores.contains_key(&tk),
+            // A `None` type asks about every node, so any store at all is a
+            // node the walk would bail on.
+            None => !self.column_stores.is_empty(),
+        };
+        if has_columnar_rows {
+            return MappedPropertyIndex::default();
+        }
         let prop_key = InternedKey::from_str(property);
         let is_title_alias = matches!(property, "title" | "label" | "name");
         let is_id_alias = matches!(property, "id" | "nid" | "qid");

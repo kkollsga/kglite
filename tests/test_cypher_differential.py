@@ -798,6 +798,34 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (p:Person) OPTIONAL MATCH (p)-[:KNOWS]->(q:Person) WITH p, count(q) AS k RETURN p.name AS n, k LIMIT 3",
         None,
     ),
+    # ── group cap vs a NodeIndex-keyed surrogate (0.16.10) ──
+    # The group set is keyed by the bound node until the resolution pass, so
+    # one resolved group spreads over as many surrogates as it has nodes.
+    # Capping the surrogate set dropped rows from groups already collected:
+    # `count(*)` answered 3 where 10 was the truth and `collect()` returned 3
+    # of 10 ids. The projecting WITH is load-bearing — without it
+    # `fuse_node_scan_aggregate` absorbs the query and neither aggregation
+    # path (nor the hint) is reached.
+    (
+        "group_cap_nodeprop_key_count",
+        "dense_group_graph",
+        "MATCH (n:T) WITH n, n.id AS i RETURN n.k AS k, count(*) AS c LIMIT 1",
+        None,
+    ),
+    (
+        "group_cap_nodeprop_key_collect",
+        "dense_group_graph",
+        "MATCH (n:T) WITH n, n.id AS i RETURN n.k AS k, collect(n.id) AS ids LIMIT 1",
+        None,
+    ),
+    # The same shape with a group key that resolves inline: the surrogate set
+    # *is* the resolved set, so the cap is exact and this arm must agree too.
+    (
+        "group_cap_eval_key_count",
+        "dense_group_graph",
+        "MATCH (n:T) WITH n.k AS kk, n.id AS i RETURN kk AS k, count(*) AS c LIMIT 1",
+        None,
+    ),
     # ORDER BY between projection and LIMIT MUST disable the
     # optimisation; the differential harness checks that the result
     # is still the proper top-3 by ascending count.
@@ -3670,6 +3698,25 @@ def uneven_group_graph() -> kglite.KnowledgeGraph:
     for k in range(8):
         for _ in range(1 if k < 3 else 2):
             rows.append({"id": len(rows), "k": f"g{k}"})
+    g = kglite.KnowledgeGraph()
+    g.add_nodes(pd.DataFrame(rows), "T", "id")
+    return g
+
+
+@pytest.fixture
+def dense_group_graph() -> kglite.KnowledgeGraph:
+    """30 `:T` nodes over three `k` values, round-robin — ten nodes per group.
+
+    Every group is spread across ten distinct nodes, so the group cap's
+    NodeIndex-keyed surrogate set is ten times the size of the resolved group
+    set. That gap is what let `push_limit_into_aggregate` freeze the surrogate
+    set and drop rows belonging to groups it had already collected. A small
+    fixture cannot see it: the cap engages only once the row pass has opened
+    more surrogate groups than the limit allows.
+    """
+    import pandas as pd
+
+    rows = [{"id": i, "k": f"g{i % 3}"} for i in range(30)]
     g = kglite.KnowledgeGraph()
     g.add_nodes(pd.DataFrame(rows), "T", "id")
     return g

@@ -468,6 +468,25 @@ pub fn apply<'q>(
     // agree on what survives aggregation.
     let carried_vars = grouping_variables(&return_clause.items);
 
+    // `push_limit_into_aggregate`'s group cap, the streaming half of the one in
+    // `aggregation::materialized` — freeze the group set at N and drop later
+    // rows that would open an N+1th group; rows for kept groups keep feeding
+    // their aggregates. The planner pass declines on ORDER BY / DISTINCT /
+    // HAVING / `WITH … WHERE`, and the trailing LIMIT clause still runs behind
+    // this, so the cap only removes work the LIMIT was going to discard.
+    //
+    // The `NodeProp` guard is the same one the materialized path carries and is
+    // not an optimisation detail: a surrogate keyed by `NodeIndex` can have any
+    // number of distinct entries resolving to one property value, so capping
+    // the surrogate set would drop rows belonging to groups already collected
+    // and undercount them. Only when every group key resolves inline are the
+    // surrogate set and the resolved set in bijection.
+    let surrogate_cap = return_clause.group_limit_hint.filter(|_| {
+        !strategies
+            .iter()
+            .any(|s| matches!(s, GroupExprStrategy::NodeProp { .. }))
+    });
+
     for (row_count, row_result) in upstream.enumerate() {
         let row = row_result?;
         executor.check_interrupt_periodic(row_count)?;
@@ -497,6 +516,11 @@ pub fn apply<'q>(
         let group_idx = match surrogate_index.get(&key_parts) {
             Some(&idx) => idx,
             None => {
+                if let Some(cap) = surrogate_cap {
+                    if surrogate_groups.len() >= cap {
+                        continue;
+                    }
+                }
                 let idx = surrogate_groups.len();
                 surrogate_index.insert(key_parts.clone(), idx);
                 let mut acc = GroupAcc::new(specs);
