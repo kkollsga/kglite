@@ -21,6 +21,7 @@ pub mod embeddings;
 pub mod explore;
 pub mod features;
 pub mod handle;
+pub mod index_freshness;
 pub mod introspection;
 pub mod io;
 pub mod languages;

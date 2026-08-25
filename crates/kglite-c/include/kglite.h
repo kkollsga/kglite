@@ -1615,14 +1615,21 @@ KgliteStatusCode kglite_session_save(struct KgliteSession *session,
  * Build a BM25 lexical index over `node_type`'s `property`, for keyword
  * ranking in Cypher.
  *
- * Wraps [`kglite::api::text_indexes::build_text_index`]. Opt-in and explicit:
- * the index does not follow later writes, so call this again to rebuild after
- * a batch of changes. Deleting a node prunes its document immediately (a freed
- * node slot is reused, and an orphaned document would be inherited by its next
- * owner); `vacuum` renumbers every node and therefore drops text indexes
- * wholesale. An empty string indexes as an empty document; a property that is
- * absent or holds a non-string is skipped and counted in the report. The
- * property is read through the same alias resolution a `MATCH` filter uses.
+ * Wraps [`kglite::api::text_indexes::build_text_index`]. Opt-in and explicit.
+ * The index does not follow later writes eagerly: it records them and folds
+ * them in at query time while the outstanding delta stays under the default
+ * auto-refresh limit, and once past it a rebuild — this call again — is the
+ * route back. `SHOW INDEXES` reports the delta. Deleting a node prunes its
+ * document immediately (a freed node slot is reused, and an orphaned document
+ * would be inherited by its next owner); `vacuum` renumbers every node and
+ * therefore drops text indexes wholesale. An empty string indexes as an empty
+ * document; a property that is absent or holds a non-string is skipped and
+ * counted in the report. The property is read through the same alias
+ * resolution a `MATCH` filter uses.
+ *
+ * The auto-refresh limit is not a parameter here: this signature is published
+ * and additive-only within the ABI major, so the C route takes the default and
+ * a future symbol carries the override if one is ever asked for.
  *
  * On success `out_report_json` is an owned JSON object
  * `{"indexed": N, "skipped": S, "terms": T}`; free it with

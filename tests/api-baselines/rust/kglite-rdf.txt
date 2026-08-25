@@ -2217,6 +2217,14 @@ pub fn kglite::api::text_indexes::QueryTerm::clone(&self) -> kglite::api::text_i
 impl core::fmt::Debug for kglite::api::text_indexes::QueryTerm
 pub fn kglite::api::text_indexes::QueryTerm::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Copy for kglite::api::text_indexes::QueryTerm
+pub struct kglite::api::text_indexes::TextIndexRead<'a>(_)
+impl kglite::api::text_indexes::TextIndexRead<'_>
+pub fn kglite::api::text_indexes::TextIndexRead<'_>::contains_node(&self, node: petgraph::graph_impl::NodeIndex) -> bool
+pub fn kglite::api::text_indexes::TextIndexRead<'_>::documents(&self) -> usize
+pub fn kglite::api::text_indexes::TextIndexRead<'_>::is_empty(&self) -> bool
+pub fn kglite::api::text_indexes::TextIndexRead<'_>::prepare_query(&self, query: &str) -> kglite::api::text_indexes::PreparedQuery
+pub fn kglite::api::text_indexes::TextIndexRead<'_>::score(&self, node: petgraph::graph_impl::NodeIndex, query: &kglite::api::text_indexes::PreparedQuery) -> core::option::Option<f64>
+pub fn kglite::api::text_indexes::TextIndexRead<'_>::top_k(&self, query: &kglite::api::text_indexes::PreparedQuery, k: usize) -> alloc::vec::Vec<(petgraph::graph_impl::NodeIndex, f64)>
 pub struct kglite::api::text_indexes::TextIndexReport
 pub kglite::api::text_indexes::TextIndexReport::indexed: usize
 pub kglite::api::text_indexes::TextIndexReport::skipped: usize
@@ -2231,10 +2239,16 @@ pub fn kglite::api::text_indexes::TextIndexReport::fmt(&self, f: &mut core::fmt:
 impl core::marker::StructuralPartialEq for kglite::api::text_indexes::TextIndexReport
 pub struct kglite::api::text_indexes::TextIndexStore
 impl kglite::api::text_indexes::TextIndexStore
+pub fn kglite::api::text_indexes::TextIndexStore::auto_refresh_limit(&self) -> usize
+pub fn kglite::api::text_indexes::TextIndexStore::can_auto_refresh(&self, graph: &kglite::api::DirGraph) -> bool
 pub fn kglite::api::text_indexes::TextIndexStore::contains_node(&self, node: petgraph::graph_impl::NodeIndex) -> bool
+pub fn kglite::api::text_indexes::TextIndexStore::delta_size(&self, graph: &kglite::api::DirGraph) -> usize
 pub fn kglite::api::text_indexes::TextIndexStore::documents(&self) -> usize
 pub fn kglite::api::text_indexes::TextIndexStore::estimated_bytes(&self) -> usize
+pub fn kglite::api::text_indexes::TextIndexStore::is_stale(&self, graph: &kglite::api::DirGraph) -> bool
 pub fn kglite::api::text_indexes::TextIndexStore::prepare_query(&self, query: &str) -> kglite::api::text_indexes::PreparedQuery
+pub fn kglite::api::text_indexes::TextIndexStore::read(&self) -> kglite::api::text_indexes::TextIndexRead<'_>
+pub fn kglite::api::text_indexes::TextIndexStore::refresh(&self, graph: &kglite::api::DirGraph, node_type: &str) -> usize
 pub fn kglite::api::text_indexes::TextIndexStore::remove_node(&mut self, node: petgraph::graph_impl::NodeIndex) -> bool
 pub fn kglite::api::text_indexes::TextIndexStore::resolved_field(&self) -> &str
 pub fn kglite::api::text_indexes::TextIndexStore::score(&self, node: petgraph::graph_impl::NodeIndex, query: &kglite::api::text_indexes::PreparedQuery) -> core::option::Option<f64>
@@ -2243,14 +2257,16 @@ pub fn kglite::api::text_indexes::TextIndexStore::terms(&self) -> usize
 pub fn kglite::api::text_indexes::TextIndexStore::top_k(&self, query: &kglite::api::text_indexes::PreparedQuery, k: usize) -> alloc::vec::Vec<(petgraph::graph_impl::NodeIndex, f64)>
 pub fn kglite::api::text_indexes::TextIndexStore::validate(&self) -> core::result::Result<(), alloc::string::String>
 impl core::clone::Clone for kglite::api::text_indexes::TextIndexStore
-pub fn kglite::api::text_indexes::TextIndexStore::clone(&self) -> kglite::api::text_indexes::TextIndexStore
+pub fn kglite::api::text_indexes::TextIndexStore::clone(&self) -> Self
 impl core::fmt::Debug for kglite::api::text_indexes::TextIndexStore
 pub fn kglite::api::text_indexes::TextIndexStore::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub fn kglite::api::text_indexes::build_text_index(graph: &mut kglite::api::DirGraph, node_type: &str, property: &str) -> core::result::Result<kglite::api::text_indexes::TextIndexReport, alloc::string::String>
+pub const kglite::api::text_indexes::DEFAULT_AUTO_REFRESH_LIMIT: usize
+pub fn kglite::api::text_indexes::build_text_index(graph: &mut kglite::api::DirGraph, node_type: &str, property: &str, auto_refresh_limit: core::option::Option<usize>) -> core::result::Result<kglite::api::text_indexes::TextIndexReport, alloc::string::String>
 pub fn kglite::api::text_indexes::drop_text_index(graph: &mut kglite::api::DirGraph, node_type: &str, property: &str) -> bool
 pub fn kglite::api::text_indexes::has_text_index(graph: &kglite::api::DirGraph, node_type: &str, property: &str) -> bool
 pub fn kglite::api::text_indexes::index_key(node_type: &str, property: &str) -> (alloc::string::String, alloc::string::String)
 pub fn kglite::api::text_indexes::list_text_indexes(graph: &kglite::api::DirGraph) -> alloc::vec::Vec<(&str, &str, &kglite::api::text_indexes::TextIndexStore)>
+pub fn kglite::api::text_indexes::refresh_text_index(graph: &kglite::api::DirGraph, node_type: &str, property: &str) -> core::option::Option<usize>
 pub type kglite::api::text_indexes::TermId = u32
 pub mod kglite::api::timeseries
 pub enum kglite::api::timeseries::DatePrecision

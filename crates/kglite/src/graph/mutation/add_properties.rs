@@ -239,6 +239,13 @@ where
             continue;
         };
         let count = interned_props.len();
+        // Field-blind: this path writes a caller-supplied property map, and
+        // "which of these is the indexed one" costs an interner resolve per key
+        // to answer a question whose wrong answer is one redundant re-read. See
+        // `index_freshness`'s over-approximation contract.
+        crate::graph::index_freshness::write_hooks::note_property_written(
+            graph, node_idx, &type_name, None,
+        );
         for (ik, v) in interned_props {
             // Through the backend: a columnar node's properties live in the
             // store the backend owns, not on the node.

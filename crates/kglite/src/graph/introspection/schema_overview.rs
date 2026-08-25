@@ -416,9 +416,10 @@ impl IndexKind {
 /// One index entry surfaced by `db.indexes()`.
 ///
 /// Field shape mirrors Neo4j's `db.indexes()` minimal subset:
-/// `name, type, entityType, labelsOrTypes, properties, state`. Degenerate
-/// columns (`uniqueness`, `populationPercent`, `indexProvider`) are
-/// omitted until a Bolt client demands them.
+/// `name, type, entityType, labelsOrTypes, properties, state`, plus the two
+/// KGLite-specific freshness columns. Degenerate Neo4j columns (`uniqueness`,
+/// `populationPercent`, `indexProvider`) are omitted until a Bolt client
+/// demands them.
 #[derive(Debug, Clone)]
 pub(crate) struct IndexInfo {
     /// Stable string ID — `"<node_type>.<property>"` for equality/range,
@@ -433,6 +434,16 @@ pub(crate) struct IndexInfo {
     pub properties: Vec<String>,
     /// Always `"ONLINE"` — KGLite indexes are atomic; no POPULATING state.
     pub state: &'static str,
+    /// Whether the graph has moved since this index last covered it, for the
+    /// kinds that track it. `None` — rendered as null — for the three
+    /// property-index families, which are maintained on every write and so have
+    /// no staleness to report; a `false` there would claim a guarantee the
+    /// column does not mean.
+    pub stale: Option<bool>,
+    /// Documents the next refresh would re-read, for the kinds that track it.
+    /// An upper bound (`crate::graph::index_freshness`), and `None` alongside a
+    /// `None` `stale`.
+    pub delta: Option<usize>,
 }
 
 /// All indexes installed on the graph, in deterministic order.
@@ -458,6 +469,8 @@ pub(crate) fn collect_indexes_structured(graph: &DirGraph) -> Vec<IndexInfo> {
             labels_or_types: vec![node_type.clone()],
             properties: vec![property.clone()],
             state: "ONLINE",
+            stale: None,
+            delta: None,
         });
     }
     for (node_type, properties) in graph.composite_indices.keys() {
@@ -468,6 +481,8 @@ pub(crate) fn collect_indexes_structured(graph: &DirGraph) -> Vec<IndexInfo> {
             labels_or_types: vec![node_type.clone()],
             properties: properties.clone(),
             state: "ONLINE",
+            stale: None,
+            delta: None,
         });
     }
     for (node_type, property) in graph.range_indices.keys() {
@@ -478,9 +493,11 @@ pub(crate) fn collect_indexes_structured(graph: &DirGraph) -> Vec<IndexInfo> {
             labels_or_types: vec![node_type.clone()],
             properties: vec![property.clone()],
             state: "ONLINE",
+            stale: None,
+            delta: None,
         });
     }
-    for (node_type, property, _) in crate::graph::text_indexes::list_text_indexes(graph) {
+    for (node_type, property, store) in crate::graph::text_indexes::list_text_indexes(graph) {
         out.push(IndexInfo {
             name: format!("{node_type}.{property}"),
             kind: IndexKind::Text,
@@ -488,6 +505,8 @@ pub(crate) fn collect_indexes_structured(graph: &DirGraph) -> Vec<IndexInfo> {
             labels_or_types: vec![node_type.to_string()],
             properties: vec![property.to_string()],
             state: "ONLINE",
+            stale: Some(store.is_stale(graph)),
+            delta: Some(store.delta_size(graph)),
         });
     }
 

@@ -313,7 +313,7 @@ impl CypherParser {
             let (procedure, columns) = if noun.starts_with("INDEX") {
                 (
                     "db.indexes()",
-                    "name, type, entityType, labelsOrTypes, properties, state",
+                    "name, type, entityType, labelsOrTypes, properties, state, stale, delta",
                 )
             } else {
                 (

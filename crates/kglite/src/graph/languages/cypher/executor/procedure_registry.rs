@@ -272,8 +272,17 @@ pub(super) const PROCEDURES: &[ProcedureSpec] = &[
     ProcedureSpec {
         name: "db.indexes",
         aliases: &[],
-        description: "All indexes in the graph (equality, composite, range), sorted by name",
-        columns: &["name", "type", "entityType", "labelsOrTypes", "properties", "state"],
+        description: "All indexes in the graph (equality, composite, range, text), sorted by name",
+        columns: &[
+            "name",
+            "type",
+            "entityType",
+            "labelsOrTypes",
+            "properties",
+            "state",
+            "stale",
+            "delta",
+        ],
     },
     ProcedureSpec {
         name: "db.constraints",

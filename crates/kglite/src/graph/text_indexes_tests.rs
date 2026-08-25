@@ -26,6 +26,10 @@ fn push_doc(graph: &mut DirGraph, id: i64, title: &str, body: Value) -> NodeInde
         .type_indices
         .entry_or_default("Doc".to_string())
         .push(idx);
+    // What both production creation funnels do at the same point — without it
+    // these fixtures would exercise a graph no `CREATE` can produce, and the
+    // recycled-slot detection would never be reached.
+    crate::graph::index_freshness::write_hooks::note_node_created(graph, idx, "Doc");
     idx
 }
 
@@ -69,7 +73,7 @@ fn build_indexes_every_string_document_and_reports_its_shape() {
     let (mut graph, nodes) = memory_corpus();
     let before = graph.version();
 
-    let report = build_text_index(&mut graph, "Doc", "body").expect("build");
+    let report = build_text_index(&mut graph, "Doc", "body", None).expect("build");
 
     assert_eq!(report.indexed, 3);
     assert_eq!(report.skipped, 0);
@@ -94,7 +98,7 @@ fn an_absent_or_non_string_property_is_skipped_but_an_empty_string_is_a_document
     let numeric = push_doc(&mut graph, 3, "c", Value::Int64(42));
     let absent = push_doc(&mut graph, 4, "d", Value::Null);
 
-    let report = build_text_index(&mut graph, "Doc", "body").expect("build");
+    let report = build_text_index(&mut graph, "Doc", "body", None).expect("build");
 
     assert_eq!(report.indexed, 2, "the string and the empty string");
     assert_eq!(report.skipped, 2, "the number and the null");
@@ -123,7 +127,7 @@ fn the_indexed_value_is_read_through_the_title_alias() {
         .title_field_aliases_mut()
         .insert("Doc".to_string(), "name".to_string());
 
-    let report = build_text_index(&mut graph, "Doc", "name").expect("build");
+    let report = build_text_index(&mut graph, "Doc", "name", None).expect("build");
 
     assert_eq!(report.indexed, 1, "'name' resolves onto the title column");
     let store = store(&graph, "name");
@@ -135,11 +139,11 @@ fn the_indexed_value_is_read_through_the_title_alias() {
 #[test]
 fn a_rebuild_replaces_the_index_and_picks_up_the_new_text() {
     let (mut graph, nodes) = memory_corpus();
-    build_text_index(&mut graph, "Doc", "body").expect("build");
+    build_text_index(&mut graph, "Doc", "body", None).expect("build");
     assert!(scores(&graph, &nodes, "marmoset")[1].expect("indexed") > 0.0);
 
     assert!(graph.set_node_property(nodes[1], "body", Value::String("entirely new words".into())));
-    build_text_index(&mut graph, "Doc", "body").expect("rebuild");
+    build_text_index(&mut graph, "Doc", "body", None).expect("rebuild");
 
     assert_eq!(
         scores(&graph, &nodes, "marmoset")[1],
@@ -154,7 +158,7 @@ fn a_rebuild_replaces_the_index_and_picks_up_the_new_text() {
 #[test]
 fn drop_reports_whether_an_index_existed() {
     let (mut graph, _) = memory_corpus();
-    build_text_index(&mut graph, "Doc", "body").expect("build");
+    build_text_index(&mut graph, "Doc", "body", None).expect("build");
     assert!(has_text_index(&graph, "Doc", "body"));
 
     assert!(drop_text_index(&mut graph, "Doc", "body"));
@@ -169,13 +173,13 @@ fn drop_reports_whether_an_index_existed() {
 fn an_unknown_type_or_an_unindexable_property_errors_loudly() {
     let (mut graph, _) = memory_corpus();
 
-    let unknown_type = build_text_index(&mut graph, "Nope", "body").unwrap_err();
+    let unknown_type = build_text_index(&mut graph, "Nope", "body", None).unwrap_err();
     assert!(
         unknown_type.contains("Unknown node type 'Nope'"),
         "{unknown_type}"
     );
 
-    let unknown_property = build_text_index(&mut graph, "Doc", "bdoy").unwrap_err();
+    let unknown_property = build_text_index(&mut graph, "Doc", "bdoy", None).unwrap_err();
     assert!(
         unknown_property.contains("No 'Doc' node carries a string value for 'bdoy'"),
         "{unknown_property}"
@@ -191,7 +195,7 @@ fn a_type_with_no_nodes_yet_builds_an_empty_index() {
     let mut graph = DirGraph::new();
     graph.type_indices.entry_or_default("Doc".to_string());
 
-    let report = build_text_index(&mut graph, "Doc", "body").expect("declare before ingest");
+    let report = build_text_index(&mut graph, "Doc", "body", None).expect("declare before ingest");
 
     assert_eq!(report.indexed, 0);
     assert_eq!(store(&graph, "body").documents(), 0);
@@ -203,7 +207,7 @@ fn disk_mode_refuses_and_names_the_modes_that_work() {
     let mut graph = new_dir_graph_in_mode(StorageMode::Disk, Some(dir.path())).expect("disk graph");
     assert!(GraphRead::is_disk(&graph.graph));
 
-    let err = build_text_index(&mut graph, "Doc", "body").unwrap_err();
+    let err = build_text_index(&mut graph, "Doc", "body", None).unwrap_err();
 
     assert!(
         err.contains("not supported on a disk-backed graph"),
@@ -217,14 +221,14 @@ fn disk_mode_refuses_and_names_the_modes_that_work() {
 fn mapped_mode_ranks_identically_to_memory() {
     let (memory, memory_nodes) = {
         let (mut graph, nodes) = memory_corpus();
-        build_text_index(&mut graph, "Doc", "body").expect("build");
+        build_text_index(&mut graph, "Doc", "body", None).expect("build");
         (graph, nodes)
     };
 
     let mut mapped = new_dir_graph_in_mode(StorageMode::Mapped, None).expect("mapped graph");
     let mapped_nodes = corpus(&mut mapped);
     mapped.build_id_index("Doc");
-    build_text_index(&mut mapped, "Doc", "body").expect("build");
+    build_text_index(&mut mapped, "Doc", "body", None).expect("build");
 
     assert_eq!(
         scores(&memory, &memory_nodes, "quick brown"),
@@ -236,7 +240,7 @@ fn mapped_mode_ranks_identically_to_memory() {
 #[test]
 fn deleting_a_node_prunes_its_document() {
     let (mut graph, nodes) = memory_corpus();
-    build_text_index(&mut graph, "Doc", "body").expect("build");
+    build_text_index(&mut graph, "Doc", "body", None).expect("build");
 
     crate::graph::mutation::maintain::detach_delete_nodes(&mut graph, &HashSet::from([nodes[1]]));
 
@@ -261,7 +265,7 @@ fn deleting_a_node_prunes_its_document() {
 #[test]
 fn a_reused_node_index_does_not_inherit_the_deleted_document() {
     let (mut graph, nodes) = memory_corpus();
-    build_text_index(&mut graph, "Doc", "body").expect("build");
+    build_text_index(&mut graph, "Doc", "body", None).expect("build");
     let doomed = nodes[1];
 
     crate::graph::mutation::maintain::detach_delete_nodes(&mut graph, &HashSet::from([doomed]));
@@ -290,7 +294,7 @@ fn a_reused_node_index_does_not_inherit_the_deleted_document() {
 fn vacuum_drops_text_indexes_wholesale() {
     let (mut graph, nodes) = memory_corpus();
     crate::graph::mutation::maintain::detach_delete_nodes(&mut graph, &HashSet::from([nodes[0]]));
-    build_text_index(&mut graph, "Doc", "body").expect("build");
+    build_text_index(&mut graph, "Doc", "body", None).expect("build");
     assert!(has_text_index(&graph, "Doc", "body"));
 
     graph.vacuum();
@@ -304,7 +308,7 @@ fn vacuum_drops_text_indexes_wholesale() {
 #[test]
 fn a_fork_indexes_independently_of_its_parent() {
     let (mut parent, nodes) = memory_corpus();
-    build_text_index(&mut parent, "Doc", "body").expect("build");
+    build_text_index(&mut parent, "Doc", "body", None).expect("build");
 
     let mut fork = parent.independent_copy();
     crate::graph::mutation::maintain::detach_delete_nodes(&mut fork, &HashSet::from([nodes[1]]));
@@ -326,7 +330,7 @@ fn a_fork_indexes_independently_of_its_parent() {
 fn show_indexes_reports_a_text_index_under_its_canonical_name() {
     let (mut graph, _) = memory_corpus();
     graph.create_index("Doc", "body");
-    build_text_index(&mut graph, "Doc", "body").expect("build");
+    build_text_index(&mut graph, "Doc", "body", None).expect("build");
 
     let rows = collect_indexes_structured(&graph);
     let text: Vec<_> = rows
@@ -350,8 +354,8 @@ fn list_text_indexes_is_ordered_by_type_then_property() {
     let mut graph = DirGraph::new();
     corpus(&mut graph);
     push_doc(&mut graph, 4, "d", Value::String("another".into()));
-    build_text_index(&mut graph, "Doc", "body").expect("build");
-    build_text_index(&mut graph, "Doc", "title").expect("build");
+    build_text_index(&mut graph, "Doc", "body", None).expect("build");
+    build_text_index(&mut graph, "Doc", "title", None).expect("build");
 
     let listed: Vec<&str> = list_text_indexes(&graph)
         .iter()

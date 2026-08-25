@@ -6809,17 +6809,34 @@ class KnowledgeGraph:
         ``(node_type, text_column)`` embedding store."""
         ...
 
-    def build_text_index(self, node_type: str, property: str) -> dict[str, Any]:
+    def build_text_index(
+        self,
+        node_type: str,
+        property: str,
+        auto_refresh_limit: Optional[int] = None,
+    ) -> dict[str, Any]:
         """Build a BM25 lexical index over a node type's string property, for
         keyword/full-text ranking.
 
         Opt-in and explicit, like :meth:`create_index`: nothing builds one for
-        you, and the index does **not** follow later writes. A node created or
-        edited after the build is simply unindexed until you call this again —
-        calling it again is the rebuild, and it replaces the index wholesale.
-        Deletion is the one exception: deleting a node prunes its document
-        immediately, because the freed node slot is handed to the next node
-        created and an orphaned document would be inherited by it.
+        you. After the build the index does not follow writes *eagerly* — it
+        records that they happened and folds them in when a query next reads
+        it, as long as the outstanding delta is at or under
+        ``auto_refresh_limit``. Past that limit it serves what it has and says
+        so, rather than hiding a corpus-sized rebuild inside your query; call
+        this method again to rebuild, which replaces the index wholesale.
+        ``SHOW INDEXES`` reports both facts, in its ``stale`` and ``delta``
+        columns.
+
+        Catching up costs the *writes* almost nothing: creations are noticed by
+        comparing one node slot against a watermark, so bulk ingest into an
+        indexed graph runs at the speed it would without one, and a graph with
+        no text index at all pays a single branch.
+
+        Deletion is handled at the delete, not by catch-up: deleting a node
+        prunes its document immediately, because the freed node slot is handed
+        to the next node created and an orphaned document would be inherited by
+        it.
 
         The property is read through the same alias resolution a Cypher
         ``MATCH`` filter uses, so a type's id/title column can be indexed under
@@ -6856,6 +6873,11 @@ class KnowledgeGraph:
         Args:
             node_type: The node type to index (e.g. ``'Article'``).
             property: The string property to index (e.g. ``'body'``).
+            auto_refresh_limit: How many changed documents a query will fold in
+                inline before it serves stale results and warns instead.
+                Defaults to 1000. A rebuild that omits this keeps whatever the
+                existing index used, so refreshing an index does not quietly
+                restore the default.
 
         Returns:
             dict: ``{'indexed': int, 'skipped': int, 'terms': int}`` —

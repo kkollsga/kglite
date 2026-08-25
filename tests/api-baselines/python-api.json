@@ -484,7 +484,7 @@
         },
         "build_text_index": {
           "kind": "method",
-          "signature": "(self, /, node_type, property)"
+          "signature": "(self, /, node_type, property, auto_refresh_limit=None)"
         },
         "build_vector_index": {
           "kind": "method",

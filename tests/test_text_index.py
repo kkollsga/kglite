@@ -124,9 +124,17 @@ def test_show_indexes_reports_the_text_index_as_fulltext(graph) -> None:
     assert text["labelsOrTypes"] == ["Doc"]
     assert text["properties"] == ["body"]
     assert text["state"] == "ONLINE"
+    # The freshness columns are the text index's alone; a hash index is
+    # maintained on every write and has no staleness to report.
+    assert text["stale"] is False
+    assert text["delta"] == 0
+    assert by_type["PROPERTY"]["stale"] is None
+    assert by_type["PROPERTY"]["delta"] is None
     # db.indexes() is the same collector, so the two must agree.
     assert (
-        graph.cypher("CALL db.indexes() YIELD name, type, entityType, labelsOrTypes, properties, state").to_list()
+        graph.cypher(
+            "CALL db.indexes() YIELD name, type, entityType, labelsOrTypes, properties, state, stale, delta"
+        ).to_list()
         == rows
     )
 
@@ -188,3 +196,91 @@ def test_disk_mode_refuses_and_names_the_modes_that_work(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="disk-backed graph"):
         g.build_text_index("Doc", "body")
+
+
+# ── catch-up (P10b) ───────────────────────────────────────────────────────
+#
+# The user-visible half of the freshness contract: how `SHOW INDEXES` reports
+# what the graph has done to an index since it was built. The refresh itself is
+# driven from the query path and asserted in the Rust tests, which can call it;
+# what a user can see today is `stale` and `delta`.
+
+
+def _text_row(graph: kglite.KnowledgeGraph) -> dict:
+    rows = [row for row in graph.cypher("SHOW INDEXES").to_list() if row["type"] == "FULLTEXT"]
+    assert len(rows) == 1, rows
+    return rows[0]
+
+
+def test_a_fresh_build_reports_itself_current(graph) -> None:
+    graph.build_text_index("Doc", "body")
+
+    row = _text_row(graph)
+    assert row["stale"] is False
+    assert row["delta"] == 0
+
+
+def test_a_node_created_after_the_build_shows_up_as_a_delta(graph) -> None:
+    graph.build_text_index("Doc", "body")
+
+    graph.cypher("CREATE (:Doc {doc_id: 4, name: 'd', body: 'a later document'})")
+
+    row = _text_row(graph)
+    assert row["stale"] is True
+    assert row["delta"] == 1
+
+
+def test_setting_the_indexed_property_shows_up_and_another_property_does_not(graph) -> None:
+    graph.build_text_index("Doc", "body")
+
+    graph.cypher("MATCH (d:Doc) WHERE d.doc_id = 1 SET d.other = 'x'")
+    assert _text_row(graph)["delta"] == 0, "'other' is not the indexed property"
+
+    graph.cypher("MATCH (d:Doc) WHERE d.doc_id = 1 SET d.body = 'rewritten'")
+    assert _text_row(graph)["stale"] is True
+    assert _text_row(graph)["delta"] == 1
+
+
+def test_bulk_ingest_of_another_node_type_leaves_the_index_current(graph) -> None:
+    """The watermark steps over creations this index cannot hold, so loading an
+    unrelated table does not make every index look stale."""
+    graph.build_text_index("Doc", "body")
+
+    graph.add_nodes(
+        pd.DataFrame({"company_id": [1, 2, 3], "name": ["Acme", "Globex", "Initech"]}),
+        "Company",
+        "company_id",
+        "name",
+    )
+
+    assert _text_row(graph)["stale"] is False
+    assert _text_row(graph)["delta"] == 0
+
+
+def test_deleting_a_node_is_not_staleness(graph) -> None:
+    """A delete prunes the document at the delete, so nothing is outstanding —
+    otherwise a bulk delete would push every index past its refresh limit."""
+    graph.build_text_index("Doc", "body")
+
+    graph.cypher("MATCH (d:Doc) WHERE d.doc_id = 1 DELETE d")
+
+    assert _text_row(graph)["stale"] is False
+    assert _text_row(graph)["delta"] == 0
+
+
+def test_a_rebuild_clears_the_delta(graph) -> None:
+    graph.build_text_index("Doc", "body")
+    graph.cypher("CREATE (:Doc {doc_id: 4, name: 'd', body: 'a later document'})")
+    assert _text_row(graph)["delta"] == 1
+
+    report = graph.build_text_index("Doc", "body")
+
+    assert report["indexed"] == 4
+    assert _text_row(graph)["stale"] is False
+
+
+def test_the_auto_refresh_limit_is_accepted_as_a_keyword(graph) -> None:
+    """The limit itself has no Python accessor (`SHOW INDEXES` reports the
+    delta, not the ceiling), so what this pins is the call shape."""
+    assert graph.build_text_index("Doc", "body", auto_refresh_limit=5)["indexed"] == 3
+    assert graph.build_text_index("Doc", "body", 5)["indexed"] == 3

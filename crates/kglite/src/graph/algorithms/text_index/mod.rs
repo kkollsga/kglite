@@ -164,8 +164,6 @@ impl TextIndex {
     /// as documents arrive, so a document's score legitimately changes when
     /// *other* documents are added — that is BM25 working, not drift. Scores
     /// are comparable only within one query against one corpus state.
-    // P10b's incremental-refresh primitive; the randomized-CRUD oracle is its only caller today.
-    #[allow(dead_code)]
     pub fn add_doc(&mut self, slot: u32, text: &str) {
         self.remove_doc(slot);
         let doc = self.intern_document(text);
@@ -259,8 +257,7 @@ impl TextIndex {
         self.docs.len()
     }
 
-    // P12's query-side short circuit; no production caller until the scalar lands.
-    #[allow(dead_code)]
+    /// Whether the corpus is empty — the query-side short circuit.
     pub fn is_empty(&self) -> bool {
         self.docs.is_empty()
     }

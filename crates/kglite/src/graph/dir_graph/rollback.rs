@@ -160,6 +160,20 @@ fn swap_data_scale(a: &mut DirGraph, b: &mut DirGraph) {
     // deletion is the only writer that reaches this map inside a statement
     // window (ingest runs outside one), so that entry is the whole story.
     std::mem::swap(&mut a.embeddings, &mut b.embeddings);
+    // O(corpus) — an inverted index over a 100k-document corpus is megabytes of
+    // postings, so cloning it per statement is out of the question for exactly
+    // the reason the vectors above are. Its undo story is
+    // `UndoEntry::TextDocPruned`, captured where a node deletion prunes the
+    // node's document (`mutation::delete_state::prune_doomed_text_docs`); a
+    // rollback re-marks the slot rather than restoring the document, and the
+    // next refresh re-reads the restored text. Every *other* in-statement
+    // mutation of this map is already a mark rather than an edit
+    // (`index_freshness::write_hooks`), so it survives the swap correctly with
+    // no entry of its own. `DROP INDEX` removing a text index is whole-index
+    // DDL and unjournalled, on the same argument as the three families above:
+    // the one fallible step after it (`dropped == 0 && !if_exists`) is
+    // reachable only when nothing was dropped.
+    std::mem::swap(&mut a.text_indexes, &mut b.text_indexes);
     std::mem::swap(&mut a.timeseries_store, &mut b.timeseries_store);
     // Parked because its inner map holds one entry per node of a constrained
     // type, so cloning it would put an O(constrained-nodes) copy back on every
@@ -416,6 +430,14 @@ fn apply(graph: &mut DirGraph, entry: UndoEntry, fallout: &mut ReplayFallout) {
             // would invent a dimension.
             if let Some(store) = graph.embeddings.get_mut(&store_key) {
                 store.restore_embedding(node, &prior);
+            }
+        }
+        UndoEntry::TextDocPruned { store_key, node } => {
+            // Marking, not restoring: the document is derived from a property
+            // this replay is putting back, so the next refresh re-tokenizes it.
+            // See the variant's own doc for why no pre-image is carried.
+            if let Some(store) = graph.text_indexes.get(&store_key) {
+                store.note_slot_changed(NodeIndex::new(node));
             }
         }
         UndoEntry::ColumnarCell {
@@ -802,11 +824,18 @@ mod tests {
             .entry_or_default("Item".to_string())
             .push(idx);
         graph.upsert_node_type_metadata("Item", HashMap::new());
+        crate::graph::text_indexes::build_text_index(&mut graph, "Item", "title", None)
+            .expect("a corpus-sized field to prove the parking on");
 
         let shell = graph.schema_shell();
 
         assert_eq!(shell.graph.node_count(), 0, "the backend must be parked");
         assert!(shell.type_indices.is_empty(), "type_indices must be parked");
+        assert!(
+            shell.text_indexes.is_empty(),
+            "text_indexes must be parked: it is corpus-sized, and cloning it \
+             per mutating statement is the cost this whole module removes"
+        );
         assert!(
             shell.node_type_metadata.contains_key("Item"),
             "schema-scale metadata must be cloned"
@@ -817,6 +846,10 @@ mod tests {
             "the live graph must be handed its data back"
         );
         assert_eq!(graph.type_indices.len(), 1);
+        assert!(
+            crate::graph::text_indexes::has_text_index(&graph, "Item", "title"),
+            "…and handed its index back with it"
+        );
     }
 
     /// User-created indexes no longer veto the journal: their bucket edits are

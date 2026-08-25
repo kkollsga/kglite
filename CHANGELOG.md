@@ -13,20 +13,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   over a string property**, alongside `drop_text_index` and
   `has_text_index` (Python) and `kglite_session_build_text_index` (C ABI).
   Explicit, like `create_index` and `build_vector_index`: nothing builds one
-  for you, and the index does not follow later writes — calling it again is
-  the rebuild. Deletion is the exception and prunes the deleted node's
-  document immediately, because the freed node slot is handed to the next node
-  created and an orphaned document would be inherited by it; `vacuum()`
+  for you. Empty strings index as empty documents; a property that is absent
+  or holds a non-string is skipped and counted in the report. The property is
+  read through the same alias resolution a `MATCH` filter uses, so a type's
+  id/title column can be indexed under the loader's name for it. `vacuum()`
   renumbers every node and so drops text indexes wholesale (rebuild after).
-  Empty strings index as empty documents; a property that is absent or holds a
-  non-string is skipped and counted in the report. The property is read
-  through the same alias resolution a `MATCH` filter uses, so a type's
-  id/title column can be indexed under the loader's name for it. Available in
-  the default (in-memory) and `mapped` storage modes; `disk` refuses, naming
-  the modes that work. Text indexes appear in `SHOW INDEXES` / `db.indexes()`
-  as type `FULLTEXT` under the canonical `Label.property` name, and
-  `DROP INDEX Label.property` removes them along with any equality or range
-  index on the same property.
+  Available in the default (in-memory) and `mapped` storage modes; `disk`
+  refuses, naming the modes that work. Text indexes appear in `SHOW INDEXES` /
+  `db.indexes()` as type `FULLTEXT` under the canonical `Label.property` name,
+  and `DROP INDEX Label.property` removes them along with any equality or
+  range index on the same property.
+
+  **The index catches up with writes instead of following them.** Creations
+  and edits after the build are recorded, not indexed on the spot, and are
+  folded in when a query next reads the index — as long as the outstanding
+  delta is at or under `auto_refresh_limit` (a `build_text_index` keyword,
+  default 1000 documents; a rebuild that omits it keeps the value you set).
+  Past that limit the index serves what it has rather than hiding a
+  corpus-sized rebuild inside your query, and `build_text_index` again is the
+  route back. `SHOW INDEXES` / `db.indexes()` gained two columns for this —
+  `stale` and `delta`, null on index kinds that are maintained on every write.
+  Recording a write is a node-slot comparison, so bulk ingest into an indexed
+  graph runs at the speed it would without one, ingest of an unrelated node
+  type does not make an index look stale, and a graph with no text index pays
+  a single branch. Deletion is not staleness: it prunes the deleted node's
+  document immediately, because the freed node slot is handed to the next node
+  created and an orphaned document would be inherited by it — and a *rolled
+  back* delete marks the slot so the next catch-up restores the document.
 
 - **MCP server operators can let queries use the engine's parallel runtime**,
   via `--parallel` or `extensions.parallel: true` in the manifest (either

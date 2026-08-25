@@ -398,7 +398,12 @@ pub struct DirGraph {
     /// Lexical (BM25) text indexes: (node_type, property) -> TextIndexStore.
     /// Opt-in, built explicitly via `build_text_index`, and heap-resident like
     /// the embedding stores beside them — see [`crate::graph::text_indexes`]
-    /// for the slot convention and the invalidation rules.
+    /// for the slot convention and the invalidation rules, and
+    /// [`crate::graph::index_freshness`] for how a store catches up with writes
+    /// that landed after its build.
+    ///
+    /// Parked by `rollback::swap_data_scale` for the same reason `embeddings`
+    /// is: it is corpus-sized, so a statement checkpoint must not clone it.
     #[serde(skip)]
     pub text_indexes: HashMap<(String, String), crate::graph::text_indexes::TextIndexStore>,
     /// Timeseries configuration per node type: type_name → TimeseriesConfig.

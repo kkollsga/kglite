@@ -60,12 +60,16 @@ fn prune_doomed_embeddings(graph: &mut DirGraph, node_idx: NodeIndex) {
 /// type, of any content — scores as the deleted one's text. That is a wrong
 /// answer, so the prune is unconditional.
 ///
-/// A rolled-back delete therefore leaves the node unindexed rather than
-/// restored. That is the *safe* direction of the two: an unindexed row scores
-/// as absent, which is exactly what a node created after the build does, and
-/// what an explicit rebuild fixes. Restoring the document would need its text
-/// re-tokenized, which the graph can do at rebuild time and the journal cannot
-/// do at all without carrying a second copy of every deleted document.
+/// A rolled-back delete would therefore leave the node restored and its
+/// document gone, so the prune journals `UndoEntry::TextDocPruned` — which
+/// carries no pre-image and instead marks the slot for the next refresh to
+/// re-read. Deriving the document again from the text the rollback restores is
+/// both cheaper than keeping a second copy of every deleted document and
+/// exactly what a rebuild would produce.
+///
+/// The journal only survives a *reversal*: a committed delete discards it, so
+/// deleting a million nodes prunes a million documents and leaves the index
+/// with an empty dirty set. Deletion is not staleness.
 ///
 /// Costs one hash probe per index, and indexes are per `(node_type, property)`
 /// — a handful, independent of graph size. The `is_empty` guard keeps the
@@ -74,8 +78,25 @@ fn prune_doomed_text_docs(graph: &mut DirGraph, node_idx: NodeIndex) {
     if graph.text_indexes.is_empty() {
         return;
     }
-    for store in graph.text_indexes.values_mut() {
-        store.remove_node(node_idx);
+    // Outside a statement window there is nothing to reverse, so the prune
+    // stays what it was: no key clones, no journal vector, on the path a
+    // million-node delete takes.
+    if graph.graph.undo_journal_mut().is_none() {
+        for store in graph.text_indexes.values_mut() {
+            store.remove_node(node_idx);
+        }
+        return;
+    }
+    let pruned: Vec<(String, String)> = graph
+        .text_indexes
+        .iter_mut()
+        .filter_map(|(key, store)| store.remove_node(node_idx).then(|| key.clone()))
+        .collect();
+    let Some(journal) = graph.graph.undo_journal_mut() else {
+        return;
+    };
+    for store_key in pruned {
+        journal.note_text_doc_pruned(store_key, node_idx.index());
     }
 }
 

@@ -227,8 +227,12 @@ def test_show_indexes_columns_match_db_indexes(graph) -> None:
         "labelsOrTypes",
         "properties",
         "state",
+        "stale",
+        "delta",
     ]
-    call = graph.cypher("CALL db.indexes() YIELD name, type, entityType, labelsOrTypes, properties, state")
+    call = graph.cypher(
+        "CALL db.indexes() YIELD name, type, entityType, labelsOrTypes, properties, state, stale, delta"
+    )
     assert show.to_list() == call.to_list()
 
 

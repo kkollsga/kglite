@@ -479,17 +479,25 @@ impl KnowledgeGraph {
     }
 
     /// Build a BM25 lexical index over a node type's string property.
-    #[pyo3(signature = (node_type, property))]
+    #[pyo3(signature = (node_type, property, auto_refresh_limit = None))]
     fn build_text_index(
         &mut self,
         py: Python<'_>,
         node_type: &str,
         property: &str,
+        auto_refresh_limit: Option<usize>,
     ) -> PyResult<Py<PyAny>> {
         let graph = get_graph_mut(&mut self.inner);
         // Built off the GIL — tokenizing a corpus is pure CPU over graph memory.
         let report = py
-            .detach(|| kglite_core::api::text_indexes::build_text_index(graph, node_type, property))
+            .detach(|| {
+                kglite_core::api::text_indexes::build_text_index(
+                    graph,
+                    node_type,
+                    property,
+                    auto_refresh_limit,
+                )
+            })
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         let result = PyDict::new(py);

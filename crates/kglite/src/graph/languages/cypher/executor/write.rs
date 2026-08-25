@@ -1004,6 +1004,10 @@ fn create_node(
     // zero-count type.
     let bucket_was_new = !graph.type_indices.contains_key(&label);
     graph.type_indices.push_to_type(&label, node_idx);
+    // One of the two creation funnels the freshness watermark cannot see
+    // through on its own: a `CREATE` into a slot petgraph recycled lands
+    // *below* the watermark and would otherwise read as already-indexed.
+    crate::graph::index_freshness::write_hooks::note_node_created(graph, node_idx, &label);
     if let Some(journal) = graph.graph.undo_journal_mut() {
         journal.note_bucket_appended(
             crate::graph::storage::undo::BucketId::NodeType(label.clone()),
@@ -1814,6 +1818,15 @@ fn execute_remove(
                             *node_idx,
                             property,
                             &old_val,
+                        );
+                        // Stripping the indexed property is a content change
+                        // like any other; the next refresh will find no string
+                        // and drop the document.
+                        crate::graph::index_freshness::write_hooks::note_property_written(
+                            graph,
+                            *node_idx,
+                            &node_type_str,
+                            Some(write_field),
                         );
                     }
                     graph.apply_property_write_plan(&constraint_plan, *node_idx);

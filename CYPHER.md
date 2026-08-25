@@ -1693,7 +1693,7 @@ sidebars; `SHOW PROCEDURES` feeds autocomplete.
 |-----------|---------------|---------|
 | `CALL db.labels()` | `label` | One row per node-type ("label") in the graph, sorted alphabetically |
 | `CALL db.relationshipTypes()` | `relationshipType` | One row per connection-type ("relationship type") in the graph, sorted alphabetically |
-| `CALL db.indexes()` | `name`, `type`, `entityType`, `labelsOrTypes`, `properties`, `state` | One row per index installed on the graph, sorted by `name`. `SHOW INDEXES` returns the same rows — see [Cypher index DDL](#cypher-index-ddl) |
+| `CALL db.indexes()` | `name`, `type`, `entityType`, `labelsOrTypes`, `properties`, `state`, `stale`, `delta` | One row per index installed on the graph, sorted by `name`. `stale`/`delta` are non-null only on `FULLTEXT` rows. `SHOW INDEXES` returns the same rows — see [Cypher index DDL](#cypher-index-ddl) |
 | `CALL db.constraints()` | `name`, `type`, `entityType`, `labelsOrTypes`, `properties`, `propertyType` | One row per declared constraint, sorted by `name`. `SHOW CONSTRAINTS` returns the same rows — see [Cypher constraint DDL](#cypher-constraint-ddl) |
 | `CALL db.propertyKeys()` | `propertyKey` | One row per declared property name (node + relationship), sorted alphabetically |
 | `CALL db.schema()` | `nodeType`, `properties` | One row per node-type with its sorted list of property names — the in-language counterpart of Python `describe()` |
@@ -2732,6 +2732,14 @@ A read, so it works on a read-only graph. Returns the same rows and columns as
 | `labelsOrTypes` | single-element list holding the node type |
 | `properties` | indexed property names, sorted for a composite |
 | `state` | always `ONLINE` — KGLite builds indexes atomically |
+| `stale` | whether the index is behind the graph. `null` on `PROPERTY` / `RANGE` rows, which are maintained on every write and have no staleness to report |
+| `delta` | how many documents the index would re-read to catch up — an upper bound. `null` alongside a `null` `stale` |
+
+`stale` / `delta` are KGLite-specific and describe the BM25 catch-up contract:
+a text index does not follow writes eagerly, it records that they happened and
+folds them in at query entry while the delta stays under the index's
+`auto_refresh_limit`. A `delta` above that limit is the signal to rebuild with
+`build_text_index(...)`.
 
 Neo4j 5 also returns `id`, `populationPercent`, `indexProvider`,
 `owningConstraint`, `lastRead`, and `readCount`. KGLite has no equivalent

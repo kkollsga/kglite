@@ -73,68 +73,9 @@ use crate::graph::constraints::{
 };
 use crate::graph::dir_graph::DirGraph;
 use crate::graph::introspection::schema_overview::{
-    collect_constraints_structured, collect_indexes_structured, ConstraintInfo, IndexInfo,
+    collect_constraints_structured, collect_indexes_structured, ConstraintInfo,
 };
 use crate::graph::property_types::DeclaredType;
-
-/// Columns `SHOW INDEXES` projects, in order. Identical to `CALL db.indexes()`
-/// — one collector, one row shape.
-///
-/// Neo4j 5's `SHOW INDEXES` also returns `id`, `populationPercent`,
-/// `indexProvider`, `owningConstraint`, `lastRead`, and `readCount`. KGLite has
-/// no equivalent state for any of them (indexes are built atomically, have no
-/// provider, and carry no usage counters), so they are omitted rather than
-/// filled with invented values. Documented in CYPHER.md.
-pub(crate) const SHOW_INDEXES_COLUMNS: &[&str] = &[
-    "name",
-    "type",
-    "entityType",
-    "labelsOrTypes",
-    "properties",
-    "state",
-];
-
-/// `SHOW INDEXES` — a read, over the shared collector named above.
-pub(crate) fn show_indexes_result_set(graph: &DirGraph) -> ResultSet {
-    let mut out = ResultSet::new();
-    out.rows = collect_indexes_structured(graph)
-        .iter()
-        .map(index_info_to_row)
-        .collect();
-    out.columns = SHOW_INDEXES_COLUMNS.iter().map(|c| c.to_string()).collect();
-    out
-}
-
-fn index_info_to_row(info: &IndexInfo) -> ResultRow {
-    let mut row = ResultRow::new();
-    row.projected
-        .insert("name".to_string(), Value::String(info.name.clone()));
-    row.projected.insert(
-        "type".to_string(),
-        Value::String(info.kind.neo4j_type().to_string()),
-    );
-    row.projected.insert(
-        "entityType".to_string(),
-        Value::String(info.entity_type.to_string()),
-    );
-    row.projected.insert(
-        "labelsOrTypes".to_string(),
-        Value::List(
-            info.labels_or_types
-                .iter()
-                .cloned()
-                .map(Value::String)
-                .collect(),
-        ),
-    );
-    row.projected.insert(
-        "properties".to_string(),
-        Value::List(info.properties.iter().cloned().map(Value::String).collect()),
-    );
-    row.projected
-        .insert("state".to_string(), Value::String(info.state.to_string()));
-    row
-}
 
 /// The read/mutation split for schema commands lives here, next to both
 /// implementations, so the engine-routing arm in `executor/mod.rs` stays a single
@@ -303,7 +244,7 @@ pub(crate) fn execute_schema_read(
     command: &SchemaCommand,
 ) -> Result<ResultSet, String> {
     match command {
-        SchemaCommand::ShowIndexes => Ok(show_indexes_result_set(graph)),
+        SchemaCommand::ShowIndexes => Ok(super::show_indexes::show_indexes_result_set(graph)),
         SchemaCommand::ShowProcedures { yield_items } => show_procedures_result_set(yield_items),
         SchemaCommand::ShowFunctions { yield_items } => show_functions_result_set(yield_items),
         SchemaCommand::Constraint(ConstraintCommand::Show) => {
@@ -1580,7 +1521,10 @@ mod tests {
         let params = HashMap::new();
         let executor = super::super::CypherExecutor::with_params(&graph, &params, None);
         let result = executor.execute(&parsed).unwrap();
-        assert_eq!(result.columns, SHOW_INDEXES_COLUMNS);
+        assert_eq!(
+            result.columns,
+            super::super::show_indexes::SHOW_INDEXES_COLUMNS
+        );
         assert_eq!(result.rows.len(), 1);
         let cell = |column: &str| {
             let idx = result.columns.iter().position(|c| c == column).unwrap();

@@ -267,6 +267,14 @@ impl BatchProcessor {
             graph
                 .type_indices
                 .push_to_type(&creation.node_type, node_idx);
+            // The bulk creation funnel's half of the recycled-slot check. Above
+            // the watermark this is one `u32` comparison per row, which is what
+            // keeps `add_nodes` ingest indifferent to an index existing.
+            crate::graph::index_freshness::write_hooks::note_node_created(
+                graph,
+                node_idx,
+                &creation.node_type,
+            );
             if let Some(journal) = graph.graph.undo_journal_mut() {
                 journal.note_bucket_appended(
                     crate::graph::storage::undo::BucketId::NodeType(creation.node_type),
@@ -465,6 +473,7 @@ impl BatchProcessor {
                     update.conflict_mode,
                     provisional_key,
                 );
+                Self::note_bulk_update(graph, update.node_idx);
                 stats.updates += 1;
             }
         }
@@ -533,6 +542,32 @@ impl BatchProcessor {
                 }
             }
         }
+    }
+
+    /// Tell the freshness-tracking indexes that an upsert rewrote this row.
+    ///
+    /// Field-blind on purpose: an upsert replaces a whole property map (and may
+    /// replace the title), and decomposing that per row would put a per-key
+    /// interner resolve on the ingest path to answer a question whose wrong
+    /// answer is only ever "refresh one document you did not have to". The
+    /// over-approximation contract is stated in `index_freshness`.
+    ///
+    /// The disk branch above skips this: `build_text_index` refuses a disk
+    /// graph, so a disk graph has no index to notify.
+    fn note_bulk_update(graph: &mut DirGraph, node_idx: NodeIndex) {
+        if !crate::graph::index_freshness::write_hooks::any_tracked_index(graph) {
+            return;
+        }
+        let Some(node_type) = graph
+            .graph
+            .node_type_of(node_idx)
+            .map(|key| graph.interner.resolve(key).to_string())
+        else {
+            return;
+        };
+        crate::graph::index_freshness::write_hooks::note_property_written(
+            graph, node_idx, &node_type, None,
+        );
     }
 
     /// Write one pending update through the backend — the memory/mapped twin

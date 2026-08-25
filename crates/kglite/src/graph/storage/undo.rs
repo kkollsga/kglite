@@ -239,6 +239,23 @@ pub enum UndoEntry {
         node: usize,
         prior: Box<RemovedEmbedding>,
     },
+    /// A node's BM25 document was pruned from `DirGraph::text_indexes` with the
+    /// node. Undo marks the slot for re-reading.
+    ///
+    /// **It carries no pre-image, deliberately.** A text document is derived
+    /// state — tokenized from a property the rollback itself restores — so the
+    /// cheapest faithful undo is to say "re-read this slot", not to keep a
+    /// second copy of every deleted document in the journal. The next refresh
+    /// tokenizes the restored text and lands exactly what a rebuild would.
+    ///
+    /// Marking is also why a *committed* delete costs the index nothing: the
+    /// journal is discarded on commit, so only a reversal reaches here, and
+    /// deleting a million nodes leaves a million pruned documents and an empty
+    /// dirty set.
+    TextDocPruned {
+        store_key: (String, String),
+        node: usize,
+    },
     /// One cell of a type's master `ColumnStore` is about to be overwritten.
     /// `prior` is the value that cell held before the statement's write; undo
     /// writes it back.
@@ -648,6 +665,12 @@ impl UndoJournal {
             node,
             prior: Box::new(prior),
         });
+    }
+
+    #[inline]
+    pub fn note_text_doc_pruned(&mut self, store_key: (String, String), node: usize) {
+        self.entries
+            .push(UndoEntry::TextDocPruned { store_key, node });
     }
 }
 

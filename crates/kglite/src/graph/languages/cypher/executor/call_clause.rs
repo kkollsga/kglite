@@ -1683,6 +1683,10 @@ pub(super) fn indexes_to_rows(
                     Value::List(info.properties.iter().cloned().map(Value::String).collect())
                 }
                 "state" => Value::String(info.state.to_string()),
+                "stale" => info.stale.map_or(Value::Null, Value::Boolean),
+                "delta" => info
+                    .delta
+                    .map_or(Value::Null, |delta| Value::Int64(delta as i64)),
                 _ => continue, // unreachable in practice (validator gate)
             };
             row.projected.insert(alias.to_string(), val);

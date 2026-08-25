@@ -390,6 +390,17 @@ fn finish_node_property_write(
         );
     }
 
+    // `write_field` is the alias-resolved spelling the value actually landed
+    // in, which is exactly what a text index records for itself — so a `SET`
+    // of some other property of an indexed type discriminates to a no-op
+    // rather than dirtying the row.
+    crate::graph::index_freshness::write_hooks::note_property_written(
+        graph,
+        write.node_idx,
+        write.node_type,
+        Some(write.write_field),
+    );
+
     graph.apply_property_write_plan(write.constraint_plan, write.node_idx);
 
     if let Some(value_type) = write.owed.record_metadata {

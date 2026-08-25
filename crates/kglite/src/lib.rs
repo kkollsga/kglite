@@ -300,13 +300,22 @@ pub mod api {
     /// `prepare_query` / `score` / `top_k` are the direct-call companions for a
     /// Rust embedder that would rather not go through Cypher; `PreparedQuery`
     /// is exported because those signatures name it (with `QueryTerm` /
-    /// `TermId`, which its own accessor names in turn).
+    /// `TermId`, which its own accessor names in turn), and `TextIndexRead`
+    /// because a per-row scoring loop must hold one view across
+    /// prepare-and-score rather than re-locking per row.
+    ///
+    /// `refresh_text_index` is the catch-up driver: a query that is about to
+    /// read an index asks `TextIndexStore::can_auto_refresh` whether the
+    /// outstanding delta is small enough to fold in, and calls this if it is.
+    /// It takes `&DirGraph` — catching up happens on the read path, and the
+    /// index is behind its own lock for exactly that reason.
     pub mod text_indexes {
         pub use crate::graph::algorithms::text_index::bm25::{PreparedQuery, QueryTerm};
         pub use crate::graph::algorithms::text_index::TermId;
+        pub use crate::graph::index_freshness::DEFAULT_AUTO_REFRESH_LIMIT;
         pub use crate::graph::text_indexes::{
             build_text_index, drop_text_index, has_text_index, index_key, list_text_indexes,
-            TextIndexReport, TextIndexStore,
+            refresh_text_index, TextIndexRead, TextIndexReport, TextIndexStore,
         };
     }
 
