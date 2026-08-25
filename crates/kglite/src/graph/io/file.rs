@@ -254,6 +254,15 @@ pub(crate) struct FileMetadata {
     /// "core" vs "supporting" in describe() output.
     #[serde(default)]
     parent_types: HashMap<String, String>,
+    /// The declared semantic layer (`graph/ontology.rs`). Additive: absent
+    /// in older files → empty store; an ontology-free graph writes
+    /// byte-identical output (the `constraint_names` posture above, which
+    /// keeps the `test_phase4_parity` golden digest stable).
+    #[serde(
+        default,
+        skip_serializing_if = "crate::graph::ontology::OntologyStore::is_empty"
+    )]
+    ontology: crate::graph::ontology::OntologyStore,
     /// Graph-level instructions/briefing per channel (rendered at the top of
     /// describe()). Additive — old files default to empty.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -407,6 +416,7 @@ impl FileMetadata {
             auto_vacuum_threshold: graph.auto_vacuum_threshold,
             storage_mode: recorded_storage_mode_tag(graph),
             parent_types: (*graph.parent_types).clone(),
+            ontology: (*graph.ontology).clone(),
             graph_instructions: graph.graph_instructions.clone(),
             user_schema_version: graph.user_schema_version,
             checkpoint_lsn: graph.checkpoint_lsn,
@@ -477,6 +487,7 @@ impl FileMetadata {
         graph.title_field_aliases = Arc::new(self.title_field_aliases);
         graph.auto_vacuum_threshold = self.auto_vacuum_threshold;
         graph.parent_types = Arc::new(self.parent_types);
+        graph.ontology = Arc::new(self.ontology);
         graph.graph_instructions = self.graph_instructions;
         graph.user_schema_version = self.user_schema_version;
         graph.checkpoint_lsn = self.checkpoint_lsn;

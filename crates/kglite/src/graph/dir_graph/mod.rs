@@ -294,6 +294,16 @@ pub struct DirGraph {
     /// through [`DirGraph::parent_types_mut`].
     #[serde(default)]
     pub parent_types: Arc<HashMap<String, String>>,
+    /// The declared semantic layer (`graph/ontology.rs`) — an `is_a` forest
+    /// plus relationship semantics. Deliberately independent of
+    /// `parent_types` (semantic "kind of" vs presentation ownership; see the
+    /// ontology module doc). `Arc`-shared like `parent_types` so forks and
+    /// the rollback shell share it O(1). Persisted via `FileMetadata`.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::graph::ontology::arc_store_is_empty"
+    )]
+    pub ontology: Arc<crate::graph::ontology::OntologyStore>,
     /// Free-text instructions/briefing rendered verbatim at the top of
     /// `describe()` so an agent opening the graph cold sees how to use it.
     /// Keyed by channel; the empty string `""` is the default channel (the
@@ -798,6 +808,7 @@ impl DirGraph {
             id_field_aliases: Arc::default(),
             title_field_aliases: Arc::default(),
             parent_types: Arc::new(HashMap::new()),
+            ontology: Arc::default(),
             graph_instructions: HashMap::new(),
             user_schema_version: 0,
             checkpoint_lsn: 0,
@@ -864,6 +875,7 @@ impl DirGraph {
             id_field_aliases: Arc::default(),
             title_field_aliases: Arc::default(),
             parent_types: Arc::new(HashMap::new()),
+            ontology: Arc::default(),
             graph_instructions: HashMap::new(),
             user_schema_version: 0,
             checkpoint_lsn: 0,

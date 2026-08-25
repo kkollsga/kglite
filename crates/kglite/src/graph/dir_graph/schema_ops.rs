@@ -230,6 +230,47 @@ impl DirGraph {
         }
     }
 
+    /// Install the declared semantic layer, replacing any existing store.
+    ///
+    /// Structural validation (forest, cap, unknown keys) already ran in
+    /// `ontology_from_value`; this adds the graph-aware checks the parser
+    /// cannot do:
+    /// - an **abstract** class whose name is a live or schema-declared
+    ///   primary type is an error (`MATCH (n:X)` must keep one meaning);
+    /// - a **concrete** class naming no live primary type is a warning
+    ///   (returned, not printed — callers own the channel).
+    pub fn define_ontology(
+        &mut self,
+        store: crate::graph::ontology::OntologyStore,
+    ) -> Result<Vec<String>, String> {
+        store.validate()?;
+        let mut warnings = Vec::new();
+        for (name, decl) in &store.classes {
+            let is_primary = self.type_indices.contains_key(name)
+                || self
+                    .schema_definition
+                    .as_ref()
+                    .is_some_and(|schema| schema.node_schemas.contains_key(name));
+            if decl.is_abstract && is_primary {
+                return Err(format!(
+                    "ontology class '{name}' is declared abstract, but '{name}' is a live                      node type — a class name and a node type share one namespace, and an                      abstract class may not shadow a concrete type"
+                ));
+            }
+            if !decl.is_abstract && !is_primary {
+                warnings.push(format!(
+                    "ontology class '{name}' is concrete but no node type of that name                      exists (declare it abstract, or load its nodes)"
+                ));
+            }
+        }
+        self.ontology = std::sync::Arc::new(store);
+        Ok(warnings)
+    }
+
+    /// Remove the declared semantic layer entirely.
+    pub fn clear_ontology(&mut self) {
+        self.ontology = std::sync::Arc::default();
+    }
+
     /// The declared ownership layer (`"managed"`/`"runtime"`) for `node_type`,
     /// if set via `define_schema`. Drives the managed-reload guard.
     pub fn layer_for(&self, node_type: &str) -> Option<&str> {

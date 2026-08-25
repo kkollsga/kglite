@@ -77,6 +77,14 @@ pub mod api {
         infer_selection_node_type, is_canonical_node_column, KnowledgeGraph,
         CANONICAL_NODE_COLUMNS,
     };
+    /// The declared semantic layer (classes with an `is_a` forest +
+    /// relationship semantics) and its one external dialect — same
+    /// chokepoint posture as `schema_from_value`: Python dicts and C-ABI
+    /// JSON parse through the identical grammar. Annotations, not axioms.
+    pub use crate::graph::ontology::{
+        ontology_from_json, ontology_from_value, CardinalityDecl, ClassDecl, Enforcement,
+        OntologyStore, RelationshipDecl, MAX_ONTOLOGY_CLASSES,
+    };
     /// Core schema data types — the node and edge records (`NodeData` /
     /// `EdgeData`), the projected `NodeInfo`, geo/temporal validity configs
     /// (`SpatialConfig` / `TemporalConfig`), and the declarative

@@ -26,6 +26,7 @@ pub mod introspection;
 pub mod io;
 pub mod languages;
 pub mod mutation;
+pub mod ontology;
 pub(crate) mod parallel;
 pub mod property_types;
 pub mod schema;

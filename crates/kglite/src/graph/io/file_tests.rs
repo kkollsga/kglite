@@ -42,6 +42,57 @@ mod atomic_save_tests {
     }
 
     #[test]
+    fn ontology_store_roundtrips_and_absent_when_empty() {
+        use crate::graph::ontology::ontology_from_json;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("g.kgl");
+        let mut g = DirGraph::new();
+        fill_docs(&mut g, 3);
+        let store = ontology_from_json(
+            r#"{"classes": {"Doc": {"description": "d"},
+                            "Record": {"abstract": true}},
+                "relationships": {"CITES": {"domain": "Record", "range": "Record",
+                                             "enforcement": "warn"}}}"#,
+        )
+        .unwrap();
+        let warnings = g.define_ontology(store.clone()).unwrap();
+        // fill_docs creates only Doc nodes; Record is abstract (no warning),
+        // Doc is concrete-and-live (no warning).
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let g = ready_for_save(g);
+        write_kgl(&g, path.to_str().unwrap()).unwrap();
+        let loaded = load_file(path.to_str().unwrap()).unwrap();
+        assert_eq!(*loaded.ontology, store);
+
+        // Ontology-free graphs must not gain a metadata key (golden-digest
+        // posture): byte-identical saves with and without the field's code.
+        let plain = tiny_graph(3);
+        let mut bytes_a: Vec<u8> = Vec::new();
+        write_kgl_to(&plain, &mut bytes_a).unwrap();
+        assert!(!String::from_utf8_lossy(&bytes_a).contains("ontology"));
+    }
+
+    #[test]
+    fn define_ontology_graph_checks() {
+        use crate::graph::ontology::ontology_from_json;
+
+        let mut g = DirGraph::new();
+        fill_docs(&mut g, 2);
+        // Abstract class shadowing the live primary type "Doc" — refused.
+        let store = ontology_from_json(r#"{"classes": {"Doc": {"abstract": true}}}"#).unwrap();
+        let err = g.define_ontology(store).unwrap_err();
+        assert!(err.contains("abstract"), "{err}");
+        // Concrete class with no live type — warning, installed anyway.
+        let store = ontology_from_json(r#"{"classes": {"Ghost": {}}}"#).unwrap();
+        let warnings = g.define_ontology(store).unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(!g.ontology.is_empty());
+        g.clear_ontology();
+        assert!(g.ontology.is_empty());
+    }
+
+    #[test]
     fn atomic_save_roundtrips() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("g.kgl");
