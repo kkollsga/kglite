@@ -194,6 +194,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Both messages predate the BM25 index and claimed ranked text retrieval was
   only available through embeddings, which is no longer true.
 
+- **`BENCHMARKS.md` is regenerated from one fresh all-backends capture, and
+  its fluent column no longer advertises capability gaps kglite does not
+  have.** The benchmark's fluent adapter raised `Skip` for twelve of the 26
+  sub-benchmarks; eight were expressible on the fluent surface all along, so
+  the published table rendered Pathfinding, Vector search, Geospatial and part
+  of Multi-type queries and Graph algorithms as `—` for "kglite (fluent)" —
+  the mark the table itself defines as a real capability gap — and reported
+  its coverage as 14/26. `shortest_path()`, `match_pattern()`,
+  `degree_centrality(normalized=False, connection_types=...)`,
+  `statistics(group_by=...)`, a range `where()` and `vector_search()` cover
+  those eight at digest-identical results to the Cypher column; coverage is
+  22/26. The four remaining skips name what actually differs — no fluent
+  edge-scan primitive, `traverse()` returning a node set rather than path
+  rows, and `connected_components()` / `louvain_communities()` taking no
+  node-type scope, so they answer about a different universe. The fluent
+  Mutations cell measures less work than its siblings (the Python surface has
+  no delete outside Cypher); that substitution is now stated in the suite's
+  fairness notes rather than left to be read off a timing. The "kglite (disk)"
+  Mutations cell ran the bulk loaders because a comment claimed Cypher
+  `CREATE` is unsupported on disk-backed graphs — it is supported, so that
+  cell now runs the same statements as every other Cypher column. All eleven
+  columns, Neo4j included, come from a single invocation on one machine, so
+  the table no longer mixes a fresh capture with a 0.11.2-era one.
+
 ### Fixed
 
 - **A `LIMIT` on an aggregating `RETURN`/`WITH` grouped by a node property

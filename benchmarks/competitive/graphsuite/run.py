@@ -1,5 +1,5 @@
 """graphsuite runner — build the synthetic graph, benchmark every selected
-backend across all 15 groups, append results, print the comparison matrix.
+backend across all 26 groups, append results, print the comparison matrix.
 
 Usage (from repo root)::
 

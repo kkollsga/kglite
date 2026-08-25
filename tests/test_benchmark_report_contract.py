@@ -17,7 +17,11 @@ REPORT = REPO_ROOT / "BENCHMARKS.md"
 def test_historical_capture_records_known_provenance_and_unknowns() -> None:
     data = json.loads(RESULTS.read_text(encoding="utf-8"))
     assert data["schema_version"] == results.SCHEMA_VERSION
-    assert data["harness"] == {"name": "graphsuite", "version": 1}
+    # `results.save()` stamps the *writing* harness's version, so pinning a
+    # literal here fails on the first rerun after a HARNESS_VERSION bump (it
+    # did, on the 0.16.10 recapture). What is contractual is that the datafile
+    # was written by this harness, not that it was written by version 1.
+    assert data["harness"] == {"name": "graphsuite", "version": results.HARNESS_VERSION}
     historical = data["historical_capture"]
     assert historical["origin"] == "manual"
     assert historical["dataset_seed"] == 1234

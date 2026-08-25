@@ -1,6 +1,6 @@
 # graphsuite — multi-library graph benchmark
 
-A reproducible, extensible benchmark that runs **15 workload groups**
+A reproducible, extensible benchmark that runs **26 workload groups**
 against many graph backends on a single synthetic knowledge graph, and
 accumulates results in a datafile you can keep adding libraries and runs
 to over time.
@@ -24,16 +24,23 @@ to over time.
 The five kglite rows exercise large parts of kglite's surface: bulk
 load, the Cypher planner/executor (filter, aggregation, variable-length
 traversal, `shortestPath`, cyclic pattern match, mutations), the fluent
-builder (`select/where/traverse/statistics`), all three storage modes,
-and the Bolt server.
+surface (`select/where/traverse/statistics`, plus `shortest_path`,
+`match_pattern`, `degree_centrality` and `vector_search`), all three
+storage modes, and the Bolt server.
 
-## The 15 groups
+## The 26 groups
 
-`build`, `node_scan`, `point_lookup`, `property_filter`,
-`group_aggregation`, `one_hop`, `two_hop`, `three_hop`,
-`filtered_traversal`, `deep_traversal` (DEPENDS_ON closure),
-`shortest_path`, `pattern_match` (Person→Company→Project→Person
-triangle), `degree_topk`, `connected_components`, `mutations`.
+`build`, `node_scan`, `point_lookup`, `edge_scan`, `property_filter`,
+`range_filter`, `group_aggregation`, `year_aggregation`, `one_hop`,
+`two_hop`, `three_hop`, `filtered_traversal`, `deep_traversal`
+(DEPENDS_ON closure), `score_filtered_traversal`, `shortest_path`,
+`pattern_match` (Person→Company→Project→Person triangle),
+`industry_aggregation`, `two_step_join`, `degree_topk`,
+`connected_components`, `louvain`, `degree_filter`, `vector_knn`,
+`geo_within`, `bulk_update`, `mutations`.
+
+`base.py`'s `GROUPS` list is the single source of truth for the set and
+its order.
 
 Run `python -m benchmarks.competitive.graphsuite.run --list` for the
 one-line description of each.
@@ -71,11 +78,25 @@ is shared by every backend so all of them run the *same* queries.
   `connected_components`; SQL uses recursive CTEs and joins. Each backend
   is written the way a competent user of *that* tool would write it.
 - **Honest skips.** A backend skips a group it can't express well rather
-  than faking it: kglite/kuzu/neo4j skip `connected_components` (no
-  native WCC); DuckDB skips `shortest_path` + `connected_components`
-  (impractical in pure SQL); rustworkx/igraph skip `pattern_match` (no
-  relational surface); the fluent API skips `shortest_path`,
-  `pattern_match`, `degree_topk`. Skips show as `skip` in the report.
+  than faking it: kùzu/Neo4j skip `connected_components` (no native WCC);
+  DuckDB skips `shortest_path` + `connected_components` (impractical in
+  pure SQL); rustworkx/igraph skip `pattern_match` (no relational
+  surface). The fluent kglite column skips exactly four — `edge_scan`
+  (no scan primitive; `label_pair_counts()` is a cached cardinality
+  snapshot, so timing it would be a fake win), `two_step_join`
+  (`traverse()` returns a node set, not path rows), and
+  `connected_components` / `louvain` (the Python binding takes no
+  node-type scope, so it would answer a different question about a
+  different universe). Skips show as `skip` in the report. A skip is a
+  claim about the surface and is re-derived, not inherited: the four
+  above are what survived the 2026-08-25 re-derivation of twelve.
+- **The fluent `mutations` cell measures less work than the others.**
+  kglite's Python surface has no node/edge delete outside Cypher, so the
+  fluent Mutations cell runs create + connect + update where every Cypher
+  column also runs a `DETACH DELETE`, and it reports the created count
+  rather than the deleted one. Read that one cell as a *substitution*,
+  not a like-for-like time. `mutations` is excluded from the
+  cross-backend result-parity check for the same reason.
 - **Full-dataset build.** The property-graph stores load the entire
   dataset; the algorithm libraries load the subgraphs they operate on.
 - **Deeper hops use smaller seed sets** (200 → 50 → 20) to keep

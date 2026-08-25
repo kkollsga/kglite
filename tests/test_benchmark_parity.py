@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from benchmarks.competitive.graphsuite import canonical
 from benchmarks.competitive.graphsuite import dataset as dm
-from benchmarks.competitive.graphsuite.ad_kglite import KgliteCypher, KgliteDisk, KgliteMapped
+from benchmarks.competitive.graphsuite.ad_kglite import KgliteCypher, KgliteDisk, KgliteFluent, KgliteMapped
 from benchmarks.competitive.graphsuite.base import GROUPS, Skip
 
 
@@ -59,3 +59,44 @@ def test_kglite_storage_mode_result_parity():
                     f"{cls.__name__} diverges from KgliteCypher on group '{gid}' "
                     f"({got[gid]} != {dig}) — kglite storage-mode correctness regression"
                 )
+
+
+# Groups whose fluent form is a same-semantics restatement of the Cypher cell
+# (re-derived and measured 2026-08-25). Anything absent is deliberately out.
+FLUENT_PARITY_GROUPS = (
+    "range_filter",
+    "degree_filter",
+    "degree_topk",
+    "shortest_path",
+    "pattern_match",
+    "industry_aggregation",
+    "geo_within",
+    "vector_knn",
+)
+
+
+def test_fluent_matches_cypher_on_the_groups_it_claims():
+    """Allowlisted fluent-vs-Cypher digest gate — deliberately not the full loop.
+
+    The two surfaces are not required to agree everywhere: the fluent k-hop
+    groups accumulate a `traverse()` walk while Cypher's `[:KNOWS*1..k]` walks
+    a trail, so a seed with a neighbour re-enters its own 2-hop set on one side
+    and not the other. That divergence is intended, documented in the suite
+    README's fairness notes, and reported as INFO rather than an error by
+    `report.render_parity` — folding KgliteFluent into the storage-mode test
+    above wholesale would turn a deliberate difference red.
+
+    What is gated is the list above: every group there was published as a
+    `Skip`, i.e. as a capability gap in BENCHMARKS.md, until it was shown to
+    produce the Cypher column's exact result. This test is what keeps that
+    claim true.
+    """
+    ds = dm.generate("small", 1234)
+    cypher = _group_digests(KgliteCypher, ds)
+    fluent = _group_digests(KgliteFluent, ds)
+    for gid in FLUENT_PARITY_GROUPS:
+        assert gid in fluent, f"KgliteFluent stopped running '{gid}' — the table would republish it as a capability gap"
+        assert fluent[gid] == cypher[gid], (
+            f"KgliteFluent diverges from KgliteCypher on group '{gid}' "
+            f"({fluent[gid]} != {cypher[gid]}) — the benchmark's fluent column would publish a different result"
+        )

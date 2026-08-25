@@ -2,9 +2,9 @@
 
 All three drive the *same* in-memory kglite engine; they differ only in
 the surface used to reach it (Cypher string / fluent builder / Bolt wire
-protocol). Connected-components and PageRank are intentionally skipped —
-kglite is a knowledge-graph engine, not a graph-analytics library, and
-has no native WCC/PageRank primitive (those belong to igraph/rustworkx).
+protocol). Where two surfaces run the same group they must agree exactly —
+tests/test_benchmark_parity.py gates the fluent-vs-Cypher digests, and the
+storage modes against each other.
 """
 
 from __future__ import annotations
@@ -290,8 +290,9 @@ class KgliteCypher(Adapter):
 class KgliteFluent(Adapter):
     """Same engine via the fluent select/where/traverse builder.
 
-    Skips groups the fluent surface cannot express directly (shortest
-    path, multi-edge cyclic pattern match, WCC)."""
+    Covers every group except the four the surface genuinely cannot express
+    at the Cypher column's semantics — see the Skips at the end of the class,
+    each of which names the measured divergence rather than a guess."""
 
     name = "kglite-memory-fluent"
 
@@ -365,6 +366,14 @@ class KgliteFluent(Adapter):
         return frozenset(seen)
 
     def g_mutations(self, ds):
+        # METHODOLOGY — this cell measures LESS work than its sibling columns.
+        # The Python surface has no node/edge delete outside Cypher, so the
+        # fluent Mutations cell is create + connect + update, without the
+        # `DETACH DELETE` every Cypher column also runs; it returns the created
+        # count where they return the deleted count. Not a like-for-like time.
+        # Stated in the suite's fairness notes (README.md) so a reader of the
+        # table hits it there too. Mutations is excluded from result-parity
+        # comparison for this reason (report.render_parity).
         import pandas as pd
 
         off = ds.params["mut_new_base"] + self._mut * 100_000
@@ -402,19 +411,92 @@ class KgliteFluent(Adapter):
         sel.update({"active": True})
         return n
 
-    # explicitly unsupported on the fluent surface (edge_scan / range_filter /
-    # degree_filter fall through to the base-class Skip)
-    def g_degree_topk(self, ds):
-        raise Skip("fluent API has no degree+rank primitive")
+    def g_range_filter(self, ds):
+        lo, hi = SCORE_RANGE
+        return frozenset(self.g.select("Person").where({"score": {">=": lo, "<=": hi}}).ids())
 
+    def g_industry_aggregation(self, ds):
+        stats = self.g.select("Company").statistics("size", group_by="industry")
+        return {ind: (s["count"], s["mean"]) for ind, s in stats.items()}
+
+    def g_geo_within(self, ds):
+        lat0, lat1, lon0, lon1 = GEO_BBOX
+        return frozenset(
+            self.g.select("City")
+            .where({"latitude": {">=": lat0, "<=": lat1}, "longitude": {">=": lon0, "<=": lon1}})
+            .ids()
+        )
+
+    # shortest_path / match_pattern / degree_centrality read the whole graph
+    # regardless of any selection an earlier group left active, so their
+    # results don't depend on where they sit in the group order.
     def g_shortest_path(self, ds):
-        raise Skip("fluent API has no shortestPath")
+        lengths = []
+        for a, b in ds.params["sp_pairs"]:
+            r = self.g.shortest_path("Person", a, "Person", b, connection_types=["KNOWS"])
+            lengths.append(r["length"] if r else None)
+        return tuple(lengths)
 
     def g_pattern_match(self, ds):
-        raise Skip("fluent API cannot express the cyclic triangle pattern")
+        return len(
+            self.g.match_pattern("(p:Person)-[:WORKS_AT]->(c:Company)-[:OWNS]->(pr:Project)<-[:CONTRIBUTES_TO]-(p)")
+        )
+
+    # `normalized=False` is what makes `score` the raw incident-edge count the
+    # Cypher column's `COUNT { (p)-[:KNOWS]-() }` reports; the default (True)
+    # divides by n-1. `degrees()` is the wrong primitive here twice over: it
+    # keys by title (not unique, and it raises on a collision) and takes no
+    # connection_types, so it cannot restrict the count to KNOWS.
+    def g_degree_topk(self, ds):
+        rows = self.g.degree_centrality(normalized=False, connection_types=["KNOWS"], top_k=ds.params["topk"]).to_list()
+        return tuple(r["score"] for r in rows)
+
+    def g_degree_filter(self, ds):
+        rows = self.g.degree_centrality(normalized=False, connection_types=["KNOWS"]).to_list()
+        return sum(1 for r in rows if r["score"] >= DEGREE_MIN)
+
+    def g_vector_knn(self, ds):
+        # Same store and same no-HNSW exact scan as the Cypher column (see
+        # KgliteCypher.g_vector_knn); built once so the reps time the query.
+        # vector_search() takes the *text column* ('embedding'), not the
+        # store name ('embedding_emb') the Cypher `vector_score` call names.
+        if not getattr(self, "_vec_ready", False):
+            embs = {}
+            for r in ds.nodes["Person"]:
+                e = r["embedding"]
+                embs[r["gid"]] = json.loads(e) if isinstance(e, str) else e
+            self.g.set_embeddings("Person", "embedding", embs)
+            self._vec_query = embs[ds.params["seed_persons"][0]]
+            self._vec_ready = True
+        hits = self.g.select("Person").vector_search(
+            "embedding", self._vec_query, top_k=VECTOR_TOPK, exact=True, returning=["id"]
+        )
+        return tuple(h["id"] for h in hits)
+
+    # ---- genuinely inexpressible at the Cypher column's semantics --------
+    # Re-derived against the live surface 2026-08-25: the four below are what
+    # survived. Every other group the class used to skip is implemented above
+    # and digest-identical to KgliteCypher.
+
+    def g_edge_scan(self, ds):
+        raise Skip("no fluent edge-scan primitive; label_pair_counts() is a cached cardinality snapshot, not a scan")
+
+    def g_two_step_join(self, ds):
+        # traverse() returns the deduplicated node set of the final level;
+        # the Cypher cell counts path rows (small scale: 400 vs 9944).
+        raise Skip("traverse() yields a node set, not the multi-type path rows the join counts")
 
     def g_connected_components(self, ds):
-        raise Skip("fluent API can't CALL procedures; use Cypher connected_components")
+        # connected_components() takes neither node_type nor connection_types,
+        # so it unions every type over every edge type: one 2533-node component
+        # at small scale where the Person/KNOWS-scoped Cypher cell reports 2000.
+        raise Skip("connected_components() takes no node-type/edge-type scope; to_subgraph() would time a graph copy")
+
+    def g_louvain(self, ds):
+        # louvain_communities() scopes edges but not nodes, so every non-Person
+        # node enters as a singleton: 537 communities at small scale against the
+        # scoped Cypher cell's 4.
+        raise Skip("louvain_communities() takes no node-type scope; to_subgraph() would time a graph copy")
 
 
 class KgliteBolt(KgliteCypher):
@@ -735,27 +817,3 @@ class KgliteDisk(KgliteCypher):
         import shutil
 
         shutil.rmtree(getattr(self, "_tmpdir", ""), ignore_errors=True)
-
-    def g_mutations(self, ds):
-        # Cypher CREATE is unsupported on disk-backed graphs; the bulk
-        # add_nodes/add_connections loaders are the supported write path.
-        # SET/DELETE via Cypher work as normal.
-        import pandas as pd
-
-        off = ds.params["mut_new_base"] + self._mut * 100_000
-        self._mut += 1
-        n = ds.params["mut_new_count"]
-        df = pd.DataFrame(
-            {
-                "gid": [off + i for i in range(n)],
-                "name": [f"M{off + i}" for i in range(n)],
-                "age": [30 + (i % 40) for i in range(n)],
-            }
-        )
-        self.g.add_nodes(df, "Person", "gid", "name")
-        edf = pd.DataFrame({"src": [off + i for i in range(1, n)], "dst": [off + i - 1 for i in range(1, n)]})
-        self.g.add_connections(edf, "KNOWS", "Person", "src", "Person", "dst")
-        self._q("MATCH (n:Person) WHERE n.id >= $off SET n.age = 99", off=off)
-        dels = [off + i for i in range(0, n, 3)]
-        self._q("MATCH (n:Person) WHERE n.id IN $ids DETACH DELETE n", ids=dels)
-        return len(dels)

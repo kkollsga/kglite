@@ -1,6 +1,6 @@
 """Render BENCHMARKS.md — the public, topic-summed comparison table.
 
-Rolls the 15 fine-grained `graphsuite` groups up into a handful of
+Rolls the 26 fine-grained `graphsuite` groups up into a handful of
 readable *topics* (one summed wall-to-wall time each), per library, from
 the most recent run of each backend at a given dataset signature. This is
 the customer-facing view; `report.py` keeps the fine-grained per-group
@@ -14,7 +14,7 @@ import statistics
 from .report import latest_per_library
 from .results import load
 
-# 15 groups → topics (summed wall time per topic). Order is the story:
+# 26 groups → topics (summed wall time per topic). Order is the story:
 # load → read → analytics → traversal → pathfinding → algorithms → write.
 TOPICS: list[tuple[str, list[str]]] = [
     ("Bulk load", ["build"]),
