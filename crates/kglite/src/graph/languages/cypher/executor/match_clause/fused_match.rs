@@ -1834,10 +1834,11 @@ impl<'a> CypherExecutor<'a> {
             // aggregation out to ~4.5 s. Sequential access is bound by
             // memory bandwidth (~5 ms for 250 MB) and restores the
             // expected ~2× scaling from 500 M → 1 B.
-            use crate::graph::storage::backend::GraphBackend;
-            let disk = match &self.graph.graph {
-                GraphBackend::Disk(dg) => dg.as_ref(),
-                _ => return Ok(None),
+            // `as_disk` looks *through* the write-capture wrapper that
+            // `durable=True` / `cdc::enable` install; a bare `Disk` match
+            // bailed this whole fast path on every such disk graph.
+            let Some(disk) = self.graph.graph.as_disk() else {
+                return Ok(None);
             };
             let conn_u64 = conn_key.as_u64();
             let mut counts: std::collections::HashMap<u32, i64> = std::collections::HashMap::new();

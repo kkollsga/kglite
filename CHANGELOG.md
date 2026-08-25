@@ -67,6 +67,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a schema install withdraws only what the schema declared and `cu` keeps
   reporting as `UNIQUENESS` until `DROP CONSTRAINT` withdraws it. A key with no
   DDL declaration behind it is withdrawn by the schema as before.
+- **A disk graph opened durably (Rust `durability::open_log`) took the memory
+  code path for type-connectivity statistics and bailed the fused typed-scan
+  aggregate**, because both routed on a bare `GraphBackend::Disk` match rather
+  than through the write-capture-transparent `as_disk()`; results were
+  unchanged, the disk fast paths were not.
 
 ## [0.16.9] - 2026-08-23
 

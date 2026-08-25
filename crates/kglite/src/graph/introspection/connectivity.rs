@@ -2,6 +2,7 @@
 //! connect to which, via which connection type.
 
 use crate::graph::schema::{ConnectivityTriple, DirGraph, GraphBackend, InternedKey};
+use crate::graph::storage::disk::graph::DiskGraph;
 use crate::graph::storage::GraphRead;
 use std::collections::{HashMap, HashSet};
 
@@ -20,9 +21,9 @@ type CountMap = HashMap<(InternedKey, InternedKey, InternedKey), usize>;
 pub fn compute_type_connectivity(graph: &DirGraph) -> Vec<ConnectivityTriple> {
     let backend = &graph.graph;
 
-    let counts: CountMap = match backend {
-        GraphBackend::Disk(dg) => compute_disk_parallel(dg),
-        _ => compute_serial(backend),
+    let counts: CountMap = match disk_scan_target(backend) {
+        Some(dg) => compute_disk_parallel(dg),
+        None => compute_serial(backend),
     };
 
     let mut triples: Vec<ConnectivityTriple> = counts
@@ -38,12 +39,25 @@ pub fn compute_type_connectivity(graph: &DirGraph) -> Vec<ConnectivityTriple> {
     triples
 }
 
+/// The disk graph [`compute_type_connectivity`] will Rayon-scan, or `None`
+/// for the serial path. Named because the routing decision is the only thing
+/// a test can observe here — both paths produce identical counts, so nothing
+/// in the result distinguishes them.
+///
+/// Goes through `GraphBackend::as_disk`, which looks *through* the
+/// write-capture wrapper that `durable=True` and `cdc::enable` install: a bare
+/// `GraphBackend::Disk` match answers `None` for every such graph and silently
+/// forfeits the parallel scan on exactly the billion-edge graphs that need it.
+fn disk_scan_target(backend: &GraphBackend) -> Option<&DiskGraph> {
+    backend.as_disk()
+}
+
 /// Disk-backend fast path: shard the edge range, scan each chunk in
 /// parallel with per-shard HashMaps, merge serially at the end.
 /// Mirrors `DiskGraph::build_peer_count_histogram` (same chunking +
 /// `advise_sequential` pattern). On Wikidata-scale graphs this cuts
 /// `rebuild_caches` from 200+ s to tens of seconds.
-fn compute_disk_parallel(dg: &crate::graph::storage::disk::graph::DiskGraph) -> CountMap {
+fn compute_disk_parallel(dg: &DiskGraph) -> CountMap {
     use crate::graph::storage::disk::csr::TOMBSTONE_EDGE;
     use petgraph::graph::NodeIndex;
     use rayon::prelude::*;
@@ -98,7 +112,9 @@ fn compute_disk_parallel(dg: &crate::graph::storage::disk::graph::DiskGraph) -> 
     combined
 }
 
-/// Single-threaded fallback for Memory / Mapped / Recording backends.
+/// Single-threaded fallback for every non-disk backend — including a
+/// `Recording` wrapper over one; a `Recording` over a *disk* graph takes the
+/// parallel path (see [`disk_scan_target`]).
 /// petgraph's `edge_references` isn't trivially Rayon-parallel and
 /// these backends operate at scales (thousands to low-millions of
 /// edges) where threading overhead dominates.
@@ -224,4 +240,117 @@ pub fn derive_edge_counts_from_triples(triples: &[ConnectivityTriple]) -> Derive
     }
 
     DerivedEdgeStats { counts, endpoints }
+}
+
+/// Routing regression for the write-capture wrapper: a disk graph opened
+/// `durable=True` (or with `cdc::enable`) is still a disk graph, and must
+/// still take the Rayon scan. The counts are identical either way — the
+/// forfeit is silent, which is why the routing seam is asserted directly.
+#[cfg(test)]
+mod capture_wrapped_routing_tests {
+    use super::*;
+    use crate::datatypes::{DataFrame, Value};
+    use tempfile::TempDir;
+
+    /// Two `Person`s pointing at one `City`, saved as a disk graph.
+    fn disk_graph(dir: &TempDir) -> DirGraph {
+        let people = DataFrame::from_cypher_rows(
+            vec!["id".into(), "title".into()],
+            vec![
+                vec![Value::Int64(1), Value::String("p1".into())],
+                vec![Value::Int64(2), Value::String("p2".into())],
+            ],
+        )
+        .unwrap();
+        let cities = DataFrame::from_cypher_rows(
+            vec!["id".into(), "title".into()],
+            vec![vec![Value::Int64(10), Value::String("Oslo".into())]],
+        )
+        .unwrap();
+        let visits = DataFrame::from_cypher_rows(
+            vec!["src".into(), "tgt".into()],
+            vec![
+                vec![Value::Int64(1), Value::Int64(10)],
+                vec![Value::Int64(2), Value::Int64(10)],
+            ],
+        )
+        .unwrap();
+
+        let mut graph = DirGraph::new();
+        crate::graph::mutation::maintain::add_nodes(
+            &mut graph,
+            people,
+            "Person".to_string(),
+            "id".to_string(),
+            Some("title".to_string()),
+            None,
+        )
+        .unwrap();
+        crate::graph::mutation::maintain::add_nodes(
+            &mut graph,
+            cities,
+            "City".to_string(),
+            "id".to_string(),
+            Some("title".to_string()),
+            None,
+        )
+        .unwrap();
+        crate::graph::mutation::maintain::add_connections(
+            &mut graph,
+            visits,
+            "VISITED".to_string(),
+            "Person".to_string(),
+            "src".to_string(),
+            "City".to_string(),
+            "tgt".to_string(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        graph.enable_disk_mode().unwrap();
+        graph.save_disk(dir.path().to_str().unwrap()).unwrap();
+        graph
+    }
+
+    /// `ConnectivityTriple` is a plain serde record with no `PartialEq`.
+    fn triples_of(graph: &DirGraph) -> Vec<(String, String, String, usize)> {
+        compute_type_connectivity(graph)
+            .into_iter()
+            .map(|t| (t.src, t.conn, t.tgt, t.count))
+            .collect()
+    }
+
+    #[test]
+    fn a_capture_wrapped_disk_graph_still_routes_to_the_parallel_scan() {
+        let dir = TempDir::new().unwrap();
+        let mut graph = disk_graph(&dir);
+        assert!(
+            disk_scan_target(&graph.graph).is_some(),
+            "fixture must be a disk graph before wrapping"
+        );
+        let bare = triples_of(&graph);
+
+        graph.graph.wrap_for_durability();
+        assert!(
+            matches!(&graph.graph, GraphBackend::Recording(_)),
+            "the wrap must have taken effect, or this test asserts nothing"
+        );
+        assert!(
+            disk_scan_target(&graph.graph).is_some(),
+            "a durability-wrapped disk graph must still reach compute_disk_parallel"
+        );
+
+        let wrapped = triples_of(&graph);
+        assert_eq!(bare, wrapped, "both scans must agree on the triples");
+        assert_eq!(
+            wrapped,
+            vec![(
+                "Person".to_string(),
+                "VISITED".to_string(),
+                "City".to_string(),
+                2
+            )]
+        );
+    }
 }

@@ -10,15 +10,13 @@
   "enum_match_whitelist": [
     "dir_graph/mod.rs",
     "dir_graph/disk_persistence.rs",
-    "introspection/connectivity.rs",
     "io/file.rs",
     "io/ntriples/column_builder.rs",
     "io/ntriples/loader.rs",
     "io/ntriples/writer.rs",
     "mutation/subgraph_streaming.rs",
     "storage/mode.rs",
-    "storage/backend.rs",
-    "languages/cypher/executor/match_clause/fused_match.rs"
+    "storage/backend.rs"
   ],
   "safety_roots": [
     "crates/kglite/src/graph"
