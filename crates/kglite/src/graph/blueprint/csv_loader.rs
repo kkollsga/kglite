@@ -161,6 +161,7 @@ pub fn typed_dataframe(
     raw: &RawCsv,
     keep_columns: &[String],
     declared_types: &HashMap<String, String>,
+    rename: &HashMap<String, String>,
 ) -> Result<DataFrame, String> {
     let mut columns: Vec<(String, ColumnType)> = Vec::with_capacity(keep_columns.len());
     let mut data: Vec<ColumnData> = Vec::with_capacity(keep_columns.len());
@@ -172,9 +173,12 @@ pub fn typed_dataframe(
                 name, raw.headers
             )
         })?;
+        // `declared_types` (and `col_index`) stay keyed by the CSV name;
+        // only the output column carries the renamed spelling.
         let col_type = resolve_column_type(raw, src_idx, declared_types.get(name));
         let col_data = build_column_data(raw, src_idx, &col_type)?;
-        columns.push((name.clone(), col_type));
+        let out_name = rename.get(name).cloned().unwrap_or_else(|| name.clone());
+        columns.push((out_name, col_type));
         data.push(col_data);
     }
 

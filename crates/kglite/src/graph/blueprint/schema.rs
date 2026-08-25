@@ -105,6 +105,13 @@ pub struct JunctionEdge {
     pub properties: Vec<String>,
     #[serde(default)]
     pub property_types: IndexMap<String, String>,
+    /// CSV column → edge property name. Keys must be listed in `properties`
+    /// and refer to CSV columns (`property_types` stays keyed by the CSV
+    /// name); fk columns are not renamable. This is the rename facility
+    /// `property_types` was never — see `validation::
+    /// unknown_property_type_warnings`.
+    #[serde(default)]
+    pub rename: IndexMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]

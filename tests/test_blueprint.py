@@ -1252,3 +1252,72 @@ class TestUnknownPropertyTypeWarning:
         kglite.from_blueprint(str(bp_path), verbose=True, save=False)
         err = capfd.readouterr().err
         assert "does not rename columns" not in err
+
+
+class TestJunctionRename:
+    def _bp_with_junction_props(self, tmp_path, rename=None, extra=None):
+        persons = pd.DataFrame({"person_id": [1, 2, 3], "name": ["Alice", "Bob", "Charlie"]})
+        _write_csv(tmp_path / "persons.csv", persons)
+        knows = pd.DataFrame(
+            {
+                "source_id": [1, 2],
+                "target_id": [2, 3],
+                "fldFrom": ["2001-01-01", "2002-02-02"],
+            }
+        )
+        _write_csv(tmp_path / "knows.csv", knows)
+        junction = {
+            "csv": "knows.csv",
+            "source_fk": "source_id",
+            "target": "Person",
+            "target_fk": "target_id",
+            "properties": ["fldFrom"],
+            "property_types": {"fldFrom": "date"},
+        }
+        if rename is not None:
+            junction["rename"] = rename
+        if extra:
+            junction.update(extra)
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "Person": {
+                    "csv": "persons.csv",
+                    "pk": "person_id",
+                    "title": "name",
+                    "properties": {},
+                    "connections": {"junction_edges": {"KNOWS": junction}},
+                }
+            },
+        }
+        bp_path = tmp_path / "blueprint.json"
+        _write_blueprint(bp_path, bp)
+        return bp_path
+
+    def test_rename_lands_property_under_new_name(self, tmp_path):
+        bp_path = self._bp_with_junction_props(tmp_path, rename={"fldFrom": "validFrom"})
+        graph = from_blueprint(bp_path, save=False)
+        rows = graph.cypher("MATCH (:Person)-[r:KNOWS]->(:Person) RETURN r.validFrom AS vf, r.fldFrom AS old").to_list()
+        assert len(rows) == 2
+        assert all(r["vf"] is not None for r in rows)
+        assert all(r["old"] is None for r in rows)
+
+    def test_without_rename_csv_name_kept(self, tmp_path):
+        bp_path = self._bp_with_junction_props(tmp_path)
+        graph = from_blueprint(bp_path, save=False)
+        rows = graph.cypher("MATCH (:Person)-[r:KNOWS]->(:Person) RETURN r.fldFrom AS vf").to_list()
+        assert all(r["vf"] is not None for r in rows)
+
+    def test_rename_of_fk_column_reports_error(self, tmp_path, capfd):
+        bp_path = self._bp_with_junction_props(tmp_path, rename={"source_id": "src"})
+        graph = from_blueprint(bp_path, save=False, verbose=True)
+        err = capfd.readouterr().err
+        assert "rename of fk column" in err
+        # The junction is skipped, not half-loaded.
+        assert graph.cypher("MATCH ()-[r:KNOWS]->() RETURN count(r) AS c").to_list()[0]["c"] == 0
+
+    def test_rename_key_must_be_declared_property(self, tmp_path, capfd):
+        bp_path = self._bp_with_junction_props(tmp_path, rename={"nosuch": "x"})
+        from_blueprint(bp_path, save=False, verbose=True)
+        err = capfd.readouterr().err
+        assert "not in 'properties'" in err

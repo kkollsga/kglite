@@ -154,6 +154,7 @@ pub fn run_calendar(
             target_fk: "next_iso".to_string(),
             properties: vec![],
             property_types: IndexMap::new(),
+            rename: Default::default(),
         },
     );
 
@@ -405,6 +406,7 @@ fn write_link(
             target_fk: "iso".to_string(),
             properties: vec![],
             property_types: IndexMap::new(),
+            rename: Default::default(),
         },
     );
     Ok(())

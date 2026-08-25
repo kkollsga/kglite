@@ -171,6 +171,7 @@ pub fn run_chain(
                 m.insert("step_index".to_string(), "int".to_string());
                 m
             },
+            rename: Default::default(),
         },
     );
 

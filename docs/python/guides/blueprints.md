@@ -235,6 +235,13 @@ For many-to-many relationships, use a separate lookup CSV. Suppose `project_assi
 
 Junction edges can carry properties — list them in `properties` and use `property_types` for type hints. This creates `(Employee)-[:ASSIGNED_TO {role: "Lead", assigned_date: ...}]->(Project)` edges.
 
+To store a column under a different property name, add a `rename` map
+(`"rename": {"assigned_date": "validFrom"}`). Keys must be columns listed in
+`properties` and refer to the CSV spelling — `property_types` stays keyed by
+the CSV column, and the fk columns are not renamable. Note that
+`property_types` itself never renames anything: it declares column types, and
+unrecognized values there are ignored with a build warning.
+
 ## Sub-Nodes
 
 Sub-nodes are hierarchical children of a parent node type. They live in a separate CSV and link to the parent via a foreign key.

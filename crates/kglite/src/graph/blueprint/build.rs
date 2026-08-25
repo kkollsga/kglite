@@ -287,6 +287,7 @@ fn clone_without_subs(spec: &NodeSpec) -> NodeSpec {
                             target_fk: v.target_fk.clone(),
                             properties: v.properties.clone(),
                             property_types: v.property_types.clone(),
+                            rename: v.rename.clone(),
                         },
                     )
                 })
@@ -568,7 +569,7 @@ fn prep_node_spec(
         .filter(|h| seen.insert(h.clone()))
         .collect();
 
-    let df = typed_dataframe(&raw_for_nodes, &keep, &declared)?;
+    let df = typed_dataframe(&raw_for_nodes, &keep, &declared, &HashMap::new())?;
 
     let title_arg = if title_field != pk {
         Some(title_field.clone())
@@ -828,7 +829,7 @@ fn load_streamed_node_spec(
             }
         }
         let keep = streaming_keep_list(&raw, &pk, &title_field, &skip_set, &parent_fk_skip);
-        let df = typed_dataframe(&raw, &keep, &declared)
+        let df = typed_dataframe(&raw, &keep, &declared, &HashMap::new())
             .map_err(|e| format!("[{}] {}", spec.node_type, e))?;
         let rep = maintain::add_nodes(
             graph,
@@ -1481,6 +1482,14 @@ fn load_junction_edges(
                 }
             }
 
+            let rename = match junction_rename_map(edge_type, junc, &keep) {
+                Ok(map) => map,
+                Err(e) => {
+                    report.errors.push(e);
+                    continue;
+                }
+            };
+
             let chunks = match read_csv_chunks(&csv_path, chunk_size) {
                 Ok(it) => it,
                 Err(e) => {
@@ -1505,7 +1514,7 @@ fn load_junction_edges(
                 if chunk_keep.is_empty() {
                     continue;
                 }
-                let df = match typed_dataframe(&chunk, &chunk_keep, &declared) {
+                let df = match typed_dataframe(&chunk, &chunk_keep, &declared, &rename) {
                     Ok(df) => df,
                     Err(e) => {
                         report.errors.push(format!("junction {}: {}", edge_type, e));
@@ -1535,6 +1544,40 @@ fn load_junction_edges(
         );
     }
     Ok(())
+}
+
+/// Validate a junction's `rename:` map and return it as the lookup
+/// `typed_dataframe` takes. Keys must be property columns (fk columns keep
+/// their spelling — `connect` finds them by name), and targets must not
+/// collide with any kept column or another target.
+fn junction_rename_map(
+    edge_type: &str,
+    junc: &crate::graph::blueprint::schema::JunctionEdge,
+    keep: &[String],
+) -> Result<HashMap<String, String>, String> {
+    let mut rename: HashMap<String, String> = HashMap::new();
+    for (col, new_name) in &junc.rename {
+        if col == &junc.source_fk || col == &junc.target_fk {
+            return Err(format!(
+                "junction {edge_type}: rename of fk column '{col}' is not supported — \
+                 source_fk/target_fk name the CSV columns"
+            ));
+        }
+        if !junc.properties.contains(col) {
+            return Err(format!(
+                "junction {edge_type}: rename key '{col}' is not in 'properties'"
+            ));
+        }
+        let collides = keep.iter().any(|k| k == new_name && k != col)
+            || rename.values().any(|v| v == new_name);
+        if collides {
+            return Err(format!(
+                "junction {edge_type}: rename target '{new_name}' collides with another column"
+            ));
+        }
+        rename.insert(col.clone(), new_name.clone());
+    }
+    Ok(rename)
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────

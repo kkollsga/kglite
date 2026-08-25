@@ -305,6 +305,7 @@ pub fn run_aggregate(
                 target_fk: edge.fk.clone(),
                 properties: vec![],
                 property_types: IndexMap::new(),
+                rename: Default::default(),
             },
         );
     }

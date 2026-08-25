@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Blueprint junction edges accept a `rename` map (`"rename": {"csv_col":
+  "property_name"}`) to store a CSV column under a different edge-property
+  name. Keys must be columns listed in `properties`; `property_types` stays
+  keyed by the CSV spelling; fk columns are not renamable.
+
 ### Changed
 
 - Blueprint builds now warn (in the build report / `verbose=True` output)
