@@ -87,6 +87,73 @@ mod multi_label_tests {
     }
 
     #[test]
+    fn bulk_stamp_matches_single_path_contract() {
+        let mut g = DirGraph::new();
+        let idxs: Vec<NodeIndex> = (0..10)
+            .map(|i| add_node(&mut g, &format!("n{i}"), "Person"))
+            .collect();
+        let vip = g.interner.get_or_intern("Vip");
+        let person = g.interner.get_or_intern("Person");
+
+        // Pre-seed two members through the single path.
+        assert!(g.add_node_label(idxs[2], vip));
+        assert!(g.add_node_label(idxs[7], vip));
+
+        // Bulk over: all ten + a duplicate + the primary key as a label.
+        let mut input = idxs.clone();
+        input.push(idxs[0]); // duplicate id
+        let (labelled, skipped) = g.add_node_labels_bulk(&input, vip);
+        assert_eq!(labelled, 8, "ten nodes minus two pre-existing members");
+        assert_eq!(skipped, 3, "two members + one duplicate input");
+        let bucket = &g.secondary_label_index[&vip];
+        assert_eq!(bucket.len(), 10);
+        assert!(bucket.windows(2).all(|w| w[0] < w[1]));
+
+        // primary == label skips, wholesale.
+        let (labelled, skipped) = g.add_node_labels_bulk(&idxs, person);
+        assert_eq!((labelled, skipped), (0, 10));
+        assert!(!g.secondary_label_index.contains_key(&person));
+
+        // Idempotent second bulk call.
+        let (labelled, skipped) = g.add_node_labels_bulk(&idxs, vip);
+        assert_eq!((labelled, skipped), (0, 10));
+    }
+
+    #[test]
+    fn bulk_stamp_rolls_back_through_the_journal() {
+        use crate::graph::dir_graph::rollback::StatementCheckpoint;
+
+        let mut g = DirGraph::new();
+        let idxs: Vec<NodeIndex> = (0..6)
+            .map(|i| add_node(&mut g, &format!("n{i}"), "Person"))
+            .collect();
+        let vip = g.interner.get_or_intern("Vip");
+        assert!(g.add_node_label(idxs[0], vip)); // pre-existing member
+
+        // Rolled-back bulk stamp: bucket returns to exactly the prior state.
+        let cp = StatementCheckpoint::open(&mut g);
+        let (labelled, _) = g.add_node_labels_bulk(&idxs, vip);
+        assert_eq!(labelled, 5);
+        cp.rollback(&mut g);
+        assert_eq!(g.secondary_label_index[&vip], vec![idxs[0]]);
+
+        // Rolled-back bulk stamp of a NEW label: the bucket it created is
+        // dropped (the bucket_was_new entry carries the drop).
+        let fresh = g.interner.get_or_intern("Fresh");
+        let cp = StatementCheckpoint::open(&mut g);
+        let (labelled, _) = g.add_node_labels_bulk(&idxs, fresh);
+        assert_eq!(labelled, 6);
+        cp.rollback(&mut g);
+        assert!(!g.secondary_label_index.contains_key(&fresh));
+
+        // Committed bulk stamp sticks.
+        let cp = StatementCheckpoint::open(&mut g);
+        g.add_node_labels_bulk(&idxs, fresh);
+        cp.commit(&mut g);
+        assert_eq!(g.secondary_label_index[&fresh].len(), 6);
+    }
+
+    #[test]
     fn create_index_refused_on_secondary_only_label() {
         let mut g = DirGraph::new();
         let idx = add_node(&mut g, "n1", "Person");

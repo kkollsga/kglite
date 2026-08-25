@@ -166,6 +166,107 @@ impl DirGraph {
         true
     }
 
+    /// Stamp one label onto many nodes in a single pass — the bulk
+    /// companion to [`add_node_label`](Self::add_node_label), and the only
+    /// other write path into `secondary_label_index`.
+    ///
+    /// Same contract per node as the single-node API (skip missing nodes,
+    /// skip `primary == label`, idempotent on members, CDC before-image +
+    /// undo-journal entry + WAL capture per node actually labelled), but the
+    /// bucket is built with one sorted merge instead of n positional
+    /// inserts: the loop-of-`add_node_label` shape was O(n²) — a per-call
+    /// membership probe plus memmove per insert — which made `add_label`
+    /// over a whole type quadratic (measured: 5× the ids = 24× the time).
+    ///
+    /// Returns `(labelled, skipped)` where skipped counts missing nodes,
+    /// primary-type hits, duplicate input ids, and already-present members.
+    pub fn add_node_labels_bulk(
+        &mut self,
+        indices: &[NodeIndex],
+        label: InternedKey,
+    ) -> (usize, usize) {
+        use crate::graph::storage::GraphRead;
+        let mut skipped = 0usize;
+        let mut candidates: Vec<NodeIndex> = Vec::with_capacity(indices.len());
+        for &idx in indices {
+            match GraphRead::node_type_of(&self.graph, idx) {
+                Some(primary) if primary != label => candidates.push(idx),
+                _ => skipped += 1,
+            }
+        }
+        candidates.sort_unstable();
+        let before_dedup = candidates.len();
+        candidates.dedup();
+        skipped += before_dedup - candidates.len();
+
+        let bucket_was_new = !self.secondary_label_index.contains_key(&label);
+        // Fresh = candidates not already members; both sides sorted, so one
+        // merge walk decides membership without per-candidate searches.
+        let fresh: Vec<NodeIndex> = match self.secondary_label_index.get(&label) {
+            Some(bucket) => {
+                let mut fresh = Vec::with_capacity(candidates.len());
+                let mut member = bucket.iter().copied().peekable();
+                for idx in candidates {
+                    while member.peek().is_some_and(|&m| m < idx) {
+                        member.next();
+                    }
+                    if member.peek() == Some(&idx) {
+                        skipped += 1;
+                    } else {
+                        fresh.push(idx);
+                    }
+                }
+                fresh
+            }
+            None => candidates,
+        };
+        if fresh.is_empty() {
+            return (0, skipped);
+        }
+
+        // Hooks fire per node, in the same order as the single-node path:
+        // before-images ahead of the bucket edit, journal + WAL after.
+        for &idx in &fresh {
+            self.capture_label_before_image(idx);
+        }
+        let bucket = self.secondary_label_index.entry(label).or_default();
+        let mut merged = Vec::with_capacity(bucket.len() + fresh.len());
+        {
+            let mut a = bucket.iter().copied().peekable();
+            let mut b = fresh.iter().copied().peekable();
+            while let (Some(&x), Some(&y)) = (a.peek(), b.peek()) {
+                if x < y {
+                    merged.push(x);
+                    a.next();
+                } else {
+                    merged.push(y);
+                    b.next();
+                }
+            }
+            merged.extend(a);
+            merged.extend(b);
+        }
+        *bucket = merged;
+        debug_assert_bucket_sorted(bucket);
+        self.has_secondary_labels = true;
+        if let Some(journal) = self.graph.undo_journal_mut() {
+            for (i, &idx) in fresh.iter().enumerate() {
+                // Only the entry that actually created the bucket carries
+                // bucket_was_new: rollback replays in reverse, so it is the
+                // last one undone, and its undo drops the bucket.
+                journal.note_bucket_appended(
+                    crate::graph::storage::undo::BucketId::SecondaryLabel(label),
+                    idx,
+                    bucket_was_new && i == 0,
+                );
+            }
+        }
+        for &idx in &fresh {
+            self.graph.note_recorded_node_labels(idx);
+        }
+        (fresh.len(), skipped)
+    }
+
     /// Remove a secondary label from a node. Choke-point API for label
     /// mutations.
     ///

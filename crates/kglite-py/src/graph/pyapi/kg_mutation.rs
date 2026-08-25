@@ -813,13 +813,18 @@ fn apply_batch_labels<'py>(
         .collect::<PyResult<_>>()?;
     let id_series = data.get_item(unique_id_field)?;
     let nrows: usize = data.getattr("shape")?.get_item(0)?.extract()?;
+    // One id-resolution pass, then one bulk stamp per label — the nested
+    // per-row × per-label add_node_label loop this replaces was quadratic
+    // in the batch size.
+    let mut indices = Vec::with_capacity(nrows);
     for i in 0..nrows {
         let id_val = py_in::py_value_to_value(&id_series.get_item(i)?)?;
         if let Some(node_idx) = graph.lookup_by_id(node_type, &id_val) {
-            for &key in &label_keys {
-                graph.add_node_label(node_idx, key);
-            }
+            indices.push(node_idx);
         }
+    }
+    for &key in &label_keys {
+        graph.add_node_labels_bulk(&indices, key);
     }
     Ok(())
 }
@@ -1624,21 +1629,19 @@ impl KnowledgeGraph {
             .interner
             .try_get_or_intern(label)
             .map_err(|e| crate::error_py::kg_to_pyerr(crate::error::KgError::from(e)))?;
-        let mut labelled = 0usize;
-        let mut skipped = 0usize;
+        // Resolve ids first, then stamp through the bulk path — the
+        // add_node_label loop this replaces was O(n²) over the id list.
+        let mut missing = 0usize;
+        let mut indices = Vec::with_capacity(ids.len());
         for item in ids.iter() {
             let id_val = py_in::py_value_to_value(&item)?;
             match g.lookup_by_id(node_type, &id_val) {
-                Some(idx) => {
-                    if g.add_node_label(idx, key) {
-                        labelled += 1;
-                    } else {
-                        skipped += 1;
-                    }
-                }
-                None => skipped += 1,
+                Some(idx) => indices.push(idx),
+                None => missing += 1,
             }
         }
+        let (labelled, bulk_skipped) = g.add_node_labels_bulk(&indices, key);
+        let skipped = missing + bulk_skipped;
         self.commit_wal()?;
         let result = PyDict::new(py);
         result.set_item("labelled", labelled)?;

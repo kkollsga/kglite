@@ -1946,3 +1946,26 @@ def test_a_failed_durable_save_raises_the_same_typed_error(tmp_path):
     finally:
         os.chmod(d, 0o700)
         g.close()
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_durable_bulk_add_label_survives_hard_crash(tmp_path, storage):
+    """add_label routes through the bulk stamp path; every stamped node must
+    reach the WAL (one SetNodeLabels op per node) and replay on recovery."""
+    _crash_child(
+        tmp_path,
+        """
+        import pandas as pd
+        g = open_durable()
+        g.add_nodes(
+            pd.DataFrame({"id": range(6), "title": [f"p{i}" for i in range(6)]}),
+            "P", "id", node_title_field="title",
+        )
+        g.add_label("P", [1, 3, 5], "VIP")
+        """,
+        storage,
+    )
+    g = _open(tmp_path / "app.kgl", storage)
+    rows = g.cypher("MATCH (n:VIP) RETURN n.id AS id").to_list()
+    assert sorted(r["id"] for r in rows) == [1, 3, 5]
+    assert g.cypher("MATCH (n:P {id: 3}) RETURN labels(n) AS l").scalar() == ["P", "VIP"]
