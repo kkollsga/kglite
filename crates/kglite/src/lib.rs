@@ -302,8 +302,11 @@ pub mod api {
     /// Rust embedder that would rather not go through Cypher; `PreparedQuery`
     /// is exported because those signatures name it (with `QueryTerm` /
     /// `TermId`, which its own accessor names in turn), and `TextIndexRead`
-    /// because a per-row scoring loop must hold one view across
-    /// prepare-and-score rather than re-locking per row.
+    /// because a scoring loop that *can* hold one view across
+    /// prepare-and-score should, rather than re-locking per row. A caller that
+    /// cannot — the Cypher scalar's executor is `Sync` and a read guard is not
+    /// `Send` — re-locks per row and watches `TextIndexStore::generation`
+    /// instead. `text_index_store` resolves one by key.
     ///
     /// `refresh_text_index` is the catch-up driver: a query that is about to
     /// read an index asks `TextIndexStore::can_auto_refresh` whether the
@@ -316,7 +319,7 @@ pub mod api {
         pub use crate::graph::index_freshness::DEFAULT_AUTO_REFRESH_LIMIT;
         pub use crate::graph::text_indexes::{
             build_text_index, drop_text_index, has_text_index, index_key, list_text_indexes,
-            refresh_text_index, TextIndexRead, TextIndexReport, TextIndexStore,
+            refresh_text_index, text_index_store, TextIndexRead, TextIndexReport, TextIndexStore,
         };
     }
 

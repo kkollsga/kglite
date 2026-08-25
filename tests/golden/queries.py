@@ -1,8 +1,14 @@
-"""Seed queries pinned for the Phase 10 golden fixture.
+"""Seed queries pinned for the golden fixtures.
 
 Any intentional output change must be re-committed via
 ``python tests/golden/regenerate.py``. Test-driven comparison lives in
 ``tests/test_golden.py``.
+
+Two fixtures, two lists: :data:`CYPHER_QUERIES` / :data:`FIND_QUERIES` run
+against the ~1,000-node social graph and are snapshotted **sorted**, because
+what they pin is the row *set*. :data:`BM25_QUERIES` runs against the
+12-document text corpus and is snapshotted **in row order**, because what it
+pins is the ranking — sorting it would throw away the only thing it measures.
 """
 
 from __future__ import annotations
@@ -80,4 +86,50 @@ FIND_QUERIES: list[tuple[str, str, str | None]] = [
     ("place_oslo", "Oslo", None),
     ("company_labs", "Labs", None),
     ("empty", "zzzzzzzzzz", None),
+]
+
+
+# (slug, cypher) over the text corpus in ``build_text_corpus.py``. Snapshotted
+# in row order, with the scores, under ``bm25_<slug>.json``.
+BM25_QUERIES: list[tuple[str, str]] = [
+    # A term in one document out-weighs a term in three, however often the
+    # query repeats the common one — this is BM25's IDF doing the job a
+    # stopword list would otherwise be asked to do.
+    (
+        "rare_term_beats_common_terms",
+        "MATCH (d:Doc) "
+        "RETURN d.title AS title, text_bm25(d, 'body', 'ferrofluid magnetic field') AS score "
+        "ORDER BY score DESC, title ASC LIMIT 5",
+    ),
+    # A natural question, mostly function words. The documents that answer it
+    # must outrank the ones that merely share 'the', 'of', 'a' and 'sun'.
+    (
+        "stopword_heavy_question",
+        "MATCH (d:Doc) "
+        "RETURN d.title AS title, "
+        "text_bm25(d, 'body', 'how does a plant convert the light of the sun into sugar') AS score "
+        "ORDER BY score DESC, title ASC LIMIT 5",
+    ),
+    # d11 and d12 are permutations of each other and score identically. The
+    # order below is the tie-break, and it must not depend on hash iteration.
+    (
+        "tie_break_is_deterministic",
+        "MATCH (d:Doc) WHERE text_bm25(d, 'body', 'alpha beta gamma') > 0 "
+        "RETURN d.title AS title, text_bm25(d, 'body', 'alpha beta gamma') AS score "
+        "ORDER BY score DESC",
+    ),
+    # Term-frequency saturation plus length normalisation: d02 says 'fox'
+    # three times in eleven words, d01 once in nine.
+    (
+        "term_frequency_saturation",
+        "MATCH (d:Doc) "
+        "RETURN d.title AS title, text_bm25(d, 'body', 'fox') AS score "
+        "ORDER BY score DESC, title ASC LIMIT 3",
+    ),
+    # An indexed document sharing no query word scores 0.0, not null. The
+    # snapshot is where that distinction is visible to a reader.
+    (
+        "no_shared_term_scores_zero",
+        "MATCH (d:Doc) WHERE d.title = 'd03' RETURN d.title AS title, text_bm25(d, 'body', 'ferrofluid') AS score",
+    ),
 ]

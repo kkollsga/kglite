@@ -60,6 +60,11 @@ pub struct CypherExecutor<'a> {
     pub(super) params: &'a HashMap<String, Value>,
     /// Cache for vector_score constant arguments.
     vs_cache: OnceLock<VectorScoreCache>,
+    /// Cache for the first `text_bm25()` call site's constant arguments, its
+    /// tokenized query and the index generation that query resolved against.
+    /// See [`TextBm25Cache`] for why one slot is enough and what a second call
+    /// site pays.
+    tb_cache: OnceLock<TextBm25Cache>,
     pub(super) deadline: Option<Instant>,
     /// Optional cooperative-cancellation flag, polled alongside
     /// `deadline` (and propagated to the pattern matcher). Set by a
@@ -153,6 +158,7 @@ impl<'a> CypherExecutor<'a> {
             graph,
             params,
             vs_cache: OnceLock::new(),
+            tb_cache: OnceLock::new(),
             deadline,
             cancel: None,
             budget: ExecutionBudget::default(),

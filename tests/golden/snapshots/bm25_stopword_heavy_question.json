@@ -1,0 +1,25 @@
+{
+  "query": "MATCH (d:Doc) RETURN d.title AS title, text_bm25(d, 'body', 'how does a plant convert the light of the sun into sugar') AS score ORDER BY score DESC, title ASC LIMIT 5",
+  "rows": [
+    {
+      "score": 13.623134,
+      "title": "d07"
+    },
+    {
+      "score": 7.144681,
+      "title": "d08"
+    },
+    {
+      "score": 4.24361,
+      "title": "d09"
+    },
+    {
+      "score": 3.600352,
+      "title": "d03"
+    },
+    {
+      "score": 2.325744,
+      "title": "d05"
+    }
+  ]
+}

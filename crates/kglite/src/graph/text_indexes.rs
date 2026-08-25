@@ -48,6 +48,7 @@
 //! inverted index over a Wikidata-scale disk graph is the RAM cliff that
 //! backend exists to avoid, and disk does not persist the HNSW index either.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{RwLock, RwLockReadGuard};
 
 use petgraph::graph::NodeIndex;
@@ -97,6 +98,20 @@ pub fn index_key(node_type: &str, property: &str) -> (String, String) {
 #[derive(Debug)]
 pub struct TextIndexStore {
     index: RwLock<TextIndex>,
+    /// Bumped by every [`Self::refresh`] that changed anything.
+    ///
+    /// Term ids are recycled, so a [`PreparedQuery`] resolved before a refresh
+    /// can name a *different* term after it — the query would then score
+    /// documents it has no word in common with. A holder that cannot keep the
+    /// read guard for its whole scoring pass (the Cypher scalar cannot: the
+    /// executor is shared across rayon regions and therefore must be `Sync`,
+    /// while `RwLockReadGuard` is `!Send`) stamps its prepared query with this
+    /// number and re-prepares when it moves.
+    ///
+    /// Read it *after* acquiring the read guard, never before: a refresh bumps
+    /// it while holding the write lock, so a guard held across the comparison
+    /// is what makes the answer still true when the score is computed.
+    generation: AtomicU64,
     /// What has changed since the last build or refresh.
     freshness: IndexFreshness,
     /// The alias-resolved field the build read — `"title"` where the caller
@@ -121,6 +136,7 @@ impl Clone for TextIndexStore {
     fn clone(&self) -> Self {
         Self {
             index: RwLock::new(self.index().clone()),
+            generation: AtomicU64::new(self.generation()),
             freshness: self.freshness.clone(),
             resolved_field: self.resolved_field.clone(),
             skipped: self.skipped,
@@ -134,7 +150,14 @@ impl Clone for TextIndexStore {
 /// posting, so a [`PreparedQuery`] is only meaningful against the index state
 /// it was prepared from. Holding this guard across prepare-and-score is what
 /// keeps a concurrent refresh from renumbering the dictionary underneath a
-/// query — the per-row scoring path takes it once, not once per row.
+/// query, so a scoring loop that can hold it takes it once rather than once
+/// per row.
+///
+/// A loop that *cannot* hold it — the Cypher `text_bm25` scalar cannot, because
+/// its executor is shared across rayon regions and must be `Sync` while this
+/// guard is `!Send` — re-acquires per row and compares
+/// [`TextIndexStore::generation`] against the number its query was prepared
+/// under, re-preparing when they differ.
 pub struct TextIndexRead<'a>(RwLockReadGuard<'a, TextIndex>);
 
 impl TextIndexRead<'_> {
@@ -205,6 +228,12 @@ impl TextIndexStore {
     /// prepare-and-score sequence lasts — see [`TextIndexRead`].
     pub fn read(&self) -> TextIndexRead<'_> {
         TextIndexRead(self.index())
+    }
+
+    /// How many times this index has been refreshed into a different shape.
+    /// See the field docs for why a query-side cache has to watch it.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
     }
 
     /// The alias-resolved field this index reads.
@@ -364,6 +393,11 @@ impl TextIndexStore {
                 index.remove_doc(slot);
             }
         }
+        if seen > 0 {
+            // Bumped under the write lock, so a reader holding the read guard
+            // cannot observe the new dictionary against the old number.
+            self.generation.fetch_add(1, Ordering::Release);
+        }
         debug_assert!(
             index.validate().is_ok(),
             "a refreshed text index must satisfy its own invariants: {:?}",
@@ -510,6 +544,7 @@ pub fn build_text_index(
     });
     let store = TextIndexStore {
         index: RwLock::new(index),
+        generation: AtomicU64::new(0),
         freshness: IndexFreshness::covering(node_bound(graph), limit),
         resolved_field: field,
         skipped,
@@ -549,6 +584,7 @@ pub(crate) fn attach_persisted_text_index(
         index_key(node_type, property),
         TextIndexStore {
             index: RwLock::new(index),
+            generation: AtomicU64::new(0),
             freshness,
             resolved_field,
             skipped,
@@ -578,6 +614,29 @@ pub fn drop_text_index(graph: &mut DirGraph, node_type: &str, property: &str) ->
         graph.bump_version();
     }
     removed
+}
+
+/// The text index over `(node_type, property)`, if one is built.
+///
+/// The read-side counterpart of [`has_text_index`].
+///
+/// Scans rather than hashing, deliberately: the map is keyed by an owned
+/// `(String, String)`, so a hash lookup from two `&str`s has to *mint* that key
+/// — two allocations, on a path the Cypher scalar takes once per row. A graph
+/// carries a handful of text indexes at most, and comparing a handful of short
+/// string pairs costs less than one allocation.
+pub fn text_index_store<'a>(
+    graph: &'a DirGraph,
+    node_type: &str,
+    property: &str,
+) -> Option<&'a TextIndexStore> {
+    graph
+        .text_indexes
+        .iter()
+        .find(|((indexed_type, indexed_property), _)| {
+            indexed_type == node_type && indexed_property == property
+        })
+        .map(|(_, store)| store)
 }
 
 /// Whether a text index is built over `(node_type, property)`.

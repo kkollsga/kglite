@@ -50,6 +50,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   files to before, older files load unchanged, and a section this build cannot
   read is skipped rather than refused (rebuild the index in that case).
 
+  **`text_bm25(n, 'property', 'query text')` is how you search it.** A Cypher
+  scalar, so every binding gets it through `cypher_query`: it returns the
+  BM25 relevance of that row's document, `0.0` for an indexed document that
+  shares no word with the query, and `null` for a row the index has no
+  document for — the two are different answers and are reported differently.
+  It composes with ordinary `WHERE` and `ORDER BY … LIMIT k` like any other
+  scalar. Calling it on a `(node type, property)` with no index is an error
+  naming `build_text_index`, never a column of nulls. A query that reads a
+  stale index folds in a small delta first (above), and one that finds a delta
+  over the limit — or a read-only graph, which a query may not write to —
+  serves what the index has, scores the rest null, and returns a warning
+  naming the delta and the rebuild call.
+
 - **Vector indexes adopt the same catch-up contract as the new text ones.**
   Writing vectors after `build_vector_index` no longer drops the index. Neither
   arm of a vector write moves an existing store slot — an append lands past the
@@ -96,6 +109,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   domain tools all inherit it. Pool width follows `available_parallelism`,
   overridable with `KGLITE_QUERY_THREADS`; the boot log records the pin and
   the width it resolved.
+
+### Changed
+
+- **`CREATE TEXT INDEX` and `CREATE FULLTEXT INDEX` now point at
+  `build_text_index` + `text_bm25()`** instead of at the vector-search API.
+  Both messages predate the BM25 index and claimed ranked text retrieval was
+  only available through embeddings, which is no longer true.
 
 ### Fixed
 

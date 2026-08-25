@@ -515,18 +515,6 @@
       "classification": "dead-code"
     },
     {
-      "identity": "crates/kglite/src/graph/algorithms/text_index/mod.rs::fn:df:pub fn df(&self, term: &str) -> usize::dead_code",
-      "classification": "dead-code"
-    },
-    {
-      "identity": "crates/kglite/src/graph/algorithms/text_index/mod.rs::fn:postings_for:pub fn postings_for(&self, term: &str) -> &[Posting]::dead_code",
-      "classification": "dead-code"
-    },
-    {
-      "identity": "crates/kglite/src/graph/algorithms/text_index/mod.rs::fn:term_freq:pub fn term_freq(&self, slot: u32, term: TermId) -> u32::dead_code",
-      "classification": "dead-code"
-    },
-    {
       "identity": "crates/kglite/src/graph/algorithms/vector.rs::fn:cosine_similarity:pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32::dead_code",
       "classification": "dead-code"
     },

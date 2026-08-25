@@ -798,6 +798,13 @@ pub(crate) const FUNCTIONS: &[FunctionSpec] = &[
         signature: "embedding_norm(node :: NODE, property :: STRING) :: FLOAT?",
     },
     FunctionSpec {
+        name: "text_bm25",
+        aliases: &[],
+        category: "utility",
+        description: "BM25 relevance of a node's indexed text against a query; null when the node has no document",
+        signature: "text_bm25(node :: NODE, property :: STRING, query :: STRING) :: FLOAT?",
+    },
+    FunctionSpec {
         name: "text_score",
         aliases: &[],
         category: "utility",

@@ -349,8 +349,10 @@ impl TextIndex {
     /// counter: removal is exact, so a posting list never holds a dead entry
     /// and its length *is* the document frequency. A second copy of the number
     /// could only ever disagree with this one.
-    // P12 reports term statistics through this; no production caller yet.
-    #[allow(dead_code)]
+    // Test-only: production scoring works in interned ids and reads a term's
+    // document frequency straight off `postings_of`. Kept because the index's
+    // own tests assert in the terms a *corpus* is written in, not in ids.
+    #[cfg(test)]
     pub fn df(&self, term: &str) -> usize {
         self.postings_for(term).len()
     }
@@ -362,8 +364,9 @@ impl TextIndex {
     }
 
     /// Postings for `term`, sorted by slot; empty when the term is unknown.
-    // P12's by-name posting lookup; the id-keyed `postings_of` is what scoring uses today.
-    #[allow(dead_code)]
+    // Test-only, for the same reason as `df`: the id-keyed `postings_of` is
+    // what scoring uses.
+    #[cfg(test)]
     pub fn postings_for(&self, term: &str) -> &[Posting] {
         match self.ids.get(term) {
             Some(&id) => &self.postings[id as usize],
@@ -377,8 +380,9 @@ impl TextIndex {
     }
 
     /// Occurrences of `term` in `slot`; `0` if either is absent.
-    // P11 serializes the forward view through this; no production caller yet.
-    #[allow(dead_code)]
+    // Test-only: scoring reaches `Doc::term_freq` directly through the forward
+    // map, and persistence encodes the whole `Doc`.
+    #[cfg(test)]
     pub fn term_freq(&self, slot: u32, term: TermId) -> u32 {
         self.docs.get(&slot).map_or(0, |doc| doc.term_freq(term))
     }

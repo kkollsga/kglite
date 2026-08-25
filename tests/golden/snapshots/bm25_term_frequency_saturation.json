@@ -1,0 +1,17 @@
+{
+  "query": "MATCH (d:Doc) RETURN d.title AS title, text_bm25(d, 'body', 'fox') AS score ORDER BY score DESC, title ASC LIMIT 3",
+  "rows": [
+    {
+      "score": 2.340032,
+      "title": "d02"
+    },
+    {
+      "score": 1.568454,
+      "title": "d01"
+    },
+    {
+      "score": 0.0,
+      "title": "d03"
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "query": "MATCH (d:Doc) WHERE text_bm25(d, 'body', 'alpha beta gamma') > 0 RETURN d.title AS title, text_bm25(d, 'body', 'alpha beta gamma') AS score ORDER BY score DESC",
+  "rows": [
+    {
+      "score": 6.644975,
+      "title": "d11"
+    },
+    {
+      "score": 6.644975,
+      "title": "d12"
+    }
+  ]
+}

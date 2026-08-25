@@ -4,6 +4,11 @@ Rebuilds the Phase 10 golden graph on every storage mode, runs each
 seed query, and asserts byte-identical output against the committed
 snapshots under ``tests/golden/snapshots/``.
 
+The BM25 rankings are a second fixture over the 12-document text corpus,
+asserted **in row order** — a ranking *is* the order. They run on the two
+storage modes that can hold a text index; ``disk`` refuses to build one, and
+that refusal is asserted here rather than skipped over.
+
 Intentional output changes: run ``python tests/golden/regenerate.py``
 and commit the refreshed snapshots alongside the feature change.
 """
@@ -16,15 +21,20 @@ import pytest
 
 from kglite import KnowledgeGraph
 from tests.golden.build_golden_graph import build_golden_graph
-from tests.golden.queries import CYPHER_QUERIES, FIND_QUERIES
+from tests.golden.build_text_corpus import build_text_corpus
+from tests.golden.queries import BM25_QUERIES, CYPHER_QUERIES, FIND_QUERIES
 from tests.golden.regenerate import (
     _cypher_snapshot,
     _find_snapshot,
+    _ranked_snapshot,
     _schema_snapshot,
 )
 
 SNAPSHOTS_DIR = pathlib.Path(__file__).resolve().parent / "golden" / "snapshots"
 STORAGE_MODES = ("memory", "mapped", "disk")
+# `disk` is absent by design: build_text_index refuses there, and
+# `test_bm25_refused_on_disk` pins the refusal.
+TEXT_INDEX_MODES = ("memory", "mapped")
 
 
 def _new_kg(mode: str, tmp_path) -> KnowledgeGraph:
@@ -107,3 +117,29 @@ def test_find_snapshot(mode, slug, name, node_type, tmp_path):
     assert got == _load_snapshot(f"find_{slug}.json"), (
         f"find_{slug}.json drift on mode={mode}. Run `python tests/golden/regenerate.py` to refresh if intentional."
     )
+
+
+@pytest.mark.parametrize("mode", TEXT_INDEX_MODES)
+@pytest.mark.parametrize("slug,cypher", BM25_QUERIES, ids=[slug for slug, _ in BM25_QUERIES])
+def test_bm25_snapshot(mode, slug, cypher, tmp_path):
+    kg = build_text_corpus(_new_kg(mode, tmp_path))
+    import json
+
+    got = (
+        json.dumps(
+            {"query": cypher, "rows": _ranked_snapshot(kg, cypher)},
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    assert got == _load_snapshot(f"bm25_{slug}.json"), (
+        f"bm25_{slug}.json drift on mode={mode}. Run `python tests/golden/regenerate.py` to refresh if intentional."
+    )
+
+
+def test_bm25_refused_on_disk(tmp_path):
+    """The corpus builds; only the index refuses, and it names the way out."""
+    kg = _new_kg("disk", tmp_path)
+    with pytest.raises(ValueError, match="disk-backed graph"):
+        build_text_corpus(kg)

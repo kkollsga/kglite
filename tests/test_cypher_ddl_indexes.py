@@ -395,10 +395,13 @@ NEO4J_SCHEMA_SCRIPT: list[tuple[str, str | None]] = [
     ("CREATE INDEX person_city_age IF NOT EXISTS FOR (p:Person) ON (p.city, p.age)", None),
     ("CREATE RANGE INDEX person_age IF NOT EXISTS FOR (p:Person) ON (p.age)", None),
     ("SHOW INDEXES", None),
-    ("CREATE TEXT INDEX pn_text IF NOT EXISTS FOR (p:Person) ON (p.name)", "TEXT INDEX"),
+    (
+        "CREATE TEXT INDEX pn_text IF NOT EXISTS FOR (p:Person) ON (p.name)",
+        "build_text_index",
+    ),
     (
         "CREATE FULLTEXT INDEX p_ft IF NOT EXISTS FOR (p:Person) ON EACH [p.name, p.city]",
-        "FULLTEXT INDEX",
+        "build_text_index",
     ),
     ("CREATE POINT INDEX p_loc IF NOT EXISTS FOR (p:Person) ON (p.location)", "POINT INDEX"),
     (

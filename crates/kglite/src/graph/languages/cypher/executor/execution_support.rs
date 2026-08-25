@@ -1,6 +1,7 @@
 //! Executor support types for specialized filters, spatial caches, and profiling labels.
 
-use super::super::ast::{Clause, ConstraintCommand, SchemaCommand};
+use super::super::ast::{Clause, ConstraintCommand, Expression, SchemaCommand};
+use crate::datatypes::values::Value;
 use crate::graph::core::pattern_matching::PatternElement;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -136,6 +137,87 @@ pub(super) struct VectorScoreCache {
     pub(super) prop_name: String,
     pub(super) query_vec: Vec<f32>,
     pub(super) scorer: crate::graph::algorithms::vector::Scorer,
+}
+
+/// The cheap identity of one row-independent `text_bm25()` argument.
+///
+/// A cached entry has to be able to say "this row's call is the *same* call" —
+/// and it has to say it without evaluating the argument, because evaluating a
+/// string literal clones the string, once per row. Both forms compare by
+/// borrow: a literal against its own value, a parameter against its name (a
+/// parameter is bound once for the execution, so the same name is the same
+/// value).
+#[derive(PartialEq, Debug)]
+pub(super) enum ArgKey {
+    Literal(Value),
+    Param(String),
+}
+
+impl ArgKey {
+    /// `None` for an argument whose value can differ per row — that call is
+    /// re-prepared every row rather than cached under a key that could match
+    /// the wrong thing.
+    pub(super) fn of(expr: &Expression) -> Option<Self> {
+        match expr {
+            Expression::Literal(value) => Some(ArgKey::Literal(value.clone())),
+            Expression::Parameter(name) => Some(ArgKey::Param(name.clone())),
+            _ => None,
+        }
+    }
+
+    pub(super) fn matches(&self, expr: &Expression) -> bool {
+        match (self, expr) {
+            (ArgKey::Literal(value), Expression::Literal(other)) => value == other,
+            (ArgKey::Param(name), Expression::Parameter(other)) => name == other,
+            _ => false,
+        }
+    }
+}
+
+/// Pre-computed `text_bm25()` arguments for one call.
+///
+/// **Why the arguments are the key, and not "the query".** `vector_score`'s
+/// cache is one `OnceLock` for the whole query, which is wrong the moment a
+/// query scores two different things — and a hybrid retrieval query
+/// (`text_bm25` over a title and over a body, fused) is exactly that shape.
+/// Two calls that agree on node type, property and query text legitimately
+/// share one prepared query; a call that disagrees on any of them re-prepares
+/// per row rather than reading an answer that is not its own.
+///
+/// The identity is deliberately *not* the address of the argument slice: the
+/// clause AST is cloned along some execution paths, so an address is neither
+/// stable across calls nor safe to trust — a freed clone's address can be
+/// handed to a different call site inside one executor's lifetime, and the
+/// cache would then answer a question it was never asked.
+///
+/// **Why `generation`.** The term ids in `prepared` name terms in the index
+/// state it was prepared against, and a refresh recycles freed ids onto new
+/// terms. The scalar cannot hold one read guard for the whole scan
+/// (`CypherExecutor` is shared across rayon regions and so must be `Sync`;
+/// `RwLockReadGuard` is `!Send`), so each row re-locks and re-checks this
+/// number instead. The store itself cannot be *replaced* mid-query — a rebuild
+/// takes `&mut DirGraph` and no `&DirGraph` reader exists then — so comparing
+/// generations compares two states of the same store.
+///
+/// The store is *not* held here: a borrow of it would make `CypherExecutor<'a>`
+/// invariant in `'a` (a `OnceLock` is invariant in its payload), which the
+/// streaming pipeline's re-borrow of `&self` relies on not being.
+/// `text_index_store` re-resolves it per row without allocating.
+pub(super) struct TextBm25Cache {
+    /// The node type the cached entry resolved its store for. A row of another
+    /// type is scored by the uncached path — correct, and slower only in the
+    /// exotic query that scores two types through one call.
+    pub(super) node_type: String,
+    /// The property and query arguments this entry was prepared for, or `None`
+    /// when at least one of them is row-dependent and the entry must not be
+    /// reused at all.
+    pub(super) keys: Option<(ArgKey, ArgKey)>,
+    /// `None` when the query argument evaluated to null: the call is null for
+    /// every row, and nothing was prepared.
+    pub(super) query_text: Option<String>,
+    pub(super) prepared: crate::graph::algorithms::text_index::bm25::PreparedQuery,
+    pub(super) prop_name: String,
+    pub(super) generation: u64,
 }
 
 /// Human-readable name for a Clause variant, used in PROFILE and EXPLAIN output.

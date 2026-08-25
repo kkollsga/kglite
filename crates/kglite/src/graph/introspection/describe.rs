@@ -682,6 +682,9 @@ fn write_extensions(xml: &mut String, graph: &DirGraph) {
     if has_spatial {
         xml.push_str("    <spatial hint=\"distance(a,b)→m, contains(a,b), intersects(a,b), centroid(n), area(n)→m², perimeter(n)→m\"/>\n");
     }
+    if !graph.text_indexes.is_empty() {
+        xml.push_str("    <lexical hint=\"text_bm25(n, 'prop', 'query text') — BM25 relevance of the node's indexed text; 0.0 = indexed but shares no word with the query, null = no document for that row. Build with build_text_index(node_type, property).\"/>\n");
+    }
     if has_embeddings {
         xml.push_str(
             "    <semantic hint=\"text_score(n, 'col', 'query'|[0.1,0.2,...], metric) — similarity; a list query is scored as your query vector, a string query is embedded via set_embedder() (metric: 'cosine'|'poincare'|'dot_product'|'euclidean'); embedding_norm(n, 'col') — L2 norm (hierarchy depth in Poincaré space)\"/>\n",

@@ -35,7 +35,7 @@ surface at a glance — most of what you'd reach for is here, in-process:
 | **Parameters** | values `$p`, and **names**: dynamic labels / relationship types `(n:$label)`, `(n:$(label))`, `-[:$type]->` — see [Parameters](#parameters) |
 | **Aggregation** | `count` / `sum` / `avg` / `min` / `max` / `collect` / `percentile_cont` / `mode` / `stdev` …, `DISTINCT`, `HAVING`, window functions (`OVER`, `PARTITION BY`, ranking) |
 | **Procedures** (`CALL`) | centralities (pagerank, betweenness, closeness, degree), community (louvain, leiden, label propagation), components, k-core, clustering, `triangle_count` / `transitivity`, `eccentricity` / `diameter`, `ready_set` (dependency frontier), `shortest_path_length`, `kg_knn`, structural validators (`duplicate_title`, `cycle_2step`, `parallel_edges`, …) |
-| **Vector + text** | `vector_score(…)` (HNSW index, exact fallback), `text_score(…)` (query vector, or query text via a pluggable embedder) — hybrid semantic + structural in one query |
+| **Vector + text** | `vector_score(…)` (HNSW index, exact fallback), `text_score(…)` (query vector, or query text via a pluggable embedder), `text_bm25(…)` (lexical BM25 over `build_text_index`) — hybrid semantic, lexical and structural in one query |
 | **Spatial** | `point(…)`, `distance(…)`, `wkt_within` / `intersects`, buffer / hull / union, k-NN — see [Spatial](#spatial-functions) |
 | **Temporal** | `date()` / `datetime()` / `localdatetime()`, `duration(…)`, `duration.between`, date arithmetic, `valid_at` / `valid_during` — see [Temporal](#temporal-functions) |
 | **Value types** | int, float, string, bool, **date**, **timestamp** (date + time), duration, point, list, map, node, relationship, path |
@@ -481,6 +481,7 @@ graph.cypher("""
 | `longitude(point)` | Extract longitude from point |
 | `valid_at(e, date, 'from', 'to')` | Temporal point-in-time filter (nodes or edges) |
 | `valid_during(e, start, end, 'from', 'to')` | Temporal range overlap filter |
+| `text_bm25(n, prop, query)` | Lexical (BM25) relevance of the node's indexed text against a query string. Needs `build_text_index(node_type, property)`; `0.0` when the document shares no word with the query, `null` when the index has no document for that row |
 | `text_score(n, prop, query)` | Semantic similarity. A **list** `query` is scored directly as your query vector; a **string** `query` is embedded first (requires `set_embedder()`) |
 | `text_score(n, prop, query, metric)` | With explicit metric (`'cosine'`, `'dot_product'`, `'euclidean'`, `'poincare'`) |
 | `vector_score(n, prop, vector [, metric])` | Semantic similarity against a pre-computed embedding vector (pass a list of floats directly, no `set_embedder()` needed) |
@@ -580,6 +581,65 @@ the `summary` column are scored as `vector_score(a, 'summary_emb', …)`.
 > the candidates, scoring is the exact brute-force scan. So building an index
 > speeds up "search the whole corpus by similarity"; a heavily-filtered query
 > stays exact.
+
+### Lexical search — `text_bm25`
+
+`text_bm25(n, 'property', 'query text')` ranks a row by **Okapi BM25** against
+a lexical index — word overlap, weighted by how rare each word is in the corpus
+and normalised for document length. No embedder, no vectors: it is the
+keyword-search half of hybrid retrieval, and it finds the exact term
+(a product code, a name, a rare noun) that an embedding blurs away.
+
+The index is **opt-in and explicit**, like `build_vector_index`:
+
+```python
+graph.build_text_index("Article", "body")     # Python; every binding has it
+```
+
+```cypher
+// Rank the corpus, best first.
+MATCH (a:Article)
+RETURN a.title, text_bm25(a, 'body', 'photosynthesis in low light') AS score
+ORDER BY score DESC LIMIT 10
+```
+
+```cypher
+// It is an ordinary scalar: filter first, then rank the survivors.
+MATCH (a:Article)-[:WRITTEN_BY]->(p:Person {name: 'Vera'})
+WHERE a.year >= 2020 AND text_bm25(a, 'body', 'low light') > 0
+RETURN a.title ORDER BY text_bm25(a, 'body', 'low light') DESC LIMIT 5
+```
+
+Semantics:
+
+| Case | Result |
+|------|--------|
+| The row's document shares no word with the query | `0.0` |
+| The index holds no document for that row (created after the build and not yet caught up, or its property is absent / not a string) | `null` |
+| The query argument is `null` | `null` |
+| No text index on the node's `(type, property)` | **error** naming `build_text_index` |
+
+`0.0` and `null` are deliberately different answers: `0.0` says the document was
+searched and did not match, `null` says it was not searched. Collapsing them
+would make an index that is quietly behind the graph look like a corpus with no
+matches.
+
+Tokenization is the same on both sides — lowercase, split on anything that is
+not a letter or a digit — with **no stemming and no stopword list**: BM25's IDF
+term already discounts a word that appears in nearly every document, without a
+language-specific list to maintain or be wrong about. A repeated query word is
+weighted once, so `'rust rust'` ranks exactly like `'rust'`.
+
+Ties break by node id, so a query over unchanged data returns the same order
+every time.
+
+**Staleness is visible, never silent.** The index does not follow writes; it
+records them and folds them in when a query next reads it, as long as the
+outstanding delta is within that index's `auto_refresh_limit` — which is why a
+node created after the build scores without anyone rebuilding. Past the limit
+(or on a read-only graph, which a query may not write to) the query serves what
+the index has, scores the rest `null`, and returns a warning naming the delta
+and the rebuild call. `SHOW INDEXES` reports `stale` and `delta` either way.
 
 ### Vector math over list properties — `dot` / `cosine` / `norm`
 
@@ -976,6 +1036,7 @@ Lexical similarity and fuzzy-match primitives — useful for deduplication, alia
 | `text_edit_distance(a, b)` | `Int64` | Levenshtein edit distance (UTF-8 aware) |
 | `text_normalize(s)` | `String` | Lowercase, drop punctuation, collapse whitespace |
 | `text_jaccard(a, b [, sep])` | `Float64` | Token-set Jaccard similarity (default separator: whitespace) |
+
 | `text_ngrams(s, n)` | `List<String>` | Character n-grams |
 | `text_contains_any(s, needles)` | `Boolean` | True if `s` contains any needle (variadic or list arg) |
 | `text_starts_with_any(s, prefixes)` | `Boolean` | True if `s` starts with any prefix (variadic or list arg) |
@@ -2773,8 +2834,8 @@ that works — never a syntax error, and never a no-op that reports success.
 
 | Statement | Why, and what to use |
 |---|---|
-| `CREATE TEXT INDEX` | No text index. `CONTAINS` / `STARTS WITH` / `ENDS WITH` work unindexed (a string index already gives prefix pushdown — see above) |
-| `CREATE FULLTEXT INDEX` | No full-text index. Use `build_vector_index` + `vector_score()` for ranked text retrieval |
+| `CREATE TEXT INDEX` | Neo4j's TEXT index accelerates `CONTAINS` / `STARTS WITH` / `ENDS WITH`, which KGLite serves unindexed (a string index already gives prefix pushdown — see above). For *ranked* retrieval, build a BM25 index: `build_text_index(node_type, property)`, then `text_bm25()` |
+| `CREATE FULLTEXT INDEX` | BM25 indexes exist, but Neo4j's FULLTEXT is multi-label, multi-property and name-addressed while KGLite's is one node type's one property, so they are created through `build_text_index(node_type, property)` and queried with `text_bm25()`. A built one *is* listed by `SHOW INDEXES` as type `FULLTEXT`, and `DROP INDEX Label.property` removes it |
 | `CREATE POINT INDEX` | No point index. Spatial predicates and the spatial-join optimiser work on geometry properties without one |
 | `CREATE VECTOR INDEX` | Vector indexes exist, but need an existing embedding store and HNSW build parameters, so they are created through `build_vector_index(...)`. A built one *is* listed by `SHOW INDEXES` as type `VECTOR`, and `DROP INDEX Label.column` removes it |
 | `CREATE LOOKUP INDEX` | Label and relationship-type lookup is always indexed automatically (`type_indices`) |

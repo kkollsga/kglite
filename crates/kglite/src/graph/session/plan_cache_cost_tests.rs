@@ -380,3 +380,40 @@ fn a_sibling_fork_is_never_served_another_forks_plan() {
          means it was served tx1's plan with tx1's anchor NodeIndex baked in"
     );
 }
+
+/// `text_bm25` stays cacheable, unlike `text_score`.
+///
+/// `text_score` is excluded structurally: its plan-time rewrite injects
+/// embedding vectors as parameters, and only a param-less statement is cached.
+/// `text_bm25` has no plan-time rewrite — the index is read at execution — so
+/// nothing about it should force a query out of the cache. Read like that, this
+/// is an absence, and an absence is exactly the claim that goes stale silently;
+/// measuring the hit is what keeps it honest.
+#[test]
+fn a_text_bm25_read_is_cached_like_any_other() {
+    let _guard = plan_cache::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let params = empty_params();
+    let opts = ExecuteOptions::eager(&params);
+    let mut graph = DirGraph::new();
+    execute_mut(
+        &mut graph,
+        "CREATE (:Item {id: 1, body: 'a quick fox'})",
+        &opts,
+    )
+    .expect("seed");
+    crate::graph::text_indexes::build_text_index(&mut graph, "Item", "body", None)
+        .expect("build the index");
+    const BM25: &str = "MATCH (n:Item) RETURN text_bm25(n, 'body', 'fox') AS s";
+
+    instrumentation::reset();
+    execute_read(&graph, BM25, &opts).expect("cold read");
+    execute_read(&graph, BM25, &opts).expect("warm read");
+
+    assert_eq!(
+        events(instrumentation::totals().read),
+        (2, 1, 1),
+        "text_bm25 carries no plan-time rewrite, so its plan is cacheable"
+    );
+}

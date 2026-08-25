@@ -346,7 +346,7 @@ Verified absent against 0.10.14:
 | `LOAD CSV` | Supported — `file://` and local paths, leading position only | `http(s)://` needs a prior download; off by default for Bolt clients (see above) |
 | `exists(n.prop)` (property existence) | Not supported | `WHERE n.prop IS NOT NULL` / `IS NULL` |
 | `exists((pattern))` in `RETURN` | Not supported as a `RETURN` expression | `EXISTS { pattern }` / inline pattern predicate in `WHERE` |
-| `CREATE TEXT / FULLTEXT / POINT / VECTOR / LOOKUP INDEX` | Not supported — rejected with the route that applies | `CONTAINS`/`STARTS WITH` need no text index; `build_vector_index(...)` for ranked retrieval; label lookup is automatic |
+| `CREATE TEXT / FULLTEXT / POINT / VECTOR / LOOKUP INDEX` | Not supported — rejected with the route that applies | `CONTAINS`/`STARTS WITH` need no index; `build_text_index(...)` + `text_bm25()` for lexical ranking, `build_vector_index(...)` for semantic; label lookup is automatic |
 | `CREATE CONSTRAINT ... IS :: LIST<T>` / unions / zoned temporal types | Parses, then rejected by name rather than approximated | Only the type names with an exact KGLite value counterpart are accepted (`BOOLEAN`, `STRING`, `INTEGER`, `FLOAT`, `DATE`, `LOCAL DATETIME`, `DURATION`, `POINT`). For the rest, `lock_schema()` rejects writes disagreeing with the recorded property type and `validate_schema()` audits existing data |
 | `CREATE CONSTRAINT ... FOR ()-[r:T]-() ... IS UNIQUE` / `IS RELATIONSHIP KEY` | Not supported | KGLite has no single answer for when two relationships of a type are the same one, so uniqueness would mean different things on different write paths. `IS NOT NULL` and `IS :: TYPE` on a relationship **are** supported — see below |
 

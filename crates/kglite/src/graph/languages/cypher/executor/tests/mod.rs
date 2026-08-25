@@ -12,6 +12,7 @@
 //! - [`semantics`] — absolute goldens for expression semantics (duplicate
 //!   result columns, `datetime()` time/zone, integer overflow and div-by-zero)
 //! - [`strings`] — string functions and procedure list arguments
+//! - [`text_bm25`] — the BM25 scalar's null/zero split, freshness policy, cache
 //! - [`vectors`] — `dot` / `cosine` / `norm` over list-valued data
 //! - [`parallel`] — deadline/cancel polling inside the rayon-parallel regions
 #![allow(clippy::approx_constant)]
@@ -35,6 +36,7 @@ mod mutations;
 mod parallel;
 mod semantics;
 mod strings;
+mod text_bm25;
 mod vectors;
 
 /// Test helper: unwraps evaluate_comparison Result for use in assert!()

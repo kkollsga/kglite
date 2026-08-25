@@ -6848,6 +6848,11 @@ class KnowledgeGraph:
         """Build a BM25 lexical index over a node type's string property, for
         keyword/full-text ranking.
 
+        Query it with the Cypher scalar ``text_bm25(n, '<property>', '<query
+        text>')``, which returns that row's BM25 relevance — ``0.0`` for an
+        indexed document sharing no word with the query, ``null`` for a row the
+        index holds no document for, and an error when no index exists.
+
         Opt-in and explicit, like :meth:`create_index`: nothing builds one for
         you. After the build the index does not follow writes *eagerly* — it
         records that they happened and folds them in when a query next reads
@@ -6931,6 +6936,11 @@ class KnowledgeGraph:
 
             g.build_text_index("Article", "body")
             # {'indexed': 1200, 'skipped': 3, 'terms': 18422}
+            g.cypher(
+                "MATCH (a:Article) "
+                "RETURN a.title, text_bm25(a, 'body', 'low light') AS score "
+                "ORDER BY score DESC LIMIT 10"
+            )
         """
         ...
 

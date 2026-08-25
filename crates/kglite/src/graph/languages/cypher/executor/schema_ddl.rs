@@ -657,17 +657,25 @@ fn unsupported_index_type_message(index_type: DdlIndexType) -> String {
     let keyword = index_type.keyword();
     let detail = match index_type {
         DdlIndexType::Text => {
-            "KGLite has no text index. `CONTAINS`, `STARTS WITH`, and `ENDS WITH` predicates \
-             work without one (they scan), and full-text-style ranking is available through the \
-             vector-search API."
+            "Neo4j's TEXT index accelerates `CONTAINS` / `STARTS WITH` / `ENDS WITH`, which \
+             KGLite serves without one (they scan, and a string index already gives prefix \
+             pushdown). For *ranked* retrieval — which is what most callers reach for TEXT \
+             expecting — build a BM25 index instead: your binding's \
+             build_text_index(node_type, property), then `text_bm25(n, 'property', 'query')` \
+             in Cypher."
         }
         DdlIndexType::Point => {
             "KGLite has no point index. Spatial predicates and the spatial-join optimiser work \
              on WKT/geometry properties without one."
         }
         DdlIndexType::Fulltext => {
-            "KGLite has no full-text index. Use the vector-search API \
-             (`build_vector_index` + `vector_score()`) for ranked text retrieval."
+            "BM25 full-text indexes exist in KGLite but are not created through Cypher DDL, \
+             because Neo4j's FULLTEXT is multi-label, multi-property and name-addressed while \
+             KGLite's is one node type's one property. Use your binding's \
+             build_text_index(node_type, property) — every binding reaches it (Python, Rust, \
+             and the C ABI's kglite_session_build_text_index, which Java and the other C \
+             consumers wrap) — then rank with `text_bm25(n, 'property', 'query')`. A built one \
+             is listed by `SHOW INDEXES` as type FULLTEXT."
         }
         DdlIndexType::Vector => {
             "Vector indexes exist in KGLite but are not created through Cypher DDL, because \
@@ -1588,11 +1596,14 @@ mod tests {
     fn unsupported_index_types_name_themselves_and_the_alternative() {
         let mut graph = person_graph();
         for (query, needle) in [
-            ("CREATE TEXT INDEX t FOR (n:Person) ON (n.name)", "CONTAINS"),
+            (
+                "CREATE TEXT INDEX t FOR (n:Person) ON (n.name)",
+                "build_text_index",
+            ),
             ("CREATE POINT INDEX p FOR (n:Person) ON (n.loc)", "Spatial"),
             (
                 "CREATE FULLTEXT INDEX f FOR (n:Person) ON EACH [n.name]",
-                "vector-search",
+                "build_text_index",
             ),
             (
                 "CREATE VECTOR INDEX v FOR (n:Person) ON (n.emb)",

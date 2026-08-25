@@ -1,8 +1,8 @@
-"""Regenerate the Phase 10 golden snapshots.
+"""Regenerate the golden snapshots.
 
-Rebuild the deterministic golden graph on memory mode, run every seed
-query from ``tests/golden/queries.py``, and write the serialised
-outputs under ``tests/golden/snapshots/``.
+Rebuild the deterministic golden graph *and* the BM25 text corpus on
+memory mode, run every seed query from ``tests/golden/queries.py``, and
+write the serialised outputs under ``tests/golden/snapshots/``.
 
 Usage:
     python tests/golden/regenerate.py              # overwrite snapshots
@@ -27,7 +27,8 @@ if str(_TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(_TESTS_DIR))
 
 from golden.build_golden_graph import build_golden_graph  # noqa: E402
-from golden.queries import CYPHER_QUERIES, FIND_QUERIES  # noqa: E402
+from golden.build_text_corpus import build_text_corpus  # noqa: E402
+from golden.queries import BM25_QUERIES, CYPHER_QUERIES, FIND_QUERIES  # noqa: E402
 
 from kglite import KnowledgeGraph  # noqa: E402
 
@@ -65,6 +66,15 @@ def _cypher_snapshot(kg: KnowledgeGraph, query: str) -> list[dict[str, Any]]:
     return _sort_rows(rows)
 
 
+def _ranked_snapshot(kg: KnowledgeGraph, query: str) -> list[dict[str, Any]]:
+    """Like :func:`_cypher_snapshot`, but **in row order**.
+
+    A ranking is the row order, so sorting the rows here would discard the
+    contract and leave a snapshot that passes whatever the ranker does.
+    """
+    return [_normalise_row(dict(r)) for r in kg.cypher(query)]
+
+
 def _find_snapshot(kg: KnowledgeGraph, name: str, node_type: str | None) -> list[dict[str, Any]]:
     if node_type is None:
         rows = list(kg.find(name))
@@ -92,6 +102,17 @@ def generate_all() -> dict[pathlib.Path, str]:
         outputs[SNAPSHOTS_DIR / f"cypher_{slug}.json"] = (
             json.dumps(
                 {"query": cypher, "rows": _cypher_snapshot(kg, cypher)},
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+
+    text_kg = build_text_corpus(KnowledgeGraph())
+    for slug, cypher in BM25_QUERIES:
+        outputs[SNAPSHOTS_DIR / f"bm25_{slug}.json"] = (
+            json.dumps(
+                {"query": cypher, "rows": _ranked_snapshot(text_kg, cypher)},
                 indent=2,
                 sort_keys=True,
             )
