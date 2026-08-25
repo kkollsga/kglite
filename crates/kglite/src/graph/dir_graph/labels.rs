@@ -116,8 +116,8 @@ impl DirGraph {
     /// mutations.
     ///
     /// Returns `Ok(true)` if removed, `Ok(false)` if the node never had
-    /// the label, `Err(...)` if `label` is the primary type (use
-    /// `SET n.type = ...` to retype instead).
+    /// the label, `Err(...)` if `label` is the primary type (the primary
+    /// type is immutable; recreate or migrate the node to change it).
     pub fn remove_node_label(
         &mut self,
         idx: NodeIndex,
@@ -129,8 +129,9 @@ impl DirGraph {
         };
         if primary == label {
             return Err(
-                "Cannot remove a node's primary label via REMOVE n:Label; use \
-                 SET n.type = 'NewType' to retype."
+                "Cannot remove a node's primary label via REMOVE n:Label; the \
+                 primary type is immutable — recreate or migrate the node to \
+                 change it."
                     .to_string(),
             );
         }

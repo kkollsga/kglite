@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The `REMOVE n:PrimaryType` error (and two `add_label`/`remove_label`
+  docstrings) advised retyping via `SET n.type = 'NewType'` — an operation
+  that does not exist (`SET n.type` is itself rejected). The message now says
+  what is true: the primary type is immutable; recreate or migrate the node.
+
 ## [0.16.10] - 2026-08-25
 
 ### Added

@@ -1591,8 +1591,8 @@ impl KnowledgeGraph {
     ///
     /// Secondary labels are queryable via Cypher (`MATCH (n:Label)`)
     /// and surfaced by `labels(n)`. The primary type (set by
-    /// `add_nodes(node_type=...)`) is immutable via this API — to
-    /// retype a node, use `SET n.type = 'NewType'`.
+    /// `add_nodes(node_type=...)`) is immutable — recreate or migrate
+    /// a node to change it.
     ///
     /// Args:
     ///     node_type: Primary type of the nodes to label.
@@ -1648,8 +1648,8 @@ impl KnowledgeGraph {
 
     /// Remove a secondary label from a batch of nodes by id.
     ///
-    /// Errors if `label` is the primary type — use `SET n.type` to
-    /// retype a node.
+    /// Errors if `label` is the primary type, which is immutable —
+    /// recreate or migrate a node to change it.
     ///
     /// Args:
     ///     node_type: Primary type of the nodes.

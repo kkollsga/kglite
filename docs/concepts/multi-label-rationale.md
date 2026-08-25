@@ -94,6 +94,13 @@ new in 0.10.5) and "labels as type hierarchy" (subtype edges, still
 preferred when the taxonomy is hierarchical or when label-specific
 properties matter).
 
+**Caveat (2026-08-25):** the subtype-edge pattern currently has no engine
+support beyond ordinary `*1..` path traversal — no declared transitivity, no
+`describe()` awareness, no validator defaults. Until a declared semantic
+layer exists, the recommendation above trades hierarchy modelling for that
+tooling gap; a large flat taxonomy (Wikidata-scale) still belongs in edges
+regardless.
+
 ## History
 
 This document was originally written to defer Track C until a

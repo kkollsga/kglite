@@ -604,6 +604,7 @@ Quick reference. Each links into the appropriate guide.
 | Feature | Description |
 |---|---|
 | **[Cypher](https://kglite.readthedocs.io/en/latest/python/guides/cypher.html)** | MATCH, CREATE, SET, DELETE, MERGE, UNION/INTERSECT/EXCEPT, aggregations (incl. `median`, `percentile_cont`, `variance`), `reduce()`, ORDER BY, LIMIT, SKIP |
+| **Label model** | One immutable primary type per node plus optional secondary labels — `CREATE (n:A:B)`, `SET n:B`, `REMOVE n:B`, `labels(n)` returns the list (primary first). Details in the [Cypher reference](CYPHER.md) callout. |
 | **[Semantic search](https://kglite.readthedocs.io/en/latest/python/guides/semantic-search.html)** | Vector embeddings + `text_score()` for similarity ranking. Bring your own embedder (`pip install fastembed` or `sentence-transformers`). |
 | **Text predicates** | `text_edit_distance`, `text_normalize`, `text_jaccard`, `text_ngrams`, `text_contains_any` / `text_starts_with_any` |
 | **[Graph algorithms](https://kglite.readthedocs.io/en/latest/python/guides/graph-algorithms.html)** | Shortest path (BFS or Dijkstra), centrality, community detection, clustering |

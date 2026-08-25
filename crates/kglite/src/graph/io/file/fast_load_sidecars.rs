@@ -344,9 +344,10 @@ const TYPE_CONN_MAGIC: &[u8; 8] = b"KGLTCN1\0";
 const TYPE_CONN_VERSION: u32 = 1;
 
 // secondary_labels.bin.zst format. Persists DirGraph.secondary_label_index
-// for disk-backed graphs. Memory + mapped backends carry secondaries inline
-// on NodeData in the portable payload; disk's columnar layout has no
-// per-row label slot, so we need this sidecar.
+// for disk-backed graphs. NodeData carries no labels in any backend —
+// memory + mapped persist the index through the .kgl
+// SECONDARY_LABELS_SECTION; disk's columnar layout has no per-row label
+// slot, so it needs this sidecar.
 //
 // Payload layout (zstd-compressed):
 //   [0..8]   magic = b"KGLSLBL1"

@@ -262,7 +262,9 @@ impl<'a> CypherExecutor<'a> {
             }
             "labels" => {
                 // labels(n) returns the list of node labels: primary
-                // first, then secondaries in insertion order.
+                // first, then secondaries sorted by name (DirGraph::
+                // secondary_labels sorts on resolved names so per-process
+                // HashMap order never leaks into results).
                 //
                 // Routes through `DirGraph::node_labels`, which reads
                 // secondaries from `secondary_label_index` (the
