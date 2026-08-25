@@ -21,8 +21,10 @@
 
 use std::collections::HashSet;
 
+use indexmap::IndexMap;
+
 use super::expr;
-use super::schema::{Blueprint, ComputeOp};
+use super::schema::{Blueprint, ComputeOp, NodeSpec};
 
 /// Walk the compute pipeline and check every op. Mutates a
 /// growing `known_types` set so each op can be validated against
@@ -278,6 +280,37 @@ mod tests {
     }
 
     #[test]
+    fn unknown_property_type_values_warn() {
+        let bp = bp_from_json(
+            r#"{"nodes": {"Person": {
+                "csv": "p.csv", "pk": "id",
+                "properties": {"age": "int", "geom": "geometry", "born": "birthDate"},
+                "connections": {"junction_edges": {"KNOWS": {
+                    "csv": "k.csv", "source_fk": "a", "target": "Person", "target_fk": "b",
+                    "property_types": {"from": "validFrom", "to": "renamedTo"}
+                }}},
+                "sub_nodes": {"Pet": {"csv": "pets.csv", "pk": "id",
+                    "properties": {"kind": "sting"}}}
+            }}}"#,
+        );
+        let warnings = unknown_property_type_warnings(&bp);
+        assert_eq!(warnings.len(), 3, "{warnings:?}");
+        assert!(warnings
+            .iter()
+            .any(|w| w.contains("'birthDate'") && w.contains("node 'Person'")));
+        assert!(warnings
+            .iter()
+            .any(|w| w.contains("'renamedTo'") && w.contains("junction 'KNOWS'")));
+        assert!(warnings
+            .iter()
+            .any(|w| w.contains("'sting'") && w.contains("node 'Pet'")));
+        // Recognized values (int, geometry, validFrom) draw no warning.
+        assert!(!warnings
+            .iter()
+            .any(|w| w.contains("'int'") || w.contains("'geometry'") || w.contains("'validFrom'")));
+    }
+
+    #[test]
     fn empty_compute_validates() {
         let bp = bp_from_json(r#"{"nodes": {}}"#);
         validate_compute(&bp).unwrap();
@@ -488,4 +521,58 @@ mod tests {
         );
         validate_compute(&bp).unwrap();
     }
+}
+
+/// One warning per `properties` / `property_types` value that is neither a
+/// type keyword `map_blueprint_type` recognizes nor a spatial target
+/// (`geometry` / `location.lat` / `location.lon`).
+///
+/// Such a value was silently ignored before 0.16.11 — the column type fell
+/// through to inference and nothing said so, which let a wrong mental model
+/// ("`property_types` renames columns") *succeed*: the sodir fleet shipped
+/// months of un-renamed property families that way. Warn, don't error:
+/// existing blueprints with stray values still build, but the report now
+/// names every ignored value.
+pub fn unknown_property_type_warnings(blueprint: &Blueprint) -> Vec<String> {
+    let mut warnings = Vec::new();
+    fn is_known(ty: &str) -> bool {
+        super::csv_loader::map_blueprint_type(ty).is_some()
+            || matches!(ty, "geometry" | "location.lat" | "location.lon")
+    }
+    fn check(warnings: &mut Vec<String>, where_: &str, kind: &str, map: &IndexMap<String, String>) {
+        for (col, ty) in map {
+            if !is_known(ty) {
+                warnings.push(format!(
+                    "{where_}: unknown {kind} value '{ty}' for column '{col}' — not a type \
+                     keyword (string|int|float|bool|date|datetime|validFrom|validTo) or spatial \
+                     target (geometry|location.lat|location.lon). The value is ignored and the \
+                     column type is inferred; note this map declares types, it does not rename \
+                     columns."
+                ));
+            }
+        }
+    }
+    fn walk(warnings: &mut Vec<String>, node_type: &str, spec: &NodeSpec) {
+        check(
+            warnings,
+            &format!("node '{node_type}'"),
+            "properties",
+            &spec.properties,
+        );
+        for (edge_type, junc) in &spec.connections.junction_edges {
+            check(
+                warnings,
+                &format!("junction '{edge_type}' (node '{node_type}')"),
+                "property_types",
+                &junc.property_types,
+            );
+        }
+        for (sub_type, sub) in &spec.sub_nodes {
+            walk(warnings, sub_type, sub);
+        }
+    }
+    for (node_type, spec) in &blueprint.nodes {
+        walk(&mut warnings, node_type, spec);
+    }
+    warnings
 }

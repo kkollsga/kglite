@@ -71,6 +71,11 @@ pub fn build(
         errors: Vec::new(),
         provisional_purged: 0,
     };
+    report
+        .warnings
+        .extend(super::validation::unknown_property_type_warnings(
+            &blueprint,
+        ));
 
     let profile = std::env::var("KGLITE_BLUEPRINT_PROFILE").is_ok();
     let t0 = std::time::Instant::now();

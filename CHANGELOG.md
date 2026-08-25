@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Blueprint builds now warn (in the build report / `verbose=True` output)
+  for every `properties` / `property_types` value that is neither a type
+  keyword nor a spatial target. Such values were silently ignored — the
+  column type fell through to inference — which let the "`property_types`
+  renames columns" misconception succeed without a trace.
+
 ### Fixed
 
 - `CREATE INDEX` (Cypher) and `create_index` / `create_range_index` /

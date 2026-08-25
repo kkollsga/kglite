@@ -1229,3 +1229,26 @@ class TestProvisionalNodes:
         assert g.cypher("MATCH (s:Student) RETURN count(s) AS n")[0]["n"] == 2
         assert g.cypher("MATCH ()-[r:FRIEND]->() RETURN count(r) AS n")[0]["n"] == 1
         assert g.cypher("MATCH (s:Student) WHERE s._provisional = true RETURN count(s) AS n")[0]["n"] == 0
+
+
+class TestUnknownPropertyTypeWarning:
+    def test_unknown_type_value_warns(self, tmp_path, capfd):
+        """A properties/property_types value that is neither a type keyword
+        nor a spatial target was silently ignored (the rename-map trap);
+        now the build report warns, naming column and value."""
+        bp_path = _minimal_blueprint(tmp_path)
+        with open(bp_path, encoding="utf-8") as f:
+            bp = json.load(f)
+        bp["nodes"]["Person"]["properties"]["age"] = "renamedAge"
+        _write_blueprint(bp_path, bp)
+
+        kglite.from_blueprint(str(bp_path), verbose=True, save=False)
+        err = capfd.readouterr().err
+        assert "renamedAge" in err
+        assert "does not rename columns" in err
+
+    def test_known_values_stay_silent(self, tmp_path, capfd):
+        bp_path = _minimal_blueprint(tmp_path)
+        kglite.from_blueprint(str(bp_path), verbose=True, save=False)
+        err = capfd.readouterr().err
+        assert "does not rename columns" not in err
