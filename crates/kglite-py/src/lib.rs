@@ -188,6 +188,7 @@ fn warn_if_sidecar_runs_ahead(py: Python<'_>, path: &str, checkpoint_lsn: u64) {
     }
 }
 
+/// Load a graph from a binary file previously saved with `save()`.
 #[pyfunction]
 fn load(py: Python<'_>, path: String) -> PyResult<KnowledgeGraph> {
     let inner = py

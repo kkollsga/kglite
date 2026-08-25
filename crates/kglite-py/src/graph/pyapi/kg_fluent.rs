@@ -117,6 +117,7 @@ impl KnowledgeGraph {
         Ok(new_kg)
     }
 
+    /// Select all nodes of a given type.
     #[pyo3(signature = (node_type, sort=None, limit=None, temporal=None, include_secondary=false))]
     fn select(
         &mut self,
@@ -215,6 +216,7 @@ impl KnowledgeGraph {
         Ok(new_kg)
     }
 
+    /// Filter the current selection by property conditions.
     #[pyo3(signature = (conditions, sort=None, limit=None))]
     #[pyo3(name = "where")]
     fn where_method(
@@ -301,6 +303,7 @@ impl KnowledgeGraph {
         })
     }
 
+    /// Filter nodes based on whether they have connections.
     #[pyo3(signature = (include_orphans=None, sort=None, limit=None))]
     fn where_orphans(
         &self,
@@ -327,6 +330,7 @@ impl KnowledgeGraph {
         })
     }
 
+    /// Sort the current selection.
     #[pyo3(signature = (sort, ascending=None))]
     fn sort(&self, sort: &Bound<'_, PyAny>, ascending: Option<bool>) -> PyResult<Self> {
         let sort_fields = py_in::parse_sort_fields(sort, ascending)?;
@@ -336,6 +340,7 @@ impl KnowledgeGraph {
         })
     }
 
+    /// Limit the number of nodes per parent group.
     fn limit(&self, max_per_group: usize) -> PyResult<Self> {
         self.derive_with(|inner, cursor| {
             kglite_core::api::fluent::limit_nodes_per_group(

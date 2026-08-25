@@ -479,6 +479,7 @@ impl KnowledgeGraph {
         })
     }
 
+    /// Clear the current selection (resets to empty).
     fn clear(&mut self) -> PyResult<()> {
         self.cursor.selection.clear();
         Ok(())
@@ -572,6 +573,7 @@ impl KnowledgeGraph {
         })
     }
 
+    /// Serialise the graph to disk, atomically and durably.
     #[pyo3(signature = (path=None, *, fsync=true))]
     fn save(&mut self, py: Python<'_>, path: Option<&str>, fsync: bool) -> PyResult<()> {
         // A graph whose log refused an append holds a statement the caller was

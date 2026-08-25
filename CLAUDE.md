@@ -459,6 +459,23 @@ Before any perf-related change:
 4. `crates/kglite-mcp-server/src/tools/` — MCP tool wrapper, if agent-facing (router wiring in `tools/register.rs`; the pre-split `tools.rs` monolith is gone).
 5. `CHANGELOG.md` `[Unreleased]` — user-visible changes only.
 
+**Which docstring says what — one line in Rust, the contract in the stub.** The
+same method is documented in three places with three readers, and they are not
+copies of each other. The Rust `///` on the `#[pymethods]` fn is a **one-line
+summary only** — its readers are `help()`/`pydoc` at an interactive prompt and
+rustdoc, so it is plain prose (convert Sphinx markup: ``x`` → `x`,
+:func:`f` → `f()`, :class:`C` → `C`) and never repeats Args/Returns.
+`kglite/__init__.pyi` carries the **full contract** — signature, Args, Returns,
+Raises, examples — and remains the source of truth the published API docs are
+generated from. `introspection/topics.rs` carries an **independent
+agent-facing one-liner** written for `describe()`, not derived from either.
+A missing `///` is a defect (an empty `help()`), but so is a `///` that
+duplicates the stub: it will drift, and the stub is the one that ships.
+Watch the adjacency — the `///` goes above the `#[pyo3(...)]` attributes with
+no blank line before the item, and it must never become the nearest `//`
+comment above an `#[allow]` (see R18: that would satisfy the allowance gate's
+reason requirement vacuously).
+
 ## Documentation
 
 Docs auto-rebuild at [kglite.readthedocs.io](https://kglite.readthedocs.io) on every push to `main`.

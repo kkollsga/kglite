@@ -89,6 +89,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Graphs built with `KnowledgeGraph(storage="disk", path=...)` were never
   affected.
 
+- **Eighteen public Python items answered `help()` with nothing at all.**
+  `kglite.load` and seventeen `KnowledgeGraph` methods — `select`, `where`,
+  `where_orphans`, `sort`, `limit`, `clear`, `save`, `connections`, `titles`,
+  `get_properties`, `unique_values`, `collect_children`, `statistics`,
+  `calculate`, `count`, `schema_text` and `selection` — carried no runtime
+  docstring, so `help(kg.select)` printed a signature and stopped, and
+  `pydoc`/IDE hovers showed the same blank. Every one now carries a one-line
+  summary matching the type stub's first sentence. The full contract (Args,
+  Returns, examples) stays in `kglite/__init__.pyi`, which is what the
+  published API reference is generated from; the runtime docstring is
+  deliberately the summary only, so the two cannot drift apart.
+
 ### Removed
 
 - **The three unstable `_`-prefixed subgraph methods on `KnowledgeGraph`** —

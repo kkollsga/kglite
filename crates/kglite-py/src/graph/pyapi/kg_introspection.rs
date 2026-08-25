@@ -585,6 +585,7 @@ impl KnowledgeGraph {
         })
     }
 
+    /// Get connections for selected nodes.
     #[pyo3(signature = (indices=None, parent_info=None, include_node_properties=None,
                         flatten_single_parent=true))]
     fn connections(
@@ -611,6 +612,7 @@ impl KnowledgeGraph {
         })
     }
 
+    /// Get titles of selected nodes.
     #[pyo3(signature = (limit=None, indices=None, flatten_single_parent=None))]
     fn titles(
         &self,
@@ -672,6 +674,7 @@ impl KnowledgeGraph {
         Ok(steps.join(" -> "))
     }
 
+    /// Get specific properties for selected nodes.
     #[pyo3(signature = (properties, limit=None, indices=None, flatten_single_parent=None))]
     fn get_properties(
         &self,
@@ -692,6 +695,7 @@ impl KnowledgeGraph {
         Python::attach(|py| py_out::level_values_to_pydict(py, &values, flatten_single_parent))
     }
 
+    /// Get unique values of a property, optionally storing results.
     // Keyword-rich Python surface: each arg is an optional pyo3 kwarg; splitting
     // into a params struct would not change the Python call shape.
     #[allow(clippy::too_many_arguments)]
@@ -1211,8 +1215,11 @@ impl KnowledgeGraph {
         Ok(new_kg)
     }
 
-    #[pyo3(signature = (property=None, r#where=None, sort=None, limit=None, store_as=None, max_length=None, keep_selection=None))]
+    /// Collect child-node property values into comma-separated lists.
+    // Keyword-rich Python surface: each arg is an optional pyo3 kwarg; splitting
+    // into a params struct would not change the Python call shape.
     #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (property=None, r#where=None, sort=None, limit=None, store_as=None, max_length=None, keep_selection=None))]
     fn collect_children(
         &mut self,
         py: Python<'_>,
@@ -1332,6 +1339,7 @@ impl KnowledgeGraph {
         Python::attach(|py| Ok(Py::new(py, new_kg)?.into_any()))
     }
 
+    /// Compute descriptive statistics for a numeric property.
     #[pyo3(signature = (property, level_index=None, group_by=None))]
     fn statistics(
         &self,
@@ -1380,6 +1388,7 @@ impl KnowledgeGraph {
         py_out::convert_stats_for_python(stats)
     }
 
+    /// Evaluate a mathematical expression on selected nodes.
     #[pyo3(signature = (expression, level_index=None, store_as=None, keep_selection=None, aggregate_connections=None))]
     fn calculate(
         &mut self,
@@ -1510,6 +1519,7 @@ impl KnowledgeGraph {
         }
     }
 
+    /// Count nodes, optionally grouped by parent or by a property.
     #[pyo3(signature = (level_index=None, group_by_parent=None, store_as=None, keep_selection=None, group_by=None))]
     fn count(
         &mut self,
@@ -1617,6 +1627,7 @@ impl KnowledgeGraph {
         }
     }
 
+    /// Return a text summary of the graph schema (node types, connections).
     fn schema_text(&self) -> PyResult<String> {
         let schema_string = introspection::debugging::get_schema_string(&self.inner);
         Ok(schema_string)
@@ -1809,6 +1820,7 @@ impl KnowledgeGraph {
         introspection::mcp_quickstart()
     }
 
+    /// Return a text summary of the current selection state.
     fn selection(&self) -> PyResult<String> {
         Ok(introspection::debugging::get_selection_string(
             &self.inner,
