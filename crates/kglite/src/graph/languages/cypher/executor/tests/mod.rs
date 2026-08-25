@@ -9,6 +9,7 @@
 //! - [`mutations`] — CREATE / SET / DELETE / REMOVE / MERGE and index upkeep
 //! - [`identifiers`] — quoted-identifier escaping (the injection class)
 //! - [`lists`] — list parsing, slicing, sizing, and quantifier predicates
+//! - [`score_fuse`] — the retrieval-fusion scalar: absent lanes, weights, fold
 //! - [`semantics`] — absolute goldens for expression semantics (duplicate
 //!   result columns, `datetime()` time/zone, integer overflow and div-by-zero)
 //! - [`strings`] — string functions and procedure list arguments
@@ -35,6 +36,7 @@ mod identifiers;
 mod lists;
 mod mutations;
 mod parallel;
+mod score_fuse;
 mod semantics;
 mod strings;
 mod text_bm25;

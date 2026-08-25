@@ -63,6 +63,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   serves what the index has, scores the rest null, and returns a warning
   naming the delta and the rebuild call.
 
+- **`score_fuse(s1, s2, … [, weights])` — hybrid retrieval in one Cypher
+  query.** A pure scalar that combines several ranked lanes into one number,
+  so `score_fuse(text_bm25(n, 'body', $q), vector_score(n, 'body_emb', $qv))`
+  ranks by keyword and by meaning in a single statement, with the graph
+  filters and traversal of ordinary Cypher around it. Lanes weigh equally by
+  default; a trailing list weights them in argument order (relative, so
+  `[3, 1]` and `[0.75, 0.25]` rank identically). A lane that could not see the
+  row — `null`, `NaN` or an infinity — **leaves the average together with its
+  weight** rather than scoring zero, because zero would rank a document one
+  lane could not see below a document both lanes disliked; the result is
+  `null` only when every lane is absent. A wrong-length weights list, a
+  negative weight, and a non-numeric score are errors rather than a quietly
+  different ranking. There is no `rrf()` scalar: Reciprocal Rank Fusion needs
+  each lane's rank across the whole result, which no per-row scalar can see —
+  CYPHER.md documents the two-line recipe (`rank() OVER (…)` in a `WITH`, then
+  fuse the reciprocals) that computes it from primitives that already exist.
+
 - **Vector indexes adopt the same catch-up contract as the new text ones.**
   Writing vectors after `build_vector_index` no longer drops the index. Neither
   arm of a vector write moves an existing store slot — an append lands past the

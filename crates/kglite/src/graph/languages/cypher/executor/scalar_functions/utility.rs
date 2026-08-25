@@ -89,6 +89,15 @@ impl<'a> CypherExecutor<'a> {
             // `string`'s text_* family are pure string→scalar functions that
             // never touch the graph.
             "text_bm25" => self.eval_text_bm25(args, row),
+            // score_fuse(s1, s2, … [, [w1, w2, …]]) — one number out of
+            // several ranked lanes. Registered in `utility` beside the lanes
+            // it fuses (text_bm25, vector_score, text_score) rather than in
+            // `numeric`, because what it is *for* is hybrid retrieval: the
+            // three names a caller needs for one query are then one
+            // `SHOW FUNCTIONS` category apart, not two. It touches no graph
+            // state, so it is also the one function here that would work
+            // unchanged in any other module.
+            "score_fuse" => self.eval_score_fuse(args, row),
             // randomUUID() — RFC 4122 version-4 UUID string. Non-
             // deterministic; classified alongside rand() in
             // `is_row_independent` (where_clause.rs) so constant folding
@@ -504,6 +513,123 @@ impl CypherExecutor<'_> {
             generation,
         })
     }
+
+    /// `score_fuse(s1, s2, … [, [w1, w2, …]])` — the weighted mean of the
+    /// signals that are **present**, so one Cypher query can rank by several
+    /// retrieval lanes at once.
+    ///
+    /// **Absent is `null`, `NaN` and `±inf`**, and an absent signal leaves the
+    /// average — its weight leaves the denominator with it. That is a
+    /// deliberate departure from the null-in/null-out rule the other scalars
+    /// follow (see `vector.rs`): a lane reports `null` for a row it *could not
+    /// see* (no document in the text index, no stored embedding), and both
+    /// alternatives are wrong for a ranking. Nulling the whole row deletes a
+    /// document the other lane found; folding the absence in as `0.0` ranks it
+    /// below a document both lanes actively disliked. Averaging the lanes that
+    /// did run keeps the row comparable on the evidence that exists. Only
+    /// "every signal absent" makes the call `null` — there is then nothing to
+    /// rank on.
+    ///
+    /// **The trailing argument decides the shape**: a list there is the weight
+    /// vector, anything else is one more score — the same list-or-variadic rule
+    /// `text_contains_any` uses, and unambiguous because a score is a number.
+    /// The one case it cannot see is a *`null`* in the last position, which is
+    /// read as an absent score rather than a missing weights list; the
+    /// documented spelling is a list literal or a non-null parameter.
+    ///
+    /// No cache: every argument is an ordinary expression the executor has
+    /// already evaluated for this row, and there is nothing to prepare once per
+    /// call site the way `text_bm25` and `vector_score` prepare a query.
+    fn eval_score_fuse(&self, args: &[Expression], row: &ResultRow) -> Result<Value, String> {
+        const USAGE: &str = "score_fuse() takes 2 or more scores and an optional trailing weights \
+                             list: score_fuse(s1, s2, … [, [w1, w2, …]])";
+        if args.len() < 2 {
+            return Err(USAGE.into());
+        }
+        // Evaluated once and kept: re-reading it as a score below would
+        // evaluate a non-deterministic argument (rand(), randomUUID()) twice.
+        let last = self.evaluate_expression(&args[args.len() - 1], row)?;
+        let (scores, weights) = match &last {
+            Value::List(items) => (&args[..args.len() - 1], Some(items.as_slice())),
+            _ => (args, None),
+        };
+        if scores.len() < 2 {
+            return Err(USAGE.into());
+        }
+        if let Some(weights) = weights {
+            if weights.len() != scores.len() {
+                return Err(format!(
+                    "score_fuse(): {} weights for {} scores — the weights list needs one entry per \
+                     score, in the same order",
+                    weights.len(),
+                    scores.len()
+                ));
+            }
+        }
+
+        let mut weighted_sum = 0.0f64;
+        let mut weight_total = 0.0f64;
+        for (position, arg) in scores.iter().enumerate() {
+            // Every weight is validated, present signal or not: a malformed
+            // weights list is a query bug, and which signals happen to be
+            // absent on this row must not decide whether it is reported.
+            let weight = match weights {
+                Some(weights) => score_fuse_weight(weights, position)?,
+                None => 1.0,
+            };
+            let value = if weights.is_none() && position + 1 == scores.len() {
+                last.clone()
+            } else {
+                self.evaluate_expression(arg, row)?
+            };
+            if matches!(value, Value::Null) {
+                continue;
+            }
+            let Some(score) = value_to_f64(&value) else {
+                return Err(format!(
+                    "score_fuse(): argument {} must be a number or null, got {}",
+                    position + 1,
+                    value.type_name()
+                ));
+            };
+            // NaN and ±inf carry no rank position, so they mean the same thing
+            // `null` does: this lane produced nothing for this row.
+            if !score.is_finite() {
+                continue;
+            }
+            weighted_sum += weight * score;
+            weight_total += weight;
+        }
+        if weight_total == 0.0 {
+            // Every signal absent, or every present signal weighted zero: the
+            // mean is 0/0, and `null` is Cypher's word for undefined.
+            return Ok(Value::Null);
+        }
+        Ok(Value::Float64(weighted_sum / weight_total))
+    }
+}
+
+/// One `score_fuse` weight, validated. Rejects a non-number, a non-finite
+/// value, and a negative weight: each of those is a query bug that a silent
+/// substitution would turn into a plausible-looking ranking. A negative weight
+/// in particular would rank *against* the lane it names while the totals still
+/// look like an average.
+fn score_fuse_weight(weights: &[Value], position: usize) -> Result<f64, String> {
+    let value = &weights[position];
+    let Some(weight) = value_to_f64(value) else {
+        return Err(format!(
+            "score_fuse(): weight {} must be a number, got {}",
+            position + 1,
+            value.type_name()
+        ));
+    };
+    if !weight.is_finite() || weight < 0.0 {
+        return Err(format!(
+            "score_fuse(): weight {} must be a finite number ≥ 0, got {weight}",
+            position + 1
+        ));
+    }
+    Ok(weight)
 }
 
 /// The error for `text_bm25(n, '<property>', …)` when the node's type carries no

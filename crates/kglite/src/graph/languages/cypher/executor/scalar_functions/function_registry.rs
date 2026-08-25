@@ -805,6 +805,13 @@ pub(crate) const FUNCTIONS: &[FunctionSpec] = &[
         signature: "text_bm25(node :: NODE, property :: STRING, query :: STRING) :: FLOAT?",
     },
     FunctionSpec {
+        name: "score_fuse",
+        aliases: &[],
+        category: "utility",
+        description: "Weighted mean of several retrieval scores; absent lanes (null/NaN/inf) drop out, all absent is null",
+        signature: "score_fuse(score1 :: FLOAT?, score2 :: FLOAT?, … [, weights :: LIST<FLOAT>]) :: FLOAT?",
+    },
+    FunctionSpec {
         name: "text_score",
         aliases: &[],
         category: "utility",

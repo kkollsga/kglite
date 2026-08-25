@@ -6,9 +6,10 @@ Any intentional output change must be re-committed via
 
 Two fixtures, two lists: :data:`CYPHER_QUERIES` / :data:`FIND_QUERIES` run
 against the ~1,000-node social graph and are snapshotted **sorted**, because
-what they pin is the row *set*. :data:`BM25_QUERIES` runs against the
-12-document text corpus and is snapshotted **in row order**, because what it
-pins is the ranking — sorting it would throw away the only thing it measures.
+what they pin is the row *set*. :data:`BM25_QUERIES` and
+:data:`HYBRID_QUERIES` run against the 12-document text corpus and are
+snapshotted **in row order**, because what they pin is the ranking — sorting
+them would throw away the only thing they measure.
 """
 
 from __future__ import annotations
@@ -131,5 +132,69 @@ BM25_QUERIES: list[tuple[str, str]] = [
     (
         "no_shared_term_scores_zero",
         "MATCH (d:Doc) WHERE d.title = 'd03' RETURN d.title AS title, text_bm25(d, 'body', 'ferrofluid') AS score",
+    ),
+]
+
+
+# (slug, cypher) over the same text corpus, fusing its two retrieval lanes.
+# Snapshotted in row order under ``hybrid_<slug>.json``. Query vectors are
+# literals rather than parameters because the snapshot runner passes no params
+# — the vectors are the topic axes documented in ``build_text_corpus.py``.
+HYBRID_QUERIES: list[tuple[str, str]] = [
+    # d07 and d08 are the same topic in different words: only d08 contains
+    # 'photosynthesis', so the keyword lane scores d07 0.0 while the vector
+    # lane scores it 1.0. Fusing puts d07 above every document neither lane
+    # liked — the single most important thing hybrid retrieval buys.
+    (
+        "vector_lane_rescues_a_keyword_miss",
+        "MATCH (d:Doc) "
+        "RETURN d.title AS title, "
+        "text_bm25(d, 'body', 'photosynthesis') AS lexical, "
+        "vector_score(d, 'body_emb', [0.0, 0.0, 1.0, 0.0]) AS semantic, "
+        "score_fuse(text_bm25(d, 'body', 'photosynthesis'), "
+        "vector_score(d, 'body_emb', [0.0, 0.0, 1.0, 0.0])) AS fused "
+        "ORDER BY fused DESC, title ASC LIMIT 5",
+    ),
+    # Both fusions of the same two lanes, side by side, ordered by the
+    # weighted one: 'magnetic field' is a lexical query while the query vector
+    # points at astronomy, so equal weights hand the top row to BM25's
+    # unbounded scale and a 1:9 tilt towards the vector lane hands it to a
+    # document with no query word in it. The reorder between the two columns
+    # is the point — weights are what stop one lane's scale from deciding.
+    (
+        "weights_reorder_two_disagreeing_lanes",
+        "MATCH (d:Doc) "
+        "RETURN d.title AS title, "
+        "score_fuse(text_bm25(d, 'body', 'magnetic field'), "
+        "vector_score(d, 'body_emb', [0.0, 0.0, 0.0, 1.0])) AS equal_weight, "
+        "score_fuse(text_bm25(d, 'body', 'magnetic field'), "
+        "vector_score(d, 'body_emb', [0.0, 0.0, 0.0, 1.0]), [0.1, 0.9]) AS vector_heavy "
+        "ORDER BY vector_heavy DESC, title ASC LIMIT 5",
+    ),
+    # d11 and d12 are word-for-word permutations, so the keyword lane cannot
+    # tell them apart — but d12 has no embedding. Its `fused` is its `lexical`
+    # exactly: the absent lane leaves the average instead of scoring zero,
+    # which is the whole of decision 5 in one snapshot.
+    (
+        "an_unembedded_row_keeps_its_lexical_score",
+        "MATCH (d:Doc) WHERE text_bm25(d, 'body', 'alpha beta gamma') > 0 "
+        "RETURN d.title AS title, "
+        "text_bm25(d, 'body', 'alpha beta gamma') AS lexical, "
+        "vector_score(d, 'body_emb', [1.0, 0.0, 0.0, 0.0]) AS semantic, "
+        "score_fuse(text_bm25(d, 'body', 'alpha beta gamma'), "
+        "vector_score(d, 'body_emb', [1.0, 0.0, 0.0, 0.0])) AS fused "
+        "ORDER BY fused DESC, title ASC",
+    ),
+    # The Reciprocal Rank Fusion recipe CYPHER.md documents in place of an
+    # rrf() scalar: rank each lane with a window function, fuse the
+    # reciprocals. Pinned because it is a documented recipe, not an internal.
+    (
+        "reciprocal_rank_fusion_recipe",
+        "MATCH (d:Doc) "
+        "WITH d, rank() OVER (ORDER BY text_bm25(d, 'body', 'magnetic field') DESC) AS lex_rank, "
+        "rank() OVER (ORDER BY vector_score(d, 'body_emb', [0.0, 1.0, 0.0, 0.0]) DESC) AS vec_rank "
+        "RETURN d.title AS title, "
+        "score_fuse(1.0 / (60 + lex_rank), 1.0 / (60 + vec_rank)) AS fused "
+        "ORDER BY fused DESC, title ASC LIMIT 5",
     ),
 ]

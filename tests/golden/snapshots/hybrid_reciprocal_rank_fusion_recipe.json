@@ -1,0 +1,25 @@
+{
+  "query": "MATCH (d:Doc) WITH d, rank() OVER (ORDER BY text_bm25(d, 'body', 'magnetic field') DESC) AS lex_rank, rank() OVER (ORDER BY vector_score(d, 'body_emb', [0.0, 1.0, 0.0, 0.0]) DESC) AS vec_rank RETURN d.title AS title, score_fuse(1.0 / (60 + lex_rank), 1.0 / (60 + vec_rank)) AS fused ORDER BY fused DESC, title ASC LIMIT 5",
+  "rows": [
+    {
+      "fused": 0.016261,
+      "title": "d04"
+    },
+    {
+      "fused": 0.016129,
+      "title": "d06"
+    },
+    {
+      "fused": 0.016009,
+      "title": "d12"
+    },
+    {
+      "fused": 0.015749,
+      "title": "d05"
+    },
+    {
+      "fused": 0.015505,
+      "title": "d11"
+    }
+  ]
+}

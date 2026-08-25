@@ -1,0 +1,30 @@
+{
+  "query": "MATCH (d:Doc) RETURN d.title AS title, score_fuse(text_bm25(d, 'body', 'magnetic field'), vector_score(d, 'body_emb', [0.0, 0.0, 0.0, 1.0])) AS equal_weight, score_fuse(text_bm25(d, 'body', 'magnetic field'), vector_score(d, 'body_emb', [0.0, 0.0, 0.0, 1.0]), [0.1, 0.9]) AS vector_heavy ORDER BY vector_heavy DESC, title ASC LIMIT 5",
+  "rows": [
+    {
+      "equal_weight": 0.5,
+      "title": "d09",
+      "vector_heavy": 0.9
+    },
+    {
+      "equal_weight": 0.5,
+      "title": "d10",
+      "vector_heavy": 0.9
+    },
+    {
+      "equal_weight": 1.54835,
+      "title": "d05",
+      "vector_heavy": 0.78967
+    },
+    {
+      "equal_weight": 0.25,
+      "title": "d11",
+      "vector_heavy": 0.45
+    },
+    {
+      "equal_weight": 1.461676,
+      "title": "d04",
+      "vector_heavy": 0.292335
+    }
+  ]
+}

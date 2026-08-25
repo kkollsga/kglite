@@ -1,6 +1,6 @@
 """Regenerate the golden snapshots.
 
-Rebuild the deterministic golden graph *and* the BM25 text corpus on
+Rebuild the deterministic golden graph *and* the BM25 + hybrid text corpus on
 memory mode, run every seed query from ``tests/golden/queries.py``, and
 write the serialised outputs under ``tests/golden/snapshots/``.
 
@@ -28,7 +28,7 @@ if str(_TESTS_DIR) not in sys.path:
 
 from golden.build_golden_graph import build_golden_graph  # noqa: E402
 from golden.build_text_corpus import build_text_corpus  # noqa: E402
-from golden.queries import BM25_QUERIES, CYPHER_QUERIES, FIND_QUERIES  # noqa: E402
+from golden.queries import BM25_QUERIES, CYPHER_QUERIES, FIND_QUERIES, HYBRID_QUERIES  # noqa: E402
 
 from kglite import KnowledgeGraph  # noqa: E402
 
@@ -111,6 +111,16 @@ def generate_all() -> dict[pathlib.Path, str]:
     text_kg = build_text_corpus(KnowledgeGraph())
     for slug, cypher in BM25_QUERIES:
         outputs[SNAPSHOTS_DIR / f"bm25_{slug}.json"] = (
+            json.dumps(
+                {"query": cypher, "rows": _ranked_snapshot(text_kg, cypher)},
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+
+    for slug, cypher in HYBRID_QUERIES:
+        outputs[SNAPSHOTS_DIR / f"hybrid_{slug}.json"] = (
             json.dumps(
                 {"query": cypher, "rows": _ranked_snapshot(text_kg, cypher)},
                 indent=2,

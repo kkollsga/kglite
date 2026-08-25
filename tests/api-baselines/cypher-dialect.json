@@ -439,6 +439,13 @@
       "note": "Embedding-backed semantic scoring."
     },
     {
+      "id": "extension.hybrid",
+      "kind": "function_family",
+      "canonical": "kglite.score_fuse",
+      "legacy": "score_fuse",
+      "note": "Fuses several ranked retrieval lanes (BM25, vector) into one score; a lane absent for a row leaves the average rather than scoring zero."
+    },
+    {
       "id": "extension.spatial",
       "kind": "function_family",
       "canonical": "kglite.geom_* and KGLite spatial helpers",

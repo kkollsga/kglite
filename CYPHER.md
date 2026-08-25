@@ -35,7 +35,7 @@ surface at a glance — most of what you'd reach for is here, in-process:
 | **Parameters** | values `$p`, and **names**: dynamic labels / relationship types `(n:$label)`, `(n:$(label))`, `-[:$type]->` — see [Parameters](#parameters) |
 | **Aggregation** | `count` / `sum` / `avg` / `min` / `max` / `collect` / `percentile_cont` / `mode` / `stdev` …, `DISTINCT`, `HAVING`, window functions (`OVER`, `PARTITION BY`, ranking) |
 | **Procedures** (`CALL`) | centralities (pagerank, betweenness, closeness, degree), community (louvain, leiden, label propagation), components, k-core, clustering, `triangle_count` / `transitivity`, `eccentricity` / `diameter`, `ready_set` (dependency frontier), `shortest_path_length`, `kg_knn`, structural validators (`duplicate_title`, `cycle_2step`, `parallel_edges`, …) |
-| **Vector + text** | `vector_score(…)` (HNSW index, exact fallback), `text_score(…)` (query vector, or query text via a pluggable embedder), `text_bm25(…)` (lexical BM25 over `build_text_index`) — hybrid semantic, lexical and structural in one query |
+| **Vector + text** | `vector_score(…)` (HNSW index, exact fallback), `text_score(…)` (query vector, or query text via a pluggable embedder), `text_bm25(…)` (lexical BM25 over `build_text_index`), `score_fuse(…)` (combine the lanes into one score) — hybrid semantic, lexical and structural in one query |
 | **Spatial** | `point(…)`, `distance(…)`, `wkt_within` / `intersects`, buffer / hull / union, k-NN — see [Spatial](#spatial-functions) |
 | **Temporal** | `date()` / `datetime()` / `localdatetime()`, `duration(…)`, `duration.between`, date arithmetic, `valid_at` / `valid_during` — see [Temporal](#temporal-functions) |
 | **Value types** | int, float, string, bool, **date**, **timestamp** (date + time), duration, point, list, map, node, relationship, path |
@@ -486,6 +486,7 @@ graph.cypher("""
 | `text_score(n, prop, query, metric)` | With explicit metric (`'cosine'`, `'dot_product'`, `'euclidean'`, `'poincare'`) |
 | `vector_score(n, prop, vector [, metric])` | Semantic similarity against a pre-computed embedding vector (pass a list of floats directly, no `set_embedder()` needed) |
 | `embedding_norm(n, prop)` | L2 norm of embedding vector (hierarchy depth in Poincaré space: 0=root, ~1=leaf) |
+| `score_fuse(s1, s2, … [, weights])` | Fuse ranked-lane scores into one — the mean of the signals that are **present**, or a weighted mean with a trailing list. A lane that could not score the row (`null`, `NaN`, `inf`) drops out of the average together with its weight; `null` only when every lane is absent |
 | `dot(a, b)` | Dot product of two list-valued vectors |
 | `cosine(a, b)` | Cosine similarity of two list-valued vectors |
 | `norm(a)` | Euclidean (L2) length of a list-valued vector |
@@ -640,6 +641,65 @@ node created after the build scores without anyone rebuilding. Past the limit
 (or on a read-only graph, which a query may not write to) the query serves what
 the index has, scores the rest `null`, and returns a warning naming the delta
 and the rebuild call. `SHOW INDEXES` reports `stale` and `delta` either way.
+
+### Fusing the lexical and semantic lanes — `score_fuse`
+
+`score_fuse(s1, s2, …)` combines the scores of several ranked lanes into one
+number, so a keyword lane and a semantic lane can rank the same query in a
+single pass:
+
+```cypher
+MATCH (a:Article)
+RETURN a.title,
+       score_fuse(text_bm25(a, 'body', $q), vector_score(a, 'body_emb', $qv)) AS score
+ORDER BY score DESC LIMIT 10
+```
+
+Each lane finds what the other misses — BM25 finds the exact term (a product
+code, a surname, a rare noun) that an embedding blurs away, and the embedding
+finds the paraphrase that shares no word with the query.
+
+By default the lanes weigh equally. A **trailing list** weights them, in
+argument order:
+
+```cypher
+// Lexical evidence counts for 70% of the score, semantic for 30%.
+RETURN score_fuse(text_bm25(a, 'body', $q), vector_score(a, 'body_emb', $qv), [0.7, 0.3]) AS score
+```
+
+Any number of lanes fuse, and the weights are relative — `[3, 1]` and
+`[0.75, 0.25]` produce the same ranking. Weights must be finite and `>= 0`,
+one per score; a wrong-length list, a negative weight and a non-numeric score
+are all errors rather than a quietly different ranking.
+
+**An absent lane leaves the average; it does not score zero.** A lane reports
+`null` (or `NaN`, or an infinity) for a row it *could not see* — a document
+the text index has not caught up with, a node with no stored embedding — and
+that row keeps the score of the lanes that did run, its weight leaving the
+denominator with it. Zero would mean "this lane looked and found nothing",
+which ranks a document one lane simply could not see below a document both
+lanes actively disliked. `score_fuse` is `null` only when **every** lane is
+absent, and — since it reads no row state — a call whose arguments are all
+constants is folded once for the whole query rather than evaluated per row.
+
+> **Where is `rrf()`?** Reciprocal Rank Fusion works on each lane's **rank**
+> across the whole result set, and a per-row scalar sees only one row's
+> scores — a function that claimed to do RRF row-by-row would be computing
+> something else. Rank the lanes first with a window function, then fuse the
+> reciprocals:
+>
+> ```cypher
+> MATCH (a:Article)
+> WITH a, rank() OVER (ORDER BY text_bm25(a, 'body', $q) DESC) AS lex_rank,
+>         rank() OVER (ORDER BY vector_score(a, 'body_emb', $qv) DESC) AS vec_rank
+> RETURN a.title, score_fuse(1.0 / (60 + lex_rank), 1.0 / (60 + vec_rank)) AS score
+> ORDER BY score DESC LIMIT 10
+> ```
+>
+> That is the whole of RRF, in the primitives that already exist. Reach for it
+> when the lanes' scores are on incomparable scales (BM25 is unbounded, cosine
+> is not), since ranks discard the magnitudes; fuse the scores directly when
+> the magnitudes carry information you want.
 
 ### Vector math over list properties — `dot` / `cosine` / `norm`
 
@@ -1036,7 +1096,6 @@ Lexical similarity and fuzzy-match primitives — useful for deduplication, alia
 | `text_edit_distance(a, b)` | `Int64` | Levenshtein edit distance (UTF-8 aware) |
 | `text_normalize(s)` | `String` | Lowercase, drop punctuation, collapse whitespace |
 | `text_jaccard(a, b [, sep])` | `Float64` | Token-set Jaccard similarity (default separator: whitespace) |
-
 | `text_ngrams(s, n)` | `List<String>` | Character n-grams |
 | `text_contains_any(s, needles)` | `Boolean` | True if `s` contains any needle (variadic or list arg) |
 | `text_starts_with_any(s, prefixes)` | `Boolean` | True if `s` starts with any prefix (variadic or list arg) |
@@ -3523,7 +3582,7 @@ all functionality while new integrations can distinguish extensions from the
 compatible subset.
 
 - `kglite.pagerank and related procedures` (legacy: flat procedure names)
-- `kglite.text_score / kglite.vector_score` (legacy: flat function names)
+- `kglite.text_score / kglite.vector_score / kglite.score_fuse` (legacy: flat function names)
 - `kglite.geom_* and KGLite spatial helpers`
 - `kglite.ts_*`
 - `kglite.text_*`

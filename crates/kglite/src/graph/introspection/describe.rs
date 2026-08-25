@@ -662,9 +662,11 @@ fn write_connections_detail(
 /// that can disagree about what the vocabulary means.
 const INDEXING_HINT: &str = "    <indexing hint=\"Properties annotated indexed='eq' are O(log N) via MATCH (n:T {prop: value}); indexed='eq,prefix' also accelerates WHERE n.prop STARTS WITH 'x' (the sorted disk-backed string index only); indexed='range' accelerates &lt;, &lt;=, &gt;, &gt;= and ORDER BY. Prefer anchored queries over unanchored scans; the default Cypher deadline is 3 minutes (override per-call with timeout_ms or globally with set_default_timeout).\"/>\n";
 
-/// Write the `<extensions>` element. The timeseries, spatial, semantic and
-/// connections sections appear only when the graph carries that feature; the
-/// language-surface sections are unconditional.
+/// Write the `<extensions>` element. The timeseries, spatial, lexical,
+/// semantic, hybrid and connections sections appear only when the graph
+/// carries that feature — `hybrid` only when it carries *both* retrieval
+/// lanes, since fusing one lane is just that lane. The language-surface
+/// sections are unconditional.
 fn write_extensions(xml: &mut String, graph: &DirGraph) {
     let has_timeseries = !graph.timeseries_configs.is_empty();
     let has_spatial = !graph.spatial_configs.is_empty()
@@ -684,6 +686,9 @@ fn write_extensions(xml: &mut String, graph: &DirGraph) {
     }
     if !graph.text_indexes.is_empty() {
         xml.push_str("    <lexical hint=\"text_bm25(n, 'prop', 'query text') — BM25 relevance of the node's indexed text; 0.0 = indexed but shares no word with the query, null = no document for that row. Build with build_text_index(node_type, property).\"/>\n");
+    }
+    if has_embeddings && !graph.text_indexes.is_empty() {
+        xml.push_str("    <hybrid hint=\"score_fuse(text_bm25(n, 'prop', $q), vector_score(n, 'col_emb', $qv)) — one score from both lanes (weights: a trailing list, e.g. [0.7, 0.3]). A lane that cannot see a row scores null and drops out of the average rather than zeroing it; all lanes absent = null. Rank with ORDER BY … DESC LIMIT k.\"/>\n");
     }
     if has_embeddings {
         xml.push_str(

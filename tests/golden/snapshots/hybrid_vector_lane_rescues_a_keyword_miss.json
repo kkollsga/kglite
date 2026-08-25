@@ -1,0 +1,35 @@
+{
+  "query": "MATCH (d:Doc) RETURN d.title AS title, text_bm25(d, 'body', 'photosynthesis') AS lexical, vector_score(d, 'body_emb', [0.0, 0.0, 1.0, 0.0]) AS semantic, score_fuse(text_bm25(d, 'body', 'photosynthesis'), vector_score(d, 'body_emb', [0.0, 0.0, 1.0, 0.0])) AS fused ORDER BY fused DESC, title ASC LIMIT 5",
+  "rows": [
+    {
+      "fused": 1.579742,
+      "lexical": 2.159484,
+      "semantic": 1.0,
+      "title": "d08"
+    },
+    {
+      "fused": 0.5,
+      "lexical": 0.0,
+      "semantic": 1.0,
+      "title": "d07"
+    },
+    {
+      "fused": 0.25,
+      "lexical": 0.0,
+      "semantic": 0.5,
+      "title": "d11"
+    },
+    {
+      "fused": 0.0,
+      "lexical": 0.0,
+      "semantic": 0.0,
+      "title": "d01"
+    },
+    {
+      "fused": 0.0,
+      "lexical": 0.0,
+      "semantic": 0.0,
+      "title": "d02"
+    }
+  ]
+}

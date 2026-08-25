@@ -15,6 +15,13 @@ The vocabulary is engineered around three cases:
 * Documents 11 and 12 are word-for-word permutations of each other, so a query
   matching both must break the tie deterministically, by node id.
 
+Every document also carries a hand-written 4-dimension "embedding" over the
+topics the corpus is built from — ``[animals, physics, biology, astronomy]`` —
+so the same fixture can pin *hybrid* rankings: the vector lane agrees with the
+keyword lane on topic and disagrees on wording, which is the whole reason to
+fuse them. ``d12`` is deliberately left **unembedded**, so one row in the
+fixture has a lane that cannot see it.
+
 Used by ``tests/golden/regenerate.py`` (snapshot refresh) and
 ``tests/test_golden.py`` (comparison).
 """
@@ -41,11 +48,35 @@ DOCUMENTS: list[tuple[int, str, str]] = [
 ]
 
 
+# title → [animals, physics, biology, astronomy]. Hand-assigned, not computed:
+# a golden fixture has to be explainable, and "d07 and d08 are the same topic in
+# different words" is the claim the hybrid snapshots rest on. `d12` is absent by
+# design — the row whose vector lane returns null.
+TOPIC_VECTORS: dict[str, list[float]] = {
+    "d01": [1.0, 0.0, 0.0, 0.0],
+    "d02": [1.0, 0.0, 0.0, 0.0],
+    "d03": [0.9, 0.0, 0.0, 0.2],
+    "d04": [0.0, 1.0, 0.0, 0.0],
+    "d05": [0.0, 0.8, 0.0, 0.6],
+    "d06": [0.0, 1.0, 0.0, 0.0],
+    "d07": [0.0, 0.0, 1.0, 0.0],
+    "d08": [0.0, 0.0, 1.0, 0.0],
+    "d09": [0.0, 0.0, 0.0, 1.0],
+    "d10": [0.0, 0.0, 0.0, 1.0],
+    "d11": [0.1, 0.1, 0.1, 0.1],
+}
+
+
 def build_text_corpus(kg: KnowledgeGraph) -> KnowledgeGraph:
-    """Create the corpus and build the BM25 index over ``Doc.body``."""
+    """Create the corpus, build the BM25 index over ``Doc.body``, and store the
+    topic vectors as the ``body_emb`` embedding store."""
     kg.cypher(
         "UNWIND $docs AS d CREATE (:Doc {doc_id: d.doc_id, title: d.title, body: d.body})",
         params={"docs": [{"doc_id": doc_id, "title": title, "body": body} for doc_id, title, body in DOCUMENTS]},
     )
     kg.build_text_index("Doc", "body")
+    # Keyed by live node id rather than by `doc_id`: the ids Cypher's CREATE
+    # hands out are the fixture's business, not this file's to predict.
+    ids = {row["title"]: row["id"] for row in kg.cypher("MATCH (d:Doc) RETURN id(d) AS id, d.title AS title")}
+    kg.set_embeddings("Doc", "body", {ids[title]: vector for title, vector in TOPIC_VECTORS.items()})
     return kg
