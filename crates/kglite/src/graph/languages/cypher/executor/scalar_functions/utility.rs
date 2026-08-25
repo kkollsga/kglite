@@ -448,7 +448,10 @@ impl CypherExecutor<'_> {
     /// performed), serves the index as it stands: the rows it has no document
     /// for score null, and the query carries a warning naming the delta and the
     /// call that fixes it. A query never silently absorbs a post-bulk-ingest
-    /// rebuild.
+    /// catch-up: it absorbs at most the ceiling the index's author set, and
+    /// never more than one rebuild's worth of work, because a fold past the
+    /// measured crossover rebuilds instead of splicing
+    /// (`text_indexes::rebuild_beats_folding`).
     pub(in crate::graph::languages::cypher::executor) fn prepare_text_bm25(
         &self,
         args: &[Expression],

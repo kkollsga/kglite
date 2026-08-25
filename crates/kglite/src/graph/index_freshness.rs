@@ -30,8 +30,8 @@
 //! # Over-approximation is the safe direction
 //!
 //! Every producer here may mark more than strictly changed; none may mark less.
-//! A redundant re-read costs one tokenization and yields the same index; a
-//! missed one is a wrong answer that no later operation notices. So a bulk
+//! A redundant re-read costs one document's worth of re-indexing and yields the
+//! same index; a missed one is a wrong answer that no later operation notices. So a bulk
 //! update path that cannot say *which* fields it wrote marks the node dirty
 //! regardless, a rolled-back statement leaves its slots dirty, and
 //! [`IndexFreshness::delta_size`] is an upper bound rather than an exact count.
@@ -48,8 +48,18 @@
 //! [`IndexFreshness::delta_size`] is O(1) — two relaxed atomic loads and a
 //! subtraction — so a query can ask "is this worth refreshing inline?" for
 //! free. Under the limit, the caller refreshes and serves fresh results; over
-//! it, the caller serves what it has and says so, rather than hiding a
-//! corpus-sized rebuild inside someone's query.
+//! it, the caller serves what it has and says so, rather than putting an
+//! unbounded catch-up inside someone's query.
+//!
+//! **The limit bounds the delta, not the time.** What a delta *costs* is the
+//! refresher's business, and it is not one unit per slot: folding a document
+//! into a BM25 index splices into postings lists that grow with the corpus, so
+//! the same 1000-document delta costs milliseconds on a small corpus and
+//! hundreds of milliseconds on a large one (measured 2026-08-25 —
+//! `text_indexes::rebuild_beats_folding` carries the table). A refresher whose
+//! per-slot cost is corpus-dependent owes its caller a cost switch that falls
+//! back to a full rebuild once folding would cost more than one; the text
+//! refresher has one.
 //!
 //! # Concurrency and lock order
 //!
@@ -77,10 +87,13 @@ use rustc_hash::FxHashSet;
 /// Documents an index will fold in inline at query entry before it declines and
 /// serves stale results instead.
 ///
-/// A round number rather than a measured one: the point is to bound the pause a
-/// query can inherit, and one thousand documents is small enough that the
-/// refresh disappears into the query it rides on. Callers that know their
-/// corpus can override it per index.
+/// A round number rather than a measured one, and it bounds a *count*, not a
+/// duration: one thousand documents is a few milliseconds of catch-up on a
+/// small corpus and, for a text index, a few hundred on a large one (the
+/// per-document cost grows with the corpus — see
+/// `text_indexes::rebuild_beats_folding`). What it really buys is the promise
+/// that the pause a query inherits is bounded and declared rather than
+/// open-ended. Callers that know their corpus can override it per index.
 pub const DEFAULT_AUTO_REFRESH_LIMIT: usize = 1000;
 
 /// Change tracking for one index instance, independent of what the index holds.

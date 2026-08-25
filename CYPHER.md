@@ -642,6 +642,13 @@ node created after the build scores without anyone rebuilding. Past the limit
 the index has, scores the rest `null`, and returns a warning naming the delta
 and the rebuild call. `SHOW INDEXES` reports `stale` and `delta` either way.
 
+Folding a document in is not a constant-cost operation — it inserts into the
+posting list of every term that document uses, and those lists grow with the
+corpus — so `auto_refresh_limit` bounds a document *count*, not a duration.
+Past roughly 1500 documents, folding costs more than rebuilding the index
+outright and the catch-up rebuilds instead: a refresh costs the cheaper of the
+two and never more than one rebuild, whatever the limit is set to.
+
 ### Fusing the lexical and semantic lanes — `score_fuse`
 
 `score_fuse(s1, s2, …)` combines the scores of several ranked lanes into one
@@ -2859,9 +2866,12 @@ A read, so it works on a read-only graph. Returns the same rows and columns as
 `stale` / `delta` are KGLite-specific and describe the catch-up contract both
 opt-in index kinds share: the index does not follow writes eagerly, it records
 that they happened and folds them in at query entry while the delta stays under
-that index's `auto_refresh_limit`. A `delta` above that limit is the signal to
-rebuild — with `build_text_index(...)`, or for a vector index with
-`build_vector_index(...)` / `refresh_vector_index(...)`.
+that index's `auto_refresh_limit` — a document count, not a time budget. A
+`delta` above that limit is the signal to rebuild — with
+`build_text_index(...)`, or for a vector index with `build_vector_index(...)` /
+`refresh_vector_index(...)`. A text index catching up past its measured
+crossover (~1500 documents) rebuilds rather than folding, so no catch-up costs
+more than one rebuild.
 
 The two kinds differ in what an over-limit delta *serves*. A stale text index
 returns `null` for the rows it has no document for, and warns. A stale **vector**

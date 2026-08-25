@@ -468,3 +468,147 @@ fn randomized_crud_with_refresh_stays_identical_to_a_rebuild() {
         assert_matches_rebuild(&graph, "quick marmoset prose");
     }
 }
+
+// ── the fold-vs-rebuild cost switch ──────────────────────────────────
+//
+// Folding one document splices into every posting list its terms appear in,
+// so per-document cost grows with the corpus (P14, measured 2026-08-25). Past
+// the measured crossover a refresh rebuilds instead, and the two arms are
+// told apart here by what each *reads*: the fold re-reads exactly the delta,
+// the rebuild re-reads every member of the type — and only the rebuild can
+// restate the skipped count, because only it revisits the nodes the index
+// holds no document for.
+
+/// Add a `Doc` whose indexed property is absent: a node every *build* counts
+/// as skipped, and no fold ever revisits.
+fn push_bodyless_doc(graph: &mut DirGraph, id: i64) -> NodeIndex {
+    let mut props = HashMap::new();
+    props.insert("tag".to_string(), Value::String("no body".to_string()));
+    let data = NodeData::new(
+        Value::Int64(id),
+        Value::String(format!("doc-{id}")),
+        "Doc".to_string(),
+        props,
+        &mut graph.interner,
+    );
+    let idx = GraphWrite::add_node(&mut graph.graph, data);
+    graph
+        .type_indices
+        .entry_or_default("Doc".to_string())
+        .push(idx);
+    write_hooks::note_node_created(graph, idx, "Doc");
+    idx
+}
+
+/// Add a node of a type this index does not cover.
+fn push_person(graph: &mut DirGraph, id: i64) -> NodeIndex {
+    let data = NodeData::new(
+        Value::Int64(id),
+        Value::String(format!("person-{id}")),
+        "Person".to_string(),
+        HashMap::new(),
+        &mut graph.interner,
+    );
+    let idx = GraphWrite::add_node(&mut graph.graph, data);
+    graph
+        .type_indices
+        .entry_or_default("Person".to_string())
+        .push(idx);
+    write_hooks::note_node_created(graph, idx, "Person");
+    idx
+}
+
+/// A 3-document index, plus `creations` new documents and one bodyless node.
+fn corpus_with_pending_creations(creations: usize) -> DirGraph {
+    let (mut graph, _) = indexed_corpus();
+    assert_eq!(store(&graph).skipped(), 0, "the build skipped nothing");
+    for n in 0..creations {
+        push_doc(&mut graph, 100 + n as i64, "a quick later document");
+    }
+    push_bodyless_doc(&mut graph, 9_001);
+    graph
+}
+
+/// Both arms must be indistinguishable from a rebuild, and each must actually
+/// be the arm the test names — asserted through the slot count the refresh
+/// reports, which is the delta for a fold and the whole type for a rebuild.
+fn assert_refresh_arm(creations: usize, expect_rebuild: bool) {
+    let graph = corpus_with_pending_creations(creations);
+    let delta = creations + 1;
+    let members = 3 + creations + 1;
+    assert_eq!(store(&graph).delta_size(&graph), delta);
+    let generation_before = store(&graph).generation();
+
+    let read = store(&graph).refresh(&graph, "Doc");
+
+    if expect_rebuild {
+        assert_eq!(read, members, "the rebuild arm re-reads every type member");
+        assert_eq!(
+            store(&graph).skipped(),
+            1,
+            "only the rebuild arm revisits the nodes that hold no document"
+        );
+    } else {
+        assert_eq!(read, delta, "the fold arm re-reads exactly the delta");
+        assert_eq!(
+            store(&graph).skipped(),
+            0,
+            "a fold never revisits a node it holds no document for"
+        );
+    }
+    assert!(
+        store(&graph).generation() > generation_before,
+        "cache invalidation rides the generation on both arms"
+    );
+    assert!(!store(&graph).is_stale(&graph));
+    assert_eq!(store(&graph).documents(), 3 + creations);
+    assert_matches_rebuild(&graph, "quick later document");
+    assert_matches_rebuild(&graph, "turtles");
+}
+
+#[test]
+fn a_small_delta_folds_and_matches_a_rebuild() {
+    assert_refresh_arm(10, false);
+}
+
+#[test]
+fn an_over_crossover_delta_rebuilds_and_matches_a_rebuild() {
+    assert_refresh_arm(FOLD_SLOTS_PER_REBUILD, true);
+}
+
+/// The delta counts *slots*, and a slot holding a node of another type folds
+/// for one type lookup and nothing else. Routing on the raw delta would let a
+/// bulk load of an unrelated table buy the next text query a corpus-sized
+/// rebuild.
+#[test]
+fn a_foreign_bulk_load_does_not_route_a_refresh_into_a_rebuild() {
+    let (mut graph, _) = indexed_corpus();
+    // One covered creation pins the watermark; every Person after it lands in
+    // the gap instead of stepping the watermark over itself.
+    push_doc(&mut graph, 100, "a quick later document");
+    let foreign = FOLD_SLOTS_PER_REBUILD + 10;
+    for n in 0..foreign {
+        push_person(&mut graph, 5_000 + n as i64);
+    }
+    assert_eq!(store(&graph).delta_size(&graph), foreign + 1);
+
+    assert_eq!(
+        store(&graph).refresh(&graph, "Doc"),
+        foreign + 1,
+        "the fold arm re-reads the delta; none of it spliced but one slot"
+    );
+    assert_eq!(store(&graph).documents(), 4);
+    assert_matches_rebuild(&graph, "quick later document");
+}
+
+/// The cost model itself, unit-tested the way `folding_moves_beats_a_rebuild`
+/// is: it decides between two correct paths, so what it owes is the measured
+/// crossover, not an answer.
+#[test]
+fn the_cost_switch_prefers_folding_up_to_the_measured_crossover() {
+    assert!(!rebuild_beats_folding(0));
+    assert!(!rebuild_beats_folding(1));
+    assert!(!rebuild_beats_folding(FOLD_SLOTS_PER_REBUILD));
+    assert!(rebuild_beats_folding(FOLD_SLOTS_PER_REBUILD + 1));
+    assert!(rebuild_beats_folding(usize::MAX));
+}

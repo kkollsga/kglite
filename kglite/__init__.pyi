@@ -6858,10 +6858,20 @@ class KnowledgeGraph:
         records that they happened and folds them in when a query next reads
         it, as long as the outstanding delta is at or under
         ``auto_refresh_limit``. Past that limit it serves what it has and says
-        so, rather than hiding a corpus-sized rebuild inside your query; call
+        so, rather than putting an open-ended catch-up inside your query; call
         this method again to rebuild, which replaces the index wholesale.
         ``SHOW INDEXES`` reports both facts, in its ``stale`` and ``delta``
         columns.
+
+        **What catching up costs.** Folding one document in is not a constant:
+        it inserts into the posting list of every term the document uses, and
+        those lists grow with the corpus, so the per-document cost rises as the
+        index does (measured 2026-08-25: 0.08 ms per document over a 20k-document
+        corpus, 0.4 ms over a 100k one). Past roughly 1500 documents that
+        overtakes a full rebuild, and the catch-up rebuilds instead — so a
+        refresh costs the cheaper of the two, never more than one rebuild, and
+        raising ``auto_refresh_limit`` well above that point buys rebuilds
+        rather than an ever-slower fold.
 
         Catching up costs the *writes* almost nothing: creations are noticed by
         comparing one node slot against a watermark, so bulk ingest into an
@@ -6916,7 +6926,9 @@ class KnowledgeGraph:
             property: The string property to index (e.g. ``'body'``).
             auto_refresh_limit: How many changed documents a query will fold in
                 inline before it serves stale results and warns instead.
-                Defaults to 1000. A rebuild that omits this keeps whatever the
+                Defaults to 1000. It bounds a document *count*, not a duration —
+                see "What catching up costs" above for what a delta of that size
+                is worth in time. A rebuild that omits this keeps whatever the
                 existing index used, so refreshing an index does not quietly
                 restore the default.
 

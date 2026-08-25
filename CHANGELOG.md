@@ -29,9 +29,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   folded in when a query next reads the index — as long as the outstanding
   delta is at or under `auto_refresh_limit` (a `build_text_index` keyword,
   default 1000 documents; a rebuild that omits it keeps the value you set).
-  Past that limit the index serves what it has rather than hiding a
-  corpus-sized rebuild inside your query, and `build_text_index` again is the
-  route back. `SHOW INDEXES` / `db.indexes()` gained two columns for this —
+  Past that limit the index serves what it has rather than putting an
+  open-ended catch-up inside your query, and `build_text_index` again is the
+  route back. The limit bounds a document count, not a duration: folding one
+  document in splices into the posting list of each of its terms, so the
+  per-document cost grows with the corpus (measured: 0.08 ms/document at 20k
+  documents, 0.4 ms at 100k). Past ~1500 documents that overtakes a full
+  rebuild, and the catch-up **rebuilds instead** — a refresh costs the cheaper
+  of the two and never more than one rebuild, whatever the limit is set to. `SHOW INDEXES` / `db.indexes()` gained two columns for this —
   `stale` and `delta`, null on index kinds that are maintained on every write.
   Recording a write is a node-slot comparison, so bulk ingest into an indexed
   graph runs at the speed it would without one, ingest of an unrelated node

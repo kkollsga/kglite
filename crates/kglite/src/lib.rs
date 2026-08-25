@@ -312,7 +312,11 @@ pub mod api {
     /// read an index asks `TextIndexStore::can_auto_refresh` whether the
     /// outstanding delta is small enough to fold in, and calls this if it is.
     /// It takes `&DirGraph` — catching up happens on the read path, and the
-    /// index is behind its own lock for exactly that reason.
+    /// index is behind its own lock for exactly that reason. Folding a
+    /// document is not a constant: it splices into postings lists that grow
+    /// with the corpus, so a refresh past the measured crossover rebuilds the
+    /// index instead, and the worst case is one rebuild rather than
+    /// delta x corpus.
     pub mod text_indexes {
         pub use crate::graph::algorithms::text_index::bm25::{PreparedQuery, QueryTerm};
         pub use crate::graph::algorithms::text_index::TermId;
