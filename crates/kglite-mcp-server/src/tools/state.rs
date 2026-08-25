@@ -82,6 +82,11 @@ pub struct GraphState {
     /// `tools[].cypher` run so the engine decodes query-side literals and
     /// encodes result columns (`'Q42'` ↔ `42`) — safely, after parsing.
     pub(crate) value_codecs: Option<Arc<Vec<ValueCodec>>>,
+    /// The operator's parallel-runtime opt-in (`--parallel` /
+    /// `extensions.parallel`). Server-config, set once at boot via
+    /// [`with_parallel`](Self::with_parallel) and carried by every clone;
+    /// reaches the engine through [`ExecPolicy`] on the read seam only.
+    pub(crate) parallel: bool,
     /// External workspace-graph lifecycle extension. Set once at boot and
     /// carried by every clone so lazy watch rebuilds use the same producer.
     pub(crate) workspace_graph_hooks: Option<Arc<WorkspaceGraphHooks>>,
@@ -113,6 +118,13 @@ impl GraphState {
     /// set once at boot, before the tool closures clone the state.
     pub fn with_value_codecs(mut self, codecs: Option<Arc<Vec<ValueCodec>>>) -> Self {
         self.value_codecs = codecs;
+        self
+    }
+
+    /// Let this server's reads use the engine's parallel runtime. Builder
+    /// form, set once at boot like [`Self::with_value_codecs`].
+    pub fn with_parallel(mut self, parallel: bool) -> Self {
+        self.parallel = parallel;
         self
     }
 
@@ -169,6 +181,17 @@ impl GraphState {
 
     pub fn value_codecs(&self) -> Option<&[ValueCodec]> {
         self.value_codecs.as_deref().map(|v| v.as_slice())
+    }
+
+    /// The boot-decided engine policy every Cypher route applies.
+    ///
+    /// One accessor rather than one per setting, so a route cannot pick up
+    /// the codecs and miss the parallel pin (or the next setting added here).
+    pub(crate) fn exec_policy(&self) -> ExecPolicy<'_> {
+        ExecPolicy {
+            value_codecs: self.value_codecs(),
+            parallel: self.parallel,
+        }
     }
 
     /// A one-line warning describing the last failed lazy refresh, or

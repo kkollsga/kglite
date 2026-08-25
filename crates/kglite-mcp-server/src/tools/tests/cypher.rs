@@ -194,6 +194,53 @@ fn structured_cypher_execution_preserves_value_codecs() {
     );
 }
 
+/// The parallel opt-in is a *permission*, not a semantics change: a pinned
+/// server must answer byte-for-byte what an unpinned one answers.
+///
+/// That is the only tool-level property worth pinning here — whether a given
+/// query actually fans out is the engine's runtime row × cost-class decision
+/// and is pinned in the engine's own suite. The `ORDER BY` case below is
+/// chosen so the comparison is not vacuous: its sort-key precompute is gated
+/// on `ExecuteOptions::parallel` *and* on 5 000 interpreted rows
+/// (`may_fan_out_sort_keys`), so at 10 000 rows the pinned run takes a
+/// parallel region the unpinned run does not. A test whose every query stayed
+/// under the thresholds would compare two sequential runs and prove nothing.
+#[test]
+fn a_parallel_pinned_server_returns_identical_rows() {
+    let queries = [
+        // Under every threshold: the ordinary small-result shape.
+        "MATCH (v:Vessel) RETURN v.id AS id",
+        // Over the projection threshold, and order-sensitive: a fan-out that
+        // reassembled its partitions out of order would show up here.
+        "UNWIND range(1, 10000) AS n RETURN n ORDER BY n DESC",
+        // Aggregation over the same range: a per-partition accumulator that
+        // is not combined correctly returns a wrong total, not a wrong order.
+        "UNWIND range(1, 10000) AS n RETURN count(n) AS c, sum(n) AS total",
+    ];
+
+    for query in queries {
+        let sequential = state_with_active(active_with_vessel())
+            .execute_cypher_read(query, HashMap::new())
+            .unwrap_or_else(|error| panic!("{query}: sequential run failed: {error}"));
+
+        let pinned_state = state_with_active(active_with_vessel()).with_parallel(true);
+        assert!(
+            pinned_state.exec_policy().parallel,
+            "with_parallel must reach the execution policy; if this fails the pin is \
+             stored and then dropped"
+        );
+        let pinned = pinned_state
+            .execute_cypher_read(query, HashMap::new())
+            .unwrap_or_else(|error| panic!("{query}: pinned run failed: {error}"));
+
+        assert_eq!(pinned.result.columns, sequential.result.columns, "{query}");
+        assert_eq!(
+            pinned.result.rows, sequential.result.rows,
+            "{query}: the parallel runtime is a permission, not a different answer"
+        );
+    }
+}
+
 #[test]
 fn single_rev_via_revs_reads_as_snapshot_and_dedups() {
     let dir = std::env::temp_dir().join(format!("kgl_singlerev_{}", std::process::id()));
@@ -368,7 +415,7 @@ fn the_read_tool_binds_its_params_argument() {
         &active,
         "MATCH (v:Vessel {id: $id}) RETURN v.id AS id",
         params,
-        None,
+        ExecPolicy::default(),
         None,
     )
     .expect("bound query answers");
@@ -379,7 +426,7 @@ fn the_read_tool_binds_its_params_argument() {
         &active,
         "MATCH (v:Vessel) WHERE v.id = $id RETURN v.id AS id",
         params,
-        None,
+        ExecPolicy::default(),
         None,
     )
     .expect("bound query answers");
@@ -402,7 +449,7 @@ fn the_write_tool_binds_its_params_argument_on_both_branches() {
         "MATCH (v:Vessel {id: $id}) RETURN v.id AS id",
         params_from_json(Some(&json_params(&[("id", serde_json::json!(1))]))),
         authz,
-        None,
+        ExecPolicy::default(),
         None,
     )
     .expect("read branch");
@@ -416,7 +463,7 @@ fn the_write_tool_binds_its_params_argument_on_both_branches() {
             ("flag", serde_json::json!("NO")),
         ]))),
         authz,
-        None,
+        ExecPolicy::default(),
         None,
     )
     .expect("write branch");
@@ -433,8 +480,14 @@ fn an_unbound_param_reaches_the_tool_response_as_an_error() {
         "MATCH (v:Vessel {id: $id}) RETURN v.id AS id",
         "MATCH (v:Vessel) WHERE v.id = $id RETURN v.id AS id",
     ] {
-        let body = run_cypher_tool(&active, query, Default::default(), None, None)
-            .expect_err("an unbound parameter is a failure, not an empty result");
+        let body = run_cypher_tool(
+            &active,
+            query,
+            Default::default(),
+            ExecPolicy::default(),
+            None,
+        )
+        .expect_err("an unbound parameter is a failure, not an empty result");
         assert!(body.contains("Missing parameter: $id"), "{query}: {body}");
     }
 }

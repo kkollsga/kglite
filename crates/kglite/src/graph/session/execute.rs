@@ -116,8 +116,13 @@ pub struct ExecuteOptions<'a> {
     /// ([`crate::graph::parallel::should_fan_out`]) — `true` is a permission,
     /// not an instruction.
     ///
-    /// The Bolt and MCP servers deliberately never set it; the Python wheel
-    /// exposes it as `kg.cypher(parallel=True)` and the CLI as `--parallel`.
+    /// The Python wheel exposes it as `kg.cypher(parallel=True)` and the CLI
+    /// as `--parallel`, both per query. The MCP server exposes it as an
+    /// operator decision instead — `--parallel` / `extensions.parallel`,
+    /// applied to its read seam only — because the agent on the other end
+    /// cannot know how many cores the deployment is willing to spend. The
+    /// Bolt server sets it nowhere: it multiplexes concurrent sessions over
+    /// one process, so the cores are already committed.
     pub parallel: bool,
 }
 

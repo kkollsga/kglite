@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **MCP server operators can let queries use the engine's parallel runtime**,
+  via `--parallel` or `extensions.parallel: true` in the manifest (either
+  surface alone turns it on; a malformed manifest value fails the boot rather
+  than being silently ignored). Off by default, because a server's cores
+  belong to its clients. It is a permission, not an instruction — the engine
+  still applies its own per-operator size gate, so small queries are
+  unaffected and the answer is identical with the pin on or off — and it
+  covers **reads only**: a `--writable` server keeps running mutations
+  sequentially. Applied at the single read seam, so built-in `cypher_query`,
+  manifest `tools[].cypher` templates, recipe routes, and a composed server's
+  domain tools all inherit it. Pool width follows `available_parallelism`,
+  overridable with `KGLITE_QUERY_THREADS`; the boot log records the pin and
+  the width it resolved.
+
 ### Fixed
 
 - **`size()` / `length()` on a bracket-delimited string returned an element

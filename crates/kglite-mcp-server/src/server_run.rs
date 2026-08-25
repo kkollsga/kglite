@@ -72,6 +72,58 @@ fn boot_graph_watch(manifest: Option<&mcp_methods::server::Manifest>) -> Result<
         .context("extensions.graph_watch must be a boolean (true or false)")
 }
 
+/// `extensions.parallel: true` — the manifest half of the parallel opt-in.
+///
+/// Boolean-key handling matches [`boot_graph_watch`]: absent is off, a
+/// non-boolean is a boot error rather than a silently dropped key.
+fn boot_manifest_parallel(manifest: Option<&mcp_methods::server::Manifest>) -> Result<bool> {
+    let Some(raw) = manifest.and_then(|m| m.extensions.get("parallel")) else {
+        return Ok(false);
+    };
+    raw.as_bool()
+        .context("extensions.parallel must be a boolean (true or false)")
+}
+
+/// Resolve the parallel-runtime opt-in from `--parallel` and
+/// `extensions.parallel`.
+///
+/// **OR, not intersection** — the opposite of [`boot_write_scope`], and for
+/// the reason that makes the two opposite: a write scope is a *perimeter*, so
+/// combining two of them may only narrow, while this is a *resource
+/// permission* whose worst case is a query using more cores than it needed.
+/// Either surface alone turns it on, so a wrapper that owns the manifest but
+/// not argv, and a bare binary launched with no manifest at all, each have a
+/// working way to say yes.
+///
+/// Applies to the read seam only ([`tools::ExecPolicy`]); mutations stay
+/// sequential.
+fn boot_parallel(manifest: Option<&mcp_methods::server::Manifest>, cli: &Cli) -> Result<bool> {
+    Ok(boot_manifest_parallel(manifest)? || cli.parallel)
+}
+
+/// The width the engine's query pool will be built at, for the boot log.
+///
+/// Recomputed here rather than read from the engine: the pool is built lazily
+/// on the first query that crosses a fan-out threshold, so at boot there is
+/// nothing to ask. Mirrors `kglite::graph::parallel::configured_width` — same
+/// env var, same `available_parallelism` fallback — and is reported as
+/// observed configuration, never as a promise about a pool that does not
+/// exist yet.
+fn query_pool_width() -> (usize, bool) {
+    let override_width = std::env::var_os("KGLITE_QUERY_THREADS")
+        .and_then(|raw| raw.to_str()?.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0);
+    match override_width {
+        Some(n) => (n, true),
+        None => (
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1),
+            false,
+        ),
+    }
+}
+
 /// `extensions.tools_allow: [name, ...]` — the closed-by-default tool surface.
 ///
 /// Absent key = no allowlist = every registered route stays visible. Present,
@@ -380,6 +432,20 @@ pub(crate) async fn run_async(
     let graph_watch = boot_graph_watch(manifest.as_ref())?;
     let tools_allow = boot_tools_allow(manifest.as_ref())?;
     let write_scope = boot_write_scope(manifest.as_ref(), &cli)?;
+    let parallel = boot_parallel(manifest.as_ref(), &cli)?;
+    if parallel {
+        let (width, overridden) = query_pool_width();
+        tracing::info!(
+            pool_threads = width,
+            width_source = if overridden {
+                "KGLITE_QUERY_THREADS"
+            } else {
+                "available_parallelism"
+            },
+            "parallel runtime enabled for reads (--parallel / extensions.parallel); \
+             mutations stay sequential"
+        );
+    }
 
     // Manifest `workspace.kind: local` wins over CLI flags — promote before
     // mode-specific binding so the rest of boot sees `Mode::LocalWorkspace`.
@@ -406,6 +472,7 @@ pub(crate) async fn run_async(
 
     let graph_state = GraphState::new(workspace_graph_mode(&mode))
         .with_value_codecs(boot_value_codecs(manifest.as_ref())?)
+        .with_parallel(parallel)
         .with_workspace_graph(workspace_graph.map(Arc::new))
         // Declared here rather than from `builtins` (built below, after the
         // csv_http boot it needs) because `bind_mode` performs the boot open on
@@ -775,5 +842,81 @@ mod boot_manifest_tests {
             .expect_err("a non-boolean value must fail boot, not be ignored")
             .to_string();
         assert!(error.contains("must be a boolean"), "{error}");
+    }
+
+    /// The parallel opt-in is an operator *pair* — `--parallel` and
+    /// `extensions.parallel` — so the boot resolution is the OR of the two.
+    /// Pinned here because a manifest-only deployment (a wrapper that never
+    /// controls argv) and a flag-only one (the bare binary, no manifest) are
+    /// both real, and either surface silently losing its half looks exactly
+    /// like "the knob does nothing".
+    #[test]
+    fn parallel_reads_the_flag_and_the_manifest() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bare_cli = Cli::parse_from(["kglite-mcp-server", "--graph", "g.kgl"]);
+        let flag_cli = Cli::parse_from(["kglite-mcp-server", "--graph", "g.kgl", "--parallel"]);
+
+        assert!(
+            !boot_parallel(None, &bare_cli).expect("no manifest parses"),
+            "neither surface set must leave the engine sequential"
+        );
+        let bare = manifest_with(tmp.path(), "name: bare\n");
+        assert!(
+            !boot_parallel(Some(&bare), &bare_cli).expect("bare manifest parses"),
+            "an absent key must leave the engine sequential — otherwise the on-arm proves nothing"
+        );
+        let off = manifest_with(tmp.path(), "name: off\nextensions:\n  parallel: false\n");
+        assert!(!boot_parallel(Some(&off), &bare_cli).expect("explicit false parses"));
+
+        assert!(
+            boot_parallel(None, &flag_cli).expect("flag alone parses"),
+            "--parallel must reach the execution wiring; if this fails the flag is parsed \
+             and then dropped"
+        );
+        let on = manifest_with(tmp.path(), "name: on\nextensions:\n  parallel: true\n");
+        assert!(
+            boot_parallel(Some(&on), &bare_cli).expect("explicit true parses"),
+            "extensions.parallel: true must reach the execution wiring; if this fails the \
+             key is parsed and then dropped"
+        );
+        assert!(
+            boot_parallel(Some(&on), &flag_cli).expect("both parse"),
+            "flag + manifest is their OR — neither surface can switch the other off"
+        );
+        assert!(
+            boot_parallel(Some(&off), &flag_cli).expect("both parse"),
+            "an explicit manifest `false` does not veto the flag; the pair is an OR, and a \
+             flag the operator typed on this launch is the more specific statement"
+        );
+    }
+
+    #[test]
+    fn a_malformed_parallel_fails_boot() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cli = Cli::parse_from(["kglite-mcp-server", "--graph", "g.kgl"]);
+
+        let word = manifest_with(
+            tmp.path(),
+            "name: word\nextensions:\n  parallel: yes-please\n",
+        );
+        let error = boot_parallel(Some(&word), &cli)
+            .expect_err("a non-boolean value must fail boot, not be ignored")
+            .to_string();
+        assert!(error.contains("must be a boolean"), "{error}");
+
+        let null = manifest_with(tmp.path(), "name: null\nextensions:\n  parallel:\n");
+        assert!(
+            boot_parallel(Some(&null), &cli).is_err(),
+            "an empty (null) value is a typo, not `false`"
+        );
+
+        let listed = manifest_with(
+            tmp.path(),
+            "name: listed\nextensions:\n  parallel:\n    - true\n",
+        );
+        assert!(
+            boot_parallel(Some(&listed), &cli).is_err(),
+            "a list is a typo, not a truthy value"
+        );
     }
 }

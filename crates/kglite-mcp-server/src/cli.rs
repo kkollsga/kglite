@@ -69,6 +69,18 @@ pub(crate) struct Cli {
     #[arg(long = "write-scope")]
     pub(crate) write_scope: Option<String>,
 
+    /// Let this server's Cypher *reads* use the engine's parallel runtime.
+    /// Off by default: a server's cores belong to its clients, so nothing
+    /// turns this on by omission. It is a permission, not an instruction —
+    /// operators that cannot partition deterministically, and queries below
+    /// the engine's runtime size gate, still run sequentially. Mutations are
+    /// deliberately excluded, so a `--writable` server keeps writing
+    /// sequentially. Equivalent to `extensions.parallel: true` in the
+    /// manifest (either surface alone turns it on). Pool width is
+    /// `available_parallelism`, overridable with `KGLITE_QUERY_THREADS`.
+    #[arg(long)]
+    pub(crate) parallel: bool,
+
     /// Run a configuration self-test instead of serving: re-spawn this binary
     /// with the same flags, drive a live MCP handshake (initialize →
     /// tools/list → activate → cypher_query), and print green/red per
@@ -293,6 +305,17 @@ mod cli_contract_tests {
         // Absent flag = no operator pin at all (distinct from an empty pin).
         let bare = Cli::parse_from(["kglite-mcp-server", "--graph", "g.kgl"]);
         assert!(bare.write_scope.is_none());
+    }
+
+    #[test]
+    fn parallel_flag_parses_and_defaults_off() {
+        let on = Cli::parse_from(["kglite-mcp-server", "--graph", "g.kgl", "--parallel"]);
+        assert!(on.parallel);
+        let off = Cli::parse_from(["kglite-mcp-server", "--graph", "g.kgl"]);
+        assert!(
+            !off.parallel,
+            "a server's cores belong to its clients — the runtime is never opted in by omission"
+        );
     }
 
     #[test]

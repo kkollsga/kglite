@@ -117,6 +117,48 @@ key are intersected with each other as well, and the effective scope is logged
 at boot; a malformed `extensions.write_scope` fails the boot rather than being
 silently ignored.
 
+#### Letting reads use the parallel runtime
+
+By default the server leaves the engine's opt-in parallel regions — candidate
+scans, fused scan-aggregates, aggregations and `ORDER BY` sort keys — switched
+off, whatever the machine has: a server's cores belong to its clients, so
+nothing spends them by omission. On a deployment that serves one agent against
+a large graph, opt in with either surface — the flag, the manifest key, or
+both:
+
+```bash
+kglite-mcp-server --graph /data/big.kgl --parallel
+```
+
+```yaml
+extensions:
+  parallel: true
+```
+
+The two are OR'd (unlike `write_scope`, which is intersected: a write scope is
+a perimeter, this is a resource permission), so a wrapper that owns the
+manifest but not the command line, and a bare binary with no manifest at all,
+each have a working way to say yes. A malformed `extensions.parallel` fails
+the boot rather than being silently ignored.
+
+Two things it does **not** do. It is a permission, not an instruction: the
+engine still applies its own per-operator size gate, so a small query runs
+sequentially either way and the answer is identical with the pin on or off.
+And it covers **reads only** — a `--writable` server keeps running mutations
+sequentially, because a write is the one place where extra cores are a
+surprise rather than a speed-up.
+
+The pin is also not the engine's only use of threads: a handful of regions
+whose fan-out was measured to be an unconditional win (notably projecting a
+large result set) parallelise above their own row thresholds whether or not it
+is set. What the pin controls is the set of regions the engine holds back by
+default.
+
+Pool width is the machine's `available_parallelism`, overridable with the
+`KGLITE_QUERY_THREADS` environment variable — one pool, shared by both kinds
+of region. When the pin is on, the boot log records it together with the width
+it resolved.
+
 ### 3. Register with Claude Desktop
 
 Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):

@@ -677,7 +677,7 @@ fn text_score_result(state: &GraphState) -> Result<String, String> {
                 kg,
                 "MATCH (d:Doc) RETURN text_score(d, 'body', 'hello') AS s",
                 std::collections::HashMap::new(),
-                None,
+                ExecPolicy::default(),
                 None,
             )
         })

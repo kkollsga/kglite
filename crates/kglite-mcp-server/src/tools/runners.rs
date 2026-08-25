@@ -5,7 +5,6 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use kglite::api::cypher;
-use kglite::api::cypher::ValueCodec;
 use kglite::api::introspection::{
     compute_description, compute_schema, ConnectionDetail, CypherDetail, FluentDetail,
 };
@@ -52,10 +51,10 @@ pub(crate) fn run_cypher_tool(
     graph: &ActiveGraph,
     query: &str,
     params: HashMap<String, kglite::api::Value>,
-    value_codecs: Option<&[ValueCodec]>,
+    policy: ExecPolicy<'_>,
     csv_http: Option<&crate::csv_http::CsvHttpConfig>,
 ) -> Result<String, String> {
-    match run_cypher_inner(&graph.kg, query, params, value_codecs, csv_http) {
+    match run_cypher_inner(&graph.kg, query, params, policy, csv_http) {
         // Compact identity footer so a query result self-identifies its
         // graph (agents often go straight to cypher_query without a prior
         // graph_overview, where a stale active root would otherwise hide).
@@ -76,7 +75,7 @@ pub(crate) fn run_cypher_write(
     query: &str,
     params: HashMap<String, kglite::api::Value>,
     authz: WriteAuthz<'_>,
-    value_codecs: Option<&[ValueCodec]>,
+    policy: ExecPolicy<'_>,
     csv_http: Option<&crate::csv_http::CsvHttpConfig>,
 ) -> Result<String, String> {
     let (pre_parsed, is_mutation) =
@@ -84,7 +83,7 @@ pub(crate) fn run_cypher_write(
     if !is_mutation {
         // Read on a writable server — same path as the read-only tool. An
         // operator pin restricts *writes*, so it never touches this branch.
-        return run_cypher_inner(&active.kg, query, params, value_codecs, csv_http);
+        return run_cypher_inner(&active.kg, query, params, policy, csv_http);
     }
     let output_csv = pre_parsed.output_format == kglite::api::cypher::OutputFormat::Csv;
     // Refusal before any mutation runs: an empty effective scope is answered
@@ -96,7 +95,11 @@ pub(crate) fn run_cypher_write(
     let dir = kglite::api::make_dir_graph_mut(active.kg.dir_mut());
     let mut opts = kglite::api::session::ExecuteOptions::eager(&params);
     opts.embedder = embedder;
-    opts.value_codecs = value_codecs;
+    opts.value_codecs = policy.value_codecs;
+    // `policy.parallel` is deliberately NOT applied: the operator's opt-in
+    // covers reads only, so a `--writable` server never runs a mutation on the
+    // parallel runtime. Writes are the one place where "more cores" is a
+    // surprise rather than a speed-up.
     opts.write_scope = scope.as_ref();
     opts.git_sha = authz.git_sha;
     opts.modified_by = authz.modified_by;

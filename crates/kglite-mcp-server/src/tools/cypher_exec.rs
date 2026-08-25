@@ -51,7 +51,7 @@ impl GraphState {
         self.ensure_graph_fresh();
         let guard = read_lock(&self.inner);
         let active = guard.as_ref().ok_or(CypherRunError::NoActiveGraph)?;
-        execute_cypher_inner(&active.kg, query, params, self.value_codecs())
+        execute_cypher_inner(&active.kg, query, params, self.exec_policy())
     }
 
     /// Execute read-only Cypher only when the current workspace graph is known
@@ -76,7 +76,7 @@ impl GraphState {
         let active = guard
             .as_ref()
             .ok_or(StrictCypherReadError::Cypher(CypherRunError::NoActiveGraph))?;
-        execute_cypher_inner(&active.kg, query, params, self.value_codecs())
+        execute_cypher_inner(&active.kg, query, params, self.exec_policy())
             .map_err(StrictCypherReadError::Cypher)
     }
 }
@@ -110,16 +110,37 @@ pub(crate) fn params_from_json(
     .unwrap_or_default()
 }
 
+/// The boot-decided engine settings a Cypher route applies to every
+/// execution, travelling as one value.
+///
+/// One struct rather than a parameter per setting: these are all read off the
+/// same [`GraphState`] at the same moment, and a route that threads them
+/// individually can silently drop one — which is indistinguishable, from the
+/// outside, from the knob having no effect.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ExecPolicy<'a> {
+    /// Manifest-declared literal codecs (`extensions.value_codecs`).
+    pub(crate) value_codecs: Option<&'a [ValueCodec]>,
+    /// The operator's parallel-runtime opt-in. Honoured on reads only — see
+    /// [`execute_cypher_inner`] and `run_cypher_write`.
+    pub(crate) parallel: bool,
+}
+
 /// Execute read-only Cypher without choosing a presentation format.
 ///
 /// This is the canonical MCP execution seam: policy, eager materialization,
 /// embedder wiring, and value codecs are applied once, while callers retain
 /// [`ExecuteOutcome`] for structured serialization or legacy rendering.
+///
+/// Every read reaching the engine passes through here — the built-in
+/// `cypher_query`, manifest `tools[].cypher` templates, recipe routes, and a
+/// domain tool's `run_cypher` — so `policy.parallel` is applied once, here,
+/// rather than at each of those four registration sites.
 pub(crate) fn execute_cypher_inner(
     kg: &KnowledgeGraph,
     query: &str,
     params: HashMap<String, Value>,
-    value_codecs: Option<&[ValueCodec]>,
+    policy: ExecPolicy<'_>,
 ) -> std::result::Result<ExecuteOutcome, CypherRunError> {
     // MCP rejects mutations regardless of read-only graph mode. Pre-parse so
     // the policy failure remains distinct from an engine execution failure.
@@ -133,7 +154,10 @@ pub(crate) fn execute_cypher_inner(
     // routes. The embedder and codecs match the pre-extraction execution path.
     let mut opts = kglite::api::session::ExecuteOptions::eager(&params);
     opts.embedder = kg.embedder().cloned();
-    opts.value_codecs = value_codecs;
+    opts.value_codecs = policy.value_codecs;
+    // A permission, not an instruction: the engine still applies its own
+    // per-operator row × cost-class gate, so a small query is unaffected.
+    opts.parallel = policy.parallel;
     kglite::api::session::execute_read(kg.dir(), query, &opts).map_err(CypherRunError::engine)
 }
 
@@ -145,11 +169,11 @@ pub(crate) fn run_cypher_inner(
     kg: &KnowledgeGraph,
     query: &str,
     params: HashMap<String, Value>,
-    value_codecs: Option<&[ValueCodec]>,
+    policy: ExecPolicy<'_>,
     csv_http: Option<&crate::csv_http::CsvHttpConfig>,
 ) -> std::result::Result<String, String> {
     let outcome =
-        execute_cypher_inner(kg, query, params, value_codecs).map_err(|error| error.to_string())?;
+        execute_cypher_inner(kg, query, params, policy).map_err(|error| error.to_string())?;
     render_cypher_output(
         &outcome.result,
         outcome.output_format == cypher::OutputFormat::Csv,

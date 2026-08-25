@@ -259,7 +259,7 @@ pub fn register(
             move |args| {
                 let csv = csv.clone();
                 s.ensure_graph_fresh();
-                let codecs = s.value_codecs();
+                let policy = s.exec_policy();
                 let scope = args.write_scope.clone();
                 let git_sha = args.git_sha.clone();
                 let modified_by = args.modified_by.clone();
@@ -272,7 +272,7 @@ pub fn register(
                 let params = params_from_json(args.params.as_ref());
                 let body = s
                     .with_active_mut(|active| {
-                        run_cypher_write(active, &args.query, params, authz, codecs, csv.as_deref())
+                        run_cypher_write(active, &args.query, params, authz, policy, csv.as_deref())
                             .map_err(|e| cypher_tool_error(&e))
                     })
                     .unwrap_or_else(|| Err(NO_GRAPH.to_string()));
@@ -286,11 +286,11 @@ pub fn register(
             move |args| {
                 let csv = csv.clone();
                 s.ensure_graph_fresh();
-                let codecs = s.value_codecs();
+                let policy = s.exec_policy();
                 let params = params_from_json(args.params.as_ref());
                 let body = s
                     .with_active(|g| {
-                        run_cypher_tool(g, &args.query, params, codecs, csv.as_deref())
+                        run_cypher_tool(g, &args.query, params, policy, csv.as_deref())
                     })
                     .unwrap_or_else(|| Err(NO_GRAPH.to_string()));
                 map_body(body, |body| s.with_rebuild_warning(body))

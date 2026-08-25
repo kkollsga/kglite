@@ -196,6 +196,17 @@ activation, and file watching; you inject only the builder. **Drop-in property:*
 your server takes the *same flags* as the kglite MCP server — operators switch
 the binary, not their config. codingest-mcp is the ~40-line reference `main`.
 
+That includes the engine-level knobs, which are deliberately **operator**
+surfaces rather than `ServerExtensions` builder methods: an operator pair
+reaches the binary, the wheel-bundled server, and your composed `main`
+identically, while a builder knob would only reach binaries whose author
+recompiled. `--parallel` / `extensions.parallel` is the current example — it
+lets the server's Cypher *reads* use the engine's parallel runtime (off by
+default; mutations stay sequential; `KGLITE_QUERY_THREADS` sets the pool
+width). It is applied at the one read seam every route funnels through, so
+built-in `cypher_query`, manifest `tools[].cypher` templates, recipe routes,
+and a domain tool's `run_cypher` all inherit it without wiring of their own.
+
 ### Domain-tool composition
 
 When a producer has deterministic domain methods that cannot be expressed as a
