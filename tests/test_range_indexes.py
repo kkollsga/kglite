@@ -87,6 +87,17 @@ class TestRangeIndexQueries:
         assert all(50 <= a <= 55 for a in ages)
         assert len(result) == 6  # ages 50-55
 
+    def test_two_sided_range_in_one_dict(self, graph):
+        """Both operators of a one-dict range apply, index present or not."""
+        graph.create_range_index("Person", "age")
+        indexed = graph.where({"type": "Person"}).where({"age": {">=": 50, "<=": 55}}).collect()
+        ages = sorted(n["age"] for n in indexed)
+        assert ages == [50, 51, 52, 53, 54, 55]
+
+        graph.drop_range_index("Person", "age")
+        scanned = graph.where({"type": "Person"}).where({"age": {">=": 50, "<=": 55}}).collect()
+        assert sorted(n["age"] for n in scanned) == ages
+
     def test_range_query_without_index_still_works(self, graph):
         """Range queries should work without an index (fallback to scan)."""
         result = graph.where({"type": "Person"}).where({"age": {">": 110}}).collect()

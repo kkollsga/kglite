@@ -215,7 +215,7 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/scalar_functions/collection.rs",
       "qualified_name": "crate::CypherExecutor<'a>::eval_collection_fn",
-      "lines": 170,
+      "lines": 169,
       "branches": 64,
       "nesting": 4
     },

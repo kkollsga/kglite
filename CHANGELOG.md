@@ -23,6 +23,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   KGLite's other list-coercions on strings (`UNWIND`, indexing,
   `head`/`last`/`reverse`, `IN`) are unchanged. Documented as a dialect note
   in `CYPHER.md`.
+- **A fluent filter that put more than one operator on the same property kept
+  only the first and silently discarded the rest.** `where({'score': {'>=':
+  10, '<=': 20}})` — the two-sided range `FLUENT.md` has always documented —
+  ran as `score >= 10` alone and returned every row above the band, with no
+  error and nothing in `explain()` to show the missing half. Which operator
+  survived was whichever the caller wrote first, so reordering the dict
+  changed the answer. Every operator in the dict is now required to hold, so a
+  one-dict range selects exactly the same nodes as the two `where()` calls
+  chained. Applies everywhere a condition dict is accepted — `where()`,
+  `where_any()`, and the `where` / `where_connection` / `filter` arguments of
+  `traverse()`, `compare()` and `collect_children()`. The engine gained a `FilterCondition::All`
+  conjunction to carry it (public Rust API addition).
 
 ## [0.16.9] - 2026-08-23
 

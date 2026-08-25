@@ -15,14 +15,7 @@ pub fn pydict_to_filter_conditions(
             let key = k.extract::<String>()?;
             let condition = match v.cast::<PyDict>() {
                 // Handle operator-based condition
-                Ok(op_dict) => {
-                    let (op, val) = op_dict.iter().next().ok_or_else(|| {
-                        PyErr::new::<pyo3::exceptions::PyValueError, _>("Empty operator dictionary")
-                    })?;
-
-                    let op_str = op.extract::<String>()?;
-                    parse_operator_condition(&op_str, &val)?
-                }
+                Ok(op_dict) => parse_operator_dict(op_dict)?,
                 // Handle direct value match (equivalent to ==)
                 Err(_) => FilterCondition::Equals(py_value_to_value(&v)?),
             };
@@ -30,6 +23,27 @@ pub fn pydict_to_filter_conditions(
             Ok((key, condition))
         })
         .collect()
+}
+
+/// Convert one property's operator dict into a single condition.
+///
+/// Every operator in the dict has to hold — `{">=": lo, "<=": hi}` is the
+/// two-sided range it reads as, and matches what the same operators written as
+/// chained `where()` calls do. Only the first entry used to survive here, so a
+/// range silently ran as a one-sided filter and returned extra rows.
+fn parse_operator_dict(op_dict: &Bound<'_, PyDict>) -> PyResult<FilterCondition> {
+    let mut conditions = Vec::with_capacity(op_dict.len());
+    for (op, val) in op_dict.iter() {
+        let op_str = op.extract::<String>()?;
+        conditions.push(parse_operator_condition(&op_str, &val)?);
+    }
+    match conditions.len() {
+        0 => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Empty operator dictionary",
+        )),
+        1 => Ok(conditions.pop().expect("len()==1")),
+        _ => Ok(FilterCondition::All(conditions)),
+    }
 }
 
 fn parse_operator_condition(op: &str, val: &Bound<'_, PyAny>) -> PyResult<FilterCondition> {

@@ -140,7 +140,7 @@ fn edge_matches_conditions(
             Some(value) => crate::graph::core::filtering::matches_condition(value, condition),
             None => {
                 // Missing field is treated as null
-                matches!(condition, FilterCondition::IsNull)
+                crate::graph::core::filtering::matches_missing_field(condition)
             }
         }
     })

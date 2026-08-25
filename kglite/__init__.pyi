@@ -2122,10 +2122,14 @@ class KnowledgeGraph:
         ``{'role': {'=~': 'admin'}}`` does not select ``'superadmin'``.
         Wrap the pattern with ``.*`` to search with ``'=~'``.
 
+        Several operators on one property are ANDed, so
+        ``{'age': {'>=': 30, '<=': 40}}`` is the two-sided range it reads as —
+        the same selection as chaining the two ``where()`` calls.
+
         Example::
 
             graph.select('Person').where({
-                'age': {'>': 25},
+                'age': {'>=': 25, '<=': 40},
                 'city': 'Oslo',
                 'name': {'regex': '^A.*'},
                 'status': {'not_in': ['inactive', 'banned']},

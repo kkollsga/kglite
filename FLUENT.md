@@ -158,6 +158,10 @@ graph.select('Person').where({
     'city': 'Oslo',
     'name': {'regex': '^A.*'},
 })
+
+# Several operators on one property are ANDed too — the two-sided range
+# above is the same selection as .where({'price': {'>=': 100}})
+#                                 .where({'price': {'<=': 500}})
 ```
 
 ### OR Filtering

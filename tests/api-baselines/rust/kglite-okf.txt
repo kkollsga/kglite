@@ -3566,6 +3566,7 @@ impl core::fmt::Display for kglite::datatypes::values::ColumnType
 pub fn kglite::datatypes::values::ColumnType::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for kglite::datatypes::values::ColumnType
 pub enum kglite::datatypes::values::FilterCondition
+pub kglite::datatypes::values::FilterCondition::All(alloc::vec::Vec<kglite::datatypes::values::FilterCondition>)
 pub kglite::datatypes::values::FilterCondition::Between(kglite::datatypes::values::Value, kglite::datatypes::values::Value)
 pub kglite::datatypes::values::FilterCondition::Contains(kglite::datatypes::values::Value)
 pub kglite::datatypes::values::FilterCondition::EndsWith(kglite::datatypes::values::Value)

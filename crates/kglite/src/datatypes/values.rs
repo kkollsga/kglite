@@ -22,6 +22,12 @@ pub enum FilterCondition {
     EndsWith(Value),
     Regex(String),
     Not(Box<FilterCondition>),
+    /// Conjunction: every inner condition must hold for the same property
+    /// value. Carries what a single-condition-per-property map cannot — a
+    /// two-sided range (`{">=": lo, "<=": hi}`) is the common case. An empty
+    /// vector matches everything, so builders must reject empty input rather
+    /// than construct one.
+    All(Vec<FilterCondition>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

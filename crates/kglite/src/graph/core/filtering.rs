@@ -74,6 +74,23 @@ pub fn matches_condition_cached(
             _ => false,
         },
         FilterCondition::Not(inner) => !matches_condition_cached(value, inner, regex_cache),
+        FilterCondition::All(inner) => inner
+            .iter()
+            .all(|c| matches_condition_cached(value, c, regex_cache)),
+    }
+}
+
+/// Whether `condition` holds for a property the node does not carry.
+///
+/// The graph treats an absent field as null, and only `is_null` accepts it —
+/// so this is `matches!(condition, IsNull)` plus the recursion `All` needs
+/// (`Not` is deliberately not recursed: `NOT is_not_null` has never matched a
+/// missing field here, and this fix does not change that).
+pub(crate) fn matches_missing_field(condition: &FilterCondition) -> bool {
+    match condition {
+        FilterCondition::IsNull => true,
+        FilterCondition::All(inner) => inner.iter().all(matches_missing_field),
+        _ => false,
     }
 }
 
@@ -95,6 +112,11 @@ fn collect_regex_patterns(condition: &FilterCondition, cache: &mut HashMap<Strin
             }
         }
         FilterCondition::Not(inner) => collect_regex_patterns(inner, cache),
+        FilterCondition::All(inner) => {
+            for condition in inner {
+                collect_regex_patterns(condition, cache);
+            }
+        }
         _ => {}
     }
 }
@@ -693,7 +715,7 @@ fn filter_nodes_by_conditions(
                         Some(v) => matches_condition_cached(v, condition, &regex_cache),
                         None => {
                             // Missing field is treated as null
-                            matches!(condition, FilterCondition::IsNull)
+                            matches_missing_field(condition)
                         }
                     }
                 })
@@ -1057,7 +1079,7 @@ pub fn filter_nodes_any(
                     let resolved = graph.resolve_alias(node.node_type_str(&graph.interner), key);
                     match node.get_field_ref(resolved) {
                         Some(v) => matches_condition_cached(&v, condition, &regex_cache),
-                        None => matches!(condition, FilterCondition::IsNull),
+                        None => matches_missing_field(condition),
                     }
                 })
             })
@@ -1626,6 +1648,55 @@ mod tests {
             &Value::Int64(42),
             &FilterCondition::EndsWith(Value::String("2".into()))
         ));
+    }
+
+    #[test]
+    fn test_matches_condition_all_is_a_conjunction() {
+        let range = FilterCondition::All(vec![
+            FilterCondition::GreaterThanEquals(Value::Int64(30)),
+            FilterCondition::LessThanEquals(Value::Int64(35)),
+        ]);
+        assert!(matches_condition(&Value::Int64(30), &range));
+        assert!(matches_condition(&Value::Int64(35), &range));
+        assert!(!matches_condition(&Value::Int64(29), &range));
+        assert!(!matches_condition(&Value::Int64(36), &range));
+    }
+
+    #[test]
+    fn test_matches_condition_all_nests() {
+        let condition = FilterCondition::All(vec![
+            FilterCondition::StartsWith(Value::String("Person_1".into())),
+            FilterCondition::Not(Box::new(FilterCondition::EndsWith(Value::String(
+                "0".into(),
+            )))),
+        ]);
+        assert!(matches_condition(
+            &Value::String("Person_11".into()),
+            &condition
+        ));
+        assert!(!matches_condition(
+            &Value::String("Person_10".into()),
+            &condition
+        ));
+        assert!(!matches_condition(
+            &Value::String("Person_20".into()),
+            &condition
+        ));
+    }
+
+    #[test]
+    fn test_missing_field_only_satisfies_is_null() {
+        assert!(matches_missing_field(&FilterCondition::IsNull));
+        assert!(!matches_missing_field(&FilterCondition::IsNotNull));
+        // A conjunction is only satisfied by a missing field when every arm is.
+        assert!(matches_missing_field(&FilterCondition::All(vec![
+            FilterCondition::IsNull,
+            FilterCondition::IsNull,
+        ])));
+        assert!(!matches_missing_field(&FilterCondition::All(vec![
+            FilterCondition::IsNull,
+            FilterCondition::GreaterThan(Value::Int64(1)),
+        ])));
     }
 
     // ── parse_date_string ──
