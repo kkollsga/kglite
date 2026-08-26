@@ -36,6 +36,8 @@ Domain-specific surfaces — pull them in when your data has the shape:
 | {doc}`text-search` | …you want keyword search, or keyword *and* meaning in one ranking. BM25 via `build_text_index()` + `text_bm25()`, the index-freshness contract, and hybrid retrieval with `score_fuse()`. |
 | {doc}`graph-algorithms` | …you need PageRank, community detection, shortest paths, centrality. |
 | {doc}`traversal-hierarchy` | …your graph has parent-child / ancestor structure. `set_parent_type`, `*` walks, hierarchical Cypher. |
+| {doc}`ontology` | …your type names have a "kind of" structure (`Student` is a `Person`) or edges connect unions of types. Declared classes + relationship semantics, no-arg validators, `ontology_audit()`, the blueprint data-quality gate, and opt-in materialization that makes supertypes matchable. |
+| {doc}`structured-data` | …properties carry tables or nested records. DataFrame table properties with fidelity, declared `list<map{...}>` shapes, atomic nested `SET`, `table.upsert`/`table.delete`, and the embedded-table-vs-row-nodes decision. |
 
 ## Power-user / less common
 

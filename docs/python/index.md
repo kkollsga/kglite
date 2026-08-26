@@ -41,6 +41,8 @@ guides/primary-store
 guides/blueprints
 guides/querying
 guides/traversal-hierarchy
+guides/ontology
+guides/structured-data
 guides/semantic-search
 guides/text-search
 guides/spatial
