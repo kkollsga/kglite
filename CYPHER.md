@@ -3210,6 +3210,38 @@ is rendered to text before any binding sees it. The *message* is stable and name
 the constraint, the property, and the offending value — match on that. Enforcement
 is identical either way.
 
+### Ontology (declared semantic layer)
+
+Declared with the Python `define_ontology()` (classes with an `is_a` forest,
+abstract supertypes, and relationship semantics), persisted with the graph,
+and read-only from Cypher:
+
+```cypher
+SHOW ONTOLOGY
+CALL ontology_audit() YIELD rule, severity, violations, total, pct
+CALL type_domain_violation() YIELD source, target, rule   -- no-arg: checks every declaration
+```
+
+`SHOW ONTOLOGY` returns one row per declared class (`kind`, `name`, `is_a`,
+`abstract`, `description`) and relationship (`kind`, `name`, `domain`,
+`range`, `enforcement`, `description`); zero rows when nothing is declared.
+`ontology_audit()` is the scorecard: one row per declared check with its
+violation count, denominator, percentage, and declared severity
+(`advisory` / `warn` / `error` — acted on by blueprint builds, reported
+everywhere else).
+
+The six declaration-backed rule procedures (`type_domain_violation`,
+`type_range_violation`, `missing_required_edge`, `cardinality_violation`,
+`inverse_violation`, `transitivity_violation`) called with **no arguments**
+iterate the declarations instead of erroring, and every row carries a `rule`
+column naming the declaration it came from. A `domain`/`range` naming an
+**abstract class** widens to the class plus its declared descendants — the
+union-endpoint case (`HAS_OPERATOR from = six concrete types`) a flat schema
+cannot declare. Semantics are annotations, not axioms: the ontology never
+changes what a `MATCH` returns, `cardinality`/`required` describe *outgoing*
+edges of the domain type, and the layer is deliberately distinct from
+`set_parent_type` (presentation ownership for `describe()` tiering).
+
 ## Timeseries Functions
 
 Query time-indexed numeric data attached to nodes. All date arguments are strings (`'2020'`, `'2020-2'`, `'2020-2-15'`), and precision is validated against the data's resolution.

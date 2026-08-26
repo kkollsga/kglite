@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Ontology declaration layer** (annotations, not axioms — SKOS in spirit,
+  never OWL; it never changes what a query matches). `define_ontology()` /
+  `ontology()` / `clear_ontology()` install a persisted store of classes
+  (an `is_a` forest with abstract supertypes, descriptions, and a
+  documentation-only `by` discriminator) and relationship semantics
+  (domain/range, `required_properties`/`property_types`, `inverse_name`,
+  cardinality, required, transitive/symmetric, per-declaration
+  `enforcement: advisory|warn|error`). Read from Cypher via `SHOW ONTOLOGY`
+  and the `CALL ontology_audit()` scorecard; the six declaration-backed rule
+  procedures called with no arguments now check every declaration (a
+  domain/range naming an abstract class widens to its declared descendants —
+  the union-endpoint case a flat schema cannot declare), each row carrying a
+  `rule` column. `describe()` renders an `<ontology>` section when declared.
+  Blueprints reference a document (`"ontology": "x.json"`) installed and
+  audited as a final build phase — warn-level violations land in the build
+  report, error-level violations fail the build after a full report, writing
+  no `.kgl`. The MCP server applies `extensions.ontology: {file: ...}` at
+  boot, memory-only. Deliberately independent of `set_parent_type`
+  (presentation ownership).
 - Blueprint junction edges accept a `rename` map (`"rename": {"csv_col":
   "property_name"}`) to store a CSV column under a different edge-property
   name. Keys must be columns listed in `properties`; `property_types` stays
@@ -16,6 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The six declaration-backed rule procedures gained a `rule` column (bare
+  `CALL`s therefore return one more column): the declaration name in
+  no-argument form, the explicit call's own subject otherwise.
 - The edge-aggregate and spatial-join query fusions no longer switch off
   for the whole graph the moment any secondary label exists. The gate is
   now per pattern: only a pattern that carries an extra label, or names a
