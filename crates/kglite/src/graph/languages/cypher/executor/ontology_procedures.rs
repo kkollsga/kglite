@@ -445,7 +445,7 @@ pub(crate) fn audit_counts(graph: &DirGraph) -> Result<Vec<AuditLine>, String> {
             };
             out.push(AuditLine {
                 rule: format!("{rel}.{}", check.name()),
-                severity: decl.enforcement,
+                severity: decl.enforcement_for(check.name()),
                 violations,
                 total,
                 pct,
@@ -507,6 +507,33 @@ fn check_total(
                 .filter_map(|t| type_indices(graph, t).ok())
                 .map(|nodes| nodes.iter().count())
                 .sum()
+        }
+    }
+}
+
+#[cfg(test)]
+mod check_name_tests {
+    use super::DeclaredCheck;
+
+    #[test]
+    fn every_declared_check_name_is_an_enforcement_key() {
+        let all = [
+            DeclaredCheck::Domain,
+            DeclaredCheck::Range,
+            DeclaredCheck::Required,
+            DeclaredCheck::RequiredProperties,
+            DeclaredCheck::PropertyTypes,
+            DeclaredCheck::Cardinality,
+            DeclaredCheck::Inverse,
+            DeclaredCheck::Symmetric,
+            DeclaredCheck::Transitive,
+        ];
+        for check in all {
+            assert!(
+                crate::graph::ontology::CHECK_NAMES.contains(&check.name()),
+                "DeclaredCheck '{}' missing from ontology::CHECK_NAMES",
+                check.name()
+            );
         }
     }
 }

@@ -494,3 +494,64 @@ def test_inverse_enforced_requires_inverse_name(props_graph):
                 "relationships": {"ENROLLED_IN": {"inverse_enforced": True}},
             }
         )
+
+
+# ---- 0.16.12: per-check enforcement severities ----
+
+
+def test_enforcement_map_sets_per_check_severity(props_graph):
+    props_graph.define_ontology(
+        {
+            "classes": {"Student": {}, "Class": {}},
+            "relationships": {
+                "ENROLLED_IN": {
+                    "domain": "Student",
+                    "range": "Class",
+                    "required_properties": ["since"],
+                    "enforcement": {"required_properties": "error", "domain": "warn"},
+                }
+            },
+        }
+    )
+    audit = _audit(props_graph)
+    assert audit["ENROLLED_IN.required_properties"]["severity"] == "error"
+    assert audit["ENROLLED_IN.domain"]["severity"] == "warn"
+    # Unlisted checks keep the advisory base.
+    assert audit["ENROLLED_IN.range"]["severity"] == "advisory"
+
+
+def test_enforcement_map_unknown_check_refused(props_graph):
+    with pytest.raises(Exception, match="enforcement"):
+        props_graph.define_ontology(
+            {
+                "classes": {"Student": {}},
+                "relationships": {"ENROLLED_IN": {"enforcement": {"inverze": "error"}}},
+            }
+        )
+
+
+def test_new_declaration_fields_persist(props_graph, tmp_path):
+    decl = {
+        "classes": {"Student": {}, "Class": {}},
+        "relationships": {
+            "ENROLLED_IN": {
+                "domain": "Student",
+                "range": "Class",
+                "inverse_name": "HAS_STUDENT",
+                "inverse_enforced": True,
+                "required_properties": ["since"],
+                "property_types": {"since": "integer"},
+                "enforcement": {"required_properties": "error"},
+            }
+        },
+    }
+    props_graph.define_ontology(decl)
+    path = str(tmp_path / "g.kgl")
+    props_graph.save(path)
+    loaded = kglite.load(path)
+    rel = loaded.ontology()["relationships"]["ENROLLED_IN"]
+    assert rel["inverse_enforced"] is True
+    assert rel["required_properties"] == ["since"]
+    assert rel["property_types"] == {"since": "integer"}
+    assert rel["enforcement_overrides"] == {"required_properties": "error"}
+    assert _audit(loaded)["ENROLLED_IN.required_properties"]["severity"] == "error"

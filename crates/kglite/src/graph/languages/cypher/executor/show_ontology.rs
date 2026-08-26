@@ -51,12 +51,23 @@ pub(crate) fn show_ontology_result_set(graph: &DirGraph) -> ResultSet {
             ("abstract", Value::Null),
             ("domain", opt(&decl.domain)),
             ("range", opt(&decl.range)),
-            (
-                "enforcement",
-                Value::String(decl.enforcement.as_str().to_string()),
-            ),
+            ("enforcement", Value::String(enforcement_column(decl))),
             ("description", opt(&decl.description)),
         ]);
     }
     out
+}
+
+/// The base severity, plus any per-check overrides as `check=severity`.
+fn enforcement_column(decl: &crate::graph::ontology::RelationshipDecl) -> String {
+    let base = decl.enforcement.as_str().to_string();
+    if decl.enforcement_overrides.is_empty() {
+        return base;
+    }
+    let overrides: Vec<String> = decl
+        .enforcement_overrides
+        .iter()
+        .map(|(check, sev)| format!("{check}={}", sev.as_str()))
+        .collect();
+    format!("{base}; {}", overrides.join(", "))
 }

@@ -123,8 +123,22 @@ pub struct RelationshipDecl {
     pub symmetric: bool,
     #[serde(default, skip_serializing_if = "Enforcement::is_default")]
     pub enforcement: Enforcement,
+    /// Per-check severities (keys from [`CHECK_NAMES`]); unlisted checks
+    /// fall back to `enforcement`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub enforcement_overrides: BTreeMap<String, Enforcement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+}
+
+impl RelationshipDecl {
+    /// The severity governing one check of this declaration.
+    pub fn enforcement_for(&self, check: &str) -> Enforcement {
+        self.enforcement_overrides
+            .get(check)
+            .copied()
+            .unwrap_or(self.enforcement)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -338,6 +352,20 @@ const PROPERTY_TYPE_NAMES: &[&str] = &[
     "any",
 ];
 
+/// Every declaration-driven check name (`DeclaredCheck::name` values) —
+/// the accepted key set for the map form of `enforcement`.
+pub const CHECK_NAMES: &[&str] = &[
+    "domain",
+    "range",
+    "required",
+    "required_properties",
+    "property_types",
+    "cardinality",
+    "inverse",
+    "symmetric",
+    "transitive",
+];
+
 const CLASS_KEYS: &[&str] = &["is_a", "abstract", "description", "by"];
 const REL_KEYS: &[&str] = &[
     "domain",
@@ -368,24 +396,49 @@ fn class_from_value(name: &str, value: &Value) -> Result<ClassDecl, String> {
 fn relationship_from_value(name: &str, value: &Value) -> Result<RelationshipDecl, String> {
     let map = as_map(value).ok_or_else(|| format!("relationship '{name}' must be a map"))?;
     reject_unknown(map, REL_KEYS, &format!("relationship '{name}'"))?;
-    let enforcement = match map.get("enforcement") {
-        None => Enforcement::Advisory,
-        Some(Value::String(s)) => match s.as_str() {
-            "advisory" => Enforcement::Advisory,
-            "warn" => Enforcement::Warn,
-            "error" => Enforcement::Error,
-            other => {
+    let severity = |s: &str| -> Result<Enforcement, String> {
+        match s {
+            "advisory" => Ok(Enforcement::Advisory),
+            "warn" => Ok(Enforcement::Warn),
+            "error" => Ok(Enforcement::Error),
+            other => Err(format!(
+                "relationship '{name}': enforcement '{other}' is not one of \
+                 'advisory', 'warn', 'error'"
+            )),
+        }
+    };
+    let (enforcement, enforcement_overrides) = match map.get("enforcement") {
+        None => (Enforcement::Advisory, BTreeMap::new()),
+        Some(Value::String(s)) => (severity(s)?, BTreeMap::new()),
+        // Map form: per-check severities; unlisted checks keep the
+        // advisory base.
+        Some(other) => match as_map(other) {
+            Some(per_check) => {
+                let mut overrides = BTreeMap::new();
+                for (check, sv) in per_check {
+                    if !CHECK_NAMES.contains(&check) {
+                        return Err(format!(
+                            "relationship '{name}': enforcement key '{check}' \
+                             is not a check — use one of {CHECK_NAMES:?}"
+                        ));
+                    }
+                    let Value::String(sv) = sv else {
+                        return Err(format!(
+                            "relationship '{name}': enforcement['{check}'] \
+                             must be a severity string"
+                        ));
+                    };
+                    overrides.insert(check.to_string(), severity(sv)?);
+                }
+                (Enforcement::Advisory, overrides)
+            }
+            None => {
                 return Err(format!(
-                    "relationship '{name}': enforcement '{other}' is not one of \
-                     'advisory', 'warn', 'error'"
+                    "relationship '{name}': 'enforcement' must be a severity \
+                     string or a {{check: severity}} map"
                 ))
             }
         },
-        Some(_) => {
-            return Err(format!(
-                "relationship '{name}': 'enforcement' must be a string"
-            ))
-        }
     };
     let cardinality = match map.get("cardinality") {
         None => None,
@@ -470,6 +523,7 @@ fn relationship_from_value(name: &str, value: &Value) -> Result<RelationshipDecl
         transitive: opt_bool(map, "transitive", name)?,
         symmetric: opt_bool(map, "symmetric", name)?,
         enforcement,
+        enforcement_overrides,
         description: opt_string(map, "description", name)?,
     })
 }
