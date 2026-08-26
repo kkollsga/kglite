@@ -427,12 +427,52 @@ pub fn clause_display_name(clause: &Clause) -> String {
         Clause::FusedMatchReturnAggregate { .. } => "FusedMatchReturnAggregate".into(),
         Clause::FusedMatchWithAggregate { .. } => "FusedMatchWithAggregate".into(),
         Clause::FusedOrderByTopK { .. } => "FusedOrderByTopK".into(),
+        Clause::FusedCountAll { .. }
+        | Clause::FusedCountAllEdges { .. }
+        | Clause::FusedCountByType { .. }
+        | Clause::FusedCountEdgesByType { .. }
+        | Clause::FusedCountTypedNode { .. }
+        | Clause::FusedCountLabelUnion { .. }
+        | Clause::FusedCountTypedEdge { .. }
+        | Clause::FusedCountAnchoredEdges { .. } => fused_count_display_name(clause),
+        Clause::FusedNodeScanAggregate {
+            where_predicate, ..
+        } => format!("FusedNodeScanAggregate{}", filter_suffix(where_predicate)),
+        Clause::FusedNodeScanTopK {
+            limit,
+            where_predicate,
+            ..
+        } => format!(
+            "FusedNodeScanTopK (k={limit}){}",
+            filter_suffix(where_predicate)
+        ),
+        Clause::SpatialJoin {
+            container_type,
+            probe_type,
+            ..
+        } => format!("SpatialJoin :{container_type} ⊇ :{probe_type}"),
+    }
+}
+
+/// The EXPLAIN operation name for a fused-count clause. Split out of
+/// [`clause_display_name`], whose one job is the exhaustive dispatch: the
+/// count family is where the *interesting* names live (each one prints the
+/// label, type or anchor it short-circuits on) and it is the family that grows
+/// as new count shapes are fused.
+///
+/// Panics on any other clause — unreachable, because the only call site is the
+/// arm that lists exactly these variants.
+fn fused_count_display_name(clause: &Clause) -> String {
+    match clause {
         Clause::FusedCountAll { .. } => "FusedCountAll".into(),
         Clause::FusedCountAllEdges { .. } => "FusedCountAllEdges".into(),
         Clause::FusedCountByType { .. } => "FusedCountByType".into(),
         Clause::FusedCountEdgesByType { .. } => "FusedCountEdgesByType".into(),
         Clause::FusedCountTypedNode { node_type, .. } => {
             format!("FusedCountTypedNode :{node_type}")
+        }
+        Clause::FusedCountLabelUnion { labels, .. } => {
+            format!("FusedCountLabelUnion :{}", labels.join("|"))
         }
         Clause::FusedCountTypedEdge { edge_type, .. } => {
             format!("FusedCountTypedEdge :{edge_type}")
@@ -452,22 +492,7 @@ pub fn clause_display_name(clause: &Clause) -> String {
                 .map_or_else(|| "*".to_string(), |types| types.join("|"));
             format!("FusedCountAnchoredEdges (anchor#{anchor_idx} {arrow} :{t})")
         }
-        Clause::FusedNodeScanAggregate {
-            where_predicate, ..
-        } => format!("FusedNodeScanAggregate{}", filter_suffix(where_predicate)),
-        Clause::FusedNodeScanTopK {
-            limit,
-            where_predicate,
-            ..
-        } => format!(
-            "FusedNodeScanTopK (k={limit}){}",
-            filter_suffix(where_predicate)
-        ),
-        Clause::SpatialJoin {
-            container_type,
-            probe_type,
-            ..
-        } => format!("SpatialJoin :{container_type} ⊇ :{probe_type}"),
+        _ => unreachable!("only the fused-count arm of clause_display_name calls this"),
     }
 }
 

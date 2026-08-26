@@ -822,3 +822,93 @@ def test_exists_fast_path_sees_secondary_peer(multi_label_graph):
         ).to_list()
     ]
     assert ids == ["P1", "P2", "P4", "P5"]
+
+
+# ─── label alternation: count fusion + per-branch index probes ─────────────
+
+
+def _alternation_graph(*, indexed: bool = True, overlap: bool = False) -> KnowledgeGraph:
+    """:Student 1..3 and :Teacher 10..11, `email` indexed on both when asked.
+
+    `overlap` adds a *secondary* :Teacher to Student 1 — legal sibling
+    overlap, and the node that must be counted and returned exactly once.
+    `indexed=False` builds the same rows with no index at all, so the
+    per-branch probe is structurally impossible and the answer comes from the
+    scan the probe has to agree with.
+    """
+    g = KnowledgeGraph()
+    g.add_nodes(
+        pd.DataFrame({"id": [1, 2, 3], "title": ["Ann", "Bob", "Cy"], "email": ["ann@x", "bob@x", "cy@x"]}),
+        "Student",
+        "id",
+        node_title_field="title",
+    )
+    g.add_nodes(
+        pd.DataFrame({"id": [10, 11], "title": ["Tea", "Tom"], "email": ["tea@x", "tom@x"]}),
+        "Teacher",
+        "id",
+        node_title_field="title",
+    )
+    if indexed:
+        g.create_index("Student", "email")
+        g.create_index("Teacher", "email")
+    if overlap:
+        g.cypher("MATCH (s:Student {id: 1}) SET s:Teacher")
+    return g
+
+
+COUNT_ALTERNATION = "MATCH (n:Student|Teacher) RETURN count(n) AS c"
+
+
+def test_alternation_count_fuses_when_branches_are_disjoint():
+    g = _alternation_graph()
+    ops = [str(r["operation"]) for r in g.cypher(f"EXPLAIN {COUNT_ALTERNATION}").to_list()]
+    assert "FusedCountLabelUnion :Student|Teacher" in ops
+    assert g.cypher(COUNT_ALTERNATION).to_list() == [{"c": 5}]
+
+
+def test_alternation_count_bails_and_counts_an_overlapping_node_once():
+    """Student 1 also carries :Teacher, so a per-branch sum would answer 6.
+
+    The fusion has to decline on that graph; the matcher's union-and-dedup
+    path is what makes the answer 5.
+    """
+    g = _alternation_graph(overlap=True)
+    ops = [str(r["operation"]) for r in g.cypher(f"EXPLAIN {COUNT_ALTERNATION}").to_list()]
+    assert not any(op.startswith("FusedCountLabelUnion") for op in ops)
+    assert g.cypher(COUNT_ALTERNATION).to_list() == [{"c": 5}]
+    # And the row set behind that count carries each node once.
+    rows = g.cypher("MATCH (n:Student|Teacher) RETURN n.id AS id ORDER BY id").to_list()
+    assert [r["id"] for r in rows] == [1, 2, 3, 10, 11]
+
+
+@pytest.mark.parametrize("overlap", [False, True])
+@pytest.mark.parametrize("email", ["ann@x", "tea@x", "nobody@x"])
+def test_alternation_equality_probe_answers_what_the_scan_answers(overlap, email):
+    """The indexed graph probes per branch; the un-indexed one cannot.
+
+    Both must produce the same rows — including for the overlapping node,
+    which the probe reaches through :Student's index *and* :Teacher's
+    secondary carriers.
+    """
+    query = f"MATCH (n:Student|Teacher {{email: '{email}'}}) RETURN n.id AS id ORDER BY id"
+    probed = _alternation_graph(indexed=True, overlap=overlap).cypher(query).to_list()
+    scanned = _alternation_graph(indexed=False, overlap=overlap).cypher(query).to_list()
+    assert probed == scanned
+
+
+def test_alternation_equality_probe_declines_on_a_partly_indexed_branch():
+    """One branch without the index means no branch is probed — and no rows
+    are lost, which is the failure a partial union would cause."""
+    g = _alternation_graph(indexed=False)
+    g.create_index("Student", "email")
+    rows = g.cypher("MATCH (n:Student|Teacher {email: 'tea@x'}) RETURN n.id AS id").to_list()
+    assert rows == [{"id": 10}]
+
+
+def test_alternation_count_with_duplicate_dynamic_labels_counts_once():
+    """`(n:$a|$b)` with both parameters bound to the same label arrives at the
+    planner as two identical branches; summing them would double the count."""
+    g = _alternation_graph()
+    rows = g.cypher("MATCH (n:$a|$b) RETURN count(n) AS c", params={"a": "Student", "b": "Student"}).to_list()
+    assert rows == [{"c": 3}]

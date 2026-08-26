@@ -89,16 +89,23 @@ pub(crate) fn closure_probe_members(
     let covered = members.iter().all(|member| {
         props
             .iter()
-            .all(|prop| member_covers_property(graph, member, prop))
+            .all(|prop| type_covers_property(graph, member, prop))
     });
     covered.then(|| members.into_iter().map(str::to_string).collect())
 }
 
-/// A point lookup of `prop` on `member` resolves without a scan.
+/// A point lookup of `prop` on `node_type` resolves without a scan.
 ///
 /// The id field needs no user index: every type carries a self-healing id map
 /// (`lookup_by_id_readonly`), and `resolve_alias` maps the type's registered
 /// id spelling onto it. Everything else must be index-answerable.
-fn member_covers_property(graph: &DirGraph, member: &str, prop: &str) -> bool {
-    graph.resolve_alias(member, prop) == "id" || graph.index_answers_point_lookup(member, prop)
+///
+/// Shared with the label-alternation probe
+/// (`matcher::PatternExecutor::try_alternation_probe`), which asks the same
+/// all-or-nothing question of a branch label that this module asks of a
+/// closure member — one coverage rule, so the two paths cannot come to
+/// different conclusions about what an index can answer.
+pub(crate) fn type_covers_property(graph: &DirGraph, node_type: &str, prop: &str) -> bool {
+    graph.resolve_alias(node_type, prop) == "id"
+        || graph.index_answers_point_lookup(node_type, prop)
 }

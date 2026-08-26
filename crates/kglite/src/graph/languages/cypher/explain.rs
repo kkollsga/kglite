@@ -210,6 +210,11 @@ pub fn generate_explain_result(query: &CypherQuery, graph: &DirGraph) -> result:
                     .map_or(0, |v| v.len());
                 Value::Int64(n.min(1) as i64)
             }
+            // One row out, exactly like every other single-count fusion. The
+            // sibling above reports 0 for an empty type; an alternation is
+            // minted only over branch labels the pass accepted, so the row
+            // count does not depend on which of them happen to be populated.
+            Clause::FusedCountLabelUnion { .. } => Value::Int64(1),
             Clause::FusedCountByType { .. } => Value::Int64(graph.type_indices.len() as i64),
             Clause::FusedVectorScoreTopK { limit, .. }
             | Clause::FusedTextBm25TopK { limit, .. }

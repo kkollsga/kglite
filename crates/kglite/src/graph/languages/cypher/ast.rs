@@ -207,6 +207,21 @@ pub enum Clause {
         node_type: String,
         alias: String,
     },
+    /// Optimizer-generated: `MATCH (n:A|B|C) RETURN count(n)` → the sum of
+    /// each branch's `label_cardinality`, in O(branches).
+    ///
+    /// Minted only when the branches are pairwise disjoint, which the pass
+    /// establishes by proving no branch label has secondary carriers: a node
+    /// then reaches a branch only through its single primary type, so no node
+    /// is in two branches and the sum counts each exactly once. The matcher's
+    /// own path unions the branch buckets and `sort`/`dedup`s them precisely
+    /// because that guarantee does not hold in general.
+    FusedCountLabelUnion {
+        /// Branch labels, deduplicated (a `(n:$a|$b)` whose parameters bind to
+        /// the same name would otherwise be summed twice).
+        labels: Vec<String>,
+        alias: String,
+    },
     /// Optimizer-generated: MATCH ()-[r:Type]->() RETURN count(*) → single-pass edge scan.
     FusedCountTypedEdge {
         edge_type: String,

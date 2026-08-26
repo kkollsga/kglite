@@ -2496,6 +2496,63 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (n:Person|Company {name: 'Acme'}) RETURN n.id AS id",
         None,
     ),
+    # ── label alternation: count fusion + per-branch index probes (0.16.13) ──
+    # Branch-disjointness decides the count fusion; index coverage decides the
+    # probe. Both regimes of both are here, on fixtures built for them.
+    (
+        "alt_count_two_branches",
+        "alternation_graph",
+        "MATCH (n:Student|Teacher) RETURN count(n) AS c",
+        None,
+    ),
+    (
+        "alt_count_three_branches",
+        "alternation_graph",
+        "MATCH (n:Student|Teacher|Staff) RETURN count(n) AS c",
+        None,
+    ),
+    (
+        "alt_count_foreign_secondary_label",
+        "alternation_foreign_label_graph",
+        "MATCH (n:Student|Teacher) RETURN count(n) AS c",
+        None,
+    ),
+    # Overlapping branches: the fusion must bail, so this pins the count the
+    # matcher's union-and-dedup path produces.
+    (
+        "alt_count_overlapping_branches",
+        "alternation_overlap_graph",
+        "MATCH (n:Student|Teacher) RETURN count(n) AS c",
+        None,
+    ),
+    (
+        "alt_equality_probe_all_branches_indexed",
+        "alternation_graph",
+        "MATCH (n:Student|Teacher {email: 'tea@x'}) RETURN n.id AS id",
+        None,
+    ),
+    (
+        "alt_equality_probe_param",
+        "alternation_graph",
+        "MATCH (n:Student|Teacher|Staff {email: $e}) RETURN n.id AS id",
+        {"e": "sam@x"},
+    ),
+    # `dept` is indexed on :Student only — the all-or-nothing coverage rule
+    # declines rather than dropping :Teacher's rows.
+    (
+        "alt_equality_partial_index_declines",
+        "alternation_graph",
+        "MATCH (n:Student|Teacher {dept: 'Sci'}) RETURN n.id AS id ORDER BY id",
+        None,
+    ),
+    # The soundness case: node 1 is primary :Student and secondary :Teacher, so
+    # the probe reaches it through both branches and must emit it once.
+    (
+        "alt_equality_probe_overlapping_branches",
+        "alternation_overlap_graph",
+        "MATCH (n:Student|Teacher {email: 'ann@x'}) RETURN n.id AS id",
+        None,
+    ),
     (
         "ml_alt_edge_endpoint",
         "multi_label_graph",
@@ -4434,6 +4491,131 @@ def test_ontology_fixture_really_probes_and_declines() -> None:
         100
     ]
     assert opened.cypher("MATCH (p:Person) RETURN count(p) AS c").to_list() == [{"c": 6}]
+
+
+def build_alternation_graph(*, overlap: bool = False, foreign_label: bool = False) -> kglite.KnowledgeGraph:
+    """Three indexed sibling labels, for the label-alternation fast paths.
+
+    `email` is indexed on every one of :Student/:Teacher/:Staff, so
+    `(n:A|B {email: …})` is fully covered and probes per branch; `dept` is
+    indexed on :Student only, so `(n:A|B {dept: …})` is the partial-coverage
+    decline in the same fixture.
+
+    `overlap=True` gives node 1 a *secondary* :Teacher on top of its primary
+    :Student — legal sibling overlap. It is the reason the branch-sum count
+    fusion must bail (5 distinct nodes, branch sum 6) and the reason the probe
+    path must dedup (branch :Student's index hit and branch :Teacher's carrier
+    scan both name node 1).
+
+    `foreign_label=True` puts a secondary label on a *different* label, so the
+    graph has secondary labels but neither alternation branch does — the case
+    the per-label disjointness proof must still fuse.
+    """
+    import pandas as pd
+
+    g = kglite.KnowledgeGraph()
+    g.add_nodes(
+        pd.DataFrame(
+            {
+                "id": [1, 2, 3],
+                "title": ["Ann", "Bob", "Cy"],
+                "email": ["ann@x", "bob@x", "cy@x"],
+                "dept": ["Sci", "Sci", "Hum"],
+            }
+        ),
+        "Student",
+        "id",
+        node_title_field="title",
+    )
+    g.add_nodes(
+        pd.DataFrame({"id": [10, 11], "title": ["Tea", "Tom"], "email": ["tea@x", "tom@x"], "dept": ["Sci", "Hum"]}),
+        "Teacher",
+        "id",
+        node_title_field="title",
+    )
+    g.add_nodes(
+        pd.DataFrame({"id": [20, 21], "title": ["Sam", "Sue"], "email": ["sam@x", "sue@x"], "dept": ["Ops", "Ops"]}),
+        "Staff",
+        "id",
+        node_title_field="title",
+    )
+    for label in ("Student", "Teacher", "Staff"):
+        g.create_index(label, "email")
+    g.create_index("Student", "dept")
+    if overlap:
+        g.cypher("MATCH (s:Student {id: 1}) SET s:Teacher")
+    if foreign_label:
+        g.cypher("MATCH (s:Staff {id: 20}) SET s:OnCall")
+    return g
+
+
+def test_alternation_fixture_fuses_and_probes() -> None:
+    """Non-vacuity + absolute goldens for the alternation corpus entries.
+
+    Two things the differential runs cannot see for themselves. The count
+    fusion IS an optimizer pass, so the corpus compares it against the
+    unoptimized path — but nothing there proves the pass *fired*, which the
+    EXPLAIN operation name does. The per-branch index probe is a matcher
+    decision, not a pass, so `disable_optimizer=True` takes the identical
+    route and both halves would agree on a wrong answer; these are its
+    expected values.
+    """
+    clean = build_alternation_graph()
+    overlap = build_alternation_graph(overlap=True)
+    foreign = build_alternation_graph(foreign_label=True)
+
+    def ops(g: kglite.KnowledgeGraph, query: str) -> list[str]:
+        return [str(row["operation"]) for row in g.cypher(f"EXPLAIN {query}").to_list()]
+
+    two = "MATCH (n:Student|Teacher) RETURN count(n) AS c"
+    three = "MATCH (n:Student|Teacher|Staff) RETURN count(n) AS c"
+
+    assert "FusedCountLabelUnion :Student|Teacher" in ops(clean, two)
+    assert "FusedCountLabelUnion :Student|Teacher|Staff" in ops(clean, three)
+    assert clean.cypher(two).to_list() == [{"c": 5}]
+    assert clean.cypher(three).to_list() == [{"c": 7}]
+
+    # A secondary label on an unrelated label leaves the branches disjoint.
+    assert "FusedCountLabelUnion :Student|Teacher" in ops(foreign, two)
+    assert foreign.cypher(two).to_list() == [{"c": 5}]
+
+    # Overlapping branches: no fusion, and node 1 is counted once, not twice.
+    assert not any(op.startswith("FusedCountLabelUnion") for op in ops(overlap, two))
+    assert overlap.cypher(two).to_list() == [{"c": 5}]
+
+    def ids(g: kglite.KnowledgeGraph, query: str) -> list:
+        return [row["id"] for row in g.cypher(query).to_list()]
+
+    # Fully covered equality → per-branch probe; each branch's own value found.
+    assert ids(clean, "MATCH (n:Student|Teacher {email: 'tea@x'}) RETURN n.id AS id") == [10]
+    assert ids(clean, "MATCH (n:Student|Teacher {email: 'ann@x'}) RETURN n.id AS id") == [1]
+    assert ids(clean, "MATCH (n:Student|Teacher {email: 'sam@x'}) RETURN n.id AS id") == []
+    assert ids(clean, "MATCH (n:Student|Teacher {email: 'nobody@x'}) RETURN n.id AS id") == []
+    # Partial coverage (`dept` is indexed on :Student only) → decline, and the
+    # uncovered branch's rows survive.
+    assert sorted(ids(clean, "MATCH (n:Student|Teacher {dept: 'Sci'}) RETURN n.id AS id")) == [1, 2, 10]
+
+    # The dedup case: node 1 is reachable through both branches at once.
+    assert ids(overlap, "MATCH (n:Student|Teacher {email: 'ann@x'}) RETURN n.id AS id") == [1]
+    assert sorted(ids(overlap, "MATCH (n:Student|Teacher {dept: 'Sci'}) RETURN n.id AS id")) == [1, 2, 10]
+
+
+@pytest.fixture
+def alternation_graph() -> kglite.KnowledgeGraph:
+    """See :func:`build_alternation_graph`."""
+    return build_alternation_graph()
+
+
+@pytest.fixture
+def alternation_overlap_graph() -> kglite.KnowledgeGraph:
+    """See :func:`build_alternation_graph` — the `overlap` variant."""
+    return build_alternation_graph(overlap=True)
+
+
+@pytest.fixture
+def alternation_foreign_label_graph() -> kglite.KnowledgeGraph:
+    """See :func:`build_alternation_graph` — the `foreign_label` variant."""
+    return build_alternation_graph(foreign_label=True)
 
 
 @pytest.fixture

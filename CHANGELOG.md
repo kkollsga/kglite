@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Label alternation stops being the slowest spelling of its own question.**
+  `MATCH (n:A|B|C) RETURN count(n)` now fuses to a per-branch cardinality sum
+  wherever the branches provably cannot overlap (no branch label carries a
+  *secondary* label, so a node reaches at most one branch through its single
+  primary type) — visible as `FusedCountLabelUnion :A|B|C` in `EXPLAIN`. Where
+  they can overlap the count still unions and deduplicates the branch buckets,
+  because a node holding two of the labels must be counted once. And
+  `MATCH (n:A|B {p: v})` now probes each branch's index when *every* branch can
+  answer a point lookup of *every* equality predicate the pattern binds,
+  unioning each label's index-invisible secondary carriers into the result; one
+  branch without that coverage declines the whole probe rather than dropping its
+  rows. Previously both shapes concatenated, sorted and deduplicated every
+  branch's full carrier set before filtering. Measured on a 2×100 000 two-type
+  graph (debug profile, so treat the ratio rather than the absolute):
+  `count()` 32.2 ms → 0.007 ms, `{email:}` 26.2 ms → 0.014 ms, with the
+  single-label controls unmoved.
+
 - **`ontology_audit()` breaks down by violating source class, and gains a
   `domain_class` column.** `CALL ontology_audit({by: 'domain_class'})` fans
   each rule's scorecard row out into one row per primary node type its

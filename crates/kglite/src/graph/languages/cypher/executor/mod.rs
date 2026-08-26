@@ -770,6 +770,29 @@ impl<'a> CypherExecutor<'a> {
         Ok(single_count_result(alias, count))
     }
 
+    /// `Clause::FusedCountLabelUnion` — count `MATCH (n:A|B)` as the sum of
+    /// each branch's `label_cardinality`, one bucket-length read per branch.
+    ///
+    /// Correct only because the pass minted this clause after proving the
+    /// branches pairwise disjoint (no branch label has secondary carriers, so
+    /// a node reaches at most one branch, through its primary type) and after
+    /// deduplicating the branch list. Both obligations are the pass's — see
+    /// `fusion::count::disjoint_alternation_branches` — and the clause is
+    /// unreachable by any other route.
+    fn execute_fused_count_label_union(
+        &self,
+        labels: &[String],
+        alias: &str,
+    ) -> Result<ResultSet, String> {
+        let count: i64 = labels
+            .iter()
+            .map(|label| self.graph.label_cardinality(label) as i64)
+            .sum();
+        self.budget
+            .check_work(count as usize, "fused label-union count")?;
+        Ok(single_count_result(alias, count))
+    }
+
     /// `Clause::FusedCountTypedEdge` — use the cached edge-type count.
     /// Populated by the N-Triples builder and persisted in metadata; for
     /// in-memory graphs the first call walks edges once and caches. Either
@@ -858,6 +881,9 @@ impl<'a> CypherExecutor<'a> {
             } => self.execute_fused_count_edges_by_type(type_alias, count_alias),
             Clause::FusedCountTypedNode { node_type, alias } => {
                 self.execute_fused_count_typed_node(node_type, alias)
+            }
+            Clause::FusedCountLabelUnion { labels, alias } => {
+                self.execute_fused_count_label_union(labels, alias)
             }
             Clause::FusedCountTypedEdge { edge_type, alias } => {
                 self.execute_fused_count_typed_edge(edge_type, alias)
@@ -979,6 +1005,7 @@ impl<'a> CypherExecutor<'a> {
             | Clause::FusedCountByType { .. }
             | Clause::FusedCountEdgesByType { .. }
             | Clause::FusedCountTypedNode { .. }
+            | Clause::FusedCountLabelUnion { .. }
             | Clause::FusedCountTypedEdge { .. }
             | Clause::FusedCountAnchoredEdges { .. } => self.execute_fused_count_clause(clause),
             Clause::FusedNodeScanAggregate {

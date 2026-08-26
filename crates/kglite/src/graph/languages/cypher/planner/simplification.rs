@@ -1510,6 +1510,7 @@ fn collect_clause_variables(clause: &Clause, out: &mut HashSet<String>) {
         | Clause::FusedCountByType { .. }
         | Clause::FusedCountEdgesByType { .. }
         | Clause::FusedCountTypedNode { .. }
+        | Clause::FusedCountLabelUnion { .. }
         | Clause::FusedCountTypedEdge { .. }
         | Clause::FusedCountAnchoredEdges { .. }
         | Clause::FusedNodeScanAggregate { .. }

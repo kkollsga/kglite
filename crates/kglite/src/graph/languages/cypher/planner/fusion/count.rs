@@ -219,87 +219,16 @@ pub(crate) fn fuse_count_short_circuits(
     }
     let pat = &match_clause.patterns[0];
 
-    // ---- Pattern A: MATCH (n) RETURN count(n) / count(*) ----
-    //   Also handles: MATCH (n:Type) RETURN count(n)  → FusedCountTypedNode
+    // ---- Pattern A: a lone node — every `count`-shaped RETURN over it ----
     if pat.elements.len() == 1 {
-        let node = match &pat.elements[0] {
-            PatternElement::Node(np) => np,
-            _ => return,
+        let PatternElement::Node(node) = &pat.elements[0] else {
+            return;
         };
-        // Cannot short-circuit with property filters
-        if node.properties.is_some() {
-            return;
-        }
-
-        // Multi-label patterns (`MATCH (n:A:B) RETURN count(n)`) require an
-        // intersection across the labels, which the O(1) type-bucket count
-        // can't express. Bail to the full matcher, which AND-intersects via
-        // `node_labels`. (Single-label secondary counts ARE handled — the
-        // FusedCountTypedNode executor unions the primary + secondary
-        // buckets for `node_type`.)
-        if node.multi_label_constrained() {
-            return;
-        }
-
-        let node_var = node.variable.as_deref();
-
-        // Typed node count: MATCH (n:Type) RETURN count(n)
-        if let Some(ref node_type) = node.node_type {
-            if return_clause.items.len() == 1
-                && is_count_of_var_or_star(&return_clause.items[0].expression, node_var)
-            {
-                let alias = return_item_column_name(&return_clause.items[0]);
-                let nt = node_type.clone();
-                query.clauses.drain(0..2);
-                query.clauses.insert(
-                    0,
-                    Clause::FusedCountTypedNode {
-                        node_type: nt,
-                        alias,
-                    },
-                );
-            }
-            return;
-        }
-
-        if return_clause.items.len() == 1 {
-            // Single item: must be count(var) or count(*)
-            let item = &return_clause.items[0];
-            if !is_count_of_var_or_star(&item.expression, node_var) {
-                return;
-            }
-            let alias = return_item_column_name(item);
-            // Replace Match + Return with FusedCountAll; keep trailing clauses
+        if let Some(fused) =
+            fuse_single_node_count(node, return_clause, has_secondary_labels, graph)
+        {
             query.clauses.drain(0..2);
-            query.clauses.insert(0, Clause::FusedCountAll { alias });
-            return;
-        }
-
-        if return_clause.items.len() == 2 {
-            // Two items: one must be n.type / labels(n), the other count(var) / count(*)
-            let (type_idx, count_idx) = identify_type_count_pair(
-                &return_clause.items,
-                node_var,
-                has_secondary_labels,
-                graph.has_type_shadowing_property(),
-            );
-            if let Some((ti, ci)) = type_idx.zip(count_idx) {
-                let type_alias = return_item_column_name(&return_clause.items[ti]);
-                let count_alias = return_item_column_name(&return_clause.items[ci]);
-                // `labels(n)` projects a list; `n.type`/`n.node_type`/`n.label`
-                // project a scalar. Preserve each accessor's natural shape.
-                let type_as_list = is_labels_call(&return_clause.items[ti].expression, node_var);
-                query.clauses.drain(0..2);
-                query.clauses.insert(
-                    0,
-                    Clause::FusedCountByType {
-                        type_alias,
-                        count_alias,
-                        type_as_list,
-                    },
-                );
-                return;
-            }
+            query.clauses.insert(0, fused);
         }
         return;
     }
@@ -436,6 +365,124 @@ pub(crate) fn is_count_of_var_or_star(expr: &Expression, node_var: Option<&str>)
         }
     }
     false
+}
+
+/// Pattern A of [`fuse_count_short_circuits`]: `MATCH (n…) RETURN <count>`
+/// over a single-element pattern → the clause it fuses to, or `None` to leave
+/// the query for the matcher. Split out so the caller stays a dispatcher over
+/// pattern shapes and each shape's own guards live in one place.
+///
+/// Returning the clause rather than rewriting in place is what lets the whole
+/// decision run off `&`-borrows of the very clauses the caller then drains.
+fn fuse_single_node_count(
+    node: &crate::graph::core::pattern_matching::NodePattern,
+    return_clause: &ReturnClause,
+    has_secondary_labels: bool,
+    graph: &DirGraph,
+) -> Option<Clause> {
+    // Property filters need the matcher; no bucket length can express them.
+    if node.properties.is_some() {
+        return None;
+    }
+    // `MATCH (n:A:B) RETURN count(n)` requires an intersection across the
+    // labels, which the O(1) type-bucket count can't express. Bail to the full
+    // matcher, which AND-intersects via `node_labels`. (Single-label secondary
+    // counts ARE handled — the FusedCountTypedNode executor unions the primary
+    // + secondary buckets for `node_type`.)
+    if !node.extra_labels.is_empty() {
+        return None;
+    }
+
+    let node_var = node.variable.as_deref();
+
+    // A label constraint, alternation or not, decides between the two typed
+    // counts and admits no other RETURN shape.
+    if let Some(node_type) = node.node_type.as_ref() {
+        let item = return_clause.items.first()?;
+        if return_clause.items.len() != 1 || !is_count_of_var_or_star(&item.expression, node_var) {
+            return None;
+        }
+        let alias = return_item_column_name(item);
+        return match node.alt_labels.as_ref() {
+            // `MATCH (n:A|B) RETURN count(n)`: a per-branch cardinality sum,
+            // but only where the branches provably cannot overlap.
+            Some(alts) => disjoint_alternation_branches(graph, alts)
+                .map(|labels| Clause::FusedCountLabelUnion { labels, alias }),
+            None => Some(Clause::FusedCountTypedNode {
+                node_type: node_type.clone(),
+                alias,
+            }),
+        };
+    }
+
+    // Untyped: `RETURN count(n)` is the whole graph; `RETURN n.type, count(n)`
+    // is the per-type histogram.
+    if return_clause.items.len() == 1 {
+        let item = &return_clause.items[0];
+        return is_count_of_var_or_star(&item.expression, node_var).then(|| {
+            Clause::FusedCountAll {
+                alias: return_item_column_name(item),
+            }
+        });
+    }
+    if return_clause.items.len() != 2 {
+        return None;
+    }
+    let (type_idx, count_idx) = identify_type_count_pair(
+        &return_clause.items,
+        node_var,
+        has_secondary_labels,
+        graph.has_type_shadowing_property(),
+    );
+    let (ti, ci) = type_idx.zip(count_idx)?;
+    Some(Clause::FusedCountByType {
+        type_alias: return_item_column_name(&return_clause.items[ti]),
+        count_alias: return_item_column_name(&return_clause.items[ci]),
+        // `labels(n)` projects a list; `n.type`/`n.node_type`/`n.label`
+        // project a scalar. Preserve each accessor's natural shape.
+        type_as_list: is_labels_call(&return_clause.items[ti].expression, node_var),
+    })
+}
+
+/// The branch labels of `(n:A|B|C)`, deduplicated, when a per-branch
+/// cardinality sum counts every node exactly once — `None` when it could not,
+/// which leaves the count to the matcher's union-and-dedup path.
+///
+/// **The disjointness proof is per-label, not global.** A node reaches a
+/// branch either as its primary type — of which it has exactly one — or as a
+/// secondary label. So two branches can share a node only if at least one of
+/// *them* has secondary carriers; `has_secondary_labels` being true somewhere
+/// else in the graph is irrelevant, and bailing on it would refuse the fusion
+/// for every alternation the moment one unrelated label gained a carrier (the
+/// 71×/33× mistake `multi_label_fuse_unsafe` was written to undo).
+/// `secondary_label_index` is consulted by key presence rather than bucket
+/// contents, so an emptied bucket keeps the answer conservative.
+///
+/// Dedup is not cosmetic: `MATCH (n:$a|$b)` whose parameters bind to the same
+/// name arrives here as two identical branches (`dynamic_labels::resolve_pattern`
+/// substitutes in place and cannot dedup — the slot indices are what the
+/// markers address), and summing them would double the count.
+///
+/// Reading the graph at plan time is sound because the plan cache is keyed on
+/// `(graph_id, version, …)` and every mutation bumps `version`, so a cached
+/// plan is only ever replayed against the exact state that minted it.
+fn disjoint_alternation_branches(graph: &DirGraph, alts: &[String]) -> Option<Vec<String>> {
+    use crate::graph::schema::InternedKey;
+
+    let mut labels: Vec<String> = Vec::with_capacity(alts.len());
+    for label in alts {
+        if graph.has_secondary_labels
+            && graph
+                .secondary_label_index
+                .contains_key(&InternedKey::from_str(label))
+        {
+            return None;
+        }
+        if !labels.contains(label) {
+            labels.push(label.clone());
+        }
+    }
+    (!labels.is_empty()).then_some(labels)
 }
 
 /// For `RETURN n.type, count(n)` — identify which item is the type accessor and which is the count.

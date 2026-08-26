@@ -614,28 +614,16 @@ impl<'a> PatternExecutor<'a> {
             return Ok(Vec::new());
         }
 
-        // `:A|B|C` alternation: the candidate set is the union of every
-        // branch's primary + secondary carriers. A node can sit in two
-        // branches at once (primary :A, secondary :B), so dedup is
-        // mandatory; sorted output keeps house determinism.
+        // `:A|B|C` alternation. Index-served first where every branch can
+        // answer the pattern's equality predicates; otherwise the union of
+        // every branch's carriers, scanned.
         if let Some(alts) = &pattern.alt_labels {
-            let mut candidates: Vec<NodeIndex> = Vec::new();
-            for label in alts {
-                candidates.extend(self.graph.nodes_with_label(label));
+            if let Some(props) = pattern.properties.as_ref() {
+                if let Some(hit) = self.try_alternation_probe(alts, props, &extra_keys) {
+                    return hit;
+                }
             }
-            candidates.sort_unstable();
-            candidates.dedup();
-            if candidates.is_empty() {
-                return Ok(Vec::new());
-            }
-            if pattern.properties.is_none() && extra_keys.is_empty() {
-                return Ok(candidates);
-            }
-            return self.filter_node_candidates(
-                &candidates,
-                pattern.properties.as_ref(),
-                &extra_keys,
-            );
+            return self.scan_label_union(alts, pattern.properties.as_ref(), &extra_keys);
         }
 
         if let Some(ref node_type) = pattern.node_type {
@@ -1051,6 +1039,133 @@ impl<'a> PatternExecutor<'a> {
     ///
     /// `None` = no global index covered any pushable predicate in `props`; the
     /// caller falls through to the type-scan path.
+    /// Every branch's carriers, unioned and property-filtered — the
+    /// alternation path that is always correct and never indexed.
+    ///
+    /// A node can sit in two branches at once (primary `:A`, secondary `:B`),
+    /// so the dedup is mandatory; sorting also keeps the candidate order
+    /// stable across runs.
+    fn scan_label_union(
+        &self,
+        alts: &[String],
+        props: Option<&HashMap<String, PropertyMatcher>>,
+        extra_keys: &[InternedKey],
+    ) -> Result<Vec<NodeIndex>, String> {
+        let mut candidates: Vec<NodeIndex> = Vec::new();
+        for label in alts {
+            candidates.extend(self.graph.nodes_with_label(label));
+        }
+        candidates.sort_unstable();
+        candidates.dedup();
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+        if props.is_none() && extra_keys.is_empty() {
+            return Ok(candidates);
+        }
+        self.filter_node_candidates(&candidates, props, extra_keys)
+    }
+
+    /// Per-branch index probes for `MATCH (n:A|B {p: v})` — the alternation
+    /// mirror of the single-label indexed path in `find_matching_nodes`.
+    ///
+    /// **Precondition, all-or-nothing:** every branch label must answer a
+    /// point lookup of every *bound* equality property, from an index or from
+    /// being that label's id field
+    /// ([`closure_probe::type_covers_property`], the same rule the closure
+    /// probe applies to its members). One uncovered branch declines the whole
+    /// probe: a partial union would drop that branch's rows silently, and a
+    /// scan is only ever allowed to be traded for a *complete* answer.
+    ///
+    /// **Rewrite:** per branch, the index answer over its primary bucket plus
+    /// a filtered scan of that label's secondary carriers. Carriers hold the
+    /// label without being of that primary type, so no per-type index sees
+    /// them and they must still be walked. `try_index_lookup`'s unified miss
+    /// contract is what makes the union possible at all — a covered
+    /// value-miss contributes nothing instead of declining the probe.
+    ///
+    /// **The dedup is soundness, not tidiness.** Sibling label overlap is
+    /// legal (primary `:A` + secondary `:B`), so branch A's index hit and
+    /// branch B's carrier scan can name the same node, and a `MATCH` binds
+    /// each node once.
+    ///
+    /// **Why-bail:** `None` — caller keeps the scan — when the pattern binds
+    /// no equality predicate (nothing to probe with) or coverage is partial.
+    fn try_alternation_probe(
+        &self,
+        alts: &[String],
+        props: &HashMap<String, PropertyMatcher>,
+        extra_keys: &[InternedKey],
+    ) -> Option<Result<Vec<NodeIndex>, String>> {
+        let equality_props = self.bound_equality_prop_names(props);
+        if equality_props.is_empty() {
+            return None;
+        }
+        let covered = alts.iter().all(|branch| {
+            equality_props
+                .iter()
+                .all(|prop| closure_probe::type_covers_property(self.graph, branch, prop))
+        });
+        covered.then(|| self.alternation_probe_candidates(alts, props, extra_keys))
+    }
+
+    /// The probe body for [`Self::try_alternation_probe`]; see its doc for the
+    /// precondition every branch has already satisfied.
+    fn alternation_probe_candidates(
+        &self,
+        alts: &[String],
+        props: &HashMap<String, PropertyMatcher>,
+        extra_keys: &[InternedKey],
+    ) -> Result<Vec<NodeIndex>, String> {
+        let mut out: Vec<NodeIndex> = Vec::new();
+        for branch in alts {
+            let Some(hits) = self.try_index_lookup(branch, props) else {
+                // Unreachable for a covered branch. Kept as the fallback that
+                // makes a coverage miscount slow rather than wrong.
+                return self.scan_label_union(alts, Some(props), extra_keys);
+            };
+            out.extend(hits);
+            if self.graph.has_secondary_labels {
+                if let Some(carriers) = self
+                    .graph
+                    .secondary_label_index
+                    .get(&InternedKey::from_str(branch))
+                {
+                    out.extend(self.filter_node_candidates(
+                        carriers.as_slice(),
+                        Some(props),
+                        &[],
+                    )?);
+                }
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        if extra_keys.is_empty() {
+            return Ok(out);
+        }
+        self.filter_node_candidates(&out, None, extra_keys)
+    }
+
+    /// The pattern's equality-predicate property names whose value is known
+    /// here: a literal, or a parameter this execution actually bound. Shared
+    /// by the two index probes so they agree on what "the pattern probes
+    /// with" means — and so neither treats an unbound `$p` as probeable.
+    fn bound_equality_prop_names<'p>(
+        &self,
+        props: &'p HashMap<String, PropertyMatcher>,
+    ) -> Vec<&'p str> {
+        props
+            .iter()
+            .filter(|(_, matcher)| match matcher {
+                PropertyMatcher::Equals(_) => true,
+                PropertyMatcher::EqualsParam(name) => self.params.contains_key(name.as_str()),
+                _ => false,
+            })
+            .map(|(name, _)| name.as_str())
+            .collect()
+    }
+
     /// The closure-aware probe: for `MATCH (n:Ancestor {p: v})` where
     /// `Ancestor` is a **Closed** managed label, run the property-index
     /// lookup per declared member type, union, and finish with the
@@ -1090,15 +1205,7 @@ impl<'a> PatternExecutor<'a> {
         node_type: &str,
         props: &HashMap<String, PropertyMatcher>,
     ) -> Option<Vec<NodeIndex>> {
-        let equality_props: Vec<&str> = props
-            .iter()
-            .filter(|(_, matcher)| match matcher {
-                PropertyMatcher::Equals(_) => true,
-                PropertyMatcher::EqualsParam(name) => self.params.contains_key(name.as_str()),
-                _ => false,
-            })
-            .map(|(name, _)| name.as_str())
-            .collect();
+        let equality_props = self.bound_equality_prop_names(props);
         let members = closure_probe::closure_probe_members(self.graph, node_type, &equality_props)?;
         let mut out = Vec::new();
         for member in members {

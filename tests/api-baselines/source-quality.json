@@ -108,8 +108,8 @@
     {
       "path": "crates/kglite/src/graph/core/pattern_matching/matcher.rs",
       "qualified_name": "crate::PatternExecutor<'a>::find_matching_nodes",
-      "lines": 231,
-      "branches": 47,
+      "lines": 219,
+      "branches": 46,
       "nesting": 7
     },
     {
@@ -181,13 +181,6 @@
       "lines": 222,
       "branches": 37,
       "nesting": 6
-    },
-    {
-      "path": "crates/kglite/src/graph/languages/cypher/executor/execution_support.rs",
-      "qualified_name": "crate::clause_display_name",
-      "lines": 104,
-      "branches": 51,
-      "nesting": 2
     },
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/match_clause/fused_match.rs",
@@ -293,13 +286,6 @@
       "lines": 243,
       "branches": 44,
       "nesting": 10
-    },
-    {
-      "path": "crates/kglite/src/graph/languages/cypher/planner/fusion/count.rs",
-      "qualified_name": "crate::fuse_count_short_circuits",
-      "lines": 241,
-      "branches": 33,
-      "nesting": 3
     },
     {
       "path": "crates/kglite/src/graph/languages/cypher/planner/rel_predicate_pushdown.rs",
