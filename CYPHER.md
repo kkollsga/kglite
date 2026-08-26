@@ -2500,6 +2500,19 @@ After the physical plan rows, `EXPLAIN` appends an `OptimizerPass <name>` row
 for every optimizer pass that changed the plan. These rows make it possible to
 verify a particular rewrite directly; disabling that pass removes its tag.
 
+A `ClosureProbe :Person (Student, Teacher)` row follows the `Match` row of any
+node pattern whose ontology closure the matcher can answer from the member
+types' indexes instead of a scan — a materialized supertype label in the
+`closed` state, where every live descendant carries an index answering the
+pattern's equality properties, and the row names those members. No row means
+no probe: the label is `open`, a member is unindexed, or nothing is
+materialized, and the match falls back to a (still correct) scan. A label
+written in `WHERE` position rather than in the pattern is an ordinary
+post-candidate predicate and never probes. The row's `estimated_rows` is
+`Null` — the probe returns the *value's* row count, which no static model
+knows — and a value supplied as a parameter (`{p: $v}`) leaves the row off
+because the plan renders before the parameter binds.
+
 ## PROFILE
 
 Prefix any Cypher query with `PROFILE` to execute AND collect per-clause statistics.
@@ -3268,6 +3281,19 @@ cannot declare. Semantics are annotations, not axioms: the ontology never
 changes what a `MATCH` returns, `cardinality`/`required` describe *outgoing*
 edges of the domain type, and the layer is deliberately distinct from
 `set_parent_type` (presentation ownership for `describe()` tiering).
+
+`transitive: true` and `ancestry: true` are mutually exclusive annotations of
+the same hierarchy shape and mean different things. `transitive` enrolls
+`transitivity_violation`, which audits a **stored** closure — every `a→b→c`
+needs a stored `a→c` edge — so a taxonomy holding only parent pointers
+reports 100% violations. `ancestry` enrolls no check: it records that the
+chain is meaningful and is walked with `*1..`, which is what a parent-pointer
+taxonomy (`STRAT_PARENT`, `wdt:P279`) is.
+
+`materialize_ontology()` (Python) stamps each declared ancestor as a real
+secondary label, after which `MATCH (p:Person)` matches every descendant with
+ordinary label semantics. On such a label `EXPLAIN` marks the per-member index
+probe with a [`ClosureProbe` row](#explain).
 
 ## Timeseries Functions
 
