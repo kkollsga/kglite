@@ -2888,6 +2888,7 @@ pub fn kglite::api::DirGraph::version(&self) -> u64
 impl kglite::api::DirGraph
 pub fn kglite::api::DirGraph::add_node_label(&mut self, idx: petgraph::graph_impl::NodeIndex, label: kglite::api::InternedKey) -> bool
 pub fn kglite::api::DirGraph::add_node_labels_bulk(&mut self, indices: &[petgraph::graph_impl::NodeIndex], label: kglite::api::InternedKey) -> (usize, usize)
+pub fn kglite::api::DirGraph::label_cardinality(&self, label: &str) -> usize
 pub fn kglite::api::DirGraph::node_has_label(&self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey) -> bool
 pub fn kglite::api::DirGraph::node_labels(&self, idx: petgraph::graph_impl::NodeIndex) -> alloc::vec::Vec<kglite::api::InternedKey>
 pub fn kglite::api::DirGraph::nodes_with_label(&self, label: &str) -> alloc::vec::Vec<petgraph::graph_impl::NodeIndex>

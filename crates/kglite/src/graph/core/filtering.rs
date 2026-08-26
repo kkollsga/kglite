@@ -495,6 +495,49 @@ fn parse_date_string(s: &str) -> Option<chrono::NaiveDate> {
         .ok()
 }
 
+/// The nodes of `nodes` that hold `property == target_value`, taken from the
+/// per-type equality indexes, or `None` when no index can answer for the
+/// input and the caller must keep looking.
+///
+/// **Every** type present must be index-answerable before the indexes replace
+/// the scan. The input is an arbitrary node set, not one type's members, and
+/// taking the first indexed type's hits alone dropped every matching node of
+/// the others — now visibly, since a covered value-miss is an empty answer
+/// rather than a fall-through to the next type.
+///
+/// `input_is_one_full_type` says the input is exactly one node type's full
+/// membership, in which case the index result is already a subset of it and
+/// the O(N) membership intersection is skipped.
+fn indexed_equality_candidates(
+    graph: &DirGraph,
+    nodes: &[NodeIndex],
+    node_types: &HashSet<&str>,
+    input_is_one_full_type: bool,
+    property: &str,
+    target_value: &Value,
+) -> Option<Vec<NodeIndex>> {
+    if !node_types
+        .iter()
+        .all(|node_type| graph.index_answers_point_lookup(node_type, property))
+    {
+        return None;
+    }
+    let mut matching_nodes: Vec<NodeIndex> = Vec::new();
+    for node_type in node_types {
+        matching_nodes.extend(
+            graph
+                .lookup_by_index(node_type, property, target_value)
+                .unwrap_or_default(),
+        );
+    }
+    if input_is_one_full_type {
+        return Some(matching_nodes);
+    }
+    let indexed_set: HashSet<_> = matching_nodes.iter().copied().collect();
+    let original_set: HashSet<_> = nodes.iter().copied().collect();
+    Some(indexed_set.intersection(&original_set).copied().collect())
+}
+
 fn filter_nodes_by_conditions(
     graph: &DirGraph,
     nodes: Vec<NodeIndex>,
@@ -612,34 +655,15 @@ fn filter_nodes_by_conditions(
 
     for (property, condition) in conditions {
         if let FilterCondition::Equals(target_value) = condition {
-            // **Every** type present must be index-answerable before the
-            // index replaces the scan. The input is an arbitrary node set,
-            // not one type's members, and taking the first indexed type's
-            // hits alone dropped every matching node of the others — now
-            // visibly, since a covered value-miss is an empty answer rather
-            // than a fall-through to the next type.
-            if !node_types
-                .iter()
-                .all(|node_type| graph.index_answers_point_lookup(node_type, property))
-            {
+            let Some(candidates) = indexed_equality_candidates(
+                graph,
+                &nodes,
+                &node_types,
+                full_single_type.is_some(),
+                property,
+                target_value,
+            ) else {
                 continue;
-            }
-            let mut matching_nodes: Vec<NodeIndex> = Vec::new();
-            for node_type in &node_types {
-                matching_nodes.extend(
-                    graph
-                        .lookup_by_index(node_type, property, target_value)
-                        .unwrap_or_default(),
-                );
-            }
-            let candidates: Vec<_> = if full_single_type.is_some() {
-                // Input is the full type set → index result is a subset
-                // already; skip the O(N) membership intersection.
-                matching_nodes
-            } else {
-                let indexed_set: HashSet<_> = matching_nodes.iter().copied().collect();
-                let original_set: HashSet<_> = nodes.iter().copied().collect();
-                indexed_set.intersection(&original_set).copied().collect()
             };
 
             let remaining_conditions: HashMap<_, _> = conditions
