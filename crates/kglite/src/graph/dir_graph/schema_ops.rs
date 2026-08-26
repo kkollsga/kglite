@@ -263,12 +263,19 @@ impl DirGraph {
             }
         }
         self.ontology = std::sync::Arc::new(store);
+        self.rebuild_ontology_closures();
         Ok(warnings)
     }
 
-    /// Remove the declared semantic layer entirely.
+    /// Remove the declared semantic layer entirely. Materialized labels (if
+    /// any) are withdrawn first — a store-less graph must not carry managed
+    /// buckets nothing can explain.
     pub fn clear_ontology(&mut self) {
+        if !self.managed_labels.is_empty() {
+            self.dematerialize_ontology();
+        }
         self.ontology = std::sync::Arc::default();
+        self.rebuild_ontology_closures();
     }
 
     /// The declared ownership layer (`"managed"`/`"runtime"`) for `node_type`,

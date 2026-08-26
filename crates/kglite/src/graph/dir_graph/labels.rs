@@ -151,6 +151,7 @@ impl DirGraph {
         bucket.insert(insert_at, idx);
         debug_assert_bucket_sorted(bucket);
         self.has_secondary_labels = true;
+        self.note_manual_add_on_managed(idx, label);
         // Statement-rollback capture: the label index lives above storage, so
         // the backend's `GraphWrite` seam cannot see this edit.
         if let Some(journal) = self.graph.undo_journal_mut() {
@@ -249,6 +250,9 @@ impl DirGraph {
         *bucket = merged;
         debug_assert_bucket_sorted(bucket);
         self.has_secondary_labels = true;
+        for &idx in &fresh {
+            self.note_manual_add_on_managed(idx, label);
+        }
         if let Some(journal) = self.graph.undo_journal_mut() {
             for (i, &idx) in fresh.iter().enumerate() {
                 // Only the entry that actually created the bucket carries
@@ -267,6 +271,42 @@ impl DirGraph {
         (fresh.len(), skipped)
     }
 
+    /// Downgrade a managed label to Open when an add lands on a node the
+    /// declared closure does not explain — the writer half of the
+    /// Closed/Open invariant (`ontology_apply.rs`): a manual `SET n:Managed`
+    /// stays legal and correct, but closure-reliant optimizations must stop
+    /// trusting the bucket. Closure-explained adds (the materializer, the
+    /// write-path maintenance) leave the state alone.
+    fn note_manual_add_on_managed(&mut self, idx: NodeIndex, label: InternedKey) {
+        if self.managed_labels.is_empty() {
+            return;
+        }
+        let Some(name) = self.interner.try_resolve(label) else {
+            return;
+        };
+        if !self.managed_labels.contains_key(name) {
+            return;
+        }
+        use crate::graph::storage::GraphRead;
+        let in_closure = GraphRead::node_type_of(&self.graph, idx)
+            .is_some_and(|t| self.ontology_ancestors_of(t).contains(&label));
+        if !in_closure {
+            let name = name.to_string();
+            self.open_managed_label(&name);
+        }
+    }
+
+    /// [`remove_node_label`](Self::remove_node_label) minus the managed-
+    /// label refusal — for the engine's own exits (dematerialize, WAL
+    /// replay reconciliation), which must remove labels the user may not.
+    pub(crate) fn remove_node_label_unchecked(
+        &mut self,
+        idx: NodeIndex,
+        label: InternedKey,
+    ) -> bool {
+        self.remove_node_label_inner(idx, label).unwrap_or(false)
+    }
+
     /// Remove a secondary label from a node. Choke-point API for label
     /// mutations.
     ///
@@ -274,6 +314,25 @@ impl DirGraph {
     /// the label, `Err(...)` if `label` is the primary type (the primary
     /// type is immutable; recreate or migrate the node to change it).
     pub fn remove_node_label(
+        &mut self,
+        idx: NodeIndex,
+        label: InternedKey,
+    ) -> Result<bool, String> {
+        // Managed labels refuse a user REMOVE: it would make the bucket
+        // under-complete, which no Open/Closed state can make safe. The
+        // engine's own exits use `remove_node_label_unchecked`.
+        if let Some(name) = self.interner.try_resolve(label) {
+            if self.managed_labels.contains_key(name) {
+                let name = name.to_string();
+                return Err(format!(
+                    "label '{name}' is managed by the materialized ontology; REMOVE would                      desynchronize it from the declarations. Use dematerialize_ontology()                      to withdraw materialized labels."
+                ));
+            }
+        }
+        self.remove_node_label_inner(idx, label)
+    }
+
+    fn remove_node_label_inner(
         &mut self,
         idx: NodeIndex,
         label: InternedKey,

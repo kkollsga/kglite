@@ -153,6 +153,27 @@ pub struct CardinalityDecl {
     pub max: Option<u64>,
 }
 
+/// State of one materialized (managed) label — see
+/// `dir_graph/ontology_apply.rs` for the invariant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ManagedLabelState {
+    /// The engine is the bucket's only writer; it holds exactly the closure.
+    Closed,
+    /// Something outside the closure touched the bucket (manual SET, adopt,
+    /// extend union). Correct, but closure-reliant optimizations stay off.
+    Open,
+}
+
+impl ManagedLabelState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ManagedLabelState::Closed => "closed",
+            ManagedLabelState::Open => "open",
+        }
+    }
+}
+
 /// `skip_serializing_if` helper for the `Arc<OntologyStore>` field on
 /// `DirGraph` (serde hands the function `&Arc<_>`, which method syntax
 /// won't coerce in the derive).

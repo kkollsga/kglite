@@ -63,6 +63,7 @@ pub(crate) mod indexes;
 mod labels;
 pub mod node_remap;
 mod node_write;
+mod ontology_apply;
 pub mod range_index_layer;
 pub(crate) mod rel_constraints;
 pub(crate) mod rollback;
@@ -304,6 +305,15 @@ pub struct DirGraph {
         skip_serializing_if = "crate::graph::ontology::arc_store_is_empty"
     )]
     pub ontology: Arc<crate::graph::ontology::OntologyStore>,
+    /// Materialized-label bookkeeping (`ontology_apply.rs`): label →
+    /// Closed/Open. Persisted via `FileMetadata` beside the store.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub managed_labels:
+        std::collections::BTreeMap<String, crate::graph::ontology::ManagedLabelState>,
+    /// Derived per-type ancestor cache (`ontology_apply.rs`); rebuilt from
+    /// the store on define/clear/load, never persisted.
+    #[serde(skip)]
+    pub(crate) ontology_closures: HashMap<InternedKey, Vec<InternedKey>>,
     /// Free-text instructions/briefing rendered verbatim at the top of
     /// `describe()` so an agent opening the graph cold sees how to use it.
     /// Keyed by channel; the empty string `""` is the default channel (the
@@ -809,6 +819,8 @@ impl DirGraph {
             title_field_aliases: Arc::default(),
             parent_types: Arc::new(HashMap::new()),
             ontology: Arc::default(),
+            managed_labels: std::collections::BTreeMap::new(),
+            ontology_closures: HashMap::new(),
             graph_instructions: HashMap::new(),
             user_schema_version: 0,
             checkpoint_lsn: 0,
@@ -876,6 +888,8 @@ impl DirGraph {
             title_field_aliases: Arc::default(),
             parent_types: Arc::new(HashMap::new()),
             ontology: Arc::default(),
+            managed_labels: std::collections::BTreeMap::new(),
+            ontology_closures: HashMap::new(),
             graph_instructions: HashMap::new(),
             user_schema_version: 0,
             checkpoint_lsn: 0,

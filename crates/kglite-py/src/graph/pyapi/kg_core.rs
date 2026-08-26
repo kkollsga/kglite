@@ -1252,8 +1252,48 @@ impl KnowledgeGraph {
     }
 
     /// Remove the declared semantic layer entirely.
-    fn clear_ontology(&mut self) {
+    fn clear_ontology(&mut self) -> PyResult<()> {
         get_graph_mut(&mut self.inner).clear_ontology();
+        self.commit_wal()
+    }
+
+    /// Materialize declared supertypes as real secondary labels.
+    #[pyo3(signature = (adopt=false))]
+    fn materialize_ontology(&mut self, py: Python<'_>, adopt: bool) -> PyResult<Py<PyAny>> {
+        let report = get_graph_mut(&mut self.inner)
+            .materialize_ontology(adopt)
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        self.commit_wal()?;
+        let out = pyo3::types::PyList::empty(py);
+        for entry in report {
+            let d = PyDict::new(py);
+            d.set_item("label", entry.label)?;
+            d.set_item("stamped", entry.stamped)?;
+            d.set_item("state", entry.state.as_str())?;
+            out.append(d)?;
+        }
+        Ok(out.into())
+    }
+
+    /// Withdraw every materialized label; returns how many were removed.
+    fn dematerialize_ontology(&mut self) -> PyResult<usize> {
+        let removed = get_graph_mut(&mut self.inner).dematerialize_ontology();
+        self.commit_wal()?;
+        Ok(removed)
+    }
+
+    /// Drift report per managed label (extra/missing vs the declared closure).
+    fn ontology_diff(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let out = pyo3::types::PyList::empty(py);
+        for (label, state, extra, missing) in self.inner.ontology_label_diff() {
+            let d = PyDict::new(py);
+            d.set_item("label", label)?;
+            d.set_item("state", state.as_str())?;
+            d.set_item("extra", extra)?;
+            d.set_item("missing", missing)?;
+            out.append(d)?;
+        }
+        Ok(out.into())
     }
 
     /// Validate the graph against the defined schema

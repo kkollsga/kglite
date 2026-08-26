@@ -4402,7 +4402,62 @@ class KnowledgeGraph:
         ...
 
     def clear_ontology(self) -> None:
-        """Remove the declared semantic layer entirely."""
+        """Remove the declared semantic layer entirely.
+
+        Materialized labels (if any) are withdrawn first, so a store-less
+        graph never carries managed buckets nothing can explain.
+        """
+        ...
+
+    def materialize_ontology(self, adopt: bool = False) -> list[dict[str, Any]]:
+        """Materialize declared supertypes as real secondary labels.
+
+        ``Student is_a Person`` stamps the actual secondary label
+        ``:Person`` onto every ``Student`` node (through the bulk label
+        path, so WAL/CDC/rollback all see it) — ``MATCH (p:Person)`` then
+        matches with today's query semantics and today's indexes; no new
+        syntax, and ``labels(n)`` agrees with what queries see. Write paths
+        maintain the closure from then on.
+
+        Each materialized label is *managed*, in one of two states:
+        ``closed`` (the engine is its only writer; the bucket holds exactly
+        the declared closure) or ``open`` (a manual ``SET``, an adoption, or
+        an extend-graph union touched it — still correct, but closure-reliant
+        optimizations stay off for it). Manual ``REMOVE`` of a managed label
+        is refused; ``dematerialize_ontology()`` is the exit.
+
+        Args:
+            adopt: Manage a label whose bucket already has members outside
+                the declared closure (it becomes ``open``). Without it such
+                a collision is refused and nothing is stamped.
+
+        Returns:
+            One dict per managed label: ``label``, ``stamped`` (nodes that
+            gained it in this call), ``state``.
+
+        Raises:
+            ValueError: No ontology declared, or a collision without
+                ``adopt``.
+        """
+        ...
+
+    def dematerialize_ontology(self) -> int:
+        """Withdraw every materialized label (the managed set empties).
+
+        The declaration store itself stays — this exits materialization,
+        not the ontology. Returns the number of label removals performed.
+        """
+        ...
+
+    def ontology_diff(self) -> list[dict[str, Any]]:
+        """Drift report per managed label.
+
+        Returns:
+            One dict per managed label: ``label``, ``state``
+            (``closed``/``open``), ``extra`` (members the declared closure
+            does not explain), ``missing`` (closure members the bucket
+            lacks).
+        """
         ...
 
     def define_schema(self, schema_dict: dict[str, Any], *, replace: bool = False) -> KnowledgeGraph:

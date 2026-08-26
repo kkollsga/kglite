@@ -207,3 +207,71 @@ def test_describe_topic_ontology(g):
     text = g.describe(cypher=["ontology"])
     assert "ontology_audit" in text
     assert "never changes what a query matches" in text
+
+
+# ─── materialization (mode D) ──────────────────────────────────────────────
+
+
+@pytest.fixture
+def mat(school) -> KnowledgeGraph:
+    report = school.materialize_ontology()
+    assert {(r["label"], r["state"]) for r in report} == {("Person", "closed")}
+    return school
+
+
+def test_materialize_makes_supertype_matchable(mat):
+    rows = mat.cypher("MATCH (p:Person) RETURN p.name AS n ORDER BY n").to_list()
+    assert [r["n"] for r in rows] == ["Ann", "Bo", "Tea"]
+    assert mat.cypher("MATCH (n:Student {id: 1}) RETURN labels(n) AS l").scalar() == [
+        "Student",
+        "Person",
+    ]
+    # Idempotent re-apply stamps nothing new.
+    again = mat.materialize_ontology()
+    assert all(r["stamped"] == 0 for r in again)
+
+
+def test_materialized_labels_persist(mat, tmp_path):
+    path = tmp_path / "mat.kgl"
+    mat.save(str(path))
+    loaded = kglite.load(str(path))
+    assert loaded.cypher("MATCH (p:Person) RETURN count(p) AS c").scalar() == 3
+    assert loaded.ontology_diff() == [{"label": "Person", "state": "closed", "extra": 0, "missing": 0}]
+
+
+def test_remove_managed_label_refused(mat):
+    with pytest.raises(Exception, match="managed by the materialized ontology"):
+        mat.cypher("MATCH (n:Student {id: 1}) REMOVE n:Person")
+    # The exit works and empties the managed set.
+    removed = mat.dematerialize_ontology()
+    assert removed == 3
+    assert mat.cypher("MATCH (p:Person) RETURN count(p) AS c").scalar() == 0
+    assert mat.ontology_diff() == []
+    # Declarations survive the exit.
+    assert mat.ontology() is not None
+
+
+def test_adopt_collision_policy(school):
+    # A manual :Person on a Class node predates materialization.
+    school.cypher("MATCH (c:Class) SET c:Person")
+    with pytest.raises(ValueError, match="adopt"):
+        school.materialize_ontology()
+    report = school.materialize_ontology(adopt=True)
+    assert report == [{"label": "Person", "stamped": 3, "state": "open"}]
+    diff = school.ontology_diff()
+    assert diff == [{"label": "Person", "state": "open", "extra": 1, "missing": 0}]
+
+
+def test_manual_set_downgrades_to_open(mat):
+    # SET of a managed label on a node outside the closure: allowed, but the
+    # label opens (correctness preserved, optimizations off).
+    mat.cypher("MATCH (c:Class) SET c:Person")
+    diff = mat.ontology_diff()
+    assert diff[0]["state"] == "open"
+    assert diff[0]["extra"] == 1
+
+
+def test_clear_ontology_dematerializes_first(mat):
+    mat.clear_ontology()
+    assert mat.cypher("MATCH (p:Person) RETURN count(p) AS c").scalar() == 0
+    assert mat.ontology() is None

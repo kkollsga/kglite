@@ -380,9 +380,12 @@ fn apply_label_sets(graph: &mut DirGraph, labels: &LabelNet, removed_nodes: &Has
         for stale in graph.secondary_label_names(idx) {
             if !target.contains(&stale) {
                 let key = graph.interner.get_or_intern(&stale);
-                // Only errors when `stale` is the primary type, which
-                // `secondary_label_names` never yields.
-                let _ = graph.remove_node_label(idx, key);
+                // Unchecked deliberately: the logged whole-set op is
+                // authoritative, so replay must be able to remove even a
+                // managed label (a logged dematerialize replays through
+                // here; the checked API's refusal would silently leave the
+                // graph over-labelled after recovery).
+                graph.remove_node_label_unchecked(idx, key);
             }
         }
         for label in target {
