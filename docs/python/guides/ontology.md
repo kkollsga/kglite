@@ -300,8 +300,8 @@ for row in g.cypher("""
 At the blueprint gate the exempted count is reported, never dropped: every
 summary line carries a `(+N exempted)` tail, and a rule declared `error`
 whose violations are *all* exempted is reported as a **warning** rather than
-passing silently. An exemption that quietly absorbed every flagged row would
-make a passing gate indistinguishable from a clean graph.
+passing silently. An exemption that quietly absorbed every flagged row
+would make a passing gate indistinguishable from a clean graph.
 
 ## Materialization (making supertypes matchable)
 
