@@ -737,3 +737,29 @@ def test_disk_vacuum_is_noop_and_keeps_labels(tmp_path):
     g.vacuum()
     rows = g.cypher("MATCH (n:VIP) RETURN n.id AS id").to_list()
     assert [r["id"] for r in rows] == [2]
+
+
+def test_extract_subgraph_preserves_secondary_labels(g):
+    # Pre-existing bug surfaced by the ontology program (2026-08-25):
+    # extract_subgraph copied no secondary labels — save_subset and the
+    # fluent extract silently dropped them.
+    g.cypher("CREATE (:P {id: 1, name: 'a'}), (:P {id: 2, name: 'b'}), (:Q {id: 3, name: 'c'})")
+    g.cypher("MATCH (n:P) WHERE n.id = 1 SET n:VIP")
+    g.cypher("MATCH (n:Q) SET n:VIP")
+    sub = g.select("P").to_subgraph()
+    rows = sub.cypher("MATCH (n:VIP) RETURN n.id AS id").to_list()
+    assert sorted(r["id"] for r in rows) == [1]
+    labels = sub.cypher("MATCH (n:P) WHERE n.id = 1 RETURN labels(n) AS l").scalar()
+    assert labels == ["P", "VIP"]
+    # Unselected Q's membership must not leak in as a dangling index.
+    assert sub.cypher("MATCH (n) RETURN count(n) AS c").scalar() == 2
+
+
+def test_save_subset_roundtrips_secondary_labels(g, tmp_path):
+    g.cypher("CREATE (:P {id: 1, name: 'a'}), (:P {id: 2, name: 'b'})")
+    g.cypher("MATCH (n:P) WHERE n.id = 1 SET n:VIP")
+    out = tmp_path / "subset.kgl"
+    g.select("P").save_subset(str(out))
+    loaded = kglite.load(str(out))
+    rows = loaded.cypher("MATCH (n:VIP) RETURN n.id AS id").to_list()
+    assert [r["id"] for r in rows] == [1]

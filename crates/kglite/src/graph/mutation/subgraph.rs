@@ -142,6 +142,31 @@ pub fn extract_subgraph(
         }
     }
 
+    // Carry secondary labels: buckets are keyed above the storage backend
+    // (labels.rs), so neither the node copy nor the store share moved them —
+    // pre-2026-08-26 this silently dropped every label from save_subset /
+    // extract_subgraph. Copied through index_map (never re-derived: a manual
+    // label must survive even where an ontology could not explain it), with
+    // the sorted-bucket invariant restored by construction since index_map
+    // values are assigned in ascending old-index iteration order per bucket
+    // — sorted per bucket only if the old bucket was sorted AND add_node
+    // assigned ascending, which holds; assert it anyway.
+    for (label, bucket) in &source.secondary_label_index {
+        let mut copied: Vec<NodeIndex> = bucket
+            .iter()
+            .filter_map(|old_idx| index_map.get(old_idx).copied())
+            .collect();
+        if copied.is_empty() {
+            continue;
+        }
+        copied.sort_unstable();
+        new_graph.secondary_label_index.insert(*label, copied);
+        new_graph.has_secondary_labels = true;
+    }
+    // The declared ontology travels with the copy (type-level metadata,
+    // like the schema install below).
+    new_graph.ontology = Arc::clone(&source.ontology);
+
     // Copy schema definition if present. The subgraph's nodes are a subset of a
     // graph that already satisfied these constraints, so installing them cannot
     // find a duplicate the source did not have — but surface the error rather
