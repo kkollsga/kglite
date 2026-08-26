@@ -173,3 +173,37 @@ def test_ontology_audit_scorecard(school):
 def test_ontology_audit_requires_ontology(g):
     with pytest.raises(Exception, match="define_ontology"):
         g.cypher("CALL ontology_audit() YIELD rule RETURN rule")
+
+
+# ─── SHOW ONTOLOGY + describe() integration ────────────────────────────────
+
+
+def test_show_ontology_rows(school):
+    rows = school.cypher("SHOW ONTOLOGY").to_list()
+    by = {(r["kind"], r["name"]): r for r in rows}
+    assert by[("class", "Person")]["abstract"] is True
+    assert by[("class", "Student")]["is_a"] == "Person"
+    rel = by[("relationship", "ENROLLED_IN")]
+    assert (rel["domain"], rel["range"], rel["enforcement"]) == ("Student", "Class", "warn")
+
+
+def test_show_ontology_empty_without_declarations(g):
+    assert g.cypher("SHOW ONTOLOGY").to_list() == []
+
+
+def test_describe_renders_ontology_section(school):
+    text = school.describe()
+    assert "<ontology " in text
+    assert 'name="Person" abstract="true"' in text
+    assert 'is_a="Person"' in text
+    assert "annotations, not axioms" in text
+
+
+def test_describe_without_ontology_unchanged(g):
+    assert "<ontology" not in g.describe()
+
+
+def test_describe_topic_ontology(g):
+    text = g.describe(cypher=["ontology"])
+    assert "ontology_audit" in text
+    assert "never changes what a query matches" in text

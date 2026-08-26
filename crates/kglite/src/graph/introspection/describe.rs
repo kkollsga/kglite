@@ -34,6 +34,96 @@ use super::{
 
 // ── Describe: shared XML writers ────────────────────────────────────────────
 
+/// The declared semantic layer, rendered when one exists. `focus` narrows
+/// to the classes touching the given types (the class itself, its
+/// ancestors/descendants, and relationships whose endpoints land in that
+/// set); `None` renders the whole store. Ontology-free graphs emit nothing
+/// — the section's absence IS the "no ontology" signal, so no mode or
+/// parameter changes for graphs that never declare one.
+fn write_ontology(xml: &mut String, graph: &DirGraph, focus: Option<&[String]>) {
+    let store = &graph.ontology;
+    if store.is_empty() {
+        return;
+    }
+    let in_focus = |name: &str| -> bool {
+        let Some(types) = focus else { return true };
+        types.iter().any(|t| {
+            t == name
+                || store.ancestors(t).iter().any(|a| a == name)
+                || store.ancestors(name).iter().any(|a| a == t)
+        })
+    };
+    xml.push_str(&format!(
+        "  <ontology classes=\"{}\" relationships=\"{}\" note=\"declared semantic layer          (annotations, not axioms — SKOS in spirit): no-arg rule procedures and CALL          ontology_audit() read these declarations; distinct from the parent_types          ownership tiering\">\n",
+        store.classes.len(),
+        store.relationships.len()
+    ));
+    for (name, decl) in &store.classes {
+        if !in_focus(name) {
+            continue;
+        }
+        let mut attrs = format!("name=\"{name}\"");
+        if decl.is_abstract {
+            attrs.push_str(" abstract=\"true\"");
+        }
+        if let Some(parent) = &decl.is_a {
+            attrs.push_str(&format!(" is_a=\"{parent}\""));
+        }
+        if let Some(nodes) = graph.type_indices.get(name) {
+            attrs.push_str(&format!(" count=\"{}\"", nodes.len()));
+        }
+        if let Some(by) = &decl.by {
+            attrs.push_str(&format!(" by=\"{by} (unenforced discriminator)\""));
+        }
+        if let Some(d) = &decl.description {
+            attrs.push_str(&format!(" desc=\"{d}\""));
+        }
+        xml.push_str(&format!("    <class {attrs}/>\n"));
+    }
+    for (name, decl) in &store.relationships {
+        let touches_focus = focus.is_none()
+            || [&decl.domain, &decl.range]
+                .into_iter()
+                .flatten()
+                .any(|endpoint| in_focus(endpoint));
+        if !touches_focus {
+            continue;
+        }
+        let mut attrs = format!("name=\"{name}\"");
+        if let Some(d) = &decl.domain {
+            attrs.push_str(&format!(" from=\"{d}\""));
+        }
+        if let Some(r) = &decl.range {
+            attrs.push_str(&format!(" to=\"{r}\""));
+        }
+        if let Some(inv) = &decl.inverse_name {
+            attrs.push_str(&format!(" inverse=\"{inv}\""));
+        }
+        if decl.required {
+            attrs.push_str(" required=\"true\"");
+        }
+        if let Some(card) = &decl.cardinality {
+            attrs.push_str(&format!(
+                " cardinality=\"{}..{}\"",
+                card.min.map_or(String::new(), |v| v.to_string()),
+                card.max.map_or(String::new(), |v| v.to_string())
+            ));
+        }
+        if decl.transitive {
+            attrs.push_str(" transitive=\"true\"");
+        }
+        if decl.symmetric {
+            attrs.push_str(" symmetric=\"true\"");
+        }
+        attrs.push_str(&format!(" enforcement=\"{}\"", decl.enforcement.as_str()));
+        if let Some(d) = &decl.description {
+            attrs.push_str(&format!(" desc=\"{d}\""));
+        }
+        xml.push_str(&format!("    <relationship {attrs}/>\n"));
+    }
+    xml.push_str("  </ontology>\n");
+}
+
 fn write_conventions(xml: &mut String, caps: &HashMap<String, TypeCapabilities>) {
     let mut specials: Vec<&str> = Vec::new();
     if caps.values().any(|c| c.has_location) {
@@ -1312,6 +1402,7 @@ fn build_inventory_capped(graph: &DirGraph, max_types: Option<usize>) -> String 
 
     write_graph_instructions(&mut xml, graph);
     write_conventions(&mut xml, &caps);
+    write_ontology(&mut xml, graph, None);
     write_read_only_notice(&mut xml, graph);
     write_user_schema_version(&mut xml, graph);
 
@@ -1415,6 +1506,7 @@ fn build_extreme_inventory(graph: &DirGraph) -> String {
 
     write_graph_instructions(&mut xml, graph);
     xml.push_str("  <conventions>All nodes have .id and .title</conventions>\n");
+    write_ontology(&mut xml, graph, None);
     write_read_only_notice(&mut xml, graph);
     write_user_schema_version(&mut xml, graph);
 
@@ -1542,6 +1634,7 @@ fn build_inventory_with_detail(graph: &DirGraph, truncate_at: Option<usize>) -> 
 
     write_graph_instructions(&mut xml, graph);
     write_conventions(&mut xml, &caps);
+    write_ontology(&mut xml, graph, None);
     write_read_only_notice(&mut xml, graph);
     write_user_schema_version(&mut xml, graph);
 
@@ -1633,6 +1726,7 @@ fn build_focused_detail(
         env!("CARGO_PKG_VERSION")
     ));
     write_graph_instructions(&mut xml, graph);
+    write_ontology(&mut xml, graph, Some(types));
     write_read_only_notice(&mut xml, graph);
     write_user_schema_version(&mut xml, graph);
 

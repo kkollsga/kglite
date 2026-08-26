@@ -11,7 +11,7 @@ const CYPHER_TOPIC_LIST: &str = "MATCH, WHERE, RETURN, WITH, HAVING, ORDER BY, U
     label_propagation, connected_components, k_core, clustering_coefficient, cluster, orphan_node, self_loop, \
     cycle_2step, missing_required_edge, missing_inbound_edge, duplicate_title, \
     duplicate_id, null_property, inverse_violation, transitivity_violation, cardinality_violation, \
-    type_domain_violation, type_range_violation, parallel_edges";
+    type_domain_violation, type_range_violation, parallel_edges, ontology";
 
 /// Tier 3: detailed Cypher docs for specific topics with params and examples.
 pub(super) fn write_cypher_topics(xml: &mut String, topics: &[String]) -> Result<(), String> {
@@ -69,6 +69,7 @@ pub(super) fn write_cypher_topics(xml: &mut String, topics: &[String]) -> Result
             "INVERSE_VIOLATION" => write_topic_inverse_violation(xml),
             "TRANSITIVITY_VIOLATION" => write_topic_transitivity_violation(xml),
             "CARDINALITY_VIOLATION" => write_topic_cardinality_violation(xml),
+            "ONTOLOGY" => write_topic_ontology(xml),
             "TYPE_DOMAIN_VIOLATION" => write_topic_type_domain_violation(xml),
             "TYPE_RANGE_VIOLATION" => write_topic_type_range_violation(xml),
             "PARALLEL_EDGES" => write_topic_parallel_edges(xml),
@@ -1389,6 +1390,7 @@ pub(super) fn write_cypher_overview(xml: &mut String) {
     xml.push_str("    <clause name=\"CREATE CONSTRAINT\">Schema DDL, a standalone statement, enforced on every write path. CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (n:Label) REQUIRE n.prop IS UNIQUE — or REQUIRE (n.a, n.b) IS UNIQUE for a composite tuple, IS NOT NULL for presence, IS NODE KEY for both at once (installed atomically), or IS :: TYPE (equivalently IS TYPED TYPE) to require a property type — BOOLEAN, STRING, INTEGER, FLOAT, DATE, LOCAL DATETIME, DURATION, POINT. A type constraint does not imply presence: null and absent both pass, so add IS NOT NULL when both are wanted. Matching is strict — an integer does not satisfy FLOAT. A relationship constraint is written FOR ()-[r:TYPE]-() REQUIRE r.prop IS NOT NULL (or IS :: TYPE); IS UNIQUE and IS RELATIONSHIP KEY are refused there. The optional NODE / RELATIONSHIP scope word before UNIQUE / KEY must agree with the FOR pattern. The Neo4j 4 ASSERT spelling works. Declaring a constraint the existing data already violates is rejected and changes nothing, so deduplicate or populate first. Constraint names ARE stored (unlike index names), so DROP CONSTRAINT by name works. Counters land in last_mutation_stats.constraints_added.</clause>\n");
     xml.push_str("    <clause name=\"DROP CONSTRAINT\">DROP CONSTRAINT &lt;name&gt; [IF EXISTS]. Accepts the name given to CREATE CONSTRAINT, or — for a constraint declared without one — its canonical descriptor (Label.property, Label.(a, b), or TYPE.property for a relationship constraint). Withdraws exactly what the declaration installed, so dropping a NODE KEY removes both its uniqueness and its presence half. A node type's declared primary key is listed as a NODE_KEY row but is owned by define_schema rather than by DDL, so DROP CONSTRAINT refuses it — IF EXISTS included, since it exists and is enforced; withdraw it by re-declaring the type without a key, or clear_schema().</clause>\n");
     xml.push_str("    <clause name=\"SHOW CONSTRAINTS\">List declared constraints as a read: columns name, type (UNIQUENESS|NODE_KEY|NODE_PROPERTY_EXISTENCE|NODE_PROPERTY_TYPE for nodes, RELATIONSHIP_PROPERTY_EXISTENCE|RELATIONSHIP_PROPERTY_TYPE for relationships), entityType (NODE or RELATIONSHIP), labelsOrTypes, properties, propertyType (the declared type on a *_PROPERTY_TYPE row, null otherwise). Same rows as CALL db.constraints(); use that form when you need YIELD or WHERE.</clause>\n");
+    xml.push_str("    <clause name=\"SHOW ONTOLOGY\">List the declared semantic layer as a read: one row per class (kind, name, is_a, abstract, description) and per relationship (kind, name, domain, range, enforcement, description). Zero rows when no ontology is declared. Declared with define_ontology(); audited with CALL ontology_audit().</clause>\n");
     xml.push_str("    <clause name=\"EXPLAIN\">Prefix to show query plan as ResultView [step, operation, estimated_rows] without executing.</clause>\n");
     xml.push_str("    <clause name=\"PROFILE\">Prefix to execute and collect per-clause stats. Result has .profile with [clause, rows_in, rows_out, elapsed_us].</clause>\n");
     xml.push_str("  </clauses>\n");
@@ -1443,4 +1445,12 @@ pub(super) fn write_cypher_overview(xml: &mut String) {
     xml.push_str("  </limitations>\n");
     xml.push_str("  <hint>Use graph_overview(cypher=['MATCH','cluster','spatial',...]) for detailed docs with examples.</hint>\n");
     xml.push_str("</cypher>\n");
+}
+
+pub(super) fn write_topic_ontology(xml: &mut String) {
+    xml.push_str("  <topic name=\"ontology\">\n");
+    xml.push_str("    <summary>The declared semantic layer: an is_a forest over type names plus relationship semantics (domain/range, inverse naming, cardinality, required, transitive/symmetric), persisted with the graph. Annotations, not axioms: it never changes what a query matches.</summary>\n");
+    xml.push_str("    <usage>Declare with define_ontology({classes: {...}, relationships: {...}}). Inspect with SHOW ONTOLOGY or describe(). Audit with CALL ontology_audit() YIELD rule, severity, violations, total, pct — one scorecard row per declared check. The six rule procedures (type_domain_violation, type_range_violation, missing_required_edge, cardinality_violation, inverse_violation, transitivity_violation) called with NO arguments check every declaration; a domain/range naming an abstract class widens to its declared descendants. enforcement (advisory|warn|error) is acted on by blueprint builds: warn lands in the build report, error fails the build.</usage>\n");
+    xml.push_str("    <caveat>domain/range checks compare primary node types (plus declared descendants); cardinality/required count OUTGOING edges of the domain type; the by field is an unenforced documentation-only discriminator. Distinct from set_parent_type (presentation ownership).</caveat>\n");
+    xml.push_str("  </topic>\n");
 }

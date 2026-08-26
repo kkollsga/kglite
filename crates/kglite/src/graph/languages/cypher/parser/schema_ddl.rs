@@ -288,10 +288,17 @@ impl CypherParser {
                      other modifiers are not supported"
                 ));
             }
-            return Ok(Clause::Schema(if noun == "PROCEDURES" {
-                SchemaCommand::ShowProcedures { yield_items }
-            } else {
-                SchemaCommand::ShowFunctions { yield_items }
+            return Ok(Clause::Schema(match noun {
+                "PROCEDURES" => SchemaCommand::ShowProcedures { yield_items },
+                "FUNCTIONS" => SchemaCommand::ShowFunctions { yield_items },
+                _ => {
+                    if !yield_items.is_empty() {
+                        return Err("SHOW ONTOLOGY does not support YIELD; project with RETURN \
+                             over CALL ontology_audit() instead"
+                            .to_string());
+                    }
+                    SchemaCommand::ShowOntology
+                }
             }));
         }
 
@@ -737,6 +744,10 @@ fn registry_noun_for_word(word: &str) -> Option<&'static str> {
         Some("PROCEDURES")
     } else if soft_word_eq(word, "FUNCTIONS") || soft_word_eq(word, "FUNCTION") {
         Some("FUNCTIONS")
+    } else if soft_word_eq(word, "ONTOLOGY") {
+        // SHOW-only via this registry path (never is_index_or_constraint_noun,
+        // which would make `DROP ONTOLOGY` parse).
+        Some("ONTOLOGY")
     } else {
         None
     }

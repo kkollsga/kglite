@@ -1110,6 +1110,7 @@ mod schema_procedures;
 mod set_row;
 pub mod shortest_path;
 pub(crate) mod show_indexes;
+mod show_ontology;
 pub mod spatial_join;
 pub mod stream;
 #[cfg(test)]

@@ -899,6 +899,8 @@ pub struct YieldItem {
 /// runs in `executor/mod.rs`. See `executor::write::clause_is_mutation`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SchemaCommand {
+    /// `SHOW ONTOLOGY` — the declared semantic layer as rows.
+    ShowOntology,
     CreateIndex(CreateIndex),
     /// `CREATE <TYPE> INDEX …` for an index type KGLite has no equivalent of
     /// (`TEXT`, `POINT`, `FULLTEXT`, `VECTOR`, `LOOKUP`). The remainder of the

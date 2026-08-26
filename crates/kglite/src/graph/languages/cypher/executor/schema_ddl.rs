@@ -86,6 +86,7 @@ pub(crate) fn is_schema_read(command: &SchemaCommand) -> bool {
         SchemaCommand::ShowIndexes
             | SchemaCommand::ShowProcedures { .. }
             | SchemaCommand::ShowFunctions { .. }
+            | SchemaCommand::ShowOntology
             | SchemaCommand::Constraint(ConstraintCommand::Show)
     )
 }
@@ -247,6 +248,7 @@ pub(crate) fn execute_schema_read(
         SchemaCommand::ShowIndexes => Ok(super::show_indexes::show_indexes_result_set(graph)),
         SchemaCommand::ShowProcedures { yield_items } => show_procedures_result_set(yield_items),
         SchemaCommand::ShowFunctions { yield_items } => show_functions_result_set(yield_items),
+        SchemaCommand::ShowOntology => Ok(super::show_ontology::show_ontology_result_set(graph)),
         SchemaCommand::Constraint(ConstraintCommand::Show) => {
             Ok(show_constraints_result_set(graph))
         }
@@ -298,6 +300,7 @@ fn dispatch_schema_mutation(
         SchemaCommand::ShowIndexes
         | SchemaCommand::ShowProcedures { .. }
         | SchemaCommand::ShowFunctions { .. }
+        | SchemaCommand::ShowOntology
         | SchemaCommand::Constraint(ConstraintCommand::Show) => Err(
             "internal: SHOW INDEXES / SHOW PROCEDURES / SHOW FUNCTIONS / SHOW CONSTRAINTS are reads \
              and must not reach the mutation engine"

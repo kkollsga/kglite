@@ -176,6 +176,13 @@
       "nesting": 6
     },
     {
+      "path": "crates/kglite/src/graph/languages/cypher/executor/execution_support.rs",
+      "qualified_name": "crate::clause_display_name",
+      "lines": 126,
+      "branches": 51,
+      "nesting": 2
+    },
+    {
       "path": "crates/kglite/src/graph/languages/cypher/executor/match_clause/fused_match.rs",
       "qualified_name": "crate::CypherExecutor<'a>::execute_fused_match_return_aggregate",
       "lines": 871,
