@@ -1307,6 +1307,8 @@ enum PropSetFlow {
 
 /// One `SET var.prop[...path...] = expr` against one result row — extracted
 /// from `execute_set`, which is at its complexity ceiling.
+// One row-loop arm extracted whole from execute_set (complexity ceiling);
+// the argument set IS that loop's working state.
 #[allow(clippy::too_many_arguments)]
 fn execute_property_set_item<'a>(
     graph: &mut DirGraph,

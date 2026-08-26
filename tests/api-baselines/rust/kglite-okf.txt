@@ -2507,6 +2507,44 @@ impl serde_core::ser::Serialize for kglite::api::ManagedLabelState
 pub fn kglite::api::ManagedLabelState::serialize<__S>(&self, __serializer: __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl<'de> serde_core::de::Deserialize<'de> for kglite::api::ManagedLabelState
 pub fn kglite::api::ManagedLabelState::deserialize<__D>(__deserializer: __D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+pub enum kglite::api::PropertyShape
+pub kglite::api::PropertyShape::List(alloc::boxed::Box<kglite::api::PropertyShape>)
+pub kglite::api::PropertyShape::Map(alloc::collections::btree::map::BTreeMap<alloc::string::String, (kglite::api::PropertyShape, bool)>)
+pub kglite::api::PropertyShape::Scalar(kglite::api::ScalarShape)
+impl kglite::api::PropertyShape
+pub fn kglite::api::PropertyShape::check(&self, property: &str, value: &kglite::datatypes::values::Value) -> core::result::Result<(), alloc::string::String>
+pub fn kglite::api::PropertyShape::render(&self) -> alloc::string::String
+impl core::clone::Clone for kglite::api::PropertyShape
+pub fn kglite::api::PropertyShape::clone(&self) -> kglite::api::PropertyShape
+impl core::cmp::Eq for kglite::api::PropertyShape
+impl core::cmp::PartialEq for kglite::api::PropertyShape
+pub fn kglite::api::PropertyShape::eq(&self, other: &kglite::api::PropertyShape) -> bool
+impl core::fmt::Debug for kglite::api::PropertyShape
+pub fn kglite::api::PropertyShape::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for kglite::api::PropertyShape
+impl serde_core::ser::Serialize for kglite::api::PropertyShape
+pub fn kglite::api::PropertyShape::serialize<__S>(&self, __serializer: __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for kglite::api::PropertyShape
+pub fn kglite::api::PropertyShape::deserialize<__D>(__deserializer: __D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+pub enum kglite::api::ScalarShape
+pub kglite::api::ScalarShape::Boolean
+pub kglite::api::ScalarShape::DateTime
+pub kglite::api::ScalarShape::Float
+pub kglite::api::ScalarShape::Integer
+pub kglite::api::ScalarShape::String
+impl core::clone::Clone for kglite::api::ScalarShape
+pub fn kglite::api::ScalarShape::clone(&self) -> kglite::api::ScalarShape
+impl core::cmp::Eq for kglite::api::ScalarShape
+impl core::cmp::PartialEq for kglite::api::ScalarShape
+pub fn kglite::api::ScalarShape::eq(&self, other: &kglite::api::ScalarShape) -> bool
+impl core::fmt::Debug for kglite::api::ScalarShape
+pub fn kglite::api::ScalarShape::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for kglite::api::ScalarShape
+impl core::marker::StructuralPartialEq for kglite::api::ScalarShape
+impl serde_core::ser::Serialize for kglite::api::ScalarShape
+pub fn kglite::api::ScalarShape::serialize<__S>(&self, __serializer: __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for kglite::api::ScalarShape
+pub fn kglite::api::ScalarShape::deserialize<__D>(__deserializer: __D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
 pub enum kglite::api::SchemaInstall
 pub kglite::api::SchemaInstall::Merge
 pub kglite::api::SchemaInstall::Replace
@@ -2750,6 +2788,7 @@ pub kglite::api::DirGraph::parent_types: alloc::sync::Arc<std::collections::hash
 pub kglite::api::DirGraph::property_index_keys: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub kglite::api::DirGraph::property_indices: std::collections::hash::map::HashMap<(alloc::string::String, alloc::string::String), kglite::graph::dir_graph::index_layer::LayeredIndex<kglite::datatypes::values::Value>>
 pub kglite::api::DirGraph::property_ndv_cache: alloc::sync::Arc<std::sync::poison::rwlock::RwLock<(u64, std::collections::hash::map::HashMap<(alloc::string::String, alloc::string::String), usize>)>>
+pub kglite::api::DirGraph::property_shapes: alloc::collections::btree::map::BTreeMap<alloc::string::String, kglite::api::PropertyShape>
 pub kglite::api::DirGraph::range_index_keys: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub kglite::api::DirGraph::range_indices: std::collections::hash::map::HashMap<(alloc::string::String, alloc::string::String), kglite::graph::dir_graph::range_index_layer::LayeredRangeIndex<kglite::datatypes::values::Value>>
 pub kglite::api::DirGraph::read_only: bool
@@ -2759,6 +2798,7 @@ pub kglite::api::DirGraph::schema_locked: bool
 pub kglite::api::DirGraph::secondary_label_index: std::collections::hash::map::HashMap<kglite::api::InternedKey, alloc::vec::Vec<petgraph::graph_impl::NodeIndex>>
 pub kglite::api::DirGraph::spatial_configs: std::collections::hash::map::HashMap<alloc::string::String, kglite::api::SpatialConfig>
 pub kglite::api::DirGraph::spill_dir: core::option::Option<std::path::PathBuf>
+pub kglite::api::DirGraph::table_property_meta: alloc::collections::btree::map::BTreeMap<alloc::string::String, kglite::api::TablePropertyMeta>
 pub kglite::api::DirGraph::temporal_edge_configs: std::collections::hash::map::HashMap<alloc::string::String, alloc::vec::Vec<kglite::api::TemporalConfig>>
 pub kglite::api::DirGraph::temporal_node_configs: std::collections::hash::map::HashMap<alloc::string::String, kglite::api::TemporalConfig>
 pub kglite::api::DirGraph::text_indexes: std::collections::hash::map::HashMap<(alloc::string::String, alloc::string::String), kglite::api::text_indexes::TextIndexStore>
@@ -2852,6 +2892,8 @@ pub fn kglite::api::DirGraph::layer_for(&self, node_type: &str) -> core::option:
 pub fn kglite::api::DirGraph::primary_key_for(&self, node_type: &str) -> core::option::Option<&str>
 pub fn kglite::api::DirGraph::set_instructions(&mut self, text: &str, channel: core::option::Option<&str>)
 pub fn kglite::api::DirGraph::set_schema(&mut self, schema: kglite::api::SchemaDefinition, mode: kglite::api::SchemaInstall) -> core::result::Result<(), kglite::error::KgError>
+pub fn kglite::api::DirGraph::shape_for(&self, node_type: &str, property: &str) -> core::option::Option<&kglite::api::PropertyShape>
+pub fn kglite::api::DirGraph::shapes_for_type(&self, node_type: &str) -> alloc::vec::Vec<(alloc::string::String, &kglite::api::PropertyShape)>
 pub fn kglite::api::DirGraph::with_write_provenance<R>(&mut self, git_sha: core::option::Option<&str>, modified_by: core::option::Option<&str>, write: impl core::ops::function::FnOnce(&mut Self) -> R) -> R
 impl kglite::api::DirGraph
 pub fn kglite::api::DirGraph::compact_disk(&mut self) -> core::result::Result<usize, alloc::string::String>
@@ -3338,6 +3380,24 @@ impl core::default::Default for kglite::api::StringInterner
 pub fn kglite::api::StringInterner::default() -> kglite::api::StringInterner
 impl core::fmt::Debug for kglite::api::StringInterner
 pub fn kglite::api::StringInterner::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct kglite::api::TablePropertyMeta
+pub kglite::api::TablePropertyMeta::columns: alloc::vec::Vec<alloc::string::String>
+pub kglite::api::TablePropertyMeta::dtypes: alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>
+pub kglite::api::TablePropertyMeta::nullable: alloc::vec::Vec<alloc::string::String>
+impl core::clone::Clone for kglite::api::TablePropertyMeta
+pub fn kglite::api::TablePropertyMeta::clone(&self) -> kglite::api::TablePropertyMeta
+impl core::cmp::Eq for kglite::api::TablePropertyMeta
+impl core::cmp::PartialEq for kglite::api::TablePropertyMeta
+pub fn kglite::api::TablePropertyMeta::eq(&self, other: &kglite::api::TablePropertyMeta) -> bool
+impl core::default::Default for kglite::api::TablePropertyMeta
+pub fn kglite::api::TablePropertyMeta::default() -> kglite::api::TablePropertyMeta
+impl core::fmt::Debug for kglite::api::TablePropertyMeta
+pub fn kglite::api::TablePropertyMeta::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for kglite::api::TablePropertyMeta
+impl serde_core::ser::Serialize for kglite::api::TablePropertyMeta
+pub fn kglite::api::TablePropertyMeta::serialize<__S>(&self, __serializer: __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for kglite::api::TablePropertyMeta
+pub fn kglite::api::TablePropertyMeta::deserialize<__D>(__deserializer: __D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
 pub struct kglite::api::TemporalConfig
 pub kglite::api::TemporalConfig::valid_from: alloc::string::String
 pub kglite::api::TemporalConfig::valid_to: alloc::string::String
@@ -3705,10 +3765,12 @@ pub fn kglite::api::is_canonical_node_column(key: &str) -> bool
 pub fn kglite::api::make_dir_graph_mut(arc: &mut alloc::sync::Arc<kglite::api::DirGraph>) -> &mut kglite::api::DirGraph
 pub fn kglite::api::ontology_from_json(json: &str) -> core::result::Result<kglite::api::OntologyStore, alloc::string::String>
 pub fn kglite::api::ontology_from_value(doc: &kglite::datatypes::values::Value) -> core::result::Result<kglite::api::OntologyStore, alloc::string::String>
+pub fn kglite::api::parse_property_shape(text: &str) -> core::option::Option<core::result::Result<kglite::api::PropertyShape, alloc::string::String>>
 pub fn kglite::api::parse_spatial_column_types_from_pairs(pairs: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>) -> core::result::Result<(core::option::Option<kglite::api::SpatialConfig>, alloc::vec::Vec<(alloc::string::String, alloc::string::String)>), alloc::string::String>
 pub fn kglite::api::parse_temporal_column_types_from_pairs(pairs: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>) -> core::result::Result<(core::option::Option<kglite::api::TemporalConfig>, alloc::vec::Vec<(alloc::string::String, alloc::string::String)>), alloc::string::String>
 pub fn kglite::api::schema_from_json(json: &str) -> core::result::Result<kglite::api::SchemaDefinition, kglite::api::SchemaParseError>
 pub fn kglite::api::schema_from_value(value: &kglite::datatypes::values::Value) -> core::result::Result<kglite::api::SchemaDefinition, kglite::api::SchemaParseError>
+pub fn kglite::api::table_meta_key(node_type: &str, property: &str) -> alloc::string::String
 pub mod kglite::datatypes
 pub mod kglite::datatypes::prop_map
 pub struct kglite::datatypes::prop_map::PropMap(_)

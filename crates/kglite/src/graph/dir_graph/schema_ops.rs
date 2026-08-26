@@ -119,6 +119,8 @@ impl DirGraph {
     /// structured-LOOKING value that does not parse fails the install (the
     /// `property_types`-as-rename lesson: a declaration the parser cannot
     /// place is never a harmless extra).
+    // Boxed like every other KgError-returning path clippy flags.
+    #[allow(clippy::result_large_err)] // matches set_schema's own Err size
     fn derive_property_shapes(&mut self) -> Result<(), KgError> {
         use crate::graph::tables::{parse_property_shape, table_meta_key};
         self.property_shapes.clear();

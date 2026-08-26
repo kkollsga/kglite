@@ -273,6 +273,10 @@
       "classification": "test"
     },
     {
+      "identity": "crates/kglite/src/graph/dir_graph/schema_ops.rs::fn:derive_property_shapes:fn derive_property_shapes(&mut self) -> Result<(), KgError>::clippy::result_large_err",
+      "classification": "api-shape"
+    },
+    {
       "identity": "crates/kglite/src/graph/dir_graph/schema_ops.rs::fn:set_schema:pub fn set_schema( &mut self, schema: SchemaDefinition, mode: SchemaInstall, ) -> Result<(), KgError>::clippy::result_large_err",
       "classification": "api-shape"
     },
@@ -350,6 +354,10 @@
     },
     {
       "identity": "crates/kglite/src/graph/languages/cypher/executor/write.rs::fn:execute_foreach:fn execute_foreach( graph: &mut DirGraph, variable: &str, list: &Expression, body: &[Clause], outer: &ResultSet, params: &HashMap<String, Value>, stats: &mut MutationStats, interrupt: &Interrupt, budget: &super::budget::ExecutionBudget, ) -> Result<(), String>::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/languages/cypher/executor/write.rs::fn:execute_property_set_item:fn execute_property_set_item<'a>( graph: &mut DirGraph, row: &ResultRow, (variable, property, path, expression): ( &'a String, &'a String, &'a [crate::graph::languages::cypher::ast::SetPathStep], &'a Expression, ), params: &HashMap<String, Value>, stats: &mut MutationStats, memos: &mut SetMemos<'a>,::clippy::too_many_arguments",
       "classification": "transitional"
     },
     {
