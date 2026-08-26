@@ -271,6 +271,68 @@ impl DirGraph {
         (fresh.len(), skipped)
     }
 
+    /// Strip one secondary label off every node that carries it, dropping
+    /// the whole bucket in a single map removal — the bulk companion to
+    /// [`remove_node_label`](Self::remove_node_label), and the mirror of
+    /// [`add_node_labels_bulk`](Self::add_node_labels_bulk).
+    ///
+    /// Same contract per member as the single-node path (CDC before-image
+    /// captured while the bucket is still live, one undo-journal entry and
+    /// one WAL `SetNodeLabels` capture per member), but the bucket itself is
+    /// vacated with one `HashMap::remove` instead of n positional removals:
+    /// members are visited in ascending order, so every `Vec::remove` vacates
+    /// position 0 and memmoves the whole tail — the loop-of-`remove_node_label`
+    /// shape was O(n²) and made `dematerialize_ontology` ~29 s on a
+    /// 1M-node graph.
+    ///
+    /// **Every member goes, including foreign ones.** On an `Open` managed
+    /// bucket some members are there because a user `SET` them, not because
+    /// the declared closure explains them (`ontology_apply.rs`). Dropping
+    /// the bucket wholesale removes those too — deliberately, and exactly as
+    /// the per-node loop over a snapshot of the bucket did: the exit
+    /// withdraws the *label*, not the engine's share of it.
+    ///
+    /// Returns the number of nodes that lost the label.
+    pub(crate) fn remove_label_bucket(&mut self, label: InternedKey) -> usize {
+        let Some(members) = self.secondary_label_index.get(&label) else {
+            return 0;
+        };
+        let members: Vec<NodeIndex> = members.clone();
+
+        // Before the edit, while `secondary_label_names` can still see the
+        // bucket: after the removal the old set no longer exists anywhere.
+        for &idx in &members {
+            self.capture_label_before_image(idx);
+        }
+        self.secondary_label_index.remove(&label);
+        // The single-node path only ever falsifies this flag (its removal can
+        // empty the index but never fill it); recomputing from the map is the
+        // same invariant stated directly.
+        self.has_secondary_labels = !self.secondary_label_index.is_empty();
+
+        if !members.is_empty() {
+            if let Some(journal) = self.graph.undo_journal_mut() {
+                // Position 0 for every member, which is what the per-node loop
+                // would have journalled: ascending members each sit at the
+                // front when their turn comes. Rollback replays in reverse and
+                // inserts at 0, rebuilding the ascending bucket exactly.
+                for &idx in &members {
+                    journal.note_bucket_removed(
+                        crate::graph::storage::undo::BucketId::SecondaryLabel(label),
+                        idx,
+                        0,
+                    );
+                }
+            }
+            // WAL capture — see `add_node_label`. One whole-set op per node,
+            // so replay reproduces the removal without re-deriving anything.
+            for &idx in &members {
+                self.graph.note_recorded_node_labels(idx);
+            }
+        }
+        members.len()
+    }
+
     /// Downgrade a managed label to Open when an add lands on a node the
     /// declared closure does not explain — the writer half of the
     /// Closed/Open invariant (`ontology_apply.rs`): a manual `SET n:Managed`
@@ -297,8 +359,10 @@ impl DirGraph {
     }
 
     /// [`remove_node_label`](Self::remove_node_label) minus the managed-
-    /// label refusal — for the engine's own exits (dematerialize, WAL
-    /// replay reconciliation), which must remove labels the user may not.
+    /// label refusal — for WAL replay reconciliation, which applies a logged
+    /// label set verbatim and so must remove labels the user may not. (The
+    /// materialization exit is the other such caller, but it withdraws whole
+    /// buckets through [`remove_label_bucket`](Self::remove_label_bucket).)
     pub(crate) fn remove_node_label_unchecked(
         &mut self,
         idx: NodeIndex,

@@ -1435,3 +1435,145 @@ mod capture_wrapped_backend_routing_tests {
         );
     }
 }
+
+/// The bulk label-bucket drop behind `dematerialize_ontology`.
+///
+/// The exit used to loop `remove_node_label_unchecked` over a snapshot of
+/// the bucket; `remove_label_bucket` vacates it in one move. These pin the
+/// behaviours that loop had and the flag it maintained, so the swap is
+/// observably equivalent where it matters.
+#[cfg(test)]
+mod dematerialize_bulk_tests {
+    use super::*;
+    use crate::graph::ontology::ontology_from_json;
+    use crate::graph::session::execute::{execute_mut, ExecuteOptions};
+
+    fn run(graph: &mut DirGraph, query: &str) {
+        let params = HashMap::new();
+        let opts = ExecuteOptions::eager(&params);
+        execute_mut(graph, query, &opts)
+            .unwrap_or_else(|e| panic!("setup query failed: {query}: {e}"));
+    }
+
+    /// Two Students, one Teacher, one Class; `:Person` materialized over the
+    /// declared closure (Students + Teacher), so the Class node is outside it.
+    fn school() -> DirGraph {
+        let mut graph = DirGraph::new();
+        run(
+            &mut graph,
+            "CREATE (:Student {id: 1, name: 'Ann'}), (:Student {id: 2, name: 'Bo'})",
+        );
+        run(&mut graph, "CREATE (:Teacher {id: 10, name: 'Tea'})");
+        run(&mut graph, "CREATE (:Class {id: 20, name: 'Math'})");
+        let store = ontology_from_json(
+            r#"{"classes": {"Person": {"abstract": true},
+                            "Student": {"is_a": "Person"},
+                            "Teacher": {"is_a": "Person"}}}"#,
+        )
+        .expect("ontology parses");
+        graph.define_ontology(store).expect("ontology installs");
+        graph
+            .materialize_ontology(false)
+            .expect("materialization succeeds");
+        assert!(
+            graph.managed_label_closed("Person"),
+            "precondition: :Person starts Closed"
+        );
+        graph
+    }
+
+    #[test]
+    fn dematerialize_takes_the_foreign_members_of_an_open_bucket() {
+        let mut graph = school();
+        // A user `SET` outside the closure: legal, and it opens the label.
+        run(&mut graph, "MATCH (c:Class) SET c:Person");
+        assert!(
+            !graph.managed_label_closed("Person"),
+            "the foreign SET must have downgraded the label to Open"
+        );
+        let class = graph.nodes_with_label("Class");
+        assert_eq!(class.len(), 1);
+        let person = graph.interner.get_or_intern("Person");
+        assert_eq!(
+            graph.secondary_label_index[&person].len(),
+            4,
+            "three closure members plus the foreign one"
+        );
+
+        // The exit withdraws the label, not the engine's share of it.
+        assert_eq!(graph.dematerialize_ontology(), 4);
+        assert!(
+            !graph.node_has_label(class[0], person),
+            "the foreign member must lose the label too"
+        );
+        assert!(
+            !graph.secondary_label_index.contains_key(&person),
+            "the bucket itself is gone, not merely emptied"
+        );
+        assert_eq!(
+            graph.nodes_with_label("Person"),
+            Vec::new(),
+            ":Person is not a primary type, so nothing may answer it"
+        );
+        assert!(graph.managed_labels.is_empty());
+        // Every node keeps its primary type and nothing else.
+        for label in ["Student", "Teacher", "Class"] {
+            for idx in graph.nodes_with_label(label) {
+                assert!(
+                    graph.secondary_label_names(idx).is_empty(),
+                    "{label} node kept a secondary label after dematerialize"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dematerialize_keeps_unrelated_buckets_and_recomputes_the_flag() {
+        let mut graph = school();
+        run(&mut graph, "MATCH (s:Student {id: 1}) SET s:Vip");
+        let vip = graph.interner.get_or_intern("Vip");
+
+        assert_eq!(graph.dematerialize_ontology(), 3);
+        assert!(
+            graph.has_secondary_labels,
+            "an unrelated secondary label survives, so the fast-path flag must stay on"
+        );
+        assert_eq!(graph.secondary_label_index[&vip].len(), 1);
+
+        // Withdrawing the last remaining bucket clears the flag.
+        assert_eq!(graph.remove_label_bucket(vip), 1);
+        assert!(graph.secondary_label_index.is_empty());
+        assert!(
+            !graph.has_secondary_labels,
+            "no buckets left, so the flag must be off"
+        );
+        assert_eq!(
+            graph.remove_label_bucket(vip),
+            0,
+            "idempotent on a gone bucket"
+        );
+    }
+
+    #[test]
+    fn bulk_bucket_drop_rolls_back_through_the_journal() {
+        use crate::graph::dir_graph::rollback::StatementCheckpoint;
+
+        let mut graph = school();
+        let person = graph.interner.get_or_intern("Person");
+        let before = graph.secondary_label_index[&person].clone();
+        assert_eq!(before.len(), 3);
+
+        // The direct API never arms the journal, so arm one explicitly: the
+        // primitive is general, and a future statement-scoped caller inherits
+        // exactly this replay.
+        let cp = StatementCheckpoint::open(&mut graph);
+        assert_eq!(graph.remove_label_bucket(person), 3);
+        assert!(!graph.secondary_label_index.contains_key(&person));
+        cp.rollback(&mut graph);
+        assert_eq!(
+            graph.secondary_label_index[&person], before,
+            "reverse replay must rebuild the bucket in its original order"
+        );
+        assert!(graph.has_secondary_labels);
+    }
+}

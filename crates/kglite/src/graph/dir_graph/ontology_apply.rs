@@ -219,26 +219,22 @@ impl DirGraph {
         Ok(report)
     }
 
-    /// Remove every managed label's bucket (through the per-node choke
-    /// points, so rollback/WAL/CDC all see it) and forget the managed set.
-    /// The declaration store itself stays — this is the materialization
-    /// exit, not `clear_ontology`.
+    /// Drop every managed label's bucket and forget the managed set. The
+    /// declaration store itself stays — this is the materialization exit,
+    /// not `clear_ontology`.
+    ///
+    /// One `remove_label_bucket` per label rather than a per-node loop: the
+    /// bulk primitive still emits the per-node hooks the observers need (CDC
+    /// before-image, undo-journal entry, one WAL `SetNodeLabels` per member),
+    /// it just vacates the bucket in a single move instead of n positional
+    /// removals. It also bypasses the managed-label REMOVE refusal, which is
+    /// deliberate: this IS the sanctioned exit. On an `Open` bucket the drop
+    /// takes foreign members with it — see the primitive's doc.
     pub fn dematerialize_ontology(&mut self) -> usize {
         let labels: Vec<String> = self.managed_labels.keys().cloned().collect();
         let mut removed_total = 0usize;
         for label in labels {
-            let key = InternedKey::from_str(&label);
-            let members: Vec<NodeIndex> = self
-                .secondary_label_index
-                .get(&key)
-                .cloned()
-                .unwrap_or_default();
-            for idx in members {
-                // Managed-refusal bypass is deliberate: this IS the exit.
-                if self.remove_node_label_unchecked(idx, key) {
-                    removed_total += 1;
-                }
-            }
+            removed_total += self.remove_label_bucket(InternedKey::from_str(&label));
         }
         self.managed_labels.clear();
         removed_total

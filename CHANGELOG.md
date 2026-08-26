@@ -19,6 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`dematerialize_ontology()` was quadratic in the number of labelled
+  nodes** (and `clear_ontology()` with it, since it withdraws materialized
+  labels first): the exit removed one member at a time from a sorted bucket,
+  and members are visited in ascending order, so every removal memmoved the
+  whole remaining tail. It now drops each managed label's bucket in a single
+  move — ~29 s on a 1M-node graph before, linear in the member count after,
+  with the per-node write-ahead-log records, change-data-capture
+  before-images and rollback entries all preserved.
 - **The ontology closure probe never engaged for property equality**: a
   `MATCH (p:Person {email: 'x'})` on a materialized `Closed` supertype scanned
   the whole label instead of probing each descendant's index, as the 0.16.11

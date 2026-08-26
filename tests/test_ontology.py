@@ -276,6 +276,35 @@ def test_manual_set_downgrades_to_open(mat):
     assert diff[0]["extra"] == 1
 
 
+def test_dematerialize_withdraws_the_labels_and_re_materialize_restores_them(mat):
+    # Standalone cover for the exit itself: `test_remove_managed_label_refused`
+    # reaches it only after asserting a refusal, and `clear_ontology` reaches it
+    # on the way to dropping the declarations.
+    assert mat.cypher("MATCH (p:Person) RETURN count(p) AS c").scalar() == 3
+
+    assert mat.dematerialize_ontology() == 3
+    assert mat.cypher("MATCH (p:Person) RETURN count(p) AS c").scalar() == 0
+    assert mat.cypher("MATCH (n:Student {id: 1}) RETURN labels(n) AS l").scalar() == ["Student"]
+    assert mat.ontology_diff() == []
+    # A second exit is a no-op, not a double count.
+    assert mat.dematerialize_ontology() == 0
+
+    # Declarations survive the exit, so the label can be rebuilt from them.
+    assert mat.materialize_ontology() == [{"label": "Person", "stamped": 3, "state": "closed"}]
+    assert mat.cypher("MATCH (p:Person) RETURN count(p) AS c").scalar() == 3
+
+
+def test_dematerialize_removes_foreign_members_of_an_open_label(mat):
+    # A user SET outside the closure opens the label; the exit withdraws the
+    # label wholesale, foreign members included.
+    mat.cypher("MATCH (c:Class) SET c:Person")
+    assert mat.ontology_diff()[0]["state"] == "open"
+
+    assert mat.dematerialize_ontology() == 4
+    assert mat.cypher("MATCH (p:Person) RETURN count(p) AS c").scalar() == 0
+    assert mat.cypher("MATCH (c:Class) RETURN labels(c) AS l").scalar() == ["Class"]
+
+
 def test_clear_ontology_dematerializes_first(mat):
     mat.clear_ontology()
     assert mat.cypher("MATCH (p:Person) RETURN count(p) AS c").scalar() == 0
