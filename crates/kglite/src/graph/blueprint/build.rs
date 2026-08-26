@@ -263,12 +263,11 @@ fn apply_ontology_gate(
     }
     if !errors.is_empty() {
         return Err(format!(
-            "ontology gate failed — {} contract(s) violated:
-  {}
-Fix the data (or lower              the declaration's enforcement) and rebuild; drill into each rule with the              matching CALL procedure (e.g. CALL type_domain_violation()).",
+            "ontology gate failed — {} contract(s) violated:\n  {}\nFix the data (or lower \
+             the declaration's enforcement) and rebuild; drill into each rule with the \
+             matching CALL procedure (e.g. CALL type_domain_violation()).",
             errors.len(),
-            errors.join("
-  ")
+            errors.join("\n  ")
         ));
     }
     Ok(())

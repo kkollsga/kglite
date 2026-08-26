@@ -325,7 +325,9 @@ impl DirGraph {
             if self.managed_labels.contains_key(name) {
                 let name = name.to_string();
                 return Err(format!(
-                    "label '{name}' is managed by the materialized ontology; REMOVE would                      desynchronize it from the declarations. Use dematerialize_ontology()                      to withdraw materialized labels."
+                    "label '{name}' is managed by the materialized ontology; REMOVE would \
+                     desynchronize it from the declarations. Use dematerialize_ontology() \
+                     to withdraw materialized labels."
                 ));
             }
         }

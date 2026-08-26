@@ -485,7 +485,8 @@ impl Parser {
         while let Some(Token::Colon) = self.peek() {
             if alt_labels.is_some() {
                 return Err(
-                    "Cannot mix label alternation '|' with a ':' label chain in one node                      pattern — write (n:A|B) or (n:A:B), or split the predicate into WHERE"
+                    "Cannot mix label alternation '|' with a ':' label chain in one node \
+                     pattern — write (n:A|B) or (n:A:B), or split the predicate into WHERE"
                         .to_string(),
                 );
             }

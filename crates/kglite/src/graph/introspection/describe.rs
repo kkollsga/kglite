@@ -54,7 +54,10 @@ fn write_ontology(xml: &mut String, graph: &DirGraph, focus: Option<&[String]>) 
         })
     };
     xml.push_str(&format!(
-        "  <ontology classes=\"{}\" relationships=\"{}\" note=\"declared semantic layer          (annotations, not axioms — SKOS in spirit): no-arg rule procedures and CALL          ontology_audit() read these declarations; distinct from the parent_types          ownership tiering\">\n",
+        "  <ontology classes=\"{}\" relationships=\"{}\" note=\"declared semantic layer \
+         (annotations, not axioms — SKOS in spirit): no-arg rule procedures and CALL \
+         ontology_audit() read these declarations; distinct from the parent_types \
+         ownership tiering\">\n",
         store.classes.len(),
         store.relationships.len()
     ));
@@ -115,7 +118,7 @@ fn write_ontology(xml: &mut String, graph: &DirGraph, focus: Option<&[String]>) 
         if decl.symmetric {
             attrs.push_str(" symmetric=\"true\"");
         }
-        attrs.push_str(&format!(" enforcement=\"{}\"", decl.enforcement.as_str()));
+        attrs.push_str(&format!(" enforcement=\"{}\"", decl.enforcement_summary()));
         if let Some(d) = &decl.description {
             attrs.push_str(&format!(" desc=\"{d}\""));
         }

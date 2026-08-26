@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`describe()` under-reported enforcement**: the ontology block printed the
+  base severity only, so a relationship whose per-check `enforcement` map
+  raised a check to `error` still read as `advisory`. Both reader surfaces
+  (`describe()` and `SHOW ONTOLOGY`) now render one summary,
+  `base; check=severity, …`.
+- **User-facing ontology and label messages no longer carry embedded
+  whitespace runs**: the blueprint ontology-gate failure, the `describe()`
+  ontology note, the managed-label `REMOVE` refusal, the
+  abstract-shadows-live-type error, the concrete-class-without-nodes warning,
+  and the label-alternation parse error each showed runs of spaces
+  mid-sentence.
+
 ## [0.16.12] - 2026-08-26
 
 ### Fixed

@@ -289,12 +289,15 @@ impl DirGraph {
                     .is_some_and(|schema| schema.node_schemas.contains_key(name));
             if decl.is_abstract && is_primary {
                 return Err(format!(
-                    "ontology class '{name}' is declared abstract, but '{name}' is a live                      node type — a class name and a node type share one namespace, and an                      abstract class may not shadow a concrete type"
+                    "ontology class '{name}' is declared abstract, but '{name}' is a live \
+                     node type — a class name and a node type share one namespace, and an \
+                     abstract class may not shadow a concrete type"
                 ));
             }
             if !decl.is_abstract && !is_primary {
                 warnings.push(format!(
-                    "ontology class '{name}' is concrete but no node type of that name                      exists (declare it abstract, or load its nodes)"
+                    "ontology class '{name}' is concrete but no node type of that name \
+                     exists (declare it abstract, or load its nodes)"
                 ));
             }
         }

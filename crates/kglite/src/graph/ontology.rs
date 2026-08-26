@@ -139,6 +139,23 @@ impl RelationshipDecl {
             .copied()
             .unwrap_or(self.enforcement)
     }
+
+    /// The base severity, plus any per-check overrides as `check=severity`.
+    /// Both reader surfaces (`SHOW ONTOLOGY`, `describe()`) render this, so a
+    /// declaration whose overrides raise a check above its base severity can
+    /// never read as the bare base in one of them.
+    pub(crate) fn enforcement_summary(&self) -> String {
+        let base = self.enforcement.as_str().to_string();
+        if self.enforcement_overrides.is_empty() {
+            return base;
+        }
+        let overrides: Vec<String> = self
+            .enforcement_overrides
+            .iter()
+            .map(|(check, sev)| format!("{check}={}", sev.as_str()))
+            .collect();
+        format!("{base}; {}", overrides.join(", "))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

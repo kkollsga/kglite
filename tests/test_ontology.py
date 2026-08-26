@@ -198,6 +198,10 @@ def test_describe_renders_ontology_section(school):
     assert 'name="Person" abstract="true"' in text
     assert 'is_a="Person"' in text
     assert "annotations, not axioms" in text
+    # The note is one prose sentence: source indentation must not leak into
+    # it as mid-sentence whitespace runs.
+    note = text.split('note="', 1)[1].split('"', 1)[0]
+    assert "  " not in note, note
 
 
 def test_describe_without_ontology_unchanged(g):
@@ -518,6 +522,29 @@ def test_enforcement_map_sets_per_check_severity(props_graph):
     assert audit["ENROLLED_IN.domain"]["severity"] == "warn"
     # Unlisted checks keep the advisory base.
     assert audit["ENROLLED_IN.range"]["severity"] == "advisory"
+
+
+def test_describe_renders_per_check_enforcement_overrides(props_graph):
+    # describe() and SHOW ONTOLOGY share one rendering: a declaration whose
+    # overrides raise a check above its advisory base must never read as the
+    # bare base in either surface.
+    props_graph.define_ontology(
+        {
+            "classes": {"Student": {}, "Class": {}},
+            "relationships": {
+                "ENROLLED_IN": {
+                    "domain": "Student",
+                    "range": "Class",
+                    "required_properties": ["since"],
+                    "enforcement": {"required_properties": "error", "domain": "warn"},
+                }
+            },
+        }
+    )
+    summary = "advisory; domain=warn, required_properties=error"
+    assert f'enforcement="{summary}"' in props_graph.describe()
+    rel = [r for r in props_graph.cypher("SHOW ONTOLOGY").to_list() if r["kind"] == "relationship"]
+    assert [r["enforcement"] for r in rel] == [summary]
 
 
 def test_enforcement_map_unknown_check_refused(props_graph):
