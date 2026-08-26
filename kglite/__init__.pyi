@@ -4448,9 +4448,15 @@ class KnowledgeGraph:
 
         Semantics: ``is_a`` is a forest (single parent, no cycles);
         ``cardinality``/``required`` describe outgoing edges of the domain
-        type; ``enforcement`` (``advisory``/``warn``/``error``) is consumed
-        by the blueprint gate and ``ontology_audit()``; ``by`` names a
-        discriminator property and is documentation only. Class names share
+        type; ``required_properties`` (per-edge presence) and
+        ``property_types`` (per-edge type check of present values, names
+        validated on declare) are audited per edge; ``inverse_name`` is a
+        reading-direction alias only unless ``inverse_enforced: True`` opts
+        into the physical-pairing check; ``enforcement`` is a severity
+        (``advisory``/``warn``/``error``) or a per-check map
+        (``{"required_properties": "error"}``, unlisted checks stay
+        advisory) consumed by the blueprint gate and ``ontology_audit()``;
+        ``by`` names a discriminator property and is documentation only. Class names share
         the label namespace: an abstract class may not shadow a live node
         type. This is deliberately separate from ``set_parent_type`` —
         that map is presentation ownership, this one is semantic "kind of".

@@ -34,11 +34,13 @@ g.define_ontology({
     "relationships": {
         "ENROLLED_IN": {
             "domain": "Student", "range": "Class",
-            "inverse_name": "HAS_STUDENT",
+            "inverse_name": "HAS_STUDENT",      # reading-direction alias
+            "inverse_enforced": True,            # opt-in: audit physical pairing
             "cardinality": {"min": 1},
             "required": True,
-            "required_properties": ["since"],
-            "enforcement": "warn",
+            "required_properties": ["since"],    # audited per edge
+            "property_types": {"since": "integer"},
+            "enforcement": "warn",               # or per-check: {"required_properties": "error"}
             "description": "Active enrolment",
         },
         "STRAT_PARENT": {"domain": "Stratigraphy", "range": "Stratigraphy",
@@ -63,8 +65,23 @@ Rules the declaration must satisfy (checked on install):
 - `cardinality` / `required` describe **outgoing** edges of the domain type.
 - `symmetric: True` lowers to an inverse check of the relationship against
   itself.
+- `required_properties` and `property_types` are audited **per edge** of the
+  relationship: a listed property must be present and non-null; a declared
+  type is checked only on present values. Type names are validated at
+  declaration time (the matcher is permissive, so a typo would otherwise
+  never fail anything).
+- `inverse_name` is a **reading-direction alias** — no second edge exists or
+  is implied, and it enrolls no check. `inverse_enforced: True` opts into
+  auditing physical pairing (each edge must have a stored inverse partner);
+  `symmetric: True` keeps its self-inverse check regardless, because
+  symmetry *is* a physical claim.
 - `enforcement` (`advisory` — the default — / `warn` / `error`) is data for
-  the consumers below, never an engine write-guarantee.
+  the consumers below, never an engine write-guarantee. It also accepts a
+  per-check map — `{"required_properties": "error", "domain": "warn"}` —
+  where unlisted checks keep the advisory base; keys are the check names
+  the audit's `rule` column uses (`domain`, `range`, `required`,
+  `required_properties`, `property_types`, `cardinality`, `inverse`,
+  `symmetric`, `transitive`).
 
 `g.ontology()` returns the store as a dict, `g.clear_ontology()` removes it
 (withdrawing any materialized labels first). The store persists in the
@@ -198,7 +215,7 @@ here:
 | `domain` / `range` | RDFS **infers**: using an edge *entails* the subject's class membership | **checked, never inferred** — the SHACL reading. A violating edge is reported (or refused at the build gate); nothing ever gains a class from edge use. If you expect RDFS semantics, this is the one difference to internalize. |
 | Validation | SHACL, deliberately separate from ontology/inference | the same separation, built in: `enforcement: advisory \| warn \| error` maps onto `sh:Info` / `sh:Warning` / `sh:Violation`. |
 | Subclass queries | entailment regimes; production stores typically **materialize** entailments | the same technique: `materialize_ontology()` stamps ancestor labels; no query rewriting, no reasoner. |
-| `inverse_name` | `owl:inverseOf` creates/entails the inverse triples | naming only — Cypher already traverses both directions, so no second edge exists or is implied. |
+| `inverse_name` | `owl:inverseOf` creates/entails the inverse triples | naming only — Cypher already traverses both directions, so no second edge exists or is implied. `inverse_enforced: True` opts into auditing stored pairing instead. |
 | `transitive` | `owl:TransitiveProperty`, entailed closures | an annotation consumed by `transitivity_violation` and documentation; the closure is *walked* (`*1..`), never stored. |
 | "abstract" | not an ontology notion (any class may have instances) | borrowed from the schema world: a class that names no node type and cannot be instantiated directly. |
 

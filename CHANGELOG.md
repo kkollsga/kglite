@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Ontology `required_properties` / `property_types` were declared-but-dead**:
+  both keys were parsed and persisted but never checked anywhere. They now
+  produce per-edge audit rows (`REL.required_properties`: listed property
+  absent or null; `REL.property_types`: present value fails its declared
+  type), flowing into `ontology_audit()`, the no-arg validators' shared
+  machinery, and the blueprint gate. `property_types` type names are
+  validated at declaration time against the closed type vocabulary.
+- **`inverse_name` no longer auto-enrolls the physical inverse check**: the
+  declared design is a reading-direction alias ("no second edge exists or is
+  implied"), but the audit scored every naming-only declaration as 100%
+  violations — and `enforcement: "error"` made correctly modelled graphs
+  unbuildable. Opt into the physical-pairing audit with
+  `inverse_enforced: true`; `symmetric` keeps its check. Behavior change:
+  naming-only declarations no longer emit `.inverse` audit rows.
+
+### Added
+
+- **Per-check enforcement severities**: `enforcement` accepts a
+  `{check: severity}` map (e.g. `{"required_properties": "error"}`) alongside
+  the scalar form; unlisted checks keep the advisory base, unknown check
+  names are refused. `SHOW ONTOLOGY` renders the base plus overrides.
+
 ## [0.16.11] - 2026-08-26
 
 ### Added
