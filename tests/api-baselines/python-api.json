@@ -738,6 +738,10 @@
           "kind": "method",
           "signature": "(self, /, properties, limit=None, indices=None, flatten_single_parent=None)"
         },
+        "get_table_property": {
+          "kind": "method",
+          "signature": "(self, /, node_type, node_id, property)"
+        },
         "graph_info": {
           "kind": "method",
           "signature": "(self, /)"
@@ -1025,6 +1029,10 @@
         "set_spatial": {
           "kind": "method",
           "signature": "(self, /, node_type, *, location=None, geometry=None, points=None, shapes=None)"
+        },
+        "set_table_property": {
+          "kind": "method",
+          "signature": "(self, /, node_type, node_id, property, data)"
         },
         "set_temporal": {
           "kind": "method",

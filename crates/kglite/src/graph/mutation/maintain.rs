@@ -191,7 +191,9 @@ fn gate_batch(
     unique_id_field: &str,
     title_field: &str,
 ) -> Result<(), String> {
-    if columns.is_none() && !pk_enforced {
+    let has_shapes =
+        !graph.property_shapes.is_empty() && !graph.shapes_for_type(node_type).is_empty();
+    if columns.is_none() && !pk_enforced && !has_shapes {
         return Ok(());
     }
     let mut batch_claims: HashSet<(UniqueConstraintKey, CompositeValue)> = HashSet::new();
@@ -215,6 +217,19 @@ fn gate_batch(
                  the input has more than one row with id {id}. Deduplicate the input before \
                  add_nodes, or drop the primary-key declaration."
             ));
+        }
+        // Declared structured shapes gate every row, DDL constraints or not
+        // (replay never reaches here with validation on — add_nodes is
+        // replay-suppressed for the ontology stamp, and shape checks share
+        // the pre-write whole-frame posture of the constraint gate).
+        if !graph.property_shapes.is_empty() {
+            for (property, shape) in graph.shapes_for_type(node_type) {
+                if let Some(value) = df_data.get_value(row_idx, &property) {
+                    shape
+                        .check(&property, &value)
+                        .map_err(|e| format!("add_nodes row {row_idx}: {e}"))?;
+                }
+            }
         }
         let Some(columns) = columns else {
             continue;

@@ -494,14 +494,36 @@ impl CypherParser {
                     replace: true,
                 });
             } else if self.check(&CypherToken::Dot) {
-                // Property assignment: var.prop = expr
+                // Property assignment: var.prop = expr — optionally with a
+                // nested l-value path (var.prop[i].field... = expr), which
+                // executes as an atomic engine-side read-modify-write.
                 self.advance(); // consume .
                 let prop_name = self.expect_name("property name after '.'")?;
+                let mut path: Vec<crate::graph::languages::cypher::ast::SetPathStep> = Vec::new();
+                loop {
+                    if self.check(&CypherToken::Dot) {
+                        self.advance();
+                        let field = self.expect_name("property name after '.'")?;
+                        path.push(crate::graph::languages::cypher::ast::SetPathStep::Field(
+                            field,
+                        ));
+                    } else if self.check(&CypherToken::LBracket) {
+                        self.advance();
+                        let index = self.parse_expression()?;
+                        self.expect(&CypherToken::RBracket)?;
+                        path.push(crate::graph::languages::cypher::ast::SetPathStep::Index(
+                            index,
+                        ));
+                    } else {
+                        break;
+                    }
+                }
                 self.expect(&CypherToken::Equals)?;
                 let expression = self.parse_expression()?;
                 items.push(SetItem::Property {
                     variable: var_name,
                     property: prop_name,
+                    path,
                     expression,
                 });
             } else if self.check(&CypherToken::Colon) {
@@ -759,6 +781,13 @@ impl CypherParser {
                     self.advance();
                     procedure_name.push('.');
                     procedure_name.push_str(&part);
+                }
+                // A keyword is a legal name segment here — `table.delete`
+                // tokenizes its tail as the DELETE keyword, and a dotted
+                // procedure name has no clause ambiguity to protect.
+                Some(CypherToken::Delete) => {
+                    self.advance();
+                    procedure_name.push_str(".delete");
                 }
                 other => {
                     return Err(format!(

@@ -19,6 +19,7 @@ pub mod result_table;
 pub mod result_view;
 pub mod session;
 pub mod spatial;
+pub mod tables;
 pub mod timeseries;
 pub mod transaction;
 pub mod vector;

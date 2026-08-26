@@ -261,6 +261,12 @@ pub(super) fn apply_node_property_set<'a>(
 
     enforce_schema_lock(graph, node_type_str, property, &value)?;
 
+    // Declared structured shapes (tables.rs): checked pre-write with the
+    // indexed error path (`line_items[3].qty: expected integer`).
+    if let Some(shape) = graph.shape_for(node_type_str, property) {
+        shape.check(property, &value)?;
+    }
+
     // Declared UNIQUE / NOT NULL gates. Planned before the write so a violation
     // returns without mutating storage; the returned plan is redeemed after the
     // value lands.

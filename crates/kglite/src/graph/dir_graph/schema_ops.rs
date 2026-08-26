@@ -108,6 +108,40 @@ impl DirGraph {
                 return Err((*violation).into());
             }
         }
+        self.derive_property_shapes()?;
+        Ok(())
+    }
+
+    /// Re-derive the structured-shape side table (`tables.rs`) from the
+    /// installed schema's `types` values. A value using the shape grammar
+    /// (`list<...>` / `map{...}`) becomes an enforced [`PropertyShape`]; a
+    /// plain type string stays advisory exactly as before; a
+    /// structured-LOOKING value that does not parse fails the install (the
+    /// `property_types`-as-rename lesson: a declaration the parser cannot
+    /// place is never a harmless extra).
+    fn derive_property_shapes(&mut self) -> Result<(), KgError> {
+        use crate::graph::tables::{parse_property_shape, table_meta_key};
+        self.property_shapes.clear();
+        let Some(schema) = self.schema_definition.clone() else {
+            return Ok(());
+        };
+        for (node_type, node) in &schema.node_schemas {
+            for (property, type_text) in &node.field_types {
+                match parse_property_shape(type_text) {
+                    None => {}
+                    Some(Ok(shape)) => {
+                        self.property_shapes
+                            .insert(table_meta_key(node_type, property), shape);
+                    }
+                    Some(Err(e)) => {
+                        return Err(crate::error::KgError::Schema {
+                            kind: crate::error::SchemaErrorKindRepr::UnknownProperty,
+                            message: format!("define_schema types for {node_type}.{property}: {e}"),
+                        });
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -276,6 +310,38 @@ impl DirGraph {
         }
         self.ontology = std::sync::Arc::default();
         self.rebuild_ontology_closures();
+    }
+
+    /// The declared structured shapes for `node_type`, as
+    /// `(property, shape)` pairs. Empty for undeclared types — the hot-path
+    /// callers gate on `property_shapes.is_empty()` first.
+    pub fn shapes_for_type(
+        &self,
+        node_type: &str,
+    ) -> Vec<(String, &crate::graph::tables::PropertyShape)> {
+        if self.property_shapes.is_empty() {
+            return Vec::new();
+        }
+        self.property_shapes
+            .iter()
+            .filter_map(|(key, shape)| {
+                let (t, p) = key.split_once('\u{1f}')?;
+                (t == node_type).then(|| (p.to_string(), shape))
+            })
+            .collect()
+    }
+
+    /// The declared shape for one `(node_type, property)`, if any.
+    pub fn shape_for(
+        &self,
+        node_type: &str,
+        property: &str,
+    ) -> Option<&crate::graph::tables::PropertyShape> {
+        if self.property_shapes.is_empty() {
+            return None;
+        }
+        self.property_shapes
+            .get(&crate::graph::tables::table_meta_key(node_type, property))
     }
 
     /// The declared ownership layer (`"managed"`/`"runtime"`) for `node_type`,

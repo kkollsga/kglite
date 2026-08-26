@@ -4346,6 +4346,52 @@ class KnowledgeGraph:
     # Schema Definition & Validation
     # ====================================================================
 
+    def set_table_property(self, node_type: str, node_id: Any, property: str, data: Any) -> int:
+        """Store a DataFrame as a table-valued property.
+
+        The stored value is a plain ``list<map>`` — queryable with today's
+        Cypher (``UNWIND o.line_items``, ``o.line_items[2].qty``, the
+        ``table.upsert``/``table.delete`` procedures, nested ``SET`` paths).
+        Column order, dtypes, and nullability are recorded in a
+        per-``(node_type, property)`` registry persisted with the graph and
+        restored by :meth:`get_table_property`; Cypher reads see map keys in
+        sorted order as for any map. The write routes through Cypher ``SET``,
+        so write scope, constraints, declared shapes, WAL, and CDC all apply.
+        Unsupported cell values raise (``on_invalid='error'`` semantics).
+
+        Note the memory shape: a large embedded table lives in a Mixed
+        (heap-only) column that cannot spill to disk — for independently
+        addressable rows at scale, prefer row nodes (see ``attach_rows`` and
+        the "embedded table vs row nodes" guide).
+
+        Args:
+            node_type: The parent node's type (plain identifier).
+            node_id: The parent node's id.
+            property: Property name to store under (plain identifier).
+            data: A pandas DataFrame.
+
+        Returns:
+            Number of rows stored.
+
+        Raises:
+            ValueError: Unknown node, empty/invalid frame, bad identifier,
+                unsupported cell values, or a declared-shape violation.
+        """
+        ...
+
+    def get_table_property(self, node_type: str, node_id: Any, property: str) -> Any:
+        """Reconstruct a table-valued property as a pandas DataFrame.
+
+        Restores the column order and dtypes recorded by
+        :meth:`set_table_property` (columns that held nulls come back as
+        pandas nullable dtypes, e.g. ``Int64``). A node without the property
+        yields an empty frame with the registered columns.
+
+        Raises:
+            ValueError: No such node.
+        """
+        ...
+
     def define_ontology(self, ontology_dict: dict[str, Any]) -> list[str]:
         """Install the declared semantic layer (classes + relationship semantics).
 

@@ -106,12 +106,21 @@ fn execute_cdc_lifecycle_call(
             .with_budget(budget.clone());
         executor.extract_call_params(&call.parameters)?
     };
-    let rows = super::cdc_procedures::execute_mutating_procedure(
-        graph,
-        &proc_name,
-        &params_map,
-        &yield_items,
-    )?;
+    let rows = if proc_name.starts_with("table.") {
+        super::table_procedures::execute_table_procedure(
+            graph,
+            &proc_name,
+            &params_map,
+            &yield_items,
+        )?
+    } else {
+        super::cdc_procedures::execute_mutating_procedure(
+            graph,
+            &proc_name,
+            &params_map,
+            &yield_items,
+        )?
+    };
     Ok(ResultSet {
         columns: yield_items
             .iter()
@@ -1002,6 +1011,15 @@ fn create_node(
     if let Err(violation) = typed {
         return Err(graph.record_constraint_violation(*violation));
     }
+    // Declared structured shapes gate CREATE the same way (never WAL
+    // replay — replay does not route through this executor).
+    if !graph.property_shapes.is_empty() {
+        for (shape_property, shape) in graph.shapes_for_type(&label) {
+            if let Some(value) = constraint_read(&shape_property) {
+                shape.check(&shape_property, &value)?;
+            }
+        }
+    }
     let unique_claims = graph.unique_claims(&label, constraint_read);
     let unique = graph.check_unique_claims(&unique_claims, None);
     if let Err(violation) = unique {
@@ -1280,6 +1298,97 @@ pub(super) fn set_node_property_direct(
     true
 }
 
+/// Row-loop control signal from [`execute_property_set_item`]: `SkipRow`
+/// maps to the openCypher null-target no-op (`continue` in the caller).
+enum PropSetFlow {
+    Applied,
+    SkipRow,
+}
+
+/// One `SET var.prop[...path...] = expr` against one result row — extracted
+/// from `execute_set`, which is at its complexity ceiling.
+#[allow(clippy::too_many_arguments)]
+fn execute_property_set_item<'a>(
+    graph: &mut DirGraph,
+    row: &ResultRow,
+    (variable, property, path, expression): (
+        &'a String,
+        &'a String,
+        &'a [crate::graph::languages::cypher::ast::SetPathStep],
+        &'a Expression,
+    ),
+    params: &HashMap<String, Value>,
+    stats: &mut MutationStats,
+    memos: &mut SetMemos<'a>,
+    edges_to_stamp: &mut std::collections::HashSet<petgraph::graph::EdgeIndex>,
+    nodes_to_stamp: &mut HashMap<NodeIndex, String>,
+) -> Result<PropSetFlow, String> {
+    if !path.is_empty() && row.edge_bindings.contains_key(variable) {
+        return Err(format!(
+            "Nested SET paths are supported on node properties only; '{variable}' is a \
+             relationship"
+        ));
+    }
+    // Relationship property SET is its own path — edges carry none of the
+    // node id/type guards, columnar routing or index maintenance below.
+    if set_edge_property(
+        graph,
+        row,
+        (variable, property, expression),
+        params,
+        stats,
+        edges_to_stamp,
+    )? {
+        return Ok(PropSetFlow::Applied);
+    }
+
+    if property == "id" {
+        return Err("Cannot SET node id — it is immutable".to_string());
+    }
+    if property == "type" || property == "node_type" || property == "label" {
+        return Err("Cannot SET node type via property assignment".to_string());
+    }
+
+    // Resolve the node. A null-valued target (OPTIONAL MATCH miss) makes this
+    // row's write a no-op per openCypher.
+    let Some(node_idx) = row.node_bindings.get(variable) else {
+        if is_null_write_target(row, variable) {
+            return Ok(PropSetFlow::SkipRow);
+        }
+        return Err(format!(
+            "Variable '{}' not bound to a node in SET",
+            variable
+        ));
+    };
+
+    // Evaluate the expression (borrows graph immutably)
+    let value = {
+        let executor = CypherExecutor::with_params(graph, params, None);
+        executor.evaluate_expression(expression, row)?
+    };
+
+    // Nested l-value (`o.line_items[2].qty`): the whole-value
+    // read-modify-write lives in set_path.rs.
+    let value = if path.is_empty() {
+        value
+    } else {
+        super::set_path::read_modify(graph, *node_idx, property, path, value, params, row)?
+    };
+
+    apply_node_property_set(
+        graph,
+        NodePropertySet {
+            node_idx: *node_idx,
+            property: property.as_str(),
+            value,
+        },
+        memos,
+        stats,
+        nodes_to_stamp,
+    )?;
+    Ok(PropSetFlow::Applied)
+}
+
 fn execute_set(
     graph: &mut DirGraph,
     set: &SetClause,
@@ -1308,58 +1417,22 @@ fn execute_set(
                 SetItem::Property {
                     variable,
                     property,
+                    path,
                     expression,
                 } => {
-                    // Relationship property SET is its own path — edges carry
-                    // none of the node id/type guards, columnar routing or
-                    // index maintenance below.
-                    if set_edge_property(
+                    let outcome = execute_property_set_item(
                         graph,
                         row,
-                        (variable, property, expression),
+                        (variable, property, path, expression),
                         params,
                         stats,
-                        &mut edges_to_stamp,
-                    )? {
-                        continue;
-                    }
-
-                    if property == "id" {
-                        return Err("Cannot SET node id — it is immutable".to_string());
-                    }
-                    if property == "type" || property == "node_type" || property == "label" {
-                        return Err("Cannot SET node type via property assignment".to_string());
-                    }
-
-                    // Resolve the node. A null-valued target (OPTIONAL MATCH
-                    // miss) makes this row's write a no-op per openCypher.
-                    let Some(node_idx) = row.node_bindings.get(variable) else {
-                        if is_null_write_target(row, variable) {
-                            continue;
-                        }
-                        return Err(format!(
-                            "Variable '{}' not bound to a node in SET",
-                            variable
-                        ));
-                    };
-
-                    // Evaluate the expression (borrows graph immutably)
-                    let value = {
-                        let executor = CypherExecutor::with_params(graph, params, None);
-                        executor.evaluate_expression(expression, row)?
-                    };
-
-                    apply_node_property_set(
-                        graph,
-                        NodePropertySet {
-                            node_idx: *node_idx,
-                            property: property.as_str(),
-                            value,
-                        },
                         &mut memos,
-                        stats,
+                        &mut edges_to_stamp,
                         &mut nodes_to_stamp,
                     )?;
+                    if matches!(outcome, PropSetFlow::SkipRow) {
+                        continue;
+                    }
                 }
                 SetItem::Map {
                     variable,
@@ -1425,6 +1498,7 @@ fn execute_set(
                         .map(|(property, value)| SetItem::Property {
                             variable: variable.clone(),
                             property: property.to_string(),
+                            path: Vec::new(),
                             expression: Expression::Literal(value),
                         })
                         .collect();

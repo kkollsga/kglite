@@ -815,11 +815,24 @@ pub struct SetClause {
     pub items: Vec<SetItem>,
 }
 
+/// One step of a nested SET l-value path (`o.line_items[2].qty` →
+/// base property `line_items`, path `[Index(2), Field("qty")]`).
+#[derive(Debug, Clone)]
+pub enum SetPathStep {
+    Field(String),
+    Index(Expression),
+}
+
 #[derive(Debug, Clone)]
 pub enum SetItem {
     Property {
         variable: String,
         property: String,
+        /// Nested l-value steps below `property`; empty for a plain
+        /// `SET n.prop = ...`. A non-empty path executes as an engine-side
+        /// read-modify-write of the whole property (atomic per statement,
+        /// whole-value WAL op — replay-correct by construction).
+        path: Vec<SetPathStep>,
         expression: Expression,
     },
     Label {

@@ -158,6 +158,11 @@ pub mod api {
     /// hold it across a `Python::attach` boundary — resolve to owned values
     /// first. See `crates/kglite/src/graph/storage/node_view.rs`.
     pub use crate::graph::storage::NodeView;
+    /// Structured-data support over the list/map substrate: table-property
+    /// fidelity metadata + declared property shapes (`list<map{...}>`).
+    pub use crate::graph::tables::{
+        parse_property_shape, table_meta_key, PropertyShape, ScalarShape, TablePropertyMeta,
+    };
     /// The temporal query context (`At` / `During` / `Today` / `All`) — the
     /// as-of filter a binding's cursor carries for temporal-validity
     /// auto-filtering.

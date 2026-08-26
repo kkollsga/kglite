@@ -305,6 +305,20 @@ pub struct DirGraph {
         skip_serializing_if = "crate::graph::ontology::arc_store_is_empty"
     )]
     pub ontology: Arc<crate::graph::ontology::OntologyStore>,
+    /// Column-order + dtype fidelity for table-valued properties
+    /// (`set_table_property`): `(node_type, property)` → ordered column
+    /// names plus their declared dtypes. The stored value stays a plain
+    /// `list<map>` (PropMap keys are sorted, so order lives here); Cypher
+    /// never consults this — only the DataFrame reconstruction does.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub table_property_meta:
+        std::collections::BTreeMap<String, crate::graph::tables::TablePropertyMeta>,
+    /// Declared structured property shapes (`tables.rs`), keyed by
+    /// `table_meta_key(node_type, property)`. Declared through
+    /// `define_schema` `types` values that use the shape grammar; enforced
+    /// at the write gates (never at WAL replay).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub property_shapes: std::collections::BTreeMap<String, crate::graph::tables::PropertyShape>,
     /// Materialized-label bookkeeping (`ontology_apply.rs`): label →
     /// Closed/Open. Persisted via `FileMetadata` beside the store.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -825,6 +839,8 @@ impl DirGraph {
             title_field_aliases: Arc::default(),
             parent_types: Arc::new(HashMap::new()),
             ontology: Arc::default(),
+            table_property_meta: std::collections::BTreeMap::new(),
+            property_shapes: std::collections::BTreeMap::new(),
             managed_labels: std::collections::BTreeMap::new(),
             ontology_closures: HashMap::new(),
             suppress_ontology_stamp: false,
@@ -895,6 +911,8 @@ impl DirGraph {
             title_field_aliases: Arc::default(),
             parent_types: Arc::new(HashMap::new()),
             ontology: Arc::default(),
+            table_property_meta: std::collections::BTreeMap::new(),
+            property_shapes: std::collections::BTreeMap::new(),
             managed_labels: std::collections::BTreeMap::new(),
             ontology_closures: HashMap::new(),
             suppress_ontology_stamp: false,

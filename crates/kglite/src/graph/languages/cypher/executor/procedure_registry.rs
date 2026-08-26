@@ -213,6 +213,18 @@ pub(super) const PROCEDURES: &[ProcedureSpec] = &[
         columns: &["source", "target", "rule"],
     },
     ProcedureSpec {
+        name: "table.upsert",
+        aliases: &[],
+        description: "Atomic keyed row upsert into a list-of-maps property: replaces the first row whose {key} cell matches row[key], else appends. Engine-side read-modify-write.",
+        columns: &["action", "rows"],
+    },
+    ProcedureSpec {
+        name: "table.delete",
+        aliases: &[],
+        description: "Atomic keyed row delete from a list-of-maps property: removes every row whose {key} cell equals {value}. Engine-side read-modify-write.",
+        columns: &["removed", "rows"],
+    },
+    ProcedureSpec {
         name: "ontology_audit",
         aliases: &[],
         description: "Scorecard: one row per declared ontology check (violations, total, pct, declared severity)",
@@ -438,7 +450,12 @@ pub(super) const PROCEDURES: &[ProcedureSpec] = &[
 /// `every_mutating_procedure_is_registered`, which fails if a name here has no
 /// spec. Two consumers read it: [`clause_is_mutation`](super::write::clause_is_mutation),
 /// which routes the query, and `SHOW PROCEDURES`, which reports the mode.
-pub(super) const MUTATING_PROCEDURES: &[&str] = &["db.cdc.enable", "db.cdc.disable"];
+pub(super) const MUTATING_PROCEDURES: &[&str] = &[
+    "db.cdc.enable",
+    "db.cdc.disable",
+    "table.upsert",
+    "table.delete",
+];
 
 /// Whether `name` (canonical spelling or alias, any case) is a mutating
 /// procedure.

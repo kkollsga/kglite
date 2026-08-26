@@ -363,7 +363,23 @@ impl CypherParser {
     }
 
     fn parse_postfix_chain(&mut self, mut expr: Expression) -> Result<Expression, String> {
-        while self.check(&CypherToken::LBracket) {
+        loop {
+            // `.field` after any postfix (`o.items[2].qty`): wraps in
+            // ExprPropertyAccess, the same node the dotted chain in
+            // parse_primary_expression produces — before this arm existed,
+            // a field access after `]` was a syntax error.
+            if self.check(&CypherToken::Dot) {
+                self.advance();
+                let property = self.expect_name("property name after '.'")?;
+                expr = Expression::ExprPropertyAccess {
+                    expr: Box::new(expr),
+                    property,
+                };
+                continue;
+            }
+            if !self.check(&CypherToken::LBracket) {
+                break;
+            }
             self.advance(); // consume [
             self.deepen()?;
 

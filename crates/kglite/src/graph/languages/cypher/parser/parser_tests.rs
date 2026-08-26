@@ -504,6 +504,7 @@ mod tests {
                 variable,
                 property,
                 expression,
+                path: _,
             } = &s.items[0]
             {
                 assert_eq!(variable, "n");

@@ -267,6 +267,13 @@ pub(crate) struct FileMetadata {
     /// reloaded graph keeps its Closed/Open states.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     managed_labels: BTreeMap<String, crate::graph::ontology::ManagedLabelState>,
+    /// Table-property fidelity metadata (`tables.rs`). Additive,
+    /// skip-when-empty (golden-digest posture).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    table_property_meta: BTreeMap<String, crate::graph::tables::TablePropertyMeta>,
+    /// Declared structured property shapes. Same posture.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    property_shapes: BTreeMap<String, crate::graph::tables::PropertyShape>,
     /// Graph-level instructions/briefing per channel (rendered at the top of
     /// describe()). Additive — old files default to empty.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -422,6 +429,8 @@ impl FileMetadata {
             parent_types: (*graph.parent_types).clone(),
             ontology: (*graph.ontology).clone(),
             managed_labels: graph.managed_labels.clone(),
+            table_property_meta: graph.table_property_meta.clone(),
+            property_shapes: graph.property_shapes.clone(),
             graph_instructions: graph.graph_instructions.clone(),
             user_schema_version: graph.user_schema_version,
             checkpoint_lsn: graph.checkpoint_lsn,
@@ -494,6 +503,8 @@ impl FileMetadata {
         graph.parent_types = Arc::new(self.parent_types);
         graph.ontology = Arc::new(self.ontology);
         graph.managed_labels = self.managed_labels;
+        graph.table_property_meta = self.table_property_meta;
+        graph.property_shapes = self.property_shapes;
         graph.rebuild_ontology_closures();
         graph.graph_instructions = self.graph_instructions;
         graph.user_schema_version = self.user_schema_version;

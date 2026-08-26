@@ -1107,12 +1107,14 @@ pub mod scalar_functions;
 mod scan_eval;
 pub(crate) mod schema_ddl;
 mod schema_procedures;
+mod set_path;
 mod set_row;
 pub mod shortest_path;
 pub(crate) mod show_indexes;
 mod show_ontology;
 pub mod spatial_join;
 pub mod stream;
+mod table_procedures;
 #[cfg(test)]
 pub mod tests;
 pub mod transient_index;
