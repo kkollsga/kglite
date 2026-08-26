@@ -1304,6 +1304,34 @@ def from_records(
     """
     ...
 
+def attach_rows(
+    graph: KnowledgeGraph,
+    parent_type: str,
+    parent_id: Any,
+    data: Any,
+    *,
+    row_type: str,
+    edge_type: str,
+    key: str,
+) -> int:
+    """Attach a DataFrame to a parent node as row NODES plus edges.
+
+    The normalized alternative to ``KnowledgeGraph.set_table_property``:
+    each DataFrame row becomes an independently addressable node of
+    ``row_type`` (id ``"<parent_id>:<key value>"``), linked from the parent
+    by an ``edge_type`` edge. Prefer this when rows need their own edges,
+    indexes, or independent updates at scale; prefer the embedded table for
+    small always-read-together payloads. See the "embedded table vs row
+    nodes" recipe in the inline-records guide.
+
+    Returns:
+        Number of row nodes attached.
+
+    Raises:
+        ValueError: Unknown parent, missing key column, or duplicate keys.
+    """
+    ...
+
 def from_networkx(
     nx_graph: Any,
     *,

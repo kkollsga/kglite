@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Structured-data support** (lists/maps stay the substrate — no new
+  value or persistence concept). `set_table_property` /
+  `get_table_property` store a DataFrame as a queryable `list<map>` with
+  column order, dtypes, and nullability restored on reconstruction from a
+  persisted per-`(type, property)` registry. `define_schema` `types`
+  values accept structured shapes (`list<map{sku: string!, qty: int!,
+  price: float}>`), enforced pre-write at `add_nodes`/`from_records`
+  (whole-frame: nothing written on violation), Cypher `SET`, and `CREATE`,
+  with indexed error paths (`line_items[37].qty: expected integer`); plain
+  type strings stay advisory, WAL replay never validates. Nested SET
+  l-values (`SET o.line_items[2].qty = 8`, `SET o.metadata.status = 'x'`)
+  execute as atomic engine-side read-modify-writes; read-side
+  `o.items[2].field` postfix access now parses; list append is
+  `o.items + [row]`. New mutating procedures `table.upsert` /
+  `table.delete` do keyed row replace/append/remove inside the engine (no
+  lost updates between application-level reads and writes).
+  `kglite.attach_rows(...)` builds the normalized row-nodes form in one
+  call, and `describe()` renders declared shapes (or a sample-inferred
+  `shape=... shape_inferred="true"`) per property. Docs gain an "embedded
+  table vs row nodes" recipe.
 - **Label expressions in reading patterns**: `MATCH (n:Law|Regulation)`
   matches through any listed label, primary or secondary carriage, deduped
   (Cypher 25 / GQL alternation; the exact shape a declared supertype

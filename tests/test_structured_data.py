@@ -213,3 +213,32 @@ def test_table_procs_are_write_gated(g):
             )
     finally:
         ro.read_only(False)
+
+
+# ─── attach_rows + describe integration ────────────────────────────────────
+
+
+def test_attach_rows_normalized_modeling(g):
+    n = kglite.attach_rows(g, "Order", "order-1", _items(), row_type="LineItem", edge_type="HAS_LINE", key="sku")
+    assert n == 3
+    rows = g.cypher(
+        "MATCH (:Order {id: 'order-1'})-[:HAS_LINE]->(r:LineItem) RETURN r.sku AS sku, r.qty AS qty ORDER BY sku"
+    ).to_list()
+    assert [(r["sku"], r["qty"]) for r in rows] == [("a-1", 1), ("b-2", 2), ("c-3", 8)]
+    with pytest.raises(ValueError, match="no Order node"):
+        kglite.attach_rows(g, "Order", "nope", _items(), row_type="LineItem", edge_type="HAS_LINE", key="sku")
+    dup = _items()
+    dup.loc[1, "sku"] = "a-1"
+    with pytest.raises(ValueError, match="duplicate"):
+        kglite.attach_rows(g, "Order", "order-1", dup, row_type="LineItem", edge_type="HAS_LINE", key="sku")
+
+
+def test_describe_reports_declared_and_inferred_shapes(g):
+    g.set_table_property("Order", "order-1", "line_items", _items())
+    text = g.describe(types=["Order"])
+    assert 'shape="list&lt;map{' in text or 'shape="list<map{' in text
+    assert "shape_inferred" in text
+    g.define_schema(SHAPE_SCHEMA)
+    text = g.describe(types=["Order"])
+    assert "qty: integer!" in text
+    assert "shape_inferred" not in text.split('name="line_items"')[1].split("/>")[0]

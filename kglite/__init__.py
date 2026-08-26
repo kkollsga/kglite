@@ -200,6 +200,49 @@ def graphgen(
     )
 
 
+def attach_rows(graph, parent_type, parent_id, data, *, row_type, edge_type, key):
+    """Attach a DataFrame to a parent node as row NODES plus edges.
+
+    The normalized alternative to :meth:`KnowledgeGraph.set_table_property`:
+    each DataFrame row becomes an independently addressable node of
+    ``row_type`` (id ``"<parent_id>:<key value>"``), linked from the parent by
+    an ``edge_type`` edge. Prefer this over an embedded table when rows need
+    their own edges, indexes, or independent updates at scale — the
+    "embedded table vs row nodes" guide has the decision table.
+
+    Args:
+        graph: The target :class:`KnowledgeGraph`.
+        parent_type: The parent node's type.
+        parent_id: The parent node's id.
+        data: A pandas DataFrame; one node per row.
+        row_type: Node type for the rows.
+        edge_type: Connection type from parent to each row.
+        key: DataFrame column whose values (unique per parent) key the rows.
+
+    Returns:
+        Number of row nodes attached.
+    """
+    import pandas as pd  # local: pandas is an optional dependency
+
+    if key not in data.columns:
+        raise ValueError(f"attach_rows: key column {key!r} not in the DataFrame")
+    if data[key].duplicated().any():
+        raise ValueError(f"attach_rows: key column {key!r} has duplicate values")
+    if not graph.cypher(
+        f"MATCH (p:{_cypher_identifier(parent_type, kind='node type')} {{id: $pid}}) RETURN count(p) AS c",
+        params={"pid": parent_id},
+    ).scalar():
+        raise ValueError(f"attach_rows: no {parent_type} node with id {parent_id}")
+
+    df = data.copy()
+    row_ids = [f"{parent_id}:{v}" for v in df[key]]
+    df.insert(0, "_row_id", row_ids)
+    graph.add_nodes(df, row_type, "_row_id", node_title_field=key)
+    edges = pd.DataFrame({"src": [parent_id] * len(row_ids), "dst": row_ids})
+    graph.add_connections(edges, edge_type, parent_type, "src", row_type, "dst")
+    return len(row_ids)
+
+
 def from_networkx(
     nx_graph,
     *,
@@ -541,6 +584,7 @@ def check_file_freshness(
 
 
 __all__ = [
+    "attach_rows",
     "__version__",
     "KnowledgeGraph",
     "FrozenGraph",

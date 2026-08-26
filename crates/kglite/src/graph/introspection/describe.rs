@@ -965,6 +965,47 @@ fn coverage_attr(non_null: usize, type_count: usize) -> String {
     }
 }
 
+/// `list<map{price: float, qty: integer, sku: string}>` from one sampled
+/// value of a list-of-maps (or map) property. `None` for scalars and empty
+/// collections — the `type` attribute already covers those.
+fn infer_nested_shape(prop: &PropertyStatInfo) -> Option<String> {
+    let sampled = prop
+        .sample
+        .as_ref()
+        .or_else(|| prop.values.as_ref().and_then(|v| v.first()))?;
+    fn value_shape(value: &Value, depth: usize) -> Option<String> {
+        if depth > 3 {
+            return Some("...".to_string());
+        }
+        match value {
+            Value::List(items) => {
+                let inner = items
+                    .first()
+                    .and_then(|v| value_shape(v, depth + 1))
+                    .unwrap_or_else(|| "?".to_string());
+                Some(format!("list<{inner}>"))
+            }
+            Value::Map(map) => {
+                let fields: Vec<String> = map
+                    .iter()
+                    .map(|(k, v)| format!("{k}: {}", value_shape(v, depth + 1).unwrap_or_default()))
+                    .collect();
+                Some(format!("map{{{}}}", fields.join(", ")))
+            }
+            Value::String(_) => Some("string".to_string()),
+            Value::Int64(_) | Value::UniqueId(_) => Some("integer".to_string()),
+            Value::Float64(_) => Some("float".to_string()),
+            Value::Boolean(_) => Some("boolean".to_string()),
+            Value::DateTime(_) | Value::Timestamp(_) => Some("datetime".to_string()),
+            _ => Some(value.type_name().to_lowercase()),
+        }
+    }
+    match sampled {
+        Value::List(_) | Value::Map(_) => value_shape(sampled, 0),
+        _ => None,
+    }
+}
+
 fn property_attrs(
     graph: &DirGraph,
     node_type: &str,
@@ -1003,6 +1044,18 @@ fn property_attrs(
     // reports what the stored values *are* rather than what a write *must* be.
     if let Some(declared) = graph.property_type_for(node_type, &prop.property_name) {
         attrs.push_str(&format!(" declared_type=\"{}\"", declared.name()));
+    }
+    // Declared structured shape (tables.rs) — the collection contract a
+    // write must satisfy, rendered in its declaration grammar.
+    if let Some(shape) = graph.shape_for(node_type, &prop.property_name) {
+        attrs.push_str(&format!(" shape=\"{}\"", xml_escape(&shape.render())));
+    } else if let Some(inferred) = infer_nested_shape(prop) {
+        // No declaration: infer from ONE sampled value (never a full scan —
+        // the same single-sample honesty `sample=` has), flagged inferred.
+        attrs.push_str(&format!(
+            " shape=\"{}\" shape_inferred=\"true\"",
+            xml_escape(&inferred)
+        ));
     }
     if let Some(ref vals) = prop.values {
         if !vals.is_empty() {

@@ -1,5 +1,6 @@
 {
   "exports": [
+    "attach_rows",
     "__version__",
     "KnowledgeGraph",
     "FrozenGraph",
@@ -1517,6 +1518,10 @@
     "__version__": {
       "kind": "constant",
       "type": "str"
+    },
+    "attach_rows": {
+      "kind": "function",
+      "signature": "(graph, parent_type, parent_id, data, *, row_type, edge_type, key)"
     },
     "check_file_freshness": {
       "kind": "function",
