@@ -107,11 +107,18 @@ pub struct GraphState {
     /// file unless an agent explicitly calls the save_graph tool (which then
     /// correctly persists them). Same interior-mutability shape and reason
     /// as `embedder` above.
-    pub(crate) ontology: Arc<RwLock<Option<Arc<kglite::api::OntologyStore>>>>,
+    pub(crate) ontology: Arc<RwLock<Option<BoundOntology>>>,
     /// Whether opens take the cross-process writer lease. Server-config, set
     /// once at boot via [`with_writer_lease_policy`](Self::with_writer_lease_policy)
     /// — before `bind_mode` performs the boot open — and carried by every clone.
     pub(crate) writer_lease_policy: WriterLeasePolicy,
+}
+
+/// The manifest-declared ontology plus its boot-time materialization flag.
+#[derive(Clone)]
+pub struct BoundOntology {
+    pub store: Arc<kglite::api::OntologyStore>,
+    pub materialize: bool,
 }
 
 impl GraphState {
@@ -391,12 +398,29 @@ impl GraphState {
         }
         // The manifest ontology rides the same seam: every install path
         // already routes through here before publication.
-        let ontology = read_lock(&self.ontology).as_ref().map(Arc::clone);
-        if let Some(store) = ontology {
-            match std::sync::Arc::make_mut(kg.dir_mut()).define_ontology((*store).clone()) {
+        let ontology = read_lock(&self.ontology).clone();
+        if let Some(bound) = ontology {
+            let dir = std::sync::Arc::make_mut(kg.dir_mut());
+            match dir.define_ontology((*bound.store).clone()) {
                 Ok(warnings) => {
                     for w in warnings {
                         tracing::warn!("manifest ontology: {w}");
+                    }
+                    if bound.materialize {
+                        // adopt=true: a served file's pre-existing manual
+                        // labels must not fail the boot — the label goes
+                        // Open, which only disables optimizations.
+                        match dir.materialize_ontology(true) {
+                            Ok(report) => {
+                                let stamped: usize = report.iter().map(|r| r.stamped).sum();
+                                tracing::info!(
+                                    labels = report.len(),
+                                    stamped,
+                                    "manifest ontology materialized (memory-only)"
+                                );
+                            }
+                            Err(e) => tracing::error!("manifest ontology materialize failed: {e}"),
+                        }
                     }
                 }
                 Err(e) => tracing::error!("manifest ontology rejected for this graph: {e}"),
@@ -406,8 +430,8 @@ impl GraphState {
 
     /// Bind the manifest-declared ontology; ["apply_bound_embedder"] installs
     /// it on every subsequently published graph.
-    pub fn bind_ontology(&self, store: Arc<kglite::api::OntologyStore>) {
-        *write_lock(&self.ontology) = Some(store);
+    pub fn bind_ontology(&self, bound: BoundOntology) {
+        *write_lock(&self.ontology) = Some(bound);
     }
 
     pub fn schema(&self) -> Option<(u64, u64)> {

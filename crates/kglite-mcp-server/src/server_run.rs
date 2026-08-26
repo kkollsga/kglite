@@ -69,12 +69,20 @@ fn boot_value_codecs(
 /// no-silently-ignored-keys rule) and applied memory-only to every graph the
 /// state installs. The path resolves against the manifest's directory, like
 /// `csv_http_server`.
+use crate::tools::BoundOntology;
+
 fn boot_ontology(
     manifest: Option<&mcp_methods::server::Manifest>,
     manifest_base: &Path,
-) -> Result<Option<Arc<kglite::api::OntologyStore>>> {
+) -> Result<Option<BoundOntology>> {
     let Some(raw) = manifest.and_then(|m| m.extensions.get("ontology")) else {
         return Ok(None);
+    };
+    let materialize = match raw.get("materialize") {
+        None => false,
+        Some(v) => v
+            .as_bool()
+            .context("extensions.ontology.materialize must be a boolean")?,
     };
     let file = raw
         .get("file")
@@ -92,9 +100,13 @@ fn boot_ontology(
     tracing::info!(
         classes = store.classes.len(),
         relationships = store.relationships.len(),
+        materialize,
         "manifest ontology parsed (memory-only; persists only via an explicit save_graph)"
     );
-    Ok(Some(Arc::new(store)))
+    Ok(Some(BoundOntology {
+        store: Arc::new(store),
+        materialize,
+    }))
 }
 
 fn boot_graph_watch(manifest: Option<&mcp_methods::server::Manifest>) -> Result<bool> {
@@ -515,8 +527,8 @@ pub(crate) async fn run_async(
 
     // Bound before `bind_mode`, whose boot open publishes the first graph —
     // the ontology rides the same pre-publication seam as the embedder.
-    if let Some(store) = boot_ontology(manifest.as_ref(), &manifest_base_dir(manifest.as_ref()))? {
-        graph_state.bind_ontology(store);
+    if let Some(bound) = boot_ontology(manifest.as_ref(), &manifest_base_dir(manifest.as_ref()))? {
+        graph_state.bind_ontology(bound);
     }
 
     let options = bind_mode(&mode, &cli, manifest.as_ref(), &graph_state, options)?;

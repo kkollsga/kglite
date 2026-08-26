@@ -2232,3 +2232,29 @@ class TestManifestOntology:
         # Memory-only: the source file never gained the declarations.
         reloaded = kglite.load(str(kgl))
         assert reloaded.ontology() is None
+
+    def test_boot_materialize_makes_supertype_matchable(self, tmp_path: Path):
+        """`materialize: true` stamps the closure at boot — supertype MATCH
+        works over the served graph, still memory-only."""
+        root = tmp_path / "onto_mat"
+        root.mkdir()
+        kgl = root / "g.kgl"
+        _build_fixture_graph(kgl)
+        (root / "o.json").write_text(
+            json.dumps({"classes": {"Agent": {"abstract": True}, "Person": {"is_a": "Agent"}}}),
+            encoding="utf-8",
+        )
+        manifest = root / "m.yaml"
+        manifest.write_text(
+            "name: onto\nextensions:\n  ontology:\n    file: o.json\n    materialize: true\n",
+            encoding="utf-8",
+        )
+        client = _spawn(["--graph", str(kgl), "--mcp-config", str(manifest)], cwd=root)
+        try:
+            r = client.call_tool("cypher_query", {"query": "MATCH (a:Agent) RETURN count(a) AS c"})
+            assert "4" in _text_content(r)
+        finally:
+            client.shutdown()
+        reloaded = kglite.load(str(kgl))
+        assert reloaded.ontology() is None
+        assert reloaded.cypher("MATCH (a:Agent) RETURN count(a) AS c").scalar() == 0
