@@ -737,8 +737,10 @@ mod secondary_label_codec_tests {
         // Node list starts after magic(8)+version(4)+count(4)+namelen(4)+name(3)+len(4).
         let list_start = 8 + 4 + 4 + 4 + 3 + 4;
         let raws: Vec<u32> = payload[list_start..]
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u32::from_le_bytes(*c))
             .collect();
         assert_eq!(raws, vec![0, 1, 2]);
     }
