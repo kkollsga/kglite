@@ -62,6 +62,7 @@ CI_PATH = WORKFLOWS / "ci.yml"
 WHEELS_PATH = WORKFLOWS / "build_wheels.yml"
 CLI_WHEELS_PATH = WORKFLOWS / "build_cli_wheels.yml"
 CRATES_PATH = WORKFLOWS / "publish_crates.yml"
+SCHEDULED_PATH = WORKFLOWS / "scheduled.yml"
 
 #: Jobs whose *existence* is a guarantee in its own right.
 #:
@@ -102,13 +103,14 @@ def _load_workflow(path: Path) -> dict:
 
 CI = _load_workflow(CI_PATH)
 #: The three heavy jobs (thread sanitizer, dependency maintenance, concurrency
-#: stress) stay off every push and PR, but must remain reachable on demand — a
+#: stress) live in scheduled.yml, whose only triggers are the weekly cron and
+#: manual dispatch — off every push and PR, but reachable on demand: a
 #: schedule-only job that breaks is invisible until the next Monday, which is
 #: how the thread sanitizer stayed red for five consecutive scheduled runs.
-SCHEDULED_ONLY_IF = "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"
 WHEELS = _load_workflow(WHEELS_PATH)
 CLI_WHEELS = _load_workflow(CLI_WHEELS_PATH)
 CRATES = _load_workflow(CRATES_PATH)
+SCHEDULED = _load_workflow(SCHEDULED_PATH)
 
 
 class _Job(dict):
@@ -128,6 +130,10 @@ def _job(workflow: dict, workflow_name: str, name: str) -> _Job:
 
 def _ci_job(name: str) -> _Job:
     return _job(CI, "ci.yml", name)
+
+
+def _scheduled_job(name: str) -> _Job:
+    return _job(SCHEDULED, "scheduled.yml", name)
 
 
 def _wheels_job(name: str) -> _Job:
@@ -269,10 +275,10 @@ def test_ci_success_needs_every_job_defined_in_ci_yml() -> None:
     same shape one layer up: a job added to `ci.yml` and forgotten in `needs`
     was gated by nothing, and nothing noticed.
 
-    `skipped` stays a pass in the aggregate's shell on purpose — three jobs
-    run only on the schedule or a manual dispatch (`SCHEDULED_ONLY_IF`) and skip
-    on every push and PR. That is a recorded trade-off, not something this test
-    may tighten.
+    `skipped` stays a pass in the aggregate's shell on purpose — the
+    dedup-gated jobs skip when the exact SHA is already PR-green (see
+    test_dedup_gates_are_consistent). That is a recorded trade-off, not
+    something this test may tighten.
     """
     jobs = set(CI["jobs"])
     assert len(jobs) > 1, "ci.yml defines no jobs — the derivation is broken"
@@ -299,8 +305,9 @@ def test_required_verification_jobs_still_exist() -> None:
     is gone. These names are checked for existence for that reason only — their
     aggregation is the derivation's job, not this one's.
     """
+    scheduled_owned = {"dependency-maintenance", "scheduled-concurrency-stress"}
     for name in sorted(REQUIRED_JOBS):
-        _ci_job(name)
+        (_scheduled_job if name in scheduled_owned else _ci_job)(name)
 
 
 def test_ci_success_actually_fails_when_a_dependency_does() -> None:
@@ -447,15 +454,18 @@ def test_loom_and_unsafe_jobs_use_the_intended_commands() -> None:
 
 
 def test_heavy_thread_sanitizer_is_scheduled_only() -> None:
-    scheduled = _ci_job("scheduled-thread-sanitizer")
-    assert scheduled["if"] == SCHEDULED_ONLY_IF
+    scheduled = _scheduled_job("scheduled-thread-sanitizer")
     tsan_steps = [step for step in _steps(scheduled) if step.get("env", {}).get("RUSTFLAGS") == "-Zsanitizer=thread"]
     assert tsan_steps, "scheduled-thread-sanitizer runs no step under -Zsanitizer=thread"
     # PyYAML resolves the YAML 1.1 key `on` to the boolean True.
-    assert "schedule" in CI[True], "ci.yml has no schedule trigger, so the scheduled-only jobs never run"
-    assert "workflow_dispatch" in CI[True], (
-        "ci.yml has no workflow_dispatch trigger, so a fix to a scheduled-only job cannot be verified "
+    triggers = set(SCHEDULED[True])
+    assert "schedule" in triggers, "scheduled.yml has no schedule trigger, so the heavy jobs never run"
+    assert "workflow_dispatch" in triggers, (
+        "scheduled.yml has no workflow_dispatch trigger, so a fix to a heavy job cannot be verified "
         "until the next scheduled run"
+    )
+    assert triggers <= {"schedule", "workflow_dispatch"}, (
+        "scheduled.yml gained a push/PR trigger — the heavy jobs belong off the per-PR critical path"
     )
 
 
@@ -467,7 +477,7 @@ def test_thread_sanitizer_covers_the_parallel_runtime():
     tests are precisely the ones a thread sanitizer exists to run. A filter
     that silently misses them leaves the job green while checking none of it.
     """
-    tsan = _ci_job("scheduled-thread-sanitizer")
+    tsan = _scheduled_job("scheduled-thread-sanitizer")
     runs = " ".join(step.get("run", "") for step in tsan["steps"])
     for module_filter in ("graph::session", "graph::parallel", "executor::tests::parallel"):
         assert module_filter in runs, (
@@ -487,7 +497,7 @@ def test_thread_sanitizer_builds_the_standard_library_from_source() -> None:
     against an uninstrumented std, i.e. green without observing the
     synchronisation it exists to check, so it is rejected here too.
     """
-    scheduled = _ci_job("scheduled-thread-sanitizer")
+    scheduled = _scheduled_job("scheduled-thread-sanitizer")
     toolchains = _steps_using(scheduled, "dtolnay/rust-toolchain@")
     assert toolchains, "scheduled-thread-sanitizer installs no toolchain"
     components = {c.strip() for step in toolchains for c in step.get("with", {}).get("components", "").split(",")}
@@ -563,8 +573,7 @@ def test_scheduled_dependency_maintenance_is_report_first() -> None:
     assert "ignore" not in group
     assert group["update-types"] == ["minor", "patch"], "grouped cargo updates must exclude majors"
 
-    maintenance = _ci_job("dependency-maintenance")
-    assert maintenance["if"] == SCHEDULED_ONLY_IF
+    maintenance = _scheduled_job("dependency-maintenance")
     tools = [step.get("with", {}).get("tool") for step in _steps_using(maintenance, "taiki-e/install-action@")]
     assert tools == ["cargo-audit@0.22.2"]
     # Report-first: the two report steps tolerate failure, the policy check does
@@ -580,7 +589,7 @@ def test_scheduled_dependency_maintenance_is_report_first() -> None:
 
 
 def test_scheduled_stress_is_bounded_and_excludes_large_runner_case() -> None:
-    stress = _ci_job("scheduled-concurrency-stress")
+    stress = _scheduled_job("scheduled-concurrency-stress")
     invocations = _pytest_invocations(stress)
     assert len(invocations) == 2, f"scheduled stress runs {len(invocations)} pytest invocations, expected 2"
     for target, marker in (
@@ -1933,9 +1942,6 @@ def test_dedup_gates_are_consistent() -> None:
         "rustsec-audit",
         "msrv",
         "ci-success",
-        "scheduled-thread-sanitizer",
-        "dependency-maintenance",
-        "scheduled-concurrency-stress",
     }
     fresh_if = "needs.dedup.outputs.fresh == 'true'"
     for job, spec in ci["jobs"].items():

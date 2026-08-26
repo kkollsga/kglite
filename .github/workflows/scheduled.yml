@@ -1,0 +1,93 @@
+name: Scheduled
+
+# The heavy race/stress verification that stays off the per-PR critical path:
+# ThreadSanitizer Session checks, the dependency advisory report, and the
+# bounded Session/Bolt stress runs. Weekly by schedule; manual dispatch exists
+# because a schedule-only job is otherwise unrunnable between Mondays, so a
+# fix to one cannot be verified for up to a week (the thread-sanitizer job
+# was broken from the day it was added and stayed red for five scheduled runs
+# for exactly that reason). Split out of ci.yml (2026-08-26) so PR checks
+# stop listing three permanently-skipped rows.
+
+on:
+  schedule:
+    - cron: '23 3 * * 1'
+  workflow_dispatch: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  scheduled-thread-sanitizer:
+    name: Scheduled ThreadSanitizer Session checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      # Three filters, not one. `graph::session` covers the concurrency model
+      # this job was built for; the two `parallel` filters cover the opt-in
+      # parallel Cypher runtime, whose regions fan a read-only `&DirGraph`
+      # across rayon workers. Those tests are where a data race would show up,
+      # and a substring filter does not pick them up on its own.
+      - name: Run Session, disk and parallel-runtime concurrency models under TSan
+        env:
+          RUSTFLAGS: -Zsanitizer=thread
+          RUSTDOCFLAGS: -Zsanitizer=thread
+        run: |
+          cargo test -Zbuild-std -p kglite --lib --target x86_64-unknown-linux-gnu graph::session
+          cargo test -Zbuild-std -p kglite --lib --target x86_64-unknown-linux-gnu graph::parallel
+          cargo test -Zbuild-std -p kglite --lib --target x86_64-unknown-linux-gnu executor::tests::parallel
+
+  dependency-maintenance:
+    name: Scheduled dependency advisory report
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_STABLE }}
+      - name: Install pinned cargo-audit
+        uses: taiki-e/install-action@v2.85.4
+        with:
+          tool: cargo-audit@0.22.2
+      - name: Validate temporary advisory exceptions
+        run: python scripts/check_rustsec_advisories.py --policy-only
+      - name: Report compatible lockfile updates
+        continue-on-error: true
+        run: cargo update --workspace --dry-run
+      - name: Report RustSec advisories
+        continue-on-error: true
+        run: python scripts/check_rustsec_advisories.py
+
+  scheduled-concurrency-stress:
+    name: Scheduled bounded Session and Bolt stress
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_STABLE }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: scheduled-concurrency-stress
+          workspaces: ". -> target"
+      - name: Build release extension and Bolt server
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install maturin pytest pytest-timeout pandas neo4j
+          .venv/bin/maturin develop --release
+          cargo build --release -p kglite-bolt-server
+      - name: Run bounded Session stress
+        run: .venv/bin/pytest tests/test_session_stress.py -m stress -v --tb=short
+      - name: Run bounded Bolt stress
+        run: .venv/bin/pytest tests/test_bolt_server_concurrency.py -m bolt_stress -v --tb=short
+
