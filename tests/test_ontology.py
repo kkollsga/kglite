@@ -98,6 +98,7 @@ def school() -> KnowledgeGraph:
                     "domain": "Student",
                     "range": "Class",
                     "inverse_name": "HAS_STUDENT",
+                    "inverse_enforced": True,
                     "required": True,
                     "enforcement": "warn",
                 },
@@ -439,5 +440,57 @@ def test_property_types_unknown_type_name_refused(props_graph):
             {
                 "classes": {"Student": {}, "Class": {}},
                 "relationships": {"ENROLLED_IN": {"property_types": {"since": "strig"}}},
+            }
+        )
+
+
+# ---- 0.16.12: inverse_name is naming-only unless inverse_enforced ----
+
+
+def test_naming_only_inverse_not_audited(props_graph):
+    # The guide defines inverse_name as a reading-direction alias — "no
+    # second edge exists or is implied" — so a correctly modelled one-edge
+    # graph must not score inverse violations.
+    props_graph.define_ontology(
+        {
+            "classes": {"Student": {}, "Class": {}},
+            "relationships": {
+                "ENROLLED_IN": {
+                    "domain": "Student",
+                    "range": "Class",
+                    "inverse_name": "HAS_STUDENT",
+                }
+            },
+        }
+    )
+    assert "ENROLLED_IN.inverse" not in _audit(props_graph)
+    rows = props_graph.cypher("CALL inverse_violation() YIELD a, b RETURN a").to_list()
+    assert rows == []
+
+
+def test_inverse_enforced_opts_into_the_physical_check(props_graph):
+    props_graph.define_ontology(
+        {
+            "classes": {"Student": {}, "Class": {}},
+            "relationships": {
+                "ENROLLED_IN": {
+                    "domain": "Student",
+                    "range": "Class",
+                    "inverse_name": "HAS_STUDENT",
+                    "inverse_enforced": True,
+                }
+            },
+        }
+    )
+    row = _audit(props_graph)["ENROLLED_IN.inverse"]
+    assert (row["violations"], row["total"]) == (2, 2)
+
+
+def test_inverse_enforced_requires_inverse_name(props_graph):
+    with pytest.raises(Exception, match="inverse_enforced"):
+        props_graph.define_ontology(
+            {
+                "classes": {"Student": {}},
+                "relationships": {"ENROLLED_IN": {"inverse_enforced": True}},
             }
         )

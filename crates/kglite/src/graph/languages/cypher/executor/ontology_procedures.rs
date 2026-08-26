@@ -189,7 +189,7 @@ fn declared_checks(rel: &str, decl: &RelationshipDecl) -> Vec<DeclaredCheck> {
     if decl.cardinality.is_some() {
         out.push(DeclaredCheck::Cardinality);
     }
-    if decl.inverse_name.is_some() {
+    if decl.inverse_name.is_some() && decl.inverse_enforced {
         out.push(DeclaredCheck::Inverse);
     }
     if decl.symmetric {

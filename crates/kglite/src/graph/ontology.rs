@@ -108,6 +108,11 @@ pub struct RelationshipDecl {
     pub property_types: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inverse_name: Option<String>,
+    /// Opt-in: audit `inverse_name` as a physical-pairing contract. Without
+    /// it the name is a reading-direction alias only (describe()/agent
+    /// metadata) and enrolls no check.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub inverse_enforced: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cardinality: Option<CardinalityDecl>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -340,6 +345,7 @@ const REL_KEYS: &[&str] = &[
     "required_properties",
     "property_types",
     "inverse_name",
+    "inverse_enforced",
     "cardinality",
     "required",
     "transitive",
@@ -445,12 +451,20 @@ fn relationship_from_value(name: &str, value: &Value) -> Result<RelationshipDecl
             out
         }
     };
+    let inverse_name = opt_string(map, "inverse_name", name)?;
+    let inverse_enforced = opt_bool(map, "inverse_enforced", name)?;
+    if inverse_enforced && inverse_name.is_none() {
+        return Err(format!(
+            "relationship '{name}': 'inverse_enforced' requires 'inverse_name'"
+        ));
+    }
     Ok(RelationshipDecl {
         domain: opt_string(map, "domain", name)?,
         range: opt_string(map, "range", name)?,
         required_properties,
         property_types,
-        inverse_name: opt_string(map, "inverse_name", name)?,
+        inverse_name,
+        inverse_enforced,
         cardinality,
         required: opt_bool(map, "required", name)?,
         transitive: opt_bool(map, "transitive", name)?,
