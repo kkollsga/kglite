@@ -323,3 +323,35 @@ def test_merge_create_stamps_closure(mat):
     mat.cypher("MERGE (s:Student {id: 42}) ON CREATE SET s.name = 'Merged'")
     labels = set(mat.cypher("MATCH (n:Student {id: 42}) RETURN labels(n) AS l").scalar())
     assert labels == {"Student", "Person"}
+
+
+# ─── closure-aware index probe (Closed-gated) ──────────────────────────────
+
+
+def test_closure_probe_uses_descendant_indexes(mat):
+    mat.create_index("Student", "name")
+    mat.create_index("Teacher", "name")
+    rows = mat.cypher("MATCH (p:Person {name: 'Ann'}) RETURN p.id AS id").to_list()
+    assert [r["id"] for r in rows] == [1]
+    # Same answer with the ontology passes off / general path (differential
+    # sanity at the surface level).
+    rows2 = mat.cypher("MATCH (p:Person) WHERE p.name = 'Ann' RETURN p.id AS id").to_list()
+    assert rows2 == rows
+
+
+def test_closure_probe_correct_when_label_open(mat):
+    # A manual carrier outside the closure opens the label; the probe must
+    # NOT run (it would miss the Class node), and the scan must find it.
+    mat.create_index("Student", "name")
+    mat.create_index("Teacher", "name")
+    mat.cypher("MATCH (c:Class) SET c:Person")
+    rows = mat.cypher("MATCH (p:Person {name: 'Math'}) RETURN p.id AS id").to_list()
+    assert [r["id"] for r in rows] == [100]
+
+
+def test_closure_probe_declines_on_partial_indexes(mat):
+    # Only Student is indexed: the probe must fall back wholesale (a partial
+    # union would silently drop Teacher rows).
+    mat.create_index("Student", "name")
+    rows = mat.cypher("MATCH (p:Person {name: 'Tea'}) RETURN p.id AS id").to_list()
+    assert [r["id"] for r in rows] == [10]

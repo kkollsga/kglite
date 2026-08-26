@@ -106,6 +106,13 @@
       "nesting": 6
     },
     {
+      "path": "crates/kglite/src/graph/core/pattern_matching/matcher.rs",
+      "qualified_name": "crate::PatternExecutor<'a>::find_matching_nodes",
+      "lines": 202,
+      "branches": 43,
+      "nesting": 7
+    },
+    {
       "path": "crates/kglite/src/graph/core/traversal.rs",
       "qualified_name": "crate::make_traversal_full",
       "lines": 218,

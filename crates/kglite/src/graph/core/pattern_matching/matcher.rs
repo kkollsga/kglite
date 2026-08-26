@@ -623,6 +623,9 @@ impl<'a> PatternExecutor<'a> {
             // label itself has secondary carriers, union their filtered scan
             // with the indexed primary hits instead of scanning every primary.
             if let Some(ref props) = pattern.properties {
+                if let Some(hit) = self.try_closure_probe(node_type, props, &extra_keys) {
+                    return hit;
+                }
                 if let Some(indexed) = self
                     .try_index_lookup(node_type, props)
                     .or_else(|| self.try_global_index_lookup_typed(node_type, props))
@@ -1018,6 +1021,66 @@ impl<'a> PatternExecutor<'a> {
     ///
     /// `None` = no global index covered any pushable predicate in `props`; the
     /// caller falls through to the type-scan path.
+    /// The closure-aware probe: for `MATCH (n:Ancestor {p: v})` where
+    /// `Ancestor` is a **Closed** managed label, run the property-index
+    /// lookup per declared member type, union, and finish with the
+    /// extra-label filter — the complete answer, so the caller returns it
+    /// without the secondary-bucket union (the probes subsume the bucket:
+    /// Closed means the engine is its only writer). `None` — caller falls
+    /// back to the correct scan — unless the label is Closed and every live
+    /// member type (the ancestor itself included, when concrete and live)
+    /// resolves the lookup; a partial union would silently drop rows, and
+    /// an Open label may hold carriers no descendant probe covers.
+    fn try_closure_probe(
+        &self,
+        node_type: &str,
+        props: &HashMap<String, PropertyMatcher>,
+        extra_keys: &[InternedKey],
+    ) -> Option<Result<Vec<NodeIndex>, String>> {
+        let unioned = self.try_closure_index_lookup(node_type, props)?;
+        Some(self.filter_node_candidates(&unioned, None, extra_keys))
+    }
+
+    fn try_closure_index_lookup(
+        &self,
+        node_type: &str,
+        props: &HashMap<String, PropertyMatcher>,
+    ) -> Option<Vec<NodeIndex>> {
+        if !self.graph.managed_label_closed(node_type) {
+            return None;
+        }
+        let mut member_types: Vec<&str> = self
+            .graph
+            .ontology
+            .classes
+            .iter()
+            .filter(|(name, _)| {
+                self.graph
+                    .ontology
+                    .ancestors(name)
+                    .iter()
+                    .any(|a| a == node_type)
+            })
+            .map(|(name, _)| name.as_str())
+            .collect();
+        member_types.push(node_type);
+        let mut out = Vec::new();
+        for member in member_types {
+            let live = self
+                .graph
+                .type_indices
+                .get(member)
+                .is_some_and(|nodes| nodes.iter().next().is_some());
+            if !live {
+                continue;
+            }
+            // Per-primary-type buckets are disjoint, so the union needs no
+            // dedup.
+            out.extend(self.try_index_lookup(member, props)?);
+        }
+        Some(out)
+    }
+
     fn try_global_index_lookup_typed(
         &self,
         node_type: &str,
