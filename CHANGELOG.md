@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Release-mode measurements vs the published 0.16.12 wheel (min of 200 rounds,
+200k-node two-member closure, two agreeing runs, controls flat): supertype
+property equality 1.495 ms → 0.0017 ms (~880×, at parity with the direct
+subtype lookup); `dematerialize_ontology()` 286 ms → 0.2 ms at 100k and
+1,195 ms → 0.4 ms at 200k; alternation `count()` 2.57 ms → 0.0010 ms and
+alternation equality 1.70 ms → 0.0016 ms. `make bench-check`: no regressions
+>+20% across 34 benchmarks (worst cell +4.3%).
+
 ### Added
 
 - **Label alternation stops being the slowest spelling of its own question.**
