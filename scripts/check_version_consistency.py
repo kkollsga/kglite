@@ -725,6 +725,14 @@ HISTORICAL_DOCS = re.compile(
 )
 #: Per-line opt-out for a deliberately pinned version in otherwise-live prose.
 SUPPRESS_MARKER = "version-check: ignore"
+#: Per-repo opt-out (sonagram feedback, 2026-08-26): a downstream carrying this
+#: marker file declares that its own CI gates upstream-version prose (e.g.
+#: sonagram's tests/version_consistency.rs asserts eleven sites against its
+#: manifest), so docs-only drift notes are noise there. The marker suppresses
+#: ONLY the stale-docs category — that a *new* upstream version exists (blocked
+#: range, superseded exact pin, breaking-symbol use) is knowledge the
+#: downstream's internal-consistency gate cannot have, and still notifies.
+SELF_GATE_MARKER = ".upstream-version-gated"
 #: A markdown table row that opens with a date is a ledger entry — sonagram's
 #: GRAPH-GATE.md records "2026-07-17 | … sonara 0.2.3 sync" forever. Same class
 #: as a changelog line, so it is history rather than a stale claim.
@@ -1615,6 +1623,9 @@ def decide_notifications(
         pins = [f for f in mine if f.kind == "exact-pin"]
         contradictions = [f for f in mine if f.kind == "contradiction"]
         stale_docs = [f for f in mine if f.kind == "stale-docs"]
+        self_gated = (root / SELF_GATE_MARKER).is_file()
+        if self_gated:
+            stale_docs = []
         touched = find_symbol_uses(root, breaking_symbols)
 
         reasons: list[str] = []
@@ -1656,7 +1667,11 @@ def decide_notifications(
         # from us" and "declares us correctly" are different facts, and only the
         # second one means the next release needs re-checking.
         declares = any(d.package.lower().replace("_", "-") in upstream_pkgs and d.repo == repo for d in declarations)
-        if not declares:
+        if self_gated and any(f.kind == "stale-docs" for f in mine):
+            skip = (
+                f"gates upstream-version prose itself ({SELF_GATE_MARKER}); nothing beyond documented drift to report"
+            )
+        elif not declares:
             skip = f"declares no {UPSTREAM_REPO} package anywhere — not a consumer"
         else:
             skip = (
@@ -1821,8 +1836,8 @@ def compose_note(
             f"kglite {ver} is published. Your package metadata already admits it, so "
             f"nothing is blocked. This note is going to {decision.repo} and not to the "
             f"rest of the ecosystem for one narrow reason: {decision.repo} states a "
-            f"superseded kglite version in published prose, where no packaging tool, "
-            f"lockfile, or CI job will ever notice the drift."
+            f"superseded kglite version in published prose, where no packaging tool "
+            f"or lockfile will ever reconcile the drift."
         )
     else:
         slug, note_type = "upgrade-required", "heads-up"

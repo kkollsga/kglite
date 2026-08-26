@@ -823,3 +823,54 @@ def test_require_siblings_turns_absence_into_a_failure(tmp_path: Path, monkeypat
     code, out = run(root, "--require-siblings")
     assert code == 1
     assert "cannot be trusted" in out
+
+
+# --------------------------------------------------------------------------
+# 10. Self-gated downstreams (sonagram feedback, 2026-08-26)
+# --------------------------------------------------------------------------
+
+
+def _docs_only_drift(ecosystem: Path) -> None:
+    """Metadata admits 0.15.1 everywhere; only prose states the old version."""
+    (ecosystem / "downstream" / ".github" / "workflows" / "ci.yml").write_text(
+        "jobs:\n  t:\n    steps:\n      - run: pip install downstream\n", encoding="utf-8"
+    )
+    _write(
+        ecosystem / "downstream" / "README.md",
+        "# downstream\n\nBuilt on kglite 0.15.0.\n",
+    )
+
+
+def test_docs_only_note_never_claims_the_recipients_ci_is_blind(ecosystem: Path) -> None:
+    """The note's justification asserted 'no CI job will ever notice' — a fact
+    about the recipient's CI the script has no way to know (sonagram gates
+    exactly this in cargo test). The claim stays scoped to what we do know."""
+    _docs_only_drift(ecosystem)
+    _, out = run(ecosystem, "--upstream-version", "0.15.1", "--notify", "--dry-run")
+    assert "NOTIFY downstream" in out, out
+    assert "CI job" not in out, out
+
+
+def test_self_gated_repo_skips_docs_only_notes(ecosystem: Path) -> None:
+    """A downstream declaring it gates upstream-version prose itself gets a
+    SKIP, not a fourth identical drift note."""
+    _docs_only_drift(ecosystem)
+    _write(
+        ecosystem / "downstream" / ".upstream-version-gated",
+        "tests/version_consistency.rs via cargo test --workspace\n",
+    )
+    _, out = run(ecosystem, "--upstream-version", "0.15.1", "--notify", "--dry-run")
+    assert "NOTIFY" not in out, out
+    assert "gates upstream-version prose itself" in out, out
+
+
+def test_self_gate_does_not_suppress_a_blocked_range(ecosystem: Path) -> None:
+    """The marker covers internal prose consistency only: that a *new upstream
+    version exists* is knowledge the downstream's own gate cannot have."""
+    _write(
+        ecosystem / "downstream" / ".upstream-version-gated",
+        "tests/version_consistency.rs\n",
+    )
+    _, out = run(ecosystem, "--upstream-version", "0.16.0", "--notify", "--dry-run")
+    assert "NOTIFY downstream" in out, out
+    assert "BLOCKED" in out, out
