@@ -687,6 +687,10 @@ When a plan has Steps 1 / 2 / 3 / …:
    phases, or before stepping away — not reflexively after each commit.
    `ci.yml` cancels superseded in-flight PR runs, so a follow-up push is
    cheap, but the habit should still be batching, with a final push covering
-   the completed plan.
+   the completed plan. **Run `make gate-push` once immediately before each
+   push** — it adds the CI-only checks that historically reddened first in CI
+   (public-API baselines, source quality, lint allowances, workspace clippy,
+   the `RUST_STABLE` toolchain-pin match). Per push, not per phase; a red
+   there costs seconds locally and a full 20-job round-trip in CI.
 6. **End with a perf gate — only if the plan touched perf-sensitive paths** (`core/pattern_matching/`, `cypher/executor/`, storage hot paths). Then run new + existing benchmarks per the Performance protocol above before the final release commit, and record the numbers in the release commit message or `[x.y.z]` CHANGELOG block. Fix regressions before the release commit, not in a follow-up. A plan that touched none of those paths skips this — CI's Linux perf gate and the release-time baseline capture cover it.
 7. **Final commit is the version bump + CHANGELOG promotion.** No earlier phase touches `Cargo.toml`. User pushes once.
