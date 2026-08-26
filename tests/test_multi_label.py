@@ -763,3 +763,62 @@ def test_save_subset_roundtrips_secondary_labels(g, tmp_path):
     loaded = kglite.load(str(out))
     rows = loaded.cypher("MATCH (n:VIP) RETURN n.id AS id").to_list()
     assert [r["id"] for r in rows] == [1]
+
+
+# ─── label alternation (n:A|B) ─────────────────────────────────────────────
+
+
+def test_alternation_unions_and_dedups(multi_label_graph):
+    g = multi_label_graph
+    rows = g.cypher("MATCH (n:Person|Company) RETURN n.id AS id").to_list()
+    assert len(rows) == 10  # 8 persons + 2 companies, each exactly once
+    # P2/P3/P5 carry :VIP secondarily; C1 too — union with Person must not
+    # double-count the person carriers.
+    assert g.cypher("MATCH (n:Person|VIP) RETURN count(n) AS c").scalar() == 9
+    ids = [r["id"] for r in g.cypher("MATCH (n:VIP|Staff) RETURN n.id AS id ORDER BY id").to_list()]
+    assert ids == ["C1", "P2", "P3", "P5"]
+
+
+def test_alternation_with_property_filter(multi_label_graph):
+    rows = multi_label_graph.cypher("MATCH (n:Person|Company {name: 'Acme'}) RETURN n.id AS id").to_list()
+    assert [r["id"] for r in rows] == ["C1"]
+
+
+def test_alternation_where_and_prebound(multi_label_graph):
+    g = multi_label_graph
+    ids = [
+        r["id"]
+        for r in g.cypher("MATCH (n) WITH n MATCH (m:VIP|Staff) WHERE m = n RETURN m.id AS id ORDER BY id").to_list()
+    ]
+    assert ids == ["C1", "P2", "P3", "P5"]
+
+
+def test_alternation_dynamic_params(multi_label_graph):
+    rows = multi_label_graph.cypher(
+        "MATCH (n:$a|$b) RETURN n.id AS id ORDER BY id",
+        params={"a": "VIP", "b": "Staff"},
+    ).to_list()
+    assert [r["id"] for r in rows] == ["C1", "P2", "P3", "P5"]
+
+
+def test_alternation_mixing_and_write_rejections(multi_label_graph):
+    g = multi_label_graph
+    with pytest.raises(Exception, match="Cannot mix label alternation"):
+        g.cypher("MATCH (n:Person|VIP:Staff) RETURN n")
+    with pytest.raises(Exception):
+        g.cypher("CREATE (n:Person|Company {id: 'X1', name: 'x'})")
+    with pytest.raises(Exception):
+        g.cypher("MATCH (n:Person) SET n:VIP|Staff")
+
+
+def test_exists_fast_path_sees_secondary_peer(multi_label_graph):
+    # Red-first 2026-08-26: the EXISTS fast path compared primary types only
+    # and answered no rows for a secondary-carried :VIP peer.
+    g = multi_label_graph
+    ids = [
+        r["id"]
+        for r in g.cypher(
+            "MATCH (a:Person) WHERE EXISTS { MATCH (a)-[:KNOWS]->(:VIP) } RETURN a.id AS id ORDER BY id"
+        ).to_list()
+    ]
+    assert ids == ["P1", "P2", "P4", "P5"]

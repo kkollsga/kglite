@@ -237,7 +237,7 @@ pub(crate) fn fuse_count_short_circuits(
         // `node_labels`. (Single-label secondary counts ARE handled — the
         // FusedCountTypedNode executor unions the primary + secondary
         // buckets for `node_type`.)
-        if !node.extra_labels.is_empty() {
+        if node.multi_label_constrained() {
             return;
         }
 
@@ -322,10 +322,10 @@ pub(crate) fn fuse_count_short_circuits(
 
         // Both nodes must be anonymous/unfiltered
         if src_node.node_type.is_some()
-            || !src_node.extra_labels.is_empty()
+            || src_node.multi_label_constrained()
             || src_node.properties.is_some()
             || tgt_node.node_type.is_some()
-            || !tgt_node.extra_labels.is_empty()
+            || tgt_node.multi_label_constrained()
             || tgt_node.properties.is_some()
         {
             return;

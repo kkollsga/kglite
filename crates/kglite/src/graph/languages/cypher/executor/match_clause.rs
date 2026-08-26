@@ -805,6 +805,47 @@ impl<'a> CypherExecutor<'a> {
     /// from the outer row, we can check edge existence directly via
     /// `edges_directed_filtered()` instead of creating a full PatternExecutor.
     /// Returns `Some(true/false)` if the fast path applies, `None` otherwise.
+    /// Union-correct label test for the anchored fast paths: a node
+    /// satisfies the pattern when ANY alternation branch (or the single
+    /// type) holds — through primary type OR secondary carriage — and every
+    /// `:A:B` extra holds. The primary-only compares this replaces missed
+    /// secondary carriers: the EXISTS fast path answered "no rows" for
+    /// `(a)-[:E]->(:VIP)` when :VIP was carried as a secondary label
+    /// (pinned red-first in the differential corpus, 2026-08-26).
+    /// True when a primary-type-only compare would under-match this
+    /// pattern: it is alternation/AND-chain shaped, or its single label has
+    /// secondary carriers.
+    fn pattern_needs_union_semantics(
+        &self,
+        np: &crate::graph::core::pattern_matching::NodePattern,
+    ) -> bool {
+        np.multi_label_constrained()
+            || (self.graph.has_secondary_labels
+                && np.node_type.as_deref().is_some_and(|t| {
+                    self.graph
+                        .secondary_label_index
+                        .contains_key(&InternedKey::from_str(t))
+                }))
+    }
+
+    fn node_satisfies_pattern_labels(
+        &self,
+        idx: NodeIndex,
+        np: &crate::graph::core::pattern_matching::NodePattern,
+    ) -> bool {
+        let alts = np.label_alternatives();
+        if !alts.is_empty()
+            && !alts
+                .iter()
+                .any(|l| self.graph.node_has_label(idx, InternedKey::from_str(l)))
+        {
+            return false;
+        }
+        np.extra_labels
+            .iter()
+            .all(|l| self.graph.node_has_label(idx, InternedKey::from_str(l)))
+    }
+
     pub(super) fn try_fast_exists_check(
         &self,
         patterns: &[Pattern],
@@ -900,15 +941,10 @@ impl<'a> CypherExecutor<'a> {
                 edge_ref.source()
             };
 
-            // Check target node type (O(1) mmap read, no materialization)
-            if let Some(ref req_type) = other_node.node_type {
-                if let Some(nt) = self.graph.graph.node_type_of(other_idx) {
-                    if self.graph.interner.resolve(nt) != req_type {
-                        continue;
-                    }
-                } else {
-                    continue;
-                }
+            // Union-correct label check (primary OR secondary carriage,
+            // alternation-aware) — see `node_satisfies_pattern_labels`.
+            if !self.node_satisfies_pattern_labels(other_idx, other_node) {
+                continue;
             }
 
             // Check target node inline properties — bail to slow path
@@ -1057,8 +1093,9 @@ impl<'a> CypherExecutor<'a> {
             &'p Option<String>,
             &'p Option<HashMap<String, PropertyMatcher>>,
             &'p [Direction],
+            &'p crate::graph::core::pattern_matching::NodePattern,
         );
-        let (bound_idx, other_type, other_props, traverse_dirs): CountFastPath =
+        let (bound_idx, other_type, other_props, traverse_dirs, other_pattern): CountFastPath =
             match (a_bound, b_bound) {
                 (None, Some(b_idx)) => {
                     let dirs: &[Direction] = match edge.direction {
@@ -1066,7 +1103,7 @@ impl<'a> CypherExecutor<'a> {
                         EdgeDirection::Incoming => &[Direction::Outgoing], // (a)<-b: b has outgoing
                         EdgeDirection::Both => &[Direction::Outgoing, Direction::Incoming],
                     };
-                    (b_idx, &node_a.node_type, &node_a.properties, dirs)
+                    (b_idx, &node_a.node_type, &node_a.properties, dirs, node_a)
                 }
                 (Some(a_idx), None) => {
                     let dirs: &[Direction] = match edge.direction {
@@ -1074,7 +1111,7 @@ impl<'a> CypherExecutor<'a> {
                         EdgeDirection::Incoming => &[Direction::Incoming],
                         EdgeDirection::Both => &[Direction::Outgoing, Direction::Incoming],
                     };
-                    (a_idx, &node_b.node_type, &node_b.properties, dirs)
+                    (a_idx, &node_b.node_type, &node_b.properties, dirs, node_b)
                 }
                 _ => return Ok(None), // both bound or neither bound — fall back
             };
@@ -1095,7 +1132,14 @@ impl<'a> CypherExecutor<'a> {
         // Distinct-peer counting can't use it (needs peer identity, not an
         // edge count); when a filter is set we fall through — the slow loop
         // below checks each edge without ever building a row.
-        if !distinct_peers && other_props.is_none() && edge.edge_filter.is_none() {
+        // `count_edges_filtered` compares primary types only; a peer label
+        // with secondary carriers (or an alternation / extras pattern) must
+        // take the slow loop, whose per-peer check is union-correct.
+        if !self.pattern_needs_union_semantics(other_pattern)
+            && !distinct_peers
+            && other_props.is_none()
+            && edge.edge_filter.is_none()
+        {
             let mut count: usize = 0;
             for &dir in traverse_dirs {
                 count = count.saturating_add(conn_filter.try_fold_counts(|conn| {
@@ -1173,14 +1217,8 @@ impl<'a> CypherExecutor<'a> {
                     continue;
                 }
 
-                if let Some(required_type) = interned_other_type {
-                    if let Some(nt) = self.graph.graph.node_type_of(other_idx) {
-                        if nt != required_type {
-                            continue;
-                        }
-                    } else {
-                        continue;
-                    }
+                if !self.node_satisfies_pattern_labels(other_idx, other_pattern) {
+                    continue;
                 }
 
                 if let Some(filter) = edge_filter {
@@ -1313,16 +1351,12 @@ impl<'a> CypherExecutor<'a> {
         let interned_conn2 = conn_filter2.hint();
 
         // Node-type check without materialization (O(1) mmap read on disk).
-        let node_type_matches = |idx: NodeIndex, want: &Option<String>| -> bool {
-            match want {
-                None => true,
-                Some(want_ty) => self
-                    .graph
-                    .graph
-                    .node_type_of(idx)
-                    .is_some_and(|nt| self.graph.interner.resolve(nt) == *want_ty),
-            }
-        };
+        // Union-correct (primary OR secondary carriage, alternation-aware);
+        // the primary-only compare this replaces shares the EXISTS fast
+        // path's missed-secondary-carrier bug class.
+        let node_type_matches = |idx: NodeIndex,
+                                 np: &crate::graph::core::pattern_matching::NodePattern|
+         -> bool { self.node_satisfies_pattern_labels(idx, np) };
 
         let mut total: i64 = 0;
         let mut work = 0usize;
@@ -1345,7 +1379,7 @@ impl<'a> CypherExecutor<'a> {
             } else {
                 e1_ref.source()
             };
-            if !node_type_matches(mid_idx, &mid_node.node_type) {
+            if !node_type_matches(mid_idx, mid_node) {
                 continue;
             }
 
@@ -1367,7 +1401,7 @@ impl<'a> CypherExecutor<'a> {
                 } else {
                     e2_ref.source()
                 };
-                if !node_type_matches(end_idx, &end_node.node_type) {
+                if !node_type_matches(end_idx, end_node) {
                     continue;
                 }
                 total += 1;

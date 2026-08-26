@@ -38,7 +38,7 @@ fn match_var_labels<'q>(query: &'q CypherQuery, graph: &DirGraph) -> HashMap<&'q
                         if let (Some(var), Some(label)) =
                             (np.variable.as_deref(), np.node_type.as_deref())
                         {
-                            if np.extra_labels.is_empty()
+                            if !np.multi_label_constrained()
                                 && graph.node_type_metadata.contains_key(label)
                             {
                                 var_label.insert(var, label);
@@ -470,7 +470,7 @@ fn endpoint_label<'s>(
     var_label: &HashMap<&'s str, &'s str>,
     graph: &DirGraph,
 ) -> Option<&'s str> {
-    if !node.extra_labels.is_empty() {
+    if node.multi_label_constrained() {
         return None;
     }
     if let Some(label) = node.node_type.as_deref() {
@@ -585,6 +585,27 @@ pub(crate) fn collect_query_warnings(
         for element in &pattern.elements {
             match element {
                 PatternElement::Node(np) if have_node_schema => {
+                    // Mirror the relationship-alternation rule three arms up:
+                    // a node matches through ANY branch, so one unknown
+                    // branch only means "returns no rows" when every branch
+                    // is unknown.
+                    if np.alt_labels.is_some() {
+                        let label_known = |label: &String| {
+                            graph.node_type_metadata.contains_key(label)
+                                || graph.type_indices.contains_key(label)
+                                || graph
+                                    .secondary_label_index
+                                    .contains_key(&InternedKey::from_str(label))
+                        };
+                        if !np.label_alternatives().iter().any(label_known) {
+                            for label in np.label_alternatives() {
+                                if seen.insert(format!("L:{label}")) {
+                                    unknown_labels.push(label.clone());
+                                }
+                            }
+                        }
+                        continue;
+                    }
                     for label in np.node_type.iter().chain(np.extra_labels.iter()) {
                         // A label is known if it's a declared primary
                         // type OR a secondary label applied via

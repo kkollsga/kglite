@@ -12,8 +12,11 @@ Neo4j implementation. For a quick overview, see the [Cypher guide](https://kglit
 [0.13 → 0.14 migration](https://kglite.readthedocs.io/en/latest/python/migrations/0.13-to-0.14.html)
 
 > **Label model:** Each node has one immutable **primary** type plus optional
-> secondary labels. `CREATE (n:A:B)`, `SET n:B`, `REMOVE n:B`, and
-> `MATCH (n:A:B)` all work; `labels(n)` returns the primary type first.
+> secondary labels. `CREATE (n:A:B)`, `SET n:B`, `REMOVE n:B`,
+> `MATCH (n:A:B)` (AND), and `MATCH (n:A|B)` (OR — reading patterns only;
+> mixing `|` with a `:` chain is a parse error, and `|` is refused in
+> CREATE/MERGE/SET/REMOVE) all work; `labels(n)` returns the primary type
+> first.
 > `SET n.type = 'NewType'` only writes a property—it does not retype the node.
 > To change the primary type, migrate/recreate the node under the new schema.
 

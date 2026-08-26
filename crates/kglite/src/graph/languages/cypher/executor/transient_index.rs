@@ -60,7 +60,7 @@ impl TransientEqIndex {
         let np = extract_single_node_pattern(pattern)?;
         // Multi-label patterns (`MATCH (n:A:B)`) need a label intersection
         // the single-property eq-index can't express — fall to the matcher.
-        if !np.extra_labels.is_empty() {
+        if np.multi_label_constrained() {
             return None;
         }
         let node_type = np.node_type.as_deref()?.to_string();

@@ -108,8 +108,8 @@
     {
       "path": "crates/kglite/src/graph/core/pattern_matching/matcher.rs",
       "qualified_name": "crate::PatternExecutor<'a>::find_matching_nodes",
-      "lines": 202,
-      "branches": 43,
+      "lines": 231,
+      "branches": 47,
       "nesting": 7
     },
     {

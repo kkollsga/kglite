@@ -269,11 +269,29 @@ fn resolve_pattern(pattern: &mut Pattern, params: &HashMap<String, Value>) -> Re
             PatternElement::Node(node) => {
                 if !node.label_params.is_empty() {
                     let mut markers = std::mem::take(&mut node.label_params);
-                    apply(&mut markers, params, |slot, name| match slot {
-                        0 => node.node_type = Some(name.to_string()),
-                        n => {
-                            if let Some(extra) = node.extra_labels.get_mut(n - 1) {
-                                *extra = name.to_string();
+                    let in_alternation = node.alt_labels.is_some();
+                    apply(&mut markers, params, |slot, name| {
+                        // Under alternation the slot indexes `alt_labels`
+                        // (0 = first branch, which mirrors into `node_type`
+                        // — the edge side's convention). Otherwise slot 0 is
+                        // `node_type` and n>0 indexes `extra_labels[n-1]`.
+                        if in_alternation {
+                            if let Some(alts) = &mut node.alt_labels {
+                                if let Some(branch) = alts.get_mut(slot) {
+                                    *branch = name.to_string();
+                                }
+                            }
+                            if slot == 0 {
+                                node.node_type = Some(name.to_string());
+                            }
+                        } else {
+                            match slot {
+                                0 => node.node_type = Some(name.to_string()),
+                                n => {
+                                    if let Some(extra) = node.extra_labels.get_mut(n - 1) {
+                                        *extra = name.to_string();
+                                    }
+                                }
                             }
                         }
                     })?;

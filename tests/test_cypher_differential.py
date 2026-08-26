@@ -2469,6 +2469,47 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (a:Person)-[:KNOWS]->(b:Person:VIP) RETURN a.id AS a, count(b) AS c ORDER BY a",
         None,
     ),
+    # Label alternation `(n:A|B)` (E4): union across primary types and
+    # secondary carriers, deduped (P5 is :Person primary + :VIP + :Staff;
+    # C1 is :Company primary + :VIP).
+    (
+        "ml_alt_two_primaries",
+        "multi_label_graph",
+        "MATCH (n:Person|Company) RETURN n.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "ml_alt_primary_and_secondary_dedup",
+        "multi_label_graph",
+        "MATCH (n:Person|VIP) RETURN count(n) AS c",
+        None,
+    ),
+    (
+        "ml_alt_secondary_pair",
+        "multi_label_graph",
+        "MATCH (n:VIP|Staff) RETURN n.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "ml_alt_property_filter",
+        "multi_label_graph",
+        "MATCH (n:Person|Company {name: 'Acme'}) RETURN n.id AS id",
+        None,
+    ),
+    (
+        "ml_alt_edge_endpoint",
+        "multi_label_graph",
+        "MATCH (a:Person)-[:KNOWS]->(b:VIP|Staff) RETURN a.id AS a, b.id AS b ORDER BY a, b",
+        None,
+    ),
+    # EXISTS fast path over a secondary-carried peer — pinned red-first
+    # 2026-08-26: the primary-only compare answered zero rows.
+    (
+        "ml_exists_secondary_peer",
+        "multi_label_graph",
+        "MATCH (a:Person) WHERE EXISTS { MATCH (a)-[:KNOWS]->(:VIP) } RETURN a.id AS id ORDER BY id",
+        None,
+    ),
     # KG-2 soft keywords as names — these don't match the social_graph
     # fixture (no CONTAINS edges / labels), but they must PARSE, plan, and
     # execute consistently under optimised vs naive passes (the optimiser

@@ -162,6 +162,7 @@ fn anonymous_intermediate() -> NodePattern {
         variable: None,
         node_type: None,
         extra_labels: Vec::new(),
+        alt_labels: None,
         properties: None,
         label_params: Vec::new(),
     }

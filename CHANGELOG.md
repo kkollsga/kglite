@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Label expressions in reading patterns**: `MATCH (n:Law|Regulation)`
+  matches through any listed label, primary or secondary carriage, deduped
+  (Cypher 25 / GQL alternation; the exact shape a declared supertype
+  compiles away, and useful without one). Alternation and the `:A:B` AND
+  chain don't mix in one pattern (parse error, so no precedence is silently
+  committed to), `|` is refused in CREATE/MERGE/SET/REMOVE, and `$param`
+  branches work (`(n:$a|$b)`).
 - **Ontology declaration layer** (annotations, not axioms — SKOS in spirit,
   never OWL; it never changes what a query matches). `define_ontology()` /
   `ontology()` / `clear_ontology()` install a persisted store of classes

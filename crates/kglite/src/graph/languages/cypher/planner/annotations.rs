@@ -576,7 +576,7 @@ fn mark_skip_target_type_check(query: &mut CypherQuery, graph: &DirGraph) {
                     // PRIMARY type. If the pattern also carries secondary
                     // labels (`(b:Type:Extra)`), skipping the check would drop
                     // the `:Extra` filter — never skip in that case.
-                    if !target.extra_labels.is_empty() {
+                    if target.multi_label_constrained() {
                         continue;
                     }
                     // An alternation's guarantee is the conjunction over its

@@ -919,14 +919,36 @@ fn validate_pattern(pattern: &Pattern, graph: &DirGraph) -> Result<(), SchemaErr
             // outer mistake — rather than a property of a type that does
             // not exist.
             if graph.schema_locked {
-                for label in np.node_type.iter().chain(np.extra_labels.iter()) {
+                // Every alternation branch is validated too — typo-catching
+                // is the lock's whole point, and one bad branch of `:A|Byp`
+                // is the same class of mistake as `:Byp` alone.
+                for label in np.label_alternatives().iter().chain(np.extra_labels.iter()) {
                     validate_label(label, graph)?;
                 }
             }
-            if let Some(ref node_type) = np.node_type {
-                if let Some(ref props) = np.properties {
-                    for prop_name in props.keys() {
-                        validate_property(node_type, prop_name, graph)?;
+            if np.alt_labels.is_none() {
+                if let Some(ref node_type) = np.node_type {
+                    if let Some(ref props) = np.properties {
+                        for prop_name in props.keys() {
+                            validate_property(node_type, prop_name, graph)?;
+                        }
+                    }
+                }
+            } else if let Some(ref props) = np.properties {
+                // `(n:A|B {p: 1})`: `p` must exist on at least ONE branch —
+                // validating against branch 0 alone would falsely reject a
+                // property that only B carries.
+                for prop_name in props.keys() {
+                    if !np
+                        .label_alternatives()
+                        .iter()
+                        .any(|t| validate_property(t, prop_name, graph).is_ok())
+                    {
+                        validate_property(
+                            np.node_type.as_deref().unwrap_or_default(),
+                            prop_name,
+                            graph,
+                        )?;
                     }
                 }
             }

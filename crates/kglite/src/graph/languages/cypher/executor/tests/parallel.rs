@@ -602,6 +602,7 @@ fn parallel_candidate_scan_is_interruptible_mid_scan() {
         variable: Some("n".to_string()),
         node_type: Some("Item".to_string()),
         extra_labels: Vec::new(),
+        alt_labels: None,
         properties: Some(HashMap::from([(
             "cat".to_string(),
             PropertyMatcher::Equals(Value::String("cat_3".to_string())),

@@ -79,7 +79,7 @@ fn collect_node_types(m: &MatchClause) -> Vec<String> {
     for pattern in &m.patterns {
         for element in &pattern.elements {
             if let PatternElement::Node(np) = element {
-                if let Some(ref t) = np.node_type {
+                for t in np.label_alternatives() {
                     types.push(t.clone());
                 }
             }
@@ -204,6 +204,9 @@ fn explain_node_display(node: Option<&NodePattern>) -> String {
     let Some(primary) = node.node_type.as_deref() else {
         return "()".to_string();
     };
+    if let Some(alts) = &node.alt_labels {
+        return format!("(:{})", alts.join("|"));
+    }
     let mut out = format!("(:{primary}");
     for label in &node.extra_labels {
         out.push(':');

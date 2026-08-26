@@ -127,6 +127,22 @@ pub(super) fn estimate_node_selectivity(
     np: &crate::graph::core::pattern_matching::NodePattern,
     graph: &DirGraph,
 ) -> usize {
+    // Alternation: the candidate set is the branch union, so the estimate
+    // is the branch sum (an upper bound — overlap only lowers it).
+    if let Some(alts) = &np.alt_labels {
+        let total: usize = alts
+            .iter()
+            .map(|label| {
+                let primary = graph.type_indices.get(label).map_or(0, |i| i.len());
+                let secondary = graph
+                    .secondary_label_index
+                    .get(&crate::graph::schema::InternedKey::from_str(label))
+                    .map_or(0, Vec::len);
+                primary.saturating_add(secondary)
+            })
+            .sum();
+        return total.max(1);
+    }
     let (type_count, secondary_count) = np.node_type.as_ref().map_or_else(
         || (GraphRead::node_count(&graph.graph), 0),
         |node_type| {

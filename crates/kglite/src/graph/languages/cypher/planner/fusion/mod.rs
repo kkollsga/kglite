@@ -37,7 +37,7 @@ pub(super) fn multi_label_fuse_unsafe(
     if !graph.has_secondary_labels {
         return false;
     }
-    if !np.extra_labels.is_empty() {
+    if np.multi_label_constrained() {
         return true;
     }
     np.node_type.as_deref().is_some_and(|node_type| {

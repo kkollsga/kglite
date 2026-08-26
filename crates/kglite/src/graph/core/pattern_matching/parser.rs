@@ -454,9 +454,41 @@ impl Parser {
             _ => {}
         }
 
+        // Label alternation `:A|B|C` (Cypher 25 / GQL OR) — mirrors the
+        // relationship alternation in `parse_edge_pattern`. Mutually
+        // exclusive with the `:A:B` AND-chain below: `:A|B:C` has a
+        // precedence this dialect does not implement, so mixing is a parse
+        // error rather than a silent commitment.
+        let mut alt_labels: Option<Vec<String>> = None;
+        while let Some(Token::Pipe) = self.peek() {
+            if node_type.is_none() {
+                return Err("Label alternation needs a first label: (n:A|B)".to_string());
+            }
+            self.advance(); // consume |
+            let (name, param) = self.expect_label_name(
+                "Expected node label name after '|'. Example: (n:Law|Regulation)",
+            )?;
+            let alts = alt_labels.get_or_insert_with(|| vec![node_type.clone().unwrap()]);
+            if !alts.contains(&name) {
+                alts.push(name);
+            }
+            if let Some(param) = param {
+                label_params.push(ParamLabel {
+                    slot: alts.len() - 1,
+                    param,
+                });
+            }
+        }
+
         // Multi-label suffix: `:A:B:C` collects any extras after the
         // first label. The executor AND-intersects across all labels.
         while let Some(Token::Colon) = self.peek() {
+            if alt_labels.is_some() {
+                return Err(
+                    "Cannot mix label alternation '|' with a ':' label chain in one node                      pattern — write (n:A|B) or (n:A:B), or split the predicate into WHERE"
+                        .to_string(),
+                );
+            }
             self.advance(); // consume :
             let (name, param) = self.expect_label_name(
                 "Expected node label name after ':'. Example: (n:Person:Manager)",
@@ -469,6 +501,9 @@ impl Parser {
                 });
             }
         }
+        if alt_labels.is_some() && self.peek() == Some(&Token::Pipe) {
+            return Err("Unexpected '|' after the label alternation".to_string());
+        }
 
         if let Some(Token::LBrace) = self.peek() {
             properties = Some(self.parse_properties()?);
@@ -480,6 +515,7 @@ impl Parser {
             variable,
             node_type,
             extra_labels,
+            alt_labels,
             properties,
             label_params,
         })

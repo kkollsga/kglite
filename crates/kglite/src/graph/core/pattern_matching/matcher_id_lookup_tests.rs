@@ -293,6 +293,7 @@ fn untyped_lookup(
         variable: None,
         node_type: None,
         extra_labels: Vec::new(),
+        alt_labels: None,
         properties: Some(props),
         label_params: Vec::new(),
     };

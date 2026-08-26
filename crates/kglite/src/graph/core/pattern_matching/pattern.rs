@@ -25,14 +25,46 @@ pub enum PatternElement {
 #[derive(Debug, Clone)]
 pub struct NodePattern {
     pub variable: Option<String>,
+    /// The first (or only) label. Under alternation this is `alt_labels[0]`
+    /// — a consumer that reads it alone silently narrows the pattern to one
+    /// branch, the exact wrong-answer class `EdgePattern::conn_filter`'s doc
+    /// records four separate bugs for on the edge side. Route through
+    /// [`NodePattern::label_alternatives`] /
+    /// [`NodePattern::multi_label_constrained`].
     pub node_type: Option<String>,
+    /// `:A:B` AND-chain extras. Empty whenever `alt_labels` is set —
+    /// alternation and conjunction are mutually exclusive in v1 (mixing is
+    /// a parse error, so no precedence is silently committed to).
     pub extra_labels: Vec<String>,
+    /// `:A|B|C` alternation, every branch including the first. `None` for
+    /// plain patterns.
+    pub alt_labels: Option<Vec<String>>,
     pub properties: Option<HashMap<String, PropertyMatcher>>,
     /// Label slots written as a parameter (`(n:$label)`), pending
     /// [`crate::graph::languages::cypher::dynamic_labels::resolve`]. See
     /// [`ParamLabel`] — empty for every literal pattern, and empty for every
     /// pattern that reaches the planner.
     pub label_params: Vec<ParamLabel>,
+}
+
+impl NodePattern {
+    /// All labels a node may match through: the alternation branches, or
+    /// the single `node_type`. Empty slice for untyped patterns.
+    pub fn label_alternatives(&self) -> &[String] {
+        match &self.alt_labels {
+            Some(alts) => alts.as_slice(),
+            None => self.node_type.as_slice(),
+        }
+    }
+
+    /// True when the pattern constrains labels beyond one primary-or-single
+    /// label — an AND-chain (`extra_labels`) or an alternation. The single
+    /// guard consumers that only understand the plain shape must use
+    /// (replacing the old `!extra_labels.is_empty()` idiom, which alternation
+    /// would silently walk past).
+    pub fn multi_label_constrained(&self) -> bool {
+        !self.extra_labels.is_empty() || self.alt_labels.is_some()
+    }
 }
 
 /// Pattern for matching edges: -[:TYPE {prop: value}]->

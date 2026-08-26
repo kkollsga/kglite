@@ -375,7 +375,7 @@ impl<'a> CypherExecutor<'a> {
             // String binding for every candidate before aggregation.
             let direct_group_nodes = match &pattern.elements[group_elem_idx] {
                 PatternElement::Node(node)
-                    if node.extra_labels.is_empty()
+                    if !node.multi_label_constrained()
                         && node.properties.as_ref().is_none_or(|props| props.is_empty()) =>
                 {
                     node.node_type
@@ -595,7 +595,7 @@ impl<'a> CypherExecutor<'a> {
                 &pattern.elements[other_elem_idx],
                 PatternElement::Node(np)
                     if np.node_type.is_none()
-                        && np.extra_labels.is_empty()
+                        && !np.multi_label_constrained()
                         && np.properties.as_ref().is_none_or(|props| props.is_empty())
             );
             let edge_histogram_safe = matches!(
@@ -921,7 +921,7 @@ impl<'a> CypherExecutor<'a> {
                 &pattern.elements[other_elem_idx_nontopk],
                 PatternElement::Node(np)
                     if np.node_type.is_none()
-                        && np.extra_labels.is_empty()
+                        && !np.multi_label_constrained()
                         && np.properties.as_ref().is_none_or(|props| props.is_empty())
             );
             let edge_histogram_safe_nontopk = matches!(
@@ -2147,7 +2147,7 @@ impl<'a> CypherExecutor<'a> {
             let other_elem_idx = if group_elem_idx == 0 { 2 } else { 0 };
             let other = match &pattern.elements[other_elem_idx] {
                 PatternElement::Node(node)
-                    if node.extra_labels.is_empty()
+                    if !node.multi_label_constrained()
                         && node.properties.as_ref().is_none_or(|props| props.is_empty()) =>
                 {
                     Some(node)

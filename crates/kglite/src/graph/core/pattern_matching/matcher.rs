@@ -573,10 +573,15 @@ impl<'a> PatternExecutor<'a> {
         if let Some(ref var) = pattern.variable {
             if let Some(&idx) = self.pre_bindings.get(var) {
                 if let Some(node) = self.graph.graph.node_view(idx) {
-                    if let Some(ref node_type) = pattern.node_type {
-                        let primary_key = InternedKey::from_str(node_type);
+                    if pattern.node_type.is_some() {
                         let labels = self.graph.node_labels(idx);
-                        if !labels.contains(&primary_key) {
+                        // Alternation: ANY branch may carry the binding;
+                        // plain/AND-chain: the type plus every extra must.
+                        let alts = pattern.label_alternatives();
+                        if !alts
+                            .iter()
+                            .any(|l| labels.contains(&InternedKey::from_str(l)))
+                        {
                             return Ok(vec![]);
                         }
                         for extra in &pattern.extra_labels {
@@ -606,6 +611,30 @@ impl<'a> PatternExecutor<'a> {
                 .any(|matcher| matches!(matcher, PropertyMatcher::In(values) if values.is_empty()))
         }) {
             return Ok(Vec::new());
+        }
+
+        // `:A|B|C` alternation: the candidate set is the union of every
+        // branch's primary + secondary carriers. A node can sit in two
+        // branches at once (primary :A, secondary :B), so dedup is
+        // mandatory; sorted output keeps house determinism.
+        if let Some(alts) = &pattern.alt_labels {
+            let mut candidates: Vec<NodeIndex> = Vec::new();
+            for label in alts {
+                candidates.extend(self.graph.nodes_with_label(label));
+            }
+            candidates.sort_unstable();
+            candidates.dedup();
+            if candidates.is_empty() {
+                return Ok(Vec::new());
+            }
+            if pattern.properties.is_none() && extra_keys.is_empty() {
+                return Ok(candidates);
+            }
+            return self.filter_node_candidates(
+                &candidates,
+                pattern.properties.as_ref(),
+                &extra_keys,
+            );
         }
 
         if let Some(ref node_type) = pattern.node_type {
@@ -1598,10 +1627,16 @@ impl<'a> PatternExecutor<'a> {
     /// filtering so a typed endpoint like `(b:VIP)` matches nodes carrying
     /// `VIP` as a secondary label, not only as their primary type.
     fn node_matches_pattern_labels(&self, idx: NodeIndex, node_pattern: &NodePattern) -> bool {
-        if let Some(ref nt) = node_pattern.node_type {
-            if !self.graph.node_has_label(idx, InternedKey::from_str(nt)) {
-                return false;
-            }
+        // Alternation: any branch admits; plain patterns are the one-branch
+        // case of the same rule. Extras (empty under alternation) must all
+        // hold.
+        let alts = node_pattern.label_alternatives();
+        if !alts.is_empty()
+            && !alts
+                .iter()
+                .any(|l| self.graph.node_has_label(idx, InternedKey::from_str(l)))
+        {
+            return false;
         }
         node_pattern
             .extra_labels
