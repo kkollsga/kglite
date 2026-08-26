@@ -551,7 +551,16 @@ mod tests {
                 .unwrap_or_else(|| panic!("MUTATING_PROCEDURES names unknown procedure {name}"));
             assert_eq!(spec.name, *name, "use the canonical spelling");
             assert!(is_mutating_procedure(name));
-            assert_eq!(procedure_mode(name), "SCHEMA");
+            // Two mutating families, two honest modes: the CDC lifecycle
+            // verbs change capture configuration (SCHEMA), the table
+            // procedures change data (WRITE). Pinned exactly, so a new
+            // mutating procedure must declare which it is.
+            let expected_mode = if name.starts_with("table.") {
+                "WRITE"
+            } else {
+                "SCHEMA"
+            };
+            assert_eq!(procedure_mode(name), expected_mode);
         }
         assert!(!is_mutating_procedure("db.cdc.query"));
         assert_eq!(procedure_mode("db.cdc.query"), "READ");
