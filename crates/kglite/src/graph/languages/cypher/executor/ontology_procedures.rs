@@ -330,19 +330,56 @@ pub(super) fn execute_ontology_audit(
     if !params.is_empty() {
         return Err("CALL ontology_audit takes no parameters".to_string());
     }
-    if graph.ontology.is_empty() {
-        return Err(
-            "ontology_audit: no ontology declared — define one with define_ontology()".to_string(),
-        );
-    }
-    // Count rows through the same check implementations the no-arg procs
-    // use, with a synthetic YIELD naming each proc's own columns.
     let alias = |name: &str| {
         yield_items
             .iter()
             .find(|y| y.name == name)
             .map(|y| y.alias.clone().unwrap_or_else(|| name.to_string()))
     };
+    let mut out = Vec::new();
+    for line in audit_counts(graph)? {
+        let mut row = ResultRow::new();
+        if let Some(a) = alias("rule") {
+            row.projected.insert(a, Value::String(line.rule));
+        }
+        if let Some(a) = alias("severity") {
+            row.projected
+                .insert(a, Value::String(line.severity.as_str().to_string()));
+        }
+        if let Some(a) = alias("violations") {
+            row.projected
+                .insert(a, Value::Int64(line.violations as i64));
+        }
+        if let Some(a) = alias("total") {
+            row.projected.insert(a, Value::Int64(line.total as i64));
+        }
+        if let Some(a) = alias("pct") {
+            row.projected.insert(a, Value::Float64(line.pct));
+        }
+        out.push(row);
+    }
+    Ok(out)
+}
+
+/// One scorecard line of [`audit_counts`].
+pub(crate) struct AuditLine {
+    pub(crate) rule: String,
+    pub(crate) severity: crate::graph::ontology::Enforcement,
+    pub(crate) violations: usize,
+    pub(crate) total: usize,
+    pub(crate) pct: f64,
+}
+
+/// The audit as data — shared by `CALL ontology_audit()` and the blueprint
+/// gate, which acts on the `severity` this module only reports. Counts run
+/// through the same check implementations as the no-arg procs, with a
+/// synthetic YIELD naming each proc's own columns.
+pub(crate) fn audit_counts(graph: &DirGraph) -> Result<Vec<AuditLine>, String> {
+    if graph.ontology.is_empty() {
+        return Err(
+            "ontology_audit: no ontology declared — define one with define_ontology()".to_string(),
+        );
+    }
     let mut out = Vec::new();
     for (rel, decl) in &graph.ontology.relationships {
         for check in declared_checks(rel, decl) {
@@ -352,28 +389,15 @@ pub(super) fn execute_ontology_audit(
             let pct = if total == 0 {
                 0.0
             } else {
-                violations as f64 / total as f64 * 100.0
+                ((violations as f64 / total as f64 * 100.0) * 10.0).round() / 10.0
             };
-            let mut row = ResultRow::new();
-            if let Some(a) = alias("rule") {
-                row.projected
-                    .insert(a, Value::String(format!("{rel}.{}", check.name())));
-            }
-            if let Some(a) = alias("severity") {
-                row.projected
-                    .insert(a, Value::String(decl.enforcement.as_str().to_string()));
-            }
-            if let Some(a) = alias("violations") {
-                row.projected.insert(a, Value::Int64(violations as i64));
-            }
-            if let Some(a) = alias("total") {
-                row.projected.insert(a, Value::Int64(total as i64));
-            }
-            if let Some(a) = alias("pct") {
-                row.projected
-                    .insert(a, Value::Float64((pct * 10.0).round() / 10.0));
-            }
-            out.push(row);
+            out.push(AuditLine {
+                rule: format!("{rel}.{}", check.name()),
+                severity: decl.enforcement,
+                violations,
+                total,
+                pct,
+            });
         }
     }
     Ok(out)

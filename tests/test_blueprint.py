@@ -1321,3 +1321,84 @@ class TestJunctionRename:
         from_blueprint(bp_path, save=False, verbose=True)
         err = capfd.readouterr().err
         assert "not in 'properties'" in err
+
+
+class TestOntologyGate:
+    def _bp(self, tmp_path, enforcement):
+        persons = pd.DataFrame({"person_id": [1, 2], "name": ["Alice", "Bob"]})
+        _write_csv(tmp_path / "persons.csv", persons)
+        classes = pd.DataFrame({"class_id": [7], "cname": ["Math"]})
+        _write_csv(tmp_path / "classes.csv", classes)
+        enrolled = pd.DataFrame({"source_id": [1], "target_id": [7]})
+        _write_csv(tmp_path / "enrolled.csv", enrolled)
+        (tmp_path / "school.ontology.json").write_text(
+            json.dumps(
+                {
+                    "relationships": {
+                        "ENROLLED_IN": {
+                            "domain": "Person",
+                            "range": "Class",
+                            # Bob has no enrollment -> 1 violation
+                            "required": True,
+                            "enforcement": enforcement,
+                        }
+                    }
+                }
+            )
+        )
+        bp = {
+            "settings": {"root": str(tmp_path), "output": "out.kgl"},
+            "ontology": "school.ontology.json",
+            "nodes": {
+                "Person": {
+                    "csv": "persons.csv",
+                    "pk": "person_id",
+                    "title": "name",
+                    "connections": {
+                        "junction_edges": {
+                            "ENROLLED_IN": {
+                                "csv": "enrolled.csv",
+                                "source_fk": "source_id",
+                                "target": "Class",
+                                "target_fk": "target_id",
+                            }
+                        }
+                    },
+                },
+                "Class": {"csv": "classes.csv", "pk": "class_id", "title": "cname"},
+            },
+        }
+        bp_path = tmp_path / "blueprint.json"
+        _write_blueprint(bp_path, bp)
+        return bp_path
+
+    def test_error_enforcement_fails_build_and_writes_nothing(self, tmp_path):
+        bp_path = self._bp(tmp_path, "error")
+        with pytest.raises(ValueError, match="ontology gate failed"):
+            kglite.from_blueprint(str(bp_path))
+        assert not (tmp_path / "out.kgl").exists()
+
+    def test_warn_enforcement_builds_and_reports(self, tmp_path, capfd):
+        bp_path = self._bp(tmp_path, "warn")
+        graph = kglite.from_blueprint(str(bp_path), save=False, verbose=True)
+        err = capfd.readouterr().err
+        assert "ENROLLED_IN.required: 1/2" in err
+        # The ontology itself is installed and persisted with the graph.
+        assert graph.ontology()["relationships"]["ENROLLED_IN"]["required"] is True
+
+    def test_advisory_enforcement_stays_silent(self, tmp_path, capfd):
+        bp_path = self._bp(tmp_path, "advisory")
+        graph = kglite.from_blueprint(str(bp_path), save=False, verbose=True)
+        err = capfd.readouterr().err
+        assert "ENROLLED_IN.required" not in err
+        # Still available on demand.
+        rows = graph.cypher("CALL ontology_audit() YIELD rule, violations RETURN rule, violations").to_list()
+        assert {r["rule"]: r["violations"] for r in rows}["ENROLLED_IN.required"] == 1
+
+    def test_clean_contract_passes_error_enforcement(self, tmp_path):
+        bp_path = self._bp(tmp_path, "error")
+        # Enroll Bob too -> contract satisfied -> error-level gate passes.
+        enrolled = pd.DataFrame({"source_id": [1, 2], "target_id": [7, 7]})
+        _write_csv(tmp_path / "enrolled.csv", enrolled)
+        graph = kglite.from_blueprint(str(bp_path), save=False)
+        assert graph.shape[0] == 3

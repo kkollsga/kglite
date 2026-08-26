@@ -24,6 +24,13 @@ pub struct Blueprint {
     /// produced by earlier ops.
     #[serde(default)]
     pub compute: Vec<ComputeOp>,
+    /// Path to an ontology declaration document (JSON), resolved relative
+    /// to the blueprint file (config sits with config; CSVs resolve against
+    /// `input_root`). Installed and audited as a final build phase: warn-
+    /// level violations land in the build report, error-level violations
+    /// fail the build after the full report — no output file is written.
+    #[serde(default)]
+    pub ontology: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]

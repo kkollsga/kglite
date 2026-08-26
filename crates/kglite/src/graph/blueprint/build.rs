@@ -202,11 +202,76 @@ pub fn build(
             );
         }
     }
+    // Phase 7: ontology install + gate. Runs after every load phase and
+    // before the caller can save, so an `enforcement: error` violation
+    // means no `.kgl` is ever written (the save lives in the callers).
+    if let Some(ontology_path) = &blueprint.ontology {
+        apply_ontology_gate(graph, ontology_path, blueprint_dir, &mut report)?;
+    }
+
     if profile {
         eprintln!("  TOTAL build: {} ms", t0.elapsed().as_millis());
     }
 
     Ok(report)
+}
+
+/// Install the referenced ontology document and run the declaration audit
+/// with per-declaration severity: `advisory` stays silent (available via
+/// `CALL`s on demand), `warn` lands one summary line per rule in the build
+/// report, `error` collects across ALL rules and then fails once — the
+/// report-all-then-fail shape, so one rebuild fixes everything rather than
+/// one rebuild per violation.
+fn apply_ontology_gate(
+    graph: &mut DirGraph,
+    ontology_path: &str,
+    blueprint_dir: &Path,
+    report: &mut BuildReport,
+) -> Result<(), String> {
+    let resolved = if Path::new(ontology_path).is_absolute() {
+        PathBuf::from(ontology_path)
+    } else {
+        blueprint_dir.join(ontology_path)
+    };
+    let text = std::fs::read_to_string(&resolved)
+        .map_err(|e| format!("ontology: cannot read {}: {e}", resolved.display()))?;
+    let store = crate::graph::ontology::ontology_from_json(&text)
+        .map_err(|e| format!("ontology {}: {e}", resolved.display()))?;
+    report.warnings.extend(
+        graph
+            .define_ontology(store)?
+            .into_iter()
+            .map(|w| format!("ontology: {w}")),
+    );
+
+    use crate::graph::languages::cypher::executor::ontology_procedures::audit_counts;
+    use crate::graph::ontology::Enforcement;
+    let mut errors: Vec<String> = Vec::new();
+    for line in audit_counts(graph)? {
+        if line.violations == 0 {
+            continue;
+        }
+        let summary = format!(
+            "{}: {}/{} ({:.1}%) violations",
+            line.rule, line.violations, line.total, line.pct
+        );
+        match line.severity {
+            Enforcement::Advisory => {}
+            Enforcement::Warn => report.warnings.push(format!("ontology: {summary}")),
+            Enforcement::Error => errors.push(summary),
+        }
+    }
+    if !errors.is_empty() {
+        return Err(format!(
+            "ontology gate failed — {} contract(s) violated:
+  {}
+Fix the data (or lower              the declaration's enforcement) and rebuild; drill into each rule with the              matching CALL procedure (e.g. CALL type_domain_violation()).",
+            errors.len(),
+            errors.join("
+  ")
+        ));
+    }
+    Ok(())
 }
 
 // ─── Spec flattening ──────────────────────────────────────────────────────
