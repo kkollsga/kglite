@@ -231,7 +231,7 @@ impl DirGraph {
             let members: Vec<NodeIndex> = self
                 .secondary_label_index
                 .get(&key)
-                .map(|bucket| bucket.clone())
+                .cloned()
                 .unwrap_or_default();
             for idx in members {
                 // Managed-refusal bypass is deliberate: this IS the exit.

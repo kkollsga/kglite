@@ -63,7 +63,7 @@ pub(crate) mod indexes;
 mod labels;
 pub mod node_remap;
 mod node_write;
-mod ontology_apply;
+pub mod ontology_apply;
 pub mod range_index_layer;
 pub(crate) mod rel_constraints;
 pub(crate) mod rollback;

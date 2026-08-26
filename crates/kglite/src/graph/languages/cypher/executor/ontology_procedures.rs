@@ -75,7 +75,7 @@ pub(super) fn scan_endpoint_mismatch(
             Some(n) => n.node_type_str(&graph.interner).to_string(),
             None => continue,
         };
-        if !accepted.iter().any(|a| *a == actual) {
+        if !accepted.contains(&actual) {
             out.push((er.source(), er.target()));
         }
     }
