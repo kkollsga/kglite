@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.12] - 2026-08-26
+
 ### Fixed
 
 - **Ontology `required_properties` / `property_types` were declared-but-dead**:
