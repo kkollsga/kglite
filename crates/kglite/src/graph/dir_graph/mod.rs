@@ -314,6 +314,12 @@ pub struct DirGraph {
     /// the store on define/clear/load, never persisted.
     #[serde(skip)]
     pub(crate) ontology_closures: HashMap<InternedKey, Vec<InternedKey>>,
+    /// WAL replay sets this while it rebuilds state: the write-funnel
+    /// closure stamp must not run there — the log's whole-set label ops are
+    /// authoritative, and re-deriving would un-apply a logged
+    /// dematerialize. Transient, never persisted.
+    #[serde(skip)]
+    pub(crate) suppress_ontology_stamp: bool,
     /// Free-text instructions/briefing rendered verbatim at the top of
     /// `describe()` so an agent opening the graph cold sees how to use it.
     /// Keyed by channel; the empty string `""` is the default channel (the
@@ -821,6 +827,7 @@ impl DirGraph {
             ontology: Arc::default(),
             managed_labels: std::collections::BTreeMap::new(),
             ontology_closures: HashMap::new(),
+            suppress_ontology_stamp: false,
             graph_instructions: HashMap::new(),
             user_schema_version: 0,
             checkpoint_lsn: 0,
@@ -890,6 +897,7 @@ impl DirGraph {
             ontology: Arc::default(),
             managed_labels: std::collections::BTreeMap::new(),
             ontology_closures: HashMap::new(),
+            suppress_ontology_stamp: false,
             graph_instructions: HashMap::new(),
             user_schema_version: 0,
             checkpoint_lsn: 0,

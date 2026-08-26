@@ -93,6 +93,41 @@ impl DirGraph {
         }
     }
 
+    /// Write-funnel closure maintenance: stamp the declared ancestors onto
+    /// the newest `created` nodes of `node_type` (the type bucket's tail —
+    /// creations append). No-op when nothing is materialized, when the type
+    /// has no declared ancestors, or during WAL replay (see
+    /// `suppress_ontology_stamp`).
+    pub(crate) fn stamp_ontology_closure_on_tail(&mut self, node_type: &str, created: usize) {
+        if created == 0 || self.managed_labels.is_empty() || self.suppress_ontology_stamp {
+            return;
+        }
+        let type_key = InternedKey::from_str(node_type);
+        let ancestors: Vec<InternedKey> = self.ontology_ancestors_of(type_key).to_vec();
+        if ancestors.is_empty() {
+            return;
+        }
+        let Some(nodes) = self.type_indices.get(node_type) else {
+            return;
+        };
+        let all: Vec<NodeIndex> = nodes.iter().collect();
+        let tail: Vec<NodeIndex> = all[all.len().saturating_sub(created)..].to_vec();
+        for ancestor in ancestors {
+            self.add_node_labels_bulk(&tail, ancestor);
+        }
+    }
+
+    /// Batch-funnel arm of the abstract-class refusal (`add_nodes`), with
+    /// the replay suppression folded in: a node created before its type was
+    /// declared abstract must replay.
+    pub(crate) fn reject_abstract_batch_type(&self, node_type: &str) -> Result<(), String> {
+        if self.suppress_ontology_stamp {
+            return Ok(());
+        }
+        crate::graph::languages::cypher::executor::write::reject_abstract_create(self, node_type)
+            .map_err(|e| format!("add_nodes: {e}"))
+    }
+
     /// Stamp every declared ancestor onto its descendants' live nodes, via
     /// the bulk label path (all WAL/CDC/undo hooks fire per node).
     ///

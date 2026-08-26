@@ -275,3 +275,51 @@ def test_clear_ontology_dematerializes_first(mat):
     mat.clear_ontology()
     assert mat.cypher("MATCH (p:Person) RETURN count(p) AS c").scalar() == 0
     assert mat.ontology() is None
+
+
+# ─── write-funnel closure maintenance ──────────────────────────────────────
+
+
+def test_create_stamps_closure(mat):
+    mat.cypher("CREATE (:Student {id: 5, name: 'New'})")
+    assert mat.cypher("MATCH (n:Student {id: 5}) RETURN labels(n) AS l").scalar() == [
+        "Person",
+        "Student",
+    ] or mat.cypher("MATCH (n:Student {id: 5}) RETURN labels(n) AS l").scalar() == [
+        "Student",
+        "Person",
+    ]
+    # Explicit redundant label normalizes to the same set.
+    mat.cypher("CREATE (:Student:Person {id: 6, name: 'Also'})")
+    assert mat.cypher("MATCH (p:Person) RETURN count(p) AS c").scalar() == 5
+    assert mat.ontology_diff() == [{"label": "Person", "state": "closed", "extra": 0, "missing": 0}]
+
+
+def test_add_nodes_stamps_closure(mat):
+    mat.add_nodes(
+        pd.DataFrame({"id": [7, 8], "name": ["a", "b"]}),
+        "Teacher",
+        "id",
+        node_title_field="name",
+    )
+    rows = mat.cypher("MATCH (p:Person) RETURN count(p) AS c").scalar()
+    assert rows == 5
+    assert mat.ontology_diff() == [{"label": "Person", "state": "closed", "extra": 0, "missing": 0}]
+
+
+def test_abstract_create_refused(mat):
+    with pytest.raises(Exception, match="abstract ontology class"):
+        mat.cypher("CREATE (:Person {id: 99, name: 'Ghost'})")
+    with pytest.raises(Exception, match="abstract ontology class"):
+        mat.add_nodes(pd.DataFrame({"id": [99], "name": ["Ghost"]}), "Person", "id", node_title_field="name")
+    # The message names the concrete subtypes.
+    try:
+        mat.cypher("CREATE (:Person {id: 99, name: 'Ghost'})")
+    except Exception as e:
+        assert "Student" in str(e) and "Teacher" in str(e)
+
+
+def test_merge_create_stamps_closure(mat):
+    mat.cypher("MERGE (s:Student {id: 42}) ON CREATE SET s.name = 'Merged'")
+    labels = set(mat.cypher("MATCH (n:Student {id: 42}) RETURN labels(n) AS l").scalar())
+    assert labels == {"Student", "Person"}

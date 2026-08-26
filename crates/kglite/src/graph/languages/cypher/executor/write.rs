@@ -905,6 +905,36 @@ fn create_pattern_edges(
     Ok(())
 }
 
+/// Refuse creating a node whose primary type is a declared **abstract**
+/// class, naming the concrete declared subtypes (built only on the cold
+/// path).
+pub(crate) fn reject_abstract_create(graph: &DirGraph, label: &str) -> Result<(), String> {
+    let Some(decl) = graph.ontology.classes.get(label) else {
+        return Ok(());
+    };
+    if !decl.is_abstract {
+        return Ok(());
+    }
+    let mut concrete: Vec<&str> = graph
+        .ontology
+        .classes
+        .iter()
+        .filter(|(name, d)| {
+            !d.is_abstract && graph.ontology.ancestors(name).iter().any(|a| a == label)
+        })
+        .map(|(name, _)| name.as_str())
+        .collect();
+    concrete.sort_unstable();
+    Err(if concrete.is_empty() {
+        format!("'{label}' is an abstract ontology class and cannot hold nodes")
+    } else {
+        format!(
+            "'{label}' is an abstract ontology class — create one of: {}",
+            concrete.join(", ")
+        )
+    })
+}
+
 fn create_node(
     graph: &mut DirGraph,
     node_pat: &CreateNodePattern,
@@ -986,6 +1016,12 @@ fn create_node(
     // outside the active write whitelist, before any storage mutation.
     enforce_write_scope(graph, &label)?;
 
+    // An abstract ontology class is not creatable — after the security
+    // guard (a caller outside the whitelist must not learn the subtype
+    // list), before the schema-lock check (which would accept a declared
+    // class and lose this message).
+    reject_abstract_create(graph, &label)?;
+
     if graph.schema_locked {
         crate::graph::mutation::validation::validate_node_creation(
             &label,
@@ -1055,6 +1091,18 @@ fn create_node(
     for extra in &node_pat.extra_labels {
         let key = graph.interner.get_or_intern(extra);
         graph.add_node_label(node_idx, key);
+    }
+
+    // Materialized-ontology closure maintenance: a new node of a declared
+    // type carries its ancestors from birth. After the explicit labels, so
+    // `CREATE (:Student:Person)` normalizes to the same set regardless of
+    // order (`add_node_label` is idempotent).
+    if !graph.managed_labels.is_empty() && !graph.suppress_ontology_stamp {
+        let type_key = graph.interner.get_or_intern(&label);
+        let ancestors: Vec<_> = graph.ontology_ancestors_of(type_key).to_vec();
+        for ancestor in ancestors {
+            graph.add_node_label(node_idx, ancestor);
+        }
     }
 
     stats.nodes_created += 1;

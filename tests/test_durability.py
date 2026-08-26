@@ -1969,3 +1969,47 @@ def test_durable_bulk_add_label_survives_hard_crash(tmp_path, storage):
     rows = g.cypher("MATCH (n:VIP) RETURN n.id AS id").to_list()
     assert sorted(r["id"] for r in rows) == [1, 3, 5]
     assert g.cypher("MATCH (n:P {id: 3}) RETURN labels(n) AS l").scalar() == ["P", "VIP"]
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_materialized_ontology_survives_crash(tmp_path, storage):
+    """Materialization stamps through the per-node label hooks, so a crash
+    replays the closure exactly; the write-funnel stamp itself is suppressed
+    during replay (the logged whole-set ops are authoritative)."""
+    _crash_child(
+        tmp_path,
+        """
+        g = open_durable()
+        g.cypher("CREATE (:Student {id: 1, name: 'Ann'})")
+        g.define_ontology({"classes": {"Person": {"abstract": True},
+                                        "Student": {"is_a": "Person"}}})
+        g.materialize_ontology()
+        g.cypher("CREATE (:Student {id: 2, name: 'Bo'})")  # funnel stamp
+        """,
+        storage,
+    )
+    g = _open(tmp_path / "app.kgl", storage)
+    rows = g.cypher("MATCH (p:Person) RETURN p.id AS id").to_list()
+    assert sorted(r["id"] for r in rows) == [1, 2]
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_logged_dematerialize_replays(tmp_path, storage):
+    """The un-apply must recover too: replay may not re-derive the closure a
+    logged dematerialize removed (the exact failure the replay-time stamp
+    suppression exists to prevent)."""
+    _crash_child(
+        tmp_path,
+        """
+        g = open_durable()
+        g.cypher("CREATE (:Student {id: 1, name: 'Ann'})")
+        g.define_ontology({"classes": {"Person": {"abstract": True},
+                                        "Student": {"is_a": "Person"}}})
+        g.materialize_ontology()
+        g.dematerialize_ontology()
+        """,
+        storage,
+    )
+    g = _open(tmp_path / "app.kgl", storage)
+    assert g.cypher("MATCH (p:Person) RETURN count(p) AS c").scalar() == 0
+    assert g.cypher("MATCH (n:Student) RETURN labels(n) AS l").scalar() == ["Student"]

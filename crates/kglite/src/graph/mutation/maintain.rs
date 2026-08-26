@@ -600,6 +600,7 @@ pub fn add_nodes(
     let column_names = df_data.get_column_names();
     interned_names.extend(column_names.iter().map(String::as_str));
     preflight_interner_names(graph, interned_names)?;
+    graph.reject_abstract_batch_type(&node_type)?;
     graph
         .prepare_disk_mutation()
         .map_err(|e| format!("disk mutation lease failed: {e}"))?;
@@ -763,6 +764,8 @@ pub fn add_nodes(
     // re-claim tuples from `UpdateFold`'s pre-images; the rebuild stays the
     // fallback (see `fold_batch_into_user_indexes` for which cases take it).
     update_fold.fold_or_rebuild(graph, &node_type, stats);
+
+    graph.stamp_ontology_closure_on_tail(&node_type, stats.creates);
 
     let elapsed_ms = metrics.processing_time * 1000.0;
 

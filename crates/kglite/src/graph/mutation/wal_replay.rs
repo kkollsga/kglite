@@ -112,6 +112,21 @@ pub fn apply_frames(
     graph
         .prepare_disk_mutation()
         .map_err(|e| format!("disk mutation lease failed: {e}"))?;
+    // Replay rebuilds state the log already decided: the write-funnel
+    // ontology stamp (and the abstract-create refusal it travels with) must
+    // not run here — logged whole-set label ops are authoritative, and a
+    // node created before its type was declared abstract must replay.
+    graph.suppress_ontology_stamp = true;
+    let result = apply_frames_inner(graph, frames, after_lsn);
+    graph.suppress_ontology_stamp = false;
+    result
+}
+
+fn apply_frames_inner(
+    graph: &mut DirGraph,
+    frames: &[WalFrame],
+    after_lsn: u64,
+) -> Result<u64, String> {
     let mut nodes: HashMap<NodeKey, NodeNet> = HashMap::new();
     let mut edges: HashMap<EdgeKey, EdgeNet> = HashMap::new();
     let mut labels: LabelNet = HashMap::new();
