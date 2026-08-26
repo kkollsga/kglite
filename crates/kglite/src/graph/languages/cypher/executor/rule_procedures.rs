@@ -30,7 +30,20 @@ pub(super) fn execute_rule_procedure(
     params: &HashMap<String, Value>,
     yield_items: &[YieldItem],
 ) -> Result<Vec<ResultRow>, String> {
-    match proc_name {
+    // With an ontology declared, a no-argument call runs the declaration-
+    // driven form (ontology_procedures.rs) instead of erroring on the
+    // missing parameter.
+    if params.is_empty() {
+        if let Some(result) =
+            super::ontology_procedures::no_arg_declaration_rows(proc_name, graph, yield_items)
+        {
+            return result;
+        }
+    }
+    if proc_name == "ontology_audit" {
+        return super::ontology_procedures::execute_ontology_audit(graph, params, yield_items);
+    }
+    let mut rows = match proc_name {
         "orphan_node" => execute_orphan_node(graph, params, yield_items),
         "self_loop" => execute_self_loop(graph, params, yield_items),
         "cycle_2step" => execute_cycle_2step(graph, params, yield_items),
@@ -48,7 +61,29 @@ pub(super) fn execute_rule_procedure(
         "parallel_edges" => execute_parallel_edges(graph, params, yield_items),
         "kg_knn" => execute_kg_knn(graph, params, yield_items),
         _ => unreachable!("non-rule procedure routed to rule dispatcher: {proc_name}"),
+    }?;
+    // The declaration-backed procs carry a `rule` column (the no-arg form
+    // stamps the declaration name); explicit calls stamp their own subject
+    // so a `YIELD rule` never hits a missing binding.
+    if matches!(
+        proc_name,
+        "missing_required_edge"
+            | "inverse_violation"
+            | "transitivity_violation"
+            | "cardinality_violation"
+            | "type_domain_violation"
+            | "type_range_violation"
+    ) {
+        let subject = ["edge", "rel", "rel_a", "type"]
+            .iter()
+            .find_map(|k| match params.get(*k) {
+                Some(Value::String(s)) => Some(s.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        super::ontology_procedures::stamp_rule(&mut rows, yield_items, &subject);
     }
+    Ok(rows)
 }
 
 /// `CALL orphan_node({type, link_type?, direction?}) YIELD node`
@@ -480,24 +515,15 @@ pub(super) fn execute_type_domain_violation(
     let expected = require_string_param(params, "expected_source", "type_domain_violation")?;
     let src_var = require_node_yield(yield_items, "type_domain_violation", "source")?;
     let tgt_var = require_node_yield(yield_items, "type_domain_violation", "target")?;
-    let key = InternedKey::from_str(&edge_type);
-
+    let accepted = [expected];
+    let pairs =
+        super::ontology_procedures::scan_endpoint_mismatch(graph, &edge_type, &accepted, true);
     let mut rows = Vec::new();
-    for er in graph.graph.edge_references() {
-        if er.weight().connection_type != key {
-            continue;
-        }
-        let src = er.source();
-        let actual_type = match graph.graph.node_view(src) {
-            Some(n) => n.node_type_str(&graph.interner),
-            None => continue,
-        };
-        if actual_type != expected {
-            let mut row = ResultRow::new();
-            row.node_bindings.insert(src_var.clone(), src);
-            row.node_bindings.insert(tgt_var.clone(), er.target());
-            rows.push(row);
-        }
+    for (src, tgt) in pairs {
+        let mut row = ResultRow::new();
+        row.node_bindings.insert(src_var.clone(), src);
+        row.node_bindings.insert(tgt_var.clone(), tgt);
+        rows.push(row);
     }
     Ok(rows)
 }
@@ -517,24 +543,15 @@ pub(super) fn execute_type_range_violation(
     let expected = require_string_param(params, "expected_target", "type_range_violation")?;
     let src_var = require_node_yield(yield_items, "type_range_violation", "source")?;
     let tgt_var = require_node_yield(yield_items, "type_range_violation", "target")?;
-    let key = InternedKey::from_str(&edge_type);
-
+    let accepted = [expected];
+    let pairs =
+        super::ontology_procedures::scan_endpoint_mismatch(graph, &edge_type, &accepted, false);
     let mut rows = Vec::new();
-    for er in graph.graph.edge_references() {
-        if er.weight().connection_type != key {
-            continue;
-        }
-        let tgt = er.target();
-        let actual_type = match graph.graph.node_view(tgt) {
-            Some(n) => n.node_type_str(&graph.interner),
-            None => continue,
-        };
-        if actual_type != expected {
-            let mut row = ResultRow::new();
-            row.node_bindings.insert(src_var.clone(), er.source());
-            row.node_bindings.insert(tgt_var.clone(), tgt);
-            rows.push(row);
-        }
+    for (src, tgt) in pairs {
+        let mut row = ResultRow::new();
+        row.node_bindings.insert(src_var.clone(), src);
+        row.node_bindings.insert(tgt_var.clone(), tgt);
+        rows.push(row);
     }
     Ok(rows)
 }

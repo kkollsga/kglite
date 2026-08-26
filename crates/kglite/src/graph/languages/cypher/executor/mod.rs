@@ -1094,6 +1094,7 @@ mod identity_fields;
 pub mod load_csv;
 pub mod match_clause;
 pub mod match_execution;
+mod ontology_procedures;
 pub(crate) mod ordering;
 mod procedure_registry;
 pub mod refresh_stats;

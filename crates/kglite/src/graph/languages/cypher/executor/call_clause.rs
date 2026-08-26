@@ -810,6 +810,7 @@ impl<'a> CypherExecutor<'a> {
             | "type_domain_violation"
             | "type_range_violation"
             | "parallel_edges"
+            | "ontology_audit"
             | "kg_knn" => super::rule_procedures::execute_rule_procedure(
                 &proc_name,
                 self.graph,

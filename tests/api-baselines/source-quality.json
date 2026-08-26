@@ -164,7 +164,7 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/call_clause.rs",
       "qualified_name": "crate::CypherExecutor<'a>::execute_call",
-      "lines": 536,
+      "lines": 537,
       "branches": 101,
       "nesting": 5
     },
