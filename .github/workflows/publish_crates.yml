@@ -1,4 +1,4 @@
-name: Publish to crates.io
+name: Publish crates
 on:
   push:
     branches: [main]

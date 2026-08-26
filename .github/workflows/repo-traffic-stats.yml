@@ -21,7 +21,7 @@
 #   Copy this workflow + scripts/repo_traffic_stats.py into that repo, add its
 #   own TRAFFIC_TOKEN. It auto-writes to `statistics/<that-repo-name>/`.
 
-name: repo-traffic-stats
+name: Repo traffic stats
 
 on:
   schedule:

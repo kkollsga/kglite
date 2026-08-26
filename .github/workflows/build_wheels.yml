@@ -1,4 +1,4 @@
-name: Build and Publish Python Wheels
+name: Publish Python wheels
 on:
   push:
     branches: [main]

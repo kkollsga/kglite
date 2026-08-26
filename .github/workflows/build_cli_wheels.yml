@@ -1,4 +1,4 @@
-name: Build & Publish kglite-cli wheels
+name: Publish CLI wheels
 # Builds the `kglite-cli` binary wheel (the `kglite` interactive shell) for each
 # platform and publishes it to PyPI as the separate `kglite-cli` distribution —
 # so `pip install kglite-cli` offers a standalone, libpython-free alternative

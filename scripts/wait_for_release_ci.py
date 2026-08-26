@@ -52,9 +52,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # match `.github/workflows/*.yml` `name:` exactly.
 RELEASE_WORKFLOWS = (
     "CI",
-    "Publish to crates.io",
-    "Build and Publish Python Wheels",
-    "Build & Publish kglite-cli wheels",
+    "Publish crates",
+    "Publish Python wheels",
+    "Publish CLI wheels",
 )
 
 TERMINAL_STATUS = "completed"

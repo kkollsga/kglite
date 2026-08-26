@@ -1,4 +1,4 @@
-name: Build and Publish Java Artifact
+name: Publish Java
 
 # Triggered by an explicit workflow_dispatch from build_wheels.yml's publish
 # job, after it creates the release tag. The tag trigger below still exists
