@@ -63,6 +63,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   violations, so a passing gate is never mistaken for a clean graph.
   `describe()` renders the same summary as an `exempt="…"` attribute.
 
+- **`ancestry: true` on an ontology relationship** — the annotation a
+  parent-pointer taxonomy actually wants. It records that ancestry along the
+  relationship is meaningful and is walked with `*1..`, and it enrolls **no**
+  check: it shows up in `describe()` (`ancestry="true (walk with *1..)"`) and
+  the agent `describe(topic='ontology')` guidance, and nowhere else.
+  `transitive: true` keeps its existing meaning — it enrolls
+  `transitivity_violation`, which audits a *stored* closure and requires a
+  stored `a→c` edge for every `a→b→c`, so declaring it on a taxonomy that
+  stores only parent pointers (`STRAT_PARENT`, `wdt:P279`) reports 100%
+  violations. The two are mutually exclusive: declaring both is refused at
+  `define_ontology()` time with the difference spelled out.
+
 - **EXPLAIN surfaces closure-probe eligibility**: a `MATCH` on a materialized
   `Closed` ontology supertype whose live member types are all index-covered
   for the queried properties now emits a `ClosureProbe :Person (Student,
@@ -70,6 +82,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   single predicate shared with the matcher, so the plan cannot advertise a
   probe the runtime declines. Parameter-valued properties (`{p: $v}`) stay
   conservatively unmarked.
+
+### Changed
+
+- **The ontology class-cap refusal no longer recommends `transitive:`.**
+  Declaring more than 512 classes has always been refused with "large
+  taxonomies are data — model them as edges", but the advice it gave for
+  those edges was `transitive: true`, which enrolls the stored-closure audit
+  and reports every parent-pointer edge as a violation. The message now
+  points at `ancestry: true` and says why `transitive` is the wrong promise.
 
 ### Fixed
 

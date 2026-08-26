@@ -36,6 +36,7 @@
 //!       "inverse_name": "OPERATOR_OF",
 //!       "cardinality": {"min": 0, "max": 1},
 //!       "required": true, "transitive": false, "symmetric": false,
+//!       "ancestry": false,
 //!       "enforcement": "warn",
 //!       "exempt": {"required_properties": ["PetregLicence"]},
 //!       "description": "Operatorship over time"
@@ -51,6 +52,14 @@
 //!   `missing_required_edge` — count outgoing only).
 //! - `symmetric` lowers to `inverse_violation(rel, rel)`, which reports each
 //!   asymmetric pair once per direction encountered.
+//! - `transitive` and `ancestry` are the two readings of "this edge is a
+//!   hierarchy", and they are mutually exclusive. `transitive` promises a
+//!   **stored** closure and lowers to `transitivity_violation`, which flags
+//!   every `a→b→c` without a stored `a→c`. `ancestry` promises nothing to
+//!   audit: it records that the chain is meaningful and is walked with
+//!   `*1..`, which is what a parent-pointer taxonomy (`STRAT_PARENT`,
+//!   `wdt:P279`) actually is — declaring *that* `transitive` would report
+//!   100% violations.
 //! - `enforcement` is data for *callers* — the blueprint gate and
 //!   `ontology_audit()` — never an engine write guarantee in this mode.
 //! - `exempt` names, per check, source classes whose violations are counted
@@ -122,8 +131,20 @@ pub struct RelationshipDecl {
     pub cardinality: Option<CardinalityDecl>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub required: bool,
+    /// Opt-in **stored-closure** audit: `transitivity_violation` flags every
+    /// `a→b→c` with no stored `a→c` edge. Correct only for graphs that
+    /// materialize the closure; mutually exclusive with [`Self::ancestry`],
+    /// which is what a parent-pointer taxonomy wants.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub transitive: bool,
+    /// Annotation that ancestry along this relationship is meaningful and is
+    /// walked with `*1..` — the parent-pointer taxonomy shape, whose closure
+    /// is deliberately not stored. Reader-facing only (`describe()`, agent
+    /// topics): it enrolls **no** check, which is the point — the stored-closure
+    /// audit that [`Self::transitive`] enrolls would flag every edge of such
+    /// a taxonomy. Declaring both is refused by [`OntologyStore::validate`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ancestry: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub symmetric: bool,
     #[serde(default, skip_serializing_if = "Enforcement::is_default")]
@@ -280,7 +301,9 @@ impl OntologyStore {
             return Err(format!(
                 "ontology declares {} classes; the layer is for schema-level vocabularies \
                  (max {MAX_ONTOLOGY_CLASSES}). Large taxonomies are data — model them as edges \
-                 (a `transitive` relationship declaration plus `*1..` paths).",
+                 walked with `*1..` paths, declaring that relationship `ancestry: true`. Do not \
+                 reach for `transitive: true` there: it audits a *stored* closure, so a \
+                 parent-pointer taxonomy reports 100% violations.",
                 self.classes.len()
             ));
         }
@@ -314,6 +337,14 @@ impl OntologyStore {
                 if endpoint.is_empty() {
                     return Err(format!("relationship '{name}': empty endpoint name"));
                 }
+            }
+            if decl.transitive && decl.ancestry {
+                return Err(format!(
+                    "relationship '{name}': 'transitive' and 'ancestry' are mutually exclusive. \
+                     'transitive' audits a stored closure — transitivity_violation flags every \
+                     a→b→c with no stored a→c edge. 'ancestry' annotates a parent-pointer \
+                     taxonomy walked with `*1..` and enrolls no check. Declare one."
+                ));
             }
             for (check, classes) in &decl.exempt {
                 for class in classes {
@@ -447,6 +478,7 @@ const REL_KEYS: &[&str] = &[
     "cardinality",
     "required",
     "transitive",
+    "ancestry",
     "symmetric",
     "enforcement",
     "exempt",
@@ -593,6 +625,7 @@ fn relationship_from_value(name: &str, value: &Value) -> Result<RelationshipDecl
         cardinality,
         required: opt_bool(map, "required", name)?,
         transitive: opt_bool(map, "transitive", name)?,
+        ancestry: opt_bool(map, "ancestry", name)?,
         symmetric: opt_bool(map, "symmetric", name)?,
         enforcement,
         enforcement_overrides,
@@ -768,6 +801,7 @@ mod tests {
                     "inverse_name": "OPERATOR_OF",
                     "cardinality": {"min": 0, "max": 1},
                     "required": true, "transitive": false, "symmetric": false,
+                    "ancestry": true,
                     "enforcement": "warn",
                     "exempt": {"required_properties": ["Licence"]},
                     "description": "op"
@@ -780,6 +814,7 @@ mod tests {
         assert_eq!(store.ancestors("Licence"), vec!["Licensable"]);
         let rel = &store.relationships["HAS_OPERATOR"];
         assert_eq!(rel.enforcement, Enforcement::Warn);
+        assert!(rel.ancestry && !rel.transitive);
         assert_eq!(rel.cardinality.unwrap().max, Some(1));
         assert_eq!(rel.exempt_classes("required_properties"), ["Licence"]);
         assert!(rel.exempt_classes("property_types").is_empty());
@@ -821,6 +856,44 @@ mod tests {
         let doc = format!("{{\"classes\": {{{}}}}}", classes.join(","));
         let err = parse(&doc).unwrap_err();
         assert!(err.contains("schema-level vocabularies"), "{err}");
+        // The refusal used to recommend `transitive:` for exactly the shape
+        // that check reports as 100% violating; it must steer to `ancestry:`
+        // and say why `transitive` is not the answer.
+        assert!(err.contains("`ancestry: true`"), "{err}");
+        assert!(err.contains("stored"), "{err}");
+    }
+
+    #[test]
+    fn transitive_and_ancestry_are_mutually_exclusive() {
+        let err = parse(r#"{"relationships": {"P279": {"transitive": true, "ancestry": true}}}"#)
+            .unwrap_err();
+        assert!(err.contains("mutually exclusive"), "{err}");
+        assert!(err.contains("stored closure"), "{err}");
+        assert!(err.contains("*1.."), "{err}");
+        // Either alone is accepted.
+        for doc in [
+            r#"{"relationships": {"P279": {"transitive": true}}}"#,
+            r#"{"relationships": {"P279": {"ancestry": true}}}"#,
+        ] {
+            parse(doc).unwrap();
+        }
+    }
+
+    #[test]
+    fn ancestry_is_not_a_check_name() {
+        // `ancestry` enrolls no check, so it is refused everywhere a check
+        // name is expected — enforcement overrides and exempt alike.
+        let err = parse(r#"{"relationships": {"R": {"enforcement": {"ancestry": "error"}}}}"#)
+            .unwrap_err();
+        assert!(err.contains("is not a check"), "{err}");
+        let err = parse(
+            r#"{"classes": {"A": {}},
+                "relationships": {"R": {"exempt": {"ancestry": ["A"]}}}}"#,
+        )
+        .unwrap_err();
+        assert!(err.contains("not a check name"), "{err}");
+        assert!(!CHECK_NAMES.contains(&"ancestry"));
+        assert!(!EXEMPTABLE_CHECKS.contains(&"ancestry"));
     }
 
     #[test]

@@ -3287,6 +3287,7 @@ pub fn kglite::datatypes::values::RelValue::serialize<__S>(&self, __serializer: 
 impl<'de> serde_core::de::Deserialize<'de> for kglite::datatypes::values::RelValue
 pub fn kglite::datatypes::values::RelValue::deserialize<__D>(__deserializer: __D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
 pub struct kglite::api::RelationshipDecl
+pub kglite::api::RelationshipDecl::ancestry: bool
 pub kglite::api::RelationshipDecl::cardinality: core::option::Option<kglite::api::CardinalityDecl>
 pub kglite::api::RelationshipDecl::description: core::option::Option<alloc::string::String>
 pub kglite::api::RelationshipDecl::domain: core::option::Option<alloc::string::String>

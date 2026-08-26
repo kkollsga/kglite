@@ -115,6 +115,12 @@ fn write_ontology(xml: &mut String, graph: &DirGraph, focus: Option<&[String]>) 
         if decl.transitive {
             attrs.push_str(" transitive=\"true\"");
         }
+        // Carries the idiom, matching the `by="… (unenforced discriminator)"`
+        // hint style: the whole value of the annotation to a reader is
+        // knowing how to traverse it.
+        if decl.ancestry {
+            attrs.push_str(" ancestry=\"true (walk with *1..)\"");
+        }
         if decl.symmetric {
             attrs.push_str(" symmetric=\"true\"");
         }

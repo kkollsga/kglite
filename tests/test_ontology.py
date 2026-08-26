@@ -752,6 +752,7 @@ def test_new_declaration_fields_persist(props_graph, tmp_path):
                 "required_properties": ["since"],
                 "property_types": {"since": "integer"},
                 "enforcement": {"required_properties": "error"},
+                "ancestry": True,
             }
         },
     }
@@ -764,6 +765,7 @@ def test_new_declaration_fields_persist(props_graph, tmp_path):
     assert rel["required_properties"] == ["since"]
     assert rel["property_types"] == {"since": "integer"}
     assert rel["enforcement_overrides"] == {"required_properties": "error"}
+    assert rel["ancestry"] is True
     assert _audit(loaded)["ENROLLED_IN.required_properties"]["severity"] == "error"
 
 
@@ -1064,3 +1066,76 @@ def test_edge_property_violation_refuses_params_and_a_bare_graph(mixed_props_gra
         mixed_props_graph.cypher("CALL edge_property_violation({edge: 'ENROLLED_IN'}) YIELD source RETURN source")
     with pytest.raises(Exception, match="define_ontology"):
         g.cypher("CALL edge_property_violation() YIELD source RETURN source")
+
+
+# ---- ancestry: the parent-pointer annotation, distinct from transitive ----
+# (mcp-servers production report 2026-08-26: `transitive: true` reads as
+# "ancestry along this relationship is meaningful", but transitivity_violation
+# audits a STORED closure — a→b→c needs a stored a→c edge — so every real
+# parent-pointer taxonomy (STRAT_PARENT, wdt:P279) reported 100% violations,
+# and the class-cap refusal actively recommended declaring it.)
+
+
+def _taxonomy_decl(**rel):
+    return {
+        "classes": {"Student": {}, "Class": {}},
+        "relationships": {"BROADER": {"domain": "Student", "range": "Class", **rel}},
+    }
+
+
+def test_ancestry_enrolls_no_check_while_transitive_does(g):
+    g.define_ontology(_taxonomy_decl())
+    plain = set(_audit(g))
+    g.define_ontology(_taxonomy_decl(ancestry=True))
+    assert set(_audit(g)) == plain
+    # The contrast the split exists for: `transitive` DOES add a rule.
+    g.define_ontology(_taxonomy_decl(transitive=True))
+    assert set(_audit(g)) - plain == {"BROADER.transitive"}
+
+
+def test_ancestry_renders_in_describe_with_the_traversal_idiom(g):
+    g.define_ontology(_taxonomy_decl(ancestry=True))
+    text = g.describe()
+    assert 'ancestry="true (walk with *1..)"' in text
+    assert "transitive=" not in text
+    g.define_ontology(_taxonomy_decl())
+    assert "ancestry=" not in g.describe()
+
+
+def test_show_ontology_renders_ancestry_the_way_it_renders_transitive(g):
+    # Which is: not as a column. SHOW ONTOLOGY's relationship row is identity
+    # + endpoints + enforcement/exempt/description; no boolean annotation
+    # (required, transitive, symmetric, inverse_enforced) has ever had one,
+    # and `ancestry` gets the same treatment — describe() is the surface that
+    # carries it. Pinned so adding a column later is a deliberate act.
+    g.define_ontology(_taxonomy_decl(ancestry=True))
+    rel = [r for r in g.cypher("SHOW ONTOLOGY").to_list() if r["kind"] == "relationship"]
+    assert set(rel[0]) == {
+        "kind",
+        "name",
+        "is_a",
+        "abstract",
+        "domain",
+        "range",
+        "enforcement",
+        "exempt",
+        "description",
+    }
+
+
+def test_transitive_and_ancestry_together_are_refused(g):
+    with pytest.raises(Exception, match="mutually exclusive") as excinfo:
+        g.define_ontology(_taxonomy_decl(transitive=True, ancestry=True))
+    message = str(excinfo.value)
+    # The refusal has to teach the difference, not just name the conflict.
+    assert "stored closure" in message
+    assert "*1.." in message
+
+
+def test_ancestry_is_refused_where_a_check_name_is_expected(g):
+    # It enrolls no check, so it can be neither severity-overridden nor
+    # exempted — the unknown-check paths must not quietly accept it.
+    with pytest.raises(Exception, match="is not a check"):
+        g.define_ontology(_taxonomy_decl(enforcement={"ancestry": "error"}))
+    with pytest.raises(Exception, match="not a check name"):
+        g.define_ontology(_taxonomy_decl(exempt={"ancestry": ["Student"]}))

@@ -4443,6 +4443,7 @@ class KnowledgeGraph:
                         "cardinality": {"min": 0, "max": 1},
                         "required": True, "enforcement": "warn",
                         "exempt": {"required_properties": ["PetregLicence"]},
+                        "ancestry": False,
                     },
                 },
             })
@@ -4466,6 +4467,14 @@ class KnowledgeGraph:
         the two checks where "domain-side class" means the edge's source
         type, and refused with an explanation for every other check name and
         for the flat ``exempt: [...]`` form;
+        ``transitive`` and ``ancestry`` are mutually exclusive and mean
+        different things — ``transitive: True`` enrolls
+        ``transitivity_violation``, which audits a **stored** closure (every
+        ``a→b→c`` must have a stored ``a→c`` edge), while ``ancestry: True``
+        is a documentation-only annotation that the chain is meaningful and
+        is walked with ``*1..``, which is what a parent-pointer taxonomy
+        (``STRAT_PARENT``, ``wdt:P279``) is, so declaring *that* transitive
+        reports 100% violations;
         ``by`` names a discriminator property and is documentation only. Class names share
         the label namespace: an abstract class may not shadow a live node
         type. This is deliberately separate from ``set_parent_type`` —
@@ -4482,7 +4491,8 @@ class KnowledgeGraph:
 
         Raises:
             ValueError: Malformed document (unknown key, cycle, dangling
-                ``is_a`` target, class cap exceeded, an ``exempt`` entry on
+                ``is_a`` target, class cap exceeded, both ``transitive``
+                and ``ancestry`` on one relationship, an ``exempt`` entry on
                 an unexemptable check or naming an undeclared class), or an
                 abstract class shadowing a live node type.
         """

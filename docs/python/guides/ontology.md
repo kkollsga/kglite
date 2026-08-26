@@ -44,7 +44,7 @@ g.define_ontology({
             "description": "Active enrolment",
         },
         "STRAT_PARENT": {"domain": "Stratigraphy", "range": "Stratigraphy",
-                          "transitive": True},
+                          "ancestry": True},   # parent pointers, walked with *1..
     },
 })
 ```
@@ -60,8 +60,17 @@ Rules the declaration must satisfy (checked on install):
   live-type is an error) — `MATCH (n:X)` keeps exactly one meaning per name.
 - There is an enforced class cap (hundreds): the layer is for schema-level
   vocabularies. A million-class taxonomy (Wikidata's P279) is **data** —
-  keep it as edges, declare the relationship `transitive: True`, and walk it
-  with `*1..` paths. That boundary is a feature.
+  keep it as edges, declare the relationship `ancestry: True`, and walk it
+  with `*1..` paths. That boundary is a feature. Do **not** reach for
+  `transitive: True` there — see the next bullet.
+- `transitive: True` and `ancestry: True` both say "this edge is a
+  hierarchy", and they are mutually exclusive (declaring both is refused).
+  `transitive` is a **promise that the closure is stored**: it enrolls
+  `transitivity_violation`, which flags every `a→b→c` with no stored `a→c`
+  edge, so a taxonomy that stores only parent pointers reports 100%
+  violations. `ancestry` is the annotation for that shape: it records that
+  the chain is meaningful and is walked with `*1..`, shows up in
+  `describe()`, and enrolls no check.
 - `cardinality` / `required` describe **outgoing** edges of the domain type.
 - `symmetric: True` lowers to an inverse check of the relationship against
   itself.
@@ -216,7 +225,8 @@ here:
 | Validation | SHACL, deliberately separate from ontology/inference | the same separation, built in: `enforcement: advisory \| warn \| error` maps onto `sh:Info` / `sh:Warning` / `sh:Violation`. |
 | Subclass queries | entailment regimes; production stores typically **materialize** entailments | the same technique: `materialize_ontology()` stamps ancestor labels; no query rewriting, no reasoner. |
 | `inverse_name` | `owl:inverseOf` creates/entails the inverse triples | naming only — Cypher already traverses both directions, so no second edge exists or is implied. `inverse_enforced: True` opts into auditing stored pairing instead. |
-| `transitive` | `owl:TransitiveProperty`, entailed closures | an annotation consumed by `transitivity_violation` and documentation; the closure is *walked* (`*1..`), never stored. |
+| `transitive` | `owl:TransitiveProperty`, entailed closures | nothing is entailed: it declares that the closure is **stored**, and `transitivity_violation` audits that claim (every `a→b→c` needs a stored `a→c`). |
+| `ancestry` | no counterpart — a reasoner would entail the chain | documentation only: the chain is meaningful and is *walked* (`*1..`), never stored. This is what a parent-pointer taxonomy declares. |
 | "abstract" | not an ontology notion (any class may have instances) | borrowed from the schema world: a class that names no node type and cannot be instantiated directly. |
 
 **Deliberate non-goals** (not omissions): entailment of any kind,
