@@ -28,6 +28,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no `.kgl`. The MCP server applies `extensions.ontology: {file: ...}` at
   boot, memory-only. Deliberately independent of `set_parent_type`
   (presentation ownership).
+- **Ontology materialization**: `materialize_ontology()` stamps declared
+  supertypes as real secondary labels — `MATCH (p:Person)` finds every
+  Student and Teacher with today's query semantics, indexes, and
+  `labels(n)`. Materialized labels are *managed* (`closed`: engine-only
+  writer, bucket = declared closure; `open`: a manual `SET`, adoption, or
+  union touched it — still correct, closure-reliant optimizations off), and
+  writers downgrade to `open` rather than refuse; manual `REMOVE` of a
+  managed label is refused, `dematerialize_ontology()` is the exit,
+  `ontology_diff()` reports drift. Write paths maintain the closure (Cypher
+  CREATE/MERGE, `add_nodes`; creating a declared *abstract* class is
+  refused naming its concrete subtypes), WAL replay treats the logged label
+  ops as authoritative (a logged dematerialize recovers as an un-apply),
+  and `extract_subgraph`/`save_subset` carry labels and ontology. A
+  property-filtered match on a `closed` supertype uses per-descendant index
+  probes instead of a bucket scan. The MCP manifest's
+  `extensions.ontology` accepts `materialize: true` (boot-time,
+  memory-only).
 - Blueprint junction edges accept a `rename` map (`"rename": {"csv_col":
   "property_name"}`) to store a CSV column under a different edge-property
   name. Keys must be columns listed in `properties`; `property_types` stays

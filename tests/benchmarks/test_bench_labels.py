@@ -233,3 +233,69 @@ def test_bench_spatial_join_one_label(benchmark):
     assert "Spatial" in ops, f"expected spatial-join plan under the finer gate, got: {ops}"
     assert graph.cypher(SPATIAL_QUERY).to_list()[0]["c"] == SPATIAL_POINTS
     benchmark(lambda: graph.cypher(SPATIAL_QUERY))
+
+
+# ── ontology materialization (E3) ─────────────────────────────────────────
+
+MAT_NODES = 50_000
+ONTOLOGY = {
+    "classes": {
+        "Asset": {"abstract": True},
+        "P": {"is_a": "Asset"},
+    }
+}
+
+
+def _declared_graph(n: int) -> KnowledgeGraph:
+    graph = _flat_graph(n)
+    graph.define_ontology(ONTOLOGY)
+    return graph
+
+
+def test_bench_materialize_ontology(benchmark):
+    """Stamp the closure over MAT_NODES nodes through the bulk path."""
+
+    def setup():
+        return (_declared_graph(MAT_NODES),), {}
+
+    def apply(graph):
+        report = graph.materialize_ontology()
+        assert report[0]["stamped"] == MAT_NODES
+
+    benchmark.pedantic(apply, setup=setup, rounds=5, iterations=1)
+
+
+def test_bench_create_plain(benchmark):
+    """Control: single CREATE on an ontology-free graph."""
+    graph = _flat_graph(1_000)
+    counter = iter(range(10_000_000))
+    benchmark(lambda: graph.cypher(f"CREATE (:P {{id: {100_000 + next(counter)}, name: 'x'}})"))
+
+
+def test_bench_create_with_closure(benchmark):
+    """Same CREATE with a materialized ancestor — measures the write-funnel
+    closure stamp (one idempotent add per ancestor)."""
+    graph = _declared_graph(1_000)
+    graph.materialize_ontology()
+    counter = iter(range(10_000_000))
+    benchmark(lambda: graph.cypher(f"CREATE (:P {{id: {100_000 + next(counter)}, name: 'x'}})"))
+
+
+def test_bench_supertype_property_scan(benchmark):
+    """Property-filtered supertype match WITHOUT descendant indexes — the
+    bucket-scan fallback the closure probe replaces."""
+    graph = _declared_graph(MAT_NODES)
+    graph.materialize_ontology()
+    query = "MATCH (a:Asset {name: 'n_777'}) RETURN a.id AS id"
+    assert graph.cypher(query).to_list()[0]["id"] == 777
+    benchmark(lambda: graph.cypher(query))
+
+
+def test_bench_supertype_property_probe(benchmark):
+    """Same match with the member type indexed: the Closed-gated probe."""
+    graph = _declared_graph(MAT_NODES)
+    graph.materialize_ontology()
+    graph.create_index("P", "name")
+    query = "MATCH (a:Asset {name: 'n_777'}) RETURN a.id AS id"
+    assert graph.cypher(query).to_list()[0]["id"] == 777
+    benchmark(lambda: graph.cypher(query))
