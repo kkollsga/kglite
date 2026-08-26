@@ -227,8 +227,8 @@ pub(super) const PROCEDURES: &[ProcedureSpec] = &[
     ProcedureSpec {
         name: "ontology_audit",
         aliases: &[],
-        description: "Scorecard: one row per declared ontology check (violations, total, pct, declared severity)",
-        columns: &["rule", "severity", "violations", "total", "pct"],
+        description: "Scorecard: one row per declared ontology check (violations, exempted, total, pct, declared severity). `exempted` counts rows an `exempt` declaration excuses; violations + exempted = everything flagged",
+        columns: &["rule", "severity", "violations", "exempted", "total", "pct"],
     },
     ProcedureSpec {
         name: "parallel_edges",

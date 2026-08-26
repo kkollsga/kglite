@@ -119,6 +119,9 @@ fn write_ontology(xml: &mut String, graph: &DirGraph, focus: Option<&[String]>) 
             attrs.push_str(" symmetric=\"true\"");
         }
         attrs.push_str(&format!(" enforcement=\"{}\"", decl.enforcement_summary()));
+        if let Some(exempt) = decl.exempt_summary() {
+            attrs.push_str(&format!(" exempt=\"{exempt}\""));
+        }
         if let Some(d) = &decl.description {
             attrs.push_str(&format!(" desc=\"{d}\""));
         }

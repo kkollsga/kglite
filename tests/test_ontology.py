@@ -559,7 +559,9 @@ def props_graph() -> KnowledgeGraph:
 
 
 def _audit(graph):
-    rows = graph.cypher("CALL ontology_audit() YIELD rule, severity, violations, total RETURN *").to_list()
+    rows = graph.cypher(
+        "CALL ontology_audit() YIELD rule, severity, violations, exempted, total, pct RETURN *"
+    ).to_list()
     return {r["rule"]: r for r in rows}
 
 
@@ -763,3 +765,162 @@ def test_new_declaration_fields_persist(props_graph, tmp_path):
     assert rel["property_types"] == {"since": "integer"}
     assert rel["enforcement_overrides"] == {"required_properties": "error"}
     assert _audit(loaded)["ENROLLED_IN.required_properties"]["severity"] == "error"
+
+
+# ---- per-source-class exemption on required_properties / property_types ----
+# (operator report 2026-08-26: 581 permanent, legitimate violations from ONE
+# source type pinned HAS_OPERATOR.required_properties at `warn` forever, so
+# the rule could never protect the other source types.)
+
+
+@pytest.fixture
+def mixed_props_graph() -> KnowledgeGraph:
+    """Two source types on one relationship: one conforms, one never can."""
+    graph = KnowledgeGraph()
+    graph.cypher("CREATE (:Class {id: 1, title: 'C'})")
+    # Student: one edge carries `since`, one does not -> a real violation.
+    graph.cypher("CREATE (:Student {id: 1, title: 'A'}), (:Student {id: 2, title: 'B'})")
+    graph.cypher("MATCH (s:Student {id: 1}), (c:Class {id: 1}) CREATE (s)-[:ENROLLED_IN {since: 2024}]->(c)")
+    graph.cypher("MATCH (s:Student {id: 2}), (c:Class {id: 1}) CREATE (s)-[:ENROLLED_IN]->(c)")
+    # Auditor: neither edge carries `since` — the class to exempt.
+    graph.cypher("CREATE (:Auditor {id: 3, title: 'X'}), (:Auditor {id: 4, title: 'Y'})")
+    graph.cypher("MATCH (a:Auditor {id: 3}), (c:Class {id: 1}) CREATE (a)-[:ENROLLED_IN]->(c)")
+    graph.cypher("MATCH (a:Auditor {id: 4}), (c:Class {id: 1}) CREATE (a)-[:ENROLLED_IN]->(c)")
+    return graph
+
+
+def _since_decl(classes, exempt=None):
+    rel = {"required_properties": ["since"], "enforcement": "error"}
+    if exempt is not None:
+        rel["exempt"] = exempt
+    return {"classes": classes, "relationships": {"ENROLLED_IN": rel}}
+
+
+FLAT_CLASSES = {"Student": {}, "Auditor": {}, "Class": {}}
+
+
+def test_exempt_counts_separately_instead_of_against_severity(mixed_props_graph):
+    # Without the exemption the rule cannot distinguish the source types.
+    mixed_props_graph.define_ontology(_since_decl(FLAT_CLASSES))
+    row = _audit(mixed_props_graph)["ENROLLED_IN.required_properties"]
+    assert (row["violations"], row["exempted"], row["total"]) == (3, 0, 4)
+
+    mixed_props_graph.define_ontology(_since_decl(FLAT_CLASSES, {"required_properties": ["Auditor"]}))
+    row = _audit(mixed_props_graph)["ENROLLED_IN.required_properties"]
+    # Same rows flagged; two of them now attributed to the exemption, and
+    # `pct` follows the severity-bearing count.
+    assert (row["violations"], row["exempted"], row["total"]) == (1, 2, 4)
+    assert row["violations"] + row["exempted"] == 3
+    assert row["pct"] == 25.0
+    assert row["severity"] == "error"
+
+
+def test_exempt_widens_over_declared_descendants(mixed_props_graph):
+    # An exemption naming an abstract ancestor covers its concrete
+    # descendants — the same widening domain/range acceptance uses.
+    classes = {
+        "Observer": {"abstract": True},
+        "Auditor": {"is_a": "Observer"},
+        "Student": {},
+        "Class": {},
+    }
+    mixed_props_graph.define_ontology(_since_decl(classes, {"required_properties": ["Observer"]}))
+    row = _audit(mixed_props_graph)["ENROLLED_IN.required_properties"]
+    assert (row["violations"], row["exempted"]) == (1, 2)
+    # A sibling that does not descend from the exempted class is untouched:
+    # exempting Student excuses only Student's own row.
+    mixed_props_graph.define_ontology(_since_decl(classes, {"required_properties": ["Student"]}))
+    row = _audit(mixed_props_graph)["ENROLLED_IN.required_properties"]
+    assert (row["violations"], row["exempted"]) == (2, 1)
+
+
+def test_exempt_applies_to_property_types_too(mixed_props_graph):
+    # `since` is an integer on the only edge that carries it; declare it a
+    # string, then exempt that edge's source class.
+    def decl(exempt=None):
+        rel = {"property_types": {"since": "string"}}
+        if exempt is not None:
+            rel["exempt"] = exempt
+        return {"classes": FLAT_CLASSES, "relationships": {"ENROLLED_IN": rel}}
+
+    mixed_props_graph.define_ontology(decl())
+    row = _audit(mixed_props_graph)["ENROLLED_IN.property_types"]
+    assert (row["violations"], row["exempted"]) == (1, 0)
+    mixed_props_graph.define_ontology(decl({"property_types": ["Student"]}))
+    row = _audit(mixed_props_graph)["ENROLLED_IN.property_types"]
+    assert (row["violations"], row["exempted"]) == (0, 1)
+
+
+def test_exempt_refuses_the_flat_list_form(mixed_props_graph):
+    with pytest.raises(Exception, match=r"\{check: \[class, \.\.\.\]\}"):
+        mixed_props_graph.define_ontology(
+            {"classes": FLAT_CLASSES, "relationships": {"ENROLLED_IN": {"exempt": ["Auditor"]}}}
+        )
+
+
+@pytest.mark.parametrize(
+    ("check", "marker"),
+    [
+        ("domain", "already tests the domain-side class"),
+        ("range", "already tests the domain-side class"),
+        ("cardinality", "already tests the domain-side class"),
+        ("transitive", "no single domain-side class"),
+        ("symmetric", "no single domain-side class"),
+    ],
+)
+def test_exempt_refuses_unexemptable_checks_with_the_reason(mixed_props_graph, check, marker):
+    with pytest.raises(Exception, match=marker):
+        mixed_props_graph.define_ontology(
+            {"classes": FLAT_CLASSES, "relationships": {"ENROLLED_IN": {"exempt": {check: ["Auditor"]}}}}
+        )
+
+
+def test_exempt_refuses_an_unknown_check_name(mixed_props_graph):
+    with pytest.raises(Exception, match="Did you mean 'required_properties'"):
+        mixed_props_graph.define_ontology(
+            {
+                "classes": FLAT_CLASSES,
+                "relationships": {"ENROLLED_IN": {"exempt": {"required_propertys": ["Auditor"]}}},
+            }
+        )
+
+
+def test_exempt_refuses_an_undeclared_class(mixed_props_graph):
+    # A typo here would silently exempt nothing and leave the rule pinned —
+    # the exact failure the feature exists to fix.
+    with pytest.raises(Exception, match="not a declared class"):
+        mixed_props_graph.define_ontology(_since_decl(FLAT_CLASSES, {"required_properties": ["Audtor"]}))
+
+
+def test_exempt_persists_through_save_load(mixed_props_graph, tmp_path):
+    decl = {
+        "classes": FLAT_CLASSES,
+        "relationships": {
+            "ENROLLED_IN": {
+                "required_properties": ["since"],
+                "property_types": {"since": "integer"},
+                "enforcement": "error",
+                "exempt": {"required_properties": ["Auditor"], "property_types": ["Student"]},
+            }
+        },
+    }
+    mixed_props_graph.define_ontology(decl)
+    path = str(tmp_path / "g.kgl")
+    mixed_props_graph.save(path)
+    loaded = kglite.load(path)
+    rel = loaded.ontology()["relationships"]["ENROLLED_IN"]
+    assert rel["exempt"] == {"required_properties": ["Auditor"], "property_types": ["Student"]}
+    assert _audit(loaded)["ENROLLED_IN.required_properties"]["exempted"] == 2
+
+
+def test_exempt_renders_in_describe_and_show_ontology(mixed_props_graph):
+    mixed_props_graph.define_ontology(_since_decl(FLAT_CLASSES, {"required_properties": ["Auditor"]}))
+    summary = "required_properties: [Auditor]"
+    assert f'exempt="{summary}"' in mixed_props_graph.describe()
+    rel = [r for r in mixed_props_graph.cypher("SHOW ONTOLOGY").to_list() if r["kind"] == "relationship"]
+    assert [r["exempt"] for r in rel] == [summary]
+    # Absent when nothing is exempted, in both surfaces.
+    mixed_props_graph.define_ontology(_since_decl(FLAT_CLASSES))
+    assert "exempt=" not in mixed_props_graph.describe()
+    rows = mixed_props_graph.cypher("SHOW ONTOLOGY").to_list()
+    assert all(r["exempt"] is None for r in rows)

@@ -18,13 +18,14 @@ pub(crate) fn show_ontology_result_set(graph: &DirGraph) -> ResultSet {
         "domain",
         "range",
         "enforcement",
+        "exempt",
         "description",
     ]
     .iter()
     .map(|c| c.to_string())
     .collect();
     let opt = |v: &Option<String>| v.clone().map(Value::String).unwrap_or(Value::Null);
-    let mut push = |cells: [(&str, Value); 8]| {
+    let mut push = |cells: [(&str, Value); 9]| {
         let mut row = ResultRow::new();
         for (name, value) in cells {
             row.projected.insert(name.to_string(), value);
@@ -40,6 +41,7 @@ pub(crate) fn show_ontology_result_set(graph: &DirGraph) -> ResultSet {
             ("domain", Value::Null),
             ("range", Value::Null),
             ("enforcement", Value::Null),
+            ("exempt", Value::Null),
             ("description", opt(&decl.description)),
         ]);
     }
@@ -52,6 +54,7 @@ pub(crate) fn show_ontology_result_set(graph: &DirGraph) -> ResultSet {
             ("domain", opt(&decl.domain)),
             ("range", opt(&decl.range)),
             ("enforcement", Value::String(decl.enforcement_summary())),
+            ("exempt", opt(&decl.exempt_summary())),
             ("description", opt(&decl.description)),
         ]);
     }

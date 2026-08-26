@@ -18,8 +18,13 @@
 //! `enforcement` levels are data here, not behaviour: `ontology_audit()`
 //! reports them, the blueprint gate acts on them; nothing in this module
 //! warns or fails on a violation.
+//!
+//! A declaration's `exempt` classes filter the *accounting*, never the
+//! scan: [`check_rows`] flags every offending edge and reports how many of
+//! them the declaration exempts, so a scorecard and a row listing can never
+//! disagree about which rows count.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use petgraph::graph::NodeIndex;
 
@@ -81,6 +86,16 @@ pub(super) fn scan_endpoint_mismatch(
         }
     }
     out
+}
+
+/// The primary node types an exemption list covers: each named class plus
+/// its declared descendants — the same widening `domain`/`range` acceptance
+/// uses ([`accepted_types`]), applied to the edge's source side.
+fn exempt_source_types(store: &OntologyStore, classes: &[String]) -> BTreeSet<String> {
+    classes
+        .iter()
+        .flat_map(|class| accepted_types(store, class))
+        .collect()
 }
 
 /// Edges of `rel` violating the declaration's property contract.
@@ -231,6 +246,29 @@ impl DeclaredCheck {
     }
 }
 
+/// What one check flagged. `rows` holds **every** flagged row, exempted
+/// ones included, so a listing stays attributable; `exempted` is how many
+/// of them the declaration's `exempt` classes cover, which the scorecard
+/// subtracts from `violations`. Only [`EXEMPTABLE_CHECKS`] can report a
+/// non-zero `exempted` — the parser refuses `exempt` on the rest.
+///
+/// [`EXEMPTABLE_CHECKS`]: crate::graph::ontology::EXEMPTABLE_CHECKS
+struct CheckOutcome {
+    rows: Vec<ResultRow>,
+    exempted: usize,
+}
+
+impl CheckOutcome {
+    /// A check with no exemptable rows.
+    fn plain(rows: Vec<ResultRow>) -> Self {
+        Self { rows, exempted: 0 }
+    }
+
+    fn violations(&self) -> usize {
+        self.rows.len() - self.exempted
+    }
+}
+
 /// Rows for one declaration-driven check. Node-scoped checks run once per
 /// accepted live type; edge-endpoint checks widen to the accepted set.
 fn check_rows(
@@ -239,7 +277,7 @@ fn check_rows(
     decl: &RelationshipDecl,
     check: DeclaredCheck,
     yield_items: &[YieldItem],
-) -> Result<Vec<ResultRow>, String> {
+) -> Result<CheckOutcome, String> {
     let store = &graph.ontology;
     match check {
         DeclaredCheck::Domain | DeclaredCheck::Range => {
@@ -259,11 +297,13 @@ fn check_rows(
             let src_var = require_node_yield(yield_items, proc, "source")?;
             let tgt_var = require_node_yield(yield_items, proc, "target")?;
             let pairs = scan_endpoint_mismatch(graph, rel, &accepted, check_source);
-            Ok(endpoint_rows(pairs, &src_var, &tgt_var))
+            Ok(CheckOutcome::plain(endpoint_rows(
+                pairs, &src_var, &tgt_var,
+            )))
         }
         DeclaredCheck::Required => {
             let Some(domain) = decl.domain.as_deref() else {
-                return Ok(Vec::new());
+                return Ok(CheckOutcome::plain(Vec::new()));
             };
             let mut rows = Vec::new();
             for node_type in accepted_types(store, domain) {
@@ -273,18 +313,34 @@ fn check_rows(
                 let params = string_params(&[("type", &node_type), ("edge", rel)]);
                 rows.extend(execute_missing_required_edge(graph, &params, yield_items)?);
             }
-            Ok(rows)
+            Ok(CheckOutcome::plain(rows))
         }
         DeclaredCheck::RequiredProperties | DeclaredCheck::PropertyTypes => {
             let src_var = require_node_yield(yield_items, "ontology_audit", "source")?;
             let tgt_var = require_node_yield(yield_items, "ontology_audit", "target")?;
             let required = check == DeclaredCheck::RequiredProperties;
             let pairs = scan_edge_property_violations(graph, rel, decl, required);
-            Ok(endpoint_rows(pairs, &src_var, &tgt_var))
+            let exempted_types = exempt_source_types(store, decl.exempt_classes(check.name()));
+            let exempted = if exempted_types.is_empty() {
+                0
+            } else {
+                pairs
+                    .iter()
+                    .filter(|(src, _)| {
+                        graph.graph.node_view(*src).is_some_and(|n| {
+                            exempted_types.contains(n.node_type_str(&graph.interner))
+                        })
+                    })
+                    .count()
+            };
+            Ok(CheckOutcome {
+                rows: endpoint_rows(pairs, &src_var, &tgt_var),
+                exempted,
+            })
         }
         DeclaredCheck::Cardinality => {
             let Some(domain) = decl.domain.as_deref() else {
-                return Ok(Vec::new());
+                return Ok(CheckOutcome::plain(Vec::new()));
             };
             let card = decl.cardinality.expect("gated on presence");
             let mut rows = Vec::new();
@@ -301,7 +357,7 @@ fn check_rows(
                 }
                 rows.extend(execute_cardinality_violation(graph, &params, yield_items)?);
             }
-            Ok(rows)
+            Ok(CheckOutcome::plain(rows))
         }
         DeclaredCheck::Inverse | DeclaredCheck::Symmetric => {
             let other = if check == DeclaredCheck::Symmetric {
@@ -310,17 +366,17 @@ fn check_rows(
                 decl.inverse_name.as_deref().expect("gated on presence")
             };
             if !edge_type_exists(graph, rel) {
-                return Ok(Vec::new());
+                return Ok(CheckOutcome::plain(Vec::new()));
             }
             let params = string_params(&[("rel_a", rel), ("rel_b", other)]);
-            execute_inverse_violation(graph, &params, yield_items)
+            execute_inverse_violation(graph, &params, yield_items).map(CheckOutcome::plain)
         }
         DeclaredCheck::Transitive => {
             if !edge_type_exists(graph, rel) {
-                return Ok(Vec::new());
+                return Ok(CheckOutcome::plain(Vec::new()));
             }
             let params = string_params(&[("rel", rel)]);
-            execute_transitivity_violation(graph, &params, yield_items)
+            execute_transitivity_violation(graph, &params, yield_items).map(CheckOutcome::plain)
         }
     }
 }
@@ -357,7 +413,8 @@ pub(super) fn no_arg_declaration_rows(
                 continue;
             }
             match check_rows(graph, rel, decl, *check, yield_items) {
-                Ok(mut rows) => {
+                Ok(outcome) => {
+                    let mut rows = outcome.rows;
                     stamp_rule(&mut rows, yield_items, &format!("{rel}.{}", check.name()));
                     all.extend(rows);
                 }
@@ -368,12 +425,13 @@ pub(super) fn no_arg_declaration_rows(
     Some(Ok(all))
 }
 
-/// `CALL ontology_audit() YIELD rule, severity, violations, total, pct` —
-/// one scorecard row per declared check. `total` is the denominator the
-/// check naturally has (edges of the relationship for endpoint/inverse/
-/// transitive checks; nodes of the accepted live domain types for
-/// required/cardinality); `pct` is `violations/total*100`, `0.0` on an
-/// empty denominator.
+/// `CALL ontology_audit() YIELD rule, severity, violations, exempted,
+/// total, pct` — one scorecard row per declared check. `total` is the
+/// denominator the check naturally has (edges of the relationship for
+/// endpoint/inverse/transitive checks; nodes of the accepted live domain
+/// types for required/cardinality); `exempted` counts the flagged rows the
+/// declaration's `exempt` classes cover, which `violations` (and therefore
+/// `pct`, `violations/total*100`, `0.0` on an empty denominator) excludes.
 pub(super) fn execute_ontology_audit(
     graph: &DirGraph,
     params: &HashMap<String, Value>,
@@ -402,6 +460,9 @@ pub(super) fn execute_ontology_audit(
             row.projected
                 .insert(a, Value::Int64(line.violations as i64));
         }
+        if let Some(a) = alias("exempted") {
+            row.projected.insert(a, Value::Int64(line.exempted as i64));
+        }
         if let Some(a) = alias("total") {
             row.projected.insert(a, Value::Int64(line.total as i64));
         }
@@ -418,6 +479,10 @@ pub(crate) struct AuditLine {
     pub(crate) rule: String,
     pub(crate) severity: crate::graph::ontology::Enforcement,
     pub(crate) violations: usize,
+    /// Flagged rows an `exempt` declaration covers — excluded from
+    /// `violations`, so `violations + exempted` is everything the check
+    /// flagged.
+    pub(crate) exempted: usize,
     pub(crate) total: usize,
     pub(crate) pct: f64,
 }
@@ -436,7 +501,8 @@ pub(crate) fn audit_counts(graph: &DirGraph) -> Result<Vec<AuditLine>, String> {
     for (rel, decl) in &graph.ontology.relationships {
         for check in declared_checks(rel, decl) {
             let count_yield: Vec<YieldItem> = counting_yield(check);
-            let violations = check_rows(graph, rel, decl, check, &count_yield)?.len();
+            let outcome = check_rows(graph, rel, decl, check, &count_yield)?;
+            let violations = outcome.violations();
             let total = check_total(graph, rel, decl, check);
             let pct = if total == 0 {
                 0.0
@@ -447,6 +513,7 @@ pub(crate) fn audit_counts(graph: &DirGraph) -> Result<Vec<AuditLine>, String> {
                 rule: format!("{rel}.{}", check.name()),
                 severity: decl.enforcement_for(check.name()),
                 violations,
+                exempted: outcome.exempted,
                 total,
                 pct,
             });

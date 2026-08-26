@@ -1396,6 +1396,91 @@ class TestOntologyGate:
         rows = graph.cypher("CALL ontology_audit() YIELD rule, violations RETURN rule, violations").to_list()
         assert {r["rule"]: r["violations"] for r in rows}["ENROLLED_IN.required"] == 1
 
+    def _bp_exempt(self, tmp_path, exempt=None):
+        """Two source types on one relationship; only one can carry `since`."""
+        _write_csv(tmp_path / "persons.csv", pd.DataFrame({"person_id": [1, 2], "name": ["Alice", "Bob"]}))
+        _write_csv(tmp_path / "legacy.csv", pd.DataFrame({"legacy_id": [5], "lname": ["Old"]}))
+        _write_csv(tmp_path / "classes.csv", pd.DataFrame({"class_id": [7], "cname": ["Math"]}))
+        _write_csv(
+            tmp_path / "enrolled.csv",
+            pd.DataFrame({"source_id": [1, 2], "target_id": [7, 7], "since": ["2020-01-01", "2021-01-01"]}),
+        )
+        # Legacy rows genuinely have no `since` — the permanent, legitimate
+        # violation the operator wants counted separately.
+        _write_csv(tmp_path / "legacy_enrolled.csv", pd.DataFrame({"source_id": [5], "target_id": [7]}))
+        rel = {"required_properties": ["since"], "enforcement": "error"}
+        if exempt is not None:
+            rel["exempt"] = exempt
+        (tmp_path / "school.ontology.json").write_text(
+            json.dumps(
+                {
+                    "classes": {"Person": {}, "Legacy": {}, "Class": {}},
+                    "relationships": {"ENROLLED_IN": rel},
+                }
+            ),
+            encoding="utf-8",
+        )
+        bp = {
+            "settings": {"root": str(tmp_path), "output": "out.kgl"},
+            "ontology": "school.ontology.json",
+            "nodes": {
+                "Person": {
+                    "csv": "persons.csv",
+                    "pk": "person_id",
+                    "title": "name",
+                    "connections": {
+                        "junction_edges": {
+                            "ENROLLED_IN": {
+                                "csv": "enrolled.csv",
+                                "source_fk": "source_id",
+                                "target": "Class",
+                                "target_fk": "target_id",
+                                "properties": ["since"],
+                            }
+                        }
+                    },
+                },
+                "Legacy": {
+                    "csv": "legacy.csv",
+                    "pk": "legacy_id",
+                    "title": "lname",
+                    "connections": {
+                        "junction_edges": {
+                            "ENROLLED_IN": {
+                                "csv": "legacy_enrolled.csv",
+                                "source_fk": "source_id",
+                                "target": "Class",
+                                "target_fk": "target_id",
+                            }
+                        }
+                    },
+                },
+                "Class": {"csv": "classes.csv", "pk": "class_id", "title": "cname"},
+            },
+        }
+        bp_path = tmp_path / "blueprint.json"
+        _write_blueprint(bp_path, bp)
+        return bp_path
+
+    def test_unexempted_source_class_fails_the_error_gate(self, tmp_path):
+        bp_path = self._bp_exempt(tmp_path)
+        with pytest.raises(ValueError, match="ontology gate failed"):
+            kglite.from_blueprint(str(bp_path))
+
+    def test_exempted_source_class_passes_and_reports_the_tail(self, tmp_path, capfd):
+        bp_path = self._bp_exempt(tmp_path, {"required_properties": ["Legacy"]})
+        graph = kglite.from_blueprint(str(bp_path), save=False, verbose=True)
+        err = capfd.readouterr().err
+        # Passing the gate must not hide the exempted rows: a zero-violation
+        # line with an exempted tail is not the same as a clean graph.
+        assert "ENROLLED_IN.required_properties: 0/3 (0.0%) violations (+1 exempted)" in err
+        row = graph.cypher(
+            "CALL ontology_audit() YIELD rule, violations, exempted RETURN rule, violations, exempted"
+        ).to_list()
+        by_rule = {r["rule"]: r for r in row}
+        assert by_rule["ENROLLED_IN.required_properties"]["violations"] == 0
+        assert by_rule["ENROLLED_IN.required_properties"]["exempted"] == 1
+
     def test_clean_contract_passes_error_enforcement(self, tmp_path):
         bp_path = self._bp(tmp_path, "error")
         # Enroll Bob too -> contract satisfied -> error-level gate passes.

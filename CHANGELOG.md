@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Per-source-class exemptions on ontology relationship checks, and two new
+  audit/`SHOW ONTOLOGY` columns.** A declaration can now name source classes
+  whose violations are reported separately instead of counted against
+  severity: `"exempt": {"required_properties": ["PetregLicence"]}`. A class
+  matches when it is the edge source's primary type *or* one of that type's
+  declared ancestors — the same widening `domain`/`range` acceptance uses — so
+  one legitimately nonconforming source type no longer pins a whole rule at
+  `advisory`. Exemption is accepted for `required_properties` and
+  `property_types` only, the two checks where "domain-side class" means the
+  edge's source type; every other check name, and the flat `exempt: [...]`
+  form, is refused at declaration time with the reason, as is a class the
+  ontology does not declare.
+
+  **Column changes — check any suite that pins these result shapes:**
+  `CALL ontology_audit()` gains an `exempted` column between `violations` and
+  `total` (`violations + exempted` = everything the check flagged;
+  `violations` and `pct` now exclude exempted rows), and `SHOW ONTOLOGY` gains
+  an `exempt` column between `enforcement` and `description` (Null for classes
+  and for relationships that exempt nothing). The blueprint ontology gate
+  reports the exempted tail — `HAS_OPERATOR.required_properties: 0/581 (0.0%)
+  violations (+581 exempted)` — including when the exemption leaves zero
+  violations, so a passing gate is never mistaken for a clean graph.
+  `describe()` renders the same summary as an `exempt="…"` attribute.
+
 - **EXPLAIN surfaces closure-probe eligibility**: a `MATCH` on a materialized
   `Closed` ontology supertype whose live member types are all index-covered
   for the queried properties now emits a `ClosureProbe :Person (Student,

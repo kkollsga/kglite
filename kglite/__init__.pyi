@@ -4442,6 +4442,7 @@ class KnowledgeGraph:
                         "required_properties": ["validFrom"],
                         "cardinality": {"min": 0, "max": 1},
                         "required": True, "enforcement": "warn",
+                        "exempt": {"required_properties": ["PetregLicence"]},
                     },
                 },
             })
@@ -4456,6 +4457,15 @@ class KnowledgeGraph:
         (``advisory``/``warn``/``error``) or a per-check map
         (``{"required_properties": "error"}``, unlisted checks stay
         advisory) consumed by the blueprint gate and ``ontology_audit()``;
+        ``exempt`` is a per-check map of source classes whose violations are
+        counted in ``ontology_audit()``'s ``exempted`` column instead of
+        against severity (a class matches when it is the edge source's
+        primary type or one of its declared ancestors), so one legitimately
+        nonconforming source type cannot pin a whole rule at ``advisory`` —
+        accepted for ``required_properties`` and ``property_types`` only,
+        the two checks where "domain-side class" means the edge's source
+        type, and refused with an explanation for every other check name and
+        for the flat ``exempt: [...]`` form;
         ``by`` names a discriminator property and is documentation only. Class names share
         the label namespace: an abstract class may not shadow a live node
         type. This is deliberately separate from ``set_parent_type`` —
@@ -4472,8 +4482,9 @@ class KnowledgeGraph:
 
         Raises:
             ValueError: Malformed document (unknown key, cycle, dangling
-                ``is_a`` target, class cap exceeded), or an abstract class
-                shadowing a live node type.
+                ``is_a`` target, class cap exceeded, an ``exempt`` entry on
+                an unexemptable check or naming an undeclared class), or an
+                abstract class shadowing a live node type.
         """
         ...
 

@@ -37,6 +37,7 @@
 //!       "cardinality": {"min": 0, "max": 1},
 //!       "required": true, "transitive": false, "symmetric": false,
 //!       "enforcement": "warn",
+//!       "exempt": {"required_properties": ["PetregLicence"]},
 //!       "description": "Operatorship over time"
 //!     }
 //!   }
@@ -52,6 +53,10 @@
 //!   asymmetric pair once per direction encountered.
 //! - `enforcement` is data for *callers* — the blueprint gate and
 //!   `ontology_audit()` — never an engine write guarantee in this mode.
+//! - `exempt` names, per check, source classes whose violations are counted
+//!   *separately* (`ontology_audit`'s `exempted`) instead of against
+//!   severity, so one legitimately-nonconforming source type cannot pin a
+//!   whole rule at `advisory`. Accepted for [`EXEMPTABLE_CHECKS`] only.
 //! - `by` names a discriminator property and is documentation only.
 
 use std::collections::BTreeMap;
@@ -127,6 +132,12 @@ pub struct RelationshipDecl {
     /// fall back to `enforcement`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub enforcement_overrides: BTreeMap<String, Enforcement>,
+    /// Per-check source-class exemptions (keys from [`EXEMPTABLE_CHECKS`]).
+    /// A violation whose edge source is one of the listed classes — or a
+    /// declared descendant of one — is reported as `exempted` rather than
+    /// counted against the check's severity.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub exempt: BTreeMap<String, Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 }
@@ -155,6 +166,27 @@ impl RelationshipDecl {
             .map(|(check, sev)| format!("{check}={}", sev.as_str()))
             .collect();
         format!("{base}; {}", overrides.join(", "))
+    }
+
+    /// Source classes exempted from `check`; empty when none are.
+    pub fn exempt_classes(&self, check: &str) -> &[String] {
+        self.exempt.get(check).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Declared exemptions as `check: [Class, …]`, `None` when there are
+    /// none — the reader-surface companion to [`Self::enforcement_summary`],
+    /// rendered by both `SHOW ONTOLOGY` and `describe()`.
+    pub(crate) fn exempt_summary(&self) -> Option<String> {
+        if self.exempt.is_empty() {
+            return None;
+        }
+        Some(
+            self.exempt
+                .iter()
+                .map(|(check, classes)| format!("{check}: [{}]", classes.join(", ")))
+                .collect::<Vec<_>>()
+                .join("; "),
+        )
     }
 }
 
@@ -283,6 +315,18 @@ impl OntologyStore {
                     return Err(format!("relationship '{name}': empty endpoint name"));
                 }
             }
+            for (check, classes) in &decl.exempt {
+                for class in classes {
+                    if !self.classes.contains_key(class) {
+                        return Err(format!(
+                            "relationship '{name}': exempt['{check}'] names '{class}', which is \
+                             not a declared class. An exemption widens over the declared is_a \
+                             forest, so a name outside it would silently exempt nothing — \
+                             declare the class (abstract or concrete) first."
+                        ));
+                    }
+                }
+            }
             if let Some(card) = &decl.cardinality {
                 if let (Some(min), Some(max)) = (card.min, card.max) {
                     if min > max {
@@ -383,6 +427,15 @@ pub const CHECK_NAMES: &[&str] = &[
     "transitive",
 ];
 
+/// The checks a source-class exemption is well-defined for. Both flag one
+/// edge, and the edge's source node carries exactly one domain-side class.
+/// Every other check either **is** a domain-side class test (`domain`,
+/// `range`, and the node-scoped `required` / `cardinality` — exempting a
+/// class there disables the check for it outright) or flags a tuple of two
+/// or three nodes with no single domain-side class (`inverse`, `symmetric`,
+/// `transitive`).
+pub const EXEMPTABLE_CHECKS: &[&str] = &["required_properties", "property_types"];
+
 const CLASS_KEYS: &[&str] = &["is_a", "abstract", "description", "by"];
 const REL_KEYS: &[&str] = &[
     "domain",
@@ -396,6 +449,7 @@ const REL_KEYS: &[&str] = &[
     "transitive",
     "symmetric",
     "enforcement",
+    "exempt",
     "description",
 ];
 
@@ -528,6 +582,7 @@ fn relationship_from_value(name: &str, value: &Value) -> Result<RelationshipDecl
             "relationship '{name}': 'inverse_enforced' requires 'inverse_name'"
         ));
     }
+    let exempt = exempt_from_value(name, map.get("exempt"))?;
     Ok(RelationshipDecl {
         domain: opt_string(map, "domain", name)?,
         range: opt_string(map, "range", name)?,
@@ -541,8 +596,90 @@ fn relationship_from_value(name: &str, value: &Value) -> Result<RelationshipDecl
         symmetric: opt_bool(map, "symmetric", name)?,
         enforcement,
         enforcement_overrides,
+        exempt,
         description: opt_string(map, "description", name)?,
     })
+}
+
+/// `exempt: {check: [class, …]}`. The flat `exempt: [class, …]` form is
+/// refused rather than spread across every check: an exemption that does
+/// not name its check would silently apply where a source class is not what
+/// the check tests, quietly weakening rules the declarer never considered.
+fn exempt_from_value(
+    name: &str,
+    value: Option<&Value>,
+) -> Result<BTreeMap<String, Vec<String>>, String> {
+    let Some(value) = value else {
+        return Ok(BTreeMap::new());
+    };
+    if matches!(value, Value::List(_)) {
+        return Err(format!(
+            "relationship '{name}': 'exempt' must be a {{check: [class, ...]}} map, not a list \
+             — name the check each exemption applies to, e.g. \
+             exempt: {{required_properties: ['PetregLicence']}}"
+        ));
+    }
+    let per_check = as_map(value).ok_or_else(|| {
+        format!("relationship '{name}': 'exempt' must be a {{check: [class, ...]}} map")
+    })?;
+    let mut out = BTreeMap::new();
+    for (check, classes) in per_check {
+        if !EXEMPTABLE_CHECKS.contains(&check) {
+            return Err(exempt_check_refusal(name, check));
+        }
+        let Value::List(items) = classes else {
+            return Err(format!(
+                "relationship '{name}': exempt['{check}'] must be a list of class names"
+            ));
+        };
+        let mut names = Vec::with_capacity(items.len());
+        for item in items {
+            match item {
+                Value::String(s) if !s.is_empty() => names.push(s.clone()),
+                Value::String(_) => {
+                    return Err(format!(
+                        "relationship '{name}': exempt['{check}'] has an empty class name"
+                    ))
+                }
+                _ => {
+                    return Err(format!(
+                        "relationship '{name}': exempt['{check}'] entries must be strings"
+                    ))
+                }
+            }
+        }
+        out.insert(check.to_string(), names);
+    }
+    Ok(out)
+}
+
+/// Why one check refuses exemption — the reason, not just the accept-list,
+/// because "use required_properties instead" is not an answer to someone
+/// who wants `domain` exempted.
+fn exempt_check_refusal(name: &str, check: &str) -> String {
+    let why = match check {
+        "domain" | "range" | "required" | "cardinality" => {
+            "that check already tests the domain-side class, so exempting a class would \
+             disable it for that class outright"
+        }
+        "inverse" | "symmetric" | "transitive" => {
+            "it flags a tuple of nodes rather than one edge, so there is no single \
+             domain-side class to exempt"
+        }
+        _ => {
+            let suggestion =
+                crate::graph::mutation::validation::did_you_mean(check, EXEMPTABLE_CHECKS);
+            return format!(
+                "relationship '{name}': 'exempt' key '{check}' is not a check name.{suggestion} \
+                 Exemption is accepted for {EXEMPTABLE_CHECKS:?} only."
+            );
+        }
+    };
+    format!(
+        "relationship '{name}': 'exempt' does not accept check '{check}' — {why}. Exemption is \
+         accepted for {EXEMPTABLE_CHECKS:?} only, where the exempted class is the edge's source \
+         type."
+    )
 }
 
 fn as_map(value: &Value) -> Option<&crate::datatypes::PropMap> {
@@ -631,7 +768,9 @@ mod tests {
                     "inverse_name": "OPERATOR_OF",
                     "cardinality": {"min": 0, "max": 1},
                     "required": true, "transitive": false, "symmetric": false,
-                    "enforcement": "warn", "description": "op"
+                    "enforcement": "warn",
+                    "exempt": {"required_properties": ["Licence"]},
+                    "description": "op"
                   }
                 }}"#,
         )
@@ -642,6 +781,12 @@ mod tests {
         let rel = &store.relationships["HAS_OPERATOR"];
         assert_eq!(rel.enforcement, Enforcement::Warn);
         assert_eq!(rel.cardinality.unwrap().max, Some(1));
+        assert_eq!(rel.exempt_classes("required_properties"), ["Licence"]);
+        assert!(rel.exempt_classes("property_types").is_empty());
+        assert_eq!(
+            rel.exempt_summary().as_deref(),
+            Some("required_properties: [Licence]")
+        );
         // Serde round-trip (the FileMetadata path).
         let json = serde_json::to_string(&store).unwrap();
         let back: OntologyStore = serde_json::from_str(&json).unwrap();
@@ -683,6 +828,47 @@ mod tests {
         let err = parse(r#"{"relationships": {"R": {"cardinality": {"min": 2, "max": 1}}}}"#)
             .unwrap_err();
         assert!(err.contains("min 2 > max 1"), "{err}");
+    }
+
+    #[test]
+    fn exempt_refuses_the_flat_form_and_unexemptable_checks() {
+        let flat = parse(
+            r#"{"classes": {"A": {}},
+                "relationships": {"R": {"exempt": ["A"]}}}"#,
+        )
+        .unwrap_err();
+        assert!(flat.contains("{check: [class, ...]}"), "{flat}");
+        for (check, marker) in [
+            ("domain", "already tests the domain-side class"),
+            ("cardinality", "already tests the domain-side class"),
+            ("transitive", "no single domain-side class"),
+        ] {
+            let err = parse(&format!(
+                r#"{{"classes": {{"A": {{}}}},
+                     "relationships": {{"R": {{"exempt": {{"{check}": ["A"]}}}}}}}}"#
+            ))
+            .unwrap_err();
+            assert!(err.contains(marker), "{check}: {err}");
+        }
+        let typo = parse(
+            r#"{"classes": {"A": {}},
+                "relationships": {"R": {"exempt": {"required_propertys": ["A"]}}}}"#,
+        )
+        .unwrap_err();
+        assert!(
+            typo.contains("Did you mean 'required_properties'?"),
+            "{typo}"
+        );
+    }
+
+    #[test]
+    fn exempt_class_must_be_declared() {
+        let err = parse(
+            r#"{"classes": {"A": {}},
+                "relationships": {"R": {"exempt": {"property_types": ["Ghost"]}}}}"#,
+        )
+        .unwrap_err();
+        assert!(err.contains("not a declared class"), "{err}");
     }
 
     #[test]

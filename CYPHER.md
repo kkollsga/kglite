@@ -3221,17 +3221,19 @@ and read-only from Cypher:
 
 ```cypher
 SHOW ONTOLOGY
-CALL ontology_audit() YIELD rule, severity, violations, total, pct
+CALL ontology_audit() YIELD rule, severity, violations, exempted, total, pct
 CALL type_domain_violation() YIELD source, target, rule   -- no-arg: checks every declaration
 ```
 
 `SHOW ONTOLOGY` returns one row per declared class (`kind`, `name`, `is_a`,
 `abstract`, `description`) and relationship (`kind`, `name`, `domain`,
-`range`, `enforcement`, `description`); zero rows when nothing is declared.
-`ontology_audit()` is the scorecard: one row per declared check with its
-violation count, denominator, percentage, and declared severity
+`range`, `enforcement`, `exempt`, `description`); zero rows when nothing is
+declared. `ontology_audit()` is the scorecard: one row per declared check with
+its violation count, denominator, percentage, and declared severity
 (`advisory` / `warn` / `error` — acted on by blueprint builds, reported
-everywhere else).
+everywhere else). `exempted` counts the rows a declaration's `exempt` classes
+excuse: they are left out of `violations` (and so out of the severity the gate
+acts on), and `violations + exempted` is everything the check flagged.
 
 The six declaration-backed rule procedures (`type_domain_violation`,
 `type_range_violation`, `missing_required_edge`, `cardinality_violation`,

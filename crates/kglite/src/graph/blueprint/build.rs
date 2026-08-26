@@ -248,17 +248,26 @@ fn apply_ontology_gate(
     use crate::graph::ontology::Enforcement;
     let mut errors: Vec<String> = Vec::new();
     for line in audit_counts(graph)? {
-        if line.violations == 0 {
+        if line.violations == 0 && line.exempted == 0 {
             continue;
         }
+        // The exempted tail is reported even when it leaves zero violations:
+        // an exemption that silently absorbs every flagged row would make a
+        // passing gate indistinguishable from a clean graph.
+        let tail = if line.exempted > 0 {
+            format!(" (+{} exempted)", line.exempted)
+        } else {
+            String::new()
+        };
         let summary = format!(
-            "{}: {}/{} ({:.1}%) violations",
+            "{}: {}/{} ({:.1}%) violations{tail}",
             line.rule, line.violations, line.total, line.pct
         );
         match line.severity {
             Enforcement::Advisory => {}
             Enforcement::Warn => report.warnings.push(format!("ontology: {summary}")),
-            Enforcement::Error => errors.push(summary),
+            Enforcement::Error if line.violations > 0 => errors.push(summary),
+            Enforcement::Error => report.warnings.push(format!("ontology: {summary}")),
         }
     }
     if !errors.is_empty() {
