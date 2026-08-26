@@ -263,7 +263,11 @@ def test_show_procedures_default_columns(small_graph):
     modes = dict(zip(df["name"], df["mode"]))
     schema_changing = {name for name, mode in modes.items() if mode == "SCHEMA"}
     assert schema_changing == {"db.cdc.enable", "db.cdc.disable"}, schema_changing
-    assert set(modes.values()) == {"READ", "SCHEMA"}
+    # Data-mutating procedures report WRITE — the third mode, pinned the
+    # same both-ways as SCHEMA above (structured-data epoch, 2026-08-26).
+    writing = {name for name, mode in modes.items() if mode == "WRITE"}
+    assert writing == {"table.upsert", "table.delete"}, writing
+    assert set(modes.values()) == {"READ", "SCHEMA", "WRITE"}
 
 
 def test_show_procedures_yield_projection_and_alias(small_graph):

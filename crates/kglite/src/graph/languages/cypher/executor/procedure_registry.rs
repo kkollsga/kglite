@@ -471,7 +471,11 @@ pub(super) fn is_mutating_procedure(name: &str) -> bool {
 /// Neo4j procedure mode for `SHOW PROCEDURES`. KGLite's mutating procedures
 /// change capture configuration rather than data, which is Neo4j's "SCHEMA".
 pub(super) fn procedure_mode(name: &str) -> &'static str {
-    if is_mutating_procedure(name) {
+    if name.starts_with("table.") {
+        // The table procedures mutate DATA (rows of a property), not
+        // capture configuration — Neo4j's WRITE mode, not SCHEMA.
+        "WRITE"
+    } else if is_mutating_procedure(name) {
         "SCHEMA"
     } else {
         "READ"
