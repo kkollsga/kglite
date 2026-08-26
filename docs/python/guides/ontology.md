@@ -186,6 +186,30 @@ The server installs (and optionally materializes) the declarations at boot,
 untouched — adoption with zero build-script changes. An agent explicitly
 calling the `save_graph` tool persists them, which is then correct.
 
+## How this maps to RDFS / OWL / SHACL
+
+For readers coming from the semantic-web stack, the honest positioning —
+including three places where a familiar word carries *different* semantics
+here:
+
+| Concept | There | Here |
+|---|---|---|
+| `is_a` | `rdfs:subClassOf`, a DAG (multiple inheritance) | a **forest** — one parent per class. Multi-role is modelled on *nodes* (secondary labels; a materialized node carries the union of its labels' ancestries), not in the class graph. |
+| `domain` / `range` | RDFS **infers**: using an edge *entails* the subject's class membership | **checked, never inferred** — the SHACL reading. A violating edge is reported (or refused at the build gate); nothing ever gains a class from edge use. If you expect RDFS semantics, this is the one difference to internalize. |
+| Validation | SHACL, deliberately separate from ontology/inference | the same separation, built in: `enforcement: advisory \| warn \| error` maps onto `sh:Info` / `sh:Warning` / `sh:Violation`. |
+| Subclass queries | entailment regimes; production stores typically **materialize** entailments | the same technique: `materialize_ontology()` stamps ancestor labels; no query rewriting, no reasoner. |
+| `inverse_name` | `owl:inverseOf` creates/entails the inverse triples | naming only — Cypher already traverses both directions, so no second edge exists or is implied. |
+| `transitive` | `owl:TransitiveProperty`, entailed closures | an annotation consumed by `transitivity_violation` and documentation; the closure is *walked* (`*1..`), never stored. |
+| "abstract" | not an ontology notion (any class may have instances) | borrowed from the schema world: a class that names no node type and cannot be instantiated directly. |
+
+**Deliberate non-goals** (not omissions): entailment of any kind,
+open-world semantics, equivalence classes (`owl:equivalentClass` — within
+one graph, two names for one concept is a rebuild, not an axiom),
+restriction classes, property hierarchies (`rdfs:subPropertyOf`), and
+disjointness axioms (low value under single primary types). RDFS/SKOS
+import/export is tracked as future interop, adopting the vocabulary, not
+the entailment.
+
 ## When not to use it
 
 - **Large taxonomies as classes** — enforced away by the class cap; keep
