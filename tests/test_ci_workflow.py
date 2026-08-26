@@ -1919,3 +1919,32 @@ def test_ci_stable_toolchain_is_pinned() -> None:
     text = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
     assert 'RUST_STABLE: "' in text, "workflow-level RUST_STABLE pin missing"
     assert "dtolnay/rust-toolchain@stable" not in text, "a job floats on @stable instead of the RUST_STABLE pin"
+
+
+def test_dedup_gates_are_consistent() -> None:
+    """Every dedup-gated job must carry the fresh-check `if` (a `needs`
+    without the `if` re-runs anyway; an `if` without the `needs` reads an
+    empty output and NEVER runs). Deliberate exemptions: rustsec-audit
+    (advisories move independent of the SHA), the schedule-only jobs (never
+    run on push), msrv (skips transitively via msrv-matrix), ci-success."""
+    ci = yaml.safe_load((WORKFLOWS / "ci.yml").read_text(encoding="utf-8"))
+    exempt = {
+        "dedup",
+        "rustsec-audit",
+        "msrv",
+        "ci-success",
+        "scheduled-thread-sanitizer",
+        "dependency-maintenance",
+        "scheduled-concurrency-stress",
+    }
+    fresh_if = "needs.dedup.outputs.fresh == 'true'"
+    for job, spec in ci["jobs"].items():
+        gated_needs = "dedup" in (spec.get("needs") or [])
+        gated_if = fresh_if in str(spec.get("if", ""))
+        if job == "ci-success":
+            assert gated_needs, "ci-success must aggregate dedup"
+            continue
+        if job in exempt:
+            assert not gated_needs, f"{job} is exempt from dedup but gated"
+        else:
+            assert gated_needs and gated_if, f"{job}: dedup gating incomplete (needs={gated_needs}, if={gated_if})"

@@ -32,7 +32,48 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  dedup:
+    name: Prior green PR run check
+    # On a push to main that fast-forwards a PR head already proven green,
+    # re-running the full ~20-job suite is pure duplication (~2.5
+    # runner-hours per release). This job asks whether THIS EXACT SHA has a
+    # completed successful pull_request run of this same workflow; if so,
+    # every gated job below skips, and `ci-success` (which tolerates
+    # `skipped`) still reports the green the publish gate waits on. Any
+    # other event, or no prior green run, means a fresh full suite.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      fresh: ${{ steps.check.outputs.fresh }}
+    steps:
+      - name: Look for a prior green pull_request run of this SHA
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          if [ "${{ github.event_name }}" != "push" ]; then
+            echo "event=${{ github.event_name }} — full suite"
+            echo "fresh=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Failure of the query itself must mean "run the suite", never
+          # "skip it" — a dedup that can silently skip on an API error is a
+          # gate that cannot fail.
+          green=$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$SHA&event=pull_request&status=success&per_page=1"             -q '.workflow_runs | length' 2>/dev/null || echo 0)
+          if [ "$green" = "1" ]; then
+            echo "SHA $SHA already green in a pull_request run — skipping the suite"
+            echo "fresh=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "no prior green pull_request run for $SHA — full suite"
+            echo "fresh=true" >> "$GITHUB_OUTPUT"
+          fi
+
   docs:
+    needs: [dedup]
+    if: needs.dedup.outputs.fresh == 'true'
     name: Documentation
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -52,6 +93,8 @@ jobs:
         run: sphinx-build -W --keep-going -b html docs docs/_build/html
 
   rust-checks:
+    needs: [dedup]
+    if: needs.dedup.outputs.fresh == 'true'
     name: Rust checks
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -102,6 +145,8 @@ jobs:
         run: bash scripts/check_packaged_features.sh
 
   rust-core-coverage:
+    needs: [dedup]
+    if: needs.dedup.outputs.fresh == 'true'
     name: Rust core coverage (report only)
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -138,6 +183,8 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
 
   source-quality:
+    needs: [dedup]
+    if: needs.dedup.outputs.fresh == 'true'
     name: Production source quality
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -163,6 +210,8 @@ jobs:
         run: python scripts/check_rustsec_advisories.py --policy-only
 
   msrv-matrix:
+    needs: [dedup]
+    if: needs.dedup.outputs.fresh == 'true'
     # Derives the MSRV job's matrix from the manifests themselves. A
     # hard-coded matrix would let the declared `rust-version` and the job
     # that verifies it drift apart — which is the exact failure a declared-
@@ -228,6 +277,8 @@ jobs:
         run: cargo check -p kglite --features okf,rdf
 
   minimal-versions:
+    needs: [dedup]
+    if: needs.dedup.outputs.fresh == 'true'
     # WHAT THIS CATCHES
     # -----------------
     # A dependency requirement that understates the version our own code
@@ -373,6 +424,8 @@ jobs:
         run: python scripts/check_rustsec_advisories.py
 
   kglite-c:
+    needs: [dedup]
+    if: needs.dedup.outputs.fresh == 'true'
     name: kglite-c (C ABI)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -432,6 +485,8 @@ jobs:
           }
 
   python-lint:
+    needs: [dedup]
+    if: needs.dedup.outputs.fresh == 'true'
     name: Python lint
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -452,6 +507,8 @@ jobs:
         run: ruff check .
 
   python-tests:
+    needs: [dedup]
+    if: needs.dedup.outputs.fresh == 'true'
     name: Python tests (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -581,6 +638,8 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
 
   free-threading:
+    needs: [dedup]
+    if: needs.dedup.outputs.fresh == 'true'
     name: Free-threading (no-GIL) smoke
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -632,6 +691,8 @@ jobs:
           ./.ftvenv/bin/python -m pytest tests/test_freethreading.py tests/test_concurrency.py tests/test_session.py -v --tb=short
 
   perf-regression:
+    needs: [dedup]
+    if: needs.dedup.outputs.fresh == 'true'
     name: Perf regression gate
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -790,6 +851,8 @@ jobs:
           retention-days: 7
 
   public-api:
+    needs: [dedup]
+    if: needs.dedup.outputs.fresh == 'true'
     name: Feature-complete public API gate
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -829,6 +892,8 @@ jobs:
         run: bash scripts/check_packaged_features.sh
 
   storage-parity:
+    needs: [dedup]
+    if: needs.dedup.outputs.fresh == 'true'
     name: Cross-storage parity
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -861,6 +926,8 @@ jobs:
             tests/test_phase5_parity.py::test_graph_copy_cow_correctness_mapped
 
   disk-concurrency:
+    needs: [dedup]
+    if: needs.dedup.outputs.fresh == 'true'
     name: Disk concurrency regressions
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -893,6 +960,8 @@ jobs:
             tests/test_session.py::test_disk_session_reuses_writer_lineage_and_composes
 
   native-lifecycle-locks:
+    needs: [dedup]
+    if: needs.dedup.outputs.fresh == 'true'
     name: Native lifecycle locks (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -930,6 +999,8 @@ jobs:
         run: cargo test -p kglite-cli
 
   loom-session:
+    needs: [dedup]
+    if: needs.dedup.outputs.fresh == 'true'
     name: Loom Session model
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -946,6 +1017,8 @@ jobs:
         run: RUSTFLAGS="--cfg loom" cargo test -p kglite --test loom_session
 
   miri-loaders:
+    needs: [dedup]
+    if: needs.dedup.outputs.fresh == 'true'
     name: Miri unsafe loader checks
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -963,6 +1036,8 @@ jobs:
           cargo miri test -p kglite --lib parse_line_preserves_utf8_literal_boundaries
 
   address-sanitizer:
+    needs: [dedup]
+    if: needs.dedup.outputs.fresh == 'true'
     name: AddressSanitizer disk arenas
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -1062,6 +1137,8 @@ jobs:
         run: .venv/bin/pytest tests/test_bolt_server_concurrency.py -m bolt_stress -v --tb=short
 
   bolt-driver-conformance:
+    needs: [dedup]
+    if: needs.dedup.outputs.fresh == 'true'
     name: Bolt conformance (official JS + Java drivers)
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -1175,6 +1252,8 @@ jobs:
         run: python scripts/assert_conformance_ran.py conformance.xml
 
   kglite-java:
+    needs: [dedup]
+    if: needs.dedup.outputs.fresh == 'true'
     name: kglite-java (JVM binding)
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -1267,6 +1346,7 @@ jobs:
     # `if: always()` makes this run after every dependency regardless of their
     # outcome, so it always produces a definitive pass/fail check to wait on.
     needs:
+      - dedup
       - docs
       - rust-checks
       - rust-core-coverage
