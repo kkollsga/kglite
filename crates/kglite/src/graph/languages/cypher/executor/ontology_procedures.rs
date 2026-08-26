@@ -30,6 +30,7 @@ use super::rule_procedures::{
 use crate::datatypes::values::Value;
 use crate::graph::languages::cypher::ast::YieldItem;
 use crate::graph::languages::cypher::result::ResultRow;
+use crate::graph::mutation::validation::value_matches_type;
 use crate::graph::ontology::{OntologyStore, RelationshipDecl};
 use crate::graph::schema::{DirGraph, InternedKey};
 use crate::graph::storage::GraphRead;
@@ -76,6 +77,40 @@ pub(super) fn scan_endpoint_mismatch(
             None => continue,
         };
         if !accepted.contains(&actual) {
+            out.push((er.source(), er.target()));
+        }
+    }
+    out
+}
+
+/// Edges of `rel` violating the declaration's property contract.
+/// `required` — a listed property absent or null on the edge;
+/// otherwise — a *present* non-null property failing its declared type
+/// (absence is `required_properties`' concern, never a type violation).
+fn scan_edge_property_violations(
+    graph: &DirGraph,
+    edge_type: &str,
+    decl: &RelationshipDecl,
+    required: bool,
+) -> Vec<(NodeIndex, NodeIndex)> {
+    let key = InternedKey::from_str(edge_type);
+    let mut out = Vec::new();
+    for er in graph.graph.edge_references() {
+        if er.weight().connection_type != key {
+            continue;
+        }
+        let violates = if required {
+            decl.required_properties
+                .iter()
+                .any(|p| matches!(er.weight().get_property(p), None | Some(Value::Null)))
+        } else {
+            decl.property_types.iter().any(|(p, ty)| {
+                er.weight()
+                    .get_property(p)
+                    .is_some_and(|v| !matches!(v, Value::Null) && !value_matches_type(v, ty))
+            })
+        };
+        if violates {
             out.push((er.source(), er.target()));
         }
     }
@@ -145,6 +180,12 @@ fn declared_checks(rel: &str, decl: &RelationshipDecl) -> Vec<DeclaredCheck> {
     if decl.required {
         out.push(DeclaredCheck::Required);
     }
+    if !decl.required_properties.is_empty() {
+        out.push(DeclaredCheck::RequiredProperties);
+    }
+    if !decl.property_types.is_empty() {
+        out.push(DeclaredCheck::PropertyTypes);
+    }
     if decl.cardinality.is_some() {
         out.push(DeclaredCheck::Cardinality);
     }
@@ -166,6 +207,8 @@ enum DeclaredCheck {
     Domain,
     Range,
     Required,
+    RequiredProperties,
+    PropertyTypes,
     Cardinality,
     Inverse,
     Symmetric,
@@ -178,6 +221,8 @@ impl DeclaredCheck {
             DeclaredCheck::Domain => "domain",
             DeclaredCheck::Range => "range",
             DeclaredCheck::Required => "required",
+            DeclaredCheck::RequiredProperties => "required_properties",
+            DeclaredCheck::PropertyTypes => "property_types",
             DeclaredCheck::Cardinality => "cardinality",
             DeclaredCheck::Inverse => "inverse",
             DeclaredCheck::Symmetric => "symmetric",
@@ -229,6 +274,13 @@ fn check_rows(
                 rows.extend(execute_missing_required_edge(graph, &params, yield_items)?);
             }
             Ok(rows)
+        }
+        DeclaredCheck::RequiredProperties | DeclaredCheck::PropertyTypes => {
+            let src_var = require_node_yield(yield_items, "ontology_audit", "source")?;
+            let tgt_var = require_node_yield(yield_items, "ontology_audit", "target")?;
+            let required = check == DeclaredCheck::RequiredProperties;
+            let pairs = scan_edge_property_violations(graph, rel, decl, required);
+            Ok(endpoint_rows(pairs, &src_var, &tgt_var))
         }
         DeclaredCheck::Cardinality => {
             let Some(domain) = decl.domain.as_deref() else {
@@ -407,7 +459,10 @@ pub(crate) fn audit_counts(graph: &DirGraph) -> Result<Vec<AuditLine>, String> {
 /// the row *count*.
 fn counting_yield(check: DeclaredCheck) -> Vec<YieldItem> {
     let names: &[&str] = match check {
-        DeclaredCheck::Domain | DeclaredCheck::Range => &["source", "target"],
+        DeclaredCheck::Domain
+        | DeclaredCheck::Range
+        | DeclaredCheck::RequiredProperties
+        | DeclaredCheck::PropertyTypes => &["source", "target"],
         DeclaredCheck::Required => &["node"],
         DeclaredCheck::Cardinality => &["node", "count"],
         DeclaredCheck::Inverse | DeclaredCheck::Symmetric => &["a", "b"],
@@ -431,6 +486,8 @@ fn check_total(
     match check {
         DeclaredCheck::Domain
         | DeclaredCheck::Range
+        | DeclaredCheck::RequiredProperties
+        | DeclaredCheck::PropertyTypes
         | DeclaredCheck::Inverse
         | DeclaredCheck::Symmetric
         | DeclaredCheck::Transitive => {

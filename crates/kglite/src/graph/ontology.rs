@@ -309,6 +309,30 @@ pub fn ontology_from_json(json: &str) -> Result<OntologyStore, String> {
     ontology_from_value(&value)
 }
 
+/// The closed accept-list for `property_types` values — every spelling
+/// [`crate::graph::mutation::validation::value_matches_type`] resolves.
+const PROPERTY_TYPE_NAMES: &[&str] = &[
+    "string",
+    "str",
+    "integer",
+    "int",
+    "i64",
+    "int64",
+    "float",
+    "double",
+    "f64",
+    "number",
+    "float64",
+    "boolean",
+    "bool",
+    "date",
+    "datetime",
+    "timestamp",
+    "uniqueid",
+    "point",
+    "any",
+];
+
 const CLASS_KEYS: &[&str] = &["is_a", "abstract", "description", "by"];
 const REL_KEYS: &[&str] = &[
     "domain",
@@ -399,6 +423,16 @@ fn relationship_from_value(name: &str, value: &Value) -> Result<RelationshipDecl
             for (k, tv) in types {
                 match tv {
                     Value::String(s) => {
+                        // value_matches_type is permissive on unknown names,
+                        // so a typo here would otherwise never fail anything.
+                        if !PROPERTY_TYPE_NAMES.contains(&s.to_lowercase().as_str()) {
+                            return Err(format!(
+                                "relationship '{name}': 'property_types' entry \
+                                 '{k}: {s}' names an unknown type — use one of \
+                                 string, integer, float, boolean, date, \
+                                 datetime, timestamp, point, any"
+                            ));
+                        }
                         out.insert(k.to_string(), s.clone());
                     }
                     _ => {

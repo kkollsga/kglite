@@ -355,3 +355,89 @@ def test_closure_probe_declines_on_partial_indexes(mat):
     mat.create_index("Student", "name")
     rows = mat.cypher("MATCH (p:Person {name: 'Tea'}) RETURN p.id AS id").to_list()
     assert [r["id"] for r in rows] == [10]
+
+
+# ---- 0.16.12: declared-but-dead required_properties / property_types ----
+# (operator report 2026-08-26: both keys parsed+persisted but never checked)
+
+
+@pytest.fixture
+def props_graph() -> KnowledgeGraph:
+    graph = KnowledgeGraph()
+    graph.cypher("CREATE (:Student {id: 1, title: 'A'}), (:Class {id: 1, title: 'C'})")
+    # One edge with `since` (correctly typed), one without it.
+    graph.cypher("MATCH (s:Student {id: 1}), (c:Class {id: 1}) CREATE (s)-[:ENROLLED_IN {since: 2024}]->(c)")
+    graph.cypher("CREATE (:Student {id: 2, title: 'B'})")
+    graph.cypher("MATCH (s:Student {id: 2}), (c:Class {id: 1}) CREATE (s)-[:ENROLLED_IN]->(c)")
+    return graph
+
+
+def _audit(graph):
+    rows = graph.cypher("CALL ontology_audit() YIELD rule, severity, violations, total RETURN *").to_list()
+    return {r["rule"]: r for r in rows}
+
+
+def test_required_properties_audit_row(props_graph):
+    props_graph.define_ontology(
+        {
+            "classes": {"Student": {}, "Class": {}},
+            "relationships": {
+                "ENROLLED_IN": {
+                    "domain": "Student",
+                    "range": "Class",
+                    "required_properties": ["since"],
+                    "enforcement": "error",
+                }
+            },
+        }
+    )
+    audit = _audit(props_graph)
+    row = audit["ENROLLED_IN.required_properties"]
+    assert (row["violations"], row["total"], row["severity"]) == (1, 2, "error")
+
+
+def test_property_types_audit_row(props_graph):
+    # `since` is an integer on the edge that has it; declare it as a string
+    # -> 1 violation (only present values are checked; absence is
+    # required_properties' business).
+    props_graph.define_ontology(
+        {
+            "classes": {"Student": {}, "Class": {}},
+            "relationships": {
+                "ENROLLED_IN": {
+                    "domain": "Student",
+                    "range": "Class",
+                    "property_types": {"since": "string"},
+                }
+            },
+        }
+    )
+    audit = _audit(props_graph)
+    row = audit["ENROLLED_IN.property_types"]
+    assert (row["violations"], row["total"]) == (1, 2)
+    # Correctly declared type -> clean row.
+    props_graph.define_ontology(
+        {
+            "classes": {"Student": {}, "Class": {}},
+            "relationships": {
+                "ENROLLED_IN": {
+                    "domain": "Student",
+                    "range": "Class",
+                    "property_types": {"since": "integer"},
+                }
+            },
+        }
+    )
+    assert _audit(props_graph)["ENROLLED_IN.property_types"]["violations"] == 0
+
+
+def test_property_types_unknown_type_name_refused(props_graph):
+    # value_matches_type is permissive on unknown names, so a typo would
+    # silently never fail -- the declaration must refuse it up front.
+    with pytest.raises(Exception, match="property_types"):
+        props_graph.define_ontology(
+            {
+                "classes": {"Student": {}, "Class": {}},
+                "relationships": {"ENROLLED_IN": {"property_types": {"since": "strig"}}},
+            }
+        )
