@@ -48,15 +48,22 @@ pub use planner::simplification::rewrite_text_score;
 
 use crate::datatypes::values::Value;
 use crate::graph::core::pattern_matching::{
-    EdgeDirection, EdgePattern, NodePattern, Pattern, PatternElement,
+    closure_probe, EdgeDirection, EdgePattern, NodePattern, Pattern, PatternElement,
+    PropertyMatcher,
 };
 use crate::graph::schema::DirGraph;
 use crate::graph::storage::GraphRead;
 
 use ast::*;
 
-/// Estimate the number of rows a MATCH clause will produce based
-/// on type_indices.
+/// Estimate the number of rows a MATCH clause will produce, from the label
+/// cardinalities its patterns constrain.
+///
+/// Counts through [`DirGraph::label_cardinality`], the same primary +
+/// secondary-bucket answer the join-order model uses: a label that only ever
+/// appears as a secondary one (every materialized ontology supertype) has an
+/// empty `type_indices` bucket, and counting that alone reported 0 rows for a
+/// pattern matching every member.
 fn estimate_match_rows(m: &MatchClause, graph: &DirGraph) -> Option<usize> {
     let types = collect_node_types(m);
     if types.is_empty() {
@@ -65,10 +72,7 @@ fn estimate_match_rows(m: &MatchClause, graph: &DirGraph) -> Option<usize> {
     } else {
         // Use the smallest type's count as the estimate (join
         // selectivity heuristic)
-        types
-            .iter()
-            .map(|t| graph.type_indices.get(t.as_str()).map_or(0, |v| v.len()))
-            .min()
+        types.iter().map(|t| graph.label_cardinality(t)).min()
     }
 }
 
@@ -273,15 +277,62 @@ fn var_length_expand_ops(patterns: &[Pattern]) -> Vec<String> {
     ops
 }
 
+/// One `ClosureProbe` operator row per node pattern whose ontology closure the
+/// matcher can answer from member indexes, in pattern order.
+///
+/// Rendered as `ClosureProbe :Person (Student, Teacher)` — the supertype the
+/// query names, then the live member types the probe would visit. Eligibility
+/// comes from [`closure_probe::closure_probe_members`], the same predicate the
+/// matcher answers to, so a plan row can never claim a probe the runtime
+/// declines.
+///
+/// Only *inline* equality properties count. Pushdown has already run by the
+/// time EXPLAIN renders (the planner moves eligible `WHERE` equalities into the
+/// pattern), but a value written as a parameter is still unresolved here, so
+/// `{p: $v}` stays conservatively unmarked rather than promising a plan the
+/// bound value might not get. `estimated_rows` stays `Null`: the probe's row
+/// count is the value's, and no static model knows it.
+fn closure_probe_ops(patterns: &[Pattern], graph: &DirGraph) -> Vec<String> {
+    let mut ops = Vec::new();
+    for pattern in patterns {
+        for element in &pattern.elements {
+            let PatternElement::Node(np) = element else {
+                continue;
+            };
+            if np.alt_labels.is_some() {
+                continue;
+            }
+            let (Some(node_type), Some(props)) = (np.node_type.as_deref(), np.properties.as_ref())
+            else {
+                continue;
+            };
+            let equality_props: Vec<&str> = props
+                .iter()
+                .filter(|(_, matcher)| matches!(matcher, PropertyMatcher::Equals(_)))
+                .map(|(name, _)| name.as_str())
+                .collect();
+            if let Some(members) =
+                closure_probe::closure_probe_members(graph, node_type, &equality_props)
+            {
+                ops.push(format!(
+                    "ClosureProbe :{node_type} ({})",
+                    members.join(", ")
+                ));
+            }
+        }
+    }
+    ops
+}
+
 /// Generate a structured query plan as a CypherResult with columns
 /// [step, operation, estimated_rows].
 pub fn generate_explain_result(query: &CypherQuery, graph: &DirGraph) -> result::CypherResult {
     let mut rows = Vec::new();
 
     for clause in query.clauses.iter() {
-        // `step` numbers rows, not clauses: a MATCH carrying variable-length
-        // edges contributes an Expand row per edge after its own row, and the
-        // column stays contiguous.
+        // `step` numbers rows, not clauses: a MATCH contributes a ClosureProbe
+        // row per eligible closure and an Expand row per variable-length edge
+        // after its own row, and the column stays contiguous.
         let step = (rows.len() + 1) as i64;
         let operation = executor::clause_display_name(clause);
         let est = match clause {
@@ -312,7 +363,10 @@ pub fn generate_explain_result(query: &CypherQuery, graph: &DirGraph) -> result:
         rows.push(vec![Value::Int64(step), Value::String(operation), est]);
 
         if let Clause::Match(m) | Clause::OptionalMatch(m) = clause {
-            for op in var_length_expand_ops(&m.patterns) {
+            for op in closure_probe_ops(&m.patterns, graph)
+                .into_iter()
+                .chain(var_length_expand_ops(&m.patterns))
+            {
                 rows.push(vec![
                     Value::Int64((rows.len() + 1) as i64),
                     Value::String(op),

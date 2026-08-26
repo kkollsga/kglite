@@ -15,6 +15,7 @@ use std::time::Instant;
 
 use crate::graph::parallel::{self, ParallelInterrupt};
 
+use super::closure_probe;
 use super::column_filter::{self, ColumnFilter};
 use super::pattern::{
     AnchorSide, ConnTypeFilter, EdgeDirection, EdgePattern, MatchBinding, NodePattern, PathHop,
@@ -1078,31 +1079,8 @@ impl<'a> PatternExecutor<'a> {
         if !self.graph.managed_label_closed(node_type) {
             return None;
         }
-        let mut member_types: Vec<&str> = self
-            .graph
-            .ontology
-            .classes
-            .iter()
-            .filter(|(name, _)| {
-                self.graph
-                    .ontology
-                    .ancestors(name)
-                    .iter()
-                    .any(|a| a == node_type)
-            })
-            .map(|(name, _)| name.as_str())
-            .collect();
-        member_types.push(node_type);
         let mut out = Vec::new();
-        for member in member_types {
-            let live = self
-                .graph
-                .type_indices
-                .get(member)
-                .is_some_and(|nodes| nodes.iter().next().is_some());
-            if !live {
-                continue;
-            }
+        for member in closure_probe::live_closure_members(self.graph, node_type) {
             // Per-primary-type buckets are disjoint, so the union needs no
             // dedup.
             out.extend(self.try_index_lookup(member, props)?);

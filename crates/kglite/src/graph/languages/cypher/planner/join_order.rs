@@ -132,14 +132,7 @@ pub(super) fn estimate_node_selectivity(
     if let Some(alts) = &np.alt_labels {
         let total: usize = alts
             .iter()
-            .map(|label| {
-                let primary = graph.type_indices.get(label).map_or(0, |i| i.len());
-                let secondary = graph
-                    .secondary_label_index
-                    .get(&crate::graph::schema::InternedKey::from_str(label))
-                    .map_or(0, Vec::len);
-                primary.saturating_add(secondary)
-            })
+            .map(|label| graph.label_cardinality(label))
             .sum();
         return total.max(1);
     }

@@ -7,8 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **EXPLAIN surfaces closure-probe eligibility**: a `MATCH` on a materialized
+  `Closed` ontology supertype whose live member types are all index-covered
+  for the queried properties now emits a `ClosureProbe :Person (Student,
+  Teacher)` row naming the members the probe visits. Eligibility comes from a
+  single predicate shared with the matcher, so the plan cannot advertise a
+  probe the runtime declines. Parameter-valued properties (`{p: $v}`) stay
+  conservatively unmarked.
+
 ### Fixed
 
+- **`estimated_rows` was 0 for materialized supertype labels**: EXPLAIN counted
+  the primary type bucket only, and a label carried purely as a secondary one
+  (every materialized ontology supertype) has none — while the join-order model
+  already counted both. One cardinality helper now answers both.
+- **Label alternation rendered only its first branch**: EXPLAIN and PROFILE
+  showed `MATCH (n:Student|Teacher)` as `Match :Student`, naming a narrower
+  plan than the one that runs. Both branches are now rendered
+  (`Match :Student|Teacher`).
 - **`describe()` under-reported enforcement**: the ontology block printed the
   base severity only, so a relationship whose per-check `enforcement` map
   raised a check to `error` still read as `advisory`. Both reader surfaces

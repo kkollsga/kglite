@@ -41,6 +41,13 @@ class TestExplainBasic:
         ops = [r["operation"] for r in result.to_list()]
         assert any("Match :Person" in op for op in ops)
 
+    def test_explain_shows_every_alternation_branch(self):
+        """`(n:A|B)` names both branches — `node_type` alone holds only the first."""
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:Student {id: 1}), (:Teacher {id: 2})")
+        ops = [r["operation"] for r in g.cypher("EXPLAIN MATCH (n:Student|Teacher) RETURN n.id").to_list()]
+        assert ops[0] == "Match :Student|Teacher"
+
     def test_explain_shows_filter(self, graph):
         """WHERE shows as a step (using <> which is not pushed into MATCH)."""
         result = graph.cypher("EXPLAIN MATCH (n:Person) WHERE n.age <> 25 RETURN n.name")

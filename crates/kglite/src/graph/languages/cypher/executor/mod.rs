@@ -764,22 +764,7 @@ impl<'a> CypherExecutor<'a> {
         node_type: &str,
         alias: &str,
     ) -> Result<ResultSet, String> {
-        let primary = self
-            .graph
-            .type_indices
-            .get(node_type)
-            .map(|v| v.len())
-            .unwrap_or(0);
-        let secondary = if self.graph.has_secondary_labels {
-            self.graph
-                .secondary_label_index
-                .get(&InternedKey::from_str(node_type))
-                .map(|v| v.len())
-                .unwrap_or(0)
-        } else {
-            0
-        };
-        let count = (primary + secondary) as i64;
+        let count = self.graph.label_cardinality(node_type) as i64;
         self.budget
             .check_work(count as usize, "fused typed node count")?;
         Ok(single_count_result(alias, count))

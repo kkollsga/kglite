@@ -1,6 +1,6 @@
 //! Executor support types for specialized filters, spatial caches, and profiling labels.
 
-use super::super::ast::{Clause, ConstraintCommand, Expression, SchemaCommand};
+use super::super::ast::{Clause, ConstraintCommand, Expression, MatchClause, SchemaCommand};
 use crate::datatypes::values::Value;
 use crate::graph::core::pattern_matching::PatternElement;
 use std::collections::HashMap;
@@ -344,22 +344,32 @@ pub(super) struct TextBm25Cache {
     pub(super) generation: u64,
 }
 
+/// The label slots a MATCH clause's node patterns constrain, one entry per
+/// typed node in pattern order: `Person`, or `Student|Teacher` under
+/// alternation.
+///
+/// Reads through [`NodePattern::label_alternatives`], never `node_type` alone —
+/// that field holds only the *first* branch, so `(n:Student|Teacher)` used to
+/// render as `Match :Student`, naming a narrower plan than the one that runs.
+/// A single-label pattern renders exactly as before.
+fn clause_label_slots(m: &MatchClause) -> Vec<String> {
+    m.patterns
+        .iter()
+        .flat_map(|p| p.elements.iter())
+        .filter_map(|e| match e {
+            PatternElement::Node(n) if !n.label_alternatives().is_empty() => {
+                Some(n.label_alternatives().join("|"))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// Human-readable name for a Clause variant, used in PROFILE and EXPLAIN output.
 pub fn clause_display_name(clause: &Clause) -> String {
     match clause {
         Clause::Match(m) => {
-            let types: Vec<&str> = m
-                .patterns
-                .iter()
-                .flat_map(|p| p.elements.iter())
-                .filter_map(|e| {
-                    if let PatternElement::Node(n) = e {
-                        n.node_type.as_deref()
-                    } else {
-                        None
-                    }
-                })
-                .collect();
+            let types = clause_label_slots(m);
             if types.is_empty() {
                 "Match".into()
             } else {
@@ -367,18 +377,7 @@ pub fn clause_display_name(clause: &Clause) -> String {
             }
         }
         Clause::OptionalMatch(m) => {
-            let types: Vec<&str> = m
-                .patterns
-                .iter()
-                .flat_map(|p| p.elements.iter())
-                .filter_map(|e| {
-                    if let PatternElement::Node(n) = e {
-                        n.node_type.as_deref()
-                    } else {
-                        None
-                    }
-                })
-                .collect();
+            let types = clause_label_slots(m);
             if types.is_empty() {
                 "OptionalMatch".into()
             } else {

@@ -485,6 +485,29 @@ impl DirGraph {
         out
     }
 
+    /// How many nodes carry `label` — as their primary type or as a
+    /// secondary label. The counting companion to [`Self::nodes_with_label`],
+    /// and the one cardinality answer every estimator must use: a
+    /// materialized ontology supertype has *no* primary bucket, so a
+    /// `type_indices`-only count reports 0 for a label matching every member
+    /// (EXPLAIN printed `estimated_rows: 0` for exactly that shape while the
+    /// join-order model, summing both, disagreed).
+    ///
+    /// Duplicate-free for the same reason `nodes_with_label` is: the
+    /// choke-point label API forbids one key being both a node's primary type
+    /// and a secondary label.
+    pub fn label_cardinality(&self, label: &str) -> usize {
+        let primary = self.type_indices.get(label).map_or(0, |v| v.len());
+        let secondary = if self.has_secondary_labels {
+            self.secondary_label_index
+                .get(&InternedKey::from_str(label))
+                .map_or(0, Vec::len)
+        } else {
+            0
+        };
+        primary.saturating_add(secondary)
+    }
+
     /// True if `idx` carries `key` as its primary type or a secondary
     /// label. Membership test companion to `nodes_with_label` for sites
     /// that filter an existing candidate set rather than enumerate one.

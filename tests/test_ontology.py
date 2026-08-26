@@ -362,6 +362,61 @@ def test_closure_probe_declines_on_partial_indexes(mat):
     assert [r["id"] for r in rows] == [10]
 
 
+# ─── EXPLAIN observability for the closure probe ───────────────────────────
+
+
+def _ops(graph, query):
+    return [row["operation"] for row in graph.cypher(query).to_list()]
+
+
+def test_explain_marks_closure_probe_when_every_member_is_indexed(mat):
+    mat.create_index("Student", "name")
+    mat.create_index("Teacher", "name")
+    ops = _ops(mat, "EXPLAIN MATCH (p:Person {name: 'Ann'}) RETURN p.id")
+    assert "ClosureProbe :Person (Student, Teacher)" in ops
+    # The marker sits directly after the clause row it belongs to.
+    assert ops.index("ClosureProbe :Person (Student, Teacher)") == ops.index("Match :Person") + 1
+
+
+def test_explain_marks_closure_probe_for_id_lookups(mat):
+    # No property index anywhere: the canonical `id` is covered by every
+    # member's id map, which is why the id arm of the probe already works.
+    ops = _ops(mat, "EXPLAIN MATCH (p:Person {id: 1}) RETURN p.name")
+    assert "ClosureProbe :Person (Student, Teacher)" in ops
+
+
+def test_explain_omits_closure_probe_on_partial_index_coverage(mat):
+    mat.create_index("Student", "name")
+    ops = _ops(mat, "EXPLAIN MATCH (p:Person {name: 'Ann'}) RETURN p.id")
+    assert not any(op.startswith("ClosureProbe") for op in ops)
+
+
+def test_explain_omits_closure_probe_when_label_is_not_materialized(school):
+    school.create_index("Student", "name")
+    school.create_index("Teacher", "name")
+    ops = _ops(school, "EXPLAIN MATCH (p:Person {name: 'Ann'}) RETURN p.id")
+    assert not any(op.startswith("ClosureProbe") for op in ops)
+
+
+def test_explain_omits_closure_probe_when_label_is_open(mat):
+    # A carrier outside the closure opens the label; the probe cannot be the
+    # complete answer, so the plan must not advertise it.
+    mat.create_index("Student", "name")
+    mat.create_index("Teacher", "name")
+    mat.cypher("MATCH (c:Class) SET c:Person")
+    ops = _ops(mat, "EXPLAIN MATCH (p:Person {name: 'Ann'}) RETURN p.id")
+    assert not any(op.startswith("ClosureProbe") for op in ops)
+
+
+def test_explain_counts_materialized_supertype_members(mat):
+    # :Person has no primary bucket at all — every carrier holds it as a
+    # secondary label. Counting `type_indices` alone reported 0.
+    rows = mat.cypher("EXPLAIN MATCH (p:Person) RETURN p.name").to_list()
+    assert rows[0]["operation"] == "Match :Person"
+    assert rows[0]["estimated_rows"] == 3
+    assert mat.cypher("MATCH (p:Person) RETURN count(p) AS c").scalar() == 3
+
+
 # ---- 0.16.12: declared-but-dead required_properties / property_types ----
 # (operator report 2026-08-26: both keys parsed+persisted but never checked)
 
