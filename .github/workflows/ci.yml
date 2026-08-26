@@ -23,6 +23,12 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
+  # Single-source pin for every stable-toolchain job in this workflow. Local
+  # dev verifies against it via `make check-toolchain-pin` (part of
+  # gate-push): floating `@stable` on both sides meant clippy verdicts
+  # diverged whenever either side updated first. Bump deliberately, together
+  # with the local toolchain.
+  RUST_STABLE: "1.98.0"
   CARGO_TERM_COLOR: always
 
 jobs:
@@ -35,7 +41,9 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_STABLE }}
       - name: Install documentation dependencies
         run: pip install -r docs/requirements.txt
       - name: Check generated documentation facts
@@ -51,8 +59,9 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_STABLE }}
           components: rustfmt, clippy
 
       - name: Cache cargo registry & target
@@ -100,8 +109,9 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install Rust stable with coverage tools
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_STABLE }}
           components: llvm-tools-preview
 
       - name: Install pinned cargo-llvm-cov
@@ -293,7 +303,9 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
 
       - name: Install Rust stable (builds the lowered lockfile)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_STABLE }}
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -350,7 +362,9 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_STABLE }}
       - name: Install pinned cargo-audit
         uses: taiki-e/install-action@v2.85.4
         with:
@@ -366,8 +380,9 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_STABLE }}
           components: clippy
 
       - name: Cache cargo registry & target
@@ -448,7 +463,9 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_STABLE }}
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v7
@@ -571,7 +588,9 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_STABLE }}
 
       - name: Set up free-threaded Python 3.14t
         uses: actions/setup-python@v7
@@ -622,7 +641,9 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_STABLE }}
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v7
@@ -813,7 +834,9 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_STABLE }}
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
@@ -843,7 +866,9 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_STABLE }}
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
@@ -877,7 +902,9 @@ jobs:
         os: [macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_STABLE }}
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: native-lifecycle-${{ matrix.os }}
@@ -908,7 +935,9 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_STABLE }}
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: loom-session
@@ -987,7 +1016,9 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_STABLE }}
       - name: Install pinned cargo-audit
         uses: taiki-e/install-action@v2.85.4
         with:
@@ -1008,7 +1039,9 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_STABLE }}
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
@@ -1047,7 +1080,9 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_STABLE }}
 
       - uses: actions/setup-python@v7
         with:
@@ -1158,7 +1193,9 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_STABLE }}
 
       - name: Set up JDK 26
         # 26, not the 22 floor: build.gradle.kts pins the Gradle toolchain to

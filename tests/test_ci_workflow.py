@@ -1909,3 +1909,13 @@ def test_helper_java_platform_derivations_can_fail(tmp_path: Path) -> None:
     # exists — a commands-only reader reports the publish scan clean.
     assert "MavenCentral" in _step_text({"run": "gradle $TASK", "env": {"TASK": "publishToMavenCentral"}})
     assert "MavenCentral" not in _step_text({"run": "gradle build"})
+
+
+def test_ci_stable_toolchain_is_pinned() -> None:
+    """Floating `@stable` on CI while local floats independently produced
+    clippy-verdict skew whenever either side updated first (ontology train,
+    2026-08). Every stable job pins through the single RUST_STABLE env, which
+    `make check-toolchain-pin` verifies locally."""
+    text = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+    assert 'RUST_STABLE: "' in text, "workflow-level RUST_STABLE pin missing"
+    assert "dtolnay/rust-toolchain@stable" not in text, "a job floats on @stable instead of the RUST_STABLE pin"

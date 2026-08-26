@@ -287,6 +287,24 @@ lint-policy: check-lint-allowances source-quality rustsec-policy
 	$(ACTIVATE) && python scripts/check_cypher_clean_room.py
 	$(ACTIVATE) && python scripts/check_dependency_licenses.py
 
+## Pre-push gate: the CI-only checks that historically reddened first in CI
+## (public-API baselines, source quality, lint allowances, workspace clippy).
+## Run once before each push — not per phase; make gate stays the phase gate.
+gate-push: gate check-lint-allowances source-quality
+	python3 scripts/rust_api_profiles.py check
+	cargo clippy --all-targets -- -D warnings
+	@$(MAKE) --no-print-directory check-toolchain-pin
+
+## Local stable must match the version CI's stable jobs pin (RUST_STABLE in
+## ci.yml), or clippy/test verdicts diverge between the two sides.
+check-toolchain-pin:
+	@PIN=$$(grep -m1 'RUST_STABLE:' .github/workflows/ci.yml | sed 's/.*"\(.*\)".*/\1/'); \
+	LOCAL=$$(rustc --version | awk '{print $$2}'); \
+	if [ -z "$$PIN" ]; then echo "toolchain pin: RUST_STABLE not found in ci.yml"; exit 1; fi; \
+	if [ "$$PIN" != "$$LOCAL" ]; then \
+	  echo "toolchain pin: local rustc $$LOCAL != CI pin $$PIN (rustup install $$PIN; or bump RUST_STABLE)"; exit 1; \
+	else echo "toolchain pin: local rustc $$LOCAL matches CI"; fi
+
 ## Explicit CI-equivalent lint sweep. Not part of routine local development.
 lint-full: gate lint-policy
 	cargo clippy --all-targets -- -D warnings
