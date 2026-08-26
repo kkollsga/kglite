@@ -19,6 +19,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The ontology closure probe never engaged for property equality**: a
+  `MATCH (p:Person {email: 'x'})` on a materialized `Closed` supertype scanned
+  the whole label instead of probing each descendant's index, as the 0.16.11
+  notes promised it would. The in-memory index store answered "no index" and
+  "index built, value not in it" identically, and the probe's per-member union
+  declined on the first miss — but a unique value lives in at most *one*
+  member's index, so with two or more live members the probe was structurally
+  guaranteed to decline. An index lookup for a covered property now answers
+  "proven empty" for a value it does not hold (the contract the disk store
+  already had), and the probe is alias-aware: an index built under a type's
+  registered title-alias spelling serves a query written as `{title: …}`, and
+  vice versa. Supertype equality on a 200k-node two-member closure went from a
+  full-label scan to a point lookup.
+- **Indexed equality for an absent value scanned the type**: the same
+  conflation made `MATCH (n:Student {email: 'absent'})` re-derive its empty
+  answer by walking every node of the type. It now short-circuits.
+- **Creating an index on `name` could change a query's answer**: `n.name`
+  resolves to the node's title when the node carries no stored `name`
+  property, but `create_index` reads the stored property alone — so the index
+  held a strict subset of what the same `MATCH` matched, and building one
+  silently dropped rows from `{name: …}` lookups. Indexes on the structurally
+  resolved names (`name`, `type`, `node_type`, `label`) are no longer read as
+  authoritative for a point lookup; those patterns take the scan that answers
+  correctly. The same rule fixes `MERGE (n:T {name: …})`, which probed the
+  *title* index for a `name` key and could create a duplicate of the node it
+  missed.
+- **A `WHERE` equality pruned rows of the wrong type**: the index pre-filter
+  read the node type of the first row's binding and pruned every other row
+  against that type's index, so an untyped `MATCH (n) WHERE n.city = 'Oslo'`
+  could drop matching nodes of the other types. Rows of another type are now
+  left for the predicate itself.
+- **A fluent `where()` equality over a mixed-type node set dropped rows**: the
+  index fast path took the first indexed type's hits as the whole answer.
+  It now requires every type present to be index-answerable and unions them.
 - **`estimated_rows` was 0 for materialized supertype labels**: EXPLAIN counted
   the primary type bucket only, and a label carried purely as a secondary one
   (every materialized ontology supertype) has none — while the join-order model

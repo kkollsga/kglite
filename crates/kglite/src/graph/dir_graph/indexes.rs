@@ -305,22 +305,87 @@ impl DirGraph {
         self.property_indices.keys().cloned().collect()
     }
 
-    /// `None` when `(node_type, property)` carries no in-memory index — and
-    /// equally when the index exists but holds no bucket for `value`. The two
-    /// are indistinguishable here: the matcher's `IN` arm pre-checks
-    /// `property_indices` itself when it needs to tell them apart, and its
-    /// equality arm treats both as "fall back to a scan".
+    /// The in-memory equality-index key holding `property`'s values for
+    /// `node_type`, or `None` when no index covers the value-space a `MATCH`
+    /// compares against. Two things separate it from a raw `property_indices`
+    /// probe:
+    ///
+    /// * **Alias spelling.** `title` and the type's registered title-alias
+    ///   spelling name one field and therefore one set of index contents
+    ///   ([`Self::index_keys_for_field`]), so an index built under either
+    ///   spelling serves a query written with the other. Same for `id`.
+    /// * **Soft aliases are excluded.** `name` / `type` / `node_type` /
+    ///   `label` resolve *structurally* on a node that carries no such stored
+    ///   property (`NodeView::resolved_field` falls back to the title / the
+    ///   type string), while [`Self::create_index`] reads the stored property
+    ///   alone ([`Self::read_indexed`]). The index is then a strict subset of
+    ///   what a scan matches — `CREATE (:T {id: 2, title: 'Ann'})` is matched
+    ///   by `{name: 'Ann'}` and indexed by nothing — so reading it as
+    ///   authoritative *drops rows*, which is what building an index on
+    ///   `name` used to do to that node.
+    fn point_lookup_index_key<'a>(&'a self, node_type: &str, property: &'a str) -> Option<&'a str> {
+        let resolved = self.resolve_alias(node_type, property);
+        if crate::graph::schema::soft_alias_fallback(resolved).is_some() {
+            return None;
+        }
+        if self.has_index(node_type, property) {
+            return Some(property);
+        }
+        let sibling: Option<&'a str> = match resolved {
+            "title" if property == "title" => {
+                self.title_field_aliases.get(node_type).map(String::as_str)
+            }
+            "id" if property == "id" => self.id_field_aliases.get(node_type).map(String::as_str),
+            // An alias spelling, whose values are filed under the canonical
+            // identity field when the index was created that way round.
+            "title" | "id" => Some(resolved),
+            _ => None,
+        };
+        sibling.filter(|key| self.has_index(node_type, key))
+    }
+
+    /// Whether an in-memory equality index can *answer* a point lookup of
+    /// `property` on `node_type` — the precondition for reading an empty
+    /// bucket as "proven empty" rather than "no index built", and for a
+    /// closure probe to count the member as covered.
+    ///
+    /// See [`Self::point_lookup_index_key`] for what "can answer" excludes.
+    pub(crate) fn index_answers_point_lookup(&self, node_type: &str, property: &str) -> bool {
+        self.point_lookup_index_key(node_type, property).is_some()
+    }
+
+    /// `Some(hits)` — **empty vector included** — when an in-memory equality
+    /// index answers `node_type.property == value`; `None` when none can and
+    /// the caller must fall back to its scan.
+    ///
+    /// An empty vector is *proven empty*, not an unbuilt index: index
+    /// completeness is a maintained invariant (`mutation/maintain.rs`, both
+    /// bulk paths and the Cypher SET path), so a covered value with no bucket
+    /// is held by no node of the type and a scan could only re-derive the same
+    /// empty answer. The disk store has always answered this way
+    /// (`lookup_by_property_eq`); conflating the two here is what kept the
+    /// ontology closure probe from ever firing — a unique value lives in at
+    /// most one member's index, so a union that declined on any member's
+    /// value-miss declined structurally.
+    ///
+    /// The composite and range stores keep the older `None`-on-miss shape.
+    /// That is safe (their callers fall through to a scan that re-derives the
+    /// same answer) and is why neither counts as closure-probe coverage.
     pub fn lookup_by_index(
         &self,
         node_type: &str,
         property: &str,
         value: &Value,
     ) -> Option<Vec<NodeIndex>> {
-        let key = (node_type.to_string(), property.to_string());
-        self.property_indices
-            .get(&key)
-            .and_then(|idx| idx.get(value))
-            .cloned()
+        let index_key = self.point_lookup_index_key(node_type, property)?;
+        let key = (node_type.to_string(), index_key.to_string());
+        Some(
+            self.property_indices
+                .get(&key)
+                .and_then(|idx| idx.get(value))
+                .cloned()
+                .unwrap_or_default(),
+        )
     }
 
     pub fn get_index_stats(&self, node_type: &str, property: &str) -> Option<IndexStats> {

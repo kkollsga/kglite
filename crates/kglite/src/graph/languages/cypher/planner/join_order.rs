@@ -198,20 +198,19 @@ pub(super) fn estimate_node_selectivity(
                 for (prop, matcher) in props {
                     match matcher {
                         PropertyMatcher::Equals(val) => {
-                            let key = (nt.clone(), prop.clone());
-                            if graph.property_indices.contains_key(&key) {
-                                if let Some(results) = graph.lookup_by_index(nt, prop, val) {
-                                    return results.len().saturating_add(secondary_count).max(1);
-                                }
-                                return 1;
+                            // The index's own answer, not merely its
+                            // existence: a spelling it cannot serve
+                            // (`index_answers_point_lookup`) leaves the
+                            // estimate to the NDV heuristic below.
+                            if let Some(results) = graph.lookup_by_index(nt, prop, val) {
+                                return results.len().saturating_add(secondary_count).max(1);
                             }
                         }
                         PropertyMatcher::In(vals) => {
                             if vals.is_empty() {
                                 return 0;
                             }
-                            let key = (nt.clone(), prop.clone());
-                            if graph.property_indices.contains_key(&key) {
+                            if graph.index_answers_point_lookup(nt, prop) {
                                 let mut hits = HashSet::new();
                                 for value in vals {
                                     if let Some(indices) = graph.lookup_by_index(nt, prop, value) {

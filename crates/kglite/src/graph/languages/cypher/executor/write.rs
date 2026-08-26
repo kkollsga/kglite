@@ -2161,15 +2161,17 @@ fn try_match_merge_pattern(
                         return Ok(None);
                     }
 
-                    // 2. Single non-id property: try property index
+                    // 2. Single non-id property: try property index.
+                    // Probed under the pattern's own spelling —
+                    // `lookup_by_index` resolves a type's registered
+                    // title/id alias itself. The old `name`/`title` → `title`
+                    // remap was not that: on a type whose `name` is an
+                    // ordinary stored property distinct from the title, it
+                    // asked the title index a question about `name` and
+                    // MERGE created a duplicate of the node it missed.
                     if expected_props.len() == 1 {
                         let (key, ref value) = expected_props[0];
-                        let index_key = if key == "name" || key == "title" {
-                            "title"
-                        } else {
-                            key
-                        };
-                        if let Some(candidates) = graph.lookup_by_index(label, index_key, value) {
+                        if let Some(candidates) = graph.lookup_by_index(label, key, value) {
                             for &idx in &candidates {
                                 if node_matches_all(idx, &expected_props) {
                                     return Ok(Some(build_result(idx)));

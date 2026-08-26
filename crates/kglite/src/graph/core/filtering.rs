@@ -612,36 +612,46 @@ fn filter_nodes_by_conditions(
 
     for (property, condition) in conditions {
         if let FilterCondition::Equals(target_value) = condition {
+            // **Every** type present must be index-answerable before the
+            // index replaces the scan. The input is an arbitrary node set,
+            // not one type's members, and taking the first indexed type's
+            // hits alone dropped every matching node of the others — now
+            // visibly, since a covered value-miss is an empty answer rather
+            // than a fall-through to the next type.
+            if !node_types
+                .iter()
+                .all(|node_type| graph.index_answers_point_lookup(node_type, property))
+            {
+                continue;
+            }
+            let mut matching_nodes: Vec<NodeIndex> = Vec::new();
             for node_type in &node_types {
-                if let Some(matching_nodes) =
-                    graph.lookup_by_index(node_type, property, target_value)
-                {
-                    let candidates: Vec<_> = if full_single_type == Some(*node_type) {
-                        // Input is the full type set → index result is a subset
-                        // already; skip the O(N) membership intersection.
-                        matching_nodes.to_vec()
-                    } else {
-                        let indexed_set: HashSet<_> = matching_nodes.iter().copied().collect();
-                        let original_set: HashSet<_> = nodes.iter().copied().collect();
-                        indexed_set.intersection(&original_set).copied().collect()
-                    };
+                matching_nodes.extend(
+                    graph
+                        .lookup_by_index(node_type, property, target_value)
+                        .unwrap_or_default(),
+                );
+            }
+            let candidates: Vec<_> = if full_single_type.is_some() {
+                // Input is the full type set → index result is a subset
+                // already; skip the O(N) membership intersection.
+                matching_nodes
+            } else {
+                let indexed_set: HashSet<_> = matching_nodes.iter().copied().collect();
+                let original_set: HashSet<_> = nodes.iter().copied().collect();
+                indexed_set.intersection(&original_set).copied().collect()
+            };
 
-                    let remaining_conditions: HashMap<_, _> = conditions
-                        .iter()
-                        .filter(|(k, _)| *k != property)
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect();
+            let remaining_conditions: HashMap<_, _> = conditions
+                .iter()
+                .filter(|(k, _)| *k != property)
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
 
-                    if remaining_conditions.is_empty() {
-                        return candidates;
-                    } else {
-                        return filter_nodes_by_conditions(
-                            graph,
-                            candidates,
-                            &remaining_conditions,
-                        );
-                    }
-                }
+            if remaining_conditions.is_empty() {
+                return candidates;
+            } else {
+                return filter_nodes_by_conditions(graph, candidates, &remaining_conditions);
             }
         }
     }

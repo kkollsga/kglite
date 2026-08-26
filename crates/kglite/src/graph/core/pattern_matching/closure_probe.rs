@@ -57,13 +57,23 @@ pub(crate) fn live_closure_members<'a>(graph: &'a DirGraph, node_type: &'a str) 
 ///   bucket may hold carriers no descendant probe covers.
 /// - at least one live member exists (see [`live_closure_members`]).
 /// - every live member resolves every property in `props`: an equality index
-///   on `(member, prop)`, or `prop` being that member's id field (canonical
-///   `id`, or its `id_field_aliases` entry). Coverage must be total —
-///   a partial union would silently drop rows.
+///   that can answer a point lookup of it (`index_answers_point_lookup` —
+///   alias-aware, and excluding the soft-alias names whose index contents are
+///   a subset of what a scan matches), or `prop` being that member's id field
+///   (canonical `id`, or its `id_field_aliases` entry). Coverage must be
+///   total — a partial union would silently drop rows.
 ///
 /// `props` are property *names*, because EXPLAIN sees an AST, not resolved
 /// `PropertyMatcher` values, and because eligibility does not depend on the
 /// value being probed.
+///
+/// Deliberately narrower than what `try_index_lookup` can serve: a composite
+/// index over the pattern's whole property set, a range index, and a
+/// disk-persistent property index all answer at runtime but do not count as
+/// coverage here. Each would have to be re-checked value-side (the persistent
+/// store is string-only and reports an all-null block as "no index"), and the
+/// point of the shared predicate is that the plan row and the runtime gate
+/// read the same answer.
 pub(crate) fn closure_probe_members(
     graph: &DirGraph,
     node_type: &str,
@@ -85,16 +95,10 @@ pub(crate) fn closure_probe_members(
 }
 
 /// A point lookup of `prop` on `member` resolves without a scan.
+///
+/// The id field needs no user index: every type carries a self-healing id map
+/// (`lookup_by_id_readonly`), and `resolve_alias` maps the type's registered
+/// id spelling onto it. Everything else must be index-answerable.
 fn member_covers_property(graph: &DirGraph, member: &str, prop: &str) -> bool {
-    if prop == "id" {
-        return true;
-    }
-    if graph
-        .id_field_aliases
-        .get(member)
-        .is_some_and(|alias| alias == prop)
-    {
-        return true;
-    }
-    graph.has_index(member, prop)
+    graph.resolve_alias(member, prop) == "id" || graph.index_answers_point_lookup(member, prop)
 }

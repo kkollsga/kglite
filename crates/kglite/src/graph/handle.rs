@@ -1102,12 +1102,15 @@ mod held_reference_clone_tests {
             // index is built, so the index is over two live properties.
             execute_mut(
                 graph,
-                "MATCH (n:Item) SET n.qty = n.id",
+                "MATCH (n:Item) SET n.qty = n.id, n.sku = n.name",
                 &ExecuteOptions::eager(&params),
             )
             .expect("seed qty");
-            graph.create_index("Item", "name");
-            graph.create_composite_index("Item", &["name", "qty"]);
+            // `sku`, not `name`: an index on a soft-alias name is not
+            // authoritative for its type (`point_lookup_index_key`) and would
+            // make every assertion below vacuous.
+            graph.create_index("Item", "sku");
+            graph.create_composite_index("Item", &["sku", "qty"]);
         }
         let reader = Arc::clone(&arc);
 
@@ -1118,52 +1121,53 @@ mod held_reference_clone_tests {
         };
         assert!(
             reader
-                .lookup_by_index("Item", "name", &existing)
+                .lookup_by_index("Item", "sku", &existing)
                 .is_some_and(|members| !members.is_empty()),
             "the fixture must be indexed, or this test proves nothing"
         );
-        let before_existing = reader.lookup_by_index("Item", "name", &existing);
+        let before_existing = reader.lookup_by_index("Item", "sku", &existing);
 
         {
             let graph = make_dir_graph_mut(&mut arc);
             execute_mut(
                 graph,
-                "CREATE (:Item {id: 4242, name: 'appended', qty: 7})",
+                "CREATE (:Item {id: 4242, name: 'appended', sku: 'appended', qty: 7})",
                 &ExecuteOptions::eager(&params),
             )
             .expect("append");
         }
 
         assert!(
-            arc.lookup_by_index("Item", "name", &created).is_some(),
+            arc.lookup_by_index("Item", "sku", &created).is_some(),
             "the writer must find the value it just indexed"
         );
         assert!(
             arc.lookup_by_composite_index(
                 "Item",
-                &["name".to_string(), "qty".to_string()],
+                &["sku".to_string(), "qty".to_string()],
                 &composite_of(&created, 7)
             )
             .is_some(),
             "the writer's composite index must carry its own write"
         );
         assert_eq!(
-            reader.lookup_by_index("Item", "name", &created),
-            None,
-            "the reader's snapshot never saw this value; finding it means the \
-             writer's delta leaked into a shared level"
+            reader.lookup_by_index("Item", "sku", &created),
+            Some(Vec::new()),
+            "the reader's index answers (it exists), and answers empty: the \
+             snapshot never saw this value, so finding a member here would \
+             mean the writer's delta leaked into a shared level"
         );
         assert_eq!(
             reader.lookup_by_composite_index(
                 "Item",
-                &["name".to_string(), "qty".to_string()],
+                &["sku".to_string(), "qty".to_string()],
                 &composite_of(&created, 7)
             ),
             None,
             "same for the composite index"
         );
         assert_eq!(
-            reader.lookup_by_index("Item", "name", &existing),
+            reader.lookup_by_index("Item", "sku", &existing),
             before_existing,
             "a value the reader already had must be unchanged, in bucket order"
         );
@@ -1173,14 +1177,14 @@ mod held_reference_clone_tests {
         // trusts the index rather than falling back to a scan — so the rows
         // would simply disappear from an indexed `MATCH`.
         assert_eq!(
-            arc.lookup_by_index("Item", "name", &existing),
+            arc.lookup_by_index("Item", "sku", &existing),
             before_existing,
             "the writer must still resolve the values it inherited"
         );
         assert!(
             arc.lookup_by_composite_index(
                 "Item",
-                &["name".to_string(), "qty".to_string()],
+                &["sku".to_string(), "qty".to_string()],
                 &composite_of(&existing, 3)
             )
             .is_some_and(|members| !members.is_empty()),
@@ -1190,7 +1194,7 @@ mod held_reference_clone_tests {
         // reader's own backend — a leak shows up as a dangling NodeIndex, not
         // merely as an extra row.
         for idx in reader
-            .lookup_by_index("Item", "name", &existing)
+            .lookup_by_index("Item", "sku", &existing)
             .unwrap_or_default()
         {
             assert!(

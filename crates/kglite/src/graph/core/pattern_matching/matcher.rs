@@ -1057,10 +1057,11 @@ impl<'a> PatternExecutor<'a> {
     /// extra-label filter — the complete answer, so the caller returns it
     /// without the secondary-bucket union (the probes subsume the bucket:
     /// Closed means the engine is its only writer). `None` — caller falls
-    /// back to the correct scan — unless the label is Closed and every live
-    /// member type (the ancestor itself included, when concrete and live)
-    /// resolves the lookup; a partial union would silently drop rows, and
-    /// an Open label may hold carriers no descendant probe covers.
+    /// back to the correct scan — whenever
+    /// [`closure_probe::closure_probe_members`] finds the shape ineligible:
+    /// an Open label may hold carriers no descendant probe covers, and a
+    /// member that cannot answer the lookup from an index would contribute a
+    /// silent row loss rather than a slow scan.
     fn try_closure_probe(
         &self,
         node_type: &str,
@@ -1071,19 +1072,40 @@ impl<'a> PatternExecutor<'a> {
         Some(self.filter_node_candidates(&unioned, None, extra_keys))
     }
 
+    /// Eligibility comes from the shared predicate, which the EXPLAIN
+    /// renderer reads too — so a `ClosureProbe` plan row and the probe that
+    /// actually runs cannot disagree about *when*. The property names handed
+    /// to it are the pattern's equality keys, matching what
+    /// `closure_probe_ops` reads off the AST, plus the parameterised
+    /// equalities whose value is bound here (EXPLAIN cannot see those, so it
+    /// stays conservatively unmarked for them).
+    ///
+    /// Each eligible member then contributes its own hits, **a value-miss
+    /// contributing none**. That is the whole fix: a unique value lives in at
+    /// most one member's index, so before `lookup_by_index` learned to say
+    /// "proven empty" the `?` below declined on the first member that did not
+    /// hold it — structurally, for every closure with two live members.
     fn try_closure_index_lookup(
         &self,
         node_type: &str,
         props: &HashMap<String, PropertyMatcher>,
     ) -> Option<Vec<NodeIndex>> {
-        if !self.graph.managed_label_closed(node_type) {
-            return None;
-        }
+        let equality_props: Vec<&str> = props
+            .iter()
+            .filter(|(_, matcher)| match matcher {
+                PropertyMatcher::Equals(_) => true,
+                PropertyMatcher::EqualsParam(name) => self.params.contains_key(name.as_str()),
+                _ => false,
+            })
+            .map(|(name, _)| name.as_str())
+            .collect();
+        let members = closure_probe::closure_probe_members(self.graph, node_type, &equality_props)?;
         let mut out = Vec::new();
-        for member in closure_probe::live_closure_members(self.graph, node_type) {
+        for member in members {
             // Per-primary-type buckets are disjoint, so the union needs no
-            // dedup.
-            out.extend(self.try_index_lookup(member, props)?);
+            // dedup. The `?` is unreachable for an eligible member and stays
+            // as the fallback that keeps a coverage miscount slow, not wrong.
+            out.extend(self.try_index_lookup(&member, props)?);
         }
         Some(out)
     }
@@ -1185,8 +1207,7 @@ impl<'a> PatternExecutor<'a> {
                 if prop_name == "id" {
                     continue; // handled above
                 }
-                let key = (node_type.to_string(), prop_name.clone());
-                if !self.graph.property_indices.contains_key(&key) {
+                if !self.graph.index_answers_point_lookup(node_type, prop_name) {
                     continue;
                 }
                 let mut result = Vec::with_capacity(values.len());
@@ -1230,6 +1251,13 @@ impl<'a> PatternExecutor<'a> {
     /// This trust is what obliges `TypeIdIndex::get` to coerce over the same
     /// numeric family as `values_equal` — a coercion the index declines but a
     /// scan would have accepted is now a lost row, not a slow one.
+    ///
+    /// **A value-miss on a covered property index is proven empty too**, for
+    /// the same reason and under the same obligation: `lookup_by_index` answers
+    /// only for `(node_type, property)` pairs whose index holds the value-space
+    /// a scan reads, and index completeness is a maintained invariant. Before
+    /// that, `MATCH (n:Student {email: 'absent'})` re-derived its empty answer
+    /// by walking the whole type.
     fn try_index_lookup(
         &self,
         node_type: &str,
@@ -1963,3 +1991,7 @@ mod limit_seed_tests;
 #[cfg(test)]
 #[path = "matcher_ceiling_tests.rs"]
 mod ceiling_tests;
+
+#[cfg(test)]
+#[path = "matcher_property_index_tests.rs"]
+mod property_index_tests;

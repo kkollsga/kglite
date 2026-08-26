@@ -534,14 +534,19 @@ fn id_in_long_list_with_duplicates_binds_each_node_once() {
 ///
 /// The control is the same query without the index — that path filters each
 /// node once and always answered 2.
+///
+/// Probed on `tag`, not `name`: an index on a soft-alias name is not
+/// authoritative for the type (see `matcher_property_index_tests.rs`), so it
+/// never becomes an anchor at all.
 #[test]
 fn indexed_property_in_list_with_duplicates_binds_each_node_once() {
     let mut graph = seeded_docs();
+    run(&mut graph, "MATCH (n:Doc) SET n.tag = n.name");
     let unindexed = lookup(
         &graph,
         "Doc",
         &in_props(
-            "name",
+            "tag",
             vec![
                 Value::String("a".to_string()),
                 Value::String("a".to_string()),
@@ -554,12 +559,12 @@ fn indexed_property_in_list_with_duplicates_binds_each_node_once() {
         "without an index the property IN has no anchor — the caller scans"
     );
 
-    graph.create_index("Doc", "name");
+    graph.create_index("Doc", "tag");
     let hits = lookup(
         &graph,
         "Doc",
         &in_props(
-            "name",
+            "tag",
             vec![
                 Value::String("a".to_string()),
                 Value::String("a".to_string()),

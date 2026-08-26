@@ -280,11 +280,7 @@ impl<'a> CypherExecutor<'a> {
                 {
                     let index_set: HashSet<petgraph::graph::NodeIndex> =
                         matching_indices.into_iter().collect();
-                    result_set.rows.retain(|row| {
-                        row.node_bindings
-                            .get(variable.as_str())
-                            .is_some_and(|idx| index_set.contains(idx))
-                    });
+                    self.retain_indexed_rows(&mut result_set, variable, &node_type, &index_set);
                 }
             }
         }
@@ -303,11 +299,7 @@ impl<'a> CypherExecutor<'a> {
                     }
                 }
                 if any_indexed {
-                    result_set.rows.retain(|row| {
-                        row.node_bindings
-                            .get(variable.as_str())
-                            .is_some_and(|idx| index_set.contains(idx))
-                    });
+                    self.retain_indexed_rows(&mut result_set, variable, &node_type, &index_set);
                 }
             }
         }
@@ -640,6 +632,34 @@ impl<'a> CypherExecutor<'a> {
     }
 
     /// Infer the node type for a variable by checking the first row's binding.
+    /// Drop the rows an index has proven cannot match, leaving every other
+    /// row for the general predicate below.
+    ///
+    /// The type filter is load-bearing: [`Self::infer_node_type`] reports the
+    /// type of the *first* row's binding, and an untyped `MATCH (n) WHERE
+    /// n.city = 'Oslo'` binds whatever the graph holds. Pruning a row of some
+    /// other type against this type's index is a row loss — invisible while a
+    /// value-miss meant "no index", and immediate now that it means "no node
+    /// of this type holds the value".
+    fn retain_indexed_rows(
+        &self,
+        result_set: &mut ResultSet,
+        variable: &str,
+        node_type: &str,
+        index_set: &HashSet<petgraph::graph::NodeIndex>,
+    ) {
+        let type_key = crate::graph::schema::InternedKey::from_str(node_type);
+        result_set
+            .rows
+            .retain(|row| match row.node_bindings.get(variable) {
+                Some(idx) if self.graph.graph.node_type_of(*idx) == Some(type_key) => {
+                    index_set.contains(idx)
+                }
+                Some(_) => true,
+                None => false,
+            });
+    }
+
     pub(super) fn infer_node_type(&self, variable: &str, result_set: &ResultSet) -> Option<String> {
         result_set.rows.iter().find_map(|row| {
             row.node_bindings

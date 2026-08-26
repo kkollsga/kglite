@@ -334,14 +334,98 @@ def test_merge_create_stamps_closure(mat):
 
 
 def test_closure_probe_uses_descendant_indexes(mat):
-    mat.create_index("Student", "name")
-    mat.create_index("Teacher", "name")
-    rows = mat.cypher("MATCH (p:Person {name: 'Ann'}) RETURN p.id AS id").to_list()
+    mat.create_index("Student", "title")
+    mat.create_index("Teacher", "title")
+    assert _probes(mat, "MATCH (p:Person {title: 'Ann'}) RETURN p.id"), "the probe must engage"
+    rows = mat.cypher("MATCH (p:Person {title: 'Ann'}) RETURN p.id AS id").to_list()
     assert [r["id"] for r in rows] == [1]
     # Same answer with the ontology passes off / general path (differential
     # sanity at the surface level).
-    rows2 = mat.cypher("MATCH (p:Person) WHERE p.name = 'Ann' RETURN p.id AS id").to_list()
+    rows2 = mat.cypher("MATCH (p:Person) WHERE p.title = 'Ann' RETURN p.id AS id").to_list()
     assert rows2 == rows
+
+
+def test_closure_probe_finds_a_value_held_by_one_member(mat):
+    # The shape the probe never used to reach: a unique value lives in at most
+    # ONE member's index, so a union that declined on any member's value-miss
+    # declined structurally, for every closure with two live members.
+    mat.create_index("Student", "title")
+    mat.create_index("Teacher", "title")
+    for value, expected in [("Ann", [1]), ("Bo", [2]), ("Tea", [10]), ("Nobody", [])]:
+        query = f"MATCH (p:Person {{title: '{value}'}}) RETURN p.id AS id"
+        assert _probes(mat, query), value
+        assert [r["id"] for r in mat.cypher(query).to_list()] == expected, value
+
+
+def test_closure_probe_sees_nodes_written_after_the_index(mat):
+    # Index completeness is the premise of reading a value-miss as "empty":
+    # a write that the index did not absorb would make the probe answer
+    # nothing where a scan answers a row.
+    mat.create_index("Student", "title")
+    mat.create_index("Teacher", "title")
+    mat.add_nodes(
+        pd.DataFrame({"id": [7], "name": ["Zed"]}),
+        "Teacher",
+        "id",
+        node_title_field="name",
+    )
+    mat.cypher("CREATE (:Student {id: 8, name: 'Yin'})")
+    mat.cypher("MATCH (s:Student {id: 2}) SET s.title = 'Renamed'")
+    query = "MATCH (p:Person {title: '%s'}) RETURN p.id AS id"
+    assert _probes(mat, query % "Zed")
+    assert [r["id"] for r in mat.cypher(query % "Zed").to_list()] == [7]
+    assert [r["id"] for r in mat.cypher(query % "Yin").to_list()] == [8]
+    assert [r["id"] for r in mat.cypher(query % "Renamed").to_list()] == [2]
+    assert mat.cypher(query % "Bo").to_list() == []
+
+
+def test_closure_probe_is_alias_aware(mat):
+    # `title` and a type's registered title-alias spelling name one field and
+    # one set of index contents, so an index built under either serves a query
+    # written with the other.
+    mat.add_nodes(
+        pd.DataFrame({"id": [20], "fullname": ["Ada"]}),
+        "Teacher",
+        "id",
+        node_title_field="fullname",
+    )
+    mat.create_index("Student", "title")
+    mat.create_index("Teacher", "fullname")
+    query = "MATCH (p:Person {title: 'Ada'}) RETURN p.id AS id"
+    assert _probes(mat, query)
+    assert [r["id"] for r in mat.cypher(query).to_list()] == [20]
+
+
+def test_closure_probe_declines_on_a_soft_alias_index(mat):
+    # `name` resolves through the structural fallback (a node with no stored
+    # `name` answers with its title) while `create_index` reads the stored
+    # property alone, so the index is a subset of what a scan matches and
+    # cannot cover a member. Correct answer, by scan.
+    mat.create_index("Student", "name")
+    mat.create_index("Teacher", "name")
+    query = "MATCH (p:Person {name: 'Ann'}) RETURN p.id AS id"
+    assert not _probes(mat, query)
+    assert [r["id"] for r in mat.cypher(query).to_list()] == [1]
+
+
+def test_an_index_on_a_soft_alias_name_does_not_change_the_answer(g):
+    # The defect the exclusion above closes, at the surface: node 2's `name`
+    # comes from its title and no index ever held it.
+    g.cypher("CREATE (:T {id: 1, name: 'Ann'})")
+    g.cypher("CREATE (:T {id: 2, title: 'Ann'})")
+    before = [r["id"] for r in g.cypher("MATCH (n:T {name: 'Ann'}) RETURN n.id AS id ORDER BY id").to_list()]
+    assert before == [1, 2]
+    g.create_index("T", "name")
+    after = [r["id"] for r in g.cypher("MATCH (n:T {name: 'Ann'}) RETURN n.id AS id ORDER BY id").to_list()]
+    assert after == before
+
+
+def test_indexed_absent_value_short_circuits_without_a_scan(mat):
+    # Single-type sibling of the closure fix: a covered value with no bucket
+    # is proven empty, not an unbuilt index.
+    mat.create_index("Student", "title")
+    assert mat.cypher("MATCH (s:Student {title: 'Absent'}) RETURN s.id AS id").to_list() == []
+    assert [r["id"] for r in mat.cypher("MATCH (s:Student {title: 'Bo'}) RETURN s.id AS id").to_list()] == [2]
 
 
 def test_closure_probe_correct_when_label_open(mat):
@@ -369,10 +453,19 @@ def _ops(graph, query):
     return [row["operation"] for row in graph.cypher(query).to_list()]
 
 
+def _probes(graph, query):
+    """Whether the plan for `query` claims a closure probe.
+
+    The marker and the runtime gate read one predicate, so this is also the
+    only observation of *engagement* the Python surface has.
+    """
+    return any(op.startswith("ClosureProbe") for op in _ops(graph, f"EXPLAIN {query}"))
+
+
 def test_explain_marks_closure_probe_when_every_member_is_indexed(mat):
-    mat.create_index("Student", "name")
-    mat.create_index("Teacher", "name")
-    ops = _ops(mat, "EXPLAIN MATCH (p:Person {name: 'Ann'}) RETURN p.id")
+    mat.create_index("Student", "title")
+    mat.create_index("Teacher", "title")
+    ops = _ops(mat, "EXPLAIN MATCH (p:Person {title: 'Ann'}) RETURN p.id")
     assert "ClosureProbe :Person (Student, Teacher)" in ops
     # The marker sits directly after the clause row it belongs to.
     assert ops.index("ClosureProbe :Person (Student, Teacher)") == ops.index("Match :Person") + 1
@@ -386,26 +479,30 @@ def test_explain_marks_closure_probe_for_id_lookups(mat):
 
 
 def test_explain_omits_closure_probe_on_partial_index_coverage(mat):
-    mat.create_index("Student", "name")
-    ops = _ops(mat, "EXPLAIN MATCH (p:Person {name: 'Ann'}) RETURN p.id")
+    mat.create_index("Student", "title")
+    ops = _ops(mat, "EXPLAIN MATCH (p:Person {title: 'Ann'}) RETURN p.id")
     assert not any(op.startswith("ClosureProbe") for op in ops)
+    # …and the scan still answers for the uncovered member.
+    assert [r["id"] for r in mat.cypher("MATCH (p:Person {title: 'Tea'}) RETURN p.id AS id").to_list()] == [10]
 
 
 def test_explain_omits_closure_probe_when_label_is_not_materialized(school):
-    school.create_index("Student", "name")
-    school.create_index("Teacher", "name")
-    ops = _ops(school, "EXPLAIN MATCH (p:Person {name: 'Ann'}) RETURN p.id")
+    school.create_index("Student", "title")
+    school.create_index("Teacher", "title")
+    ops = _ops(school, "EXPLAIN MATCH (p:Person {title: 'Ann'}) RETURN p.id")
     assert not any(op.startswith("ClosureProbe") for op in ops)
 
 
 def test_explain_omits_closure_probe_when_label_is_open(mat):
     # A carrier outside the closure opens the label; the probe cannot be the
     # complete answer, so the plan must not advertise it.
-    mat.create_index("Student", "name")
-    mat.create_index("Teacher", "name")
+    mat.create_index("Student", "title")
+    mat.create_index("Teacher", "title")
     mat.cypher("MATCH (c:Class) SET c:Person")
-    ops = _ops(mat, "EXPLAIN MATCH (p:Person {name: 'Ann'}) RETURN p.id")
+    ops = _ops(mat, "EXPLAIN MATCH (p:Person {title: 'Ann'}) RETURN p.id")
     assert not any(op.startswith("ClosureProbe") for op in ops)
+    # The opened bucket's foreign carrier is still found — by scan.
+    assert [r["id"] for r in mat.cypher("MATCH (p:Person {title: 'Math'}) RETURN p.id AS id").to_list()] == [100]
 
 
 def test_explain_counts_materialized_supertype_members(mat):

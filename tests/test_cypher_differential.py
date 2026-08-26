@@ -2502,6 +2502,113 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (a:Person)-[:KNOWS]->(b:VIP|Staff) RETURN a.id AS a, b.id AS b ORDER BY a, b",
         None,
     ),
+    # Ontology closures (0.16.13). The corpus had no ontology shape at all
+    # while the closure probe was structurally unable to fire; these pin the
+    # probe against the path it replaces. The `WHERE` spellings are the ones
+    # that genuinely differ between the two runs — pushdown moves the equality
+    # into the pattern under the optimizer and leaves it a post-filter without.
+    (
+        "onto_supertype_equality_probe",
+        "ontology_closure_graph",
+        "MATCH (p:Person {email: 'tea@x'}) RETURN p.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "onto_supertype_equality_other_member",
+        "ontology_closure_graph",
+        "MATCH (p:Person {email: 'bo@x'}) RETURN p.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "onto_supertype_equality_absent",
+        "ontology_closure_graph",
+        "MATCH (p:Person {email: 'nobody@x'}) RETURN p.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "onto_supertype_equality_where_pushdown",
+        "ontology_closure_graph",
+        "MATCH (p:Person) WHERE p.email = 'tea@x' RETURN p.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "onto_supertype_equality_param",
+        "ontology_closure_graph",
+        "MATCH (p:Person {email: $e}) RETURN p.id AS id ORDER BY id",
+        {"e": "ann@x"},
+    ),
+    (
+        "onto_supertype_id_lookup",
+        "ontology_closure_graph",
+        "MATCH (p:Person {id: 11}) RETURN p.title AS t",
+        None,
+    ),
+    (
+        "onto_supertype_id_lookup_absent",
+        "ontology_closure_graph",
+        "MATCH (p:Person {id: 999}) RETURN p.title AS t",
+        None,
+    ),
+    # Partial coverage: `dept` is indexed on Student only, so the probe must
+    # decline wholesale — a union without Teacher's rows would drop id 10.
+    (
+        "onto_supertype_partial_index_decline",
+        "ontology_closure_graph",
+        "MATCH (p:Person {dept: 'Sci'}) RETURN p.id AS id ORDER BY id",
+        None,
+    ),
+    # Two properties, one covered one not: the covered index anchors and the
+    # rest is a filter.
+    (
+        "onto_supertype_multi_property",
+        "ontology_closure_graph",
+        "MATCH (p:Person {email: 'cy@x', dept: 'Art'}) RETURN p.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "onto_supertype_unindexed_property",
+        "ontology_closure_graph",
+        "MATCH (p:Person {title: 'Uli'}) RETURN p.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "onto_subtype_equality_control",
+        "ontology_closure_graph",
+        "MATCH (s:Student {email: 'ann@x'}) RETURN s.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "onto_supertype_count",
+        "ontology_closure_graph",
+        "MATCH (p:Person) RETURN count(p) AS c",
+        None,
+    ),
+    (
+        "onto_supertype_expand",
+        "ontology_closure_graph",
+        "MATCH (p:Person {email: 'ann@x'}) RETURN p.id AS id, p.dept AS d",
+        None,
+    ),
+    # Open label: `:Class` carries `:Person` from outside the closure, so no
+    # descendant probe covers it and every shape returns to the scan.
+    (
+        "onto_open_label_equality",
+        "ontology_open_label_graph",
+        "MATCH (p:Person {email: 'math@x'}) RETURN p.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "onto_open_label_member_equality",
+        "ontology_open_label_graph",
+        "MATCH (p:Person {email: 'tea@x'}) RETURN p.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "onto_open_label_count",
+        "ontology_open_label_graph",
+        "MATCH (p:Person) RETURN count(p) AS c",
+        None,
+    ),
     # EXISTS fast path over a secondary-carried peer — pinned red-first
     # 2026-08-26: the primary-only compare answered zero rows.
     (
@@ -4210,6 +4317,135 @@ def build_cross_type_id_graph() -> kglite.KnowledgeGraph:
 def cross_type_id_graph() -> kglite.KnowledgeGraph:
     """See :func:`build_cross_type_id_graph`."""
     return build_cross_type_id_graph()
+
+
+def build_ontology_closure_graph(open_label: bool = False) -> kglite.KnowledgeGraph:
+    """A **materialized ontology closure**: abstract `:Person` over `:Student`
+    and `:Teacher`, plus an unrelated `:Class`.
+
+    Index coverage is deliberately mixed, so one fixture carries all three
+    closure-probe outcomes:
+
+    * `email` — indexed on **both** members: the probe engages.
+    * `dept`  — indexed on `Student` only: partial coverage, wholesale decline
+      (a union missing Teacher's rows would silently drop them).
+    * `title` — indexed nowhere: plain scan.
+
+    `open_label=True` additionally stamps `:Person` onto the `:Class` node, so
+    the managed label is **Open** — a carrier no descendant probe covers, which
+    must send every shape back to the scan.
+
+    Kept out of conftest and out of the shared fixtures — which are pinned by
+    absolute goldens across the suite — so adding the shape cannot move any
+    existing expectation. Materialization stamps secondary labels, and every
+    query in this corpus that counts labels reads a fixture this one does not
+    touch.
+    """
+    import pandas as pd
+
+    g = kglite.KnowledgeGraph()
+    g.add_nodes(
+        pd.DataFrame(
+            {
+                "id": [1, 2, 3],
+                "title": ["Ann", "Bo", "Cy"],
+                "email": ["ann@x", "bo@x", "cy@x"],
+                "dept": ["Sci", "Sci", "Art"],
+            }
+        ),
+        "Student",
+        "id",
+        node_title_field="title",
+    )
+    g.add_nodes(
+        pd.DataFrame(
+            {
+                "id": [10, 11],
+                "title": ["Tea", "Uli"],
+                "email": ["tea@x", "uli@x"],
+                "dept": ["Sci", "Art"],
+            }
+        ),
+        "Teacher",
+        "id",
+        node_title_field="title",
+    )
+    g.add_nodes(
+        pd.DataFrame({"id": [100], "title": ["Math"], "email": ["math@x"], "dept": ["Sci"]}),
+        "Class",
+        "id",
+        node_title_field="title",
+    )
+    g.define_ontology(
+        {
+            "classes": {
+                "Person": {"abstract": True},
+                "Student": {"is_a": "Person"},
+                "Teacher": {"is_a": "Person"},
+            }
+        }
+    )
+    g.materialize_ontology()
+    g.create_index("Student", "email")
+    g.create_index("Teacher", "email")
+    g.create_index("Student", "dept")
+    if open_label:
+        g.cypher("MATCH (c:Class) SET c:Person")
+    return g
+
+
+def test_ontology_fixture_really_probes_and_declines() -> None:
+    """Non-vacuity + absolute goldens for the ontology corpus.
+
+    The differential runs cannot see this on their own: the closure probe is
+    a matcher decision, not an optimizer pass, so `disable_optimizer=True`
+    takes the same route for the inline-property shapes and both halves would
+    agree on a wrong answer. These are the expected *values*, plus the plan
+    marker that says the probe is the thing producing them.
+    """
+    g = build_ontology_closure_graph()
+
+    def probes(query: str) -> bool:
+        rows = g.cypher(f"EXPLAIN {query}").to_list()
+        return any(str(row["operation"]).startswith("ClosureProbe") for row in rows)
+
+    def ids(query: str) -> list:
+        return [row["id"] for row in g.cypher(query).to_list()]
+
+    # Covered on both members → probe, and each member's own value is found.
+    assert probes("MATCH (p:Person {email: 'tea@x'}) RETURN p.id")
+    assert ids("MATCH (p:Person {email: 'tea@x'}) RETURN p.id AS id") == [10]
+    assert ids("MATCH (p:Person {email: 'ann@x'}) RETURN p.id AS id") == [1]
+    assert ids("MATCH (p:Person {email: 'nobody@x'}) RETURN p.id AS id") == []
+    # The Class node holds `math@x` but not `:Person` — the closure is closed.
+    assert ids("MATCH (p:Person {email: 'math@x'}) RETURN p.id AS id") == []
+
+    # Partial coverage → decline, and the uncovered member's rows survive.
+    assert not probes("MATCH (p:Person {dept: 'Sci'}) RETURN p.id")
+    assert sorted(ids("MATCH (p:Person {dept: 'Sci'}) RETURN p.id AS id")) == [1, 2, 10]
+
+    # Open label → decline everywhere, foreign carrier included in the answer.
+    opened = build_ontology_closure_graph(open_label=True)
+    assert not any(
+        str(row["operation"]).startswith("ClosureProbe")
+        for row in opened.cypher("EXPLAIN MATCH (p:Person {email: 'tea@x'}) RETURN p.id").to_list()
+    )
+    assert [row["id"] for row in opened.cypher("MATCH (p:Person {email: 'math@x'}) RETURN p.id AS id").to_list()] == [
+        100
+    ]
+    assert opened.cypher("MATCH (p:Person) RETURN count(p) AS c").to_list() == [{"c": 6}]
+
+
+@pytest.fixture
+def ontology_closure_graph() -> kglite.KnowledgeGraph:
+    """See :func:`build_ontology_closure_graph`."""
+    return build_ontology_closure_graph()
+
+
+@pytest.fixture
+def ontology_open_label_graph() -> kglite.KnowledgeGraph:
+    """See :func:`build_ontology_closure_graph` — the `open_label` variant."""
+    return build_ontology_closure_graph(open_label=True)
 
 
 def build_mixed_type_props_graph() -> kglite.KnowledgeGraph:
