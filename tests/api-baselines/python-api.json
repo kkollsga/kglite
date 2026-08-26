@@ -502,6 +502,10 @@
           "kind": "method",
           "signature": "(self, /)"
         },
+        "clear_ontology": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
         "clear_schema": {
           "kind": "method",
           "signature": "(self, /)"
@@ -598,6 +602,10 @@
           "kind": "method",
           "signature": "(self, /, date_str=None, end_str=None)"
         },
+        "define_ontology": {
+          "kind": "method",
+          "signature": "(self, /, ontology_dict)"
+        },
         "define_schema": {
           "kind": "method",
           "signature": "(self, /, schema_dict, *, replace=False)"
@@ -607,6 +615,10 @@
           "signature": "(self, /, normalized=None, connection_types=None, top_k=None, timeout_ms=None, to_df=None)"
         },
         "degrees": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "dematerialize_ontology": {
           "kind": "method",
           "signature": "(self, /)"
         },
@@ -830,6 +842,10 @@
           "kind": "method",
           "signature": "(self, /, pattern, max_matches=None)"
         },
+        "materialize_ontology": {
+          "kind": "method",
+          "signature": "(self, /, adopt=False)"
+        },
         "near_point": {
           "kind": "method",
           "signature": "(self, /, center_lat, center_lon, max_distance, lat_field=None, lon_field=None)"
@@ -857,6 +873,14 @@
         "offset": {
           "kind": "method",
           "signature": "(self, /, n)"
+        },
+        "ontology": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "ontology_diff": {
+          "kind": "method",
+          "signature": "(self, /)"
         },
         "operation_index": {
           "kind": "method",

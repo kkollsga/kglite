@@ -1344,7 +1344,8 @@ class TestOntologyGate:
                         }
                     }
                 }
-            )
+            ),
+            encoding="utf-8",
         )
         bp = {
             "settings": {"root": str(tmp_path), "output": "out.kgl"},
