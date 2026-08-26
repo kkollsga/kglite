@@ -924,3 +924,143 @@ def test_exempt_renders_in_describe_and_show_ontology(mixed_props_graph):
     assert "exempt=" not in mixed_props_graph.describe()
     rows = mixed_props_graph.cypher("SHOW ONTOLOGY").to_list()
     assert all(r["exempt"] is None for r in rows)
+
+
+# ---- ontology_audit({by: 'domain_class'}) breakdown ------------------------
+# (operator report 2026-08-26: the first question after every non-zero audit
+# row is "which source types are violating?", answered until now by a
+# hand-written Cypher query per rule.)
+
+
+def _audit_rows(graph, by=None):
+    """Every audit row, breakdown column included, grouped by rule."""
+    param = f"({{by: '{by}'}})" if by else "()"
+    rows = graph.cypher(
+        f"CALL ontology_audit{param} YIELD rule, severity, violations, exempted, total, pct, domain_class RETURN *"
+    ).to_list()
+    out = {}
+    for row in rows:
+        out.setdefault(row["rule"], []).append(row)
+    return out
+
+
+def test_audit_breakdown_fans_a_rule_per_violating_class(mixed_props_graph):
+    mixed_props_graph.define_ontology(_since_decl(FLAT_CLASSES))
+    aggregate = _audit_rows(mixed_props_graph)["ENROLLED_IN.required_properties"]
+    assert len(aggregate) == 1
+    assert (aggregate[0]["violations"], aggregate[0]["domain_class"]) == (3, None)
+
+    fanned = _audit_rows(mixed_props_graph, by="domain_class")["ENROLLED_IN.required_properties"]
+    assert {r["domain_class"]: r["violations"] for r in fanned} == {"Student": 1, "Auditor": 2}
+    # The fan-out is a partition of the aggregate count, and the per-rule
+    # columns ride along unchanged on every row.
+    assert sum(r["violations"] for r in fanned) == aggregate[0]["violations"]
+    assert {(r["severity"], r["total"], r["exempted"]) for r in fanned} == {("error", 4, 0)}
+    assert [r["pct"] for r in sorted(fanned, key=lambda r: r["domain_class"])] == [50.0, 25.0]
+
+
+def test_audit_breakdown_leaves_exempted_classes_out(mixed_props_graph):
+    mixed_props_graph.define_ontology(_since_decl(FLAT_CLASSES, {"required_properties": ["Auditor"]}))
+    fanned = _audit_rows(mixed_props_graph, by="domain_class")["ENROLLED_IN.required_properties"]
+    # Auditor's two flagged edges are excused, so the class has no
+    # severity-bearing violations and no row of its own; the per-rule
+    # `exempted` tail rides along on the row that remains, unsplit.
+    assert [(r["domain_class"], r["violations"], r["exempted"]) for r in fanned] == [("Student", 1, 2)]
+
+    # A rule whose every violation is exempted still reports itself — a rule
+    # vanishing from the scorecard would read as "not declared".
+    mixed_props_graph.define_ontology(_since_decl(FLAT_CLASSES, {"required_properties": ["Auditor", "Student"]}))
+    fanned = _audit_rows(mixed_props_graph, by="domain_class")["ENROLLED_IN.required_properties"]
+    assert [(r["domain_class"], r["violations"], r["exempted"]) for r in fanned] == [(None, 0, 3)]
+
+
+def test_audit_breakdown_attributes_pair_rules_to_the_source_side(school):
+    """inverse/symmetric/transitive rows have no domain-side *endpoint*; they
+    are attributed to the first bound node — the source of the edge or chain
+    whose partner is missing."""
+    fanned = _audit_rows(school, by="domain_class")
+    assert [(r["domain_class"], r["violations"]) for r in fanned["ENROLLED_IN.inverse"]] == [("Teacher", 1)]
+    assert [(r["domain_class"], r["violations"]) for r in fanned["ENROLLED_IN.required"]] == [("Student", 1)]
+    # A clean rule keeps its single aggregate row with a Null class.
+    assert [(r["domain_class"], r["violations"]) for r in fanned["ENROLLED_IN.range"]] == [(None, 0)]
+
+
+def test_audit_bare_call_gains_a_null_domain_class_column(school):
+    rows = school.cypher("CALL ontology_audit()").to_list()
+    assert len(rows) == 4
+    assert all(r["domain_class"] is None for r in rows)
+    assert set(rows[0]) == {"rule", "severity", "violations", "exempted", "total", "pct", "domain_class"}
+
+
+def test_audit_by_param_is_validated(school):
+    with pytest.raises(Exception, match="invalid 'by' value 'nonsense'"):
+        school.cypher("CALL ontology_audit({by: 'nonsense'}) YIELD rule RETURN rule")
+    with pytest.raises(Exception, match="unknown parameter 'group_by'"):
+        school.cypher("CALL ontology_audit({group_by: 'domain_class'}) YIELD rule RETURN rule")
+    # The column is still a normal YIELD target, aliasable like any other.
+    rows = school.cypher(
+        "CALL ontology_audit({by: 'domain_class'}) YIELD rule, domain_class AS cls RETURN rule, cls"
+    ).to_list()
+    assert ("ENROLLED_IN.domain", "Teacher") in {(r["rule"], r["cls"]) for r in rows}
+
+
+# ---- edge_property_violation drill-down -----------------------------------
+
+
+def _property_decl(exempt=None):
+    rel = {
+        "required_properties": ["since"],
+        "property_types": {"since": "string"},
+        "enforcement": "error",
+    }
+    if exempt is not None:
+        rel["exempt"] = exempt
+    return {"classes": FLAT_CLASSES, "relationships": {"ENROLLED_IN": rel}}
+
+
+def test_edge_property_violation_lists_both_checks(mixed_props_graph):
+    mixed_props_graph.define_ontology(_property_decl({"required_properties": ["Auditor"]}))
+    rows = mixed_props_graph.cypher(
+        "CALL edge_property_violation() YIELD relationship, check, source, target, property, exempt "
+        "RETURN relationship, check, source.title AS src, target.title AS tgt, property, exempt "
+        "ORDER BY check, src"
+    ).to_list()
+    assert [(r["check"], r["src"], r["property"], r["exempt"]) for r in rows] == [
+        # `since` is an integer on the one edge that carries it.
+        ("property_types", "A", "since", False),
+        # Absent on the other three; the two Auditor-sourced ones are excused.
+        ("required_properties", "B", "since", False),
+        ("required_properties", "X", "since", True),
+        ("required_properties", "Y", "since", True),
+    ]
+    assert {(r["relationship"], r["tgt"]) for r in rows} == {("ENROLLED_IN", "C")}
+
+    # Every flagged row is attributable: the listing reconciles with the
+    # scorecard it drills into, exempted rows included.
+    audit = _audit(mixed_props_graph)
+    for check in ("required_properties", "property_types"):
+        line = audit[f"ENROLLED_IN.{check}"]
+        listed = [r for r in rows if r["check"] == check]
+        assert len(listed) == line["violations"] + line["exempted"]
+        assert sum(1 for r in listed if r["exempt"]) == line["exempted"]
+
+
+def test_edge_property_violation_yields_column_subsets(mixed_props_graph):
+    mixed_props_graph.define_ontology(_property_decl())
+    checks = mixed_props_graph.cypher(
+        "CALL edge_property_violation() YIELD check RETURN check ORDER BY check"
+    ).to_list()
+    assert [r["check"] for r in checks] == ["property_types"] + ["required_properties"] * 3
+    bare = mixed_props_graph.cypher("CALL edge_property_violation()").to_list()
+    assert len(bare) == 4
+    assert set(bare[0]) == {"relationship", "check", "source", "target", "property", "exempt"}
+    with pytest.raises(Exception, match="does not yield"):
+        mixed_props_graph.cypher("CALL edge_property_violation() YIELD bogus RETURN bogus")
+
+
+def test_edge_property_violation_refuses_params_and_a_bare_graph(mixed_props_graph, g):
+    mixed_props_graph.define_ontology(_property_decl())
+    with pytest.raises(Exception, match="takes no parameters"):
+        mixed_props_graph.cypher("CALL edge_property_violation({edge: 'ENROLLED_IN'}) YIELD source RETURN source")
+    with pytest.raises(Exception, match="define_ontology"):
+        g.cypher("CALL edge_property_violation() YIELD source RETURN source")

@@ -463,7 +463,7 @@ Vector embeddings via a bring-your-own embedder — `pip install fastembed` (or
 
 ### Structural validators — surface data-integrity gaps
 
-Fourteen built-in `CALL` procedures find the gaps that aren't visible
+Fifteen built-in `CALL` procedures find the gaps that aren't visible
 from normal queries: orphan nodes, missing-required-edge violations,
 two-step cycles, duplicate titles, parallel edges, cardinality
 violations, more. They compose with the rest of Cypher.
@@ -610,7 +610,7 @@ Quick reference. Each links into the appropriate guide.
 | **[Graph algorithms](https://kglite.readthedocs.io/en/latest/python/guides/graph-algorithms.html)** | Shortest path (BFS or Dijkstra), centrality, community detection, clustering |
 | **[Ontology](https://kglite.readthedocs.io/en/latest/python/guides/ontology.html)** | Declared semantic layer: `is_a` class forest + relationship semantics (`define_ontology`), `SHOW ONTOLOGY`, no-arg validators, `CALL ontology_audit()` scorecard, blueprint data-quality gate, opt-in materialization. Annotations, not axioms — SKOS in spirit, never OWL. |
 | **[Structured data](https://kglite.readthedocs.io/en/latest/python/guides/structured-data.html)** | DataFrame table properties (`set_table_property`/`get_table_property`), declared `list<map{...}>` shapes with indexed error paths, atomic nested `SET o.items[2].qty = 8`, `table.upsert`/`table.delete`, `attach_rows`. |
-| **Structural validators** | 14 `CALL` procedures: `orphan_node`, `missing_required_edge`, `cycle_2step`, `inverse_violation`, `cardinality_violation`, `parallel_edges`, `null_property`, more — agent-discoverable integrity checks composable with Cypher |
+| **Structural validators** | 15 `CALL` procedures: `orphan_node`, `missing_required_edge`, `cycle_2step`, `inverse_violation`, `cardinality_violation`, `parallel_edges`, `null_property`, `edge_property_violation`, more — agent-discoverable integrity checks composable with Cypher |
 | **[Spatial](https://kglite.readthedocs.io/en/latest/python/guides/spatial.html)** | Coordinates, WKT geometry, distance + containment, `kg_knn` k-nearest-neighbour. Pragmatic primitives, not a full GIS stack. |
 | **[Timeseries](https://kglite.readthedocs.io/en/latest/python/guides/timeseries.html)** | Time-indexed values with `ts_*()` Cypher functions. For graphs whose nodes carry value-over-time series. |
 | **[Bulk loading](https://kglite.readthedocs.io/en/latest/python/guides/data-loading.html)** | `add_nodes` / `add_connections` for DataFrames |

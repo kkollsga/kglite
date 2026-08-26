@@ -227,8 +227,29 @@ pub(super) const PROCEDURES: &[ProcedureSpec] = &[
     ProcedureSpec {
         name: "ontology_audit",
         aliases: &[],
-        description: "Scorecard: one row per declared ontology check (violations, exempted, total, pct, declared severity). `exempted` counts rows an `exempt` declaration excuses; violations + exempted = everything flagged",
-        columns: &["rule", "severity", "violations", "exempted", "total", "pct"],
+        description: "Scorecard: one row per declared ontology check (violations, exempted, total, pct, declared severity). `exempted` counts rows an `exempt` declaration excuses; violations + exempted = everything flagged. {by: 'domain_class'} fans each rule into one row per violating domain-side class (domain_class is Null otherwise, and on a rule with no violations to break down)",
+        columns: &[
+            "rule",
+            "severity",
+            "violations",
+            "exempted",
+            "total",
+            "pct",
+            "domain_class",
+        ],
+    },
+    ProcedureSpec {
+        name: "edge_property_violation",
+        aliases: &[],
+        description: "Rule: edges flagged by a declaration's required_properties (property absent/null) or property_types (present value of the wrong type) — the row listing behind those two ontology_audit counts. No-arg only; `property` names the first failing property, `exempt` marks rows an `exempt` declaration excuses",
+        columns: &[
+            "relationship",
+            "check",
+            "source",
+            "target",
+            "property",
+            "exempt",
+        ],
     },
     ProcedureSpec {
         name: "parallel_edges",

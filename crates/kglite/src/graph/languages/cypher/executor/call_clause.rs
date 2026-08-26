@@ -795,28 +795,14 @@ impl<'a> CypherExecutor<'a> {
                 vec![row]
             }
             "cluster" => self.execute_call_cluster(&params, &clause.yield_items, &existing)?,
-            "orphan_node"
-            | "self_loop"
-            | "cycle_2step"
-            | "missing_required_edge"
-            | "missing_inbound_edge"
-            | "duplicate_title"
-            | "duplicate_id"
-            | "outline"
-            | "null_property"
-            | "inverse_violation"
-            | "transitivity_violation"
-            | "cardinality_violation"
-            | "type_domain_violation"
-            | "type_range_violation"
-            | "parallel_edges"
-            | "ontology_audit"
-            | "kg_knn" => super::rule_procedures::execute_rule_procedure(
-                &proc_name,
-                self.graph,
-                &params,
-                &clause.yield_items,
-            )?,
+            name if super::rule_procedures::RULE_PROCEDURES.contains(&name) => {
+                super::rule_procedures::execute_rule_procedure(
+                    &proc_name,
+                    self.graph,
+                    &params,
+                    &clause.yield_items,
+                )?
+            }
             "affected_tests" | "rev_diff" | "dead_code" | "refresh_stats" => {
                 super::analysis_procedures::execute_analysis_procedure(
                     &proc_name,

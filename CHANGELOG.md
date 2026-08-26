@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`ontology_audit()` breaks down by violating source class, and gains a
+  `domain_class` column.** `CALL ontology_audit({by: 'domain_class'})` fans
+  each rule's scorecard row out into one row per primary node type its
+  violations come from — the "which source types are actually violating?"
+  follow-up that previously needed a hand-written Cypher query per rule.
+  `violations` and `pct` are that class's share; `severity`, `exempted` and
+  `total` keep their per-rule values on every fanned row. Exempted rows are
+  left out of the breakdown (a class whose every violation is exempted gets
+  no row), and a rule with nothing to fan out keeps its single aggregate row,
+  so no rule ever disappears from the scorecard. The domain-side class is the
+  edge source for `domain`/`range`/`required_properties`/`property_types`,
+  the node itself for `required`/`cardinality`, and for the pair/triple
+  shapes (`inverse`/`symmetric`/`transitive`) the first bound node — the
+  source of the edge or chain whose partner is missing. `by` is validated:
+  any other key, or any other value, is refused with the accepted spelling.
+
+  **Column change — check any suite that pins this result shape:** `CALL
+  ontology_audit()` gains a trailing `domain_class` column, Null on every row
+  of a bare call.
+
+- **`CALL edge_property_violation()`** — the row-level drill-down behind the
+  audit's `required_properties` and `property_types` counts, which were the
+  only declared checks with no procedure to enumerate their rows. Yields
+  `relationship, check, source, target, property, exempt` — one row per
+  flagged edge, `property` naming the first declared property it fails and
+  `exempt` marking the rows an `exempt` declaration excuses, so a
+  relationship's row count for a check equals that rule's `violations +
+  exempted` in the scorecard. No-argument only: the declarations are the
+  argument.
+
 - **Per-source-class exemptions on ontology relationship checks, and two new
   audit/`SHOW ONTOLOGY` columns.** A declaration can now name source classes
   whose violations are reported separately instead of counted against

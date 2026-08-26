@@ -22,6 +22,34 @@ use crate::graph::dir_graph::DirGraph;
 use crate::graph::schema::InternedKey;
 use crate::graph::storage::GraphRead;
 
+/// The procedure names `execute_call` routes to [`execute_rule_procedure`],
+/// beside the dispatcher that answers them so wiring a new rule procedure
+/// touches this file and the registry rather than the CALL clause. Every
+/// name here must be answered below: `ontology_audit` and
+/// `edge_property_violation` return from the early declaration-driven
+/// branches, the rest from the final match, whose `unreachable!()` is the
+/// consequence of adding a name here and nowhere else.
+pub(super) const RULE_PROCEDURES: &[&str] = &[
+    "orphan_node",
+    "self_loop",
+    "cycle_2step",
+    "missing_required_edge",
+    "missing_inbound_edge",
+    "duplicate_title",
+    "duplicate_id",
+    "outline",
+    "null_property",
+    "inverse_violation",
+    "transitivity_violation",
+    "cardinality_violation",
+    "type_domain_violation",
+    "type_range_violation",
+    "parallel_edges",
+    "edge_property_violation",
+    "ontology_audit",
+    "kg_knn",
+];
+
 /// Dispatch a structural-rule procedure after the CALL clause has completed
 /// shared name/YIELD/parameter validation.
 pub(super) fn execute_rule_procedure(
@@ -42,6 +70,17 @@ pub(super) fn execute_rule_procedure(
     }
     if proc_name == "ontology_audit" {
         return super::ontology_procedures::execute_ontology_audit(graph, params, yield_items);
+    }
+    // Declaration-driven like the no-arg forms above, but with no
+    // parameter-driven twin to fall back to (`required_properties` /
+    // `property_types` are declaration-only checks), so it dispatches here
+    // rather than through `proc_check`.
+    if proc_name == "edge_property_violation" {
+        return super::ontology_procedures::execute_edge_property_violation(
+            graph,
+            params,
+            yield_items,
+        );
     }
     let mut rows = match proc_name {
         "orphan_node" => execute_orphan_node(graph, params, yield_items),
