@@ -3283,6 +3283,7 @@ pub kglite::api::RelationshipDecl::description: core::option::Option<alloc::stri
 pub kglite::api::RelationshipDecl::domain: core::option::Option<alloc::string::String>
 pub kglite::api::RelationshipDecl::enforcement: kglite::api::Enforcement
 pub kglite::api::RelationshipDecl::enforcement_overrides: alloc::collections::btree::map::BTreeMap<alloc::string::String, kglite::api::Enforcement>
+pub kglite::api::RelationshipDecl::exempt: alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::vec::Vec<alloc::string::String>>
 pub kglite::api::RelationshipDecl::inverse_enforced: bool
 pub kglite::api::RelationshipDecl::inverse_name: core::option::Option<alloc::string::String>
 pub kglite::api::RelationshipDecl::property_types: alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>
@@ -3293,6 +3294,7 @@ pub kglite::api::RelationshipDecl::symmetric: bool
 pub kglite::api::RelationshipDecl::transitive: bool
 impl kglite::api::RelationshipDecl
 pub fn kglite::api::RelationshipDecl::enforcement_for(&self, check: &str) -> kglite::api::Enforcement
+pub fn kglite::api::RelationshipDecl::exempt_classes(&self, check: &str) -> &[alloc::string::String]
 impl core::clone::Clone for kglite::api::RelationshipDecl
 pub fn kglite::api::RelationshipDecl::clone(&self) -> kglite::api::RelationshipDecl
 impl core::cmp::Eq for kglite::api::RelationshipDecl
