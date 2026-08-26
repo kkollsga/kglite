@@ -100,6 +100,14 @@ pub struct GraphState {
     /// `register_kglite_tools` has cloned the state into every tool closure,
     /// so a plain field would only ever reach the boot clone.
     pub(crate) embedder: Arc<RwLock<Option<Arc<dyn Embedder>>>>,
+    /// The manifest-declared ontology (`extensions.ontology`), parsed once
+    /// at boot and re-applied — **memory-only** — to every graph this state
+    /// installs. Nothing in this server auto-saves, and boot opens use
+    /// `DurabilityLevel::Off`, so the declarations never reach the source
+    /// file unless an agent explicitly calls the save_graph tool (which then
+    /// correctly persists them). Same interior-mutability shape and reason
+    /// as `embedder` above.
+    pub(crate) ontology: Arc<RwLock<Option<Arc<kglite::api::OntologyStore>>>>,
     /// Whether opens take the cross-process writer lease. Server-config, set
     /// once at boot via [`with_writer_lease_policy`](Self::with_writer_lease_policy)
     /// — before `bind_mode` performs the boot open — and carried by every clone.
@@ -381,6 +389,25 @@ impl GraphState {
         if let Some(embedder) = bound {
             kg.set_embedder_native(embedder);
         }
+        // The manifest ontology rides the same seam: every install path
+        // already routes through here before publication.
+        let ontology = read_lock(&self.ontology).as_ref().map(Arc::clone);
+        if let Some(store) = ontology {
+            match std::sync::Arc::make_mut(kg.dir_mut()).define_ontology((*store).clone()) {
+                Ok(warnings) => {
+                    for w in warnings {
+                        tracing::warn!("manifest ontology: {w}");
+                    }
+                }
+                Err(e) => tracing::error!("manifest ontology rejected for this graph: {e}"),
+            }
+        }
+    }
+
+    /// Bind the manifest-declared ontology; ["apply_bound_embedder"] installs
+    /// it on every subsequently published graph.
+    pub fn bind_ontology(&self, store: Arc<kglite::api::OntologyStore>) {
+        *write_lock(&self.ontology) = Some(store);
     }
 
     pub fn schema(&self) -> Option<(u64, u64)> {

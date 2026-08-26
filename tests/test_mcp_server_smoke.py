@@ -2180,3 +2180,55 @@ def teardown_module(_module):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+
+
+# ── Test: extensions.ontology (manifest-declared semantic layer) ──────────
+
+
+class TestManifestOntology:
+    def test_boot_ontology_serves_and_stays_memory_only(self, tmp_path: Path):
+        """`extensions.ontology: {file: ...}` applies at boot to the served
+        graph (SHOW ONTOLOGY + no-arg validators work) but never reaches the
+        source `.kgl` — nothing in the server auto-saves."""
+        root = tmp_path / "onto_server"
+        root.mkdir()
+        kgl = root / "g.kgl"
+        _build_fixture_graph(kgl)
+        (root / "school.ontology.json").write_text(
+            json.dumps(
+                {
+                    "relationships": {
+                        "KNOWS": {
+                            "domain": "Person",
+                            "range": "Person",
+                            "required": True,
+                            "enforcement": "advisory",
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        manifest = root / "onto_mcp.yaml"
+        manifest.write_text(
+            "name: onto\nextensions:\n  ontology:\n    file: school.ontology.json\n",
+            encoding="utf-8",
+        )
+        client = _spawn(["--graph", str(kgl), "--mcp-config", str(manifest)], cwd=root)
+        try:
+            r = client.call_tool("cypher_query", {"query": "SHOW ONTOLOGY"})
+            body = _text_content(r)
+            assert "KNOWS" in body and "relationship" in body
+            # Dave (id 4) has no outgoing KNOWS -> the declaration-driven
+            # no-arg validator sees him.
+            r = client.call_tool(
+                "cypher_query",
+                {"query": "CALL missing_required_edge() YIELD node, rule RETURN node.title AS t, rule"},
+            )
+            body = _text_content(r)
+            assert "Dave" in body and "KNOWS.required" in body
+        finally:
+            client.shutdown()
+        # Memory-only: the source file never gained the declarations.
+        reloaded = kglite.load(str(kgl))
+        assert reloaded.ontology() is None

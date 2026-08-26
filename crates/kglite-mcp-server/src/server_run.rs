@@ -64,6 +64,39 @@ fn boot_value_codecs(
 /// Applies only to `--graph` mode; `resolve_graph_watch_target` warns and
 /// declines everywhere else. A non-boolean value is a boot error, never a
 /// silently ignored key (see [`boot_tools_allow`]).
+/// `extensions.ontology: {"file": "x.json"}` — the declared semantic layer,
+/// parsed once at boot (a malformed value fails the server, per the crate's
+/// no-silently-ignored-keys rule) and applied memory-only to every graph the
+/// state installs. The path resolves against the manifest's directory, like
+/// `csv_http_server`.
+fn boot_ontology(
+    manifest: Option<&mcp_methods::server::Manifest>,
+    manifest_base: &Path,
+) -> Result<Option<Arc<kglite::api::OntologyStore>>> {
+    let Some(raw) = manifest.and_then(|m| m.extensions.get("ontology")) else {
+        return Ok(None);
+    };
+    let file = raw
+        .get("file")
+        .and_then(|v| v.as_str())
+        .context("extensions.ontology must be a map with a 'file' path (JSON document)")?;
+    let path = if Path::new(file).is_absolute() {
+        PathBuf::from(file)
+    } else {
+        manifest_base.join(file)
+    };
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("extensions.ontology: cannot read {}", path.display()))?;
+    let store = kglite::api::ontology_from_json(&text)
+        .map_err(|e| anyhow::anyhow!("extensions.ontology {}: {e}", path.display()))?;
+    tracing::info!(
+        classes = store.classes.len(),
+        relationships = store.relationships.len(),
+        "manifest ontology parsed (memory-only; persists only via an explicit save_graph)"
+    );
+    Ok(Some(Arc::new(store)))
+}
+
 fn boot_graph_watch(manifest: Option<&mcp_methods::server::Manifest>) -> Result<bool> {
     let Some(raw) = manifest.and_then(|m| m.extensions.get("graph_watch")) else {
         return Ok(false);
@@ -479,6 +512,12 @@ pub(crate) async fn run_async(
         // the very next line — a policy set later would arrive after the lease
         // decision it governs. Both read the same `graph_writes_enabled`.
         .with_writer_lease_policy(writer_lease_policy(manifest.as_ref(), &cli));
+
+    // Bound before `bind_mode`, whose boot open publishes the first graph —
+    // the ontology rides the same pre-publication seam as the embedder.
+    if let Some(store) = boot_ontology(manifest.as_ref(), &manifest_base_dir(manifest.as_ref()))? {
+        graph_state.bind_ontology(store);
+    }
 
     let options = bind_mode(&mode, &cli, manifest.as_ref(), &graph_state, options)?;
 
