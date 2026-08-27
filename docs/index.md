@@ -24,12 +24,7 @@ engine. The `.kgl` file format is portable across all bindings.
 **[Fluent API](reference/fluent-api.md)** ·
 **[Rust quickstart](rust/index.md)** ·
 **[Operators and deployment](operators/index.md)** ·
-**[Reference](reference/index.md)** ·
-**[0.13 → 0.14 migration](python/migrations/0.13-to-0.14.md)**
-
-Upgrading from 0.13? Convert pre-0.14 `.kgl`, `.kgle`, disk, and WAL
-artifacts with kglite 0.13.4 before installing the current Postcard-only
-release; the migration guide above has the exact paths.
+**[Reference](reference/index.md)**
 
 ```{rubric} Cypher first
 ```
@@ -62,18 +57,13 @@ released and versioned on its own cadence:
   MCP server.
 - **[codingest](https://codingest.readthedocs.io)** — parses codebases into
   code graphs (14 languages, web-framework route detection). Build with it,
-  query the `.kgl` here. Requires kglite ≥ 0.14.
+  query the `.kgl` here.
 - **[kglite-datasets](https://kglite-datasets.readthedocs.io)** —
   fetch-build-cache loaders for public registries (SEC EDGAR, Wikidata, Sodir).
 - **[sonagram](https://sonagram.readthedocs.io)** — turns a local music
   library into a kglite knowledge graph via sonara audio analysis (tempo,
   energy, mood, key); AI agents curate playlists over it through a simple
   bundled skill and CLI (`pip install sonagram`).
-
-**Coming from 0.13?** The code-graph builder and dataset loaders moved out of
-the wheel, and pre-0.14 bincode persistence needs a 0.13.4 conversion — see
-the [0.13 → 0.14 migration guide](python/migrations/0.13-to-0.14.md).
-Pin back anytime with `pip install "kglite<0.14"`.
 
 ```{rubric} Pick your track
 ```

@@ -93,8 +93,6 @@ def test_readme_leads_with_install_query_and_reference_paths() -> None:
         "MCP and agents",
         "Operators",
         "all documentation",
-        "0.13.4",
-        "Postcard-only",
     ):
         assert required in onboarding
 
@@ -109,8 +107,6 @@ def test_docs_home_leads_with_high_level_routes() -> None:
         "Rust",
         "Operators",
         "Reference",
-        "0.13.4",
-        "Postcard-only",
     ):
         assert required in index[start : start + 2_500]
 
@@ -289,3 +285,35 @@ def test_c_abi_distribution_docs_match_source_only_releases() -> None:
     assert truth in c_abi
     assert truth in binding
     assert "release workflow separately" not in publishing
+
+
+def test_readme_sells_its_distinctive_capabilities() -> None:
+    """The README's allocation contract, from the 2026-08-27 editorial review.
+
+    The drift this pins is append-per-release without a whole-document edit:
+    duplicated boilerplate crowds out the capabilities no competing embedded
+    engine has, and a feature that ships on Monday is invisible on Wednesday.
+    Thresholds are the shipped document's actual counts, not aspirations — each
+    one fails if the fact it guards is edited away.
+    """
+    readme = REPO_ROOT / "README.md"
+    text = readme.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    lowered = text.lower()
+
+    # The 0.13 -> 0.14 migration is retired from the README entirely
+    # (user call, 2026-08-27: too old to be relevant); the guide itself
+    # stays in docs/ for stragglers.
+    assert "0.13 → 0.14" not in text and "0.13-to-0.14" not in text
+
+    # As-of temporal filtering and the declared ontology are the two zero- and
+    # one-mention capabilities the review found buried. Keep them sold.
+    assert lowered.count("valid_at") >= 2
+    assert lowered.count("ontology") >= 3
+    assert "define_ontology" in lowered or "ontology_audit" in lowered
+
+    # Runnable value above the fold, and a length budget so the next append has
+    # to displace something rather than accrete.
+    quick_start = next(i for i, line in enumerate(lines, 1) if line.startswith("## Quick Start"))
+    assert quick_start <= 80, f"Quick Start sank to line {quick_start}"
+    assert len(lines) <= 600, f"README grew to {len(lines)} lines"

@@ -1,9 +1,5 @@
 # Getting Started
 
-> **Coming from 0.13?** The code-graph builder and dataset loaders moved out of
-> the wheel in 0.14 — see the [0.13 → 0.14 migration guide](migrations/0.13-to-0.14.md).
-> Pin back anytime with `pip install "kglite<0.14"`.
-
 ## Installation
 
 ```bash

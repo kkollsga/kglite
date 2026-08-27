@@ -8,11 +8,6 @@ the wheel as of 0.10.26 — no separate install). A standalone
 `cargo install kglite-mcp-server` binary is also available; see
 {doc}`guides/mcp-servers`.
 
-> **Coming from 0.13?** The code-graph builder and dataset loaders moved out of
-> the wheel, and pre-0.14 bincode persistence needs a 0.13.4 conversion — see
-> the [0.13 → 0.14 migration guide](migrations/0.13-to-0.14.md).
-> Pin back anytime with `pip install "kglite<0.14"`.
-
 If you're embedding the engine directly in a Rust binary, the
 [Rust guide](../rust/index.md) is for you.
 
