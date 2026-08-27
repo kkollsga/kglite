@@ -70,8 +70,9 @@ def test_active_docs_only_name_declared_extras() -> None:
 
 
 def test_dataframe_walkthroughs_name_the_pandas_extra() -> None:
+    # The README installs plain `pip install kglite` (user call, 2026-08-27:
+    # naming the extra there is pedantic); the guides still teach it.
     for relative in (
-        "README.md",
         "docs/python/getting-started.md",
         "docs/python/guides/data-loading.md",
     ):
@@ -311,6 +312,9 @@ def test_readme_sells_its_distinctive_capabilities() -> None:
     assert lowered.count("valid_at") >= 2
     assert lowered.count("ontology") >= 3
     assert "define_ontology" in lowered or "ontology_audit" in lowered
+
+    # House voice: no em-dashes, so an append cannot reintroduce them.
+    assert "\u2014" not in text
 
     # Runnable value above the fold, and a length budget so the next append has
     # to displace something rather than accrete.
