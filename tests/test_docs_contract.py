@@ -81,16 +81,22 @@ def test_dataframe_walkthroughs_name_the_pandas_extra() -> None:
 
 def test_readme_leads_with_install_query_and_reference_paths() -> None:
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-    start = readme.index("## Start here")
-    ecosystem = readme.index("## Ecosystem")
-    onboarding = readme[start:ecosystem]
+    # One merged onboarding section (2026-08-27 restructure): a single install
+    # block, a single first snippet, and the two doorways at its end. The old
+    # "## Start here" teaser that preceded it is gone.
+    assert "## Start here" not in readme
+    start = readme.index("## Quick Start")
+    what_makes = readme.index("## What makes it different")
+    onboarding = readme[start:what_makes]
     assert start < 2_000, "README onboarding drifted below the opening screen"
+    install_block = "```bash\npip install kglite"
+    assert readme.count(install_block) == 1, "onboarding install block duplicated"
     # The opening screen carries exactly two doorways (user call, 2026-08-27:
     # less early information): Getting Started and the AI-agents guide. The
     # reference stack and track indexes live in the body sections instead.
     for required in (
         "pip install kglite",
-        "kglite.from_records",
+        "graph.cypher(",
         "Getting Started",
         "guides/ai-agents",
     ):
@@ -318,5 +324,22 @@ def test_readme_sells_its_distinctive_capabilities() -> None:
     # Runnable value above the fold, and a length budget so the next append has
     # to displace something rather than accrete.
     quick_start = next(i for i, line in enumerate(lines, 1) if line.startswith("## Quick Start"))
-    assert quick_start <= 80, f"Quick Start sank to line {quick_start}"
+    assert quick_start <= 37, f"Quick Start sank to line {quick_start}"
     assert len(lines) <= 600, f"README grew to {len(lines)} lines"
+
+
+def test_readme_links_every_python_guide() -> None:
+    """Every shipped guide is reachable from the README.
+
+    The README's Documentation section is the guide index, so a guide added
+    without a link there is a page no README reader can find. Guides are
+    enumerated from disk, not listed here, so a new one fails this test until
+    it is linked.
+    """
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    guides = sorted(
+        path.stem for path in (REPO_ROOT / "docs" / "python" / "guides").glob("*.md") if path.stem != "index"
+    )
+    assert guides, "no Python guides found on disk"
+    missing = [stem for stem in guides if f"python/guides/{stem}.html" not in readme]
+    assert not missing, f"guides with no README link: {missing}"
