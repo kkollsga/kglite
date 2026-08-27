@@ -30,12 +30,13 @@ graph = kglite.from_records({"nodes": [{
 print(graph.cypher("MATCH (p:Person) RETURN p.name ORDER BY p.name").to_dicts())
 ```
 
-Choose the path that matches what you are doing:
+Two guides cover most first sessions:
 
 - **[Getting Started](https://kglite.readthedocs.io/en/latest/python/getting-started.html)**: install, first graph, storage choices
-- **[Python API](https://kglite.readthedocs.io/en/latest/autoapi/kglite/index.html)** · **[Cypher](https://kglite.readthedocs.io/en/latest/reference/cypher-reference.html)** · **[Fluent API](https://kglite.readthedocs.io/en/latest/reference/fluent-api.html)**
-- **[MCP and agents](https://kglite.readthedocs.io/en/latest/python/guides/mcp-servers.html)** · **[Rust](https://kglite.readthedocs.io/en/latest/rust/index.html)** · **[Operators](https://kglite.readthedocs.io/en/latest/operators/index.html)**
-- **[all documentation](https://kglite.readthedocs.io)**
+- **[AI agents](https://kglite.readthedocs.io/en/latest/python/guides/ai-agents.html)**: hand a graph to an LLM agent: `describe()` prompts, semantic search, MCP
+
+Everything else is linked where it comes up, and the
+[Documentation](#documentation) section at the bottom indexes all five tracks.
 
 ## Quick Start
 
@@ -219,7 +220,7 @@ Wikidata slice, a SQL warehouse, a RAG corpus, or a parsed codebase.
   (`set_instructions`) leads `describe()`, and `CALL ready_set(...)` hands out
   the next actionable work. These are opt-in guards, not an enforced perimeter;
   the exact boundaries, and what each does *not* cover, are in the
-  **[agent-contract guide](https://kglite.readthedocs.io/en/latest/python/guides/ai-agents.html)**.
+  **[MCP servers guide](https://kglite.readthedocs.io/en/latest/python/guides/mcp-servers.html)**.
 - 🧠 **Markdown knowledge bases & agent memory.** `kglite.okf.build(dir)` ingests
   an [Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog)
   bundle (or a Claude memory dir, skills folder, or Obsidian vault) into a

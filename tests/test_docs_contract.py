@@ -85,15 +85,14 @@ def test_readme_leads_with_install_query_and_reference_paths() -> None:
     ecosystem = readme.index("## Ecosystem")
     onboarding = readme[start:ecosystem]
     assert start < 2_000, "README onboarding drifted below the opening screen"
+    # The opening screen carries exactly two doorways (user call, 2026-08-27:
+    # less early information): Getting Started and the AI-agents guide. The
+    # reference stack and track indexes live in the body sections instead.
     for required in (
         "pip install kglite",
         "kglite.from_records",
         "Getting Started",
-        "Python API",
-        "Cypher",
-        "MCP and agents",
-        "Operators",
-        "all documentation",
+        "guides/ai-agents",
     ):
         assert required in onboarding
 
