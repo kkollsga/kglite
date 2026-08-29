@@ -2246,6 +2246,7 @@ use text_index_persistence::{decode_text_indexes, encode_text_indexes};
 
 mod vector_persistence;
 
+// Return type of the exported export_embeddings_to_file; nothing in-crate names it.
 #[allow(unused_imports)]
 pub use vector_persistence::ExportStats;
 use vector_persistence::{decode_vector_indexes, encode_vector_indexes};
