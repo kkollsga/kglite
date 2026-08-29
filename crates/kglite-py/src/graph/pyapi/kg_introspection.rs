@@ -1129,6 +1129,7 @@ impl KnowledgeGraph {
             embedder: self.embedder.as_ref().map(Arc::clone),
             default_timeout_ms: self.default_timeout_ms,
             default_max_work_units: self.default_max_work_units,
+            default_row_limit: self.default_row_limit,
             lifecycle: crate::graph::GraphLifecycle::detached_from(&self.lifecycle),
         };
 
@@ -1204,6 +1205,7 @@ impl KnowledgeGraph {
             embedder: self.embedder.as_ref().map(Arc::clone),
             default_timeout_ms: self.default_timeout_ms,
             default_max_work_units: self.default_max_work_units,
+            default_row_limit: self.default_row_limit,
             lifecycle: crate::graph::GraphLifecycle::detached_from(&self.lifecycle),
         };
 
@@ -1331,6 +1333,7 @@ impl KnowledgeGraph {
             embedder: self.embedder.as_ref().map(Arc::clone),
             default_timeout_ms: self.default_timeout_ms,
             default_max_work_units: self.default_max_work_units,
+            default_row_limit: self.default_row_limit,
             lifecycle: crate::graph::GraphLifecycle::detached_from(&self.lifecycle),
         };
 
@@ -1435,6 +1438,7 @@ impl KnowledgeGraph {
                         embedder: self.embedder.as_ref().map(Arc::clone),
                         default_timeout_ms: self.default_timeout_ms,
                         default_max_work_units: self.default_max_work_units,
+                        default_row_limit: self.default_row_limit,
                         lifecycle: crate::graph::GraphLifecycle::detached_from(&self.lifecycle),
                     };
 
@@ -1607,6 +1611,7 @@ impl KnowledgeGraph {
                 embedder: self.embedder.as_ref().map(Arc::clone),
                 default_timeout_ms: self.default_timeout_ms,
                 default_max_work_units: self.default_max_work_units,
+                default_row_limit: self.default_row_limit,
                 lifecycle: crate::graph::GraphLifecycle::detached_from(&self.lifecycle),
             };
 
@@ -1846,6 +1851,7 @@ impl KnowledgeGraph {
             embedder: self.embedder.as_ref().map(Arc::clone),
             default_timeout_ms: self.default_timeout_ms,
             default_max_work_units: self.default_max_work_units,
+            default_row_limit: self.default_row_limit,
             lifecycle: crate::graph::GraphLifecycle::detached(),
         }
     }

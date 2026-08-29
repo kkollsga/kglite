@@ -508,6 +508,15 @@ class ResultView:
         - ``timeout_ms`` (Optional[int]): the deadline that was in effect,
           or ``None`` when no deadline applied (memory graphs by default,
           or any call with ``timeout_ms=0``).
+        - ``row_limit`` (Optional[int]): the result-row retention cap that
+          was in effect, echoed back, or ``None`` when the call set none.
+          Present whether or not the cap bit, so "no cap" and "capped, and
+          it fitted" stay distinguishable.
+        - ``total_rows`` (Optional[int]): the exact number of rows the query
+          produced **before** ``row_limit`` truncated it. Set *only* when
+          truncation actually happened, so ``total_rows is not None`` is the
+          truncation flag, and ``len(rv), total_rows`` is the "showing X of
+          Y" pair. Exact on every execution path, never an estimate.
         - ``warnings`` (list[str]): non-fatal advisory warnings about the
           query — the shapes that silently return nothing useful instead of
           raising: a ``MATCH`` against an unknown node label or relationship
@@ -517,7 +526,8 @@ class ResultView:
           direction matches no edges while the reverse direction has them.
           Carries a "did you mean?" hint where one is genuinely close, and
           execution-time advisories too, e.g. a procedure scoped to a
-          relationship type the graph does not have. Empty for a clean query.
+          relationship type the graph does not have, or a result cut short
+          by ``row_limit``. Empty for a clean query.
           The same signal interactive users see on stderr, exposed here for
           programmatic / agent callers. Shortcut: :attr:`warnings`, which is
           ``[]`` rather than an error on a view with no diagnostics.
@@ -4351,6 +4361,64 @@ class KnowledgeGraph:
         """
         ...
 
+    def set_default_row_limit(self, row_limit: Optional[int] = None) -> None:
+        """Set a default cap on the result rows every ``cypher()`` call keeps.
+
+        This is a **result-row cap, not a work budget** — the deliberate
+        opposite number to :meth:`set_default_max_work_units`:
+
+        =========================  ==========================  ==============
+        knob                       bounds                      on overrun
+        =========================  ==========================  ==============
+        ``max_work_units``         work the executor performs  raises
+        ``row_limit``              rows handed back to you     truncates
+        =========================  ==========================  ==============
+
+        The query still runs to completion and still computes every row, so
+        ``ORDER BY`` sorts the whole answer and aggregation folds the whole
+        answer; only *retention* of the finished rows stops at the cap. The
+        rows you keep are therefore the first N of the answer you would have
+        got uncapped — the genuine top-N under ``ORDER BY``. An explicit
+        ``LIMIT m`` in the query is applied first, so the effective cap is
+        ``min(m, row_limit)``.
+
+        Truncation is never silent. It raises a query warning, and
+        :attr:`ResultView.diagnostics` carries ``row_limit`` plus the exact
+        pre-truncation ``total_rows``, so a "showing 5,000 of 412,003" banner
+        is answerable from the result alone.
+
+        Args:
+            row_limit: Maximum rows to retain, or ``None`` (default) to retain
+                everything. ``0`` is legal and means "keep no rows, still tell
+                me the total".
+
+        Returns:
+            None.
+
+        Example:
+            >>> kg.set_default_row_limit(5_000)
+            >>> rv = kg.cypher("MATCH (n:Item) RETURN n.id ORDER BY n.id")
+            >>> len(rv), rv.diagnostics["total_rows"]
+            (5000, 412003)
+
+        Note:
+            Per-query ``row_limit`` overrides this default, ``0`` included.
+            Applies to a mutation's trailing ``RETURN`` as well: the writes
+            all still happen and ``last_mutation_stats`` still counts them
+            all, because this caps what is *reported*, never what is
+            *changed*. ``EXPLAIN`` is exempt.
+        """
+        ...
+
+    def get_default_row_limit(self) -> Optional[int]:
+        """Get the current default result-row cap, or None.
+
+        Returns:
+            The cap set by :meth:`set_default_row_limit`, or ``None`` when no
+            default cap is set.
+        """
+        ...
+
     def last_report(self) -> dict[str, Any]:
         """Get the most recent operation report as a dict.
 
@@ -5781,6 +5849,7 @@ class KnowledgeGraph:
         params: Optional[dict[str, Any]] = None,
         timeout_ms: Optional[int] = None,
         max_work_units: Optional[int] = None,
+        row_limit: Optional[int] = None,
         streaming: bool = True,
         parallel: bool = False,
         disable_optimizer: bool = False,
@@ -5897,6 +5966,22 @@ class KnowledgeGraph:
                 rows you get back. Direct mutation calls are in-place; use
                 Session/Transaction for rollback. Defaults to
                 ``set_default_max_work_units()``.
+            row_limit: Cap on the result rows this call **retains** — the
+                opposite number to ``max_work_units``, which bounds work and
+                raises. The query still runs to completion and still computes
+                every row (``ORDER BY`` sorts the whole answer, aggregation
+                folds the whole answer); only retention stops at the cap, so
+                the rows you keep are the first N of the uncapped answer, and
+                the genuine top-N under ``ORDER BY``. An explicit ``LIMIT m``
+                is applied first, making the effective cap ``min(m,
+                row_limit)``. Applies to a mutation's trailing ``RETURN`` too:
+                every write still happens and ``last_mutation_stats`` still
+                counts them all — the cap bounds what is reported, never what
+                is changed. ``EXPLAIN`` is exempt. ``0`` is legal ("keep no
+                rows, still tell me the total"). Truncation is never silent:
+                it raises a query warning, and ``diagnostics`` carries
+                ``row_limit`` plus the exact pre-truncation ``total_rows``.
+                Defaults to ``set_default_row_limit()``.
             streaming: When ``True`` (default), the executor absorbs
                 compatible clause runs (currently
                 ``WITH/RETURN(group, agg) [ORDER BY ... LIMIT k]``) into
@@ -7298,6 +7383,7 @@ class Session:
         params: dict[str, Any] | None = None,
         timeout_ms: int | None = None,
         max_work_units: int | None = None,
+        row_limit: int | None = None,
     ) -> Any:
         """Run a read-only Cypher query against a momentary snapshot.
 
@@ -7309,6 +7395,14 @@ class Session:
         Read semantics match :meth:`KnowledgeGraph.cypher`. A mutation query
         (``CREATE`` / ``SET`` / ``DELETE`` / ``REMOVE`` / ``MERGE``) raises
         ``ValueError`` — use :meth:`execute` for writes.
+
+        ``row_limit`` caps the rows the call **retains** — the query still runs
+        in full and only retention stops at the cap, so the rows kept are the
+        first N of the uncapped answer (the genuine top-N under ``ORDER BY``)
+        and an explicit ``LIMIT m`` makes the effective cap ``min(m,
+        row_limit)``. Truncation is never silent: it warns, and
+        :attr:`ResultView.diagnostics` carries ``row_limit`` plus the exact
+        pre-truncation ``total_rows``.
         """
         ...
 
@@ -7319,6 +7413,7 @@ class Session:
         params: dict[str, Any] | None = None,
         timeout_ms: int | None = None,
         max_work_units: int | None = None,
+        row_limit: int | None = None,
         write_scope: list[str] | None = None,
         git_sha: str | None = None,
         modified_by: str | None = None,
@@ -7345,6 +7440,16 @@ class Session:
         working-copy materialisation), so mixed traffic can route through
         ``execute()`` safely. Returns the query result (rows for
         ``... RETURN``, otherwise mutation stats).
+
+        ``row_limit`` caps the rows the call **retains** — the query still runs
+        in full and only retention stops at the cap, so the rows kept are the
+        first N of the uncapped answer (the genuine top-N under ``ORDER BY``)
+        and an explicit ``LIMIT m`` makes the effective cap ``min(m,
+        row_limit)``. Truncation is never silent: it warns, and
+        :attr:`ResultView.diagnostics` carries ``row_limit`` plus the exact
+        pre-truncation ``total_rows``. It bounds a mutation's ``RETURN`` rows the
+        same way, and never the writes themselves — every write still happens
+        and is still counted.
         """
         ...
 
@@ -7408,6 +7513,7 @@ class FrozenGraph:
         params: dict[str, Any] | None = None,
         timeout_ms: int | None = None,
         max_work_units: int | None = None,
+        row_limit: int | None = None,
     ) -> Any:
         """Run a read-only Cypher query against the snapshot.
 
@@ -7419,6 +7525,14 @@ class FrozenGraph:
         and take a fresh :meth:`KnowledgeGraph.freeze`.
 
         Safe to call concurrently from many threads on the same snapshot.
+
+        ``row_limit`` caps the rows the call **retains** — the query still runs
+        in full and only retention stops at the cap, so the rows kept are the
+        first N of the uncapped answer (the genuine top-N under ``ORDER BY``)
+        and an explicit ``LIMIT m`` makes the effective cap ``min(m,
+        row_limit)``. Truncation is never silent: it warns, and
+        :attr:`ResultView.diagnostics` carries ``row_limit`` plus the exact
+        pre-truncation ``total_rows``.
         """
         ...
 
@@ -7465,6 +7579,7 @@ class Transaction:
         to_df: bool = False,
         timeout_ms: Optional[int] = None,
         max_work_units: Optional[int] = None,
+        row_limit: Optional[int] = None,
         write_scope: list[str] | None = None,
         git_sha: Optional[str] = None,
         modified_by: Optional[str] = None,

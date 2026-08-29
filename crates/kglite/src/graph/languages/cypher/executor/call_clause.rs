@@ -1283,7 +1283,8 @@ impl<'a> CypherExecutor<'a> {
         clause: &UnionClause,
         result_set: ResultSet,
     ) -> Result<ResultSet, String> {
-        let right_result = self.execute(&clause.query)?;
+        // `None`, never `self.row_limit`: see `execute_with_cap`.
+        let right_result = self.execute_with_cap(&clause.query, None)?;
 
         // All arms of a set operation must return the same column names, in the
         // same order — matching Neo4j ("All sub queries in an UNION must have

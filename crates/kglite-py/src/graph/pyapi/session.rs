@@ -98,6 +98,7 @@ struct QueryOpts {
     to_df: bool,
     deadline: Option<std::time::Instant>,
     max_work_units: Option<usize>,
+    row_limit: Option<usize>,
     output_csv: bool,
     /// Role-scoped write whitelist; only consulted on the write path.
     write_scope: Option<std::collections::HashSet<String>>,
@@ -106,10 +107,13 @@ struct QueryOpts {
 }
 
 impl QueryOpts {
+    // The Python boundary mirrors the public query-option surface.
+    #[allow(clippy::too_many_arguments)]
     fn from_parts(
         to_df: bool,
         timeout_ms: Option<u64>,
         max_work_units: Option<usize>,
+        row_limit: Option<usize>,
         csv: bool,
         write_scope: Option<std::collections::HashSet<String>>,
         git_sha: Option<String>,
@@ -119,6 +123,7 @@ impl QueryOpts {
             to_df,
             deadline: deadline_from(timeout_ms),
             max_work_units,
+            row_limit,
             output_csv: csv,
             write_scope,
             git_sha,
@@ -159,11 +164,13 @@ impl Session {
         let query_owned = query.to_string();
         let deadline = qopts.deadline;
         let max_work_units = qopts.max_work_units;
+        let row_limit = qopts.row_limit;
         let result = py.enter_kg(move |cancel| -> Result<cypher::CypherResult, KgError> {
             let opts = ExecuteOptions {
                 params: &param_map,
                 deadline,
                 max_work_units,
+                row_limit,
                 lazy_eligible: false,
                 parallel: false,
                 disabled_passes: None,
@@ -200,6 +207,7 @@ impl Session {
         let query_owned = query.to_string();
         let deadline = qopts.deadline;
         let max_work_units = qopts.max_work_units;
+        let row_limit = qopts.row_limit;
         let write_scope = qopts.write_scope;
         let git_sha = qopts.git_sha;
         let modified_by = qopts.modified_by;
@@ -239,6 +247,7 @@ impl Session {
                 params: &param_map,
                 deadline,
                 max_work_units,
+                row_limit,
                 lazy_eligible: false,
                 parallel: false,
                 disabled_passes: None,
@@ -296,7 +305,9 @@ impl Session {
     /// `FrozenGraph.cypher`. A mutation query
     /// (`CREATE` / `SET` / `DELETE` / `REMOVE` / `MERGE`) is rejected — use
     /// `Session.execute()` for writes.
-    #[pyo3(signature = (query, to_df=false, params=None, timeout_ms=None, max_work_units=None))]
+    #[pyo3(signature = (query, to_df=false, params=None, timeout_ms=None, max_work_units=None, row_limit=None))]
+    // The Python boundary mirrors the public query-option surface.
+    #[allow(clippy::too_many_arguments)]
     fn cypher(
         &self,
         py: Python<'_>,
@@ -305,6 +316,7 @@ impl Session {
         params: Option<&Bound<'_, PyDict>>,
         timeout_ms: Option<u64>,
         max_work_units: Option<usize>,
+        row_limit: Option<usize>,
     ) -> PyResult<Py<PyAny>> {
         let pre_parsed = cypher::parse_cypher(query).map_err(crate::error_py::kg_to_pyerr)?;
         if cypher::is_mutation_query(&pre_parsed) {
@@ -319,6 +331,7 @@ impl Session {
             to_df,
             timeout_ms,
             max_work_units,
+            row_limit,
             output_csv,
             None,
             None,
@@ -348,6 +361,10 @@ impl Session {
     ///     timeout_ms: Per-call deadline in milliseconds.
     ///     max_work_units: Work budget for the query, not a result-row cap;
     ///         exceeding it is an error.
+    ///     row_limit: Cap on the result rows kept. The query — writes
+    ///         included — still runs in full; only retention stops at the
+    ///         cap, and truncation warns and reports the exact pre-truncation
+    ///         `total_rows` in `diagnostics`.
     ///     write_scope: Role-scoped write whitelist restricting this
     ///         statement's mutations — every node write is judged by the
     ///         node's *stored* type (a pattern label cannot widen it), and a
@@ -359,7 +376,7 @@ impl Session {
     ///
     /// Returns the query result (rows for `... RETURN`, otherwise mutation
     /// stats), same shape as `KnowledgeGraph.cypher`.
-    #[pyo3(signature = (query, to_df=false, params=None, timeout_ms=None, max_work_units=None, write_scope=None, git_sha=None, modified_by=None))]
+    #[pyo3(signature = (query, to_df=false, params=None, timeout_ms=None, max_work_units=None, row_limit=None, write_scope=None, git_sha=None, modified_by=None))]
     // Python boundary mirrors the public query option surface.
     #[allow(clippy::too_many_arguments)]
     fn execute(
@@ -370,6 +387,7 @@ impl Session {
         params: Option<&Bound<'_, PyDict>>,
         timeout_ms: Option<u64>,
         max_work_units: Option<usize>,
+        row_limit: Option<usize>,
         write_scope: Option<Vec<String>>,
         git_sha: Option<String>,
         modified_by: Option<String>,
@@ -382,6 +400,7 @@ impl Session {
             to_df,
             timeout_ms,
             max_work_units,
+            row_limit,
             output_csv,
             scope_set,
             git_sha,

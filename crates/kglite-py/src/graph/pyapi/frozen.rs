@@ -58,9 +58,11 @@ impl FrozenGraph {
     /// then take a fresh `freeze()`.
     ///
     /// Safe to call from many threads on the same `FrozenGraph` at once.
-    #[pyo3(signature = (query, to_df=false, params=None, timeout_ms=None, max_work_units=None))]
+    #[pyo3(signature = (query, to_df=false, params=None, timeout_ms=None, max_work_units=None, row_limit=None))]
     // The detached closure preserves the engine's structured KgError until PyErr conversion.
     #[allow(clippy::result_large_err)]
+    // The Python boundary mirrors the public query-option surface.
+    #[allow(clippy::too_many_arguments)]
     fn cypher(
         &self,
         py: Python<'_>,
@@ -69,6 +71,7 @@ impl FrozenGraph {
         params: Option<&Bound<'_, PyDict>>,
         timeout_ms: Option<u64>,
         max_work_units: Option<usize>,
+        row_limit: Option<usize>,
     ) -> PyResult<Py<PyAny>> {
         // Reject mutations up front with a frozen-specific message (clearer
         // than execute_read's generic "use execute_mut").
@@ -108,6 +111,7 @@ impl FrozenGraph {
                     params: &param_map,
                     deadline,
                     max_work_units,
+                    row_limit,
                     lazy_eligible: false,
                     parallel: false,
                     disabled_passes: None,

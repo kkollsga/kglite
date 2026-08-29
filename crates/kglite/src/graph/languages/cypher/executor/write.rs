@@ -142,6 +142,20 @@ pub fn execute_mutable(
     execute_mutable_bounded(graph, query, params, interrupt, None)
 }
 
+/// The result-shaping knobs a mutation carries from `ExecuteOptions`. Bundled
+/// so the two `Option<usize>`s — which mean opposite things — cannot be
+/// swapped at a call site.
+#[derive(Clone, Copy)]
+pub(crate) struct MutationLimits {
+    /// Work budget; exceeding it fails the statement.
+    pub max_work_units: Option<usize>,
+    /// Retention cap on the trailing RETURN's rows; exceeding it truncates.
+    /// The writes themselves always run in full — a cap on what is *reported*
+    /// is not a cap on what is *changed*, and `MutationStats` still counts
+    /// every write.
+    pub row_limit: Option<usize>,
+}
+
 /// Invariant context for one mutation run — everything the clause loop reads
 /// but never changes. Bundled so [`run_clause_pipeline`] can be called once
 /// per `LOAD CSV` batch without a ten-argument signature.
@@ -165,6 +179,7 @@ struct FinalizeCtx {
     params: HashMap<String, Value>,
     interrupt: Interrupt,
     budget: super::budget::ExecutionBudget,
+    row_limit: Option<usize>,
 }
 
 impl MutationCtx<'_> {
@@ -201,7 +216,10 @@ pub(crate) fn execute_mutable_bounded(
         query,
         params,
         interrupt,
-        max_work_units,
+        MutationLimits {
+            max_work_units,
+            row_limit: None,
+        },
         &super::load_csv::CsvImportPolicy::Denied,
     )
 }
@@ -215,7 +233,7 @@ pub(crate) fn execute_mutable_with_csv(
     query: &CypherQuery,
     params: HashMap<String, Value>,
     interrupt: Interrupt,
-    max_work_units: Option<usize>,
+    limits: MutationLimits,
     csv_import: &super::load_csv::CsvImportPolicy,
 ) -> Result<CypherResult, String> {
     // Arena guard for the whole mutation: holds the query count so every
@@ -223,7 +241,7 @@ pub(crate) fn execute_mutable_with_csv(
     // is guard-covered. Owned counter handle — coexists with `&mut`.
     let _arena_guard = graph.graph.begin_query();
 
-    let budget = super::budget::ExecutionBudget::new(max_work_units);
+    let budget = super::budget::ExecutionBudget::new(limits.max_work_units);
 
     let mut stats = MutationStats::default();
     let profiling = query.profile;
@@ -282,6 +300,7 @@ pub(crate) fn execute_mutable_with_csv(
             params,
             interrupt,
             budget,
+            row_limit: limits.row_limit,
         },
         result_set,
         stats,
@@ -514,7 +533,7 @@ fn finalize_mutation(
     graph: &mut DirGraph,
     query: &CypherQuery,
     ctx: FinalizeCtx,
-    result_set: ResultSet,
+    mut result_set: ResultSet,
     stats: MutationStats,
     profile: Option<Vec<ClauseStats>>,
 ) -> Result<CypherResult, String> {
@@ -533,11 +552,17 @@ fn finalize_mutation(
             params,
             interrupt,
             budget,
+            row_limit,
         } = ctx;
+        // The writes are already applied and counted; the cap only decides how
+        // many of the RETURN's rows come back. Same placement as the read
+        // path: before projection, after every clause. See `apply_row_limit`.
+        let capped = super::apply_row_limit(&mut result_set.rows, row_limit);
         let executor = CypherExecutor::with_params(graph, &params, interrupt.deadline)
             .with_cancel(interrupt.cancel)
             .with_budget(budget);
         let mut result = executor.finalize_result(result_set)?;
+        super::stamp_row_limit(&mut result, capped);
         result.stats = Some(stats);
         result.profile = profile;
         Ok(result)

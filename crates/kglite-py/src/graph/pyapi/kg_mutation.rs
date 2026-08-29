@@ -1149,6 +1149,7 @@ impl KnowledgeGraph {
             embedder: None,
             default_timeout_ms: None,
             default_max_work_units: None,
+            default_row_limit: None,
             lifecycle: crate::graph::GraphLifecycle::detached(),
         })
     }

@@ -837,6 +837,7 @@ pub fn kglite::api::cypher::CypherExecutor<'a>::with_csv_import(self, policy: kg
 pub fn kglite::api::cypher::CypherExecutor<'a>::with_max_work_units(self, max_work_units: core::option::Option<usize>) -> Self
 pub fn kglite::api::cypher::CypherExecutor<'a>::with_parallel(self, parallel: bool) -> Self
 pub fn kglite::api::cypher::CypherExecutor<'a>::with_params(graph: &'a kglite::api::DirGraph, params: &'a std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>, deadline: core::option::Option<std::time::Instant>) -> Self
+pub fn kglite::api::cypher::CypherExecutor<'a>::with_row_limit(self, row_limit: core::option::Option<usize>) -> Self
 pub fn kglite::api::cypher::CypherExecutor<'a>::with_streaming(self, streaming: bool) -> Self
 impl<'a> kglite::api::cypher::CypherExecutor<'a>
 pub fn kglite::api::cypher::CypherExecutor<'a>::finalize_result(&self, result_set: kglite::graph::languages::cypher::result::ResultSet) -> core::result::Result<kglite::api::cypher::CypherResult, alloc::string::String>
@@ -896,8 +897,10 @@ impl core::fmt::Debug for kglite::api::cypher::MutationStats
 pub fn kglite::api::cypher::MutationStats::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct kglite::api::cypher::QueryDiagnostics
 pub kglite::api::cypher::QueryDiagnostics::elapsed_ms: u64
+pub kglite::api::cypher::QueryDiagnostics::row_limit: core::option::Option<usize>
 pub kglite::api::cypher::QueryDiagnostics::timed_out: bool
 pub kglite::api::cypher::QueryDiagnostics::timeout_ms: core::option::Option<u64>
+pub kglite::api::cypher::QueryDiagnostics::total_rows: core::option::Option<u64>
 pub kglite::api::cypher::QueryDiagnostics::warnings: alloc::vec::Vec<alloc::string::String>
 impl core::clone::Clone for kglite::api::cypher::QueryDiagnostics
 pub fn kglite::api::cypher::QueryDiagnostics::clone(&self) -> kglite::api::cypher::QueryDiagnostics
@@ -1893,6 +1896,7 @@ pub kglite::api::session::ExecuteOptions::max_work_units: core::option::Option<u
 pub kglite::api::session::ExecuteOptions::modified_by: core::option::Option<&'a str>
 pub kglite::api::session::ExecuteOptions::parallel: bool
 pub kglite::api::session::ExecuteOptions::params: &'a std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>
+pub kglite::api::session::ExecuteOptions::row_limit: core::option::Option<usize>
 pub kglite::api::session::ExecuteOptions::value_codecs: core::option::Option<&'a [kglite::api::cypher::ValueCodec]>
 pub kglite::api::session::ExecuteOptions::write_scope: core::option::Option<&'a std::collections::hash::set::HashSet<alloc::string::String>>
 impl<'a> kglite::api::session::ExecuteOptions<'a>

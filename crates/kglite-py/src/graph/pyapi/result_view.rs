@@ -638,10 +638,14 @@ impl ResultView {
     ///
     /// Returns a dict with ``elapsed_ms`` (wall-clock query duration),
     /// ``timed_out`` (True when the deadline fired), ``timeout_ms``
-    /// (the deadline that was in effect, or None) and ``warnings``
-    /// (shortcut: the `warnings` property). Use this to tune
+    /// (the deadline that was in effect, or None), ``row_limit`` (the
+    /// result-row cap in force, or None), ``total_rows`` (the exact row
+    /// count before ``row_limit`` truncated the result — set only when
+    /// truncation happened, so it doubles as the truncation flag) and
+    /// ``warnings`` (shortcut: the `warnings` property). Use this to tune
     /// ``timeout_ms`` or move toward anchored queries when queries
-    /// approach the deadline.
+    /// approach the deadline, and to render "showing X of Y" when a cap
+    /// bit.
     #[getter]
     fn diagnostics(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         match &self.diagnostics {
@@ -652,6 +656,14 @@ impl ResultView {
                 match d.timeout_ms {
                     Some(ms) => dict.set_item("timeout_ms", ms)?,
                     None => dict.set_item("timeout_ms", py.None())?,
+                }
+                match d.row_limit {
+                    Some(cap) => dict.set_item("row_limit", cap)?,
+                    None => dict.set_item("row_limit", py.None())?,
+                }
+                match d.total_rows {
+                    Some(total) => dict.set_item("total_rows", total)?,
+                    None => dict.set_item("total_rows", py.None())?,
                 }
                 dict.set_item("warnings", d.warnings.clone())?;
                 Ok(dict.into_any().unbind())

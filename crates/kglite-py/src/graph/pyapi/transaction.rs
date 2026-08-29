@@ -99,6 +99,9 @@ impl Transaction {
     ///         endpoint's stored type in the list. `None` (default) =
     ///         unrestricted; `[]` denies every mutation. See
     ///         `KnowledgeGraph.cypher` for the exact perimeter.
+    ///     row_limit: Cap on the result rows kept. The query still runs in
+    ///         full; only retention stops at the cap, and truncation warns
+    ///         and reports the exact pre-truncation `total_rows`.
     ///     git_sha, modified_by: Freshness provenance stamped alongside
     ///         `updated_at` on types that declare `auto_timestamp`.
     ///
@@ -106,7 +109,7 @@ impl Transaction {
     ///     Query results (same format as KnowledgeGraph.cypher).
     // Python boundary mirrors the public query option surface.
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (query, params=None, to_df=false, timeout_ms=None, max_work_units=None, write_scope=None, git_sha=None, modified_by=None))]
+    #[pyo3(signature = (query, params=None, to_df=false, timeout_ms=None, max_work_units=None, row_limit=None, write_scope=None, git_sha=None, modified_by=None))]
     fn cypher(
         &mut self,
         py: Python<'_>,
@@ -115,6 +118,7 @@ impl Transaction {
         to_df: bool,
         timeout_ms: Option<u64>,
         max_work_units: Option<usize>,
+        row_limit: Option<usize>,
         write_scope: Option<Vec<String>>,
         git_sha: Option<String>,
         modified_by: Option<String>,
@@ -211,6 +215,7 @@ impl Transaction {
             params: &param_map,
             deadline,
             max_work_units,
+            row_limit,
             // Transactions historically went through the eager path
             // (mark_lazy off, streaming off) — no lazy materializer
             // is wired through the tx ResultView. Preserve that.

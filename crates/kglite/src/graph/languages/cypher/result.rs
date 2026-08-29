@@ -261,7 +261,25 @@ pub struct QueryDiagnostics {
     /// typo), with a "did you mean?" hint. Empty for a clean query. Lets
     /// programmatic / agent callers see the same signal interactive users get
     /// on stderr.
+    ///
+    /// A `row_limit` truncation adds one here too, so a caller that reads only
+    /// the warnings still learns its result was cut.
     pub warnings: Vec<String>,
+    /// The `row_limit` retention cap that was in force, echoed back. `None`
+    /// when the caller set no cap.
+    ///
+    /// Set whether or not the cap bit, so a caller can distinguish "no cap
+    /// applied" from "capped, and the result fitted".
+    pub row_limit: Option<usize>,
+    /// Rows the query produced *before* `row_limit` truncated it.
+    ///
+    /// `Some` **only** when truncation actually happened — so
+    /// `total_rows.is_some()` is the truncation signal, and the count is the
+    /// exact pre-truncation total on every execution path (eager rows, the
+    /// lazy descriptor, and a mutation's RETURN), never an estimate or a
+    /// lower bound. `None` both when no cap applied and when the result fitted
+    /// inside one.
+    pub total_rows: Option<u64>,
 }
 
 /// Side-channel lazy-evaluation descriptor. When set on a `CypherResult`,

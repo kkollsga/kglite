@@ -938,6 +938,17 @@ impl KnowledgeGraph {
         self.default_max_work_units
     }
 
+    /// Set a default cap on the result rows every cypher() call retains.
+    #[pyo3(signature = (row_limit=None))]
+    fn set_default_row_limit(&mut self, row_limit: Option<usize>) {
+        self.default_row_limit = row_limit;
+    }
+
+    /// Get the current default result-row cap, or None.
+    fn get_default_row_limit(&self) -> Option<usize> {
+        self.default_row_limit
+    }
+
     /// Get the most recent operation report as a Python dictionary
     fn last_report(&self) -> PyResult<Py<PyAny>> {
         Python::attach(|py| {
@@ -1637,6 +1648,13 @@ impl KnowledgeGraph {
     ///     max_work_units: Work budget for the query, not a result-row cap;
     ///         exceeding it is an error. Defaults to
     ///         `set_default_max_work_units()`.
+    ///     row_limit: Cap on the result rows kept — the query still runs in
+    ///         full and only retention stops at the cap, so a truncated
+    ///         result is the first N of the answer (the genuine top-N under
+    ///         ORDER BY). Truncation is never silent: it warns, and
+    ///         `diagnostics` carries `row_limit` plus the exact
+    ///         pre-truncation `total_rows`. Defaults to
+    ///         `set_default_row_limit()`.
     ///     write_scope: Role-scoped write whitelist (integrity, not secrecy)
     ///         — e.g. a coding role may write ["Plan", "Task"] but not
     ///         research-owned "Algorithm" nodes. `None` (default) =
@@ -1671,7 +1689,7 @@ impl KnowledgeGraph {
     ///     for row in result:
     ///         print(f"{row['person']}: {row['friends']} friends")
     ///     ```
-    #[pyo3(signature = (query, *, to_df=false, params=None, timeout_ms=None, max_work_units=None, streaming=true, parallel=false, disable_optimizer=false, disabled_passes=None, write_scope=None, git_sha=None, modified_by=None))]
+    #[pyo3(signature = (query, *, to_df=false, params=None, timeout_ms=None, max_work_units=None, row_limit=None, streaming=true, parallel=false, disable_optimizer=false, disabled_passes=None, write_scope=None, git_sha=None, modified_by=None))]
     #[allow(clippy::too_many_arguments)]
     // The detached closure preserves the engine's structured KgError until PyErr conversion.
     #[allow(clippy::result_large_err)]
@@ -1683,6 +1701,7 @@ impl KnowledgeGraph {
         params: Option<&Bound<'_, PyDict>>,
         timeout_ms: Option<u64>,
         max_work_units: Option<usize>,
+        row_limit: Option<usize>,
         streaming: bool,
         parallel: bool,
         disable_optimizer: bool,
@@ -1698,6 +1717,7 @@ impl KnowledgeGraph {
             .or(self_ref.default_timeout_ms)
             .or_else(|| backend_default_timeout_ms(&self_ref.inner));
         let effective_max_work_units = max_work_units.or(self_ref.default_max_work_units);
+        let effective_row_limit = row_limit.or(self_ref.default_row_limit);
         drop(self_ref);
         // timeout_ms == 0 is the documented escape hatch for "no deadline".
         let deadline = match effective_timeout {
@@ -1764,6 +1784,7 @@ impl KnowledgeGraph {
                 params: &param_map,
                 deadline,
                 max_work_units: effective_max_work_units,
+                row_limit: effective_row_limit,
                 lazy_eligible: streaming,
                 parallel,
                 disabled_passes: disabled_owned.as_ref(),
@@ -1827,6 +1848,7 @@ impl KnowledgeGraph {
                 params: &param_map,
                 deadline,
                 max_work_units: effective_max_work_units,
+                row_limit: effective_row_limit,
                 lazy_eligible: streaming,
                 parallel,
                 disabled_passes: disabled_owned.as_ref(),

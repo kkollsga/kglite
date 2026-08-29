@@ -85,9 +85,20 @@ def test_diagnostics_shape_is_unchanged():
     must not have moved anything else."""
     g = _graph()
     diag = g.cypher("MATCH (n:Persn) RETURN n").diagnostics
-    assert set(diag) == {"elapsed_ms", "timed_out", "timeout_ms", "warnings"}
+    assert set(diag) == {
+        "elapsed_ms",
+        "timed_out",
+        "timeout_ms",
+        "row_limit",
+        "total_rows",
+        "warnings",
+    }
     assert isinstance(diag["elapsed_ms"], int)
     assert diag["timed_out"] is False
+    # No `row_limit` was asked for, so neither the cap nor a pre-truncation
+    # total exists. `test_row_limit.py` owns the populated cases.
+    assert diag["row_limit"] is None
+    assert diag["total_rows"] is None
     # The wheel still reports the caller-configured deadline (the in-memory
     # default is 180 s), not the instant core derived it from.
     assert diag["timeout_ms"] == 180_000

@@ -202,6 +202,12 @@ pub struct KnowledgeGraph {
     /// rather than truncating. None = no explicit budget (default), leaving
     /// the engine's own backstop in charge.
     pub(crate) default_max_work_units: Option<usize>,
+    /// Default cap on the result rows a query **retains**. Applied to cypher()
+    /// when `row_limit` is not explicitly passed. The opposite number to
+    /// `default_max_work_units`: that one fails a query that does too much
+    /// work, this one truncates a result that is too big and says so.
+    /// None = retain everything (default).
+    pub(crate) default_row_limit: Option<usize>,
     /// Graph lifecycle / identity — save target + durability session. See
     /// [`GraphLifecycle`].
     pub(crate) lifecycle: GraphLifecycle,
@@ -384,6 +390,7 @@ impl KnowledgeGraph {
             embedder: None,
             default_timeout_ms: None,
             default_max_work_units: None,
+            default_row_limit: None,
             lifecycle: crate::graph::GraphLifecycle::detached(),
         }
     }
@@ -624,6 +631,7 @@ impl Clone for KnowledgeGraph {
             embedder: self.embedder.as_ref().map(Arc::clone),
             default_timeout_ms: self.default_timeout_ms,
             default_max_work_units: self.default_max_work_units,
+            default_row_limit: self.default_row_limit,
             // A true Clone preserves the save identity (source_path) but never
             // the durable session (the WAL File handle isn't shareable) nor the
             // writer lease — write ownership stays with the graph that opened

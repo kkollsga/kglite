@@ -51,6 +51,76 @@ pub(super) const INTERRUPT_POLL_INTERVAL: usize = 4096;
 
 type SpatialCacheShard = RwLock<HashMap<usize, Option<NodeSpatialData>>>;
 
+/// What [`apply_row_limit`] observed, for [`stamp_row_limit`] to record.
+pub(super) struct RowLimitOutcome {
+    /// The cap that was in force.
+    cap: usize,
+    /// Exact pre-truncation row count, `Some` only when rows were dropped.
+    total_rows: Option<u64>,
+}
+
+/// Truncate a statement's final row set to `row_limit`, reporting the exact
+/// count it had first. `None` in, `None` out, and nothing spent.
+///
+/// Called on the finished rows of a **top-level** statement — after every
+/// clause has run (ORDER BY has sorted, LIMIT/SKIP have windowed, DISTINCT has
+/// deduplicated, aggregation has folded) and before they are projected into
+/// cells. That placement is the whole semantic: the query computes exactly
+/// what it would have computed uncapped, and the cap decides only how much of
+/// the answer is kept. Compute overruns stay `max_work_units`' job, which
+/// errors rather than truncating.
+///
+/// The pre-truncation count is exact on every path, because it is read off the
+/// materialized row set: the eager path, the lazy descriptor (whose pending
+/// rows are these same rows), and a mutation's trailing RETURN all funnel
+/// through here. No path reports a lower bound.
+pub(super) fn apply_row_limit(
+    rows: &mut Vec<ResultRow>,
+    row_limit: Option<usize>,
+) -> Option<RowLimitOutcome> {
+    let cap = row_limit?;
+    let total = rows.len();
+    if total > cap {
+        rows.truncate(cap);
+        Some(RowLimitOutcome {
+            cap,
+            total_rows: Some(total as u64),
+        })
+    } else {
+        Some(RowLimitOutcome {
+            cap,
+            total_rows: None,
+        })
+    }
+}
+
+/// Record an [`apply_row_limit`] outcome on the result's diagnostics, and —
+/// when the cap actually bit — raise the warning that makes a truncation
+/// impossible to miss.
+///
+/// The warning rides the ordinary query-warning channel rather than a new one,
+/// so it reaches stderr, `QueryDiagnostics::warnings`, and every binding's
+/// existing warning surface without per-binding wiring.
+pub(super) fn stamp_row_limit(result: &mut CypherResult, outcome: Option<RowLimitOutcome>) {
+    let Some(outcome) = outcome else {
+        return;
+    };
+    let diagnostics = result
+        .diagnostics
+        .get_or_insert_with(QueryDiagnostics::default);
+    diagnostics.row_limit = Some(outcome.cap);
+    diagnostics.total_rows = outcome.total_rows;
+    if let Some(total) = outcome.total_rows {
+        let message = format!(
+            "Result truncated by row_limit: showing {} of {total} rows. Raise row_limit, \
+             or add ORDER BY/LIMIT so the rows you keep are the ones you meant to keep.",
+            outcome.cap
+        );
+        super::emit_query_warnings(std::slice::from_ref(&message));
+        diagnostics.warnings.push(message);
+    }
+}
+
 /// Executes parsed Cypher queries against a `DirGraph`.
 ///
 /// Processes a pipeline of clauses (MATCH → WHERE → RETURN, etc.) by
@@ -148,6 +218,10 @@ pub struct CypherExecutor<'a> {
     /// (they don't materialize through shared arenas), so the in-memory
     /// hot path pays one enum match at construction.
     _arena_guard: Option<crate::graph::storage::disk::graph::DiskQueryGuard>,
+    /// Retention cap on the *final* row set of a top-level statement — see
+    /// [`apply_row_limit`]. `None` (the default, and the only value a nested
+    /// executor ever holds) retains everything.
+    pub(super) row_limit: Option<usize>,
 }
 
 impl<'a> CypherExecutor<'a> {
@@ -171,6 +245,7 @@ impl<'a> CypherExecutor<'a> {
             csv_import: load_csv::CsvImportPolicy::Denied,
             runtime_warnings: Mutex::new(Vec::new()),
             _arena_guard: graph.graph.begin_query(),
+            row_limit: None,
         }
     }
 
@@ -209,6 +284,20 @@ impl<'a> CypherExecutor<'a> {
 
     pub fn with_max_work_units(mut self, max_work_units: Option<usize>) -> Self {
         self.budget = ExecutionBudget::new(max_work_units);
+        self
+    }
+
+    /// Cap how many result rows this execution *retains*, without changing
+    /// what it computes. The companion to [`Self::with_max_work_units`], and
+    /// deliberately not the same knob: that one bounds work and fails the
+    /// query, this one bounds retained rows and truncates with a signal. See
+    /// [`apply_row_limit`].
+    ///
+    /// Set only on the executor for a top-level statement; a nested one (a
+    /// `CALL {}` body, a UNION arm) must keep `None`, or the cap would change
+    /// the answer instead of the size of the answer.
+    pub fn with_row_limit(mut self, row_limit: Option<usize>) -> Self {
+        self.row_limit = row_limit;
         self
     }
 
@@ -367,11 +456,31 @@ impl<'a> CypherExecutor<'a> {
     /// idle period reclaims the prior generation; overlapping and nested
     /// queries share the generation without invalidating refs.
     pub fn execute(&self, query: &CypherQuery) -> Result<CypherResult, String> {
+        self.execute_with_cap(query, self.row_limit)
+    }
+
+    /// [`Self::execute`] with the retention cap named explicitly.
+    ///
+    /// `execute_union` calls this with `None`: a UNION arm is an *input* to
+    /// the statement's result, not the result, so capping it would drop rows
+    /// the set operation still has to see — `A EXCEPT B` with a truncated `B`
+    /// keeps rows that should have been excluded. Only the top-level call
+    /// passes the executor's own `row_limit`.
+    pub(super) fn execute_with_cap(
+        &self,
+        query: &CypherQuery,
+        row_limit: Option<usize>,
+    ) -> Result<CypherResult, String> {
         let mut profile_stats: Vec<ClauseStats> = Vec::new();
-        let result_set =
+        let mut result_set =
             self.execute_clauses_profiled(query, ResultSet::new(), Some(&mut profile_stats))?;
 
+        // Applied before `finalize_result`, so rows past the cap are never
+        // projected into cells: the cap bounds what the caller retains *and*
+        // the work of building what they would have discarded.
+        let capped = apply_row_limit(&mut result_set.rows, row_limit);
         let mut result = self.finalize_result(result_set)?;
+        stamp_row_limit(&mut result, capped);
         result.stats = None;
         if query.profile {
             result.profile = Some(profile_stats);

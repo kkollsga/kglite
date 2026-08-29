@@ -9,6 +9,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`row_limit`: a true result-row cap, with a mandatory truncation signal.**
+  Available per query on `KnowledgeGraph.cypher`, `Session.cypher` /
+  `Session.execute`, `FrozenGraph.cypher` and `Transaction.cypher`, with a
+  graph-level default via `set_default_row_limit()` /
+  `get_default_row_limit()`, and on the Rust surface as
+  `ExecuteOptions::row_limit` / `CypherExecutor::with_row_limit`. For a caller
+  that executes arbitrary user-typed Cypher and cannot inject a `LIMIT`
+  textually, this bounds what comes back without rewriting the query.
+
+  It is the deliberate opposite number to `max_work_units`, not a rename of
+  it: `max_work_units` bounds **work** and *errors*, `row_limit` bounds
+  **retained result rows** and *truncates*. The two are orthogonal and compose
+  — a generous cap never rescues a query from an exhausted work budget.
+
+  The query still runs to completion and still computes every row: `ORDER BY`
+  sorts the whole answer and aggregation folds the whole answer, and only
+  *retention* of the finished rows stops at the cap. So the rows kept are the
+  first N of the uncapped answer — the genuine top-N under `ORDER BY` — and an
+  explicit `LIMIT m` in the query is applied first, making the effective cap
+  `min(m, row_limit)`. A UNION arm and a `CALL {}` body are inputs to the
+  result rather than the result, so neither is capped; capping them would
+  change the answer instead of its size. A mutation's trailing `RETURN` is
+  capped like any other result, while every write still happens and
+  `last_mutation_stats` still counts them all — the cap bounds what is
+  *reported*, never what is *changed*. `EXPLAIN` is exempt. `row_limit=0` is
+  legal: keep no rows, still report the total.
+
+  **Truncation is never silent, and the reported total is exact.**
+  `QueryDiagnostics` gains `row_limit` (the cap in force, echoed whether or
+  not it bit) and `total_rows` (the pre-truncation count, populated *only*
+  when rows were actually dropped, so it doubles as the truncation flag).
+  The count is exact on every execution path — eager rows, the lazy/streaming
+  descriptor, and a mutation's `RETURN` — never an estimate or a lower bound,
+  so `"showing 5,000 of 412,003"` is answerable from the result alone. In
+  Python both fields appear in `ResultView.diagnostics`, and a truncation also
+  raises an ordinary query warning, so it reaches stderr, `ResultView.warnings`
+  and the `pywarn` announcement channel — including for `to_df=True` and
+  `FORMAT CSV`, whose return shapes cannot carry diagnostics.
+
+  Exposure through the C ABI and the Java binding is **deferred**: the
+  published C ABI is additive-only within a major, so `row_limit` there means
+  a new exported symbol rather than a changed signature, and that is a
+  separate change.
+
+  Two source-compatibility notes for Rust consumers: `ExecuteOptions` and
+  `QueryDiagnostics` each gain a public field, so any struct-literal
+  construction of them needs the new field (`ExecuteOptions::eager(&params)`
+  and `QueryDiagnostics::default()` are unaffected).
+
 - **`KGLITE_TMPDIR` redirects the `.kgl` load spill directory.** Loading a
   graph with a column blob of 256 KB or more mints
   `$TMPDIR/kglite_portable_<pid>_<tick><seq>/` and writes the blob there to be

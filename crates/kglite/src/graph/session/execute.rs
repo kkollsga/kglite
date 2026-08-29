@@ -53,6 +53,41 @@ pub struct ExecuteOptions<'a> {
     /// materialized quantities; `Some(n)` replaces that backstop with `n` and
     /// additionally charges scan work against it.
     pub max_work_units: Option<usize>,
+    /// Cap on the result rows this execution **retains** — the deliberate
+    /// opposite number to [`Self::max_work_units`], not a rename of it:
+    ///
+    /// | | bounds | on overrun |
+    /// |---|---|---|
+    /// | `max_work_units` | work: intermediate rows, retained items, scans | **errors** |
+    /// | `row_limit` | rows handed back to the caller | **truncates, with a signal** |
+    ///
+    /// The query still runs to completion and still computes every row —
+    /// ORDER BY sorts the whole set, aggregation folds the whole set — and
+    /// only the *retention* of the finished rows stops at the cap. So the
+    /// rows kept are the first `n` of the answer the caller would have got
+    /// uncapped, and with an ORDER BY they are its genuine top-`n`. An
+    /// explicit `LIMIT m` in the query is applied first, so the effective cap
+    /// is `min(m, n)`.
+    ///
+    /// Truncation is **never silent**. `QueryDiagnostics` carries the cap in
+    /// `row_limit`, the exact pre-truncation total in `total_rows` (populated
+    /// only when rows were actually dropped, and exact on every execution
+    /// path), and a warning in `warnings` that reaches the ordinary
+    /// query-warning channel — so `"showing 5,000 of 412,003"` is answerable
+    /// from the result alone.
+    ///
+    /// Applies to a mutation's trailing `RETURN` exactly as it does to a read:
+    /// the writes still all happen and `MutationStats` still counts them all,
+    /// because this caps what is *reported*, never what is *changed*.
+    /// `EXPLAIN` is exempt — a rendered plan is not result data.
+    ///
+    /// `Some(0)` is legal and means "retain nothing, still tell me the total".
+    /// `None` (the default on every surface) retains everything.
+    ///
+    /// One wart worth knowing: a query with **no** `RETURN` clause infers its
+    /// columns from the rows it kept, so capping such a query to 0 yields no
+    /// columns either.
+    pub row_limit: Option<usize>,
     /// Lazy-projection mode.
     ///
     /// - `true` (Python): `mark_lazy_eligibility` runs after optimize and the
@@ -158,6 +193,7 @@ impl<'a> ExecuteOptions<'a> {
             params,
             deadline: None,
             max_work_units: None,
+            row_limit: None,
             lazy_eligible: false,
             disabled_passes: None,
             embedder: None,
@@ -298,6 +334,7 @@ pub fn execute_read(
 
     let mut result = cypher::CypherExecutor::with_params(graph, &params, opts.deadline)
         .with_max_work_units(opts.max_work_units)
+        .with_row_limit(opts.row_limit)
         .with_streaming(opts.lazy_eligible)
         .with_parallel(opts.parallel)
         .with_cancel(opts.cancel)
@@ -453,7 +490,10 @@ pub fn execute_mut(
                 &parsed,
                 params,
                 interrupt,
-                opts.max_work_units,
+                cypher::executor::write::MutationLimits {
+                    max_work_units: opts.max_work_units,
+                    row_limit: opts.row_limit,
+                },
                 &opts.csv_import,
             )
         });
@@ -488,6 +528,7 @@ pub fn execute_mut(
     } else {
         cypher::CypherExecutor::with_params(graph, &params, opts.deadline)
             .with_max_work_units(opts.max_work_units)
+            .with_row_limit(opts.row_limit)
             .with_streaming(opts.lazy_eligible)
             .with_parallel(opts.parallel)
             .with_cancel(opts.cancel)
