@@ -67,6 +67,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or on a different disk from the graph (on macOS it is always on the system
   volume, wherever the graph lives).
 
+### Changed
+
+- **`.kgl` loads are 5–10% faster.** Rebuilding a loaded graph's type indexes
+  allocated and hashed a fresh `String` for every node's type name; it now
+  groups on the interned type key and resolves once per type, which is what
+  the standalone `rebuild_type_indices` already did. Release-profile load
+  wall time on the measurement fixtures: 621 → 589 ms (546k nodes / 765k
+  edges) and 362 → 324 ms (500k nodes, 4 indexes), with peak physical
+  footprint down ~0.5 MB.
+
 ### Fixed
 
 - **Concurrent `.kgl` loads in one process could fail with a bare OS error.**

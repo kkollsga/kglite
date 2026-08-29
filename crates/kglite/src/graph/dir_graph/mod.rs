@@ -1659,20 +1659,33 @@ impl DirGraph {
     /// Rebuild type_indices from the live graph. Called after deserialization
     /// (type_indices is `#[serde(skip)]`) and by [`Self::reindex`].
     pub fn rebuild_type_indices(&mut self) {
-        let type_count = self.node_type_metadata.len().max(4);
+        let grouped = self.group_node_indices_by_type(self.node_type_metadata.len());
+        self.type_indices.replace_with(grouped);
+        // `secondary_label_index` is *not* rebuilt from node data — it's
+        // the canonical store, populated either by the choke-point API
+        // during the session or by the load path (the disk sidecar /
+        // the in-memory .kgl section).
+    }
+
+    /// One pass over the nodes producing `type name -> node indices`.
+    /// `type_hint` is the caller's expectation of how many distinct node types
+    /// there are, used only to size the map and the per-type vectors.
+    ///
+    /// Group on the node's *interned* type key, not its name. The name is a
+    /// per-type fact but this loop is per-node: resolving it and allocating a
+    /// `String` for every node — then hashing that string with SipHash on the
+    /// way into the map — was ~10% of a fired vacuum at 1M. `InternedKey` is a
+    /// `Copy` integer, so grouping on it costs nothing and the O(types)
+    /// resolve happens once, at the end.
+    fn group_node_indices_by_type(&self, type_hint: usize) -> HashMap<String, Vec<NodeIndex>> {
+        let type_count = type_hint.max(4);
         let avg_per_type = self.graph.node_count() / type_count.max(1);
-        // Group on the node's *interned* type key, not its name. The name is
-        // a per-type fact but this loop is per-node: resolving it and
-        // allocating a `String` for every node — then hashing that string
-        // with SipHash on the way into the map — was ~10% of a fired vacuum
-        // at 1M. `InternedKey` is a `Copy` integer, so grouping on it costs
-        // nothing and the O(types) resolve happens once, below.
         let mut by_type_key: FxHashMap<InternedKey, Vec<NodeIndex>> =
             FxHashMap::with_capacity_and_hasher(type_count, Default::default());
         {
             // Arena guard: node_weight materializes on the disk backend
-            // (protocol in disk/graph.rs); scoped so the borrow ends before
-            // the replace_with below.
+            // (protocol in disk/graph.rs); scoped so the borrow ends with the
+            // scan.
             let _guard = self.graph.begin_query();
             for node_idx in self.graph.node_indices() {
                 if let Some(node) = self.graph.node_view(node_idx) {
@@ -1683,16 +1696,12 @@ impl DirGraph {
                 }
             }
         }
-        let mut new_type_indices: HashMap<String, Vec<NodeIndex>> =
+        let mut by_type_name: HashMap<String, Vec<NodeIndex>> =
             HashMap::with_capacity(by_type_key.len());
         for (type_key, indices) in by_type_key {
-            new_type_indices.insert(self.interner.resolve(type_key).to_string(), indices);
+            by_type_name.insert(self.interner.resolve(type_key).to_string(), indices);
         }
-        self.type_indices.replace_with(new_type_indices);
-        // `secondary_label_index` is *not* rebuilt from node data — it's
-        // the canonical store, populated either by the choke-point API
-        // during the session or by the load path (the disk sidecar /
-        // the in-memory .kgl section).
+        by_type_name
     }
 
     /// Rebuild `self.type_schemas` — one shared [`TypeSchema`] per node type,
@@ -1752,9 +1761,11 @@ impl DirGraph {
         self.type_schemas = Arc::new(schemas.into_iter().map(|(t, s)| (t, Arc::new(s))).collect());
     }
 
-    /// Combined [`Self::rebuild_type_indices`] + [`Self::rebuild_type_schemas`]
-    /// in a single pass over the nodes. Used after deserialization, where both
-    /// need to run.
+    /// Combined [`Self::rebuild_type_indices`] + [`Self::rebuild_type_schemas`],
+    /// used after deserialization where both need to run. Schemas come from
+    /// `node_type_metadata` (O(types)), so the usual cost is the one node pass
+    /// the type-index grouping needs; only a graph carrying no metadata pays a
+    /// second pass for the schema fallback scan.
     pub fn rebuild_type_indices_and_schemas(&mut self) {
         let mut schemas: HashMap<String, TypeSchema> = HashMap::new();
         for (node_type, props) in self.node_type_metadata.iter() {
@@ -1771,7 +1782,7 @@ impl DirGraph {
         // Fallback: if metadata is empty (loaded from file), scan nodes.
         // Arena guard: node_weight materializes on the disk backend
         // (protocol in disk/graph.rs); scoped so the borrow ends before
-        // the single-pass node_weight_mut loop below.
+        // the type-index grouping pass below takes its own.
         if schemas.is_empty() {
             let _guard = self.graph.begin_query();
             for node_idx in self.graph.node_indices() {
@@ -1795,20 +1806,7 @@ impl DirGraph {
         let arc_schemas: HashMap<String, Arc<TypeSchema>> =
             schemas.into_iter().map(|(t, s)| (t, Arc::new(s))).collect();
 
-        let type_count = arc_schemas.len().max(4);
-        let avg_per_type = self.graph.node_count() / type_count.max(1);
-        let mut new_type_indices: HashMap<String, Vec<NodeIndex>> =
-            HashMap::with_capacity(type_count);
-
-        let node_indices: Vec<NodeIndex> = self.graph.node_indices().collect();
-        for node_idx in node_indices {
-            let node = self.graph.node_weight_mut(node_idx).unwrap();
-            let type_str = node.node_type_str(&self.interner).to_string();
-            new_type_indices
-                .entry(type_str)
-                .or_insert_with(|| Vec::with_capacity(avg_per_type))
-                .push(node_idx);
-        }
+        let new_type_indices = self.group_node_indices_by_type(arc_schemas.len());
 
         self.type_indices.replace_with(new_type_indices);
         self.type_schemas = Arc::new(arc_schemas);
