@@ -1388,6 +1388,10 @@ impl<'a> SectionCursor<'a> {
 /// A caller that takes the path over — one that may later save back to it —
 /// wants [`crate::graph::io::open::open_or_create_graph`], which adds the
 /// recovery refusal, or a durable open, which replays.
+///
+/// Reading a `.kgl` with column sections spills mmap-backed column blobs to a
+/// temp directory, with the ownership rules, `KGLITE_TMPDIR` override and
+/// orphan sweep [`load_kgl_bytes`] describes.
 pub fn load_file(path: &str) -> io::Result<Arc<DirGraph>> {
     let p = std::path::Path::new(path);
     if p.is_dir() {
@@ -1462,8 +1466,16 @@ pub fn load_file(path: &str) -> io::Result<Arc<DirGraph>> {
 /// heap-allocated; smaller columns stay on the heap and the directory is left
 /// empty. The paths are registered on the returned graph, and the last
 /// `DirGraph` holding them removes the tree in `Drop` — so they live exactly
-/// as long as the graph, and a process killed before that drop leaves them
-/// behind for the OS temp sweep.
+/// as long as the graph.
+///
+/// **That drop is the only cleanup on this process's side.** A process killed
+/// by a signal, an OOM kill or a panic-abort never runs it and leaves the tree
+/// behind, and no OS sweep reclaims it on a live macOS login session. What
+/// does is the next spilling load in *any* process: it removes sibling
+/// directories under the same root whose encoded pid names no running process
+/// and whose mtime is over an hour old (unix only — see
+/// `file::spill_dirs`). Set `KGLITE_TMPDIR` to put the spills, and that sweep,
+/// somewhere other than `$TMPDIR`.
 pub fn load_kgl_bytes(data: &[u8]) -> io::Result<Arc<DirGraph>> {
     if data.len() < 4 {
         return Err(io::Error::other(
@@ -1977,17 +1989,6 @@ fn decode_portable_topology(
     Ok((dir_graph, plan))
 }
 
-fn portable_temp_dir() -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
-        "kglite_portable_{}_{:x}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    ))
-}
-
 fn load_portable_column_section(
     codec: serde_codec::CodecVersion,
     dir_graph: &mut DirGraph,
@@ -2182,6 +2183,9 @@ fn load_portable_columnar(
 
 mod columns;
 use columns::{attach_portable_column_stores, load_column_sidecars};
+
+mod spill_dirs;
+use spill_dirs::portable_temp_dir;
 
 mod save_guard;
 pub use save_guard::SaveError;

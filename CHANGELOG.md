@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`KGLITE_TMPDIR` redirects the `.kgl` load spill directory.** Loading a
+  graph with a column section of 256 KB or more mints
+  `$TMPDIR/kglite_portable_<pid>_<nanos>/` and writes the blob there to be
+  mmap'd. Set `KGLITE_TMPDIR` to a non-empty path to put those directories —
+  and the orphan sweep below — on a chosen volume instead; unset or empty
+  keeps `std::env::temp_dir()`. Useful where `$TMPDIR` is small, RAM-backed,
+  or on a different disk from the graph (on macOS it is always on the system
+  volume, wherever the graph lives).
+
+### Fixed
+
+- **Spill directories orphaned by a killed process are now reclaimed.**
+  Cleanup was drop-based only — the last `DirGraph` holding the paths removed
+  them — so any process that died by signal, OOM kill or panic-abort left its
+  spill tree behind, and nothing swept it: macOS does not clean `$TMPDIR`
+  during a live login session. A downstream measured 4,377 orphaned trees
+  totalling 8.5 GB accumulating in a single day of load-and-kill cycles. Each
+  process now sweeps once, at its first spilling load, removing sibling
+  directories that match the spill-name pattern exactly, carry a pid no
+  running process has, and are more than an hour old (the margin covers pid
+  reuse). Every predicate fails towards keeping a directory: unparseable
+  names, symlinks, our own pid, live pids, young directories and unreadable
+  metadata are all left alone, and a removal that fails is counted and
+  stepped over rather than failing the load. Unix only — Windows keeps
+  drop-based cleanup, since its liveness probe has untested pid-reuse
+  semantics.
+
 ## [0.16.14] - 2026-08-29
 
 ### Added
