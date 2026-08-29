@@ -2512,6 +2512,7 @@ pub use load_options::LoadOptions;
 use load_options::MAX_LOAD_ENV_VAR;
 
 mod spill_dirs;
+pub(crate) use spill_dirs::memory_limit_temp_dir;
 use spill_dirs::portable_temp_dir;
 
 mod save_guard;

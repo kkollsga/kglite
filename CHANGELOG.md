@@ -198,6 +198,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`set_memory_limit`'s spill directories leaked after a kill, ignored
+  `KGLITE_TMPDIR`, and could collide between graphs.** A graph under a memory
+  limit — which includes every `storage="mapped"` graph, since mapped *is* a
+  zero limit — materialises its columns into
+  `kglite_spill_<pid>_<clock>` and removes the tree when the last handle drops.
+  Three defects, all in the directory's minting:
+
+  It was swept by nobody. The spill janitor added in the previous release
+  reclaims directories whose embedded pid names no running process, but it knew
+  only the `.kgl` load's `kglite_portable_` prefix, so a process killed by a
+  signal, an OOM kill or a panic-abort left its `kglite_spill_` trees behind
+  forever — the same accumulation, in a second site, that was measured at 4,377
+  orphaned trees and 8.5 GB in a day of load-and-kill cycles. The sweep now
+  covers both prefixes with the identical predicates (parseable name, not our
+  own pid, a real directory rather than a symlink, over an hour old, and dead
+  only on `ESRCH`), so one sweep reclaims both.
+
+  It ignored `KGLITE_TMPDIR`. This path resolved `std::env::temp_dir()`
+  directly, so an operator who pointed the variable at a roomy volume still had
+  memory-limit spills land in `$TMPDIR`. Both producers now mint through one
+  root resolver.
+
+  It could collide. The name's only varying part was the wall clock, and
+  `CLOCK_REALTIME` advances in ~41.7 ns steps on arm64 macOS — so two graphs in
+  one process crossing their limit together shared a directory, and the first
+  one dropped ran `remove_dir_all` over columns the second still had mapped.
+  This is the same race fixed for the load path in 0.16.14; the fixed-width
+  sequence counter that closed it there now covers this site too.
+
 - **Concurrent `.kgl` loads in one process could fail with a bare OS error.**
   Every load mints a spill directory named `kglite_portable_<pid>_<clock>`, and
   the clock is not a unique value — `CLOCK_REALTIME` advances in ~41.7 ns steps

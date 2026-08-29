@@ -1,11 +1,19 @@
-//! Where a portable `.kgl` load spills its mmap-backed column blobs, and who
-//! reclaims the ones a killed process left behind.
+//! Where kglite spills its mmap-backed column blobs, and who reclaims the ones
+//! a killed process left behind.
 //!
-//! A load with any column blob of 256 KB or more mints
-//! `<root>/kglite_portable_<pid>_<nanos_hex><seq_hex>/` and writes the blob
-//! there so the column can be mmap'd instead of heap-allocated. A load with no
-//! such blob — every small `.kgl` — creates nothing. `<root>` is `KGLITE_TMPDIR`
-//! when it is set and non-empty, otherwise [`std::env::temp_dir`].
+//! Two producers, one root and one janitor:
+//!
+//! * a **load** with any column blob of 256 KB or more mints
+//!   `<root>/kglite_portable_<pid>_<nanos_hex><seq_hex>/` and writes the blob
+//!   there so the column can be mmap'd instead of heap-allocated. A load with
+//!   no such blob — every small `.kgl` — creates nothing;
+//! * a graph under a **`set_memory_limit`** mints
+//!   `<root>/kglite_spill_<pid>_<nanos_hex><seq_hex>/` the first time
+//!   `maybe_spill_columns` has to materialise a store to files.
+//!
+//! `<root>` is `KGLITE_TMPDIR` when it is set and non-empty, otherwise
+//! [`std::env::temp_dir`] — for both, which is why both mint through this
+//! module rather than reaching for `temp_dir()` themselves.
 //!
 //! Ownership is drop-based — the paths are registered on the loaded `DirGraph`
 //! and the last `Arc` holder removes them — which covers every clean exit and
@@ -16,17 +24,30 @@
 //! in a single day of load-and-kill cycles.
 //!
 //! So each process sweeps once, at its own first spill: [`portable_temp_dir`]
-//! removes sibling directories whose embedded pid is dead. The sweep is
-//! deliberately timid — every predicate below fails towards *keeping* a
-//! directory, because deleting one that is still mapped corrupts a running
-//! graph while keeping one merely defers a reclaim to the next process.
+//! and [`memory_limit_temp_dir`] remove sibling directories, of **either**
+//! prefix, whose embedded pid is dead. The sweep is deliberately timid — every
+//! predicate below fails towards *keeping* a directory, because deleting one
+//! that is still mapped corrupts a running graph while keeping one merely
+//! defers a reclaim to the next process.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-/// Prefix every spill directory carries, and the only names the sweep will
+/// Prefix a `.kgl` load's spill directories carry.
+const PORTABLE_PREFIX: &str = "kglite_portable_";
+
+/// Prefix a `set_memory_limit` graph's spill directories carry.
+const MEMORY_LIMIT_PREFIX: &str = "kglite_spill_";
+
+/// Every prefix this module mints, and therefore the only names the sweep will
 /// even consider.
-const SPILL_PREFIX: &str = "kglite_portable_";
+///
+/// The janitor is keyed on this list rather than on one constant because the
+/// two producers leak identically — the drop that removes the tree is the only
+/// cleanup either has, and a signal, an OOM kill or a panic-abort skips it —
+/// so a prefix that mints without appearing here is an accumulation with no
+/// gate, which is exactly what `kglite_spill_` was until this list existed.
+const SPILL_PREFIXES: [&str; 2] = [PORTABLE_PREFIX, MEMORY_LIMIT_PREFIX];
 
 /// How old a dead-pid directory must be before the sweep will remove it.
 ///
@@ -39,6 +60,10 @@ const ORPHAN_MIN_AGE: Duration = Duration::from_secs(3600);
 
 /// Root the spill directories are minted under: `KGLITE_TMPDIR` when set and
 /// non-empty, otherwise [`std::env::temp_dir`].
+///
+/// Both producers resolve their root here. `maybe_spill_columns` used to call
+/// `std::env::temp_dir()` directly, so an operator who pointed `KGLITE_TMPDIR`
+/// at a roomy volume still had memory-limit spills land in `$TMPDIR`.
 fn spill_root() -> PathBuf {
     match std::env::var_os("KGLITE_TMPDIR") {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir),
@@ -63,19 +88,19 @@ static NEXT_SPILL_DIR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU
 /// `seq` is fixed-width so that two names are equal only when both inputs are:
 /// a variable-width counter could pair a different tick with a different
 /// sequence and spell the same directory.
-fn spill_dir_name(pid: u32, nanos: u128, seq: u64) -> String {
-    format!("{SPILL_PREFIX}{pid}_{nanos:x}{seq:016x}")
+fn spill_dir_name(prefix: &str, pid: u32, nanos: u128, seq: u64) -> String {
+    format!("{prefix}{pid}_{nanos:x}{seq:016x}")
 }
 
-/// A fresh, unique spill directory for this load, after this process has taken
-/// its one turn at reclaiming dead predecessors' directories.
+/// A fresh, unique directory under `prefix`, after this process has taken its
+/// one turn at reclaiming dead predecessors' directories.
 ///
-/// The path is a *name*, not a directory: nothing is created here, and a load
-/// whose columns all stay on the heap creates nothing at all (the spill writer
-/// mints the tree on its first blob — see `ColumnStore::load_typed_vec`).
-pub(super) fn portable_temp_dir() -> PathBuf {
+/// The counter is shared across prefixes, which costs nothing and means the
+/// two producers cannot collide with each other either.
+fn mint_spill_dir(prefix: &str) -> PathBuf {
     sweep_once();
     spill_root().join(spill_dir_name(
+        prefix,
         std::process::id(),
         SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -85,15 +110,45 @@ pub(super) fn portable_temp_dir() -> PathBuf {
     ))
 }
 
+/// A fresh, unique spill directory for this load, after this process has taken
+/// its one turn at reclaiming dead predecessors' directories.
+///
+/// The path is a *name*, not a directory: nothing is created here, and a load
+/// whose columns all stay on the heap creates nothing at all (the spill writer
+/// mints the tree on its first blob — see `ColumnStore::load_typed_vec`).
+pub(super) fn portable_temp_dir() -> PathBuf {
+    mint_spill_dir(PORTABLE_PREFIX)
+}
+
+/// A fresh, unique spill directory for a `set_memory_limit` graph — the
+/// counterpart of [`portable_temp_dir`] for `DirGraph::maybe_spill_columns`,
+/// which mints one lazily the first time it has to materialise a store.
+///
+/// Like the load's, this is a *name*: the caller creates the tree, registers it
+/// on the graph, and the last `Arc` holder removes it.
+///
+/// **The sequence counter is load-bearing here for the same reason it is
+/// there.** This name's only varying part was the wall clock, and
+/// `CLOCK_REALTIME` advances in ~41.7 ns steps on arm64 macOS, so two graphs in
+/// one process crossing their memory limit together read the same nanosecond,
+/// share a directory, and the first one dropped runs `remove_dir_all` over
+/// columns the second still has mapped.
+pub(crate) fn memory_limit_temp_dir() -> PathBuf {
+    mint_spill_dir(MEMORY_LIMIT_PREFIX)
+}
+
 /// The pid encoded in a spill-directory name, or `None` for any name that is
-/// not exactly `kglite_portable_<decimal pid>_<lowercase hex suffix>`, where the
-/// suffix is the tick and sequence [`spill_dir_name`] joins.
+/// not exactly `<one of [`SPILL_PREFIXES`]><decimal pid>_<lowercase hex
+/// suffix>`, where the suffix is the tick and sequence [`spill_dir_name`]
+/// joins.
 ///
 /// Strict on purpose: this predicate is the entire guard between the sweep and
 /// whatever else shares the temp root, so anything it cannot fully account for
 /// is somebody else's and is left alone.
 fn parse_spill_pid(name: &str) -> Option<u32> {
-    let rest = name.strip_prefix(SPILL_PREFIX)?;
+    let rest = SPILL_PREFIXES
+        .iter()
+        .find_map(|prefix| name.strip_prefix(prefix))?;
     let (pid, suffix) = rest.split_once('_')?;
     if pid.is_empty() || !pid.bytes().all(|b| b.is_ascii_digit()) {
         return None;
@@ -265,34 +320,55 @@ mod tests {
     fn two_spills_reading_one_clock_tick_get_different_directories() {
         let pid = std::process::id();
         let tick = 0x1234_5678_9abc_u128;
-        let first = spill_dir_name(pid, tick, 0);
-        let second = spill_dir_name(pid, tick, 1);
+        // Both producers, because both mint from the clock and both hand the
+        // directory to a drop that runs `remove_dir_all` over it.
+        for prefix in SPILL_PREFIXES {
+            let first = spill_dir_name(prefix, pid, tick, 0);
+            let second = spill_dir_name(prefix, pid, tick, 1);
+            assert_ne!(
+                first, second,
+                "two spills in one clock tick shared a directory ({prefix})"
+            );
+            // Both must stay sweepable: the janitor only reclaims names it can
+            // fully parse (see `parse_spill_pid`).
+            assert_eq!(parse_spill_pid(&first), Some(pid));
+            assert_eq!(parse_spill_pid(&second), Some(pid));
+        }
+        // And the two producers cannot collide with each other.
         assert_ne!(
-            first, second,
-            "two loads in one clock tick shared a spill directory"
+            spill_dir_name(PORTABLE_PREFIX, pid, tick, 0),
+            spill_dir_name(MEMORY_LIMIT_PREFIX, pid, tick, 0)
         );
-        // Both must stay sweepable: the janitor only reclaims names it can
-        // fully parse (see `parse_spill_pid`).
-        assert_eq!(parse_spill_pid(&first), Some(pid));
-        assert_eq!(parse_spill_pid(&second), Some(pid));
     }
 
     #[test]
     fn parses_only_the_exact_spill_name() {
         assert_eq!(parse_spill_pid("kglite_portable_1234_1a2b3c"), Some(1234));
+        assert_eq!(parse_spill_pid("kglite_spill_1234_1a2b3c"), Some(1234));
+        // The same malformations under both prefixes: the memory-limit half
+        // inherits the whole predicate, not a looser cousin of it.
+        for prefix in SPILL_PREFIXES {
+            for suffix in [
+                "1234",
+                "1234_",
+                "_1a2b",
+                "1234_1a2b_3c",
+                "12x4_1a2b",
+                "+12_1a2b",
+                "1234_zzz",
+                "1234_+1a",
+                "0_1a2b",
+                "99999999999999999999_1a2b",
+                "notapid_x",
+            ] {
+                let bad = format!("{prefix}{suffix}");
+                assert_eq!(parse_spill_pid(&bad), None, "{bad} parsed as a spill dir");
+            }
+        }
         for bad in [
-            "kglite_portable_1234",
-            "kglite_portable_1234_",
-            "kglite_portable__1a2b",
-            "kglite_portable_1234_1a2b_3c",
-            "kglite_portable_12x4_1a2b",
-            "kglite_portable_+12_1a2b",
-            "kglite_portable_1234_zzz",
-            "kglite_portable_1234_+1a",
-            "kglite_portable_0_1a2b",
-            "kglite_portable_99999999999999999999_1a2b",
-            "kglite_portable_notapid_x",
             "kglite-portable-1234-1a2b",
+            "kglite-spill-1234-1a2b",
+            "kglite_spilled_1234_1a2b",
             "someone-elses-data",
             ".DS_Store",
         ] {
@@ -300,46 +376,76 @@ mod tests {
         }
     }
 
+    /// The whole predicate, run once per prefix so the memory-limit half is
+    /// held to the identical contract rather than a looser one: only a
+    /// directory that is old, dead-pid, well-named and ours-by-prefix goes.
     #[test]
     fn sweeps_old_dead_pid_dirs_only() {
+        for prefix in SPILL_PREFIXES {
+            let root = tempfile::tempdir().unwrap();
+            let dead = dead_pid();
+            let old_orphan = mint(
+                root.path(),
+                &format!("{prefix}{dead}_aa"),
+                Duration::from_secs(7200),
+            );
+            let young_orphan = mint(
+                root.path(),
+                &format!("{prefix}{dead}_bb"),
+                Duration::from_secs(60),
+            );
+            let live = mint(
+                root.path(),
+                &format!("{prefix}{}_cc", std::process::id()),
+                Duration::from_secs(7200),
+            );
+            let junk = mint(root.path(), "not-a-spill-dir", Duration::from_secs(7200));
+            let malformed = mint(
+                root.path(),
+                &format!("{prefix}{dead}"),
+                Duration::from_secs(7200),
+            );
+
+            let outcome = sweep_orphans(root.path(), std::process::id(), SystemTime::now());
+
+            assert_eq!(
+                outcome,
+                SweepOutcome {
+                    removed: 1,
+                    failed: 0
+                },
+                "{prefix}"
+            );
+            assert!(!old_orphan.exists(), "{prefix}");
+            assert!(young_orphan.exists(), "{prefix}");
+            assert!(live.exists(), "{prefix}");
+            assert!(junk.exists(), "{prefix}");
+            assert!(malformed.exists(), "{prefix}");
+        }
+    }
+
+    /// One sweep reclaims both producers' leftovers. The regression this pins:
+    /// `kglite_spill_` accumulated unswept from the day `set_memory_limit`
+    /// shipped, because the janitor knew only the load's prefix.
+    #[test]
+    fn one_sweep_reclaims_both_producers_orphans() {
         let root = tempfile::tempdir().unwrap();
         let dead = dead_pid();
-        let old_orphan = mint(
-            root.path(),
-            &format!("{SPILL_PREFIX}{dead}_aa"),
-            Duration::from_secs(7200),
-        );
-        let young_orphan = mint(
-            root.path(),
-            &format!("{SPILL_PREFIX}{dead}_bb"),
-            Duration::from_secs(60),
-        );
-        let live = mint(
-            root.path(),
-            &format!("{SPILL_PREFIX}{}_cc", std::process::id()),
-            Duration::from_secs(7200),
-        );
-        let junk = mint(root.path(), "not-a-spill-dir", Duration::from_secs(7200));
-        let malformed = mint(
-            root.path(),
-            &format!("{SPILL_PREFIX}{dead}"),
-            Duration::from_secs(7200),
-        );
+        let old = Duration::from_secs(7200);
+        let from_a_load = mint(root.path(), &format!("{PORTABLE_PREFIX}{dead}_aa"), old);
+        let from_a_limit = mint(root.path(), &format!("{MEMORY_LIMIT_PREFIX}{dead}_bb"), old);
 
         let outcome = sweep_orphans(root.path(), std::process::id(), SystemTime::now());
 
         assert_eq!(
             outcome,
             SweepOutcome {
-                removed: 1,
+                removed: 2,
                 failed: 0
             }
         );
-        assert!(!old_orphan.exists());
-        assert!(young_orphan.exists());
-        assert!(live.exists());
-        assert!(junk.exists());
-        assert!(malformed.exists());
+        assert!(!from_a_load.exists());
+        assert!(!from_a_limit.exists());
     }
 
     #[test]
@@ -347,7 +453,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let target = tempfile::tempdir().unwrap();
         fs::write(target.path().join("precious.txt"), b"keep me").unwrap();
-        let link = root.path().join(format!("{SPILL_PREFIX}{}_aa", dead_pid()));
+        let link = root
+            .path()
+            .join(format!("{MEMORY_LIMIT_PREFIX}{}_aa", dead_pid()));
         std::os::unix::fs::symlink(target.path(), &link).unwrap();
 
         let outcome = sweep_orphans(root.path(), std::process::id(), SystemTime::now());
@@ -362,8 +470,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let dead = dead_pid();
         let old = Duration::from_secs(7200);
-        let blocked = mint(root.path(), &format!("{SPILL_PREFIX}{dead}_aa"), old);
-        let removable = mint(root.path(), &format!("{SPILL_PREFIX}{dead}_bb"), old);
+        // One of each prefix, so a failure on the load's leftovers cannot stop
+        // the memory-limit ones being reclaimed.
+        let blocked = mint(root.path(), &format!("{PORTABLE_PREFIX}{dead}_aa"), old);
+        let removable = mint(root.path(), &format!("{MEMORY_LIMIT_PREFIX}{dead}_bb"), old);
         // A read-only parent makes the unlink inside it fail; the entry itself
         // stays listable and its own mtime unchanged.
         let mut perms = fs::metadata(&blocked).unwrap().permissions();
@@ -388,16 +498,21 @@ mod tests {
     #[test]
     fn our_own_pid_is_never_swept_however_old_the_dir_looks() {
         let root = tempfile::tempdir().unwrap();
-        let ours = mint(
-            root.path(),
-            &format!("{SPILL_PREFIX}{}_aa", std::process::id()),
-            Duration::from_secs(86_400),
-        );
+        let ours: Vec<PathBuf> = SPILL_PREFIXES
+            .iter()
+            .map(|prefix| {
+                mint(
+                    root.path(),
+                    &format!("{prefix}{}_aa", std::process::id()),
+                    Duration::from_secs(86_400),
+                )
+            })
+            .collect();
 
         let outcome = sweep_orphans(root.path(), std::process::id(), SystemTime::now());
 
         assert_eq!(outcome, SweepOutcome::default());
-        assert!(ours.exists());
+        assert!(ours.iter().all(|dir| dir.exists()));
     }
 
     #[test]
@@ -408,7 +523,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         std::env::set_var("KGLITE_TMPDIR", root.path());
         assert_eq!(spill_root(), root.path());
+        // Both producers, because both used to be able to disagree: the
+        // memory-limit path resolved `std::env::temp_dir()` itself and ignored
+        // the override entirely.
         assert!(portable_temp_dir().starts_with(root.path()));
+        assert!(memory_limit_temp_dir().starts_with(root.path()));
 
         std::env::set_var("KGLITE_TMPDIR", "");
         assert_eq!(spill_root(), std::env::temp_dir());

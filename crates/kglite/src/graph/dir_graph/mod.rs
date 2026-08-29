@@ -501,7 +501,9 @@ pub struct DirGraph {
     /// will spill columns to temp files when total heap_bytes exceeds n.
     #[serde(skip)]
     pub memory_limit: Option<usize>,
-    /// Directory for spill files. Defaults to std::env::temp_dir()/kglite_spill_<pid>.
+    /// Directory for spill files. Minted on first use by
+    /// `io::file::memory_limit_temp_dir` (see it for the root, the naming and
+    /// the janitor that reclaims it).
     #[serde(skip)]
     pub spill_dir: Option<std::path::PathBuf>,
     /// Temp directories created during load or spill that should be cleaned up on drop.
@@ -1914,16 +1916,15 @@ impl DirGraph {
             return;
         }
 
-        let spill_dir = self.spill_dir.clone().unwrap_or_else(|| {
-            std::env::temp_dir().join(format!(
-                "kglite_spill_{}_{:x}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos()
-            ))
-        });
+        // Minted by `io::file::spill_dirs`, which owns both spill prefixes:
+        // that is what puts this directory under `KGLITE_TMPDIR` when one is
+        // set, gives it the sequence counter two graphs crossing their limit in
+        // the same clock tick need, and — the reason it matters most — makes it
+        // a name the janitor recognises and reclaims after a kill.
+        let spill_dir = self
+            .spill_dir
+            .clone()
+            .unwrap_or_else(crate::graph::io::file::memory_limit_temp_dir);
         if self.spill_dir.is_none() {
             self.spill_dir = Some(spill_dir.clone());
         }
