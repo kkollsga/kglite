@@ -479,6 +479,26 @@ pub mod api {
         /// rather than a file calls this and then `write_kgl_to`; `save_graph`
         /// runs it internally.
         pub use crate::graph::io::file::prepare_kgl_write;
+        /// What a `.kgl` load will cost, from its metadata head alone — no
+        /// section is decompressed, so the answer costs one short read.
+        ///
+        /// [`LoadMemoryEstimate`] reports named terms rather than one number
+        /// because they have different accuracies and different remedies: the
+        /// index-rebuild term is *modelled* from the file's own declarations
+        /// and row counts, while the section and transient terms are calibrated
+        /// heuristics with a published error band. The number is **physical
+        /// footprint** (what an OS memory killer judges), not RSS, and covers
+        /// the load-settled plateau — not the further ~30% a first point lookup
+        /// adds by building `id_indices`. The type's documentation states all
+        /// of this; read it before acting on a number from here.
+        ///
+        /// The same estimate backs
+        /// [`LoadOptions::max_load_bytes`](crate::graph::io::file::LoadOptions::max_load_bytes),
+        /// so a load that would be refused reports the number this function
+        /// returns.
+        pub use crate::graph::io::file::{
+            estimate_load_memory, estimate_load_memory_bytes, LoadMemoryEstimate,
+        };
         /// Embedding-vector file export / import.
         pub use crate::graph::io::file::{
             export_embeddings_to_file, import_embeddings_from_file, EmbeddingExportFilter,

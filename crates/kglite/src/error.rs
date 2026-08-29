@@ -33,7 +33,8 @@
 //! Everything else subclasses `KgError` directly: `SchemaError`,
 //! `ValidationError`, `ExprError`, `TransactionConflictError`,
 //! `NodeNotFoundError`, `ConnectionNotFoundError`, `PropertyNotFoundError`,
-//! `FileError`, `FileFormatError`, `FileIoError`, `ArgumentError`,
+//! `FileError`, `FileFormatError`, `FileIoError`, `LoadMemoryLimitError`,
+//! `ArgumentError`,
 //! `MissingArgumentError`, `InternerCollisionError`, `InternalError`.
 //!
 //! Internal identity: `InternerCollisionError` reports a rejected persisted
@@ -91,6 +92,16 @@ pub enum KgErrorCode {
     FileFormat,
     FileIo,
 
+    // A `.kgl` load refused by the caller's own memory ceiling
+    // (`LoadOptions::max_load_bytes` / `KGLITE_MAX_LOAD_MB`). Split from
+    // `FileFormat` because the two call for opposite reactions: a format error
+    // says "this file is broken, rebuild it", while this says "this file is
+    // fine and this process cannot afford it" — raise the ceiling, defer the
+    // index rebuild, or load it somewhere with more memory. A binding that
+    // reported it as corruption would send an operator to rebuild a graph that
+    // is not broken.
+    LoadMemoryLimit,
+
     InvalidArgument,
     MissingArgument,
 
@@ -121,6 +132,7 @@ impl KgErrorCode {
             KgErrorCode::FileNotFound => "FileNotFound",
             KgErrorCode::FileFormat => "FileFormat",
             KgErrorCode::FileIo => "FileIo",
+            KgErrorCode::LoadMemoryLimit => "LoadMemoryLimit",
             KgErrorCode::InvalidArgument => "InvalidArgument",
             KgErrorCode::MissingArgument => "MissingArgument",
             KgErrorCode::Internal => "Internal",
@@ -140,6 +152,7 @@ impl KgErrorCode {
     /// - `TransactionConflict` → 409 Conflict
     /// - `Schema`, `Validation`, `Expr`, `ConstraintViolation`,
     ///   `ConstraintCreationFailed` → 422 Unprocessable Entity
+    /// - `LoadMemoryLimit` → 507 Insufficient Storage
     /// - `Cancelled` → 499 Client Closed Request
     /// - `CypherExecution`, `FileFormat`, `FileIo`, `Internal` →
     ///   500 Internal Server Error
@@ -167,6 +180,12 @@ impl KgErrorCode {
             // 499 Client Closed Request (nginx convention) — the caller
             // interrupted the query before it finished.
             KgErrorCode::Cancelled => 499,
+
+            // 507 Insufficient Storage — the request was well-formed and the
+            // stored data is fine; this server cannot hold what serving it
+            // would take. Retrying it unchanged fails the same way, so it is
+            // deliberately not a 4xx the client is invited to repeat.
+            KgErrorCode::LoadMemoryLimit => 507,
 
             KgErrorCode::Schema
             | KgErrorCode::Validation
@@ -222,6 +241,13 @@ impl KgErrorCode {
             | KgErrorCode::PropertyNotFound => "Neo.ClientError.Statement.EntityNotFound",
             KgErrorCode::InvalidArgument => "Neo.ClientError.Statement.ArgumentError",
             KgErrorCode::MissingArgument => "Neo.ClientError.Statement.ParameterMissing",
+            // Neo4j's own published code for "there is not enough memory to
+            // perform the current task". Its `TransientError` class invites a
+            // driver to retry, which is inert here: a `.kgl` load is not
+            // reachable through a Bolt managed transaction, and the wire
+            // mapping exists so a Neo4j-compatible binding reports the
+            // condition Neo4j reports rather than an unknown-error catch-all.
+            KgErrorCode::LoadMemoryLimit => "Neo.TransientError.General.OutOfMemoryError",
             KgErrorCode::FileNotFound
             | KgErrorCode::FileFormat
             | KgErrorCode::FileIo
@@ -371,6 +397,15 @@ pub enum KgError {
     /// downstream inspection.
     FileIo(std::io::Error),
 
+    /// A `.kgl` load was refused *before decoding* because its estimated peak
+    /// memory exceeded the ceiling the caller set
+    /// (`LoadOptions::max_load_bytes` / `KGLITE_MAX_LOAD_MB`).
+    ///
+    /// The file is valid and nothing was read past its metadata head. The
+    /// message carries the estimate, the ceiling, the terms it is made of, and
+    /// the ways out — see `graph::io::file`'s `load_memory_refusal`.
+    LoadMemoryLimit(String),
+
     /// A user-supplied argument violated a precondition with full
     /// structured context — argument name, what was expected, what
     /// was found. Used when the call site can naturally populate all
@@ -457,6 +492,7 @@ impl KgError {
             KgError::FileNotFound(_) => KgErrorCode::FileNotFound,
             KgError::FileFormat { .. } => KgErrorCode::FileFormat,
             KgError::FileIo(_) => KgErrorCode::FileIo,
+            KgError::LoadMemoryLimit(_) => KgErrorCode::LoadMemoryLimit,
             KgError::InvalidArgument { .. } | KgError::Argument(_) => KgErrorCode::InvalidArgument,
             KgError::MissingArgument(_) => KgErrorCode::MissingArgument,
             KgError::InternerCollision(_) => KgErrorCode::Internal,
@@ -555,6 +591,9 @@ impl fmt::Display for KgError {
                 write!(f, "File format error ({}): {}", path.display(), message)
             }
             KgError::FileIo(e) => write!(f, "File I/O error: {}", e),
+            KgError::LoadMemoryLimit(message) => {
+                write!(f, "Load refused by the memory ceiling: {message}")
+            }
             KgError::InvalidArgument {
                 argument,
                 expected,
@@ -608,12 +647,13 @@ impl From<ExprError> for KgError {
 impl From<std::io::Error> for KgError {
     fn from(e: std::io::Error) -> Self {
         match e.kind() {
-            std::io::ErrorKind::NotFound => {
-                // The path isn't recoverable from io::Error, but the
-                // caller usually has it; the From impl preserves the
-                // I/O error for downstream inspection via FileIo.
-                KgError::FileIo(e)
-            }
+            // The load-memory ceiling's refusal, which is a policy decision
+            // about this process rather than an I/O fault. Reporting it as
+            // `FileIo` would tell an operator their disk misbehaved.
+            std::io::ErrorKind::OutOfMemory => KgError::LoadMemoryLimit(e.to_string()),
+            // Every other kind — including `NotFound`, whose path is not
+            // recoverable from an `io::Error` — keeps the original error for
+            // downstream inspection.
             _ => KgError::FileIo(e),
         }
     }
@@ -735,6 +775,23 @@ mod tests {
         assert_eq!(kg.code(), KgErrorCode::FileIo);
     }
 
+    /// The load-memory ceiling's refusal must not arrive as an I/O fault: the
+    /// disk is fine, and the operator's fix is a bigger ceiling, not a bigger
+    /// disk.
+    #[test]
+    fn from_io_error_classifies_out_of_memory_as_the_load_ceiling() {
+        let io = std::io::Error::new(std::io::ErrorKind::OutOfMemory, "estimated 900 MB");
+        let kg: KgError = io.into();
+        assert_eq!(kg.code(), KgErrorCode::LoadMemoryLimit);
+        assert!(format!("{kg}").contains("estimated 900 MB"));
+        assert_eq!(KgErrorCode::LoadMemoryLimit.as_str(), "LoadMemoryLimit");
+        assert_eq!(KgErrorCode::LoadMemoryLimit.http_status_code(), 507);
+        assert_eq!(
+            KgErrorCode::LoadMemoryLimit.neo4j_status_code(),
+            "Neo.TransientError.General.OutOfMemoryError"
+        );
+    }
+
     #[test]
     fn http_status_code_categorises_correctly() {
         assert_eq!(KgErrorCode::CypherSyntax.http_status_code(), 400);
@@ -784,6 +841,7 @@ mod tests {
             KgErrorCode::FileNotFound,
             KgErrorCode::FileFormat,
             KgErrorCode::FileIo,
+            KgErrorCode::LoadMemoryLimit,
             KgErrorCode::InvalidArgument,
             KgErrorCode::MissingArgument,
             KgErrorCode::Internal,

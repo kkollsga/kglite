@@ -17,6 +17,20 @@
 //! settled footprint (−42.8%) and its load from 351 ms to 157 ms (§9 of the
 //! same results). The price is paid elsewhere and is documented on the field.
 //!
+//! **`max_load_bytes` is neither** — it is a refusal, not a size. It compares
+//! the load's estimated peak footprint against a ceiling *before* the first
+//! section is decompressed, and fails the load rather than letting a process
+//! that cannot afford the graph find that out from the OOM killer. See
+//! [`estimate_load_memory`](super::estimate_load_memory) for what the estimate
+//! models and how accurate it is.
+//!
+//! The environment variable `KGLITE_MAX_LOAD_MB` sets the *default* for
+//! `max_load_bytes`, in **megabytes** — the unit every other numeric knob in
+//! this engine takes (`KGLITE_FLUSH_MB`). The field is in bytes because it is a
+//! byte quantity in code; the variable is in MB because that is what an
+//! operator types. An explicit [`LoadOptions::with_max_load_bytes`] outranks
+//! it.
+//!
 //! The environment variable `KGLITE_DEFER_INDEX_REBUILD` sets the *default* for
 //! `defer_index_rebuild`, so an operator can turn the deferral on for a process
 //! that never passes options (the CLI, an existing binding). `1`/`true`/`yes`/
@@ -29,6 +43,9 @@ use crate::graph::storage::mode::StorageMode;
 
 /// Environment switch; see the module doc for accepted values.
 pub(crate) const DEFER_ENV_VAR: &str = "KGLITE_DEFER_INDEX_REBUILD";
+
+/// Environment ceiling, in **megabytes**; see the module doc.
+pub(crate) const MAX_LOAD_ENV_VAR: &str = "KGLITE_MAX_LOAD_MB";
 
 /// Options for [`load_file_with`](super::load_file_with) /
 /// [`load_kgl_bytes_with`](super::load_kgl_bytes_with).
@@ -98,6 +115,30 @@ pub struct LoadOptions {
     /// indexes on disk and never rebuilds them at load, so there is nothing
     /// there to defer.
     pub defer_index_rebuild: bool,
+    /// Refuse the load if it is estimated to peak above this many **bytes** of
+    /// physical footprint. `None` (the default, unless `KGLITE_MAX_LOAD_MB`
+    /// says otherwise) is no ceiling — today's behaviour.
+    ///
+    /// Checked from the metadata head, *before* a single section is
+    /// decompressed, so a refused load costs one short read. The refusal is
+    /// `io::ErrorKind::OutOfMemory` — a statement about this process's budget,
+    /// not about the file, which is why it is not the corrupt-file kind — and
+    /// carries the estimate, the ceiling, the term breakdown, and the two ways
+    /// out (raise the ceiling, or defer the index rebuild).
+    ///
+    /// **What it compares is an estimate, not a measurement**, and the estimate
+    /// is deliberately conservative: it read 0.56×–1.30× of measured settled
+    /// footprint across the calibration corpora and over-predicted the load peak
+    /// by 1.35×–1.46× on the two fixtures with peak measurements. So a ceiling
+    /// set close to a graph's real cost can refuse a load that would have fit.
+    /// Set it where a *failure* is what you want — a serving process that must
+    /// not be OOM-killed by a file it did not choose — not as a tight budget.
+    /// [`estimate_load_memory`](super::estimate_load_memory) reports the same
+    /// number this compares, so a caller can decide for itself instead.
+    ///
+    /// Portable `.kgl` loads only. A disk-graph directory streams its columns
+    /// off disk and has no single decode to refuse.
+    pub max_load_bytes: Option<u64>,
 }
 
 impl LoadOptions {
@@ -108,6 +149,7 @@ impl LoadOptions {
         LoadOptions {
             storage: None,
             defer_index_rebuild: defer_index_rebuild_default(),
+            max_load_bytes: max_load_bytes_default(),
         }
     }
 
@@ -123,6 +165,14 @@ impl LoadOptions {
         self.defer_index_rebuild = defer;
         self
     }
+
+    /// Set the load-memory ceiling in **bytes**, outranking `KGLITE_MAX_LOAD_MB`
+    /// in both directions — including [`None`], which lifts a ceiling the
+    /// environment set.
+    pub fn with_max_load_bytes(mut self, max_bytes: Option<u64>) -> Self {
+        self.max_load_bytes = max_bytes;
+        self
+    }
 }
 
 impl Default for LoadOptions {
@@ -136,6 +186,44 @@ fn defer_index_rebuild_default() -> bool {
     match std::env::var(DEFER_ENV_VAR) {
         Ok(raw) => parse_flag(&raw),
         Err(_) => false,
+    }
+}
+
+/// The environment's answer for [`LoadOptions::max_load_bytes`].
+fn max_load_bytes_default() -> Option<u64> {
+    let raw = std::env::var(MAX_LOAD_ENV_VAR).ok()?;
+    parse_max_load_mb(&raw)
+}
+
+/// `KGLITE_MAX_LOAD_MB` → a byte ceiling, warning loudly on anything it cannot
+/// read as one.
+///
+/// **This variable warns where the rest of the engine stays silent, and that is
+/// deliberate.** Every other numeric env var here treats an unreadable value as
+/// absent without a word, which is harmless when the value is a tuning knob.
+/// This one is a safety ceiling: silently dropping `KGLITE_MAX_LOAD_MB=1O24`
+/// (letter O) disables the exact protection the operator was asking for, and
+/// the first evidence would be the OOM kill the ceiling existed to prevent. So
+/// an unparseable value warns on stderr, naming the value, and is then treated
+/// as unset — refusing every load would be worse, since the variable is
+/// process-wide and may not have been set by whoever runs the load.
+///
+/// `0` is accepted and means "refuse every load", which is a legitimate thing
+/// to ask of a process that must never decode a graph it did not open itself.
+fn parse_max_load_mb(raw: &str) -> Option<u64> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match trimmed.parse::<u64>() {
+        Ok(mb) => Some(mb.saturating_mul(1024 * 1024)),
+        Err(_) => {
+            eprintln!(
+                "kglite: ignoring {MAX_LOAD_ENV_VAR}={trimmed:?} — expected a whole number of \
+                 megabytes; loading with NO memory ceiling"
+            );
+            None
+        }
     }
 }
 
@@ -164,9 +252,18 @@ mod tests {
 
         let options = LoadOptions::new()
             .with_storage(StorageMode::Mapped)
-            .with_defer_index_rebuild(true);
+            .with_defer_index_rebuild(true)
+            .with_max_load_bytes(Some(64 * 1024 * 1024));
         assert_eq!(options.storage, Some(StorageMode::Mapped));
         assert!(options.defer_index_rebuild);
+        assert_eq!(options.max_load_bytes, Some(64 * 1024 * 1024));
+        // `None` must be able to *lift* a ceiling, not just leave one alone —
+        // otherwise a process-wide `KGLITE_MAX_LOAD_MB` would be unopposable
+        // from code.
+        assert_eq!(
+            options.clone().with_max_load_bytes(None).max_load_bytes,
+            None
+        );
 
         // Explicit `false` outranks whatever the environment says, which is
         // what makes the option a decision rather than a suggestion.
@@ -182,5 +279,23 @@ mod tests {
         // The warning goes to stderr; the value that matters is the refusal to
         // guess. `maybe` must not enable a memory mode nobody asked for.
         assert!(!parse_flag("maybe"));
+    }
+
+    #[test]
+    fn max_load_mb_parses_megabytes_and_is_loud_when_it_cannot() {
+        assert_eq!(parse_max_load_mb("512"), Some(512 * 1024 * 1024));
+        assert_eq!(parse_max_load_mb("  512  "), Some(512 * 1024 * 1024));
+        // A deliberate "never load anything" is a value, not an error.
+        assert_eq!(parse_max_load_mb("0"), Some(0));
+        assert_eq!(parse_max_load_mb(""), None);
+        // Every shape that has silently disabled a ceiling elsewhere: a unit
+        // suffix, a letter for a digit, a float, a negative.
+        for bad in ["1024MB", "1O24", "1.5", "-1", "lots"] {
+            assert_eq!(parse_max_load_mb(bad), None, "{bad} parsed as a ceiling");
+        }
+        // No overflow panic on a value large enough to wrap the MB→byte
+        // multiply; it saturates to "effectively no ceiling", which is what an
+        // operator asking for 18 exabytes meant.
+        assert_eq!(parse_max_load_mb(&u64::MAX.to_string()), Some(u64::MAX));
     }
 }

@@ -64,6 +64,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `defer_index_rebuild=` outranks it in both directions, and an unrecognised
   value warns on stderr and loads eagerly rather than guessing.
 
+- **`estimate_load_memory` + `max_load_mb`: know what a `.kgl` will cost before
+  paying it, and refuse to pay above a ceiling.**
+  `kglite.estimate_load_memory(path)` returns a dict of named terms
+  (`kglite::api::io::estimate_load_memory` / `estimate_load_memory_bytes` and
+  `LoadMemoryEstimate` on the Rust surface), read from the metadata block at the
+  head of the file — 0.01%–0.35% of it on the measured corpora, with **no
+  section decompressed**.
+
+  It reports terms rather than one number because they differ in accuracy and in
+  remedy. `index_rebuild_bytes` is **modelled** from the file's own index
+  declarations and row counts, and is exactly the term `defer_index_rebuild`
+  removes; `section_heap_bytes` and `transient_peak_bytes` are **calibrated
+  heuristics** with a published error band. The numbers estimate *physical
+  footprint* — the metric an OS memory killer judges; RSS overstates it by up to
+  3.6× here and swings 2.3× with the allocator — and cover the load-settled
+  plateau, not the further ~30% a first point lookup adds by building per-type
+  id indexes. Calibrated against the 0.16.14 load-memory measurements: the
+  section term read 0.56×–1.30× of measured settled footprint across three
+  corpora and the modelled index term landed inside the 64–79 MB band measured
+  for a 500k-row four-index fixture.
+
+  **The ceiling.** `kglite.load(path, max_load_mb=N)` — and the same keyword on
+  `kglite.from_bytes` and `kglite.open_session`, `LoadOptions::max_load_bytes`
+  in Rust (bytes), and `KGLITE_MAX_LOAD_MB` as a process-wide default an
+  explicit argument outranks — refuses the load when that estimate's peak is
+  over the ceiling. The check runs on the metadata side of the decode, so a
+  refused load costs one short read; it charges only for what the load will
+  actually spend, so turning on `defer_index_rebuild` genuinely buys the
+  headroom the refusal recommends. Note the **unit**: the keyword and the
+  environment variable are megabytes, the Rust field is bytes.
+
+  **The refusal is its own error class, not a corrupt-file one.**
+  `kglite.LoadMemoryLimitError` (code `LoadMemoryLimit`, HTTP 507,
+  `Neo.TransientError.General.OutOfMemoryError`, C ABI
+  `KGLITE_STATUS_CODE_LOAD_MEMORY_LIMIT = 21`, `io::ErrorKind::OutOfMemory` in
+  Rust, and `category: "load_memory_limit"` on an MCP recipe-query failure).
+  The file is valid and nothing was decompressed — reporting it as
+  `FileFormatError` would send an operator to rebuild a graph that is not
+  broken. The message names the estimate, the ceiling, the terms and the two
+  ways out. An unparseable `KGLITE_MAX_LOAD_MB` warns loudly on stderr and is
+  treated as unset: silently dropping a safety ceiling is the failure the
+  ceiling exists to prevent.
+
+  The estimate is conservative by construction and can refuse a load that would
+  have fitted; set the ceiling where a *failure* is what you want, not as a
+  tight budget.
+
 - **`row_limit`: a true result-row cap, with a mandatory truncation signal.**
   Available per query on `KnowledgeGraph.cypher`, `Session.cypher` /
   `Session.execute`, `FrozenGraph.cypher` and `Transaction.cypher`, with a

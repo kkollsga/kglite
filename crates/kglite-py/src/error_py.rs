@@ -37,6 +37,7 @@
 //!     ├── kglite.FileError                     (FileNotFound)
 //!     ├── kglite.FileFormatError
 //!     ├── kglite.FileIoError
+//!     ├── kglite.LoadMemoryLimitError
 //!     ├── kglite.ArgumentError
 //!     ├── kglite.MissingArgumentError
 //!     ├── kglite.InternerCollisionError
@@ -212,6 +213,13 @@ pyo3::create_exception!(
     "Generic I/O failure (permission denied, mid-read EOF, mmap failure)."
 );
 
+pyo3::create_exception!(
+    kglite,
+    LoadMemoryLimitError,
+    KgError,
+    "A .kgl load was refused before decoding: its estimated memory exceeded max_load_mb / KGLITE_MAX_LOAD_MB. The file is valid."
+);
+
 // ── Argument validation ──────────────────────────────────────────────
 
 pyo3::create_exception!(
@@ -308,6 +316,7 @@ fn kg_to_pyerr_class(e: RustKgError, message: String) -> PyErr {
         RustKgError::FileNotFound(_) => FileError::new_err(message),
         RustKgError::FileFormat { .. } => FileFormatError::new_err(message),
         RustKgError::FileIo(_) => FileIoError::new_err(message),
+        RustKgError::LoadMemoryLimit(_) => LoadMemoryLimitError::new_err(message),
         RustKgError::InvalidArgument { .. } | RustKgError::Argument(_) => {
             ArgumentError::new_err(message)
         }
@@ -413,6 +422,10 @@ pub(crate) fn register(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     m.add("FileError", py.get_type::<FileError>())?;
     m.add("FileFormatError", py.get_type::<FileFormatError>())?;
     m.add("FileIoError", py.get_type::<FileIoError>())?;
+    m.add(
+        "LoadMemoryLimitError",
+        py.get_type::<LoadMemoryLimitError>(),
+    )?;
 
     // Argument validation
     m.add("ArgumentError", py.get_type::<ArgumentError>())?;
@@ -483,6 +496,8 @@ fn register_class_codes(py: Python<'_>) -> PyResult<()> {
         .setattr("code", C::FileFormat.as_str())?;
     py.get_type::<FileIoError>()
         .setattr("code", C::FileIo.as_str())?;
+    py.get_type::<LoadMemoryLimitError>()
+        .setattr("code", C::LoadMemoryLimit.as_str())?;
     py.get_type::<ArgumentError>()
         .setattr("code", C::InvalidArgument.as_str())?;
     py.get_type::<MissingArgumentError>()

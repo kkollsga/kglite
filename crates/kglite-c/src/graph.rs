@@ -342,6 +342,10 @@ pub(crate) fn classify_io_error(err: &std::io::Error) -> (KgliteStatusCode, Stri
     let code = match err.kind() {
         std::io::ErrorKind::NotFound => KgliteStatusCode::FileNotFound,
         std::io::ErrorKind::InvalidData => KgliteStatusCode::FileFormat,
+        // The load-memory ceiling's refusal. Not `FileFormat` — the file is
+        // valid and rebuilding it would not help — and not `FileIo`, which
+        // would blame the disk for a policy decision this process made.
+        std::io::ErrorKind::OutOfMemory => KgliteStatusCode::LoadMemoryLimit,
         _ => KgliteStatusCode::FileIo,
     };
     (code, err.to_string())

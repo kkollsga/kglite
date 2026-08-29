@@ -76,6 +76,20 @@ enum KgliteStatusCode
    */
   KGLITE_STATUS_CODE_TRANSACTION_CONFLICT = 20,
   /**
+   * A `.kgl` load was refused *before decoding* because its estimated peak
+   * memory exceeded the ceiling the caller set
+   * (`LoadOptions::max_load_bytes` / `KGLITE_MAX_LOAD_MB`). The file is
+   * valid; this process's budget is not. Its own code rather than a
+   * `FileFormat` because the two call for opposite reactions — "rebuild this
+   * file" versus "raise the ceiling, defer the index rebuild, or load it
+   * somewhere larger" — and a consumer cannot tell them apart by
+   * string-matching a message.
+   *
+   * Appended (not renumbered) to keep the existing discriminants stable
+   * across this ABI major version.
+   */
+  KGLITE_STATUS_CODE_LOAD_MEMORY_LIMIT = 21,
+  /**
    * A string argument failed UTF-8 validation. The C-side
    * caller passed a `*const c_char` whose bytes didn't decode
    * as UTF-8 — typically a corrupted buffer or a non-UTF-8

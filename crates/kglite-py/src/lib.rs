@@ -118,16 +118,20 @@ impl crate::graph::KnowledgeGraph {
 
 /// Map the `io::Error` a load returns onto a *classifiable* typed exception, so
 /// a caller can tell "this `.kgl` is corrupt → rebuild from source"
-/// (`FileFormatError`) from "it isn't there" (`FileError`) and a genuine IO
-/// fault (`FileIoError`) without catching a broad `IOError`. Anything that is
-/// neither not-found nor permission is treated as corruption (bad magic,
-/// truncated section, version mismatch, codec failure).
+/// (`FileFormatError`) from "it isn't there" (`FileError`), a genuine IO fault
+/// (`FileIoError`) and a load this process's own memory ceiling refused
+/// (`LoadMemoryLimitError`) without catching a broad `IOError`. Anything left
+/// over is treated as corruption (bad magic, truncated section, version
+/// mismatch, codec failure).
 fn load_err_to_pyerr(e: std::io::Error, path: Option<&str>) -> PyErr {
     use std::io::ErrorKind;
     let pb = || std::path::PathBuf::from(path.unwrap_or(""));
     let kg = match e.kind() {
         ErrorKind::NotFound => crate::error::KgError::FileNotFound(pb()),
         ErrorKind::PermissionDenied => crate::error::KgError::FileIo(e),
+        // The load-memory ceiling's refusal. Falling through to `FileFormat`
+        // would tell the caller to rebuild a graph that is not broken.
+        ErrorKind::OutOfMemory => crate::error::KgError::LoadMemoryLimit(e.to_string()),
         _ => crate::error::KgError::FileFormat {
             path: pb(),
             message: e.to_string(),
@@ -208,6 +212,7 @@ fn warn_if_sidecar_runs_ahead(py: Python<'_>, path: &str, checkpoint_lsn: u64) {
 fn load_options_from_args(
     storage: Option<&str>,
     defer_index_rebuild: Option<bool>,
+    max_load_mb: Option<u64>,
 ) -> PyResult<kglite_core::api::io::LoadOptions> {
     let mut options = kglite_core::api::io::LoadOptions::new();
     if let Some(mode_str) = storage {
@@ -218,7 +223,36 @@ fn load_options_from_args(
     if let Some(defer) = defer_index_rebuild {
         options = options.with_defer_index_rebuild(defer);
     }
+    // `max_load_mb` is MEGABYTES, matching `KGLITE_MAX_LOAD_MB`; the core field
+    // is bytes. The conversion lives here, once, at the boundary between the
+    // unit an operator types and the unit the engine counts in.
+    if let Some(mb) = max_load_mb {
+        options = options.with_max_load_bytes(Some(mb.saturating_mul(1024 * 1024)));
+    }
     Ok(options)
+}
+
+/// Estimate what loading the `.kgl` at `path` would cost, reading only its
+/// metadata head — no section is decompressed.
+///
+/// Returns a dict of named terms rather than one number, because they have
+/// different accuracies and different remedies. See the type stub for the
+/// contract, and `LoadOptions::max_load_bytes` in the Rust docs for what each
+/// term models versus guesses.
+#[pyfunction]
+fn estimate_load_memory(py: Python<'_>, path: String) -> PyResult<Py<PyAny>> {
+    let estimate = py
+        .detach(|| kglite_core::api::io::estimate_load_memory(&path))
+        .map_err(|e| load_request_err_to_pyerr(e, Some(&path)))?;
+    let dict = pyo3::types::PyDict::new(py);
+    dict.set_item("index_rebuild_bytes", estimate.index_rebuild_bytes)?;
+    dict.set_item("section_heap_bytes", estimate.section_heap_bytes)?;
+    dict.set_item("transient_peak_bytes", estimate.transient_peak_bytes)?;
+    dict.set_item("total_settled_bytes", estimate.total_settled_bytes())?;
+    dict.set_item("total_peak_bytes", estimate.total_peak_bytes())?;
+    dict.set_item("node_rows", estimate.node_rows)?;
+    dict.set_item("declared_indexes", estimate.declared_indexes)?;
+    Ok(dict.into_any().unbind())
 }
 
 /// Load a graph from a binary file previously saved with `save()`.
@@ -240,15 +274,22 @@ fn load_options_from_args(
 /// write pays the whole build (+193 ms, once). `None` (the default) leaves the
 /// process default in charge, which is off unless `KGLITE_DEFER_INDEX_REBUILD`
 /// says otherwise.
+///
+/// `max_load_mb` is a ceiling **in megabytes** — not bytes: refuse the load,
+/// before decoding anything, if `estimate_load_memory` puts its peak above it.
+/// Raises `kglite.LoadMemoryLimitError` naming the estimate, the ceiling and
+/// the ways out. `KGLITE_MAX_LOAD_MB` sets a process-wide default this
+/// outranks.
 #[pyfunction]
-#[pyo3(signature = (path, *, storage=None, defer_index_rebuild=None))]
+#[pyo3(signature = (path, *, storage=None, defer_index_rebuild=None, max_load_mb=None))]
 fn load(
     py: Python<'_>,
     path: String,
     storage: Option<&str>,
     defer_index_rebuild: Option<bool>,
+    max_load_mb: Option<u64>,
 ) -> PyResult<KnowledgeGraph> {
-    let options = load_options_from_args(storage, defer_index_rebuild)?;
+    let options = load_options_from_args(storage, defer_index_rebuild, max_load_mb)?;
     let inner = py
         .detach(|| kglite_core::api::io::load_file_with(&path, &options))
         .map_err(|e| load_request_err_to_pyerr(e, Some(&path)))?;
@@ -320,19 +361,21 @@ fn load_rdf(
 /// register the model first via the `KnowledgeGraph` path:
 /// `g = kglite.load(path); g.set_embedder(model); s = g.session()`.
 ///
-/// `storage` and `defer_index_rebuild` mean exactly what they mean on
-/// `kglite.load` — a session is a load plus a thread-safe handle over it.
+/// `storage`, `defer_index_rebuild` and `max_load_mb` mean exactly what they
+/// mean on `kglite.load` — a session is a load plus a thread-safe handle over
+/// it.
 /// Deferral suits this entry point especially: a session that only reads never
 /// pays the build at all.
 #[pyfunction]
-#[pyo3(signature = (path, *, storage=None, defer_index_rebuild=None))]
+#[pyo3(signature = (path, *, storage=None, defer_index_rebuild=None, max_load_mb=None))]
 fn open_session(
     py: Python<'_>,
     path: String,
     storage: Option<&str>,
     defer_index_rebuild: Option<bool>,
+    max_load_mb: Option<u64>,
 ) -> PyResult<Session> {
-    let options = load_options_from_args(storage, defer_index_rebuild)?;
+    let options = load_options_from_args(storage, defer_index_rebuild, max_load_mb)?;
     let inner = py
         .detach(|| kglite_core::api::io::load_file_with(&path, &options))
         .map_err(|e| load_request_err_to_pyerr(e, Some(&path)))?;
@@ -347,17 +390,18 @@ fn open_session(
 /// or non-`.kgl` buffer raises a classifiable error (bad magic / truncated
 /// section), distinct from a successful empty graph.
 ///
-/// `storage` and `defer_index_rebuild` mean exactly what they mean on
-/// `kglite.load`.
+/// `storage`, `defer_index_rebuild` and `max_load_mb` mean exactly what they
+/// mean on `kglite.load`.
 #[pyfunction]
-#[pyo3(signature = (data, *, storage=None, defer_index_rebuild=None))]
+#[pyo3(signature = (data, *, storage=None, defer_index_rebuild=None, max_load_mb=None))]
 fn from_bytes(
     py: Python<'_>,
     data: &[u8],
     storage: Option<&str>,
     defer_index_rebuild: Option<bool>,
+    max_load_mb: Option<u64>,
 ) -> PyResult<KnowledgeGraph> {
-    let options = load_options_from_args(storage, defer_index_rebuild)?;
+    let options = load_options_from_args(storage, defer_index_rebuild, max_load_mb)?;
     py.detach(|| kglite_core::api::io::load_kgl_bytes_with(data, &options))
         .map(KnowledgeGraph::from_arc)
         .map_err(|e| load_request_err_to_pyerr(e, None))
@@ -863,6 +907,7 @@ fn _run_mcp_server(
 fn kglite(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_function(wrap_pyfunction!(load, m)?)?;
+    m.add_function(wrap_pyfunction!(estimate_load_memory, m)?)?;
     m.add_function(wrap_pyfunction!(load_rdf, m)?)?;
     m.add_function(wrap_pyfunction!(open_session, m)?)?;
     m.add_function(wrap_pyfunction!(from_bytes, m)?)?;

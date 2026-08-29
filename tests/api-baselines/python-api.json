@@ -10,6 +10,7 @@
     "ResultIter",
     "load",
     "load_rdf",
+    "estimate_load_memory",
     "open",
     "open_session",
     "from_bytes",
@@ -47,6 +48,7 @@
     "FileError",
     "FileFormatError",
     "FileIoError",
+    "LoadMemoryLimitError",
     "ArgumentError",
     "MissingArgumentError",
     "InternerCollisionError",
@@ -1234,6 +1236,21 @@
       },
       "module": "kglite"
     },
+    "LoadMemoryLimitError": {
+      "bases": [
+        "KgError"
+      ],
+      "constructible": true,
+      "constructor": null,
+      "kind": "class",
+      "members": {
+        "code": {
+          "kind": "attribute",
+          "type": "str"
+        }
+      },
+      "module": "kglite"
+    },
     "MissingArgumentError": {
       "bases": [
         "KgError"
@@ -1539,13 +1556,17 @@
       "kind": "function",
       "signature": "()"
     },
+    "estimate_load_memory": {
+      "kind": "function",
+      "signature": "(path)"
+    },
     "from_blueprint": {
       "kind": "function",
       "signature": "(blueprint_path: 'Union[str, Path]', *, verbose: 'bool' = False, save: 'Optional[bool]' = None, lock_schema: 'bool' = False, storage: 'str' = 'default', path: 'Optional[str]' = None) -> 'KnowledgeGraph'"
     },
     "from_bytes": {
       "kind": "function",
-      "signature": "(data, *, storage=None, defer_index_rebuild=None)"
+      "signature": "(data, *, storage=None, defer_index_rebuild=None, max_load_mb=None)"
     },
     "from_networkx": {
       "kind": "function",
@@ -1565,7 +1586,7 @@
     },
     "load": {
       "kind": "function",
-      "signature": "(path, *, storage=None, defer_index_rebuild=None)"
+      "signature": "(path, *, storage=None, defer_index_rebuild=None, max_load_mb=None)"
     },
     "load_rdf": {
       "kind": "function",
@@ -1577,7 +1598,7 @@
     },
     "open_session": {
       "kind": "function",
-      "signature": "(path, *, storage=None, defer_index_rebuild=None)"
+      "signature": "(path, *, storage=None, defer_index_rebuild=None, max_load_mb=None)"
     },
     "outline": {
       "kind": "function",

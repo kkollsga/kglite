@@ -109,6 +109,7 @@ mod tests {
             KgErrorCode::ConstraintViolation,
             KgErrorCode::ConstraintCreationFailed,
             KgErrorCode::TransactionConflict,
+            KgErrorCode::LoadMemoryLimit,
         ] {
             let s = code.neo4j_status_code();
             assert!(

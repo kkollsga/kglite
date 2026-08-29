@@ -104,6 +104,16 @@ class FileFormatError(KgError):
 class FileIoError(KgError):
     """Generic I/O failure (permission denied, mid-read EOF, mmap failure)."""
 
+class LoadMemoryLimitError(KgError):
+    """A ``.kgl`` load was refused before decoding: its estimated memory exceeded
+    the ceiling set by ``max_load_mb`` or ``KGLITE_MAX_LOAD_MB``.
+
+    The file is valid and nothing was decompressed — this is a statement about
+    the process's budget, not about the data, which is why it is not
+    :class:`FileFormatError`. The message names the estimate, the ceiling, the
+    terms it is made of, and the ways out. See :func:`estimate_load_memory`.
+    """
+
 class ArgumentError(KgError):
     """A user-supplied argument violated a precondition."""
 
@@ -633,11 +643,64 @@ class ResultView:
         """Vertical card format: one key-value per line, rows separated by blank lines."""
         ...
 
+def estimate_load_memory(path: str) -> dict[str, int]:
+    """Estimate what loading the ``.kgl`` at ``path`` would cost, without
+    loading it.
+
+    Reads only the metadata block at the head of the file — 0.01%-0.35% of it on
+    the measured corpora — so the answer costs one short read and decompresses
+    nothing. This is the same estimate ``max_load_mb`` refuses on, so a caller
+    can decide for itself instead of setting a ceiling.
+
+    Args:
+        path: Path to a portable ``.kgl`` file. A disk-mode graph *directory*
+            raises :class:`ArgumentError`: it has no metadata head, and it never
+            rebuilds its indexes at load, so these terms would not describe it.
+
+    Returns:
+        A dict of byte counts:
+
+        - ``index_rebuild_bytes`` - **modelled** from the file's own index
+          declarations and row counts: what rebuilding them costs. This is the
+          term ``defer_index_rebuild=True`` removes.
+        - ``section_heap_bytes`` - **heuristic**: the decoded graph itself.
+        - ``transient_peak_bytes`` - **heuristic**: the largest single
+          decompression buffer held live during the load.
+        - ``total_settled_bytes`` - sections + index rebuild.
+        - ``total_peak_bytes`` - settled + transient; the number a ceiling
+          compares, because a process dies at its peak.
+        - ``node_rows`` - node rows the file declares.
+        - ``declared_indexes`` - index declarations the index term summed.
+
+    Raises:
+        FileError: ``path`` does not exist.
+        FileFormatError: ``path`` is not a readable ``.kgl``.
+        ArgumentError: ``path`` is a disk-mode graph directory.
+
+    **Read this before acting on the numbers.** They estimate *physical
+    footprint* — the metric an OS memory killer judges — not RSS, which
+    overstates it by up to 3.6x on this path and swings 2.3x with the
+    allocator. They cover the load-settled plateau, **not** the further ~30% a
+    first point lookup adds by building per-type id indexes. And they are an
+    estimate: the section term measured 0.56x-1.30x of actual across three
+    corpora, and the peak is deliberately conservative (1.35x-1.46x of measured
+    on the two fixtures with peak measurements).
+
+    Example::
+
+        est = kglite.estimate_load_memory("graph.kgl")
+        if est["total_peak_bytes"] > budget:
+            # The index rebuild is usually the term worth dropping.
+            g = kglite.load("graph.kgl", defer_index_rebuild=True)
+    """
+    ...
+
 def load(
     path: str,
     *,
     storage: str | None = None,
     defer_index_rebuild: bool | None = None,
+    max_load_mb: int | None = None,
 ) -> KnowledgeGraph:
     """Load a graph from a binary file previously saved with ``save()``.
 
@@ -652,6 +715,11 @@ def load(
             building them at load. ``None`` (default) leaves the process
             default in charge — off, unless ``KGLITE_DEFER_INDEX_REBUILD`` is
             set; ``True``/``False`` decide for this call.
+        max_load_mb: Refuse the load if it is estimated to peak above this many
+            **megabytes** — not bytes. Checked from the file's metadata head,
+            before anything is decompressed. ``None`` (default) leaves the
+            process default in charge — no ceiling, unless
+            ``KGLITE_MAX_LOAD_MB`` sets one, which this outranks.
 
     Returns:
         A new KnowledgeGraph with the loaded data.
@@ -659,6 +727,8 @@ def load(
     Raises:
         FileError: ``path`` does not exist.
         FileFormatError: ``path`` is not a readable ``.kgl``.
+        LoadMemoryLimitError: The estimated load exceeds ``max_load_mb`` (or
+            ``KGLITE_MAX_LOAD_MB``). Nothing was decompressed.
         ArgumentError: ``storage`` is an unknown mode, or ``"disk"``.
 
     **``storage`` is not a memory lever.** For a loaded ``.kgl``, mapped and
@@ -751,6 +821,7 @@ def open_session(
     *,
     storage: str | None = None,
     defer_index_rebuild: bool | None = None,
+    max_load_mb: int | None = None,
 ) -> "Session":
     """Load a saved graph at ``path`` directly as a thread-safe :class:`Session`.
 
@@ -773,6 +844,7 @@ def open_session(
         storage: As on :func:`load`.
         defer_index_rebuild: As on :func:`load`. Well suited to this entry
             point: a session that only reads never pays the deferred build.
+        max_load_mb: As on :func:`load` — a ceiling in **megabytes**.
     """
     ...
 
@@ -781,6 +853,7 @@ def from_bytes(
     *,
     storage: str | None = None,
     defer_index_rebuild: bool | None = None,
+    max_load_mb: int | None = None,
 ) -> KnowledgeGraph:
     """Load an in-memory graph from a ``.kgl`` byte buffer.
 
@@ -793,11 +866,14 @@ def from_bytes(
         data: A ``.kgl`` byte buffer from :meth:`KnowledgeGraph.to_bytes`.
         storage: As on :func:`load`.
         defer_index_rebuild: As on :func:`load`.
+        max_load_mb: As on :func:`load` — a ceiling in **megabytes**.
 
     Returns:
         A new KnowledgeGraph with the loaded data.
 
     Raises:
+        LoadMemoryLimitError: The estimated load exceeds ``max_load_mb`` (or
+            ``KGLITE_MAX_LOAD_MB``). Nothing was decompressed.
         FileFormatError: If ``data`` is not a valid ``.kgl`` buffer (bad magic,
             truncated, or an incompatible/older format) — a typed
             ``kglite.KgError`` subclass, distinct from a successful load of an

@@ -28,6 +28,7 @@ Exception
     ├── kglite.FileError
     ├── kglite.FileFormatError
     ├── kglite.FileIoError
+    ├── kglite.LoadMemoryLimitError
     ├── kglite.ArgumentError
     ├── kglite.MissingArgumentError
     ├── kglite.InternerCollisionError
@@ -151,6 +152,31 @@ except KeyboardInterrupt:
 Load failures are classifiable: a missing engine-managed path raises
 `FileError`; malformed, truncated, or unsupported saved data raises
 `FileFormatError`; other I/O failures raise `FileIoError`.
+
+A fourth case is not a failure of the file at all. `kglite.load(path,
+max_load_mb=N)` — and the process-wide `KGLITE_MAX_LOAD_MB` — refuse a load
+whose estimated peak memory is over the ceiling, *before* decompressing
+anything, and raise `LoadMemoryLimitError`. The graph is valid; this process
+cannot afford it. Rebuilding would not help, which is exactly why it is its own
+class: raise the ceiling, pass `defer_index_rebuild=True` (usually the largest
+term), or load it somewhere with more memory. `kglite.estimate_load_memory(path)`
+returns the same estimate as a dict of named terms, so a caller can decide for
+itself rather than setting a ceiling.
+
+```python
+budget_mb = 512
+try:
+    graph = kglite.load("large.kgl", max_load_mb=budget_mb)
+except kglite.LoadMemoryLimitError:
+    # The index rebuild is the term usually worth dropping.
+    graph = kglite.load("large.kgl", max_load_mb=budget_mb, defer_index_rebuild=True)
+```
+
+The ceiling compares an *estimate* read from the file's metadata head, not a
+measurement, and it errs high on purpose — so a ceiling set close to a graph's
+real cost can refuse a load that would have fitted. Set it where a failure is
+what you want (a serving process that must not be killed by a file it did not
+choose), not as a tight budget.
 
 The write half classifies the same way: a `save()`, `sync()` or `to_bytes()`
 that fails on I/O — a full disk, a read-only directory, a failing device —

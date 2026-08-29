@@ -1638,12 +1638,33 @@ impl core::convert::From<kglite::api::io::LeaseRefusal> for core::io::error::Err
 pub fn core::io::error::Error::from(refusal: kglite::api::io::LeaseRefusal) -> Self
 impl core::fmt::Debug for kglite::api::io::LeaseRefusal
 pub fn kglite::api::io::LeaseRefusal::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct kglite::api::io::LoadMemoryEstimate
+pub kglite::api::io::LoadMemoryEstimate::declared_indexes: u32
+pub kglite::api::io::LoadMemoryEstimate::index_rebuild_bytes: u64
+pub kglite::api::io::LoadMemoryEstimate::node_rows: u64
+pub kglite::api::io::LoadMemoryEstimate::section_heap_bytes: u64
+pub kglite::api::io::LoadMemoryEstimate::transient_peak_bytes: u64
+impl kglite::api::io::LoadMemoryEstimate
+pub fn kglite::api::io::LoadMemoryEstimate::projected_peak_bytes(&self, defer_index_rebuild: bool) -> u64
+pub fn kglite::api::io::LoadMemoryEstimate::total_peak_bytes(&self) -> u64
+pub fn kglite::api::io::LoadMemoryEstimate::total_settled_bytes(&self) -> u64
+impl core::clone::Clone for kglite::api::io::LoadMemoryEstimate
+pub fn kglite::api::io::LoadMemoryEstimate::clone(&self) -> kglite::api::io::LoadMemoryEstimate
+impl core::cmp::Eq for kglite::api::io::LoadMemoryEstimate
+impl core::cmp::PartialEq for kglite::api::io::LoadMemoryEstimate
+pub fn kglite::api::io::LoadMemoryEstimate::eq(&self, other: &kglite::api::io::LoadMemoryEstimate) -> bool
+impl core::fmt::Debug for kglite::api::io::LoadMemoryEstimate
+pub fn kglite::api::io::LoadMemoryEstimate::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for kglite::api::io::LoadMemoryEstimate
+impl core::marker::StructuralPartialEq for kglite::api::io::LoadMemoryEstimate
 pub struct kglite::api::io::LoadOptions
 pub kglite::api::io::LoadOptions::defer_index_rebuild: bool
+pub kglite::api::io::LoadOptions::max_load_bytes: core::option::Option<u64>
 pub kglite::api::io::LoadOptions::storage: core::option::Option<kglite::api::storage::StorageMode>
 impl kglite::api::io::LoadOptions
 pub fn kglite::api::io::LoadOptions::new() -> Self
 pub fn kglite::api::io::LoadOptions::with_defer_index_rebuild(self, defer: bool) -> Self
+pub fn kglite::api::io::LoadOptions::with_max_load_bytes(self, max_bytes: core::option::Option<u64>) -> Self
 pub fn kglite::api::io::LoadOptions::with_storage(self, mode: kglite::api::storage::StorageMode) -> Self
 impl core::clone::Clone for kglite::api::io::LoadOptions
 pub fn kglite::api::io::LoadOptions::clone(&self) -> kglite::api::io::LoadOptions
@@ -1707,6 +1728,8 @@ pub const kglite::api::io::MIN_READABLE_WAL_FORMAT_VERSION: u8
 pub const kglite::api::io::WAL_FORMAT_VERSION: u8
 pub trait kglite::api::io::ProgressSink: core::marker::Send + core::marker::Sync
 pub fn kglite::api::io::ProgressSink::emit(&self, event: kglite::api::io::ProgressEvent<'_>) -> core::result::Result<(), kglite::api::io::Cancelled>
+pub fn kglite::api::io::estimate_load_memory(path: &str) -> core::io::error::Result<kglite::api::io::LoadMemoryEstimate>
+pub fn kglite::api::io::estimate_load_memory_bytes(data: &[u8]) -> core::io::error::Result<kglite::api::io::LoadMemoryEstimate>
 pub fn kglite::api::io::export_embeddings_to_file(graph: &kglite::api::DirGraph, path: &str, filter: core::option::Option<&kglite::api::io::EmbeddingExportFilter>) -> core::io::error::Result<kglite::graph::io::file::vector_persistence::ExportStats>
 pub fn kglite::api::io::import_embeddings_from_file(graph: &mut kglite::api::DirGraph, path: &str) -> core::io::error::Result<kglite::api::io::ImportStats>
 pub fn kglite::api::io::load_file(path: &str) -> core::io::error::Result<alloc::sync::Arc<kglite::api::DirGraph>>
@@ -2576,6 +2599,7 @@ pub kglite::api::KgError::InvalidArgument
 pub kglite::api::KgError::InvalidArgument::argument: alloc::string::String
 pub kglite::api::KgError::InvalidArgument::expected: alloc::string::String
 pub kglite::api::KgError::InvalidArgument::found: alloc::string::String
+pub kglite::api::KgError::LoadMemoryLimit(alloc::string::String)
 pub kglite::api::KgError::MissingArgument(alloc::string::String)
 pub kglite::api::KgError::NodeNotFound
 pub kglite::api::KgError::NodeNotFound::id: alloc::string::String
@@ -2622,6 +2646,7 @@ pub kglite::api::KgErrorCode::FileIo
 pub kglite::api::KgErrorCode::FileNotFound
 pub kglite::api::KgErrorCode::Internal
 pub kglite::api::KgErrorCode::InvalidArgument
+pub kglite::api::KgErrorCode::LoadMemoryLimit
 pub kglite::api::KgErrorCode::MissingArgument
 pub kglite::api::KgErrorCode::NodeNotFound
 pub kglite::api::KgErrorCode::PropertyNotFound
@@ -4476,6 +4501,7 @@ pub kglite::error::KgError::InvalidArgument
 pub kglite::error::KgError::InvalidArgument::argument: alloc::string::String
 pub kglite::error::KgError::InvalidArgument::expected: alloc::string::String
 pub kglite::error::KgError::InvalidArgument::found: alloc::string::String
+pub kglite::error::KgError::LoadMemoryLimit(alloc::string::String)
 pub kglite::error::KgError::MissingArgument(alloc::string::String)
 pub kglite::error::KgError::NodeNotFound
 pub kglite::error::KgError::NodeNotFound::id: alloc::string::String
@@ -4522,6 +4548,7 @@ pub kglite::error::KgErrorCode::FileIo
 pub kglite::error::KgErrorCode::FileNotFound
 pub kglite::error::KgErrorCode::Internal
 pub kglite::error::KgErrorCode::InvalidArgument
+pub kglite::error::KgErrorCode::LoadMemoryLimit
 pub kglite::error::KgErrorCode::MissingArgument
 pub kglite::error::KgErrorCode::NodeNotFound
 pub kglite::error::KgErrorCode::PropertyNotFound

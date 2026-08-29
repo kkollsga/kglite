@@ -56,6 +56,18 @@ pub enum KgliteStatusCode {
     /// whole transaction. Appended to keep the existing discriminants
     /// stable across this ABI major version.
     TransactionConflict = 20,
+    /// A `.kgl` load was refused *before decoding* because its estimated peak
+    /// memory exceeded the ceiling the caller set
+    /// (`LoadOptions::max_load_bytes` / `KGLITE_MAX_LOAD_MB`). The file is
+    /// valid; this process's budget is not. Its own code rather than a
+    /// `FileFormat` because the two call for opposite reactions — "rebuild this
+    /// file" versus "raise the ceiling, defer the index rebuild, or load it
+    /// somewhere larger" — and a consumer cannot tell them apart by
+    /// string-matching a message.
+    ///
+    /// Appended (not renumbered) to keep the existing discriminants stable
+    /// across this ABI major version.
+    LoadMemoryLimit = 21,
 
     // 100+: C-ABI-only errors.
     /// A string argument failed UTF-8 validation. The C-side
@@ -105,6 +117,7 @@ impl KgliteStatusCode {
             KgErrorCode::ConstraintViolation => Self::ConstraintViolation,
             KgErrorCode::ConstraintCreationFailed => Self::ConstraintCreationFailed,
             KgErrorCode::TransactionConflict => Self::TransactionConflict,
+            KgErrorCode::LoadMemoryLimit => Self::LoadMemoryLimit,
         }
     }
 
@@ -125,6 +138,7 @@ impl KgliteStatusCode {
             Self::ConstraintViolation => KgErrorCode::ConstraintViolation,
             Self::ConstraintCreationFailed => KgErrorCode::ConstraintCreationFailed,
             Self::TransactionConflict => KgErrorCode::TransactionConflict,
+            Self::LoadMemoryLimit => KgErrorCode::LoadMemoryLimit,
             Self::Validation => KgErrorCode::Validation,
             Self::Expr => KgErrorCode::Expr,
             Self::NodeNotFound => KgErrorCode::NodeNotFound,
@@ -224,6 +238,7 @@ fn static_name(code: KgliteStatusCode) -> Option<&'static CStr> {
         KgliteStatusCode::ConstraintViolation => c"ConstraintViolation",
         KgliteStatusCode::ConstraintCreationFailed => c"ConstraintCreationFailed",
         KgliteStatusCode::TransactionConflict => c"TransactionConflict",
+        KgliteStatusCode::LoadMemoryLimit => c"LoadMemoryLimit",
         KgliteStatusCode::InvalidUtf8 => c"InvalidUtf8",
         KgliteStatusCode::NullPointer => c"NullPointer",
         KgliteStatusCode::WriterLeaseHeld => c"WriterLeaseHeld",
@@ -297,6 +312,7 @@ mod tests {
         KgliteStatusCode::ConstraintViolation,
         KgliteStatusCode::ConstraintCreationFailed,
         KgliteStatusCode::TransactionConflict,
+        KgliteStatusCode::LoadMemoryLimit,
         KgliteStatusCode::InvalidUtf8,
         KgliteStatusCode::NullPointer,
         KgliteStatusCode::WriterLeaseHeld,
@@ -425,5 +441,65 @@ mod tests {
             // No Neo4j wire code exists for a boundary-only failure.
             assert!(kglite_status_code_neo4j_status(code).is_null(), "{name}");
         }
+    }
+
+    /// The load-memory ceiling's code crosses the ABI as a *core* code, not a
+    /// boundary-only one: it maps both ways, names itself, and carries the HTTP
+    /// and Neo4j spellings core assigns. A binding that saw it arrive as
+    /// `FileFormat` would tell an operator to rebuild a file that is not
+    /// broken.
+    #[test]
+    fn the_load_memory_ceiling_code_maps_both_ways() {
+        let code = KgliteStatusCode::LoadMemoryLimit;
+        assert_eq!(code as u32, 21, "published discriminants never move");
+        assert_eq!(
+            KgliteStatusCode::from_kg_error_code(KgErrorCode::LoadMemoryLimit),
+            code
+        );
+        assert_eq!(code.to_kg_error_code(), Some(KgErrorCode::LoadMemoryLimit));
+        assert_eq!(kglite_status_code_http_status(code), 507);
+
+        let named = kglite_status_code_name(code);
+        assert!(!named.is_null());
+        assert_eq!(
+            unsafe { std::ffi::CStr::from_ptr(named) }.to_str().unwrap(),
+            "LoadMemoryLimit"
+        );
+        unsafe { crate::kglite_free_string(named) };
+
+        let neo4j = kglite_status_code_neo4j_status(code);
+        assert!(!neo4j.is_null(), "a core code has a Neo4j spelling");
+        assert_eq!(
+            unsafe { std::ffi::CStr::from_ptr(neo4j) }.to_str().unwrap(),
+            "Neo.TransientError.General.OutOfMemoryError"
+        );
+        unsafe { crate::kglite_free_string(neo4j) };
+    }
+
+    /// The `io::Error` a refused load returns must classify as the ceiling code
+    /// at the C boundary — the arm in `graph::classify_io_error` that keeps a
+    /// refusal from arriving as `FileFormat` (corrupt) or `FileIo` (disk).
+    #[test]
+    fn a_refused_load_classifies_as_the_ceiling_code() {
+        let refusal = std::io::Error::new(
+            std::io::ErrorKind::OutOfMemory,
+            "estimated to peak at 900 MB",
+        );
+        let (code, message) = crate::graph::classify_io_error(&refusal);
+        assert_eq!(code, KgliteStatusCode::LoadMemoryLimit);
+        assert!(message.contains("900 MB"));
+
+        // Non-vacuity: the two kinds it must not be confused with still map
+        // where they did.
+        let corrupt = std::io::Error::new(std::io::ErrorKind::InvalidData, "bad magic");
+        assert_eq!(
+            crate::graph::classify_io_error(&corrupt).0,
+            KgliteStatusCode::FileFormat
+        );
+        let denied = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        assert_eq!(
+            crate::graph::classify_io_error(&denied).0,
+            KgliteStatusCode::FileIo
+        );
     }
 }

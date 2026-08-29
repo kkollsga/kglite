@@ -1307,6 +1307,13 @@ const MAX_DECOMPRESSED_SECTION_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 /// [`io_context`]. `ErrorKind::Other` is left for the residue: a failure that
 /// is about neither the bytes nor a syscall, such as a storage-mode conversion
 /// that could not be completed after the file decoded fine.
+///
+/// **`OutOfMemory` is a statement about this process, not about the file**: the
+/// load-memory ceiling refused a file that is perfectly valid and would load
+/// elsewhere (see [`load_memory_refusal`]). It is a separate kind precisely
+/// because `InvalidData`'s advice — "rebuild this file from its source" — is
+/// wrong for it, and every binding maps it to its own `LoadMemoryLimit` class
+/// rather than to a corrupt-file one.
 fn invalid_data(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
@@ -1328,6 +1335,33 @@ pub(crate) fn io_context(operation: &str, path: impl AsRef<Path>, error: io::Err
         error.kind(),
         format!("{operation} '{}': {error}", path.as_ref().display()),
     )
+}
+
+/// Which portable container `prefix` names, or the refusal its magic earns.
+///
+/// The four entry points that reach a `.kgl` header — the mmap and read halves
+/// of [`load_file_with`], [`load_kgl_bytes_with`], and the metadata-head read
+/// behind [`estimate_load_memory`] — must agree on every one of these answers,
+/// including which deliberate format break gets which message. `origin` names
+/// what was refused, since that is the only thing they differ in.
+///
+/// `prefix` must be at least 4 bytes; each caller checks that first, because
+/// "too small to be a `.kgl`" is phrased in terms of what the caller was
+/// handed (a file, a buffer).
+fn portable_container_format(prefix: &[u8], origin: &str) -> io::Result<&'static str> {
+    if prefix[..4] == V6_MAGIC {
+        Ok("v6")
+    } else if prefix[..4] == V5_MAGIC {
+        Ok("v5")
+    } else if prefix[..4] == V4_MAGIC {
+        Err(pre_014_bincode_error(".kgl container v4"))
+    } else if prefix[..4] == V3_MAGIC {
+        Err(invalid_data(V3_HARD_BREAK_MSG))
+    } else if prefix[..3] == V6_MAGIC[..3] && prefix[3] > V6_MAGIC[3] {
+        Err(newer_portable_format_error(prefix[3]))
+    } else {
+        Err(unrecognized_magic_error(&prefix[..4], origin))
+    }
 }
 
 fn validate_and_rebuild_embedding_norms(
@@ -1485,41 +1519,16 @@ pub fn load_file_with(path: &str, options: &LoadOptions) -> io::Result<Arc<DirGr
         if mmap.len() < 4 {
             return Err(invalid_data("File is too small to be a valid kglite file."));
         }
-        if mmap[..4] == V6_MAGIC {
-            return load_portable_container(&mmap, "v6", options);
-        }
-        if mmap[..4] == V5_MAGIC {
-            return load_portable_container(&mmap, "v5", options);
-        }
-        if mmap[..4] == V4_MAGIC {
-            return Err(pre_014_bincode_error(".kgl container v4"));
-        }
-        if mmap[..4] == V3_MAGIC {
-            return Err(invalid_data(V3_HARD_BREAK_MSG));
-        }
-        if mmap[..3] == V6_MAGIC[..3] && mmap[3] > V6_MAGIC[3] {
-            return Err(newer_portable_format_error(mmap[3]));
-        }
-        return Err(unrecognized_magic_error(&mmap[..4], &format!("'{path}'")));
+        let format_name = portable_container_format(&mmap, &format!("'{path}'"))?;
+        return load_portable_container(&mmap, format_name, options);
     }
 
     let buf = std::fs::read(path).map_err(|e| io_context("reading", p, e))?;
     if buf.len() < 4 {
         return Err(invalid_data("File is too small to be a valid kglite file."));
     }
-    if buf[..4] == V6_MAGIC {
-        load_portable_container(&buf, "v6", options)
-    } else if buf[..4] == V5_MAGIC {
-        load_portable_container(&buf, "v5", options)
-    } else if buf[..4] == V4_MAGIC {
-        Err(pre_014_bincode_error(".kgl container v4"))
-    } else if buf[..4] == V3_MAGIC {
-        Err(invalid_data(V3_HARD_BREAK_MSG))
-    } else if buf[..3] == V6_MAGIC[..3] && buf[3] > V6_MAGIC[3] {
-        Err(newer_portable_format_error(buf[3]))
-    } else {
-        Err(unrecognized_magic_error(&buf[..4], &format!("'{path}'")))
-    }
+    let format_name = portable_container_format(&buf, &format!("'{path}'"))?;
+    load_portable_container(&buf, format_name, options)
 }
 
 /// Load an in-memory graph from a `.kgl` byte buffer — the counterpart of
@@ -1558,19 +1567,8 @@ pub fn load_kgl_bytes_with(data: &[u8], options: &LoadOptions) -> io::Result<Arc
             "Byte buffer is too small to be a valid kglite graph.",
         ));
     }
-    if data[..4] == V6_MAGIC {
-        load_portable_container(data, "v6", options)
-    } else if data[..4] == V5_MAGIC {
-        load_portable_container(data, "v5", options)
-    } else if data[..4] == V4_MAGIC {
-        Err(pre_014_bincode_error(".kgl container v4"))
-    } else if data[..4] == V3_MAGIC {
-        Err(invalid_data(V3_HARD_BREAK_MSG))
-    } else if data[..3] == V6_MAGIC[..3] && data[3] > V6_MAGIC[3] {
-        Err(newer_portable_format_error(data[3]))
-    } else {
-        Err(unrecognized_magic_error(&data[..4], "the byte buffer"))
-    }
+    let format_name = portable_container_format(data, "the byte buffer")?;
+    load_portable_container(data, format_name, options)
 }
 
 /// Contained break message for a pre-v3 embeddings section (model_id +
@@ -2049,6 +2047,18 @@ fn parse_portable_metadata<'a>(
             "{format_name} file is truncated — metadata incomplete"
         ))
     })?;
+    let metadata = decode_metadata_json(metadata_bytes, format_name)?;
+    let digests = metadata.section_digests.clone();
+    Ok((metadata, SectionCursor::new(buf, metadata_end, digests)?))
+}
+
+/// Parse the metadata JSON block and apply the guard every reader of it needs.
+///
+/// Shared by the loader and by the head-only read behind
+/// [`estimate_load_memory`] so the two cannot disagree about which metadata is
+/// acceptable — an estimate that parsed a block the load then rejects would put
+/// a number on a file that never opens.
+fn decode_metadata_json(metadata_bytes: &[u8], format_name: &str) -> io::Result<FileMetadata> {
     let metadata: FileMetadata = serde_json::from_slice(metadata_bytes)
         .map_err(|e| invalid_data(format!("failed to parse {format_name} metadata: {e}")))?;
     if metadata.column_sections.len() > 1_000_000 {
@@ -2056,8 +2066,88 @@ fn parse_portable_metadata<'a>(
             "{format_name} metadata declares too many column sections"
         )));
     }
-    let digests = metadata.section_digests.clone();
-    Ok((metadata, SectionCursor::new(buf, metadata_end, digests)?))
+    Ok(metadata)
+}
+
+/// Length of a portable container's fixed header, and the offset its metadata
+/// JSON starts at.
+const PORTABLE_HEADER_BYTES: usize = 13;
+
+/// Read a portable container's metadata block out of `buf` without touching a
+/// single section — the whole of what an estimate needs.
+///
+/// `buf` may stop immediately after the metadata block; nothing here indexes
+/// past `13 + metadata_len`, which is what lets the file variant read a few
+/// kilobytes instead of the whole graph.
+pub(crate) fn read_metadata_head(buf: &[u8], origin: &str) -> io::Result<FileMetadata> {
+    if buf.len() < 4 {
+        return Err(invalid_data(format!(
+            "{origin} is too small to be a valid kglite graph."
+        )));
+    }
+    let format_name = portable_container_format(buf, origin)?;
+    if buf.len() < PORTABLE_HEADER_BYTES {
+        return Err(invalid_data(format!(
+            "{format_name} file is truncated — header incomplete"
+        )));
+    }
+    let metadata_len = u32::from_le_bytes([buf[9], buf[10], buf[11], buf[12]]) as usize;
+    if metadata_len > MAX_METADATA_BYTES {
+        return Err(invalid_data(format!(
+            "{format_name} metadata is {metadata_len} bytes; limit is {MAX_METADATA_BYTES}"
+        )));
+    }
+    let metadata_bytes = buf
+        .get(PORTABLE_HEADER_BYTES..PORTABLE_HEADER_BYTES + metadata_len)
+        .ok_or_else(|| {
+            invalid_data(format!(
+                "{format_name} file is truncated — metadata incomplete"
+            ))
+        })?;
+    decode_metadata_json(metadata_bytes, format_name)
+}
+
+/// [`read_metadata_head`] against a file, reading only the header and the
+/// metadata block it declares — two short reads, no matter how large the graph.
+pub(crate) fn read_metadata_head_from_file(path: &str) -> io::Result<FileMetadata> {
+    let p = Path::new(path);
+    let mut file = File::open(path).map_err(|e| io_context("opening", p, e))?;
+    // `read` rather than `read_exact`: a file too short for the header is a
+    // format refusal with the wording every other reader gives it, not an
+    // `UnexpectedEof` a binding would classify as an I/O fault. Every refusal
+    // below is raised by the single `read_metadata_head` call at the end, so
+    // this function decides only how many bytes to fetch.
+    let mut buf = vec![0u8; PORTABLE_HEADER_BYTES];
+    let header_len =
+        read_up_to(&mut file, &mut buf).map_err(|e| io_context("reading the header of", p, e))?;
+    buf.truncate(header_len);
+    if header_len == PORTABLE_HEADER_BYTES {
+        let metadata_len = u32::from_le_bytes([buf[9], buf[10], buf[11], buf[12]]) as usize;
+        // An over-large declared length is not read: the shared reader refuses
+        // it by the same limit, and allocating it first would be the resource
+        // exhaustion the limit exists to prevent.
+        if metadata_len <= MAX_METADATA_BYTES {
+            buf.resize(PORTABLE_HEADER_BYTES + metadata_len, 0);
+            let read = read_up_to(&mut file, &mut buf[PORTABLE_HEADER_BYTES..])
+                .map_err(|e| io_context("reading the metadata of", p, e))?;
+            buf.truncate(PORTABLE_HEADER_BYTES + read);
+        }
+    }
+    read_metadata_head(&buf, &format!("'{path}'"))
+}
+
+/// Fill as much of `buf` as the reader has, returning how many bytes landed.
+/// A short read here means a truncated file, which the caller turns into the
+/// format refusal rather than into an EOF error.
+fn read_up_to(reader: &mut impl std::io::Read, buf: &mut [u8]) -> io::Result<usize> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match reader.read(&mut buf[filled..])? {
+            0 => break,
+            n => filled += n,
+        }
+    }
+    Ok(filled)
 }
 
 fn decode_portable_topology(
@@ -2245,6 +2335,82 @@ fn load_portable_optional_sections(
     Ok(())
 }
 
+/// Bytes in the largest unit that keeps them readable.
+///
+/// Unit-picking rather than fixed MB: the ceiling is as legitimate on a 40 KB
+/// graph as on a 40 GB one, and rounding a 280-byte term to "1 MB" would put a
+/// false number in a message whose whole job is to be believed.
+fn human_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{} MB", bytes / MB)
+    } else if bytes >= KB {
+        format!("{} KB", bytes / KB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+/// The refusal [`LoadOptions::max_load_bytes`] produces: what was estimated,
+/// what the ceiling is, which terms make up the estimate, and the two ways out.
+///
+/// `ErrorKind::OutOfMemory`, not `InvalidData` — see the error-kind rule on
+/// [`invalid_data`]. The file is fine; this process's budget is not, and a
+/// binding must not tell the operator to rebuild a graph that is not broken.
+fn load_memory_refusal(
+    estimate: &load_estimate::LoadMemoryEstimate,
+    limit: u64,
+    options: &LoadOptions,
+) -> io::Error {
+    let projected = estimate.projected_peak_bytes(options.defer_index_rebuild);
+    let index_term_is_payable = !options.defer_index_rebuild && estimate.index_rebuild_bytes > 0;
+    let mut message = format!(
+        "loading this .kgl is estimated to peak at {} of memory, over the {} ceiling this load \
+         was given (LoadOptions::max_load_bytes / {MAX_LOAD_ENV_VAR}). Nothing was decompressed. \
+         Estimated terms: {} for the graph's {} node rows and their columns",
+        human_bytes(projected),
+        human_bytes(limit),
+        human_bytes(estimate.section_heap_bytes),
+        estimate.node_rows,
+    );
+    if index_term_is_payable {
+        message.push_str(&format!(
+            ", {} to rebuild the {} declared index(es)",
+            human_bytes(estimate.index_rebuild_bytes),
+            estimate.declared_indexes,
+        ));
+    }
+    message.push_str(&format!(
+        ", and {} held transiently while the largest section decompresses. ",
+        human_bytes(estimate.transient_peak_bytes),
+    ));
+    if index_term_is_payable {
+        message.push_str(&format!(
+            "Two ways forward: raise the ceiling, or load with defer_index_rebuild, which records \
+             the file's declared indexes instead of building them — that removes the {} index \
+             term (measured −42.8% settled footprint on a 500k-row four-index fixture) at the \
+             price of a scan where an indexed lookup would have run, and a one-time build on the \
+             first write. ",
+            human_bytes(estimate.index_rebuild_bytes),
+        ));
+    } else {
+        message.push_str(
+            "The index rebuild is already deferred, so the way forward is to raise the ceiling — \
+             what remains is the graph itself. ",
+        );
+    }
+    message.push_str(
+        "This is an ESTIMATE read from the file's metadata head, not a measurement: it ran \
+         0.56×–1.30× of measured settled footprint across the calibration fixtures and errs high \
+         on the peak, so it can refuse a load that would have fitted.",
+    );
+    io::Error::new(io::ErrorKind::OutOfMemory, message)
+}
+
 /// The fields [`load_portable_container`] reads out of a v5/v6 container's
 /// fixed-size header, carried as one value so the loader's signature does not
 /// grow a parameter per header field.
@@ -2285,6 +2451,15 @@ fn load_portable_columnar(
     }
     let (metadata, mut sections) =
         parse_portable_metadata(buf, format_name, metadata_len, metadata_start)?;
+    // The ceiling is checked here, on the metadata side of the decode: a load
+    // refused for memory must not first allocate the memory. See
+    // `LoadOptions::max_load_bytes`.
+    if let Some(limit) = options.max_load_bytes {
+        let estimate = load_estimate::estimate_from_metadata(&metadata);
+        if estimate.projected_peak_bytes(options.defer_index_rebuild) > limit {
+            return Err(load_memory_refusal(&estimate, limit, options));
+        }
+    }
     // Resolved before a section is decompressed, so an unplaceable mode fails
     // before the expensive part.
     let recorded_mode = metadata.portable_storage_mode()?;
@@ -2329,8 +2504,12 @@ fn load_portable_columnar(
 mod columns;
 use columns::{attach_portable_column_stores, load_column_sidecars};
 
+mod load_estimate;
+pub use load_estimate::{estimate_load_memory, estimate_load_memory_bytes, LoadMemoryEstimate};
+
 mod load_options;
 pub use load_options::LoadOptions;
+use load_options::MAX_LOAD_ENV_VAR;
 
 mod spill_dirs;
 use spill_dirs::portable_temp_dir;
@@ -2353,6 +2532,9 @@ pub use vector_persistence::{
 #[cfg(test)]
 #[path = "file_deferred_index_tests.rs"]
 mod file_deferred_index_tests;
+#[cfg(test)]
+#[path = "file_load_ceiling_tests.rs"]
+mod file_load_ceiling_tests;
 #[cfg(test)]
 #[path = "file_load_contract_tests.rs"]
 mod file_load_contract_tests;
