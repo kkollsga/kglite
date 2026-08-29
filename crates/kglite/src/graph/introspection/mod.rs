@@ -126,6 +126,7 @@ pub struct NeighborsSchema {
 }
 
 /// Scale classification for adaptive describe output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GraphScale {
     /// 0-15 core types: full inline detail.
     Small,

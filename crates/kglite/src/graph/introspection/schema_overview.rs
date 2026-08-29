@@ -1330,6 +1330,17 @@ pub fn compute_property_stats(
 }
 
 /// Connection topology for one node type: outgoing and incoming grouped by (conn_type, other_type).
+///
+/// **Walks every edge incident to `node_type`.** The same
+/// `(connection_type, other_type) -> count` numbers are already in the
+/// type-connectivity cache: `DirGraph::get_or_compute_type_connectivity()`
+/// serves them from the `.kgl`, where the rows with `src == node_type` are the
+/// outgoing side and `tgt == node_type` the incoming — the route `describe()`
+/// takes whenever triples are available. Reach for this one when there is no
+/// usable cache or a fresh count is the point; the cache is invalidated on
+/// every edge mutation, so the risk it avoids is cost, not staleness. Note the
+/// orders differ: this sorts by `(connection_type, other_type)`, the
+/// triple-derived form by descending count.
 pub fn compute_neighbors_schema(
     graph: &DirGraph,
     node_type: &str,

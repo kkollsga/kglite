@@ -884,7 +884,7 @@ impl SaveMetadata {
 }
 
 /// Type connectivity triple: one row of the type-level graph.
-/// (source_type) -[connection_type]-> (target_type) with edge count.
+/// (source_type) -\[connection_type\]-> (target_type) with edge count.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectivityTriple {
     pub src: String,

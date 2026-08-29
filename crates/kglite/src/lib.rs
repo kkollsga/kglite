@@ -44,9 +44,21 @@ pub mod api {
     // else is clustered into a submodule by concern. Each item lives in
     // exactly one of them — no root↔submodule duplication.
     pub use crate::datatypes::values::{NodeValue, PathValue, RelValue};
+    /// The property container `Value::Map`, `NodeValue::properties`,
+    /// `RelValue::properties` and `mutation::ColumnData::Map` all carry: an
+    /// `Arc`'d flat map, sorted by key and duplicate-free (every read binary-
+    /// searches on that, and `Eq`/`Ord`/`Hash`/`Serialize` rely on it for
+    /// determinism). Keys are plain `String`.
+    pub use crate::datatypes::PropMap;
     pub use crate::datatypes::Value;
     pub use crate::error::{KgError, KgErrorCode};
     pub use crate::graph::dir_graph::DirGraph;
+    /// The storage-health report `DirGraph::graph_info` returns: live vs
+    /// tombstoned node and edge slots, columnar row and heap totals, index
+    /// counts, and the two mmap flags. `fragmentation_ratio` is the node-slot
+    /// reading only — the auto-vacuum trigger takes the worst of all three
+    /// garbage populations.
+    pub use crate::graph::dir_graph::GraphInfo;
     /// The old→new node-index mapping `DirGraph::vacuum` returns.
     pub use crate::graph::dir_graph::NodeRemap;
     #[cfg(feature = "fastembed")]
@@ -170,6 +182,16 @@ pub mod api {
     // `Arc<DirGraph>` → `&mut DirGraph` + version bump.
     pub use crate::graph::handle::make_dir_graph_mut;
 
+    /// The item type of every [`GraphRead`] edge iterator (`EdgesIter`,
+    /// `EdgeReferencesIter`, `EdgesConnectingIter`), so a consumer that stores
+    /// or returns one can name it. Its inherent `source()` / `target()` /
+    /// `id()` / `weight()` mirror `petgraph::visit::EdgeRef`, so no trait
+    /// import is needed. Prefer `connection_type()` over
+    /// `weight().connection_type` in traversals: on the disk backend `weight()`
+    /// materialises the [`EdgeData`], `connection_type()` reads the CSR
+    /// endpoint table.
+    pub use crate::graph::core::iterators::GraphEdgeRef;
+
     /// Parameter-shape helpers for bindings — wire-shaped values
     /// (JSON / protobuf-map / etc.) ↔ `kglite::api::Value`. The
     /// canonical converters both ways, so no binding re-implements the
@@ -187,15 +209,20 @@ pub mod api {
     /// (the C ABI's `kglite_create_edges_batch` wraps it); the DataFrame-based
     /// `add_nodes` / `add_connections` / `replace_connections` are the
     /// Rust-side bulk-ingest path (`DataFrame` in, operation report out).
-    /// That `DataFrame` is kglite's own columnar container
-    /// (`crate::datatypes::values::DataFrame`, built on `Value`) — kglite
-    /// does not depend on polars. `update_node_properties`,
+    /// That [`mutation::DataFrame`] is kglite's own columnar container, built on
+    /// `Value` — kglite does not depend on polars. `update_node_properties`,
     /// `purge_provisional_nodes`, and
     /// `extend_graph` (merge one graph into another) round out the
     /// generic, non-Selection mutation surface. `create_connections`
     /// (edge-create between the two ends of a selection) is here too, since
     /// `CurrentSelection` is itself an api type.
     pub mod mutation {
+        /// The bulk-ingest container and its column vocabulary.
+        /// `DataFrame::new` declares columns by [`ColumnType`] and
+        /// `DataFrame::add_column` fills one from the matching [`ColumnData`]
+        /// variant, so all three are needed to build a frame at all —
+        /// `from_cypher_rows` is the only route that skips them.
+        pub use crate::datatypes::values::{ColumnData, ColumnType, DataFrame};
         /// Structured mutation reports — what a write touched (nodes/edges
         /// created/updated/deleted, per operation). Returned by the mutation
         /// functions above; every binding surfaces them after a mutating call.
@@ -387,6 +414,10 @@ pub mod api {
     /// agent-facing schema from.
     pub mod introspection {
         pub use crate::graph::introspection::bug_report::write_bug_report;
+        /// What [`derive_edge_counts_from_triples`] folds a triple list into:
+        /// per-edge-type totals plus each type's endpoint sets, so a caller
+        /// that already holds the triples needs no second scan for either.
+        pub use crate::graph::introspection::connectivity::DerivedEdgeStats;
         /// Debug-string helpers (schema / selection dumps) for diagnostics.
         pub use crate::graph::introspection::debugging;
         pub use crate::graph::introspection::describe::{compute_description, mcp_quickstart};
@@ -399,6 +430,25 @@ pub mod api {
             ConnectionDetail, ConnectionTypeStats, CypherDetail, FluentDetail, SchemaOverview,
             EXACT_PROPERTY_STATS_MAX_NODES,
         };
+        /// Core-type-count tier classification — the four ranges `describe()`
+        /// adapts its output by (supporting types, those with a parent, are not
+        /// counted). Exported so a consumer that renders a graph reads the
+        /// thresholds from here instead of copying them, which drifts silently.
+        pub use crate::graph::introspection::{graph_scale, GraphScale};
+        /// Result types of the `compute_*` functions above:
+        /// `NodeTypeOverview` is one [`SchemaOverview::node_types`] entry,
+        /// `NeighborsSchema` / `NeighborConnection` are
+        /// [`compute_neighbors_schema`]'s answer, and `PropertyStatInfo` is
+        /// [`compute_property_stats`]'.
+        pub use crate::graph::introspection::{
+            NeighborConnection, NeighborsSchema, NodeTypeOverview, PropertyStatInfo,
+        };
+        /// One row of the type-level cardinality graph —
+        /// `(src)-[conn]->(tgt)` and its edge count.
+        /// [`compute_type_connectivity`] computes them in one O(E) pass;
+        /// `DirGraph::get_or_compute_type_connectivity` serves the copy
+        /// persisted in the `.kgl`.
+        pub use crate::graph::schema::ConnectivityTriple;
     }
 
     /// Graph I/O: `.kgl` load/save, format exporters (GraphML / GEXF /

@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The `kglite::api` facade now exports the types its own signatures name.**
+  A Rust downstream previously had to hand-mirror them or reach past the
+  curated surface into `kglite::datatypes::*`, and a mirrored copy drifts
+  silently. New paths, all re-exports of existing types (no behaviour change):
+  `api::mutation::{DataFrame, ColumnType, ColumnData}` — the bulk-ingest
+  container `add_nodes` / `add_connections` / `replace_connections` take, and
+  the two types needed to fill one; `api::PropMap` — the property container
+  behind `Value::Map`, `NodeValue::properties`, `RelValue::properties` and
+  `ColumnData::Map`; `api::GraphEdgeRef` — the item type of every `GraphRead`
+  edge iterator; `api::GraphInfo` — what `DirGraph::graph_info()` returns;
+  `api::introspection::{ConnectivityTriple, DerivedEdgeStats, NodeTypeOverview,
+  NeighborsSchema, NeighborConnection, PropertyStatInfo}` — the result types of
+  the already-exported `compute_*` / `derive_*` functions and of
+  `DirGraph::get_or_compute_type_connectivity()`; and
+  `api::introspection::{graph_scale, GraphScale}` — the four-tier core-type-count
+  classification `describe()` adapts its output by, so a consumer stops copying
+  the thresholds. `GraphScale` gains `Debug`/`Clone`/`Copy`/`PartialEq`/`Eq`.
+
 ### Changed
 
 - **BREAKING — `max_rows` is renamed `max_work_units` on every surface.** The

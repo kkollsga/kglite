@@ -259,7 +259,7 @@ development needed per binding.
 | `kglite::api::*` | **The documented surface**, CI-baseline-locked. Pre-1.0, any release — patch included — may ship a documented break, announced in `CHANGELOG.md`. |
 | `kglite::error::*` | Same policy as `api::*`: documented breaks may land in any pre-1.0 release. |
 | `kglite::graph::*` (raw module path) | **Internal**. Subject to reorganization. Always go through `api::*` re-exports. |
-| `kglite::datatypes::*` (raw module path) | Internal — use `api::{Value, NodeValue, PathValue, RelValue}`. |
+| `kglite::datatypes::*` (raw module path) | Internal — use `api::{Value, NodeValue, PathValue, RelValue, PropMap}` and, for bulk ingest, `api::mutation::{DataFrame, ColumnType, ColumnData}`. |
 | Public items outside the curated `api::*` boundary | **Unstable** implementation detail; do not bind them. |
 
 If you depend on something outside `api::*`, you're on your own

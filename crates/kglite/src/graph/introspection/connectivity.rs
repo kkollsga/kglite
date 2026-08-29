@@ -18,6 +18,13 @@ type CountMap = HashMap<(InternedKey, InternedKey, InternedKey), usize>;
 /// shard-and-merge scan over `edge_endpoints` — an 8–10× wall-clock win on
 /// multi-core machines for billion-edge graphs. Memory and Mapped keep the
 /// single-threaded path (see [`compute_serial`]).
+///
+/// **This is the fill, not the read.** `DirGraph::get_or_compute_type_connectivity`
+/// answers with the same triples out of the cache persisted in the `.kgl` — an
+/// `O(triples)` clone — and calls this only when that cache is cold. Reach for
+/// this one when a *fresh* compute is the point: no usable cache, or a
+/// recomputation you are about to install with `set_type_connectivity`.
+/// Calling it per request instead walks every edge of the graph each time.
 pub fn compute_type_connectivity(graph: &DirGraph) -> Vec<ConnectivityTriple> {
     let backend = &graph.graph;
 
