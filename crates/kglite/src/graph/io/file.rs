@@ -2253,5 +2253,8 @@ pub use vector_persistence::{
     export_embeddings_to_file, import_embeddings_from_file, EmbeddingExportFilter, ImportStats,
 };
 #[cfg(test)]
+#[path = "file_load_contract_tests.rs"]
+mod file_load_contract_tests;
+#[cfg(test)]
 #[path = "file_tests.rs"]
 mod file_tests;
