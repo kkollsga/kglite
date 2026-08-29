@@ -10,8 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **`KGLITE_TMPDIR` redirects the `.kgl` load spill directory.** Loading a
-  graph with a column section of 256 KB or more mints
-  `$TMPDIR/kglite_portable_<pid>_<nanos>/` and writes the blob there to be
+  graph with a column blob of 256 KB or more mints
+  `$TMPDIR/kglite_portable_<pid>_<tick><seq>/` and writes the blob there to be
   mmap'd. Set `KGLITE_TMPDIR` to a non-empty path to put those directories —
   and the orphan sweep below — on a chosen volume instead; unset or empty
   keeps `std::env::temp_dir()`. Useful where `$TMPDIR` is small, RAM-backed,
@@ -19,6 +19,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   volume, wherever the graph lives).
 
 ### Fixed
+
+- **Concurrent `.kgl` loads in one process could fail with a bare OS error.**
+  Every load mints a spill directory named `kglite_portable_<pid>_<clock>`, and
+  the clock is not a unique value — `CLOCK_REALTIME` advances in ~41.7 ns steps
+  on arm64 macOS, so two threads loading at the same moment read the same
+  nanosecond and got the *same* directory. The first graph dropped then ran
+  `remove_dir_all` over the tree the second was still using, and the loser's
+  next syscall failed: measured at roughly 1 in 600 loads with 16 threads
+  reading one small file, surfacing as `EEXIST` ("File exists"), `EINVAL`
+  ("Invalid argument") or `ENOENT` out of `load_file`, with nothing in the
+  error to say what had happened. A downstream hit two of those three on a
+  12 KB fixture during a concurrent test run. Directory names now carry a
+  process-global sequence number, so two loads can never name the same
+  directory whatever the clock says.
+
+- **A load with nothing to spill no longer creates a temp directory.** The
+  spill directory was minted per column section at load time, before anything
+  knew whether a column would be written there — so loading a small `.kgl`,
+  whose every column is far below the 256 KB mmap threshold, still ran `mkdir`
+  under a shared `$TMPDIR` and left an empty tree behind if the process was
+  killed. The directory is now created at the first blob actually written to
+  it. A `.kgl` with no large column touches no path but its own.
+
+- **Load errors now name the operation and the path.** `load_file` reports
+  through `io::Error`, and a failing syscall's error went out exactly as the OS
+  produced it: `Os { code: 17, kind: AlreadyExists }` from a function called
+  "load", with no way to tell which syscall, which path, or whether the failure
+  was even kglite's. Every syscall on the load path — opening and stat'ing the
+  file, reading it, mapping it, and writing or mapping a spill column — now
+  wraps its error as `opening '<path>': No such file or directory (os error 2)`.
+  The `ErrorKind` is unchanged (consumers classify on it) and the OS errno stays
+  in the message.
+
+- **A malformed `.kgl` is now reported as a format error, not an I/O error.**
+  Bad magic, a container or core-data version from the future, the v3 hard
+  break, and the pre-provenance embeddings break all raised
+  `io::ErrorKind::Other`, while the v4 break, truncation and digest failures
+  raised `InvalidData`. Consumers classify on that kind: the C ABI mapped the
+  first group to `KGLITE_ERR_FILE_IO` — contradicting `kglite_load_file`'s own
+  documented `KGLITE_ERR_FILE_FORMAT` ("file isn't a valid `.kgl`") — so a C
+  consumer handed a CSV was told to retry the I/O. Every refusal that is a
+  statement about the file's bytes is now `InvalidData` /
+  `KGLITE_ERR_FILE_FORMAT`; `Other` is left for failures that are about neither
+  the bytes nor a syscall. Python is unaffected: the wheel already mapped
+  everything but not-found and permission-denied to `FileFormatError`.
 
 - **Spill directories orphaned by a killed process are now reclaimed.**
   Cleanup was drop-based only — the last `DirGraph` holding the paths removed

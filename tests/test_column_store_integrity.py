@@ -321,13 +321,35 @@ class TestKglRoundtrip:
 
 
 class TestTempDirCleanup:
-    def test_load_cleans_temp_dir_on_drop(self, person_graph, tmp_path):
-        """Temp dirs created during portable load are cleaned up on drop."""
+    """The spill directory a portable load mmaps its big columns out of.
+
+    Both tests used ``person_graph`` — five rows, whose every column packs
+    into a few hundred bytes. Nothing in that load can clear the 256 KB spill
+    threshold, so what they pinned was an *empty* directory being minted and
+    removed, and a loader that stopped minting it would have failed them for
+    doing the right thing. They spill for real now.
+    """
+
+    @staticmethod
+    def _spilling_graph():
+        """A graph whose ``Doc.body`` column packs well past 256 KB."""
+        kg = kglite.KnowledgeGraph()
+        df = pd.DataFrame(
+            {
+                "id": list(range(4000)),
+                "body": ["x" * 128] * 4000,
+            }
+        )
+        kg.add_nodes(df, "Doc", "id", "id")
+        return kg
+
+    def test_load_cleans_temp_dir_on_drop(self, tmp_path):
+        """Temp dirs created during a spilling load are cleaned up on drop."""
         import gc
         import glob
 
         fp = str(tmp_path / "cleanup.kgl")
-        person_graph.save(fp)
+        self._spilling_graph().save(fp)
 
         # The pid-scoped pattern can also match graphs other tests left alive in
         # this process, so measure the DELTA this test creates, not an absolute
@@ -337,9 +359,12 @@ class TestTempDirCleanup:
         baseline = set(glob.glob(pattern))
 
         kg2 = kglite.load(fp)
-        assert kg2.graph_info()["node_count"] == 5
+        assert kg2.graph_info()["node_count"] == 4000
         created = set(glob.glob(pattern)) - baseline
         assert created, f"Expected a new temp dir matching {pattern}"
+        assert any(os.listdir(d) for d in created), (
+            f"the load minted a directory but spilled nothing into it: {created}"
+        )
 
         # Drop the graph — the dir(s) it created must be gone (gc.collect forces
         # the Rust Drop to run promptly).
@@ -348,13 +373,36 @@ class TestTempDirCleanup:
         leaked = created & set(glob.glob(pattern))
         assert not leaked, f"Temp dirs leaked: {leaked}"
 
-    def test_multiple_loads_no_leak(self, person_graph, tmp_path):
+    def test_a_load_with_nothing_to_spill_creates_no_temp_dir(self, person_graph, tmp_path):
+        """Five rows spill nothing, so they earn no directory in $TMPDIR.
+
+        A load that mints a directory it never writes to still races every
+        other load for that name, and still leaves the tree behind when the
+        process is killed — which is how a downstream accumulated thousands of
+        empty ones.
+        """
+        import glob
+
+        fp = str(tmp_path / "small.kgl")
+        person_graph.save(fp)
+        assert os.path.getsize(fp) < 256 * 1024
+
+        pid = os.getpid()
+        pattern = os.path.join(tempfile.gettempdir(), f"kglite_portable_{pid}_*")
+        baseline = set(glob.glob(pattern))
+
+        kg2 = kglite.load(fp)
+        assert kg2.graph_info()["node_count"] == 5
+        created = set(glob.glob(pattern)) - baseline
+        assert not created, f"a load with nothing to spill wrote to $TMPDIR: {created}"
+
+    def test_multiple_loads_no_leak(self, tmp_path):
         """Multiple load/drop cycles don't accumulate temp dirs."""
         import gc
         import glob
 
         fp = str(tmp_path / "multi.kgl")
-        person_graph.save(fp)
+        self._spilling_graph().save(fp)
 
         pid = os.getpid()
         pattern = os.path.join(tempfile.gettempdir(), f"kglite_portable_{pid}_*")
@@ -362,7 +410,7 @@ class TestTempDirCleanup:
 
         for _ in range(5):
             kg = kglite.load(fp)
-            assert kg.graph_info()["node_count"] == 5
+            assert kg.graph_info()["node_count"] == 4000
             del kg
             gc.collect()
 

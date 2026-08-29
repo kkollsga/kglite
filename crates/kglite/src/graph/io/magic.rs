@@ -10,6 +10,14 @@
 
 use std::io;
 
+/// Every refusal here is a statement about the file's bytes, so every one of
+/// them is `InvalidData` — the kind `kglite-c` reports as
+/// `KGLITE_ERR_FILE_FORMAT` and the wheel as `FileFormatError`. See the rule
+/// on `io::file::invalid_data`.
+fn invalid_data(message: String) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
+}
+
 /// Magic bytes for the v3 columnar format: "RGF\x03". Retained ONLY
 /// so the loader can detect a v3 file and emit a specific
 /// "rebuild your graph" error rather than a generic "unrecognized".
@@ -54,7 +62,7 @@ pub(crate) const V3_HARD_BREAK_MSG: &str = "kglite .kgl file format v3 is not su
      with kglite.from_blueprint('backup/blueprint.json').";
 
 pub(crate) fn newer_portable_format_error(version: u8) -> io::Error {
-    io::Error::other(format!(
+    invalid_data(format!(
         "File uses .kgl container version {version}, but this library only supports up to version {}. Please upgrade kglite.",
         V6_MAGIC[3]
     ))
@@ -80,7 +88,7 @@ pub(crate) fn newer_portable_format_error(version: u8) -> io::Error {
 /// the message is actionable when several files are being loaded at once.
 pub(crate) fn unrecognized_magic_error(prefix: &[u8], origin: &str) -> io::Error {
     if prefix.len() >= 3 && prefix[..3] == V6_MAGIC[..3] {
-        return io::Error::other(format!(
+        return invalid_data(format!(
             "Unrecognized .kgl container version {} in {origin}. This file was saved with an \
              older version of kglite. Please rebuild the graph with the current version and \
              save again. If you no longer have the original source but can still run the old \
@@ -89,7 +97,7 @@ pub(crate) fn unrecognized_magic_error(prefix: &[u8], origin: &str) -> io::Error
             prefix.get(3).copied().unwrap_or(0)
         ));
     }
-    io::Error::other(format!(
+    invalid_data(format!(
         "{origin} is not a kglite graph: it does not start with the .kgl container magic \
          \"RGF\" (first bytes: {}). Check the path — a disk-mode graph is a directory, not a \
          file inside it, and every .kgl kglite has ever written begins with RGF.",

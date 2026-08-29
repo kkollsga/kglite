@@ -2381,3 +2381,138 @@ mod byte_determinism_tests {
         );
     }
 }
+
+/// What a failing load *says*, and what kind it says it with.
+///
+/// Both are consumer contracts. The kind is what the C ABI
+/// (`classify_io_error`) and the wheel (`load_err_to_pyerr`) classify on —
+/// `InvalidData` means "this file is not readable, rebuild it", anything else
+/// means "the I/O failed, maybe retry" — and the message is the only thing a
+/// human gets. A bare `Os { code: 17 }` from a function called "load" cost a
+/// downstream two debugging sessions on 0.16.14; every syscall in the load path
+/// now names its operation and its path.
+#[cfg(test)]
+mod load_error_reporting_tests {
+    use super::*;
+    use crate::datatypes::{DataFrame, Value};
+    use crate::graph::dir_graph::DirGraph;
+
+    fn tiny_bytes() -> Vec<u8> {
+        let mut g = DirGraph::new();
+        let rows: Vec<Vec<Value>> = (1..=3i64)
+            .map(|i| vec![Value::Int64(i), Value::String(format!("t{i}"))])
+            .collect();
+        let df =
+            DataFrame::from_cypher_rows(vec!["id".to_string(), "title".to_string()], rows).unwrap();
+        crate::graph::mutation::maintain::add_nodes(
+            &mut g,
+            df,
+            "Doc".to_string(),
+            "id".to_string(),
+            Some("title".to_string()),
+            None,
+        )
+        .unwrap();
+        let mut arc = Arc::new(g);
+        prepare_save(&mut arc);
+        Arc::make_mut(&mut arc).enable_columnar();
+        let mut bytes = Vec::new();
+        write_kgl_to(&arc, &mut bytes).unwrap();
+        bytes
+    }
+
+    fn load_bytes_from_file(bytes: &[u8]) -> io::Error {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph.kgl");
+        std::fs::write(&path, bytes).unwrap();
+        load_file(path.to_str().unwrap())
+            .err()
+            .expect("these bytes must not load")
+    }
+
+    #[test]
+    fn a_missing_file_names_the_operation_and_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("absent.kgl");
+        let error = load_file(path.to_str().unwrap())
+            .err()
+            .expect("a missing path must not load");
+
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        let text = error.to_string();
+        assert!(text.contains("opening"), "no operation named: {text}");
+        assert!(
+            text.contains(path.to_str().unwrap()),
+            "no path named: {text}"
+        );
+        assert!(
+            text.contains("os error"),
+            "the OS errno must survive the wrap: {text}"
+        );
+    }
+
+    /// The small-file branch (`< FILE_MMAP_THRESHOLD`, `std::fs::read`) and the
+    /// mmap branch classify the same way — a header this build has no reader
+    /// for is a statement about the bytes.
+    #[test]
+    fn a_file_that_is_not_a_kgl_is_invalid_data_in_both_branches() {
+        let small = load_bytes_from_file(b"id,title\n1,x\n");
+        assert_eq!(small.kind(), io::ErrorKind::InvalidData, "{small}");
+        assert!(small.to_string().contains("RGF"), "{small}");
+
+        let large = load_bytes_from_file(&vec![b'z'; 70_000]);
+        assert_eq!(large.kind(), io::ErrorKind::InvalidData, "{large}");
+    }
+
+    #[test]
+    fn a_header_too_short_to_classify_is_invalid_data() {
+        let error = load_bytes_from_file(b"RG");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+
+        let from_buffer = load_kgl_bytes(b"RG")
+            .err()
+            .expect("two bytes are not a graph");
+        assert_eq!(from_buffer.kind(), io::ErrorKind::InvalidData);
+    }
+
+    /// The deliberate format breaks are refusals about the file's content, so
+    /// they classify with the rest of them. v4 already did; v3 and the
+    /// pre-provenance embeddings break said `Other`, which the C ABI reports as
+    /// an I/O fault.
+    #[test]
+    fn the_deliberate_format_breaks_are_invalid_data() {
+        for magic in [V3_MAGIC, V4_MAGIC] {
+            let mut bytes = magic.to_vec();
+            bytes.extend_from_slice(&[0u8; 32]);
+            let from_file = load_bytes_from_file(&bytes);
+            assert_eq!(
+                from_file.kind(),
+                io::ErrorKind::InvalidData,
+                "{:?}: {from_file}",
+                magic
+            );
+            let from_buffer = load_kgl_bytes(&bytes)
+                .err()
+                .expect("a broken-format container must not load");
+            assert_eq!(from_buffer.kind(), io::ErrorKind::InvalidData);
+        }
+    }
+
+    #[test]
+    fn a_container_version_from_the_future_is_invalid_data() {
+        let mut bytes = tiny_bytes();
+        bytes[3] = V6_MAGIC[3] + 1;
+        let error = load_bytes_from_file(&bytes);
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        assert!(error.to_string().contains("upgrade kglite"), "{error}");
+    }
+
+    #[test]
+    fn a_core_data_version_from_the_future_is_invalid_data() {
+        let mut bytes = tiny_bytes();
+        bytes[5..9].copy_from_slice(&99u32.to_le_bytes());
+        let error = load_bytes_from_file(&bytes);
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        assert!(error.to_string().contains("core data version"), "{error}");
+    }
+}

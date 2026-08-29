@@ -1068,6 +1068,34 @@ mod tests {
         unsafe { crate::kglite_free_string(err) };
     }
 
+    /// The documented contract of this entry point: `KGLITE_ERR_FILE_FORMAT`
+    /// means "the file isn't a valid `.kgl`". It is derived from the loader's
+    /// `io::ErrorKind`, so a refusal the loader classified as anything but
+    /// `InvalidData` reaches a C consumer as `KGLITE_ERR_FILE_IO` — an I/O
+    /// fault it might retry — which is what every bad-magic, wrong-version and
+    /// deliberate-format-break refusal did until 0.16.15.
+    #[test]
+    fn load_a_file_that_is_not_a_kgl_returns_file_format() {
+        // No `tempfile` dev-dependency here: this crate's manifest is a
+        // published-package surface, and one temp file does not earn an edit
+        // to it.
+        let file = std::env::temp_dir().join(format!(
+            "kglite_c_not_a_graph_{}_{:?}.csv",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&file, b"id,title\n1,x\n").unwrap();
+        let path = CString::new(file.to_str().unwrap()).unwrap();
+        let mut graph: *mut KgliteGraph = std::ptr::null_mut();
+        let mut err: *const c_char = std::ptr::null();
+        let rc =
+            unsafe { kglite_load_file(path.as_ptr(), &mut graph as *mut _, &mut err as *mut _) };
+        let _ = std::fs::remove_file(&file);
+        assert_eq!(rc, KgliteStatusCode::FileFormat);
+        assert!(graph.is_null());
+        unsafe { crate::kglite_free_string(err) };
+    }
+
     #[test]
     fn load_null_path_returns_null_pointer() {
         let mut graph: *mut KgliteGraph = std::ptr::null_mut();

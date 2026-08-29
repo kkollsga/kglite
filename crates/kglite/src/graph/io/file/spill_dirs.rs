@@ -1,9 +1,10 @@
 //! Where a portable `.kgl` load spills its mmap-backed column blobs, and who
 //! reclaims the ones a killed process left behind.
 //!
-//! A load with any column section of 256 KB or more mints
-//! `<root>/kglite_portable_<pid>_<nanos_hex>/` and writes the blob there so the
-//! column can be mmap'd instead of heap-allocated. `<root>` is `KGLITE_TMPDIR`
+//! A load with any column blob of 256 KB or more mints
+//! `<root>/kglite_portable_<pid>_<nanos_hex><seq_hex>/` and writes the blob
+//! there so the column can be mmap'd instead of heap-allocated. A load with no
+//! such blob — every small `.kgl` — creates nothing. `<root>` is `KGLITE_TMPDIR`
 //! when it is set and non-empty, otherwise [`std::env::temp_dir`].
 //!
 //! Ownership is drop-based — the paths are registered on the loaded `DirGraph`
@@ -45,33 +46,59 @@ fn spill_root() -> PathBuf {
     }
 }
 
+/// Distinguishes two spill directories minted inside one clock tick. The pid
+/// separates processes and the clock orders the directories a process minted,
+/// but the clock is not a unique value: `CLOCK_REALTIME` advances in ~41.7 ns
+/// steps on arm64 macOS, so two threads loading `.kgl` files at once do read
+/// the same nanosecond. Sharing a directory is a data race with `DirGraph`'s
+/// drop — the first graph released removes the tree the second is still
+/// filling — and it reproduced as `EEXIST`, `EINVAL` and `ENOENT` out of
+/// `load_file` at roughly 1 in 600 concurrent loads before this counter
+/// existed.
+static NEXT_SPILL_DIR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The name of one spill directory, as a pure function of its inputs so the
+/// uniqueness it promises is testable.
+///
+/// `seq` is fixed-width so that two names are equal only when both inputs are:
+/// a variable-width counter could pair a different tick with a different
+/// sequence and spell the same directory.
+fn spill_dir_name(pid: u32, nanos: u128, seq: u64) -> String {
+    format!("{SPILL_PREFIX}{pid}_{nanos:x}{seq:016x}")
+}
+
 /// A fresh, unique spill directory for this load, after this process has taken
 /// its one turn at reclaiming dead predecessors' directories.
+///
+/// The path is a *name*, not a directory: nothing is created here, and a load
+/// whose columns all stay on the heap creates nothing at all (the spill writer
+/// mints the tree on its first blob — see `ColumnStore::load_typed_vec`).
 pub(super) fn portable_temp_dir() -> PathBuf {
     sweep_once();
-    spill_root().join(format!(
-        "kglite_portable_{}_{:x}",
+    spill_root().join(spill_dir_name(
         std::process::id(),
         SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_nanos()
+            .as_nanos(),
+        NEXT_SPILL_DIR.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
     ))
 }
 
 /// The pid encoded in a spill-directory name, or `None` for any name that is
-/// not exactly `kglite_portable_<decimal pid>_<lowercase hex nanos>`.
+/// not exactly `kglite_portable_<decimal pid>_<lowercase hex suffix>`, where the
+/// suffix is the tick and sequence [`spill_dir_name`] joins.
 ///
 /// Strict on purpose: this predicate is the entire guard between the sweep and
 /// whatever else shares the temp root, so anything it cannot fully account for
 /// is somebody else's and is left alone.
 fn parse_spill_pid(name: &str) -> Option<u32> {
     let rest = name.strip_prefix(SPILL_PREFIX)?;
-    let (pid, nanos) = rest.split_once('_')?;
+    let (pid, suffix) = rest.split_once('_')?;
     if pid.is_empty() || !pid.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    if nanos.is_empty() || !nanos.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if suffix.is_empty() || !suffix.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     // A pid that does not fit `u32` was never written by `std::process::id()`,
@@ -224,6 +251,30 @@ mod tests {
         let pid = child.id();
         child.wait().unwrap();
         pid
+    }
+
+    /// Two loads that read the same clock tick must still get their own
+    /// directory. The name's only varying part was the wall clock, and
+    /// `CLOCK_REALTIME` is not a per-call unique value: on arm64 macOS it
+    /// advances in ~41.7 ns steps, so two threads loading `.kgl` files at once
+    /// can read the same nanosecond. Sharing a directory means the first graph
+    /// dropped runs `remove_dir_all` over the second's spill files while it is
+    /// still filling them — its next `create_dir_all`/`write` fails, or the
+    /// column it already mapped is the last reference to a deleted file.
+    #[test]
+    fn two_spills_reading_one_clock_tick_get_different_directories() {
+        let pid = std::process::id();
+        let tick = 0x1234_5678_9abc_u128;
+        let first = spill_dir_name(pid, tick, 0);
+        let second = spill_dir_name(pid, tick, 1);
+        assert_ne!(
+            first, second,
+            "two loads in one clock tick shared a spill directory"
+        );
+        // Both must stay sweepable: the janitor only reclaims names it can
+        // fully parse (see `parse_spill_pid`).
+        assert_eq!(parse_spill_pid(&first), Some(pid));
+        assert_eq!(parse_spill_pid(&second), Some(pid));
     }
 
     #[test]

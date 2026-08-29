@@ -18,6 +18,7 @@ use typed_column::{MMAP_THRESHOLD, NEXT_TEMP_COLUMN_FILE};
 
 use crate::datatypes::values::Value;
 use crate::graph::core::filtering::str_values_equal;
+use crate::graph::io::file::io_context;
 use crate::graph::schema::{InternedKey, StringInterner, TypeSchema};
 use crate::graph::storage::mapped::mmap_vec::{MmapBytes, MmapOrVec};
 use crate::graph::storage::packed_codec::{
@@ -1722,8 +1723,11 @@ impl ColumnStore {
 
     /// Load columns from the portable packed byte representation.
     ///
-    /// If `temp_dir` is `Some`, writes column data to temp files and mmaps them
-    /// (for larger-than-RAM support). If `None`, loads into heap.
+    /// If `temp_dir` is `Some`, a column of [`MMAP_THRESHOLD`] bytes or more is
+    /// written to a file there and mmap'd (for larger-than-RAM support);
+    /// smaller ones, and every column when it is `None`, load onto the heap.
+    /// The directory is created at the first such write, so a `Some` whose
+    /// columns all stay small leaves nothing on disk.
     pub fn load_packed(
         schema: Arc<TypeSchema>,
         type_meta: &HashMap<String, String>,
@@ -2191,6 +2195,15 @@ impl ColumnStore {
         Ok(TypedColumn::Mixed { data })
     }
 
+    /// Create the spill directory for a column that is about to be written to
+    /// it. Called at the write, never at the load: a `.kgl` whose every column
+    /// stays under [`MMAP_THRESHOLD`] must leave no directory behind, and a
+    /// mkdir a load does not need is one more thing to race with another
+    /// load's cleanup.
+    fn mint_spill_dir(dir: &Path) -> io::Result<()> {
+        std::fs::create_dir_all(dir).map_err(|e| io_context("creating the spill directory", dir, e))
+    }
+
     fn load_typed_vec<T: PackedElement>(
         bytes: &[u8],
         len: usize,
@@ -2216,11 +2229,19 @@ impl ColumnStore {
 
         // Skip mmap for small columns — file I/O overhead exceeds memory savings.
         if let Some(dir) = temp_dir.filter(|_| bytes.len() >= MMAP_THRESHOLD) {
+            Self::mint_spill_dir(dir)?;
             let file_id = NEXT_TEMP_COLUMN_FILE.fetch_add(1, Ordering::Relaxed);
             let path = dir.join(format!("column_{file_id}.{ext}"));
             if cfg!(target_endian = "little") {
-                std::fs::write(&path, bytes)?;
+                std::fs::write(&path, bytes).map_err(|e| {
+                    io_context(
+                        &format!("writing a {}-byte spill column", bytes.len()),
+                        &path,
+                        e,
+                    )
+                })?;
                 MmapOrVec::load_mapped(&path, len)
+                    .map_err(|e| io_context("memory-mapping the spill column", &path, e))
             } else {
                 let mut data = MmapOrVec::mapped_prefilled(&path, len)?;
                 // Chunk size is an associated const; as_chunks needs generic_const_exprs.
@@ -2246,10 +2267,18 @@ impl ColumnStore {
     ) -> io::Result<MmapBytes> {
         // Skip mmap for small data — file I/O overhead exceeds memory savings
         if let Some(dir) = temp_dir.filter(|_| bytes.len() >= MMAP_THRESHOLD) {
+            Self::mint_spill_dir(dir)?;
             let file_id = NEXT_TEMP_COLUMN_FILE.fetch_add(1, Ordering::Relaxed);
             let path = dir.join(format!("column_{file_id}.{ext}"));
-            std::fs::write(&path, bytes)?;
+            std::fs::write(&path, bytes).map_err(|e| {
+                io_context(
+                    &format!("writing a {}-byte spill column", bytes.len()),
+                    &path,
+                    e,
+                )
+            })?;
             MmapBytes::load_mapped(&path, bytes.len())
+                .map_err(|e| io_context("memory-mapping the spill column", &path, e))
         } else {
             Ok(MmapBytes::Heap {
                 data: bytes.to_vec(),

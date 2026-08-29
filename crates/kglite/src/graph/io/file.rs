@@ -673,12 +673,13 @@ pub(crate) fn decode_disk_serde<'de, T: Deserialize<'de>>(
             .ok_or_else(|| invalid_data("disk codec frame is truncated"))?;
         let payload = &bytes[DISK_SERDE_MAGIC.len() + 1..];
         return serde_codec::decode_exact_with(
-            serde_codec::CodecVersion::from_tag(codec_tag).map_err(io::Error::other)?,
+            serde_codec::CodecVersion::from_tag(codec_tag)
+                .map_err(|e| invalid_data(format!("disk sidecar has an invalid codec tag: {e}")))?,
             payload,
             allocated_bytes,
             serde_codec::DecodeLimits::new(MAX_CODEC_BYTES, MAX_CODEC_BYTES),
         )
-        .map_err(io::Error::other);
+        .map_err(|e| invalid_data(format!("disk sidecar payload is undecodable: {e}")));
     }
     Err(pre_014_bincode_error("unframed disk sidecar"))
 }
@@ -1289,8 +1290,43 @@ const FILE_MMAP_THRESHOLD: u64 = 65_536; // 64 KB
 const MAX_METADATA_BYTES: usize = 64 * 1024 * 1024;
 const MAX_DECOMPRESSED_SECTION_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 
+/// The load path's error-kind rule, in one place.
+///
+/// **`InvalidData` is a statement about the bytes**: truncation, a magic this
+/// build has no reader for, a metadata parse failure, a digest mismatch, a
+/// deliberate format break (v3, v4, pre-provenance embeddings), a container or
+/// core-data version from the future. Every consumer classifies on it —
+/// `kglite-c`'s `classify_io_error` maps it to `KGLITE_ERR_FILE_FORMAT`
+/// ("file isn't a valid `.kgl`") and the wheel's `load_err_to_pyerr` to
+/// `FileFormatError` — and all of them mean the same thing to the operator:
+/// rebuild this file from its source, retrying the read will not help.
+///
+/// A **syscall** failure keeps whatever kind the OS gave it (`NotFound`,
+/// `PermissionDenied`, …) and gains its operation and path through
+/// [`io_context`]. `ErrorKind::Other` is left for the residue: a failure that
+/// is about neither the bytes nor a syscall, such as a storage-mode conversion
+/// that could not be completed after the file decoded fine.
 fn invalid_data(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
+}
+
+/// Name the operation and the path on an `io::Error` a syscall produced.
+///
+/// A load reports through `io::Error`, so an unwrapped one reaching a caller
+/// says only that *something* under `load_file` failed: a downstream spent two
+/// debugging sessions on a bare `Os { code: 17 }` and a bare
+/// `Os { code: 22 }` out of this call (0.16.14), with no way to tell which
+/// syscall, which path, or even whether the error was ours.
+///
+/// The kind is preserved because consumers classify on it, and the OS message
+/// keeps its own `(os error N)` suffix, so the only thing the rewrap costs is
+/// the `raw_os_error()` accessor — which nothing in the tree, or in any
+/// binding, reads off a load.
+pub(crate) fn io_context(operation: &str, path: impl AsRef<Path>, error: io::Error) -> io::Error {
+    io::Error::new(
+        error.kind(),
+        format!("{operation} '{}': {error}", path.as_ref().display()),
+    )
 }
 
 fn validate_and_rebuild_embedding_norms(
@@ -1389,17 +1425,21 @@ impl<'a> SectionCursor<'a> {
 /// wants [`crate::graph::io::open::open_or_create_graph`], which adds the
 /// recovery refusal, or a durable open, which replays.
 ///
-/// Reading a `.kgl` with column sections spills mmap-backed column blobs to a
-/// temp directory, with the ownership rules, `KGLITE_TMPDIR` override and
-/// orphan sweep [`load_kgl_bytes`] describes.
+/// Reading a `.kgl` that carries a column blob of 256 KB or more spills it to a
+/// temp directory to be mmap'd, with the ownership rules, `KGLITE_TMPDIR`
+/// override and orphan sweep [`load_kgl_bytes`] describes. A smaller `.kgl`
+/// touches no path but this one.
 pub fn load_file(path: &str) -> io::Result<Arc<DirGraph>> {
     let p = std::path::Path::new(path);
     if p.is_dir() {
         return load_disk_dir(p);
     }
 
-    let file = File::open(path)?;
-    let file_len = file.metadata()?.len();
+    let file = File::open(path).map_err(|e| io_context("opening", p, e))?;
+    let file_len = file
+        .metadata()
+        .map_err(|e| io_context("reading the metadata of", p, e))?
+        .len();
 
     // For large files, mmap avoids the full copy into a Vec<u8>
     if file_len >= FILE_MMAP_THRESHOLD {
@@ -1407,11 +1447,10 @@ pub fn load_file(path: &str) -> io::Result<Arc<DirGraph>> {
         // single-writer contract. Writers replace the destination atomically
         // rather than truncating it in place, so this opened inode remains
         // stable for the mapping's lifetime.
-        let mmap = unsafe { Mmap::map(&file)? };
+        let mmap = unsafe { Mmap::map(&file) }
+            .map_err(|e| io_context(&format!("memory-mapping {file_len} bytes of"), p, e))?;
         if mmap.len() < 4 {
-            return Err(io::Error::other(
-                "File is too small to be a valid kglite file.",
-            ));
+            return Err(invalid_data("File is too small to be a valid kglite file."));
         }
         if mmap[..4] == V6_MAGIC {
             return load_portable_container(&mmap, "v6");
@@ -1423,7 +1462,7 @@ pub fn load_file(path: &str) -> io::Result<Arc<DirGraph>> {
             return Err(pre_014_bincode_error(".kgl container v4"));
         }
         if mmap[..4] == V3_MAGIC {
-            return Err(io::Error::other(V3_HARD_BREAK_MSG));
+            return Err(invalid_data(V3_HARD_BREAK_MSG));
         }
         if mmap[..3] == V6_MAGIC[..3] && mmap[3] > V6_MAGIC[3] {
             return Err(newer_portable_format_error(mmap[3]));
@@ -1431,11 +1470,9 @@ pub fn load_file(path: &str) -> io::Result<Arc<DirGraph>> {
         return Err(unrecognized_magic_error(&mmap[..4], &format!("'{path}'")));
     }
 
-    let buf = std::fs::read(path)?;
+    let buf = std::fs::read(path).map_err(|e| io_context("reading", p, e))?;
     if buf.len() < 4 {
-        return Err(io::Error::other(
-            "File is too small to be a valid kglite file.",
-        ));
+        return Err(invalid_data("File is too small to be a valid kglite file."));
     }
     if buf[..4] == V6_MAGIC {
         load_portable_container(&buf, "v6")
@@ -1444,7 +1481,7 @@ pub fn load_file(path: &str) -> io::Result<Arc<DirGraph>> {
     } else if buf[..4] == V4_MAGIC {
         Err(pre_014_bincode_error(".kgl container v4"))
     } else if buf[..4] == V3_MAGIC {
-        Err(io::Error::other(V3_HARD_BREAK_MSG))
+        Err(invalid_data(V3_HARD_BREAK_MSG))
     } else if buf[..3] == V6_MAGIC[..3] && buf[3] > V6_MAGIC[3] {
         Err(newer_portable_format_error(buf[3]))
     } else {
@@ -1459,14 +1496,14 @@ pub fn load_file(path: &str) -> io::Result<Arc<DirGraph>> {
 /// the single-file in-memory format.
 ///
 /// **It does not read the `.kgl` from disk — the caller already holds the
-/// bytes. It is not filesystem-free.** Loading a graph that has column
-/// sections creates a per-process spill directory
-/// (`$TMPDIR/kglite_portable_<pid>_<nanos>/type_<n>/`) and writes any column
-/// blob of 256 KB or more into it so the column can be mmap'd instead of
-/// heap-allocated; smaller columns stay on the heap and the directory is left
-/// empty. The paths are registered on the returned graph, and the last
-/// `DirGraph` holding them removes the tree in `Drop` — so they live exactly
-/// as long as the graph.
+/// bytes. It is not filesystem-free** *when it has something big to map*: a
+/// column blob of 256 KB or more is written to a per-load spill directory
+/// (`$TMPDIR/kglite_portable_<pid>_<tick><seq>/type_<n>/`) so the column can be
+/// mmap'd instead of heap-allocated. Smaller columns stay on the heap and no
+/// directory is created — a graph whose every column is small touches nothing.
+/// The paths of the ones that are created are registered on the returned
+/// graph, and the last `DirGraph` holding them removes the tree in `Drop` — so
+/// they live exactly as long as the graph.
 ///
 /// **That drop is the only cleanup on this process's side.** A process killed
 /// by a signal, an OOM kill or a panic-abort never runs it and leaves the tree
@@ -1478,7 +1515,7 @@ pub fn load_file(path: &str) -> io::Result<Arc<DirGraph>> {
 /// somewhere other than `$TMPDIR`.
 pub fn load_kgl_bytes(data: &[u8]) -> io::Result<Arc<DirGraph>> {
     if data.len() < 4 {
-        return Err(io::Error::other(
+        return Err(invalid_data(
             "Byte buffer is too small to be a valid kglite graph.",
         ));
     }
@@ -1489,7 +1526,7 @@ pub fn load_kgl_bytes(data: &[u8]) -> io::Result<Arc<DirGraph>> {
     } else if data[..4] == V4_MAGIC {
         Err(pre_014_bincode_error(".kgl container v4"))
     } else if data[..4] == V3_MAGIC {
-        Err(io::Error::other(V3_HARD_BREAK_MSG))
+        Err(invalid_data(V3_HARD_BREAK_MSG))
     } else if data[..3] == V6_MAGIC[..3] && data[3] > V6_MAGIC[3] {
         Err(newer_portable_format_error(data[3]))
     } else {
@@ -1777,22 +1814,31 @@ fn load_disk_column_stores(dir: &std::path::Path, graph: &mut DirGraph) -> io::R
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .open(&mmap_path)?;
+            .open(&mmap_path)
+            .map_err(|e| io_context("opening", &mmap_path, e))?;
         // SAFETY: GraphDirectoryLock serializes disk-graph writers, which
         // publish a new immutable generation instead of truncating the
         // generation selected by this reader. This columns.bin inode remains
         // stable for the mapping's lifetime.
-        let mmap = unsafe { MmapMut::map_mut(&file)? };
+        let mmap = unsafe { MmapMut::map_mut(&file) }
+            .map_err(|e| io_context("memory-mapping", &mmap_path, e))?;
         let mmap_arc = std::sync::Arc::new(mmap);
 
         // Prefer the binary sidecar over JSON (slow for 295 MB).
         let type_metas: Vec<ColumnTypeMeta> = if meta_bin_path.exists() {
-            let compressed = std::fs::read(&meta_bin_path)?;
+            let compressed = std::fs::read(&meta_bin_path)
+                .map_err(|e| io_context("reading", &meta_bin_path, e))?;
             let bytes = zstd_decompress(&compressed)?;
             decode_disk_serde(&bytes, bytes.capacity() as u64)?
         } else {
-            let meta_json = std::fs::read_to_string(&meta_json_path)?;
-            serde_json::from_str(&meta_json).map_err(io::Error::other)?
+            let meta_json = std::fs::read_to_string(&meta_json_path)
+                .map_err(|e| io_context("reading", &meta_json_path, e))?;
+            serde_json::from_str(&meta_json).map_err(|e| {
+                invalid_data(format!(
+                    "disk graph column metadata '{}' is not valid JSON: {e}",
+                    meta_json_path.display()
+                ))
+            })?
         };
 
         // `columns.bin` bytes are untrusted disk input, but the hot string
@@ -2056,8 +2102,13 @@ fn load_portable_column_section(
         .get(&section_meta.type_name)
         .cloned()
         .unwrap_or_default();
+    // A *name* for this section's spill directory, not a directory: the column
+    // reader creates it when it has a blob to write there, and most sections
+    // never do. Creating it here made every load — including one of a 12 KB
+    // file that cannot spill a single column — mkdir under a shared `$TMPDIR`,
+    // and racing that mkdir against another load's cleanup is what returned
+    // bare `EEXIST`/`EINVAL`/`ENOENT` from `load_file`.
     let type_temp_dir = temp_dir.join(format!("type_{section_index}"));
-    std::fs::create_dir_all(&type_temp_dir)?;
     let store = ColumnStore::load_packed_with_codec(
         column_schema,
         &type_meta,
@@ -2097,7 +2148,7 @@ fn load_portable_optional_sections(
 ) -> io::Result<()> {
     if plan.embeddings > 0 {
         if core_version < EMBED_PROVENANCE_MIN_VERSION {
-            return Err(io::Error::other(EMBED_FORMAT_BREAK_MSG));
+            return Err(invalid_data(EMBED_FORMAT_BREAK_MSG));
         }
         let compressed = sections.take(plan.embeddings, EMBEDDINGS_SECTION)?;
         let raw = zstd_decompress(compressed)?;
@@ -2157,7 +2208,7 @@ fn load_portable_columnar(
     }
 
     if core_version > CURRENT_CORE_DATA_VERSION {
-        return Err(io::Error::other(format!(
+        return Err(invalid_data(format!(
             "File uses core data version {} but this library only supports up to version {}. \
              Please upgrade kglite.",
             core_version, CURRENT_CORE_DATA_VERSION,
