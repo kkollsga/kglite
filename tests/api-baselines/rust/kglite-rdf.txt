@@ -1473,6 +1473,22 @@ impl core::fmt::Debug for kglite::api::introspection::GraphScale
 pub fn kglite::api::introspection::GraphScale::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Copy for kglite::api::introspection::GraphScale
 impl core::marker::StructuralPartialEq for kglite::api::introspection::GraphScale
+pub enum kglite::api::introspection::IndexState
+pub kglite::api::introspection::IndexState::Deferred
+pub kglite::api::introspection::IndexState::Ready
+impl kglite::api::introspection::IndexState
+pub fn kglite::api::introspection::IndexState::as_str(self) -> &'static str
+impl core::clone::Clone for kglite::api::introspection::IndexState
+pub fn kglite::api::introspection::IndexState::clone(&self) -> kglite::api::introspection::IndexState
+impl core::cmp::Eq for kglite::api::introspection::IndexState
+impl core::cmp::PartialEq for kglite::api::introspection::IndexState
+pub fn kglite::api::introspection::IndexState::eq(&self, other: &kglite::api::introspection::IndexState) -> bool
+impl core::fmt::Debug for kglite::api::introspection::IndexState
+pub fn kglite::api::introspection::IndexState::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for kglite::api::introspection::IndexState
+pub fn kglite::api::introspection::IndexState::hash<__H: core::hash::Hasher>(&self, state: &mut __H)
+impl core::marker::Copy for kglite::api::introspection::IndexState
+impl core::marker::StructuralPartialEq for kglite::api::introspection::IndexState
 pub struct kglite::api::introspection::ConnectionTypeStats
 pub kglite::api::introspection::ConnectionTypeStats::connection_type: alloc::string::String
 pub kglite::api::introspection::ConnectionTypeStats::count: usize
@@ -1622,6 +1638,23 @@ impl core::convert::From<kglite::api::io::LeaseRefusal> for core::io::error::Err
 pub fn core::io::error::Error::from(refusal: kglite::api::io::LeaseRefusal) -> Self
 impl core::fmt::Debug for kglite::api::io::LeaseRefusal
 pub fn kglite::api::io::LeaseRefusal::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct kglite::api::io::LoadOptions
+pub kglite::api::io::LoadOptions::defer_index_rebuild: bool
+pub kglite::api::io::LoadOptions::storage: core::option::Option<kglite::api::storage::StorageMode>
+impl kglite::api::io::LoadOptions
+pub fn kglite::api::io::LoadOptions::new() -> Self
+pub fn kglite::api::io::LoadOptions::with_defer_index_rebuild(self, defer: bool) -> Self
+pub fn kglite::api::io::LoadOptions::with_storage(self, mode: kglite::api::storage::StorageMode) -> Self
+impl core::clone::Clone for kglite::api::io::LoadOptions
+pub fn kglite::api::io::LoadOptions::clone(&self) -> kglite::api::io::LoadOptions
+impl core::cmp::Eq for kglite::api::io::LoadOptions
+impl core::cmp::PartialEq for kglite::api::io::LoadOptions
+pub fn kglite::api::io::LoadOptions::eq(&self, other: &kglite::api::io::LoadOptions) -> bool
+impl core::default::Default for kglite::api::io::LoadOptions
+pub fn kglite::api::io::LoadOptions::default() -> Self
+impl core::fmt::Debug for kglite::api::io::LoadOptions
+pub fn kglite::api::io::LoadOptions::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for kglite::api::io::LoadOptions
 pub struct kglite::api::io::NTriplesConfig
 pub kglite::api::io::NTriplesConfig::auto_type: bool
 pub kglite::api::io::NTriplesConfig::languages: core::option::Option<std::collections::hash::set::HashSet<alloc::string::String>>
@@ -1677,7 +1710,9 @@ pub fn kglite::api::io::ProgressSink::emit(&self, event: kglite::api::io::Progre
 pub fn kglite::api::io::export_embeddings_to_file(graph: &kglite::api::DirGraph, path: &str, filter: core::option::Option<&kglite::api::io::EmbeddingExportFilter>) -> core::io::error::Result<kglite::graph::io::file::vector_persistence::ExportStats>
 pub fn kglite::api::io::import_embeddings_from_file(graph: &mut kglite::api::DirGraph, path: &str) -> core::io::error::Result<kglite::api::io::ImportStats>
 pub fn kglite::api::io::load_file(path: &str) -> core::io::error::Result<alloc::sync::Arc<kglite::api::DirGraph>>
+pub fn kglite::api::io::load_file_with(path: &str, options: &kglite::api::io::LoadOptions) -> core::io::error::Result<alloc::sync::Arc<kglite::api::DirGraph>>
 pub fn kglite::api::io::load_kgl_bytes(data: &[u8]) -> core::io::error::Result<alloc::sync::Arc<kglite::api::DirGraph>>
+pub fn kglite::api::io::load_kgl_bytes_with(data: &[u8], options: &kglite::api::io::LoadOptions) -> core::io::error::Result<alloc::sync::Arc<kglite::api::DirGraph>>
 pub fn kglite::api::io::load_ntriples(graph: &mut kglite::api::DirGraph, path: &str, config: &kglite::api::io::NTriplesConfig) -> core::result::Result<kglite::graph::io::ntriples::NTriplesStats, alloc::string::String>
 pub fn kglite::api::io::load_rdf(graph: &mut kglite::api::DirGraph, path: &str, config: &kglite::api::io::RdfConfig) -> core::result::Result<kglite::api::io::RdfStats, alloc::string::String>
 pub fn kglite::api::io::materialize_disk_graph(graph: &mut alloc::sync::Arc<kglite::api::DirGraph>, path: &str) -> core::result::Result<(), kglite::api::io::SaveError>
@@ -2972,9 +3007,7 @@ pub fn kglite::api::DirGraph::lookup_by_id_readonly(&self, node_type: &str, id: 
 pub fn kglite::api::DirGraph::maybe_spill_columns(&mut self)
 pub fn kglite::api::DirGraph::new() -> Self
 pub fn kglite::api::DirGraph::node_view(&self, index: petgraph::graph_impl::NodeIndex) -> core::option::Option<kglite::api::NodeView<'_>>
-pub fn kglite::api::DirGraph::populate_index_keys(&mut self)
 pub fn kglite::api::DirGraph::rebuild_columns_to_heap(&mut self)
-pub fn kglite::api::DirGraph::rebuild_indices_from_keys(&mut self)
 pub fn kglite::api::DirGraph::rebuild_type_indices(&mut self)
 pub fn kglite::api::DirGraph::rebuild_type_indices_and_schemas(&mut self)
 pub fn kglite::api::DirGraph::rebuild_type_schemas(&mut self)
@@ -3047,7 +3080,9 @@ pub fn kglite::api::DirGraph::has_composite_index(&self, node_type: &str, proper
 pub fn kglite::api::DirGraph::has_index(&self, node_type: &str, property: &str) -> bool
 pub fn kglite::api::DirGraph::has_persistent_property_index(&self, node_type: &str, property: &str) -> bool
 pub fn kglite::api::DirGraph::list_composite_indexes(&self) -> alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<alloc::string::String>)>
+pub fn kglite::api::DirGraph::list_composite_indexes_with_state(&self) -> alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<alloc::string::String>, kglite::api::introspection::IndexState)>
 pub fn kglite::api::DirGraph::list_indexes(&self) -> alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
+pub fn kglite::api::DirGraph::list_indexes_with_state(&self) -> alloc::vec::Vec<(alloc::string::String, alloc::string::String, kglite::api::introspection::IndexState)>
 pub fn kglite::api::DirGraph::lookup_by_composite_index(&self, node_type: &str, properties: &[alloc::string::String], values: &[kglite::datatypes::values::Value]) -> core::option::Option<alloc::vec::Vec<petgraph::graph_impl::NodeIndex>>
 pub fn kglite::api::DirGraph::lookup_by_index(&self, node_type: &str, property: &str, value: &kglite::datatypes::values::Value) -> core::option::Option<alloc::vec::Vec<petgraph::graph_impl::NodeIndex>>
 pub fn kglite::api::DirGraph::lookup_range(&self, node_type: &str, property: &str, lower: core::ops::range::Bound<&kglite::datatypes::values::Value>, upper: core::ops::range::Bound<&kglite::datatypes::values::Value>) -> core::option::Option<alloc::vec::Vec<petgraph::graph_impl::NodeIndex>>
@@ -3071,6 +3106,11 @@ pub fn kglite::api::DirGraph::has_type_connectivity_cache(&self) -> bool
 pub fn kglite::api::DirGraph::property_ndv(&self, node_type: &str, property: &str) -> core::option::Option<usize>
 impl kglite::api::DirGraph
 pub fn kglite::api::DirGraph::independent_copy(&self) -> Self
+impl kglite::api::DirGraph
+pub fn kglite::api::DirGraph::indexes_deferred(&self) -> bool
+pub fn kglite::api::DirGraph::materialize_indexes(&mut self) -> bool
+pub fn kglite::api::DirGraph::populate_index_keys(&mut self)
+pub fn kglite::api::DirGraph::rebuild_indices_from_keys(&mut self)
 impl kglite::api::DirGraph
 pub fn kglite::api::DirGraph::insert_node_routed(&mut self, id: kglite::datatypes::values::Value, title: kglite::datatypes::values::Value, node_type: &str, properties: std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>) -> petgraph::graph_impl::NodeIndex
 impl core::clone::Clone for kglite::api::DirGraph

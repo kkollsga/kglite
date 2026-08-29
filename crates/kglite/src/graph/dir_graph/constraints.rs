@@ -151,8 +151,23 @@ impl DirGraph {
     /// Every declared unique constraint, as `(node_type, properties)`, sorted —
     /// `unique_indices` is a `HashMap`, so an unsorted listing would vary
     /// between runs. Backs `SHOW CONSTRAINTS`.
+    ///
+    /// **A listing, never a predicate** — the same rule as
+    /// [`DirGraph::list_indexes_with_state`], and the reason this is the only
+    /// constraint reader that may touch `unique_constraint_keys`. A deferred
+    /// load's constraints are listed from that declaration list, and carry no
+    /// state marker because there is nothing to mark: enforcement is
+    /// materialized before any write reaches it
+    /// (`DirGraph::indexes_deferred`), and the eager path's load-time
+    /// verification is discarded rather than reported, so the two loads are
+    /// observably identical here. [`Self::has_unique_constraint`] and
+    /// [`Self::has_unique_constraints`] stay on the maps.
     pub fn list_unique_constraints(&self) -> Vec<UniqueConstraintKey> {
-        let mut all: Vec<UniqueConstraintKey> = self.unique_indices.keys().cloned().collect();
+        let mut all: Vec<UniqueConstraintKey> = if self.indexes_deferred {
+            self.unique_constraint_keys.clone()
+        } else {
+            self.unique_indices.keys().cloned().collect()
+        };
         all.sort();
         all
     }

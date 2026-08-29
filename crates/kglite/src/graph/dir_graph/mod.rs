@@ -58,6 +58,7 @@ mod columnar_rebuild;
 pub mod constraints;
 mod disk_persistence;
 mod independent_copy;
+mod index_keys;
 pub mod index_layer;
 pub(crate) mod indexes;
 mod labels;
@@ -137,8 +138,17 @@ pub struct DirGraph {
     /// Reporting an index as *present* while its map is empty is what would:
     /// the matcher treats a value-miss on a covered index as proven-empty
     /// (`try_index_lookup`), so a declaration-backed `has_index` would turn
-    /// every indexed lookup into zero rows. Nothing may consult the
-    /// declaration lists to answer "is there an index".
+    /// every indexed lookup into zero rows. Nothing that *decides how to answer
+    /// a query* may consult the declaration lists.
+    ///
+    /// Three functions may, and they are the whole exception:
+    /// [`Self::list_indexes_with_state`],
+    /// [`Self::list_composite_indexes_with_state`] and
+    /// [`Self::list_unique_constraints`] — the listing lane behind
+    /// `SHOW INDEXES` / `SHOW CONSTRAINTS` / `describe()`, which reports the
+    /// declarations so an operator can see they are still there (marked
+    /// `DEFERRED` for the index kinds that have a state column). They answer a
+    /// different question from the predicates and must never be wired into one.
     ///
     /// Writes are the other half: `unique_claims` reads `unique_indices`, so a
     /// deferred graph would admit duplicates. Every route to a `&mut DirGraph`
@@ -681,14 +691,6 @@ fn warn_on_duplicate_ids(node_type: &str, entry_count: usize, unique_count: usiz
     } else if seen == 5 {
         eprintln!("warning: further duplicate-id warnings suppressed.");
     }
-}
-
-/// The keys of a hash map, sorted — the shape every persisted index-key
-/// snapshot takes (see [`DirGraph::populate_index_keys`]).
-fn sorted_keys<K: Ord + Clone, V>(map: &HashMap<K, V>) -> Vec<K> {
-    let mut keys: Vec<K> = map.keys().cloned().collect();
-    keys.sort_unstable();
-    keys
 }
 
 impl DirGraph {
@@ -1621,126 +1623,6 @@ impl DirGraph {
 
     pub fn _get_connection_mut(&mut self, index: EdgeIndex) -> Option<&mut EdgeData> {
         self.graph.edge_weight_mut(index)
-    }
-
-    /// Snapshot which property/composite/range indexes exist so they survive
-    /// serialization. Called automatically before save.
-    ///
-    /// Every list is sorted. Each source is a `HashMap` whose iteration order is
-    /// reseeded per process, and these lists are read back as sets
-    /// (`rebuild_indices_from_keys`, `rebuild_unique_indices_from_keys`), so the
-    /// order carries no meaning — imposing one is what makes two saves of the
-    /// same graph byte-identical.
-    pub fn populate_index_keys(&mut self) {
-        // A deferred graph's four maps are empty *by construction*, so
-        // snapshotting them would erase every declaration the file carries —
-        // and `prune_constraint_names` would drop every constraint name with
-        // them. The lists it would rebuild are already exactly the loaded
-        // declarations, canonicalized by `defer_index_rebuild_from_keys`, so
-        // the save writes the same bytes an eager load would have produced.
-        if self.indexes_deferred {
-            return;
-        }
-        self.property_index_keys = sorted_keys(&self.property_indices);
-        self.composite_index_keys = sorted_keys(&self.composite_indices);
-        self.range_index_keys = sorted_keys(&self.range_indices);
-        // Declared UNIQUE constraints persist the same way. `unique_indices`
-        // keys *are* the declaration list, so snapshotting them keeps the two
-        // from drifting when a constraint is dropped.
-        self.unique_constraint_keys = sorted_keys(&self.unique_indices);
-        // Constraint *names* cannot be re-derived from the enforcement
-        // structures, so unlike the lists above they are maintained live. Prune
-        // instead: a name whose declaration is gone must not be saved, or
-        // `DROP CONSTRAINT <name>` would resurrect it after a reload.
-        self.prune_constraint_names();
-    }
-
-    /// Rebuild property, composite and range indexes from the persisted key
-    /// lists. Called automatically after load.
-    ///
-    /// Unique constraints are rebuilt too. Any violation the loaded data already
-    /// contains is discarded here rather than failing the load — see
-    /// [`Self::rebuild_unique_indices_from_keys`] for why a `.kgl` must always
-    /// open, and use [`Self::verify_unique_constraints`] to audit on demand.
-    pub fn rebuild_indices_from_keys(&mut self) {
-        let prop_keys: Vec<IndexKey> = std::mem::take(&mut self.property_index_keys);
-        for (node_type, property) in &prop_keys {
-            self.create_index(node_type, property);
-        }
-        self.property_index_keys = prop_keys;
-
-        // A `.kgl` written before composite keys were canonicalized carries the
-        // declaration order; `create_composite_index` sorts it, so re-deriving
-        // the list from the rebuilt map keeps the snapshot and the live index
-        // agreeing on one spelling instead of persisting the old one again.
-        let comp_keys: Vec<CompositeIndexKey> = std::mem::take(&mut self.composite_index_keys);
-        for (node_type, properties) in &comp_keys {
-            let prop_refs: Vec<&str> = properties.iter().map(|s| s.as_str()).collect();
-            self.create_composite_index(node_type, &prop_refs);
-        }
-        self.composite_index_keys = sorted_keys(&self.composite_indices);
-
-        let range_keys: Vec<IndexKey> = std::mem::take(&mut self.range_index_keys);
-        for (node_type, property) in &range_keys {
-            self.create_range_index(node_type, property);
-        }
-        self.range_index_keys = range_keys;
-
-        let _preexisting_violations = self.rebuild_unique_indices_from_keys();
-    }
-
-    /// Record the declared indexes without building them: the deferred
-    /// counterpart of [`Self::rebuild_indices_from_keys`], and the only place
-    /// that sets [`Self::indexes_deferred`].
-    ///
-    /// Canonicalizes the four lists to the spelling the eager rebuild would
-    /// have persisted — `create_composite_index` sorts a composite key's
-    /// property names, and every list is stored sorted — so a deferred load
-    /// followed by a save writes the same bytes as an eager one.
-    ///
-    /// The load-time unique-constraint *verification* is dropped with the
-    /// rebuild, and that is observable nowhere: its violations are returned to
-    /// `rebuild_indices_from_keys`, which discards them, and `build_unique_index`
-    /// has no other effect. Enforcement is unaffected — the first write
-    /// materializes.
-    pub(crate) fn defer_index_rebuild_from_keys(&mut self) {
-        self.property_index_keys.sort_unstable();
-        self.property_index_keys.dedup();
-        for (_, properties) in self.composite_index_keys.iter_mut() {
-            properties.sort_unstable();
-        }
-        self.composite_index_keys.sort_unstable();
-        self.composite_index_keys.dedup();
-        self.range_index_keys.sort_unstable();
-        self.range_index_keys.dedup();
-        self.unique_constraint_keys.sort_unstable();
-        self.unique_constraint_keys.dedup();
-        self.indexes_deferred = true;
-    }
-
-    /// Whether this graph's declared indexes are still unbuilt.
-    pub fn indexes_deferred(&self) -> bool {
-        self.indexes_deferred
-    }
-
-    /// Build the indexes a deferred load left declared-but-unbuilt. Returns
-    /// `true` when it did work, `false` when there was nothing deferred.
-    ///
-    /// Idempotent, and safe to call from inside the DDL entry points that
-    /// [`Self::rebuild_indices_from_keys`] itself calls: the flag is cleared
-    /// *before* the rebuild, so the nested calls see a non-deferred graph.
-    ///
-    /// Does not bump the version, so a plan cached while the graph was still
-    /// deferred can outlive the build. That plan scans where it could now
-    /// probe — slower, never wrong, and the callers that matter (a write, a
-    /// DDL statement) bump the version themselves.
-    pub fn materialize_indexes(&mut self) -> bool {
-        if !self.indexes_deferred {
-            return false;
-        }
-        self.indexes_deferred = false;
-        self.rebuild_indices_from_keys();
-        true
     }
 
     /// Rebuild type_indices from the live graph. Called after deserialization

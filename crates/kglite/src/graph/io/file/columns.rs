@@ -123,7 +123,7 @@ pub(super) fn load_column_sidecars(
     Ok(())
 }
 
-pub(super) fn attach_portable_column_stores(dir_graph: &mut DirGraph) {
+pub(super) fn attach_portable_column_stores(dir_graph: &mut DirGraph, defer_index_rebuild: bool) {
     // `(type name, has id/title)` snapshot first: the loop below takes a
     // mutable node borrow, and the stores now live on the same backend.
     let types: Vec<(String, bool)> = dir_graph
@@ -150,7 +150,7 @@ pub(super) fn attach_portable_column_stores(dir_graph: &mut DirGraph) {
     // The declared indexes: built now, or recorded for the first write / DDL /
     // explicit `materialize_indexes()` to build. See `DirGraph::indexes_deferred`
     // for why the deferred state cannot answer a query wrongly.
-    if super::defer_index_rebuild_requested() {
+    if defer_index_rebuild {
         dir_graph.defer_index_rebuild_from_keys();
     } else {
         dir_graph.rebuild_indices_from_keys();

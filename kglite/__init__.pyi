@@ -633,19 +633,60 @@ class ResultView:
         """Vertical card format: one key-value per line, rows separated by blank lines."""
         ...
 
-def load(path: str) -> KnowledgeGraph:
+def load(
+    path: str,
+    *,
+    storage: str | None = None,
+    defer_index_rebuild: bool | None = None,
+) -> KnowledgeGraph:
     """Load a graph from a binary file previously saved with ``save()``.
 
     Args:
         path: Path to the ``.kgl`` file.
+        storage: ``"memory"`` or ``"mapped"`` to override the mode the
+            checkpoint recorded; ``None`` (default) honours it. Resolved before
+            any section is decompressed, so an unserveable request costs only
+            the metadata read. ``"disk"`` raises :class:`ArgumentError` — a
+            ``.kgl`` is a file and a disk graph is a directory.
+        defer_index_rebuild: Record the file's declared indexes instead of
+            building them at load. ``None`` (default) leaves the process
+            default in charge — off, unless ``KGLITE_DEFER_INDEX_REBUILD`` is
+            set; ``True``/``False`` decide for this call.
 
     Returns:
         A new KnowledgeGraph with the loaded data.
 
-    The graph comes back in the storage mode its checkpoint recorded: a
-    mapped-saved ``.kgl`` loads mapped, while one saved by a memory graph — or
-    by a kglite old enough not to record the mode — loads in memory. Use
-    :func:`open` with ``storage=`` to ask for a different mode.
+    Raises:
+        FileError: ``path`` does not exist.
+        FileFormatError: ``path`` is not a readable ``.kgl``.
+        ArgumentError: ``storage`` is an unknown mode, or ``"disk"``.
+
+    **``storage`` is not a memory lever.** For a loaded ``.kgl``, mapped and
+    memory cost the same resident memory — measured within 0.3 MB of each other
+    on every fixture, because columns of 256 KB or more spill to a temp
+    directory and are mmap'd on *both* paths. What the mode decides is the
+    backend the graph continues in: the spill policy its later writes follow,
+    and the mode its next ``save()`` records.
+
+    **``defer_index_rebuild`` is the memory lever.** Rebuilding the declared
+    indexes is the largest single term in what an index-bearing graph costs to
+    hold. On a 500k-row fixture declaring four index families, deferring it took
+    settled footprint from 150 MB to 86 MB (-42.8%) and the load from 351 ms to
+    157 ms. The build is *moved*, not avoided, and both halves of the price are
+    measured: an indexed lookup runs as a scan for as long as the graph stays
+    read-only (12 ms → 20 ms at that size), and the first write pays the whole
+    build (+193 ms, once; later writes are unchanged). So it is a win for a
+    read-mostly consumer that does not use the indexes, a wash for a
+    write-then-work one, and a loss for a read-only consumer that does issue
+    indexed lookups. Correctness is identical either way — a deferred graph
+    answers every query the same, its declarations survive a ``save()``
+    byte-for-byte, and :meth:`KnowledgeGraph.list_indexes` /
+    ``SHOW INDEXES`` list them with ``state="DEFERRED"``.
+
+    Example::
+
+        # A viewer that never writes and never uses the indexes.
+        g = kglite.load("graph.kgl", defer_index_rebuild=True)
 
     The returned graph remembers ``path``, so a later bare ``save()`` writes
     back to it. See :func:`open` for load-or-create semantics, or
@@ -705,7 +746,12 @@ def load_rdf(
     """
     ...
 
-def open_session(path: str) -> "Session":
+def open_session(
+    path: str,
+    *,
+    storage: str | None = None,
+    defer_index_rebuild: bool | None = None,
+) -> "Session":
     """Load a saved graph at ``path`` directly as a thread-safe :class:`Session`.
 
     The one-call shortcut for the concurrent-serving case — equivalent to
@@ -721,10 +767,21 @@ def open_session(path: str) -> "Session":
         g = kglite.load(path)
         g.set_embedder(model)
         s = g.session()
+
+    Args:
+        path: Path to the ``.kgl`` file.
+        storage: As on :func:`load`.
+        defer_index_rebuild: As on :func:`load`. Well suited to this entry
+            point: a session that only reads never pays the deferred build.
     """
     ...
 
-def from_bytes(data: bytes) -> KnowledgeGraph:
+def from_bytes(
+    data: bytes,
+    *,
+    storage: str | None = None,
+    defer_index_rebuild: bool | None = None,
+) -> KnowledgeGraph:
     """Load an in-memory graph from a ``.kgl`` byte buffer.
 
     The in-memory counterpart of :func:`load` — deserialises the bytes
@@ -734,6 +791,8 @@ def from_bytes(data: bytes) -> KnowledgeGraph:
 
     Args:
         data: A ``.kgl`` byte buffer from :meth:`KnowledgeGraph.to_bytes`.
+        storage: As on :func:`load`.
+        defer_index_rebuild: As on :func:`load`.
 
     Returns:
         A new KnowledgeGraph with the loaded data.
@@ -916,6 +975,15 @@ def open(
         take no lease, so any number of processes can read a graph while one
         writes; they observe the last published snapshot. Only :func:`open` —
         the write-back entry point — claims ownership.
+
+        **A viewer should not use these defaults.** ``open()`` defaults to a
+        writer's posture: it attaches a WAL sidecar and takes the lease, so it
+        writes ``<path>-wal`` and ``<path>.lock-owner`` next to a file you only
+        meant to read, and the log's buffers add to the process footprint
+        (roughly +110 MB on a 134 MB graph, measured). Read with
+        :func:`load` / :func:`open_session`, which take neither — or, if you
+        need ``open()``'s save-back binding for a read-mostly handle, pass
+        ``durable="off", lock=False``.
 
         **A crash releases the lease.** The lock belongs to the operating
         system, not to the sidecar file, so a writer killed with ``SIGKILL``
@@ -5429,10 +5497,12 @@ class KnowledgeGraph:
         """Save the current selection as an independent subgraph file.
 
         Equivalent to ``kg.to_subgraph().save(path)`` in a single call.
-        Output is a ``.kgl`` file that reloads via ``kglite.load(path)``
-        (or ``kglite.open(path, storage='disk')`` for disk mode — ``load``
-        takes no ``storage`` argument). All edges between selected nodes are
-        included; node and edge properties round-trip byte-for-byte.
+        Output is a ``.kgl`` file that reloads via ``kglite.load(path)``.
+        A ``.kgl`` is a file, never a disk-mode directory, so
+        ``storage='disk'`` is refused on either entry point; build a disk graph
+        with ``kglite.open(dir, storage='disk')`` and ingest into it. All edges
+        between selected nodes are included; node and edge properties
+        round-trip byte-for-byte.
 
         Args:
             path: Destination path for the subgraph file.
@@ -5707,8 +5777,16 @@ class KnowledgeGraph:
     def list_indexes(self) -> list[dict[str, str]]:
         """List the in-memory equality indexes.
 
-        Each dict has ``node_type`` and ``property``. Range, composite and
-        disk-backed persistent indexes are not included.
+        Each dict has ``node_type``, ``property`` and ``state``. Range,
+        composite and disk-backed persistent indexes are not included.
+
+        ``state`` is ``"ONLINE"`` for a built index and ``"DEFERRED"`` for one
+        a ``kglite.load(..., defer_index_rebuild=True)`` has declared but not
+        yet built. This is a *listing*: :meth:`has_index` answers from the
+        built stores alone, so it reports ``False`` for a ``DEFERRED`` entry —
+        deliberately, since a query planner that believed an unbuilt index was
+        present would return no rows instead of scanning. Any write or index
+        DDL builds the whole set and turns it ``ONLINE``.
         """
         ...
 
@@ -5803,7 +5881,11 @@ class KnowledgeGraph:
         ...
 
     def list_composite_indexes(self) -> list[dict[str, Any]]:
-        """List all composite indexes."""
+        """List all composite indexes.
+
+        Each dict has ``node_type``, ``properties`` and ``state``; ``state``
+        means what it means on :meth:`list_indexes`.
+        """
         ...
 
     def has_composite_index(self, node_type: str, properties: list[str]) -> bool:

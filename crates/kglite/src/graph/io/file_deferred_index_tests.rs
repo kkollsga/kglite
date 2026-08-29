@@ -11,7 +11,6 @@
 use super::*;
 use crate::api::cypher::CypherResult;
 use crate::graph::dir_graph::DirGraph;
-use crate::graph::io::file::defer_indexes::DeferIndexRebuild;
 use crate::graph::session::execute::{execute_mut, execute_read, ExecuteOptions};
 use std::collections::HashMap;
 
@@ -77,16 +76,17 @@ fn write_fixture(dir: &std::path::Path) -> String {
 }
 
 fn load_eager(path: &str) -> Arc<DirGraph> {
-    let _scope = DeferIndexRebuild::scoped(false);
-    load_file(path).unwrap()
+    // Explicit rather than `load_file`: `LoadOptions::new()` takes its default
+    // from `KGLITE_DEFER_INDEX_REBUILD`, so an operator's environment must not
+    // be able to turn the control arm into a second deferred arm.
+    load_file_with(path, &LoadOptions::new().with_defer_index_rebuild(false)).unwrap()
 }
 
 fn load_deferred(path: &str) -> Arc<DirGraph> {
-    let _scope = DeferIndexRebuild::scoped(true);
-    let graph = load_file(path).unwrap();
+    let graph = load_file_with(path, &LoadOptions::new().with_defer_index_rebuild(true)).unwrap();
     assert!(
         graph.indexes_deferred(),
-        "the scoped override must have produced a deferred load"
+        "the option must have produced a deferred load"
     );
     graph
 }
@@ -181,10 +181,15 @@ fn deferred_load_builds_nothing_and_keeps_every_declaration() {
     assert!(!Arc::make_mut(&mut materialized).materialize_indexes());
 }
 
-/// While deferred, no index may report itself as *present*. This is the
-/// invariant the whole design rests on: the matcher treats a value-miss on a
-/// covered index as proven-empty, so a `has_index` that answered from the
-/// declaration list would turn every indexed lookup into zero rows.
+/// While deferred, no index may report itself as *present* to anything that
+/// decides how to answer a query. This is the invariant the whole design rests
+/// on: the matcher treats a value-miss on a covered index as proven-empty, so a
+/// `has_index` that answered from the declaration list would turn every indexed
+/// lookup into zero rows.
+///
+/// `type_has_user_indexes` is deliberately not probed here — it carries a
+/// `debug_assert` tripwire, so *reaching* it on a deferred graph is already a
+/// failure rather than a wrong answer, which is the stronger separation.
 #[test]
 fn deferred_state_never_claims_an_index_is_present() {
     let dir = tempfile::tempdir().unwrap();
@@ -192,10 +197,10 @@ fn deferred_state_never_claims_an_index_is_present() {
     let deferred = load_deferred(&path);
 
     assert!(!deferred.has_index("Item", "category"));
+    assert!(!deferred.has_any_index("Item", "category"));
     assert!(!deferred.has_composite_index("Item", &["category".to_string(), "region".to_string()]));
-    assert!(deferred.list_indexes().is_empty());
-    assert!(deferred.list_composite_indexes().is_empty());
     assert!(!deferred.has_unique_constraints());
+    assert!(!deferred.has_unique_constraint("Item", &["sku".to_string()]));
     assert!(deferred
         .lookup_by_index("Item", "category", &Value::String("cat-1".into()))
         .is_none());
@@ -206,6 +211,76 @@ fn deferred_state_never_claims_an_index_is_present() {
             &[Value::String("cat-1".into()), Value::String("reg-1".into())]
         )
         .is_none());
+}
+
+/// The other half of the split P3 introduced: the *listing* surfaces do show a
+/// deferred load's declarations, marked, while every predicate above stays on
+/// the built stores. Both halves in one test, because the pair is the contract
+/// — a listing that reported nothing would hide the indexes an operator still
+/// has, and a predicate that reported them would drop rows.
+#[test]
+fn deferred_indexes_are_listed_with_their_state_while_predicates_stay_absent() {
+    use crate::graph::dir_graph::indexes::IndexState;
+    use crate::graph::introspection::schema_overview::collect_indexes_structured;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_fixture(dir.path());
+    let eager = load_eager(&path);
+    let deferred = load_deferred(&path);
+
+    // Same declarations, both arms — only the state differs.
+    let names = |graph: &DirGraph| {
+        let mut out: Vec<String> = graph
+            .list_indexes_with_state()
+            .into_iter()
+            .map(|(node_type, property, _)| format!("{node_type}.{property}"))
+            .collect();
+        out.sort();
+        out
+    };
+    assert_eq!(names(&deferred), names(&eager));
+    assert!(!names(&deferred).is_empty(), "the fixture declares indexes");
+    assert!(deferred
+        .list_indexes_with_state()
+        .iter()
+        .all(|(_, _, state)| *state == IndexState::Deferred));
+    assert!(eager
+        .list_indexes_with_state()
+        .iter()
+        .all(|(_, _, state)| *state == IndexState::Ready));
+
+    let composite = deferred.list_composite_indexes_with_state();
+    assert_eq!(composite.len(), 1);
+    assert_eq!(composite[0].2, IndexState::Deferred);
+    assert_eq!(
+        deferred.list_composite_indexes(),
+        eager.list_composite_indexes()
+    );
+
+    // The unique constraint is listed too, and carries no state marker: it is
+    // materialized before any write reaches enforcement, so there is no state
+    // to distinguish.
+    assert_eq!(
+        deferred.list_unique_constraints(),
+        eager.list_unique_constraints()
+    );
+    assert!(!deferred.list_unique_constraints().is_empty());
+
+    // `SHOW INDEXES` / `CALL db.indexes()` / `describe()` all project this.
+    let rows = collect_indexes_structured(&deferred);
+    assert!(!rows.is_empty());
+    assert!(
+        rows.iter().all(|row| row.state == "DEFERRED"),
+        "every declared index must be listed as DEFERRED: {rows:?}"
+    );
+    assert!(collect_indexes_structured(&eager)
+        .iter()
+        .all(|row| row.state == "ONLINE"));
+
+    // …and the predicates are still absent-semantics on the very same graph.
+    assert!(!deferred.has_index("Item", "category"));
+    assert!(!deferred.has_composite_index("Item", &["category".to_string(), "region".to_string()]));
+    assert!(deferred.indexes_deferred());
 }
 
 /// A write arriving before the build must leave the index correct. The build

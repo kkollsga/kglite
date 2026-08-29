@@ -91,7 +91,7 @@ def test_composite_index_identity_ignores_property_order(graph) -> None:
     graph.cypher("CREATE INDEX FOR (p:Person) ON (p.city, p.age)")
     assert graph.has_composite_index("Person", ["age", "city"])
     assert graph.composite_index_stats("Person", ["age", "city"]) is not None
-    assert graph.list_composite_indexes() == [{"node_type": "Person", "properties": ["age", "city"]}]
+    assert graph.list_composite_indexes() == [{"node_type": "Person", "properties": ["age", "city"], "state": "ONLINE"}]
     graph.cypher("CREATE INDEX IF NOT EXISTS FOR (p:Person) ON (p.age, p.city)")
     assert len([n for n in _names(graph) if n.startswith("Person.(")]) == 1
     assert graph.drop_composite_index("Person", ["city", "age"])

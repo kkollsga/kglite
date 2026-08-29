@@ -39,7 +39,6 @@ use graph::pyapi::frozen::FrozenGraph;
 use graph::pyapi::result_view::{ResultIter, ResultView};
 use graph::pyapi::session::Session;
 use graph::{KnowledgeGraph, Transaction};
-use kglite_core::api::io::load_file;
 
 /// Curated Rust-side façade, and the **only** stable Rust API this wrapper
 /// promises to keep: every other module in this crate is private, and the
@@ -137,6 +136,16 @@ fn load_err_to_pyerr(e: std::io::Error, path: Option<&str>) -> PyErr {
     crate::error_py::kg_to_pyerr(kg)
 }
 
+/// [`load_err_to_pyerr`] plus the one error class a *request* can produce: a
+/// `storage=` with no conversion (either disk direction) comes back as
+/// `InvalidInput` and must read as a bad argument, not as a corrupt file.
+fn load_request_err_to_pyerr(e: std::io::Error, path: Option<&str>) -> PyErr {
+    if e.kind() == std::io::ErrorKind::InvalidInput {
+        return crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e.to_string()));
+    }
+    load_err_to_pyerr(e, path)
+}
+
 /// Warn — never raise — when `path`'s write-ahead sidecar holds commits the
 /// checkpoint just loaded does not contain.
 ///
@@ -188,12 +197,61 @@ fn warn_if_sidecar_runs_ahead(py: Python<'_>, path: &str, checkpoint_lsn: u64) {
     }
 }
 
+/// Build the core `LoadOptions` from the `storage=` / `defer_index_rebuild=`
+/// kwargs the three read-only load entry points share.
+///
+/// `defer_index_rebuild` is tri-state on purpose: `None` leaves the process
+/// default in charge (`KGLITE_DEFER_INDEX_REBUILD`, off unless an operator set
+/// it), while `True`/`False` decide for this call. A plain `False` default
+/// would silently ignore an operator who turned the deferral on for the
+/// process.
+fn load_options_from_args(
+    storage: Option<&str>,
+    defer_index_rebuild: Option<bool>,
+) -> PyResult<kglite_core::api::io::LoadOptions> {
+    let mut options = kglite_core::api::io::LoadOptions::new();
+    if let Some(mode_str) = storage {
+        let mode = kglite_core::api::storage::StorageMode::parse(mode_str)
+            .map_err(|e| crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e)))?;
+        options = options.with_storage(mode);
+    }
+    if let Some(defer) = defer_index_rebuild {
+        options = options.with_defer_index_rebuild(defer);
+    }
+    Ok(options)
+}
+
 /// Load a graph from a binary file previously saved with `save()`.
+///
+/// `storage` ("memory" / "mapped") overrides the mode the checkpoint recorded;
+/// with no argument the recorded mode is honoured. It is resolved before the
+/// file's sections are decompressed, so an unserveable request is cheap.
+/// "disk" is refused: a `.kgl` is a file and a disk graph is a directory.
+/// **It is not a memory lever** — for a loaded `.kgl`, mapped and memory cost
+/// the same resident memory to within 0.3 MB on every measured fixture, because
+/// columns of 256 KB or more spill and are mmap'd on both paths. What it decides
+/// is the backend the graph continues in.
+///
+/// `defer_index_rebuild=True` is the memory lever: the file's declared indexes
+/// are recorded rather than built, which took a 500k-row four-index fixture from
+/// 150 MB to 86 MB of settled footprint (-42.8%) and its load from 351 ms to
+/// 157 ms. The build is moved, not avoided — an indexed lookup runs as a scan
+/// while the graph stays read-only (12 ms to 20 ms at that size) and the first
+/// write pays the whole build (+193 ms, once). `None` (the default) leaves the
+/// process default in charge, which is off unless `KGLITE_DEFER_INDEX_REBUILD`
+/// says otherwise.
 #[pyfunction]
-fn load(py: Python<'_>, path: String) -> PyResult<KnowledgeGraph> {
+#[pyo3(signature = (path, *, storage=None, defer_index_rebuild=None))]
+fn load(
+    py: Python<'_>,
+    path: String,
+    storage: Option<&str>,
+    defer_index_rebuild: Option<bool>,
+) -> PyResult<KnowledgeGraph> {
+    let options = load_options_from_args(storage, defer_index_rebuild)?;
     let inner = py
-        .detach(|| load_file(&path))
-        .map_err(|e| load_err_to_pyerr(e, Some(&path)))?;
+        .detach(|| kglite_core::api::io::load_file_with(&path, &options))
+        .map_err(|e| load_request_err_to_pyerr(e, Some(&path)))?;
     warn_if_sidecar_runs_ahead(py, &path, inner.checkpoint_lsn);
     let mut kg = KnowledgeGraph::from_arc(inner);
     kg.lifecycle.source_path = Some(std::path::PathBuf::from(&path));
@@ -261,11 +319,23 @@ fn load_rdf(
 /// For embedding-backed semantic search (`text_score()` over a query string),
 /// register the model first via the `KnowledgeGraph` path:
 /// `g = kglite.load(path); g.set_embedder(model); s = g.session()`.
+///
+/// `storage` and `defer_index_rebuild` mean exactly what they mean on
+/// `kglite.load` — a session is a load plus a thread-safe handle over it.
+/// Deferral suits this entry point especially: a session that only reads never
+/// pays the build at all.
 #[pyfunction]
-fn open_session(py: Python<'_>, path: String) -> PyResult<Session> {
+#[pyo3(signature = (path, *, storage=None, defer_index_rebuild=None))]
+fn open_session(
+    py: Python<'_>,
+    path: String,
+    storage: Option<&str>,
+    defer_index_rebuild: Option<bool>,
+) -> PyResult<Session> {
+    let options = load_options_from_args(storage, defer_index_rebuild)?;
     let inner = py
-        .detach(|| load_file(&path))
-        .map_err(|e| load_err_to_pyerr(e, Some(&path)))?;
+        .detach(|| kglite_core::api::io::load_file_with(&path, &options))
+        .map_err(|e| load_request_err_to_pyerr(e, Some(&path)))?;
     warn_if_sidecar_runs_ahead(py, &path, inner.checkpoint_lsn);
     Ok(Session::from_arc(inner, None))
 }
@@ -276,11 +346,21 @@ fn open_session(py: Python<'_>, path: String) -> PyResult<Session> {
 /// so a bare `save()` will ask for an explicit path. A corrupt/truncated
 /// or non-`.kgl` buffer raises a classifiable error (bad magic / truncated
 /// section), distinct from a successful empty graph.
+///
+/// `storage` and `defer_index_rebuild` mean exactly what they mean on
+/// `kglite.load`.
 #[pyfunction]
-fn from_bytes(py: Python<'_>, data: &[u8]) -> PyResult<KnowledgeGraph> {
-    py.detach(|| kglite_core::api::io::load_kgl_bytes(data))
+#[pyo3(signature = (data, *, storage=None, defer_index_rebuild=None))]
+fn from_bytes(
+    py: Python<'_>,
+    data: &[u8],
+    storage: Option<&str>,
+    defer_index_rebuild: Option<bool>,
+) -> PyResult<KnowledgeGraph> {
+    let options = load_options_from_args(storage, defer_index_rebuild)?;
+    py.detach(|| kglite_core::api::io::load_kgl_bytes_with(data, &options))
         .map(KnowledgeGraph::from_arc)
-        .map_err(|e| load_err_to_pyerr(e, None))
+        .map_err(|e| load_request_err_to_pyerr(e, None))
 }
 
 /// Normalise the `durable=` argument — a level name, a bool, or `None` — into
@@ -387,6 +467,15 @@ fn durable_level_from_arg(
 /// a complete snapshot and the last `save()` wins. `false` opts out for callers
 /// who coordinate writers themselves. Readers never take the lease — that is
 /// what `load` / `open_session` are for.
+///
+/// **Opening a graph to look at it costs more than reading it.** The defaults
+/// here are a writer's: `open()` attaches a WAL sidecar beside `path` and takes
+/// the writer lease, so it writes `<path>-wal` and `<path>.lock-owner` next to
+/// a file you only meant to read, and the log's buffers add to the process
+/// footprint (measured at roughly +110 MB on a 134 MB graph). A viewer wants
+/// `kglite.load(path)` / `kglite.open_session(path)`, which take neither — or,
+/// if it needs `open()`'s save-back binding, `kglite.open(path, durable="off",
+/// lock=False)`.
 #[pyfunction]
 #[pyo3(signature = (path, *, storage=None, durable=None, lock=true))]
 fn open(
@@ -461,37 +550,43 @@ fn open(
         })
         .transpose()?;
 
+    // Load-or-create, the recovery-on-open rule, and the mode conversion all
+    // live in core (`open_or_create_graph_in_mode`), which is what the C ABI,
+    // the Java wrapper and both servers already open through. Only what is
+    // Python-specific stays here: the lease taken above, the exception classes
+    // below, and the WAL attachment.
+    //
+    // `create_mode` is supplied only when the path is absent, because core
+    // treats a mode as a *request* and would convert an existing graph to it:
+    // `open(path)` with no `storage=` must leave a mapped checkpoint mapped.
+    // The existence check races the open in principle; it did before this
+    // change too (it chose load-vs-construct), and it now decides only which
+    // default a *creating* open uses.
     let existed = std::path::Path::new(&path).exists();
-    let mut kg = if existed {
-        py.detach(|| load_file(&path))
-            .map(KnowledgeGraph::from_arc)
-            .map_err(|e| load_err_to_pyerr(e, Some(&path)))?
-    } else {
-        KnowledgeGraph::construct(storage, Some(&path))?
-    };
-    // The load already honours the mode the checkpoint recorded, so a
-    // `storage=` that still disagrees is an explicit request to change it.
-    // Refuse the structurally impossible directions rather than handing back a
-    // mode the caller did not ask for — that silence already invalidated one
-    // mapped-vs-memory comparison.
-    if existed {
-        if let Some(requested) = requested_mode {
-            let actual = kglite_core::api::storage::live_storage_mode(&kg.inner);
-            if requested != actual {
-                convert_open_graph_to_mode(&mut kg, requested).map_err(|reason| {
-                    // `ArgumentError`, matching `KnowledgeGraph(storage="invalid")`
-                    // and the parse failure above — one error class for one kwarg.
-                    // (The neighbouring disk-plus-`durable` refusal raises
-                    // `ValueError`; that is about `durable=`, not about this.)
-                    crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(format!(
-                        "cannot open existing graph {path:?} with storage={:?}: {reason} \
-                         To accept whatever the file provides, omit `storage=`.",
-                        requested.as_str(),
-                    )))
-                })?;
-            }
-        }
-    }
+    let create_mode = requested_mode
+        .or_else(|| (!existed).then_some(kglite_core::api::storage::StorageMode::Memory));
+    // `attaching_log`: this binding attaches a log opener at *every* level —
+    // `setup_durable` below calls `open_log` even at `off`, where it performs
+    // the same unrecovered-sidecar refusal core would perform here. Declaring a
+    // logging level suppresses core's duplicate so that refusal keeps coming
+    // from the single site that raises the documented `ValueError`
+    // (`test_off_refuses_to_open_over_an_unreplayed_log`); the hazard it exists
+    // for is closed either way, because `setup_durable` is unconditional.
+    let opened = py
+        .detach(|| {
+            kglite_core::api::io::open_or_create_graph_in_mode(
+                std::path::Path::new(&path),
+                create_mode,
+                kglite_core::api::durable::DurabilityLevel::Full,
+            )
+        })
+        .map_err(|e| open_err_to_pyerr(e, &path, requested_mode, existed))?;
+    // `opened.converted_from` is not surfaced: on this entry point a conversion
+    // happens only where the caller asked for one, so it reports back exactly
+    // what the caller already passed. The servers, whose `--storage` is an
+    // operator default rather than a per-call argument, are the ones that need
+    // to be told.
+    let mut kg = KnowledgeGraph::from_arc(opened.graph);
     kg.lifecycle.source_path = Some(std::path::PathBuf::from(&path));
     kg.lifecycle.writer_lease = writer_lease;
     // Resolved after the graph exists, because the mode of an *existing* path
@@ -509,19 +604,42 @@ fn open(
     Ok(kg)
 }
 
-/// Switch a just-opened graph to the mode the caller asked for.
+/// Classify the `io::Error` `open_or_create_graph_in_mode` returns into the
+/// wheel's exception hierarchy.
 ///
-/// Thin by design: the transition, and the reason a disk direction has none,
-/// live in `kglite::api::storage`, so the bolt/mcp servers convert and refuse
-/// on the same terms. Only the `Arc` reach stays here.
-fn convert_open_graph_to_mode(
-    kg: &mut KnowledgeGraph,
-    requested: kglite_core::api::storage::StorageMode,
-) -> Result<(), String> {
-    kglite_core::api::storage::convert_dir_graph_to_mode(
-        kglite_core::api::make_dir_graph_mut(&mut kg.inner),
-        requested,
-    )
+/// Everything about a *request* — a mode with no conversion, a disk directory
+/// that cannot be created — arrives as `InvalidInput` and becomes
+/// `ArgumentError`, matching `KnowledgeGraph(storage="invalid")` and the
+/// `storage=` parse failure: one error class for one kwarg. (The neighbouring
+/// disk-plus-`durable` refusal raises `ValueError`; that is about `durable=`.)
+/// A conversion refusal on an *existing* path additionally names the path and
+/// the way out, which core's binding-neutral message cannot do.
+///
+/// `WouldBlock` is core's "the file changed while it was loading" — a genuine
+/// I/O race rather than a malformed file, so it must not be classified as
+/// corruption. Everything else routes through `load_err_to_pyerr`.
+fn open_err_to_pyerr(
+    error: std::io::Error,
+    path: &str,
+    requested_mode: Option<kglite_core::api::storage::StorageMode>,
+    existed: bool,
+) -> PyErr {
+    use std::io::ErrorKind;
+    match error.kind() {
+        ErrorKind::InvalidInput => {
+            let message = match (existed, requested_mode) {
+                (true, Some(requested)) => format!(
+                    "cannot open existing graph {path:?} with storage={:?}: {error} \
+                     To accept whatever the file provides, omit `storage=`.",
+                    requested.as_str(),
+                ),
+                _ => error.to_string(),
+            };
+            crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(message))
+        }
+        ErrorKind::WouldBlock => crate::error_py::kg_to_pyerr(crate::error::KgError::FileIo(error)),
+        _ => load_request_err_to_pyerr(error, Some(path)),
+    }
 }
 
 /// Attach durability to a freshly opened graph: replay any WAL frames

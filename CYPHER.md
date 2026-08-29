@@ -1889,7 +1889,7 @@ for row in graph.cypher("CALL db.schema() YIELD nodeType, properties RETURN node
 | `entityType` | Always `"NODE"` — relationship indexes are not yet supported |
 | `labelsOrTypes` | `[node_type]` — single-element list |
 | `properties` | `[property]` for equality/range/text/vector; `[p1, p2, ...]` for composite |
-| `state` | Always `"ONLINE"` — KGLite indexes are atomic, no `POPULATING` state |
+| `state` | `"ONLINE"`, or `"DEFERRED"` on a graph loaded with `kglite.load(path, defer_index_rebuild=True)` — the index is declared but not yet built, and any write builds it. There is no `POPULATING` in between: a KGLite index is built atomically |
 
 **KGLite extension.** Neo4j collapses equality + range under a single
 `type = "PROPERTY"`; KGLite distinguishes range indexes
@@ -2876,7 +2876,7 @@ A read, so it works on a read-only graph. Returns the same rows and columns as
 | `entityType` | always `NODE` |
 | `labelsOrTypes` | single-element list holding the node type |
 | `properties` | indexed property names, sorted for a composite |
-| `state` | always `ONLINE` — KGLite builds indexes atomically |
+| `state` | `ONLINE`, or `DEFERRED` for an index a `defer_index_rebuild=True` load has declared but not built (any write builds it). Nothing in between — KGLite builds indexes atomically |
 | `stale` | whether the index is behind the graph. `null` on `PROPERTY` / `RANGE` rows, which are maintained on every write and have no staleness to report |
 | `delta` | how many documents (or vectors) the index would re-read to catch up — an upper bound. `null` alongside a `null` `stale` |
 | `unembedded` | `VECTOR` rows only: nodes of the type carrying no vector at all. `null` on every other row |

@@ -231,7 +231,7 @@ impl KnowledgeGraph {
     /// range indexes and composite indexes are not included.
     ///
     /// Returns:
-    ///     List of dictionaries with 'node_type' and 'property' keys
+    ///     List of dictionaries with 'node_type', 'property' and 'state' keys
     ///
     /// Example:
     ///     ```python
@@ -240,13 +240,18 @@ impl KnowledgeGraph {
     ///         print(f"{idx['node_type']}.{idx['property']}")
     ///     ```
     fn list_indexes(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let indexes = self.inner.list_indexes();
+        // The state-aware lister, so a `defer_index_rebuild` load's declared
+        // indexes are listed rather than silently absent. It is a *listing* —
+        // `has_index` stays on the built stores (see
+        // `DirGraph::list_indexes_with_state`).
+        let indexes = self.inner.list_indexes_with_state();
 
         let result_list = pyo3::types::PyList::empty(py);
-        for (node_type, property) in indexes {
+        for (node_type, property, state) in indexes {
             let idx_dict = PyDict::new(py);
             idx_dict.set_item("node_type", node_type)?;
             idx_dict.set_item("property", property)?;
+            idx_dict.set_item("state", state.as_str())?;
             result_list.append(idx_dict)?;
         }
 
@@ -433,15 +438,16 @@ impl KnowledgeGraph {
     /// List all composite indexes in the graph.
     ///
     /// Returns:
-    ///     A list of dicts with 'node_type' and 'properties' keys
+    ///     A list of dicts with 'node_type', 'properties' and 'state' keys
     fn list_composite_indexes(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let indexes = self.inner.list_composite_indexes();
+        let indexes = self.inner.list_composite_indexes_with_state();
 
         let result_list = pyo3::types::PyList::empty(py);
-        for (node_type, properties) in indexes {
+        for (node_type, properties, state) in indexes {
             let idx_dict = PyDict::new(py);
             idx_dict.set_item("node_type", node_type)?;
             idx_dict.set_item("properties", properties)?;
+            idx_dict.set_item("state", state.as_str())?;
             result_list.append(idx_dict)?;
         }
 

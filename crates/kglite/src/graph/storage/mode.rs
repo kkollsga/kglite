@@ -253,7 +253,12 @@ pub fn convert_dir_graph_to_mode(
 
 /// Why a disk-direction conversion cannot happen, and what to do instead. Named
 /// in core rather than in a binding so every binding refuses with one reason.
-fn disk_conversion_refusal(current: StorageMode, requested: StorageMode) -> String {
+/// The refusal both disk directions share, in one place: the load path raises
+/// it *before* decoding a `.kgl` a caller asked for in disk mode (and before
+/// loading a disk directory a caller asked for in a portable one), and
+/// [`convert_dir_graph_to_mode`] raises it for an already-built graph. One
+/// wording, so the two cannot drift.
+pub(crate) fn disk_conversion_refusal(current: StorageMode, requested: StorageMode) -> String {
     if current == StorageMode::Disk {
         format!(
             "this graph is a disk-mode directory, which cannot be converted to '{}': the \

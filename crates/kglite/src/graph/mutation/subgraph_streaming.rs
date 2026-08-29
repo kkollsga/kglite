@@ -345,9 +345,10 @@ pub fn pass_a_scan_to_file(
 /// chain `kg.select(...).expand(...)`. All edges between kept nodes are
 /// included.
 ///
-/// The output reloads into any storage mode via `kglite.open(path,
-/// storage=...)`; `kglite.load` takes no `storage` argument and restores the
-/// mode the checkpoint recorded.
+/// The output reloads into either portable mode via `kglite.open(path,
+/// storage=...)` or `kglite.load(path, storage=...)`; with no argument both
+/// restore the mode the checkpoint recorded. Disk is not among them — a `.kgl`
+/// is a file, and a disk graph is a directory.
 pub fn save_subset(
     source: &DirGraph,
     selection: &CowSelection,

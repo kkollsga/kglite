@@ -9,35 +9,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`KGLITE_DEFER_INDEX_REBUILD=1`: load a `.kgl` without rebuilding its
-  declared indexes.** A load normally rebuilds every property, composite,
-  range and unique index the file declares, which on an index-bearing graph is
-  the single largest term in what the loaded graph costs to hold — measured at
-  **−64.3 MB physical footprint (−42.8%) and −194 ms load (−55%)** on a
-  500k-row fixture with four index structures. Set the variable and the load
+- **`LoadOptions`: `storage` and `defer_index_rebuild` on the load itself.**
+  `kglite.load(path, *, storage=None, defer_index_rebuild=None)` — and the same
+  two keywords on `kglite.from_bytes` and `kglite.open_session` — plus
+  `kglite::api::io::{load_file_with, load_kgl_bytes_with, LoadOptions}` on the
+  Rust surface. `load_file` / `load_kgl_bytes` are unchanged and are exactly the
+  default options.
+
+  **`storage` overrides the mode the checkpoint recorded**, resolved *below the
+  decode*: an unserveable request is refused after the metadata read and before
+  a single section is decompressed. `"disk"` is refused structurally (a `.kgl`
+  is a file; a disk graph is a directory), and so is a portable request on a
+  disk-graph directory. It is **not** a memory lever — for a loaded `.kgl`,
+  mapped and memory measure within 0.3 MB of each other on every fixture,
+  because columns of 256 KB or more spill and are mmap'd on both paths. What it
+  decides is the backend the graph continues in.
+
+- **`defer_index_rebuild`: load a `.kgl` without rebuilding its declared
+  indexes.** A load normally rebuilds every property, composite, range and
+  unique index the file declares, which on an index-bearing graph is the single
+  largest term in what the loaded graph costs to hold — measured at **−64.3 MB
+  physical footprint (−42.8%) and −194 ms load (−55%)** on a 500k-row fixture
+  with four index structures. Pass `defer_index_rebuild=True` and the load
   records the declarations instead of building them.
 
   **Answers are identical either way.** A deferred graph presents to every
-  reader exactly as a graph that declares no index: a lookup misses and falls
-  back to a scan, which is a supported, exercised path. The build happens
-  before it could matter — the first write, the first index/constraint DDL, or
-  an explicit materialization — so a `UNIQUE` constraint still rejects a
-  duplicate and an incremental index update is still filed into a complete
+  *query decision* exactly as a graph that declares no index: a lookup misses
+  and falls back to a scan, which is a supported, exercised path. The build
+  happens before it could matter — the first write, the first index/constraint
+  DDL, or an explicit materialization — so a `UNIQUE` constraint still rejects
+  a duplicate and an incremental index update is still filed into a complete
   index.
+
+  **Introspection lists them, marked.** `SHOW INDEXES`, `CALL db.indexes()`,
+  `list_indexes()`, `list_composite_indexes()` and `describe()` show a deferred
+  load's declarations with `state = "DEFERRED"` (`ONLINE` otherwise; the two
+  Python listings gained a `state` key), and `SHOW CONSTRAINTS` lists the
+  declared constraints unmarked, since enforcement is materialized before any
+  write and the two loads are observably identical there. The predicates are
+  strictly separate and unchanged: `has_index()`, `has_any_index()`,
+  `has_composite_index()` and `has_unique_constraint()` answer from the built
+  stores alone and report `False` while deferred — nothing may report an index
+  as *present* while its buckets are empty, which would turn an indexed lookup
+  into an empty result.
 
   **The costs, stated plainly.** An indexed equality lookup on a graph that
   stays read-only runs as a scan (12 ms → 20 ms on 500k rows), and the first
   write pays the whole build in one step (+193 ms), after which writes are
-  unchanged. While the indexes are unbuilt, `SHOW INDEXES`, `SHOW
-  CONSTRAINTS`, `list_indexes()`, `has_index()` and `describe()` report none —
-  the declarations are intact and survive a save unchanged, but nothing may
-  report an index as *present* while its buckets are empty without turning
-  indexed lookups into empty results. Best for a consumer that loads a large
-  graph to scan, export or serve it read-only; not for one that leans on
-  indexed lookups.
+  unchanged. Best for a consumer that loads a large graph to scan, export or
+  serve it read-only; not for one that leans on indexed lookups.
 
-  Off by default. An unrecognised value warns on stderr and loads eagerly
-  rather than guessing.
+  Off by default. `KGLITE_DEFER_INDEX_REBUILD` sets the *process* default for
+  callers that pass no options (the CLI, an existing binding); an explicit
+  `defer_index_rebuild=` outranks it in both directions, and an unrecognised
+  value warns on stderr and loads eagerly rather than guessing.
 
 - **`row_limit`: a true result-row cap, with a mandatory truncation signal.**
   Available per query on `KnowledgeGraph.cypher`, `Session.cypher` /
@@ -98,6 +123,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   volume, wherever the graph lives).
 
 ### Changed
+
+- **`kglite.open` routes through the shared core open path.** The wheel
+  hand-rolled its own load-then-convert sequence; it now calls
+  `kglite::api::io::open_or_create_graph_in_mode`, the same entry point the
+  C ABI, the Java wrapper and the Bolt/MCP servers already open through, so
+  load-or-create, the mode conversion and the recovery-on-open rule have one
+  implementation instead of two. Signature, error classes and durability
+  semantics are unchanged; the one behavioural gain is core's file-identity
+  check, which now turns a `.kgl` replaced *while it was being read* into an
+  error rather than a graph assembled from two different files.
+
+- **`kglite.open`'s docstring says what a viewer should use instead.** The
+  defaults are a writer's — a WAL sidecar and the writer lease are attached
+  beside the path, adding roughly +110 MB on a 134 MB graph — which is right
+  for the embedded-database entry point and wrong for reading. `load()` /
+  `open_session()` take neither; `open(path, durable="off", lock=False)` is the
+  read-mostly form. Nothing changed in the behaviour, only in what says so.
 
 - **`.kgl` loads are 5–10% faster.** Rebuilding a loaded graph's type indexes
   allocated and hashed a fresh `String` for every node's type name; it now

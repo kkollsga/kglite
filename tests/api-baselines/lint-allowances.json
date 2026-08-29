@@ -329,7 +329,7 @@
       "classification": "transitional"
     },
     {
-      "identity": "crates/kglite/src/graph/io/file.rs::mod:file_load_contract_tests::unused_imports",
+      "identity": "crates/kglite/src/graph/io/file.rs::mod:file_deferred_index_tests::unused_imports",
       "classification": "boundary"
     },
     {

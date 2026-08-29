@@ -17,6 +17,35 @@ use crate::graph::storage::undo::BucketId;
 use crate::graph::storage::GraphRead;
 use petgraph::graph::NodeIndex;
 
+/// Whether a listed index is built, or only declared and waiting to be.
+///
+/// `Deferred` is reachable only between a `LoadOptions::defer_index_rebuild`
+/// load and the materialization that follows it, and is a statement about the
+/// index *store*, not about the declaration: the declaration is complete, it
+/// survives a save byte-for-byte, and any write, DDL or
+/// `DirGraph::materialize_indexes` builds it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IndexState {
+    /// Built and serving lookups.
+    Ready,
+    /// Declared by a deferred load, not yet built. A query that could have used
+    /// it runs as a scan until something materializes it.
+    Deferred,
+}
+
+impl IndexState {
+    /// The `state` column value `SHOW INDEXES` / `CALL db.indexes()` project.
+    /// `ONLINE` is Neo4j's spelling for a usable index and is what KGLite has
+    /// always reported; `DEFERRED` has no Neo4j counterpart, because Neo4j has
+    /// no such state.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IndexState::Ready => "ONLINE",
+            IndexState::Deferred => "DEFERRED",
+        }
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     /// Incremental-maintenance passes that ran past the "this type carries no
@@ -311,8 +340,60 @@ impl DirGraph {
             .is_some_and(|dg| dg.has_property_index(node_type, property))
     }
 
+    /// The equality indexes on this graph, built or merely declared.
+    ///
+    /// **A listing, never a predicate.** It is the one index surface that may
+    /// read the declaration lists, and it exists so an operator can see that a
+    /// deferred load's indexes are still there. Nothing that decides *how to
+    /// answer a query* may call it: the matcher treats a value-miss on a
+    /// covered index as proven-empty, so an index reported present while its
+    /// map is empty drops every row (the 0.16.13 bug class, reproduced
+    /// deliberately in `file_deferred_index_tests`). [`Self::has_index`] and
+    /// the rest of the predicate family answer from the maps alone and must
+    /// keep doing so — see `DirGraph::indexes_deferred`.
+    pub fn list_indexes_with_state(&self) -> Vec<(String, String, IndexState)> {
+        if self.indexes_deferred {
+            return self
+                .property_index_keys
+                .iter()
+                .map(|(node_type, property)| {
+                    (node_type.clone(), property.clone(), IndexState::Deferred)
+                })
+                .collect();
+        }
+        self.property_indices
+            .keys()
+            .map(|(node_type, property)| (node_type.clone(), property.clone(), IndexState::Ready))
+            .collect()
+    }
+
+    /// [`Self::list_indexes_with_state`] without the state — the shape callers
+    /// that only want the names have always had.
     pub fn list_indexes(&self) -> Vec<(String, String)> {
-        self.property_indices.keys().cloned().collect()
+        self.list_indexes_with_state()
+            .into_iter()
+            .map(|(node_type, property, _)| (node_type, property))
+            .collect()
+    }
+
+    /// The range indexes, built or merely declared. Same listing-not-predicate
+    /// rule as [`Self::list_indexes_with_state`]; not public because no binding
+    /// surface lists range indexes on their own — `SHOW INDEXES` does, through
+    /// the shared collector.
+    pub(crate) fn list_range_indexes_with_state(&self) -> Vec<(String, String, IndexState)> {
+        if self.indexes_deferred {
+            return self
+                .range_index_keys
+                .iter()
+                .map(|(node_type, property)| {
+                    (node_type.clone(), property.clone(), IndexState::Deferred)
+                })
+                .collect();
+        }
+        self.range_indices
+            .keys()
+            .map(|(node_type, property)| (node_type.clone(), property.clone(), IndexState::Ready))
+            .collect()
     }
 
     /// The in-memory equality-index key holding `property`'s values for
@@ -559,10 +640,34 @@ impl DirGraph {
         self.composite_indices.contains_key(&key)
     }
 
+    /// The composite indexes, built or merely declared, with property names in
+    /// the canonical (sorted) order. Same listing-not-predicate rule as
+    /// [`Self::list_indexes_with_state`].
+    pub fn list_composite_indexes_with_state(&self) -> Vec<(String, Vec<String>, IndexState)> {
+        if self.indexes_deferred {
+            return self
+                .composite_index_keys
+                .iter()
+                .map(|(node_type, properties)| {
+                    (node_type.clone(), properties.clone(), IndexState::Deferred)
+                })
+                .collect();
+        }
+        self.composite_indices
+            .keys()
+            .map(|(node_type, properties)| {
+                (node_type.clone(), properties.clone(), IndexState::Ready)
+            })
+            .collect()
+    }
+
     /// Property names come back in the canonical (sorted) order, not the order
     /// they were declared in.
     pub fn list_composite_indexes(&self) -> Vec<(String, Vec<String>)> {
-        self.composite_indices.keys().cloned().collect()
+        self.list_composite_indexes_with_state()
+            .into_iter()
+            .map(|(node_type, properties, _)| (node_type, properties))
+            .collect()
     }
 
     /// `values[i]` is the value of `properties[i]`; the pair is reordered into

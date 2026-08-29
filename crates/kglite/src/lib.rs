@@ -413,6 +413,16 @@ pub mod api {
     /// The typed schema-discovery surface every binding builds its
     /// agent-facing schema from.
     pub mod introspection {
+        /// Whether a listed index is built (`Ready` → the `ONLINE` that
+        /// `SHOW INDEXES` projects) or declared-but-unbuilt by a
+        /// `LoadOptions::defer_index_rebuild` load (`Deferred` → `DEFERRED`).
+        /// Returned by `DirGraph::list_indexes_with_state` /
+        /// `list_composite_indexes_with_state`, which are **listings, never
+        /// predicates** — `has_index` and its family answer from the built
+        /// stores alone, and a binding that routes a query decision through a
+        /// listing reintroduces the index-reported-present-while-empty bug
+        /// class.
+        pub use crate::graph::dir_graph::indexes::IndexState;
         pub use crate::graph::introspection::bug_report::write_bug_report;
         /// What [`derive_edge_counts_from_triples`] folds a triple list into:
         /// per-edge-type totals plus each type's endpoint sets, so a caller
@@ -489,6 +499,21 @@ pub mod api {
             load_file, load_kgl_bytes, materialize_disk_graph, prepare_save, save_graph,
             save_graph_with, write_kgl, write_kgl_to, write_kgl_with, SaveError,
         };
+        /// The optional half of a `.kgl` load: `load_file_with` /
+        /// `load_kgl_bytes_with` take a [`LoadOptions`], which `load_file` /
+        /// `load_kgl_bytes` fill in with defaults.
+        ///
+        /// Two levers, and only one of them is about memory. `storage`
+        /// overrides the mode the file recorded and is resolved *below* the
+        /// decode, so an unserveable request costs only the metadata read — but
+        /// mapped and memory measure within 0.3 MB of each other for a loaded
+        /// `.kgl`, so it decides the graph's continuing backend rather than its
+        /// size. `defer_index_rebuild` is the memory lever: it records the
+        /// file's declared indexes instead of building them (−42.8% settled
+        /// footprint on a 500k-row four-index fixture), at the price of a scan
+        /// where an indexed lookup would have run and a one-time build on the
+        /// first write. Both are documented in full on [`LoadOptions`].
+        pub use crate::graph::io::file::{load_file_with, load_kgl_bytes_with, LoadOptions};
         pub use crate::graph::io::ntriples::{
             load_ntriples, Cancelled, NTriplesConfig, ProgressEvent, ProgressSink, ProgressValue,
         };

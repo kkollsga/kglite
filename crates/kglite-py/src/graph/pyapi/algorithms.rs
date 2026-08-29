@@ -1457,10 +1457,11 @@ impl KnowledgeGraph {
     /// Equivalent to `kg.to_subgraph().save(path)` but as a single call
     /// that does not bind the intermediate in-memory graph to a local
     /// variable. Output is a `.kgl` file that reloads via
-    /// ``kglite.load(path)`` (or ``kglite.open(path, storage='disk')`` for
-    /// disk mode — ``load`` takes no ``storage`` argument). All edges
-    /// between selected nodes are included; node and
-    /// edge properties round-trip byte-for-byte.
+    /// ``kglite.load(path)``. A `.kgl` is a file, never a disk-mode
+    /// directory, so ``storage='disk'`` is refused on either entry point;
+    /// build a disk graph with ``kglite.open(dir, storage='disk')`` and
+    /// ingest into it. All edges between selected nodes are included; node
+    /// and edge properties round-trip byte-for-byte.
     ///
     /// Args:
     ///     path: Destination path for the subgraph file.

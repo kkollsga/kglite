@@ -36,6 +36,7 @@ use crate::graph::schema::{
     SpatialConfig, StringInterner, StripPropertiesGuard, TemporalConfig,
 };
 use crate::graph::storage::column_store::ColumnStore;
+use crate::graph::storage::mode::StorageMode;
 use crate::graph::storage::property_storage::ColumnarRow;
 use crate::graph::storage::{GraphRead, GraphWrite};
 // Loaders return `Arc<DirGraph>`; each binding wraps that in its own type
@@ -1429,9 +1430,41 @@ impl<'a> SectionCursor<'a> {
 /// temp directory to be mmap'd, with the ownership rules, `KGLITE_TMPDIR`
 /// override and orphan sweep [`load_kgl_bytes`] describes. A smaller `.kgl`
 /// touches no path but this one.
+///
+/// Loads with [`LoadOptions::new`]; [`load_file_with`] is the same function
+/// taking those options explicitly.
 pub fn load_file(path: &str) -> io::Result<Arc<DirGraph>> {
+    load_file_with(path, &LoadOptions::new())
+}
+
+/// [`load_file`], with the caller's [`LoadOptions`].
+///
+/// The two options are resolved at opposite ends of the load:
+/// `options.storage` below the decode (before a section is decompressed, so an
+/// unserveable request is refused cheaply) and `options.defer_index_rebuild` at
+/// the very end, where the declared indexes would otherwise be built. Read
+/// [`LoadOptions`] before reaching for `storage` as a memory lever — it is not
+/// one for a `.kgl`.
+pub fn load_file_with(path: &str, options: &LoadOptions) -> io::Result<Arc<DirGraph>> {
     let p = std::path::Path::new(path);
     if p.is_dir() {
+        // The directory *is* the graph, so a request for a portable mode has
+        // nothing to convert — the same structural refusal
+        // `convert_dir_graph_to_mode` gives, raised before the load rather than
+        // after it.
+        if let Some(requested) = options.storage {
+            if requested != StorageMode::Disk {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    crate::graph::storage::mode::disk_conversion_refusal(
+                        StorageMode::Disk,
+                        requested,
+                    ),
+                ));
+            }
+        }
+        // A disk graph's indexes live on disk and are never rebuilt at load, so
+        // `defer_index_rebuild` has nothing to defer here.
         return load_disk_dir(p);
     }
 
@@ -1453,10 +1486,10 @@ pub fn load_file(path: &str) -> io::Result<Arc<DirGraph>> {
             return Err(invalid_data("File is too small to be a valid kglite file."));
         }
         if mmap[..4] == V6_MAGIC {
-            return load_portable_container(&mmap, "v6");
+            return load_portable_container(&mmap, "v6", options);
         }
         if mmap[..4] == V5_MAGIC {
-            return load_portable_container(&mmap, "v5");
+            return load_portable_container(&mmap, "v5", options);
         }
         if mmap[..4] == V4_MAGIC {
             return Err(pre_014_bincode_error(".kgl container v4"));
@@ -1475,9 +1508,9 @@ pub fn load_file(path: &str) -> io::Result<Arc<DirGraph>> {
         return Err(invalid_data("File is too small to be a valid kglite file."));
     }
     if buf[..4] == V6_MAGIC {
-        load_portable_container(&buf, "v6")
+        load_portable_container(&buf, "v6", options)
     } else if buf[..4] == V5_MAGIC {
-        load_portable_container(&buf, "v5")
+        load_portable_container(&buf, "v5", options)
     } else if buf[..4] == V4_MAGIC {
         Err(pre_014_bincode_error(".kgl container v4"))
     } else if buf[..4] == V3_MAGIC {
@@ -1514,15 +1547,21 @@ pub fn load_file(path: &str) -> io::Result<Arc<DirGraph>> {
 /// `file::spill_dirs`). Set `KGLITE_TMPDIR` to put the spills, and that sweep,
 /// somewhere other than `$TMPDIR`.
 pub fn load_kgl_bytes(data: &[u8]) -> io::Result<Arc<DirGraph>> {
+    load_kgl_bytes_with(data, &LoadOptions::new())
+}
+
+/// [`load_kgl_bytes`], with the caller's [`LoadOptions`] — the byte-buffer
+/// counterpart of [`load_file_with`], resolving both options identically.
+pub fn load_kgl_bytes_with(data: &[u8], options: &LoadOptions) -> io::Result<Arc<DirGraph>> {
     if data.len() < 4 {
         return Err(invalid_data(
             "Byte buffer is too small to be a valid kglite graph.",
         ));
     }
     if data[..4] == V6_MAGIC {
-        load_portable_container(data, "v6")
+        load_portable_container(data, "v6", options)
     } else if data[..4] == V5_MAGIC {
-        load_portable_container(data, "v5")
+        load_portable_container(data, "v5", options)
     } else if data[..4] == V4_MAGIC {
         Err(pre_014_bincode_error(".kgl container v4"))
     } else if data[..4] == V3_MAGIC {
@@ -1950,7 +1989,11 @@ fn apply_disk_metadata(dir: &std::path::Path, graph: &mut DirGraph) -> io::Resul
 /// layout; they differ only in which per-column encodings the column sections
 /// may use, and the column reader dispatches on the section's own type tags.
 /// `format_name` is the version the caller matched, and appears in errors.
-fn load_portable_container(buf: &[u8], format_name: &str) -> io::Result<Arc<DirGraph>> {
+fn load_portable_container(
+    buf: &[u8],
+    format_name: &str,
+    options: &LoadOptions,
+) -> io::Result<Arc<DirGraph>> {
     if buf.len() < 13 {
         return Err(invalid_data(format!(
             "{format_name} file is truncated — header incomplete"
@@ -1970,7 +2013,17 @@ fn load_portable_container(buf: &[u8], format_name: &str) -> io::Result<Arc<DirG
     }
     let core_version = u32::from_le_bytes([buf[5], buf[6], buf[7], buf[8]]);
     let metadata_len = u32::from_le_bytes([buf[9], buf[10], buf[11], buf[12]]) as usize;
-    load_portable_columnar(buf, format_name, codec, core_version, metadata_len, 13)
+    load_portable_columnar(
+        buf,
+        format_name,
+        PortableHeader {
+            codec,
+            core_version,
+            metadata_len,
+            metadata_start: 13,
+        },
+        options,
+    )
 }
 
 struct PortableSectionPlan {
@@ -2127,6 +2180,7 @@ fn load_portable_columns(
     dir_graph: &mut DirGraph,
     sections: &mut SectionCursor<'_>,
     columns: &[PortableColumnSection],
+    defer_index_rebuild: bool,
 ) -> io::Result<()> {
     let temp_dir = portable_temp_dir();
     if let Ok(mut dirs) = dir_graph.temp_dirs.lock() {
@@ -2135,7 +2189,7 @@ fn load_portable_columns(
     for (index, metadata) in columns.iter().enumerate() {
         load_portable_column_section(codec, dir_graph, sections, metadata, index, &temp_dir)?;
     }
-    attach_portable_column_stores(dir_graph);
+    attach_portable_column_stores(dir_graph, defer_index_rebuild);
     Ok(())
 }
 
@@ -2191,16 +2245,31 @@ fn load_portable_optional_sections(
     Ok(())
 }
 
+/// The fields [`load_portable_container`] reads out of a v5/v6 container's
+/// fixed-size header, carried as one value so the loader's signature does not
+/// grow a parameter per header field.
+struct PortableHeader {
+    codec: serde_codec::CodecVersion,
+    core_version: u32,
+    metadata_len: usize,
+    /// Byte offset of the metadata JSON — immediately after the header.
+    metadata_start: usize,
+}
+
 /// Load the shared v5/v6 columnar section layout through the codec selected by
 /// the already-validated container header.
 fn load_portable_columnar(
     buf: &[u8],
     format_name: &str,
-    codec: serde_codec::CodecVersion,
-    core_version: u32,
-    metadata_len: usize,
-    metadata_start: usize,
+    header: PortableHeader,
+    options: &LoadOptions,
 ) -> io::Result<Arc<DirGraph>> {
+    let PortableHeader {
+        codec,
+        core_version,
+        metadata_len,
+        metadata_start,
+    } = header;
     if metadata_len > MAX_METADATA_BYTES {
         return Err(invalid_data(format!(
             "{format_name} metadata is {metadata_len} bytes; limit is {MAX_METADATA_BYTES}"
@@ -2219,15 +2288,40 @@ fn load_portable_columnar(
     // Resolved before a section is decompressed, so an unplaceable mode fails
     // before the expensive part.
     let recorded_mode = metadata.portable_storage_mode()?;
+    // The caller's request outranks the file's record; the record is the
+    // fallback. Resolved here, on the same side of the decode, so a request
+    // this build cannot serve costs the metadata read and nothing else.
+    let target_mode = match options.storage {
+        // No `.kgl` can become a directory. Refused with the same wording
+        // `convert_dir_graph_to_mode` gives after a load, minus the load.
+        Some(StorageMode::Disk) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                crate::graph::storage::mode::disk_conversion_refusal(
+                    recorded_mode,
+                    StorageMode::Disk,
+                ),
+            ))
+        }
+        Some(requested) => requested,
+        None => recorded_mode,
+    };
     let (mut dir_graph, plan) = decode_portable_topology(codec, &mut sections, metadata)?;
-    load_portable_columns(codec, &mut dir_graph, &mut sections, &plan.columns)?;
+    load_portable_columns(
+        codec,
+        &mut dir_graph,
+        &mut sections,
+        &plan.columns,
+        options.defer_index_rebuild,
+    )?;
     load_portable_optional_sections(codec, core_version, &mut dir_graph, &mut sections, &plan)?;
-    // Honour the recorded mode. The payload always deserializes into a memory
-    // backend (`GraphBackend`'s Deserialize), so a mapped-saved checkpoint is
+    // Place the graph in its mode. The payload always deserializes into a
+    // memory backend (`GraphBackend`'s Deserialize), so a mapped target is
     // swapped onto the mapped backend here — after the graph is complete, and
     // by moving the topology rather than copying it. Memory (and a file that
-    // recorded nothing) is already what the decode produced, so it is a no-op.
-    crate::graph::storage::mode::convert_dir_graph_to_mode(&mut dir_graph, recorded_mode)
+    // recorded nothing, with nothing requested) is already what the decode
+    // produced, so it is a no-op.
+    crate::graph::storage::mode::convert_dir_graph_to_mode(&mut dir_graph, target_mode)
         .map_err(io::Error::other)?;
     Ok(Arc::new(dir_graph))
 }
@@ -2235,8 +2329,8 @@ fn load_portable_columnar(
 mod columns;
 use columns::{attach_portable_column_stores, load_column_sidecars};
 
-pub(crate) mod defer_indexes;
-pub(crate) use defer_indexes::defer_index_rebuild_requested;
+mod load_options;
+pub use load_options::LoadOptions;
 
 mod spill_dirs;
 use spill_dirs::portable_temp_dir;
@@ -2262,6 +2356,9 @@ mod file_deferred_index_tests;
 #[cfg(test)]
 #[path = "file_load_contract_tests.rs"]
 mod file_load_contract_tests;
+#[cfg(test)]
+#[path = "file_load_options_tests.rs"]
+mod file_load_options_tests;
 #[cfg(test)]
 #[path = "file_tests.rs"]
 mod file_tests;

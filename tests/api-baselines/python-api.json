@@ -1545,7 +1545,7 @@
     },
     "from_bytes": {
       "kind": "function",
-      "signature": "(data)"
+      "signature": "(data, *, storage=None, defer_index_rebuild=None)"
     },
     "from_networkx": {
       "kind": "function",
@@ -1565,7 +1565,7 @@
     },
     "load": {
       "kind": "function",
-      "signature": "(path)"
+      "signature": "(path, *, storage=None, defer_index_rebuild=None)"
     },
     "load_rdf": {
       "kind": "function",
@@ -1577,7 +1577,7 @@
     },
     "open_session": {
       "kind": "function",
-      "signature": "(path)"
+      "signature": "(path, *, storage=None, defer_index_rebuild=None)"
     },
     "outline": {
       "kind": "function",

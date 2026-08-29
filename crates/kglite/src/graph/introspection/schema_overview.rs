@@ -2,6 +2,7 @@
 
 use crate::datatypes::values::Value;
 use crate::graph::constraints::{ConstraintKind, EntityKind};
+use crate::graph::dir_graph::indexes::IndexState;
 use crate::graph::property_types::DeclaredType;
 use crate::graph::schema::{DirGraph, InternedKey};
 use crate::graph::storage::column_store::TypedColumn;
@@ -439,7 +440,10 @@ pub(crate) struct IndexInfo {
     pub labels_or_types: Vec<String>,
     /// Indexed property names, in definition order. Length ≥ 2 for composite.
     pub properties: Vec<String>,
-    /// Always `"ONLINE"` — KGLite indexes are atomic; no POPULATING state.
+    /// `"ONLINE"` for a built index, `"DEFERRED"` for one a
+    /// `LoadOptions::defer_index_rebuild` load has declared but not yet built
+    /// (`IndexState`). There is no POPULATING state in between — a KGLite index
+    /// is built atomically.
     pub state: &'static str,
     /// Whether the graph has moved since this index last covered it, for the
     /// kinds that track it. `None` — rendered as null — for the three
@@ -476,40 +480,45 @@ pub(crate) struct IndexInfo {
 pub(crate) fn collect_indexes_structured(graph: &DirGraph) -> Vec<IndexInfo> {
     let mut out: Vec<IndexInfo> = Vec::new();
 
-    for (node_type, property) in graph.property_indices.keys() {
+    // The three property-index families come through the state-aware listers
+    // rather than off the maps directly, so a deferred load's declarations are
+    // listed — marked `DEFERRED` — instead of vanishing from every introspection
+    // surface at once. Those listers are the only index readers allowed to
+    // consult the declaration lists; see `DirGraph::list_indexes_with_state`.
+    for (node_type, property, state) in graph.list_indexes_with_state() {
         out.push(IndexInfo {
             name: format!("{node_type}.{property}"),
             kind: IndexKind::Equality,
             entity_type: "NODE",
-            labels_or_types: vec![node_type.clone()],
-            properties: vec![property.clone()],
-            state: "ONLINE",
+            labels_or_types: vec![node_type],
+            properties: vec![property],
+            state: state.as_str(),
             stale: None,
             delta: None,
             unembedded: None,
         });
     }
-    for (node_type, properties) in graph.composite_indices.keys() {
+    for (node_type, properties, state) in graph.list_composite_indexes_with_state() {
         out.push(IndexInfo {
             name: format!("{node_type}.({})", properties.join(",")),
             kind: IndexKind::Composite,
             entity_type: "NODE",
-            labels_or_types: vec![node_type.clone()],
-            properties: properties.clone(),
-            state: "ONLINE",
+            labels_or_types: vec![node_type],
+            properties,
+            state: state.as_str(),
             stale: None,
             delta: None,
             unembedded: None,
         });
     }
-    for (node_type, property) in graph.range_indices.keys() {
+    for (node_type, property, state) in graph.list_range_indexes_with_state() {
         out.push(IndexInfo {
             name: format!("{node_type}.{property}"),
             kind: IndexKind::Range,
             entity_type: "NODE",
-            labels_or_types: vec![node_type.clone()],
-            properties: vec![property.clone()],
-            state: "ONLINE",
+            labels_or_types: vec![node_type],
+            properties: vec![property],
+            state: state.as_str(),
             stale: None,
             delta: None,
             unembedded: None,
@@ -805,15 +814,28 @@ pub fn compute_schema(graph: &DirGraph) -> SchemaOverview {
     // structured helper they format also feeds `db.indexes()`.
     let mut indexes: Vec<String> = collect_indexes_structured(graph)
         .into_iter()
-        .map(|idx| match idx.kind {
-            IndexKind::Equality => format!("{}.{}", idx.labels_or_types[0], idx.properties[0]),
-            IndexKind::Composite => {
-                format!("{}.({})", idx.labels_or_types[0], idx.properties.join(", "))
-            }
-            IndexKind::Range => format!("{}.{} [range]", idx.labels_or_types[0], idx.properties[0]),
-            IndexKind::Text => format!("{}.{} [text]", idx.labels_or_types[0], idx.properties[0]),
-            IndexKind::Vector => {
-                format!("{}.{} [vector]", idx.labels_or_types[0], idx.properties[0])
+        .map(|idx| {
+            let entry = match idx.kind {
+                IndexKind::Equality => format!("{}.{}", idx.labels_or_types[0], idx.properties[0]),
+                IndexKind::Composite => {
+                    format!("{}.({})", idx.labels_or_types[0], idx.properties.join(", "))
+                }
+                IndexKind::Range => {
+                    format!("{}.{} [range]", idx.labels_or_types[0], idx.properties[0])
+                }
+                IndexKind::Text => {
+                    format!("{}.{} [text]", idx.labels_or_types[0], idx.properties[0])
+                }
+                IndexKind::Vector => {
+                    format!("{}.{} [vector]", idx.labels_or_types[0], idx.properties[0])
+                }
+            };
+            // Suffix only on the state the shapes above cannot express, so the
+            // pinned `ONLINE` strings are byte-identical to what they were.
+            if idx.state == IndexState::Deferred.as_str() {
+                format!("{entry} [deferred]")
+            } else {
+                entry
             }
         })
         .collect();
