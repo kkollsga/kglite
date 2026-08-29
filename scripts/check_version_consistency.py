@@ -142,7 +142,14 @@ ECOSYSTEM_ROOT = _default_ecosystem_root(REPO_ROOT)
 #: The release source, then the sibling repos that consume it, in dependency
 #: order.
 UPSTREAM_REPO = "KGLite"
-DOWNSTREAM_REPOS = ("codingest", "kglite-datasets", "sonagram", "sonara", "mcp-methods")
+DOWNSTREAM_REPOS = (
+    "codingest",
+    "kglite-datasets",
+    "sonagram",
+    "sonara",
+    "mcp-methods",
+    "kglite-visual",
+)
 
 #: Package names published by this ecosystem, grouped by the repo that owns
 #: them. Any declaration of one of these anywhere is cross-repo coupling.
@@ -159,6 +166,12 @@ ECOSYSTEM_PACKAGES: dict[str, tuple[str, ...]] = {
     "sonagram": ("sonagram",),
     "sonara": ("sonara", "sonara-python"),
     "mcp-methods": ("mcp-methods", "mcp-methods-macros"),
+    "kglite-visual": (
+        "kglite-visual",
+        "kglite-visual-core",
+        "kglite-visual-cli",
+        "kglite-visual-py",
+    ),
 }
 
 #: Third-party dependencies whose floors have burned us. These are watched for
