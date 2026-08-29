@@ -524,18 +524,27 @@ impl FileMetadata {
         if let Some(counts) = self.edge_type_counts {
             *graph.edge_type_counts_cache.write().unwrap() = Some(std::sync::Arc::new(counts));
         }
-        if let Some(triples) = self.type_connectivity {
+        let persisted = self
+            .type_connectivity
+            .filter(|triples| !connectivity_is_fabricated(triples, graph));
+        if let Some(triples) = persisted {
             *graph.type_connectivity_cache.write().unwrap() = Some(triples);
         } else if derive_type_connectivity && !graph.connection_type_metadata.is_empty() {
             // Older graphs persist no triples: derive them from
-            // connection_type_metadata (instant, no I/O).
+            // connection_type_metadata (instant, no I/O). Only real counts may
+            // be derived from: `edge_type_counts` is persisted solely when its
+            // cache was warm at save time, and filling in a 0 for every triple
+            // when it was cold is not "unknown" to the reader — it is a cache
+            // hit, so `get_or_compute_type_connectivity` serves the zeros and
+            // never runs the O(E) count that would produce the true numbers.
+            // Leaving the cache cold costs one lazy recount and is honest.
             let edge_counts = graph.edge_type_counts_cache.read().unwrap();
+            let Some(edge_counts) = edge_counts.as_ref() else {
+                return;
+            };
             let mut triples = Vec::new();
             for (conn_type, info) in graph.connection_type_metadata.iter() {
-                let count = edge_counts
-                    .as_ref()
-                    .and_then(|c| c.get(conn_type).copied())
-                    .unwrap_or(0);
+                let count = edge_counts.get(conn_type).copied().unwrap_or(0);
                 for src in &info.source_types {
                     for tgt in &info.target_types {
                         triples.push(crate::graph::schema::ConnectivityTriple {
@@ -552,6 +561,22 @@ impl FileMetadata {
             }
         }
     }
+}
+
+/// Do persisted connectivity triples carry the fabricated zeros an older build
+/// wrote? Such a build derived triples from `connection_type_metadata` with a
+/// count of 0 apiece whenever the save carried no `edge_type_counts`, and a
+/// later save of that graph persisted the zeros — so the poison round-trips
+/// until a load refuses it. An honestly-computed triple set never holds a zero
+/// count for a graph with edges: the counter emits a triple only for an edge it
+/// walked. Short-circuits on the first non-zero count.
+fn connectivity_is_fabricated(
+    triples: &[crate::graph::schema::ConnectivityTriple],
+    graph: &DirGraph,
+) -> bool {
+    !triples.is_empty()
+        && graph.graph.edge_count() > 0
+        && triples.iter().all(|triple| triple.count == 0)
 }
 
 pub(crate) fn build_disk_metadata(graph: &DirGraph) -> FileMetadata {
@@ -1660,7 +1685,7 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
         && !graph.has_type_connectivity_cache()
     {
         if let Ok(Some(triples)) = read_type_connectivity_bin(dir, &graph) {
-            if !triples.is_empty() {
+            if !triples.is_empty() && !connectivity_is_fabricated(&triples, &graph) {
                 *graph.type_connectivity_cache.write().unwrap() = Some(triples);
             }
         }

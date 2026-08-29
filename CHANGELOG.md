@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A reloaded `.kgl` no longer reports every relationship type as having zero
+  edges.** Edge counts are persisted only when their cache happens to be warm at
+  save time, so a graph built with Cypher `CREATE` and saved carried none — and
+  the load path then derived the type-connectivity cache with a fabricated count
+  of 0 per triple. That cache is authoritative on read, so the lazy recount that
+  would have produced the true numbers never ran, and `describe()` plus the
+  planner's selectivity estimates saw zeros over a graph full of edges. The load
+  now leaves the cache cold when real counts are absent, and distrusts persisted
+  all-zero triples on a graph that has edges, which repairs files already written
+  with the fabricated zeros.
+
 ## [0.16.13] - 2026-08-27
 
 Release-mode measurements vs the published 0.16.12 wheel (min of 200 rounds,

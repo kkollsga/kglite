@@ -2040,3 +2040,128 @@ mod section_integrity_tests {
         assert_eq!(graph.graph.node_count(), 52);
     }
 }
+
+/// A `.kgl` load must never install *fabricated* type-connectivity counts.
+/// `edge_type_counts` is persisted only when its cache happens to be warm, so a
+/// graph built by Cypher `CREATE` and saved normally carries none — and the
+/// derive fallback used to fill the connectivity cache with zeros, which
+/// `get_or_compute_type_connectivity` then served forever as a cache hit.
+#[cfg(test)]
+mod type_connectivity_load_tests {
+    use super::*;
+    use crate::graph::dir_graph::DirGraph;
+    use crate::graph::schema::ConnectivityTriple;
+    use crate::graph::session::execute::{execute_mut, ExecuteOptions};
+    use std::collections::BTreeMap;
+
+    fn run(graph: &mut DirGraph, query: &str) {
+        let params = std::collections::HashMap::new();
+        let opts = ExecuteOptions::eager(&params);
+        execute_mut(graph, query, &opts)
+            .unwrap_or_else(|e| panic!("setup query failed: {query}: {e}"));
+    }
+
+    /// 3 `KNOWS` (Person→Person) and 2 `WORKS_AT` (Person→Company).
+    fn built() -> DirGraph {
+        let mut graph = DirGraph::new();
+        run(
+            &mut graph,
+            "CREATE (p1:Person {id: 1})-[:KNOWS]->(p2:Person {id: 2}),
+                    (p2)-[:KNOWS]->(p3:Person {id: 3}),
+                    (p3)-[:KNOWS]->(p1),
+                    (p1)-[:WORKS_AT]->(c1:Company {id: 10}),
+                    (p2)-[:WORKS_AT]->(c1)",
+        );
+        graph
+    }
+
+    fn expected() -> BTreeMap<(String, String, String), usize> {
+        BTreeMap::from([
+            (
+                (
+                    "Person".to_string(),
+                    "KNOWS".to_string(),
+                    "Person".to_string(),
+                ),
+                3,
+            ),
+            (
+                (
+                    "Person".to_string(),
+                    "WORKS_AT".to_string(),
+                    "Company".to_string(),
+                ),
+                2,
+            ),
+        ])
+    }
+
+    fn tally(triples: &[ConnectivityTriple]) -> BTreeMap<(String, String, String), usize> {
+        triples
+            .iter()
+            .map(|t| ((t.src.clone(), t.conn.clone(), t.tgt.clone()), t.count))
+            .collect()
+    }
+
+    fn roundtrip(graph: DirGraph, dir: &std::path::Path) -> Arc<DirGraph> {
+        let path = dir.join("g.kgl");
+        let mut arc = Arc::new(graph);
+        prepare_save(&mut arc);
+        Arc::make_mut(&mut arc).enable_columnar();
+        write_kgl(&arc, path.to_str().unwrap()).unwrap();
+        load_file(path.to_str().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn cold_counts_cache_does_not_persist_zero_connectivity() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = built();
+        assert!(
+            !graph.has_edge_type_counts_cache(),
+            "fixture must save with a cold counts cache — that is the case under test"
+        );
+        let loaded = roundtrip(graph, dir.path());
+        assert_eq!(
+            tally(&loaded.get_or_compute_type_connectivity()),
+            expected()
+        );
+    }
+
+    /// Repair path for files already written by an affected build: the zeros it
+    /// invented on load became `Some(triples)` in the next save, and a plain
+    /// `Some` branch would serve them forever.
+    #[test]
+    fn persisted_all_zero_triples_are_distrusted() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = built();
+        let poisoned: Vec<ConnectivityTriple> = expected()
+            .into_keys()
+            .map(|(src, conn, tgt)| ConnectivityTriple {
+                src,
+                conn,
+                tgt,
+                count: 0,
+            })
+            .collect();
+        graph.set_type_connectivity(poisoned);
+        let loaded = roundtrip(graph, dir.path());
+        assert_eq!(
+            tally(&loaded.get_or_compute_type_connectivity()),
+            expected()
+        );
+    }
+
+    #[test]
+    fn warm_counts_cache_roundtrips_connectivity_exactly() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = built();
+        let counts = graph.get_edge_type_counts();
+        assert_eq!(counts.get("KNOWS").copied(), Some(3));
+        assert_eq!(counts.get("WORKS_AT").copied(), Some(2));
+        let loaded = roundtrip(graph, dir.path());
+        assert_eq!(
+            tally(&loaded.get_or_compute_type_connectivity()),
+            expected()
+        );
+    }
+}
