@@ -2165,3 +2165,219 @@ mod type_connectivity_load_tests {
         );
     }
 }
+
+/// `.kgl` bytes must be a pure function of graph content, so a content-addressed
+/// cache or a committed fixture downstream can rely on two saves of the same
+/// graph comparing equal.
+///
+/// The detector is two *separately built* equivalent graphs rather than two
+/// saves of one: every `HashMap::new()` draws a fresh `RandomState` seed from a
+/// per-thread counter, so equivalent maps in the same process already iterate
+/// differently — which is what a fresh process would also do to a single graph.
+#[cfg(test)]
+mod byte_determinism_tests {
+    use super::*;
+    use crate::graph::dir_graph::DirGraph;
+    use crate::graph::session::execute::{execute_mut, ExecuteOptions};
+
+    fn run(graph: &mut DirGraph, query: &str) {
+        let params = std::collections::HashMap::new();
+        let opts = ExecuteOptions::eager(&params);
+        execute_mut(graph, query, &opts)
+            .unwrap_or_else(|e| panic!("setup query failed: {query}: {e}"));
+    }
+
+    /// Ten node types, ten connection types, every connectivity triple at
+    /// count 1 — a count-keyed sort cannot order these, so any residual
+    /// map-iteration order in the persisted metadata shows up as a byte diff.
+    const TYPES: [&str; 10] = [
+        "Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Eta", "Theta", "Iota", "Kappa",
+    ];
+
+    /// One class and one relationship declaration per type, so the ontology
+    /// store and the managed-label bookkeeping are both non-trivially filled.
+    fn ontology_json() -> String {
+        let classes: Vec<String> = TYPES
+            .iter()
+            .map(|t| format!("\"{t}\": {{\"description\": \"d{t}\"}}"))
+            .collect();
+        let rels: Vec<String> = (0..TYPES.len())
+            .map(|i| {
+                format!(
+                    "\"R{i:02}\": {{\"domain\": \"{}\", \"range\": \"{}\"}}",
+                    TYPES[i],
+                    TYPES[(i + 1) % TYPES.len()]
+                )
+            })
+            .collect();
+        format!(
+            "{{\"classes\": {{{}}}, \"relationships\": {{{}}}}}",
+            classes.join(", "),
+            rels.join(", ")
+        )
+    }
+
+    fn build() -> Arc<DirGraph> {
+        let mut graph = DirGraph::new();
+        for (i, t) in TYPES.iter().enumerate() {
+            run(
+                &mut graph,
+                &format!(
+                    "CREATE (n:{t} {{id: {i}, title: 'n{i}', rank: {i}, tag: 'g{}'}})",
+                    i % 3
+                ),
+            );
+        }
+        for i in 0..TYPES.len() {
+            let src = TYPES[i];
+            let tgt = TYPES[(i + 1) % TYPES.len()];
+            run(
+                &mut graph,
+                &format!("MATCH (a:{src}), (b:{tgt}) CREATE (a)-[:R{i:02} {{w: {i}}}]->(b)"),
+            );
+        }
+        for (i, t) in TYPES.iter().enumerate() {
+            run(&mut graph, &format!("CREATE INDEX FOR (n:{t}) ON (n.rank)"));
+            run(
+                &mut graph,
+                &format!("CREATE INDEX FOR (n:{t}) ON (n.tag, n.rank)"),
+            );
+            run(
+                &mut graph,
+                &format!("CREATE RANGE INDEX FOR (n:{t}) ON (n.title)"),
+            );
+            run(
+                &mut graph,
+                &format!("CREATE CONSTRAINT u{i} FOR (n:{t}) REQUIRE n.title IS UNIQUE"),
+            );
+            run(
+                &mut graph,
+                &format!("CREATE CONSTRAINT nn{i} FOR (n:{t}) REQUIRE n.tag IS NOT NULL"),
+            );
+            run(
+                &mut graph,
+                &format!("CREATE CONSTRAINT pt{i} FOR (n:{t}) REQUIRE n.title IS :: STRING"),
+            );
+            // Secondary labels — their own `.kgl` section, keyed by label.
+            run(&mut graph, &format!("MATCH (n:{t}) SET n:Extra{i}"));
+        }
+        graph
+            .define_ontology(crate::graph::ontology::ontology_from_json(&ontology_json()).unwrap())
+            .unwrap();
+        for t in TYPES {
+            crate::graph::text_indexes::build_text_index(&mut graph, t, "title", None).unwrap();
+        }
+        // Warm both rebuildable caches so they reach the writer; a cold cache
+        // is simply omitted and would hide the field under test.
+        let _ = graph.get_edge_type_counts();
+        let _ = graph.get_or_compute_type_connectivity();
+
+        let mut arc = Arc::new(graph);
+        {
+            use crate::graph::algorithms::hnsw::HnswParams;
+            use crate::graph::algorithms::vector::DistanceMetric;
+            use crate::graph::schema::EmbeddingStore;
+            let dir = Arc::make_mut(&mut arc);
+            for (i, t) in TYPES.iter().enumerate() {
+                let mut store = EmbeddingStore::with_metric(4, "cosine");
+                store.set_embedding(i, &[i as f32, 1.0, 0.5, (i % 3) as f32]);
+                store
+                    .build_index(DistanceMetric::Cosine, HnswParams::default(), 1)
+                    .unwrap();
+                dir.embeddings
+                    .insert((t.to_string(), "emb".to_string()), store);
+            }
+        }
+        prepare_save(&mut arc);
+        Arc::make_mut(&mut arc).enable_columnar();
+        arc
+    }
+
+    fn save(graph: &Arc<DirGraph>) -> Vec<u8> {
+        let mut out = Vec::new();
+        write_kgl_to(graph, &mut out).unwrap();
+        out
+    }
+
+    fn first_diff(a: &[u8], b: &[u8]) -> String {
+        match a.iter().zip(b).position(|(x, y)| x != y) {
+            Some(at) => {
+                let lo = at.saturating_sub(40);
+                format!(
+                    "lengths {} vs {}, first differing byte at {at}\n  a: {:?}\n  b: {:?}",
+                    a.len(),
+                    b.len(),
+                    String::from_utf8_lossy(&a[lo..(at + 40).min(a.len())]),
+                    String::from_utf8_lossy(&b[lo..(at + 40).min(b.len())]),
+                )
+            }
+            None => format!("common prefix equal; lengths {} vs {}", a.len(), b.len()),
+        }
+    }
+
+    /// Non-vacuity: the fixture must actually fill every metadata list and
+    /// optional section the two tests below claim to cover. Without this a
+    /// later fixture edit could empty one and leave a green test asserting
+    /// nothing about it.
+    #[test]
+    fn the_fixture_populates_every_audited_section() {
+        let bytes = save(&build());
+        let len = u32::from_le_bytes(bytes[9..13].try_into().unwrap()) as usize;
+        let meta: FileMetadata = serde_json::from_slice(&bytes[13..13 + len]).unwrap();
+        // `CREATE RANGE INDEX` also installs the hash equality index, so each
+        // type contributes two property-index keys.
+        assert_eq!(meta.property_index_keys.len(), TYPES.len() * 2);
+        assert_eq!(meta.composite_index_keys.len(), TYPES.len());
+        assert_eq!(meta.range_index_keys.len(), TYPES.len());
+        assert_eq!(meta.unique_constraint_keys.len(), TYPES.len());
+        assert_eq!(meta.constraint_names.len(), TYPES.len() * 3);
+        assert_eq!(meta.ddl_not_null_constraints.len(), TYPES.len());
+        assert_eq!(meta.ddl_property_type_constraints.len(), TYPES.len());
+        assert_eq!(meta.node_type_metadata.len(), TYPES.len());
+        assert_eq!(meta.connection_type_metadata.len(), TYPES.len());
+        assert_eq!(meta.column_sections.len(), TYPES.len());
+        assert_eq!(meta.ontology.classes.len(), TYPES.len());
+        assert_eq!(meta.ontology.relationships.len(), TYPES.len());
+        assert_eq!(
+            meta.type_connectivity.as_ref().map(Vec::len),
+            Some(TYPES.len()),
+            "connectivity triples must reach the writer"
+        );
+        assert_eq!(
+            meta.edge_type_counts.as_ref().map(HashMap::len),
+            Some(TYPES.len())
+        );
+        for (label, size) in [
+            ("secondary_labels", meta.secondary_labels_compressed_size),
+            ("vector_index", meta.vector_index_compressed_size),
+            ("text_index", meta.text_index_compressed_size),
+        ] {
+            assert!(size > 0, "the {label} section must be present");
+        }
+    }
+
+    #[test]
+    fn equivalent_graphs_save_to_identical_bytes() {
+        let first = save(&build());
+        let second = save(&build());
+        assert!(
+            first == second,
+            ".kgl bytes must not depend on map iteration order: {}",
+            first_diff(&first, &second)
+        );
+    }
+
+    #[test]
+    fn a_reloaded_graph_saves_to_the_same_bytes() {
+        let first = save(&build());
+        let mut reloaded = load_kgl_bytes(&first).unwrap();
+        prepare_save(&mut reloaded);
+        Arc::make_mut(&mut reloaded).enable_columnar();
+        let again = save(&reloaded);
+        assert!(
+            first == again,
+            "a load/save round-trip must be a fixed point: {}",
+            first_diff(&first, &again)
+        );
+    }
+}

@@ -25,7 +25,9 @@ use crate::datatypes::values::Value;
 use crate::graph::schema::DirGraph;
 use std::collections::HashMap;
 
-pub use connectivity::{compute_type_connectivity, derive_edge_counts_from_triples};
+pub use connectivity::{
+    compute_type_connectivity, derive_edge_counts_from_triples, sort_connectivity_triples,
+};
 
 pub struct ConnectionTypeStats {
     pub connection_type: String,

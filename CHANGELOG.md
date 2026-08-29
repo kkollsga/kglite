@@ -19,6 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now leaves the cache cold when real counts are absent, and distrusts persisted
   all-zero triples on a graph that has edges, which repairs files already written
   with the fabricated zeros.
+- **Two saves of the same graph produce identical `.kgl` bytes again.** Four
+  persisted lists were written in hash-map iteration order — the type
+  connectivity triples, and the property / composite / range index-key
+  snapshots — so a content-addressed cache or a committed fixture downstream
+  saw the file change with nothing in the graph changing. Each is now sorted at
+  the write, where the reader already treats it as a set; the disk-mode
+  `type_connectivity.bin.zst` and `interner.bin.zst` sidecars get the same
+  treatment. No format change: the same reader loads files written either way.
 
 ## [0.16.13] - 2026-08-27
 

@@ -160,7 +160,11 @@ pub(crate) fn read_type_indices_bin(
 // parse overhead.
 
 pub(crate) fn write_interner_bin(dir: &std::path::Path, graph: &DirGraph) -> Result<(), String> {
-    let originals: Vec<String> = graph.interner.iter().map(|(_, v)| v.to_string()).collect();
+    // Sorted: the reader re-derives each key by hashing the string, so the
+    // order here is incidental — fixing it is what makes two saves of one
+    // graph produce identical bytes.
+    let mut originals: Vec<String> = graph.interner.iter().map(|(_, v)| v.to_string()).collect();
+    originals.sort_unstable();
     let bytes = encode_disk_serde(&originals)
         .map_err(|e| format!("interner serialization failed: {}", e))?;
     let compressed = zstd::encode_all(bytes.as_slice(), 3)
@@ -371,12 +375,13 @@ pub(crate) fn write_type_connectivity_bin(
     dir: &std::path::Path,
     graph: &DirGraph,
 ) -> Result<(), String> {
-    let Some(triples) = graph.get_type_connectivity() else {
+    let Some(mut triples) = graph.get_type_connectivity() else {
         return Ok(());
     };
     if triples.is_empty() {
         return Ok(());
     }
+    crate::graph::introspection::sort_connectivity_triples(&mut triples);
     let n = triples.len() as u32;
     let mut payload: Vec<u8> = Vec::with_capacity(16 + (triples.len() * 32));
     payload.extend_from_slice(TYPE_CONN_MAGIC);

@@ -466,7 +466,10 @@ impl FileMetadata {
             // `type_connectivity.bin.zst` separately (3.17 M-entry JSON
             // list → packed binary). In-memory .kgl saves keep embedding
             // it here for single-file portability.
-            type_connectivity: graph.get_type_connectivity(),
+            type_connectivity: graph.get_type_connectivity().map(|mut triples| {
+                crate::graph::introspection::sort_connectivity_triples(&mut triples);
+                triples
+            }),
         }
     }
 

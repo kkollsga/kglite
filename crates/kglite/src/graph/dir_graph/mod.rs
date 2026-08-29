@@ -661,6 +661,14 @@ fn warn_on_duplicate_ids(node_type: &str, entry_count: usize, unique_count: usiz
     }
 }
 
+/// The keys of a hash map, sorted — the shape every persisted index-key
+/// snapshot takes (see [`DirGraph::populate_index_keys`]).
+fn sorted_keys<K: Ord + Clone, V>(map: &HashMap<K, V>) -> Vec<K> {
+    let mut keys: Vec<K> = map.keys().cloned().collect();
+    keys.sort_unstable();
+    keys
+}
+
 impl DirGraph {
     /// Current monotonic version counter, bumped by every mutation path. The
     /// OCC token for [`crate::graph::session`] and downstream consumers (the
@@ -1593,24 +1601,20 @@ impl DirGraph {
 
     /// Snapshot which property/composite/range indexes exist so they survive
     /// serialization. Called automatically before save.
+    ///
+    /// Every list is sorted. Each source is a `HashMap` whose iteration order is
+    /// reseeded per process, and these lists are read back as sets
+    /// (`rebuild_indices_from_keys`, `rebuild_unique_indices_from_keys`), so the
+    /// order carries no meaning — imposing one is what makes two saves of the
+    /// same graph byte-identical.
     pub fn populate_index_keys(&mut self) {
-        self.property_index_keys = self.property_indices.keys().cloned().collect();
-        self.composite_index_keys = self.composite_indices.keys().cloned().collect();
-        self.range_index_keys = self.range_indices.keys().cloned().collect();
+        self.property_index_keys = sorted_keys(&self.property_indices);
+        self.composite_index_keys = sorted_keys(&self.composite_indices);
+        self.range_index_keys = sorted_keys(&self.range_indices);
         // Declared UNIQUE constraints persist the same way. `unique_indices`
         // keys *are* the declaration list, so snapshotting them keeps the two
         // from drifting when a constraint is dropped.
-        //
-        // Sorted, unlike the index-key lists above: `unique_indices` is a
-        // `HashMap`, so its iteration order is reseeded per process and two
-        // saves of the same graph would otherwise disagree byte for byte. The
-        // order carries no meaning — `rebuild_unique_indices_from_keys` reads
-        // the list as a set — so imposing one costs nothing and makes a saved
-        // graph reproducible.
-        let mut unique_keys: Vec<UniqueConstraintKey> =
-            self.unique_indices.keys().cloned().collect();
-        unique_keys.sort_unstable();
-        self.unique_constraint_keys = unique_keys;
+        self.unique_constraint_keys = sorted_keys(&self.unique_indices);
         // Constraint *names* cannot be re-derived from the enforcement
         // structures, so unlike the lists above they are maintained live. Prune
         // instead: a name whose declaration is gone must not be saved, or
@@ -1641,7 +1645,7 @@ impl DirGraph {
             let prop_refs: Vec<&str> = properties.iter().map(|s| s.as_str()).collect();
             self.create_composite_index(node_type, &prop_refs);
         }
-        self.composite_index_keys = self.composite_indices.keys().cloned().collect();
+        self.composite_index_keys = sorted_keys(&self.composite_indices);
 
         let range_keys: Vec<IndexKey> = std::mem::take(&mut self.range_index_keys);
         for (node_type, property) in &range_keys {

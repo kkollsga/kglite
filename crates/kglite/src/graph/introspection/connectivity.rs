@@ -39,6 +39,26 @@ pub fn compute_type_connectivity(graph: &DirGraph) -> Vec<ConnectivityTriple> {
     triples
 }
 
+/// Impose the canonical persisted order on connectivity triples.
+///
+/// Every writer of the cache — the `.kgl` metadata field and the disk-mode
+/// `type_connectivity.bin.zst` sidecar — sorts through here. The triples reach
+/// the cache in `HashMap` iteration order, which is reseeded per process, and
+/// every reader treats the list as a set keyed by `(src, conn, tgt)`, so the
+/// order is free to fix — and fixing it is what makes two saves of one graph
+/// produce identical bytes.
+///
+/// Deliberately not applied in the getter: a Wikidata-scale graph carries
+/// millions of triples and the planner reads them per query.
+pub fn sort_connectivity_triples(triples: &mut [ConnectivityTriple]) {
+    triples.sort_unstable_by(|a, b| {
+        a.src
+            .cmp(&b.src)
+            .then_with(|| a.conn.cmp(&b.conn))
+            .then_with(|| a.tgt.cmp(&b.tgt))
+    });
+}
+
 /// The disk graph [`compute_type_connectivity`] will Rayon-scan, or `None`
 /// for the serial path. Named because the routing decision is the only thing
 /// a test can observe here — both paths produce identical counts, so nothing
