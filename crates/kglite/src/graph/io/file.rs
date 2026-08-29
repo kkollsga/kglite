@@ -2235,6 +2235,9 @@ fn load_portable_columnar(
 mod columns;
 use columns::{attach_portable_column_stores, load_column_sidecars};
 
+pub(crate) mod defer_indexes;
+pub(crate) use defer_indexes::defer_index_rebuild_requested;
+
 mod spill_dirs;
 use spill_dirs::portable_temp_dir;
 
@@ -2253,6 +2256,9 @@ use vector_persistence::{decode_vector_indexes, encode_vector_indexes};
 pub use vector_persistence::{
     export_embeddings_to_file, import_embeddings_from_file, EmbeddingExportFilter, ImportStats,
 };
+#[cfg(test)]
+#[path = "file_deferred_index_tests.rs"]
+mod file_deferred_index_tests;
 #[cfg(test)]
 #[path = "file_load_contract_tests.rs"]
 mod file_load_contract_tests;

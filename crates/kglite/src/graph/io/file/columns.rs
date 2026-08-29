@@ -147,5 +147,12 @@ pub(super) fn attach_portable_column_stores(dir_graph: &mut DirGraph) {
             }
         }
     }
-    dir_graph.rebuild_indices_from_keys();
+    // The declared indexes: built now, or recorded for the first write / DDL /
+    // explicit `materialize_indexes()` to build. See `DirGraph::indexes_deferred`
+    // for why the deferred state cannot answer a query wrongly.
+    if super::defer_index_rebuild_requested() {
+        dir_graph.defer_index_rebuild_from_keys();
+    } else {
+        dir_graph.rebuild_indices_from_keys();
+    }
 }

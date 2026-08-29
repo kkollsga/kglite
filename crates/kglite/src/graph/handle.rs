@@ -628,6 +628,16 @@ pub(crate) fn make_dir_graph_mut_preserving_lineage(arc: &mut Arc<DirGraph>) -> 
 ///   fork rather than once per statement.
 pub fn make_dir_graph_mut(arc: &mut Arc<DirGraph>) -> &mut DirGraph {
     let graph = make_dir_graph_mut_preserving_lineage(arc);
+    // A deferred load left the declared indexes unbuilt. Build them *here*,
+    // before the caller's write, so the write is recorded into a complete
+    // index and `unique_claims` can see the constraints it must enforce —
+    // building afterwards would double-count the row the caller is about to
+    // add. Sited on this half of the pair rather than on
+    // `make_dir_graph_mut_preserving_lineage` on purpose: that one is also the
+    // save path's `&mut`, and a save must be able to persist a deferred
+    // graph's declarations without paying to rebuild them
+    // (`populate_index_keys`). A bool load on every write otherwise.
+    graph.materialize_indexes();
     graph.bump_version();
     graph
 }

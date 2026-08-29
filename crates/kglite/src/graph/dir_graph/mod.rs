@@ -125,6 +125,28 @@ pub struct DirGraph {
     /// Persisted list of range index keys so indexes can be rebuilt on load
     #[serde(default)]
     pub range_index_keys: Vec<IndexKey>,
+    /// `true` between a deferred load and the materialization that follows it:
+    /// the four declaration lists are populated but `property_indices`,
+    /// `composite_indices`, `range_indices` and `unique_indices` are still
+    /// empty ([`Self::defer_index_rebuild_from_keys`]).
+    ///
+    /// **The one invariant this state rests on: while it is set, every reader
+    /// of those four maps sees exactly what it would see on a graph that
+    /// declares no index at all.** That is a supported, exercised state — a
+    /// miss falls back to a scan — so no read can produce a wrong answer.
+    /// Reporting an index as *present* while its map is empty is what would:
+    /// the matcher treats a value-miss on a covered index as proven-empty
+    /// (`try_index_lookup`), so a declaration-backed `has_index` would turn
+    /// every indexed lookup into zero rows. Nothing may consult the
+    /// declaration lists to answer "is there an index".
+    ///
+    /// Writes are the other half: `unique_claims` reads `unique_indices`, so a
+    /// deferred graph would admit duplicates. Every route to a `&mut DirGraph`
+    /// that can write materializes first — `handle::make_dir_graph_mut`,
+    /// `session::execute_mut`, and each index/constraint DDL entry point — so
+    /// the index is complete *before* the write it must record.
+    #[serde(skip)]
+    pub(crate) indexes_deferred: bool,
     /// Declared UNIQUE constraints, as the enforcement structure itself:
     /// (node_type, [properties]) -> tuple value -> the one node occupying it.
     /// A single-occupant map (rather than the `Vec<NodeIndex>` the other index
@@ -830,6 +852,7 @@ impl DirGraph {
             composite_index_keys: Vec::new(),
             range_indices: HashMap::new(),
             range_index_keys: Vec::new(),
+            indexes_deferred: false,
             unique_indices: HashMap::new(),
             ddl_unique_constraints: std::collections::BTreeSet::new(),
             unique_constraint_keys: Vec::new(),
@@ -902,6 +925,7 @@ impl DirGraph {
             composite_index_keys: Vec::new(),
             range_indices: HashMap::new(),
             range_index_keys: Vec::new(),
+            indexes_deferred: false,
             unique_indices: HashMap::new(),
             ddl_unique_constraints: std::collections::BTreeSet::new(),
             unique_constraint_keys: Vec::new(),
@@ -1608,6 +1632,15 @@ impl DirGraph {
     /// order carries no meaning — imposing one is what makes two saves of the
     /// same graph byte-identical.
     pub fn populate_index_keys(&mut self) {
+        // A deferred graph's four maps are empty *by construction*, so
+        // snapshotting them would erase every declaration the file carries —
+        // and `prune_constraint_names` would drop every constraint name with
+        // them. The lists it would rebuild are already exactly the loaded
+        // declarations, canonicalized by `defer_index_rebuild_from_keys`, so
+        // the save writes the same bytes an eager load would have produced.
+        if self.indexes_deferred {
+            return;
+        }
         self.property_index_keys = sorted_keys(&self.property_indices);
         self.composite_index_keys = sorted_keys(&self.composite_indices);
         self.range_index_keys = sorted_keys(&self.range_indices);
@@ -1654,6 +1687,60 @@ impl DirGraph {
         self.range_index_keys = range_keys;
 
         let _preexisting_violations = self.rebuild_unique_indices_from_keys();
+    }
+
+    /// Record the declared indexes without building them: the deferred
+    /// counterpart of [`Self::rebuild_indices_from_keys`], and the only place
+    /// that sets [`Self::indexes_deferred`].
+    ///
+    /// Canonicalizes the four lists to the spelling the eager rebuild would
+    /// have persisted — `create_composite_index` sorts a composite key's
+    /// property names, and every list is stored sorted — so a deferred load
+    /// followed by a save writes the same bytes as an eager one.
+    ///
+    /// The load-time unique-constraint *verification* is dropped with the
+    /// rebuild, and that is observable nowhere: its violations are returned to
+    /// `rebuild_indices_from_keys`, which discards them, and `build_unique_index`
+    /// has no other effect. Enforcement is unaffected — the first write
+    /// materializes.
+    pub(crate) fn defer_index_rebuild_from_keys(&mut self) {
+        self.property_index_keys.sort_unstable();
+        self.property_index_keys.dedup();
+        for (_, properties) in self.composite_index_keys.iter_mut() {
+            properties.sort_unstable();
+        }
+        self.composite_index_keys.sort_unstable();
+        self.composite_index_keys.dedup();
+        self.range_index_keys.sort_unstable();
+        self.range_index_keys.dedup();
+        self.unique_constraint_keys.sort_unstable();
+        self.unique_constraint_keys.dedup();
+        self.indexes_deferred = true;
+    }
+
+    /// Whether this graph's declared indexes are still unbuilt.
+    pub fn indexes_deferred(&self) -> bool {
+        self.indexes_deferred
+    }
+
+    /// Build the indexes a deferred load left declared-but-unbuilt. Returns
+    /// `true` when it did work, `false` when there was nothing deferred.
+    ///
+    /// Idempotent, and safe to call from inside the DDL entry points that
+    /// [`Self::rebuild_indices_from_keys`] itself calls: the flag is cleared
+    /// *before* the rebuild, so the nested calls see a non-deferred graph.
+    ///
+    /// Does not bump the version, so a plan cached while the graph was still
+    /// deferred can outlive the build. That plan scans where it could now
+    /// probe — slower, never wrong, and the callers that matter (a write, a
+    /// DDL statement) bump the version themselves.
+    pub fn materialize_indexes(&mut self) -> bool {
+        if !self.indexes_deferred {
+            return false;
+        }
+        self.indexes_deferred = false;
+        self.rebuild_indices_from_keys();
+        true
     }
 
     /// Rebuild type_indices from the live graph. Called after deserialization
@@ -1999,6 +2086,11 @@ impl DirGraph {
     }
 
     pub fn reindex(&mut self) {
+        // A deferred load's declared indexes must exist before this DDL reads
+        // or edits the maps as authoritative (`DirGraph::indexes_deferred`).
+        // Re-entrant-safe: the flag is cleared before the rebuild, so the
+        // rebuild's own `create_*` calls see a non-deferred graph.
+        self.materialize_indexes();
         self.rebuild_type_indices();
 
         // Lazy caches rebuild on next access.
@@ -2051,6 +2143,11 @@ impl DirGraph {
     /// first**: buffered ops are keyed by `NodeIndex` and every index moves
     /// here.
     pub fn vacuum(&mut self) -> NodeRemap {
+        // A deferred load's declared indexes must exist before this DDL reads
+        // or edits the maps as authoritative (`DirGraph::indexes_deferred`).
+        // Re-entrant-safe: the flag is cleared before the rebuild, so the
+        // rebuild's own `create_*` calls see a non-deferred graph.
+        self.materialize_indexes();
         if self.graph.is_disk() {
             return NodeRemap::default();
         }

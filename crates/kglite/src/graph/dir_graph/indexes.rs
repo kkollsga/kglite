@@ -161,6 +161,11 @@ impl DirGraph {
     /// `id_index`, and SET-on-id stays in sync because id mutation updates the
     /// id_index directly.
     pub fn create_index(&mut self, node_type: &str, property: &str) -> usize {
+        // A deferred load's declared indexes must exist before this DDL reads
+        // or edits the maps as authoritative (`DirGraph::indexes_deferred`).
+        // Re-entrant-safe: the flag is cleared before the rebuild, so the
+        // rebuild's own `create_*` calls see a non-deferred graph.
+        self.materialize_indexes();
         // Store key uses the user's `property` name verbatim — the matcher's
         // `try_index_lookup` indexes into `property_indices` by the unresolved
         // user-facing key, so the auto-maintenance path keeps things in sync
@@ -260,6 +265,11 @@ impl DirGraph {
     /// directly would drop the (absent) heap entry on a durable/CDC disk graph
     /// and report success while the persistent index stayed on disk.
     pub fn drop_index(&mut self, node_type: &str, property: &str) -> Result<bool, String> {
+        // A deferred load's declared indexes must exist before this DDL reads
+        // or edits the maps as authoritative (`DirGraph::indexes_deferred`).
+        // Re-entrant-safe: the flag is cleared before the rebuild, so the
+        // rebuild's own `create_*` calls see a non-deferred graph.
+        self.materialize_indexes();
         if let Some(disk) = self.graph.as_disk_mut() {
             return disk
                 .drop_property_index(node_type, property)
@@ -411,6 +421,11 @@ impl DirGraph {
     /// Create a B-tree index serving `>`, `>=`, `<`, `<=` and BETWEEN.
     /// Returns the number of unique values indexed.
     pub fn create_range_index(&mut self, node_type: &str, property: &str) -> usize {
+        // A deferred load's declared indexes must exist before this DDL reads
+        // or edits the maps as authoritative (`DirGraph::indexes_deferred`).
+        // Re-entrant-safe: the flag is cleared before the rebuild, so the
+        // rebuild's own `create_*` calls see a non-deferred graph.
+        self.materialize_indexes();
         let key = (node_type.to_string(), property.to_string());
         let reader = self.property_reader(node_type, property);
         let mut index: std::collections::BTreeMap<Value, Vec<NodeIndex>> =
@@ -432,6 +447,11 @@ impl DirGraph {
 
     /// Drop a range index. Returns true if it existed.
     pub fn drop_range_index(&mut self, node_type: &str, property: &str) -> bool {
+        // A deferred load's declared indexes must exist before this DDL reads
+        // or edits the maps as authoritative (`DirGraph::indexes_deferred`).
+        // Re-entrant-safe: the flag is cleared before the rebuild, so the
+        // rebuild's own `create_*` calls see a non-deferred graph.
+        self.materialize_indexes();
         let key = (node_type.to_string(), property.to_string());
         self.range_indices.remove(&key).is_some()
     }
@@ -473,6 +493,11 @@ impl DirGraph {
     /// family — `has_`/`drop_`/`lookup_by_`/`get_composite_index_stats`
     /// canonicalize the same way.
     pub fn create_composite_index(&mut self, node_type: &str, properties: &[&str]) -> usize {
+        // A deferred load's declared indexes must exist before this DDL reads
+        // or edits the maps as authoritative (`DirGraph::indexes_deferred`).
+        // Re-entrant-safe: the flag is cleared before the rebuild, so the
+        // rebuild's own `create_*` calls see a non-deferred graph.
+        self.materialize_indexes();
         let mut sorted_properties: Vec<&str> = properties.to_vec();
         sorted_properties.sort_unstable();
         let key = (
@@ -519,6 +544,11 @@ impl DirGraph {
     /// Returns true if the composite index existed and was removed.
     /// Property order is not significant.
     pub fn drop_composite_index(&mut self, node_type: &str, properties: &[String]) -> bool {
+        // A deferred load's declared indexes must exist before this DDL reads
+        // or edits the maps as authoritative (`DirGraph::indexes_deferred`).
+        // Re-entrant-safe: the flag is cleared before the rebuild, so the
+        // rebuild's own `create_*` calls see a non-deferred graph.
+        self.materialize_indexes();
         let key = Self::composite_key(node_type, properties);
         self.composite_indices.remove(&key).is_some()
     }
@@ -1287,6 +1317,17 @@ impl DirGraph {
     /// never land in `property_indices`, so the updaters cannot see them
     /// either.
     pub(crate) fn type_has_user_indexes(&self, node_type: &str) -> bool {
+        // Every incremental updater gates on this. A deferred graph reaching
+        // it means a write is about to be filed into indexes that were never
+        // built — see `DirGraph::indexes_deferred` for the routes that must
+        // materialize first. Debug-only: in release the answer (`false`, no
+        // indexes) is still the honest one for the empty maps.
+        debug_assert!(
+            !self.indexes_deferred,
+            "incremental index maintenance on a graph with unmaterialized \
+             deferred-load indexes"
+        );
+
         if self.property_indices.is_empty()
             && self.range_indices.is_empty()
             && self.composite_indices.is_empty()

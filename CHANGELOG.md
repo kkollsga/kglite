@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`KGLITE_DEFER_INDEX_REBUILD=1`: load a `.kgl` without rebuilding its
+  declared indexes.** A load normally rebuilds every property, composite,
+  range and unique index the file declares, which on an index-bearing graph is
+  the single largest term in what the loaded graph costs to hold — measured at
+  **−64.3 MB physical footprint (−42.8%) and −194 ms load (−55%)** on a
+  500k-row fixture with four index structures. Set the variable and the load
+  records the declarations instead of building them.
+
+  **Answers are identical either way.** A deferred graph presents to every
+  reader exactly as a graph that declares no index: a lookup misses and falls
+  back to a scan, which is a supported, exercised path. The build happens
+  before it could matter — the first write, the first index/constraint DDL, or
+  an explicit materialization — so a `UNIQUE` constraint still rejects a
+  duplicate and an incremental index update is still filed into a complete
+  index.
+
+  **The costs, stated plainly.** An indexed equality lookup on a graph that
+  stays read-only runs as a scan (12 ms → 20 ms on 500k rows), and the first
+  write pays the whole build in one step (+193 ms), after which writes are
+  unchanged. While the indexes are unbuilt, `SHOW INDEXES`, `SHOW
+  CONSTRAINTS`, `list_indexes()`, `has_index()` and `describe()` report none —
+  the declarations are intact and survive a save unchanged, but nothing may
+  report an index as *present* while its buckets are empty without turning
+  indexed lookups into empty results. Best for a consumer that loads a large
+  graph to scan, export or serve it read-only; not for one that leans on
+  indexed lookups.
+
+  Off by default. An unrecognised value warns on stderr and loads eagerly
+  rather than guessing.
+
 - **`row_limit`: a true result-row cap, with a mandatory truncation signal.**
   Available per query on `KnowledgeGraph.cypher`, `Session.cypher` /
   `Session.execute`, `FrozenGraph.cypher` and `Transaction.cypher`, with a

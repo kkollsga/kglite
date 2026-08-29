@@ -441,6 +441,11 @@ pub fn execute_mut(
     }
 
     if is_mutation {
+        // A `&mut DirGraph` reached here without passing `make_dir_graph_mut`
+        // (a transaction working copy, an embedder's owned graph). Build a
+        // deferred load's indexes before the statement writes into them —
+        // `DirGraph::indexes_deferred` for why it must be before.
+        graph.materialize_indexes();
         let mut names = Vec::new();
         collect_mutation_names(&parsed, &mut names);
         graph

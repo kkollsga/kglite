@@ -185,6 +185,11 @@ impl DirGraph {
         node_type: &str,
         properties: &[&str],
     ) -> ConstraintResult<usize> {
+        // A deferred load's declared indexes must exist before this DDL reads
+        // or edits the maps as authoritative (`DirGraph::indexes_deferred`).
+        // Re-entrant-safe: the flag is cleared before the rebuild, so the
+        // rebuild's own `create_*` calls see a non-deferred graph.
+        self.materialize_indexes();
         if properties.is_empty() {
             // A constraint over no properties would claim one global slot and
             // reject the type's second node. Reject the declaration instead.
@@ -284,6 +289,11 @@ impl DirGraph {
         node_type: &str,
         properties: &[String],
     ) -> bool {
+        // A deferred load's declared indexes must exist before this DDL reads
+        // or edits the maps as authoritative (`DirGraph::indexes_deferred`).
+        // Re-entrant-safe: the flag is cleared before the rebuild, so the
+        // rebuild's own `create_*` calls see a non-deferred graph.
+        self.materialize_indexes();
         self.ddl_unique_constraints
             .remove(&(node_type.to_string(), normalize_properties(properties)));
         match self.find_unique_key(node_type, properties).cloned() {
@@ -305,6 +315,11 @@ impl DirGraph {
     /// itself goes away, so a later type of the same name does not inherit a
     /// constraint whose index refers to deleted nodes.
     pub fn drop_unique_constraints_for_type(&mut self, node_type: &str) -> usize {
+        // A deferred load's declared indexes must exist before this DDL reads
+        // or edits the maps as authoritative (`DirGraph::indexes_deferred`).
+        // Re-entrant-safe: the flag is cleared before the rebuild, so the
+        // rebuild's own `create_*` calls see a non-deferred graph.
+        self.materialize_indexes();
         let keys: Vec<UniqueConstraintKey> = self
             .unique_indices
             .keys()
@@ -423,6 +438,15 @@ impl DirGraph {
     where
         F: Fn(&str) -> Option<Value>,
     {
+        // Enforcement reads `unique_indices`, so a deferred graph would report
+        // no claims and admit a duplicate. Every write route materializes
+        // first (`DirGraph::indexes_deferred`); this is the tripwire for one
+        // that does not.
+        debug_assert!(
+            !self.indexes_deferred,
+            "unique-constraint enforcement on a graph with unmaterialized \
+             deferred-load indexes"
+        );
         if !self.has_unique_constraints() {
             return Vec::new();
         }
@@ -1383,6 +1407,11 @@ impl DirGraph {
     /// present. The on-demand counterpart of the load-time rebuild, for callers
     /// that want to audit a graph filled by a path that bypasses enforcement.
     pub fn verify_unique_constraints(&mut self) -> Vec<ConstraintViolation> {
+        // A deferred load's declared indexes must exist before this DDL reads
+        // or edits the maps as authoritative (`DirGraph::indexes_deferred`).
+        // Re-entrant-safe: the flag is cleared before the rebuild, so the
+        // rebuild's own `create_*` calls see a non-deferred graph.
+        self.materialize_indexes();
         let keys: Vec<UniqueConstraintKey> = self.unique_indices.keys().cloned().collect();
         let mut violations = Vec::new();
         for key in &keys {
