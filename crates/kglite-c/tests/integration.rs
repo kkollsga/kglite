@@ -535,8 +535,8 @@ fn execute_read_opts_caps_rows() {
     };
     unsafe { kglite_cypher_result_free(result) };
 
-    // max_rows is a safety guard: a 3-row query with max_rows=2 ERRORS
-    // (it does not truncate).
+    // max_work_units is a work budget, not a row cap: a 3-row query run with
+    // max_work_units=2 ERRORS (it does not truncate).
     let q = CString::new("MATCH (n:T) RETURN n.id AS id").unwrap();
     let mut result: *mut KgliteCypherResult = std::ptr::null_mut();
     let mut err: *const c_char = std::ptr::null();
@@ -551,7 +551,11 @@ fn execute_read_opts_caps_rows() {
             &mut err as *mut _,
         )
     };
-    assert_ne!(rc, KgliteStatusCode::Ok, "exceeding max_rows must error");
+    assert_ne!(
+        rc,
+        KgliteStatusCode::Ok,
+        "exceeding max_work_units must error"
+    );
     assert!(result.is_null());
     assert!(!err.is_null());
     unsafe { kglite_free_string(err) };

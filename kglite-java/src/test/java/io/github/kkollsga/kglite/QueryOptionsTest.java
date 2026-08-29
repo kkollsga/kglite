@@ -11,13 +11,13 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
- * The per-query timeout and row-budget overloads, over
+ * The per-query timeout and work-budget overloads, over
  * {@code kglite_session_execute_read_opts} / {@code _mut_opts}.
  *
  * <p>Covers the two things the header defines that a caller can get wrong: that
  * {@code 0} (and a {@code null}/zero {@code Duration}) is "unlimited", not
- * "expire immediately", and that a {@code maxRows} overflow is a thrown error
- * rather than a silent truncation.
+ * "expire immediately", and that a {@code maxWorkUnits} overflow is a thrown
+ * error rather than a silent truncation.
  */
 class QueryOptionsTest {
 
@@ -52,8 +52,8 @@ class QueryOptionsTest {
     }
 
     @Test
-    @DisplayName("maxRows caps a read: an overflow is an error, not a truncation")
-    void maxRowsCapsRead() {
+    @DisplayName("maxWorkUnits budgets a read: an overflow is an error, not a truncation")
+    void maxWorkUnitsBudgetsRead() {
         try (KnowledgeGraph graph = fivePeople()) {
             // 5 rows through a budget of 2 is rejected outright.
             KgliteException e = assertThrows(KgliteException.class, () -> graph.query(
@@ -67,8 +67,8 @@ class QueryOptionsTest {
     }
 
     @Test
-    @DisplayName("maxRows on the write path rejects and rolls back the whole statement")
-    void maxRowsCapsWriteAndRollsBack() {
+    @DisplayName("maxWorkUnits on the write path rejects and rolls back the whole statement")
+    void maxWorkUnitsBudgetsWriteAndRollsBack() {
         try (KnowledgeGraph graph = KnowledgeGraph.createInMemory()) {
             assertThrows(KgliteException.class, () -> graph.cypher(
                     "UNWIND range(1, 5) AS i CREATE (:X {id: i}) RETURN i", Map.of(), null, 2));

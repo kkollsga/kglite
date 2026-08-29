@@ -4307,16 +4307,48 @@ class KnowledgeGraph:
         """Get the current default query timeout in milliseconds, or None."""
         ...
 
-    def set_default_max_rows(self, max_rows: Optional[int] = None) -> None:
-        """Set a default max rows limit for all cypher() calls.
+    def set_default_max_work_units(self, max_work_units: Optional[int] = None) -> None:
+        """Set a default per-query work budget for all cypher() calls.
 
-        Queries producing more intermediate rows than this will raise an error.
-        Pass None to disable (default). Per-query ``max_rows`` overrides this.
+        This is a **work budget, not a result-row cap**. It is charged against
+        intermediate rows, retained collection items and scan work — every
+        quantity the executor holds or walks on the way to an answer — so the
+        count can far exceed the rows a query returns. A query that exceeds the
+        budget raises an error; it is never truncated to it. To bound the rows
+        you get back, write ``LIMIT`` in the query.
+
+        Args:
+            max_work_units: Positive work-unit budget, or ``None`` (default) to
+                set no explicit budget, leaving the engine's own 10,000,000-unit
+                backstop in charge of materialized quantities.
+
+        Returns:
+            None.
+
+        Raises:
+            Nothing here — a breach surfaces later, from the ``cypher()`` call
+            that exceeds the budget, as ``CypherExecutionError``.
+
+        Example:
+            >>> kg.set_default_max_work_units(1_000_000)
+            >>> kg.cypher("MATCH (a)--(b)--(c) RETURN count(*)")
+            Traceback (most recent call last):
+            kglite.CypherExecutionError: Query produced 1000001 rows while
+            executing MATCH, exceeding the max_work_units budget of 1000000.
+            Add a LIMIT clause or raise max_work_units.
+
+        Note:
+            Per-query ``max_work_units`` overrides this default.
         """
         ...
 
-    def get_default_max_rows(self) -> Optional[int]:
-        """Get the current default max rows limit, or None."""
+    def get_default_max_work_units(self) -> Optional[int]:
+        """Get the current default per-query work budget, or None.
+
+        Returns:
+            The work-unit budget set by :meth:`set_default_max_work_units`, or
+            ``None`` when no default budget is set.
+        """
         ...
 
     def last_report(self) -> dict[str, Any]:
@@ -5748,7 +5780,7 @@ class KnowledgeGraph:
         to_df: bool = False,
         params: Optional[dict[str, Any]] = None,
         timeout_ms: Optional[int] = None,
-        max_rows: Optional[int] = None,
+        max_work_units: Optional[int] = None,
         streaming: bool = True,
         parallel: bool = False,
         disable_optimizer: bool = False,
@@ -5857,11 +5889,14 @@ class KnowledgeGraph:
                 deadline, a long-running **read** can be interrupted with
                 ``Ctrl-C`` (raises ``KeyboardInterrupt``) on POSIX — the
                 query aborts promptly instead of waiting for the deadline.
-            max_rows: Cap on intermediate rows and retained collection/work
-                growth across every execution path. Exceeding the cap raises
-                an error (never truncates). Direct mutation calls are in-place;
-                use Session/Transaction for rollback. Defaults to
-                ``set_default_max_rows()``.
+            max_work_units: Work budget for this query — **not** a
+                result-row cap. Charged against intermediate rows, retained
+                collection items and scan work across every execution path, so
+                it can far exceed the rows returned. Exceeding the budget
+                raises an error (never truncates); use ``LIMIT`` to bound the
+                rows you get back. Direct mutation calls are in-place; use
+                Session/Transaction for rollback. Defaults to
+                ``set_default_max_work_units()``.
             streaming: When ``True`` (default), the executor absorbs
                 compatible clause runs (currently
                 ``WITH/RETURN(group, agg) [ORDER BY ... LIMIT k]``) into
@@ -7262,7 +7297,7 @@ class Session:
         to_df: bool = False,
         params: dict[str, Any] | None = None,
         timeout_ms: int | None = None,
-        max_rows: int | None = None,
+        max_work_units: int | None = None,
     ) -> Any:
         """Run a read-only Cypher query against a momentary snapshot.
 
@@ -7283,7 +7318,7 @@ class Session:
         to_df: bool = False,
         params: dict[str, Any] | None = None,
         timeout_ms: int | None = None,
-        max_rows: int | None = None,
+        max_work_units: int | None = None,
         write_scope: list[str] | None = None,
         git_sha: str | None = None,
         modified_by: str | None = None,
@@ -7372,7 +7407,7 @@ class FrozenGraph:
         to_df: bool = False,
         params: dict[str, Any] | None = None,
         timeout_ms: int | None = None,
-        max_rows: int | None = None,
+        max_work_units: int | None = None,
     ) -> Any:
         """Run a read-only Cypher query against the snapshot.
 
@@ -7429,7 +7464,7 @@ class Transaction:
         params: dict[str, Any] | None = None,
         to_df: bool = False,
         timeout_ms: Optional[int] = None,
-        max_rows: Optional[int] = None,
+        max_work_units: Optional[int] = None,
         write_scope: list[str] | None = None,
         git_sha: Optional[str] = None,
         modified_by: Optional[str] = None,
@@ -7448,8 +7483,9 @@ class Transaction:
             git_sha: Commit SHA stamped on opted-in types.
             modified_by: Actor id stamped on opted-in types.
             timeout_ms: Per-query timeout in milliseconds (merged with transaction deadline).
-            max_rows: Maximum intermediate rows or collection items. Exceeding
-                the cap raises an error and rolls back the statement.
+            max_work_units: Work budget for the statement — intermediate rows,
+                retained collection items and scan work, not a result-row cap.
+                Exceeding it raises an error and rolls back the statement.
         """
         ...
 

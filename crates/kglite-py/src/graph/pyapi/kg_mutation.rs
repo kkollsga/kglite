@@ -1148,7 +1148,7 @@ impl KnowledgeGraph {
             cursor: crate::graph::CursorState::new(),
             embedder: None,
             default_timeout_ms: None,
-            default_max_rows: None,
+            default_max_work_units: None,
             lifecycle: crate::graph::GraphLifecycle::detached(),
         })
     }

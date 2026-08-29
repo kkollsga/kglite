@@ -91,7 +91,8 @@ impl Transaction {
     ///     params: Optional dict of query parameters.
     ///     to_df: If True, return a pandas DataFrame instead of list of dicts.
     ///     timeout_ms: Per-call deadline in milliseconds.
-    ///     max_rows: Cap on intermediate result rows.
+    ///     max_work_units: Work budget for the query, not a result-row cap;
+    ///         exceeding it is an error.
     ///     write_scope: Role-scoped write whitelist — every node write is
     ///         judged by the node's *stored* type (a pattern label cannot
     ///         widen it), and a relationship write needs at least one
@@ -105,7 +106,7 @@ impl Transaction {
     ///     Query results (same format as KnowledgeGraph.cypher).
     // Python boundary mirrors the public query option surface.
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (query, params=None, to_df=false, timeout_ms=None, max_rows=None, write_scope=None, git_sha=None, modified_by=None))]
+    #[pyo3(signature = (query, params=None, to_df=false, timeout_ms=None, max_work_units=None, write_scope=None, git_sha=None, modified_by=None))]
     fn cypher(
         &mut self,
         py: Python<'_>,
@@ -113,7 +114,7 @@ impl Transaction {
         params: Option<&Bound<'_, PyDict>>,
         to_df: bool,
         timeout_ms: Option<u64>,
-        max_rows: Option<usize>,
+        max_work_units: Option<usize>,
         write_scope: Option<Vec<String>>,
         git_sha: Option<String>,
         modified_by: Option<String>,
@@ -209,7 +210,7 @@ impl Transaction {
         let opts = kglite_core::api::session::ExecuteOptions {
             params: &param_map,
             deadline,
-            max_rows,
+            max_work_units,
             // Transactions historically went through the eager path
             // (mark_lazy off, streaming off) — no lazy materializer
             // is wired through the tx ResultView. Preserve that.

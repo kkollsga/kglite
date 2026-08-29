@@ -1,19 +1,12 @@
 //! Query-wide cardinality guards shared by every Cypher execution path.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-/// A cheap, cloneable execution budget shared by nested executors.
-///
-/// `max_rows` is both the maximum materialized row-set cardinality and the
-/// maximum number of collection items a single expanding operator may emit.
-/// Keeping those counters conceptually separate matters: an operator can do
-/// dangerous work before its final result rows exist (for example UNWIND or a
-/// correlated subquery join).
 use std::sync::Arc;
 
 /// Absolute ceiling on materialized rows and retained collection items for a
-/// query that sets no explicit `max_rows`.
+/// query that sets no explicit `max_work_units`.
 ///
-/// `max_rows` is opt-in and unset by default on every surface, which left the
+/// `max_work_units` is opt-in and unset by default on every surface, which left the
 /// checks below completely inert on the default path: a nested `UNWIND`
 /// cross-product (`UNWIND range(1,1000) AS a UNWIND … AS b UNWIND … AS c`)
 /// materialized a billion rows at a measured 356 B/row and the operating
@@ -22,7 +15,7 @@ use std::sync::Arc;
 ///
 /// This ceiling is a last line of defence, not a query planner hint: it is
 /// set at twice the largest row set any legitimate query in this repository
-/// materializes without `max_rows`, so reaching it means the query is
+/// materializes without `max_work_units`, so reaching it means the query is
 /// expanding without bound rather than merely being big. The two largest
 /// measured default-path materializations are the 5,000,000-row comma
 /// cross-join in `tests/test_aggregation_perf.py` (measured at 1.4 GB peak
@@ -31,9 +24,17 @@ use std::sync::Arc;
 /// 800k rows and `LOAD CSV` documents its own 1M-row cap.
 ///
 /// A caller who genuinely wants a larger row set says so by setting
-/// `max_rows` explicitly, which replaces this backstop with their number.
+/// `max_work_units` explicitly, which replaces this backstop with their number.
 pub const MAX_UNBOUNDED_ROWS: usize = 10_000_000;
 
+/// A cheap, cloneable execution budget shared by nested executors.
+///
+/// `max_work_units` is a **work budget, not a row cap**: it bounds the
+/// materialized row-set cardinality, the collection items a single expanding
+/// operator may emit, *and* the scan work an operator charges — and a breach
+/// is an error, never a truncation. Keeping those counters conceptually
+/// separate matters: an operator can do dangerous work before its final
+/// result rows exist (for example UNWIND or a correlated subquery join).
 #[derive(Clone, Debug, Default)]
 pub struct ExecutionBudget {
     inner: Arc<BudgetInner>,
@@ -41,11 +42,11 @@ pub struct ExecutionBudget {
 
 #[derive(Debug, Default)]
 struct BudgetInner {
-    max_rows: Option<usize>,
+    max_work_units: Option<usize>,
     collection_items: AtomicUsize,
 }
 
-/// What a check is charging, which decides whether the no-`max_rows`
+/// What a check is charging, which decides whether the no-`max_work_units`
 /// backstop applies.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Charge {
@@ -55,7 +56,7 @@ enum Charge {
     /// Scan work whose memory cost may be O(1) — `fused count(*)` charges
     /// the whole `node_count()` of the graph while allocating nothing, and a
     /// 100M-node mapped graph must keep answering those. Exempt from the
-    /// backstop; still charged against an explicit `max_rows`.
+    /// backstop; still charged against an explicit `max_work_units`.
     Work,
 }
 
@@ -118,33 +119,33 @@ impl MatchCeiling {
 
 impl ExecutionBudget {
     #[inline]
-    pub fn new(max_rows: Option<usize>) -> Self {
+    pub fn new(max_work_units: Option<usize>) -> Self {
         Self {
             inner: Arc::new(BudgetInner {
-                max_rows,
+                max_work_units,
                 ..BudgetInner::default()
             }),
         }
     }
 
     #[inline]
-    pub fn max_rows(&self) -> Option<usize> {
-        self.inner.max_rows
+    pub fn max_work_units(&self) -> Option<usize> {
+        self.inner.max_work_units
     }
 
     /// The in-flight ceiling a *materializing* caller holds a pattern
     /// execution to, or `None` when this budget needs none.
     ///
-    /// An explicit `max_rows` returns `None` on purpose: it already bounds the
+    /// An explicit `max_work_units` returns `None` on purpose: it already bounds the
     /// producer through [`super::CypherExecutor::budget_probe_limit`], which
-    /// caps `max_matches` at `max_rows + 1` and lets the matcher stop exactly
-    /// where truncation is sound. Re-imposing `max_rows` here would instead
+    /// caps `max_matches` at `max_work_units + 1` and lets the matcher stop exactly
+    /// where truncation is sound. Re-imposing `max_work_units` here would instead
     /// *reject* the intermediate hops' deliberate 50x overcommit, turning a
-    /// legal multi-hop query with a small `max_rows` into an error.
+    /// legal multi-hop query with a small `max_work_units` into an error.
     #[inline]
     pub fn match_ceiling(&self, operator: &'static str) -> Option<MatchCeiling> {
         self.inner
-            .max_rows
+            .max_work_units
             .is_none()
             .then(|| MatchCeiling::new(MAX_UNBOUNDED_ROWS, operator))
     }
@@ -194,19 +195,20 @@ impl ExecutionBudget {
         operator: &str,
         charge: Charge,
     ) -> Result<(), String> {
-        let Some(max) = self.inner.max_rows else {
+        let Some(max) = self.inner.max_work_units else {
             return Self::check_backstop(actual, unit, operator, charge);
         };
         if actual > max {
             return Err(format!(
                 "Query produced {actual} {unit} while executing {operator}, exceeding \
-                 max_rows limit of {max}. Add a LIMIT clause or increase max_rows."
+                 the max_work_units budget of {max}. Add a LIMIT clause or raise \
+                 max_work_units."
             ));
         }
         Ok(())
     }
 
-    /// Absolute ceiling enforced when the query set no `max_rows`.
+    /// Absolute ceiling enforced when the query set no `max_work_units`.
     #[inline]
     fn check_backstop(
         actual: usize,
@@ -231,9 +233,9 @@ impl ExecutionBudget {
     fn backstop_message(actual: usize, unit: &str, operator: &str, ceiling: usize) -> String {
         format!(
             "Query materialized {actual} {unit} while executing {operator}, exceeding the \
-             safety ceiling of {ceiling} {unit} that applies when no max_rows \
-             is set. Add a LIMIT clause, or set an explicit max_rows (per query: \
-             max_rows=…; per graph or session: set_default_max_rows(…)) to choose your \
+             safety ceiling of {ceiling} {unit} that applies when no max_work_units \
+             is set. Add a LIMIT clause, or set an explicit max_work_units (per query: \
+             max_work_units=…; per graph or session: set_default_max_work_units(…)) to choose your \
              own ceiling."
         )
     }
@@ -253,13 +255,14 @@ impl ExecutionBudget {
         let total = previous
             .checked_add(additional)
             .ok_or_else(|| format!("Query {unit} overflow while executing {operator}"))?;
-        let Some(max) = self.inner.max_rows else {
+        let Some(max) = self.inner.max_work_units else {
             return Self::check_backstop(total, unit, operator, Charge::Materialized);
         };
         if total > max {
             return Err(format!(
                 "Query consumed {total} {unit} while executing {operator}, exceeding \
-                 max_rows limit of {max}. Add a LIMIT clause or increase max_rows."
+                 the max_work_units budget of {max}. Add a LIMIT clause or raise \
+                 max_work_units."
             ));
         }
         Ok(())
@@ -290,10 +293,10 @@ mod tests {
 
         let err = budget
             .check_rows(MAX_UNBOUNDED_ROWS + 1, "UNWIND")
-            .expect_err("row backstop must fire without max_rows");
+            .expect_err("row backstop must fire without max_work_units");
         assert!(err.contains("UNWIND"), "{err}");
         assert!(err.contains(&MAX_UNBOUNDED_ROWS.to_string()), "{err}");
-        assert!(err.contains("max_rows"), "{err}");
+        assert!(err.contains("max_work_units"), "{err}");
 
         assert!(budget
             .reserve_rows(MAX_UNBOUNDED_ROWS, 1, "UNWIND")
@@ -309,7 +312,7 @@ mod tests {
         assert!(budget.consume_collection(chunk, "range()").is_ok());
         let err = budget
             .consume_collection(1, "range()")
-            .expect_err("collection backstop must fire without max_rows");
+            .expect_err("collection backstop must fire without max_work_units");
         assert!(err.contains("collection items"), "{err}");
         assert!(err.contains(&MAX_UNBOUNDED_ROWS.to_string()), "{err}");
         assert!(budget.consume_collection(usize::MAX, "range()").is_err());

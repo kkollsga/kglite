@@ -333,7 +333,7 @@
       "members": {
         "cypher": {
           "kind": "method",
-          "signature": "(self, /, query, to_df=False, params=None, timeout_ms=None, max_rows=None)"
+          "signature": "(self, /, query, to_df=False, params=None, timeout_ms=None, max_work_units=None)"
         },
         "node_count": {
           "kind": "method",
@@ -597,7 +597,7 @@
         },
         "cypher": {
           "kind": "method",
-          "signature": "(self, /, query, *, to_df=False, params=None, timeout_ms=None, max_rows=None, streaming=True, parallel=False, disable_optimizer=False, disabled_passes=None, write_scope=None, git_sha=None, modified_by=None)"
+          "signature": "(self, /, query, *, to_df=False, params=None, timeout_ms=None, max_work_units=None, streaming=True, parallel=False, disable_optimizer=False, disabled_passes=None, write_scope=None, git_sha=None, modified_by=None)"
         },
         "date": {
           "kind": "method",
@@ -727,7 +727,7 @@
           "kind": "method",
           "signature": "(self, /)"
         },
-        "get_default_max_rows": {
+        "get_default_max_work_units": {
           "kind": "method",
           "signature": "(self, /)"
         },
@@ -995,9 +995,9 @@
           "kind": "method",
           "signature": "(self, /, threshold)"
         },
-        "set_default_max_rows": {
+        "set_default_max_work_units": {
           "kind": "method",
-          "signature": "(self, /, max_rows=None)"
+          "signature": "(self, /, max_work_units=None)"
         },
         "set_default_timeout": {
           "kind": "method",
@@ -1394,11 +1394,11 @@
         },
         "cypher": {
           "kind": "method",
-          "signature": "(self, /, query, to_df=False, params=None, timeout_ms=None, max_rows=None)"
+          "signature": "(self, /, query, to_df=False, params=None, timeout_ms=None, max_work_units=None)"
         },
         "execute": {
           "kind": "method",
-          "signature": "(self, /, query, to_df=False, params=None, timeout_ms=None, max_rows=None, write_scope=None, git_sha=None, modified_by=None)"
+          "signature": "(self, /, query, to_df=False, params=None, timeout_ms=None, max_work_units=None, write_scope=None, git_sha=None, modified_by=None)"
         },
         "node_count": {
           "kind": "method",
@@ -1472,7 +1472,7 @@
         },
         "cypher": {
           "kind": "method",
-          "signature": "(self, /, query, params=None, to_df=False, timeout_ms=None, max_rows=None, write_scope=None, git_sha=None, modified_by=None)"
+          "signature": "(self, /, query, params=None, to_df=False, timeout_ms=None, max_work_units=None, write_scope=None, git_sha=None, modified_by=None)"
         },
         "is_read_only": {
           "kind": "attribute",

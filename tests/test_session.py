@@ -123,7 +123,7 @@ def test_disk_session_reuses_writer_lineage_and_composes(tmp_path):
     with pytest.raises(Exception):
         s.execute(
             "MATCH (n:Doc {id: 2}) SET n.title = 'leaked' WITH [1, 2, 3] AS xs UNWIND xs AS x RETURN x",
-            max_rows=1,
+            max_work_units=1,
         )
     s.execute("CREATE (:Doc {id: 4, title: 'after-error'})")
     assert _count(s) == 4

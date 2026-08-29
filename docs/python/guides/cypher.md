@@ -197,48 +197,57 @@ promotes only when both sides are declared.
 Surface `warnings` whenever an agent gets an empty result — it turns a silent
 zero-row mystery into an actionable typo hint.
 
-### Timeouts and row caps
+### Timeouts and work budgets
 
 ```python
 # Abort after 500 ms; raises kglite.CypherTimeoutError (no partial result)
 graph.cypher(long_query, timeout_ms=500)
 
-# Cap intermediate rows and retained collection/work growth. Exceeding the
-# cap raises an error. Use Session/Transaction for rollback-safe writes.
-graph.cypher(broad_query, max_rows=1000)
+# Budget the work — intermediate rows, retained collection items and scan
+# work — NOT the rows returned. Exceeding the budget raises an error; it never
+# truncates. Use Session/Transaction for rollback-safe writes.
+graph.cypher(broad_query, max_work_units=1000)
 
 # Set graph-wide defaults (per-query args still override)
 graph.set_default_timeout(30_000)
-graph.set_default_max_rows(10_000)
+graph.set_default_max_work_units(10_000)
 ```
+
+`max_work_units` is a **work budget, not a row cap**. It counts every quantity
+the executor holds or walks on the way to an answer, so it can be far larger
+than the result. To bound the rows you get *back*, write `LIMIT`.
 
 In-memory graphs default to a generous deadline (shown in
 `diagnostics['timeout_ms']`); pass `timeout_ms=0` to disable it. When a query
 repeatedly nears its deadline, that's the signal to add an index or anchor the
 pattern, not just to raise the budget.
 
-**There is a row ceiling even when you set none.** `max_rows` is opt-in, so a
-query that expands without bound — a nested `UNWIND` cross-product is the
+**There is a row ceiling even when you set none.** `max_work_units` is opt-in,
+so a query that expands without bound — a nested `UNWIND` cross-product is the
 classic — used to materialize rows until the operating system killed the
 process. kglite is *embedded*: the process it kills is your application. So a
-query with no `max_rows` gets a backstop of **10,000,000 materialized rows or
-retained collection items**, and crossing it raises:
+query with no `max_work_units` gets a backstop of **10,000,000 materialized
+rows or retained collection items**, and crossing it raises:
 
 ```text
 Query materialized 10000001 rows while executing UNWIND, exceeding the safety
-ceiling of 10000000 rows that applies when no max_rows is set. Add a LIMIT
-clause, or set an explicit max_rows (per query: max_rows=…; per graph or
-session: set_default_max_rows(…)) to choose your own ceiling.
+ceiling of 10000000 rows that applies when no max_work_units is set. Add a
+LIMIT clause, or set an explicit max_work_units (per query: max_work_units=…;
+per graph or session: set_default_max_work_units(…)) to choose your own
+ceiling.
 ```
 
 It is a last line of defence, not a planner hint: it sits at roughly twice the
 largest row set any legitimate query in this project materializes without
-`max_rows`, so reaching it means a query is running away rather than merely
-being big. Two escape hatches, both explicit: pass `max_rows=N` on the query
-(or `set_default_max_rows(N)`) to choose your own ceiling instead — a number
-above 10M lifts the backstop as well as lowering it — or add a `LIMIT`. Work
-whose memory cost is O(1) is exempt: a `count(*)` over a 100M-node mapped graph
-charges 100M *work units* and allocates nothing, so it keeps answering.
+`max_work_units`, so reaching it means a query is running away rather than
+merely being big. Two escape hatches, both explicit: pass `max_work_units=N` on
+the query (or `set_default_max_work_units(N)`) to choose your own ceiling
+instead — a number above 10M lifts the backstop as well as lowering it — or add
+a `LIMIT`. Work whose memory cost is O(1) is exempt from the *backstop*: a
+`count(*)` over a 100M-node mapped graph charges 100M *work units* and
+allocates nothing, so it keeps answering. An explicit `max_work_units` is not
+so forgiving — it charges that scan work too, which is the other reason the
+knob is not a row cap.
 
 The backstop is charged **as a clause builds its rows**, not only against the
 finished set, so a pattern that expands explosively is refused while it expands
@@ -362,7 +371,7 @@ Two limits are worth stating plainly rather than discovering:
   materializing, so the error arrives in seconds instead of after the process
   has run out of memory. It is still seconds and gigabytes — reaching ten
   million held matches is not free — so for an open-ended shape set your own
-  `max_rows` rather than relying on the backstop to be comfortable.
+  `max_work_units` rather than relying on the backstop to be comfortable.
 
 ## Semantic Search in Cypher
 

@@ -7,8 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING — `max_rows` is renamed `max_work_units` on every surface.** The
+  knob was never a result-row cap: it is a budget over *work* — intermediate
+  rows, retained collection items and scan work units — and exceeding it fails
+  the query with an error rather than truncating it. The old name told callers
+  the opposite, and the first Rust downstream read it as a row limit. The old
+  spelling is removed outright, with no alias: `kglite::api::session::ExecuteOptions::max_rows`
+  → `max_work_units` and `CypherExecutor::with_max_rows` →
+  `with_max_work_units` (Rust); the Python `cypher()` / `execute()` keyword
+  `max_rows=` → `max_work_units=` and `set_default_max_rows()` /
+  `get_default_max_rows()` → `set_default_max_work_units()` /
+  `get_default_max_work_units()`; the Java `cypher(...)` / `query(...)`
+  overloads' `maxRows` parameter → `maxWorkUnits`. Error text changes with it
+  (`exceeding max_rows limit of N` → `exceeding the max_work_units budget of
+  N`), so callers matching on the message need updating. A future true row cap
+  would be a separate feature under its own name.
+  **The C ABI's exported symbols are unchanged** — no signature, type, arity or
+  ordering moved. `kglite_session_execute_read_opts` and
+  `kglite_session_execute_mut_opts` simply spell their fifth parameter
+  `max_work_units` in `kglite.h`, and parameter names are not part of the ABI,
+  so prebuilt consumers relink unmodified.
+
 ### Fixed
 
+- **Two doc comments that described behaviour the code does not have.**
+  `load_kgl_bytes` claimed "no filesystem access"; loading a graph with column
+  sections in fact mints a `$TMPDIR/kglite_portable_*` directory and spills any
+  column blob of 256 KB or more into it to be mmap'd (removed when the last
+  `DirGraph` holding it drops). And the C ABI's `_opts` doc said the query is
+  rejected "if it would produce more than this many rows", which is the row-cap
+  reading the rename exists to kill. Both now state what actually happens.
+- **The embedder-facing read-pass docs named a function embedders cannot
+  call.** `GraphRead::node_view` and `NodeView` told callers their borrow must
+  not outlive the `begin_query()` guard; `begin_query` is `pub(crate)`. They now
+  point at the public `DirGraph::begin_read_pass`.
 - **A reloaded `.kgl` no longer reports every relationship type as having zero
   edges.** Edge counts are persisted only when their cache happens to be warm at
   save time, so a graph built with Cypher `CREATE` and saved carried none — and

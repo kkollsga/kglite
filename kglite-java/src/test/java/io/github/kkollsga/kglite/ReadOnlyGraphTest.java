@@ -60,7 +60,7 @@ class ReadOnlyGraphTest {
     }
 
     @Test
-    @DisplayName("openReadOnly refuses the timeout/maxRows write overloads too")
+    @DisplayName("openReadOnly refuses the timeout/maxWorkUnits write overloads too")
     void readOnlyRefusesWriteOverloads(@TempDir Path dir) {
         Path path = seed(dir);
         try (KnowledgeGraph graph = KnowledgeGraph.openReadOnly(path)) {

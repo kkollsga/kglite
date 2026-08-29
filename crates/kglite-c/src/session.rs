@@ -213,10 +213,12 @@ pub unsafe extern "C" fn kglite_session_execute_read(
 ///
 /// - `timeout_ms`: past this wall-clock budget the query returns
 ///   `CypherTimeout`. `0` = no deadline.
-/// - `max_rows`: reject the query (error) if it would produce more than
-///   this many rows — a safety guard against runaway results, not a
-///   silent truncation; add a `LIMIT` clause to bound output. `0` = no
-///   limit.
+/// - `max_work_units`: work budget for the query, **not** a result-row cap.
+///   It is charged against intermediate rows, retained collection items and
+///   scan work — every quantity the executor holds or walks on the way to an
+///   answer — so the count can far exceed the rows returned. Exceeding it
+///   fails the query with an error; nothing is ever silently truncated to it.
+///   Add a `LIMIT` clause to bound output. `0` = no explicit budget.
 ///
 /// # Safety
 ///
@@ -227,7 +229,7 @@ pub unsafe extern "C" fn kglite_session_execute_read_opts(
     query: *const c_char,
     params_json: *const c_char,
     timeout_ms: u64,
-    max_rows: u64,
+    max_work_units: u64,
     out_result: *mut *mut KgliteCypherResult,
     out_error_msg: *mut *const c_char,
 ) -> KgliteStatusCode {
@@ -253,8 +255,8 @@ pub unsafe extern "C" fn kglite_session_execute_read_opts(
             if timeout_ms > 0 {
                 opts.deadline = Some(Instant::now() + Duration::from_millis(timeout_ms));
             }
-            if max_rows > 0 {
-                opts.max_rows = Some(max_rows as usize);
+            if max_work_units > 0 {
+                opts.max_work_units = Some(max_work_units as usize);
             }
 
             match execute_read(&snapshot, query_str, &opts) {
@@ -309,8 +311,9 @@ pub unsafe extern "C" fn kglite_session_execute_mut(
     unsafe { execute_mut_impl(session, query, params_json, 0, 0, out_result, out_error_msg) }
 }
 
-/// Run a mutating query with the same timeout and row/collection budget
-/// semantics as [`kglite_session_execute_read_opts`]. A budget failure rolls
+/// Run a mutating query with the same timeout and work-budget semantics as
+/// [`kglite_session_execute_read_opts`] — `max_work_units` is a work budget
+/// that errors when exceeded, not a result-row cap. A budget failure rolls
 /// back the complete statement. `0` disables the corresponding option.
 ///
 /// # Safety
@@ -322,7 +325,7 @@ pub unsafe extern "C" fn kglite_session_execute_mut_opts(
     query: *const c_char,
     params_json: *const c_char,
     timeout_ms: u64,
-    max_rows: u64,
+    max_work_units: u64,
     out_result: *mut *mut KgliteCypherResult,
     out_error_msg: *mut *const c_char,
 ) -> KgliteStatusCode {
@@ -332,20 +335,24 @@ pub unsafe extern "C" fn kglite_session_execute_mut_opts(
             query,
             params_json,
             timeout_ms,
-            max_rows,
+            max_work_units,
             out_result,
             out_error_msg,
         )
     }
 }
 
+// The arity is the published C ABI's: this is the shared body of
+// kglite_session_execute_mut and _mut_opts, so its parameters are exactly the
+// wider exported signature and cannot be grouped into a struct without
+// changing what those symbols take.
 #[allow(clippy::too_many_arguments)]
 unsafe fn execute_mut_impl(
     session: *mut KgliteSession,
     query: *const c_char,
     params_json: *const c_char,
     timeout_ms: u64,
-    max_rows: u64,
+    max_work_units: u64,
     out_result: *mut *mut KgliteCypherResult,
     out_error_msg: *mut *const c_char,
 ) -> KgliteStatusCode {
@@ -373,8 +380,8 @@ unsafe fn execute_mut_impl(
             if timeout_ms > 0 {
                 opts.deadline = Some(Instant::now() + Duration::from_millis(timeout_ms));
             }
-            if max_rows > 0 {
-                opts.max_rows = Some(max_rows as usize);
+            if max_work_units > 0 {
+                opts.max_work_units = Some(max_work_units as usize);
             }
 
             // Hold the core Session write guard across execution. This serializes the

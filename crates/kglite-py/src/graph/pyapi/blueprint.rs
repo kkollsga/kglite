@@ -144,7 +144,7 @@ pub fn from_blueprint_rust(
                     cursor: crate::graph::CursorState::new(),
                     embedder: None,
                     default_timeout_ms: None,
-                    default_max_rows: None,
+                    default_max_work_units: None,
                     lifecycle: crate::graph::GraphLifecycle::detached(),
                 };
                 Ok((kg, output_path))
@@ -194,7 +194,7 @@ pub fn from_records_rust(
                 cursor: crate::graph::CursorState::new(),
                 embedder: None,
                 default_timeout_ms: None,
-                default_max_rows: None,
+                default_max_work_units: None,
                 lifecycle: crate::graph::GraphLifecycle::detached(),
             })
         })

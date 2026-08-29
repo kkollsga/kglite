@@ -194,14 +194,14 @@ pub(crate) fn execute_mutable_bounded(
     query: &CypherQuery,
     params: HashMap<String, Value>,
     interrupt: Interrupt,
-    max_rows: Option<usize>,
+    max_work_units: Option<usize>,
 ) -> Result<CypherResult, String> {
     execute_mutable_with_csv(
         graph,
         query,
         params,
         interrupt,
-        max_rows,
+        max_work_units,
         &super::load_csv::CsvImportPolicy::Denied,
     )
 }
@@ -215,7 +215,7 @@ pub(crate) fn execute_mutable_with_csv(
     query: &CypherQuery,
     params: HashMap<String, Value>,
     interrupt: Interrupt,
-    max_rows: Option<usize>,
+    max_work_units: Option<usize>,
     csv_import: &super::load_csv::CsvImportPolicy,
 ) -> Result<CypherResult, String> {
     // Arena guard for the whole mutation: holds the query count so every
@@ -223,7 +223,7 @@ pub(crate) fn execute_mutable_with_csv(
     // is guard-covered. Owned counter handle — coexists with `&mut`.
     let _arena_guard = graph.graph.begin_query();
 
-    let budget = super::budget::ExecutionBudget::new(max_rows);
+    let budget = super::budget::ExecutionBudget::new(max_work_units);
 
     let mut stats = MutationStats::default();
     let profiling = query.profile;

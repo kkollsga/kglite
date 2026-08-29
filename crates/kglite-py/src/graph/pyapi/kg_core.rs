@@ -927,17 +927,15 @@ impl KnowledgeGraph {
         self.default_timeout_ms
     }
 
-    /// Set a default max rows limit applied to all cypher() calls.
-    /// Queries producing more intermediate rows than this will error.
-    /// Pass None to disable (default). Per-query max_rows overrides this.
-    #[pyo3(signature = (max_rows=None))]
-    fn set_default_max_rows(&mut self, max_rows: Option<usize>) {
-        self.default_max_rows = max_rows;
+    /// Set a default per-query work budget applied to all cypher() calls.
+    #[pyo3(signature = (max_work_units=None))]
+    fn set_default_max_work_units(&mut self, max_work_units: Option<usize>) {
+        self.default_max_work_units = max_work_units;
     }
 
-    /// Get the current default max rows limit, or None.
-    fn get_default_max_rows(&self) -> Option<usize> {
-        self.default_max_rows
+    /// Get the current default per-query work budget, or None.
+    fn get_default_max_work_units(&self) -> Option<usize> {
+        self.default_max_work_units
     }
 
     /// Get the most recent operation report as a Python dictionary
@@ -1636,8 +1634,9 @@ impl KnowledgeGraph {
     ///         `set_default_timeout()` when set, otherwise the built-in
     ///         default of 180_000 ms (3 min). Pass `0` to disable the
     ///         deadline entirely for this call.
-    ///     max_rows: Cap on intermediate result rows; queries producing
-    ///         more return an error. Defaults to `set_default_max_rows()`.
+    ///     max_work_units: Work budget for the query, not a result-row cap;
+    ///         exceeding it is an error. Defaults to
+    ///         `set_default_max_work_units()`.
     ///     write_scope: Role-scoped write whitelist (integrity, not secrecy)
     ///         — e.g. a coding role may write ["Plan", "Task"] but not
     ///         research-owned "Algorithm" nodes. `None` (default) =
@@ -1672,7 +1671,7 @@ impl KnowledgeGraph {
     ///     for row in result:
     ///         print(f"{row['person']}: {row['friends']} friends")
     ///     ```
-    #[pyo3(signature = (query, *, to_df=false, params=None, timeout_ms=None, max_rows=None, streaming=true, parallel=false, disable_optimizer=false, disabled_passes=None, write_scope=None, git_sha=None, modified_by=None))]
+    #[pyo3(signature = (query, *, to_df=false, params=None, timeout_ms=None, max_work_units=None, streaming=true, parallel=false, disable_optimizer=false, disabled_passes=None, write_scope=None, git_sha=None, modified_by=None))]
     #[allow(clippy::too_many_arguments)]
     // The detached closure preserves the engine's structured KgError until PyErr conversion.
     #[allow(clippy::result_large_err)]
@@ -1683,7 +1682,7 @@ impl KnowledgeGraph {
         to_df: bool,
         params: Option<&Bound<'_, PyDict>>,
         timeout_ms: Option<u64>,
-        max_rows: Option<usize>,
+        max_work_units: Option<usize>,
         streaming: bool,
         parallel: bool,
         disable_optimizer: bool,
@@ -1698,7 +1697,7 @@ impl KnowledgeGraph {
         let effective_timeout = timeout_ms
             .or(self_ref.default_timeout_ms)
             .or_else(|| backend_default_timeout_ms(&self_ref.inner));
-        let effective_max_rows = max_rows.or(self_ref.default_max_rows);
+        let effective_max_work_units = max_work_units.or(self_ref.default_max_work_units);
         drop(self_ref);
         // timeout_ms == 0 is the documented escape hatch for "no deadline".
         let deadline = match effective_timeout {
@@ -1764,7 +1763,7 @@ impl KnowledgeGraph {
             let opts = kglite_core::api::session::ExecuteOptions {
                 params: &param_map,
                 deadline,
-                max_rows: effective_max_rows,
+                max_work_units: effective_max_work_units,
                 lazy_eligible: streaming,
                 parallel,
                 disabled_passes: disabled_owned.as_ref(),
@@ -1827,7 +1826,7 @@ impl KnowledgeGraph {
             let opts = kglite_core::api::session::ExecuteOptions {
                 params: &param_map,
                 deadline,
-                max_rows: effective_max_rows,
+                max_work_units: effective_max_work_units,
                 lazy_eligible: streaming,
                 parallel,
                 disabled_passes: disabled_owned.as_ref(),

@@ -37,7 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let opts = session::ExecuteOptions {
         params: &params,
         deadline: None,
-        max_rows: None,
+        max_work_units: None,
         lazy_eligible: false,
         disabled_passes: None,
         embedder: None,
@@ -93,7 +93,7 @@ use std::sync::Arc;
 let session = Arc::new(Session::new(DirGraph::new()));
 let params: HashMap<String, kglite::api::Value> = HashMap::new();
 let opts = ExecuteOptions {
-    params: &params, deadline: None, max_rows: None,
+    params: &params, deadline: None, max_work_units: None,
     lazy_eligible: false, disabled_passes: None, embedder: None,
 };
 

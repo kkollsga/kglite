@@ -48,11 +48,11 @@ def test_range_rejects_huge_cardinality_before_allocation(
             params={"start": I64_MIN, "end": I64_MAX},
         )
 
-    with pytest.raises(kglite.CypherExecutionError, match="max_rows"):
-        graph.cypher("RETURN range(0, 10) AS r", max_rows=5)
+    with pytest.raises(kglite.CypherExecutionError, match="max_work_units"):
+        graph.cypher("RETURN range(0, 10) AS r", max_work_units=5)
     with pytest.raises(kglite.CypherExecutionError, match="256 MiB"):
         graph.cypher("RETURN range(0, 100000000) AS r")
-    assert graph.cypher("RETURN range(0, 4) AS r", max_rows=5).to_list() == [{"r": [0, 1, 2, 3, 4]}]
+    assert graph.cypher("RETURN range(0, 4) AS r", max_work_units=5).to_list() == [{"r": [0, 1, 2, 3, 4]}]
 
 
 @pytest.mark.parametrize("amount", [I64_MIN, I64_MAX])

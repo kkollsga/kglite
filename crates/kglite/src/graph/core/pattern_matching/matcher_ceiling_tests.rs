@@ -67,7 +67,7 @@ fn ceiling(max: usize) -> Option<MatchCeiling> {
 fn assert_quantified(err: &str, held_at_least: usize, max: usize) {
     assert!(err.contains("MATCH expansion"), "{err}");
     assert!(err.contains(&max.to_string()), "{err}");
-    assert!(err.contains("max_rows"), "{err}");
+    assert!(err.contains("max_work_units"), "{err}");
     assert!(err.contains("LIMIT"), "{err}");
     let count: usize = err
         .split_whitespace()
@@ -174,7 +174,7 @@ fn the_parallel_expansion_reports_the_ceiling_before_it_finishes() {
 
 #[test]
 fn only_an_unbounded_budget_hands_down_a_ceiling() {
-    // An explicit `max_rows` already bounds the producer through
+    // An explicit `max_work_units` already bounds the producer through
     // `budget_probe_limit`; re-imposing it here would reject the intermediate
     // hops' deliberate overcommit.
     let unbounded = ExecutionBudget::new(None)

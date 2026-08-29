@@ -461,7 +461,7 @@ graph.cypher("""
 | `date(str)` / `datetime(str)` | Parse a date / ISO-8601 datetime string (`date('2020-01-15')`, `datetime('2020-01-15T10:30:00Z')`) |
 | `date_diff(d1, d2)` | Days between two dates (`d1 - d2`); also supports `date - date` arithmetic |
 | `coalesce(a, b, ...)` | First non-null argument |
-| `range(start, end [, step])` | Generate a checked inclusive integer list; default step = 1. Cardinality, `max_rows`, and a 256 MiB materialization ceiling are validated before allocation |
+| `range(start, end [, step])` | Generate a checked inclusive integer list; default step = 1. Cardinality, the `max_work_units` budget, and a 256 MiB materialization ceiling are validated before allocation |
 | `head(list)` / `last(list)` | First / last element of a list (returns `null` on empty) |
 | `length(p)` | Path hop count; on a string or list, same as `size()` |
 | `nodes(p)` | Nodes in a path |
@@ -1625,7 +1625,7 @@ guide's [How deep traversal behaves](https://kglite.readthedocs.io/en/latest/pyt
 section carries the measured curves.
 
 When a pattern does explode, the **10,000,000-row backstop that applies when
-no `max_rows` is set** is charged against the expansion as it runs, not only
+no `max_work_units` is set** is charged against the expansion as it runs, not only
 against the finished result, so an open-ended traversal is refused while it
 expands rather than after it has exhausted memory. The error names which
 expansion overflowed — the `MATCH` itself, a comma-pattern join, an
@@ -2718,7 +2718,7 @@ What stays sequential, and why:
   depends on how many cores answered the query is not a number this engine
   will return.
 - **Anything that would change an error.** A `LIMIT` pushed into a `MATCH`, a
-  `max_rows` budget, and a group-limited aggregation all have outcomes that
+  `max_work_units` budget, and a group-limited aggregation all have outcomes that
   depend on where the sequential scan stopped, so they opt out.
 
 Scope:

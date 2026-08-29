@@ -35,7 +35,24 @@ pub struct ExecuteOptions<'a> {
     pub params: &'a HashMap<String, Value>,
     /// Past this, the executor returns `CypherTimeout`.
     pub deadline: Option<Instant>,
-    pub max_rows: Option<usize>,
+    /// Work budget for one query, **not** a result-row cap.
+    ///
+    /// It is charged against intermediate rows, retained collection items, and
+    /// scan work units — every quantity the executor holds or walks on the way
+    /// to an answer, which is why the count can far exceed the rows the caller
+    /// eventually receives. Exceeding it *fails the query*:
+    ///
+    /// ```text
+    /// Query produced 3 rows while executing MATCH, exceeding the
+    /// max_work_units budget of 2. Add a LIMIT clause or raise max_work_units.
+    /// ```
+    ///
+    /// A query is never truncated to this number — a caller who wants N rows
+    /// back writes `LIMIT N`. `None` (the default on every surface) leaves the
+    /// engine's 10,000,000-unit `MAX_UNBOUNDED_ROWS` backstop in charge of
+    /// materialized quantities; `Some(n)` replaces that backstop with `n` and
+    /// additionally charges scan work against it.
+    pub max_work_units: Option<usize>,
     /// Lazy-projection mode.
     ///
     /// - `true` (Python): `mark_lazy_eligibility` runs after optimize and the
@@ -140,7 +157,7 @@ impl<'a> ExecuteOptions<'a> {
         Self {
             params,
             deadline: None,
-            max_rows: None,
+            max_work_units: None,
             lazy_eligible: false,
             disabled_passes: None,
             embedder: None,
@@ -280,7 +297,7 @@ pub fn execute_read(
     }
 
     let mut result = cypher::CypherExecutor::with_params(graph, &params, opts.deadline)
-        .with_max_rows(opts.max_rows)
+        .with_max_work_units(opts.max_work_units)
         .with_streaming(opts.lazy_eligible)
         .with_parallel(opts.parallel)
         .with_cancel(opts.cancel)
@@ -321,7 +338,9 @@ fn can_skip_rollback_checkpoint(
     query: &CypherQuery,
     opts: &ExecuteOptions<'_>,
 ) -> bool {
-    if !graph.graph.supports_checkpoint_free_mutation() || query.profile || opts.max_rows.is_some()
+    if !graph.graph.supports_checkpoint_free_mutation()
+        || query.profile
+        || opts.max_work_units.is_some()
     {
         return false;
     }
@@ -434,7 +453,7 @@ pub fn execute_mut(
                 &parsed,
                 params,
                 interrupt,
-                opts.max_rows,
+                opts.max_work_units,
                 &opts.csv_import,
             )
         });
@@ -468,7 +487,7 @@ pub fn execute_mut(
         r
     } else {
         cypher::CypherExecutor::with_params(graph, &params, opts.deadline)
-            .with_max_rows(opts.max_rows)
+            .with_max_work_units(opts.max_work_units)
             .with_streaming(opts.lazy_eligible)
             .with_parallel(opts.parallel)
             .with_cancel(opts.cancel)

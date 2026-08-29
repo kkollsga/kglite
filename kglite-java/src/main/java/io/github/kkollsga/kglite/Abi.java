@@ -96,10 +96,10 @@ final class Abi {
             "kglite_session_execute_read", FunctionDescriptor.of(I32, PTR, PTR, PTR, PTR, PTR));
     private static final MethodHandle SESSION_EXECUTE_MUT = bind(
             "kglite_session_execute_mut", FunctionDescriptor.of(I32, PTR, PTR, PTR, PTR, PTR));
-    // The `_opts` forms add (timeout_ms, max_rows) as two uint64 arguments
-    // between params_json and the out-slots. `0` disables each option (no
-    // deadline / no row cap), per the header — the wrapper maps an absent
-    // timeout or an unlimited row budget to `0`.
+    // The `_opts` forms add (timeout_ms, max_work_units) as two uint64
+    // arguments between params_json and the out-slots. `0` disables each
+    // option (no deadline / no work budget), per the header — the wrapper maps
+    // an absent timeout or an unlimited work budget to `0`.
     private static final MethodHandle SESSION_EXECUTE_READ_OPTS = bind(
             "kglite_session_execute_read_opts",
             FunctionDescriptor.of(I32, PTR, PTR, PTR, I64, I64, PTR, PTR));
@@ -330,28 +330,30 @@ final class Abi {
      *
      * <p>As {@link #execute}, routing through {@code execute_read_opts} /
      * {@code execute_mut_opts} with the two extra budget arguments. The header
-     * defines {@code 0} as "no deadline" / "no limit" for each, so an unbounded
-     * call passes {@code 0}; a non-zero {@code maxRows} the result would exceed
-     * is an engine error (a guard, never a silent truncation).
+     * defines {@code 0} as "no deadline" / "no budget" for each, so an
+     * unbounded call passes {@code 0}; a non-zero {@code maxWorkUnits} the
+     * query's work exceeds is an engine error (a guard, never a silent
+     * truncation) — and it counts intermediate rows, retained collection items
+     * and scan work, not result rows.
      *
      * @param session   the session handle
      * @param query     the Cypher text
      * @param paramsJson JSON object of bindings, or {@code null} for none
      * @param mutating  {@code true} selects {@code execute_mut_opts}
      * @param timeoutMs wall-clock budget in milliseconds; {@code 0} is no deadline
-     * @param maxRows   maximum rows the query may produce; {@code 0} is no limit
+     * @param maxWorkUnits work units the query may charge; {@code 0} is no budget
      * @return the decoded rows
      */
     static java.util.List<Map<String, Object>> executeOpts(
             MemorySegment session, String query, String paramsJson, boolean mutating,
-            long timeoutMs, long maxRows) {
+            long timeoutMs, long maxWorkUnits) {
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment outResult = arena.allocate(PTR);
             MemorySegment outError = arena.allocate(PTR);
             MethodHandle handle = mutating ? SESSION_EXECUTE_MUT_OPTS : SESSION_EXECUTE_READ_OPTS;
             int rc = (int) handle.invokeExact(
                     session, cstr(arena, query), cstr(arena, paramsJson),
-                    timeoutMs, maxRows, outResult, outError);
+                    timeoutMs, maxWorkUnits, outResult, outError);
             check(rc, outError);
             MemorySegment result = outResult.get(PTR, 0);
             try {

@@ -37,7 +37,7 @@
 //!   route reads vs writes against `Transaction::current()` vs
 //!   `Transaction::working_mut()`).
 //! - [`ExecuteOptions`] — single struct for all per-query knobs
-//!   (params, deadline, max_rows, lazy_eligible flag, disabled
+//!   (params, deadline, max_work_units, lazy_eligible flag, disabled
 //!   planner passes, optional embedder reference).
 //! - [`ExecuteOutcome`] — wraps `CypherResult` with `is_mutation`,
 //!   `output_format`, `explain` flags that callers need for

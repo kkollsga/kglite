@@ -123,9 +123,9 @@ def test_binary_operands_fail_left_to_right(expression_graph: kglite.KnowledgeGr
 def test_count_subquery_honors_the_shared_budget(
     expression_graph: kglite.KnowledgeGraph,
 ) -> None:
-    with pytest.raises(kglite.CypherExecutionError, match="max_rows"):
-        expression_graph.cypher("RETURN COUNT { (n:Thing) } AS value", max_rows=1).to_list()
-    assert expression_graph.cypher("RETURN COUNT { (n:Thing) } AS value", max_rows=2).to_list() == [{"value": 2}]
+    with pytest.raises(kglite.CypherExecutionError, match="max_work_units"):
+        expression_graph.cypher("RETURN COUNT { (n:Thing) } AS value", max_work_units=1).to_list()
+    assert expression_graph.cypher("RETURN COUNT { (n:Thing) } AS value", max_work_units=2).to_list() == [{"value": 2}]
 
 
 def test_count_subquery_propagates_where_errors(

@@ -207,8 +207,8 @@ impl<'a> CypherExecutor<'a> {
         set.contains(&InternedKey::from_str(property).as_u64())
     }
 
-    pub fn with_max_rows(mut self, max_rows: Option<usize>) -> Self {
-        self.budget = ExecutionBudget::new(max_rows);
+    pub fn with_max_work_units(mut self, max_work_units: Option<usize>) -> Self {
+        self.budget = ExecutionBudget::new(max_work_units);
         self
     }
 
@@ -224,7 +224,10 @@ impl<'a> CypherExecutor<'a> {
     /// than silently truncating.
     #[inline]
     pub(super) fn budget_probe_limit(&self, requested: Option<usize>) -> Option<usize> {
-        let probe = self.budget.max_rows().and_then(|max| max.checked_add(1));
+        let probe = self
+            .budget
+            .max_work_units()
+            .and_then(|max| max.checked_add(1));
         match (requested, probe) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (Some(a), None) => Some(a),

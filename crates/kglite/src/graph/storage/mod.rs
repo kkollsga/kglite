@@ -226,7 +226,9 @@ pub trait GraphRead {
     /// property of the same node is read.
     ///
     /// On the disk backend the returned view borrows per-query arena memory;
-    /// it must not outlive the `begin_query()` guard.
+    /// it must not outlive the read-pass guard. Embedders take one from the
+    /// public [`DirGraph::begin_read_pass`](crate::graph::dir_graph::DirGraph::begin_read_pass);
+    /// the crate-internal spelling is `begin_query()`.
     #[inline]
     fn node_view(&self, idx: NodeIndex) -> Option<NodeView<'_>> {
         let data = self.node_weight(idx)?;

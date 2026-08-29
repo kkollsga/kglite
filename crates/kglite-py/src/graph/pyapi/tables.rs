@@ -26,7 +26,7 @@ fn table_opts(params: &HashMap<String, Value>) -> ExecuteOptions<'_> {
     ExecuteOptions {
         params,
         deadline: None,
-        max_rows: None,
+        max_work_units: None,
         lazy_eligible: false,
         parallel: false,
         disabled_passes: None,

@@ -1319,10 +1319,12 @@ KgliteStatusCode kglite_session_execute_read(const struct KgliteSession *session
  *
  * - `timeout_ms`: past this wall-clock budget the query returns
  *   `CypherTimeout`. `0` = no deadline.
- * - `max_rows`: reject the query (error) if it would produce more than
- *   this many rows — a safety guard against runaway results, not a
- *   silent truncation; add a `LIMIT` clause to bound output. `0` = no
- *   limit.
+ * - `max_work_units`: work budget for the query, **not** a result-row cap.
+ *   It is charged against intermediate rows, retained collection items and
+ *   scan work — every quantity the executor holds or walks on the way to an
+ *   answer — so the count can far exceed the rows returned. Exceeding it
+ *   fails the query with an error; nothing is ever silently truncated to it.
+ *   Add a `LIMIT` clause to bound output. `0` = no explicit budget.
  *
  * # Safety
  *
@@ -1333,7 +1335,7 @@ KgliteStatusCode kglite_session_execute_read_opts(const struct KgliteSession *se
                                                   const char *query,
                                                   const char *params_json,
                                                   uint64_t timeout_ms,
-                                                  uint64_t max_rows,
+                                                  uint64_t max_work_units,
                                                   struct KgliteCypherResult **out_result,
                                                   const char **out_error_msg);
 
@@ -1359,8 +1361,9 @@ KgliteStatusCode kglite_session_execute_mut(struct KgliteSession *session,
                                             const char **out_error_msg);
 
 /**
- * Run a mutating query with the same timeout and row/collection budget
- * semantics as [`kglite_session_execute_read_opts`]. A budget failure rolls
+ * Run a mutating query with the same timeout and work-budget semantics as
+ * [`kglite_session_execute_read_opts`] — `max_work_units` is a work budget
+ * that errors when exceeded, not a result-row cap. A budget failure rolls
  * back the complete statement. `0` disables the corresponding option.
  *
  * # Safety
@@ -1372,7 +1375,7 @@ KgliteStatusCode kglite_session_execute_mut_opts(struct KgliteSession *session,
                                                  const char *query,
                                                  const char *params_json,
                                                  uint64_t timeout_ms,
-                                                 uint64_t max_rows,
+                                                 uint64_t max_work_units,
                                                  struct KgliteCypherResult **out_result,
                                                  const char **out_error_msg);
 

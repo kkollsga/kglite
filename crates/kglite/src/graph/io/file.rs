@@ -1450,10 +1450,20 @@ pub fn load_file(path: &str) -> io::Result<Arc<DirGraph>> {
 
 /// Load an in-memory graph from a `.kgl` byte buffer — the counterpart of
 /// [`write_kgl_to`] / `KnowledgeGraph.to_bytes()`. Same magic/version
-/// validation and error classification as [`load_file`]'s small-file
-/// branch, but with no filesystem access (the caller already holds the
-/// bytes). Disk-mode graphs are a directory, not a byte stream, so this
-/// only handles the single-file in-memory format.
+/// validation and error classification as [`load_file`]'s small-file branch.
+/// Disk-mode graphs are a directory, not a byte stream, so this only handles
+/// the single-file in-memory format.
+///
+/// **It does not read the `.kgl` from disk — the caller already holds the
+/// bytes. It is not filesystem-free.** Loading a graph that has column
+/// sections creates a per-process spill directory
+/// (`$TMPDIR/kglite_portable_<pid>_<nanos>/type_<n>/`) and writes any column
+/// blob of 256 KB or more into it so the column can be mmap'd instead of
+/// heap-allocated; smaller columns stay on the heap and the directory is left
+/// empty. The paths are registered on the returned graph, and the last
+/// `DirGraph` holding them removes the tree in `Drop` — so they live exactly
+/// as long as the graph, and a process killed before that drop leaves them
+/// behind for the OS temp sweep.
 pub fn load_kgl_bytes(data: &[u8]) -> io::Result<Arc<DirGraph>> {
     if data.len() < 4 {
         return Err(io::Error::other(

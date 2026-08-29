@@ -834,7 +834,7 @@ pub fn kglite::api::cypher::CypherExecutor<'a>::execute(&self, query: &kglite::a
 pub fn kglite::api::cypher::CypherExecutor<'a>::execute_single_clause(&self, clause: &kglite::graph::languages::cypher::ast::Clause, result_set: kglite::graph::languages::cypher::result::ResultSet) -> core::result::Result<kglite::graph::languages::cypher::result::ResultSet, alloc::string::String>
 pub fn kglite::api::cypher::CypherExecutor<'a>::with_cancel(self, cancel: core::option::Option<&'static core::sync::atomic::AtomicBool>) -> Self
 pub fn kglite::api::cypher::CypherExecutor<'a>::with_csv_import(self, policy: kglite::api::session::CsvImportPolicy) -> Self
-pub fn kglite::api::cypher::CypherExecutor<'a>::with_max_rows(self, max_rows: core::option::Option<usize>) -> Self
+pub fn kglite::api::cypher::CypherExecutor<'a>::with_max_work_units(self, max_work_units: core::option::Option<usize>) -> Self
 pub fn kglite::api::cypher::CypherExecutor<'a>::with_parallel(self, parallel: bool) -> Self
 pub fn kglite::api::cypher::CypherExecutor<'a>::with_params(graph: &'a kglite::api::DirGraph, params: &'a std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>, deadline: core::option::Option<std::time::Instant>) -> Self
 pub fn kglite::api::cypher::CypherExecutor<'a>::with_streaming(self, streaming: bool) -> Self
@@ -1787,7 +1787,7 @@ pub kglite::api::session::ExecuteOptions::disabled_passes: core::option::Option<
 pub kglite::api::session::ExecuteOptions::embedder: core::option::Option<alloc::sync::Arc<dyn kglite::api::Embedder>>
 pub kglite::api::session::ExecuteOptions::git_sha: core::option::Option<&'a str>
 pub kglite::api::session::ExecuteOptions::lazy_eligible: bool
-pub kglite::api::session::ExecuteOptions::max_rows: core::option::Option<usize>
+pub kglite::api::session::ExecuteOptions::max_work_units: core::option::Option<usize>
 pub kglite::api::session::ExecuteOptions::modified_by: core::option::Option<&'a str>
 pub kglite::api::session::ExecuteOptions::parallel: bool
 pub kglite::api::session::ExecuteOptions::params: &'a std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>

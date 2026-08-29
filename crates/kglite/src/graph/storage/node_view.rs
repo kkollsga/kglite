@@ -43,10 +43,12 @@ use crate::graph::storage::StrField;
 ///
 /// A `NodeView` borrows the storage backend. On the disk backend the borrowed
 /// `NodeData` lives in the per-query arena, so a view must not outlive the
-/// `begin_query()` guard, and must never be held across a `Python::attach`
-/// boundary or a GIL release — resolve to owned [`Value`]s at such a boundary
-/// (that is what [`NodeView::properties_cloned`] and
-/// [`NodeView::to_node_info`] are for).
+/// read-pass guard, and must never be held across a `Python::attach` boundary
+/// or a GIL release — resolve to owned [`Value`]s at such a boundary (that is
+/// what [`NodeView::properties_cloned`] and [`NodeView::to_node_info`] are
+/// for). Embedders acquire the guard from the public
+/// [`DirGraph::begin_read_pass`](crate::graph::dir_graph::DirGraph::begin_read_pass);
+/// the crate-internal spelling is `begin_query()`.
 #[derive(Clone, Copy)]
 pub struct NodeView<'a> {
     data: &'a NodeData,

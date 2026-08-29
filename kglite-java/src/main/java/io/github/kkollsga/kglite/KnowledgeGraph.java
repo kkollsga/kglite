@@ -475,29 +475,32 @@ public final class KnowledgeGraph implements AutoCloseable {
 
     /**
      * Run a parameterised Cypher statement (the <strong>write</strong> path)
-     * under a wall-clock timeout and a row budget.
+     * under a wall-clock timeout and a work budget.
      *
-     * <p>The fullest write overload. {@code maxRows} is a runaway-result guard:
-     * a statement that would return more than {@code maxRows} rows is an engine
-     * error (a {@link KgliteException}, statement rolled back), <em>not</em> a
-     * silent truncation — add a {@code LIMIT} clause to bound output instead.
-     * {@code 0} (and any negative value) means no row limit, matching a
+     * <p>The fullest write overload. {@code maxWorkUnits} is a work budget,
+     * <em>not</em> a result-row cap: it is charged against intermediate rows,
+     * retained collection items and scan work — every quantity the engine
+     * holds or walks on the way to an answer — so the count can far exceed the
+     * rows returned. Exceeding it is an engine error (a
+     * {@link KgliteException}, statement rolled back), never a silent
+     * truncation — add a {@code LIMIT} clause to bound output instead.
+     * {@code 0} (and any negative value) means no explicit budget, matching a
      * {@code null}/zero {@code timeout} meaning no deadline.
      *
      * @param query   the Cypher text, referring to bindings as {@code $name}
      * @param params  the bindings; may be empty, never {@code null}
      * @param timeout the wall-clock budget, or {@code null} for none
-     * @param maxRows the maximum rows the statement may produce; {@code 0} is
-     *     unlimited
+     * @param maxWorkUnits the work units the statement may charge; {@code 0}
+     *     is unlimited
      * @return one insertion-ordered, unmodifiable map per row
      * @throws KgliteException on any engine failure, including the timeout or
-     *     the row-budget overflow
+     *     the work-budget overflow
      * @throws ReadOnlyGraphException if this graph was opened read-only
      * @throws IllegalStateException if this graph is closed
      */
     public List<Map<String, Object>> cypher(
-            String query, Map<String, Object> params, Duration timeout, long maxRows) {
-        return runOpts(query, params, true, timeout, maxRows);
+            String query, Map<String, Object> params, Duration timeout, long maxWorkUnits) {
+        return runOpts(query, params, true, timeout, maxWorkUnits);
     }
 
     /**
@@ -597,28 +600,31 @@ public final class KnowledgeGraph implements AutoCloseable {
 
     /**
      * Run a parameterised read-only Cypher statement (the <strong>read</strong>
-     * path) under a wall-clock timeout and a row budget.
+     * path) under a wall-clock timeout and a work budget.
      *
-     * <p>The fullest read overload. {@code maxRows} is a runaway-result guard:
-     * a query that would return more than {@code maxRows} rows is an engine
-     * error (a {@link KgliteException}), <em>not</em> a silent truncation — add
-     * a {@code LIMIT} clause to bound output instead. {@code 0} (and any
-     * negative value) means no row limit, matching a {@code null}/zero
+     * <p>The fullest read overload. {@code maxWorkUnits} is a work budget,
+     * <em>not</em> a result-row cap: it is charged against intermediate rows,
+     * retained collection items and scan work — every quantity the engine
+     * holds or walks on the way to an answer — so the count can far exceed the
+     * rows returned. Exceeding it is an engine error (a
+     * {@link KgliteException}), never a silent truncation — add a
+     * {@code LIMIT} clause to bound output instead. {@code 0} (and any
+     * negative value) means no explicit budget, matching a {@code null}/zero
      * {@code timeout} meaning no deadline.
      *
      * @param query   the Cypher text, referring to bindings as {@code $name}
      * @param params  the bindings; may be empty, never {@code null}
      * @param timeout the wall-clock budget, or {@code null} for none
-     * @param maxRows the maximum rows the query may produce; {@code 0} is
+     * @param maxWorkUnits the work units the query may charge; {@code 0} is
      *     unlimited
      * @return one insertion-ordered, unmodifiable map per row
      * @throws KgliteException on any engine failure, including the timeout or
-     *     the row-budget overflow
+     *     the work-budget overflow
      * @throws IllegalStateException if this graph is closed
      */
     public List<Map<String, Object>> query(
-            String query, Map<String, Object> params, Duration timeout, long maxRows) {
-        return runOpts(query, params, false, timeout, maxRows);
+            String query, Map<String, Object> params, Duration timeout, long maxWorkUnits) {
+        return runOpts(query, params, false, timeout, maxWorkUnits);
     }
 
     private List<Map<String, Object>> run(String query, Map<String, Object> params, boolean mutating) {
@@ -628,12 +634,12 @@ public final class KnowledgeGraph implements AutoCloseable {
 
     private List<Map<String, Object>> runOpts(
             String query, Map<String, Object> params, boolean mutating,
-            Duration timeout, long maxRows) {
+            Duration timeout, long maxWorkUnits) {
         String paramsJson = prepareRun(query, params, mutating);
         long timeoutMs = timeoutMillis(timeout);
-        long rows = maxRows < 0 ? 0 : maxRows;
+        long workUnits = maxWorkUnits < 0 ? 0 : maxWorkUnits;
         return session.use(handle ->
-                Abi.executeOpts(handle, query, paramsJson, mutating, timeoutMs, rows));
+                Abi.executeOpts(handle, query, paramsJson, mutating, timeoutMs, workUnits));
     }
 
     /** Validate the shared arguments, enforce the read-only guard, and encode params. */

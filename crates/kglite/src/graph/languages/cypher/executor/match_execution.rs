@@ -10,7 +10,7 @@ use crate::graph::core::membership::MembershipSet;
 //
 // It was implemented partitioned (`into_par_iter` over the match vector,
 // order-preserving, gated to `limit_hint.is_none()` + no `distinct_node_hint`
-// + an unbounded `max_rows` + non-disk + non-spatial) and then removed,
+// + an unbounded `max_work_units` + non-disk + non-spatial) and then removed,
 // because it is a *regression*: release, 1M-node graphgen fixture, 792k
 // surviving rows, min of 7, four runs —
 //
@@ -31,7 +31,7 @@ use crate::graph::core::membership::MembershipSet;
 // partitioned as written (its dedup tests `seen` *before* evaluating the
 // predicate, so a duplicate the sequential path never evaluates would be
 // evaluated by a partition that has not seen the original — turning a
-// predicate error into a divergence); `max_rows` cannot reproduce the
+// predicate error into a divergence); `max_work_units` cannot reproduce the
 // sequential error message (which names the count at which the cap was
 // crossed, an offset a partition cannot know); and `limit_hint` has no
 // partitioned stopping point.

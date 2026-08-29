@@ -196,10 +196,12 @@ pub struct KnowledgeGraph {
     /// Default per-query timeout in milliseconds. Applied to cypher() when
     /// timeout_ms is not explicitly passed. None = no timeout (default).
     pub(crate) default_timeout_ms: Option<u64>,
-    /// Default maximum result rows. Applied to cypher() when max_rows is not
-    /// explicitly passed. Queries exceeding this limit return an error.
-    /// None = no limit (default).
-    pub(crate) default_max_rows: Option<usize>,
+    /// Default per-query work budget — intermediate rows, retained collection
+    /// items and scan work, not a result-row cap. Applied to cypher() when
+    /// max_work_units is not explicitly passed; a query that exceeds it errors
+    /// rather than truncating. None = no explicit budget (default), leaving
+    /// the engine's own backstop in charge.
+    pub(crate) default_max_work_units: Option<usize>,
     /// Graph lifecycle / identity — save target + durability session. See
     /// [`GraphLifecycle`].
     pub(crate) lifecycle: GraphLifecycle,
@@ -381,7 +383,7 @@ impl KnowledgeGraph {
             cursor: CursorState::new(),
             embedder: None,
             default_timeout_ms: None,
-            default_max_rows: None,
+            default_max_work_units: None,
             lifecycle: crate::graph::GraphLifecycle::detached(),
         }
     }
@@ -621,7 +623,7 @@ impl Clone for KnowledgeGraph {
             cursor: self.cursor.clone(), // selection/reports Arc-backed — O(1)
             embedder: self.embedder.as_ref().map(Arc::clone),
             default_timeout_ms: self.default_timeout_ms,
-            default_max_rows: self.default_max_rows,
+            default_max_work_units: self.default_max_work_units,
             // A true Clone preserves the save identity (source_path) but never
             // the durable session (the WAL File handle isn't shareable) nor the
             // writer lease — write ownership stays with the graph that opened

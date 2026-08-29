@@ -539,10 +539,13 @@ fn count_subquery_expression_propagates_deadline_and_cancellation() {
     assert_eq!(cancelled, "Query cancelled");
 
     let over_budget = CypherExecutor::with_params(&graph, &no_params, None)
-        .with_max_rows(Some(1))
+        .with_max_work_units(Some(1))
         .evaluate_expression(expr, &ResultRow::new())
         .unwrap_err();
-    assert!(over_budget.contains("max_rows limit of 1"), "{over_budget}");
+    assert!(
+        over_budget.contains("max_work_units budget of 1"),
+        "{over_budget}"
+    );
 }
 
 #[test]

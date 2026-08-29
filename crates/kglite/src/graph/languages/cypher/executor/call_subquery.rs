@@ -384,7 +384,7 @@ impl<'a> CypherExecutor<'a> {
             })?;
             // `total` rows are about to be reserved and filled, so this is a
             // pre-sized row collection, not scan work: charging it as rows is
-            // what puts it under the no-max_rows backstop *before* the
+            // what puts it under the no-max_work_units backstop *before* the
             // allocation rather than after the join has materialized.
             self.budget
                 .check_rows(total, "uncorrelated CALL subquery join")?;
