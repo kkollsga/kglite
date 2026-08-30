@@ -57,6 +57,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   offset answers the wrong rows, silently, because the wrong rows are still
   real nodes).
 
+- **Ctrl-C now interrupts a variable-length path expansion.** The three poll
+  sites inside `-[*n..m]-` matching (`matcher_var_length.rs`) checked the
+  deadline and nothing else, so a cooperative cancellation — the Python
+  wheel's Ctrl-C, or any binding's cancel flag — was invisible to them and
+  was noticed only once the expansion finished or hit the 10,000,000-row
+  safety ceiling. Every other poll in the engine, including the one three
+  functions away in the same file, uses the combined `interrupt_reason()`
+  check; these did not. Measured on a fan-out fixture: a flag raised 100 ms
+  in was observed after **3.93 s** (the expansion running to its ceiling) and
+  is now observed after 112 ms. The deadline path was never affected, and the
+  fix adds one relaxed atomic load to a poll that already fires once per 512
+  frontier pops.
+
 - **A query deadline is now observed inside the MATCH row loops, not only
   inside the pattern matcher.** `match_execution.rs` polled neither the
   deadline nor the cancel flag: the matcher stopped on time, and then every

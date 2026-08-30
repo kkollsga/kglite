@@ -496,10 +496,8 @@ impl<'a> PatternExecutor<'a> {
         while let Some((current, depth)) = queue.pop_front() {
             iter_count += 1;
             if iter_count & 511 == 0 {
-                if let Some(dl) = self.deadline {
-                    if Instant::now() > dl {
-                        return Err("Query timed out".to_string());
-                    }
+                if let Some(msg) = self.interrupt_reason() {
+                    return Err(msg);
                 }
             }
             if depth >= max_hops {
@@ -516,15 +514,13 @@ impl<'a> PatternExecutor<'a> {
                 let mut inner_iter: usize = 0;
                 for edge in edges {
                     inner_iter += 1;
-                    // Inner-loop deadline check. A 1-2 hop fan-out from a hub
+                    // Inner-loop interrupt check. A 1-2 hop fan-out from a hub
                     // like Q42 can push hundreds of millions of inner
                     // iterations between the outer `iter_count & 511` check
                     // — without this the 20 s deadline overshoots to 30+ s.
                     if inner_iter.is_multiple_of(1 << 20) {
-                        if let Some(dl) = self.deadline {
-                            if Instant::now() > dl {
-                                return Err("Query timed out".to_string());
-                            }
+                        if let Some(msg) = self.interrupt_reason() {
+                            return Err(msg);
                         }
                     }
                     if self
@@ -648,10 +644,8 @@ impl<'a> PatternExecutor<'a> {
         while let Some((current, depth, path)) = queue.pop_front() {
             vlp_count += 1;
             if vlp_count.is_multiple_of(512) {
-                if let Some(dl) = self.deadline {
-                    if Instant::now() > dl {
-                        return Err("Query timed out".to_string());
-                    }
+                if let Some(msg) = self.interrupt_reason() {
+                    return Err(msg);
                 }
                 // The frontier is the other buffer this loop holds, and it
                 // grows even where the node pattern rejects every target (so
