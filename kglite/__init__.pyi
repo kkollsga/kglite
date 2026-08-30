@@ -512,12 +512,12 @@ class ResultView:
         Returned dict keys:
 
         - ``elapsed_ms`` (int): wall-clock query duration in milliseconds.
-        - ``timed_out`` (bool): ``False`` for returned results. A deadline
-          expiry raises :class:`CypherTimeoutError` instead of returning a
-          partial ``ResultView``.
         - ``timeout_ms`` (Optional[int]): the deadline that was in effect,
           or ``None`` when no deadline applied (memory graphs by default,
-          or any call with ``timeout_ms=0``).
+          or any call with ``timeout_ms=0``). A deadline that fires raises
+          :class:`CypherTimeoutError` rather than returning a partial
+          ``ResultView``, so a returned result never carries a truncated-by-
+          timeout row set.
         - ``row_limit`` (Optional[int]): the result-row retention cap that
           was in effect, echoed back, or ``None`` when the call set none.
           Present whether or not the cap bit, so "no cap" and "capped, and

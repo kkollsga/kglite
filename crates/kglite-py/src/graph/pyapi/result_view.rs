@@ -637,9 +637,9 @@ impl ResultView {
     /// paths).
     ///
     /// Returns a dict with ``elapsed_ms`` (wall-clock query duration),
-    /// ``timed_out`` (True when the deadline fired), ``timeout_ms``
-    /// (the deadline that was in effect, or None), ``row_limit`` (the
-    /// result-row cap in force, or None), ``total_rows`` (the exact row
+    /// ``timeout_ms`` (the deadline that was in effect, or None),
+    /// ``row_limit`` (the result-row cap in force, or None), ``total_rows``
+    /// (the exact row
     /// count before ``row_limit`` truncated the result — set only when
     /// truncation happened, so it doubles as the truncation flag) and
     /// ``warnings`` (shortcut: the `warnings` property). Use this to tune
@@ -652,7 +652,6 @@ impl ResultView {
             Some(d) => {
                 let dict = PyDict::new(py);
                 dict.set_item("elapsed_ms", d.elapsed_ms)?;
-                dict.set_item("timed_out", d.timed_out)?;
                 match d.timeout_ms {
                     Some(ms) => dict.set_item("timeout_ms", ms)?,
                     None => dict.set_item("timeout_ms", py.None())?,

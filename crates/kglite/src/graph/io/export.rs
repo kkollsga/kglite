@@ -34,11 +34,21 @@ pub fn to_graphml(
         "  <key id=\"node_title\" for=\"node\" attr.name=\"title\" attr.type=\"string\"/>\n",
     );
     xml.push_str("  <key id=\"node_id\" for=\"node\" attr.name=\"id\" attr.type=\"string\"/>\n");
+    // `label` is the display name Gephi / yEd / Cytoscape render; the `title`
+    // key above is kglite's own name for the same string and those readers
+    // ignore it, so without this an import shows the synthetic `n0` element
+    // ids. Both are emitted: consumers already reading `title` keep working.
+    xml.push_str(
+        "  <key id=\"node_label\" for=\"node\" attr.name=\"label\" attr.type=\"string\"/>\n",
+    );
     xml.push_str("  <key id=\"node_properties\" for=\"node\" attr.name=\"properties\" attr.type=\"string\"/>\n");
 
     // Define attribute keys for edges
     xml.push_str("  <key id=\"edge_type\" for=\"edge\" attr.name=\"connection_type\" attr.type=\"string\"/>\n");
     xml.push_str("  <key id=\"edge_properties\" for=\"edge\" attr.name=\"properties\" attr.type=\"string\"/>\n");
+    xml.push_str(
+        "  <key id=\"edge_label\" for=\"edge\" attr.name=\"label\" attr.type=\"string\"/>\n",
+    );
 
     xml.push_str("  <graph id=\"G\" edgedefault=\"directed\">\n");
 
@@ -54,10 +64,9 @@ pub fn to_graphml(
                 "      <data key=\"node_type\">{}</data>\n",
                 escape_xml(node.node_type_str(&graph.interner))
             ));
-            xml.push_str(&format!(
-                "      <data key=\"node_title\">{}</data>\n",
-                escape_xml(&crate::datatypes::values::raw_string(&node.title()))
-            ));
+            let title = escape_xml(&crate::datatypes::values::raw_string(&node.title()));
+            xml.push_str(&format!("      <data key=\"node_title\">{title}</data>\n"));
+            xml.push_str(&format!("      <data key=\"node_label\">{title}</data>\n"));
             xml.push_str(&format!(
                 "      <data key=\"node_id\">{}</data>\n",
                 escape_xml(&crate::datatypes::values::raw_string(&node.id()))
@@ -99,9 +108,12 @@ pub fn to_graphml(
                     source_idx.index(),
                     target_idx.index()
                 ));
+                let conn_type = escape_xml(edge.weight().connection_type_str(&graph.interner));
                 xml.push_str(&format!(
-                    "      <data key=\"edge_type\">{}</data>\n",
-                    escape_xml(edge.weight().connection_type_str(&graph.interner))
+                    "      <data key=\"edge_type\">{conn_type}</data>\n"
+                ));
+                xml.push_str(&format!(
+                    "      <data key=\"edge_label\">{conn_type}</data>\n"
                 ));
 
                 if edge.weight().property_count() > 0 {

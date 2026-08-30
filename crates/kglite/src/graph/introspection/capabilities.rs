@@ -27,7 +27,10 @@ impl TypeCapabilities {
         if self.has_geometry {
             flags.push("geo");
         }
-        if self.has_location && !self.has_geometry {
+        // `loc` and `geo` are independent facts — a type declaring lat/lon
+        // columns *and* a WKT field carries both, and suppressing `loc` here
+        // hid the cheap-coordinate half from every reader of the badge.
+        if self.has_location {
             flags.push("loc");
         }
         if self.has_embeddings {
@@ -338,4 +341,33 @@ pub(super) fn discover_endpoint_types_batch(
             (conn, (src_set, tgt_set))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TypeCapabilities;
+
+    fn caps(ts: bool, loc: bool, geo: bool, vec: bool) -> TypeCapabilities {
+        TypeCapabilities {
+            has_timeseries: ts,
+            has_location: loc,
+            has_geometry: geo,
+            has_embeddings: vec,
+        }
+    }
+
+    /// `loc` and `geo` are independent facts about a type, and a type that
+    /// declares both must advertise both. `geo` used to suppress `loc`, so a
+    /// type carrying lat/lon columns *and* a WKT field looked geometry-only —
+    /// a downstream reading the badge went to parse polygons to recover
+    /// coordinates that were sitting in plain float columns next door
+    /// (measured on 37 of 38 sodir types, all of which declare both).
+    #[test]
+    fn location_and_geometry_flags_are_independent() {
+        assert_eq!(caps(false, true, true, false).flags_csv(), "geo,loc");
+        assert_eq!(caps(false, true, false, false).flags_csv(), "loc");
+        assert_eq!(caps(false, false, true, false).flags_csv(), "geo");
+        assert_eq!(caps(false, false, false, false).flags_csv(), "");
+        assert_eq!(caps(true, true, true, true).flags_csv(), "ts,geo,loc,vec");
+    }
 }

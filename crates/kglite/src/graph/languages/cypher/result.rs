@@ -250,9 +250,6 @@ pub struct MutationStats {
 pub struct QueryDiagnostics {
     /// Wall-clock time spent executing the query (parse + plan + execute).
     pub elapsed_ms: u64,
-    /// True when the deadline fired during execution. When set, the
-    /// result rows are the partial set materialised before cancellation.
-    pub timed_out: bool,
     /// Deadline that was in effect for this query, in milliseconds.
     /// `None` when no deadline applied.
     pub timeout_ms: Option<u64>,

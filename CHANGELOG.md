@@ -7,7 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **`QueryDiagnostics::timed_out` (Rust) / the `timed_out` key in
+  `ResultView.diagnostics` (Python).** Naming it precisely, since a caller
+  reading it needs to know which key went: the removed field is `timed_out`,
+  and every other diagnostics key — `elapsed_ms`, `timeout_ms`, `row_limit`,
+  `total_rows`, `warnings` — is unchanged. The field had **no writer anywhere
+  in the engine**: it read `false` on every result ever returned, while its
+  doc comment promised "the result rows are the partial set materialised
+  before cancellation" — semantics that do not exist, because a fired
+  deadline returns `Err("Query timed out…")` / raises `CypherTimeoutError`
+  and never yields rows. A caller branching on it was branching on a
+  constant. Callers that want the deadline that was in force read
+  `timeout_ms`, which is real and stays.
+
+### Added
+
+- **`kglite::api::fluent::FilterCondition`.** `make_traversal`'s
+  `filter_target` / `filter_connection` and `filter_nodes`' `conditions` all
+  take `HashMap<String, FilterCondition>`, but the facade never re-exported
+  the enum — so a downstream reaching the engine through `kglite::api::*`
+  only (the sealed path the boundary principle asks for) could pass those
+  parameters only as `None` or an empty map.
+- **GraphML export emits a `label` key.** Gephi, yEd and Cytoscape all read
+  `attr.name="label"` as an element's display name; kglite wrote the readable
+  name under its own `title` key, which no reader looks at, so an import
+  rendered synthetic `n0`/`n1` ids. Nodes now carry `node_label` (the node
+  title) and edges `edge_label` (the connection type), both declared as
+  `attr.name="label"`. The existing `id` / `title` / `type` /
+  `connection_type` / `properties` keys are unchanged — a reader already
+  consuming them keeps working. GEXF already did this correctly.
+
 ### Fixed
+
+- **`describe()` type badges now advertise `loc` and `geo` independently.** A
+  type that declares both lat/lon columns and a WKT geometry field carries
+  both facts, but `geo` suppressed `loc`, so the badge read geometry-only.
+  Reported downstream on a dataset where 37 of 38 types declare both: reading
+  the badge, they were about to parse WKT polygons to recover coordinates
+  that were sitting in plain float columns next door.
+- **`id(n)` is documented as reading the node's `id` field.** In Neo4j and
+  most other Cypher implementations `id(n)` returns an engine-assigned
+  integer unrelated to your data; in kglite it returns the source data's own
+  key — the same value as `n.id`. CYPHER.md's function table, its identity
+  section, and `describe()`'s Cypher-function group now say so, along with
+  the two consequences that bite: it is only as stable across a rebuild as
+  the source key is, and it is not a positional index (treating it as a row
+  offset answers the wrong rows, silently, because the wrong rows are still
+  real nodes).
 
 - **A query deadline is now observed inside the MATCH row loops, not only
   inside the pattern matcher.** `match_execution.rs` polled neither the

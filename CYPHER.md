@@ -450,7 +450,7 @@ graph.cypher("""
 | `toFloat(expr)` | Convert to float |
 | `size(expr)` | Element count of a list, or **character** count of a string (not UTF-8 bytes) |
 | `type(r)` | Relationship type |
-| `id(n)` | Node ID |
+| `id(n)` | The node's `id` **field** — the source data's own key, same value as `n.id`. Not an internal/engine identifier as in other Cypher implementations (see below) |
 | `labels(n)` | Node labels as a list, primary type first |
 | `degree(n)` | Node's total edge count (in + out; a self-loop counts twice) — e.g. `WHERE degree(n) > 100` to find hubs |
 | `inDegree(n)` / `outDegree(n)` | Node's incoming / outgoing edge count |
@@ -2546,15 +2546,15 @@ Every `cypher()` call attaches lightweight execution diagnostics to the returned
 ```python
 result = graph.cypher("MATCH (n:Country {label: 'Norway'}) RETURN n.nid")
 print(result.diagnostics)
-# {'elapsed_ms': 3, 'timed_out': False, 'timeout_ms': 180000, 'warnings': []}
+# {'elapsed_ms': 3, 'timeout_ms': 180000, 'row_limit': None, 'total_rows': None, 'warnings': []}
 ```
 
 Keys:
 
 - `elapsed_ms` — wall-clock duration in milliseconds.
-- `timed_out` — `False` on every successful result. A fired deadline raises
-  `CypherTimeoutError`, so no partial `ResultView` is returned.
-- `timeout_ms` — the deadline that was in effect, or `None` when no deadline applied.
+- `timeout_ms` — the deadline that was in effect, or `None` when no deadline
+  applied. A fired deadline raises `CypherTimeoutError`, so no partial
+  `ResultView` is ever returned.
 - `warnings` — non-fatal advisories about the query, empty for a clean one.
   Each is legal Cypher that quietly returns nothing useful, so it is a warning
   and not an error — with a "did you mean?" hint where one is genuinely close.
@@ -3511,6 +3511,17 @@ shadow them). Use `labels(n)` for the label set and `id(n)` / `type(r)` for
 the structural forms regardless of any same-named property.
 
 ### Identity (`id`) and prefixed-id datasets (`nid`)
+
+**`id(n)` reads the node's `id` field, not an internal identifier.** In Neo4j
+and most other Cypher implementations `id(n)` returns an engine-assigned
+integer that has nothing to do with your data; in kglite it returns the source
+data's own key — exactly what `n.id` returns. Two consequences worth planning
+around: it is only as stable across a rebuild as the source key is (a rebuild
+that renumbers your keys renumbers `id(n)`), and it is **not** a positional
+index into anything — treating the value as a row offset or an array position
+answers the wrong rows, silently, because the wrong rows are still real nodes.
+Use it as a key, join on it, and let `labels(n)` / `type(r)` cover the
+structural questions.
 
 `n.id` is the node's **indexed logical identity** and behaves identically in every
 storage mode (in-memory / mapped / disk). `CREATE (n {id: X})` and

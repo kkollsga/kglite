@@ -87,14 +87,16 @@ def test_diagnostics_shape_is_unchanged():
     diag = g.cypher("MATCH (n:Persn) RETURN n").diagnostics
     assert set(diag) == {
         "elapsed_ms",
-        "timed_out",
         "timeout_ms",
         "row_limit",
         "total_rows",
         "warnings",
     }
     assert isinstance(diag["elapsed_ms"], int)
-    assert diag["timed_out"] is False
+    # `timed_out` is deliberately absent: it had no writer anywhere, so it read
+    # False on every result — a fired deadline raises CypherTimeoutError rather
+    # than returning partial rows. The set assertion above is what fails if it
+    # ever comes back.
     # No `row_limit` was asked for, so neither the cap nor a pre-truncation
     # total exists. `test_row_limit.py` owns the populated cases.
     assert diag["row_limit"] is None

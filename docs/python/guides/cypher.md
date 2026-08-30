@@ -142,7 +142,7 @@ Scope — worth knowing before you go looking for a win that is not there:
 ```python
 r = graph.cypher("MATCH (n:Person) RETURN n.name")
 r.diagnostics
-# {'elapsed_ms': 1, 'timed_out': False, 'timeout_ms': 180000, 'warnings': []}
+# {'elapsed_ms': 1, 'timeout_ms': 180000, 'row_limit': None, 'total_rows': None, 'warnings': []}
 ```
 
 The `warnings` list surfaces non-fatal advisories — the query shapes that

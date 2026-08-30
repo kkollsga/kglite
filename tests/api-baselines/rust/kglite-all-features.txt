@@ -898,7 +898,6 @@ pub fn kglite::api::cypher::MutationStats::fmt(&self, f: &mut core::fmt::Formatt
 pub struct kglite::api::cypher::QueryDiagnostics
 pub kglite::api::cypher::QueryDiagnostics::elapsed_ms: u64
 pub kglite::api::cypher::QueryDiagnostics::row_limit: core::option::Option<usize>
-pub kglite::api::cypher::QueryDiagnostics::timed_out: bool
 pub kglite::api::cypher::QueryDiagnostics::timeout_ms: core::option::Option<u64>
 pub kglite::api::cypher::QueryDiagnostics::total_rows: core::option::Option<u64>
 pub kglite::api::cypher::QueryDiagnostics::warnings: alloc::vec::Vec<alloc::string::String>
@@ -1258,6 +1257,27 @@ pub mod kglite::api::fluent
 pub enum kglite::api::fluent::EvaluationResult
 pub kglite::api::fluent::EvaluationResult::Computed(alloc::vec::Vec<kglite::api::fluent::StatResult>)
 pub kglite::api::fluent::EvaluationResult::Stored(kglite::graph::introspection::reporting::CalculationOperationReport)
+pub enum kglite::api::fluent::FilterCondition
+pub kglite::api::fluent::FilterCondition::All(alloc::vec::Vec<kglite::datatypes::values::FilterCondition>)
+pub kglite::api::fluent::FilterCondition::Between(kglite::datatypes::values::Value, kglite::datatypes::values::Value)
+pub kglite::api::fluent::FilterCondition::Contains(kglite::datatypes::values::Value)
+pub kglite::api::fluent::FilterCondition::EndsWith(kglite::datatypes::values::Value)
+pub kglite::api::fluent::FilterCondition::Equals(kglite::datatypes::values::Value)
+pub kglite::api::fluent::FilterCondition::GreaterThan(kglite::datatypes::values::Value)
+pub kglite::api::fluent::FilterCondition::GreaterThanEquals(kglite::datatypes::values::Value)
+pub kglite::api::fluent::FilterCondition::In(alloc::vec::Vec<kglite::datatypes::values::Value>)
+pub kglite::api::fluent::FilterCondition::IsNotNull
+pub kglite::api::fluent::FilterCondition::IsNull
+pub kglite::api::fluent::FilterCondition::LessThan(kglite::datatypes::values::Value)
+pub kglite::api::fluent::FilterCondition::LessThanEquals(kglite::datatypes::values::Value)
+pub kglite::api::fluent::FilterCondition::Not(alloc::boxed::Box<kglite::datatypes::values::FilterCondition>)
+pub kglite::api::fluent::FilterCondition::NotEquals(kglite::datatypes::values::Value)
+pub kglite::api::fluent::FilterCondition::Regex(alloc::string::String)
+pub kglite::api::fluent::FilterCondition::StartsWith(kglite::datatypes::values::Value)
+impl core::clone::Clone for kglite::datatypes::values::FilterCondition
+pub fn kglite::datatypes::values::FilterCondition::clone(&self) -> kglite::datatypes::values::FilterCondition
+impl core::fmt::Debug for kglite::datatypes::values::FilterCondition
+pub fn kglite::datatypes::values::FilterCondition::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub enum kglite::api::fluent::MatchBinding
 pub kglite::api::fluent::MatchBinding::Edge
 pub kglite::api::fluent::MatchBinding::Edge::connection_type: kglite::api::InternedKey

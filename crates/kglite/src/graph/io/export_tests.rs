@@ -129,3 +129,58 @@ fn csv_dir_export_carries_properties_from_columnar_storage() {
     assert!(csv.contains("topic"), "got: {csv}");
     assert!(csv.contains("alpha"), "got: {csv}");
 }
+
+/// Gephi, yEd and Cytoscape all read `attr.name="label"` as a node's display
+/// name. Without that key an import shows the synthetic `n0`/`n1` element ids
+/// while the readable name sits under the non-standard `title` key, which no
+/// reader looks at. GEXF's writer already gets this right (`label=` on the
+/// node element), so GraphML was the odd one out.
+#[test]
+fn graphml_export_carries_a_label_key_from_the_node_title() {
+    let g = docs_graph();
+    let xml = to_graphml(&g, None).unwrap();
+    assert!(
+        xml.contains(
+            "<key id=\"node_label\" for=\"node\" attr.name=\"label\" attr.type=\"string\"/>"
+        ),
+        "GraphML declared no node label key; got: {xml}"
+    );
+    assert!(
+        xml.contains("<data key=\"node_label\">t1</data>"),
+        "GraphML label key carried no title; got: {xml}"
+    );
+    // The pre-existing keys stay: readers already consuming them must not break.
+    assert!(xml.contains("attr.name=\"title\""), "got: {xml}");
+    assert!(xml.contains("attr.name=\"id\""), "got: {xml}");
+}
+
+/// Same story on the edge side: `attr.name="label"` is what a reader renders
+/// on the arc, and the connection type is the only label kglite has.
+#[test]
+fn graphml_export_carries_an_edge_label_key_from_the_connection_type() {
+    let mut g = docs_graph();
+    crate::graph::mutation::maintain::add_edges_from_specs(
+        &mut g,
+        vec![crate::graph::mutation::maintain::EdgeSpec {
+            source_type: "Doc".to_string(),
+            source_id: Value::Int64(1),
+            target_type: "Doc".to_string(),
+            target_id: Value::Int64(2),
+            edge_type: "CITES".to_string(),
+            properties: std::collections::HashMap::new(),
+        }],
+    )
+    .unwrap();
+    let xml = to_graphml(&g, None).unwrap();
+    assert!(
+        xml.contains(
+            "<key id=\"edge_label\" for=\"edge\" attr.name=\"label\" attr.type=\"string\"/>"
+        ),
+        "GraphML declared no edge label key; got: {xml}"
+    );
+    assert!(
+        xml.contains("<data key=\"edge_label\">CITES</data>"),
+        "GraphML edge label key carried no connection type; got: {xml}"
+    );
+    assert!(xml.contains("attr.name=\"connection_type\""), "got: {xml}");
+}

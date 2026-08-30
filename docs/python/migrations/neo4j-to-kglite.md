@@ -431,7 +431,8 @@ Both are supported but the shape differs from Neo4j's plan tree:
   (`[clause, rows_in, rows_out, elapsed_us]`).
 
 Every `cypher()` call also attaches lightweight `result.diagnostics`
-(`elapsed_ms`, `timed_out`, `timeout_ms`) with no prefix required.
+(`elapsed_ms`, `timeout_ms`, `row_limit`, `total_rows`, `warnings`) with no
+prefix required.
 
 ## Operational differences
 

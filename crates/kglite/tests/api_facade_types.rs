@@ -172,3 +172,55 @@ fn edge_iterators_yield_a_nameable_reference_type() {
     );
     assert_eq!(edge.weight().connection_type, edge.connection_type());
 }
+
+/// `FilterCondition` is the per-property predicate `api::fluent`'s filtering
+/// and traversal entry points take. Without the re-export a facade-only caller
+/// can pass `make_traversal`'s `filter_target` / `filter_connection` only as
+/// `None`, and `filter_nodes` only an empty map.
+#[test]
+fn filter_conditions_are_constructible_through_the_facade() {
+    use kglite::api::fluent::{filter_nodes, make_traversal, FilterCondition};
+    use kglite::api::CurrentSelection;
+    use std::collections::HashMap;
+
+    let graph = two_person_graph();
+    let mut selection = CurrentSelection::new();
+    selection.add_level();
+
+    let mut conditions: HashMap<String, FilterCondition> = HashMap::new();
+    conditions.insert(
+        "age".to_string(),
+        FilterCondition::GreaterThan(Value::Int64(35)),
+    );
+    filter_nodes(&graph, &mut selection, conditions, None, None).expect("filter");
+    assert_eq!(
+        selection.current_node_count(),
+        1,
+        "only the 41-year-old passes the predicate"
+    );
+
+    // The signature position the re-export exists for: a non-`None` filter map
+    // handed to the traversal entry point.
+    let mut edge_filter: HashMap<String, FilterCondition> = HashMap::new();
+    edge_filter.insert("weight".to_string(), FilterCondition::IsNull);
+    make_traversal(
+        &graph,
+        &mut selection,
+        "KNOWS".to_string(),
+        None,
+        Some("incoming".to_string()),
+        None,
+        Some(&edge_filter),
+        None,
+        None,
+        Some(true),
+        None,
+        None,
+    )
+    .expect("traverse");
+    assert_eq!(
+        selection.current_node_count(),
+        1,
+        "the 41-year-old's only KNOWS edge is inbound from the 30-year-old"
+    );
+}

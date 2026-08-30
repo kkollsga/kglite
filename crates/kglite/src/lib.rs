@@ -254,6 +254,12 @@ pub mod api {
     /// `core::*` primitives stay *defined* in `crate::graph::core`; this is
     /// their curated, stable re-export surface.
     pub mod fluent {
+        /// The per-property predicate every filtering and traversal entry
+        /// point here takes (`filter_nodes`'s `conditions`, `make_traversal`'s
+        /// `filter_target` / `filter_connection`). Without it a facade-only
+        /// caller can name the parameter type only as `None`.
+        pub use crate::datatypes::values::FilterCondition;
+
         // Selection set algebra + subgraph.
         pub use crate::graph::mutation::set_ops::{
             difference_selections, intersection_selections, symmetric_difference_selections,

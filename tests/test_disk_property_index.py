@@ -171,7 +171,6 @@ class TestQueryDiagnostics:
         d = r.diagnostics
         assert d is not None
         assert d["elapsed_ms"] >= 0
-        assert d["timed_out"] is False
         # Built-in default timeout = 180_000 ms (3 min); user did not override.
         assert d["timeout_ms"] == 180_000
 
