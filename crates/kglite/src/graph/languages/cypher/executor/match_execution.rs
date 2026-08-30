@@ -244,7 +244,16 @@ impl<'a> CypherExecutor<'a> {
                 },
                 Default::default(),
             );
+        // Every unit here is a row this loop builds, filters and retains, and
+        // the enclosing matcher has already finished: nothing further down
+        // polls until the whole vector is converted. A 1.9M-match MATCH spent
+        // that entire conversion past its deadline before this poll existed
+        // (the kglite-visual OOM), so the loop that charges `reserve_rows`
+        // charges the interrupt at the same stride.
+        let mut work = 0usize;
         for m in matches {
+            self.check_interrupt_periodic(work)?;
+            work = work.saturating_add(1);
             let dedup_idx = clause
                 .distinct_node_hint
                 .as_ref()
@@ -334,6 +343,12 @@ impl<'a> CypherExecutor<'a> {
             // indices each row consumed within this clause.
             let mut clause_edge_sets: Vec<Vec<petgraph::graph::EdgeIndex>> = Vec::new();
 
+            // One monotonic counter for the whole comma-pattern join, so the
+            // poll fires once per `INTERRUPT_POLL_INTERVAL` units however the
+            // work is split between driving rows and the matches they expand
+            // to — a single driving row with a huge compatible set is bounded
+            // by the inner poll, a million cheap rows by the outer one.
+            let mut join_work = 0usize;
             for (pi, pattern) in clause.patterns.iter().enumerate() {
                 if pi == 0 {
                     // First pattern — create the initial rows. The matcher may
@@ -391,6 +406,8 @@ impl<'a> CypherExecutor<'a> {
                     let mut new_rows = Vec::with_capacity(old_rows.len());
                     let mut new_sets: Vec<Vec<petgraph::graph::EdgeIndex>> = Vec::new();
                     for (ri, mut existing_row) in old_rows.into_iter().enumerate() {
+                        self.check_interrupt_periodic(join_work)?;
+                        join_work = join_work.saturating_add(1);
                         let remaining = limit_hint.map(|l| l.saturating_sub(new_rows.len()));
                         if remaining == Some(0) {
                             break;
@@ -449,6 +466,8 @@ impl<'a> CypherExecutor<'a> {
                             .collect();
                         let total = compatible.len();
                         for (i, (m, edges)) in compatible.into_iter().enumerate() {
+                            self.check_interrupt_periodic(join_work)?;
+                            join_work = join_work.saturating_add(1);
                             if i + 1 == total {
                                 // Last compatible match: move row instead of cloning
                                 self.merge_match_into_row(&mut existing_row, m);
@@ -494,6 +513,9 @@ impl<'a> CypherExecutor<'a> {
         // VariableLengthPath binding under the path variable `p`.
         // For single-hop `MATCH p = (a)-[:REL]->(b)`, synthesize a PathBinding
         // from the edge binding.
+        // Runs over the finished row set, once per path assignment, cloning a
+        // path binding per row — the last unbounded per-row pass of the clause.
+        let mut path_work = 0usize;
         for pa in &clause.path_assignments {
             if pa.is_shortest_path {
                 continue;
@@ -513,6 +535,8 @@ impl<'a> CypherExecutor<'a> {
                 });
 
             for row in &mut result_rows {
+                self.check_interrupt_periodic(path_work)?;
+                path_work = path_work.saturating_add(1);
                 let path_binding = if let Some(ref vlp_var) = vlp_edge_var {
                     row.path_bindings.get(vlp_var).cloned()
                 } else {
@@ -647,12 +671,20 @@ impl<'a> CypherExecutor<'a> {
         let mut seen: std::collections::HashSet<petgraph::graph::NodeIndex> =
             std::collections::HashSet::new();
 
+        // Same monotonic-counter shape as the comma-pattern join above: a
+        // driving row that produces nothing still advances the poll, so a
+        // clause that filters everything out is bounded too.
+        let mut work = 0usize;
         for row in existing_rows {
+            self.check_interrupt_periodic(work)?;
+            work = work.saturating_add(1);
             if limit_hint.is_some_and(|l| new_rows.len() >= l) {
                 break;
             }
             let produced = self.expand_driving_row(&plan, row, new_rows.len(), &mut seen)?;
             for r in produced {
+                self.check_interrupt_periodic(work)?;
+                work = work.saturating_add(1);
                 self.budget.reserve_rows(new_rows.len(), 1, "MATCH join")?;
                 new_rows.push(r);
                 if limit_hint.is_some_and(|l| new_rows.len() >= l) {
@@ -694,6 +726,10 @@ impl<'a> CypherExecutor<'a> {
         // spurious nodes. The single-pattern case (the hot path) reduces to
         // one chain step and keeps the executor's `remaining` limit cap.
         let single_pattern = clause.patterns.len() == 1;
+        // One driving row can fan out to millions across the cross-join, so the
+        // two emit loops below poll on their own counter; the caller polls the
+        // driving rows themselves.
+        let mut work = 0usize;
         let mut row_set: Vec<ResultRow> = vec![row.clone()];
         // Relationship-uniqueness bookkeeping, parallel to `row_set`:
         // the edges each working row consumed within THIS clause.
@@ -733,6 +769,8 @@ impl<'a> CypherExecutor<'a> {
                     {
                         if let Some(probe) = idx.probe_value(cur, self.graph) {
                             for &node_idx in idx.lookup(&probe) {
+                                self.check_interrupt_periodic(work)?;
+                                work = work.saturating_add(1);
                                 self.budget.reserve_rows(
                                     expanded.len(),
                                     1,
@@ -770,6 +808,8 @@ impl<'a> CypherExecutor<'a> {
                     self.driving_row_matches(clause, pat, cur, exec_limit, cur_dedup_var, seen)?;
                 self.budget.check_work(matches.len(), "MATCH join")?;
                 for m in &matches {
+                    self.check_interrupt_periodic(work)?;
+                    work = work.saturating_add(1);
                     if !self.bindings_compatible(cur, m) {
                         continue;
                     }

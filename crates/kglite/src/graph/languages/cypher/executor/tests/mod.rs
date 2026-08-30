@@ -16,6 +16,8 @@
 //! - [`text_bm25`] — the BM25 scalar's null/zero split, freshness policy, cache
 //! - [`vector_score`] — the embedding-store scalar's per-query argument cache
 //! - [`vectors`] — `dot` / `cosine` / `norm` over list-valued data
+//! - [`deadline_rows`] — deadline/cancel polling inside the sequential MATCH
+//!   row loops (match-to-row, comma-pattern join, driving-row join)
 //! - [`parallel`] — deadline/cancel polling inside the rayon-parallel regions
 #![allow(clippy::approx_constant)]
 
@@ -30,6 +32,7 @@ use crate::graph::storage::GraphWrite;
 // the `super::super::parser` the flat file used before the split.
 use crate::graph::languages::cypher::parser;
 
+mod deadline_rows;
 mod exists_witness;
 mod expressions;
 mod identifiers;

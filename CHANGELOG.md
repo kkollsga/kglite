@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A query deadline is now observed inside the MATCH row loops, not only
+  inside the pattern matcher.** `match_execution.rs` polled neither the
+  deadline nor the cancel flag: the matcher stopped on time, and then every
+  row loop downstream of it — the match-to-row conversion (with its fused
+  `WHERE`), the comma-pattern join, the subsequent-`MATCH` driving join, the
+  path-binding propagation — ran to completion no matter how long ago the
+  deadline had passed. The loops charged `max_work_units` per row the whole
+  way, so the work was counted but never checked against the clock.
+
+  Reported downstream (kglite-visual): a 3-hop path query with 1.9M
+  intermediate rows ran past a 30 s deadline for over 120 s, reached 7.29 GB
+  RSS, and OOM-killed the serving process on an earlier identical run.
+  Reproduced here at 600k rows, where a deadline set a quarter of the way
+  into the query was detected only after 94% of it had run.
+
+  Each loop now polls at the executor's existing `INTERRUPT_POLL_INTERVAL`
+  stride, on a counter that advances per row examined rather than per row
+  retained — so a clause whose `WHERE` rejects everything is bounded too. The
+  timeout contract is unchanged (`Err("Query timed out…")`, no partial
+  results), and the poll is not measurable: 34 tracked benchmarks over two
+  runs, worst cell +8.7% and its own sibling −4.1%/+7.1% across the same two
+  runs, with the directly affected row-loop cells flat
+  (`return_node_rel_node_100` +0.1%, `return_id_10k` +0.5%,
+  `consecutive_match_id_anchor` +1.0%).
+
 ## [0.16.15] - 2026-08-29
 
 ### Added
