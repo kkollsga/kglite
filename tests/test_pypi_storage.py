@@ -59,7 +59,7 @@ def test_storage_check_rejects_malformed_file_size(tmp_path: Path) -> None:
 
 
 def test_wheel_release_runs_capacity_check_before_builds() -> None:
-    workflow = (REPO_ROOT / ".github" / "workflows" / "build_wheels.yml").read_text(encoding="utf-8")
+    workflow = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
     version_job = workflow.split("  ci-gate:", maxsplit=1)[0]
     assert "python scripts/check_pypi_storage.py" in version_job
     assert "--project-limit-bytes 10000000000" in version_job

@@ -7,7 +7,7 @@ was on `origin` the whole time. Three things conspired, and each is still true
 of every release:
 
 1. **The tag is created remotely, by CI.** `softprops/action-gh-release` in
-   `build_wheels.yml` creates `v<version>` if it does not exist. Nothing in
+   `release.yml` creates `v<version>` if it does not exist. Nothing in
    the local working tree ever creates it.
 2. **The release push never fetches.** The skill's ff-mechanic is
    `git push origin HEAD:main`, chosen so unrelated working-tree WIP never
@@ -17,11 +17,13 @@ of every release:
    what version is live. Both answered `0.15.3` correctly. "Did something
    publish" is not "is the release fully recorded" — the same shape as R9.
 
-There is also a real failure this catches rather than merely tidies: the tag
-step lives **only** in `build_wheels.yml`, inside the PyPI publish job. If the
-wheels job fails or is skipped while `publish_crates.yml` succeeds, the crates
-ship with no tag and no GitHub Release at all. A version check reports success
-for that state.
+There is also a real failure this catches rather than merely tidies. Until
+2026-08-30 the tag step lived **only** inside the PyPI publish job, so a failed
+wheels job alongside a successful crates.io publish shipped the crates with no
+tag and no GitHub Release — the 0.15.3 state above, and a version check reports
+success for it. `release.yml`'s `tag-release` job now `needs:` all three publish
+legs, which makes that state unreachable *going forward*; this check is what
+notices if it becomes reachable again.
 
 Read-only: `git fetch --tags` plus `git rev-parse` / `git ls-remote`. It never
 creates, moves or deletes a tag — if the tag is missing, that is a finding for
@@ -92,10 +94,10 @@ def verify(root: Path, version: str, *, fetch: bool = True, remote: str = "origi
     if local.returncode != 0:
         raise TagProblem(
             f"{tag} does not exist locally, even after fetching from {remote}.\n"
-            f"That means CI never created it. The tag step lives only in\n"
-            f"build_wheels.yml's PyPI publish job — check whether that job ran,\n"
-            f"because crates.io can publish without it and the version check\n"
-            f"will still look green."
+            f"That means CI never created it. The tag comes from release.yml's\n"
+            f"`tag-release` job, which runs only if every publish leg that was\n"
+            f"supposed to ship succeeded — so check which leg did not, and note\n"
+            f"that the registries can already hold this version."
         )
     local_sha = local.stdout.strip()
     notes.append(f"{tag} present locally at {local_sha[:12]}")

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Wait for the four push-triggered release workflows to finish, and say
+"""Wait for the push-triggered release workflows to finish, and say
 whether they PASSED — not merely that they completed.
 
 Two recorded failures shape this script:
 
 1. **The `--commit` query silently returns nothing.** During the 0.15.0
    release `gh run list --commit <sha>` reported `runs=0` for a full
-   hour while all four workflows on that exact SHA were green;
+   hour while every workflow on that exact SHA was green;
    `gh run list --branch main` showed them immediately. An earlier note
    records the same filter returning `[]` for 5-10 s right after a push.
    So the primary query here is **by branch**, with a client-side
@@ -48,13 +48,14 @@ import time
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# The four workflows a push to `main` triggers for a release. Names must
-# match `.github/workflows/*.yml` `name:` exactly.
+# The workflows a push to `main` triggers for a release. Names must match
+# `.github/workflows/*.yml` `name:` exactly. It was four until 2026-08-30,
+# when publish_crates.yml + build_wheels.yml + build_cli_wheels.yml merged
+# into release.yml — one run now carries the crates.io publish, both PyPI
+# publishes, and the tag.
 RELEASE_WORKFLOWS = (
     "CI",
-    "Publish crates",
-    "Publish Python wheels",
-    "Publish CLI wheels",
+    "Release",
 )
 
 TERMINAL_STATUS = "completed"
@@ -176,7 +177,7 @@ def main() -> int:
     parser.add_argument(
         "--expect",
         action="append",
-        help="Workflow name that must be present. Repeatable; defaults to the four release workflows.",
+        help="Workflow name that must be present. Repeatable; defaults to the release workflows.",
     )
     args = parser.parse_args()
 

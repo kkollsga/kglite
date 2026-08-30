@@ -1,6 +1,6 @@
 name: Publish Java
 
-# Triggered by an explicit workflow_dispatch from build_wheels.yml's publish
+# Triggered by an explicit workflow_dispatch from release.yml's tag-release
 # job, after it creates the release tag. The tag trigger below still exists
 # for a hand-pushed tag, but it CANNOT fire from the release train: the train's
 # tag is created with GITHUB_TOKEN, and events created with GITHUB_TOKEN never
@@ -45,7 +45,7 @@ jobs:
   # SymbolLookup.libraryLookup with a link error, at runtime, in the user's
   # application. 22.04 puts the floor at glibc 2.35 (Ubuntu 22.04+, RHEL 9+,
   # Debian 12+); 24.04 would raise it to 2.39 and silently break every LTS
-  # deployment older than a year. Same concern build_wheels.yml solves with
+  # deployment older than a year. Same concern release.yml solves with
   # manylinux containers, which are not usable as job containers here because
   # the manylinux2014 image predates the glibc the runner's node actions need.
   build-native:
@@ -101,7 +101,7 @@ jobs:
 
   # No `timeout-minutes`: the last steps of this job deploy to a registry, and
   # killing a Central deployment part-way leaves a half-uploaded bundle that has
-  # to be dropped by hand in the portal. build_wheels.yml's publish job omits
+  # to be dropped by hand in the portal. release.yml's PyPI publish job omits
   # its timeout for the same reason — a job that runs long is the cheaper
   # failure.
   assemble:

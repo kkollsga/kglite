@@ -38,7 +38,7 @@ series it used to:
    omission stayed invisible across a dozen patch releases and then
    detonated on the first minor. With `X.Y.Z` the requirement changes
    every single release, which is exactly what `--check` gates.
-3. **The publish order supports it.** `publish_crates.yml` publishes
+3. **The publish order supports it.** `release.yml` publishes
    `kglite` first and waits for the crates.io index to serve it before
    publishing the four dependents, so `^X.Y.Z` is satisfiable by the
    time any dependent is verified.
@@ -77,7 +77,7 @@ INLINE_DEP_RE = re.compile(r"^(?P<key>[A-Za-z0-9_-]+)\s*=\s*\{(?P<body>[^}]*)\}\
 BODY_VERSION_RE = re.compile(r'version\s*=\s*"(?P<version>[^"]*)"')
 BODY_PATH_RE = re.compile(r'path\s*=\s*"(?P<path>[^"]*)"')
 
-# The crates `publish_crates.yml` pushes to crates.io, in lockstep at one
+# The crates `release.yml` pushes to crates.io, in lockstep at one
 # version. A divergence here is a broken publish set, not a warning.
 PUBLISHED_CRATES = ("kglite", "kglite-bolt-server", "kglite-c", "kglite-cli", "kglite-mcp-server")
 

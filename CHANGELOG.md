@@ -39,6 +39,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `connection_type` / `properties` keys are unchanged — a reader already
   consuming them keeps working. GEXF already did this correctly.
 
+### Changed
+
+- **The three publish workflows are one `release.yml`.** `publish_crates.yml`,
+  `build_wheels.yml` and `build_cli_wheels.yml` each read the version out of
+  `Cargo.toml`, each decided independently whether that version was already
+  published, and each polled `ci.yml` with its own copy of the same wait loop
+  — three copies free to drift, and the `grep | cut` empty-version hazard had
+  to be fixed in three places. There is now one `version-check` job, one
+  `ci-gate`, and every publish leg consumes them. **Operators:** a push to
+  `main` now shows two runs (`CI`, `Release`) instead of four, and
+  `scripts/wait_for_release_ci.py` expects those two.
+- **The tag and GitHub Release are a terminal job gated on the whole artifact
+  set.** They used to live inside the PyPI-wheels publish job, which is how
+  0.15.3 published five crates, failed its wheel leg, and left no `v0.15.3`
+  tag and no GitHub Release for two days while every registry query answered
+  "0.15.3". `tag-release` now `needs:` all three publish legs and pairs each
+  with its own publish decision, so a leg that skipped because a build failed
+  can no longer be mistaken for a leg that had nothing to ship.
+- **PyPI Trusted Publishing moved to `release.yml`.** Trusted Publishing binds
+  to the workflow *filename*, so the `kglite` and `kglite-cli` projects each
+  needed a `release.yml` publisher added before this landed. The old
+  `build_wheels.yml` / `build_cli_wheels.yml` publishers are now inert and can
+  be removed from both PyPI projects once the first `release.yml` run has
+  published successfully — not before.
+
 ### Fixed
 
 - **`describe()` type badges now advertise `loc` and `geo` independently.** A

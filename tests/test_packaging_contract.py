@@ -78,7 +78,7 @@ def test_classifiers_match_native_cpython_artifacts() -> None:
 
 
 def test_wheel_policy_and_support_page_match_workflow() -> None:
-    workflow = (WORKFLOWS / "build_wheels.yml").read_text(encoding="utf-8")
+    workflow = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
     support = (REPO_ROOT / "docs" / "python" / "platform-support.md").read_text(encoding="utf-8")
     targets = set(re.findall(r"(?m)^\s+(?:-\s+)?target:\s+([\w-]+)\s*$", workflow))
     assert targets
@@ -212,7 +212,7 @@ def test_wheel_inventory_checks_native_extension_and_mcp_entry_point(tmp_path: P
 
 
 def test_release_workflow_inventories_all_wheels_and_smokes_native_targets() -> None:
-    workflow = (WORKFLOWS / "build_wheels.yml").read_text(encoding="utf-8")
+    workflow = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
     assert workflow.count('python scripts/check_wheel_artifact.py "wheels/*.whl"') == 3
     assert "scripts/smoke_installed_wheel.py" in workflow
     assert "matrix.target == 'x86_64-pc-windows-msvc'" in workflow
@@ -288,13 +288,12 @@ def test_wheel_license_checker_rejects_duplicate_metadata(tmp_path: Path) -> Non
 
 
 def test_wheel_license_gate_covers_every_published_wheel_family() -> None:
-    main_release = (WORKFLOWS / "build_wheels.yml").read_text(encoding="utf-8")
-    cli_release = (WORKFLOWS / "build_cli_wheels.yml").read_text(encoding="utf-8")
+    release = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
     ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
     documentation = (REPO_ROOT / "docs" / "explanation" / "dependency-licenses.md").read_text(encoding="utf-8")
 
-    assert main_release.count('python scripts/check_wheel_artifact.py "wheels/*.whl"') == 3
-    assert cli_release.count("python scripts/check_wheel_license.py --expected-name kglite-cli") == 3
+    assert release.count('python scripts/check_wheel_artifact.py "wheels/*.whl"') == 3
+    assert release.count("python scripts/check_wheel_license.py --expected-name kglite-cli") == 3
     assert 'scripts/check_wheel_license.py --expected-name kglite "$RUNNER_TEMP/candidate-wheel/*.whl"' in ci
     assert "wheel-only" in documentation
     # Narrowed 2026-07-29: the release process DOES build and install the

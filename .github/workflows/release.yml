@@ -1,0 +1,1005 @@
+name: Release
+# The single push-to-main release pipeline: one version decision, five
+# crates.io publishes, two PyPI distributions (`kglite` wheels + sdist, and the
+# standalone `kglite-cli` binary wheels), and — only if the whole set shipped —
+# the `v<version>` tag, the GitHub Release, and the Java publish dispatch.
+#
+# Merged from publish_crates.yml + build_wheels.yml + build_cli_wheels.yml
+# (2026-08-30). Those three each re-derived the version from Cargo.toml, each
+# re-implemented the "is it already published" decision, and each polled ci.yml
+# with its own copy of the same loop — three copies free to drift, and the
+# empty-version-from `grep | cut` hazard had to be fixed in three places. Here
+# the extraction, the semver assertion and the CI wait happen exactly once and
+# every publish leg consumes them.
+#
+# The other thing the merge buys is `tag-release`. The tag and GitHub Release
+# used to live inside the PyPI-wheels publish job, so 0.15.3 published five
+# crates to crates.io, failed its wheel leg, and left no tag and no Release for
+# two days while every version query answered "0.15.3, fine". The tag is now a
+# terminal job that `needs:` all three publish legs and refuses to run unless
+# each leg that was *supposed* to ship actually succeeded.
+#
+# PyPI publishing uses Trusted Publishing (OIDC), which binds to this file's
+# name: the `kglite` and `kglite-cli` projects each have a publisher configured
+# for `release.yml` in this repo. Renaming this file breaks both publishes.
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - 'docs/**'
+  workflow_dispatch:
+
+jobs:
+  version-check:
+    name: Check the workspace version against crates.io and PyPI
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      should_publish_kglite: ${{ steps.check.outputs.should_publish_kglite }}
+      should_publish_bolt: ${{ steps.check.outputs.should_publish_bolt }}
+      should_publish_mcp: ${{ steps.check.outputs.should_publish_mcp }}
+      should_publish_c: ${{ steps.check.outputs.should_publish_c }}
+      should_publish_cli: ${{ steps.check.outputs.should_publish_cli }}
+      should_publish_wheels: ${{ steps.check.outputs.should_publish_wheels }}
+      should_publish_cli_wheels: ${{ steps.check.outputs.should_publish_cli_wheels }}
+      # `any_crates` and `any_publish` exist so downstream `if:` expressions
+      # can ask "was this a release run at all" without restating the
+      # seven-term OR — and `tag-release` can tell a leg that skipped because
+      # nothing needed publishing from one that skipped because a build failed.
+      any_crates: ${{ steps.check.outputs.any_crates }}
+      any_publish: ${{ steps.check.outputs.any_publish }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check PyPI project storage budget
+        run: >-
+          python scripts/check_pypi_storage.py
+          --project kglite
+          --project-limit-bytes 10000000000
+          --action-threshold 0.80
+          --reserve-bytes 250000000
+      - name: Decide what needs publishing
+        id: check
+        run: |
+          # Version is single-sourced in [workspace.package] (root Cargo.toml);
+          # every member crate — engine, wheel crate, bolt/mcp servers, C ABI,
+          # CLI — inherits it via `version.workspace = true`, so all seven
+          # artifacts below share one value. Read the root table; the per-crate
+          # Cargo.tomls no longer carry a literal version.
+          WS_VERSION=$(grep -m 1 '^version' Cargo.toml | cut -d '"' -f 2)
+          # The pipeline's status is `cut`'s, which is always 0, so a grep that
+          # matches nothing yields an empty WS_VERSION without failing. That
+          # value drives every publish decision below: empty means each probe
+          # queries a malformed URL, every answer reads as "already published",
+          # and this workflow reports green having published nothing at all.
+          # Assert it looks like a version before anything consumes it.
+          if ! printf '%s\n' "$WS_VERSION" | grep -Eq '^[0-9]+[.][0-9]+[.][0-9]+'; then
+            echo "::error::could not read a version from Cargo.toml (got '$WS_VERSION')"
+            exit 1
+          fi
+          echo "version=$WS_VERSION" >> $GITHUB_OUTPUT
+          echo "workspace version: $WS_VERSION"
+
+          # Registry APIs: 200 if the version exists, 404 if not, 403 if
+          # rate-limited or the User-Agent is missing. HTTP 404 is the only
+          # "publish" signal — anything else (200, 403, 5xx) means "already
+          # there or I can't tell, skip to be safe". Without that, a
+          # rate-limit 403 would read as "not published → publish" and
+          # `cargo publish` would die on "already exists on crates.io index".
+          #
+          # crates.io's API policy requires a User-Agent with a contact
+          # address; anonymous requests can be rejected with 403 before the
+          # rate limit is anywhere near.
+          UA="kglite-ci/0.10.1 (https://github.com/kkollsga/kglite)"
+          crates_status() {
+            curl -s -o /dev/null -w "%{http_code}" -A "$UA" \
+              "https://crates.io/api/v1/crates/$1/$WS_VERSION"
+          }
+          pypi_status() {
+            curl -s -o /dev/null -w "%{http_code}" -A "$UA" \
+              "https://pypi.org/pypi/$1/$WS_VERSION/json"
+          }
+
+          KG_STATUS=$(crates_status kglite)
+          BS_STATUS=$(crates_status kglite-bolt-server)
+          MS_STATUS=$(crates_status kglite-mcp-server)
+          C_STATUS=$(crates_status kglite-c)
+          CLI_STATUS=$(crates_status kglite-cli)
+          WHEEL_STATUS=$(pypi_status kglite)
+          CLI_WHEEL_STATUS=$(pypi_status kglite-cli)
+
+          ANY_CRATES=false
+          ANY_PUBLISH=false
+
+          if [ "$KG_STATUS" = "404" ]; then
+            echo "kglite $WS_VERSION not on crates.io (HTTP 404) — will publish"
+            echo "should_publish_kglite=true" >> $GITHUB_OUTPUT
+            ANY_CRATES=true
+          else
+            echo "kglite $WS_VERSION already on crates.io or unverifiable (HTTP $KG_STATUS) — skipping publish"
+            echo "should_publish_kglite=false" >> $GITHUB_OUTPUT
+          fi
+
+          if [ "$BS_STATUS" = "404" ]; then
+            echo "kglite-bolt-server $WS_VERSION not on crates.io (HTTP 404) — will publish"
+            echo "should_publish_bolt=true" >> $GITHUB_OUTPUT
+            ANY_CRATES=true
+          else
+            echo "kglite-bolt-server $WS_VERSION already on crates.io or unverifiable (HTTP $BS_STATUS) — skipping publish"
+            echo "should_publish_bolt=false" >> $GITHUB_OUTPUT
+          fi
+
+          if [ "$MS_STATUS" = "404" ]; then
+            echo "kglite-mcp-server $WS_VERSION not on crates.io (HTTP 404) — will publish"
+            echo "should_publish_mcp=true" >> $GITHUB_OUTPUT
+            ANY_CRATES=true
+          else
+            echo "kglite-mcp-server $WS_VERSION already on crates.io or unverifiable (HTTP $MS_STATUS) — skipping publish"
+            echo "should_publish_mcp=false" >> $GITHUB_OUTPUT
+          fi
+
+          if [ "$C_STATUS" = "404" ]; then
+            echo "kglite-c $WS_VERSION not on crates.io (HTTP 404) — will publish"
+            echo "should_publish_c=true" >> $GITHUB_OUTPUT
+            ANY_CRATES=true
+          else
+            echo "kglite-c $WS_VERSION already on crates.io or unverifiable (HTTP $C_STATUS) — skipping publish"
+            echo "should_publish_c=false" >> $GITHUB_OUTPUT
+          fi
+
+          if [ "$CLI_STATUS" = "404" ]; then
+            echo "kglite-cli $WS_VERSION not on crates.io (HTTP 404) — will publish"
+            echo "should_publish_cli=true" >> $GITHUB_OUTPUT
+            ANY_CRATES=true
+          else
+            echo "kglite-cli $WS_VERSION already on crates.io or unverifiable (HTTP $CLI_STATUS) — skipping publish"
+            echo "should_publish_cli=false" >> $GITHUB_OUTPUT
+          fi
+
+          if [ "$WHEEL_STATUS" = "404" ]; then
+            echo "kglite $WS_VERSION not on PyPI (HTTP 404) — will build and publish wheels"
+            echo "should_publish_wheels=true" >> $GITHUB_OUTPUT
+            ANY_PUBLISH=true
+          else
+            echo "kglite $WS_VERSION already on PyPI or unverifiable (HTTP $WHEEL_STATUS) — skipping wheel build"
+            echo "should_publish_wheels=false" >> $GITHUB_OUTPUT
+          fi
+
+          if [ "$CLI_WHEEL_STATUS" = "404" ]; then
+            echo "kglite-cli $WS_VERSION not on PyPI (HTTP 404) — will build and publish CLI wheels"
+            echo "should_publish_cli_wheels=true" >> $GITHUB_OUTPUT
+            ANY_PUBLISH=true
+          else
+            echo "kglite-cli $WS_VERSION already on PyPI or unverifiable (HTTP $CLI_WHEEL_STATUS) — skipping CLI wheel build"
+            echo "should_publish_cli_wheels=false" >> $GITHUB_OUTPUT
+          fi
+
+          [ "$ANY_CRATES" = "true" ] && ANY_PUBLISH=true
+          echo "any_crates=$ANY_CRATES" >> $GITHUB_OUTPUT
+          echo "any_publish=$ANY_PUBLISH" >> $GITHUB_OUTPUT
+          echo "crates to publish: $ANY_CRATES; anything to publish: $ANY_PUBLISH"
+
+  ci-gate:
+    name: Wait for CI to pass
+    needs: [version-check]
+    if: needs.version-check.outputs.any_publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      # Wait on the single CI aggregate gate (ci.yml's `ci-success` job, which
+      # `needs` every CI job and fails if any failed). That replaced an older
+      # per-check allowlist so any failing CI job blocks every publish below —
+      # a green-but-incomplete gate is the worst case for an irreversible
+      # registry push (the gap that shipped 0.11.6 while the free-threading
+      # job was red).
+      #
+      # Poll the push-triggered CI workflow run directly: a commit can also
+      # have a pull-request CI run with the same check names, so selecting a
+      # commit-level check is ambiguous. This loop waits up to 45 min.
+      #
+      # One gate, three consumers. Each of the three merged workflows carried
+      # its own copy of this loop; publish-crates, publish-pypi and
+      # publish-pypi-cli all gate on this job's result now.
+      - name: Wait for CI to pass
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          deadline=$(( $(date +%s) + 2700 ))
+          while :; do
+            line=$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$SHA&event=push&per_page=10" \
+              -q '.workflow_runs[0] | "\(.status) \(.conclusion // "")"' \
+              2>/dev/null | head -n1 || true)
+            status=${line%% *}
+            conclusion=${line#* }
+            if [ "$status" = "completed" ]; then
+              if [ "$conclusion" = "success" ]; then
+                echo "✅ CI success"
+                exit 0
+              fi
+              echo "🔴 CI success concluded: $conclusion"
+              exit 1
+            fi
+            [ -n "$status" ] && echo "Main CI: $status…" \
+              || echo "Main CI run not registered yet…"
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::timed out waiting for the main CI run"
+              exit 1
+            fi
+            sleep 20
+          done
+
+  # ---- `kglite` wheels (the abi3 extension) ---------------------------------
+
+  # Windows + macOS build natively (one abi3 wheel per target). macOS
+  # builds both arm64 (native on the arm runner) and x86_64 (cross —
+  # Apple ships both SDKs, so `--target x86_64-apple-darwin` just works).
+  # The abi3-py310 extension and its bundled MCP entry point serve all
+  # Python 3.10+ versions — one wheel per target, no per-Python matrix.
+  # See docs/python/guides/mcp-servers.md.
+  wheels-native:
+    name: Build wheel - ${{ matrix.os }} - ${{ matrix.target }}
+    # Build in PARALLEL with CI (don't wait on ci-gate). Every publish job
+    # still gates on ci-gate succeeding, so nothing reaches a registry before
+    # CI is green — this just overlaps the slow wheel compile with CI instead
+    # of starting it ~12m later. `if` keeps builds release-only (a skipped
+    # ci-gate would otherwise cascade a skip onto the build jobs).
+    needs: [version-check]
+    if: needs.version-check.outputs.should_publish_wheels == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up Python 3.10 (abi3 floor)
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Force cargo PATH precedence (macOS rustup-init shim workaround)
+        # macos-latest images ship a `rustup-init` shim at
+        # /usr/local/bin/cargo that takes precedence over the toolchain
+        # dtolnay/rust-toolchain installs at ~/.cargo/bin/cargo. When
+        # maturin invokes `cargo metadata`, the shim resolves first and
+        # rejects `metadata` as an unknown argument ("unexpected
+        # argument 'metadata' found"). Hit on 0.9.26 (one rerun cleared
+        # it as transient) and again on 0.9.29 (two consecutive
+        # failures — not transient anymore). Prepending ~/.cargo/bin
+        # to GITHUB_PATH forces the real toolchain to win.
+        if: matrix.os == 'macos-latest'
+        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+        shell: bash
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          shared-key: "wheel-${{ matrix.target }}-0922"
+      - name: Install Maturin
+        run: pip install maturin
+      - name: Build abi3 wheel
+        run: |
+          if (!(Test-Path -Path "wheels")) { New-Item -ItemType Directory -Path "wheels" }
+          maturin build --release --target ${{ matrix.target }} --out wheels
+        shell: pwsh
+      - name: List build directory
+        run: Get-ChildItem -Recurse wheels
+        shell: pwsh
+      - name: Inventory wheel contents and entry points
+        run: python scripts/check_wheel_artifact.py "wheels/*.whl"
+      - name: Smoke-test installed wheel (Windows x86_64)
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          python -m venv .wheel-smoke
+          $wheel = (Get-ChildItem wheels\*.whl | Select-Object -First 1).FullName
+          .\.wheel-smoke\Scripts\python -m pip install $wheel
+          .\.wheel-smoke\Scripts\python scripts/smoke_installed_wheel.py
+      - name: Smoke-test installed wheel (macOS arm64)
+        if: matrix.target == 'aarch64-apple-darwin'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv .wheel-smoke
+          ./.wheel-smoke/bin/python -m pip install wheels/*.whl
+          ./.wheel-smoke/bin/python scripts/smoke_installed_wheel.py
+      - name: Upload wheels as artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: wheels-${{ matrix.os }}-${{ matrix.target }}
+          path: wheels/*.whl
+          # `error`, not the default `warn`: a build job that exits 0 while
+          # producing no wheel would otherwise upload an empty artifact and
+          # stay green, and publish runs with `skip-existing: true` — so a
+          # partial wheel set ships silently.
+          if-no-files-found: error
+
+      # ---- pyarrow-coexistence canary (macOS arm64 only) ----
+      # The dual-mimalloc teardown SIGSEGV this guards (kglite's Rust global
+      # mimalloc vs pyarrow's bundled copy on CPython 3.14) was ONLY ever
+      # observed on macOS arm64. ci.yml runs the same canary
+      # (tests/test_pyarrow_coexistence.py) on a Linux py3.14 leg; this closes
+      # the macOS blind spot by exercising it on the native arm64 runner BEFORE
+      # any wheel is published (`publish-pypi` needs wheels-native == success,
+      # so a nonzero exit here blocks the release).
+      #
+      # Scoped to `aarch64-apple-darwin`: the x86_64 cell cross-builds on the
+      # arm64 runner and can't run its wheel; the windows cell is a different OS.
+      - name: Set up Python 3.14 for the pyarrow-coexistence canary
+        if: matrix.target == 'aarch64-apple-darwin'
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+      - name: pyarrow-coexistence canary (macOS arm64)
+        # Install the wheel we just built (abi3-py310 → runs on 3.14) into a
+        # fresh venv alongside UNPINNED pyarrow. Unpinned BY DESIGN, mirroring
+        # ci.yml's Linux leg: we WANT the newest pyarrow/CPython allocator
+        # behaviour so a future change that reintroduces the clash trips here
+        # early. A nonzero exit (139 / SIGSEGV at teardown) fails the job.
+        if: matrix.target == 'aarch64-apple-darwin'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv .canary-venv
+          ./.canary-venv/bin/python -m pip install --upgrade pip
+          ./.canary-venv/bin/python -m pip install wheels/*.whl pyarrow pytest pytest-timeout
+          ./.canary-venv/bin/python -m pytest --noconftest tests/test_pyarrow_coexistence.py -v
+
+  # Linux builds inside the manylinux2014 container (glibc 2.17) via
+  # maturin-action, NOT a bare `maturin build` on the runner — a bare
+  # build tags the wheel with the runner's glibc (0.10.28 shipped
+  # `manylinux_2_39`, which pip refuses to install on anything older than
+  # Ubuntu 24.04, forcing downstreams to self-host; operator B8). The
+  # container also cross-builds aarch64 (Graviton / Apple-via-Docker) and
+  # the musllinux_1_2 wheels for Alpine.
+  # x86_64 Linux — the must-pass cells (gnu manylinux2014 + musl). A
+  # failure here blocks the release; we never publish a Linux-x86_64
+  # set missing the primary glibc wheel.
+  wheels-linux:
+    name: Build wheel - linux - ${{ matrix.target }} (${{ matrix.manylinux }})
+    needs: [version-check]
+    if: needs.version-check.outputs.should_publish_wheels == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            manylinux: '2014'
+          - target: x86_64-unknown-linux-musl
+            manylinux: musllinux_1_2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build abi3 wheel (manylinux/musllinux container)
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          args: --release --out wheels
+      - name: List build directory
+        run: ls -la wheels
+      - name: Inventory wheel contents and entry points
+        run: python scripts/check_wheel_artifact.py "wheels/*.whl"
+      - name: Smoke-test installed manylinux wheel
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          set -euo pipefail
+          python -m venv .wheel-smoke
+          ./.wheel-smoke/bin/python -m pip install wheels/*.whl
+          ./.wheel-smoke/bin/python scripts/smoke_installed_wheel.py
+      - name: Upload wheels as artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: wheels/*.whl
+          # See wheels-native's upload: `warn` would ship a partial set silently.
+          if-no-files-found: error
+
+  # aarch64 Linux — extra coverage built via QEMU/cross. These are the
+  # fragile combos (native C deps cross-compiling to aarch64, esp.
+  # musl), so the job is best-effort: `continue-on-error` keeps a
+  # cross-build failure from blocking the release. Any cell that *does*
+  # build uploads its wheel and gets published; a broken one is simply
+  # absent until the next release fixes it. Entry + compensating check:
+  # .github/workflows/doctrine-allowlist.txt.
+  wheels-linux-arm:
+    name: Build wheel - linux - ${{ matrix.target }} (${{ matrix.manylinux }})
+    needs: [version-check]
+    if: needs.version-check.outputs.should_publish_wheels == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    continue-on-error: true
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-unknown-linux-gnu
+            manylinux: '2_28'
+          - target: aarch64-unknown-linux-musl
+            manylinux: musllinux_1_2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build abi3 wheel (manylinux/musllinux container)
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          args: --release --out wheels
+          # gnu-aarch64 builds on the manylinux_2_28 cross image (gcc 12),
+          # NOT 2014: the ancient 2014 cross gcc (4.8.5) can't cross-build
+          # this wheel's C deps for aarch64. It `#error`ed on `ring`'s `.S`
+          # asm (no `__ARM_ARCH`) in 0.11.0, and then choked on
+          # `libmimalloc-sys` passing `-Wno-error=date-time` (gcc <4.9 has
+          # no `-Wdate-time`). A modern toolchain clears the whole class of
+          # old-gcc cross failures in one move. Trade-off: this wheel's glibc
+          # floor rises 2.17 -> 2.28 (RHEL8 / Ubuntu 18.10+) — fine for
+          # aarch64 (recent deployments) and strictly better than today's
+          # absent wheel. x86_64 stays on 2014 for broad compat; the musl
+          # leg builds fine and is unchanged. The `__ARM_ARCH` define below
+          # is retained as harmless belt-and-suspenders (gcc 12 already
+          # defines it; the export is gnu-target-scoped, a no-op for musl).
+          before-script-linux: |
+            export CFLAGS_aarch64_unknown_linux_gnu="${CFLAGS_aarch64_unknown_linux_gnu:-} -D__ARM_ARCH=8"
+      - name: List build directory
+        run: ls -la wheels
+      - name: Inventory wheel contents and entry points
+        run: python scripts/check_wheel_artifact.py "wheels/*.whl"
+      - name: Upload wheels as artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: wheels/*.whl
+          # See wheels-native's upload: `warn` would ship a partial set silently.
+          if-no-files-found: error
+
+  wheels-sdist:
+    name: Build sdist (source fallback)
+    # WHY AN SDIST, when we ship wheels for the common platforms:
+    # a wheel exists only for the targets built above. Anyone else — an
+    # older-glibc Linux (glibc < 2.17), a BSD, an unusual arch, or an
+    # aarch64-musl box on a release where that best-effort leg did not
+    # build — cannot install kglite at all. pip falls back to the sdist and
+    # compiles from source, which needs a Rust toolchain but works.
+    # (Intel macOS and x86_64 musl DO get release-blocking wheels. An
+    # earlier draft of this comment listed them as uncovered, written from
+    # a stale memory of mid-2026 before those legs existed.)
+    #
+    # This sdist is self-contained by construction: kglite has no path
+    # dependency pointing outside its own workspace, so nothing foreign gets
+    # vendored (contrast sonagram, whose sdist carried 258 files of KGLite
+    # because it path-depends on a sibling checkout). Verified locally: 1.8 MB,
+    # 354 files, and `cargo metadata` resolves after unpacking it somewhere
+    # with nothing else present.
+    needs: [version-check]
+    if: needs.version-check.outputs.should_publish_wheels == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install Maturin
+        run: pip install maturin
+      - name: Build sdist
+        run: maturin sdist --out dist
+      - name: Verify the sdist is self-contained and carries its licence
+        # A source fallback that cannot build is worse than no fallback: it
+        # turns a clear "no matching distribution" into a compile error deep
+        # in someone else's install log. Resolve it in a scratch directory
+        # with no sibling checkouts, exactly as a consumer would.
+        run: |
+          set -euo pipefail
+          sdist=$(ls dist/*.tar.gz)
+          test "$(tar -tzf "$sdist" | grep -c '/LICENSE$')" -ge 1
+          work=$(mktemp -d)
+          tar -xzf "$sdist" -C "$work"
+          cd "$work"/*/
+          cargo metadata --format-version 1 > /dev/null
+          echo "sdist resolves standalone: $(basename "$sdist")"
+
+      - name: Install the sdist from source and import it
+        # Resolving proves the manifest is coherent; it does NOT prove the
+        # thing builds. docs/python/platform-support.md promises a *tested*
+        # source distribution, and this is the step that makes the promise
+        # true — a full `pip install` of the tarball, compiling the engine
+        # exactly as a user on an uncovered platform would, then importing
+        # the result. Slow on purpose; it runs once per release.
+        run: |
+          set -euo pipefail
+          sdist=$(ls dist/*.tar.gz)
+          python -m venv /tmp/sdist-check
+          /tmp/sdist-check/bin/pip install --upgrade pip
+          /tmp/sdist-check/bin/pip install --no-binary :all: "$sdist"
+          # Probe from a neutral directory. The repo root holds a `kglite/`
+          # source package, and CWD precedes site-packages on sys.path — so
+          # running this here imports the SOURCE tree, which has no compiled
+          # extension, and the probe fails with "No module named
+          # kglite.kglite" while the install was in fact fine. CLAUDE.md
+          # records the same trap for benchmark A/B runs.
+          cd /tmp
+          /tmp/sdist-check/bin/python -c "
+          import kglite
+          g = kglite.KnowledgeGraph()
+          g.cypher('CREATE (n:Probe {name: \"sdist\"})')
+          rows = g.cypher('MATCH (n:Probe) RETURN n.name AS name').to_list()
+          assert rows and rows[0]['name'] == 'sdist', rows
+          print('sdist installs and runs:', kglite.__version__)
+          "
+      - name: Upload sdist as artifact
+        # Named `wheels-sdist` on purpose: the publish job collects
+        # `pattern: wheels-*`, so this needs no change there.
+        uses: actions/upload-artifact@v7
+        with:
+          name: wheels-sdist
+          path: dist/*.tar.gz
+          # See wheels-native's upload: `warn` would ship a partial set silently.
+          if-no-files-found: error
+
+  # ---- `kglite-cli` wheels (the standalone `kglite` shell binary) -----------
+  #
+  # The maturin `bin` wheel — one `py3-none-<platform>` wheel per target, no
+  # Python-version matrix — published to PyPI as the separate `kglite-cli`
+  # distribution, so `pip install kglite-cli` offers a standalone,
+  # libpython-free alternative to the CLI bundled in the main `kglite` wheel.
+  # `cargo install kglite-cli` is the fallback on any platform whose wheel
+  # isn't available.
+
+  cli-native:
+    name: cli wheel - ${{ matrix.os }} - ${{ matrix.target }}
+    needs: [version-check]
+    if: needs.version-check.outputs.should_publish_cli_wheels == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Force cargo PATH precedence (macOS rustup-init shim workaround)
+        # See wheels-native's copy of this step for the shim's failure mode.
+        if: matrix.os == 'macos-latest'
+        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+        shell: bash
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          shared-key: "cliwheel-${{ matrix.target }}"
+      - run: pip install maturin
+      - name: Build kglite-cli bin wheel
+        # Run from the crate dir so maturin uses crates/kglite-cli/pyproject.toml
+        # (`bindings = "bin"`), not the workspace-root pyproject (which configures
+        # the python-extension wheel). `-m <pyproject>` is invalid — maturin's
+        # manifest-path wants a Cargo.toml — so cd in instead.
+        working-directory: crates/kglite-cli
+        run: maturin build --release --target ${{ matrix.target }} --out wheels
+      - name: Verify wheel license metadata
+        run: python scripts/check_wheel_license.py --expected-name kglite-cli --license crates/kglite-cli/LICENSE "crates/kglite-cli/wheels/*.whl"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cli-wheels-${{ matrix.os }}-${{ matrix.target }}
+          path: crates/kglite-cli/wheels/*.whl
+          # `error`, not the default `warn`: a build job that exits 0 while
+          # producing no wheel would otherwise upload an empty artifact and
+          # stay green. Unlike the kglite wheels, the CLI publish does NOT set
+          # `skip-existing`, so a re-run after a partial publish fails loudly
+          # rather than filling the gap — which makes an empty artifact worse
+          # here, not better: the gap needs a manual fix.
+          if-no-files-found: error
+
+  cli-linux:
+    name: cli wheel - linux - ${{ matrix.target }}
+    needs: [version-check]
+    if: needs.version-check.outputs.should_publish_cli_wheels == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            manylinux: '2014'
+          - target: x86_64-unknown-linux-musl
+            manylinux: musllinux_1_2
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build kglite-cli bin wheel (manylinux/musllinux)
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          working-directory: crates/kglite-cli
+          args: --release --out wheels
+      - name: Verify wheel license metadata
+        run: python scripts/check_wheel_license.py --expected-name kglite-cli --license crates/kglite-cli/LICENSE "crates/kglite-cli/wheels/*.whl"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cli-wheels-linux-${{ matrix.target }}
+          path: crates/kglite-cli/wheels/*.whl
+          # See cli-native's upload: no `skip-existing` on this publish, so an
+          # empty artifact leaves a gap only a human can fill.
+          if-no-files-found: error
+
+  cli-linux-arm:
+    name: cli wheel - linux - ${{ matrix.target }} (best-effort)
+    needs: [version-check]
+    if: needs.version-check.outputs.should_publish_cli_wheels == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    # aarch64 cross-builds are the fragile combos (native C deps); keep a
+    # failure from blocking the release. A target that builds is published; a
+    # broken one is simply absent until a later release — `cargo install
+    # kglite-cli` covers it meanwhile. Entry + compensating check:
+    # .github/workflows/doctrine-allowlist.txt.
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-unknown-linux-gnu
+            manylinux: '2_28'
+          - target: aarch64-unknown-linux-musl
+            manylinux: musllinux_1_2
+    steps:
+      - uses: actions/checkout@v7
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          working-directory: crates/kglite-cli
+          args: --release --out wheels
+      - name: Verify wheel license metadata
+        run: python scripts/check_wheel_license.py --expected-name kglite-cli --license crates/kglite-cli/LICENSE "crates/kglite-cli/wheels/*.whl"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cli-wheels-linux-${{ matrix.target }}
+          path: crates/kglite-cli/wheels/*.whl
+          # See cli-native's upload: no `skip-existing` on this publish, so an
+          # empty artifact leaves a gap only a human can fill.
+          if-no-files-found: error
+
+  # ---- the three publish legs ----------------------------------------------
+
+  publish-crates:
+    # No `timeout-minutes`: this job pushes five crates to crates.io in
+    # dependency order. Killing a publish part-way leaves a partial release
+    # that has to be repaired by hand, and crates.io is irreversible — a job
+    # that runs long is the cheaper failure. The waits inside it are bounded
+    # by their own deadlines. The same reasoning applies to the two PyPI
+    # publish jobs below, which likewise declare no timeout.
+    name: Publish to crates.io
+    needs: [version-check, ci-gate, wheels-native, wheels-linux, wheels-sdist]
+    # crates.io publishes are permanent — if the wheel matrix would break on
+    # this commit, we want to know BEFORE publishing the crate. The wheel legs
+    # used to be gated through a `lewagon/wait-on-check-action` regexp against
+    # rendered matrix names, because they lived in a different workflow; now
+    # they are `needs` edges, which cannot silently match a smaller set than
+    # they appear to. `skipped` is accepted for the same reason the old wait
+    # allowed it: when the wheels are already on PyPI but a crate is not on
+    # crates.io (a repair run), the wheel legs never run and must not block.
+    # The best-effort aarch64 legs are deliberately absent from `needs` —
+    # their failure must not wedge an irreversible publish.
+    if: >-
+      always() &&
+      needs.version-check.outputs.any_crates == 'true' &&
+      needs.ci-gate.result == 'success' &&
+      contains(fromJSON('["success", "skipped"]'), needs.wheels-native.result) &&
+      contains(fromJSON('["success", "skipped"]'), needs.wheels-linux.result) &&
+      contains(fromJSON('["success", "skipped"]'), needs.wheels-sdist.result)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          shared-key: "publish-${{ needs.version-check.outputs.version }}"
+
+      # 1. Publish kglite (the core crate).
+      # `--locked` honours Cargo.lock for reproducibility.
+      # CI has already unpacked the generated crate outside the workspace and
+      # compiled its public `parallel-bz2` feature against registry deps.
+      - name: Publish kglite
+        if: needs.version-check.outputs.should_publish_kglite == 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p kglite --locked
+
+      # 2. Wait for crates.io's sparse index to surface the new
+      # kglite version. The first version of this step polled
+      # /api/v1/crates/kglite/<version> for HTTP=200 — that hit
+      # crates.io's rate limit (30 requests in 10 min from the
+      # same runner IP) and started getting HTTP=403, mistaken for
+      # "not yet". Fixed by switching to a fixed sleep + an actual
+      # `cargo` operation as the readiness probe. `cargo search`
+      # against the sparse index uses the same resolver path the
+      # downstream `cargo publish -p ...` will use, so once it
+      # finds our crate the next publish will too.
+      - name: Wait for crates.io index propagation (kglite)
+        if: needs.version-check.outputs.should_publish_kglite == 'true' && (needs.version-check.outputs.should_publish_bolt == 'true' || needs.version-check.outputs.should_publish_mcp == 'true' || needs.version-check.outputs.should_publish_c == 'true')
+        run: |
+          VERSION="${{ needs.version-check.outputs.version }}"
+          # crates.io's own docs note "an index update can take up
+          # to 1 minute". 90s buys headroom without burning CI time.
+          echo "Sleeping 90s for crates.io index propagation of kglite $VERSION..."
+          sleep 90
+          # Confirm via cargo's own resolver — if this finds the
+          # version, downstream `cargo publish -p kglite-bolt-server`
+          # will resolve `kglite = "0.10"` to it.
+          for i in $(seq 1 5); do
+            if cargo search kglite --limit 1 2>&1 | grep -E "^kglite = \"$VERSION\""; then
+              echo "kglite $VERSION visible to cargo resolver (attempt $i)"
+              exit 0
+            fi
+            echo "Not yet visible to cargo resolver (attempt $i), waiting 30s..."
+            sleep 30
+          done
+          echo "WARNING: cargo search didn't find kglite $VERSION after 90s + 5×30s."
+          # Backticks stay escaped: unescaped, this double-quoted string is a
+          # command substitution and the "explanation" runs a bare
+          # `cargo publish` against whatever package cargo picks by default.
+          echo "Proceeding anyway — \`cargo publish\` for the next crate will surface a"
+          echo "real error if the index isn't ready."
+
+      # 3. Publish kglite-bolt-server. Skipped if its version is
+      # already on crates.io (bolt-server may bump independently of
+      # kglite).
+      - name: Publish kglite-bolt-server
+        if: needs.version-check.outputs.should_publish_bolt == 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p kglite-bolt-server --locked
+
+      # 4. (Optional) Wait for kglite-bolt-server to surface in the
+      # crates.io index. mcp-server doesn't depend on bolt-server,
+      # so this isn't strictly required for correctness — but it
+      # gives the index a settling window before the next publish.
+      # Only fires when BOTH bolt and mcp are publishing this run.
+      - name: Wait for crates.io index propagation (kglite-bolt-server)
+        if: needs.version-check.outputs.should_publish_bolt == 'true' && needs.version-check.outputs.should_publish_mcp == 'true'
+        run: |
+          # mcp-server doesn't depend on bolt-server, so this wait
+          # is purely cosmetic spacing. 60s sleep, no API polling
+          # (see the kglite wait step's comment for the 403/rate-limit
+          # rationale).
+          sleep 60
+
+      # 5. Publish kglite-mcp-server. Skipped if its version is
+      # already on crates.io (mcp-server may bump independently).
+      # Pyo3 is no longer in the dep tree as of 0.10.1 — see the
+      # lift in `kglite::api::handle::*`.
+      - name: Publish kglite-mcp-server
+        if: needs.version-check.outputs.should_publish_mcp == 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p kglite-mcp-server --locked
+
+      # 6. (Optional) Wait before publishing kglite-c. Like the
+      # bolt → mcp wait above, this is cosmetic spacing — kglite-c
+      # only depends on `kglite`, not on bolt-server or mcp-server.
+      # Only fires when BOTH mcp and c are publishing this run.
+      - name: Wait for crates.io index propagation (kglite-mcp-server)
+        if: needs.version-check.outputs.should_publish_mcp == 'true' && needs.version-check.outputs.should_publish_c == 'true'
+        run: sleep 60
+
+      # 7. Publish kglite-c (C ABI crate for non-Rust bindings).
+      # Skipped if its version is already on crates.io. The cdylib +
+      # staticlib artifacts are NOT published here — crates.io
+      # publishes the source crate; consumers run `cargo build` to
+      # produce the platform library. The generated header is committed
+      # under crates/kglite-c/include/ and ships in the source crate.
+      # Precompiled C ABI libraries are not release assets today.
+      - name: Publish kglite-c
+        if: needs.version-check.outputs.should_publish_c == 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p kglite-c --locked
+
+      # 8. Publish kglite-cli (the `kglite` interactive shell binary).
+      # Depends only on `kglite`, so no extra index-propagation wait is
+      # needed beyond the kglite one above (and when only kglite-cli is
+      # new in a later run, kglite is already on crates.io). Skipped if
+      # its version is already published.
+      - name: Publish kglite-cli
+        if: needs.version-check.outputs.should_publish_cli == 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p kglite-cli --locked
+
+  publish-pypi:
+    # No `timeout-minutes` — see publish-crates.
+    name: Publish kglite to PyPI
+    needs: [version-check, ci-gate, wheels-native, wheels-linux, wheels-linux-arm, wheels-sdist]
+    # Run once CI has passed (ci-gate) AND the must-pass builds are green,
+    # regardless of the best-effort aarch64 job's result — a `continue-on-error`
+    # job that fails still counts as a failed dependency, which would otherwise
+    # *skip* publish. `always()` + explicit gates let publish proceed with
+    # whatever wheels exist (skip-existing handles partial sets). The
+    # `ci-gate.result == 'success'` term is the safety wall: builds run in
+    # parallel with CI, so this is the single point that keeps an un-CI'd commit
+    # from ever reaching PyPI.
+    if: >-
+      always() &&
+      needs.version-check.outputs.should_publish_wheels == 'true' &&
+      needs.ci-gate.result == 'success' &&
+      needs.wheels-native.result == 'success' &&
+      needs.wheels-linux.result == 'success'
+      && needs.wheels-sdist.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # Required for Trusted Publishing
+    steps:
+      - name: Download all wheel artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+      - name: Display structure of downloaded files
+        run: find dist -type f
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
+          password: ${{ secrets.PYPI_API_TOKEN }}
+
+  publish-pypi-cli:
+    # No `timeout-minutes` — see publish-crates.
+    name: Publish kglite-cli to PyPI
+    needs: [version-check, ci-gate, cli-native, cli-linux, cli-linux-arm]
+    # Same shape as publish-pypi: `always()` so the best-effort aarch64 leg's
+    # failure cannot skip the publish, with the must-pass legs and the CI gate
+    # named explicitly. The CI wait itself used to be an inline first step of
+    # this job — a third copy of the same poll loop; it is the shared `ci-gate`
+    # job now.
+    if: >-
+      always() &&
+      needs.version-check.outputs.should_publish_cli_wheels == 'true' &&
+      needs.ci-gate.result == 'success' &&
+      needs.cli-native.result == 'success' &&
+      needs.cli-linux.result == 'success'
+    runs-on: ubuntu-latest
+    # Trusted Publishing (OIDC) — the `kglite-cli` PyPI project has a publisher
+    # configured for this workflow file, so no API token is needed.
+    permissions:
+      id-token: write
+    steps:
+      - name: Download all cli wheels
+        uses: actions/download-artifact@v8
+        with:
+          pattern: cli-wheels-*
+          path: dist
+          merge-multiple: true
+      - run: ls -la dist
+      - name: Publish to PyPI (Trusted Publishing / OIDC)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+
+  # ---- the tag, last ------------------------------------------------------
+
+  tag-release:
+    name: Tag + GitHub Release
+    # Every publish leg, and nothing between them and the tag. 0.15.3 shipped
+    # five crates while its wheel leg failed, and because the tag step lived
+    # *inside* the wheels publish job, the release had no `v0.15.3` tag and no
+    # GitHub Release for two days — with every registry query answering
+    # "0.15.3" the whole time. Tag iff the whole set shipped.
+    #
+    # Each term reads "if this leg was supposed to ship, it succeeded". A bare
+    # `result == 'success' || result == 'skipped'` would not do: `skipped` is
+    # ambiguous — it is both "nothing to publish here" and "a build failed, so
+    # the publish never ran", and the second is precisely the 0.15.3 state.
+    # Pairing each result with its publish *decision* separates them.
+    needs: [version-check, publish-crates, publish-pypi, publish-pypi-cli]
+    if: >-
+      always() &&
+      needs.version-check.outputs.any_publish == 'true' &&
+      (needs.version-check.outputs.any_crates != 'true' || needs.publish-crates.result == 'success') &&
+      (needs.version-check.outputs.should_publish_wheels != 'true' || needs.publish-pypi.result == 'success') &&
+      (needs.version-check.outputs.should_publish_cli_wheels != 'true' || needs.publish-pypi-cli.result == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: write  # Dispatch publish_java.yml (tag events from GITHUB_TOKEN can't)
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download the published wheels for the release assets
+        # Only when this run actually built them; on a repair run that
+        # re-published crates alone there is nothing to attach.
+        if: needs.publish-pypi.result == 'success'
+        uses: actions/download-artifact@v8
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+      - name: Extract changelog for this version
+        id: changelog
+        run: |
+          VERSION="${{ needs.version-check.outputs.version }}"
+          # Extract the section between "## [VERSION]" and the next "## [" heading
+          NOTES=$(awk "/^## \[${VERSION}\]/{found=1; next} /^## \[/{if(found) exit} found" CHANGELOG.md)
+          if [ -z "$NOTES" ]; then
+            echo "No changelog entry found for $VERSION, using auto-generated notes"
+            echo "has_notes=false" >> $GITHUB_OUTPUT
+          else
+            echo "has_notes=true" >> $GITHUB_OUTPUT
+            echo "$NOTES" > /tmp/release_notes.md
+          fi
+      - name: Create GitHub Release (with changelog)
+        if: steps.changelog.outputs.has_notes == 'true'
+        uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*.whl
+          body_path: /tmp/release_notes.md
+          tag_name: v${{ needs.version-check.outputs.version }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create GitHub Release (auto-generated)
+        if: steps.changelog.outputs.has_notes != 'true'
+        uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*.whl
+          generate_release_notes: true
+          tag_name: v${{ needs.version-check.outputs.version }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Dispatch Java publish
+        # The v* tag above is created with GITHUB_TOKEN, and events created
+        # with GITHUB_TOKEN never trigger other workflows — so
+        # publish_java.yml's tag trigger cannot fire from a release train run
+        # (it never has; 0.15.9's Java publish was a manual dispatch, and
+        # 0.15.10's tag fired nothing). workflow_dispatch via the API is
+        # exempt from that recursion guard, so the train dispatches
+        # explicitly. publish_java.yml's own gates (tag-vs-Cargo.toml,
+        # JAVA_CENTRAL_PUBLISH_ENABLED) still decide whether it deploys.
+        run: gh workflow run publish_java.yml --repo "$GITHUB_REPOSITORY"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

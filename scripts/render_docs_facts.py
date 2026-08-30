@@ -79,7 +79,7 @@ def _workflow_facts() -> tuple[list[str], list[str]]:
         raise ValueError("CI Python matrix not found")
     python_versions = re.findall(r"\d+\.\d+", versions_match.group(1))
 
-    wheels = (REPO_ROOT / ".github" / "workflows" / "build_wheels.yml").read_text(encoding="utf-8")
+    wheels = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
     wheel_targets = sorted(set(re.findall(r"(?m)^\s+(?:-\s+)?target:\s+([\w-]+)\s*$", wheels)))
     return python_versions, wheel_targets
 

@@ -59,9 +59,13 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 CI_PATH = WORKFLOWS / "ci.yml"
-WHEELS_PATH = WORKFLOWS / "build_wheels.yml"
-CLI_WHEELS_PATH = WORKFLOWS / "build_cli_wheels.yml"
-CRATES_PATH = WORKFLOWS / "publish_crates.yml"
+#: The whole release pipeline — crates.io, both PyPI distributions, and the
+#: tag — merged out of publish_crates.yml + build_wheels.yml +
+#: build_cli_wheels.yml (2026-08-30). Those three carried three copies of the
+#: version read, the already-published decision and the ci.yml poll; the guards
+#: below now check one of each, and several of them exist specifically to keep
+#: it that way.
+RELEASE_PATH = WORKFLOWS / "release.yml"
 SCHEDULED_PATH = WORKFLOWS / "scheduled.yml"
 
 #: Jobs whose *existence* is a guarantee in its own right.
@@ -107,9 +111,7 @@ CI = _load_workflow(CI_PATH)
 #: manual dispatch — off every push and PR, but reachable on demand: a
 #: schedule-only job that breaks is invisible until the next Monday, which is
 #: how the thread sanitizer stayed red for five consecutive scheduled runs.
-WHEELS = _load_workflow(WHEELS_PATH)
-CLI_WHEELS = _load_workflow(CLI_WHEELS_PATH)
-CRATES = _load_workflow(CRATES_PATH)
+RELEASE = _load_workflow(RELEASE_PATH)
 SCHEDULED = _load_workflow(SCHEDULED_PATH)
 
 
@@ -136,16 +138,8 @@ def _scheduled_job(name: str) -> _Job:
     return _job(SCHEDULED, "scheduled.yml", name)
 
 
-def _wheels_job(name: str) -> _Job:
-    return _job(WHEELS, "build_wheels.yml", name)
-
-
-def _cli_wheels_job(name: str) -> _Job:
-    return _job(CLI_WHEELS, "build_cli_wheels.yml", name)
-
-
-def _crates_job(name: str) -> _Job:
-    return _job(CRATES, "publish_crates.yml", name)
+def _release_job(name: str) -> _Job:
+    return _job(RELEASE, "release.yml", name)
 
 
 def _steps(job: dict) -> list[dict]:
@@ -711,53 +705,28 @@ def test_kglite_java_leg_is_a_blocking_gate() -> None:
 # publish` that rejects a duplicate) need no guard here — they announce
 # themselves.
 
-_WHEELS_PARAM = pytest.param(WHEELS, "build_wheels.yml", id="build_wheels")
-_CLI_WHEELS_PARAM = pytest.param(CLI_WHEELS, "build_cli_wheels.yml", id="build_cli_wheels")
-_CRATES_PARAM = pytest.param(CRATES, "publish_crates.yml", id="publish_crates")
+#: The two PyPI publish legs: `(publish job, the artifact-name prefix it
+#: downloads, the producers it is allowed to lose)`. The producer *set* is
+#: derived from the prefix rather than listed here on purpose — a build job
+#: whose wheels the publish would collect must be gated on it, and a
+#: hand-written list is exactly the thing that stops noticing a new one.
+PYPI_LEGS = [
+    pytest.param("publish-pypi", "wheels-", {"wheels-linux-arm"}, id="kglite_wheels"),
+    pytest.param("publish-pypi-cli", "cli-wheels-", {"cli-linux-arm"}, id="cli_wheels"),
+]
 
-PUBLISHING_WORKFLOWS = [_WHEELS_PARAM, _CLI_WHEELS_PARAM, _CRATES_PARAM]
+#: Every job that ships something irreversible. `tag-release` is deliberately
+#: not in here: it is the job that must not run unless all of these did.
+PUBLISH_JOBS = ("publish-crates", "publish-pypi", "publish-pypi-cli")
 
-#: The two artifact-producing wheel workflows. `publish_crates.yml` uploads
-#: nothing — it publishes source crates straight from the checkout — so the
-#: artifact guards below do not apply to it and must not be parametrized over
-#: it, or they would pass on an empty scan. Listed rather than sliced out of
-#: the set above: a slice that silently shrinks drops a whole workflow's
-#: guards without failing anything.
-WHEEL_WORKFLOWS = [_WHEELS_PARAM, _CLI_WHEELS_PARAM]
-
-#: Artifact producers each `publish` job deliberately does NOT require to
-#: succeed. Each entry is a conscious "this platform may silently not ship"
+#: Artifact producers a `publish` job deliberately does NOT require to
+#: succeed. Each is a conscious "this platform may silently not ship"
 #: decision, not an oversight — cross-compiled aarch64 wheels are fragile and
-#: were judged not worth blocking a release over. `build_cli_wheels.yml` goes
-#: further and marks its arm job `continue-on-error` at *job* level, which
-#: makes the job structurally unable to fail.
-BEST_EFFORT_PRODUCERS = {
-    "build_wheels.yml": {"build-linux-arm"},
-    "build_cli_wheels.yml": {"build-linux-arm"},
-}
-
-
-_MATRIX_REF = re.compile(r"\$\{\{\s*matrix\.([A-Za-z0-9_-]+)\s*\}\}")
-
-
-def _rendered_job_names(job: dict, fallback: str) -> list[str]:
-    """Every check name a job produces, with ``${{ matrix.* }}`` substituted.
-
-    GitHub names each matrix leg by rendering the job's ``name:`` against that
-    leg's values; the unrendered template appears only when the job never ran.
-    A guard matching the template alone could not tell the must-pass legs from
-    the best-effort ones — which is the whole distinction the crates.io gate's
-    ``check-regexp`` exists to make.
-
-    A reference to a key the leg does not define is left as-is rather than
-    blanked, so a typo shows up as an unmatched name instead of quietly
-    rendering to something that matches.
-    """
-    template = job.get("name") or fallback
-    includes = ((job.get("strategy") or {}).get("matrix") or {}).get("include") or [{}]
-    return [
-        _MATRIX_REF.sub(lambda match: str(values.get(match.group(1), match.group(0))), template) for values in includes
-    ]
+#: were judged not worth blocking a release over. Both are marked
+#: `continue-on-error` at *job* level, which makes them structurally unable to
+#: fail; the reason and the compensating check are recorded in
+#: `.github/workflows/doctrine-allowlist.txt`.
+BEST_EFFORT_PRODUCERS = {leg.values[0]: leg.values[2] for leg in PYPI_LEGS}
 
 
 def _upload_steps(workflow: dict) -> list[tuple[str, dict]]:
@@ -789,27 +758,41 @@ def _artifact_producers(workflow: dict) -> set[str]:
     return producers
 
 
+def _producers_for(prefix: str) -> set[str]:
+    """Jobs uploading an artifact whose name a leg's download pattern collects."""
+    producers = {job for job, name in _uploaded_artifacts(RELEASE) if name and name.startswith(prefix)}
+    assert producers, f"no job uploads an artifact named {prefix}* — the scan is broken"
+    return producers
+
+
 def _gated_successes(job: dict) -> set[str]:
     """Jobs whose ``success`` result the ``if:`` condition explicitly requires."""
     return set(re.findall(r"needs\.([a-zA-Z0-9_-]+)\.result\s*==\s*'success'", str(job.get("if", ""))))
 
 
-@pytest.mark.parametrize("workflow, workflow_name", WHEEL_WORKFLOWS)
-def test_publish_gates_on_every_artifact_producer(workflow: dict, workflow_name: str) -> None:
-    """`publish` must require every producer to have SUCCEEDED.
+@pytest.mark.parametrize("publish_job, prefix, best_effort", PYPI_LEGS)
+def test_publish_gates_on_every_artifact_producer(publish_job: str, prefix: str, best_effort: set[str]) -> None:
+    """`publish` must require every producer it collects to have SUCCEEDED.
 
     Listing a job in `needs` is not enough, and that distinction is the point.
-    Both publish jobs are guarded by `if: always() && ...`, and `always()`
+    Both PyPI publish jobs are guarded by `if: always() && ...`, and `always()`
     neutralises the implicit needs-succeeded gate — so what actually decides
     is the chain of `needs.<job>.result == 'success'` terms in that condition.
     A producer present in `needs` but absent from the `if:` can fail while
     publish proceeds: the wheels ship and its artifact silently does not.
 
-    Not hypothetical. `build_wheels.yml`'s sdist job was added to `needs` only,
-    and its commit message claimed publish gated on it. It did not. Caught in
-    review, which is why this reads the `if:` rather than `needs`.
+    Not hypothetical. The sdist job was added to `needs` only, and its commit
+    message claimed publish gated on it. It did not. Caught in review, which is
+    why this reads the `if:` rather than `needs`.
     """
-    publish = _job(workflow, workflow_name, "publish")
+    publish = _release_job(publish_job)
+
+    downloads = _steps_using(publish, "actions/download-artifact@")
+    assert len(downloads) == 1, f"{publish.label} should download artifacts in exactly one step"
+    assert downloads[0]["with"]["pattern"] == f"{prefix}*", (
+        f"{publish.label} does not download {prefix}* — this test derives its producer set from "
+        "that pattern, so it would now be gating on the wrong set of jobs"
+    )
 
     declared = set(publish["needs"])
     assert declared, f"{publish.label} declares no `needs`"
@@ -819,12 +802,12 @@ def test_publish_gates_on_every_artifact_producer(workflow: dict, workflow_name:
         "this test reads the `if:` chain and would now be checking the wrong thing"
     )
     gated = _gated_successes(publish)
-    producers = _artifact_producers(workflow)
+    producers = _producers_for(prefix)
 
     missing_needs = producers - declared
     assert not missing_needs, f"{publish.label} does not `needs` producer(s): {sorted(missing_needs)}"
 
-    ungated = producers - gated - BEST_EFFORT_PRODUCERS[workflow_name]
+    ungated = producers - gated - best_effort
     assert not ungated, (
         f"{publish.label} does not require producer(s) {sorted(ungated)} to succeed — add "
         "`needs.<job>.result == 'success'` to its `if:`, or record the job in "
@@ -832,14 +815,15 @@ def test_publish_gates_on_every_artifact_producer(workflow: dict, workflow_name:
     )
 
 
-@pytest.mark.parametrize("workflow, workflow_name", WHEEL_WORKFLOWS)
-def test_publish_collects_every_uploaded_artifact_name(workflow: dict, workflow_name: str) -> None:
-    """Every uploaded artifact must match the pattern `publish` downloads.
+def test_every_uploaded_artifact_reaches_a_publish_leg() -> None:
+    """Every upload must match the pattern one of the publish jobs downloads.
 
     `download-artifact` silently returns nothing for a non-matching name, so
-    an artifact named outside the pattern is dropped without an error. The
-    sdist is deliberately named `wheels-sdist` for this reason, and every
-    `build_cli_wheels.yml` upload carries the `cli-wheels-` prefix.
+    an artifact named outside both patterns is dropped without an error. The
+    sdist is deliberately named `wheels-sdist` for this reason, and every CLI
+    upload carries the `cli-wheels-` prefix. With both wheel families in one
+    workflow the failure is now also *cross-family*: a `kglite` producer named
+    `cli-wheels-…` would be published to the wrong PyPI project.
 
     The names are read from the parsed `with.name` of each upload step. The
     regex this replaced scanned for `^\\s+name:\\s*(wheels…)$`, which could not
@@ -847,28 +831,29 @@ def test_publish_collects_every_uploaded_artifact_name(workflow: dict, workflow_
     `${{ }}`) and — because the capture group itself began with `wheels` —
     could not express the stray name it existed to reject.
     """
-    publish = _job(workflow, workflow_name, "publish")
-    downloads = _steps_using(publish, "actions/download-artifact@")
-    assert len(downloads) == 1, f"{publish.label} should download artifacts in exactly one step"
-    pattern = downloads[0]["with"]["pattern"]
-    assert pattern.endswith("*"), f"{publish.label} downloads a literal name, not a pattern: {pattern!r}"
-    prefix = pattern[:-1]
-
-    uploaded = _uploaded_artifacts(workflow)
+    uploaded = _uploaded_artifacts(RELEASE)
     assert uploaded, "no uploaded artifact names found — the scan is broken"
     unnamed = [job_name for job_name, name in uploaded if name is None]
     assert not unnamed, (
         f"{unnamed} upload an artifact with no `name` — it defaults to `artifact`, "
-        f"which {publish.label}'s pattern {pattern!r} never matches"
+        "which neither publish job's pattern ever matches"
     )
-    assert {job_name for job_name, _ in uploaded} == _artifact_producers(workflow)
 
-    stray = [(job_name, name) for job_name, name in uploaded if name is not None and not name.startswith(prefix)]
-    assert not stray, f"artifact name(s) {stray} do not match {publish.label}'s pattern {pattern!r}"
+    claimed: set[str] = set()
+    for leg in PYPI_LEGS:
+        producers = _producers_for(leg.values[1])
+        overlap = claimed & producers
+        assert not overlap, f"{sorted(overlap)} upload artifacts both publish legs collect: {overlap}"
+        claimed |= producers
+
+    stray = _artifact_producers(RELEASE) - claimed
+    assert not stray, (
+        f"job(s) {sorted(stray)} upload an artifact no publish leg's pattern collects — the "
+        "wheels build, the run stays green, and nothing is published from them"
+    )
 
 
-@pytest.mark.parametrize("workflow, workflow_name", WHEEL_WORKFLOWS)
-def test_no_upload_can_contribute_an_empty_artifact(workflow: dict, workflow_name: str) -> None:
+def test_no_upload_can_contribute_an_empty_artifact() -> None:
     """Every upload must set `if-no-files-found: error`.
 
     The action's default is `warn`. A build job that exits 0 without producing
@@ -876,15 +861,15 @@ def test_no_upload_can_contribute_an_empty_artifact(workflow: dict, workflow_nam
     ships whatever it collected, and a platform is missing from the release
     with nothing in any log marked as a failure.
     """
-    uploads = _upload_steps(workflow)
-    assert uploads, f"no upload steps found in {workflow_name} — the scan is broken"
+    uploads = _upload_steps(RELEASE)
+    assert uploads, "no upload steps found in release.yml — the scan is broken"
     lax = [
         (job_name, (step.get("with") or {}).get("name"))
         for job_name, step in uploads
         if (step.get("with") or {}).get("if-no-files-found") != "error"
     ]
     assert not lax, (
-        f"{workflow_name} upload(s) {lax} do not set `if-no-files-found: error`, so an "
+        f"release.yml upload(s) {lax} do not set `if-no-files-found: error`, so an "
         "empty artifact uploads silently and the release ships without that platform"
     )
 
@@ -896,11 +881,32 @@ def test_sdist_is_built_and_proven_usable() -> None:
     "no matching distribution" into a compile error inside a stranger's
     install log. Producing a tarball proves nothing about that.
     """
-    sdist = _wheels_job("build-sdist")
+    sdist = _release_job("wheels-sdist")
     _assert_runs(sdist, "maturin sdist --out dist")
     _assert_runs(sdist, 'tar -xzf "$sdist" -C "$work"')
     _assert_runs(sdist, "cargo metadata --format-version 1 > /dev/null")
     _assert_runs(sdist, 'test "$(tar -tzf "$sdist" | grep -c \'/LICENSE$\')" -ge 1')
+
+
+def test_pypi_publishes_can_use_trusted_publishing() -> None:
+    """Both PyPI publish jobs must carry `id-token: write`.
+
+    Trusted Publishing is OIDC: without the token permission the exchange
+    fails at the upload step, after every wheel has been built. `permissions:`
+    is also subtractive — naming any scope drops the rest — so this cannot be
+    inherited from a workflow-level default that a later edit adds.
+    """
+    for leg in PYPI_LEGS:
+        publish = _release_job(leg.values[0])
+        permissions = publish.get("permissions") or {}
+        assert permissions.get("id-token") == "write", (
+            f"{publish.label} does not request `id-token: write`; PyPI Trusted Publishing "
+            f"cannot mint a token and the upload fails after the whole matrix has built"
+        )
+        uploads = [
+            step for step in _steps(publish) if str(step.get("uses", "")).startswith("pypa/gh-action-pypi-publish@")
+        ]
+        assert len(uploads) == 1, f"{publish.label} has {len(uploads)} PyPI upload steps, expected 1"
 
 
 _SINGLE_QUOTED = re.compile(r"'[^']*'")
@@ -920,7 +926,7 @@ def _runs_prose_as_a_command(line: str) -> bool:
 def test_no_workflow_script_executes_the_prose_it_prints() -> None:
     """No `run:` command may contain an unescaped backtick.
 
-    `publish_crates.yml`'s index-propagation fallback printed
+    The crates.io index-propagation fallback printed
     ``echo "Proceeding anyway — `cargo publish` for the next crate…"``. Inside
     double quotes those backticks are command substitution, so the explanation
     ran a bare `cargo publish` against whatever package cargo picks by default
@@ -980,17 +986,16 @@ def _github_outputs_written(job: dict) -> set[str]:
     return {match.group(1) for line in _command_lines(job) for match in _GITHUB_OUTPUT_WRITE.finditer(line)}
 
 
-@pytest.mark.parametrize("workflow, workflow_name", PUBLISHING_WORKFLOWS)
-def test_version_probe_validates_the_version_it_read(workflow: dict, workflow_name: str) -> None:
+def test_version_probe_validates_the_version_it_read() -> None:
     """A malformed version read must abort, not publish nothing quietly.
 
     `VERSION=$(grep -m1 '^version' Cargo.toml | cut -d '"' -f 2)` reports
     `cut`'s status — always 0. Rename the key, reformat the table, and the
-    grep matches nothing, `VERSION` is empty, the registry probe queries a
-    malformed URL, its non-404 answer reads as "already published", and the
+    grep matches nothing, `VERSION` is empty, every registry probe queries a
+    malformed URL, each non-404 answer reads as "already published", and the
     whole workflow goes green having published nothing at all.
     """
-    check = _job(workflow, workflow_name, "version-check")
+    check = _release_job("version-check")
 
     read = _cargo_version_reads(check)
     assert read, f"{check.label} does not read a version out of Cargo.toml — the scan is broken"
@@ -1008,8 +1013,28 @@ def test_version_probe_validates_the_version_it_read(workflow: dict, workflow_na
     )
 
 
-@pytest.mark.parametrize("workflow, workflow_name", PUBLISHING_WORKFLOWS)
-def test_version_check_outputs_are_actually_written(workflow: dict, workflow_name: str) -> None:
+def test_the_version_is_read_exactly_once_in_the_whole_pipeline() -> None:
+    """No job outside `version-check` may re-derive the version from Cargo.toml.
+
+    This is the property the merge exists to create. Three workflows each read
+    the version, each decided independently whether it was already published,
+    and each had to be fixed separately when the `grep | cut` hazard above was
+    found — one of the three was fixed months after the other two. A second
+    read here would restart that drift, and it fails silently: the copies agree
+    right up until the day they do not.
+    """
+    elsewhere = {
+        job_name: sorted(reads)
+        for job_name, job in RELEASE["jobs"].items()
+        if job_name != "version-check" and (reads := _cargo_version_reads(job))
+    }
+    assert not elsewhere, (
+        f"release.yml jobs {elsewhere} read the version out of Cargo.toml themselves; consume "
+        "`needs.version-check.outputs.version` instead — a second read is a second thing to drift"
+    )
+
+
+def test_version_check_outputs_are_actually_written() -> None:
     """Every declared `version-check` output must be written by a step.
 
     A job output wired to a step output no step writes resolves to the empty
@@ -1018,7 +1043,7 @@ def test_version_check_outputs_are_actually_written(workflow: dict, workflow_nam
     having shipped nothing. That is the same silent shape as the empty version
     above, one layer further along.
     """
-    check = _job(workflow, workflow_name, "version-check")
+    check = _release_job("version-check")
     written = _github_outputs_written(check)
     assert written, f"{check.label} writes nothing to $GITHUB_OUTPUT — the scan is broken"
 
@@ -1074,48 +1099,41 @@ def _assert_waits_for_ci_success(job: _Job) -> None:
     )
 
 
-def test_pypi_publishes_cannot_outrun_the_ci_gate() -> None:
-    """Both wheel workflows must block PyPI on ci.yml, in the two shapes they use.
+def test_no_publish_can_outrun_the_single_ci_gate() -> None:
+    """One `ci-gate` job, and every publish leg gated on it.
 
-    `build_wheels.yml` gates through a separate `ci-gate` job named in the
-    publish `if:` chain; `build_cli_wheels.yml` waits inline as the publish
-    job's first step. Both are load-bearing and neither had a test.
+    The three merged workflows carried three copies of this poll loop — one as
+    a `ci-gate` job named in a publish `if:` chain, one the same, one inline as
+    the CLI publish job's first step. Under `always()` the builds run in
+    parallel with CI, so `needs.ci-gate.result == 'success'` is the only thing
+    keeping an un-CI'd commit off a registry; `publish-crates` carries the same
+    term because crates.io is irreversible.
     """
-    wheels_publish = _wheels_job("publish")
-    assert "ci-gate" in _gated_successes(wheels_publish), (
-        "build_wheels.yml `publish` does not require `needs.ci-gate.result == 'success'`; "
-        "under `always()` the builds run in parallel with CI, so this term is the only thing "
-        "keeping an un-CI'd commit off PyPI"
+    pollers = sorted(
+        job_name
+        for job_name, job in RELEASE["jobs"].items()
+        if any("actions/workflows/ci.yml/runs" in line for line in _command_lines(job))
     )
-    _assert_waits_for_ci_success(_wheels_job("ci-gate"))
-
-    cli_publish = _cli_wheels_job("publish")
-    assert "needs.version-check.outputs.should_publish == 'true'" in cli_publish["if"], (
-        "build_cli_wheels.yml `publish` does not require a publish decision, so it would run on every push to main"
+    assert pollers == ["ci-gate"], (
+        f"release.yml polls ci.yml from {pollers}; the gate is one job every publish leg gates on, "
+        "and a second copy is free to drift from it"
     )
-    _assert_waits_for_ci_success(cli_publish)
+    _assert_waits_for_ci_success(_release_job("ci-gate"))
 
-    # The inline wait only gates what runs after it.
-    steps = _steps(cli_publish)
-    waits = [
-        index
-        for index, step in enumerate(steps)
-        if any("actions/workflows/ci.yml/runs" in line for line in _step_commands(step))
-    ]
-    uploads = [
-        index
-        for index, step in enumerate(steps)
-        if str(step.get("uses", "")).startswith("pypa/gh-action-pypi-publish@")
-    ]
-    assert len(waits) == 1 and len(uploads) == 1, f"expected one CI wait and one PyPI upload, got {waits} and {uploads}"
-    assert waits[0] < uploads[0], "build_cli_wheels.yml waits for CI *after* uploading to PyPI — the wait gates nothing"
+    for job_name in PUBLISH_JOBS:
+        publish = _release_job(job_name)
+        assert "ci-gate" in _gated_successes(publish), (
+            f"{publish.label} does not require `needs.ci-gate.result == 'success'` — under "
+            "`always()` nothing else stops it publishing off a red CI run"
+        )
+        assert "ci-gate" in set(publish["needs"]), f"{publish.label} does not `needs` ci-gate"
 
 
-# --- publish_crates.yml: five irreversible publishes ------------------------
+# --- the crates.io leg: five irreversible publishes -------------------------
 
-#: Each `cargo publish` command in `publish_crates.yml`, and the
-#: `version-check` output that must gate it. Publishing a crate version is
-#: irreversible; yanking does not free the version number.
+#: Each `cargo publish` command, and the `version-check` output that must gate
+#: it. Publishing a crate version is irreversible; yanking does not free the
+#: version number.
 CRATE_PUBLISH_GATES = {
     "cargo publish -p kglite --locked": "should_publish_kglite",
     "cargo publish -p kglite-bolt-server --locked": "should_publish_bolt",
@@ -1124,64 +1142,51 @@ CRATE_PUBLISH_GATES = {
     "cargo publish -p kglite-cli --locked": "should_publish_cli",
 }
 
+#: `should_publish_*` outputs consumed by the two PyPI legs rather than by a
+#: `cargo publish` step. Named so the orphan check below can still fail on a
+#: crates output nothing consumes.
+PYPI_PUBLISH_DECISIONS = {"should_publish_wheels", "should_publish_cli_wheels"}
 
-def test_crates_publish_waits_for_ci() -> None:
-    """crates.io publishes must be downstream of a green ci.yml run.
 
-    Unlike the PyPI publish jobs this one carries no `always()`, so `needs`
-    gates it directly — which means the guard here is that `ci-gate` is in
-    `needs` and that `always()` has not appeared since. If it ever did, every
-    `needs` term would stop gating and the `if:` (an OR of five publish
-    decisions, none of them about CI) would let publish run on a red CI.
+def test_crates_publish_waits_for_the_must_pass_wheel_legs() -> None:
+    """crates.io must not publish while the wheel matrix is broken.
+
+    A crates.io publish is permanent, so a kglite change that breaks the wheel
+    build has to surface *before* it. That used to be a
+    `lewagon/wait-on-check-action` matching rendered matrix names by regexp,
+    because the wheels were built in another workflow; here they are `needs`
+    edges, which cannot silently match a smaller set than they appear to.
+
+    `skipped` is accepted for the same reason the old wait allowed it: on a
+    repair run where the wheels are already on PyPI but a crate is not on
+    crates.io, the wheel legs never run and must not block. The best-effort
+    aarch64 legs must stay out of `needs` entirely — their failure must not
+    wedge an irreversible publish.
     """
-    publish = _crates_job("publish")
-    assert "always()" not in publish["if"], (
-        "publish_crates.yml `publish` gained `always()`, which neutralises its `needs` gate — "
-        "add explicit `needs.<job>.result == 'success'` terms to the `if:` if that is intended"
-    )
-    assert "ci-gate" in set(publish["needs"]), "publish_crates.yml `publish` does not wait on `ci-gate`"
+    publish = _release_job("publish-crates")
+    condition = str(publish["if"])
+    declared = set(publish["needs"])
 
-    gate = _crates_job("ci-gate")
-    _assert_waits_for_ci_success(gate)
+    must_pass = {"wheels-native", "wheels-linux", "wheels-sdist"}
+    missing = must_pass - declared
+    assert not missing, f"{publish.label} does not `needs` must-pass wheel leg(s): {sorted(missing)}"
 
+    for leg in sorted(must_pass):
+        term = f'contains(fromJSON(\'["success", "skipped"]\'), needs.{leg}.result)'
+        assert term in condition, (
+            f"{publish.label} does not require `{leg}` to be success-or-skipped; under `always()` "
+            f"a failed wheel build would not stop an irreversible crates.io publish.\nExpected: {term}"
+        )
 
-def test_crates_gate_waits_on_the_must_pass_wheel_legs() -> None:
-    """The wheel-matrix wait must actually match the must-pass legs.
-
-    It selects checks by regexp against *rendered* matrix names. A renamed job
-    or a widened negative lookahead leaves the regexp matching the wrong set,
-    and a gate that waits on nothing is the same as no gate — while looking
-    identical in the file.
-    """
-    gate = _crates_job("ci-gate")
-    waits = _steps_using(gate, "lewagon/wait-on-check-action@")
-    assert len(waits) == 1, f"publish_crates.yml `ci-gate` has {len(waits)} check waits, expected 1"
-    settings = waits[0]["with"]
-    regexp = re.compile(settings["check-regexp"])
-
-    must_pass = [
-        name
-        for job_name in ("build-native", "build-linux")
-        for name in _rendered_job_names(_wheels_job(job_name), job_name)
-    ]
-    assert must_pass, "no must-pass wheel legs derived — the scan is broken"
-    unmatched = [name for name in must_pass if not regexp.match(name)]
-    assert not unmatched, (
-        f"the crates.io gate's check-regexp {settings['check-regexp']!r} does not match must-pass "
-        f"wheel leg(s) {unmatched} — it would wait on a smaller set than it appears to"
-    )
-
-    best_effort = _rendered_job_names(_wheels_job("build-linux-arm"), "build-linux-arm")
-    assert best_effort
-    blocking = [name for name in best_effort if regexp.match(name)]
+    best_effort = {producer for producers in BEST_EFFORT_PRODUCERS.values() for producer in producers}
+    blocking = best_effort & declared
     assert not blocking, (
-        f"the crates.io gate waits on best-effort leg(s) {blocking}; those are `continue-on-error` "
-        "and their failure must not wedge an irreversible crates.io publish"
+        f"{publish.label} `needs` best-effort leg(s) {sorted(blocking)}; those are "
+        "`continue-on-error` and their result must not gate an irreversible crates.io publish"
     )
 
-    allowed = {conclusion.strip() for conclusion in settings["allowed-conclusions"].split(",")}
-    assert not allowed & {"failure", "cancelled", "timed_out"}, (
-        f"the crates.io gate accepts {sorted(allowed)} as a pass — a failed wheel build would not block the publish"
+    assert "needs.version-check.outputs.any_crates == 'true'" in condition, (
+        f"{publish.label} does not require a crates.io publish decision, so it would run on every push to main"
     )
 
 
@@ -1195,13 +1200,13 @@ def test_every_crates_io_publish_is_gated_on_its_own_version_check() -> None:
     stops being released. So the gate names are checked against what
     `version-check` actually declares, in both directions.
     """
-    publish = _crates_job("publish")
-    version_check = _crates_job("version-check")
+    publish = _release_job("publish-crates")
+    version_check = _release_job("version-check")
     declared = set(version_check.get("outputs") or {})
 
     found = sorted(line for line in _command_lines(publish) if line.startswith("cargo publish"))
     assert found == sorted(CRATE_PUBLISH_GATES), (
-        f"publish_crates.yml publishes {found}, but this test knows {sorted(CRATE_PUBLISH_GATES)} — "
+        f"release.yml publishes {found}, but this test knows {sorted(CRATE_PUBLISH_GATES)} — "
         "a crate was added or removed and its gate is unverified"
     )
 
@@ -1215,10 +1220,70 @@ def test_every_crates_io_publish_is_gated_on_its_own_version_check() -> None:
             "not declare — the expression is always empty, so this crate is never published"
         )
 
-    orphaned = {name for name in declared if name.startswith("should_publish")} - set(CRATE_PUBLISH_GATES.values())
+    for output in sorted(PYPI_PUBLISH_DECISIONS):
+        assert output in declared, f"version-check no longer declares the PyPI decision `{output}`"
+
+    orphaned = (
+        {name for name in declared if name.startswith("should_publish")}
+        - set(CRATE_PUBLISH_GATES.values())
+        - PYPI_PUBLISH_DECISIONS
+    )
     assert not orphaned, (
-        f"version-check computes {sorted(orphaned)} but no `cargo publish` step consumes it — that "
-        "crate's version is probed against crates.io and then never published"
+        f"version-check computes {sorted(orphaned)} but nothing consumes it — that artifact's "
+        "version is probed against its registry and then never published"
+    )
+
+
+# --- the tag, which must not exist unless the whole set shipped -------------
+
+
+def test_the_tag_is_gated_on_every_publish_leg() -> None:
+    """`tag-release` must `needs` all three publish legs and gate on each.
+
+    0.15.3 published five crates to crates.io, failed its wheel leg, and left
+    no `v0.15.3` tag and no GitHub Release for two days — because the tag step
+    lived *inside* the wheels publish job, and every version query answered
+    "0.15.3, fine" the whole time. The tag is a terminal job now, and this is
+    the guard that keeps it terminal.
+
+    Each leg is paired with the decision that says whether it was supposed to
+    run: `result == 'success' || result == 'skipped'` alone would not do, since
+    `skipped` means both "nothing to publish here" and "a build failed, so the
+    publish never ran" — and the second is precisely the 0.15.3 state.
+    """
+    tag = _release_job("tag-release")
+    declared = set(tag["needs"])
+    missing = set(PUBLISH_JOBS) - declared
+    assert not missing, (
+        f"{tag.label} does not `needs` publish leg(s) {sorted(missing)} — it would tag a release "
+        "whose artifacts are still building, or never shipped at all"
+    )
+
+    condition = str(tag["if"])
+    for decision, job_name in (
+        ("any_crates", "publish-crates"),
+        ("should_publish_wheels", "publish-pypi"),
+        ("should_publish_cli_wheels", "publish-pypi-cli"),
+    ):
+        term = f"(needs.version-check.outputs.{decision} != 'true' || needs.{job_name}.result == 'success')"
+        assert term in condition, (
+            f"{tag.label} does not pair `{job_name}` with its publish decision; a leg that skipped "
+            f"because a build failed would be read as 'nothing to publish'.\nExpected: {term}"
+        )
+
+    assert "needs.version-check.outputs.any_publish == 'true'" in condition, (
+        f"{tag.label} would run on every push to main, re-tagging an already-released version"
+    )
+
+    releasers = sorted(
+        job_name
+        for job_name, job in RELEASE["jobs"].items()
+        for step in _steps(job)
+        if str(step.get("uses", "")).startswith("softprops/action-gh-release@")
+    )
+    assert set(releasers) == {"tag-release"}, (
+        f"the tag/GitHub Release is created from {sorted(set(releasers))}; it belongs in "
+        "`tag-release` alone, or the 0.15.3 shape (a tag gated on one leg) returns"
     )
 
 
@@ -1480,24 +1545,13 @@ def _synthetic_publish_job(name: str) -> _Job:
     return _job(_synthetic_publish(), "synthetic-publish.yml", name)
 
 
-def test_helper_upload_steps_and_rendered_names_are_derived_per_job() -> None:
+def test_helper_upload_steps_are_derived_per_job() -> None:
     uploads = _upload_steps(_synthetic_publish())
     assert [(job_name, step["with"].get("if-no-files-found")) for job_name, step in uploads] == [
         ("build", "error"),
         ("build", None),
     ]
     assert _upload_steps(UPLOADLESS_WORKFLOW) == []
-
-    # Matrix values are substituted per leg; a reference to a key no leg
-    # defines is left visible rather than blanked.
-    assert _rendered_job_names(_synthetic_publish_job("build"), "build") == [
-        "Build wheel - linux - aarch64-unknown-linux-gnu (${{ matrix.absent }})",
-        "Build wheel - linux - x86_64-unknown-linux-gnu (${{ matrix.absent }})",
-    ]
-    # A job with no matrix renders exactly one name, and a job with no `name:`
-    # falls back to its key rather than to None.
-    assert _rendered_job_names(_synthetic_publish_job("publish"), "publish") == ["Publish"]
-    assert _rendered_job_names(_synthetic_publish_job("lint"), "lint") == ["lint"]
 
 
 def test_helper_backtick_detection_tells_substitution_from_literal_text() -> None:
@@ -1675,10 +1729,10 @@ def test_helper_continue_on_error_scan_and_allowlist_can_fail(tmp_path: Path) ->
 
 # --- the Java artifact's publish workflow -----------------------------------
 #
-# `publish_java.yml` is not in `PUBLISHING_WORKFLOWS`. Those tests all reach for
-# a `version-check` job that probes the registry and drives a `should_publish`
-# output; the Java workflow is tag-triggered and has no such job, so
-# parametrizing it in would fail on a shape it deliberately does not have.
+# `publish_java.yml` is deliberately outside the release.yml guards above.
+# Those reach for a `version-check` job that probes a registry and drives a
+# `should_publish` output; the Java workflow is tag-triggered and has no such
+# job, so folding it in would fail on a shape it deliberately does not have.
 # Its own silent failure modes are different, and are guarded here.
 #
 # What is *already* covered generically, by whole-directory globs, and must not

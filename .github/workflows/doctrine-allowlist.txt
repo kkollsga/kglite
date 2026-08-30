@@ -21,5 +21,5 @@
 # empty upload from a job that ran. Until the release flow compares the
 # published artifact set against the previous release, these two entries are
 # accepted risk, not covered risk.
-build_wheels.yml:build-linux-arm
-build_cli_wheels.yml:build-linux-arm
+release.yml:wheels-linux-arm
+release.yml:cli-linux-arm

@@ -190,6 +190,6 @@ def test_published_crate_list_matches_the_publish_workflow():
     """If a crate is added to (or dropped from) the crates.io publish set
     without updating PUBLISHED_CRATES, the lockstep assertion silently
     stops covering it."""
-    workflow = (REPO_ROOT / ".github" / "workflows" / "publish_crates.yml").read_text(encoding="utf-8")
+    workflow = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
     published = set(re.findall(r"cargo publish -p ([\w-]+)", workflow))
     assert published == set(bump_version.PUBLISHED_CRATES)
