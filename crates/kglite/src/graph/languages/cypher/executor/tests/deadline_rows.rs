@@ -102,6 +102,23 @@ fn subsequent_match_join_polls_the_interrupt() {
     assert_hook_fired_and_query_is_otherwise_fine(&graph, query, err);
 }
 
+/// The path-binding propagation pass — the one loop of the clause that runs
+/// *after* both the matcher and the join have finished, so no wall-clock test
+/// can reach it: by the time it starts, a deadline short enough to prove
+/// anything has already fired upstream. Only the hook can put the abort here.
+///
+/// Two polls precede it on this query — the first-pattern row loop's, then the
+/// path loop's own — so the hook is armed for the second.
+#[test]
+fn path_binding_loop_polls_the_interrupt() {
+    let graph = fan_in_graph(2, 4);
+    let query = "MATCH p = (n0:A)-[r1:R1]->(n1:B) RETURN length(p)";
+
+    CypherExecutor::interrupt_after_periodic_polls(1);
+    let err = read(&graph, query).expect_err("the path-binding loop must reach a poll");
+    assert_hook_fired_and_query_is_otherwise_fine(&graph, query, err);
+}
+
 /// The report itself, in miniature: a deadline set a quarter of the way into a
 /// query whose time is dominated by the row loop must abort near the deadline,
 /// not after the loop finishes.
