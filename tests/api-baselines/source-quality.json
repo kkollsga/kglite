@@ -199,8 +199,8 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/match_execution.rs",
       "qualified_name": "crate::CypherExecutor<'a>::execute_match",
-      "lines": 245,
-      "branches": 34,
+      "lines": 260,
+      "branches": 37,
       "nesting": 7
     },
     {
