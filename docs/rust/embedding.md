@@ -76,6 +76,49 @@ engine examples (`embedded_basic` reads a `.kgl` and
 `embedded_session` demonstrates OCC transactions). Source-tree
 construction lives in the separate `codingest` crate.
 
+## Keeping your debug tree small
+
+A debug (`dev`-profile) build of kglite produces a large rlib — measured
+at 336 MB on 0.16.16 (arm64 macOS, rustc 1.98). Two-thirds of that is
+DWARF debug info, dominated by fully-expanded generic type-name strings;
+only ~5% is machine code. Every kglite version bump also strands the
+previous generation's artifacts in your `target/` dir, because cargo
+never garbage-collects it.
+
+Cargo gives a library crate no way to fix this on its end — build
+profiles are controlled solely by the **workspace root** being built. Add
+this to yours:
+
+```toml
+[profile.dev.package."*"]
+debug = "line-tables-only"
+```
+
+Measured effect: the kglite rlib drops 336 MB → 191 MB (−43%), and a
+minimal dependent's whole debug tree shrinks about 22%. Your own crates
+keep full debug info; dependency frames keep file/line in backtraces —
+what you lose is variable/type inspection *inside dependency code* under
+a debugger. `debug = 0` goes further (rlib → 107 MB, tree −46%) at the
+cost of file/line in dependency backtrace frames.
+
+Two gotchas, both measured rather than inferred:
+
+- The `"*"` wildcard matches only non-member dependencies. If kglite is a
+  **path/workspace member** in your tree, name it explicitly:
+  `[profile.dev.package.kglite] debug = "line-tables-only"`.
+- `strip` and `split-debuginfo` settings have **zero** effect on rlib
+  size — they act at link time, and the DWARF lives in the rlib's
+  archived object files either way.
+
+If you build the same workspace through several entry points (e.g.
+`cargo build --workspace`, `cargo test --workspace`, and a
+`cargo test -p <one-crate> --test <name>`), note that each distinct
+*package selection* can re-unify features and flags differently and leave
+an additional full-size kglite rlib in `target/` per shape. Preferring
+`--workspace` (with `--all-targets` on the build step, or `--test <name>`
+to scope a test run) keeps every invocation on one shared dependency
+build.
+
 ## The stable API surface
 
 `kglite::api::*` is the curated, documented surface. Pre-1.0 that

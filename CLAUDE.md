@@ -39,16 +39,28 @@ Do not use that pair as a generic gate. Select one path:
 
 The default extension intentionally links the engine, CLI, and MCP server; its
 MCP feature adds roughly 100 resolved packages. Do not pay that cost for a
-Rust-only or narrow Python check. Build caches live on the internal disk by
-standing setup (2026-07): `target` is a **symlink** to
-`/Users/Shared/cargo-targets/KGLite` (repo-relative `target/...` paths keep
-working), and `SCCACHE_DIR=/Users/Shared/sccache` is pinned in
-`~/.cargo/config.toml [env]` because `$HOME` sits on the external USB volume.
+Rust-only or narrow Python check. Build caches live on the external volume
+beside the repos by standing setup (2026-08-31, superseding the 2026-07
+internal-disk setup after unbounded target dirs filled the 228 GB system disk
+to zero mid-build): `target` is a **symlink** to
+`/Volumes/EksternalHome/coding-cache/cargo-targets/KGLite` (repo-relative
+`target/...` paths keep working), and
+`SCCACHE_DIR=/Volumes/EksternalHome/coding-cache/sccache` is pinned in
+`~/.cargo/config.toml [env]`. The old "external USB is slow" premise was
+re-measured at the move: ~973 MB/s sequential write (SSD) vs ~2.1 GB/s
+internal — not a build bottleneck.
 Do not override `CARGO_TARGET_DIR`/`SCCACHE_DIR` per-plan or switch
 target/profile paths mid-plan merely because a build is slow; if the symlink
 is missing (fresh clone), recreate it before the first build. Cargo never
 garbage-collects the target dir — `make prune-target` (size-gated
-`cargo clean`, wired into the release skill) keeps it bounded. macOS
+`cargo clean`, wired into the release skill) keeps it bounded. Alternating
+`make dev` and a workspace `cargo test` leaves TWO full-size kglite rlib
+variants (maturin's single-manifest scope narrows the package set, which
+re-unifies one transitive dep's flags and forks the metadata hash — no
+feature difference; evidenced 2026-08-31): expected cache cost, not a bug —
+don't chase the duplicate. Dep debuginfo is trimmed to `line-tables-only`
+via `[profile.dev.package]` overrides in the root manifest (rlib −43%;
+debug assertions unaffected — see the comment there before touching them). macOS
 Gatekeeper adds a ~30 s first-run assessment to every freshly linked local
 binary unless the invoking terminal is in Privacy & Security → Developer
 Tools; a warm `cargo test` that stalls at ~0 % CPU on first execution is that
@@ -150,9 +162,10 @@ prune`; the empty `KGLite-worktrees/` directory is deleted at the end. **A
 worktree with uncommitted work is never removed without its `git diff` saved
 under `dev-docs/` first and a `todos.md` entry pointing at it.** Note that a
 fresh worktree does **not** inherit `target` — that is a symlink to
-`/Users/Shared/cargo-targets/KGLite` in this repo (see "Build the smallest
-touched surface"), and a worktree missing it cold-builds onto the external USB
-volume. Recreate the symlink before the first build in any new worktree.
+`/Volumes/EksternalHome/coding-cache/cargo-targets/KGLite` in this repo (see
+"Build the smallest touched surface"), and a worktree missing it cold-builds
+into its own local `target/` outside the shared cache. Recreate the symlink
+before the first build in any new worktree.
 
 **Local correctness testing stays in the default/debug profile.** Never run
 `maturin develop --release`, `cargo test --release`, or another release-profile

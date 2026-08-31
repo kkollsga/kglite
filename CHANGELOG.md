@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Smaller dependency tree for Rust consumers: `geo` is now pulled with
+  `default-features = false`.** geo's default `earcut`/`spade` features
+  (triangulation/Voronoi — five transitive packages, including a second
+  hashbrown build) gated APIs no kglite code path calls; its
+  `multithreading` feature is kept. No kglite API or Cypher behavior
+  changes — spatial functions (`geom_union`, `intersects`, `distance`, …)
+  are unaffected. If your crate relied on kglite to activate geo's default
+  features for your **own** direct `geo` dependency, declare those
+  features yourself.
+- **Documented how to shrink kglite's debug-build footprint** (a dev-profile
+  rlib is ~336 MB, two-thirds DWARF): the crate README and the Rust
+  embedding guide now carry a measured
+  `[profile.dev.package."*"] debug = "line-tables-only"` recipe
+  (rlib −43%, dependent debug tree −22%) with its workspace-member gotcha.
+
 ## [0.16.16] - 2026-08-31
 
 ### Removed

@@ -147,6 +147,24 @@ Polars-io style: opt in only to what you use.
 kglite = { version = "0.13", features = ["rdf", "okf"] }
 ```
 
+## Debug build footprint
+
+A debug build of kglite produces a large rlib (hundreds of MB — almost
+all of it DWARF debug info, not code). If your `target/` dir grows faster
+than you'd like, add this to your **workspace root** `Cargo.toml`:
+
+```toml
+# Dependency frames keep file/line in backtraces; you lose only
+# variable inspection inside dependency code. Measured on kglite:
+# rlib 336 MB -> 191 MB, whole debug tree about -22%.
+[profile.dev.package."*"]
+debug = "line-tables-only"
+```
+
+The `"*"` wildcard skips workspace members — if you vendor kglite as a
+path dependency inside your workspace, name it: `[profile.dev.package.kglite]`.
+Details in the [embedding guide](https://kglite.readthedocs.io/en/latest/rust/embedding.html).
+
 ## Documentation
 
 - **[Rust quickstart](https://kglite.readthedocs.io/en/latest/rust/index.html)**

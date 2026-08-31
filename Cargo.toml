@@ -58,6 +58,23 @@ lto = "thin"
 codegen-units = 1
 strip = "symbols"
 
+# Debug-tree size control (measured 2026-08-31, downstream compile-footprint
+# review): a debug libkglite rlib is 66% DWARF — mostly fully-expanded
+# generic type-name strings — and only ~5% code. "line-tables-only" cuts the
+# rlib 336 MB -> 191 MB and the whole debug tree ~22%, while backtraces keep
+# file/line and cfg(debug_assertions) detectors (parser stack-depth, disk
+# arena guard) are untouched — debuginfo level and debug assertions are
+# independent knobs. What is lost: variable/type inspection under a debugger
+# inside the covered crates. NOTE the `"*"` wildcard matches only NON-member
+# dependencies (measured, not just documented) — workspace members must be
+# named explicitly, which is why `kglite` has its own entry. `strip` /
+# `split-debuginfo` were measured at zero rlib effect; don't retry them.
+[profile.dev.package."*"]
+debug = "line-tables-only"
+
+[profile.dev.package.kglite]
+debug = "line-tables-only"
+
 # Same codegen as release but keeps line tables + symbols so samply
 # / `cargo flamegraph` / Instruments can attribute hot frames. Use
 # with `maturin develop --profile profiling` for Python-driven

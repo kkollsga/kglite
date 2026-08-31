@@ -90,7 +90,13 @@ serde = { version = "1.0.229", features = ["derive", "rc"] }
 serde_json = "1.0.150"
 postcard = { version = "1.1.3", default-features = false, features = ["use-std"] }
 chrono = { version = "0.4.45", features = ["serde"] }
-geo = "0.33"
+# default-features = false sheds geo's default "earcut" + "spade"
+# (triangulation/Voronoi crates — 5 transitive packages incl. a duplicate
+# hashbrown) which no kglite code path calls; "multithreading" is kept
+# because it gates i_overlay's parallel boolean ops used by geom_union &
+# friends. Audit before re-enabling defaults: 2026-08-31 downstream
+# compile-footprint review.
+geo = { version = "0.33", default-features = false, features = ["multithreading"] }
 rstar = "0.13"
 wkt = "0.14"
 # 1.10 is a real minimum: tokenizers 0.22 requires regex ^1.10, and the

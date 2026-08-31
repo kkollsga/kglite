@@ -841,15 +841,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
-name = "earcut"
-version = "0.4.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "88459a2a8e3a514b6e6de38cf3aaa9250a894cb098f74a932db77fcc8341b6d0"
-dependencies = [
- "num-traits",
-]
-
-[[package]]
 name = "either"
 version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1190,7 +1181,6 @@ version = "0.33.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "30eb1fdc57c1e5cfd11826fe0caec4b9dc7901f3758263bb506228d88c8d9e9a"
 dependencies = [
- "earcut",
  "float_next_after",
  "geo-types",
  "geographiclib-rs",
@@ -1202,7 +1192,6 @@ dependencies = [
  "robust",
  "rstar 0.12.2",
  "sif-itree",
- "spade",
 ]
 
 [[package]]
@@ -1229,7 +1218,6 @@ dependencies = [
  "rstar 0.8.4",
  "rstar 0.9.3",
  "serde",
- "spade",
 ]
 
 [[package]]
@@ -3563,18 +3551,6 @@ dependencies = [
  "byteorder",
  "libc",
  "winapi",
-]
-
-[[package]]
-name = "spade"
-version = "2.15.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9699399fd9349b00b184f5635b074f9ec93afffef30c853f8c875b32c0f8c7fa"
-dependencies = [
- "hashbrown 0.16.1",
- "num-traits",
- "robust",
- "smallvec",
 ]
 
 [[package]]
