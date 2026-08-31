@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`extensions.csv_http_server` binds an OS-assigned port again.** The Rust
+  MCP server hard-coded 8765 as the default, so a machine running several MCP
+  clients off one manifest (Claude Desktop, Claude Code, Codex) served only the
+  first to boot — every later process died at bind before answering
+  `initialize`. Omitting `port:` (or setting `port: 0`) now binds
+  `127.0.0.1:0`, and the kernel-assigned port is what the boot summary and
+  every `FORMAT CSV` URL report. This restores the behaviour documented since
+  0.9.29 and lost in the Python-to-Rust rewrite. An explicit non-zero `port:`
+  is unchanged.
+- **A CSV listener that cannot start no longer kills the server.** A failed
+  bind or an uncreatable `dir:` logs a warning and disables the extension; the
+  server finishes booting and registers every graph tool. A malformed
+  `csv_http_server:` value is still a fatal manifest error.
+- **A manifest `source_root:` / `source_roots:` that does not resolve no
+  longer aborts boot.** The server logs a warning, reports
+  `source tools: unavailable (…)` in its boot summary and in the agent's
+  `instructions`, and serves every graph tool; `read_source` / `grep` /
+  `list_source` report no active source root until the path is fixed. In
+  `--graph` mode a failed declaration is **not** replaced by the `.kgl`'s
+  parent directory — the operator named a root, and substituting another is
+  the silent-wrong-root failure the explicit-YAML-wins rule exists to prevent.
+  One missing entry degrades the whole `source_roots:` list (mcp-methods
+  resolves all-or-nothing).
+
+### Changed
+
+- The boot summary line carries the peripheral state: `csv_http:
+  http://127.0.0.1:<port>` or `csv_http: disabled (<reason>)`, and
+  `source tools: unavailable (<detail>)` when a declared root is missing.
+- `FORMAT CSV` on a server whose `csv_http_server` was configured but failed
+  to bind returns the inline CSV plus a notice naming the bind failure,
+  instead of the "ask the operator to enable extensions.csv_http_server" line
+  meant for a server where the extension was never configured.
+- `kglite-mcp-server --selftest` reports a declared source root as its own
+  check — green when it resolves, a non-failing yellow line naming the missing
+  path when it does not — and a handshake that gets no response now quotes the
+  child's last stderr lines as the cause instead of only the symptom.
+
 ## [0.16.17] - 2026-08-31
 
 ### Changed
@@ -14193,7 +14233,7 @@ one coherent release rather than two adjacent versions on PyPI.
     Python entry queued for 0.9.34 (the PyPI publish of the
     0.3.37 wheel is still in flight at release-cut time).
 
-### Fixed (MCP server)
+### Fixed
 
 These fixes were drafted as 0.9.32 commits but folded into 0.9.33
 so a single coherent cut publishes to PyPI:
@@ -14279,7 +14319,7 @@ Both confirmed root-cause; one is kglite-side and shipped here,
 the other is a framework-design issue forwarded to mcp-methods
 with our reading of the trade-offs.
 
-### Fixed (MCP server)
+### Fixed
 
 - **`overview_prefix:` from the manifest is now prepended to bare
   `graph_overview()` output.** Pre-0.9.32 the field was parsed by
@@ -14535,7 +14575,7 @@ impossible, and a workspace manifest layout that forced explicit
 upstream in mcp-methods 0.3.33 via an opt-in `workspace.applies_to`
 declaration — kglite 0.9.29 bumps the pin to pick it up.
 
-### Fixed (MCP server)
+### Fixed
 
 - **`csv_http_server` default port changed from 8765 to 0
   (OS-assigned).** When Claude Desktop launches multiple
@@ -14617,7 +14657,7 @@ with an empty graph, and `kglite.code_tree` attribute-chain access
 raised at runtime. Two of the four servers they were migrating
 couldn't work end-to-end before this release; they can now.
 
-### Fixed (MCP server)
+### Fixed
 
 - **`--workspace` mode now actually builds graphs on activate.** The
   workspace's `post_activate` hook was registered as a Python wrapper
