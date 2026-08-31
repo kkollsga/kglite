@@ -57,8 +57,23 @@ pub(crate) fn apply_bundled_tool_overrides(
     }
 
     let router = server.tool_router_mut();
-    for override_ in &overrides {
-        if !router.map.contains_key(override_.name.as_str()) {
+    let mut applicable = Vec::with_capacity(overrides.len());
+    for override_ in overrides {
+        if router.map.contains_key(override_.name.as_str()) {
+            applicable.push(override_);
+        } else if override_.name == "repo_management" {
+            // The framework registers `repo_management` only for
+            // `kind: github` workspaces (mcp-methods 0.4.7 removes the route
+            // in every other mode), so a manifest shared across modes may
+            // legitimately customise a tool this boot never had. Skipping
+            // beats the unknown-route bail below: the override's absence
+            // changes nothing the agent can see, while failing boot over it
+            // is a total outage for a peripheral config line.
+            tracing::warn!(
+                "manifest bundled-tool override targets `repo_management`, which is not \
+                 registered in this mode (github workspaces only) — override ignored"
+            );
+        } else {
             anyhow::bail!(
                 "manifest bundled-tool override targets unknown route {:?}",
                 override_.name
@@ -66,7 +81,7 @@ pub(crate) fn apply_bundled_tool_overrides(
         }
     }
 
-    let final_names = overrides
+    let final_names = applicable
         .iter()
         .map(|override_| {
             (
@@ -85,8 +100,8 @@ pub(crate) fn apply_bundled_tool_overrides(
         }
     }
 
-    let mut routes = Vec::with_capacity(overrides.len());
-    for override_ in overrides {
+    let mut routes = Vec::with_capacity(applicable.len());
+    for override_ in applicable {
         let was_disabled = router.is_disabled(&override_.name);
         let route = router
             .map
@@ -197,48 +212,39 @@ mod bundled_override_tests {
         assert!(error.to_string().contains("conflicts"));
     }
 
-    /// The local-workspace boot path hides `repo_management` before manifest
-    /// overrides run. It must hide it by *disabling* the route, because the
-    /// unknown-route bail above reads `router.map`: a removed route makes any
-    /// manifest naming it a hard boot error, while a disabled one resolves.
-    /// Both halves are asserted so the constraint cannot silently invert.
+    /// `repo_management` is mode-gated by the framework itself since
+    /// mcp-methods 0.4.7 — registered only for `kind: github` workspaces — so
+    /// a manifest shared across modes may customise a tool this boot never
+    /// had. An override for it must be skipped, not fatal, where the route is
+    /// absent, and must keep applying normally where the route exists. Any
+    /// other unknown name stays a boot error (the typo guard,
+    /// `unknown_and_colliding_routes_fail_at_boot` above).
     #[test]
-    fn hiding_a_route_before_overrides_must_disable_it_not_remove_it() {
+    fn a_repo_management_override_is_skipped_where_the_framework_gated_it_out() {
         let manifest_yaml = "tools:\n  - bundled: repo_management\n    hidden: true\n";
 
-        fn workspace_server() -> McpServer {
-            let mut server = McpServer::new(ServerOptions::default());
-            server.register_typed_tool::<CollisionArgs, _>(
-                "repo_management",
-                "Stub repo-management route.",
-                |_| "stub".to_string(),
-            );
-            server
-        }
-
-        // Pre-fix boot shape: the route is gone from `map`, so the manifest
-        // override targets a name the router no longer knows.
+        // Non-github boot: `McpServer::new` never registers the route.
         let (_dir, manifest) = load_manifest(manifest_yaml);
-        let mut removed = workspace_server();
-        removed.tool_router_mut().remove_route("repo_management");
-        let error = apply_bundled_tool_overrides(&mut removed, &manifest)
-            .expect_err("a removed route must still be rejected as unknown");
-        assert!(error.to_string().contains("unknown route"));
+        let mut absent = McpServer::new(ServerOptions::default());
+        assert!(!absent.tool_router_mut().map.contains_key("repo_management"));
+        apply_bundled_tool_overrides(&mut absent, &manifest)
+            .expect("an override for the mode-gated route must be ignored, not fatal");
 
-        // Fixed boot shape: same user-visible effect, override resolves.
+        // Github-shaped boot (route present, stubbed): the override applies.
         let (_dir, manifest) = load_manifest(manifest_yaml);
-        let mut disabled = workspace_server();
-        disabled.tool_router_mut().disable_route("repo_management");
-        assert!(disabled.tool_router_mut().is_disabled("repo_management"));
-
-        apply_bundled_tool_overrides(&mut disabled, &manifest)
-            .expect("a manifest may hide an already-disabled route");
-
-        assert!(
-            disabled.tool_router_mut().is_disabled("repo_management"),
-            "the hide override must leave the route disabled, not re-enable it"
+        let mut present = McpServer::new(ServerOptions::default());
+        present.register_typed_tool::<CollisionArgs, _>(
+            "repo_management",
+            "Stub repo-management route.",
+            |_| "stub".to_string(),
         );
-        assert!(!disabled.tool_router_mut().has_route("repo_management"));
+        apply_bundled_tool_overrides(&mut present, &manifest)
+            .expect("override applies where the route exists");
+        assert!(
+            present.tool_router_mut().is_disabled("repo_management"),
+            "the hide override must still disable a present route"
+        );
+        assert!(!present.tool_router_mut().has_route("repo_management"));
     }
 
     fn recipe_catalog() -> Arc<recipe_queries::RecipeCatalog> {

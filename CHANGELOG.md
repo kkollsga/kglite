@@ -30,18 +30,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--graph` mode a failed declaration is **not** replaced by the `.kgl`'s
   parent directory — the operator named a root, and substituting another is
   the silent-wrong-root failure the explicit-YAML-wins rule exists to prevent.
-  One missing entry degrades the whole `source_roots:` list (mcp-methods
-  resolves all-or-nothing).
+  Source roots are resolved **per entry** (mcp-methods 0.4.7): the declared
+  roots that exist are served and only the missing ones are dropped, each
+  named in the boot summary, in the agent's `instructions`, and — when no
+  root resolved at all — in the source tools' own reply.
+- **A `bundled: repo_management` override no longer fails boot in modes where
+  the framework does not register the tool.** mcp-methods 0.4.7 registers
+  `repo_management` only for `kind: github` workspaces, so a manifest shared
+  across modes may customise a tool a given boot never had; the override is
+  now ignored with a warning instead of an "unknown route" boot failure.
+  Overrides naming genuinely unknown routes still fail at boot.
 
 ### Changed
 
 - The boot summary line carries the peripheral state: `csv_http:
-  http://127.0.0.1:<port>` or `csv_http: disabled (<reason>)`, and
-  `source tools: unavailable (<detail>)` when a declared root is missing.
+  http://127.0.0.1:<port>` or `csv_http: disabled (<reason>)`, plus
+  `source tools: unavailable (…)` when no declared root resolved, or
+  `source tools: N root(s) serving, unresolved: …` when only some did.
 - `FORMAT CSV` on a server whose `csv_http_server` was configured but failed
   to bind returns the inline CSV plus a notice naming the bind failure,
   instead of the "ask the operator to enable extensions.csv_http_server" line
   meant for a server where the extension was never configured.
+- **mcp-methods pin bumped to 0.4.7** (was 0.4.6). Picks up the per-root
+  lenient source-root resolver and `with_unresolved_source_roots` (both used
+  above), the framework-side boot-degradation audit, and the github-only
+  `repo_management` registration. The bump alone reworded two rustdoc links
+  in `set_root_dir`'s schema text (interface-contract baseline refreshed; no
+  tool added, removed, or renamed).
 - `kglite-mcp-server --selftest` reports a declared source root as its own
   check — green when it resolves, a non-failing yellow line naming the missing
   path when it does not — and a handshake that gets no response now quotes the

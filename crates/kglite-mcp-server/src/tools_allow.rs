@@ -41,7 +41,7 @@ use crate::*;
 ///    would force operators to maintain a different manifest per environment,
 ///    which is exactly the fragility this key exists to remove.
 /// 2. **It only removes.** A route another mechanism disabled (the
-///    local-workspace `repo_management` hide, the non-code-graph code-tool gate,
+///    non-code-graph code-tool gate,
 ///    a manifest `hidden: true`) stays disabled even when the allowlist names
 ///    it. `enable_route` is never called here: an allowlist expresses the
 ///    ceiling of the surface, not the floor.
@@ -294,19 +294,19 @@ mod tools_allow_tests {
     }
 
     /// The allowlist is a ceiling, not a floor: it never re-enables a route
-    /// another gate disabled (`repo_management` in local-workspace mode, the
-    /// code-tool gate on a non-code graph, a manifest `hidden: true`).
+    /// another gate disabled (the code-tool gate on a non-code graph, a
+    /// manifest `hidden: true`).
     #[test]
     fn an_allowlisted_route_that_is_already_disabled_stays_disabled() {
-        let mut server = server_with(&["repo_management"]);
-        server.tool_router_mut().disable_route("repo_management");
+        let mut server = server_with(&["explore"]);
+        server.tool_router_mut().disable_route("explore");
 
-        apply_tool_allowlist(&mut server, &allow(&["ping", "repo_management"]), false)
+        apply_tool_allowlist(&mut server, &allow(&["ping", "explore"]), false)
             .expect("allowlist applies");
 
         assert!(server.tool_router_mut().has_route("ping"));
         assert!(
-            server.tool_router_mut().is_disabled("repo_management"),
+            server.tool_router_mut().is_disabled("explore"),
             "an allowlist must never re-enable a route another gate disabled"
         );
     }

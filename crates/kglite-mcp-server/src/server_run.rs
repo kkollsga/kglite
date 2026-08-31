@@ -557,20 +557,13 @@ pub(crate) async fn run_async(
     );
 
     let mut server = McpServer::new(options);
-    if matches!(mode, Mode::LocalWorkspace { .. }) {
-        // Local workspaces activate a directory with `set_root_dir`; the
-        // GitHub clone-oriented `repo_management` tool is mutually exclusive
-        // and would steer agents toward the wrong activation protocol.
-        //
-        // Disable, never remove: `remove_route` drops the entry from
-        // `router.map`, and `apply_bundled_tool_overrides` hard-errors on any
-        // manifest override naming a route that is not in that map — so a
-        // local-workspace manifest carrying `bundled: repo_management` (hide,
-        // rename, or description) would fail every boot with "unknown route".
-        // `disable_route` keeps the entry and hides it the same way (unlisted,
-        // rejected on call) while leaving overrides resolvable.
-        server.tool_router_mut().disable_route("repo_management");
-    }
+    // `repo_management` needs no gate here since mcp-methods 0.4.7:
+    // `McpServer::new` registers it only for `kind: github` workspaces, so
+    // local-workspace (and graph/bare) servers never carry the route. The
+    // manifest-override consequence of that removal is handled where the
+    // overrides are applied — see the `repo_management` pass in
+    // `apply_bundled_tool_overrides`.
+    //
     // Read before `builtins` moves into `register_kglite_tools` below.
     let gate_code_tools = code_tools_are_dead(&mode, &builtins, &graph_state);
     register_kglite_tools(
@@ -590,8 +583,11 @@ pub(crate) async fn run_async(
     }
     if gate_code_tools {
         // Disable, never skip registration: an unregistered name is absent from
-        // `router.map`, which hard-errors any manifest override naming it (see
-        // the `repo_management` comment above for the full mechanism).
+        // `router.map`, and `apply_bundled_tool_overrides` hard-errors on any
+        // manifest override naming a route not in that map (only the
+        // framework-gated `repo_management` gets a pass there). `disable_route`
+        // keeps the entry — unlisted, rejected on call — while leaving
+        // overrides resolvable.
         server.tool_router_mut().disable_route("explore");
         server.tool_router_mut().disable_route("read_code_source");
     }
