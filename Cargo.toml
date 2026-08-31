@@ -20,7 +20,7 @@ resolver = "2"
 # `make bump-version VERSION=X.Y.Z` — hand-editing this line alone leaves
 # `cargo metadata` unable to resolve the workspace across a minor bump.
 [workspace.package]
-version = "0.16.15"
+version = "0.16.16"
 
 # Minimum supported Rust version — the DEFAULT for members that inherit it
 # with `rust-version.workspace = true`. Two members legitimately need more
