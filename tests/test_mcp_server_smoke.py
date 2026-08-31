@@ -289,6 +289,22 @@ def _spawn(
     return client
 
 
+def _wait_for_stderr(client: McpClient, needle: str, timeout_s: float = 10.0) -> str:
+    """Return the first drained stderr line containing ``needle``.
+
+    The drain thread runs asynchronously, so a line the server wrote before
+    ``initialize`` returned may not be in the list yet — poll rather than
+    read once.
+    """
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        for line in list(client._stderr_lines):
+            if needle in line:
+                return line
+        time.sleep(0.05)
+    raise AssertionError(f"{needle!r} never appeared on stderr; saw:\n" + "\n".join(client._stderr_lines[-20:]))
+
+
 def _text_content(result: dict[str, Any]) -> str:
     """Extract the joined text from a tools/call result envelope."""
     parts = result.get("content", [])
@@ -382,6 +398,48 @@ class TestGraphMode:
             assert "read_source" in names
             assert "grep" in names
             assert "list_source" in names
+        finally:
+            client.shutdown()
+
+    def test_missing_manifest_source_root_degrades_instead_of_killing_the_server(
+        self, graph_fixture: Path, tmp_path: Path
+    ):
+        """A `source_root:` that no longer exists must not abort boot.
+
+        Operator report (0.16.17): a deployment directory copied without its
+        `source/` subdir exited before `initialize`, losing every graph tool to
+        a configuration problem that only affects `read_source` / `grep` /
+        `list_source`. From the client side that is indistinguishable from a
+        crashed binary. The server now warns, says so in the boot summary and
+        in `instructions`, and serves.
+        """
+        manifest = tmp_path / "stale_mcp.yaml"
+        manifest.write_text("name: stale\nsource_root: source\n", encoding="utf-8")
+        assert not (tmp_path / "source").exists()
+
+        client = _spawn(["--graph", str(graph_fixture), "--mcp-config", str(manifest)])
+        try:
+            names = {t["name"] for t in client.list_tools()}
+            assert {"cypher_query", "graph_overview", "ping"} <= names
+            r = client.call_tool("cypher_query", {"query": "MATCH (n) RETURN count(n) AS n"})
+            assert not _is_error(r), _text_content(r)
+            assert "4" in _text_content(r)
+
+            # The source tools stay listed (mcp-methods registers them
+            # unconditionally) and report that they have no root — the same
+            # answer a server with no `source_root:` at all gives. Crucially
+            # they were NOT re-pointed at the .kgl's parent directory: the
+            # operator asked for `source`, and serving a different directory
+            # instead would be a silent wrong answer.
+            grep = _text_content(client.call_tool("grep", {"pattern": "Alice"}))
+            assert "no active source root" in grep
+
+            instructions = client.init_result["result"].get("instructions") or ""
+            assert "source tools" in instructions
+            assert str(tmp_path / "source") in instructions
+
+            summary = _wait_for_stderr(client, "source tools: unavailable")
+            assert str(tmp_path / "source") in summary
         finally:
             client.shutdown()
 
@@ -1572,6 +1630,23 @@ class TestBareBoot:
         finally:
             client.shutdown()
 
+    def test_missing_manifest_source_root_degrades_instead_of_killing_the_server(self, tmp_path: Path):
+        """Bare mode has the same non-fatal contract as `--graph` mode: the
+        manifest's stale `source_root:` costs three tools, not the server."""
+        manifest = tmp_path / "bare_mcp.yaml"
+        manifest.write_text("name: Bare Stale Root\nsource_root: source\n", encoding="utf-8")
+        assert not (tmp_path / "source").exists()
+
+        client = _spawn(["--mcp-config", str(manifest)])
+        try:
+            names = {t["name"] for t in client.list_tools()}
+            assert {"ping", "cypher_query", "graph_overview"} <= names
+            assert "no active source root" in _text_content(client.call_tool("grep", {"pattern": "x"}))
+            summary = _wait_for_stderr(client, "source tools: unavailable")
+            assert str(tmp_path / "source") in summary
+        finally:
+            client.shutdown()
+
 
 # ── Test: explore tool + skills (the single Rust server) ──────────────────
 
@@ -2115,6 +2190,37 @@ class TestSelftest:
         rc, out = _run_selftest(["--graph", str(missing)])
         assert rc != 0, out
         assert "Selftest FAILED" in out
+        # The check must carry the CAUSE, not just the symptom: a reader
+        # skimming CI output sees why the child never answered.
+        assert "does not exist and no creation storage mode" in out
+
+    def test_missing_source_root_is_yellow_not_red(self, graph_fixture: Path, tmp_path: Path):
+        """The operator's repro: a copied deployment dir without its source
+        subdir. It used to exit before `initialize` (a red boot failure for a
+        peripheral misconfiguration); now the run passes with the degradation
+        reported on its own line."""
+        manifest = tmp_path / "stale_mcp.yaml"
+        manifest.write_text("name: Stale Root\nsource_root: source\n", encoding="utf-8")
+
+        rc, out = _run_selftest(["--graph", str(graph_fixture), "--mcp-config", str(manifest)])
+
+        assert rc == 0, out
+        assert "Selftest PASSED" in out
+        assert "✓ server initializes" in out
+        assert "– manifest source roots: source tools unavailable" in out
+        assert str(tmp_path / "source") in out
+
+    def test_resolvable_source_root_is_green(self, graph_fixture: Path, tmp_path: Path):
+        # Control: without this arm the yellow line above could be printed for
+        # every manifest that declares a root, degraded or not.
+        (tmp_path / "source").mkdir()
+        manifest = tmp_path / "live_mcp.yaml"
+        manifest.write_text("name: Live Root\nsource_root: source\n", encoding="utf-8")
+
+        rc, out = _run_selftest(["--graph", str(graph_fixture), "--mcp-config", str(manifest)])
+
+        assert rc == 0, out
+        assert "✓ manifest source roots: resolved" in out
 
     def test_local_workspace_passes(self, tmp_path: Path):
         manifest, _ws = _write_local_workspace_manifest(tmp_path)

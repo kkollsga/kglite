@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use mcp_methods::server::{init_tracing, load_env_for_mode, McpServer, ResultCtx, ServerOptions};
+use mcp_methods::server::{init_tracing, load_env_for_mode, McpServer, ServerOptions};
 use rmcp::transport::stdio;
 use rmcp::ServiceExt;
 
@@ -536,24 +536,11 @@ pub(crate) async fn run_async(
         graph_state.bind_ontology(bound);
     }
 
-    let options = bind_mode(&mode, &cli, manifest.as_ref(), &graph_state, options)?;
+    let (options, source_tools_unavailable) =
+        bind_mode(&mode, &cli, manifest.as_ref(), &graph_state, options)?;
 
-    // Runtime graph-over-grep steering (mcp-methods result-postprocess hook):
-    // append a one-line footer to a builtin tool result at the moment of a
-    // likely misuse — a definition-shaped or zero-match `grep`, or a
-    // `cypher_query` result carrying `qualified_name`. Delivered on the RESULT
-    // (read every call), it corrects course where the load-once tool
-    // description could not (petekSuite field report 2026-07-02). See
-    // `graph_result_footer` for when it declines and leaves the result
-    // untouched.
-    let options = {
-        let gs = graph_state.clone();
-        options.with_result_postprocess(Arc::new(
-            move |tool: &str, args: &serde_json::Value, body: &str, _ctx: &ResultCtx| {
-                graph_result_footer(&gs, tool, args, body)
-            },
-        ))
-    };
+    let options =
+        apply_result_decorations(options, &graph_state, source_tools_unavailable.as_deref());
 
     // Snapshot the dynamic source-roots provider before `options` moves into
     // the McpServer. `read_code_source` queries it on every call, so
@@ -651,6 +638,7 @@ pub(crate) async fn run_async(
         &graph_state,
         env_file_loaded.as_deref(),
         &csv_http,
+        source_tools_unavailable.as_deref(),
     );
 
     let service = server

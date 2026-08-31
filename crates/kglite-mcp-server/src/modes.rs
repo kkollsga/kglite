@@ -91,15 +91,59 @@ pub(crate) fn local_workspace(
     apply_workspace_boundaries(ws, manifest)
 }
 
+/// Resolve a manifest's declared `source_root:` / `source_roots:` without
+/// making a stale path fatal.
+///
+/// A declared root that no longer exists costs exactly three tools —
+/// `read_source` / `grep` / `list_source`. The graph tools never read it, so
+/// aborting boot over one is disproportionate: the operator report that
+/// prompted this (0.16.17) was a deployment directory copied without its
+/// `source/` subdir, where the process exited before `initialize` and the
+/// client could not distinguish a misconfigured server from a crashed binary.
+/// On failure this warns, records the detail for the boot summary, and returns
+/// `None` — the caller then binds no source roots at all.
+///
+/// **No fallback.** In `--graph` mode the caller must NOT fall back to the
+/// auto-bound parent of the `.kgl` when a declared root fails: substituting a
+/// different directory for the one the operator asked for is the silent-wrong-
+/// root failure the explicit-YAML-wins rule below exists to prevent.
+///
+/// mcp-methods' `resolve_source_roots` is all-or-nothing — it returns on the
+/// first entry that does not canonicalise — so a multi-root manifest with one
+/// missing entry degrades the whole set. Serving the survivors would need a
+/// per-root upstream API that does not exist.
+fn resolve_declared_source_roots(
+    manifest: &Manifest,
+    unavailable: &mut Option<String>,
+) -> Option<Vec<String>> {
+    match resolve_source_roots(manifest) {
+        Ok(roots) => Some(roots),
+        Err(e) => {
+            tracing::warn!(
+                manifest = %manifest.yaml_path.display(),
+                detail = %e.message,
+                "manifest source_root does not resolve — serving without source tools \
+                 (read_source / grep / list_source); graph tools are unaffected"
+            );
+            *unavailable = Some(e.message);
+            None
+        }
+    }
+}
+
 /// Apply mode-specific bindings — source roots, workspace handle, initial
-/// graph load/build — onto `options`, returning the transformed value.
+/// graph load/build — onto `options`, returning the transformed value plus,
+/// when the manifest declared source roots that did not resolve, the reason
+/// the source tools are unavailable (for the boot summary and the degraded
+/// tool-result footer).
 pub(crate) fn bind_mode(
     mode: &Mode,
     cli: &Cli,
     manifest: Option<&Manifest>,
     graph_state: &GraphState,
     mut options: ServerOptions,
-) -> Result<ServerOptions> {
+) -> Result<(ServerOptions, Option<String>)> {
+    let mut source_tools_unavailable: Option<String> = None;
     match mode {
         Mode::Graph { path } => {
             let create_mode = cli
@@ -131,18 +175,18 @@ pub(crate) fn bind_mode(
             // overrode operators who declared a different root in
             // YAML (e.g. when the .kgl lives in a build dir but the
             // source files are elsewhere). Now: explicit YAML wins,
-            // auto-bind only when the manifest doesn't declare one.
-            let manifest_roots = manifest
-                .filter(|m| !m.source_roots.is_empty())
-                .map(resolve_source_roots)
-                .transpose()
-                .context("manifest source_root resolution failed")?;
-            let roots = if let Some(rs) = manifest_roots {
-                rs
-            } else if let Some(parent) = base.parent() {
-                vec![parent.to_string_lossy().into_owned()]
-            } else {
-                Vec::new()
+            // auto-bind only when the manifest doesn't declare one —
+            // and a declaration that fails to resolve keeps winning:
+            // it degrades to no source tools rather than falling back
+            // to the parent directory (see
+            // `resolve_declared_source_roots`).
+            let roots = match manifest.filter(|m| !m.source_roots.is_empty()) {
+                Some(m) => resolve_declared_source_roots(m, &mut source_tools_unavailable)
+                    .unwrap_or_default(),
+                None => base
+                    .parent()
+                    .map(|parent| vec![parent.to_string_lossy().into_owned()])
+                    .unwrap_or_default(),
             };
             if !roots.is_empty() {
                 options = options.with_static_source_roots(roots);
@@ -167,16 +211,16 @@ pub(crate) fn bind_mode(
             options = options.with_workspace(ws);
         }
         Mode::Bare => {
-            if let Some(m) = manifest {
-                if !m.source_roots.is_empty() {
-                    let resolved =
-                        resolve_source_roots(m).context("source root resolution failed")?;
+            if let Some(m) = manifest.filter(|m| !m.source_roots.is_empty()) {
+                if let Some(resolved) =
+                    resolve_declared_source_roots(m, &mut source_tools_unavailable)
+                {
                     options = options.with_static_source_roots(resolved);
                 }
             }
         }
     }
-    Ok(options)
+    Ok((options, source_tools_unavailable))
 }
 
 /// The manifest's workspace-boundary keys must actually reach the `Workspace`.
@@ -312,5 +356,181 @@ mod workspace_boundary_tests {
             "with no sandbox_root the same swap must succeed — otherwise the \
              refusal above cannot be attributed to the boundary"
         );
+    }
+}
+
+/// A manifest-declared source root that no longer exists must not take the
+/// server down.
+///
+/// The operator report (0.16.17): a deployment directory copied without its
+/// `source/` subdir exited before `initialize`, so every graph tool was lost
+/// to a configuration problem that only affects `read_source` / `grep` /
+/// `list_source`. From the client side that is indistinguishable from a
+/// crashed binary. These tests pin both halves of the contract — boot
+/// survives, and the source roots stay unbound rather than silently falling
+/// back to some other directory.
+#[cfg(test)]
+mod source_root_degradation_tests {
+    use super::*;
+
+    use clap::Parser;
+    use mcp_methods::server::Manifest;
+
+    use crate::tools::GraphState;
+
+    fn manifest_with(dir: &std::path::Path, body: &str) -> Manifest {
+        let path = dir.join("fixture_mcp.yaml");
+        std::fs::write(&path, body).expect("write manifest");
+        mcp_methods::server::load_manifest(&path).expect("manifest loads")
+    }
+
+    /// The bound roots, or `None` when the source tools have nothing to serve.
+    fn bound_roots(options: &ServerOptions) -> Option<Vec<String>> {
+        options.source_roots.as_ref().map(|provider| provider())
+    }
+
+    fn bind_graph_mode(
+        dir: &std::path::Path,
+        manifest: Option<&Manifest>,
+    ) -> Result<(ServerOptions, Option<String>)> {
+        let cli = Cli::parse_from([
+            "kglite-mcp-server",
+            "--graph",
+            "g.kgl",
+            "--storage",
+            "memory",
+        ]);
+        let state = GraphState::new(None);
+        let mode = Mode::Graph {
+            path: dir.join("g.kgl"),
+        };
+        bind_mode(&mode, &cli, manifest, &state, ServerOptions::default())
+    }
+
+    #[test]
+    fn graph_mode_serves_on_without_a_missing_declared_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().canonicalize().expect("canonicalize");
+        let m = manifest_with(&dir, "name: fixture\nsource_root: source\n");
+
+        let (options, unavailable) = bind_graph_mode(&dir, Some(&m)).expect(
+            "a manifest source_root that does not exist must not abort boot — the graph \
+             tools do not read it",
+        );
+        assert_eq!(
+            bound_roots(&options),
+            None,
+            "a declared root that failed to resolve must leave the source tools unbound; \
+             falling back to the .kgl's parent would serve a directory the operator never \
+             asked for"
+        );
+        let detail = unavailable.expect("the degraded state must be reported to the operator");
+        assert!(
+            detail.contains("source") && detail.contains(&dir.join("source").display().to_string()),
+            "the boot-summary detail must name the declaration and the path it resolved \
+             to, got: {detail}"
+        );
+    }
+
+    #[test]
+    fn graph_mode_binds_a_declared_root_that_exists() {
+        // Control for the test above: without this arm, "roots are unbound"
+        // would also pass on a build where a declared root never binds at all.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().canonicalize().expect("canonicalize");
+        std::fs::create_dir(dir.join("source")).expect("mkdir source");
+        let m = manifest_with(&dir, "name: fixture\nsource_root: source\n");
+
+        let (options, unavailable) = bind_graph_mode(&dir, Some(&m)).expect("binds");
+        assert_eq!(
+            bound_roots(&options),
+            Some(vec![dir.join("source").to_string_lossy().into_owned()]),
+            "an existing declared root must still win over the .kgl parent auto-bind"
+        );
+        assert_eq!(unavailable, None, "nothing is degraded here");
+    }
+
+    #[test]
+    fn graph_mode_auto_binds_the_parent_when_nothing_is_declared() {
+        // Second control: the auto-bind path is what the missing-root case must
+        // NOT fall back to, so it has to be demonstrably alive.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().canonicalize().expect("canonicalize");
+        let m = manifest_with(&dir, "name: fixture\n");
+
+        let (options, unavailable) = bind_graph_mode(&dir, Some(&m)).expect("binds");
+        assert_eq!(
+            bound_roots(&options),
+            Some(vec![dir.to_string_lossy().into_owned()]),
+            "with no declaration the .kgl's parent is auto-bound"
+        );
+        assert_eq!(unavailable, None);
+    }
+
+    #[test]
+    fn bare_mode_serves_on_without_a_missing_declared_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().canonicalize().expect("canonicalize");
+        let m = manifest_with(&dir, "name: fixture\nsource_root: source\n");
+        let cli = Cli::parse_from(["kglite-mcp-server"]);
+        let state = GraphState::new(None);
+
+        let (options, unavailable) = bind_mode(
+            &Mode::Bare,
+            &cli,
+            Some(&m),
+            &state,
+            ServerOptions::default(),
+        )
+        .expect("a manifest source_root that does not exist must not abort bare boot");
+        assert_eq!(bound_roots(&options), None);
+        let detail = unavailable.expect("the degraded state must be reported to the operator");
+        assert!(
+            detail.contains(&dir.join("source").display().to_string()),
+            "detail must name the missing path, got: {detail}"
+        );
+    }
+
+    #[test]
+    fn bare_mode_binds_a_declared_root_that_exists() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().canonicalize().expect("canonicalize");
+        std::fs::create_dir(dir.join("source")).expect("mkdir source");
+        let m = manifest_with(&dir, "name: fixture\nsource_root: source\n");
+        let cli = Cli::parse_from(["kglite-mcp-server"]);
+        let state = GraphState::new(None);
+
+        let (options, unavailable) = bind_mode(
+            &Mode::Bare,
+            &cli,
+            Some(&m),
+            &state,
+            ServerOptions::default(),
+        )
+        .expect("binds");
+        assert_eq!(
+            bound_roots(&options),
+            Some(vec![dir.join("source").to_string_lossy().into_owned()])
+        );
+        assert_eq!(unavailable, None);
+    }
+
+    /// One missing entry degrades the whole set: mcp-methods'
+    /// `resolve_source_roots` returns on the first failure, so there is no
+    /// per-root survivor list to bind. Pinned so an upstream bump that gains a
+    /// per-root API surfaces here as a failure rather than passing unnoticed.
+    #[test]
+    fn one_missing_entry_degrades_every_declared_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().canonicalize().expect("canonicalize");
+        std::fs::create_dir(dir.join("present")).expect("mkdir present");
+        let m = manifest_with(
+            &dir,
+            "name: fixture\nsource_roots:\n  - present\n  - absent\n",
+        );
+
+        let (options, unavailable) = bind_graph_mode(&dir, Some(&m)).expect("boots");
+        assert_eq!(bound_roots(&options), None);
+        assert!(unavailable.is_some_and(|d| d.contains("absent")));
     }
 }

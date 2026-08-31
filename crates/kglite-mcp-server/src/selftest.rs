@@ -21,14 +21,15 @@
 //! Exit code is 0 when every non-skipped check passes, 1 otherwise, so it
 //! doubles as a CI / deployment smoke gate.
 
+use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 
 use mcp_methods::server::Manifest;
@@ -40,14 +41,23 @@ use super::{load_manifest, pick_mode, promote_local_workspace, Cli, Mode};
 /// mode triggers the code-tree build.
 const RPC_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// How many trailing stderr lines to keep for quoting as the *cause* of a
+/// missing response. Two, not one: a boot failure is usually a tracing line
+/// plus the `ERROR:` summary, and the useful half varies.
+const STDERR_TAIL_LINES: usize = 2;
+
 /// Minimal JSON-RPC-over-child-stdio client. A background thread reads the
 /// child's stdout into a channel so a hung child surfaces as a timeout (or a
-/// fast `Disconnected` on child exit) rather than a deadlocked read.
+/// fast `Disconnected` on child exit) rather than a deadlocked read; a second
+/// thread mirrors the child's stderr to ours and keeps the tail so a failed
+/// handshake can name what the child said instead of only its own symptom.
 struct Rpc {
     child: Child,
     stdin: ChildStdin,
     rx: mpsc::Receiver<Value>,
     next_id: i64,
+    stderr_tail: Arc<Mutex<VecDeque<String>>>,
+    stderr_reader: Option<thread::JoinHandle<()>>,
 }
 
 /// Resolve the command that launches a fresh server instance for the child
@@ -79,14 +89,18 @@ fn respawn_command() -> Result<(OsString, Vec<OsString>)> {
 impl Rpc {
     fn spawn(child_args: &[OsString]) -> Result<Self> {
         let (program, lead_args) = respawn_command()?;
-        // stderr is inherited so the child's boot diagnostics (bad manifest,
-        // missing .env, PATH-shadow warnings) reach the operator directly.
+        // stderr is piped rather than inherited, then mirrored line-by-line to
+        // our own stderr below: the operator still sees the child's boot
+        // diagnostics (bad manifest, missing .env, PATH-shadow warnings) live
+        // and in place, and we additionally keep the tail so a failed
+        // handshake can quote the *cause* rather than only reporting that no
+        // response arrived.
         let mut child = Command::new(&program)
             .args(&lead_args)
             .args(child_args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .spawn()
             .with_context(|| {
                 format!(
@@ -96,6 +110,26 @@ impl Rpc {
             })?;
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
+        let stderr = child.stderr.take().expect("piped stderr");
+        let stderr_tail = Arc::new(Mutex::new(VecDeque::new()));
+        let tail = stderr_tail.clone();
+        let stderr_reader = thread::spawn(move || {
+            for line in BufReader::new(stderr).lines() {
+                let Ok(line) = line else { break };
+                eprintln!("{line}");
+                // `Caused by:` is anyhow's chain header — it carries none of
+                // the cause it introduces, and keeping it would spend one of
+                // the two tail slots on nothing.
+                if line.trim().is_empty() || line.trim() == "Caused by:" {
+                    continue;
+                }
+                let mut tail = tail.lock().expect("stderr tail lock");
+                if tail.len() == STDERR_TAIL_LINES {
+                    tail.pop_front();
+                }
+                tail.push_back(line);
+            }
+        });
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
             let reader = BufReader::new(stdout);
@@ -114,7 +148,35 @@ impl Rpc {
             stdin,
             rx,
             next_id: 0,
+            stderr_tail,
+            stderr_reader: Some(stderr_reader),
         })
+    }
+
+    /// The child's last non-empty stderr lines, as a trailing clause for a
+    /// handshake failure. `exited` joins the mirror thread first — on child
+    /// exit the pipe closes, so the join is bounded and guarantees the final
+    /// line (typically the very error that killed the boot) is in the buffer;
+    /// on a *hung* child the thread is still running and joining would block
+    /// forever, so we read whatever has arrived.
+    fn stderr_cause(&mut self, exited: bool) -> String {
+        if exited {
+            let _ = self.child.wait();
+            if let Some(handle) = self.stderr_reader.take() {
+                let _ = handle.join();
+            }
+        }
+        let tail = self.stderr_tail.lock().expect("stderr tail lock");
+        if tail.is_empty() {
+            return " (child printed nothing to stderr)".to_string();
+        }
+        format!(
+            " — last stderr: {}",
+            tail.iter()
+                .map(|line| truncate(line.trim(), 200))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        )
     }
 
     fn send(&mut self, payload: &Value) -> Result<()> {
@@ -129,9 +191,20 @@ impl Rpc {
         let id = self.next_id;
         self.send(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))?;
         loop {
-            let msg = self.rx.recv_timeout(RPC_TIMEOUT).map_err(|_| {
-                anyhow!("no `{method}` response — child server unresponsive or exited (see stderr above)")
-            })?;
+            let msg = match self.rx.recv_timeout(RPC_TIMEOUT) {
+                Ok(msg) => msg,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    let cause = self.stderr_cause(true);
+                    bail!("no `{method}` response — child server exited{cause}");
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    let cause = self.stderr_cause(false);
+                    bail!(
+                        "no `{method}` response — child server unresponsive after {}s{cause}",
+                        RPC_TIMEOUT.as_secs()
+                    );
+                }
+            };
             if msg.get("id").and_then(Value::as_i64) == Some(id) {
                 if let Some(err) = msg.get("error") {
                     bail!("`{method}` returned an error: {err}");
@@ -238,8 +311,12 @@ fn snippet(text: &str) -> String {
         .find(|l| !l.trim().is_empty())
         .unwrap_or("")
         .trim();
-    if line.chars().count() > 100 {
-        format!("{}…", line.chars().take(100).collect::<String>())
+    truncate(line, 100)
+}
+
+fn truncate(line: &str, max_chars: usize) -> String {
+    if line.chars().count() > max_chars {
+        format!("{}…", line.chars().take(max_chars).collect::<String>())
     } else {
         line.to_string()
     }
@@ -373,6 +450,40 @@ fn check_recipe_tools(
             "recipe catalog tools",
             Check::Fail("recipe routes registered without a non-empty catalog".into()),
         ));
+    }
+}
+
+/// 2b. declared source roots — informational, never a hard failure.
+///
+/// A `source_root:` that no longer resolves is non-fatal at boot (see
+/// `modes::resolve_declared_source_roots`): the server serves its graph tools
+/// and the source tools report "no active source root" on call. That is
+/// exactly the "quietly half-broken" state this harness exists to surface, so
+/// it gets its own line — yellow, not red, because the graph capability the
+/// deployment is *for* is intact.
+///
+/// Only manifests that declare a root produce a line; the far more common "no
+/// source_root at all" is a configuration choice, not a degradation.
+fn check_declared_source_roots(
+    manifest: Option<&Manifest>,
+    checks: &mut Vec<(&'static str, Check)>,
+) {
+    let Some(m) = manifest.filter(|m| !m.source_roots.is_empty()) else {
+        return;
+    };
+    match mcp_methods::server::resolve_source_roots(m) {
+        Ok(roots) => checks.push((
+            "manifest source roots",
+            Check::Pass(format!("resolved: {}", roots.join(", "))),
+        )),
+        Err(e) => checks.push((
+            "manifest source roots",
+            Check::Skip(format!(
+                "source tools unavailable — {}; graph tools unaffected. Create the directory \
+                 or fix source_root, then restart",
+                e.message
+            )),
+        )),
     }
 }
 
@@ -538,6 +649,7 @@ pub fn run_selftest(cli: &Cli, argv: &[OsString]) -> Result<()> {
 
     check_graph_tools(&names, &mut checks);
     check_recipe_tools(manifest.as_ref(), &names, &mut checks);
+    check_declared_source_roots(manifest.as_ref(), &mut checks);
     check_github_tools(&names, &mut checks);
 
     let local_activated = check_local_activation(&mut rpc, cli, &mode, &names, &mut checks)?;

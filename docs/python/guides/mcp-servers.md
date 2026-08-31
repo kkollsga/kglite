@@ -228,6 +228,14 @@ deployment or CI smoke gate. Pass the *absolute path to the binary you
 registered* (per the caveat above) so the self-test exercises the same
 server your client launches.
 
+`✓` is a working capability, `✗` a failure, and `–` a capability that is
+absent or degraded without breaking the server — a manifest
+`source_root:` that no longer exists prints
+`– manifest source roots: source tools unavailable — …` and the run
+still passes, because the graph tools it exists to serve are intact.
+When the child never answers, the failing check quotes the child's last
+stderr lines as the cause, so a CI log is readable without scrolling.
+
 ### 4. (Optional) Add a manifest for more tools
 
 Drop a sibling YAML file next to your graph and you get three more
@@ -302,6 +310,18 @@ source_roots:
   - ./data
   - ../shared/lookups
 ```
+
+A declared root that does not exist is **not** a boot failure. The
+server logs a `WARN`, notes `source tools: unavailable (…)` in its
+boot summary, says so in the agent's `instructions`, and serves
+everything else — the graph tools never read the source root. The
+three source tools stay listed and answer "no active source root"
+until the path is fixed and the server restarted. One missing entry
+degrades the whole `source_roots:` list (resolution is
+all-or-nothing), and in `--graph` mode a failed declaration does
+**not** fall back to the `.kgl`'s parent directory: serving a
+directory the operator never asked for would be a silent wrong
+answer.
 
 This auto-registers three tools, all sandboxed to the configured
 roots:
@@ -585,7 +605,7 @@ startup with a non-zero exit code. The recurring ones:
 | Error message | What it means | Fix |
 |---|---|---|
 | `ERROR: <path>: unknown top-level keys: ['foo']` | Typo or unsupported key in manifest. | Compare against the [top-level field list](#top-level-fields). |
-| `ERROR: <path>: source root './data' resolves to '/abs/.../data' which is not an existing directory` | The path is relative-to-yaml; it didn't land on a real directory. | Check the path; create the directory; or use `source_roots:` if you have multiple. |
+| `WARN … manifest source_root does not resolve …` plus `source tools: unavailable (source root './data' resolves to '/abs/.../data' which is not an existing directory)` in the boot summary | The path is relative-to-yaml; it didn't land on a real directory. **The server still boots and serves its graph tools** — only `read_source` / `grep` / `list_source` are out. | Check the path; create the directory; or use `source_roots:` if you have multiple. Then restart. |
 | `ERROR: --mcp-config path does not exist: <path>` | Explicit `--mcp-config` value points at a missing file. | Check the path. Sibling auto-detect is `<basename>_mcp.yaml`. |
 | `ERROR: extensions.value_codecs ... is not bijective` | A `map` codec has two keys mapping to the same value, so encode is ambiguous. | Make the `map:` one-to-one. |
 | `ERROR: value_codecs[i].match ... is not a valid regex` | A `regex` codec's `match` doesn't compile. | Fix the regex (anchor it for a full match). |
@@ -974,9 +994,12 @@ tool needs to register. Most common cases:
 
 - `repo_management` missing — repository cloning is a `codingest-mcp`
   workspace feature. `set_root_dir` requires `workspace.kind: local`.
-- `read_source` / `grep` / `list_source` missing — no source root
-  is configured (no `source_root:` in the manifest, no `--source-root`
-  CLI flag, and `--graph` parent auto-bind didn't fire).
+- `read_source` / `grep` / `list_source` answering "no active source
+  root" — they are always listed, but no root is bound: no
+  `source_root:` in the manifest, no `--source-root` CLI flag and
+  `--graph` parent auto-bind didn't fire, or a declared `source_root:`
+  did not resolve (check the boot summary for `source tools:
+  unavailable`).
 - `github_issues` / `github_api` missing — the manifest doesn't set
   `builtins.github: true` (the default), or no `GITHUB_TOKEN` in env.
 - `save_graph` missing — you're not in `--graph` mode OR the
@@ -1011,7 +1034,7 @@ the discriminator for `--graph` / `--workspace` / `--watch` /
 | Manifest key | `--graph` | `--workspace` | `--watch` | `--source-root` | bare (no graph) |
 |---|---|---|---|---|---|
 | `name`, `instructions`, `overview_prefix` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `source_root` / `source_roots` | ✓ (overrides parent-of-`.kgl`) | — | — | ✓ (canonical) | ✓ |
+| `source_root` / `source_roots` | ✓ (overrides parent-of-`.kgl`; a declared root that doesn't resolve degrades to no source tools rather than falling back to the parent) | — | — | ✓ (canonical) | ✓ |
 | `env_file` | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `workspace.kind: local` + `workspace.root: <dir>` | — | — | — | — | promotes into local-workspace mode |
 | `workspace.watch: true` | — | — | ✓ (auto-rebuild) | — | ✓ when `workspace.kind: local` |
@@ -1065,7 +1088,7 @@ will my agent see?"
 | `ping` | always | Liveness probe. |
 | `read_code_source` | always | Requires an active graph at call time (returns the no-graph message otherwise). |
 | `save_graph` | `--graph` mode AND `builtins.save_graph: true` | Other modes have no single graph to save back to. |
-| `read_source` / `grep` / `list_source` | a source root is configured (`--source-root`, `--graph` parent auto-bind, manifest `source_root:`, or active workspace repo) | All three register together; never registered independently. |
+| `read_source` / `grep` / `list_source` | always | All three register together. They *serve* only with a bound root (`--source-root`, `--graph` parent auto-bind, a manifest `source_root:` that resolves, or an active workspace repo); otherwise each call answers "no active source root". |
 | `repo_management` | `codingest-mcp --workspace` clone-tracker mode | Not registered in local-workspace mode; use `set_root_dir` there. |
 | `set_root_dir` | `workspace.kind: local` only | **Unbounded unless `workspace.sandbox_root` is set** (kglite 0.15.5+, mcp-methods 0.4.3+). Without that key a swap may point the server at any readable directory; `workspace.root` is the *starting* root, not a boundary. |
 | `github_issues` / `github_api` | `builtins.github: true` in the manifest **and** `GITHUB_TOKEN` (or `GH_TOKEN`) reachable at boot | Opt-in is required as of mcp-methods 0.4.5 — an ambient token no longer registers anything on its own. Token loaded from process env, walk-up `.env`, or explicit `env_file:`. Tools are registered together; never one without the other. |
