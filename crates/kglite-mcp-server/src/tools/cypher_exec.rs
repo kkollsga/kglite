@@ -24,7 +24,7 @@ impl GraphState {
         &self,
         template: &str,
         args: &serde_json::Map<String, serde_json::Value>,
-        csv_http: Option<&crate::csv_http::CsvHttpConfig>,
+        csv_http: &crate::csv_http::CsvHttpState,
     ) -> Result<String, String> {
         match self.execute_cypher_read(template, params_from_json(Some(args))) {
             Ok(outcome) => render_cypher_output(
@@ -170,7 +170,7 @@ pub(crate) fn run_cypher_inner(
     query: &str,
     params: HashMap<String, Value>,
     policy: ExecPolicy<'_>,
-    csv_http: Option<&crate::csv_http::CsvHttpConfig>,
+    csv_http: &crate::csv_http::CsvHttpState,
 ) -> std::result::Result<String, String> {
     let outcome =
         execute_cypher_inner(kg, query, params, policy).map_err(|error| error.to_string())?;
@@ -213,7 +213,7 @@ pub(crate) fn cypher_warning_block(result: &cypher::CypherResult) -> String {
 pub(crate) fn render_cypher_output(
     result: &cypher::CypherResult,
     output_csv: bool,
-    csv_http: Option<&crate::csv_http::CsvHttpConfig>,
+    csv_http: &crate::csv_http::CsvHttpState,
 ) -> Result<String, String> {
     render_cypher_body(result, output_csv, csv_http)
         .map(|body| format!("{body}{}", cypher_warning_block(result)))
@@ -222,11 +222,11 @@ pub(crate) fn render_cypher_output(
 fn render_cypher_body(
     result: &cypher::CypherResult,
     output_csv: bool,
-    csv_http: Option<&crate::csv_http::CsvHttpConfig>,
+    csv_http: &crate::csv_http::CsvHttpState,
 ) -> Result<String, String> {
     if output_csv {
         let csv = result.to_csv();
-        if let Some(cfg) = csv_http {
+        if let Some(cfg) = csv_http.config() {
             match crate::csv_http::write_csv(cfg, &csv) {
                 Ok(name) => {
                     let url = cfg.url_for(&name);
@@ -247,11 +247,11 @@ fn render_cypher_body(
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "csv_http write_csv failed; falling back to inline");
-                    Ok(cap_inline_csv(&csv))
+                    Ok(cap_inline_csv(&csv, csv_http))
                 }
             }
         } else {
-            Ok(cap_inline_csv(&csv))
+            Ok(cap_inline_csv(&csv, csv_http))
         }
     } else {
         Ok(format_cypher_inline(result))
@@ -282,10 +282,16 @@ pub(crate) const INLINE_CSV_ROW_LIMIT: usize = crate::recipe_queries::RECIPE_RES
 /// escape hatch has no way to obtain the rest. `csv_http_server` stays
 /// opt-in — it binds a port and writes files, which no query should be able
 /// to turn on — so the notice names it as an operator action.
-pub(crate) fn cap_inline_csv(csv: &str) -> String {
+pub(crate) fn cap_inline_csv(csv: &str, csv_http: &crate::csv_http::CsvHttpState) -> String {
     let total_rows = count_csv_rows(csv);
     if total_rows <= INLINE_CSV_ROW_LIMIT {
-        return csv.to_string();
+        return match inline_csv_reason(csv_http) {
+            // A body that fits carries no truncation notice, so this is the
+            // only place a degraded server can tell the agent that the fetch
+            // URL its manifest promised is not coming.
+            Some(reason) => format!("{csv}\nFORMAT CSV: {reason}\n"),
+            None => csv.to_string(),
+        };
     }
     // Header plus the first N data rows, re-joined with the newline
     // terminator `lines()` strips.
@@ -294,14 +300,43 @@ pub(crate) fn cap_inline_csv(csv: &str) -> String {
         out.push_str(line);
         out.push('\n');
     }
+    let escape_hatch = match inline_csv_reason(csv_http) {
+        Some(reason) => format!(". {reason}"),
+        None => ", or ask the operator to enable extensions.csv_http_server in the server \
+                 manifest, which returns the complete CSV as a fetch URL instead of inline text."
+            .to_string(),
+    };
     out.push_str(&format!(
         "\nFORMAT CSV truncated: showing the first {INLINE_CSV_ROW_LIMIT} of {total_rows} row(s) \
-         ({} bytes in full). Narrow the query (WHERE / LIMIT / SKIP / aggregate) to fit, or ask \
-         the operator to enable extensions.csv_http_server in the server manifest, which returns \
-         the complete CSV as a fetch URL instead of inline text.\n",
+         ({} bytes in full). Narrow the query (WHERE / LIMIT / SKIP / aggregate) to fit{escape_hatch}\n",
         csv.len()
     ));
     out
+}
+
+/// Why this `FORMAT CSV` answer is inline when the server was configured to
+/// answer with a fetch URL. `None` is the plain case — no `csv_http_server` in
+/// the manifest, nothing to explain beyond the row cap.
+///
+/// The `Up` arm is reachable only from the write-failure fallback in
+/// [`render_cypher_body`]: a live listener that renders inline did so because
+/// the file could not be written.
+fn inline_csv_reason(csv_http: &crate::csv_http::CsvHttpState) -> Option<String> {
+    use crate::csv_http::CsvHttpState;
+    match csv_http {
+        CsvHttpState::Off => None,
+        CsvHttpState::Failed { reason, .. } => Some(format!(
+            "extensions.csv_http_server is configured on this server but its listener did not \
+             start, so the fetch URL it would have returned is unavailable ({reason}). Ask the \
+             operator to free that port, or to drop the pinned `port:` from the manifest so the \
+             OS assigns a free one."
+        )),
+        CsvHttpState::Up(_) => Some(
+            "extensions.csv_http_server is running on this server but the CSV file could not be \
+             written, so this result is inline."
+                .to_string(),
+        ),
+    }
 }
 
 /// Render a CypherResult as an inline 15-row preview (header + repr per

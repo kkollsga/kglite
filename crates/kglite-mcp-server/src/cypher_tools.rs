@@ -41,15 +41,15 @@ pub type CypherRunner =
 
 /// Build a runner backed by the given `GraphState`. The runner forwards
 /// to [`GraphState::run_cypher_template`] which calls into the pure-Rust
-/// kglite Cypher pipeline (no PyO3 boundary). When `csv_http` is set,
+/// kglite Cypher pipeline (no PyO3 boundary). When `csv_http` is up,
 /// `FORMAT CSV` results from the template are routed through the
 /// CSV-over-HTTP server (URL return) instead of inlined.
 pub fn make_runner(
     state: GraphState,
-    csv_http: Option<Arc<crate::csv_http::CsvHttpConfig>>,
+    csv_http: Arc<crate::csv_http::CsvHttpState>,
 ) -> CypherRunner {
     Arc::new(move |template: &str, args: &Map<String, Value>| {
-        state.run_cypher_template(template, args, csv_http.as_deref())
+        state.run_cypher_template(template, args, &csv_http)
     })
 }
 
@@ -157,7 +157,7 @@ mod tests {
         state
             .build_workspace_graph(workspace.path(), None)
             .expect("install initial workspace graph");
-        let runner = make_runner(state.clone(), None);
+        let runner = make_runner(state.clone(), Arc::default());
 
         state.tag_workspace_graph_dirty(&[workspace.path().join("changed.rs")]);
         let output = runner(
@@ -202,7 +202,7 @@ mod tests {
             )
             .expect("active graph");
         let mut server = McpServer::new(Default::default());
-        register_cypher_tools(&mut server, &manifest, make_runner(state, None))
+        register_cypher_tools(&mut server, &manifest, make_runner(state, Arc::default()))
             .expect("register manifest tools");
 
         let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);

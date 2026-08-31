@@ -556,8 +556,7 @@ extensions:                           # kglite-specific addons (see matrix below
     library: sentence-transformers    # or fastembed (py) / fastembed-rs (cargo)
     model: BAAI/bge-m3
   csv_http_server:
-    port: 8765
-    dir: temp/
+    dir: temp/                        # port omitted -> OS-assigned. See below.
 tools:
   - name: ...                         # See sections above
 ```
@@ -1180,25 +1179,41 @@ exports produced by `cypher_query ... FORMAT CSV`.
 ```yaml
 extensions:
   csv_http_server:
-    port: 8765                      # optional; default 8765
     dir: temp/                      # optional; default temp/ (relative to manifest)
     cors_origin: "*"                # optional; default "*"
+    # port:                         # optional; omit for an OS-assigned port
 ```
 
 Also accepts shorthand:
 
 ```yaml
 extensions:
-  csv_http_server: true             # defaults — port 8765, dir temp/
+  csv_http_server: true             # defaults — OS-assigned port, dir temp/
   # or
   csv_http_server: false            # explicitly disabled (same as absent)
 ```
 
 | Field | Type | Default | Constraint |
 |---|---|---|---|
-| `port` | int | 8765 | `0 ≤ port ≤ 65535`. |
+| `port` | int | `0` (OS-assigned) | `0 ≤ port ≤ 65535`. |
 | `dir` | string | `temp` | Path; resolved against the manifest's parent directory. |
 | `cors_origin` | string | `"*"` | Sent in `Access-Control-Allow-Origin`. Use a specific origin for tighter security. |
+
+**Leave `port` out unless something outside the server needs the
+number.** One machine commonly runs several MCP clients (Claude
+Desktop, two Claude Code frontends, Codex) against the *same* manifest
+by absolute path, so a pinned port is claimed by whichever server
+boots first and refused to every other. With `port` omitted the kernel
+hands each one a free port; the server reports what it got in its
+stderr boot summary (`csv_http: http://127.0.0.1:54321`) and builds
+every `FORMAT CSV` URL from it.
+
+A listener that cannot start — pinned port already taken, `dir` not
+creatable — logs a warning, disables the CSV extension, and lets the
+server carry on serving; the boot summary then reads
+`csv_http: disabled (<reason>)` and `FORMAT CSV` answers come back
+inline, naming the failure. A *malformed* `csv_http_server:` value is
+a manifest syntax error and still fails the boot.
 
 Only GETs of flat filenames inside `dir` are served. No directory
 listings, no write surface from the HTTP layer (writes only come

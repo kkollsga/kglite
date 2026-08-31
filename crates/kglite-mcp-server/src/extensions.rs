@@ -106,7 +106,7 @@ impl DomainGraphState {
         // its own tool prose calls for. KGLite's own routes take the fallible
         // path and flip `isError` instead.
         self.inner
-            .run_cypher_template(query, params, None)
+            .run_cypher_template(query, params, &csv_http::CsvHttpState::Off)
             .unwrap_or_else(|error| error)
     }
 }
@@ -226,7 +226,7 @@ pub(crate) fn register_extension_tools(
     server: &mut McpServer,
     graph_state: &GraphState,
     manifest: Option<&Manifest>,
-    csv_http: &Option<Arc<csv_http::CsvHttpConfig>>,
+    csv_http: &Arc<csv_http::CsvHttpState>,
     recipe_catalog: Arc<recipe_queries::RecipeCatalog>,
     domain_tools: Option<Box<DomainToolRegistrar>>,
 ) -> Result<()> {

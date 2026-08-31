@@ -326,7 +326,7 @@ mod bundled_override_tests {
             &mut server,
             &GraphState::default(),
             Some(&manifest),
-            &None,
+            &std::sync::Arc::default(),
             recipe_catalog(),
             None,
         )
@@ -364,7 +364,7 @@ mod bundled_override_tests {
             &mut server,
             &GraphState::default(),
             None,
-            &None,
+            &std::sync::Arc::default(),
             recipe_catalog(),
             Some(domain_tools),
         )

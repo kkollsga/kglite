@@ -67,6 +67,7 @@ pub(crate) fn print_boot_summary(
     manifest: Option<&Manifest>,
     graph_state: &GraphState,
     env_file_loaded: Option<&std::path::Path>,
+    csv_http: &crate::csv_http::CsvHttpState,
 ) {
     let label = match mode {
         Mode::Graph { path } => format!("graph [{}]", path.display()),
@@ -91,6 +92,16 @@ pub(crate) fn print_boot_summary(
     }
     if let Some((nodes, edges)) = graph_state.schema() {
         parts.push(format!("graph: {nodes} nodes, {edges} edges"));
+    }
+    // A configured-but-dead CSV listener is the one boot outcome an operator
+    // cannot see anywhere else: the server serves normally and only a
+    // `FORMAT CSV` query notices. Named here, with the port when it is up —
+    // which, with the default OS-assigned port, is the only place the number
+    // is written down.
+    if let Some(reason) = csv_http.failure() {
+        parts.push(format!("csv_http: disabled ({reason})"));
+    } else if let Some(cfg) = csv_http.config() {
+        parts.push(format!("csv_http: {}", cfg.url_base()));
     }
     eprintln!("kglite-mcp-server: {}", parts.join("; "));
 }

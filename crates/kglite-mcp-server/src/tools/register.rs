@@ -194,7 +194,7 @@ pub fn register(
     state: GraphState,
     builtins: Builtins,
     overview_decorations: OverviewDecorations,
-    csv_http: Option<Arc<crate::csv_http::CsvHttpConfig>>,
+    csv_http: Arc<crate::csv_http::CsvHttpState>,
 ) {
     let s = state.clone();
     let csv = csv_http.clone();
@@ -205,7 +205,12 @@ pub fn register(
     // structure, navigate) so lazy-tool-discovery clients (Codex / code_mode)
     // surface cypher_query on their first broad tool search instead of falling
     // back to grep. (mcp-servers inbox 2026-07-01.)
-    let cypher_desc: &'static str = match (csv.is_some(), writable) {
+    // Matched on `config().is_some()` — "a fetch URL is actually available",
+    // not "the operator asked for one". A configured-but-failed listener reads
+    // as absent here; the failure reason reaches the agent on the result
+    // itself (`inline_csv_reason`), which a description loaded once at boot
+    // could not do.
+    let cypher_desc: &'static str = match (csv.config().is_some(), writable) {
         (_, true) => {
             "Query, explore, and understand the active knowledge graph with Cypher, and \
              modify it — reads AND writes (CREATE/SET/DELETE/MERGE) are accepted; this is a \
@@ -272,7 +277,7 @@ pub fn register(
                 let params = params_from_json(args.params.as_ref());
                 let body = s
                     .with_active_mut(|active| {
-                        run_cypher_write(active, &args.query, params, authz, policy, csv.as_deref())
+                        run_cypher_write(active, &args.query, params, authz, policy, &csv)
                             .map_err(|e| cypher_tool_error(&e))
                     })
                     .unwrap_or_else(|| Err(NO_GRAPH.to_string()));
@@ -289,9 +294,7 @@ pub fn register(
                 let policy = s.exec_policy();
                 let params = params_from_json(args.params.as_ref());
                 let body = s
-                    .with_active(|g| {
-                        run_cypher_tool(g, &args.query, params, policy, csv.as_deref())
-                    })
+                    .with_active(|g| run_cypher_tool(g, &args.query, params, policy, &csv))
                     .unwrap_or_else(|| Err(NO_GRAPH.to_string()));
                 map_body(body, |body| s.with_rebuild_warning(body))
             },

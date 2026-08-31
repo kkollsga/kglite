@@ -52,7 +52,7 @@ pub(crate) fn run_cypher_tool(
     query: &str,
     params: HashMap<String, kglite::api::Value>,
     policy: ExecPolicy<'_>,
-    csv_http: Option<&crate::csv_http::CsvHttpConfig>,
+    csv_http: &crate::csv_http::CsvHttpState,
 ) -> Result<String, String> {
     match run_cypher_inner(&graph.kg, query, params, policy, csv_http) {
         // Compact identity footer so a query result self-identifies its
@@ -76,7 +76,7 @@ pub(crate) fn run_cypher_write(
     params: HashMap<String, kglite::api::Value>,
     authz: WriteAuthz<'_>,
     policy: ExecPolicy<'_>,
-    csv_http: Option<&crate::csv_http::CsvHttpConfig>,
+    csv_http: &crate::csv_http::CsvHttpState,
 ) -> Result<String, String> {
     let (pre_parsed, is_mutation) =
         kglite::api::cypher::parse_with_mutation_check(query).map_err(|e| e.to_string())?;

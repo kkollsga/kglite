@@ -678,7 +678,7 @@ fn text_score_result(state: &GraphState) -> Result<String, String> {
                 "MATCH (d:Doc) RETURN text_score(d, 'body', 'hello') AS s",
                 std::collections::HashMap::new(),
                 ExecPolicy::default(),
-                None,
+                CSV_OFF,
             )
         })
         .expect("a graph must be active")

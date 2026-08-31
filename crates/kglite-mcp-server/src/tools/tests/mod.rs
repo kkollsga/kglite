@@ -20,6 +20,10 @@ mod rebuild;
 mod supersession;
 mod workspace_api;
 
+/// The `csv_http_server`-absent state — what every test that is not about the
+/// CSV extension passes for it.
+const CSV_OFF: &crate::csv_http::CsvHttpState = &crate::csv_http::CsvHttpState::Off;
+
 fn catalog_summary() -> CatalogSummary {
     CatalogSummary {
         recipe_count: 2,
@@ -207,6 +211,6 @@ fn write_pinned(
         Default::default(),
         authz,
         ExecPolicy::default(),
-        None,
+        CSV_OFF,
     )
 }

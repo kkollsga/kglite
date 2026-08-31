@@ -37,7 +37,7 @@ fn kglite_server(state: GraphState, builtins: Builtins) -> McpServer {
         state,
         builtins,
         OverviewDecorations::default(),
-        None,
+        Arc::default(),
     );
     server
 }
@@ -112,7 +112,7 @@ fn assert_success(result: &CallToolResult) -> String {
 async fn cypher_syntax_error_is_an_error_envelope_carrying_the_engine_text() {
     let state = state_with_active(active_with_vessel());
     let expected = state
-        .run_cypher_template("RETURN @", &serde_json::Map::new(), None)
+        .run_cypher_template("RETURN @", &serde_json::Map::new(), CSV_OFF)
         .expect_err("invalid syntax must fail at the seam");
     assert!(
         expected.starts_with("Cypher syntax error"),
@@ -135,7 +135,7 @@ async fn cypher_syntax_error_is_an_error_envelope_carrying_the_engine_text() {
 async fn unknown_procedure_is_an_error_envelope() {
     let state = state_with_active(active_with_vessel());
     let expected = state
-        .run_cypher_template("CALL db.notAProcedure()", &serde_json::Map::new(), None)
+        .run_cypher_template("CALL db.notAProcedure()", &serde_json::Map::new(), CSV_OFF)
         .expect_err("unknown procedure must fail at the seam");
 
     let result = call(
@@ -360,7 +360,7 @@ async fn a_failed_bare_overview_keeps_its_discovery_decorations() {
             prefix: Some("operator prefix".to_string()),
             catalog: Some(catalog_summary()),
         },
-        None,
+        Arc::default(),
     );
 
     let result = call(server, "graph_overview", json!({})).await;

@@ -50,7 +50,7 @@ fn structured_cypher_execution_preserves_outcome_before_legacy_rendering() {
 
     assert_eq!(
         state
-            .run_cypher_template(query, &serde_json::Map::new(), None)
+            .run_cypher_template(query, &serde_json::Map::new(), CSV_OFF)
             .expect("rendered rows"),
         "16 row(s) (showing first 15):\n\
          n\n\
@@ -81,7 +81,7 @@ fn legacy_cypher_template_golden_outputs_survive_structured_seam() {
 
     assert_eq!(
         state
-            .run_cypher_template("RETURN $label AS label, $count AS count", &args, None,)
+            .run_cypher_template("RETURN $label AS label, $count AS count", &args, CSV_OFF,)
             .expect("rendered rows"),
         "1 row(s):\nlabel\tcount\n\"Ada\"\t7\n"
     );
@@ -90,7 +90,7 @@ fn legacy_cypher_template_golden_outputs_survive_structured_seam() {
             .run_cypher_template(
                 "MATCH (n:Missing) RETURN n.id AS id",
                 &serde_json::Map::new(),
-                None,
+                CSV_OFF,
             )
             .expect("an empty result is an answer, not a failure"),
         "No results."
@@ -100,20 +100,24 @@ fn legacy_cypher_template_golden_outputs_survive_structured_seam() {
             .run_cypher_template(
                 "RETURN 'Ada' AS name, 7 AS count FORMAT CSV",
                 &serde_json::Map::new(),
-                None,
+                CSV_OFF,
             )
             .expect("rendered CSV"),
         "name,count\nAda,7\n"
     );
     assert_eq!(
         state
-            .run_cypher_template("CREATE (:Forbidden {id: 1})", &serde_json::Map::new(), None,)
+            .run_cypher_template(
+                "CREATE (:Forbidden {id: 1})",
+                &serde_json::Map::new(),
+                CSV_OFF,
+            )
             .expect_err("the read seam refuses mutations"),
         format!("Cypher error: {MUTATION_NOT_ALLOWED}")
     );
     assert_eq!(
         GraphState::default()
-            .run_cypher_template("RETURN 1 AS n", &serde_json::Map::new(), None,)
+            .run_cypher_template("RETURN 1 AS n", &serde_json::Map::new(), CSV_OFF,)
             .expect_err("no graph is a failure, not an empty answer"),
         NO_GRAPH
     );
@@ -130,7 +134,7 @@ fn structured_cypher_execution_retains_engine_error_taxonomy() {
     assert_eq!(error.code(), kglite::api::KgErrorCode::CypherSyntax);
     assert_eq!(
         state
-            .run_cypher_template("RETURN @", &serde_json::Map::new(), None)
+            .run_cypher_template("RETURN @", &serde_json::Map::new(), CSV_OFF)
             .expect_err("invalid syntax is a failure"),
         error.to_string(),
         "legacy syntax text remains the engine's exact rendered message"
@@ -187,7 +191,7 @@ fn structured_cypher_execution_preserves_value_codecs() {
             .run_cypher_template(
                 "MATCH (n:Entity {id: 'Q42'}) RETURN n.id AS id",
                 &serde_json::Map::new(),
-                None,
+                CSV_OFF,
             )
             .expect("rendered rows"),
         "1 row(s):\nid\n\"Q42\"\n"
@@ -340,7 +344,7 @@ fn a_typod_label_reaches_the_tool_response() {
         .run_cypher_template(
             "MATCH (v:vessel) RETURN count(v) AS c",
             &serde_json::Map::new(),
-            None,
+            CSV_OFF,
         )
         .expect("the query answers; only its warnings differ");
     assert!(body.contains("warnings:"), "{body}");
@@ -357,7 +361,7 @@ fn a_clean_query_gets_no_warning_block() {
         .run_cypher_template(
             "MATCH (v:Vessel) RETURN count(v) AS c",
             &serde_json::Map::new(),
-            None,
+            CSV_OFF,
         )
         .expect("the query answers; only its warnings differ");
     assert!(!body.contains("warnings:"), "{body}");
@@ -372,7 +376,7 @@ fn the_warning_block_survives_csv_rendering() {
         .run_cypher_template(
             "MATCH (v:vessel) RETURN v.id AS id FORMAT CSV",
             &serde_json::Map::new(),
-            None,
+            CSV_OFF,
         )
         .expect("the query answers; only its warnings differ");
     assert!(body.contains("unknown node label 'vessel'"), "{body}");
@@ -416,7 +420,7 @@ fn the_read_tool_binds_its_params_argument() {
         "MATCH (v:Vessel {id: $id}) RETURN v.id AS id",
         params,
         ExecPolicy::default(),
-        None,
+        CSV_OFF,
     )
     .expect("bound query answers");
     assert!(body.contains("1 row"), "{body}");
@@ -427,7 +431,7 @@ fn the_read_tool_binds_its_params_argument() {
         "MATCH (v:Vessel) WHERE v.id = $id RETURN v.id AS id",
         params,
         ExecPolicy::default(),
-        None,
+        CSV_OFF,
     )
     .expect("bound query answers");
     assert!(body.contains("1 row"), "{body}");
@@ -450,7 +454,7 @@ fn the_write_tool_binds_its_params_argument_on_both_branches() {
         params_from_json(Some(&json_params(&[("id", serde_json::json!(1))]))),
         authz,
         ExecPolicy::default(),
-        None,
+        CSV_OFF,
     )
     .expect("read branch");
     assert!(read.contains("1 row"), "{read}");
@@ -464,7 +468,7 @@ fn the_write_tool_binds_its_params_argument_on_both_branches() {
         ]))),
         authz,
         ExecPolicy::default(),
-        None,
+        CSV_OFF,
     )
     .expect("write branch");
     assert!(written.starts_with("OK: 1 property"), "{written}");
@@ -485,7 +489,7 @@ fn an_unbound_param_reaches_the_tool_response_as_an_error() {
             query,
             Default::default(),
             ExecPolicy::default(),
-            None,
+            CSV_OFF,
         )
         .expect_err("an unbound parameter is a failure, not an empty result");
         assert!(body.contains("Missing parameter: $id"), "{query}: {body}");
@@ -553,7 +557,7 @@ fn an_oversized_inline_csv_is_capped_and_says_so() {
         .run_cypher_template(
             &format!("UNWIND range(1, {total}) AS n RETURN n FORMAT CSV"),
             &serde_json::Map::new(),
-            None,
+            CSV_OFF,
         )
         .expect("the query answers; only its warnings differ");
 
@@ -597,7 +601,7 @@ fn a_csv_within_the_cap_is_untouched() {
         .run_cypher_template(
             &format!("UNWIND range(1, {INLINE_CSV_ROW_LIMIT}) AS n RETURN n FORMAT CSV"),
             &serde_json::Map::new(),
-            None,
+            CSV_OFF,
         )
         .expect("the query answers; only its warnings differ");
     assert!(!body.contains("FORMAT CSV truncated"), "{body}");
@@ -613,18 +617,18 @@ fn the_csv_http_write_failure_fallback_is_capped_too() {
     let file = tempfile::NamedTempFile::new().expect("temp file");
     // A directory path *under a regular file* — `create_dir_all` cannot make
     // it, so `write_csv` returns Err on every call.
-    let cfg = crate::csv_http::CsvHttpConfig {
-        port: 0,
+    let up = crate::csv_http::CsvHttpState::Up(Arc::new(crate::csv_http::CsvHttpConfig {
+        port: 1,
         dir: file.path().join("unmakeable"),
         cors_origin: None,
-    };
+    }));
     let state = state_with_active(fresh_active());
     let total = INLINE_CSV_ROW_LIMIT + 5;
     let body = state
         .run_cypher_template(
             &format!("UNWIND range(1, {total}) AS n RETURN n FORMAT CSV"),
             &serde_json::Map::new(),
-            Some(&cfg),
+            &up,
         )
         .expect("the query answers; only its warnings differ");
     assert!(
@@ -636,6 +640,46 @@ fn the_csv_http_write_failure_fallback_is_capped_too() {
         body.contains(&format!("first {INLINE_CSV_ROW_LIMIT} of {total} row(s)")),
         "{body}"
     );
+}
+
+/// A server whose `csv_http_server` was configured but could not bind must
+/// say so on every `FORMAT CSV` answer. Reading "ask the operator to enable
+/// extensions.csv_http_server" on a server where it *is* enabled sends the
+/// agent (and the operator it reports to) after the wrong thing entirely.
+#[test]
+fn a_failed_csv_http_listener_says_so_on_every_format_csv_answer() {
+    const REASON: &str =
+        "csv_http_server: bind 127.0.0.1:8765 failed: Address already in use (os error 48)";
+    let failed = crate::csv_http::CsvHttpState::Failed {
+        dir: std::path::PathBuf::from("/tmp/kglite-csv"),
+        reason: REASON.to_string(),
+    };
+    let state = state_with_active(fresh_active());
+
+    // Both sides of the row cap: the small answer carries no truncation
+    // notice, so it needs its own line or the failure is invisible there.
+    for rows in [3, INLINE_CSV_ROW_LIMIT + 5] {
+        let body = state
+            .run_cypher_template(
+                &format!("UNWIND range(1, {rows}) AS n RETURN n FORMAT CSV"),
+                &serde_json::Map::new(),
+                &failed,
+            )
+            .expect("the query answers; only its delivery is degraded");
+        assert!(
+            body.contains("did not start"),
+            "{rows}-row body must name the dead listener: {body}"
+        );
+        assert!(
+            body.contains(REASON),
+            "{rows}-row body must carry why: {body}"
+        );
+        assert!(
+            !body.contains("ask the operator to enable extensions.csv_http_server"),
+            "the never-configured wording must not appear on a configured server: {body}"
+        );
+        assert!(!body.contains("Fetch with: curl"), "{body}");
+    }
 }
 
 /// The inline cap and the structured recipe route quote the same number, so

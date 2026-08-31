@@ -21,10 +21,12 @@ import json
 import os
 from pathlib import Path
 import shutil
+import socket
 import subprocess
 import threading
 import time
 from typing import Any, Optional
+import urllib.request
 
 import pandas as pd
 import pytest
@@ -2258,3 +2260,79 @@ class TestManifestOntology:
         reloaded = kglite.load(str(kgl))
         assert reloaded.ontology() is None
         assert reloaded.cypher("MATCH (a:Agent) RETURN count(a) AS c").scalar() == 0
+
+
+def _write_csv_http_manifest(kgl: Path, port: int | None) -> Path:
+    """A sibling manifest enabling `extensions.csv_http_server`, optionally
+    pinning a port. Omitting `port:` is the documented default and the shape
+    the operator's report used."""
+    pin = f"    port: {port}\n" if port is not None else ""
+    manifest = kgl.with_name(f"{kgl.stem}_mcp.yaml")
+    manifest.write_text(
+        f"name: CSV HTTP Smoke\nextensions:\n  csv_http_server:\n{pin}    dir: temp/\n",
+        encoding="utf-8",
+    )
+    return manifest
+
+
+class TestCsvHttpServer:
+    """`extensions.csv_http_server` must survive the multi-client machine the
+    server actually runs on: one manifest, referenced by absolute path from
+    Claude Desktop, two Claude Code frontends and Codex at once."""
+
+    def test_two_servers_share_one_manifest_and_get_different_ports(self, tmp_path: Path):
+        kgl = tmp_path / "demo.kgl"
+        _build_fixture_graph(kgl)
+        _write_csv_http_manifest(kgl, port=None)
+
+        clients = [_spawn(["--graph", str(kgl)]) for _ in range(2)]
+        try:
+            urls = []
+            for client in clients:
+                text = _text_content(
+                    client.call_tool(
+                        "cypher_query",
+                        {"query": "MATCH (p:Person) RETURN p.title AS name ORDER BY name FORMAT CSV"},
+                    )
+                )
+                assert "written to http://127.0.0.1:" in text, text
+                urls.append(text.split("written to ")[1].split()[0])
+            ports = {url.split(":")[2].split("/")[0] for url in urls}
+            assert len(ports) == 2, f"both servers bound the same port: {urls}"
+            for url in urls:
+                assert "Alice" in urllib.request.urlopen(url, timeout=10).read().decode()
+        finally:
+            for client in clients:
+                client.shutdown()
+
+    def test_a_taken_pinned_port_degrades_instead_of_killing_the_server(self, tmp_path: Path):
+        """The reported crash: the bind error propagated out of the boot, so
+        the client saw no `initialize` response at all."""
+        squatter = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        squatter.bind(("127.0.0.1", 0))
+        squatter.listen(1)
+        taken = squatter.getsockname()[1]
+        try:
+            kgl = tmp_path / "demo.kgl"
+            _build_fixture_graph(kgl)
+            _write_csv_http_manifest(kgl, port=taken)
+
+            # `_spawn` performs the handshake — a server that exits at boot
+            # fails here, which is the defect verbatim.
+            client = _spawn(["--graph", str(kgl)])
+            try:
+                assert "cypher_query" in {t["name"] for t in client.list_tools()}
+                text = _text_content(
+                    client.call_tool(
+                        "cypher_query",
+                        {"query": "MATCH (p:Person) RETURN p.title AS name ORDER BY name FORMAT CSV"},
+                    )
+                )
+                assert "Alice" in text, text
+                assert "written to http://" not in text, text
+                assert "did not start" in text, text
+                assert f"127.0.0.1:{taken}" in text, text
+            finally:
+                client.shutdown()
+        finally:
+            squatter.close()

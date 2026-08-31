@@ -285,23 +285,27 @@ fn manifest_base_dir(manifest: Option<&mcp_methods::server::Manifest>) -> PathBu
 /// Start the opt-in `extensions.csv_http_server:` CSV-over-HTTP listener.
 ///
 /// When configured we spawn a tokio task to serve files out of the directory;
-/// the `cypher_query` tool sees the same config and writes `FORMAT CSV` results
+/// the `cypher_query` tool sees the same state and writes `FORMAT CSV` results
 /// to that directory, returning a URL instead of an inline CSV blob.
+///
+/// `Err` is a malformed `csv_http_server` value only — a config-syntax error,
+/// fatal like every other manifest mistake. A well-formed config whose
+/// listener fails to *start* comes back as [`csv_http::CsvHttpState::Failed`]:
+/// the extension is off, the boot continues, and both the summary line and
+/// every `FORMAT CSV` answer say why.
 async fn boot_csv_http(
     manifest: Option<&mcp_methods::server::Manifest>,
     manifest_base: &Path,
-) -> Result<Option<csv_http::CsvHttpConfig>> {
+) -> Result<csv_http::CsvHttpState> {
     let cfg = match manifest.and_then(|m| m.extensions.get("csv_http_server")) {
         Some(raw) => csv_http::CsvHttpConfig::from_manifest_value(raw, manifest_base)
             .context("extensions.csv_http_server parse failed")?,
         None => None,
     };
-    if let Some(cfg) = cfg.as_ref() {
-        csv_http::spawn(cfg.clone())
-            .await
-            .context("csv_http_server failed to bind")?;
-    }
-    Ok(cfg)
+    Ok(match cfg {
+        Some(cfg) => csv_http::spawn(cfg).await,
+        None => csv_http::CsvHttpState::Off,
+    })
 }
 
 /// Whether this deployment can write the graph file it serves — `--writable`
@@ -345,7 +349,7 @@ fn writer_lease_policy(
 fn boot_builtins(
     manifest: Option<&mcp_methods::server::Manifest>,
     cli: &Cli,
-    csv_http_cfg: Option<&csv_http::CsvHttpConfig>,
+    csv_http: &csv_http::CsvHttpState,
     manifest_base: &Path,
     write_scope: Option<Vec<String>>,
 ) -> tools::Builtins {
@@ -366,8 +370,9 @@ fn boot_builtins(
         // directory when configured, so both sides of the CSV pipeline agree
         // on what counts as "the temp dir".
         temp_dir: Some(
-            csv_http_cfg
-                .map(|c| c.dir.clone())
+            csv_http
+                .dir()
+                .map(Path::to_path_buf)
                 .unwrap_or_else(|| manifest_base.join("temp")),
         ),
     }
@@ -379,7 +384,7 @@ fn register_kglite_tools(
     manifest: Option<&mcp_methods::server::Manifest>,
     builtins: tools::Builtins,
     recipe_catalog_summary: Option<crate::recipe_queries::CatalogSummary>,
-    csv_http_arc: Option<Arc<csv_http::CsvHttpConfig>>,
+    csv_http: Arc<csv_http::CsvHttpState>,
     source_roots_provider: Option<mcp_methods::server::source::SourceRootsProvider>,
 ) -> Result<()> {
     tools::register(
@@ -390,7 +395,7 @@ fn register_kglite_tools(
             prefix: manifest.and_then(|manifest| manifest.overview_prefix.clone()),
             catalog: recipe_catalog_summary,
         },
-        csv_http_arc,
+        csv_http,
     );
     code_source::register(server, graph_state.clone(), source_roots_provider.clone())
         .context("read_code_source registration failed")?;
@@ -556,15 +561,14 @@ pub(crate) async fn run_async(
     let source_roots_provider = options.source_roots.clone();
 
     let manifest_base = manifest_base_dir(manifest.as_ref());
-    let csv_http_cfg = boot_csv_http(manifest.as_ref(), &manifest_base).await?;
+    let csv_http = Arc::new(boot_csv_http(manifest.as_ref(), &manifest_base).await?);
     let builtins = boot_builtins(
         manifest.as_ref(),
         &cli,
-        csv_http_cfg.as_ref(),
+        &csv_http,
         &manifest_base,
         write_scope,
     );
-    let csv_http_arc = csv_http_cfg.map(Arc::new);
 
     let mut server = McpServer::new(options);
     if matches!(mode, Mode::LocalWorkspace { .. }) {
@@ -589,7 +593,7 @@ pub(crate) async fn run_async(
         manifest.as_ref(),
         builtins,
         recipe_catalog_summary,
-        csv_http_arc.clone(),
+        csv_http.clone(),
         source_roots_provider,
     )?;
     if matches!(mode, Mode::Graph { .. }) {
@@ -617,7 +621,7 @@ pub(crate) async fn run_async(
         &mut server,
         &graph_state,
         manifest.as_ref(),
-        &csv_http_arc,
+        &csv_http,
         recipe_catalog,
         domain_tools,
     )?;
@@ -646,6 +650,7 @@ pub(crate) async fn run_async(
         manifest.as_ref(),
         &graph_state,
         env_file_loaded.as_deref(),
+        &csv_http,
     );
 
     let service = server

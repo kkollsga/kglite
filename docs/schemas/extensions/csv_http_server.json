@@ -2,11 +2,11 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://kglite.readthedocs.io/schemas/extensions/csv_http_server.json",
   "title": "extensions.csv_http_server",
-  "description": "Configuration for the localhost HTTP listener that serves FORMAT CSV exports. Accepts boolean shorthand or an explicit mapping. Loopback-only (127.0.0.1).",
+  "description": "Configuration for the localhost HTTP listener that serves FORMAT CSV exports. Accepts boolean shorthand or an explicit mapping. Loopback-only (127.0.0.1). A listener that fails to start disables the extension with a warning; it does not fail the boot.",
   "oneOf": [
     {
       "type": "boolean",
-      "description": "Shorthand. true = enable with defaults (port 8765, dir temp/). false = disabled (same as absent)."
+      "description": "Shorthand. true = enable with defaults (OS-assigned port, dir temp/). false = disabled (same as absent)."
     },
     {
       "type": "object",
@@ -17,8 +17,8 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 65535,
-          "default": 8765,
-          "description": "TCP port for the loopback listener. 0 lets the OS choose."
+          "default": 0,
+          "description": "TCP port for the loopback listener. 0 (the default) lets the OS choose a free port, which is what lets several MCP clients boot the same manifest at once; the chosen port is reported in the boot summary and in every FORMAT CSV URL. Pin a number only when something outside the server must know it in advance."
         },
         "dir": {
           "type": "string",
