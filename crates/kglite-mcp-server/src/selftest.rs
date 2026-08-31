@@ -455,11 +455,13 @@ fn check_recipe_tools(
 
 /// 2b. declared source roots — informational, never a hard failure.
 ///
-/// A `source_root:` that no longer resolves is non-fatal at boot (see
-/// `modes::resolve_declared_source_roots`): the server serves its graph tools
-/// and the source tools report "no active source root" on call. That is
-/// exactly the "quietly half-broken" state this harness exists to surface, so
-/// it gets its own line — yellow, not red, because the graph capability the
+/// A `source_root:` that does not resolve is non-fatal at boot (see
+/// `modes::resolve_declared_source_roots`): since mcp-methods 0.4.7 the
+/// surviving roots are served and only the missing ones are dropped. That is
+/// exactly the "quietly half-broken" state this harness exists to surface —
+/// especially in the partial case, where every tool call still succeeds and
+/// nothing else says the search covered fewer directories than declared. So it
+/// gets its own line — yellow, not red, because the graph capability the
 /// deployment is *for* is intact.
 ///
 /// Only manifests that declare a root produce a line; the far more common "no
@@ -471,20 +473,40 @@ fn check_declared_source_roots(
     let Some(m) = manifest.filter(|m| !m.source_roots.is_empty()) else {
         return;
     };
-    match mcp_methods::server::resolve_source_roots(m) {
-        Ok(roots) => checks.push((
+    let (resolved, unresolved) = mcp_methods::server::resolve_source_roots_lenient(m);
+    if unresolved.is_empty() {
+        checks.push((
             "manifest source roots",
-            Check::Pass(format!("resolved: {}", roots.join(", "))),
-        )),
-        Err(e) => checks.push((
-            "manifest source roots",
-            Check::Skip(format!(
-                "source tools unavailable — {}; graph tools unaffected. Create the directory \
-                 or fix source_root, then restart",
-                e.message
-            )),
-        )),
+            Check::Pass(format!("resolved: {}", resolved.join(", "))),
+        ));
+        return;
     }
+    // Name what is missing AND what survived: with a partial resolve the
+    // source tools answer normally from the survivors, so an operator reading
+    // only "something is missing" cannot tell whether the tools are dead or
+    // merely searching less than they declared.
+    let missing = unresolved
+        .iter()
+        .map(|bad| format!("{:?} → {}", bad.declared, bad.path.display()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let state = if resolved.is_empty() {
+        "source tools unavailable — no declared root resolved".to_string()
+    } else {
+        format!(
+            "source tools serving {} of {} declared roots ({})",
+            resolved.len(),
+            resolved.len() + unresolved.len(),
+            resolved.join(", ")
+        )
+    };
+    checks.push((
+        "manifest source roots",
+        Check::Skip(format!(
+            "{state}; unresolved: {missing}. Graph tools unaffected — create the \
+             directory or fix source_root, then restart"
+        )),
+    ));
 }
 
 /// 3. github tools — informational, never a hard failure. Honest listing:

@@ -311,17 +311,28 @@ source_roots:
   - ../shared/lookups
 ```
 
-A declared root that does not exist is **not** a boot failure. The
-server logs a `WARN`, notes `source tools: unavailable (…)` in its
-boot summary, says so in the agent's `instructions`, and serves
-everything else — the graph tools never read the source root. The
-three source tools stay listed and answer "no active source root"
-until the path is fixed and the server restarted. One missing entry
-degrades the whole `source_roots:` list (resolution is
-all-or-nothing), and in `--graph` mode a failed declaration does
-**not** fall back to the `.kgl`'s parent directory: serving a
-directory the operator never asked for would be a silent wrong
-answer.
+A declared root that does not exist is **not** a boot failure, and
+resolution is **per root**: the server logs a `WARN` for each entry
+that fails, serves the ones that resolved, names the rest in its boot
+summary and in the agent's `instructions`, and answers `initialize`
+normally — the graph tools never read the source root.
+
+- **Some roots missing.** The surviving roots are searched as usual.
+  The missing ones are simply absent from every result, and no
+  per-call message says so, which is why the agent's `instructions`
+  name them.
+- **All roots missing.** The three source tools stay listed and each
+  call answers "no active source root", followed by a line per
+  declared root naming it and the path it was looked for at.
+- **`--graph` mode never falls back.** Even when nothing resolves, the
+  `.kgl`'s parent directory is not auto-bound in its place: serving a
+  directory the operator never asked for would be a silent wrong
+  answer.
+
+Fix the path (or create the directory) and restart to pick the root
+back up. Requires kglite 0.16.18+ / mcp-methods 0.4.7+; earlier
+versions resolved all-or-nothing, so one missing entry cost every
+root.
 
 This auto-registers three tools, all sandboxed to the configured
 roots:
@@ -605,7 +616,7 @@ startup with a non-zero exit code. The recurring ones:
 | Error message | What it means | Fix |
 |---|---|---|
 | `ERROR: <path>: unknown top-level keys: ['foo']` | Typo or unsupported key in manifest. | Compare against the [top-level field list](#top-level-fields). |
-| `WARN … manifest source_root does not resolve …` plus `source tools: unavailable (source root './data' resolves to '/abs/.../data' which is not an existing directory)` in the boot summary | The path is relative-to-yaml; it didn't land on a real directory. **The server still boots and serves its graph tools** — only `read_source` / `grep` / `list_source` are out. | Check the path; create the directory; or use `source_roots:` if you have multiple. Then restart. |
+| `WARN … declared source_root does not resolve …` plus `source tools: unavailable (unresolved: "./data" → /abs/.../data)` — or `source tools: 2 root(s) serving, unresolved: …` — in the boot summary | The path is relative-to-yaml; it didn't land on a real directory. **The server still boots and serves its graph tools**; other declared roots keep serving, and only the named one is dropped. | Check the path; create the directory; or use `source_roots:` if you have multiple. Then restart. |
 | `ERROR: --mcp-config path does not exist: <path>` | Explicit `--mcp-config` value points at a missing file. | Check the path. Sibling auto-detect is `<basename>_mcp.yaml`. |
 | `ERROR: extensions.value_codecs ... is not bijective` | A `map` codec has two keys mapping to the same value, so encode is ambiguous. | Make the `map:` one-to-one. |
 | `ERROR: value_codecs[i].match ... is not a valid regex` | A `regex` codec's `match` doesn't compile. | Fix the regex (anchor it for a full match). |
@@ -997,9 +1008,14 @@ tool needs to register. Most common cases:
 - `read_source` / `grep` / `list_source` answering "no active source
   root" — they are always listed, but no root is bound: no
   `source_root:` in the manifest, no `--source-root` CLI flag and
-  `--graph` parent auto-bind didn't fire, or a declared `source_root:`
-  did not resolve (check the boot summary for `source tools:
-  unavailable`).
+  `--graph` parent auto-bind didn't fire, or *every* declared
+  `source_root:` failed to resolve (check the boot summary for
+  `source tools: unavailable`).
+- `grep` / `read_source` succeeding but missing files you expect — with
+  several `source_roots:`, the ones that resolved serve and the rest are
+  dropped, with no per-call warning. The boot summary
+  (`source tools: N root(s) serving, unresolved: …`) and the agent's
+  `instructions` name the dropped roots.
 - `github_issues` / `github_api` missing — the manifest doesn't set
   `builtins.github: true` (the default), or no `GITHUB_TOKEN` in env.
 - `save_graph` missing — you're not in `--graph` mode OR the
@@ -1034,7 +1050,7 @@ the discriminator for `--graph` / `--workspace` / `--watch` /
 | Manifest key | `--graph` | `--workspace` | `--watch` | `--source-root` | bare (no graph) |
 |---|---|---|---|---|---|
 | `name`, `instructions`, `overview_prefix` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `source_root` / `source_roots` | ✓ (overrides parent-of-`.kgl`; a declared root that doesn't resolve degrades to no source tools rather than falling back to the parent) | — | — | ✓ (canonical) | ✓ |
+| `source_root` / `source_roots` | ✓ (overrides parent-of-`.kgl`; roots are resolved per entry — the ones that exist serve, and a declaration that resolves to nothing still does not fall back to the parent) | — | — | ✓ (canonical) | ✓ |
 | `env_file` | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `workspace.kind: local` + `workspace.root: <dir>` | — | — | — | — | promotes into local-workspace mode |
 | `workspace.watch: true` | — | — | ✓ (auto-rebuild) | — | ✓ when `workspace.kind: local` |

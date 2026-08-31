@@ -73,12 +73,12 @@ pub(crate) fn graph_result_footer(
 /// could not (petekSuite field report 2026-07-02); see [`graph_result_footer`]
 /// for when it declines and leaves the result untouched.
 ///
-/// Then the degraded-source-tools declaration, applied last so it lands after
+/// Then the unresolved-source-root declaration, applied last so it lands after
 /// the discovery steer and any manifest `instructions:`.
 pub(crate) fn apply_result_decorations(
     options: ServerOptions,
     graph_state: &GraphState,
-    source_tools_unavailable: Option<&str>,
+    source_roots: Option<&SourceRootStatus>,
 ) -> ServerOptions {
     let gs = graph_state.clone();
     let options = options.with_result_postprocess(std::sync::Arc::new(
@@ -86,33 +86,47 @@ pub(crate) fn apply_result_decorations(
             graph_result_footer(&gs, tool, args, body)
         },
     ));
-    declare_source_tools_unavailable(options, source_tools_unavailable)
+    declare_unresolved_source_roots(options, source_roots)
 }
 
-/// Declare the degraded source-tool surface in `initialize`'s `instructions`,
-/// so a client sees it at session start rather than inferring it from a failed
-/// call.
+/// Declare unresolved `source_root:` entries in `initialize`'s `instructions`,
+/// so a client sees them at session start rather than inferring them from a
+/// call that quietly searched fewer directories than the operator declared.
 ///
-/// `read_source` / `grep` / `list_source` stay listed in `tools/list` on a
-/// rootless server (mcp-methods registers them unconditionally and answers
-/// "no active source root" per call), and that answer's advice — "Configure
-/// source_root in your manifest" — reads as wrong to an operator whose
-/// manifest *does* configure one. The per-call channel cannot be improved from
-/// here: those handlers return before the `with_result_postprocess` hook runs,
-/// so a result footer would never fire. `instructions` is the one agent-facing
-/// surface this crate owns on that path.
-pub(crate) fn declare_source_tools_unavailable(
+/// Worth keeping even though mcp-methods 0.4.7 names the missing root in the
+/// source tools' own reply, because that reply is only produced when NO root
+/// is active (`no_source_root_message`). In the partial case — two roots
+/// served, one gone — `grep` answers normally from the survivors and never
+/// mentions the third, so this note is the only agent-visible sign that the
+/// search covered less ground than the manifest asked for.
+///
+/// The two cases are worded differently on purpose: "unavailable" (nothing
+/// resolved, every call reports no active source root) versus "serving N of M"
+/// (calls succeed but silently omit the missing roots).
+pub(crate) fn declare_unresolved_source_roots(
     mut options: ServerOptions,
-    detail: Option<&str>,
+    source_roots: Option<&SourceRootStatus>,
 ) -> ServerOptions {
-    let Some(detail) = detail else {
+    let Some(status) = source_roots else {
         return options;
     };
-    let note = format!(
-        "NOTE: source tools (`read_source`, `grep`, `list_source`) are unavailable on this \
-         server — {detail}. They remain listed but every call reports no active source root. \
-         The graph tools are unaffected: use `cypher_query` / `graph_overview`."
-    );
+    let missing = status.describe_unresolved();
+    let note = if status.is_serving() {
+        format!(
+            "NOTE: source tools (`read_source`, `grep`, `list_source`) serve {} of the \
+             declared source roots on this server — these did not resolve and are NOT \
+             searched: {missing}. Results from those directories will be missing without \
+             any per-call warning.",
+            status.resolved_count
+        )
+    } else {
+        format!(
+            "NOTE: source tools (`read_source`, `grep`, `list_source`) are unavailable on \
+             this server — no declared source root resolved: {missing}. They remain listed \
+             but every call reports no active source root. The graph tools are unaffected: \
+             use `cypher_query` / `graph_overview`."
+        )
+    };
     options.instructions = Some(match options.instructions.take() {
         Some(existing) if !existing.trim().is_empty() => format!("{existing}\n\n{note}"),
         _ => note,
@@ -126,7 +140,7 @@ pub(crate) fn print_boot_summary(
     graph_state: &GraphState,
     env_file_loaded: Option<&std::path::Path>,
     csv_http: &crate::csv_http::CsvHttpState,
-    source_tools_unavailable: Option<&str>,
+    source_roots: Option<&SourceRootStatus>,
 ) {
     let label = match mode {
         Mode::Graph { path } => format!("graph [{}]", path.display()),
@@ -162,8 +176,16 @@ pub(crate) fn print_boot_summary(
     } else if let Some(cfg) = csv_http.config() {
         parts.push(format!("csv_http: {}", cfg.url_base()));
     }
-    if let Some(detail) = source_tools_unavailable {
-        parts.push(format!("source tools: unavailable ({detail})"));
+    if let Some(status) = source_roots {
+        let missing = status.describe_unresolved();
+        parts.push(if status.is_serving() {
+            format!(
+                "source tools: {} root(s) serving, unresolved: {missing}",
+                status.resolved_count
+            )
+        } else {
+            format!("source tools: unavailable (unresolved: {missing})")
+        });
     }
     eprintln!("kglite-mcp-server: {}", parts.join("; "));
 }
@@ -179,9 +201,19 @@ mod source_tools_note_tests {
         }
     }
 
+    fn status(resolved_count: usize, missing: &[&str]) -> SourceRootStatus {
+        SourceRootStatus {
+            resolved_count,
+            unresolved: missing
+                .iter()
+                .map(|d| ((*d).to_string(), std::path::PathBuf::from("/abs").join(d)))
+                .collect(),
+        }
+    }
+
     #[test]
-    fn a_healthy_server_says_nothing_about_source_tools() {
-        let out = declare_source_tools_unavailable(with_instructions("manifest text"), None);
+    fn a_healthy_server_says_nothing_about_source_roots() {
+        let out = declare_unresolved_source_roots(with_instructions("manifest text"), None);
         assert_eq!(out.instructions.as_deref(), Some("manifest text"));
     }
 
@@ -189,23 +221,41 @@ mod source_tools_note_tests {
     fn the_note_is_appended_without_dropping_manifest_instructions() {
         // Replacing rather than appending would silently delete an operator's
         // `instructions:` block as a side effect of a missing directory.
-        let out = declare_source_tools_unavailable(
+        let out = declare_unresolved_source_roots(
             with_instructions("manifest text"),
-            Some("source root \"src\" is missing"),
+            Some(&status(0, &["src"])),
         );
         let text = out.instructions.expect("instructions");
         assert!(text.starts_with("manifest text"), "got: {text}");
-        assert!(
-            text.contains("source root \"src\" is missing"),
-            "got: {text}"
-        );
+        assert!(text.contains("/abs/src"), "got: {text}");
     }
 
     #[test]
-    fn the_note_stands_alone_when_there_are_no_instructions() {
-        let out = declare_source_tools_unavailable(ServerOptions::default(), Some("detail"));
-        assert!(out
-            .instructions
-            .is_some_and(|t| t.starts_with("NOTE: source tools")));
+    fn nothing_resolved_says_the_tools_are_unavailable() {
+        let out =
+            declare_unresolved_source_roots(ServerOptions::default(), Some(&status(0, &["src"])));
+        let text = out.instructions.expect("instructions");
+        assert!(
+            text.contains("are unavailable on this server"),
+            "got: {text}"
+        );
+        assert!(text.contains("no active source root"), "got: {text}");
+    }
+
+    /// The partial case is the one the upstream per-call reply cannot cover:
+    /// `grep` answers from the survivors and never mentions the missing root,
+    /// so claiming "every call reports no active source root" here would be a
+    /// false statement to the agent.
+    #[test]
+    fn a_partial_resolve_says_the_search_is_narrower_not_dead() {
+        let out =
+            declare_unresolved_source_roots(ServerOptions::default(), Some(&status(2, &["gone"])));
+        let text = out.instructions.expect("instructions");
+        assert!(text.contains("serve 2 of the"), "got: {text}");
+        assert!(text.contains("/abs/gone"), "got: {text}");
+        assert!(
+            !text.contains("no active source root"),
+            "the partial case must not claim the tools are dead: {text}"
+        );
     }
 }

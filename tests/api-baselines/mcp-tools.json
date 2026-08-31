@@ -1584,7 +1584,7 @@
           "RevsRequest": {
             "anyOf": [
               {
-                "description": "Last `n` **stable** release tags of the repo's dominant tag family,\nordered oldest\u2192newest with `HEAD` appended. Tags are classified\ninto `(prefix, version, is_prerelease)` and grouped by prefix; the\nfamily with the most stable tags wins, so on a repo with several\ntag families (e.g. `apache-arrow-*`, `go/v*`, `r-*`) the release\nline is chosen, not an unrelated package family. Prereleases (rc,\nalpha, beta, dev, pre, preview) and non-version tags (e.g.\n`r-universe-release`) are excluded. See [`Workspace::resolve_revs`]\nfor the full selection + fallback semantics.",
+                "description": "Last `n` **stable** release tags of the repo's dominant tag family,\nordered oldest\u2192newest with `HEAD` appended. Tags are classified\ninto `(prefix, version, is_prerelease)` and grouped by prefix; the\nfamily with the most stable tags wins, so on a repo with several\ntag families (e.g. `apache-arrow-*`, `go/v*`, `r-*`) the release\nline is chosen, not an unrelated package family. Prereleases (rc,\nalpha, beta, dev, pre, preview) and non-version tags (e.g.\n`r-universe-release`) are excluded. See `Workspace::resolve_revs`\nfor the full selection + fallback semantics.",
                 "format": "uint",
                 "minimum": 0,
                 "type": "integer"
@@ -1597,7 +1597,7 @@
                 "type": "array"
               }
             ],
-            "description": "A revisions request carried by the activation tools. `Count(n)`\nresolves to the newest `n` **stable release** tags of the repo's\ndominant tag family (plus `HEAD`); `List(revs)` is an explicit set of\ngit revspecs used verbatim. The untagged deserialization maps a JSON\ninteger to `Count` and a JSON array of strings to `List`, so the tool\narg accepts `int | [str]`. Resolution happens at activate time \u2014 see\n[`Workspace::resolve_revs`]."
+            "description": "A revisions request carried by the activation tools. `Count(n)`\nresolves to the newest `n` **stable release** tags of the repo's\ndominant tag family (plus `HEAD`); `List(revs)` is an explicit set of\ngit revspecs used verbatim. The untagged deserialization maps a JSON\ninteger to `Count` and a JSON array of strings to `List`, so the tool\narg accepts `int | [str]`. Resolution happens at activate time \u2014 see\n`Workspace::resolve_revs`."
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",

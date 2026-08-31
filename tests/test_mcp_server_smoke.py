@@ -433,6 +433,11 @@ class TestGraphMode:
             # instead would be a silent wrong answer.
             grep = _text_content(client.call_tool("grep", {"pattern": "Alice"}))
             assert "no active source root" in grep
+            # mcp-methods 0.4.7 appends the declaration and the path it was
+            # sought at, so the agent is not told to configure a `source_root:`
+            # the operator already configured.
+            assert "did not resolve" in grep
+            assert str(tmp_path / "source") in grep
 
             instructions = client.init_result["result"].get("instructions") or ""
             assert "source tools" in instructions
@@ -440,6 +445,40 @@ class TestGraphMode:
 
             summary = _wait_for_stderr(client, "source tools: unavailable")
             assert str(tmp_path / "source") in summary
+        finally:
+            client.shutdown()
+
+    def test_partially_resolvable_source_roots_serve_the_survivors(self, graph_fixture: Path, tmp_path: Path):
+        """Per-root resolution (mcp-methods 0.4.7): two of three roots exist,
+        so the source tools serve those two and drop only the third.
+
+        The partial case has no per-call channel — `grep` answers normally from
+        the survivors and never mentions the missing root — so the boot summary
+        and the agent's `instructions` are the only places it is named.
+        """
+        (tmp_path / "alpha").mkdir()
+        (tmp_path / "gamma").mkdir()
+        (tmp_path / "alpha" / "hit.txt").write_text("findme alpha\n", encoding="utf-8")
+        manifest = tmp_path / "multi_mcp.yaml"
+        manifest.write_text("name: multi\nsource_roots:\n  - alpha\n  - beta\n  - gamma\n", encoding="utf-8")
+        assert not (tmp_path / "beta").exists()
+
+        client = _spawn(["--graph", str(graph_fixture), "--mcp-config", str(manifest)])
+        try:
+            # The surviving roots really serve: a grep hit proves the binding,
+            # where a bare "no error" would also pass on a server with no roots.
+            grep = _text_content(client.call_tool("grep", {"pattern": "findme"}))
+            assert "no active source root" not in grep
+            assert "hit.txt" in grep
+
+            instructions = client.init_result["result"].get("instructions") or ""
+            assert "serve 2 of the" in instructions
+            assert str(tmp_path / "beta") in instructions
+            assert "no active source root" not in instructions
+
+            summary = _wait_for_stderr(client, "source tools: 2 root(s) serving")
+            assert str(tmp_path / "beta") in summary
+            assert "unavailable" not in summary
         finally:
             client.shutdown()
 
@@ -2207,7 +2246,7 @@ class TestSelftest:
         assert rc == 0, out
         assert "Selftest PASSED" in out
         assert "✓ server initializes" in out
-        assert "– manifest source roots: source tools unavailable" in out
+        assert "– manifest source roots: source tools unavailable — no declared root resolved" in out
         assert str(tmp_path / "source") in out
 
     def test_resolvable_source_root_is_green(self, graph_fixture: Path, tmp_path: Path):
@@ -2221,6 +2260,20 @@ class TestSelftest:
 
         assert rc == 0, out
         assert "✓ manifest source roots: resolved" in out
+
+    def test_partial_source_roots_report_both_halves(self, graph_fixture: Path, tmp_path: Path):
+        """A partial resolve must say what still serves as well as what is
+        gone — "something is missing" alone leaves the operator unable to tell
+        a dead source surface from a narrowed one."""
+        (tmp_path / "alpha").mkdir()
+        manifest = tmp_path / "partial_mcp.yaml"
+        manifest.write_text("name: Partial\nsource_roots:\n  - alpha\n  - beta\n", encoding="utf-8")
+
+        rc, out = _run_selftest(["--graph", str(graph_fixture), "--mcp-config", str(manifest)])
+
+        assert rc == 0, out
+        assert "– manifest source roots: source tools serving 1 of 2 declared roots" in out
+        assert str(tmp_path / "beta") in out
 
     def test_local_workspace_passes(self, tmp_path: Path):
         manifest, _ws = _write_local_workspace_manifest(tmp_path)

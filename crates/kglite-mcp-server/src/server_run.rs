@@ -536,11 +536,10 @@ pub(crate) async fn run_async(
         graph_state.bind_ontology(bound);
     }
 
-    let (options, source_tools_unavailable) =
+    let (options, source_root_status) =
         bind_mode(&mode, &cli, manifest.as_ref(), &graph_state, options)?;
 
-    let options =
-        apply_result_decorations(options, &graph_state, source_tools_unavailable.as_deref());
+    let options = apply_result_decorations(options, &graph_state, source_root_status.as_ref());
 
     // Snapshot the dynamic source-roots provider before `options` moves into
     // the McpServer. `read_code_source` queries it on every call, so
@@ -638,7 +637,7 @@ pub(crate) async fn run_async(
         &graph_state,
         env_file_loaded.as_deref(),
         &csv_http,
-        source_tools_unavailable.as_deref(),
+        source_root_status.as_ref(),
     );
 
     let service = server
