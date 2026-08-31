@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.17] - 2026-08-31
+
 ### Changed
 
 - **Smaller dependency tree for Rust consumers: `geo` is now pulled with

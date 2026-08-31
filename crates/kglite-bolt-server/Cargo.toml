@@ -37,7 +37,7 @@ path = "src/main.rs"
 # the crates.io kglite). The requirement tracks the exact workspace
 # version; `make bump-version VERSION=X.Y.Z` moves it, and `make gate`
 # fails if it drifts.
-kglite = { version = "0.16.16", path = "../kglite", default-features = false }
+kglite = { version = "0.16.17", path = "../kglite", default-features = false }
 
 # Bolt v5.x protocol library. Implements PackStream framing, message
 # dispatch, session state machine, handshake. We implement BoltBackend
