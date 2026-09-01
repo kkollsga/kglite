@@ -517,6 +517,7 @@ impl GraphState {
         // reports on every later response must stop claiming to hold one.
         active.lease_since = None;
         active.source_path = Some(path.to_path_buf());
+        active.arm_freshness_for(path);
         let path_str = path.to_string_lossy().into_owned();
         let overview = compute_schema(active.kg.dir());
         Ok(format!(

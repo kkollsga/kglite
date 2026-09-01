@@ -318,6 +318,8 @@ pub(crate) fn run_save(graph: &mut ActiveGraph) -> Result<String, String> {
     // The lease went back with the publish; the status on every later response
     // must not go on naming a hold that ended here.
     graph.lease_since = None;
+    let path = path.clone();
+    graph.arm_freshness_for(&path);
     // `compute_schema` only needs `&DirGraph` — no second make_mut.
     let overview = compute_schema(graph.kg.dir());
     Ok(format!(

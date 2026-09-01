@@ -362,3 +362,66 @@ fn freshness_is_armed_only_for_an_atomically_republished_graph() {
         "a producer-backed graph is not stat-refreshed"
     );
 }
+
+/// A graph this server *created* has no file to stat at the open, but it has
+/// one from its first save onwards — and a peer can rewrite that file like any
+/// other. Freshness is armed by the publish, not only by the open.
+#[test]
+fn a_created_graph_is_refreshed_once_it_has_been_published() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("created.kgl");
+    let state = GraphState::new(None);
+    state
+        .create_in_mode(&path, StorageMode::Memory)
+        .expect("create the graph");
+    assert_eq!(
+        state.with_active(|active| active.freshness_path.clone()),
+        Some(None),
+        "nothing to stat before the first save"
+    );
+    state.save_as(&path).expect("first publish");
+    assert_eq!(
+        state.with_active(|active| active.freshness_path.clone()),
+        Some(Some(path.clone())),
+        "the publish is what puts a file behind this graph"
+    );
+    let before = generation(&state);
+    seed_kgl(&path, 3);
+    state.ensure_graph_fresh();
+    assert_eq!(
+        generation(&state),
+        before + 1,
+        "a peer's rewrite must be picked up"
+    );
+    assert_eq!(nodes(&state), 3);
+}
+
+/// `save_graph_as` moves the graph to a new file; freshness must move with it.
+/// Left pointing at the old path, a peer rewriting *that* file would replace
+/// the agent's just-saved graph with the old file's contents.
+#[test]
+fn save_as_moves_freshness_to_the_new_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let old = tmp.path().join("old.kgl");
+    let new = tmp.path().join("new.kgl");
+    seed_kgl(&old, 1);
+    let state = serving(&old);
+    state.save_as(&new).expect("save under a new name");
+    assert_eq!(
+        state.with_active(|active| active.freshness_path.clone()),
+        Some(Some(new.clone()))
+    );
+    let before = generation(&state);
+    seed_kgl(&old, 5);
+    state.ensure_graph_fresh();
+    assert_eq!(
+        generation(&state),
+        before,
+        "the old file is no longer this graph's file"
+    );
+    assert_eq!(nodes(&state), 1);
+    seed_kgl(&new, 7);
+    state.ensure_graph_fresh();
+    assert_eq!(generation(&state), before + 1, "the new file is");
+    assert_eq!(nodes(&state), 7);
+}
