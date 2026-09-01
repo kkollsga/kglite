@@ -79,7 +79,7 @@ fn open_owned(
         // for a snapshot nothing would ever read.
         false,
     );
-    ownership.adopt_lease(lease, &graph);
+    ownership.adopt_lease(lease, &graph, true);
     Ok((graph, ownership))
 }
 

@@ -136,35 +136,70 @@ pub fn register_graph_mode_tools(server: &mut McpServer, state: GraphState) {
         "reload_graph",
         "Re-read the served graph file from disk, replacing the in-memory graph — use this \
          when the file has been rebuilt by another process and queries are returning stale \
-         results. Takes no arguments; the path is the one this server was started on. On a \
-         write-enabled server any unsaved in-memory changes are discarded (call save_graph \
-         first to keep them). If the re-read fails, the current graph stays active and the \
-         error is returned.",
-        move |_| match state.source_path() {
+         results. The path is the one this server was started on. If this server has unsaved \
+         in-memory changes the reload is refused, because it would discard them: call \
+         save_graph first to keep them, or pass discard_unsaved=true to drop them and serve \
+         the file as it is on disk. If the re-read fails, the current graph stays active and \
+         the error is returned.",
+        move |args| match state.source_path() {
             // `open_or_create(path, None)`: no storage mode is requested, so a
             // reload never re-runs the boot `--storage` conversion — it serves
             // whatever the (possibly newly written) checkpoint records, exactly
             // as `load_graph` does. A load failure returns before the write
             // lock is taken, so the old graph provably stays active.
-            Some(path) => match state.open_or_create(&path, None) {
-                Ok(_) => {
-                    let path = path.display();
-                    let generation = state
-                        .generation()
-                        .map(|g| format!(" Graph generation {g}."))
-                        .unwrap_or_default();
-                    Ok(match state.schema() {
-                        Some((n, e)) => {
-                            format!("Reloaded {path} ({n} nodes, {e} edges).{generation}")
-                        }
-                        None => format!("Reloaded {path}.{generation}"),
-                    })
-                }
-                Err(e) => Err(format!("reload_graph error: {e}")),
+            Some(path) => match reload_disposition(&state, args.discard_unsaved) {
+                Err(refusal) => Err(refusal),
+                Ok(()) => match state.open_or_create(&path, None) {
+                    Ok(_) => {
+                        let path = path.display();
+                        let generation = state
+                            .generation()
+                            .map(|g| format!(" Graph generation {g}."))
+                            .unwrap_or_default();
+                        Ok(match state.schema() {
+                            Some((n, e)) => {
+                                format!("Reloaded {path} ({n} nodes, {e} edges).{generation}")
+                            }
+                            None => format!("Reloaded {path}.{generation}"),
+                        })
+                    }
+                    Err(e) => Err(format!("reload_graph error: {e}")),
+                },
             },
             None => Err(format!("reload_graph error: {NO_GRAPH}")),
         },
     );
+}
+
+/// Settle what an incoming `reload_graph` does about unsaved changes, before
+/// the re-read that would silently drop them.
+///
+/// `Ok(())` means the re-read may proceed — either nothing was unsaved, or the
+/// caller asked for the discard and it has now happened. The discard is a
+/// snapshot restore rather than a re-read, so it also releases the writer
+/// lease: the peer waiting on it gets the file back even if the reload that
+/// follows fails.
+fn reload_disposition(state: &GraphState, discard_unsaved: bool) -> Result<(), String> {
+    if !state.is_dirty() {
+        return Ok(());
+    }
+    if !discard_unsaved {
+        return Err(refused_while_dirty("reload_graph"));
+    }
+    state.discard_unsaved_changes();
+    Ok(())
+}
+
+/// Refuse a route that would replace the active graph while this server holds
+/// unsaved changes. `load_graph` and `create_graph` grow no flag of their own —
+/// the one spelling for "throw my work away" is
+/// `reload_graph(discard_unsaved=true)`, so an agent cannot reach it by
+/// accident on a route whose purpose is something else.
+fn refuse_swap_while_dirty(state: &GraphState, tool: &str) -> Result<(), String> {
+    if state.is_dirty() {
+        return Err(refused_while_dirty(tool));
+    }
+    Ok(())
 }
 
 /// Extend the write-enabled `cypher_query` description with the operator's
@@ -344,23 +379,29 @@ pub fn register(
         let s = state.clone();
         server.register_typed_tool_fallible::<LoadGraphArgs, _>(
             "load_graph",
-            "Load a .kgl file as the new active graph (replaces the current one — \
-             save_graph first to keep unsaved changes). Write-enabled servers only.",
-            move |args| match s.load_kgl(Path::new(&args.path)) {
-                Ok(()) => Ok(match s.schema() {
-                    Some((n, e)) => format!("Loaded {} ({n} nodes, {e} edges).", args.path),
-                    None => format!("Loaded {}.", args.path),
-                }),
-                Err(e) => Err(format!("load_graph error: {e}")),
+            "Load a .kgl file as the new active graph (replaces the current one). Refused \
+             while this server has unsaved changes — call save_graph first to keep them, or \
+             reload_graph(discard_unsaved=true) to drop them. Write-enabled servers only.",
+            move |args| {
+                refuse_swap_while_dirty(&s, "load_graph")?;
+                match s.load_kgl(Path::new(&args.path)) {
+                    Ok(()) => Ok(match s.schema() {
+                        Some((n, e)) => format!("Loaded {} ({n} nodes, {e} edges).", args.path),
+                        None => format!("Loaded {}.", args.path),
+                    }),
+                    Err(e) => Err(format!("load_graph error: {e}")),
+                }
             },
         );
         let s = state.clone();
         server.register_typed_tool_fallible::<CreateGraphArgs, _>(
             "create_graph",
             "Create a fresh, empty graph bound to a path (its save_graph target) and \
-             make it active. storage = memory (default) | mapped | disk. Write-enabled \
-             servers only.",
+             make it active. storage = memory (default) | mapped | disk. Refused while this \
+             server has unsaved changes — call save_graph first to keep them, or \
+             reload_graph(discard_unsaved=true) to drop them. Write-enabled servers only.",
             move |args| {
+                refuse_swap_while_dirty(&s, "create_graph")?;
                 let mode = args
                     .storage
                     .as_ref()

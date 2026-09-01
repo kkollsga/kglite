@@ -13,11 +13,17 @@ fn lifecycle_create_mutate_save_load() {
     let s = GraphState::default();
     // create empty → mutate via the write path → save_as
     s.create_in_mode(&p, StorageMode::Memory).unwrap();
+    assert!(
+        !s.is_dirty(),
+        "a freshly created graph matches the file it was just written to"
+    );
     let r = s
         .with_active_mut(|a| write(a, "CREATE (:Task {id:'t1', status:'todo'})", None))
         .unwrap();
     assert!(r.is_ok(), "{r:?}");
+    assert!(s.is_dirty(), "an applied mutation is an unsaved change");
     s.save_as(&p).unwrap();
+    assert!(!s.is_dirty(), "a save clears the unsaved-change state");
     drop(s);
     // load into a *fresh* state → the node survived (the 0.12.2 fix path too)
     let s2 = GraphState::default();
@@ -169,16 +175,53 @@ fn an_unrecovered_wal_sidecar_is_refused_rather_than_served() {
     GraphState::default().open_or_create(&p, None).unwrap();
 }
 
+/// Creating a graph *is* a write, so the lease is taken at the open and held
+/// until the first save publishes what was created — the one window where a
+/// half-built graph must not be raced.
 #[test]
-fn path_backed_active_graph_retains_writer_lease() {
+fn a_created_graph_holds_the_writer_lease_until_its_first_save() {
     let tmp = tempfile::tempdir().unwrap();
     let p = tmp.path().join("retained_lease.kgl");
     let state = GraphState::default();
     state.create_in_mode(&p, StorageMode::Memory).unwrap();
     assert_eq!(Arc::strong_count(&state.inner), 1);
     assert!(kglite::api::io::GraphWriterLease::acquire(&p, Duration::ZERO).is_err());
+    state.save_as(&p).unwrap();
+    kglite::api::io::GraphWriterLease::acquire(&p, Duration::ZERO)
+        .expect("the created graph's lease is released once it is published");
     drop(state);
-    kglite::api::io::GraphWriterLease::acquire(&p, Duration::ZERO).unwrap();
+}
+
+/// The inversion this program exists for: *opening* an existing file is not a
+/// write, so it takes no lease. Four MCP clients can serve one `.kgl`; the
+/// lease appears only around a real unsaved change.
+#[test]
+fn an_opened_path_backed_graph_takes_no_lease_until_it_writes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("lazy_lease.kgl");
+    seed_with_nodes(&p, 1);
+
+    let state = GraphState::default();
+    state.open_or_create(&p, None).unwrap();
+    assert!(
+        external_lease_is_available(&p),
+        "an opened graph must not lock the file before it has anything to save"
+    );
+
+    state
+        .with_active_mut(|a| write(a, "CREATE (:Task {id:'t1'})", None))
+        .unwrap()
+        .unwrap();
+    assert!(
+        !external_lease_is_available(&p),
+        "the first unsaved change takes the lease"
+    );
+
+    state.with_active_mut(run_save).unwrap().unwrap();
+    assert!(
+        external_lease_is_available(&p),
+        "publishing gives the lease back — the dirty window is over"
+    );
 }
 
 #[test]
@@ -265,17 +308,19 @@ fn reload_serves_an_externally_rewritten_file() {
         generation_before + 1,
         "a reload installs a new graph and must bump the generation"
     );
-    // Re-opening the path already active reuses the held lease rather than
-    // dropping and re-acquiring it — the path stays owned across the swap.
+    // Nothing was ever mutated here, so no lease was ever taken — and the
+    // reload carries that "no lease" across the swap rather than acquiring
+    // one. A clean reader must leave the file lockable on both sides of a
+    // re-read; that is what lets the external producer republish it again.
     assert!(
         read_lock(&s.inner)
             .as_ref()
-            .is_some_and(|active| active.writer_lease.is_some()),
-        "the writer lease must be carried across a same-path reload"
+            .is_some_and(|active| active.ownership.is_some()),
+        "a write-enabled state keeps its write ownership across a reload"
     );
     assert!(
-        kglite::api::io::GraphWriterLease::acquire(&p, Duration::ZERO).is_err(),
-        "the reloaded graph must still hold the path's writer lease"
+        external_lease_is_available(&p),
+        "a clean reload must not have quietly acquired the path's writer lease"
     );
     // A reload is a graph swap, so it inherits the B2 fix: the boot-bound
     // embedder is re-applied to the fresh handle.
@@ -361,8 +406,8 @@ fn a_read_only_state_leaves_the_served_file_lockable() {
     assert!(
         read_lock(&s.inner)
             .as_ref()
-            .is_some_and(|active| active.writer_lease.is_none()),
-        "a read-only state must not hold a lease on a regular-file graph"
+            .is_some_and(|active| active.ownership.is_none()),
+        "a read-only state must carry no write ownership of a regular-file graph"
     );
     assert!(
         external_lease_is_available(&p),
@@ -371,7 +416,7 @@ fn a_read_only_state_leaves_the_served_file_lockable() {
 }
 
 #[test]
-fn a_write_enabled_state_keeps_the_served_file_locked() {
+fn a_write_enabled_state_locks_the_served_file_only_while_it_is_dirty() {
     let tmp = tempfile::tempdir().unwrap();
     let p = tmp.path().join("write_enabled.kgl");
     seed_with_nodes(&p, 1);
@@ -382,13 +427,233 @@ fn a_write_enabled_state_keeps_the_served_file_locked() {
     s.open_or_create(&p, None).unwrap();
 
     assert!(
-        !external_lease_is_available(&p),
-        "a write-enabled server must keep refusing a second writer"
+        external_lease_is_available(&p),
+        "a write-enabled server that has written nothing must not refuse a peer"
     );
-    drop(s);
+    s.with_active_mut(|a| write(a, "CREATE (:Task {id:'t1'})", None))
+        .unwrap()
+        .unwrap();
+    assert!(
+        !external_lease_is_available(&p),
+        "an unsaved change must refuse a second writer — that is the lost-update window"
+    );
+    s.with_active_mut(run_save).unwrap().unwrap();
     assert!(
         external_lease_is_available(&p),
-        "and must release the path when it goes away"
+        "and the window closes at the save, not at process exit"
+    );
+    drop(s);
+}
+
+/// A write refused by the engine must not leave the lease parked over a graph
+/// nothing landed on. `make_dir_graph_mut` bumps the version *before* the
+/// statement runs, so without the rollback the server would look permanently
+/// dirty — and hold the file — over a mutation that never happened.
+#[test]
+fn a_failed_first_write_gives_the_lease_back() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("failed_first_write.kgl");
+    seed_with_nodes(&p, 1);
+
+    let s = GraphState::default();
+    s.open_or_create(&p, None).unwrap();
+    let scope = vec!["Task".to_string()];
+    let refusal = s
+        .with_active_mut(|a| write(a, "CREATE (:Algorithm {id:'a1'})", Some(&scope)))
+        .unwrap()
+        .expect_err("an out-of-scope write must be refused");
+    assert!(refusal.contains("write scope"), "{refusal}");
+
+    assert!(
+        external_lease_is_available(&p),
+        "a refused write must release the lease it took to attempt the write"
+    );
+    assert!(
+        !s.is_dirty(),
+        "a refused write leaves nothing unsaved, so the server must not report changes"
+    );
+}
+
+/// Two servers on one file: the second one's write is refused by name, and the
+/// refusal tells it what to do — which becomes possible as soon as the first
+/// one saves.
+#[test]
+fn a_second_server_is_refused_by_name_until_the_first_one_saves() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("two_servers.kgl");
+    seed_with_nodes(&p, 1);
+
+    let first = GraphState::default().with_lease_label(Some("Claude Desktop".to_string()));
+    let second = GraphState::default().with_lease_label(Some("Codex".to_string()));
+    first.open_or_create(&p, None).unwrap();
+    second.open_or_create(&p, None).unwrap();
+
+    first
+        .with_active_mut(|a| write(a, "CREATE (:Task {id:'t1'})", None))
+        .unwrap()
+        .unwrap();
+
+    // The label the refusal renders cross-process. Both states live in *this*
+    // process, where `LeaseHolder::describe` deliberately says "this same
+    // process" instead of naming a label — so the label is asserted where it
+    // is produced (the owner record), and the rendered form is pinned by the
+    // cross-process test in `tests/test_mcp_server_smoke.py`.
+    let owner = std::fs::read_to_string(p.with_extension("kgl.lock-owner"))
+        .expect("the holder publishes an owner record");
+    assert!(
+        owner.contains("label=Claude Desktop"),
+        "the holding server must name itself for a peer to read: {owner}"
+    );
+
+    let refusal = second
+        .with_active_mut(|a| write(a, "CREATE (:Task {id:'t2'})", None))
+        .unwrap()
+        .expect_err("a peer holding the lease must refuse the second write");
+    assert!(
+        refusal.contains("only one process may write"),
+        "the refusal identifies the holder: {refusal}"
+    );
+    assert!(
+        refusal.contains("Nothing was changed here"),
+        "the refusal states that no data was lost: {refusal}"
+    );
+    assert!(
+        refusal.contains("reload_graph"),
+        "the refusal names the way out: {refusal}"
+    );
+    // The refused server is still a working reader.
+    assert_eq!(second.schema().unwrap().0, 1);
+
+    first.with_active_mut(run_save).unwrap().unwrap();
+    // The second server was loaded from the pre-save bytes, so its write is
+    // now refused for *staleness* rather than contention — and that refusal
+    // names the reload, not the holder.
+    let stale = second
+        .with_active_mut(|a| write(a, "CREATE (:Task {id:'t2'})", None))
+        .unwrap()
+        .expect_err("a file rewritten since load must not be written over");
+    assert!(stale.contains("changed on disk"), "{stale}");
+    assert!(stale.contains("reload_graph"), "{stale}");
+
+    second.open_or_create(&p, None).unwrap();
+    second
+        .with_active_mut(|a| write(a, "CREATE (:Task {id:'t2'})", None))
+        .unwrap()
+        .expect("after refreshing, the second server writes normally");
+}
+
+/// `save_graph_as` is the escape hatch from a jammed file, so it must not keep
+/// the jam: retargeting releases the source path's lease.
+#[test]
+fn save_as_releases_the_source_files_lease() {
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("source.kgl");
+    let elsewhere = tmp.path().join("elsewhere.kgl");
+    seed_with_nodes(&source, 1);
+
+    let s = GraphState::default();
+    s.open_or_create(&source, None).unwrap();
+    s.with_active_mut(|a| write(a, "CREATE (:Task {id:'t1'})", None))
+        .unwrap()
+        .unwrap();
+    assert!(!external_lease_is_available(&source));
+
+    s.save_as(&elsewhere).unwrap();
+
+    assert!(
+        external_lease_is_available(&source),
+        "the graph is not going back to the source path — its lease must be released"
+    );
+    assert!(
+        external_lease_is_available(&elsewhere),
+        "and the published target's lease is released like any other save"
+    );
+    assert!(!s.is_dirty(), "the work is saved, just somewhere else");
+    // The bytes went to the *new* path, and the source was left exactly as the
+    // peer this manoeuvre exists to avoid would find it.
+    let written = GraphState::default();
+    written.open_or_create(&elsewhere, None).unwrap();
+    assert_eq!(
+        written.schema().unwrap().0,
+        2,
+        "the new path holds the work"
+    );
+    drop(written);
+    let untouched = GraphState::default();
+    untouched.open_or_create(&source, None).unwrap();
+    assert_eq!(
+        untouched.schema().unwrap().0,
+        1,
+        "save_graph_as must not have written the source path as well"
+    );
+}
+
+// ── unsaved changes vs. routes that replace the active graph ────────────────
+
+/// A reload discards whatever is unsaved, so it refuses rather than doing it
+/// silently — and names the flag that says "yes, discard".
+#[test]
+fn a_dirty_state_refuses_a_reload_until_the_discard_is_explicit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("dirty_reload.kgl");
+    seed_with_nodes(&p, 1);
+
+    let s = GraphState::default();
+    s.open_or_create(&p, None).unwrap();
+    s.with_active_mut(|a| write(a, "CREATE (:Task {id:'t1'})", None))
+        .unwrap()
+        .unwrap();
+    assert!(s.is_dirty());
+
+    let refusal = refused_while_dirty("reload_graph");
+    assert!(refusal.contains("discard_unsaved=true"), "{refusal}");
+    assert!(refusal.contains("save_graph"), "{refusal}");
+
+    // The explicit discard restores the file's version of the graph and hands
+    // the lease back — without reading the file, so it works even when the
+    // file cannot be read.
+    assert!(
+        s.discard_unsaved_changes(),
+        "a snapshot was there to restore"
+    );
+    assert!(!s.is_dirty());
+    assert_eq!(
+        s.schema().unwrap().0,
+        1,
+        "the discarded CREATE must be gone from the served graph"
+    );
+    assert!(
+        external_lease_is_available(&p),
+        "discarding releases the lease the discarded change was holding"
+    );
+}
+
+/// The plan-cache trap: `graph_id` survives the rollback, and the cache is
+/// keyed `(graph_id, version)`, so a restored graph must land *above* every
+/// version the discarded lineage reached rather than back at its baseline.
+#[test]
+fn a_discard_lands_above_the_versions_the_discarded_writes_reached() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("discard_version.kgl");
+    seed_with_nodes(&p, 1);
+
+    let s = GraphState::default();
+    s.open_or_create(&p, None).unwrap();
+    let baseline = s.with_kg(|kg| kg.dir().version()).unwrap();
+    for i in 0..3 {
+        s.with_active_mut(|a| write(a, &format!("CREATE (:Task {{id:'t{i}'}})"), None))
+            .unwrap()
+            .unwrap();
+    }
+    let dirty_version = s.with_kg(|kg| kg.dir().version()).unwrap();
+    assert!(dirty_version > baseline);
+
+    s.discard_unsaved_changes();
+
+    assert!(
+        s.with_kg(|kg| kg.dir().version()).unwrap() > dirty_version,
+        "a rollback that re-used a version the discarded lineage cached against \
+         would serve that lineage's plans"
     );
 }
 
@@ -456,8 +721,11 @@ fn write_with_no_return_acknowledges_stats() {
     assert_eq!(
         out,
         format!(
-            "OK: 1 node(s) created. [engine {}]",
-            env!("CARGO_PKG_VERSION")
+            "OK: 1 node(s) created. [engine {}]{}",
+            env!("CARGO_PKG_VERSION"),
+            // The ack self-identifies its graph like every read does: an agent
+            // that mutated the wrong graph has no later call that tells it so.
+            a.identity_footer()
         ),
         "write ACK is a legacy text contract"
     );
@@ -466,8 +734,9 @@ fn write_with_no_return_acknowledges_stats() {
     assert_eq!(
         out,
         format!(
-            "OK: 1 property(ies) set. [engine {}]",
-            env!("CARGO_PKG_VERSION")
+            "OK: 1 property(ies) set. [engine {}]{}",
+            env!("CARGO_PKG_VERSION"),
+            a.identity_footer()
         )
     );
     // A read that matches nothing still says "No results" (distinct signal) —
@@ -644,6 +913,119 @@ fn new_edge_type_via_write_path_registers() {
     )
     .unwrap();
     assert!(out.contains('1'), "expected 1 edge, got: {out}");
+}
+
+// ── manifest ontology: configuration, not an unsaved change ─────────────────
+
+/// `Person` nodes for the ontology to hang a supertype on.
+fn seed_people(path: &std::path::Path, mode: StorageMode) {
+    let s = GraphState::default();
+    s.create_in_mode(path, mode).unwrap();
+    for i in 0..3 {
+        s.with_active_mut(|a| write(a, &format!("CREATE (:Person {{id:'p{i}'}})"), None))
+            .unwrap()
+            .unwrap();
+    }
+    s.save_as(path).unwrap();
+}
+
+/// The manifest ontology the two tests below bind: `Person` is an `Agent`, so
+/// materializing it stamps an `Agent` label on every person.
+fn agent_ontology(materialize: bool) -> BoundOntology {
+    let store = kglite::api::ontology_from_json(
+        r#"{"classes": {"Agent": {"abstract": true}, "Person": {"is_a": "Agent"}}}"#,
+    )
+    .expect("ontology parses");
+    BoundOntology {
+        store: Arc::new(store),
+        materialize,
+    }
+}
+
+/// How many nodes carry the materialized supertype label.
+fn agent_count(state: &GraphState) -> String {
+    state
+        .with_kg(|kg| {
+            run_cypher_inner(
+                kg,
+                "MATCH (a:Agent) RETURN count(a) AS c",
+                std::collections::HashMap::new(),
+                ExecPolicy::default(),
+                CSV_OFF,
+            )
+        })
+        .expect("a graph must be active")
+        .expect("the label query must run")
+}
+
+/// Boot-time materialization is *server configuration*, not an agent's change:
+/// it must not make the server report unsaved work it did not do. And because
+/// a clean graph still publishes, an explicit save is still how that
+/// materialization reaches disk.
+#[test]
+fn a_materializing_server_boots_clean_and_its_clean_save_persists_the_labels() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("materialized.kgl");
+    seed_people(&p, StorageMode::Memory);
+
+    let s = GraphState::default();
+    s.bind_ontology(agent_ontology(true));
+    s.open_or_create(&p, None).unwrap();
+
+    assert!(
+        agent_count(&s).contains('3'),
+        "the boot materialization must have stamped the supertype"
+    );
+    assert!(
+        !s.is_dirty(),
+        "a manifest ontology is configuration — a materializing server must boot clean"
+    );
+    assert!(
+        external_lease_is_available(&p),
+        "and a clean server must not be holding the file"
+    );
+
+    s.with_active_mut(run_save)
+        .unwrap()
+        .expect("a clean graph still publishes");
+    drop(s);
+
+    // A plain reader with no ontology bound sees the stamped labels, so the
+    // save really did carry the materialization to disk.
+    let plain = GraphState::default();
+    plain.open_or_create(&p, None).unwrap();
+    assert!(
+        agent_count(&plain).contains('3'),
+        "save_graph on a clean materializing server must still write the labels"
+    );
+}
+
+/// A mapped-mode graph forces the `Arc::make_mut` inside `apply_bound_embedder`
+/// down its deep-copy path; doing that without re-adopting the writer lineage
+/// left the ontology applied to a graph the state no longer served.
+#[test]
+fn a_mapped_graph_boots_with_a_materialized_ontology() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("mapped_materialized.kgl");
+    seed_people(&p, StorageMode::Mapped);
+
+    let s = GraphState::default();
+    s.bind_ontology(agent_ontology(true));
+    s.open_or_create(&p, None).unwrap();
+
+    assert_eq!(
+        active_mode(&s),
+        "mapped",
+        "the fixture must exercise mapped"
+    );
+    assert!(
+        agent_count(&s).contains('3'),
+        "a mapped graph must serve the boot-materialized labels"
+    );
+    assert!(
+        !s.is_dirty(),
+        "boot materialization is not an unsaved change"
+    );
 }
 
 // ── embedder survival across graph swaps ────────────────────────────────────

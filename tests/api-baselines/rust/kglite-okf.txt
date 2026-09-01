@@ -1572,6 +1572,18 @@ pub fn kglite::api::introspection::mcp_quickstart() -> alloc::string::String
 pub fn kglite::api::introspection::schema_overview_to_json(schema: &kglite::api::introspection::SchemaOverview) -> serde_json::value::Value
 pub fn kglite::api::introspection::write_bug_report(query: &str, result: &str, expected: &str, description: &str, path: core::option::Option<&str>) -> core::result::Result<alloc::string::String, alloc::string::String>
 pub mod kglite::api::io
+pub enum kglite::api::io::BeginWrite
+pub kglite::api::io::BeginWrite::Acquired
+pub kglite::api::io::BeginWrite::Held
+impl core::clone::Clone for kglite::api::io::BeginWrite
+pub fn kglite::api::io::BeginWrite::clone(&self) -> kglite::api::io::BeginWrite
+impl core::cmp::Eq for kglite::api::io::BeginWrite
+impl core::cmp::PartialEq for kglite::api::io::BeginWrite
+pub fn kglite::api::io::BeginWrite::eq(&self, other: &kglite::api::io::BeginWrite) -> bool
+impl core::fmt::Debug for kglite::api::io::BeginWrite
+pub fn kglite::api::io::BeginWrite::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for kglite::api::io::BeginWrite
+impl core::marker::StructuralPartialEq for kglite::api::io::BeginWrite
 pub enum kglite::api::io::EmbeddingExportFilter
 pub kglite::api::io::EmbeddingExportFilter::TypeProperties(std::collections::hash::map::HashMap<alloc::string::String, alloc::vec::Vec<alloc::string::String>>)
 pub kglite::api::io::EmbeddingExportFilter::Types(alloc::vec::Vec<alloc::string::String>)
@@ -1613,7 +1625,28 @@ impl core::fmt::Debug for kglite::api::io::SaveError
 pub fn kglite::api::io::SaveError::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::fmt::Display for kglite::api::io::SaveError
 pub fn kglite::api::io::SaveError::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub enum kglite::api::io::WriteRefusal
+pub kglite::api::io::WriteRefusal::Contended(kglite::api::io::LeaseRefusal)
+pub kglite::api::io::WriteRefusal::Io(core::io::error::Error)
+pub kglite::api::io::WriteRefusal::Stale
+pub kglite::api::io::WriteRefusal::Stale::path: std::path::PathBuf
+impl core::error::Error for kglite::api::io::WriteRefusal
+impl core::fmt::Debug for kglite::api::io::WriteRefusal
+pub fn kglite::api::io::WriteRefusal::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for kglite::api::io::WriteRefusal
+pub fn kglite::api::io::WriteRefusal::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct kglite::api::io::Cancelled
+pub struct kglite::api::io::Discarded
+pub kglite::api::io::Discarded::restored: bool
+impl core::clone::Clone for kglite::api::io::Discarded
+pub fn kglite::api::io::Discarded::clone(&self) -> kglite::api::io::Discarded
+impl core::cmp::Eq for kglite::api::io::Discarded
+impl core::cmp::PartialEq for kglite::api::io::Discarded
+pub fn kglite::api::io::Discarded::eq(&self, other: &kglite::api::io::Discarded) -> bool
+impl core::fmt::Debug for kglite::api::io::Discarded
+pub fn kglite::api::io::Discarded::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for kglite::api::io::Discarded
+impl core::marker::StructuralPartialEq for kglite::api::io::Discarded
 pub struct kglite::api::io::GraphFileIdentity
 impl kglite::api::io::GraphFileIdentity
 pub fn kglite::api::io::GraphFileIdentity::capture(path: &std::path::Path) -> core::io::error::Result<Self>
@@ -1629,6 +1662,7 @@ pub struct kglite::api::io::GraphWriterLease
 impl kglite::api::io::GraphWriterLease
 pub fn kglite::api::io::GraphWriterLease::acquire(graph_path: &std::path::Path, timeout: core::time::Duration) -> core::io::error::Result<Self>
 pub fn kglite::api::io::GraphWriterLease::acquire_ex(graph_path: &std::path::Path, timeout: core::time::Duration) -> core::result::Result<Self, kglite::api::io::LeaseRefusal>
+pub fn kglite::api::io::GraphWriterLease::acquire_labeled(graph_path: &std::path::Path, timeout: core::time::Duration, label: core::option::Option<&str>) -> core::result::Result<Self, kglite::api::io::LeaseRefusal>
 impl core::ops::drop::Drop for kglite::api::io::GraphWriterLease
 pub fn kglite::api::io::GraphWriterLease::drop(&mut self)
 pub struct kglite::api::io::ImportStats
@@ -1637,6 +1671,7 @@ pub kglite::api::io::ImportStats::imported: usize
 pub kglite::api::io::ImportStats::skipped: usize
 pub kglite::api::io::ImportStats::stores: usize
 pub struct kglite::api::io::LeaseHolder
+pub kglite::api::io::LeaseHolder::label: core::option::Option<alloc::string::String>
 pub kglite::api::io::LeaseHolder::pid: core::option::Option<u32>
 pub kglite::api::io::LeaseHolder::since: core::option::Option<alloc::string::String>
 impl kglite::api::io::LeaseHolder
@@ -1729,7 +1764,23 @@ impl core::default::Default for kglite::api::io::SubsetSpec
 pub fn kglite::api::io::SubsetSpec::default() -> kglite::api::io::SubsetSpec
 impl core::fmt::Debug for kglite::api::io::SubsetSpec
 pub fn kglite::api::io::SubsetSpec::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct kglite::api::io::WriteOwnership
+impl kglite::api::io::WriteOwnership
+pub fn kglite::api::io::WriteOwnership::adopt_lease(&mut self, lease: kglite::api::io::GraphWriterLease, graph: &alloc::sync::Arc<kglite::api::DirGraph>, pinned: bool)
+pub fn kglite::api::io::WriteOwnership::begin_write(&mut self, graph: &mut alloc::sync::Arc<kglite::api::DirGraph>) -> core::result::Result<kglite::api::io::BeginWrite, kglite::api::io::WriteRefusal>
+pub fn kglite::api::io::WriteOwnership::discard(&mut self, graph: &mut alloc::sync::Arc<kglite::api::DirGraph>) -> kglite::api::io::Discarded
+pub fn kglite::api::io::WriteOwnership::holds_lease(&self) -> bool
+pub fn kglite::api::io::WriteOwnership::is_dirty(&self, graph: &kglite::api::DirGraph) -> bool
+pub fn kglite::api::io::WriteOwnership::label(&self) -> core::option::Option<&str>
+pub fn kglite::api::io::WriteOwnership::new(path: std::path::PathBuf, identity: kglite::api::io::GraphFileIdentity, graph: &kglite::api::DirGraph, label: core::option::Option<alloc::string::String>, keep_pristine: bool) -> Self
+pub fn kglite::api::io::WriteOwnership::note_version(&mut self, graph: &kglite::api::DirGraph)
+pub fn kglite::api::io::WriteOwnership::path(&self) -> &std::path::Path
+pub fn kglite::api::io::WriteOwnership::publish(&mut self, graph: &mut alloc::sync::Arc<kglite::api::DirGraph>) -> core::result::Result<(), kglite::api::io::WriteRefusal>
+pub fn kglite::api::io::WriteOwnership::resynced(&mut self, identity: kglite::api::io::GraphFileIdentity, graph: &kglite::api::DirGraph)
+pub fn kglite::api::io::WriteOwnership::retarget(&mut self, new_path: std::path::PathBuf, identity: kglite::api::io::GraphFileIdentity)
+pub fn kglite::api::io::WriteOwnership::synced(&self) -> &kglite::api::io::GraphFileIdentity
 pub const kglite::api::io::KGL_FORMAT_VERSION: u32
+pub const kglite::api::io::LAZY_LEASE_ACQUIRE_TIMEOUT: core::time::Duration
 pub const kglite::api::io::MIN_READABLE_WAL_FORMAT_VERSION: u8
 pub const kglite::api::io::WAL_FORMAT_VERSION: u8
 pub trait kglite::api::io::ProgressSink: core::marker::Send + core::marker::Sync
@@ -4057,6 +4108,7 @@ pub fn kglite::api::graphgen(cfg: &kglite::graphgen::GraphGenConfig, out_dir: &s
 pub fn kglite::api::infer_selection_node_type(selection: &kglite::api::CowSelection, dir: &alloc::sync::Arc<kglite::api::DirGraph>) -> core::option::Option<alloc::string::String>
 pub fn kglite::api::is_canonical_node_column(key: &str) -> bool
 pub fn kglite::api::make_dir_graph_mut(arc: &mut alloc::sync::Arc<kglite::api::DirGraph>) -> &mut kglite::api::DirGraph
+pub fn kglite::api::make_dir_graph_mut_preserving_lineage(arc: &mut alloc::sync::Arc<kglite::api::DirGraph>) -> &mut kglite::api::DirGraph
 pub fn kglite::api::ontology_from_json(json: &str) -> core::result::Result<kglite::api::OntologyStore, alloc::string::String>
 pub fn kglite::api::ontology_from_value(doc: &kglite::datatypes::values::Value) -> core::result::Result<kglite::api::OntologyStore, alloc::string::String>
 pub fn kglite::api::parse_property_shape(text: &str) -> core::option::Option<core::result::Result<kglite::api::PropertyShape, alloc::string::String>>

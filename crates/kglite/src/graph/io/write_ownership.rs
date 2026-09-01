@@ -153,15 +153,18 @@ impl WriteOwnership {
     /// graph was even opened.
     ///
     /// This is how a caller keeps an acquisition ordering, or a timeout, that
-    /// the lazy path does not offer: the CLI's `--save` and `--save-on-exit`
-    /// paths take the lease *before* loading, at 30 s, so two of them writing
-    /// the same graph serialize into one after the other instead of the second
-    /// one loading a snapshot the first is about to invalidate. A lease
-    /// adopted this way is the caller's for as long as this value lives —
-    /// [`Self::publish`] does not release it.
-    pub fn adopt_lease(&mut self, lease: GraphWriterLease, graph: &Arc<DirGraph>) {
+    /// the lazy path does not offer: a path that is about to be *created* must
+    /// be locked before the create, and the CLI's `--save` / `--save-on-exit`
+    /// paths lock before loading, at 30 s, so two of them writing the same
+    /// graph serialize instead of the second loading a snapshot the first is
+    /// about to invalidate. `pinned` says who owns the lease's lifetime: `true`
+    /// keeps it across [`Self::publish`] for a caller that exists only to
+    /// complete its writes (the CLI); `false` hands it to the lazy lifecycle,
+    /// released by the first publish or discard (a server that created a file
+    /// and should stop excluding peers once it is on disk).
+    pub fn adopt_lease(&mut self, lease: GraphWriterLease, graph: &Arc<DirGraph>, pinned: bool) {
         self.lease = Some(lease);
-        self.pinned_lease = true;
+        self.pinned_lease = pinned;
         if self.keep_pristine && self.pristine.is_none() {
             self.pristine = Some(Arc::clone(graph));
         }
@@ -263,6 +266,11 @@ impl WriteOwnership {
         self.synced = GraphFileIdentity::capture(&self.path).map_err(WriteRefusal::Io)?;
         self.baseline = graph.version();
         self.note_version(graph);
+        // Dropped only now, so a save that fails still has a memory-only
+        // rollback. It costs the save nothing: the first mutation already
+        // forked the live graph away from this snapshot, so `prepare_save`
+        // sees a unique `Arc` — pinned by the MCP crate's
+        // `save_does_not_deep_copy_the_active_graph`.
         self.pristine = None;
         if !self.pinned_lease {
             self.lease = None;

@@ -258,9 +258,16 @@
     },
     {
       "name": "reload_graph",
-      "description": "Re-read the served graph file from disk, replacing the in-memory graph \u2014 use this when the file has been rebuilt by another process and queries are returning stale results. Takes no arguments; the path is the one this server was started on. On a write-enabled server any unsaved in-memory changes are discarded (call save_graph first to keep them). If the re-read fails, the current graph stays active and the error is returned.",
+      "description": "Re-read the served graph file from disk, replacing the in-memory graph \u2014 use this when the file has been rebuilt by another process and queries are returning stale results. The path is the one this server was started on. If this server has unsaved in-memory changes the reload is refused, because it would discard them: call save_graph first to keep them, or pass discard_unsaved=true to drop them and serve the file as it is on disk. If the re-read fails, the current graph stays active and the error is returned.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "discard_unsaved": {
+            "default": false,
+            "description": "Set `true` to throw away this server's unsaved in-memory changes and\nserve the file as it is on disk. Without it, a reload that would\ndiscard unsaved changes is refused instead \u2014 call `save_graph` first to\nkeep them, or `save_graph_as` to keep them somewhere else. There is no\nmerge: the in-memory version and the file are alternatives.",
+            "type": "boolean"
+          }
+        },
         "title": "ReloadGraphArgs",
         "type": "object"
       }
@@ -269,7 +276,7 @@
   "graph_writable": [
     {
       "name": "create_graph",
-      "description": "Create a fresh, empty graph bound to a path (its save_graph target) and make it active. storage = memory (default) | mapped | disk. Write-enabled servers only.",
+      "description": "Create a fresh, empty graph bound to a path (its save_graph target) and make it active. storage = memory (default) | mapped | disk. Refused while this server has unsaved changes \u2014 call save_graph first to keep them, or reload_graph(discard_unsaved=true) to drop them. Write-enabled servers only.",
       "inputSchema": {
         "$defs": {
           "StorageArg": {
@@ -534,7 +541,7 @@
     },
     {
       "name": "load_graph",
-      "description": "Load a .kgl file as the new active graph (replaces the current one \u2014 save_graph first to keep unsaved changes). Write-enabled servers only.",
+      "description": "Load a .kgl file as the new active graph (replaces the current one). Refused while this server has unsaved changes \u2014 call save_graph first to keep them, or reload_graph(discard_unsaved=true) to drop them. Write-enabled servers only.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -707,9 +714,16 @@
     },
     {
       "name": "reload_graph",
-      "description": "Re-read the served graph file from disk, replacing the in-memory graph \u2014 use this when the file has been rebuilt by another process and queries are returning stale results. Takes no arguments; the path is the one this server was started on. On a write-enabled server any unsaved in-memory changes are discarded (call save_graph first to keep them). If the re-read fails, the current graph stays active and the error is returned.",
+      "description": "Re-read the served graph file from disk, replacing the in-memory graph \u2014 use this when the file has been rebuilt by another process and queries are returning stale results. The path is the one this server was started on. If this server has unsaved in-memory changes the reload is refused, because it would discard them: call save_graph first to keep them, or pass discard_unsaved=true to drop them and serve the file as it is on disk. If the re-read fails, the current graph stays active and the error is returned.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "discard_unsaved": {
+            "default": false,
+            "description": "Set `true` to throw away this server's unsaved in-memory changes and\nserve the file as it is on disk. Without it, a reload that would\ndiscard unsaved changes is refused instead \u2014 call `save_graph` first to\nkeep them, or `save_graph_as` to keep them somewhere else. There is no\nmerge: the in-memory version and the file are alternatives.",
+            "type": "boolean"
+          }
+        },
         "title": "ReloadGraphArgs",
         "type": "object"
       }
@@ -745,7 +759,7 @@
   "graph_writable_scoped": [
     {
       "name": "create_graph",
-      "description": "Create a fresh, empty graph bound to a path (its save_graph target) and make it active. storage = memory (default) | mapped | disk. Write-enabled servers only.",
+      "description": "Create a fresh, empty graph bound to a path (its save_graph target) and make it active. storage = memory (default) | mapped | disk. Refused while this server has unsaved changes \u2014 call save_graph first to keep them, or reload_graph(discard_unsaved=true) to drop them. Write-enabled servers only.",
       "inputSchema": {
         "$defs": {
           "StorageArg": {
@@ -1010,7 +1024,7 @@
     },
     {
       "name": "load_graph",
-      "description": "Load a .kgl file as the new active graph (replaces the current one \u2014 save_graph first to keep unsaved changes). Write-enabled servers only.",
+      "description": "Load a .kgl file as the new active graph (replaces the current one). Refused while this server has unsaved changes \u2014 call save_graph first to keep them, or reload_graph(discard_unsaved=true) to drop them. Write-enabled servers only.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -1183,9 +1197,16 @@
     },
     {
       "name": "reload_graph",
-      "description": "Re-read the served graph file from disk, replacing the in-memory graph \u2014 use this when the file has been rebuilt by another process and queries are returning stale results. Takes no arguments; the path is the one this server was started on. On a write-enabled server any unsaved in-memory changes are discarded (call save_graph first to keep them). If the re-read fails, the current graph stays active and the error is returned.",
+      "description": "Re-read the served graph file from disk, replacing the in-memory graph \u2014 use this when the file has been rebuilt by another process and queries are returning stale results. The path is the one this server was started on. If this server has unsaved in-memory changes the reload is refused, because it would discard them: call save_graph first to keep them, or pass discard_unsaved=true to drop them and serve the file as it is on disk. If the re-read fails, the current graph stays active and the error is returned.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "discard_unsaved": {
+            "default": false,
+            "description": "Set `true` to throw away this server's unsaved in-memory changes and\nserve the file as it is on disk. Without it, a reload that would\ndiscard unsaved changes is refused instead \u2014 call `save_graph` first to\nkeep them, or `save_graph_as` to keep them somewhere else. There is no\nmerge: the in-memory version and the file are alternatives.",
+            "type": "boolean"
+          }
+        },
         "title": "ReloadGraphArgs",
         "type": "object"
       }
@@ -1896,9 +1917,16 @@
     },
     {
       "name": "reload_graph",
-      "description": "Re-read the served graph file from disk, replacing the in-memory graph \u2014 use this when the file has been rebuilt by another process and queries are returning stale results. Takes no arguments; the path is the one this server was started on. On a write-enabled server any unsaved in-memory changes are discarded (call save_graph first to keep them). If the re-read fails, the current graph stays active and the error is returned.",
+      "description": "Re-read the served graph file from disk, replacing the in-memory graph \u2014 use this when the file has been rebuilt by another process and queries are returning stale results. The path is the one this server was started on. If this server has unsaved in-memory changes the reload is refused, because it would discard them: call save_graph first to keep them, or pass discard_unsaved=true to drop them and serve the file as it is on disk. If the re-read fails, the current graph stays active and the error is returned.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "discard_unsaved": {
+            "default": false,
+            "description": "Set `true` to throw away this server's unsaved in-memory changes and\nserve the file as it is on disk. Without it, a reload that would\ndiscard unsaved changes is refused instead \u2014 call `save_graph` first to\nkeep them, or `save_graph_as` to keep them somewhere else. There is no\nmerge: the in-memory version and the file are alternatives.",
+            "type": "boolean"
+          }
+        },
         "title": "ReloadGraphArgs",
         "type": "object"
       }

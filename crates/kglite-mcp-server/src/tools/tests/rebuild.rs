@@ -14,6 +14,27 @@ fn save_does_not_deep_copy_the_active_graph() {
     // Pin the fix by asserting the DirGraph allocation is pointer-
     // identical across the save.
     let mut active = fresh_active();
+    let path = std::env::temp_dir().join(format!(
+        "kglite-mcp-save-noclone-{}.kgl",
+        std::process::id()
+    ));
+    active.source_path = Some(path.clone());
+    // The real write sequence: ownership takes its pristine snapshot on the
+    // first write and the mutation forks the live graph away from it, so the
+    // snapshot `publish` still holds during the save is the *old* allocation
+    // and the save runs at refcount 1. Pins that a held snapshot never makes
+    // a save fork.
+    let mut ownership = kglite::api::io::WriteOwnership::new(
+        path.clone(),
+        kglite::api::io::GraphFileIdentity::capture(&path).expect("capture a missing path"),
+        active.kg.dir(),
+        None,
+        true,
+    );
+    ownership
+        .begin_write(active.kg.dir_mut())
+        .expect("first write on an uncontended path");
+    active.ownership = Some(ownership);
     {
         // Put something in the graph so the save isn't trivially empty.
         let dir = kglite::api::make_dir_graph_mut(active.kg.dir_mut());
@@ -26,11 +47,6 @@ fn save_does_not_deep_copy_the_active_graph() {
         )
         .expect("seed mutation");
     }
-    let path = std::env::temp_dir().join(format!(
-        "kglite-mcp-save-noclone-{}.kgl",
-        std::process::id()
-    ));
-    active.source_path = Some(path.clone());
 
     let before = Arc::as_ptr(active.kg.dir());
     let msg = run_save(&mut active).expect("save must succeed");

@@ -11,37 +11,45 @@ use anyhow::Result;
 use kglite::api::cypher::ValueCodec;
 use kglite::api::durable::DurabilityLevel;
 use kglite::api::introspection::compute_schema;
-use kglite::api::io::{open_or_create_graph_in_mode, GraphWriterLease, OpenDisposition};
+use kglite::api::io::{
+    open_or_create_graph_in_mode, GraphFileIdentity, GraphWriterLease, OpenDisposition,
+    WriteOwnership,
+};
 use kglite::api::storage::StorageMode;
 use kglite::api::{Embedder, KnowledgeGraph};
 
 use crate::tools::*;
 
-/// Whether this server takes the cross-process single-writer lease
-/// (`<path>.lock`, `GraphWriterLease`) on the graph path it opens.
+/// Whether this server may ever write back the graph file it opens — and so
+/// whether it takes the cross-process single-writer lease
+/// (`<path>.lock`, `GraphWriterLease`) on it at all.
 ///
 /// The lease is what stops two writers from each building a full snapshot and
-/// having the last `save()` win. A server that can never write the file it
-/// serves buys nothing with it and costs the operator a great deal: while it is
-/// held, `kglite.open(path)` — the default, locking open an external rebuilder
-/// uses — is refused outright for the server's whole lifetime, with an error
-/// that never mentions this server.
+/// having the last `save()` win. It is taken **lazily**: a server that may
+/// write holds it from its first unsaved change until that change is saved or
+/// discarded, not for its lifetime. That window is exactly the lost-update
+/// window, and nothing else — four MCP clients can serve one `.kgl` and only
+/// the one actually mid-write excludes the others. While a lease is held,
+/// `kglite.open(path)` — the default, locking open an external rebuilder uses
+/// — is refused, with an error that names the holder.
 ///
 /// [`Self::Exclusive`] is the [`Default`] on purpose: a construction path that
-/// forgets to declare a policy keeps the historical, conservative behaviour.
+/// forgets to declare a policy keeps the writable, conservative behaviour.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum WriterLeasePolicy {
-    /// Own the path: take the lease on every open. What a `--writable` /
-    /// `save_graph`-enabled server does, because it really can rewrite the file.
+    /// May write the path: carry write ownership and take the lease at the
+    /// first unsaved change. What a `--writable` / `save_graph`-enabled server
+    /// does, because it really can rewrite the file.
     #[default]
     Exclusive,
-    /// Read-only deployment: skip the lease for a regular-file graph, so
-    /// external rebuilders (and other read-only servers) can lock the same
-    /// `.kgl`. A torn in-place rewrite arriving mid-load is already caught by
-    /// the load path's `GraphFileIdentity` before/after check, which fails the
-    /// load and leaves the previously served graph installed.
+    /// Read-only deployment: never writes a regular-file graph back, so it
+    /// carries no ownership and never locks — external rebuilders (and other
+    /// read-only servers) can lock the same `.kgl`. A torn in-place rewrite
+    /// arriving mid-load is already caught by the load path's
+    /// `GraphFileIdentity` before/after check, which fails the load and leaves
+    /// the previously served graph installed.
     ///
-    /// Not unconditional — see [`GraphState::takes_writer_lease`].
+    /// Not unconditional — see [`GraphState::owns_writes`].
     ReadOnly,
 }
 
@@ -108,10 +116,15 @@ pub struct GraphState {
     /// correctly persists them). Same interior-mutability shape and reason
     /// as `embedder` above.
     pub(crate) ontology: Arc<RwLock<Option<BoundOntology>>>,
-    /// Whether opens take the cross-process writer lease. Server-config, set
+    /// Whether opens carry write ownership at all. Server-config, set
     /// once at boot via [`with_writer_lease_policy`](Self::with_writer_lease_policy)
     /// — before `bind_mode` performs the boot open — and carried by every clone.
     pub(crate) writer_lease_policy: WriterLeasePolicy,
+    /// Operator-facing name this server publishes in the `<path>.lock-owner`
+    /// record, so a peer refused the lease is told *which* client is holding
+    /// it rather than a bare pid. Server-config, set once at boot via
+    /// [`with_lease_label`](Self::with_lease_label).
+    pub(crate) lease_label: Option<Arc<str>>,
 }
 
 /// The manifest-declared ontology plus its boot-time materialization flag.
@@ -159,10 +172,18 @@ impl GraphState {
         self
     }
 
-    /// Whether opening `path` should take the writer lease.
+    /// Name this server publishes in the owner record it writes while holding
+    /// the writer lease. Builder form, set once at boot like
+    /// [`Self::with_value_codecs`].
+    pub fn with_lease_label(mut self, label: Option<String>) -> Self {
+        self.lease_label = label.map(Arc::from);
+        self
+    }
+
+    /// Whether opening `path` carries write ownership of it.
     ///
-    /// [`WriterLeasePolicy::ReadOnly`] skips it only for a **regular file** —
-    /// the atomically-republished `.kgl` case. Two targets keep the lease even
+    /// [`WriterLeasePolicy::ReadOnly`] declines it only for a **regular file** —
+    /// the atomically-republished `.kgl` case. Two targets keep ownership even
     /// there:
     ///
     /// - a **disk-graph directory**: a tree of retained mmaps behind a `CURRENT`
@@ -171,11 +192,25 @@ impl GraphState {
     /// - a **path that does not exist yet**: this open is about to *create* the
     ///   graph, which is a write regardless of what the tool surface allows
     ///   afterwards.
-    fn takes_writer_lease(&self, path: &Path) -> bool {
+    fn owns_writes(&self, path: &Path) -> bool {
         match self.writer_lease_policy {
             WriterLeasePolicy::Exclusive => true,
             WriterLeasePolicy::ReadOnly => !path.is_file(),
         }
+    }
+
+    /// Whether the lease has to be held from the open rather than from the
+    /// first unsaved change.
+    ///
+    /// The lazy lease answers "who may overwrite this file", and waiting for a
+    /// first mutation is safe for a `.kgl` that is replaced atomically. The two
+    /// non-regular-file cases cannot wait: a path that does not exist yet is
+    /// being *created* by this very open, and a disk-graph directory is a tree
+    /// of live mmaps an external writer would corrupt rather than merely make
+    /// stale. Both are decided before the open, while `path` still describes
+    /// what was there when we looked.
+    fn leases_at_open(path: &Path) -> bool {
+        !path.is_file()
     }
 
     /// Whether an external builder is injected. Activation hooks branch on
@@ -276,26 +311,63 @@ impl GraphState {
         let reuse_existing = read_lock(&self.inner)
             .as_ref()
             .is_some_and(|active| active.source_path.as_deref() == Some(path));
-        let mut writer_lease = if reuse_existing || !self.takes_writer_lease(path) {
-            None
-        } else {
-            Some(
-                GraphWriterLease::acquire(path, Duration::from_secs(30))
-                    .map_err(|e| anyhow::anyhow!("kglite writer lease failed: {e}"))?,
-            )
-        };
+        let owns_writes = self.owns_writes(path);
+        // A same-path reload inherits the lease the previous ownership already
+        // holds, so it must not try to take a second one: `flock` is per
+        // open-file-description, and this process would contend with itself.
+        // Taken *before* the open, not after: for a path this call creates,
+        // lock-then-create is what stops two servers booting on the same
+        // missing path from both creating it. Adopted unpinned below, so the
+        // first save hands it to the lazy lifecycle like any other lease.
+        let eager_lease = (owns_writes && !reuse_existing && Self::leases_at_open(path))
+            .then(|| {
+                GraphWriterLease::acquire_labeled(
+                    path,
+                    Duration::from_secs(30),
+                    self.lease_label.as_deref(),
+                )
+            })
+            .transpose()
+            .map_err(|e| anyhow::anyhow!("kglite writer lease failed: {}", e.error))?;
         // `DurabilityLevel::Off`: this server attaches no write-ahead log, so
         // it takes the unrecovered-sidecar refusal rather than opening a graph
         // that is silently missing another writer's committed frames.
         let opened = open_or_create_graph_in_mode(path, requested_mode, DurabilityLevel::Off)
             .map_err(|e| anyhow::anyhow!("kglite graph open/create failed: {e}"))?;
+        let identity = opened.identity;
         let mut kg = KnowledgeGraph::from_arc(opened.graph);
         // Off-lock, before publication: the new handle carries no embedder of
-        // its own, so the boot-bound one is re-applied here.
+        // its own, so the boot-bound one is re-applied here. The version
+        // baseline below is taken *after* it, so a manifest ontology installed
+        // (or materialized) on this graph is part of what "clean" means rather
+        // than reading as an unsaved change nobody made.
         self.apply_bound_embedder(&mut kg);
+        let mut ownership = owns_writes.then(|| {
+            WriteOwnership::new(
+                path.to_path_buf(),
+                identity.clone(),
+                kg.dir(),
+                self.lease_label.as_deref().map(str::to_owned),
+                // The pristine snapshot is what makes a failed first write —
+                // and `reload_graph(discard_unsaved=true)` — recoverable
+                // without re-reading the file. `Arc::clone` is O(1); the fork
+                // it may later cost is paid once per dirty window.
+                true,
+            )
+        });
+        if let (Some(ownership), Some(lease)) = (ownership.as_mut(), eager_lease) {
+            ownership.adopt_lease(lease, kg.dir(), false);
+        }
         let mut guard = write_lock(&self.inner);
         if reuse_existing {
-            writer_lease = guard.as_mut().and_then(|active| active.writer_lease.take());
+            // Carry the previous ownership across the swap rather than the
+            // fresh one: it holds the lease (if this server was mid-write) and
+            // knows the high-water version, neither of which survives being
+            // rebuilt. `resynced` re-points it at what was just read.
+            if let Some(mut previous) = guard.as_mut().and_then(|active| active.ownership.take()) {
+                previous.resynced(identity, kg.dir());
+                ownership = Some(previous);
+            }
         }
         let generation = guard
             .as_ref()
@@ -307,7 +379,7 @@ impl GraphState {
         let previous = guard.replace(ActiveGraph {
             kg,
             source_path: Some(path.to_path_buf()),
-            writer_lease,
+            ownership,
             root: Some(path.to_path_buf()),
             revs: None,
             built_at: SystemTime::now(),
@@ -345,32 +417,80 @@ impl GraphState {
     /// graph's `source_path` to it, so subsequent `save_graph` calls target
     /// the new location. Backs the `save_graph_as` workbench tool. Returns a
     /// human-readable status (node/edge counts) or an error string.
+    ///
+    /// Retargeting **releases the source file's lease**: this graph is not
+    /// going back there, and it is `save_graph_as` an agent reaches for when a
+    /// peer holds the original — leaving the old path locked would keep the
+    /// jam it exists to escape.
     pub(crate) fn save_as(&self, path: &Path) -> std::result::Result<String, String> {
         let mut guard = write_lock(&self.inner);
         let Some(active) = guard.as_mut() else {
             return Err(NO_GRAPH.to_string());
         };
         let replacing_target = active.source_path.as_deref() != Some(path);
-        let new_lease = replacing_target
-            .then(|| GraphWriterLease::acquire(path, Duration::from_secs(30)))
-            .transpose()
-            .map_err(|e| format!("save_graph_as writer lease error: {e}"))?;
-        let path_str = path.to_string_lossy().into_owned();
-        // Save through the active graph's own Arc (write lock held) so
+        let identity = GraphFileIdentity::capture(path)
+            .map_err(|e| format!("save_graph_as error: cannot read {}: {e}", path.display()))?;
+        match active.ownership.as_mut() {
+            Some(ownership) if replacing_target => ownership.retarget(path.to_path_buf(), identity),
+            // Same target as the bound one: `save_graph` under another name,
+            // lost-update check included — publishing over a file somebody
+            // else replaced is refused here exactly as it is there.
+            Some(_) => {}
+            // A graph with no file behind it (a workspace build, a bare
+            // in-memory session) acquires ownership by being given a path.
+            None => {
+                active.ownership = Some(WriteOwnership::new(
+                    path.to_path_buf(),
+                    identity,
+                    active.kg.dir(),
+                    self.lease_label.as_deref().map(str::to_owned),
+                    true,
+                ));
+            }
+        }
+        let ownership = active
+            .ownership
+            .as_mut()
+            .expect("ownership is present on every branch above");
+        // Publish through the active graph's own Arc (write lock held) so
         // `prepare_save`'s `Arc::make_mut` sees refcount 1 — no deep copy,
         // and the columnar consolidation lands on the live graph instead
         // of a discarded clone. `compute_schema` only needs `&DirGraph`.
-        kglite::api::io::save_graph(active.kg.dir_mut(), &path_str)
-            .map_err(|e| format!("save_graph_as error: {e}"))?;
+        ownership
+            .publish(active.kg.dir_mut())
+            .map_err(|refusal| refused_save("save_graph_as", &refusal))?;
         active.source_path = Some(path.to_path_buf());
-        if let Some(lease) = new_lease {
-            active.writer_lease = Some(lease);
-        }
+        let path_str = path.to_string_lossy().into_owned();
         let overview = compute_schema(active.kg.dir());
         Ok(format!(
             "Saved {path_str} ({} nodes, {} edges); save target rebound here.",
             overview.node_count, overview.edge_count
         ))
+    }
+
+    /// Whether the active graph carries changes its file does not.
+    pub(crate) fn is_dirty(&self) -> bool {
+        read_lock(&self.inner)
+            .as_ref()
+            .is_some_and(ActiveGraph::is_dirty)
+    }
+
+    /// Throw away every unsaved change and release the writer lease, leaving
+    /// the graph exactly as the file last had it.
+    ///
+    /// The rollback is a snapshot restore, not a re-read: nothing touches the
+    /// disk, so it works while the file is unreadable or held by somebody
+    /// else. Returns whether a snapshot was there to restore — `false` means
+    /// the mutations are still installed and only a reload can clear them.
+    pub(crate) fn discard_unsaved_changes(&self) -> bool {
+        let mut guard = write_lock(&self.inner);
+        let Some(active) = guard.as_mut() else {
+            return false;
+        };
+        let Some(ownership) = active.ownership.as_mut() else {
+            return false;
+        };
+        ownership.discard(active.kg.dir_mut()).restored
     }
 
     /// Bind the embedder `text_score()` uses. Held on the state, so it applies
@@ -400,7 +520,13 @@ impl GraphState {
         // already routes through here before publication.
         let ontology = read_lock(&self.ontology).clone();
         if let Some(bound) = ontology {
-            let dir = std::sync::Arc::make_mut(kg.dir_mut());
+            // Lineage-preserving rather than a raw `Arc::make_mut`: a forced
+            // clone here must re-adopt the disk writer authority and fold the
+            // copy-on-write overlays back, which `Arc::make_mut` alone skips.
+            // And deliberately *not* the version-bumping `make_dir_graph_mut`:
+            // a manifest ontology is server configuration, not an agent's
+            // change, so a materializing server must still boot clean.
+            let dir = kglite::api::make_dir_graph_mut_preserving_lineage(kg.dir_mut());
             match dir.define_ontology((*bound.store).clone()) {
                 Ok(warnings) => {
                     for w in warnings {

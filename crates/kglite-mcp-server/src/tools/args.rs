@@ -100,7 +100,15 @@ pub(crate) struct LoadGraphArgs {
 }
 
 #[derive(Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
-pub(crate) struct ReloadGraphArgs {}
+pub(crate) struct ReloadGraphArgs {
+    /// Set `true` to throw away this server's unsaved in-memory changes and
+    /// serve the file as it is on disk. Without it, a reload that would
+    /// discard unsaved changes is refused instead — call `save_graph` first to
+    /// keep them, or `save_graph_as` to keep them somewhere else. There is no
+    /// merge: the in-memory version and the file are alternatives.
+    #[serde(default)]
+    pub discard_unsaved: bool,
+}
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]

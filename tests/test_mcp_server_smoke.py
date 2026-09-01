@@ -766,15 +766,81 @@ class TestGraphMode:
         finally:
             client.shutdown()
 
-    def test_writable_server_keeps_the_graph_locked(self, graph_fixture: Path):
-        """The other half of the contract — and the proof the test above is not
-        passing because locking stopped working. A `--writable` server owns the
-        file it serves, so a second writer is still refused."""
+    def test_writable_server_leaves_the_graph_lockable_until_it_writes(self, tmp_path: Path):
+        """The headline acceptance test for the lazy writer lease.
+
+        The operator's case: four MCP clients on one `.kgl`, and with
+        `save_graph` enabled the first one to boot used to take the lease for
+        its whole lifetime, so every other client died at spawn. Now the lease
+        window is exactly the lost-update window — first unsaved change to
+        save — and the refusal a peer *does* get names this server by label.
+
+        Cross-process on purpose: `kglite.open(path)` is precisely what the
+        rebuilder and the sibling clients do, and the boot wiring that decides
+        when the lease is taken is the part a Rust unit test cannot see.
+        """
+        fixture = tmp_path / "lazy.kgl"
+        _build_fixture_graph(fixture)
+        client = _spawn(["--graph", str(fixture), "--writable", "--lease-label", "Claude Desktop"])
+        try:
+            # 1. Booted, serving, holding nothing: the peer takes the lease.
+            peer = kglite.open(str(fixture))
+            try:
+                assert list(peer.cypher("MATCH (n) RETURN count(n) AS c"))[0]["c"] == 4
+            finally:
+                peer.close()
+            # `close()` on a locking open republishes the file, so the server is
+            # now holding a snapshot of bytes that no longer exist — and its next
+            # write is refused for exactly that reason. Refreshing is the
+            # documented way through, and it is what the operator's rebuilder
+            # loop looks like.
+            stale = client.call_tool(
+                "cypher_query",
+                {"query": "CREATE (:Task {id: 't0'})", "write_scope": ["Task"]},
+            )
+            assert _is_error(stale)
+            assert "changed on disk" in _text_content(stale)
+            assert not _is_error(client.call_tool("reload_graph"))
+
+            # 2. One unsaved change, and the file is this server's until it saves.
+            ack = client.call_tool(
+                "cypher_query",
+                {"query": "CREATE (:Task {id: 't1'})", "write_scope": ["Task"]},
+            )
+            assert not _is_error(ack), _text_content(ack)
+            with pytest.raises(Exception) as caught:
+                kglite.open(str(fixture))
+            assert "only one process may write" in str(caught.value)
+            # The name a peer reads instead of a bare pid, asserted at the file
+            # the holder publishes it to rather than in the peer's rendered
+            # message: rendering it is the installed `kglite` extension's job,
+            # and that extension is rebuilt on its own cadence. What this test
+            # owns is that the *running server* published the operator's label.
+            owner = fixture.with_name(fixture.name + ".lock-owner").read_text(encoding="utf-8")
+            assert "label=Claude Desktop" in owner, owner
+
+            # 3. Saved — the window closes at the save, not at process exit.
+            saved = client.call_tool("save_graph")
+            assert not _is_error(saved), _text_content(saved)
+            reopened = kglite.open(str(fixture))
+            try:
+                assert list(reopened.cypher("MATCH (t:Task) RETURN count(t) AS c"))[0]["c"] == 1
+            finally:
+                reopened.close()
+        finally:
+            client.shutdown()
+
+    def test_writable_server_boots_without_locking_the_graph(self, graph_fixture: Path):
+        """The `--writable` mirror of the read-only test above: booting is not
+        writing, so both policies leave the served file lockable at boot. The
+        difference between them shows up only once something is unsaved."""
         client = _spawn(["--graph", str(graph_fixture), "--writable"])
         try:
-            with pytest.raises(Exception) as caught:
-                kglite.open(str(graph_fixture))
-            assert "only one process may write" in str(caught.value)
+            rebuilder = kglite.open(str(graph_fixture))
+            try:
+                assert list(rebuilder.cypher("MATCH (n) RETURN count(n) AS c"))[0]["c"] == 4
+            finally:
+                rebuilder.close()
         finally:
             client.shutdown()
 
@@ -848,6 +914,12 @@ class TestWritableMode:
             )
             assert "write scope" in _text_content(r).lower()
             assert _is_error(r), "a refused write is a failed call"
+            # The refusal took the lease to attempt the write and must give it
+            # back: `make_dir_graph_mut` bumps the version before the statement
+            # runs, so without the rollback this server would look permanently
+            # dirty — and hold the file — over a mutation that never happened.
+            peer = kglite.open(str(graph_fixture))
+            peer.close()
         finally:
             client.shutdown()
 
@@ -870,6 +942,10 @@ class TestWritableMode:
             assert "Saved" in text and "node" in text  # message format check
             assert not _is_error(r)
             assert src.stat().st_mtime > mtime_before
+            # Publishing releases the lease: a save is the end of the window in
+            # which this server has anything to protect.
+            peer = kglite.open(str(src))
+            peer.close()
         finally:
             client.shutdown()
 

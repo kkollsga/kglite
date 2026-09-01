@@ -451,3 +451,148 @@ async fn a_successful_read_keeps_its_identity_footer() {
     let text = assert_success(&result);
     assert!(text.contains("— active graph:"), "{text}");
 }
+
+// ── unsaved changes: refusals that protect an agent's own work ──────────────
+//
+// Every route that would replace the active graph refuses while this server
+// holds unsaved changes. The refusal is a *failure* — the tool did not do what
+// it was asked — and its text is the agent's only route back: it names the one
+// spelling for "throw my work away" and the one for "keep it".
+
+/// A write-enabled state serving a real `.kgl`, carrying one unsaved change.
+fn dirty_state(dir: &std::path::Path) -> (GraphState, std::path::PathBuf) {
+    let path = dir.join("dirty.kgl");
+    let seed = GraphState::default();
+    seed.create_in_mode(&path, kglite::api::storage::StorageMode::Memory)
+        .expect("create the served graph");
+    seed.save_as(&path).expect("publish the served graph");
+    drop(seed);
+
+    let state = GraphState::default();
+    state.open_or_create(&path, None).expect("open the graph");
+    state
+        .with_active_mut(|active| write(active, "CREATE (:Task {id: 't1'})", None))
+        .expect("a graph is active")
+        .expect("the mutation lands");
+    assert!(state.is_dirty(), "the fixture must actually be dirty");
+    (state, path)
+}
+
+#[tokio::test]
+async fn reload_graph_refuses_to_discard_unsaved_changes_silently() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (state, _path) = dirty_state(temp.path());
+
+    let mut server = McpServer::new(Default::default());
+    register_graph_mode_tools(&mut server, state.clone());
+    let result = call(server, "reload_graph", json!({})).await;
+
+    assert_error(&result, &refused_while_dirty("reload_graph"));
+    let text = text_of(&result);
+    assert!(text.contains("discard_unsaved=true"), "{text}");
+    assert!(text.contains("save_graph"), "{text}");
+    assert!(
+        state.is_dirty(),
+        "a refused reload must leave the unsaved changes exactly where they were"
+    );
+}
+
+#[tokio::test]
+async fn reload_graph_with_the_flag_discards_and_re_reads() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (state, path) = dirty_state(temp.path());
+    assert!(
+        kglite::api::io::GraphWriterLease::acquire(&path, std::time::Duration::ZERO).is_err(),
+        "the fixture's unsaved change is holding the lease"
+    );
+
+    let mut server = McpServer::new(Default::default());
+    register_graph_mode_tools(&mut server, state.clone());
+    let result = call(server, "reload_graph", json!({ "discard_unsaved": true })).await;
+
+    let text = assert_success(&result);
+    assert!(text.starts_with("Reloaded "), "{text}");
+    assert!(
+        !state.is_dirty(),
+        "the flag is what makes the discard happen"
+    );
+    assert_eq!(
+        state.schema().expect("a graph is active").0,
+        0,
+        "the discarded CREATE must be gone from the served graph"
+    );
+    // The discard is what hands the lease back. Without it the reload would
+    // carry the held lease across the swap and park it over a graph with
+    // nothing left to save.
+    kglite::api::io::GraphWriterLease::acquire(&path, std::time::Duration::ZERO)
+        .expect("discarding the work releases the file it was holding");
+}
+
+#[tokio::test]
+async fn the_lifecycle_tools_refuse_to_replace_a_dirty_graph() {
+    for (tool, arguments) in [
+        ("load_graph", json!({ "path": "other.kgl" })),
+        ("create_graph", json!({ "path": "other.kgl" })),
+    ] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (state, _path) = dirty_state(temp.path());
+
+        let result = call(
+            kglite_server(state.clone(), writable_builtins()),
+            tool,
+            arguments,
+        )
+        .await;
+
+        assert_error(&result, &refused_while_dirty(tool));
+        let text = text_of(&result);
+        assert!(
+            text.contains("reload_graph(discard_unsaved=true)"),
+            "{text}"
+        );
+        assert!(state.is_dirty(), "{tool} must not have touched the graph");
+    }
+}
+
+/// A save the file moved underneath is a failure, and its text has to say that
+/// the unsaved work survived — an agent reading "refused" without that will
+/// assume it is gone.
+#[tokio::test]
+async fn save_graph_over_a_replaced_file_is_an_error_that_keeps_the_work() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (state, path) = dirty_state(temp.path());
+
+    // A peer republishes the served path while this server holds changes.
+    let outside = temp.path().join("republished.kgl");
+    let producer = GraphState::default();
+    producer
+        .create_in_mode(&outside, kglite::api::storage::StorageMode::Memory)
+        .expect("build the replacement");
+    producer.save_as(&outside).expect("publish the replacement");
+    drop(producer);
+    std::fs::rename(&outside, &path).expect("republish over the served path");
+
+    let result = call(
+        kglite_server(state.clone(), writable_builtins()),
+        "save_graph",
+        json!({}),
+    )
+    .await;
+
+    let text = text_of(&result);
+    assert_eq!(result.is_error, Some(true), "{text}");
+    assert!(
+        text.contains("changed on disk since you loaded it"),
+        "{text}"
+    );
+    assert!(text.contains("save_graph_as"), "{text}");
+    assert!(
+        text.contains("reload_graph(discard_unsaved=true)"),
+        "{text}"
+    );
+    assert!(text.contains("no merge"), "{text}");
+    assert!(
+        state.is_dirty(),
+        "a refused save keeps the work it refused to overwrite the file with"
+    );
+}

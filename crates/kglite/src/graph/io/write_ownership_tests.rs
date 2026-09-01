@@ -274,7 +274,7 @@ fn an_adopted_lease_survives_a_publish() {
     let path = tmp.path().join("adopted.kgl");
     let (mut graph, mut ownership) = owned(&path, false);
     let lease = GraphWriterLease::acquire(&path, Duration::ZERO).unwrap();
-    ownership.adopt_lease(lease, &graph);
+    ownership.adopt_lease(lease, &graph, true);
     mutate(&mut graph);
 
     ownership.publish(&mut graph).unwrap();

@@ -36,7 +36,7 @@ fn fresh_active() -> ActiveGraph {
     ActiveGraph {
         kg: KnowledgeGraph::from_arc(Arc::new(dir)),
         source_path: None,
-        writer_lease: None,
+        ownership: None,
         root: None,
         revs: None,
         built_at: SystemTime::now(),

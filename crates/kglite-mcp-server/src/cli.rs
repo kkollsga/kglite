@@ -69,6 +69,15 @@ pub(crate) struct Cli {
     #[arg(long = "write-scope")]
     pub(crate) write_scope: Option<String>,
 
+    /// Operator-facing name this server publishes while it holds the graph's
+    /// writer lease, so a peer refused a write is told *which* client is
+    /// mid-write ("Claude Desktop") instead of a bare pid. Falls back to
+    /// `KGLITE_LEASE_LABEL`, then to the parent process's name — which is
+    /// usually the MCP client that spawned this server, and is why four
+    /// clients sharing one manifest still name themselves apart.
+    #[arg(long = "lease-label")]
+    pub(crate) lease_label: Option<String>,
+
     /// Let this server's Cypher *reads* use the engine's parallel runtime.
     /// Off by default: a server's cores belong to its clients, so nothing
     /// turns this on by omission. It is a permission, not an instruction —
@@ -305,6 +314,22 @@ mod cli_contract_tests {
         // Absent flag = no operator pin at all (distinct from an empty pin).
         let bare = Cli::parse_from(["kglite-mcp-server", "--graph", "g.kgl"]);
         assert!(bare.write_scope.is_none());
+    }
+
+    #[test]
+    fn lease_label_flag_parses_and_defaults_absent() {
+        let named = Cli::parse_from([
+            "kglite-mcp-server",
+            "--graph",
+            "g.kgl",
+            "--lease-label",
+            "Claude Desktop",
+        ]);
+        assert_eq!(named.lease_label.as_deref(), Some("Claude Desktop"));
+        // Absent flag = fall through to KGLITE_LEASE_LABEL, then to the parent
+        // process name; `boot_lease_label` owns that precedence.
+        let bare = Cli::parse_from(["kglite-mcp-server", "--graph", "g.kgl"]);
+        assert!(bare.lease_label.is_none());
     }
 
     #[test]

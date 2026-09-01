@@ -90,9 +90,21 @@ pub(crate) fn run_cypher_write(
     // here, naming the operator pin, rather than handed to the engine as an
     // empty set that would refuse the first node it happened to reach.
     let scope = resolve_write_scope(authz.operator_scope, authz.agent_scope)?;
+    // The lease is taken here — after every refusal that can be decided
+    // without it, before the first byte of the graph changes. A refused
+    // acquisition is the whole reason this server does not hold the lease
+    // from boot, so it is answered in the tool's own vocabulary rather than
+    // as an I/O error.
+    let began = match active.ownership.as_mut() {
+        Some(ownership) => Some(
+            ownership
+                .begin_write(active.kg.dir_mut())
+                .map_err(|refusal| refused_write("cypher_query", &refusal))?,
+        ),
+        None => None,
+    };
     // Snapshot the embedder Arc before the mutable borrow of `kg`.
     let embedder = active.kg.embedder().cloned();
-    let dir = kglite::api::make_dir_graph_mut(active.kg.dir_mut());
     let mut opts = kglite::api::session::ExecuteOptions::eager(&params);
     opts.embedder = embedder;
     opts.value_codecs = policy.value_codecs;
@@ -103,17 +115,38 @@ pub(crate) fn run_cypher_write(
     opts.write_scope = scope.as_ref();
     opts.git_sha = authz.git_sha;
     opts.modified_by = authz.modified_by;
+    let executed = {
+        let dir = kglite::api::make_dir_graph_mut(active.kg.dir_mut());
+        let executed = kglite::api::session::execute_mut(dir, query, &opts);
+        if executed.is_ok() {
+            // This tool call is the server's commit boundary, so this is where
+            // a change stream learns about the write — a no-op unless `CALL
+            // db.cdc.enable()` has been run. A statement that *failed* rolled
+            // its captured ops back already, so nothing uncommitted can be
+            // published from here; and draining is what keeps the capture
+            // buffer from growing for the life of a long-running server.
+            kglite::api::cdc::drain_at_commit(dir);
+        }
+        executed
+    };
     // `KgError`'s Display already prefixes `Cypher execution error: …` — pass it
     // through verbatim rather than re-prefixing (which produced the triple wrap).
-    let outcome =
-        kglite::api::session::execute_mut(dir, query, &opts).map_err(|e| e.to_string())?;
-    // This tool call is the server's commit boundary, so this is where a change
-    // stream learns about the write — a no-op unless `CALL db.cdc.enable()` has
-    // been run. A statement that *failed* returned above, having already rolled
-    // its captured ops back, so nothing uncommitted can be published from here;
-    // and draining is what keeps the capture buffer from growing for the life
-    // of a long-running server.
-    kglite::api::cdc::drain_at_commit(dir);
+    let outcome = match executed {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            // `make_dir_graph_mut` bumps the version *before* the statement
+            // runs, so a first write that the engine refuses leaves the graph
+            // looking dirty with nothing applied — and the lease parked over
+            // it, blocking every peer until this server restarts. Roll back to
+            // the pristine snapshot and give the lease back.
+            if began == Some(kglite::api::io::BeginWrite::Acquired) {
+                if let Some(ownership) = active.ownership.as_mut() {
+                    ownership.discard(active.kg.dir_mut());
+                }
+            }
+            return Err(error.to_string());
+        }
+    };
     // A mutation with no RETURN yields no rows — acknowledge with a write
     // summary (nodes/edges/props changed) instead of the bare "No results."
     // that a *read* matching nothing returns, so an agent can tell a
@@ -125,12 +158,17 @@ pub(crate) fn run_cypher_write(
         // reports "OK (no changes)", which is the single most misleading
         // response the write tool can give without it.
         return Ok(format!(
-            "{}{}",
+            "{}{}{}",
             format_mutation_ack(&outcome.result),
-            cypher_warning_block(&outcome.result)
+            cypher_warning_block(&outcome.result),
+            // The read path has self-identified its graph since the footer
+            // shipped; a write needs it more, not less — an agent that mutates
+            // the wrong graph has no later call that can tell it so.
+            active.identity_footer()
         ));
     }
-    render_cypher_output(&outcome.result, output_csv, csv_http)
+    let rendered = render_cypher_output(&outcome.result, output_csv, csv_http)?;
+    Ok(format!("{rendered}{}", active.identity_footer()))
 }
 
 /// One-line acknowledgement of a write that returned no rows, summarising the
@@ -224,15 +262,30 @@ pub(crate) fn parse_cypher_detail(v: Option<&DetailSelection>) -> CypherDetail {
     }
 }
 
-/// `Err` is a graph that was not persisted — no bound path, or a write the
-/// engine refused.
+/// `Err` is a graph that was not persisted — no bound path, a file some other
+/// writer replaced since it was loaded, or a write the engine refused.
+///
+/// A *clean* graph still publishes: a server that materialized a manifest
+/// ontology at boot has changed nothing the version counter can see, and this
+/// call is the only way that materialization reaches disk.
 pub(crate) fn run_save(graph: &mut ActiveGraph) -> Result<String, String> {
     let Some(path) = graph.source_path.as_ref() else {
         return Err("save_graph requires --graph mode (no source path bound).".to_string());
     };
     let path_str = path.to_string_lossy().into_owned();
-    // `kglite::api::io::save_graph` dispatches on storage mode (mirrors
-    // `KnowledgeGraph::save` at `src/graph/pyapi/kg_core.rs`):
+    let Some(ownership) = graph.ownership.as_mut() else {
+        return Err(format!(
+            "save_graph refused: this server serves {path_str} read-only and never \
+             writes it back. Use save_graph_as to write the active graph somewhere \
+             else."
+        ));
+    };
+    // `publish` takes the lease if this server is not already holding one,
+    // proves the file is still the one this graph was read from, and hands the
+    // lease back afterwards — a saved graph has nothing left to protect.
+    //
+    // Underneath, `kglite::api::io::save_graph` dispatches on storage mode
+    // (mirrors `KnowledgeGraph::save` at `src/graph/pyapi/kg_core.rs`):
     //   - disk-backed → `save_disk(path)` (the folder IS the graph)
     //   - in-memory  → `prepare_kgl_write` (metadata + column
     //     consolidation) → `write_kgl`
@@ -242,15 +295,13 @@ pub(crate) fn run_save(graph: &mut ActiveGraph) -> Result<String, String> {
     // the refcount to ≥2, so `prepare_save`'s `Arc::make_mut` deep-copied
     // the entire graph on EVERY save — and the columnar consolidation
     // landed in the discarded clone, so the next save paid it all again.
-    match kglite::api::io::save_graph(graph.kg.dir_mut(), &path_str) {
-        Ok(()) => {
-            // `compute_schema` only needs `&DirGraph` — no second make_mut.
-            let overview = compute_schema(graph.kg.dir());
-            Ok(format!(
-                "Saved {path_str} ({} nodes, {} edges).",
-                overview.node_count, overview.edge_count
-            ))
-        }
-        Err(e) => Err(format!("save_graph error: {e}")),
-    }
+    ownership
+        .publish(graph.kg.dir_mut())
+        .map_err(|refusal| refused_save("save_graph", &refusal))?;
+    // `compute_schema` only needs `&DirGraph` — no second make_mut.
+    let overview = compute_schema(graph.kg.dir());
+    Ok(format!(
+        "Saved {path_str} ({} nodes, {} edges).",
+        overview.node_count, overview.edge_count
+    ))
 }

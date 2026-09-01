@@ -217,7 +217,7 @@ impl GraphState {
         let active = ActiveGraph {
             kg,
             source_path: None,
-            writer_lease: None,
+            ownership: None,
             root: Some(root.to_path_buf()),
             revs: revisions,
             built_at: SystemTime::now(),

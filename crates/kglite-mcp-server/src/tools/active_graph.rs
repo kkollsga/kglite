@@ -4,7 +4,7 @@
 use std::time::SystemTime;
 
 use kglite::api::introspection::compute_schema;
-use kglite::api::io::GraphWriterLease;
+use kglite::api::io::WriteOwnership;
 use kglite::api::KnowledgeGraph;
 
 use crate::tools::*;
@@ -12,9 +12,16 @@ use crate::tools::*;
 pub(crate) struct ActiveGraph {
     pub(crate) kg: KnowledgeGraph,
     pub(crate) source_path: Option<std::path::PathBuf>,
-    /// Held for every path-backed graph because this MCP surface can publish
-    /// mutations through `save_graph` / `save_graph_as`.
-    pub(crate) writer_lease: Option<GraphWriterLease>,
+    /// Write ownership of `source_path`: the file identity this graph was
+    /// loaded at, whether it carries unpublished changes, and the
+    /// cross-process writer lease — taken at the *first unsaved change*, not
+    /// at the open, so four MCP clients can serve one `.kgl` and only the one
+    /// actually mid-write excludes the others.
+    ///
+    /// `None` for a graph with no file behind it (a workspace graph, an
+    /// in-memory test fixture) and for a read-only deployment serving a
+    /// regular file, which never writes it back.
+    pub(crate) ownership: Option<WriteOwnership>,
     /// The source root this graph was built/loaded from — a code-tree
     /// directory or a `.kgl` file path. Stamped into agent-facing output
     /// (the `<active_graph/>` header, the `cypher_query` footer, and the
@@ -70,6 +77,18 @@ pub(crate) fn humanize_age(t: SystemTime) -> String {
 }
 
 impl ActiveGraph {
+    /// Whether this graph carries mutations its file does not have yet.
+    ///
+    /// A graph with no write ownership can never be dirty: it has no file to
+    /// be out of step with. That covers the workspace modes (rebuilt from a
+    /// producer) and read-only deployments, which is why every dirty-refusal
+    /// site can ask this without first asking what mode it is in.
+    pub(crate) fn is_dirty(&self) -> bool {
+        self.ownership
+            .as_ref()
+            .is_some_and(|ownership| ownership.is_dirty(self.kg.dir()))
+    }
+
     pub(crate) fn workspace_target(&self) -> Option<WorkspaceGraphTarget> {
         Some(WorkspaceGraphTarget {
             root: absolute_lexical_path(self.root.as_deref()?)?,

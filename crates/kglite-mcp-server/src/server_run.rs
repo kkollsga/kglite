@@ -146,6 +146,64 @@ fn boot_parallel(manifest: Option<&mcp_methods::server::Manifest>, cli: &Cli) ->
     Ok(boot_manifest_parallel(manifest)? || cli.parallel)
 }
 
+/// Fallback name for the lease record: the process that spawned this server.
+///
+/// Best-effort by construction — every failure returns `None` and the caller
+/// falls back to the binary's own name. Zero new dependencies: `/proc` on
+/// Linux, one `ps` on macOS, nothing on Windows (where the owner record still
+/// carries pid and timestamp).
+#[cfg(unix)]
+fn parent_process_name() -> Option<String> {
+    let ppid = std::os::unix::process::parent_id();
+    #[cfg(target_os = "linux")]
+    let raw = std::fs::read_to_string(format!("/proc/{ppid}/comm")).ok()?;
+    #[cfg(not(target_os = "linux"))]
+    let raw = {
+        let output = std::process::Command::new("ps")
+            .args(["-o", "comm=", "-p", &ppid.to_string()])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        String::from_utf8(output.stdout).ok()?
+    };
+    // macOS `ps -o comm=` reports the executable path, not the basename.
+    let name = raw.trim().rsplit('/').next()?.trim();
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
+#[cfg(not(unix))]
+fn parent_process_name() -> Option<String> {
+    None
+}
+
+/// Resolve the name this server publishes in the graph's `<path>.lock-owner`
+/// record: `--lease-label`, else `KGLITE_LEASE_LABEL`, else the parent process
+/// name, else the binary's own name.
+///
+/// Mirrors [`boot_parallel`]'s shape — resolved once at boot, carried by every
+/// clone of the state. There is deliberately **no manifest key**: the case this
+/// exists for is four MCP clients sharing one manifest on one graph, so a
+/// manifest-declared label would give all four the same name and answer
+/// nothing. The env var is read explicitly rather than through clap's `env`
+/// attribute so the precedence above is visible here rather than in an
+/// attribute two files away.
+fn boot_lease_label(cli: &Cli) -> String {
+    if let Some(label) = cli.lease_label.as_deref().map(str::trim) {
+        if !label.is_empty() {
+            return label.to_owned();
+        }
+    }
+    if let Ok(label) = std::env::var("KGLITE_LEASE_LABEL") {
+        let label = label.trim();
+        if !label.is_empty() {
+            return label.to_owned();
+        }
+    }
+    parent_process_name().unwrap_or_else(|| "kglite-mcp-server".to_owned())
+}
+
 /// The width the engine's query pool will be built at, for the boot log.
 ///
 /// Recomputed here rather than read from the engine: the pool is built lazily
@@ -528,7 +586,8 @@ pub(crate) async fn run_async(
         // csv_http boot it needs) because `bind_mode` performs the boot open on
         // the very next line — a policy set later would arrive after the lease
         // decision it governs. Both read the same `graph_writes_enabled`.
-        .with_writer_lease_policy(writer_lease_policy(manifest.as_ref(), &cli));
+        .with_writer_lease_policy(writer_lease_policy(manifest.as_ref(), &cli))
+        .with_lease_label(Some(boot_lease_label(&cli)));
 
     // Bound before `bind_mode`, whose boot open publishes the first graph —
     // the ontology rides the same pre-publication seam as the embedder.
@@ -679,6 +738,33 @@ mod boot_manifest_tests {
             "extensions.graph_watch: true must reach the watcher wiring; if this fails \
              the key is parsed and then dropped"
         );
+    }
+
+    /// The name a peer reads instead of "another process". Precedence is
+    /// `--lease-label` > `KGLITE_LEASE_LABEL` > parent process name; only the
+    /// flag half is asserted here, because the other two read process state a
+    /// unit test cannot set without racing every other test in the binary.
+    #[test]
+    fn an_explicit_lease_label_wins_and_a_blank_one_falls_through() {
+        let named = Cli::parse_from([
+            "kglite-mcp-server",
+            "--graph",
+            "g.kgl",
+            "--lease-label",
+            "  Claude Desktop  ",
+        ]);
+        assert_eq!(boot_lease_label(&named), "Claude Desktop");
+        // A blank flag is not a name. Falling through matters because the
+        // fallback is what a peer reads in the owner record instead of
+        // "another process".
+        let blank = Cli::parse_from([
+            "kglite-mcp-server",
+            "--graph",
+            "g.kgl",
+            "--lease-label",
+            " ",
+        ]);
+        assert!(!boot_lease_label(&blank).is_empty());
     }
 
     /// Boot wiring for the writer-lease policy: which deployments own the

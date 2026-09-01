@@ -563,7 +563,13 @@ impl KnowledgeGraph {
 /// Copy-on-write access that preserves disk writer authority when a shared
 /// snapshot forces a clone. Does not change the graph version; callers that
 /// perform semantic mutations should use [`make_dir_graph_mut`].
-pub(crate) fn make_dir_graph_mut_preserving_lineage(arc: &mut Arc<DirGraph>) -> &mut DirGraph {
+///
+/// Public because a binding that installs *configuration* on a graph — a
+/// declared ontology, a materialized label set — is not making a semantic
+/// mutation and must not bump the version: the version is what tells that
+/// binding whether it holds unsaved changes, and boot-time configuration that
+/// bumped it would report a freshly opened file as dirty.
+pub fn make_dir_graph_mut_preserving_lineage(arc: &mut Arc<DirGraph>) -> &mut DirGraph {
     let parent = if Arc::get_mut(arc).is_none() {
         Some(Arc::clone(arc))
     } else {

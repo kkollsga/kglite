@@ -181,6 +181,14 @@ pub mod api {
     pub use crate::graph::TemporalContext;
     // `Arc<DirGraph>` → `&mut DirGraph` + version bump.
     pub use crate::graph::handle::make_dir_graph_mut;
+    /// `Arc<DirGraph>` → `&mut DirGraph` **without** the version bump, and
+    /// preserving disk writer authority when a shared snapshot forces the
+    /// clone. For writes that are configuration rather than data — installing
+    /// a declared ontology, materializing its labels at boot — because the
+    /// version counter is how a binding knows it holds unsaved changes, and a
+    /// boot-time bump would report a freshly opened file as dirty. Every
+    /// semantic mutation uses [`make_dir_graph_mut`] instead.
+    pub use crate::graph::handle::make_dir_graph_mut_preserving_lineage;
 
     /// The item type of every [`GraphRead`] edge iterator (`EdgesIter`,
     /// `EdgeReferencesIter`, `EdgesConnectingIter`), so a consumer that stores
