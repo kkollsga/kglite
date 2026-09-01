@@ -90,18 +90,31 @@ def _rows(rv) -> list[dict]:
 
 
 def test_disk_writer_lease_is_enforced_across_processes(tmp_path):
+    """The engine lease covers the dirty window, not the handle's lifetime.
+
+    A second process is refused while this one holds unpublished changes —
+    that is the window in which a lock-free peer's own publish would write
+    over state the dirty writer is about to publish. Once `save()` has
+    published, nothing of the writer maps the directory beyond what any
+    reader maps, so the lease is released and the peer may take it: an
+    unsaved-forever session must not hold a graph directory hostage.
+    """
     graph_path = str(tmp_path / "writer_lease")
     writer = KnowledgeGraph(storage="disk", path=graph_path)
     writer.add_nodes(pd.DataFrame({"id": [1], "title": ["doc-1"]}), "Doc", "id", "title")
-    writer.save(graph_path)
 
+    # Dirty and unsaved: the first mutation took the lease.
     status, message = _run_child_add(graph_path, 2)
     assert status == "error"
     assert "active writer" in message
 
-    del writer
+    writer.save(graph_path)
+
+    # Published, so the lease is gone even though the parent handle lives on.
     status, message = _run_child_add(graph_path, 2)
     assert (status, message) == ("ok", "")
+
+    del writer
     reloaded = kglite.load(graph_path)
     assert _rows(reloaded.cypher("MATCH (n:Doc) RETURN count(n) AS n")) == [{"n": 2}]
 

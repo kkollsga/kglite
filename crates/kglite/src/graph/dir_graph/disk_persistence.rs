@@ -201,8 +201,10 @@ impl DirGraph {
         Ok(())
     }
 
-    /// Acquire the retained disk-writer lease before creating a mutation
-    /// overlay. Memory and mapped backends are unaffected.
+    /// Acquire the disk-writer lease before creating a mutation overlay. The
+    /// lease is held for the dirty window only: [`Self::save_disk`] releases
+    /// it once the publish has rebased the handle onto the new generation.
+    /// Memory and mapped backends are unaffected.
     pub(crate) fn prepare_disk_mutation(&mut self) -> std::io::Result<()> {
         if let GraphBackend::Disk(disk) = &mut self.graph {
             disk.prepare_mutation()?;
@@ -258,10 +260,12 @@ impl DirGraph {
             {
                 disk.writer_lock.as_ref().unwrap().clone()
             }
-            GraphBackend::Disk(_) => std::sync::Arc::new(
-                crate::graph::storage::disk::generation::GraphDirectoryLock::try_acquire(&root)
-                    .map_err(|e| format!("Failed to acquire disk writer lock: {e}"))?,
-            ),
+            // Not `try_acquire`: after a publish this handle holds no lease,
+            // and a lineage sibling may still hold the one it published under
+            // — `take_lease` re-joins that rather than deadlocking on it.
+            GraphBackend::Disk(disk) => disk
+                .take_lease(&root)
+                .map_err(|e| format!("Failed to acquire disk writer lock: {e}"))?,
             _ => return Err("save_disk requires disk mode".to_string()),
         };
         if let GraphBackend::Disk(disk) = &mut self.graph {
@@ -276,9 +280,15 @@ impl DirGraph {
             .publish()
             .map_err(|e| format!("Failed to publish disk generation: {e}"))?;
         if let GraphBackend::Disk(disk) = &mut self.graph {
-            disk.finish_generation(root, published, writer_lock)
+            disk.finish_generation(root, published)
                 .map_err(|e| format!("Failed to activate published disk generation: {e}"))?;
         }
+        // The lease was held across the whole snapshot-write / publish /
+        // rebase sequence by this local `Arc`; `finish_generation` cleared the
+        // graph's own reference, so dropping it here is what actually releases
+        // the directory — unless a live transaction fork cloned the lease, in
+        // which case the lock outlives this save by design.
+        drop(writer_lock);
         Ok(())
     }
 

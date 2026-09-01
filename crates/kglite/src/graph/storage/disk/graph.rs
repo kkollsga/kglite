@@ -138,9 +138,19 @@ pub struct DiskGraph {
     pub(super) free_edge_slots: Vec<u32>,
 
     pub(crate) data_dir: PathBuf,
-    /// User-visible graph root and retained cross-process writer lease.
+    /// User-visible graph root; also the directory the writer lease locks.
     pub(crate) logical_root: PathBuf,
+    /// Cross-process writer lease, held for the dirty window only: taken by
+    /// `prepare_mutation` and released by `finish_generation` once the publish
+    /// has rebased this handle onto the new generation. `Arc` because
+    /// `adopt_writer_lineage` shares one lease with transaction forks.
     pub(crate) writer_lock: Option<Arc<super::generation::GraphDirectoryLock>>,
+    /// The one lease slot this *writer lineage* shares — the handle, its
+    /// transaction forks and the copy-on-write snapshots it leaves behind.
+    /// Weak, so it never keeps the lock alive; it exists so a sibling can
+    /// re-join the lease another sibling holds instead of deadlocking against
+    /// this process's own lock. See `DiskGraph::take_lease`.
+    pub(super) lease_cell: LeaseCell,
     pub(super) mutation_workspace: Option<Arc<super::generation::MutationWorkspace>>,
     pub(super) parent_workspaces: Vec<Arc<super::generation::MutationWorkspace>>,
     /// Cleanup owner for an explicit copy's lazily-created private writer
@@ -233,7 +243,16 @@ type PropertyIndexCache =
 type GlobalIndexCache =
     std::sync::RwLock<HashMap<String, Option<Arc<property_index::PropertyIndex>>>>;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
+
+/// The lease slot shared by one writer lineage. Weak by construction: a slot
+/// never keeps a lock alive, it only lets a lineage sibling find the lease
+/// another sibling is holding.
+pub(super) type LeaseCell = Arc<Mutex<Weak<super::generation::GraphDirectoryLock>>>;
+
+pub(super) fn new_lease_cell() -> LeaseCell {
+    Arc::new(Mutex::new(Weak::new()))
+}
 
 // SAFETY — DiskGraph interior-mutability model:
 //
@@ -2008,6 +2027,10 @@ impl Clone for DiskGraph {
             data_dir: self.data_dir.clone(),
             logical_root: self.logical_root.clone(),
             writer_lock: None,
+            // A fresh slot, deliberately not the parent's: a generic clone has
+            // no writer authority, so it must not re-join the parent's lease
+            // either. `adopt_writer_lineage` is what shares the slot.
+            lease_cell: new_lease_cell(),
             mutation_workspace: None,
             parent_workspaces: self.parent_workspaces.clone(),
             independent_root: self.independent_root.clone(),
@@ -2114,11 +2137,20 @@ impl DiskGraph {
         self.independent_root.as_deref().map(|root| root.path())
     }
 
-    /// Adopt the retained writer lease from a shared-identity parent.
+    /// Adopt the writer lease from a shared-identity parent.
     /// Generic clones intentionally lack writer authority unless a controlled
     /// transaction or Arc copy-on-write path calls this method.
+    ///
+    /// The lease is shared, not moved: cloning the `Arc` keeps the directory
+    /// locked for as long as *either* handle lives, so the parent's next
+    /// publish — which drops only its own reference — cannot pull the lock out
+    /// from under a fork that is still writing into its private workspace.
     pub(crate) fn adopt_writer_lineage(&mut self, parent: &Self) {
         self.writer_lock = parent.writer_lock.clone();
+        // Share the slot, not just the current lease: the parent may be clean
+        // right now (it published), in which case whichever sibling writes
+        // first acquires the lease and the rest find it here.
+        self.lease_cell = Arc::clone(&parent.lease_cell);
         self.parent_workspaces = parent.parent_workspaces.clone();
         if let Some(workspace) = &parent.mutation_workspace {
             self.parent_workspaces.push(Arc::clone(workspace));

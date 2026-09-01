@@ -4,6 +4,7 @@ use crate::datatypes::{DataFrame, Value};
 use crate::graph::schema::{EdgeData, InternedKey, NodeData, StringInterner};
 use crate::graph::storage::backend::GraphBackend;
 use crate::graph::storage::disk::csr::{CsrEdge, DiskNodeSlot, EdgeEndpoints};
+use crate::graph::storage::disk::generation::GraphDirectoryLock;
 use crate::graph::storage::disk::graph_persist::{concat_segment_csrs, SegmentCsr};
 use crate::graph::storage::disk::temp_owner::{TempGraphDir, TrackedOwner};
 use crate::graph::storage::mapped::mmap_vec::MmapOrVec;
@@ -241,6 +242,217 @@ fn save_rebases_every_mapping_onto_the_published_generation() {
         "writer still maps files outside the published generation {}: {stray:?}",
         data_dir.display()
     );
+}
+
+/// A clean publish hands the directory back. The engine's `.kglite.lock` is
+/// the backstop against lock-free peers, not a permanent claim: once
+/// `finish_generation` has rebased every mapping onto the published
+/// generation, this handle needs nothing from the directory that a fresh
+/// reader would not also take, so holding the lock past that point only
+/// blocks other writers for as long as the process happens to live.
+#[test]
+fn a_published_disk_graph_leaves_its_directory_lockable() {
+    let root = TempDir::new().unwrap();
+    let root_path = root.path().to_str().unwrap();
+
+    let mut graph = DirGraph::new();
+    add_docs(&mut graph, &[1, 2]);
+    graph.enable_disk_mode().unwrap();
+    graph.save_disk(root_path).unwrap();
+
+    // Mutate after the first save so the lease is genuinely held — and a
+    // workspace minted — at the moment the second publish starts.
+    add_docs(&mut graph, &[3]);
+    assert!(
+        GraphDirectoryLock::try_acquire(root.path()).is_err(),
+        "a dirty writer must hold the directory against other writers"
+    );
+
+    graph.save_disk(root_path).unwrap();
+
+    let lock = GraphDirectoryLock::try_acquire(root.path())
+        .expect("a published disk graph must leave its directory lockable");
+    drop(lock);
+    let disk = match &graph.graph {
+        GraphBackend::Disk(disk) => disk,
+        _ => panic!("expected disk backend"),
+    };
+    assert!(
+        disk.writer_lock.is_none(),
+        "the publish must drop the lease"
+    );
+    assert!(disk.mutation_workspace.is_none());
+}
+
+/// Releasing at publish is only safe because taking is re-entrant: the next
+/// mutation acquires the lease again and mints a *fresh* workspace, rather
+/// than writing into the one the publish just removed.
+#[test]
+fn the_next_mutation_re_takes_the_lock_and_mints_a_new_workspace() {
+    let root = TempDir::new().unwrap();
+    let root_path = root.path().to_str().unwrap();
+
+    let mut graph = DirGraph::new();
+    add_docs(&mut graph, &[1, 2]);
+    graph.enable_disk_mode().unwrap();
+    graph.save_disk(root_path).unwrap();
+
+    add_docs(&mut graph, &[3]);
+    let pre_save_workspace = match &graph.graph {
+        GraphBackend::Disk(disk) => disk.active_write_dir().to_path_buf(),
+        _ => panic!("expected disk backend"),
+    };
+    graph.save_disk(root_path).unwrap();
+    drop(
+        GraphDirectoryLock::try_acquire(root.path())
+            .expect("the publish releases the directory before the next mutation re-takes it"),
+    );
+
+    add_docs(&mut graph, &[4]);
+    let disk = match &graph.graph {
+        GraphBackend::Disk(disk) => disk,
+        _ => panic!("expected disk backend"),
+    };
+    assert!(
+        disk.writer_lock.is_some(),
+        "the mutation after a publish must re-take the lease"
+    );
+    assert!(disk.mutation_workspace.is_some());
+    let workspace = disk.active_write_dir().to_path_buf();
+    assert_ne!(
+        workspace, pre_save_workspace,
+        "the removed workspace must not be reused"
+    );
+    let workspace_root = workspace.parent().unwrap();
+    assert_eq!(workspace_root.parent(), Some(root.path()));
+    assert!(workspace_root
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .starts_with(".working-"));
+    assert!(
+        GraphDirectoryLock::try_acquire(root.path()).is_err(),
+        "the re-taken lease must hold the directory again"
+    );
+}
+
+/// Two transactions opened on a *clean* graph — one that has published and
+/// therefore holds no lease — must not lock each other out. They are one
+/// writer lineage; whichever writes first takes the lease and the other finds
+/// it through the shared slot. Serialization between them is the commit-time
+/// version check, not the directory lock.
+#[test]
+fn sibling_transactions_after_a_save_share_one_lease() {
+    let root = TempDir::new().unwrap();
+    let root_path = root.path().to_str().unwrap();
+
+    let mut graph = DirGraph::new();
+    add_docs(&mut graph, &[1]);
+    graph.enable_disk_mode().unwrap();
+    graph.save_disk(root_path).unwrap();
+
+    let parent = match &graph.graph {
+        GraphBackend::Disk(disk) => disk,
+        _ => panic!("expected disk backend"),
+    };
+    let mut winner = parent.clone();
+    winner.adopt_writer_lineage(parent);
+    let mut loser = parent.clone();
+    loser.adopt_writer_lineage(parent);
+
+    winner.prepare_mutation().unwrap();
+    loser
+        .prepare_mutation()
+        .expect("a sibling transaction must re-join the lease, not fight it");
+    assert!(
+        Arc::ptr_eq(
+            winner.writer_lock.as_ref().unwrap(),
+            loser.writer_lock.as_ref().unwrap()
+        ),
+        "siblings must share one lease"
+    );
+    assert_ne!(
+        winner.active_write_dir(),
+        loser.active_write_dir(),
+        "a shared lease still means private workspaces"
+    );
+}
+
+/// A snapshot taken while the graph was dirty must not lock its own writer
+/// out. The copy-on-write fork behind `make_dir_graph_mut_preserving_lineage`
+/// leaves the *old* handle holding the lease, so after the live handle
+/// publishes and releases its own reference, the OS lock is still held — by
+/// this process. Re-acquiring it blindly refuses the writer's own next
+/// mutation; the writer must re-join the lease it published under instead.
+///
+/// Reproduced through the binding as: create disk graph, write, `freeze()`,
+/// write, `save()`, write → "already has an active writer".
+#[test]
+fn a_snapshot_taken_while_dirty_does_not_lock_out_the_writer() {
+    let root = TempDir::new().unwrap();
+    let root_path = root.path().to_str().unwrap();
+
+    let mut graph = DirGraph::new();
+    add_docs(&mut graph, &[1]);
+    graph.enable_disk_mode().unwrap();
+    graph.save_disk(root_path).unwrap();
+    // Dirty when the snapshot is taken: the lease is live and the snapshot
+    // inherits the handle that owns it.
+    add_docs(&mut graph, &[2]);
+
+    let mut handle = Arc::new(graph);
+    let snapshot = Arc::clone(&handle);
+    let live = crate::graph::handle::make_dir_graph_mut_preserving_lineage(&mut handle);
+
+    add_docs(live, &[3]);
+    live.save_disk(root_path).unwrap();
+
+    add_docs(live, &[4]);
+    live.save_disk(root_path).unwrap();
+
+    drop(snapshot);
+    let live = crate::graph::handle::make_dir_graph_mut_preserving_lineage(&mut handle);
+    add_docs(live, &[5]);
+    live.save_disk(root_path).unwrap();
+    GraphDirectoryLock::try_acquire(root.path())
+        .expect("with the snapshot gone the directory is free again");
+}
+
+/// The lease is an `Arc`, and `adopt_writer_lineage` clones it into a
+/// transaction fork. A parent's publish therefore drops only *its own*
+/// reference: the OS lock stays held for as long as the fork — which may
+/// still write into its private workspace — is alive.
+#[test]
+fn a_live_fork_keeps_the_lock_held_across_the_parents_save() {
+    let root = TempDir::new().unwrap();
+    let root_path = root.path().to_str().unwrap();
+
+    let mut graph = DirGraph::new();
+    add_docs(&mut graph, &[1]);
+    graph.enable_disk_mode().unwrap();
+    graph.save_disk(root_path).unwrap();
+    add_docs(&mut graph, &[2]);
+
+    let mut fork = match &graph.graph {
+        GraphBackend::Disk(disk) => {
+            let mut fork = (**disk).clone();
+            fork.adopt_writer_lineage(disk);
+            fork
+        }
+        _ => panic!("expected disk backend"),
+    };
+    assert!(fork.writer_lock.is_some(), "the fork inherits the lease");
+    fork.prepare_mutation().unwrap();
+
+    graph.save_disk(root_path).unwrap();
+    assert!(
+        GraphDirectoryLock::try_acquire(root.path()).is_err(),
+        "a live fork's cloned lease must keep the directory locked"
+    );
+
+    drop(fork);
+    GraphDirectoryLock::try_acquire(root.path())
+        .expect("the last lease reference dropping must release the directory");
 }
 
 #[test]
@@ -538,6 +750,14 @@ fn generation_round_trips_node_and_edge_add_delete_overlays() {
     assert_eq!(held_reader.graph.edge_count(), 2);
 }
 
+/// A refused write must be refused *whole*: the overlay is unchanged, so the
+/// caller can retry the same statement once the directory frees up.
+///
+/// The lease covers the first writer's unpublished window — the interval in
+/// which a second writer's publish would land on top of changes the first is
+/// still holding — so `first` is deliberately left dirty here. Its `save_disk`
+/// then releases the directory and the retry succeeds without `first` being
+/// dropped.
 #[test]
 fn second_disk_writer_is_rejected_before_mutation() {
     let target = TempDir::new().unwrap();
@@ -552,6 +772,7 @@ fn second_disk_writer_is_rejected_before_mutation() {
         Ok(graph) => graph,
         Err(_) => panic!("fresh load unexpectedly had another Arc owner"),
     };
+    add_docs(&mut first, &[3]);
     let error = crate::graph::mutation::maintain::add_nodes(
         &mut second,
         one_doc_frame(2),
@@ -564,7 +785,7 @@ fn second_disk_writer_is_rejected_before_mutation() {
     assert!(error.contains("active writer"), "{error}");
     assert_eq!(second.graph.node_count(), 1);
 
-    drop(first);
+    first.save_disk(path).unwrap();
     crate::graph::mutation::maintain::add_nodes(
         &mut second,
         one_doc_frame(2),

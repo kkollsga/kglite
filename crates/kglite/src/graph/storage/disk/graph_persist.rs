@@ -1114,6 +1114,7 @@ impl DiskGraph {
                 data_dir: csr_dir.clone(),
                 logical_root: dir.to_path_buf(),
                 writer_lock: None,
+                lease_cell: super::graph::new_lease_cell(),
                 mutation_workspace: None,
                 parent_workspaces: Vec::new(),
                 independent_root: None,

@@ -103,7 +103,7 @@ fn disk_dir_holds_a_graph(dir: &Path) -> bool {
 /// loadable graph immediately, rather than only from its first `save()`.
 ///
 /// **Why this is not deferred.** `DiskGraph::new_at_path` materialises the
-/// directory — the writer lock and `seg_000/*.bin` — but publishes nothing, so
+/// directory — `seg_000/*.bin` — but publishes nothing, so
 /// between creation and the first `save()` the path existed and held files yet
 /// resolved to no generation. `load_disk_dir` then fell through to the
 /// legacy-flat root, found no `disk_graph_meta.json`, and refused the path with

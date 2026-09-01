@@ -9,9 +9,8 @@ impl DiskGraph {
 
     pub(crate) fn prepare_mutation(&mut self) -> std::io::Result<()> {
         if self.writer_lock.is_none() {
-            self.writer_lock = Some(Arc::new(
-                super::generation::GraphDirectoryLock::try_acquire(&self.logical_root)?,
-            ));
+            let root = self.logical_root.clone();
+            self.writer_lock = Some(self.take_lease(&root)?);
         }
         if self.mutation_workspace.is_none() {
             self.mutation_workspace = Some(Arc::new(super::generation::MutationWorkspace::create(
@@ -19,6 +18,46 @@ impl DiskGraph {
             )?));
         }
         Ok(())
+    }
+
+    /// The directory lease for `root`, re-joining the lease this handle last
+    /// published under when a lineage sibling still holds it.
+    ///
+    /// `finish_generation` drops this handle's own reference at every publish,
+    /// but the lease is an `Arc` and lineage siblings hold their own: a
+    /// transaction fork, the sibling transaction beside it, or the
+    /// copy-on-write snapshot `make_dir_graph_mut_preserving_lineage` leaves
+    /// behind when a reader holds the graph. Any of them may still own the
+    /// lease — and therefore the OS lock, whose exclusion is per open file
+    /// description and so applies to this process too. A bare `try_acquire`
+    /// then fails against *ourselves*: a graph frozen while dirty locked its
+    /// own writer out of every later mutation, and two transactions opened
+    /// after a save locked out the second
+    /// (`a_snapshot_taken_while_dirty_does_not_lock_out_the_writer`,
+    /// `test_transactions.py::test_disk_commit_and_rollback_after_prior_write`).
+    ///
+    /// The slot is shared by the lineage and holds only a weak reference, so
+    /// re-joining costs nothing once every sibling is gone: the upgrade fails
+    /// and a fresh lock is taken, which is the ordinary path. Handles that are
+    /// *not* lineage siblings — a second `load_file` of the same directory —
+    /// get their own slot and are still refused, which is the protection the
+    /// lock exists for.
+    pub(crate) fn take_lease(
+        &mut self,
+        root: &Path,
+    ) -> std::io::Result<Arc<super::generation::GraphDirectoryLock>> {
+        let mut slot = self
+            .lease_cell
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(lease) = slot.upgrade() {
+            if lease.root == root {
+                return Ok(lease);
+            }
+        }
+        let lease = Arc::new(super::generation::GraphDirectoryLock::try_acquire(root)?);
+        *slot = Arc::downgrade(&lease);
+        Ok(lease)
     }
 
     /// Paths of every memory-mapped array this graph currently holds.
@@ -66,7 +105,6 @@ impl DiskGraph {
         &mut self,
         logical_root: PathBuf,
         snapshot_dir: PathBuf,
-        writer_lock: Arc<super::generation::GraphDirectoryLock>,
     ) -> std::io::Result<()> {
         self.logical_root = logical_root;
         self.data_dir = snapshot_dir.join(segment_subdir(0));
@@ -123,7 +161,28 @@ impl DiskGraph {
             edge_props_meta,
             &mut unused_interner,
         )?;
-        self.writer_lock = Some(writer_lock);
+        // Release the cross-process writer lease. Everything above has just
+        // rebased this handle onto the published generation, so what remains
+        // is exactly what a fresh reader holds — no CSR array and no
+        // pending-edge buffer maps the workspace any more (asserted by
+        // `save_rebases_every_mapping_onto_the_published_generation`), and
+        // the workspace and parent workspaces are dropped a few lines below.
+        // A published generation is immutable and this handle no longer
+        // writes anywhere, so keeping the directory locked until the process
+        // exits would refuse other writers for nothing. `prepare_mutation` is
+        // re-entrant: the next mutation re-acquires the lease and mints a
+        // fresh workspace.
+        //
+        // Refcount rule: the lease is an `Arc`, and `adopt_writer_lineage`
+        // clones it into a transaction fork, whose private workspace *is*
+        // still live. Clearing the field here drops only this handle's
+        // reference, so a save taken while a fork is alive leaves the OS lock
+        // held until that fork drops. That is the correct outcome — a
+        // "lockable after save" test must therefore keep no fork alive. The
+        // lineage's shared slot keeps a weak reference to it, which is how the
+        // next mutation re-joins such a lease instead of deadlocking against
+        // it — see `take_lease`.
+        self.writer_lock = None;
         self.property_indexes.write().unwrap().clear();
         self.global_indexes.write().unwrap().clear();
         self.removed_property_indexes.clear();
@@ -176,6 +235,7 @@ impl DiskGraph {
             data_dir: data_dir.to_path_buf(),
             logical_root: root_dir.to_path_buf(),
             writer_lock: None,
+            lease_cell: super::graph::new_lease_cell(),
             mutation_workspace: None,
             parent_workspaces: Vec::new(),
             independent_root: None,
@@ -370,6 +430,7 @@ impl DiskGraph {
             data_dir: data_dir.to_path_buf(),
             logical_root: root_dir.to_path_buf(),
             writer_lock: None,
+            lease_cell: super::graph::new_lease_cell(),
             mutation_workspace: None,
             parent_workspaces: Vec::new(),
             independent_root: None,
