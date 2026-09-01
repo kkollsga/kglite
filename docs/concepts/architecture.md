@@ -128,9 +128,10 @@ Graph state is shared through `Arc<DirGraph>`:
   `Arc::make_mut` copy. This is the cost of snapshot isolation.
 
 Disk readers resolve `CURRENT` once and retain the selected immutable mmap
-generation. A retained cross-process writer lease prevents two writers from
-publishing concurrently. Readers do not take that writer lock. The detailed
-contract and verification matrix live in [Concurrency](concurrency.md).
+generation. A cross-process writer lease prevents two writers from publishing
+concurrently; it is held from the first mutation until the publish, not for the
+writer's lifetime. Readers do not take that writer lock. The detailed contract
+and verification matrix live in [Concurrency](concurrency.md).
 
 ## Spatial execution
 

@@ -43,8 +43,10 @@ production bindings should not use last-writer-wins.
 ## Disk generations and processes
 
 Disk mode publishes immutable generations. Readers resolve `CURRENT` once and
-keep that generation mmaped. One retained cross-process writer lease prevents
-two processes from publishing concurrently; readers do not take the writer
+keep that generation mmaped. A cross-process writer lease prevents two
+processes from publishing concurrently, held from a writer's first mutation
+until the publish that ends it and re-taken by the next mutation, so a process
+that has finished publishing excludes nobody. Readers do not take the writer
 lease and can keep using an older generation after a new one lands.
 
 This is stable-reader/single-writer publication, not a shared live

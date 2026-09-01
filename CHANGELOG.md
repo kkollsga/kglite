@@ -19,9 +19,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bounded wait, then a refusal), and hands it back at `save_graph`,
   `save_graph_as`, or `reload_graph(discard_unsaved=true)`. Several
   write-enabled servers can therefore serve one graph and arbitrate per write
-  instead of per process. Two targets still lock from the open, because waiting
-  is not safe for them: a path this server creates, and a disk-graph directory
-  (live memory maps rather than an atomically replaced file).
+  instead of per process. **This covers disk-graph directories too**: a
+  directory carrying a `CURRENT` pointer is republished atomically — the save
+  stages a new generation and swings the pointer, never rewriting the
+  generation another reader has mapped, and no generation is ever deleted — so
+  it is served lease-free and locked only for its dirty window. At the engine
+  level the directory's own `.kglite.lock` is likewise released at each
+  publish and re-taken by the next mutation, instead of being held until the
+  process exits. Two targets still lock from the open, because waiting is not
+  safe for them: a path this server creates, and a **legacy flat directory** (a
+  pre-generations disk graph with CSR files at the root and no `CURRENT`),
+  whose files a rebuild rewrites in place under live mappings — that one keeps
+  the pre-generations behaviour unchanged, including its pinned lease.
 - **A `--graph` server serving a regular `.kgl` re-reads it automatically.**
   Every tool call stats the served file and re-reads it — single-flight,
   off-lock, through the normal open path — when its identity differs from the
@@ -33,8 +42,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   just saved. A failed re-read keeps the loaded graph serving and is retried
   only when the file's identity changes again *and* at least 5 s have passed,
   so a file that stays broken is never retried automatically; `reload_graph`
-  always tries. Disk-graph directories are not auto-refreshed and keep
-  `reload_graph` as their refresh path. **Operators:** each peer save now costs
+  always tries. A disk-graph directory carrying a `CURRENT` pointer is
+  refreshed the same way — the pointer is the graph's identity, so a peer's
+  published generation arrives on the next tool call, at the cost of one open
+  and read per call instead of a bare `stat`. Only a legacy flat directory (no
+  `CURRENT`) is left with `reload_graph` as its refresh path. Freshness follows
+  the file a publish writes rather than only the one the open read, so a graph
+  this server *created* is refreshed from its first `save_graph` onwards, and
+  `save_graph_as` moves the refresh target to the new path — left on the old
+  one, a peer rewriting *that* file would have replaced the agent's just-saved
+  graph on the next call. **Operators:** each peer save now costs
   every other server one full re-read on its next tool call (seconds on a
   ~100 MB graph, with concurrent calls waiting behind it) — the price of the
   freshness guarantee, and a reason to keep served graphs on local storage.
@@ -93,6 +110,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without the version bump, for writes that are configuration rather than data
   (installing a declared ontology, materializing its labels at boot), so a
   freshly opened graph is not reported as carrying unsaved changes.
+
+### Fixed
+
+- **A disk-graph directory's identity is its `CURRENT` pointer, not its root
+  directory.** `GraphFileIdentity` folded the root directory's own size and
+  mtime into a disk graph's identity, and a writer's first mutation mints
+  `.working-<pid>-*/` and `.kglite.lock` *inside* that root — so a server
+  writing a disk directory changed its own identity and its `save_graph` was
+  then refused as a lost update, while a clean server re-read the whole graph
+  whenever a peer merely started a mutation. The identity is now shaped by the
+  path: a regular file is its metadata, a generation directory is its `CURRENT`
+  pointer (metadata plus bytes, replaced by every publish), a legacy flat
+  directory is the directory's own inode, and a missing path is its own value.
 
 ## [0.16.18] - 2026-08-31
 

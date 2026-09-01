@@ -425,3 +425,109 @@ fn save_as_moves_freshness_to_the_new_path() {
     assert_eq!(generation(&state), before + 1, "the new file is");
     assert_eq!(nodes(&state), 7);
 }
+
+// ── disk-graph directories: a peer's generation is a republish ───────────────
+//
+// `CURRENT` is part of `GraphFileIdentity`, so a peer swinging the pointer to
+// a freshly staged generation reads exactly like a peer renaming a new `.kgl`
+// over the old one. These two are the file suite's headline pair
+// (`an_external_rewrite_is_served_by_the_next_call` and
+// `a_save_does_not_make_the_next_call_reload_itself`) re-asked of a directory.
+
+/// Publish a disk-graph directory holding `nodes` nodes, then release it. The
+/// disk-mode counterpart of [`seed_kgl`], and built the same way — through the
+/// engine, so the fixture is whatever the current format publishes.
+fn seed_disk_dir(path: &Path, nodes: u64) {
+    let mut dir = new_dir_graph_in_mode(StorageMode::Disk, Some(path)).expect("create disk graph");
+    let params = std::collections::HashMap::new();
+    let opts = ExecuteOptions::eager(&params);
+    for i in 0..nodes {
+        execute_mut(&mut dir, &format!("CREATE (:N {{id:'{i}'}})"), &opts).expect("seed node");
+    }
+    let mut graph = Arc::new(dir);
+    kglite::api::io::save_graph(&mut graph, path.to_str().expect("utf-8 fixture path"))
+        .expect("publish the generation");
+}
+
+/// A peer process opens the directory, adds a node and publishes generation
+/// N+1 — the rebuilder loop the served server is supposed to follow.
+fn peer_publishes(path: &Path, id: &str) {
+    let opened = kglite::api::io::open_or_create_graph_in_mode(
+        path,
+        None,
+        kglite::api::durable::DurabilityLevel::Off,
+    )
+    .expect("the peer opens the same directory");
+    let mut graph = opened.graph;
+    let params = std::collections::HashMap::new();
+    let opts = ExecuteOptions::eager(&params);
+    kglite::api::session::execute_mut(
+        kglite::api::make_dir_graph_mut(&mut graph),
+        &format!("CREATE (:N {{id:'{id}'}})"),
+        &opts,
+    )
+    .expect("the peer's write applies");
+    kglite::api::io::save_graph(&mut graph, path.to_str().expect("utf-8 fixture path"))
+        .expect("the peer publishes a new generation");
+}
+
+#[test]
+fn a_peers_new_generation_is_served_by_the_next_call() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let served = tmp.path().join("shared_dir");
+    seed_disk_dir(&served, 2);
+    let state = serving(&served);
+    let before = generation(&state);
+    assert_eq!(nodes(&state), 2);
+
+    peer_publishes(&served, "peer");
+
+    state.ensure_graph_fresh();
+    assert_eq!(
+        generation(&state),
+        before + 1,
+        "a peer's publish must be picked up on the next tool call"
+    );
+    assert_eq!(nodes(&state), 3, "and the peer's node must be visible");
+
+    state.ensure_graph_fresh();
+    assert_eq!(
+        generation(&state),
+        before + 1,
+        "an unchanged CURRENT must not reload again on every later call"
+    );
+}
+
+#[test]
+fn a_disk_save_does_not_make_the_next_call_reload_itself() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let served = tmp.path().join("self_published_dir");
+    seed_disk_dir(&served, 2);
+    let state = serving(&served);
+    state
+        .with_active_mut(|active| write(active, "CREATE (:N {id:'local'})", None))
+        .expect("a graph is active")
+        .expect("the write applies");
+    state
+        .with_active_mut(run_save)
+        .expect("a graph is active")
+        .expect("the save publishes a generation");
+    let after_save = generation(&state);
+
+    state.ensure_graph_fresh();
+    assert_eq!(
+        generation(&state),
+        after_save,
+        "a server must not re-read the generation it just published"
+    );
+    assert_eq!(nodes(&state), 3, "and must keep serving what it saved");
+    assert!(!state.is_dirty(), "a published graph is clean");
+
+    // The control arm: the same server DOES follow somebody else's publish, so
+    // the suppression above is about authorship and not about the identity
+    // capture being asleep on directories.
+    peer_publishes(&served, "peer");
+    state.ensure_graph_fresh();
+    assert_eq!(generation(&state), after_save + 1);
+    assert_eq!(nodes(&state), 4);
+}

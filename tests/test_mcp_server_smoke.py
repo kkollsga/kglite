@@ -368,6 +368,42 @@ def _build_directed_fixture_graph(path: Path) -> None:
     g.save(str(path))
 
 
+def _build_disk_fixture_graph(directory: Path) -> None:
+    """Publish a disk-graph *directory* holding the same four Person nodes.
+
+    ``storage="disk"`` makes the directory itself the graph: a ``generations/``
+    tree with a ``CURRENT`` pointer selecting the published one. That pointer is
+    what a peer swings to publish, and what every server serving the directory
+    stats to notice the publish — the disk-mode counterpart of a rename-over.
+    """
+    g = kglite.open(str(directory), storage="disk")
+    try:
+        g.add_nodes(
+            pd.DataFrame(
+                {
+                    "id": [1, 2, 3, 4],
+                    "title": ["Alice", "Bob", "Carol", "Dave"],
+                    "city": ["Oslo", "Bergen", "Oslo", "Trondheim"],
+                }
+            ),
+            "Person",
+            "id",
+            "title",
+        )
+        g.save()
+    finally:
+        g.close()
+    assert (directory / "CURRENT").is_file(), "the fixture must be the generation layout"
+
+
+def _footer_generation(text: str) -> int:
+    """The generation an identity footer reports. A bump is how a caller knows
+    a re-read actually happened rather than the freshness check being skipped."""
+    marker = "· generation "
+    assert marker in text, text
+    return int(text.split(marker, 1)[1].split(" ", 1)[0].strip(" ·"))
+
+
 @pytest.fixture
 def directed_graph_fixture(tmp_path: Path) -> Path:
     fixture = tmp_path / "directed.kgl"
@@ -844,6 +880,136 @@ class TestGraphMode:
                 assert list(rebuilder.cypher("MATCH (n) RETURN count(n) AS c"))[0]["c"] == 4
             finally:
                 rebuilder.close()
+        finally:
+            client.shutdown()
+
+    # ── disk-graph directories ──────────────────────────────────────────────
+    #
+    # A directory carrying `CURRENT` is republished atomically, exactly as a
+    # `.kgl` is: the save stages a new generation and swings the pointer,
+    # leaving the generation every other reader has mapped untouched. So it
+    # follows the same rules — no lease at the open, a lease from the first
+    # unsaved change to the publish, and automatic refresh on a peer's publish.
+    # Cross-process on purpose: `kglite.open(dir)` is what an external
+    # rebuilder does, and one server's publish reaching another is not
+    # observable inside a single process.
+
+    def test_two_servers_on_one_disk_directory_follow_each_others_publishes(self, tmp_path: Path):
+        """The multi-client case disk mode used to make impossible.
+
+        Before the lazy lease, the first server to open the directory locked it
+        for its lifetime; now four can serve it, and a peer's published
+        generation reaches the others on their next tool call because `CURRENT`
+        is part of the graph's identity.
+        """
+        directory = tmp_path / "shared_disk"
+        _build_disk_fixture_graph(directory)
+        manifest = _write_savegraph_manifest(tmp_path)
+        writer = _spawn(["--graph", str(directory), "--writable", "--mcp-config", str(manifest)])
+        reader = _spawn(["--graph", str(directory)])
+        try:
+            first = reader.call_tool("cypher_query", {"query": "MATCH (n) RETURN count(n) AS c"})
+            assert not _is_error(first), _text_content(first)
+            assert "4" in _text_content(first)
+            before = _footer_generation(_text_content(first))
+
+            written = writer.call_tool(
+                "cypher_query",
+                {"query": "CREATE (:Task {id: 't1'})", "write_scope": ["Task"]},
+            )
+            assert not _is_error(written), _text_content(written)
+            saved = writer.call_tool("save_graph")
+            assert not _is_error(saved), _text_content(saved)
+
+            # The reader took no lease and re-reads on its own: no reload_graph
+            # call, no watcher, no manifest key.
+            after = reader.call_tool("cypher_query", {"query": "MATCH (t:Task) RETURN count(t) AS c"})
+            assert not _is_error(after), _text_content(after)
+            assert "1" in _text_content(after), _text_content(after)
+            assert _footer_generation(_text_content(after)) == before + 1, _text_content(after)
+        finally:
+            reader.shutdown()
+            writer.shutdown()
+
+    def test_a_second_disk_writer_is_refused_while_the_first_is_dirty(self, tmp_path: Path):
+        """The lease window on a directory is the dirty window, and nothing more.
+
+        A peer's write is refused by name while the first server holds unsaved
+        changes, and goes through once that server publishes — the refusal is
+        the same "nothing was changed here, retry" text a contended `.kgl`
+        produces, because a contended directory is the same situation.
+        """
+        directory = tmp_path / "contended_disk"
+        _build_disk_fixture_graph(directory)
+        manifest = _write_savegraph_manifest(tmp_path)
+        first = _spawn(
+            [
+                "--graph",
+                str(directory),
+                "--writable",
+                "--mcp-config",
+                str(manifest),
+                "--lease-label",
+                "Claude Desktop",
+            ]
+        )
+        second = _spawn(["--graph", str(directory), "--writable", "--mcp-config", str(manifest)])
+        try:
+            held = first.call_tool(
+                "cypher_query",
+                {"query": "CREATE (:Task {id: 't1'})", "write_scope": ["Task"]},
+            )
+            assert not _is_error(held), _text_content(held)
+
+            refused = second.call_tool(
+                "cypher_query",
+                {"query": "CREATE (:Task {id: 't2'})", "write_scope": ["Task"]},
+            )
+            assert _is_error(refused), _text_content(refused)
+            text = _text_content(refused)
+            assert "only one process may write" in text, text
+            assert "Nothing was changed here" in text, text
+            assert "refreshes automatically on its next call" in text, text
+            # The holder names itself, so the operator reading the refusal in
+            # another client knows which one to look at.
+            owner = directory.with_name(directory.name + ".lock-owner").read_text(encoding="utf-8")
+            assert "label=Claude Desktop" in owner, owner
+
+            # The refused server is still a working reader.
+            still_reading = second.call_tool("cypher_query", {"query": "MATCH (n:Person) RETURN count(n) AS c"})
+            assert not _is_error(still_reading), _text_content(still_reading)
+            assert "4" in _text_content(still_reading)
+
+            # The window closes at the publish, not at process exit.
+            saved = first.call_tool("save_graph")
+            assert not _is_error(saved), _text_content(saved)
+            accepted = second.call_tool(
+                "cypher_query",
+                {"query": "CREATE (:Task {id: 't2'})", "write_scope": ["Task"]},
+            )
+            assert not _is_error(accepted), _text_content(accepted)
+        finally:
+            second.shutdown()
+            first.shutdown()
+
+    def test_readonly_server_leaves_a_disk_directory_lockable(self, tmp_path: Path):
+        """The disk-mode mirror of `test_readonly_server_leaves_the_graph_lockable`.
+
+        A read-only server never writes the directory, so an external rebuilder's
+        `kglite.open(dir)` — which locks by default — must still succeed. It used
+        to be refused for the server's whole lifetime.
+        """
+        directory = tmp_path / "read_only_disk"
+        _build_disk_fixture_graph(directory)
+        client = _spawn(["--graph", str(directory)])
+        try:
+            rebuilder = kglite.open(str(directory))
+            try:
+                assert list(rebuilder.cypher("MATCH (n) RETURN count(n) AS c"))[0]["c"] == 4
+            finally:
+                rebuilder.close()
+            r = client.call_tool("cypher_query", {"query": "MATCH (n) RETURN count(n) AS c"})
+            assert "4" in _text_content(r)
         finally:
             client.shutdown()
 

@@ -105,9 +105,15 @@ What that costs, and where it stops:
   discard them silently. It warns on every response instead and leaves the
   choice to `save_graph_as` or `reload_graph(discard_unsaved=true)` (see *The
   writer lease* below).
-- **Disk-graph *directories* are never auto-refreshed.** A disk graph is a tree
-  of live memory maps behind a `CURRENT` pointer rather than an atomically
-  replaced file, so `reload_graph` remains its refresh path.
+- **Disk-graph *directories* carrying a `CURRENT` pointer are refreshed too.**
+  A disk publish is atomic in the same way a `.kgl` rename is: it stages a
+  fresh generation and swings `CURRENT` to it, never rewriting the generation
+  another server has mapped, and never deleting one. The pointer *is* the
+  identity, so a peer's publish is noticed on the next tool call exactly as a
+  republished file is — at the cost of one open and read per call rather than a
+  bare `stat`. A **legacy flat directory** (CSR files at the root, no `CURRENT`)
+  is not refreshed: its files are rewritten in place, so there is no pointer to
+  compare and `reload_graph` remains its refresh path.
 - **`extensions.graph_watch` is retired.** The key is still parsed — a
   non-boolean value still fails boot — but any boolean now only logs a
   retirement warning and arms nothing, because the refresh it used to opt into
@@ -183,13 +189,29 @@ Writes that reach disk cannot silently overwrite each other either:
   activation summary. A lease parked by a write that died mid-call is
   therefore visible on every query instead of only to whoever writes next.
 
+The same applies to a **disk-graph directory carrying a `CURRENT` pointer**: it
+is a graph republished atomically, so it is served lease-free and locked only
+between a first unsaved change and the `save_graph` that publishes it. Several
+servers can therefore serve one directory and arbitrate per write. Reading one
+lock-free is safe because a publish never touches the generation a reader has
+mapped — it stages a new one and swings the pointer — and kglite deletes no
+generation, so nothing disappears under a live mapping.
+
 Two targets keep the lock from the open instead, because waiting is not safe
 for them: a path that does not exist yet (this open is creating it, and locking
-first is what stops two servers from both creating it), and a disk-graph
-*directory*, whose columns stay memory-mapped while served, so an external
-writer mutating one is memory corruption rather than a stale read. A created
-file joins the lazy lifecycle once its first `save_graph` has published it; a
-disk-graph directory keeps its lock for as long as the server serves it.
+first is what stops two servers from both creating it), and a **legacy flat
+directory** — a pre-generations disk graph whose CSR files sit at the root with
+no `CURRENT` beside them, which a rebuild rewrites in place under this server's
+live mappings. A created path joins the lazy lifecycle once its first
+`save_graph` has published it; a legacy flat directory keeps its lock for as
+long as the server serves it.
+
+Budget for the directory's growth before you enable `save_graph` on one: every
+disk save writes a complete new generation and the superseded ones are retained
+deliberately, so *N* saves leave *N* full copies. There is no retention policy
+— prune old `generations/gen_*` directories yourself once no reader is using
+them, as described under *Durability* in the
+[durable-apps guide](../python/guides/durable-apps.md).
 
 Operating notes:
 
@@ -272,7 +294,8 @@ have `load_graph`/`create_graph`/`save_graph_as` in `extensions.tools_allow`.
 Those tools are also the ones that *end* a lease window, so an allowlist that
 hides both `save_graph` and `reload_graph` from a server that can still mutate
 leaves it holding the writer lease from its first write until the process
-exits — locking every peer out of the file for the session. Hide the mutation
+exits — locking every peer out of the graph (a `.kgl` or a generation
+directory alike) for the session. Hide the mutation
 route (`cypher_query` write scope, or read-only mode) rather than the way back
 out of one.
 

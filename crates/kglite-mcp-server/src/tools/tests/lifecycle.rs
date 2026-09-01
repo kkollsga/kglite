@@ -221,6 +221,163 @@ fn a_created_disk_graph_gives_its_lease_back_at_the_publish() {
     );
 }
 
+/// Build a published disk-graph directory holding `nodes` nodes at `path`,
+/// then release it — a `CURRENT`-bearing directory exactly as a peer leaves
+/// one behind.
+///
+/// Built through the engine rather than through a second `GraphState`: the
+/// fixture is "what somebody else published here", and a producer that is not
+/// an MCP server is the shape that makes the fewest assumptions about the
+/// state machine under test.
+fn seed_disk_dir(path: &std::path::Path, nodes: u64) {
+    let mut dir = kglite::api::storage::new_dir_graph_in_mode(StorageMode::Disk, Some(path))
+        .expect("create the disk graph");
+    let params = std::collections::HashMap::new();
+    let opts = kglite::api::session::ExecuteOptions::eager(&params);
+    for i in 0..nodes {
+        kglite::api::session::execute_mut(&mut dir, &format!("CREATE (:N {{id:'{i}'}})"), &opts)
+            .expect("seed node");
+    }
+    let mut graph = Arc::new(dir);
+    kglite::api::io::save_graph(&mut graph, path.to_str().expect("utf-8 fixture path"))
+        .expect("publish the first generation");
+    drop(graph);
+    assert!(
+        path.join("CURRENT").is_file(),
+        "the fixture must be the generation layout, not the legacy one"
+    );
+}
+
+/// Rewrite `root` into the pre-generations layout: the selected generation's
+/// files moved up to the root, and no `CURRENT` beside them. That is the
+/// on-disk shape `resolve_snapshot` treats as legacy (`snapshot_dir == root`,
+/// `generation == None`), and the one a rebuild writes in place.
+fn flatten_to_legacy_layout(root: &std::path::Path) {
+    let pointer = std::fs::read_to_string(root.join("CURRENT")).expect("CURRENT");
+    let generation = root.join("generations").join(pointer.trim_end());
+    for entry in std::fs::read_dir(&generation).expect("generation dir") {
+        let entry = entry.expect("generation entry");
+        let target = root.join(entry.file_name());
+        // The build left its pre-publish scratch copies at the root; the
+        // published generation's files are the ones that must end up there.
+        if target.is_dir() {
+            std::fs::remove_dir_all(&target).expect("clear the stale root copy");
+        } else if target.exists() {
+            std::fs::remove_file(&target).expect("clear the stale root copy");
+        }
+        std::fs::rename(entry.path(), &target).expect("move up to the root");
+    }
+    std::fs::remove_file(root.join("CURRENT")).expect("drop the pointer");
+    std::fs::remove_dir_all(root.join("generations")).expect("drop the generations dir");
+}
+
+/// The disk-directory half of the inversion: *opening* a published generation
+/// directory is not a write either, so it takes no lease. A peer's publish
+/// stages a new generation and swings `CURRENT` — it never rewrites the one
+/// this server mapped — so four servers can serve one directory and only the
+/// one mid-write excludes the others.
+#[test]
+fn an_opened_disk_directory_takes_no_lease_until_it_writes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("lazy_disk_dir");
+    seed_disk_dir(&p, 1);
+
+    let state = GraphState::default();
+    state.open_or_create(&p, None).unwrap();
+    assert_eq!(active_mode(&state), "disk");
+    assert_eq!(state.schema().unwrap().0, 1, "the directory must be served");
+    assert!(
+        external_lease_is_available(&p),
+        "an opened directory must not lock before it has anything to save"
+    );
+
+    state
+        .with_active_mut(|a| write(a, "CREATE (:N {id:'local'})", None))
+        .unwrap()
+        .unwrap();
+    assert!(
+        !external_lease_is_available(&p),
+        "the first unsaved change takes the lease"
+    );
+
+    state.with_active_mut(run_save).unwrap().unwrap();
+    assert!(
+        external_lease_is_available(&p),
+        "publishing the generation gives the lease back — the dirty window is over"
+    );
+}
+
+/// A read-only server never writes the directory, so an external rebuilder
+/// must be able to lock it — the disk-mode mirror of
+/// `a_read_only_state_leaves_the_served_file_lockable`.
+#[test]
+fn a_read_only_state_leaves_a_disk_directory_lockable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("read_only_disk_dir");
+    seed_disk_dir(&p, 1);
+
+    let s = GraphState::default().with_writer_lease_policy(WriterLeasePolicy::ReadOnly);
+    s.open_or_create(&p, None).unwrap();
+    assert_eq!(s.schema().unwrap().0, 1, "the graph must be served");
+    assert!(
+        read_lock(&s.inner)
+            .as_ref()
+            .is_some_and(|active| active.ownership.is_none()),
+        "a read-only state must carry no write ownership of a published directory"
+    );
+    assert!(
+        external_lease_is_available(&p),
+        "an external rebuilder must be able to lock the directory a read-only server serves"
+    );
+}
+
+/// The one directory shape that keeps the pre-generations rules. A legacy flat
+/// directory has no `CURRENT`, so a rebuild writes CSR files straight into the
+/// root under this server's live mappings — corruption rather than staleness —
+/// and its `GraphFileIdentity` degenerates to the root inode, so there is no
+/// change signal to auto-refresh from either. It therefore locks from the open
+/// and stays locked for as long as the graph is served.
+#[test]
+fn a_legacy_flat_directory_keeps_the_eager_lease() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("legacy_flat_dir");
+    seed_disk_dir(&p, 1);
+    flatten_to_legacy_layout(&p);
+
+    let state = GraphState::default();
+    state.open_or_create(&p, None).unwrap();
+    assert_eq!(
+        state.schema().unwrap().0,
+        1,
+        "the legacy layout must still load"
+    );
+    assert!(
+        !external_lease_is_available(&p),
+        "a legacy flat directory locks from the open, before anything is unsaved"
+    );
+    assert_eq!(
+        state.with_active(|active| active.freshness_path.clone()),
+        Some(None),
+        "and it is not stat-refreshed: the root inode carries no publish signal"
+    );
+
+    state
+        .with_active_mut(|a| write(a, "CREATE (:N {id:'local'})", None))
+        .unwrap()
+        .unwrap();
+    state.with_active_mut(run_save).unwrap().unwrap();
+    assert!(
+        !external_lease_is_available(&p),
+        "the lease is pinned for the graph's lifetime, not released at the publish"
+    );
+
+    drop(state);
+    assert!(
+        external_lease_is_available(&p),
+        "and dropping the server is what finally releases it"
+    );
+}
+
 /// The inversion this program exists for: *opening* an existing file is not a
 /// write, so it takes no lease. Four MCP clients can serve one `.kgl`; the
 /// lease appears only around a real unsaved change.
