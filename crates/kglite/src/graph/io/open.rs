@@ -404,13 +404,62 @@ impl MetadataIdentity {
     }
 }
 
-/// Identity of a graph path at load/save time. Disk directories include the
-/// published `CURRENT` pointer bytes, so a generation promotion is detected
-/// even when the root directory inode itself is unchanged.
+/// Identity of a graph path at load/save time — the value a writer compares
+/// to decide whether the path is still the one its graph was read from.
+///
+/// What counts as "changed" depends on the shape of the path, because each
+/// shape has a different publish mechanism and a different kind of noise:
+///
+/// - a **regular file** is replaced atomically by every save, so its own
+///   metadata (size, mtime, inode) is the signal;
+/// - a **disk-graph directory with a `CURRENT` pointer** is that pointer alone
+///   — its metadata plus its bytes. The root directory's own mtime and size are
+///   deliberately *not* part of it: a writer mints its scratch
+///   (`.working-<pid>-<nonce>/`, `.kglite.lock`) inside the root, and a server
+///   that folded the root in would refuse to publish its own write. A publish
+///   always replaces `CURRENT` (new inode, new bytes), so the pointer is the
+///   complete change signal;
+/// - a **legacy flat directory** (no pointer) has no publish signal at all — its
+///   files are rewritten in place — so it is keyed on the directory's own
+///   inode: it changes only if the directory is replaced wholesale, and the
+///   first save under a lease migrates it to the pointer shape;
+/// - a **missing path** is its own shape, equal only to another missing path.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GraphFileIdentity {
-    root: Option<MetadataIdentity>,
-    current: Option<(MetadataIdentity, Vec<u8>)>,
+    shape: Shape,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Shape {
+    Missing,
+    File(MetadataIdentity),
+    Generation(MetadataIdentity, Vec<u8>),
+    LegacyDir(DirIdentity),
+}
+
+/// A directory's identity without its contents' churn: which directory, not
+/// what is in it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DirIdentity {
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(windows)]
+    handle: Arc<same_file::Handle>,
+}
+
+impl DirIdentity {
+    fn of(metadata: &MetadataIdentity) -> Self {
+        Self {
+            #[cfg(unix)]
+            device: metadata.device,
+            #[cfg(unix)]
+            inode: metadata.inode,
+            #[cfg(windows)]
+            handle: Arc::clone(&metadata.handle),
+        }
+    }
 }
 
 impl GraphFileIdentity {
@@ -419,16 +468,14 @@ impl GraphFileIdentity {
             Ok(captured) => captured,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 return Ok(Self {
-                    root: None,
-                    current: None,
+                    shape: Shape::Missing,
                 });
             }
             Err(error) => return Err(error),
         };
         if !metadata.is_dir() {
             return Ok(Self {
-                root: Some(root),
-                current: None,
+                shape: Shape::File(root),
             });
         }
 
@@ -437,8 +484,7 @@ impl GraphFileIdentity {
             Ok(captured) => captured,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 return Ok(Self {
-                    root: Some(root),
-                    current: None,
+                    shape: Shape::LegacyDir(DirIdentity::of(&root)),
                 });
             }
             Err(error) => return Err(error),
@@ -454,8 +500,7 @@ impl GraphFileIdentity {
             .open_snapshot(&current_path)?
             .read_to_end(&mut bytes)?;
         Ok(Self {
-            root: Some(root),
-            current: Some((current_identity, bytes)),
+            shape: Shape::Generation(current_identity, bytes),
         })
     }
 }
@@ -869,6 +914,41 @@ mod tests {
         std::fs::write(tmp.path().join("CURRENT"), b"gen_00000000000000000002\n").unwrap();
         let second = GraphFileIdentity::capture(tmp.path()).unwrap();
         assert_ne!(first, second);
+    }
+
+    /// A writer's own scratch — `.working-<pid>-<nonce>/`, `.kglite.lock` —
+    /// lands *inside* the graph root and moves the root directory's mtime and
+    /// size. The identity must not see that, or a disk server refuses to save
+    /// its own write: only the `CURRENT` pointer says which generation is
+    /// published.
+    #[test]
+    fn disk_identity_ignores_scratch_beside_current() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("CURRENT"), b"gen_00000000000000000001\n").unwrap();
+        let before = GraphFileIdentity::capture(tmp.path()).unwrap();
+        std::fs::create_dir(tmp.path().join(".working-1-1")).unwrap();
+        std::fs::write(tmp.path().join(".kglite.lock"), b"pid=1\n").unwrap();
+        let after = GraphFileIdentity::capture(tmp.path()).unwrap();
+        assert_eq!(
+            before, after,
+            "root-directory churn is not a generation change"
+        );
+
+        // Same for a legacy flat directory, which is keyed on the directory
+        // itself; its first save then migrates it to the pointer shape, and
+        // that migration *is* a change.
+        let legacy = tempfile::tempdir().unwrap();
+        std::fs::write(legacy.path().join("metadata.json"), b"{}").unwrap();
+        let before = GraphFileIdentity::capture(legacy.path()).unwrap();
+        std::fs::create_dir(legacy.path().join(".working-1-1")).unwrap();
+        let after = GraphFileIdentity::capture(legacy.path()).unwrap();
+        assert_eq!(
+            before, after,
+            "scratch inside a legacy root is not a change"
+        );
+        std::fs::write(legacy.path().join("CURRENT"), b"gen_00000000000000000001\n").unwrap();
+        let migrated = GraphFileIdentity::capture(legacy.path()).unwrap();
+        assert_ne!(before, migrated, "gaining a CURRENT pointer is a change");
     }
 
     #[test]

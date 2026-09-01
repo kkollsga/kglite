@@ -175,8 +175,6 @@ impl ActiveGraph {
         }
     }
 
-    /// Compact one-line identity footer appended to `cypher_query` results so
-    /// every query self-identifies which graph (and how fresh) it ran against.
     /// Point per-call freshness at `path` if a peer can republish it atomically
     /// — a regular file, or a generation directory with a `CURRENT` pointer.
     /// The open decides this for the path it read; a publish decides it again
@@ -188,6 +186,8 @@ impl ActiveGraph {
         self.freshness_path = republished_atomically.then(|| path.to_path_buf());
     }
 
+    /// Compact one-line identity footer appended to `cypher_query` results so
+    /// every query self-identifies which graph (and how fresh) it ran against.
     pub(crate) fn identity_footer(&self) -> String {
         let root = match &self.root {
             Some(r) => r.display().to_string(),
