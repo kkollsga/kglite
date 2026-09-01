@@ -90,24 +90,13 @@ fn boot_value_codecs(
     Ok((!codecs.is_empty()).then(|| Arc::new(codecs)))
 }
 
-/// `extensions.graph_watch` — **retired**, and still parsed.
-///
-/// What it used to arm is now unconditional: a `--graph` server stats the
-/// served file on every tool call (`tools::graph_reload`), so there is no
-/// watcher to switch on and nothing an operator gains by setting the key.
-/// Returning what was parsed rather than dropping it is what lets the caller
-/// warn about a key that no longer does anything — a manifest carrying
-/// `graph_watch: false` used to *mean* "do not refresh", and its author has to
-/// learn that it no longer says that. A non-boolean value is still a boot
-/// error rather than a silently ignored key (see [`boot_tools_allow`]): the
-/// day this key is finally deleted, a typo in it must not start passing.
+use crate::tools::BoundOntology;
+
 /// `extensions.ontology: {"file": "x.json"}` — the declared semantic layer,
 /// parsed once at boot (a malformed value fails the server, per the crate's
 /// no-silently-ignored-keys rule) and applied memory-only to every graph the
 /// state installs. The path resolves against the manifest's directory, like
 /// `csv_http_server`.
-use crate::tools::BoundOntology;
-
 fn boot_ontology(
     manifest: Option<&mcp_methods::server::Manifest>,
     manifest_base: &Path,
@@ -146,6 +135,17 @@ fn boot_ontology(
     }))
 }
 
+/// `extensions.graph_watch` — **retired**, and still parsed.
+///
+/// What it used to arm is now unconditional: a `--graph` server stats the
+/// served file on every tool call (`tools::graph_reload`), so there is no
+/// watcher to switch on and nothing an operator gains by setting the key.
+/// Returning what was parsed rather than dropping it is what lets the caller
+/// warn about a key that no longer does anything — a manifest carrying
+/// `graph_watch: false` used to *mean* "do not refresh", and its author has to
+/// learn that it no longer says that. A non-boolean value is still a boot
+/// error rather than a silently ignored key (see [`boot_tools_allow`]): the
+/// day this key is finally deleted, a typo in it must not start passing.
 fn boot_graph_watch(manifest: Option<&mcp_methods::server::Manifest>) -> Result<Option<bool>> {
     let Some(raw) = manifest.and_then(|m| m.extensions.get("graph_watch")) else {
         return Ok(None);
