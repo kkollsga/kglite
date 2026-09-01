@@ -12,7 +12,8 @@ Three real failures of that single class, all on 2026-07-27:
    added in 0.4.1. Our ``Cargo.lock`` held 0.4.1, so every local build and every
    CI run here resolved fine; a sibling with an older lock hit a compile failure
    against the published crate.
-2. ``fastembed = "5"`` selects a feature that first existed in 5.9.0;
+2. ``fastembed = "5"`` selects a feature that first existed in 5.9.0 (the
+   ecosystem has since moved to the 6.x line, so the watched floor is 6.0.0);
    ``mimalloc = "0.1"`` selects ``v2``, added in 0.1.49. Same shape.
 3. codingest's ``.github/workflows/ci.yml`` pinned ``kglite==0.14.5`` while its
    wheel metadata required ``>=0.15.0,<0.16``. ``pip check`` fails on push, and
@@ -179,7 +180,7 @@ ECOSYSTEM_PACKAGES: dict[str, tuple[str, ...]] = {
 #: the value is the version at which the *feature we actually use* appeared, or
 #: None to just compare against the lockfile.
 WATCHED_THIRD_PARTY: dict[str, str | None] = {
-    "fastembed": "5.9.0",  # the feature selected by `fastembed = "5"` is 5.9.0+
+    "fastembed": "6.0.0",  # this ecosystem's fastembed integration is on the 6.x line
     "mimalloc": "0.1.49",  # the `v2` feature landed in 0.1.49
     "rmcp": None,
     "rmcp-macros": None,

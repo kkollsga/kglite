@@ -345,7 +345,7 @@ def test_manifest_floor_below_the_governing_lock_is_reported(ecosystem: Path) ->
 
 
 def test_known_feature_floor_beats_the_lock_heuristic(ecosystem: Path) -> None:
-    """`fastembed = "5"` selects a feature that first exists in 5.9.0."""
+    """`fastembed = "5"` is below the 6.0.0 line this ecosystem builds on."""
     _write(
         ecosystem / "downstream" / "Cargo.toml",
         '[workspace.package]\nversion = "1.0.0"\n\n[workspace.dependencies]\nfastembed = { version = "5" }\n',
@@ -353,7 +353,7 @@ def test_known_feature_floor_beats_the_lock_heuristic(ecosystem: Path) -> None:
     _write(ecosystem / "downstream" / "Cargo.lock", '[[package]]\nname = "fastembed"\nversion = "5.17.3"\n')
 
     _, out = run(ecosystem)
-    assert "first exists in 5.9.0" in out
+    assert "first exists in 6.0.0" in out
     assert out.count("fastembed") >= 1
     # Exactly one finding, not one per detection route.
     assert out.count("UNDERSTATED FLOORS — declared minimum below what actually builds (1)") == 1
