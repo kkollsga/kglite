@@ -1650,6 +1650,7 @@ impl core::marker::StructuralPartialEq for kglite::api::io::Discarded
 pub struct kglite::api::io::GraphFileIdentity
 impl kglite::api::io::GraphFileIdentity
 pub fn kglite::api::io::GraphFileIdentity::capture(path: &std::path::Path) -> core::io::error::Result<Self>
+pub fn kglite::api::io::GraphFileIdentity::modified(&self) -> core::option::Option<std::time::SystemTime>
 impl core::clone::Clone for kglite::api::io::GraphFileIdentity
 pub fn kglite::api::io::GraphFileIdentity::clone(&self) -> kglite::api::io::GraphFileIdentity
 impl core::cmp::Eq for kglite::api::io::GraphFileIdentity
