@@ -14,3 +14,4 @@ pub mod open;
 #[cfg(feature = "rdf")]
 pub mod rdf;
 pub mod unified_columns;
+pub mod write_ownership;

@@ -26,8 +26,8 @@ use kglite::api::introspection::{
     compute_description, ConnectionDetail, CypherDetail, FluentDetail,
 };
 use kglite::api::io::{
-    load_file, open_or_create_graph, save_graph, GraphFileIdentity, GraphWriterLease,
-    OpenDisposition,
+    load_file, open_or_create_graph, GraphWriterLease, OpenDisposition, WriteOwnership,
+    WriteRefusal,
 };
 use kglite::api::storage::{new_dir_graph_in_mode, StorageMode};
 use kglite::api::{DirGraph, Value};
@@ -35,7 +35,53 @@ use kglite::api::{DirGraph, Value};
 use crate::exec::QueryOptions;
 use crate::format::Mode;
 
+/// How long a save-capable invocation waits for a peer to release the graph.
+///
+/// Taken *before* the graph is read, and deliberately long: two `kglite write
+/// --save` runs against one file are expected to serialize into one after the
+/// other, and the second one has nothing useful to do with a snapshot the
+/// first is about to invalidate.
 const WRITE_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Render a core write refusal in the CLI's own vocabulary. The lost-update
+/// wording is the one users have seen since the guard shipped.
+fn write_refusal(path: &Path, refusal: WriteRefusal) -> anyhow::Error {
+    match refusal {
+        WriteRefusal::Stale { .. } => anyhow::anyhow!(
+            "refusing to overwrite {}: it changed since this session loaded it",
+            path.display()
+        ),
+        other => anyhow::anyhow!("failed to save {}: {other}", path.display()),
+    }
+}
+
+/// Open `path` for a run that may write it back, holding the writer lease
+/// across the whole read/modify/publish interval.
+///
+/// The lease is taken *before* the open, which is the ordering that makes two
+/// concurrent `--save` runs serialize: the loser waits, then reads what the
+/// winner published, instead of reading first and finding its snapshot stale.
+fn open_owned(
+    path: &Path,
+    create_mode: Option<StorageMode>,
+) -> Result<(Arc<DirGraph>, WriteOwnership)> {
+    let lease = GraphWriterLease::acquire(path, WRITE_LOCK_TIMEOUT)?;
+    let opened = open_or_create_graph(path, create_mode)
+        .with_context(|| format!("failed to open or create {}", path.display()))?;
+    let graph = opened.graph;
+    let mut ownership = WriteOwnership::new(
+        path.to_path_buf(),
+        opened.identity,
+        &graph,
+        None,
+        // The CLI has no rollback path: a failed statement ends the process,
+        // and holding a second `Arc` would fork the graph on the next write
+        // for a snapshot nothing would ever read.
+        false,
+    );
+    ownership.adopt_lease(lease, &graph);
+    Ok((graph, ownership))
+}
 
 /// Interactive Cypher shell for kglite `.kgl` graphs.
 #[derive(Parser, Debug)]
@@ -381,7 +427,7 @@ where
         };
     }
 
-    let (graph, source, source_identity) = match &cli.graph {
+    let (graph, ownership) = match &cli.graph {
         Some(path) => {
             let p = path.to_string_lossy().to_string();
             let opened = open_or_create_graph(path, Some(StorageMode::Memory))
@@ -389,14 +435,17 @@ where
             if opened.disposition == OpenDisposition::Created {
                 eprintln!("note: {p} does not exist — starting an empty in-memory graph");
             }
-            let source = (opened.disposition == OpenDisposition::Opened).then_some(p);
-            let identity = source.as_ref().map(|_| opened.identity);
-            (opened.graph, source, identity)
+            // A path that did not exist is not this session's file yet: `.save`
+            // with no argument still asks for one, as it always has.
+            let ownership = (opened.disposition == OpenDisposition::Opened).then(|| {
+                WriteOwnership::new(path.clone(), opened.identity, &opened.graph, None, false)
+            });
+            (opened.graph, ownership)
         }
-        None => (Arc::new(fresh_graph()?), None, None),
+        None => (Arc::new(fresh_graph()?), None),
     };
 
-    repl::run(graph, source.as_deref(), source_identity)
+    repl::run(graph, ownership)
 }
 
 /// A fresh in-memory graph. `new_dir_graph_in_mode` returns `Result<_, String>`
@@ -460,14 +509,15 @@ fn run_write(
     git_sha: Option<String>,
     modified_by: Option<String>,
 ) -> Result<()> {
-    let _lease = if persist {
-        Some(GraphWriterLease::acquire(path, WRITE_LOCK_TIMEOUT)?)
+    let (mut graph, mut ownership) = if persist {
+        let (graph, ownership) = open_owned(path, Some(StorageMode::Memory))?;
+        (graph, Some(ownership))
     } else {
-        None
+        let graph = open_or_create_graph(path, None)
+            .with_context(|| format!("failed to open or create {}", path.display()))?
+            .graph;
+        (graph, None)
     };
-    let mut graph = open_or_create_graph(path, persist.then_some(StorageMode::Memory))
-        .with_context(|| format!("failed to open or create {}", path.display()))?
-        .graph;
     let params: HashMap<String, Value> = HashMap::new();
     let options = QueryOptions {
         write_scope: exec::parse_write_scope(write_scope),
@@ -477,9 +527,10 @@ fn run_write(
     };
     let outcome = exec::execute(&mut graph, query, &params, &options)
         .with_context(|| "Cypher execution failed")?;
-    if persist {
-        let p = path.to_string_lossy().to_string();
-        save_graph(&mut graph, &p).map_err(|e| anyhow::anyhow!("failed to save {p}: {e}"))?;
+    if let Some(ownership) = ownership.as_mut() {
+        ownership
+            .publish(&mut graph)
+            .map_err(|refusal| write_refusal(path, refusal))?;
     }
     exec::write_stdout(&exec::render_outcome(
         mode,
@@ -551,15 +602,20 @@ fn run_session(
     git_sha: Option<String>,
     modified_by: Option<String>,
 ) -> Result<()> {
-    let lease = if save_on_exit {
-        Some(GraphWriterLease::acquire(path, WRITE_LOCK_TIMEOUT)?)
+    let (mut graph, mut ownership) = if save_on_exit {
+        open_owned(path, Some(StorageMode::Memory))?
     } else {
-        None
+        let opened = open_or_create_graph(path, None)
+            .with_context(|| format!("failed to open or create {}", path.display()))?;
+        let ownership = WriteOwnership::new(
+            path.to_path_buf(),
+            opened.identity,
+            &opened.graph,
+            None,
+            false,
+        );
+        (opened.graph, ownership)
     };
-    let mut graph = open_or_create_graph(path, save_on_exit.then_some(StorageMode::Memory))
-        .with_context(|| format!("failed to open or create {}", path.display()))?
-        .graph;
-    let mut source_identity = GraphFileIdentity::capture(path)?;
     let base_options = QueryOptions {
         write_scope: exec::parse_write_scope(write_scope),
         git_sha,
@@ -575,25 +631,23 @@ fn run_session(
         }
         match handle_session_line(
             &mut graph,
-            path,
             line,
             default_mode,
             &base_options,
-            &mut source_identity,
-            lease.is_some(),
+            &mut ownership,
         ) {
             SessionAction::Continue(value) => write_json_line(value)?,
             SessionAction::Exit(value) => {
                 write_json_line(value)?;
                 if save_on_exit {
-                    save_loaded_graph(&mut graph, path, &mut source_identity, lease.is_some())?;
+                    session_save(&mut graph, &mut ownership)?;
                 }
                 return Ok(());
             }
         }
     }
     if save_on_exit {
-        save_loaded_graph(&mut graph, path, &mut source_identity, lease.is_some())?;
+        session_save(&mut graph, &mut ownership)?;
     }
     Ok(())
 }
@@ -605,12 +659,10 @@ enum SessionAction {
 
 fn handle_session_line(
     graph: &mut Arc<DirGraph>,
-    path: &Path,
     line: &str,
     default_mode: Mode,
     base_options: &QueryOptions,
-    source_identity: &mut GraphFileIdentity,
-    lease_held: bool,
+    ownership: &mut WriteOwnership,
 ) -> SessionAction {
     let request: serde_json::Value = match serde_json::from_str(line) {
         Ok(v) => v,
@@ -632,8 +684,9 @@ fn handle_session_line(
             base_options,
         ),
         "describe" => session_describe(graph, &request),
-        "save" => save_loaded_graph(graph, path, source_identity, lease_held)
-            .map(|()| serde_json::json!({"ok": true, "op": "save"})),
+        "save" => {
+            session_save(graph, ownership).map(|()| serde_json::json!({"ok": true, "op": "save"}))
+        }
         "help" => Ok(session_help()),
         "exit" | "quit" => {
             let mut value = serde_json::json!({"ok": true, "op": op});
@@ -769,26 +822,11 @@ fn session_describe(
     }))
 }
 
-fn save_loaded_graph(
-    graph: &mut Arc<DirGraph>,
-    path: &Path,
-    source_identity: &mut GraphFileIdentity,
-    lease_held: bool,
-) -> Result<()> {
-    let _lease = (!lease_held)
-        .then(|| GraphWriterLease::acquire(path, WRITE_LOCK_TIMEOUT))
-        .transpose()?;
-    let current = GraphFileIdentity::capture(path)?;
-    if current != *source_identity {
-        anyhow::bail!(
-            "refusing to overwrite {}: it changed since this session loaded it",
-            path.display()
-        );
-    }
-    let p = path.to_string_lossy().to_string();
-    save_graph(graph, &p).map_err(|e| anyhow::anyhow!("failed to save {p}: {e}"))?;
-    *source_identity = GraphFileIdentity::capture(path)?;
-    Ok(())
+fn session_save(graph: &mut Arc<DirGraph>, ownership: &mut WriteOwnership) -> Result<()> {
+    let path = ownership.path().to_path_buf();
+    ownership
+        .publish(graph)
+        .map_err(|refusal| write_refusal(&path, refusal))
 }
 
 fn write_json_line(value: serde_json::Value) -> Result<()> {
@@ -1013,8 +1051,8 @@ fn cypher_string(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::save_loaded_graph;
-    use kglite::api::io::GraphFileIdentity;
+    use super::session_save;
+    use kglite::api::io::{GraphFileIdentity, WriteOwnership};
     use kglite::api::DirGraph;
     use std::fs;
     use std::sync::Arc;
@@ -1025,15 +1063,24 @@ mod tests {
         let graph = tmp.path().join("demo.kgl");
         let mut initial = Arc::new(DirGraph::new());
         kglite::api::io::save_graph(&mut initial, &graph.to_string_lossy()).unwrap();
-        let mut identity = GraphFileIdentity::capture(&graph).unwrap();
         let mut working = initial.clone();
+        let mut ownership = WriteOwnership::new(
+            graph.clone(),
+            GraphFileIdentity::capture(&graph).unwrap(),
+            &working,
+            None,
+            false,
+        );
 
         fs::write(&graph, b"competing writer").unwrap();
-        let error = save_loaded_graph(&mut working, &graph, &mut identity, false).unwrap_err();
+        let error = session_save(&mut working, &mut ownership).unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("changed since this session loaded"));
+        assert!(
+            error
+                .to_string()
+                .contains("changed since this session loaded"),
+            "unexpected refusal text: {error}"
+        );
         assert_eq!(fs::read(&graph).unwrap(), b"competing writer");
     }
 }

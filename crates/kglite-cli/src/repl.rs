@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
-use kglite::api::io::{to_csv_dir, GraphFileIdentity};
+use kglite::api::io::{to_csv_dir, GraphFileIdentity, WriteOwnership};
 use kglite::api::session::{execute_read, ExecuteOptions};
 use kglite::api::{DirGraph, Value};
 use rustyline::error::ReadlineError;
@@ -23,7 +23,6 @@ use rustyline::Editor;
 use crate::exec::{self, QueryOptions};
 use crate::format::{stdout_cell_cap, Mode};
 use crate::helper::{self, ShellHelper};
-use crate::save_loaded_graph;
 
 const PROMPT: &str = "kglite> ";
 
@@ -55,21 +54,17 @@ Ctrl-C cancels a running query; Ctrl-D (or .quit) exits.";
 /// Mutable shell state threaded through the loop.
 struct Shell {
     graph: Arc<DirGraph>,
-    /// The file the graph is associated with (for `.save` with no argument).
-    path: Option<String>,
-    /// Identity of `path` when it was loaded or last saved.
-    source_identity: Option<GraphFileIdentity>,
+    /// The file the graph is associated with (for `.save` with no argument),
+    /// together with what is needed to write it back without clobbering a
+    /// change somebody else made to it. `None` for a session with no file.
+    ownership: Option<WriteOwnership>,
     mode: Mode,
     /// Print wall-time after each statement (`.timing on`).
     timing: bool,
 }
 
 /// Run the REPL against `graph` until EOF / `.quit`.
-pub fn run(
-    graph: Arc<DirGraph>,
-    source: Option<&str>,
-    source_identity: Option<GraphFileIdentity>,
-) -> Result<()> {
+pub fn run(graph: Arc<DirGraph>, ownership: Option<WriteOwnership>) -> Result<()> {
     // Install the SIGINT → cancel handler once. Ignore an error (e.g. handler
     // already set in an odd embedding) — the shell still works, just without
     // mid-query cancellation.
@@ -77,12 +72,11 @@ pub fn run(
 
     let mut shell = Shell {
         graph,
-        path: source.map(str::to_string),
-        source_identity,
+        ownership,
         mode: Mode::default(),
         timing: false,
     };
-    match &shell.path {
+    match shell.source_path() {
         Some(p) => println!("kglite shell — {p}"),
         None => println!("kglite shell — in-memory graph (not saved)"),
     }
@@ -318,9 +312,16 @@ impl Shell {
         }
     }
 
+    /// The file this session would save to with a bare `.save`.
+    fn source_path(&self) -> Option<String> {
+        self.ownership
+            .as_ref()
+            .map(|o| o.path().to_string_lossy().to_string())
+    }
+
     fn save(&mut self, arg: &str) {
         let target = if arg.is_empty() {
-            self.path.clone()
+            self.source_path()
         } else {
             Some(arg.to_string())
         };
@@ -328,31 +329,42 @@ impl Shell {
             println!("Usage: .save <path>  (no path is associated with this session yet)");
             return;
         };
-        let same_source = self.path.as_deref() == Some(path.as_str());
-        let mut identity = if same_source && self.source_identity.is_some() {
-            self.source_identity.clone().expect("checked above")
-        } else {
-            match GraphFileIdentity::capture(std::path::Path::new(&path)) {
-                Ok(identity) => identity,
-                Err(error) => {
-                    eprintln!("error: {error}");
-                    return;
-                }
-            }
-        };
-        match save_loaded_graph(
-            &mut self.graph,
-            std::path::Path::new(&path),
-            &mut identity,
-            false,
-        ) {
-            Ok(()) => {
-                println!("saved to {path}");
-                self.path = Some(path);
-                self.source_identity = Some(identity);
-            }
-            Err(e) => eprintln!("error: {e}"),
+        if let Err(error) = self.retarget(&path) {
+            eprintln!("error: {error}");
+            return;
         }
+        let ownership = self.ownership.as_mut().expect("retarget installs one");
+        match ownership.publish(&mut self.graph) {
+            Ok(()) => println!("saved to {path}"),
+            Err(refusal) => eprintln!(
+                "error: {}",
+                crate::write_refusal(std::path::Path::new(&path), refusal)
+            ),
+        }
+    }
+
+    /// Point the session at `path`, capturing what is on disk there now so a
+    /// save to a file somebody else is also writing is refused rather than
+    /// silently winning.
+    fn retarget(&mut self, path: &str) -> std::io::Result<()> {
+        if self.source_path().as_deref() == Some(path) {
+            return Ok(());
+        }
+        let target = std::path::Path::new(path);
+        let identity = GraphFileIdentity::capture(target)?;
+        match self.ownership.as_mut() {
+            Some(ownership) => ownership.retarget(target.to_path_buf(), identity),
+            None => {
+                self.ownership = Some(WriteOwnership::new(
+                    target.to_path_buf(),
+                    identity,
+                    &self.graph,
+                    None,
+                    false,
+                ))
+            }
+        }
+        Ok(())
     }
 
     /// Execute one Cypher statement (no params) and print it in the active mode.

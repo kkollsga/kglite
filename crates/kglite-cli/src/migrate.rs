@@ -38,7 +38,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use kglite::api::io::{save_graph, GraphWriterLease};
 use kglite::api::{make_dir_graph_mut, DirGraph};
 
 use crate::exec::{self, QueryOptions};
@@ -207,11 +206,10 @@ pub(crate) fn run(graph_path: &Path, dir: &Path, dry_run: bool) -> Result<()> {
         return Ok(());
     }
 
-    let _lease = GraphWriterLease::acquire(graph_path, crate::WRITE_LOCK_TIMEOUT)?;
     // Re-load under the lease: the stamp may have moved between the read above
     // and acquiring the lease, and applying a plan built against a stale stamp
     // would double-apply.
-    let mut graph = crate::load_graph(graph_path)?;
+    let (mut graph, mut ownership) = crate::open_owned(graph_path, None)?;
     let locked_stamp = graph.user_schema_version;
     if locked_stamp != stamp {
         anyhow::bail!(
@@ -229,10 +227,12 @@ pub(crate) fn run(graph_path: &Path, dir: &Path, dry_run: bool) -> Result<()> {
         );
     }
 
-    let path = graph_path.to_string_lossy().to_string();
-    save_graph(&mut graph, &path).map_err(|e| anyhow::anyhow!("failed to save {path}: {e}"))?;
+    ownership
+        .publish(&mut graph)
+        .map_err(|refusal| crate::write_refusal(graph_path, refusal))?;
     println!(
-        "saved {path} at user-schema version {}",
+        "saved {} at user-schema version {}",
+        graph_path.display(),
         graph.user_schema_version
     );
     Ok(())
@@ -252,13 +252,16 @@ pub(crate) fn print_version(graph_path: &Path) -> Result<()> {
 /// deliberately a separate, explicit verb — it asserts a fact about the data
 /// rather than changing it.
 pub(crate) fn set_version(graph_path: &Path, version: u32) -> Result<()> {
-    let _lease = GraphWriterLease::acquire(graph_path, crate::WRITE_LOCK_TIMEOUT)?;
-    let mut graph = crate::load_graph(graph_path)?;
+    let (mut graph, mut ownership) = crate::open_owned(graph_path, None)?;
     let previous = graph.user_schema_version;
     make_dir_graph_mut(&mut graph).user_schema_version = version;
-    let path = graph_path.to_string_lossy().to_string();
-    save_graph(&mut graph, &path).map_err(|e| anyhow::anyhow!("failed to save {path}: {e}"))?;
-    println!("{path}: user-schema version {previous} -> {version}");
+    ownership
+        .publish(&mut graph)
+        .map_err(|refusal| crate::write_refusal(graph_path, refusal))?;
+    println!(
+        "{}: user-schema version {previous} -> {version}",
+        graph_path.display()
+    );
     Ok(())
 }
 

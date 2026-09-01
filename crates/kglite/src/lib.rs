@@ -556,6 +556,22 @@ pub mod api {
         /// TriG). Gated behind the `rdf` Cargo feature.
         #[cfg(feature = "rdf")]
         pub use crate::graph::io::rdf::{load_rdf, RdfConfig, RdfStats};
+        /// The read-modify-publish half of the open lifecycle above:
+        /// `GraphWriterLease` says who may write, `GraphFileIdentity` says
+        /// whether the file is still the one that was read, and
+        /// [`WriteOwnership`] is the state
+        /// machine every server-style binding otherwise reimplements over the
+        /// two — take the lease no earlier than the first unsaved change,
+        /// refuse rather than overwrite a file somebody else replaced, and get
+        /// back to a publishable state when a write fails. It deliberately
+        /// never reloads: a binding re-applies its own per-open state (bound
+        /// embedders, a materialized ontology) that a reload from in here
+        /// would silently drop, so staleness comes back as
+        /// `WriteRefusal::Stale` and the binding refreshes through its own
+        /// open path.
+        pub use crate::graph::io::write_ownership::{
+            BeginWrite, Discarded, WriteOwnership, WriteRefusal, LAZY_LEASE_ACQUIRE_TIMEOUT,
+        };
         /// Streaming disk subset export (bounded-memory subgraph save).
         pub use crate::graph::mutation::subgraph_streaming::{
             pass_a_scan, pass_a_scan_to_file, save_subset, save_subset_streaming_disk, RankIndex,

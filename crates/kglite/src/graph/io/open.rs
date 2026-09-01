@@ -95,6 +95,24 @@ impl GraphWriterLease {
     /// implementation, two return shapes — `acquire` is this plus a
     /// projection, so the two can never disagree about who holds what.
     pub fn acquire_ex(graph_path: &Path, timeout: Duration) -> Result<Self, LeaseRefusal> {
+        Self::acquire_labeled(graph_path, timeout, None)
+    }
+
+    /// [`Self::acquire_ex`], naming the holder in the published owner record.
+    ///
+    /// A pid alone identifies a process on *this* machine at *this* moment; an
+    /// operator running four MCP clients over one graph reads the refusal
+    /// somewhere else entirely, where the pid is already meaningless. `label`
+    /// is what survives that trip — "Claude Desktop", "Codex" — and it is
+    /// carried as a third `label=` line so a record written by a build from
+    /// before this existed still parses, and one written by this build still
+    /// parses in that build (the reader ignores unknown keys, and `pid=` /
+    /// `since=` keep their positions).
+    pub fn acquire_labeled(
+        graph_path: &Path,
+        timeout: Duration,
+        label: Option<&str>,
+    ) -> Result<Self, LeaseRefusal> {
         let path = writer_lease_path(graph_path);
         let started = Instant::now();
         loop {
@@ -107,7 +125,7 @@ impl GraphWriterLease {
                 .map_err(LeaseRefusal::io)?;
             match file.try_lock_exclusive() {
                 Ok(()) => {
-                    publish_owner_record(&writer_owner_path(graph_path));
+                    publish_owner_record(&writer_owner_path(graph_path), label);
                     // Taking write ownership is the one moment that is both
                     // rare enough to afford a directory scan and safe enough
                     // to act on what it finds: a save that died mid-write
@@ -175,8 +193,10 @@ fn writer_lease_path(graph_path: &Path) -> std::path::PathBuf {
 /// check therefore recognises contention on Unix and silently misses it on
 /// Windows, where two things then go wrong at once: the raw platform error
 /// escapes instead of a message naming the holder, *and* the retry loop in
-/// [`GraphWriterLease::acquire_ex`] never runs, so a caller's timeout (the CLI
-/// and MCP server both pass 30s) returns instantly instead of waiting.
+/// [`GraphWriterLease::acquire_ex`] never runs, so a caller's timeout (30s for
+/// the CLI's eager save paths,
+/// [`crate::graph::io::write_ownership::LAZY_LEASE_ACQUIRE_TIMEOUT`] for a
+/// lazily-acquired one) returns instantly instead of waiting.
 ///
 /// [`fs2::lock_contended_error`] exists precisely so callers can compare
 /// portably. The `WouldBlock` arm is kept as a belt-and-braces fallback for an
@@ -205,12 +225,22 @@ fn writer_owner_path(graph_path: &Path) -> std::path::PathBuf {
 /// already won the lock at this point, and failing an acquisition because a
 /// cosmetic sidecar could not be written would trade a working guard for a
 /// better error message.
-fn publish_owner_record(owner_path: &Path) {
-    let record = format!(
+fn publish_owner_record(owner_path: &Path, label: Option<&str>) {
+    let mut record = format!(
         "pid={}\nsince={}\n",
         std::process::id(),
         chrono::Local::now().to_rfc3339()
     );
+    if let Some(label) = label {
+        // Newlines would forge extra key=value lines in a record the reader
+        // parses line-wise, so a multi-line label collapses to one line rather
+        // than inventing fields.
+        let flattened: String = label
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
+        record.push_str(&format!("label={}\n", flattened.trim()));
+    }
     let _ = std::fs::write(owner_path, record);
 }
 
@@ -228,6 +258,10 @@ pub struct LeaseHolder {
     pub pid: Option<u32>,
     /// RFC-3339 local timestamp of when the holder took the lease.
     pub since: Option<String>,
+    /// Operator-facing name the holder published for itself, when it published
+    /// one. Absent for every holder that took the lease without a label, and
+    /// for records written before the field existed.
+    pub label: Option<String>,
 }
 
 impl LeaseHolder {
@@ -264,6 +298,9 @@ impl LeaseHolder {
             match line.split_once('=') {
                 Some(("pid", value)) => holder.pid = value.trim().parse().ok(),
                 Some(("since", value)) => holder.since = Some(value.trim().to_string()),
+                Some(("label", value)) if !value.trim().is_empty() => {
+                    holder.label = Some(value.trim().to_string())
+                }
                 _ => {}
             }
         }
@@ -287,9 +324,14 @@ impl LeaseHolder {
                 std::process::id()
             );
         }
-        match (self.pid, self.since.as_deref()) {
-            (Some(pid), Some(since)) => format!("pid {pid} (since {since})"),
-            (Some(pid), None) => format!("pid {pid}"),
+        match (self.label.as_deref(), self.pid, self.since.as_deref()) {
+            (Some(label), Some(pid), Some(since)) => {
+                format!("\"{label}\" (pid {pid}, since {since})")
+            }
+            (Some(label), Some(pid), None) => format!("\"{label}\" (pid {pid})"),
+            (Some(label), None, _) => format!("\"{label}\""),
+            (None, Some(pid), Some(since)) => format!("pid {pid} (since {since})"),
+            (None, Some(pid), None) => format!("pid {pid}"),
             _ => "another process".to_string(),
         }
     }
@@ -1113,6 +1155,82 @@ mod tests {
         let legacy = tmp.path().join("legacy.lock");
         std::fs::write(&legacy, b"pid=999999\n").unwrap();
         assert_eq!(LeaseHolder::read_once(&legacy).describe(), "pid 999999");
+    }
+
+    /// The record is parsed line-wise by builds on both sides of the label's
+    /// introduction, so `label=` is appended after the two fields those builds
+    /// read positionally — `tests/test_cli_shell_smoke.py` asserts the record
+    /// still starts with `pid=`.
+    #[test]
+    fn a_label_is_published_after_pid_and_since() {
+        let tmp = tempfile::tempdir().unwrap();
+        let graph = tmp.path().join("labelled.kgl");
+        let _lease =
+            GraphWriterLease::acquire_labeled(&graph, Duration::ZERO, Some("Claude Desktop"))
+                .unwrap();
+
+        let record = std::fs::read_to_string(writer_owner_path(&graph)).unwrap();
+        let lines: Vec<&str> = record.lines().collect();
+        assert!(record.starts_with("pid="), "record was {record:?}");
+        assert!(lines[1].starts_with("since="));
+        assert_eq!(lines[2], "label=Claude Desktop");
+
+        let holder = LeaseHolder::read(&writer_owner_path(&graph));
+        assert_eq!(holder.label.as_deref(), Some("Claude Desktop"));
+        assert_eq!(holder.pid, Some(std::process::id()));
+    }
+
+    #[test]
+    fn an_unlabeled_acquisition_writes_the_record_it_always_did() {
+        let tmp = tempfile::tempdir().unwrap();
+        let graph = tmp.path().join("plain.kgl");
+        let _lease = GraphWriterLease::acquire(&graph, Duration::ZERO).unwrap();
+
+        let record = std::fs::read_to_string(writer_owner_path(&graph)).unwrap();
+        assert_eq!(record.lines().count(), 2, "record was {record:?}");
+        assert!(!record.contains("label="));
+        assert_eq!(
+            LeaseHolder::read_once(&writer_owner_path(&graph)).label,
+            None
+        );
+    }
+
+    /// A record written before the field existed must keep describing its
+    /// holder exactly as it used to, not degrade to "another process".
+    #[test]
+    fn a_record_without_a_label_line_describes_as_before() {
+        let tmp = tempfile::tempdir().unwrap();
+        let legacy = tmp.path().join("legacy.lock-owner");
+        std::fs::write(&legacy, b"pid=999999\nsince=2026-01-01T00:00:00+01:00\n").unwrap();
+        assert_eq!(
+            LeaseHolder::read_once(&legacy).describe(),
+            "pid 999999 (since 2026-01-01T00:00:00+01:00)"
+        );
+    }
+
+    #[test]
+    fn a_labeled_holder_is_described_by_its_label() {
+        let holder = LeaseHolder {
+            pid: Some(999999),
+            since: Some("2026-01-01T00:00:00+01:00".to_string()),
+            label: Some("Claude Desktop".to_string()),
+        };
+        assert_eq!(
+            holder.describe(),
+            "\"Claude Desktop\" (pid 999999, since 2026-01-01T00:00:00+01:00)"
+        );
+    }
+
+    #[test]
+    fn a_refusal_names_the_holders_label() {
+        let tmp = tempfile::tempdir().unwrap();
+        let graph = tmp.path().join("named-holder.kgl");
+        let _lease =
+            GraphWriterLease::acquire_labeled(&graph, Duration::ZERO, Some("Codex")).unwrap();
+        let refusal = GraphWriterLease::acquire_ex(&graph, Duration::ZERO)
+            .err()
+            .expect("second acquire must be refused");
+        assert_eq!(refusal.holder.unwrap().label.as_deref(), Some("Codex"));
     }
 
     #[test]
