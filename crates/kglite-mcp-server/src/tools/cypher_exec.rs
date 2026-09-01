@@ -60,7 +60,7 @@ impl GraphState {
     /// Freshness is ensured exactly once. A remaining typed rebuild failure is
     /// returned before the active graph is borrowed or the query is parsed, so
     /// stale data can never escape through a structured evidence route. The
-    /// query then executes directly against the installed generation while its
+    /// query then executes directly against the installed graph while its
     /// read guard is held; calling [`Self::execute_cypher_read`] here would
     /// incorrectly run freshness handling a second time.
     pub(crate) fn execute_cypher_read_strict(

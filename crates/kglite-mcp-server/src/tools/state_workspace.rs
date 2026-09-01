@@ -14,7 +14,7 @@ impl GraphState {
     /// Tag the installed workspace graph as needing rebuild. Called from the
     /// watch callback; non-blocking (two short lock-protected reads/writes).
     /// The observed root/revision identity permits binding to the latest
-    /// compatible generation while preventing a deferred event from silently
+    /// compatible install while preventing a deferred event from silently
     /// crossing into another source snapshot.
     /// The actual rebuild happens lazily on the next tool call via
     /// [`ensure_workspace_graph_fresh`].
@@ -35,7 +35,7 @@ impl GraphState {
             return WorkspaceGraphEnqueue::Empty;
         }
 
-        // Bind against the latest compatible generation under active ->
+        // Bind against the latest compatible install under active ->
         // pending. There is no finite snapshot/retry window for activation to
         // race through.
         let active = read_lock(&self.inner);
@@ -48,7 +48,7 @@ impl GraphState {
         tracing::debug!(
             target = %current.root.display(),
             revisions = ?current.revisions,
-            generation = current.generation,
+            load_count = current.load_count,
             changed_paths = changed_paths.len(),
             "workspace graph tagged for rebuild"
         );
@@ -89,7 +89,7 @@ impl GraphState {
 
         // `pending_rebuild` is empty while an owner prepares off-lock. Keep
         // later freshness callers behind that owner until it has installed
-        // the new generation or published a typed failure snapshot.
+        // the new graph or published a typed failure snapshot.
         let _rebuild_owner = self.rebuild_gate.enter();
         let pending_rebuild = {
             let mut pending = write_lock(&self.pending_rebuild);
@@ -106,7 +106,7 @@ impl GraphState {
         tracing::info!(
             target = %target.root.display(),
             revisions = ?target.revisions,
-            generation = target.generation,
+            load_count = target.load_count,
             changed_paths = pending_rebuild.changed_paths.len(),
             "rebuilding workspace graph (lazy, FS changed)"
         );
@@ -120,14 +120,14 @@ impl GraphState {
                 WorkspaceRebuildCommit::RequeuedCompatible => {
                     tracing::debug!(
                         target = %target.root.display(),
-                        generation = target.generation,
+                        load_count = target.load_count,
                         "requeued consumed paths after compatible activation superseded rebuild"
                     );
                 }
                 WorkspaceRebuildCommit::DiscardedIncompatible => {
                     tracing::debug!(
                         target = %target.root.display(),
-                        generation = target.generation,
+                        load_count = target.load_count,
                         "discarding workspace rebuild prepared for an incompatible graph"
                     );
                 }
@@ -147,14 +147,14 @@ impl GraphState {
                 WorkspaceRebuildFailureDisposition::RequeuedCompatible => {
                     tracing::debug!(
                         target = %target.root.display(),
-                        generation = target.generation,
+                        load_count = target.load_count,
                         "requeued consumed paths after compatible activation superseded failed rebuild"
                     );
                 }
                 WorkspaceRebuildFailureDisposition::DiscardedIncompatible => {
                     tracing::debug!(
                         target = %target.root.display(),
-                        generation = target.generation,
+                        load_count = target.load_count,
                         "discarding workspace rebuild failure for an incompatible graph"
                     );
                 }
@@ -163,7 +163,7 @@ impl GraphState {
     }
 
     /// Snapshot the failed rebuild for the currently installed workspace
-    /// generation. Call after [`Self::ensure_workspace_graph_fresh`] when a
+    /// graph. Call after [`Self::ensure_workspace_graph_fresh`] when a
     /// route must reject stale evidence instead of rendering the legacy
     /// warning and continuing.
     pub(crate) fn workspace_rebuild_failure(&self) -> Option<WorkspaceRebuildFailureSnapshot> {
@@ -227,7 +227,7 @@ impl GraphState {
             revs: revisions,
             unpersisted_config,
             built_at: SystemTime::now(),
-            generation: 0,
+            load_count: 0,
         };
         let summary = activation_summary_for_active(&active);
         Ok(PreparedWorkspaceGraph { active, summary })
@@ -242,9 +242,9 @@ impl GraphState {
     ) -> Option<String> {
         let mut slot = write_lock(&self.inner);
         let mut pending = write_lock(&self.pending_rebuild);
-        prepared.active.generation = slot
+        prepared.active.load_count = slot
             .as_ref()
-            .map_or(1, |active| active.generation.saturating_add(1));
+            .map_or(1, |active| active.load_count.saturating_add(1));
         let installed_target = prepared
             .active
             .workspace_target()
@@ -261,9 +261,9 @@ impl GraphState {
         prepared.summary
     }
 
-    /// Publish a lazy rebuild only if its exact source generation remains
+    /// Publish a lazy rebuild only if its exact source load count remains
     /// installed. If compatible activation superseded it, atomically requeue
-    /// the consumed paths against the latest generation instead of losing
+    /// the consumed paths against the latest install instead of losing
     /// them; incompatible source changes discard the obsolete work.
     pub(crate) fn commit_workspace_rebuild(
         &self,
@@ -286,7 +286,7 @@ impl GraphState {
             );
             return WorkspaceRebuildCommit::RequeuedCompatible;
         }
-        prepared.active.generation = consumed.target.generation.saturating_add(1);
+        prepared.active.load_count = consumed.target.load_count.saturating_add(1);
         let installed_target = prepared
             .active
             .workspace_target()

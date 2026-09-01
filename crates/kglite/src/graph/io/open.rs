@@ -503,6 +503,23 @@ impl GraphFileIdentity {
             shape: Shape::Generation(current_identity, bytes),
         })
     }
+
+    /// When the served path was last published, as its filesystem reports it —
+    /// the one field every server on the same path agrees on once refreshed.
+    ///
+    /// `None` for the two shapes that have no publish moment to report: a
+    /// legacy flat directory, whose files are rewritten in place rather than
+    /// replaced, and a path that is not there at all.
+    pub fn modified(&self) -> Option<SystemTime> {
+        match &self.shape {
+            Shape::File(metadata) => Some(metadata.modified),
+            // The `CURRENT` pointer's mtime, not the root's: swinging the
+            // pointer is the publish, and the root's mtime also moves for a
+            // writer's own scratch (see the shape doc above).
+            Shape::Generation(current, _) => Some(current.modified),
+            Shape::LegacyDir(_) | Shape::Missing => None,
+        }
+    }
 }
 
 /// Open an existing graph, or create an empty graph in `create_mode` when the
@@ -949,6 +966,51 @@ mod tests {
         std::fs::write(legacy.path().join("CURRENT"), b"gen_00000000000000000001\n").unwrap();
         let migrated = GraphFileIdentity::capture(legacy.path()).unwrap();
         assert_ne!(before, migrated, "gaining a CURRENT pointer is a change");
+    }
+
+    /// The cross-server identity: two processes serving one path disagree on
+    /// every counter they keep themselves, so what they report has to come off
+    /// the filesystem. Only the two atomically-republished shapes have such a
+    /// moment; the other two must say so rather than invent one.
+    #[test]
+    fn modified_reports_a_publish_moment_only_for_the_republished_shapes() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let file = tmp.path().join("graph.kgl");
+        std::fs::write(&file, b"bytes").unwrap();
+        let file_modified = GraphFileIdentity::capture(&file).unwrap().modified();
+        assert_eq!(
+            file_modified,
+            Some(std::fs::metadata(&file).unwrap().modified().unwrap()),
+            "a regular file reports its own mtime"
+        );
+
+        // A generation directory reports the `CURRENT` pointer's mtime — the
+        // moment the publish swung it — not the root's.
+        let disk = tmp.path().join("disk");
+        std::fs::create_dir(&disk).unwrap();
+        let current = disk.join("CURRENT");
+        std::fs::write(&current, b"gen_00000000000000000001\n").unwrap();
+        assert_eq!(
+            GraphFileIdentity::capture(&disk).unwrap().modified(),
+            Some(std::fs::metadata(&current).unwrap().modified().unwrap()),
+        );
+
+        let legacy = tmp.path().join("legacy");
+        std::fs::create_dir(&legacy).unwrap();
+        std::fs::write(legacy.join("metadata.json"), b"{}").unwrap();
+        assert_eq!(
+            GraphFileIdentity::capture(&legacy).unwrap().modified(),
+            None,
+            "a legacy flat directory is rewritten in place and has no publish moment"
+        );
+
+        assert_eq!(
+            GraphFileIdentity::capture(&tmp.path().join("absent"))
+                .unwrap()
+                .modified(),
+            None,
+        );
     }
 
     #[test]

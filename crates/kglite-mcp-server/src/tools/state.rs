@@ -420,9 +420,9 @@ impl GraphState {
                 ownership = Some(previous);
             }
         }
-        let generation = guard
+        let load_count = guard
             .as_ref()
-            .map_or(1, |active| active.generation.saturating_add(1));
+            .map_or(1, |active| active.load_count.saturating_add(1));
         // Take the outgoing graph *out* of the slot rather than letting the
         // assignment free it in place: dropping a large graph (petgraph arenas,
         // columnar buffers, mmap teardown) is not free, and doing it under the
@@ -438,7 +438,7 @@ impl GraphState {
             revs: None,
             unpersisted_config,
             built_at: SystemTime::now(),
-            generation,
+            load_count,
         });
         drop(guard);
         drop(previous);
@@ -459,13 +459,15 @@ impl GraphState {
             .and_then(|active| active.source_path.clone())
     }
 
-    /// Monotonic identity of the installed graph — bumped by every swap.
-    /// Reported by `reload_graph` so a caller can tell a completed re-read
-    /// apart from a response about the graph it already had.
-    pub(crate) fn generation(&self) -> Option<u64> {
+    /// How many graphs this server has installed since boot — bumped by every
+    /// swap. Reported by `reload_graph` so a caller can tell a completed
+    /// re-read apart from a response about the graph it already had. Counted
+    /// per server process, so it is not comparable across servers; see
+    /// [`ActiveGraph::load_count`].
+    pub(crate) fn load_count(&self) -> Option<u64> {
         read_lock(&self.inner)
             .as_ref()
-            .map(|active| active.generation)
+            .map(|active| active.load_count)
     }
 
     /// Save the active graph to an explicit `path` and rebind the active

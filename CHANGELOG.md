@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 ### Changed
 
+- **The MCP identity footer and `<active_graph>` header report `load N` and
+  `file saved <T>` instead of `generation N`.** The renamed counter is the same
+  number it always was — how many graphs *this server process* has installed
+  since boot — but calling it a generation invited two readings it cannot
+  support: two servers on one file report different values for the same bytes,
+  a server's own save does not move its own, and the word already means the
+  disk mode's on-disk `generations/` directories, which every process does see.
+  `load` is now stated as server-local (`Load N on this server.` from
+  `reload_graph`), and the identity servers *can* compare is the new
+  `file saved` field — the served path's publish time, taken off the
+  filesystem, present on the footer, the header (`file_saved="…"`) and the
+  activation summary. It is omitted where there is no publish moment to report:
+  a workspace graph, and a legacy flat disk directory rewritten in place.
+  Tooling parsing `· generation ` from a footer must switch to `· load `, and
+  anything reading the `generation="…"` header attribute to `load="…"`; there
+  is no compatibility spelling. `kglite::api::io::GraphFileIdentity` gains the
+  `modified()` accessor this is rendered from.
+
 - **`save_graph` on a clean MCP server no longer rewrites the file.** A save
   with nothing unsaved to write used to publish anyway, moving the `.kgl`'s
   size, mtime and inode — and every peer server bound to the same file then

@@ -77,7 +77,8 @@ never writes onto, a snapshot older than the file was at the time of the call.
 
 `reload_graph` is still registered in `--graph` mode, read-only servers
 included. It forces the re-read instead of waiting for the next call, reports
-the new node/edge counts and the graph generation, and is the refresh path for
+the new node/edge counts and this server's load count (`Load N on this
+server.`), and is the refresh path for
 the cases the automatic one declines. A failed re-read keeps the current graph
 serving and returns the error.
 
@@ -183,11 +184,25 @@ Writes that reach disk cannot silently overwrite each other either:
 - `reload_graph` refuses to discard unsaved changes silently, and `load_graph`
   / `create_graph` refuse outright while the server is dirty. All three name
   `reload_graph(discard_unsaved=true)`: throwing work away has one spelling.
-- Every `cypher_query` result footer — reads and writes alike — carries the
-  graph generation and either `clean` or `unsaved changes — lease held since
-  <T>`, as do the `<active_graph>` header on `graph_overview` and the
-  activation summary. A lease parked by a write that died mid-call is
-  therefore visible on every query instead of only to whoever writes next.
+- Every `cypher_query` result footer — reads and writes alike — carries
+  `file saved <T>`, `load N`, and either `clean` or `unsaved changes — lease
+  held since <T>`, as do the `<active_graph>` header on `graph_overview`
+  (`file_saved="…" load="…" state="…"`) and the activation summary. A lease
+  parked by a write that died mid-call is therefore visible on every query
+  instead of only to whoever writes next.
+- **`load` is server-local; `file saved` is the shared identity.** `load`
+  counts the graphs *this server process* has installed since boot, so it is
+  how you tell a re-read from a skipped freshness check on one server — and two
+  servers on the same path report different numbers for the same bytes, and a
+  server's own save does not move its own. `file saved` is the served path's
+  publish time taken off the filesystem, so it is the field every server on the
+  path agrees on once refreshed, and the one to compare when you are asking
+  whether two clients are serving the same graph. A server holding unsaved
+  changes reports the moment it loaded rather than the file's current one —
+  correct by design: that is the identity its `save_graph` will be checked
+  against. The field is omitted entirely for a graph with no file behind it (a
+  workspace graph) and for a legacy flat directory, which has no publish
+  moment.
 
 The same applies to a **disk-graph directory carrying a `CURRENT` pointer**: it
 is a graph republished atomically, so it is served lease-free and locked only
@@ -195,7 +210,11 @@ between a first unsaved change and the `save_graph` that publishes it. Several
 servers can therefore serve one directory and arbitrate per write. Reading one
 lock-free is safe because a publish never touches the generation a reader has
 mapped — it stages a new one and swings the pointer — and kglite deletes no
-generation, so nothing disappears under a live mapping.
+generation, so nothing disappears under a live mapping. These `generations/`
+directories are the disk mode's own on-disk versions and are unrelated to the
+`load` counter in the footer: `load` counts one server's installs and is not
+written anywhere, while a generation is a published artifact every process
+sees.
 
 Two targets keep the lock from the open instead, because waiting is not safe
 for them: a path that does not exist yet (this open is creating it, and locking

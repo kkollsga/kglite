@@ -51,7 +51,7 @@ impl WorkspaceRebuildFailureReason {
 }
 
 /// Typed snapshot of a failed rebuild for the currently installed workspace
-/// generation. Structured routes consume this after freshness handling; the
+/// graph. Structured routes consume this after freshness handling; the
 /// legacy warning renderer uses the same snapshot rather than parsing prose.
 #[derive(Clone, Debug)]
 pub(crate) struct WorkspaceRebuildFailureSnapshot {
@@ -123,14 +123,14 @@ impl Drop for WorkspaceRebuildGuard<'_> {
     }
 }
 
-/// Exact installed workspace product a watcher event observed. The generation
+/// Exact installed workspace product a watcher event observed. The load count
 /// prevents a slow rebuild prepared for an older activation from overwriting a
 /// newer graph, even when the root/revision labels later repeat.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct WorkspaceGraphTarget {
     pub(crate) root: PathBuf,
     pub(crate) revisions: Option<Vec<String>>,
-    pub(crate) generation: u64,
+    pub(crate) load_count: u64,
 }
 
 impl WorkspaceGraphTarget {

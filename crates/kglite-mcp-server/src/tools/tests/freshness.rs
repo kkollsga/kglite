@@ -36,8 +36,8 @@ fn nodes(state: &GraphState) -> u64 {
     state.schema().expect("a graph is active").0
 }
 
-fn generation(state: &GraphState) -> u64 {
-    state.generation().expect("a graph is active")
+fn load_count(state: &GraphState) -> u64 {
+    state.load_count().expect("a graph is active")
 }
 
 /// The headline property: a clean server never answers from a snapshot older
@@ -51,7 +51,7 @@ fn an_external_rewrite_is_served_by_the_next_call() {
     seed_kgl(&served, 2);
     seed_kgl(&rebuilt, 5);
     let state = serving(&served);
-    let before = generation(&state);
+    let before = load_count(&state);
 
     // An external producer republishes the path (rename-over, as kglite's own
     // save does).
@@ -60,14 +60,14 @@ fn an_external_rewrite_is_served_by_the_next_call() {
     state.ensure_graph_fresh();
     assert_eq!(nodes(&state), 5, "the next tool call must serve new bytes");
     assert_eq!(
-        generation(&state),
+        load_count(&state),
         before + 1,
-        "a completed reload installs a graph and bumps the generation"
+        "a completed reload installs a graph and bumps the load count"
     );
 
     state.ensure_graph_fresh();
     assert_eq!(
-        generation(&state),
+        load_count(&state),
         before + 1,
         "an unchanged file must not reload again on every later call"
     );
@@ -83,7 +83,7 @@ fn a_dirty_server_does_not_auto_reload_and_warns() {
     seed_kgl(&served, 2);
     seed_kgl(&rebuilt, 5);
     let state = serving(&served);
-    let before = generation(&state);
+    let before = load_count(&state);
     state
         .with_active_mut(|active| write(active, "CREATE (:N {id:'local'})", None))
         .expect("a graph is active")
@@ -94,7 +94,7 @@ fn a_dirty_server_does_not_auto_reload_and_warns() {
     state.ensure_graph_fresh();
 
     assert_eq!(
-        generation(&state),
+        load_count(&state),
         before,
         "a reload while dirty would silently discard this server's unsaved work"
     );
@@ -129,11 +129,11 @@ fn a_save_does_not_make_the_next_call_reload_itself() {
         .with_active_mut(|a| run_save(a, false))
         .expect("a graph is active")
         .expect("the save lands");
-    let after_save = generation(&state);
+    let after_save = load_count(&state);
 
     state.ensure_graph_fresh();
     assert_eq!(
-        generation(&state),
+        load_count(&state),
         after_save,
         "a server must not re-read the file it just wrote"
     );
@@ -145,7 +145,7 @@ fn a_save_does_not_make_the_next_call_reload_itself() {
     // being asleep.
     std::fs::rename(&rebuilt, &served).expect("republish");
     state.ensure_graph_fresh();
-    assert_eq!(generation(&state), after_save + 1);
+    assert_eq!(load_count(&state), after_save + 1);
     assert_eq!(nodes(&state), 5);
 }
 
@@ -158,7 +158,7 @@ fn a_failed_reload_retries_per_identity_behind_a_time_backstop() {
     let served = tmp.path().join("torn.kgl");
     seed_kgl(&served, 3);
     let state = serving(&served);
-    let before = generation(&state);
+    let before = load_count(&state);
 
     // A producer writing non-atomically (or a truncated copy) leaves bytes
     // that cannot be opened.
@@ -170,7 +170,7 @@ fn a_failed_reload_retries_per_identity_behind_a_time_backstop() {
         "a failed reload must leave the previous graph serving"
     );
     assert_eq!(
-        generation(&state),
+        load_count(&state),
         before,
         "a failed reload installs nothing"
     );
@@ -385,11 +385,11 @@ fn a_created_graph_is_refreshed_once_it_has_been_published() {
         Some(Some(path.clone())),
         "the publish is what puts a file behind this graph"
     );
-    let before = generation(&state);
+    let before = load_count(&state);
     seed_kgl(&path, 3);
     state.ensure_graph_fresh();
     assert_eq!(
-        generation(&state),
+        load_count(&state),
         before + 1,
         "a peer's rewrite must be picked up"
     );
@@ -411,18 +411,18 @@ fn save_as_moves_freshness_to_the_new_path() {
         state.with_active(|active| active.freshness_path.clone()),
         Some(Some(new.clone()))
     );
-    let before = generation(&state);
+    let before = load_count(&state);
     seed_kgl(&old, 5);
     state.ensure_graph_fresh();
     assert_eq!(
-        generation(&state),
+        load_count(&state),
         before,
         "the old file is no longer this graph's file"
     );
     assert_eq!(nodes(&state), 1);
     seed_kgl(&new, 7);
     state.ensure_graph_fresh();
-    assert_eq!(generation(&state), before + 1, "the new file is");
+    assert_eq!(load_count(&state), before + 1, "the new file is");
     assert_eq!(nodes(&state), 7);
 }
 
@@ -477,14 +477,14 @@ fn a_peers_new_generation_is_served_by_the_next_call() {
     let served = tmp.path().join("shared_dir");
     seed_disk_dir(&served, 2);
     let state = serving(&served);
-    let before = generation(&state);
+    let before = load_count(&state);
     assert_eq!(nodes(&state), 2);
 
     peer_publishes(&served, "peer");
 
     state.ensure_graph_fresh();
     assert_eq!(
-        generation(&state),
+        load_count(&state),
         before + 1,
         "a peer's publish must be picked up on the next tool call"
     );
@@ -492,7 +492,7 @@ fn a_peers_new_generation_is_served_by_the_next_call() {
 
     state.ensure_graph_fresh();
     assert_eq!(
-        generation(&state),
+        load_count(&state),
         before + 1,
         "an unchanged CURRENT must not reload again on every later call"
     );
@@ -512,11 +512,11 @@ fn a_disk_save_does_not_make_the_next_call_reload_itself() {
         .with_active_mut(|a| run_save(a, false))
         .expect("a graph is active")
         .expect("the save publishes a generation");
-    let after_save = generation(&state);
+    let after_save = load_count(&state);
 
     state.ensure_graph_fresh();
     assert_eq!(
-        generation(&state),
+        load_count(&state),
         after_save,
         "a server must not re-read the generation it just published"
     );
@@ -528,6 +528,6 @@ fn a_disk_save_does_not_make_the_next_call_reload_itself() {
     // capture being asleep on directories.
     peer_publishes(&served, "peer");
     state.ensure_graph_fresh();
-    assert_eq!(generation(&state), after_save + 1);
+    assert_eq!(load_count(&state), after_save + 1);
     assert_eq!(nodes(&state), 4);
 }

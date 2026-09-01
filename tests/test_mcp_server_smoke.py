@@ -396,12 +396,24 @@ def _build_disk_fixture_graph(directory: Path) -> None:
     assert (directory / "CURRENT").is_file(), "the fixture must be the generation layout"
 
 
-def _footer_generation(text: str) -> int:
-    """The generation an identity footer reports. A bump is how a caller knows
-    a re-read actually happened rather than the freshness check being skipped."""
-    marker = "· generation "
+def _footer_load(text: str) -> int:
+    """The load count an identity footer reports — how many graphs this server
+    has installed since boot. A bump is how a caller knows a re-read actually
+    happened rather than the freshness check being skipped. It is per-server,
+    so two servers on one file legitimately disagree; `_footer_file_saved` is
+    the field they agree on."""
+    marker = "· load "
     assert marker in text, text
     return int(text.split(marker, 1)[1].split(" ", 1)[0].strip(" ·"))
+
+
+def _footer_file_saved(text: str) -> str:
+    """The `file saved` timestamp an identity footer reports: when the served
+    path was last published, off the filesystem rather than off this server's
+    own clock or counters."""
+    marker = "· file saved "
+    assert marker in text, text
+    return text.split(marker, 1)[1].split(" ", 1)[0].strip(" ·")
 
 
 @pytest.fixture
@@ -830,14 +842,14 @@ class TestGraphMode:
             # per-call stat landed there is nothing for the operator to do
             # about that: the very next call re-reads the file first, and the
             # write lands on the republished bytes. This is the rebuilder loop
-            # the operator actually runs, and the generation bump is what says
+            # the operator actually runs, and the load bump is what says
             # the re-read happened rather than the check having been skipped.
             written = client.call_tool(
                 "cypher_query",
                 {"query": "CREATE (:Task {id: 't0'})", "write_scope": ["Task"]},
             )
             assert not _is_error(written), _text_content(written)
-            assert "generation 2" in _text_content(written), _text_content(written)
+            assert "load 2" in _text_content(written), _text_content(written)
 
             # 2. One unsaved change, and the file is this server's until it saves.
             ack = client.call_tool(
@@ -883,6 +895,51 @@ class TestGraphMode:
         finally:
             client.shutdown()
 
+    def test_two_servers_agree_on_file_saved_and_disagree_on_load(self, tmp_path: Path):
+        """The two identity fields answer different questions, and an operator
+        comparing two servers has to know which is which.
+
+        `load` counts installs *in one server process*, so two servers on the
+        same bytes report different numbers and neither is wrong — that is why
+        it is no longer called `generation`. `file saved` comes off the
+        filesystem, so it is the field they agree on once both have refreshed,
+        and it moves when — and only when — somebody republishes the path."""
+        src = tmp_path / "shared.kgl"
+        _build_fixture_graph(src)
+        manifest = _write_savegraph_manifest(tmp_path)
+
+        writer = _spawn(["--graph", str(src), "--writable", "--mcp-config", str(manifest)])
+        # A second install on the reader, so the two servers' counters differ.
+        reader = _spawn(["--graph", str(src)])
+        try:
+            probe = {"query": "MATCH (p:Person) RETURN count(p) AS c"}
+            reader.call_tool("reload_graph")
+            reader_text = _text_content(reader.call_tool("cypher_query", probe))
+            writer_text = _text_content(writer.call_tool("cypher_query", probe))
+            assert _footer_load(reader_text) == 2, reader_text
+            assert _footer_load(writer_text) == 1, writer_text
+            saved_before = _footer_file_saved(reader_text)
+            assert _footer_file_saved(writer_text) == saved_before, (reader_text, writer_text)
+
+            time.sleep(1.1)  # the footer's timestamp is second-precision
+            written = writer.call_tool(
+                "cypher_query",
+                {"query": "CREATE (:Task {id: 't1'})", "write_scope": ["Task"]},
+            )
+            assert not _is_error(written), _text_content(written)
+            assert not _is_error(writer.call_tool("save_graph"))
+
+            after = _text_content(reader.call_tool("cypher_query", probe))
+            assert _footer_file_saved(after) != saved_before, after
+            assert _footer_load(after) == 3, after
+            # …and the writer, which published those bytes, reports the same
+            # moment without having re-read anything.
+            writer_after = _text_content(writer.call_tool("cypher_query", probe))
+            assert _footer_file_saved(writer_after) == _footer_file_saved(after), writer_after
+        finally:
+            reader.shutdown()
+            writer.shutdown()
+
     # ── disk-graph directories ──────────────────────────────────────────────
     #
     # A directory carrying `CURRENT` is republished atomically, exactly as a
@@ -911,7 +968,7 @@ class TestGraphMode:
             first = reader.call_tool("cypher_query", {"query": "MATCH (n) RETURN count(n) AS c"})
             assert not _is_error(first), _text_content(first)
             assert "4" in _text_content(first)
-            before = _footer_generation(_text_content(first))
+            before = _footer_load(_text_content(first))
 
             written = writer.call_tool(
                 "cypher_query",
@@ -926,7 +983,7 @@ class TestGraphMode:
             after = reader.call_tool("cypher_query", {"query": "MATCH (t:Task) RETURN count(t) AS c"})
             assert not _is_error(after), _text_content(after)
             assert "1" in _text_content(after), _text_content(after)
-            assert _footer_generation(_text_content(after)) == before + 1, _text_content(after)
+            assert _footer_load(_text_content(after)) == before + 1, _text_content(after)
         finally:
             reader.shutdown()
             writer.shutdown()
@@ -1064,7 +1121,7 @@ class TestWritableMode:
             text = _text_content(r)
             assert not _is_error(r), text
             assert "— active graph:" in text, text
-            assert _footer_generation(text) >= 0, text
+            assert _footer_load(text) >= 0, text
         finally:
             client.shutdown()
 
@@ -1145,7 +1202,7 @@ class TestWritableMode:
         A rewrite that changes nothing still moves the file's identity, and
         every peer serving the same `.kgl` then pays a full re-read on its
         next call — half a second at 133 MB, per peer. The peer arm is the
-        point of the test: its footer generation must not advance."""
+        point of the test: its footer load count must not advance."""
         src = tmp_path / "clean.kgl"
         _build_fixture_graph(src)
         manifest = _write_savegraph_manifest(tmp_path)
@@ -1154,7 +1211,7 @@ class TestWritableMode:
         client = _spawn(["--graph", str(src), "--mcp-config", str(manifest)])
         try:
             probe = {"query": "MATCH (p:Person) RETURN count(p) AS c"}
-            peer_before = _footer_generation(_text_content(peer.call_tool("cypher_query", probe)))
+            peer_before = _footer_load(_text_content(peer.call_tool("cypher_query", probe)))
             stat_before = src.stat()
             time.sleep(0.05)  # any rewrite would land a detectably newer mtime
 
@@ -1166,7 +1223,7 @@ class TestWritableMode:
 
             after = src.stat()
             assert (after.st_mtime_ns, after.st_size) == (stat_before.st_mtime_ns, stat_before.st_size), text
-            peer_after = _footer_generation(_text_content(peer.call_tool("cypher_query", probe)))
+            peer_after = _footer_load(_text_content(peer.call_tool("cypher_query", probe)))
             assert peer_after == peer_before, "a peer must not re-read a file nobody rewrote"
         finally:
             client.shutdown()
@@ -2259,7 +2316,7 @@ class TestReloadGraph:
         it suspicious. The tool is still not a no-op: it re-reads
         unconditionally, which is what makes it the recovery path when the
         automatic refresh is holding back a failing file. Both halves are
-        asserted through the generation counter, because the node counts alone
+        asserted through the load counter, because the node counts alone
         cannot tell one re-read from two."""
         client = _spawn(["--graph", str(graph_fixture)])
         try:
@@ -2268,7 +2325,7 @@ class TestReloadGraph:
                 client.call_tool("cypher_query", {"query": "MATCH (p:Person) RETURN count(p) AS n"})
             )
             assert "4" in counted, counted
-            assert "generation 1" in counted, counted
+            assert "load 1" in counted, counted
 
             # An external producer rebuilds the file (kglite's save is a
             # rename-over, so this is exactly the atomic-republish shape).
@@ -2276,19 +2333,19 @@ class TestReloadGraph:
             g.add_nodes(pd.DataFrame({"id": [9], "title": ["Zoe"], "city": ["Tromso"]}), "Person", "id", "title")
             g.save(str(graph_fixture))
 
-            # The ordinary query already refreshes: generation 2, new bytes.
+            # The ordinary query already refreshes: load 2, new bytes.
             after = _text_content(client.call_tool("cypher_query", {"query": "MATCH (p:Person) RETURN p.title AS t"}))
             assert "Zoe" in after and "Alice" not in after, after
-            assert "generation 2" in after, after
+            assert "load 2" in after, after
 
-            # The explicit tool re-reads the same file again — generation 3 —
+            # The explicit tool re-reads the same file again — load 3 —
             # rather than reporting on the graph it already had.
             reload_result = client.call_tool("reload_graph")
             assert not _is_error(reload_result)
             reloaded = _text_content(reload_result)
             assert "1 nodes" in reloaded and "0 edges" in reloaded, reloaded
             assert str(graph_fixture) in reloaded, reloaded
-            assert "Graph generation 3." in reloaded, reloaded
+            assert "Load 3 on this server." in reloaded, reloaded
         finally:
             client.shutdown()
 
@@ -2360,9 +2417,9 @@ class TestAutomaticFreshness:
 
             after = self._titles(client)
             assert "Zoe" in after and "Alice" not in after, after
-            # The generation moved, so the new bytes came from a re-read rather
+            # The load count moved, so the new bytes came from a re-read rather
             # than from the fixture having been wrong to begin with.
-            assert "generation 2" in after, after
+            assert "load 2" in after, after
         finally:
             client.shutdown()
 

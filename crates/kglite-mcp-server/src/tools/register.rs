@@ -158,15 +158,15 @@ pub fn register_graph_mode_tools(server: &mut McpServer, state: GraphState) {
                 Ok(()) => match state.open_or_create(&path, None) {
                     Ok(_) => {
                         let path = path.display();
-                        let generation = state
-                            .generation()
-                            .map(|g| format!(" Graph generation {g}."))
+                        let load = state
+                            .load_count()
+                            .map(|n| format!(" Load {n} on this server."))
                             .unwrap_or_default();
                         Ok(match state.schema() {
                             Some((n, e)) => {
-                                format!("Reloaded {path} ({n} nodes, {e} edges).{generation}")
+                                format!("Reloaded {path} ({n} nodes, {e} edges).{load}")
                             }
-                            None => format!("Reloaded {path}.{generation}"),
+                            None => format!("Reloaded {path}.{load}"),
                         })
                     }
                     Err(e) => Err(format!("reload_graph error: {e}")),

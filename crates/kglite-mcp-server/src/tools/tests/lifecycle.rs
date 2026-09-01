@@ -465,10 +465,44 @@ fn seed_with_nodes(path: &std::path::Path, nodes: u64) {
     s.save_as(path).unwrap();
 }
 
-/// The active graph's generation counter — bumped by every swap. Reads the
-/// same accessor the `reload_graph` response reports from.
-fn generation(state: &GraphState) -> u64 {
-    state.generation().expect("a graph must be active")
+/// The active graph's load counter — bumped by every swap. Reads the same
+/// accessor the `reload_graph` response reports from.
+fn load_count(state: &GraphState) -> u64 {
+    state.load_count().expect("a graph must be active")
+}
+
+/// The two identity fields answer different questions, and the rendering has
+/// to keep them apart: `load` counts this server's own installs, `file saved`
+/// is the served path's publish moment taken off the filesystem — the only one
+/// two servers on one path can compare. A graph with no file behind it has no
+/// publish moment, so the field is omitted rather than filled with this
+/// server's clock (which is what `built_at` already is, and what made the old
+/// header unable to answer "are we serving the same bytes?").
+#[test]
+fn file_saved_is_the_paths_own_timestamp_and_absent_without_a_path() {
+    let bare = fresh_active();
+    let footer = bare.identity_footer();
+    assert!(footer.contains(" · load 0 · "), "{footer}");
+    assert!(!footer.contains("file saved"), "{footer}");
+    assert!(!bare.identity_attrs().contains("file_saved"), "{footer}");
+
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("published.kgl");
+    seed_with_nodes(&p, 1);
+    let published = iso8601(std::fs::metadata(&p).unwrap().modified().unwrap());
+
+    let s = GraphState::default();
+    s.open_or_create(&p, None).unwrap();
+    let footer = s.with_active(|a| a.identity_footer()).unwrap();
+    assert!(
+        footer.contains(&format!(" · file saved {published} · load 1 · ")),
+        "{footer}"
+    );
+    let attrs = s.with_active(|a| a.identity_attrs()).unwrap();
+    assert!(
+        attrs.contains(&format!(" file_saved=\"{published}\" load=\"1\"")),
+        "{attrs}"
+    );
 }
 
 #[test]
@@ -483,7 +517,7 @@ fn reload_serves_an_externally_rewritten_file() {
     s.bind_embedder(Arc::new(TestEmbedder)).unwrap();
     s.open_or_create(&p, None).unwrap();
     assert_eq!(s.schema().unwrap().0, 1);
-    let generation_before = generation(&s);
+    let load_before = load_count(&s);
 
     // An external producer republishes the served path. kglite's own save is a
     // rename-over, and the writer lease lives on a `<path>.lock` sidecar, so
@@ -499,9 +533,9 @@ fn reload_serves_an_externally_rewritten_file() {
 
     assert_eq!(s.schema().unwrap().0, 3, "reload must serve the new bytes");
     assert_eq!(
-        generation(&s),
-        generation_before + 1,
-        "a reload installs a new graph and must bump the generation"
+        load_count(&s),
+        load_before + 1,
+        "a reload installs a new graph and must bump the load count"
     );
     // Nothing was ever mutated here, so no lease was ever taken — and the
     // reload carries that "no lease" across the swap rather than acquiring
@@ -539,7 +573,7 @@ fn a_failed_reload_keeps_the_previous_graph_serving() {
     let s = GraphState::default();
     s.open_or_create(&p, None).unwrap();
     assert_eq!(s.schema().unwrap().0, 2);
-    let generation_before = generation(&s);
+    let load_before = load_count(&s);
 
     // A producer writing the file non-atomically (or a truncated copy) leaves
     // bytes that cannot be opened.
@@ -554,16 +588,16 @@ fn a_failed_reload_keeps_the_previous_graph_serving() {
     );
 
     // Every load failure returns *before* the write lock is taken, so the
-    // previous graph is untouched — still serving, still the same generation.
+    // previous graph is untouched — still serving, still the same install.
     assert_eq!(
         s.schema().unwrap().0,
         2,
         "a failed reload must leave the old graph active"
     );
     assert_eq!(
-        generation(&s),
-        generation_before,
-        "a failed reload installs nothing and must not bump the generation"
+        load_count(&s),
+        load_before,
+        "a failed reload installs nothing and must not bump the load count"
     );
 }
 
@@ -884,7 +918,7 @@ fn a_leaseless_reload_still_serves_the_new_bytes() {
 
     let s = GraphState::default().with_writer_lease_policy(WriterLeasePolicy::ReadOnly);
     s.open_or_create(&p, None).unwrap();
-    let generation_before = generation(&s);
+    let load_before = load_count(&s);
 
     // The rebuild an unleased path makes possible: an external process locks
     // the file, republishes it, and releases.
@@ -898,7 +932,7 @@ fn a_leaseless_reload_still_serves_the_new_bytes() {
     // branch takes `None` from the old slot and the swap proceeds.
     s.open_or_create(&p, None).unwrap();
     assert_eq!(s.schema().unwrap().0, 3, "reload must serve the new bytes");
-    assert_eq!(generation(&s), generation_before + 1);
+    assert_eq!(load_count(&s), load_before + 1);
     assert!(
         external_lease_is_available(&p),
         "the reload must not have quietly acquired a lease"

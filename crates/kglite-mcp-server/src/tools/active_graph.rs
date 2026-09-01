@@ -79,8 +79,17 @@ pub(crate) struct ActiveGraph {
     /// Wall-clock time this graph was built/loaded. Surfaced next to `root`
     /// so an agent can tell how fresh the active graph is.
     pub(crate) built_at: SystemTime,
-    /// Monotonic identity of this installed graph within the server process.
-    pub(crate) generation: u64,
+    /// How many graphs this server process has installed since boot, this one
+    /// included — a monotonic identity for the installed slot, bumped by every
+    /// swap.
+    ///
+    /// Server-local, not a file property: two servers on one path count their
+    /// own installs and legitimately disagree, and a server's own save does
+    /// not move it. It is deliberately *not* called a generation — a disk
+    /// graph's `generations/` directories are the on-disk, cross-process
+    /// thing, and one word for both had operators comparing numbers that
+    /// answer different questions. [`Self::file_saved`] is what they agree on.
+    pub(crate) load_count: u64,
 }
 
 /// Producer output prepared off the workspace activation lock. Publication is
@@ -161,19 +170,23 @@ impl ActiveGraph {
         Some(WorkspaceGraphTarget {
             root: absolute_lexical_path(self.root.as_deref()?)?,
             revisions: self.revs.clone(),
-            generation: self.generation,
+            load_count: self.load_count,
         })
     }
 
-    /// `root="…" built_at="…" age="…" generation="…" state="…"` attributes for
-    /// the `<active_graph/>` header injected above the `graph_overview`
-    /// schema. Omits `root` when no path is recorded.
+    /// `root="…" built_at="…" age="…" file_saved="…" load="…" state="…"`
+    /// attributes for the `<active_graph/>` header injected above the
+    /// `graph_overview` schema. Omits `root` when no path is recorded, and
+    /// `file_saved` when the served path has no publish moment to report.
     pub(crate) fn identity_attrs(&self) -> String {
         let time = format!(
-            " built_at=\"{}\" age=\"{}\" generation=\"{}\" state=\"{}\"",
+            " built_at=\"{}\" age=\"{}\"{} load=\"{}\" state=\"{}\"",
             iso8601(self.built_at),
             humanize_age(self.built_at),
-            self.generation,
+            self.file_saved()
+                .map(|t| format!(" file_saved=\"{t}\""))
+                .unwrap_or_default(),
+            self.load_count,
             self.write_state()
         );
         // A multi-rev graph names the loaded rev-set on the header so an agent
@@ -207,12 +220,31 @@ impl ActiveGraph {
             None => "(in-memory)".to_string(),
         };
         format!(
-            "\n\n— active graph: {root} · built {} ({} ago) · generation {} · {}",
+            "\n\n— active graph: {root} · built {} ({} ago){} · load {} · {}",
             iso8601(self.built_at),
             humanize_age(self.built_at),
-            self.generation,
+            self.file_saved()
+                .map(|t| format!(" · file saved {t}"))
+                .unwrap_or_default(),
+            self.load_count,
             self.write_state()
         )
+    }
+
+    /// When the served path was last published, as its filesystem reports it.
+    ///
+    /// The counterpart to [`Self::load_count`]: every server on one path
+    /// agrees on this once it has refreshed, so it is the field an operator
+    /// compares across servers. A *dirty* server reports the moment it loaded
+    /// rather than the file's current one — correct by design, because that is
+    /// the identity its save will be checked against.
+    ///
+    /// `None` for a graph with no file behind it and for a legacy flat
+    /// directory, which is rewritten in place and has no publish moment.
+    fn file_saved(&self) -> Option<String> {
+        self.synced_identity()
+            .and_then(|identity| identity.modified())
+            .map(iso8601)
     }
 }
 
@@ -233,8 +265,12 @@ pub(crate) fn activation_summary_for_active(active: &ActiveGraph) -> Option<Stri
         .map(|(name, count)| format!("{count} {name}"))
         .collect();
     let state = format!(
-        " · generation {} · {}.",
-        active.generation,
+        "{} · load {} · {}.",
+        active
+            .file_saved()
+            .map(|t| format!(" · file saved {t}"))
+            .unwrap_or_default(),
+        active.load_count,
         active.write_state()
     );
     let root_note = match &active.root {
