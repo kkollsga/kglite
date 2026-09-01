@@ -49,8 +49,8 @@ in; once it's in, you query with Cypher.
 ```{rubric} Ecosystem
 ```
 
-kglite is the engine. Two companion projects build graphs it serves — each
-released and versioned on its own cadence:
+kglite is the engine. Four companion projects surround it — three build graphs
+it serves, one looks at them — each released and versioned on its own cadence:
 
 - **[kglite](https://github.com/kkollsga/kglite)** — the embedded Cypher
   knowledge-graph engine (this project): graph + Cypher + fluent API + bundled
@@ -64,6 +64,11 @@ released and versioned on its own cadence:
   library into a kglite knowledge graph via sonara audio analysis (tempo,
   energy, mood, key); AI agents curate playlists over it through a simple
   bundled skill and CLI (`pip install sonagram`).
+- **[kglite-visual](https://kglite-visual.readthedocs.io)** — opens a `.kgl` in
+  a browser (`pip install kglite-visual`, then `kglite-visual graph.kgl`),
+  starting from the type-level meta-graph; `render` draws the same views
+  headlessly and its running server speaks MCP, so an agent can drive the
+  window you are watching.
 
 ```{rubric} Pick your track
 ```

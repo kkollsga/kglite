@@ -147,6 +147,11 @@ MCP-capable client and any KGLite graph is queryable. Code-graph construction,
 repository cloning, and code-watch workflows belong to **codingest-mcp**, which
 embeds this same graph-serving surface.
 
+A second MCP surface is visual: while **kglite-visual** serves a `.kgl` in a
+browser window, the same port speaks MCP, so an agent can put a Cypher result
+on screen, expand it, and re-lay it out — driving the window you are watching.
+**→ [Agents and MCP](https://kglite-visual.readthedocs.io/en/latest/agents.html).**
+
 When you register it, point `command` at the **absolute path** to the binary
 (`/abs/path/to/venv/bin/kglite-mcp-server`), not a bare name: a bare command can
 silently launch an older PATH-shadowing install. Then confirm it with
@@ -288,8 +293,8 @@ has a decision table for the server-shaped doorways.
 
 ## Ecosystem
 
-kglite is the engine. Three companion projects build graphs it serves, each
-released and versioned on its own cadence:
+kglite is the engine. Four companion projects surround it — three build graphs
+it serves, one looks at them — each released and versioned on its own cadence:
 
 - **[codingest](https://codingest.readthedocs.io)** parses codebases into
   code graphs (14 languages, web-framework route detection). Build with it,
@@ -300,6 +305,12 @@ released and versioned on its own cadence:
   library into a kglite knowledge graph via sonara audio analysis (tempo,
   energy, mood, key); AI agents curate playlists over it through a bundled
   skill and CLI (`pip install sonagram`).
+- **[kglite-visual](https://kglite-visual.readthedocs.io)** opens a `.kgl` in a
+  browser ([`pip install kglite-visual`](https://pypi.org/project/kglite-visual/),
+  then `kglite-visual graph.kgl`), landing on the type-level meta-graph so a
+  100M-node file still has an entry screen; `render` draws the same views
+  headlessly and `export` writes GraphML, GEXF, CSV, or JSON. No required
+  runtime dependencies.
 
 ## How it compares
 
@@ -533,6 +544,13 @@ tracks by audience, each with its own index:
   the [auto-generated Python API](https://kglite.readthedocs.io/en/latest/autoapi/kglite/index.html).
 - **[Concepts](https://kglite.readthedocs.io/en/latest/concepts/index.html)**:
   architecture, design decisions, Cypher conformance, concurrency.
+
+Looking at a graph rather than querying it is documented next door, at
+**[kglite-visual.readthedocs.io](https://kglite-visual.readthedocs.io)**:
+[getting started](https://kglite-visual.readthedocs.io/en/latest/getting-started.html) ·
+[agents and MCP](https://kglite-visual.readthedocs.io/en/latest/agents.html) ·
+[Python API](https://kglite-visual.readthedocs.io/en/latest/python.html) ·
+[render](https://kglite-visual.readthedocs.io/en/latest/render.html).
 
 Quick reference to the feature set; each row links into the appropriate guide.
 
