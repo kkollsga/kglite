@@ -452,6 +452,44 @@ async fn a_successful_read_keeps_its_identity_footer() {
     assert!(text.contains("— active graph:"), "{text}");
 }
 
+/// The same read on a `--writable` server. The write route decides "this is a
+/// read" and hands it to the read path, so the answer an agent gets must not
+/// depend on whether the operator enabled writes.
+#[tokio::test]
+async fn a_writable_read_keeps_its_identity_footer() {
+    let state = state_with_active(active_with_vessel());
+
+    let result = call(
+        kglite_server(state, writable_builtins()),
+        "cypher_query",
+        json!({ "query": "MATCH (v:Vessel) RETURN v.id AS id" }),
+    )
+    .await;
+
+    let text = assert_success(&result);
+    assert!(text.contains("— active graph:"), "{text}");
+}
+
+/// The writable twin of
+/// [`cypher_syntax_error_is_an_error_envelope_carrying_the_engine_text`]: a
+/// failed read reads byte-identically on both routes.
+#[tokio::test]
+async fn a_writable_read_error_is_byte_identical_to_the_read_only_route() {
+    let state = state_with_active(active_with_vessel());
+    let expected = state
+        .run_cypher_template("RETURN @", &serde_json::Map::new(), CSV_OFF)
+        .expect_err("invalid syntax must fail at the seam");
+
+    let result = call(
+        kglite_server(state, writable_builtins()),
+        "cypher_query",
+        json!({ "query": "RETURN @" }),
+    )
+    .await;
+
+    assert_error(&result, &expected);
+}
+
 // ── unsaved changes: refusals that protect an agent's own work ──────────────
 //
 // Every route that would replace the active graph refuses while this server

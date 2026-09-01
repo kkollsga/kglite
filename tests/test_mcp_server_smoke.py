@@ -1053,6 +1053,21 @@ class TestWritableMode:
         finally:
             client.shutdown()
 
+    def test_read_on_a_writable_server_keeps_its_identity_footer(self, graph_fixture: Path):
+        """A plain read routed through the write-enabled tool self-identifies
+        like one on a read-only server. The write route delegates reads to the
+        read path, so the footer an agent uses to notice it is querying the
+        wrong graph must not depend on the operator's `--writable` flag."""
+        client = _spawn(["--graph", str(graph_fixture), "--writable"])
+        try:
+            r = client.call_tool("cypher_query", {"query": "MATCH (p:Person) RETURN p.title AS t"})
+            text = _text_content(r)
+            assert not _is_error(r), text
+            assert "— active graph:" in text, text
+            assert _footer_generation(text) >= 0, text
+        finally:
+            client.shutdown()
+
     def test_write_tool_binds_params_on_reads_and_mutations(self, graph_fixture: Path):
         """The write path built its own empty parameter map and ignored the
         caller's, so a parameterised mutation was unreachable too."""

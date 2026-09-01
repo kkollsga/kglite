@@ -930,14 +930,18 @@ fn write_with_no_return_acknowledges_stats() {
         )
     );
     // A read that matches nothing still says "No results" (distinct signal) —
-    // and, since `Nope` is a type this graph has never had, says why.
+    // and, since `Nope` is a type this graph has never had, says why. A read on
+    // the writable path self-identifies exactly like one on the read-only tool:
+    // the footer is a property of the answer, not of the server's write mode.
     let out = write(&mut a, "MATCH (x:Nope) RETURN x", None).unwrap();
     assert!(out.starts_with("No results.\n"), "{out}");
     assert!(out.contains("unknown node label 'Nope'"), "{out}");
+    assert!(out.ends_with(&a.identity_footer()), "{out}");
     // A read that matches nothing against a type that DOES exist gets the
-    // bare signal — the warning block is earned, not decoration.
+    // bare signal — the warning block is earned, not decoration — plus the
+    // same footer.
     let out = write(&mut a, "MATCH (t:Task {id:'absent'}) RETURN t", None).unwrap();
-    assert_eq!(out, "No results.");
+    assert_eq!(out, format!("No results.{}", a.identity_footer()));
 }
 
 #[test]

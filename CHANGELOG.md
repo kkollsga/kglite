@@ -19,6 +19,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `rustls >= 0.23.22`, because fastembed 6 reaches `ureq` 3 through `hf-hub`
   0.5 and cargo unifies those crates across the tree.
 
+### Fixed
+
+- **Every read on a write-enabled MCP server now carries the `— active graph:`
+  identity footer.** The write-enabled `cypher_query` recognised a read and ran
+  it, but returned the rendered rows without the footer the read-only server
+  appends — so on a `--writable` server an agent got `4 row(s): …` or a bare
+  `No results.` with nothing naming the graph that answered, which is the one
+  line that tells it the active root is not the one it meant. Reads now
+  delegate to the read path itself, so the answer is byte-identical whichever
+  way the operator started the server.
+
 ## [0.16.19] - 2026-09-01
 ### Changed
 

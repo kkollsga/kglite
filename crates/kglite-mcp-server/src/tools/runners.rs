@@ -81,9 +81,15 @@ pub(crate) fn run_cypher_write(
     let (pre_parsed, is_mutation) =
         kglite::api::cypher::parse_with_mutation_check(query).map_err(|e| e.to_string())?;
     if !is_mutation {
-        // Read on a writable server — same path as the read-only tool. An
-        // operator pin restricts *writes*, so it never touches this branch.
-        return run_cypher_inner(&active.kg, query, params, policy, csv_http);
+        // Read on a writable server — literally the read-only tool, so the
+        // answer (identity footer included) cannot depend on whether the
+        // operator enabled writes. Calling `run_cypher_inner` directly here
+        // dropped the footer from every read a `--writable` server served.
+        // An operator pin restricts *writes*, so it never touches this branch.
+        // `run_cypher_tool` already applies `cypher_tool_error`; the write
+        // route re-applies it in `register.rs`, which is a no-op because the
+        // prefix is only added to a message that does not already carry it.
+        return run_cypher_tool(active, query, params, policy, csv_http);
     }
     let output_csv = pre_parsed.output_format == kglite::api::cypher::OutputFormat::Csv;
     // Refusal before any mutation runs: an empty effective scope is answered
