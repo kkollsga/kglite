@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.19] - 2026-09-01
 ### Changed
 
 - **The MCP server takes the served `.kgl`'s writer lease at its first unsaved
@@ -105,7 +106,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`GraphWriterLease::acquire_labeled`** and `LeaseHolder.label`. The
   `<path>.lock-owner` record gains a third `label=` line after `pid=` /
   `since=` (additive: an older reader ignores it), and refusals render it.
-  `acquire` / `acquire_ex` and the C ABI are unchanged.
+  `acquire` / `acquire_ex` and the C ABI are unchanged. Rust embedders that build `LeaseHolder` with a struct literal must add the new field (`make semver-check`: `constructible_struct_adds_field`, the one major-class finding of this release; shipped as a patch per this project's policy).
 - **`kglite::api::make_dir_graph_mut_preserving_lineage`** — mutable access
   without the version bump, for writes that are configuration rather than data
   (installing a declared ontology, materializing its labels at boot), so a
