@@ -51,7 +51,7 @@ jobs:
         with:
           toolchain: ${{ env.RUST_STABLE }}
       - name: Install pinned cargo-audit
-        uses: taiki-e/install-action@v2.85.4
+        uses: taiki-e/install-action@v2.87.1
         with:
           tool: cargo-audit@0.22.2
       - name: Validate temporary advisory exceptions

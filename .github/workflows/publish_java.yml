@@ -136,12 +136,12 @@ jobs:
           echo "publishing io.github.kkollsga:kglite:$VERSION"
 
       - name: Set up JDK 26
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '26'
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v5
+        uses: gradle/actions/setup-gradle@v6
         with:
           # Pinned, and no wrapper in the repo: kglite-java is built by whatever
           # Gradle the developer has, so CI naming a version is the only place
@@ -149,7 +149,7 @@ jobs:
           gradle-version: '9.7.0'
 
       - name: Download every platform's native
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           pattern: java-native-*
           path: downloaded-natives
