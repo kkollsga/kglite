@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+
+- **The optional `fastembed` embedder backend moved from fastembed 5 to
+  fastembed 6.** Nothing changes for a KGLite user: the same model names
+  resolve to the same weights, and the backend is still opt-in behind the
+  `fastembed` Cargo feature (off in the Python wheel). fastembed 6's one
+  breaking change is upstream error handling — a typed `fastembed::Error`
+  replaces its `anyhow` error — which reaches KGLite only as slightly
+  different wording inside an embedder failure message. Building the workspace
+  with that feature now requires `flate2 >= 1.0.30`, `indexmap >= 2.6.0` and
+  `rustls >= 0.23.22`, because fastembed 6 reaches `ureq` 3 through `hf-hub`
+  0.5 and cargo unifies those crates across the tree.
 
 ## [0.16.19] - 2026-09-01
 ### Changed
