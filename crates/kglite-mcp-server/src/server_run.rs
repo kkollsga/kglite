@@ -613,6 +613,71 @@ fn bind_manifest_embedder(
     Ok(())
 }
 
+/// The `extensions:` knobs the rest of boot is wired from.
+struct BootExtensions {
+    recipe_catalog: Arc<recipe_queries::RecipeCatalog>,
+    tools_allow: Option<Vec<String>>,
+    mutations_enabled: bool,
+    write_scope: Option<Vec<String>>,
+    parallel: bool,
+}
+
+/// Settle every `extensions:` knob before the first route, lease or listener
+/// exists, so a malformed value fails the boot instead of leaving a running
+/// server half-configured.
+///
+/// The sequence is load-bearing rather than tidy: the unknown-key warning goes
+/// out before anything acts on the block, and `mutations_enabled` is decided
+/// ahead of [`boot_write_scope`], whose warning asks whether the pin has
+/// anything left to apply to.
+fn boot_extensions(
+    manifest: Option<&mcp_methods::server::Manifest>,
+    cli: &Cli,
+) -> Result<BootExtensions> {
+    let unknown_keys = unknown_extension_keys(manifest);
+    if !unknown_keys.is_empty() {
+        tracing::warn!(
+            unknown = unknown_keys.join(","),
+            known = KNOWN_EXTENSION_KEYS.join(","),
+            "manifest extensions: key(s) this server does not read — check the spelling, or \
+             ignore this if a skill's `applies_when: extension_enabled:` names them"
+        );
+    }
+    let recipe_catalog = boot_recipe_catalog(manifest)?;
+    if boot_graph_watch(manifest)?.is_some() {
+        tracing::warn!(
+            "extensions.graph_watch is retired — a --graph server now refreshes automatically \
+             on every tool call; remove the key"
+        );
+    }
+    let tools_allow = boot_tools_allow(manifest)?;
+    // Carried as a `bool` from here on: the lease policy, the builtins and the
+    // code-tool gate all read this one answer rather than re-deriving it.
+    let mutations_enabled = boot_mutations_enabled(manifest, cli)?;
+    let write_scope = boot_write_scope(manifest, cli, mutations_enabled)?;
+    let parallel = boot_parallel(manifest, cli)?;
+    if parallel {
+        let (width, overridden) = query_pool_width();
+        tracing::info!(
+            pool_threads = width,
+            width_source = if overridden {
+                "KGLITE_QUERY_THREADS"
+            } else {
+                "available_parallelism"
+            },
+            "parallel runtime enabled for reads (--parallel / extensions.parallel); \
+             mutations stay sequential"
+        );
+    }
+    Ok(BootExtensions {
+        recipe_catalog,
+        tools_allow,
+        mutations_enabled,
+        write_scope,
+        parallel,
+    })
+}
+
 pub(crate) async fn run_async(
     cli: Cli,
     py_embedder_factory: Option<PyEmbedderFactory>,
@@ -627,45 +692,14 @@ pub(crate) async fn run_async(
     validate_mode_paths(&mode, &cli)?;
 
     let manifest = load_manifest(&cli, &mode).context("manifest load failed")?;
-    let unknown_keys = unknown_extension_keys(manifest.as_ref());
-    if !unknown_keys.is_empty() {
-        tracing::warn!(
-            unknown = unknown_keys.join(","),
-            known = KNOWN_EXTENSION_KEYS.join(","),
-            "manifest extensions: key(s) this server does not read — check the spelling, or \
-             ignore this if a skill's `applies_when: extension_enabled:` names them"
-        );
-    }
-    let recipe_catalog = boot_recipe_catalog(manifest.as_ref())?;
+    let BootExtensions {
+        recipe_catalog,
+        tools_allow,
+        mutations_enabled,
+        write_scope,
+        parallel,
+    } = boot_extensions(manifest.as_ref(), &cli)?;
     let recipe_catalog_summary = recipe_catalog.discovery_summary();
-    // Parsed here, at the top of boot, so a malformed value fails the server
-    // rather than surfacing as a key that quietly does nothing.
-    if boot_graph_watch(manifest.as_ref())?.is_some() {
-        tracing::warn!(
-            "extensions.graph_watch is retired — a --graph server now refreshes automatically \
-             on every tool call; remove the key"
-        );
-    }
-    let tools_allow = boot_tools_allow(manifest.as_ref())?;
-    // Resolved before its first consumer (the write-scope warning) and carried
-    // as a `bool` from here on: the lease policy, the builtins and the
-    // code-tool gate all read this one answer rather than re-deriving it.
-    let mutations_enabled = boot_mutations_enabled(manifest.as_ref(), &cli)?;
-    let write_scope = boot_write_scope(manifest.as_ref(), &cli, mutations_enabled)?;
-    let parallel = boot_parallel(manifest.as_ref(), &cli)?;
-    if parallel {
-        let (width, overridden) = query_pool_width();
-        tracing::info!(
-            pool_threads = width,
-            width_source = if overridden {
-                "KGLITE_QUERY_THREADS"
-            } else {
-                "available_parallelism"
-            },
-            "parallel runtime enabled for reads (--parallel / extensions.parallel); \
-             mutations stay sequential"
-        );
-    }
 
     // Manifest `workspace.kind: local` wins over CLI flags — promote before
     // mode-specific binding so the rest of boot sees `Mode::LocalWorkspace`.

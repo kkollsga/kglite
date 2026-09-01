@@ -230,28 +230,22 @@ fn pinned_cypher_description(base: &str, pin: &[String]) -> &'static str {
     .leak()
 }
 
-pub fn register(
-    server: &mut McpServer,
-    state: GraphState,
-    builtins: Builtins,
-    overview_decorations: OverviewDecorations,
-    csv_http: Arc<crate::csv_http::CsvHttpState>,
-) {
-    let s = state.clone();
-    let csv = csv_http.clone();
-    let writable = builtins.writable;
-    let operator_scope = builtins.write_scope.clone();
-    // Descriptions lead with the code-exploration vocabulary agents actually
-    // search for (explore, understand, "how does", call graph, "where defined",
-    // structure, navigate) so lazy-tool-discovery clients (Codex / code_mode)
-    // surface cypher_query on their first broad tool search instead of falling
-    // back to grep. (mcp-servers inbox 2026-07-01.)
-    // Matched on `config().is_some()` — "a fetch URL is actually available",
-    // not "the operator asked for one". A configured-but-failed listener reads
-    // as absent here; the failure reason reaches the agent on the result
-    // itself (`inline_csv_reason`), which a description loaded once at boot
-    // could not do.
-    let cypher_desc: &'static str = match (csv.config().is_some(), writable) {
+/// Pick the `cypher_query` description for this server's actual capabilities.
+///
+/// Every arm leads with the code-exploration vocabulary agents search for
+/// (explore, understand, "how does", call graph, "where defined", structure,
+/// navigate) so lazy-tool-discovery clients (Codex / code_mode) surface
+/// `cypher_query` on their first broad tool search instead of falling back to
+/// grep. (mcp-servers inbox 2026-07-01.)
+///
+/// `csv_enabled` is `config().is_some()` — "a fetch URL is actually available",
+/// not "the operator asked for one". A configured-but-failed listener reads as
+/// absent here; its failure reason reaches the agent on the result itself
+/// (`inline_csv_reason`), which a description loaded once at boot could not do.
+/// An operator `pin` is part of the contract the agent plans against, so it is
+/// stated here rather than left to surface as a refusal.
+fn cypher_description(csv_enabled: bool, writable: bool, pin: Option<&[String]>) -> &'static str {
+    let base: &'static str = match (csv_enabled, writable) {
         (_, true) => {
             "Query, explore, and understand the active knowledge graph with Cypher, and \
              modify it — reads AND writes (CREATE/SET/DELETE/MERGE) are accepted; this is a \
@@ -292,12 +286,82 @@ pub fn register(
              fetch URL carrying the complete result."
         }
     };
-    // An operator pin is part of the contract the agent plans against, so it
-    // is stated in the description rather than left to surface as a refusal.
-    let cypher_desc = match operator_scope.as_deref() {
-        Some(pin) => pinned_cypher_description(cypher_desc, pin),
-        None => cypher_desc,
-    };
+    match pin {
+        Some(pin) => pinned_cypher_description(base, pin),
+        None => base,
+    }
+}
+
+/// Register the runtime graph-lifecycle tools — `load_graph`, `create_graph`
+/// and `save_graph_as` — that turn a write-enabled server into a workbench an
+/// agent can re-point at another graph mid-session.
+///
+/// Write-enabled only: each one replaces or rebinds the served graph, so on a
+/// read-only deployment they would offer a mutation the rest of the surface
+/// refuses. They reuse the existing `GraphState` swap methods, which take the
+/// write lock internally, so a swap cannot race a query in flight.
+fn register_graph_lifecycle_tools(server: &mut McpServer, state: GraphState) {
+    let s = state.clone();
+    server.register_typed_tool_fallible::<LoadGraphArgs, _>(
+        "load_graph",
+        "Load a .kgl file as the new active graph (replaces the current one). Refused \
+         while this server has unsaved changes — call save_graph first to keep them, or \
+         reload_graph(discard_unsaved=true) to drop them. Write-enabled servers only.",
+        move |args| {
+            refuse_swap_while_dirty(&s, "load_graph")?;
+            match s.load_kgl(Path::new(&args.path)) {
+                Ok(()) => Ok(match s.schema() {
+                    Some((n, e)) => format!("Loaded {} ({n} nodes, {e} edges).", args.path),
+                    None => format!("Loaded {}.", args.path),
+                }),
+                Err(e) => Err(format!("load_graph error: {e}")),
+            }
+        },
+    );
+    let s = state.clone();
+    server.register_typed_tool_fallible::<CreateGraphArgs, _>(
+        "create_graph",
+        "Create a fresh, empty graph bound to a path (its save_graph target) and \
+         make it active. storage = memory (default) | mapped | disk. Refused while this \
+         server has unsaved changes — call save_graph first to keep them, or \
+         reload_graph(discard_unsaved=true) to drop them. Write-enabled servers only.",
+        move |args| {
+            refuse_swap_while_dirty(&s, "create_graph")?;
+            let mode = args
+                .storage
+                .as_ref()
+                .map_or(StorageMode::Memory, StorageArg::mode);
+            match s.create_in_mode(Path::new(&args.path), mode) {
+                Ok(()) => Ok(format!("Created empty graph at {} (active).", args.path)),
+                Err(e) => Err(format!("create_graph error: {e}")),
+            }
+        },
+    );
+    let s = state;
+    server.register_typed_tool_fallible::<SaveGraphAsArgs, _>(
+        "save_graph_as",
+        "Save the active graph to an explicit path and rebind the save target there. \
+         Write-enabled servers only.",
+        move |args| {
+            s.ensure_graph_fresh();
+            s.save_as(Path::new(&args.path))
+        },
+    );
+}
+
+pub fn register(
+    server: &mut McpServer,
+    state: GraphState,
+    builtins: Builtins,
+    overview_decorations: OverviewDecorations,
+    csv_http: Arc<crate::csv_http::CsvHttpState>,
+) {
+    let s = state.clone();
+    let csv = csv_http.clone();
+    let writable = builtins.writable;
+    let operator_scope = builtins.write_scope.clone();
+    let cypher_desc =
+        cypher_description(csv.config().is_some(), writable, operator_scope.as_deref());
     if writable {
         server.register_typed_tool_fallible::<CypherArgs, _>(
             "cypher_query",
@@ -380,56 +444,7 @@ pub fn register(
         );
     }
 
-    // Runtime graph-lifecycle tools — only on a write-enabled workbench server.
-    // They reuse the existing GraphState swap methods (which take the write-lock
-    // internally), so an agent can load/create/save graphs and switch between
-    // them within one session.
     if builtins.writable {
-        let s = state.clone();
-        server.register_typed_tool_fallible::<LoadGraphArgs, _>(
-            "load_graph",
-            "Load a .kgl file as the new active graph (replaces the current one). Refused \
-             while this server has unsaved changes — call save_graph first to keep them, or \
-             reload_graph(discard_unsaved=true) to drop them. Write-enabled servers only.",
-            move |args| {
-                refuse_swap_while_dirty(&s, "load_graph")?;
-                match s.load_kgl(Path::new(&args.path)) {
-                    Ok(()) => Ok(match s.schema() {
-                        Some((n, e)) => format!("Loaded {} ({n} nodes, {e} edges).", args.path),
-                        None => format!("Loaded {}.", args.path),
-                    }),
-                    Err(e) => Err(format!("load_graph error: {e}")),
-                }
-            },
-        );
-        let s = state.clone();
-        server.register_typed_tool_fallible::<CreateGraphArgs, _>(
-            "create_graph",
-            "Create a fresh, empty graph bound to a path (its save_graph target) and \
-             make it active. storage = memory (default) | mapped | disk. Refused while this \
-             server has unsaved changes — call save_graph first to keep them, or \
-             reload_graph(discard_unsaved=true) to drop them. Write-enabled servers only.",
-            move |args| {
-                refuse_swap_while_dirty(&s, "create_graph")?;
-                let mode = args
-                    .storage
-                    .as_ref()
-                    .map_or(StorageMode::Memory, StorageArg::mode);
-                match s.create_in_mode(Path::new(&args.path), mode) {
-                    Ok(()) => Ok(format!("Created empty graph at {} (active).", args.path)),
-                    Err(e) => Err(format!("create_graph error: {e}")),
-                }
-            },
-        );
-        let s = state;
-        server.register_typed_tool_fallible::<SaveGraphAsArgs, _>(
-            "save_graph_as",
-            "Save the active graph to an explicit path and rebind the save target there. \
-             Write-enabled servers only.",
-            move |args| {
-                s.ensure_graph_fresh();
-                s.save_as(Path::new(&args.path))
-            },
-        );
+        register_graph_lifecycle_tools(server, state);
     }
 }
