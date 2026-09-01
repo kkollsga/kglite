@@ -149,7 +149,7 @@ indexmap = { version = "2.5.0", features = ["serde"] }
 # `yaml-rust2` is a pure-Rust, actively-maintained YAML 1.2 parser (no
 # `unsafe`/libyaml, no unmaintained advisory); only pulled when `okf` is
 # enabled (the wheel enables it; bare builds don't).
-yaml-rust2 = { version = "0.11", optional = true }
+yaml-rust2 = { version = "0.12", optional = true }
 
 # RDF loader deps — gated behind the `rdf` feature. `oxttl` is the
 # Oxigraph family's standalone Turtle/N-Triples/N-Quads/TriG parser;
