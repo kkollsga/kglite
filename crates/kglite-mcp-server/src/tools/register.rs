@@ -14,12 +14,18 @@ use crate::tools::*;
 /// Builtins toggled by the manifest's `builtins:` block.
 #[derive(Clone, Debug, Default)]
 pub struct Builtins {
+    /// The `save_graph` route. Wider than [`Self::writable`]: a manifest that
+    /// sets `builtins.save_graph: true` registers it on an otherwise read-only
+    /// server (`server_run::owns_graph_file`), which is how a boot-time
+    /// ontology materialization gets persisted.
     pub save_graph: bool,
-    /// Write-enabled "agent graph workbench" mode (CLI `--writable`). When
-    /// true, `cypher_query` accepts mutations (routed through the write-lock)
-    /// and the runtime graph-lifecycle tools (`load_graph` / `create_graph` /
-    /// `save_graph_as`) are registered. Off by default — read-only is the safe
-    /// default for code-review / analysis deployments.
+    /// Write-enabled "agent graph workbench" mode — `--writable` or
+    /// `extensions.writable: true`, resolved once in
+    /// `server_run::boot_mutations_enabled`. When true, `cypher_query` accepts
+    /// mutations (routed through the write-lock) and the runtime
+    /// graph-lifecycle tools (`load_graph` / `create_graph` / `save_graph_as`)
+    /// are registered. Off by default — read-only is the safe default for
+    /// code-review / analysis deployments.
     pub writable: bool,
     /// Operator-pinned `write_scope` (CLI `--write-scope` /
     /// `extensions.write_scope`, intersected in `server_run::boot_write_scope`).

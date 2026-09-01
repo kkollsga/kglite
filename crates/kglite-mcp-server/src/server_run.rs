@@ -12,6 +12,42 @@ use rmcp::ServiceExt;
 use crate::tools::GraphState;
 use crate::*;
 
+/// Every `extensions:` key this crate reads. mcp-methods stores the block as an
+/// unvalidated map (`Manifest.extensions`), so nothing upstream notices a
+/// misspelled key — and the failure direction of a typo is silent: the feature
+/// is simply off. **A new `boot_*` extension reader adds its key here in the
+/// same change**, or [`unknown_extension_keys`] reports the working key as a
+/// typo forever after.
+const KNOWN_EXTENSION_KEYS: &[&str] = &[
+    "cypher_recipes",
+    "value_codecs",
+    "ontology",
+    // Retired but still recognised — see `boot_graph_watch`.
+    "graph_watch",
+    "parallel",
+    "tools_allow",
+    "write_scope",
+    "csv_http_server",
+    "embedder",
+    "writable",
+];
+
+/// Manifest `extensions:` keys this build does not read, for the boot warning.
+///
+/// A warning rather than a boot error, and deliberately: a skill's
+/// `applies_when: { extension_enabled: <key> }` predicate reads the same block
+/// and legitimately names a key no `boot_*` reader knows, so refusing the boot
+/// would break a working deployment. Returned rather than logged so the set is
+/// testable without a tracing subscriber; the call site does the logging.
+fn unknown_extension_keys(manifest: Option<&mcp_methods::server::Manifest>) -> Vec<String> {
+    manifest
+        .into_iter()
+        .flat_map(|m| m.extensions.keys())
+        .filter(|key| !KNOWN_EXTENSION_KEYS.contains(&key.as_str()))
+        .cloned()
+        .collect()
+}
+
 /// Compile and validate the manifest's stored Cypher recipes once at boot.
 ///
 /// Recipe definitions are configuration, not per-call input, so the
@@ -146,6 +182,42 @@ fn boot_manifest_parallel(manifest: Option<&mcp_methods::server::Manifest>) -> R
 /// sequential.
 fn boot_parallel(manifest: Option<&mcp_methods::server::Manifest>, cli: &Cli) -> Result<bool> {
     Ok(boot_manifest_parallel(manifest)? || cli.parallel)
+}
+
+/// `extensions.writable: true` — the manifest half of the write opt-in.
+///
+/// Boolean-key handling matches [`boot_manifest_parallel`]: absent is off, a
+/// non-boolean is a boot error rather than a silently dropped key. That
+/// strictness is what keeps the typo's failure direction safe *and* loud —
+/// a mistyped **value** fails the boot, and a mistyped **key** leaves a
+/// read-only server that warns about the unknown key
+/// ([`unknown_extension_keys`]) and names both spellings when it refuses the
+/// first mutation (`tools::MUTATION_NOT_ALLOWED`).
+fn boot_manifest_writable(manifest: Option<&mcp_methods::server::Manifest>) -> Result<bool> {
+    let Some(raw) = manifest.and_then(|m| m.extensions.get("writable")) else {
+        return Ok(false);
+    };
+    raw.as_bool()
+        .context("extensions.writable must be a boolean (true or false)")
+}
+
+/// Whether agents may mutate the served graph: `--writable` or
+/// `extensions.writable: true`.
+///
+/// **OR, not intersection**, for [`boot_parallel`]'s reason: a wrapper that
+/// owns the manifest but not argv, and a bare binary launched with no manifest
+/// at all, each need a working way to say yes.
+///
+/// Resolved once at boot and threaded as a `bool` to every consumer — the
+/// write-scope warning, [`writer_lease_policy`], [`boot_builtins`] and the
+/// code-tool gate — so no consumer can re-derive it and disagree. Distinct
+/// from [`owns_graph_file`]: this is "the agent may write", that is "this
+/// server may rewrite the file".
+fn boot_mutations_enabled(
+    manifest: Option<&mcp_methods::server::Manifest>,
+    cli: &Cli,
+) -> Result<bool> {
+    Ok(boot_manifest_writable(manifest)? || cli.writable)
 }
 
 /// Fallback name for the lease record: the process that spawned this server.
@@ -302,6 +374,7 @@ fn boot_manifest_write_scope(
 fn boot_write_scope(
     manifest: Option<&mcp_methods::server::Manifest>,
     cli: &Cli,
+    mutations_enabled: bool,
 ) -> Result<Option<Vec<String>>> {
     let from_manifest = boot_manifest_write_scope(manifest)?;
     let from_flag = cli.write_scope.as_deref().map(parse_write_scope_flag);
@@ -320,14 +393,15 @@ fn boot_write_scope(
             Some(both)
         }
     };
-    // `cli.writable`, not `graph_writes_enabled`: a manifest that only enables
+    // `mutations_enabled`, not `owns_graph_file`: a manifest that only enables
     // `builtins.save_graph` registers `save_graph` but still serves the
     // read-only `cypher_query`, so the pin has nothing to apply to there
     // either.
-    if resolved.is_some() && !cli.writable {
+    if resolved.is_some() && !mutations_enabled {
         tracing::warn!(
             "--write-scope / extensions.write_scope is set on a server whose cypher_query is \
-             read-only; every mutation is refused already. Add --writable to serve scoped writes."
+             read-only; every mutation is refused already. Add --writable, or \
+             extensions.writable: true, to serve scoped writes."
         );
     }
     Ok(resolved)
@@ -368,16 +442,29 @@ async fn boot_csv_http(
     })
 }
 
-/// Whether this deployment can write the graph file it serves — `--writable`
-/// (which implies `save_graph`: an agent that mutates needs to persist) or a
-/// manifest that enables `save_graph` on its own.
+/// `builtins.save_graph` exactly as the manifest declared it, before
+/// [`owns_graph_file`] widens it.
+fn manifest_save_graph(manifest: Option<&mcp_methods::server::Manifest>) -> bool {
+    manifest.map(|m| m.builtins.save_graph).unwrap_or(false)
+}
+
+/// Whether this deployment may **rewrite the graph file it serves** — a
+/// manifest that enables `save_graph` on its own, or any write-enabled
+/// deployment (an agent that mutates needs somewhere to persist, so
+/// `save_graph` follows from `mutations_enabled`).
 ///
-/// Read twice, once for each thing that follows from it: which write tools get
-/// registered ([`tools::Builtins`]) and whether the server takes the path's
+/// Read twice, once for each thing that follows from it: whether `save_graph`
+/// is registered ([`tools::Builtins`]) and whether the server takes the path's
 /// cross-process writer lease ([`writer_lease_policy`]). One function so those
-/// two can never disagree about what "this server writes the graph" means.
-fn graph_writes_enabled(manifest: Option<&mcp_methods::server::Manifest>, cli: &Cli) -> bool {
-    manifest.map(|m| m.builtins.save_graph).unwrap_or(false) || cli.writable
+/// two can never disagree about what "this server writes the file" means.
+///
+/// **Not** the mutation gate. `builtins.save_graph: true` alone owns the file —
+/// it persists a boot-time ontology materialization — while `cypher_query`
+/// stays read-only; that is [`boot_mutations_enabled`]'s question, and the two
+/// predicates are separate names precisely because they answered as one for
+/// long enough to be documented wrong.
+fn owns_graph_file(save_graph: bool, mutations_enabled: bool) -> bool {
+    save_graph || mutations_enabled
 }
 
 /// Whether to take the single-writer lease on the served path.
@@ -391,9 +478,9 @@ fn graph_writes_enabled(manifest: Option<&mcp_methods::server::Manifest>, cli: &
 /// `GraphState::takes_writer_lease`).
 fn writer_lease_policy(
     manifest: Option<&mcp_methods::server::Manifest>,
-    cli: &Cli,
+    mutations_enabled: bool,
 ) -> tools::WriterLeasePolicy {
-    if graph_writes_enabled(manifest, cli) {
+    if owns_graph_file(manifest_save_graph(manifest), mutations_enabled) {
         tools::WriterLeasePolicy::Exclusive
     } else {
         tools::WriterLeasePolicy::ReadOnly
@@ -401,21 +488,24 @@ fn writer_lease_policy(
 }
 
 /// Builtin toggles from the manifest.
-///   - `save_graph`: registration gated on [`graph_writes_enabled`], so a
+///   - `save_graph`: registration gated on [`owns_graph_file`], so a
 ///     destructive operation is not exposed to the agent on every graph
 ///     regardless of intent.
+///   - `writable`: the mutation gate, resolved once by
+///     [`boot_mutations_enabled`] from `--writable` and
+///     `extensions.writable`.
 ///   - `temp_cleanup: on_overview`: wipe `temp/` on every bare
 ///     `graph_overview()`.
 fn boot_builtins(
     manifest: Option<&mcp_methods::server::Manifest>,
-    cli: &Cli,
+    mutations_enabled: bool,
     csv_http: &csv_http::CsvHttpState,
     manifest_base: &Path,
     write_scope: Option<Vec<String>>,
 ) -> tools::Builtins {
     tools::Builtins {
-        save_graph: graph_writes_enabled(manifest, cli),
-        writable: cli.writable,
+        save_graph: owns_graph_file(manifest_save_graph(manifest), mutations_enabled),
+        writable: mutations_enabled,
         write_scope,
         temp_cleanup_on_overview: manifest
             .map(|m| {
@@ -483,9 +573,11 @@ fn register_kglite_tools(
 ///    the server is running. A same-path graph reload rarely changes the
 ///    graph's *class* (a code graph stays a code graph), so the staleness
 ///    window is accepted. If handlers ever gain router access, make it live.
-/// 2. **Writable servers are exempt.** `load_graph` can swap a code graph in
+/// 2. **Write-enabled servers are exempt** — `--writable` or
+///    `extensions.writable: true`, read here as `builtins.writable` (the
+///    resolved `mutations_enabled`). `load_graph` can swap a code graph in
 ///    at any time, and by (1) there would be no way to re-enable the routes
-///    afterwards — so a writable server keeps both tools regardless of what
+///    afterwards — so such a server keeps both tools regardless of what
 ///    it booted with.
 /// 3. **Graph mode only.** Every other mode has no graph at boot, so
 ///    `has_node_type` is uniformly `false` there and a mode-blind gate would
@@ -535,6 +627,15 @@ pub(crate) async fn run_async(
     validate_mode_paths(&mode, &cli)?;
 
     let manifest = load_manifest(&cli, &mode).context("manifest load failed")?;
+    let unknown_keys = unknown_extension_keys(manifest.as_ref());
+    if !unknown_keys.is_empty() {
+        tracing::warn!(
+            unknown = unknown_keys.join(","),
+            known = KNOWN_EXTENSION_KEYS.join(","),
+            "manifest extensions: key(s) this server does not read — check the spelling, or \
+             ignore this if a skill's `applies_when: extension_enabled:` names them"
+        );
+    }
     let recipe_catalog = boot_recipe_catalog(manifest.as_ref())?;
     let recipe_catalog_summary = recipe_catalog.discovery_summary();
     // Parsed here, at the top of boot, so a malformed value fails the server
@@ -546,7 +647,11 @@ pub(crate) async fn run_async(
         );
     }
     let tools_allow = boot_tools_allow(manifest.as_ref())?;
-    let write_scope = boot_write_scope(manifest.as_ref(), &cli)?;
+    // Resolved before its first consumer (the write-scope warning) and carried
+    // as a `bool` from here on: the lease policy, the builtins and the
+    // code-tool gate all read this one answer rather than re-deriving it.
+    let mutations_enabled = boot_mutations_enabled(manifest.as_ref(), &cli)?;
+    let write_scope = boot_write_scope(manifest.as_ref(), &cli, mutations_enabled)?;
     let parallel = boot_parallel(manifest.as_ref(), &cli)?;
     if parallel {
         let (width, overridden) = query_pool_width();
@@ -592,8 +697,8 @@ pub(crate) async fn run_async(
         // Declared here rather than from `builtins` (built below, after the
         // csv_http boot it needs) because `bind_mode` performs the boot open on
         // the very next line — a policy set later would arrive after the lease
-        // decision it governs. Both read the same `graph_writes_enabled`.
-        .with_writer_lease_policy(writer_lease_policy(manifest.as_ref(), &cli))
+        // decision it governs. Both read the same `owns_graph_file`.
+        .with_writer_lease_policy(writer_lease_policy(manifest.as_ref(), mutations_enabled))
         .with_lease_label(Some(boot_lease_label(&cli)));
 
     // Bound before `bind_mode`, whose boot open publishes the first graph —
@@ -616,7 +721,7 @@ pub(crate) async fn run_async(
     let csv_http = Arc::new(boot_csv_http(manifest.as_ref(), &manifest_base).await?);
     let builtins = boot_builtins(
         manifest.as_ref(),
-        &cli,
+        mutations_enabled,
         &csv_http,
         &manifest_base,
         write_scope,
@@ -794,31 +899,218 @@ mod boot_manifest_tests {
     #[test]
     fn only_write_enabled_deployments_take_the_writer_lease() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let read_only = Cli::parse_from(["kglite-mcp-server", "--graph", "g.kgl"]);
         assert_eq!(
-            writer_lease_policy(None, &read_only),
+            writer_lease_policy(None, false),
             tools::WriterLeasePolicy::ReadOnly,
             "a read-only --graph server must leave the file lockable by a rebuilder"
         );
 
-        let writable = Cli::parse_from(["kglite-mcp-server", "--graph", "g.kgl", "--writable"]);
         assert_eq!(
-            writer_lease_policy(None, &writable),
+            writer_lease_policy(None, true),
             tools::WriterLeasePolicy::Exclusive,
-            "--writable owns the file it serves"
+            "a write-enabled server owns the file it serves"
         );
 
-        // `save_graph` without `--writable`: still a writer of that file.
+        // `save_graph` without writes enabled: still a writer of that file.
         let saver = manifest_with(tmp.path(), "name: saver\nbuiltins:\n  save_graph: true\n");
         assert_eq!(
-            writer_lease_policy(Some(&saver), &read_only),
+            writer_lease_policy(Some(&saver), false),
             tools::WriterLeasePolicy::Exclusive
         );
         let plain = manifest_with(tmp.path(), "name: plain\n");
         assert_eq!(
-            writer_lease_policy(Some(&plain), &read_only),
+            writer_lease_policy(Some(&plain), false),
             tools::WriterLeasePolicy::ReadOnly,
             "a manifest that enables nothing must not re-arm the lease"
+        );
+
+        // The manifest-writable arm reaches the same policy as the flag, via
+        // the one resolution every consumer reads.
+        let read_only_cli = Cli::parse_from(["kglite-mcp-server", "--graph", "g.kgl"]);
+        let manifest_writable =
+            manifest_with(tmp.path(), "name: mw\nextensions:\n  writable: true\n");
+        assert_eq!(
+            writer_lease_policy(
+                Some(&manifest_writable),
+                boot_mutations_enabled(Some(&manifest_writable), &read_only_cli)
+                    .expect("extensions.writable parses"),
+            ),
+            tools::WriterLeasePolicy::Exclusive,
+            "extensions.writable must reach the lease decision; if this fails the key is \
+             parsed and then dropped"
+        );
+    }
+
+    /// `--writable` and `extensions.writable` are one operator pair, resolved
+    /// once. Pinned like [`parallel_reads_the_flag_and_the_manifest`], because
+    /// a manifest-only deployment (a wrapper that never controls argv) and a
+    /// flag-only one (the bare binary, no manifest) are both real.
+    #[test]
+    fn mutations_read_the_flag_and_the_manifest() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bare_cli = Cli::parse_from(["kglite-mcp-server", "--graph", "g.kgl"]);
+        let flag_cli = Cli::parse_from(["kglite-mcp-server", "--graph", "g.kgl", "--writable"]);
+
+        assert!(
+            !boot_mutations_enabled(None, &bare_cli).expect("no manifest parses"),
+            "neither surface set must leave the server read-only"
+        );
+        let bare = manifest_with(tmp.path(), "name: bare\n");
+        assert!(
+            !boot_mutations_enabled(Some(&bare), &bare_cli).expect("bare manifest parses"),
+            "an absent key must leave the server read-only — otherwise the on-arm proves nothing"
+        );
+        let off = manifest_with(tmp.path(), "name: off\nextensions:\n  writable: false\n");
+        assert!(!boot_mutations_enabled(Some(&off), &bare_cli).expect("explicit false parses"));
+
+        assert!(boot_mutations_enabled(None, &flag_cli).expect("flag alone parses"));
+        let on = manifest_with(tmp.path(), "name: on\nextensions:\n  writable: true\n");
+        assert!(
+            boot_mutations_enabled(Some(&on), &bare_cli).expect("explicit true parses"),
+            "extensions.writable: true must reach the mutation gate; if this fails the key \
+             is parsed and then dropped"
+        );
+        assert!(
+            boot_mutations_enabled(Some(&on), &flag_cli).expect("both parse"),
+            "flag + manifest is their OR — neither surface can switch the other off"
+        );
+        assert!(
+            boot_mutations_enabled(Some(&off), &flag_cli).expect("both parse"),
+            "an explicit manifest `false` does not veto the flag; the pair is an OR, and a \
+             flag the operator typed on this launch is the more specific statement"
+        );
+
+        // `builtins.save_graph` is the *other* predicate and must not leak
+        // into this one — that fusion is the bug this split undoes.
+        let saver = manifest_with(tmp.path(), "name: saver\nbuiltins:\n  save_graph: true\n");
+        assert!(
+            !boot_mutations_enabled(Some(&saver), &bare_cli).expect("save_graph manifest parses"),
+            "builtins.save_graph: true registers save_graph; it does not open cypher_query \
+             to mutations"
+        );
+    }
+
+    /// The two predicates as the router sees them. `writable` gates
+    /// `cypher_query` mutations and the lifecycle tools; `save_graph` gates
+    /// only the save route, and is the union of the two — so the
+    /// `save_graph`-only manifest is the one arm where they differ.
+    #[test]
+    fn builtins_separate_the_save_route_from_the_mutation_gate() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bare_cli = Cli::parse_from(["kglite-mcp-server", "--graph", "g.kgl"]);
+        let flag_cli = Cli::parse_from(["kglite-mcp-server", "--graph", "g.kgl", "--writable"]);
+        let csv_off = csv_http::CsvHttpState::Off;
+
+        let resolve = |manifest: Option<&mcp_methods::server::Manifest>, cli: &Cli| {
+            let mutations_enabled =
+                boot_mutations_enabled(manifest, cli).expect("manifest writable parses");
+            let builtins = boot_builtins(manifest, mutations_enabled, &csv_off, tmp.path(), None);
+            (builtins.writable, builtins.save_graph)
+        };
+
+        assert_eq!(
+            resolve(None, &flag_cli),
+            (true, true),
+            "--writable implies save_graph: an agent that mutates needs somewhere to persist"
+        );
+        let on = manifest_with(tmp.path(), "name: on\nextensions:\n  writable: true\n");
+        assert_eq!(
+            resolve(Some(&on), &bare_cli),
+            (true, true),
+            "extensions.writable is the same statement as the flag, made in the manifest"
+        );
+        let both = manifest_with(
+            tmp.path(),
+            "name: both\nextensions:\n  writable: true\nbuiltins:\n  save_graph: true\n",
+        );
+        assert_eq!(
+            resolve(Some(&both), &flag_cli),
+            (true, true),
+            "every surface saying yes is still one yes — the union, not a conflict"
+        );
+        let saver = manifest_with(tmp.path(), "name: saver\nbuiltins:\n  save_graph: true\n");
+        assert_eq!(
+            resolve(Some(&saver), &bare_cli),
+            (false, true),
+            "builtins.save_graph: true alone registers save_graph and leaves cypher_query \
+             read-only"
+        );
+        let plain = manifest_with(tmp.path(), "name: plain\n");
+        assert_eq!(
+            resolve(Some(&plain), &bare_cli),
+            (false, false),
+            "a manifest that enables nothing must expose neither"
+        );
+    }
+
+    #[test]
+    fn a_malformed_writable_fails_boot() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cli = Cli::parse_from(["kglite-mcp-server", "--graph", "g.kgl"]);
+
+        let word = manifest_with(
+            tmp.path(),
+            "name: word\nextensions:\n  writable: yes-please\n",
+        );
+        let error = boot_mutations_enabled(Some(&word), &cli)
+            .expect_err("a non-boolean value must fail boot, not be ignored")
+            .to_string();
+        assert!(error.contains("must be a boolean"), "{error}");
+
+        let null = manifest_with(tmp.path(), "name: null\nextensions:\n  writable:\n");
+        assert!(
+            boot_mutations_enabled(Some(&null), &cli).is_err(),
+            "an empty (null) value is a typo, not `false`"
+        );
+
+        let mapping = manifest_with(
+            tmp.path(),
+            "name: mapping\nextensions:\n  writable:\n    enabled: true\n",
+        );
+        assert!(
+            boot_mutations_enabled(Some(&mapping), &cli).is_err(),
+            "a mapping is a typo, not a truthy value"
+        );
+    }
+
+    /// A misspelled key is the one failure mode `extensions.writable` adds
+    /// that a mistyped *value* does not cover: it parses, it is stored, and
+    /// nothing reads it. Every key a `boot_*` reader consumes must be absent
+    /// from this list, or the warning cries wolf on a working manifest.
+    #[test]
+    fn an_unreadable_extensions_key_is_reported_and_every_read_key_is_not() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        assert!(unknown_extension_keys(None).is_empty());
+        let bare = manifest_with(tmp.path(), "name: bare\n");
+        assert!(unknown_extension_keys(Some(&bare)).is_empty());
+
+        let typo = manifest_with(tmp.path(), "name: typo\nextensions:\n  writeable: true\n");
+        assert_eq!(
+            unknown_extension_keys(Some(&typo)),
+            vec!["writeable".to_string()],
+            "the near-miss spelling of the write opt-in must be named at boot; unwarned, it \
+             is a read-only server the operator believes is writable"
+        );
+
+        // One entry per key this crate actually reads, so a key that stops
+        // being read (or a new reader whose key nobody registered) shows up
+        // here rather than as a boot warning on a manifest that works.
+        let all_keys = manifest_with(
+            tmp.path(),
+            "name: all\nextensions:\n  cypher_recipes: {}\n  value_codecs: []\n  \
+             ontology: {}\n  graph_watch: true\n  parallel: true\n  tools_allow: []\n  \
+             write_scope: []\n  csv_http_server: false\n  embedder: {}\n  writable: true\n",
+        );
+        assert!(
+            unknown_extension_keys(Some(&all_keys)).is_empty(),
+            "every key with a boot_* reader must be in KNOWN_EXTENSION_KEYS: {:?}",
+            unknown_extension_keys(Some(&all_keys))
+        );
+        assert_eq!(
+            all_keys.extensions.len(),
+            KNOWN_EXTENSION_KEYS.len(),
+            "this manifest must exercise every known key, or the list can grow stale entries \
+             unnoticed"
         );
     }
 
@@ -893,7 +1185,7 @@ mod boot_manifest_tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let bare_cli = Cli::parse_from(["kglite-mcp-server", "--graph", "g.kgl", "--writable"]);
         assert!(
-            boot_write_scope(None, &bare_cli)
+            boot_write_scope(None, &bare_cli, true)
                 .expect("no pin parses")
                 .is_none(),
             "no flag and no manifest must leave writes unpinned"
@@ -908,7 +1200,7 @@ mod boot_manifest_tests {
             "Plan,Task",
         ]);
         assert_eq!(
-            boot_write_scope(None, &flag).expect("flag parses"),
+            boot_write_scope(None, &flag, true).expect("flag parses"),
             Some(vec!["Plan".to_string(), "Task".to_string()])
         );
 
@@ -917,7 +1209,7 @@ mod boot_manifest_tests {
             "name: listed\nextensions:\n  write_scope:\n    - Plan\n    - Task\n",
         );
         assert_eq!(
-            boot_write_scope(Some(&listed), &bare_cli).expect("list parses"),
+            boot_write_scope(Some(&listed), &bare_cli, true).expect("list parses"),
             Some(vec!["Plan".to_string(), "Task".to_string()]),
             "extensions.write_scope must reach the tool wiring; if this fails the key is \
              parsed and then dropped"
@@ -933,14 +1225,14 @@ mod boot_manifest_tests {
             "Task,Algorithm",
         ]);
         assert_eq!(
-            boot_write_scope(Some(&listed), &narrower).expect("both parse"),
+            boot_write_scope(Some(&listed), &narrower, true).expect("both parse"),
             Some(vec!["Task".to_string()]),
             "flag + manifest is their intersection, not either one alone"
         );
 
         let empty = manifest_with(tmp.path(), "name: empty\nextensions:\n  write_scope: []\n");
         assert_eq!(
-            boot_write_scope(Some(&empty), &bare_cli).expect("empty list parses"),
+            boot_write_scope(Some(&empty), &bare_cli, true).expect("empty list parses"),
             Some(Vec::new()),
             "an explicit empty list pins 'no writes' — it is not 'no pin'"
         );
@@ -955,14 +1247,14 @@ mod boot_manifest_tests {
             tmp.path(),
             "name: scalar\nextensions:\n  write_scope: Task\n",
         );
-        let error = boot_write_scope(Some(&scalar), &cli)
+        let error = boot_write_scope(Some(&scalar), &cli, true)
             .expect_err("a scalar must fail boot, not be ignored")
             .to_string();
         assert!(error.contains("must be a list"), "{error}");
 
         let null = manifest_with(tmp.path(), "name: null\nextensions:\n  write_scope:\n");
         assert!(
-            boot_write_scope(Some(&null), &cli).is_err(),
+            boot_write_scope(Some(&null), &cli, true).is_err(),
             "an empty (null) value is a typo, not an empty list"
         );
 
@@ -970,7 +1262,7 @@ mod boot_manifest_tests {
             tmp.path(),
             "name: mistyped\nextensions:\n  write_scope:\n    - Task\n    - 7\n",
         );
-        let error = boot_write_scope(Some(&mistyped), &cli)
+        let error = boot_write_scope(Some(&mistyped), &cli, true)
             .expect_err("a non-string element must fail boot")
             .to_string();
         assert!(error.contains("must be node types"), "{error}");

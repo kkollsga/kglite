@@ -1134,6 +1134,64 @@ class TestWritableMode:
             client.shutdown()
 
 
+class TestManifestWritable:
+    """`extensions.writable: true` — the manifest half of the write opt-in.
+
+    A wrapper that owns the manifest but not argv had no way to serve a
+    write-enabled graph, and `builtins.save_graph: true` (documented as if it
+    did) only ever registered `save_graph`. Both halves are pinned here: the
+    manifest key opens `cypher_query`, and `save_graph` on its own does not.
+    """
+
+    def _manifest(self, path: Path, body: str) -> Path:
+        manifest = path / "writable_mcp.yaml"
+        manifest.write_text(body, encoding="utf-8")
+        return manifest
+
+    def test_extensions_writable_opens_cypher_query_without_the_flag(self, tmp_path: Path):
+        src = tmp_path / "manifest_writable.kgl"
+        _build_fixture_graph(src)
+        manifest = self._manifest(tmp_path, "name: mw\nextensions:\n  writable: true\n")
+        client = _spawn(["--graph", str(src), "--mcp-config", str(manifest)])
+        try:
+            names = {t["name"] for t in client.list_tools()}
+            # Same consequences as --writable: the mutation gate and the
+            # save route an agent needs to persist what it mutated.
+            assert "save_graph" in names, names
+            assert {"load_graph", "create_graph", "save_graph_as"} <= names, names
+
+            ack = client.call_tool(
+                "cypher_query",
+                {"query": "CREATE (:Task {id: 't1', status: 'todo'})", "write_scope": ["Task"]},
+            )
+            assert not _is_error(ack), _text_content(ack)
+            assert _text_content(ack).startswith("OK: 1 node(s) created")
+            r = client.call_tool("cypher_query", {"query": "MATCH (t:Task) RETURN count(t) AS n"})
+            assert "1" in _text_content(r)
+        finally:
+            client.shutdown()
+
+    def test_save_graph_alone_refuses_the_mutation_and_names_both_spellings(self, tmp_path: Path):
+        src = tmp_path / "saver_only.kgl"
+        _build_fixture_graph(src)
+        manifest = _write_savegraph_manifest(tmp_path)
+        client = _spawn(["--graph", str(src), "--mcp-config", str(manifest)])
+        try:
+            names = {t["name"] for t in client.list_tools()}
+            assert "save_graph" in names, names
+            assert "load_graph" not in names, "save_graph does not make a workbench server"
+
+            r = client.call_tool("cypher_query", {"query": "CREATE (:Task {id: 't1'})"})
+            text = _text_content(r)
+            assert _is_error(r), text
+            # The refusal is the only place an operator who mistyped the key
+            # learns which spellings actually enable writes.
+            assert "--writable" in text, text
+            assert "extensions.writable" in text, text
+        finally:
+            client.shutdown()
+
+
 # ── Test: --graph + --source-root (adds source tools) ─────────────────────
 
 

@@ -19,6 +19,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `rustls >= 0.23.22`, because fastembed 6 reaches `ureq` 3 through `hf-hub`
   0.5 and cargo unifies those crates across the tree.
 
+### Added
+
+- **`extensions.writable: true` enables MCP writes from the manifest**, the
+  same statement `--writable` makes on the command line: either surface alone
+  opens `cypher_query` to mutations and registers `save_graph` plus the
+  lifecycle tools, so a wrapper that owns the manifest but not the argv of the
+  server it spawns can serve a write-enabled graph. **`builtins.save_graph:
+  true` alone registers only `save_graph`** — it lets the server persist what
+  it loaded (a boot-time ontology materialization, say) and leaves
+  `cypher_query` read-only. That has always been the behaviour; the operator
+  docs described it as write-enabling, and the refusal an agent got named
+  neither spelling. A read-only server's mutation refusal now names both
+  `--writable` and `extensions.writable: true`, and any `extensions:` key this
+  server does not read is reported at boot with the known set beside it, so a
+  misspelled key is visible instead of silently leaving the server read-only.
+
 ### Fixed
 
 - **Every read on a write-enabled MCP server now carries the `— active graph:`

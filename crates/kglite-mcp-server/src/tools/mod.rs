@@ -47,8 +47,11 @@ pub(crate) const NO_GRAPH: &str =
 pub(crate) const MUTATION_NOT_ALLOWED: &str =
     "mutation Cypher (CREATE/SET/DELETE/REMOVE/MERGE, and schema DDL such as \
      CREATE INDEX / DROP INDEX / CREATE CONSTRAINT / DROP CONSTRAINT) is not \
-     allowed through the MCP cypher_query tool. Use the kglite CLI for graph \
-     edits. SHOW INDEXES and SHOW CONSTRAINTS are reads and are accepted.";
+     allowed through the MCP cypher_query tool. This server is read-only: an \
+     operator enables writes with the --writable flag or extensions.writable: \
+     true in the manifest (builtins.save_graph alone does not), and until then \
+     graph edits go through the kglite CLI. SHOW INDEXES and SHOW CONSTRAINTS \
+     are reads and are accepted.";
 
 /// Lock the `RwLock` for reading, recovering a poisoned lock instead of
 /// propagating the panic. This is the mcp-server-wide lock policy: every

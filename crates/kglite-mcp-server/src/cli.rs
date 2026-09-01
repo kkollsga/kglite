@@ -54,6 +54,9 @@ pub(crate) struct Cli {
     /// `write_scope`-restricted) and the runtime graph-lifecycle tools
     /// (`load_graph` / `create_graph` / `save_graph_as`) are registered.
     /// Off by default — read-only is the safe default for analysis servers.
+    /// Equivalent to `extensions.writable: true` in the manifest; either
+    /// surface alone enables writes (`builtins.save_graph: true` does not —
+    /// it registers `save_graph` and nothing else).
     #[arg(long)]
     pub(crate) writable: bool,
 
@@ -64,7 +67,8 @@ pub(crate) struct Cli {
     /// **intersection** of the two. An empty intersection — or an explicitly
     /// empty pin — refuses every mutation. Combines with
     /// `extensions.write_scope:` in the manifest by intersection. Only
-    /// meaningful with `--writable`; a read-only server refuses every mutation
+    /// meaningful on a write-enabled server (`--writable` /
+    /// `extensions.writable: true`); a read-only one refuses every mutation
     /// already.
     #[arg(long = "write-scope")]
     pub(crate) write_scope: Option<String>,
