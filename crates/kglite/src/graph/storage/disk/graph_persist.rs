@@ -120,6 +120,22 @@ fn load_overflow_edges(
     .map_err(std::io::Error::other)
 }
 
+/// The sealed-node watermark a loaded graph starts from.
+///
+/// Older graphs predate the persisted watermark and serde-default it to 0,
+/// but their `seg_000` already accounts for every node. Without the bump, a
+/// re-save calls `seal_to_new_segment` with `tail_lo=0` and
+/// `tail_hi=node_count`, writing a fresh empty `seg_001` AND truncating
+/// seg_000's `out_offsets.bin` / `in_offsets.bin` via `reconcile_seg0_csr` —
+/// corrupting the graph. Graphs that persist the watermark are unaffected.
+fn sealed_nodes_bound_on_load(meta: &DiskGraphMeta, segment_manifest: &SegmentManifest) -> u32 {
+    if meta.sealed_nodes_bound == 0 && !segment_manifest.is_empty() && meta.node_count > 0 {
+        meta.node_count as u32
+    } else {
+        meta.sealed_nodes_bound
+    }
+}
+
 impl DiskGraph {
     fn save_logical_node_slots(&mut self, path: &Path) -> std::io::Result<()> {
         let logical_len = self.node_slot_len();
@@ -1070,21 +1086,7 @@ impl DiskGraph {
         let segment_manifest = SegmentManifest::load_from(dir).unwrap_or_default();
         log_stage("dg.segment_manifest", t);
 
-        // Older graphs predate the persisted watermark and serde-default
-        // it to 0, but their `seg_000` already accounts for every node.
-        // Without the bump, a re-save calls `seal_to_new_segment` with
-        // `tail_lo=0` and `tail_hi=node_count`, writing a fresh empty
-        // `seg_001` AND truncating seg_000's `out_offsets.bin` /
-        // `in_offsets.bin` via `reconcile_seg0_csr` — corrupting the
-        // graph. Graphs that persist the watermark are unaffected.
-        let sealed_nodes_bound = if meta.sealed_nodes_bound == 0
-            && !segment_manifest.is_empty()
-            && meta.node_count > 0
-        {
-            meta.node_count as u32
-        } else {
-            meta.sealed_nodes_bound
-        };
+        let sealed_nodes_bound = sealed_nodes_bound_on_load(&meta, &segment_manifest);
 
         Ok((
             DiskGraph {
