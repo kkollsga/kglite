@@ -15,7 +15,7 @@ use kglite::api::io::{
     open_or_create_graph_in_mode, GraphFileIdentity, GraphWriterLease, OpenDisposition,
     WriteOwnership,
 };
-use kglite::api::storage::StorageMode;
+use kglite::api::storage::{live_storage_mode, StorageMode};
 use kglite::api::{Embedder, KnowledgeGraph};
 
 use crate::tools::*;
@@ -369,7 +369,14 @@ impl GraphState {
             )
         });
         if let (Some(ownership), Some(lease)) = (ownership.as_mut(), eager_lease) {
-            ownership.adopt_lease(lease, kg.dir(), false);
+            // A created *file* hands its lease to the lazy lifecycle: once the
+            // first save has published it, it is a regular `.kgl` like any
+            // other. A disk graph never does — its columns stay memory-mapped
+            // for as long as it is served, and an external writer under that
+            // mapping is corruption, not staleness — so its lease is pinned
+            // for the lifetime of the active graph.
+            let pinned = live_storage_mode(kg.dir()) == StorageMode::Disk;
+            ownership.adopt_lease(lease, kg.dir(), pinned);
         }
         let mut guard = write_lock(&self.inner);
         if reuse_existing {

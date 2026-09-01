@@ -192,6 +192,33 @@ fn a_created_graph_holds_the_writer_lease_until_its_first_save() {
     drop(state);
 }
 
+/// A disk graph is a directory of live mmaps, not a file replaced atomically,
+/// so an external writer under a held mapping is corruption rather than a
+/// stale read. Its lease is therefore held for the server's lifetime — a
+/// publish does not release it the way it releases a created *file*'s.
+#[test]
+fn a_disk_graph_keeps_its_lease_across_a_save() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("pinned_disk_graph");
+    let state = GraphState::default();
+    state.create_in_mode(&p, StorageMode::Disk).unwrap();
+    assert_eq!(active_mode(&state), "disk");
+    assert!(
+        !external_lease_is_available(&p),
+        "created disk graph must lock its directory"
+    );
+    state.save_as(&p).unwrap();
+    assert!(
+        !external_lease_is_available(&p),
+        "a disk directory's lease must survive a publish: its columns are still mapped"
+    );
+    drop(state);
+    assert!(
+        external_lease_is_available(&p),
+        "and it is released when the server drops the graph"
+    );
+}
+
 /// The inversion this program exists for: *opening* an existing file is not a
 /// write, so it takes no lease. Four MCP clients can serve one `.kgl`; the
 /// lease appears only around a real unsaved change.
