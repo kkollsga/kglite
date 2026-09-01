@@ -186,8 +186,13 @@ def test_concurrent_write_save_serializes(tmp_path):
     # The sibling lock file persists so every contender locks the same inode;
     # only the OS advisory lock is released. The human-readable holder record
     # lives in the `.lock-owner` sidecar; its text is diagnostic, not liveness.
+    # Both writers have exited cleanly, so the last one to hold the lease
+    # stamped its own record with the moment it gave it back — a reader of the
+    # sidecar sees a released lease rather than a stale "held since".
     assert (tmp_path / "shared.kgl.lock").exists()
-    assert (tmp_path / "shared.kgl.lock-owner").read_text(encoding="utf-8").startswith("pid=")
+    owner_record = (tmp_path / "shared.kgl.lock-owner").read_text(encoding="utf-8")
+    assert owner_record.startswith("pid="), owner_record
+    assert "released=" in owner_record, owner_record
 
 
 def test_ready_set_subcommand(tmp_path):

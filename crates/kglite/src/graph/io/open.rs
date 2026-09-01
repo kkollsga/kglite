@@ -1,8 +1,8 @@
 //! Shared graph open-or-create lifecycle used by server-style bindings.
 
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read};
-use std::path::Path;
+use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -59,6 +59,11 @@ pub struct OpenGraphResult {
 /// `snapshot_files` helper, which skips `.kglite.lock` for this reason.
 pub struct GraphWriterLease {
     file: File,
+    /// The `.lock-owner` sidecar this holder published, kept so `Drop` can
+    /// stamp the release into the record it wrote. Derived from the graph
+    /// path once at acquisition rather than re-derived at teardown, so the
+    /// two can never name different files.
+    owner: PathBuf,
 }
 
 /// A refused acquisition, with the holder still **structured**.
@@ -125,7 +130,8 @@ impl GraphWriterLease {
                 .map_err(LeaseRefusal::io)?;
             match file.try_lock_exclusive() {
                 Ok(()) => {
-                    publish_owner_record(&writer_owner_path(graph_path), label);
+                    let owner = writer_owner_path(graph_path);
+                    publish_owner_record(&owner, label);
                     // Taking write ownership is the one moment that is both
                     // rare enough to afford a directory scan and safe enough
                     // to act on what it finds: a save that died mid-write
@@ -135,7 +141,7 @@ impl GraphWriterLease {
                     // unlinking, because `lock=False` writers and unrelated
                     // processes are not covered by this lease.
                     crate::graph::io::file::reap_stale_save_temps(graph_path);
-                    return Ok(Self { file });
+                    return Ok(Self { file, owner });
                 }
                 Err(error) if is_lock_contended(&error) => {
                     if started.elapsed() >= timeout {
@@ -170,6 +176,21 @@ impl LeaseRefusal {
 
 impl Drop for GraphWriterLease {
     fn drop(&mut self) {
+        // Stamp the release into the record *before* unlocking, and only in
+        // that order. While the flock is held no peer can have published a
+        // record, so the only record this append can reach is the one this
+        // holder wrote on acquisition. After the unlock a successor may
+        // already have truncated and republished, and the identical append
+        // would then stamp that live holder's lease as released.
+        //
+        // Append rather than rewrite, so the release cannot lose the `pid=` /
+        // `since=` lines a contender reads, and infallible for the same
+        // reason `publish_owner_record` is: the record is naming, not
+        // locking. A missing sidecar is skipped rather than created — a lone
+        // `released=` line names nobody.
+        if let Ok(mut owner) = OpenOptions::new().append(true).open(&self.owner) {
+            let _ = writeln!(owner, "released={}", record_timestamp());
+        }
         // Closing a locked descriptor normally releases its advisory lock,
         // but doing so explicitly gives every fs2 backend the same teardown
         // boundary and lets another writer acquire immediately after drop.
@@ -226,11 +247,7 @@ fn writer_owner_path(graph_path: &Path) -> std::path::PathBuf {
 /// cosmetic sidecar could not be written would trade a working guard for a
 /// better error message.
 fn publish_owner_record(owner_path: &Path, label: Option<&str>) {
-    let mut record = format!(
-        "pid={}\nsince={}\n",
-        std::process::id(),
-        chrono::Local::now().to_rfc3339()
-    );
+    let mut record = format!("pid={}\nsince={}\n", std::process::id(), record_timestamp());
     if let Some(label) = label {
         // Newlines would forge extra key=value lines in a record the reader
         // parses line-wise, so a multi-line label collapses to one line rather
@@ -242,6 +259,13 @@ fn publish_owner_record(owner_path: &Path, label: Option<&str>) {
         record.push_str(&format!("label={}\n", flattened.trim()));
     }
     let _ = std::fs::write(owner_path, record);
+}
+
+/// The one clock the owner record is written from. `since=` and `released=`
+/// are compared against each other by whoever reads the record, so they are
+/// formatted here rather than at two call sites that could drift apart.
+fn record_timestamp() -> String {
+    chrono::Local::now().to_rfc3339()
 }
 
 /// Ownership details published to `<path>.lock-owner`, read back only on the
@@ -301,6 +325,14 @@ impl LeaseHolder {
                 Some(("label", value)) if !value.trim().is_empty() => {
                     holder.label = Some(value.trim().to_string())
                 }
+                // Unknown keys are skipped, which is what lets the record gain
+                // fields without breaking older readers. `released=` is
+                // deliberately among them: a contender only ever reads this
+                // after its own lock attempt failed, so a record it can see is
+                // one whose holder is still holding — the released line is
+                // reachable here only in the few instructions between the
+                // append and the unlock, and reporting it would say nothing
+                // the flock has not already settled.
                 _ => {}
             }
         }
@@ -1373,6 +1405,174 @@ mod tests {
             .err()
             .expect("second acquire must be refused");
         assert_eq!(refusal.holder.unwrap().label.as_deref(), Some("Codex"));
+    }
+
+    /// Reads one `key=value` line out of a raw owner record, so a test can
+    /// assert on a field without depending on line order.
+    fn record_value(record: &str, key: &str) -> Option<String> {
+        record.lines().find_map(|line| {
+            line.split_once('=')
+                .filter(|(name, _)| *name == key)
+                .map(|(_, value)| value.trim().to_string())
+        })
+    }
+
+    /// The operator complaint this answers: a record left behind by a holder
+    /// that exited cleanly still read as "held since <time>", with nothing in
+    /// it saying the lease was given back. Liveness was and remains the flock
+    /// — the record is forensics, and it has to be honest forensics.
+    #[test]
+    fn a_released_lease_records_its_release() {
+        let tmp = tempfile::tempdir().unwrap();
+        let graph = tmp.path().join("released.kgl");
+        let owner = writer_owner_path(&graph);
+
+        let lease = GraphWriterLease::acquire(&graph, Duration::ZERO).unwrap();
+        let held = std::fs::read_to_string(&owner).unwrap();
+        assert!(
+            !held.contains("released="),
+            "a lease that is still held has not been released; record was {held:?}"
+        );
+        drop(lease);
+
+        let record = std::fs::read_to_string(&owner).unwrap();
+        assert!(
+            record.starts_with("pid="),
+            "the release must be appended, not prepended; record was {record:?}"
+        );
+        let since =
+            record_value(&record, "since").unwrap_or_else(|| panic!("record was {record:?}"));
+        let released = record_value(&record, "released")
+            .unwrap_or_else(|| panic!("a released lease must say so; record was {record:?}"));
+        let since = chrono::DateTime::parse_from_rfc3339(&since)
+            .unwrap_or_else(|error| panic!("since={since:?} is not rfc3339: {error}"));
+        let released = chrono::DateTime::parse_from_rfc3339(&released)
+            .unwrap_or_else(|error| panic!("released={released:?} is not rfc3339: {error}"));
+        assert!(
+            released >= since,
+            "a lease cannot be released before it was taken ({released} < {since})"
+        );
+        assert_eq!(
+            record.matches("released=").count(),
+            1,
+            "record was {record:?}"
+        );
+    }
+
+    /// `Drop` is the only writer of the line, so a `SIGKILL`ed holder must
+    /// leave a record that still reads as held. That asymmetry is the whole
+    /// diagnostic value: a record with no `released=` is either a live holder
+    /// or a crash, and the flock tells an operator which.
+    #[test]
+    fn a_crashed_holder_leaves_no_released_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let graph = tmp.path().join("crashed.kgl");
+        let ready = tmp.path().join("ready");
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "graph::io::open::tests::writer_lease_child",
+                "--nocapture",
+            ])
+            .env("KGLITE_LEASE_CHILD_GRAPH", &graph)
+            .env("KGLITE_LEASE_CHILD_READY", &ready)
+            .spawn()
+            .unwrap();
+        let child_pid = child.id();
+        let started = Instant::now();
+        while !ready.exists() && started.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(ready.exists(), "child did not acquire lease");
+        child.kill().unwrap();
+        child.wait().unwrap();
+
+        let record = std::fs::read_to_string(writer_owner_path(&graph)).unwrap();
+        assert_eq!(
+            record_value(&record, "pid"),
+            Some(child_pid.to_string()),
+            "record was {record:?}"
+        );
+        assert!(
+            !record.contains("released="),
+            "a killed holder never ran Drop, so nothing may claim it released \
+             the lease; record was {record:?}"
+        );
+    }
+
+    /// The reason the append happens *before* the unlock. Were it after, a
+    /// successor could win the lock and publish its own record in the window,
+    /// and the predecessor's append would then land on the new holder's
+    /// record — stamping a live lease as released. Under the lock, the only
+    /// record that can exist is the holder's own.
+    #[test]
+    fn a_successors_record_is_not_touched_by_its_predecessors_release() {
+        let tmp = tempfile::tempdir().unwrap();
+        let graph = tmp.path().join("succession-release.kgl");
+        let owner = writer_owner_path(&graph);
+
+        let first = GraphWriterLease::acquire(&graph, Duration::ZERO).unwrap();
+        drop(first);
+        let second = GraphWriterLease::acquire(&graph, Duration::ZERO).unwrap();
+
+        let record = std::fs::read_to_string(&owner).unwrap();
+        assert_eq!(
+            record.matches("pid=").count(),
+            1,
+            "the successor truncates, so its record carries one pid; record was {record:?}"
+        );
+        assert!(
+            !record.contains("released="),
+            "the live holder's record must not inherit its predecessor's \
+             release; record was {record:?}"
+        );
+
+        drop(second);
+        let record = std::fs::read_to_string(&owner).unwrap();
+        assert_eq!(
+            record.matches("released=").count(),
+            1,
+            "record was {record:?}"
+        );
+    }
+
+    /// The record is parsed line-wise and unknown keys are skipped, so a build
+    /// from before `released=` existed reads a record carrying it exactly as
+    /// it reads one without. `read`'s retry loop keys on `pid`, so a released
+    /// record is neither retried longer nor returned faster than any other —
+    /// and it is not treated as evidence of a live holder, because nothing
+    /// reads the record unless the lock is currently held.
+    #[test]
+    fn a_record_with_a_released_line_still_parses_the_holder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let held = tmp.path().join("held.lock-owner");
+        let released = tmp.path().join("released.lock-owner");
+        let base = "pid=999999\nsince=2026-01-01T00:00:00+01:00\nlabel=Codex\n";
+        std::fs::write(&held, base).unwrap();
+        std::fs::write(
+            &released,
+            format!("{base}released=2026-01-01T00:05:00+01:00\n"),
+        )
+        .unwrap();
+
+        let held_holder = LeaseHolder::read_once(&held);
+        let released_holder = LeaseHolder::read_once(&released);
+        assert_eq!(released_holder.pid, Some(999999));
+        assert_eq!(released_holder.label.as_deref(), Some("Codex"));
+        assert_eq!(
+            released_holder, held_holder,
+            "an extra line must not change what the holder parses to"
+        );
+        assert_eq!(released_holder.describe(), held_holder.describe());
+
+        let started = Instant::now();
+        assert_eq!(LeaseHolder::read(&released), released_holder);
+        assert!(
+            started.elapsed() < Duration::from_millis(150),
+            "a record carrying a pid returns on the first attempt; the retry \
+             loop waits ~180ms and must not have run (took {:?})",
+            started.elapsed()
+        );
     }
 
     #[test]

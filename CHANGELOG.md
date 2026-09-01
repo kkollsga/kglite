@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 ### Changed
 
+- **A released writer lease appends `released=<time>` to its `.lock-owner`
+  record.** The sidecar beside a graph names whichever process holds the write
+  lease (`pid=`, `since=`, and an optional `label=`); until now it said nothing
+  when that process gave the lease back, so a human opening the file after a
+  clean exit read a live-looking "held since" for a lease nobody was holding.
+  The record now carries the release moment as a fourth line, which also makes
+  the crash case legible by contrast: a process killed mid-hold never writes
+  one, so a record with no `released=` is either a live holder or a crash. What
+  the record has never been is the liveness check — that was and remains the OS
+  lock on `<path>.lock`, which the kernel releases whether or not the holder
+  got to write anything, and which is what a refusal is decided by. Deleting
+  the sidecar still releases nothing and only discards the name.
+
 - **The MCP identity footer and `<active_graph>` header report `load N` and
   `file saved <T>` instead of `generation N`.** The renamed counter is the same
   number it always was — how many graphs *this server process* has installed
