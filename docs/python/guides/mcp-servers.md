@@ -1153,6 +1153,11 @@ keys validated below are first-class — they have parser-level
 validation, default values, and contracts. Anything else under
 `extensions.*` is opaque passthrough.
 
+`extensions.graph_watch` is **retired**: a `--graph` server now re-reads a
+changed `.kgl` automatically on the next tool call, so the key arms nothing —
+it is still parsed (a non-boolean value still fails boot) and any boolean
+value is accepted with a retirement warning at boot.
+
 Machine-readable JSON Schema (Draft 2020-12) for each first-class
 block lives under [`docs/schemas/extensions/`][schemas-dir] in the
 repo:

@@ -67,40 +67,51 @@ Details worth knowing before writing one:
 
 ## Refreshing a rebuilt graph
 
-The graph is read once at boot and served from memory, so a `.kgl` rebuilt by
-another process — a nightly ingest, an external producer — does not reach a
-running server on its own. `--graph` mode registers a no-argument
-`reload_graph` tool (read-only servers included) that re-reads the served path
-and reports the new node/edge counts. A failed re-read keeps the current graph
-serving and returns the error; on a `--writable` server a reload discards
-unsaved in-memory changes, so call `save_graph` first.
+A `--graph` server serving a regular `.kgl` file re-reads it by itself. Every
+graph tool call first `stat`s the served path, and when the file's identity
+(length, mtime, device/inode) differs from the one the in-memory graph was
+loaded — or last saved — from, the server re-reads it through the normal open
+path before answering. There is nothing to configure and no manifest key, and what an agent
+can rely on is the strong property: a clean server never answers from, and
+never writes onto, a snapshot older than the file was at the time of the call.
 
-To make that automatic, put `graph_watch` in the manifest beside the `.kgl`:
+`reload_graph` is still registered in `--graph` mode, read-only servers
+included. It forces the re-read instead of waiting for the next call, reports
+the new node/edge counts and the graph generation, and is the refresh path for
+the cases the automatic one declines. A failed re-read keeps the current graph
+serving and returns the error.
 
-```yaml
-# /data/graph_mcp.yaml, next to /data/graph.kgl
-name: My Graph
-extensions:
-  graph_watch: true
-```
+What that costs, and where it stops:
 
-The server then watches the served file and re-reads it on the next graph tool
-call after an external rewrite — no `reload_graph` call needed. It is off by
-default and applies to `--graph` mode only. The reload is lazy (a query, not
-the filesystem event, pays for it) and single-flight, so a producer that writes
-several times between two queries costs one re-read. A re-read that fails keeps
-the previous graph serving and attaches a warning to tool results; after three
-consecutive failures the watcher stops retrying until a `reload_graph` call
-succeeds. Single-file graphs only — a disk-graph *directory* logs a boot warning
-and starts no watcher, and `reload_graph` remains its refresh path.
-
-A read-only server does not hold the graph's single-writer lock, so a rebuilder
-can open the served `.kgl` with `kglite.open(path)` and republish it in place
-while the server keeps answering queries — and several read-only servers can
-serve one file at once. Servers that can write the file (`--writable`, or
-`builtins.save_graph: true`) keep the exclusive lock for their lifetime, as do
-disk-graph directories in every mode, because their columns stay memory-mapped
-while served.
+- **Every save by another process costs each other server one full re-read** on
+  its next tool call — seconds on a ~100 MB graph, paid inside whichever tool
+  call happens to be first, with concurrent calls waiting behind it. The
+  re-read is single-flight and lazy: calls that all saw the change queue behind
+  one load rather than starting several, and a producer that writes ten times
+  between two queries costs one re-read, not ten.
+- **The `stat` runs on the calling thread**, so a `.kgl` on a hung network
+  volume stalls tool calls in the freshness check itself. Serve graphs from
+  local storage.
+- **A failed re-read keeps the previously loaded graph serving** and attaches a
+  warning to tool results. It is retried only when the file's identity changes
+  *again* **and** at least five seconds have passed since the failure — so a
+  producer republishing torn bytes cannot cost every call a doomed load, and a
+  file that stays broken is never retried automatically at all. An explicit
+  `reload_graph` always tries.
+- **A file written by a newer kglite than this binary** cannot be read at all,
+  and the warning says to restart this server on a newer kglite rather than
+  offering a retry that can never succeed.
+- **A server holding unsaved changes never auto-reloads** — the re-read would
+  discard them silently. It warns on every response instead and leaves the
+  choice to `save_graph_as` or `reload_graph(discard_unsaved=true)` (see *The
+  writer lease* below).
+- **Disk-graph *directories* are never auto-refreshed.** A disk graph is a tree
+  of live memory maps behind a `CURRENT` pointer rather than an atomically
+  replaced file, so `reload_graph` remains its refresh path.
+- **`extensions.graph_watch` is retired.** The key is still parsed — a
+  non-boolean value still fails boot — but any boolean now only logs a
+  retirement warning and arms nothing, because the refresh it used to opt into
+  is unconditional. Remove it from the manifest.
 
 ## Writable workbench
 
@@ -118,6 +129,83 @@ has no in-place form and is refused at boot naming `enable_disk_mode()`. Omit
 the flag to serve whatever mode the graph recorded.
 Keep read-only mode for untrusted agents and scope filesystem access with
 manifest `source_root`/`source_roots`.
+
+### The writer lease, and several servers on one file
+
+A `.kgl` has one writer at a time, guarded by an advisory lock on a
+`<name>.kgl.lock` sidecar. A server takes that lease **at its first unsaved
+change**, not at boot:
+
+- A **read-only** server serving a `.kgl` that already exists never takes it.
+  Any number of them can serve one file while a rebuilder republishes it in
+  place.
+- A **write-enabled** server (`--writable`, or `builtins.save_graph: true`)
+  boots lease-free as well. The first mutating `cypher_query` acquires the
+  lease, and it is held until `save_graph` writes the changes back,
+  `save_graph_as` moves them elsewhere,
+  `reload_graph(discard_unsaved=true)` drops them, or the process exits.
+  Outside that window the server is an ordinary reader.
+
+So several write-enabled servers — four MCP clients booted from one manifest,
+say — can serve the same graph and arbitrate per *write* rather than per
+process. The first to mutate holds the lease; a peer that writes while it is
+held waits about a quarter of a second and is then refused, by name:
+
+```
+cypher_query refused: /data/work.kgl is open for writing by "Claude Desktop"
+(pid 4711, since 2026-09-01T09:12:04+02:00); only one process may write a graph
+at a time. […] Nothing was changed here, and this graph is still readable —
+keep querying it.
+```
+
+That name is `--lease-label`, else the `KGLITE_LEASE_LABEL` environment
+variable, else the name of the process that spawned this server — usually the
+MCP client itself, which is how four clients sharing one manifest still name
+themselves apart. A refused write changes nothing, the graph stays readable,
+and this server picks up what the holder wrote on its next call.
+
+Writes that reach disk cannot silently overwrite each other either:
+
+- `save_graph` refuses if the file changed on disk since this server loaded or
+  last saved it. There is no merge between the two versions: `save_graph_as` to
+  another path keeps this server's work, and
+  `reload_graph(discard_unsaved=true)` drops it and serves the file as it is.
+- `save_graph_as` **to the bound path** is `save_graph` under another name,
+  that lost-update check included. To a *different* path it also releases the
+  source file's lease — the graph is not going back there, and this is the call
+  an agent reaches for to get out of the jam.
+- `reload_graph` refuses to discard unsaved changes silently, and `load_graph`
+  / `create_graph` refuse outright while the server is dirty. All three name
+  `reload_graph(discard_unsaved=true)`: throwing work away has one spelling.
+- Every `cypher_query` result footer — reads and writes alike — carries the
+  graph generation and either `clean` or `unsaved changes — lease held since
+  <T>`, as do the `<active_graph>` header on `graph_overview` and the
+  activation summary. A lease parked by a write that died mid-call is
+  therefore visible on every query instead of only to whoever writes next.
+
+Two targets keep the lock from the open instead, because waiting is not safe
+for them: a path that does not exist yet (this open is creating it, and locking
+first is what stops two servers from both creating it), and a disk-graph
+*directory*, whose columns stay memory-mapped while served, so an external
+writer mutating one is memory corruption rather than a stale read. A created
+file joins the lazy lifecycle once its first `save_graph` has published it; a
+disk-graph directory keeps its lock for as long as the server serves it.
+
+Operating notes:
+
+- **Never delete `<name>.kgl.lock` from a build script or a cleanup job.**
+  Deleting it does not release a live lock and does nothing for a dead one —
+  the operating system releases the lease when the holder exits, crash
+  included. All the deletion removes is the `<name>.kgl.lock-owner` record that
+  lets the next refusal name the holder.
+- **A peer that merely *inspects* the graph with `kglite.open(path)` rewrites
+  it.** `open()` is the writer's entry point: it takes the lease, and its
+  `close()` (or `with`-block exit) writes the whole graph back even when
+  nothing was mutated. That rewrite costs every serving server one full re-read
+  on its next call, and a server that was holding unsaved changes has its
+  `save_graph` refused from then on. Inspect with `kglite.load(path)` or
+  `kglite.open_session(path)`, which take neither the lease nor the save-back
+  binding.
 
 ### The source root `--graph` binds by default
 
@@ -180,6 +268,13 @@ scope). Outside it, deliberately: relationship *constraint* DDL, `db.cdc.*`, and
 the graph-lifecycle tools, which replace or persist the whole graph rather than
 writing nodes in it — an agent that must not swap the served graph should not
 have `load_graph`/`create_graph`/`save_graph_as` in `extensions.tools_allow`.
+
+Those tools are also the ones that *end* a lease window, so an allowlist that
+hides both `save_graph` and `reload_graph` from a server that can still mutate
+leaves it holding the writer lease from its first write until the process
+exits — locking every peer out of the file for the session. Hide the mutation
+route (`cypher_query` write scope, or read-only mode) rather than the way back
+out of one.
 
 ## Code intelligence
 

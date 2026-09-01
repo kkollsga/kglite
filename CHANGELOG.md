@@ -7,6 +7,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The MCP server takes the served `.kgl`'s writer lease at its first unsaved
+  change, not at boot.** A write-enabled server (`--writable`, or
+  `builtins.save_graph: true`) used to lock the file for its whole lifetime, so
+  the first of several MCP clients booted from one manifest took the graph and
+  every later one died at spawn with "Server disconnected" — the operator's
+  only way out was to run them all read-only. Such a server now opens
+  lease-free, acquires the lease on the first mutating `cypher_query` (a 250 ms
+  bounded wait, then a refusal), and hands it back at `save_graph`,
+  `save_graph_as`, or `reload_graph(discard_unsaved=true)`. Several
+  write-enabled servers can therefore serve one graph and arbitrate per write
+  instead of per process. Two targets still lock from the open, because waiting
+  is not safe for them: a path this server creates, and a disk-graph directory
+  (live memory maps rather than an atomically replaced file).
+- **A `--graph` server serving a regular `.kgl` re-reads it automatically.**
+  Every tool call stats the served file and re-reads it — single-flight,
+  off-lock, through the normal open path — when its identity differs from the
+  one the graph was loaded or last saved from, so a clean server never answers
+  from, and never writes onto, a snapshot older than the file was at the time
+  of the call. A server holding unsaved changes never auto-reloads: it attaches
+  a divergence warning and leaves the choice to `save_graph_as` /
+  `reload_graph(discard_unsaved=true)`. A server never re-reads the file it
+  just saved. A failed re-read keeps the loaded graph serving and is retried
+  only when the file's identity changes again *and* at least 5 s have passed,
+  so a file that stays broken is never retried automatically; `reload_graph`
+  always tries. Disk-graph directories are not auto-refreshed and keep
+  `reload_graph` as their refresh path. **Operators:** each peer save now costs
+  every other server one full re-read on its next tool call (seconds on a
+  ~100 MB graph, with concurrent calls waiting behind it) — the price of the
+  freshness guarantee, and a reason to keep served graphs on local storage.
+- **`extensions.graph_watch` is retired.** The refresh it opted into is now
+  unconditional. The key is still parsed — a non-boolean value still fails boot
+  — but any boolean only logs a retirement warning at boot and arms nothing.
+- **`save_graph` refuses to overwrite a file that changed on disk** since this
+  server loaded or last saved it, instead of silently discarding whatever the
+  other writer published. There is no merge: `save_graph_as` to another path
+  keeps the unsaved work, `reload_graph(discard_unsaved=true)` drops it.
+  `reload_graph` likewise refuses to discard unsaved changes without that flag,
+  and `load_graph` / `create_graph` refuse outright while the server is dirty.
+- **`save_graph_as` releases the source file's lease** when it writes to a
+  different path — the graph is not going back there, and leaving the original
+  locked would keep the jam that call exists to escape. To the *bound* path it
+  behaves as `save_graph`, lost-update check included.
+- **Refused writes and saves name the holder**, not just a pid: `"Claude
+  Desktop" (pid 4711, since …)`, and they state that nothing was changed, that
+  the graph is still readable, and which call gets the agent unstuck.
+- **The `cypher_query` footer, the `<active_graph>` header and the activation
+  summary carry the graph generation and write state** — `clean`, or `unsaved
+  changes — lease held since <T>` — so a lease parked by a write that died
+  mid-call is visible on every response instead of only to the next writer. The
+  write acknowledgement gains the same footer the read path already had.
+- **A `.kgl` written by a newer kglite is reported as "restart this server"**
+  rather than as a retryable reload failure: no re-read of that file can
+  succeed until the binary is newer.
+- **CLI: every save path goes through the shared ownership helper.** `--save`,
+  `--save-on-exit`, `migrate` and the shell's `.save` share one
+  lease-and-identity implementation, so all of them refuse a lost update the
+  same way. `.save` on a file another process is writing now fails after
+  250 ms with a refusal naming the holder, instead of blocking the shell for
+  up to 30 s.
+
+### Added
+
+- **`--lease-label` / `KGLITE_LEASE_LABEL` (MCP server).** The name this server
+  publishes while it holds the graph's writer lease, so a peer refused a write
+  is told which client is mid-write. Defaults to the parent process's name —
+  usually the MCP client that spawned the server, which is how four clients
+  sharing one manifest still name themselves apart.
+- **`reload_graph(discard_unsaved=true)`.** The one spelling for dropping
+  unsaved changes: it restores the pre-write snapshot, releases the lease, and
+  re-reads the file. Without the flag a dirty `reload_graph` is refused.
+- **`kglite::api::io::WriteOwnership`** (with `BeginWrite`, `Discarded`,
+  `WriteRefusal` and `LAZY_LEASE_ACQUIRE_TIMEOUT`) — the read-modify-publish
+  state machine every path-backed binding otherwise reimplements over
+  `GraphWriterLease` + `GraphFileIdentity`: take the lease no earlier than the
+  first unsaved change, refuse rather than overwrite a file somebody else
+  replaced, and roll back to a publishable state when a write fails.
+- **`GraphWriterLease::acquire_labeled`** and `LeaseHolder.label`. The
+  `<path>.lock-owner` record gains a third `label=` line after `pid=` /
+  `since=` (additive: an older reader ignores it), and refusals render it.
+  `acquire` / `acquire_ex` and the C ABI are unchanged.
+- **`kglite::api::make_dir_graph_mut_preserving_lineage`** — mutable access
+  without the version bump, for writes that are configuration rather than data
+  (installing a declared ontology, materializing its labels at boot), so a
+  freshly opened graph is not reported as carrying unsaved changes.
+
 ## [0.16.18] - 2026-08-31
 
 ### Fixed
