@@ -22,6 +22,30 @@ pub(crate) struct ActiveGraph {
     /// in-memory test fixture) and for a read-only deployment serving a
     /// regular file, which never writes it back.
     pub(crate) ownership: Option<WriteOwnership>,
+    /// When this server took the writer lease it is currently holding, for the
+    /// "unsaved changes — lease held since T" status every tool response
+    /// carries. Lives here rather than on [`WriteOwnership`] because it answers
+    /// an operator question this binding asks (*which client is sitting on my
+    /// graph, and since when*), not a question the read-modify-publish
+    /// protocol needs answered. `None` whenever no lease is held.
+    pub(crate) lease_since: Option<SystemTime>,
+    /// The path this server stats before every tool call to notice somebody
+    /// else's rewrite. `Some` only for a single **regular file** served in
+    /// `--graph` mode: a disk-graph directory would cost an open + `CURRENT`
+    /// read per call, a workspace graph refreshes from its producer instead,
+    /// and a graph with no file behind it has nothing to stat. Decided once,
+    /// at the open, because that is when `path` still describes what was
+    /// there when we looked.
+    pub(crate) freshness_path: Option<std::path::PathBuf>,
+    /// Identity of `source_path` when this graph was read from it.
+    ///
+    /// Consulted only when there is no `ownership` — a read-only deployment,
+    /// which by definition never writes this file, so the identity it loaded
+    /// at cannot go out of date except through an open that replaces this
+    /// whole struct. Where there *is* ownership, the identity moves on every
+    /// publish and the ownership's own `synced` is the single authority; see
+    /// [`Self::synced_identity`].
+    pub(crate) loaded_identity: Option<kglite::api::io::GraphFileIdentity>,
     /// The source root this graph was built/loaded from — a code-tree
     /// directory or a `.kgl` file path. Stamped into agent-facing output
     /// (the `<active_graph/>` header, the `cypher_query` footer, and the
@@ -89,6 +113,34 @@ impl ActiveGraph {
             .is_some_and(|ownership| ownership.is_dirty(self.kg.dir()))
     }
 
+    /// The file identity this graph is in step with — what a `stat` of the
+    /// served path is compared against to decide whether somebody else has
+    /// republished it. `None` for a graph with no file behind it.
+    pub(crate) fn synced_identity(&self) -> Option<&kglite::api::io::GraphFileIdentity> {
+        match &self.ownership {
+            Some(ownership) => Some(ownership.synced()),
+            None => self.loaded_identity.as_ref(),
+        }
+    }
+
+    /// This graph's write state, in the words an agent has to act on.
+    ///
+    /// Both halves matter to a *reader*, not just to the writer: a server that
+    /// panicked mid-write, or whose write failed in a way no refusal covered,
+    /// keeps serving happily with unsaved changes and a parked lease — and the
+    /// only place that is visible is on every response it sends. The recovery
+    /// (`save_graph`, or `reload_graph(discard_unsaved=true)`) is named by the
+    /// refusals; this is the standing signal that one of them is needed.
+    pub(crate) fn write_state(&self) -> String {
+        if !self.is_dirty() {
+            return "clean".to_string();
+        }
+        match self.lease_since {
+            Some(since) => format!("unsaved changes — lease held since {}", iso8601(since)),
+            None => "unsaved changes".to_string(),
+        }
+    }
+
     pub(crate) fn workspace_target(&self) -> Option<WorkspaceGraphTarget> {
         Some(WorkspaceGraphTarget {
             root: absolute_lexical_path(self.root.as_deref()?)?,
@@ -97,14 +149,16 @@ impl ActiveGraph {
         })
     }
 
-    /// `root="…" built_at="…" age="…"` attributes for the `<active_graph/>`
-    /// header injected above the `graph_overview` schema. Omits `root` when
-    /// no path is recorded.
+    /// `root="…" built_at="…" age="…" generation="…" state="…"` attributes for
+    /// the `<active_graph/>` header injected above the `graph_overview`
+    /// schema. Omits `root` when no path is recorded.
     pub(crate) fn identity_attrs(&self) -> String {
         let time = format!(
-            " built_at=\"{}\" age=\"{}\"",
+            " built_at=\"{}\" age=\"{}\" generation=\"{}\" state=\"{}\"",
             iso8601(self.built_at),
-            humanize_age(self.built_at)
+            humanize_age(self.built_at),
+            self.generation,
+            self.write_state()
         );
         // A multi-rev graph names the loaded rev-set on the header so an agent
         // sees at a glance that unscoped queries span all these revs.
@@ -126,9 +180,11 @@ impl ActiveGraph {
             None => "(in-memory)".to_string(),
         };
         format!(
-            "\n\n— active graph: {root} · built {} ({} ago)",
+            "\n\n— active graph: {root} · built {} ({} ago) · generation {} · {}",
             iso8601(self.built_at),
-            humanize_age(self.built_at)
+            humanize_age(self.built_at),
+            self.generation,
+            self.write_state()
         )
     }
 }
@@ -149,13 +205,18 @@ pub(crate) fn activation_summary_for_active(active: &ActiveGraph) -> Option<Stri
         .take(4)
         .map(|(name, count)| format!("{count} {name}"))
         .collect();
+    let state = format!(
+        " · generation {} · {}.",
+        active.generation,
+        active.write_state()
+    );
     let root_note = match &active.root {
         Some(root) => format!(
-            " · root {} · built {} ago.",
+            " · root {} · built {} ago{state}",
             root.display(),
             humanize_age(active.built_at)
         ),
-        None => format!(" · built {} ago.", humanize_age(active.built_at)),
+        None => format!(" · built {} ago{state}", humanize_age(active.built_at)),
     };
     let mut message = format!(
         "Graph ready: {} nodes ({}) · {} edges.{root_note} Start with graph_overview() \

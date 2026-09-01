@@ -103,6 +103,12 @@ pub(crate) fn run_cypher_write(
         ),
         None => None,
     };
+    if began == Some(kglite::api::io::BeginWrite::Acquired) {
+        // Recorded at the acquisition, not at the first refusal a peer hits:
+        // the operator's question is how long this client has been sitting on
+        // the graph, and every response from here on answers it.
+        active.lease_since = Some(std::time::SystemTime::now());
+    }
     // Snapshot the embedder Arc before the mutable borrow of `kg`.
     let embedder = active.kg.embedder().cloned();
     let mut opts = kglite::api::session::ExecuteOptions::eager(&params);
@@ -143,6 +149,7 @@ pub(crate) fn run_cypher_write(
                 if let Some(ownership) = active.ownership.as_mut() {
                     ownership.discard(active.kg.dir_mut());
                 }
+                active.lease_since = None;
             }
             return Err(error.to_string());
         }
@@ -298,6 +305,9 @@ pub(crate) fn run_save(graph: &mut ActiveGraph) -> Result<String, String> {
     ownership
         .publish(graph.kg.dir_mut())
         .map_err(|refusal| refused_save("save_graph", &refusal))?;
+    // The lease went back with the publish; the status on every later response
+    // must not go on naming a hold that ended here.
+    graph.lease_since = None;
     // `compute_schema` only needs `&DirGraph` — no second make_mut.
     let overview = compute_schema(graph.kg.dir());
     Ok(format!(

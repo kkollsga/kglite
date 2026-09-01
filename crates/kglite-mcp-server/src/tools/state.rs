@@ -77,9 +77,11 @@ pub struct GraphState {
     /// guard.
     pub(crate) rebuild_status: Arc<RwLock<RebuildStatus>>,
     /// `--graph` mode's counterpart to `pending_rebuild` + `rebuild_status`:
-    /// the flag an armed `extensions.graph_watch` watcher sets when the served
-    /// file is rewritten, plus that reload's failure bookkeeping. Untouched
-    /// (and never contended) in every other mode — see `graph_reload`.
+    /// what the per-call `stat` of the served file learned — the last failed
+    /// re-read (with the bytes it failed on, so the same failure is not
+    /// retried every call) and whether the file has moved away from a server
+    /// holding unsaved changes. Untouched (and never contended) in every other
+    /// mode — see `graph_reload`.
     pub(crate) graph_reload: Arc<RwLock<GraphReloadStatus>>,
     /// Workspace mode used to build request/relevance context. `None` for
     /// graph/source-root/bare modes that never ask a producer to build.
@@ -312,6 +314,15 @@ impl GraphState {
             .as_ref()
             .is_some_and(|active| active.source_path.as_deref() == Some(path));
         let owns_writes = self.owns_writes(path);
+        // Decided here, once, rather than per tool call: `GraphFileIdentity`
+        // is a cheap `stat` for a regular file but an open + read of `CURRENT`
+        // for a disk-graph directory, and the answer cannot change without a
+        // new open landing here anyway. A workspace-backed state never reaches
+        // the stat path at all (`ensure_graph_fresh` dispatches on the mode),
+        // so this only has to separate "one republished file" from "a
+        // directory of live mmaps" and "a path that is not there".
+        let freshness_path =
+            (self.workspace_mode.is_none() && path.is_file()).then(|| path.to_path_buf());
         // A same-path reload inherits the lease the previous ownership already
         // holds, so it must not try to take a second one: `flock` is per
         // open-file-description, and this process would contend with itself.
@@ -335,6 +346,7 @@ impl GraphState {
         let opened = open_or_create_graph_in_mode(path, requested_mode, DurabilityLevel::Off)
             .map_err(|e| anyhow::anyhow!("kglite graph open/create failed: {e}"))?;
         let identity = opened.identity;
+        let loaded_identity = identity.clone();
         let mut kg = KnowledgeGraph::from_arc(opened.graph);
         // Off-lock, before publication: the new handle carries no embedder of
         // its own, so the boot-bound one is re-applied here. The version
@@ -342,6 +354,7 @@ impl GraphState {
         // (or materialized) on this graph is part of what "clean" means rather
         // than reading as an unsaved change nobody made.
         self.apply_bound_embedder(&mut kg);
+        let mut lease_since = eager_lease.is_some().then(SystemTime::now);
         let mut ownership = owns_writes.then(|| {
             WriteOwnership::new(
                 path.to_path_buf(),
@@ -366,6 +379,11 @@ impl GraphState {
             // rebuilt. `resynced` re-points it at what was just read.
             if let Some(mut previous) = guard.as_mut().and_then(|active| active.ownership.take()) {
                 previous.resynced(identity, kg.dir());
+                lease_since = previous
+                    .holds_lease()
+                    .then(|| guard.as_ref().and_then(|active| active.lease_since))
+                    .flatten()
+                    .or(lease_since);
                 ownership = Some(previous);
             }
         }
@@ -380,6 +398,9 @@ impl GraphState {
             kg,
             source_path: Some(path.to_path_buf()),
             ownership,
+            lease_since,
+            freshness_path,
+            loaded_identity: Some(loaded_identity),
             root: Some(path.to_path_buf()),
             revs: None,
             built_at: SystemTime::now(),
@@ -459,6 +480,9 @@ impl GraphState {
         ownership
             .publish(active.kg.dir_mut())
             .map_err(|refusal| refused_save("save_graph_as", &refusal))?;
+        // A successful publish hands the lease back, so the status this graph
+        // reports on every later response must stop claiming to hold one.
+        active.lease_since = None;
         active.source_path = Some(path.to_path_buf());
         let path_str = path.to_string_lossy().into_owned();
         let overview = compute_schema(active.kg.dir());
@@ -490,7 +514,9 @@ impl GraphState {
         let Some(ownership) = active.ownership.as_mut() else {
             return false;
         };
-        ownership.discard(active.kg.dir_mut()).restored
+        let discarded = ownership.discard(active.kg.dir_mut());
+        active.lease_since = None;
+        discarded.restored
     }
 
     /// Bind the embedder `text_score()` uses. Held on the state, so it applies

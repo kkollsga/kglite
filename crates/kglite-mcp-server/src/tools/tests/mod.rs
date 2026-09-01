@@ -14,6 +14,7 @@ use crate::tools::*;
 mod activation;
 mod cypher;
 mod error_envelope;
+mod freshness;
 mod lifecycle;
 mod overview;
 mod rebuild;
@@ -37,6 +38,9 @@ fn fresh_active() -> ActiveGraph {
         kg: KnowledgeGraph::from_arc(Arc::new(dir)),
         source_path: None,
         ownership: None,
+        lease_since: None,
+        loaded_identity: None,
+        freshness_path: None,
         root: None,
         revs: None,
         built_at: SystemTime::now(),

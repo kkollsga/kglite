@@ -26,7 +26,8 @@ pub(crate) fn refused_write(tool: &str, refusal: &WriteRefusal) -> String {
         WriteRefusal::Contended(details) => format!(
             "{tool} refused: {} Nothing was changed here, and this graph is still \
              readable — keep querying it. Retry the write once that server saves and \
-             releases the file; call reload_graph to pick up what it wrote.",
+             releases the file; this server refreshes automatically on its next call, \
+             so you will be reading what it wrote.",
             details.error
         ),
         WriteRefusal::Stale { path } => format!(

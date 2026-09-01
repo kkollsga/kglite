@@ -517,8 +517,10 @@ fn a_second_server_is_refused_by_name_until_the_first_one_saves() {
         refusal.contains("Nothing was changed here"),
         "the refusal states that no data was lost: {refusal}"
     );
+    // The way out of contention is to wait, not to call anything: this server
+    // stats the file on every tool call, so the peer's save arrives on its own.
     assert!(
-        refusal.contains("reload_graph"),
+        refusal.contains("refreshes automatically on its next call"),
         "the refusal names the way out: {refusal}"
     );
     // The refused server is still a working reader.

@@ -790,17 +790,18 @@ class TestGraphMode:
             finally:
                 peer.close()
             # `close()` on a locking open republishes the file, so the server is
-            # now holding a snapshot of bytes that no longer exist — and its next
-            # write is refused for exactly that reason. Refreshing is the
-            # documented way through, and it is what the operator's rebuilder
-            # loop looks like.
-            stale = client.call_tool(
+            # now holding a snapshot of bytes that no longer exist. Since the
+            # per-call stat landed there is nothing for the operator to do
+            # about that: the very next call re-reads the file first, and the
+            # write lands on the republished bytes. This is the rebuilder loop
+            # the operator actually runs, and the generation bump is what says
+            # the re-read happened rather than the check having been skipped.
+            written = client.call_tool(
                 "cypher_query",
                 {"query": "CREATE (:Task {id: 't0'})", "write_scope": ["Task"]},
             )
-            assert _is_error(stale)
-            assert "changed on disk" in _text_content(stale)
-            assert not _is_error(client.call_tool("reload_graph"))
+            assert not _is_error(written), _text_content(written)
+            assert "generation 2" in _text_content(written), _text_content(written)
 
             # 2. One unsaved change, and the file is this server's until it saves.
             ack = client.call_tool(
@@ -824,7 +825,9 @@ class TestGraphMode:
             assert not _is_error(saved), _text_content(saved)
             reopened = kglite.open(str(fixture))
             try:
-                assert list(reopened.cypher("MATCH (t:Task) RETURN count(t) AS c"))[0]["c"] == 1
+                # Both writes: the one that rode the automatic refresh and the
+                # one that took the lease afterwards.
+                assert list(reopened.cypher("MATCH (t:Task) RETURN count(t) AS c"))[0]["c"] == 2
             finally:
                 reopened.close()
         finally:
@@ -1953,7 +1956,14 @@ class TestReloadGraph:
     external process, and is registered only in `--graph` mode (no other mode
     has a single source file to re-read)."""
 
-    def test_reload_picks_up_an_external_rewrite(self, graph_fixture: Path):
+    def test_reload_re_reads_even_when_the_call_before_it_already_did(self, graph_fixture: Path):
+        """Since the per-call stat landed, an agent reaching for `reload_graph`
+        has usually *already* been served the new bytes by the query that made
+        it suspicious. The tool is still not a no-op: it re-reads
+        unconditionally, which is what makes it the recovery path when the
+        automatic refresh is holding back a failing file. Both halves are
+        asserted through the generation counter, because the node counts alone
+        cannot tell one re-read from two."""
         client = _spawn(["--graph", str(graph_fixture)])
         try:
             assert "reload_graph" in {t["name"] for t in client.list_tools()}
@@ -1961,6 +1971,7 @@ class TestReloadGraph:
                 client.call_tool("cypher_query", {"query": "MATCH (p:Person) RETURN count(p) AS n"})
             )
             assert "4" in counted, counted
+            assert "generation 1" in counted, counted
 
             # An external producer rebuilds the file (kglite's save is a
             # rename-over, so this is exactly the atomic-republish shape).
@@ -1968,17 +1979,19 @@ class TestReloadGraph:
             g.add_nodes(pd.DataFrame({"id": [9], "title": ["Zoe"], "city": ["Tromso"]}), "Person", "id", "title")
             g.save(str(graph_fixture))
 
+            # The ordinary query already refreshes: generation 2, new bytes.
+            after = _text_content(client.call_tool("cypher_query", {"query": "MATCH (p:Person) RETURN p.title AS t"}))
+            assert "Zoe" in after and "Alice" not in after, after
+            assert "generation 2" in after, after
+
+            # The explicit tool re-reads the same file again — generation 3 —
+            # rather than reporting on the graph it already had.
             reload_result = client.call_tool("reload_graph")
             assert not _is_error(reload_result)
             reloaded = _text_content(reload_result)
             assert "1 nodes" in reloaded and "0 edges" in reloaded, reloaded
             assert str(graph_fixture) in reloaded, reloaded
-            # The generation bump is what distinguishes a completed re-read
-            # from a reply about the graph the server already had.
-            assert "Graph generation 2." in reloaded, reloaded
-
-            after = _text_content(client.call_tool("cypher_query", {"query": "MATCH (p:Person) RETURN p.title AS t"}))
-            assert "Zoe" in after and "Alice" not in after, after
+            assert "Graph generation 3." in reloaded, reloaded
         finally:
             client.shutdown()
 
@@ -1992,6 +2005,15 @@ class TestReloadGraph:
             failed = client.call_tool("reload_graph")
             assert _is_error(failed)
             assert _text_content(failed).startswith("reload_graph error: "), _text_content(failed)
+
+            # And the staleness is not confined to the call that discovered it:
+            # every later response carries the warning, because the served
+            # graph is now older than the file for the rest of this server's
+            # life (the per-call stat re-reads the unreadable bytes once, fails
+            # the same way, and records it).
+            after = _text_content(client.call_tool("cypher_query", {"query": "MATCH (p:Person) RETURN count(p) AS n"}))
+            assert "graph reload failed" in after, after
+            assert "STALE" in after, after
         finally:
             client.shutdown()
 
@@ -2007,18 +2029,18 @@ class TestReloadGraph:
             client.shutdown()
 
 
-class TestGraphWatch:
-    """`extensions.graph_watch: true` arms a filesystem watch on the served
-    `.kgl`: an external rewrite marks the graph, and the *next* graph tool call
-    serves the new bytes without anyone calling `reload_graph`. Opt-in — the
-    control test below pins that a server without the key never moves."""
+class TestAutomaticFreshness:
+    """A `--graph` server stats the served `.kgl` before every tool call, so a
+    rewrite by another process is served by the *next* call — no manifest key,
+    no watcher, no `reload_graph`. That is the property four MCP clients on one
+    graph depend on: a clean server never answers from a snapshot older than
+    the file was when the call arrived."""
 
     @staticmethod
     def _rewrite(kgl: Path) -> None:
         """Republish the served file with different contents. kglite's save
         writes a sibling temp file and renames it over, so this is exactly the
-        atomic-republish event shape a real producer emits (and the sibling
-        churn the watch callback has to filter out)."""
+        atomic-republish event shape a real producer emits."""
         g = kglite.KnowledgeGraph()
         g.add_nodes(pd.DataFrame({"id": [9], "title": ["Zoe"], "city": ["Tromso"]}), "Person", "id", "title")
         g.save(str(kgl))
@@ -2027,12 +2049,11 @@ class TestGraphWatch:
     def _titles(client: McpClient) -> str:
         return _text_content(client.call_tool("cypher_query", {"query": "MATCH (p:Person) RETURN p.title AS t"}))
 
-    def test_manifest_opt_in_reloads_after_an_external_rewrite(self, graph_fixture: Path, tmp_path: Path):
-        # `--graph X.kgl` auto-finds `X_mcp.yaml` beside it, so the manifest
-        # needs no CLI flag — the deployment shape an operator actually uses.
-        (tmp_path / "fixture_mcp.yaml").write_text(
-            "name: Graph Watch\nextensions:\n  graph_watch: true\n", encoding="utf-8"
-        )
+    def test_the_next_call_serves_an_external_rewrite(self, graph_fixture: Path):
+        """No manifest and no poll loop: the assertion is that ONE call after
+        the rewrite already has the new bytes. A sleep here would hide the
+        thing being tested — that the refresh is synchronous with the call
+        rather than racing a debounced watcher."""
         client = _spawn(["--graph", str(graph_fixture)])
         try:
             before = self._titles(client)
@@ -2040,31 +2061,29 @@ class TestGraphWatch:
 
             self._rewrite(graph_fixture)
 
-            # The watch debounces (500 ms) and the reload is lazy, so poll the
-            # tool instead of guessing one sleep long enough to be non-flaky.
-            deadline = time.monotonic() + 10.0
-            after = ""
-            while time.monotonic() < deadline:
-                after = self._titles(client)
-                if "Zoe" in after:
-                    break
-                time.sleep(0.25)
+            after = self._titles(client)
             assert "Zoe" in after and "Alice" not in after, after
+            # The generation moved, so the new bytes came from a re-read rather
+            # than from the fixture having been wrong to begin with.
+            assert "generation 2" in after, after
         finally:
             client.shutdown()
 
-    def test_without_the_manifest_key_a_rewrite_is_not_picked_up(self, graph_fixture: Path):
-        """The control arm: the same rewrite against a server with no
-        `graph_watch` key must leave the served graph alone (`reload_graph` is
-        the only refresh there). A fixed short wait is right here — the
-        assertion is an absence, and 2 s is well past the 500 ms debounce."""
+    def test_a_retired_graph_watch_key_still_boots(self, graph_fixture: Path, tmp_path: Path):
+        """`extensions.graph_watch` is retired, not rejected: four clients share
+        one manifest, so a server that upgrades before the manifest is edited
+        must keep working (it warns on stderr and refreshes anyway). A
+        *non-boolean* value is still a boot error — pinned in Rust by
+        `a_non_boolean_graph_watch_fails_boot`."""
+        (tmp_path / "fixture_mcp.yaml").write_text(
+            "name: Retired Key\nextensions:\n  graph_watch: false\n", encoding="utf-8"
+        )
         client = _spawn(["--graph", str(graph_fixture)])
         try:
             assert "Alice" in self._titles(client)
             self._rewrite(graph_fixture)
-            time.sleep(2.0)
-            after = self._titles(client)
-            assert "Alice" in after and "Zoe" not in after, after
+            # `false` used to mean "never refresh"; it means nothing now.
+            assert "Zoe" in self._titles(client)
         finally:
             client.shutdown()
 

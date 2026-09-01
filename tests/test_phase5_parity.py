@@ -330,8 +330,9 @@ def test_binary_size_regression():
 
       - 0.16.3:       20,497,376 bytes (≈19.5 MB). +32 KB over 0.16.2,
         all in the bundled MCP server: the graph-mode refresh machinery
-        (reload_graph tool, graph_reload pending/dormancy state, the
-        graph_watch watcher arm), the extensions.tools_allow allowlist
+        (reload_graph tool, graph_reload state, the graph_watch watcher
+        arm, since retired in favour of per-call stat freshness), the
+        extensions.tools_allow allowlist
         pass, the code-tool gating predicate, and the mcp-methods
         0.4.4 -> 0.4.5 bump (builtins.github opt-in gate).
 

@@ -218,6 +218,11 @@ impl GraphState {
             kg,
             source_path: None,
             ownership: None,
+            lease_since: None,
+            loaded_identity: None,
+            // A workspace graph refreshes from its producer, never by
+            // re-reading a file, so there is nothing here to stat.
+            freshness_path: None,
             root: Some(root.to_path_buf()),
             revs: revisions,
             built_at: SystemTime::now(),

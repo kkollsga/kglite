@@ -54,16 +54,17 @@ fn boot_value_codecs(
     Ok((!codecs.is_empty()).then(|| Arc::new(codecs)))
 }
 
-/// `extensions.graph_watch: true` — opt-in filesystem watch on the served
-/// `.kgl` in `--graph` mode.
+/// `extensions.graph_watch` — **retired**, and still parsed.
 ///
-/// Off by default: watching costs an OS watch registration and makes the served
-/// graph change under a client that never asked for it, so it stays an operator
-/// decision. When on, an external rewrite of the file marks the graph for
-/// reload and the next graph tool call re-reads it (`tools::graph_reload`).
-/// Applies only to `--graph` mode; `resolve_graph_watch_target` warns and
-/// declines everywhere else. A non-boolean value is a boot error, never a
-/// silently ignored key (see [`boot_tools_allow`]).
+/// What it used to arm is now unconditional: a `--graph` server stats the
+/// served file on every tool call (`tools::graph_reload`), so there is no
+/// watcher to switch on and nothing an operator gains by setting the key.
+/// Returning what was parsed rather than dropping it is what lets the caller
+/// warn about a key that no longer does anything — a manifest carrying
+/// `graph_watch: false` used to *mean* "do not refresh", and its author has to
+/// learn that it no longer says that. A non-boolean value is still a boot
+/// error rather than a silently ignored key (see [`boot_tools_allow`]): the
+/// day this key is finally deleted, a typo in it must not start passing.
 /// `extensions.ontology: {"file": "x.json"}` — the declared semantic layer,
 /// parsed once at boot (a malformed value fails the server, per the crate's
 /// no-silently-ignored-keys rule) and applied memory-only to every graph the
@@ -109,17 +110,18 @@ fn boot_ontology(
     }))
 }
 
-fn boot_graph_watch(manifest: Option<&mcp_methods::server::Manifest>) -> Result<bool> {
+fn boot_graph_watch(manifest: Option<&mcp_methods::server::Manifest>) -> Result<Option<bool>> {
     let Some(raw) = manifest.and_then(|m| m.extensions.get("graph_watch")) else {
-        return Ok(false);
+        return Ok(None);
     };
     raw.as_bool()
+        .map(Some)
         .context("extensions.graph_watch must be a boolean (true or false)")
 }
 
 /// `extensions.parallel: true` — the manifest half of the parallel opt-in.
 ///
-/// Boolean-key handling matches [`boot_graph_watch`]: absent is off, a
+/// Boolean-key handling matches [`boot_tools_allow`]: absent is off, a
 /// non-boolean is a boot error rather than a silently dropped key.
 fn boot_manifest_parallel(manifest: Option<&mcp_methods::server::Manifest>) -> Result<bool> {
     let Some(raw) = manifest.and_then(|m| m.extensions.get("parallel")) else {
@@ -239,7 +241,7 @@ fn query_pool_width() -> (usize, bool) {
 /// A non-list value, or a non-string element, is a boot error rather than a
 /// dropped key: an allowlist that silently fails open is worse than no
 /// allowlist, and "parsed and then ignored" is this crate's recurring defect
-/// shape (`graph_watch`, `temp_cleanup`).
+/// shape (`temp_cleanup`).
 fn boot_tools_allow(
     manifest: Option<&mcp_methods::server::Manifest>,
 ) -> Result<Option<Vec<String>>> {
@@ -536,8 +538,13 @@ pub(crate) async fn run_async(
     let recipe_catalog = boot_recipe_catalog(manifest.as_ref())?;
     let recipe_catalog_summary = recipe_catalog.discovery_summary();
     // Parsed here, at the top of boot, so a malformed value fails the server
-    // rather than surfacing as a watcher that quietly never fires.
-    let graph_watch = boot_graph_watch(manifest.as_ref())?;
+    // rather than surfacing as a key that quietly does nothing.
+    if boot_graph_watch(manifest.as_ref())?.is_some() {
+        tracing::warn!(
+            "extensions.graph_watch is retired — a --graph server now refreshes automatically \
+             on every tool call; remove the key"
+        );
+    }
     let tools_allow = boot_tools_allow(manifest.as_ref())?;
     let write_scope = boot_write_scope(manifest.as_ref(), &cli)?;
     let parallel = boot_parallel(manifest.as_ref(), &cli)?;
@@ -678,7 +685,7 @@ pub(crate) async fn run_async(
             .context("extensions.tools_allow could not be applied")?;
     }
 
-    let _watch_handle = spawn_mode_watcher(&mode, &graph_state, graph_watch)?;
+    let _watch_handle = spawn_mode_watcher(&mode, &graph_state)?;
 
     // Bare-mode (no manifest) deployments get no skills — the `skills:`
     // declaration lives in the manifest.
@@ -718,25 +725,38 @@ mod boot_manifest_tests {
         mcp_methods::server::load_manifest(&path).expect("manifest loads")
     }
 
+    /// The retired key is *accepted*, not honoured: a manifest that still
+    /// carries it must boot (four MCP clients share one manifest, and an
+    /// operator cannot edit it the moment this server upgrades), and the boot
+    /// must be able to tell it apart from an absent key so it can say the key
+    /// no longer does anything. Both values are declared present, including
+    /// `false` — that is the one an author wrote to mean "never refresh", and
+    /// it is the one whose meaning this release took away.
     #[test]
-    fn graph_watch_defaults_off_and_reads_the_manifest_key() {
+    fn a_graph_watch_key_is_accepted_and_reported_as_retired() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        assert!(
-            !boot_graph_watch(None).expect("no manifest parses"),
-            "no manifest must leave the watcher off"
+        assert_eq!(
+            boot_graph_watch(None).expect("no manifest parses"),
+            None,
+            "no manifest carries no key to warn about"
         );
         let bare = manifest_with(tmp.path(), "name: bare\n");
-        assert!(
-            !boot_graph_watch(Some(&bare)).expect("bare manifest parses"),
-            "an absent key must leave the watcher off — otherwise the on-arm proves nothing"
+        assert_eq!(
+            boot_graph_watch(Some(&bare)).expect("bare manifest parses"),
+            None,
+            "an absent key must not produce a retirement warning"
         );
         let off = manifest_with(tmp.path(), "name: off\nextensions:\n  graph_watch: false\n");
-        assert!(!boot_graph_watch(Some(&off)).expect("explicit false parses"));
+        assert_eq!(
+            boot_graph_watch(Some(&off)).expect("explicit false parses"),
+            Some(false),
+            "`false` no longer disables anything, so its author must be told"
+        );
         let on = manifest_with(tmp.path(), "name: on\nextensions:\n  graph_watch: true\n");
-        assert!(
+        assert_eq!(
             boot_graph_watch(Some(&on)).expect("explicit true parses"),
-            "extensions.graph_watch: true must reach the watcher wiring; if this fails \
-             the key is parsed and then dropped"
+            Some(true),
+            "and `true` is now what every --graph server does anyway"
         );
     }
 
