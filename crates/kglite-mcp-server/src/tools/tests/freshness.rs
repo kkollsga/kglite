@@ -308,11 +308,11 @@ fn the_reload_tool_retries_bytes_the_backstop_is_holding() {
     assert!(state.rebuild_error_note().is_none());
 }
 
-/// Eligibility is decided once, at the open, and only for the one shape the
-/// stat is cheap and meaningful for: a single regular file that a producer
-/// republishes atomically.
+/// Eligibility is decided once, at the open, and only for the shapes the
+/// comparison is meaningful for: a graph some peer republishes atomically at a
+/// path this server can stat.
 #[test]
-fn freshness_is_armed_only_for_a_regular_file_graph() {
+fn freshness_is_armed_only_for_an_atomically_republished_graph() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let served = tmp.path().join("armed.kgl");
     seed_kgl(&served, 1);
@@ -323,9 +323,8 @@ fn freshness_is_armed_only_for_a_regular_file_graph() {
         "a regular-file --graph server stats its file"
     );
 
-    // A disk graph is a directory of retained mmaps behind a CURRENT pointer,
-    // not one file republished atomically: capturing its identity costs an
-    // open + read, and `reload_graph` covers it instead.
+    // A path being *created* has nothing to compare against — the identity is
+    // decided before the open, when the directory is not there yet.
     let disk = tmp.path().join("disk-graph");
     let disk_state = GraphState::new(None);
     disk_state
@@ -334,7 +333,18 @@ fn freshness_is_armed_only_for_a_regular_file_graph() {
     assert_eq!(
         disk_state.with_active(|active| active.freshness_path.clone()),
         Some(None),
-        "a disk-graph directory is not stat-refreshed"
+        "a path this open creates has no prior identity to stat"
+    );
+    // Re-opened, it is a CURRENT-bearing directory: a peer's publish stages a
+    // new generation and swings the pointer, and `GraphFileIdentity::capture`
+    // folds the pointer's bytes in, so the comparison is exact.
+    disk_state
+        .open_or_create(&disk, None)
+        .expect("re-open the created disk graph");
+    assert_eq!(
+        disk_state.with_active(|active| active.freshness_path.clone()),
+        Some(Some(disk)),
+        "a disk-graph directory with a CURRENT pointer is stat-refreshed"
     );
 
     // A workspace graph refreshes from its producer; it has no file at all.

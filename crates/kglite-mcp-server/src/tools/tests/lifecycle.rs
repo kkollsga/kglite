@@ -192,14 +192,15 @@ fn a_created_graph_holds_the_writer_lease_until_its_first_save() {
     drop(state);
 }
 
-/// A disk graph is a directory of live mmaps, not a file replaced atomically,
-/// so an external writer under a held mapping is corruption rather than a
-/// stale read. Its lease is therefore held for the server's lifetime — a
-/// publish does not release it the way it releases a created *file*'s.
+/// A disk graph is published like a file, not rewritten in place: the save
+/// stages a new generation and swings `CURRENT`, leaving the generation any
+/// other reader has mapped untouched. So a *created* directory locks from the
+/// open — nothing exists yet to publish atomically — and hands the lease back
+/// at its first publish, exactly as a created `.kgl` does.
 #[test]
-fn a_disk_graph_keeps_its_lease_across_a_save() {
+fn a_created_disk_graph_gives_its_lease_back_at_the_publish() {
     let tmp = tempfile::tempdir().unwrap();
-    let p = tmp.path().join("pinned_disk_graph");
+    let p = tmp.path().join("created_disk_graph");
     let state = GraphState::default();
     state.create_in_mode(&p, StorageMode::Disk).unwrap();
     assert_eq!(active_mode(&state), "disk");
@@ -209,13 +210,14 @@ fn a_disk_graph_keeps_its_lease_across_a_save() {
     );
     state.save_as(&p).unwrap();
     assert!(
-        !external_lease_is_available(&p),
-        "a disk directory's lease must survive a publish: its columns are still mapped"
+        external_lease_is_available(&p),
+        "publishing the created directory gives the lease back — it is now a \
+         CURRENT-bearing graph like any other"
     );
     drop(state);
     assert!(
         external_lease_is_available(&p),
-        "and it is released when the server drops the graph"
+        "and dropping the server leaves it lockable"
     );
 }
 
@@ -401,17 +403,19 @@ fn a_failed_reload_keeps_the_previous_graph_serving() {
 
 // ── writer-lease scoping: who owns the served path ──────────────────────────
 //
-// A `--writable` / `save_graph` server owns the file it serves and holds the
-// cross-process lease for its lifetime. A read-only `--graph` server never
-// writes that file, and holding the lease there only refuses the external
-// rebuilder that wants to republish it (`kglite.open(path)` fails fast, and
-// its error names nothing about this server).
+// A `--writable` / `save_graph` server owns the graph it serves, but holds the
+// cross-process lease only from its first unsaved change until that change is
+// saved or discarded. A read-only `--graph` server never writes the graph at
+// all, and holding the lease there would only refuse the external rebuilder
+// that wants to republish it (`kglite.open(path)` fails fast, and its error
+// names nothing about this server).
 //
-// Gap, deliberately not covered here: the disk-graph *directory* case, which
-// keeps the lease under either policy. Building a disk graph needs the
-// multi-file arena/`CURRENT` scaffolding, which is exercised by the engine's
-// own storage tests and by `tests/test_storage_parity.py`; the branch it takes
-// here is one `path.is_file()` check shared with the missing-path case below.
+// "The graph" is a regular `.kgl` *or* a disk-graph directory carrying a
+// `CURRENT` pointer: both are republished atomically, so both follow the lazy
+// rule. The two exceptions lock from the open — a path that does not exist yet
+// (this open creates it) and a legacy flat directory with no `CURRENT` (its
+// files are rewritten in place under our mappings), and only the latter keeps
+// its lease pinned for the graph's lifetime.
 
 /// Whether a process that is *not* this state can take the path's writer lease
 /// right now. Fail-fast (`Duration::ZERO`) — a contended lease answers

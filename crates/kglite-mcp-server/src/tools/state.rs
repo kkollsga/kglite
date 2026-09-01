@@ -15,7 +15,7 @@ use kglite::api::io::{
     open_or_create_graph_in_mode, GraphFileIdentity, GraphWriterLease, OpenDisposition,
     WriteOwnership,
 };
-use kglite::api::storage::{live_storage_mode, StorageMode};
+use kglite::api::storage::StorageMode;
 use kglite::api::{Embedder, KnowledgeGraph};
 
 use crate::tools::*;
@@ -28,8 +28,9 @@ use crate::tools::*;
 /// having the last `save()` win. It is taken **lazily**: a server that may
 /// write holds it from its first unsaved change until that change is saved or
 /// discarded, not for its lifetime. That window is exactly the lost-update
-/// window, and nothing else — four MCP clients can serve one `.kgl` and only
-/// the one actually mid-write excludes the others. While a lease is held,
+/// window, and nothing else — four MCP clients can serve one `.kgl`, or one
+/// disk-graph directory carrying a `CURRENT` pointer, and only the one actually
+/// mid-write excludes the others. While a lease is held,
 /// `kglite.open(path)` — the default, locking open an external rebuilder uses
 /// — is refused, with an error that names the holder.
 ///
@@ -42,10 +43,11 @@ pub enum WriterLeasePolicy {
     /// does, because it really can rewrite the file.
     #[default]
     Exclusive,
-    /// Read-only deployment: never writes a regular-file graph back, so it
-    /// carries no ownership and never locks — external rebuilders (and other
-    /// read-only servers) can lock the same `.kgl`. A torn in-place rewrite
-    /// arriving mid-load is already caught by the load path's
+    /// Read-only deployment: never writes an atomically-republished graph back
+    /// — a regular file, or a directory behind a `CURRENT` pointer — so it
+    /// carries no ownership and never locks one, and external rebuilders (and
+    /// other read-only servers) can lock the same graph. A torn in-place
+    /// rewrite arriving mid-load is already caught by the load path's
     /// `GraphFileIdentity` before/after check, which fails the load and leaves
     /// the previously served graph installed.
     ///
@@ -184,35 +186,53 @@ impl GraphState {
 
     /// Whether opening `path` carries write ownership of it.
     ///
-    /// [`WriterLeasePolicy::ReadOnly`] declines it only for a **regular file** —
-    /// the atomically-republished `.kgl` case. Two targets keep ownership even
-    /// there:
+    /// [`WriterLeasePolicy::ReadOnly`] declines it for anything a peer
+    /// republishes *atomically* — a regular `.kgl`, and a disk-graph directory
+    /// carrying a `CURRENT` pointer, whose publish stages a new generation and
+    /// swings the pointer without touching the one we mapped. Two targets keep
+    /// ownership even there:
     ///
-    /// - a **disk-graph directory**: a tree of retained mmaps behind a `CURRENT`
-    ///   pointer, where an external writer mutating a column under our live
-    ///   mapping is memory corruption, not a stale read;
+    /// - a **legacy flat directory** (no `CURRENT`): a rebuild writes CSR files
+    ///   in place, under our live mappings, which is memory corruption rather
+    ///   than a stale read — see [`Self::is_legacy_flat_dir`];
     /// - a **path that does not exist yet**: this open is about to *create* the
     ///   graph, which is a write regardless of what the tool surface allows
     ///   afterwards.
     fn owns_writes(&self, path: &Path) -> bool {
         match self.writer_lease_policy {
             WriterLeasePolicy::Exclusive => true,
-            WriterLeasePolicy::ReadOnly => !path.is_file(),
+            WriterLeasePolicy::ReadOnly => !path.exists() || Self::is_legacy_flat_dir(path),
         }
     }
 
     /// Whether the lease has to be held from the open rather than from the
     /// first unsaved change.
     ///
-    /// The lazy lease answers "who may overwrite this file", and waiting for a
-    /// first mutation is safe for a `.kgl` that is replaced atomically. The two
-    /// non-regular-file cases cannot wait: a path that does not exist yet is
-    /// being *created* by this very open, and a disk-graph directory is a tree
-    /// of live mmaps an external writer would corrupt rather than merely make
-    /// stale. Both are decided before the open, while `path` still describes
-    /// what was there when we looked.
+    /// The lazy lease answers "who may overwrite this graph", and waiting for a
+    /// first mutation is safe wherever a peer's write is published atomically:
+    /// a `.kgl` replaced by rename, and a disk-graph directory whose publish
+    /// stages a fresh generation and then swings `CURRENT` (the selected
+    /// generation is never rewritten). Two cases cannot wait — a path that does
+    /// not exist yet is being *created* by this very open, and a legacy flat
+    /// directory is rewritten in place under our live mappings. Both are
+    /// decided before the open, while `path` still describes what was there
+    /// when we looked.
     fn leases_at_open(path: &Path) -> bool {
-        !path.is_file()
+        !path.exists() || Self::is_legacy_flat_dir(path)
+    }
+
+    /// Whether `path` is a disk-graph directory from before generations — CSR
+    /// files sitting at the root with no `CURRENT` pointer beside them.
+    ///
+    /// It is the layout that has no safe lock-free reader: a rebuild truncates
+    /// the shared `_zst_cache` and an ntriples load writes CSR files straight
+    /// into the root, both under whatever this server has mapped, and its
+    /// `GraphFileIdentity` degenerates to the root inode so a change is not
+    /// even detectable. So it keeps the pre-generation rules — eager lease,
+    /// pinned for the graph's lifetime, no auto-refresh — while a `CURRENT`-
+    /// bearing directory follows the same rules as a regular file.
+    fn is_legacy_flat_dir(path: &Path) -> bool {
+        path.is_dir() && !path.join("CURRENT").is_file()
     }
 
     /// Whether an external builder is injected. Activation hooks branch on
@@ -314,15 +334,21 @@ impl GraphState {
             .as_ref()
             .is_some_and(|active| active.source_path.as_deref() == Some(path));
         let owns_writes = self.owns_writes(path);
-        // Decided here, once, rather than per tool call: `GraphFileIdentity`
-        // is a cheap `stat` for a regular file but an open + read of `CURRENT`
-        // for a disk-graph directory, and the answer cannot change without a
-        // new open landing here anyway. A workspace-backed state never reaches
-        // the stat path at all (`ensure_graph_fresh` dispatches on the mode),
-        // so this only has to separate "one republished file" from "a
-        // directory of live mmaps" and "a path that is not there".
-        let freshness_path =
-            (self.workspace_mode.is_none() && path.is_file()).then(|| path.to_path_buf());
+        // Read once, before the open, because every decision below is about
+        // what was at `path` when we looked — and after the open a directory
+        // this call created carries a `CURRENT` it did not have a moment ago.
+        let legacy_flat_dir = Self::is_legacy_flat_dir(path);
+        // Decided here, once, rather than per tool call: the answer cannot
+        // change without a new open landing here anyway. A workspace-backed
+        // state never reaches the stat path at all (`ensure_graph_fresh`
+        // dispatches on the mode), so this only has to separate what a peer
+        // republishes atomically — a regular file, or a generation directory
+        // whose `CURRENT` bytes `GraphFileIdentity::capture` folds into the
+        // identity — from a legacy flat directory (no change signal to compare)
+        // and a path that is not there.
+        let freshness_path = (self.workspace_mode.is_none()
+            && (path.is_file() || (path.is_dir() && !legacy_flat_dir)))
+            .then(|| path.to_path_buf());
         // A same-path reload inherits the lease the previous ownership already
         // holds, so it must not try to take a second one: `flock` is per
         // open-file-description, and this process would contend with itself.
@@ -369,14 +395,14 @@ impl GraphState {
             )
         });
         if let (Some(ownership), Some(lease)) = (ownership.as_mut(), eager_lease) {
-            // A created *file* hands its lease to the lazy lifecycle: once the
-            // first save has published it, it is a regular `.kgl` like any
-            // other. A disk graph never does — its columns stay memory-mapped
-            // for as long as it is served, and an external writer under that
-            // mapping is corruption, not staleness — so its lease is pinned
-            // for the lifetime of the active graph.
-            let pinned = live_storage_mode(kg.dir()) == StorageMode::Disk;
-            ownership.adopt_lease(lease, kg.dir(), pinned);
+            // A *created* path hands its lease to the lazy lifecycle: once the
+            // first save has published it, it is an ordinary `.kgl` — or an
+            // ordinary generation directory — like any other, and this server
+            // should stop excluding peers. A legacy flat directory never does:
+            // its files are rewritten in place under mappings this server keeps
+            // for as long as it serves the graph, so its lease is pinned for
+            // the lifetime of the active graph.
+            ownership.adopt_lease(lease, kg.dir(), legacy_flat_dir);
         }
         let mut guard = write_lock(&self.inner);
         if reuse_existing {

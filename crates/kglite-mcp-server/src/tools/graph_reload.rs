@@ -15,8 +15,13 @@
 //! Two things this deliberately does *not* do. It never re-reads while this
 //! server holds unsaved changes — that would discard them silently, so the
 //! divergence is surfaced as a warning instead and the agent chooses. And it
-//! never re-reads a disk-graph directory or a producer-backed graph:
-//! eligibility is decided once, at the open (`ActiveGraph::freshness_path`).
+//! never re-reads a producer-backed graph or a legacy flat disk directory (one
+//! with no `CURRENT` pointer, whose identity degenerates to the root inode and
+//! so carries no change signal to compare): eligibility is decided once, at the
+//! open (`ActiveGraph::freshness_path`). A `CURRENT`-bearing directory *is*
+//! re-read — its publish stages a new generation and swings the pointer, never
+//! rewriting the generation this server has mapped, so it is stale-and-
+//! reloadable exactly as a republished file is.
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
@@ -86,8 +91,8 @@ impl GraphState {
     }
 
     /// Read out everything the freshness decision needs under one short read
-    /// lock. `None` for a state with no graph, or one whose graph is not a
-    /// single republished file.
+    /// lock. `None` for a state with no graph, or one whose graph is not
+    /// republished atomically at a path it can stat.
     fn freshness_probe(&self) -> Option<FreshnessProbe> {
         let guard = read_lock(&self.inner);
         let active = guard.as_ref()?;

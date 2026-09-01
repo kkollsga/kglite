@@ -30,10 +30,13 @@ pub(crate) struct ActiveGraph {
     /// protocol needs answered. `None` whenever no lease is held.
     pub(crate) lease_since: Option<SystemTime>,
     /// The path this server stats before every tool call to notice somebody
-    /// else's rewrite. `Some` only for a single **regular file** served in
-    /// `--graph` mode: a disk-graph directory would cost an open + `CURRENT`
-    /// read per call, a workspace graph refreshes from its producer instead,
-    /// and a graph with no file behind it has nothing to stat. Decided once,
+    /// else's republish. `Some` in `--graph` mode for anything a peer replaces
+    /// atomically: a regular file, and a disk-graph directory carrying a
+    /// `CURRENT` pointer (whose bytes `GraphFileIdentity::capture` folds in, so
+    /// a new generation is a change signal — at the cost of one open + read per
+    /// call). `None` for a legacy flat directory, which has no such signal, for
+    /// a workspace graph, which refreshes from its producer instead, and for a
+    /// graph with no path behind it, which has nothing to stat. Decided once,
     /// at the open, because that is when `path` still describes what was
     /// there when we looked.
     pub(crate) freshness_path: Option<std::path::PathBuf>,

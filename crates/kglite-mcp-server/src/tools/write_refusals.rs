@@ -10,6 +10,11 @@
 //! All four texts state the same two facts first, because an agent that reads
 //! only the first sentence must still not retry blindly or assume data loss:
 //! nothing was changed here, and what to call to get unstuck.
+//!
+//! A fifth source does not arrive as a [`WriteRefusal`] at all: the engine's
+//! own `<dir>/.kglite.lock`, which refuses a second writer of a disk-graph
+//! directory as opaque text. [`is_engine_lock_contention`] recognises it so it
+//! is answered in the contended voice too — see [`ENGINE_LOCK_CLAUSE`].
 
 use kglite::api::io::WriteRefusal;
 
@@ -21,15 +26,7 @@ use kglite::api::io::WriteRefusal;
 /// warning, so neither is restated here.
 pub(crate) fn refused_write(tool: &str, refusal: &WriteRefusal) -> String {
     match refusal {
-        // The engine's message already ends in a full stop; a second one here
-        // read as a typo in every refusal the operator saw.
-        WriteRefusal::Contended(details) => format!(
-            "{tool} refused: {} Nothing was changed here, and this graph is still \
-             readable — keep querying it. Retry the write once that server saves and \
-             releases the file; this server refreshes automatically on its next call, \
-             so you will be reading what it wrote.",
-            details.error
-        ),
+        WriteRefusal::Contended(details) => contended_write(tool, &details.error.to_string()),
         WriteRefusal::Stale { path } => format!(
             "{tool} refused: {} changed on disk after this server loaded it, so the \
              write would have been applied to a stale graph. Nothing was changed here. \
@@ -48,6 +45,13 @@ pub(crate) fn refused_write(tool: &str, refusal: &WriteRefusal) -> String {
 /// of them merges.
 pub(crate) fn refused_save(tool: &str, refusal: &WriteRefusal) -> String {
     match refusal {
+        // The engine's directory lock refused the save before the file lease
+        // ever came into it, so it arrives as an I/O failure rather than a
+        // structured contention. Answering it in the contended voice is what
+        // makes a disk collision read like a `.kgl` collision.
+        WriteRefusal::Io(error) if is_engine_lock_contention(&error.to_string()) => {
+            contended_save(tool, ENGINE_LOCK_CLAUSE)
+        }
         WriteRefusal::Stale { path } => format!(
             "{tool} refused: {} changed on disk since you loaded it, so saving would \
              overwrite whatever the other writer put there. Your unsaved changes are \
@@ -56,14 +60,66 @@ pub(crate) fn refused_save(tool: &str, refusal: &WriteRefusal) -> String {
              on disk. There is no merge between the two versions.",
             path.display()
         ),
-        WriteRefusal::Contended(details) => format!(
-            "{tool} refused: {} Your unsaved changes are still here and still \
-             queryable. Retry once that server releases the file, or save_graph_as to \
-             a different path.",
-            details.error
-        ),
+        WriteRefusal::Contended(details) => contended_save(tool, &details.error.to_string()),
         WriteRefusal::Io(error) => format!("{tool} error: {error}"),
     }
+}
+
+/// The contended text a write refusal renders, given the clause that says who
+/// is holding the graph. One body, two holders: the file lease's own message
+/// (which names label, pid and since) and [`ENGINE_LOCK_CLAUSE`], which cannot.
+///
+/// Both clauses already end in a full stop, so none is added here — a second
+/// one read as a typo in every refusal the operator saw.
+fn contended_write(tool: &str, holder_clause: &str) -> String {
+    format!(
+        "{tool} refused: {holder_clause} Nothing was changed here, and this graph is still \
+         readable — keep querying it. Retry the write once that server saves and \
+         releases the file; this server refreshes automatically on its next call, \
+         so you will be reading what it wrote."
+    )
+}
+
+/// [`contended_write`]'s counterpart for a refused save — same two holders,
+/// and the save's own two ways out.
+fn contended_save(tool: &str, holder_clause: &str) -> String {
+    format!(
+        "{tool} refused: {holder_clause} Your unsaved changes are still here and still \
+         queryable. Retry once that server releases the file, or save_graph_as to \
+         a different path."
+    )
+}
+
+/// The holder clause for a refusal by the engine's directory lock.
+///
+/// `<path>.lock` publishes an owner record beside itself, so a contended file
+/// lease can say *which* client is sitting on the graph. `<dir>/.kglite.lock`
+/// structurally cannot: it is `flock`/`LockFileEx`, whose Windows locks are
+/// mandatory, so the pid written inside it is unreadable to any contender
+/// (`storage/disk/generation.rs`). The agent is told that rather than left to
+/// read an unexplained `WouldBlock`.
+const ENGINE_LOCK_CLAUSE: &str = "this disk graph's directory is held by another process \
+                                  (engine lock — the holder cannot be named).";
+
+/// Whether `message` is the engine refusing a disk-graph directory that
+/// another writer already holds.
+///
+/// Two sites raise it, each with one fixed phrase, and this matches the phrase
+/// and nothing else — there is no holder in the string to parse out. A
+/// mutation reaches it through `execute_mut` → `prepare_disk_mutation` →
+/// `GraphDirectoryLock::try_acquire` ("already has an active writer"), a save
+/// through `save_disk`'s `take_lease` ("Failed to acquire disk writer lock").
+/// Both arrive at this crate as opaque text: the first as a `KgError::FileIo`
+/// out of the Cypher call, the second wrapped in [`WriteRefusal::Io`].
+pub(crate) fn is_engine_lock_contention(message: &str) -> bool {
+    message.contains("already has an active writer")
+        || message.contains("Failed to acquire disk writer lock")
+}
+
+/// A mutation the engine's directory lock refused, in the same voice as a
+/// contended file lease.
+pub(crate) fn refused_write_engine_lock(tool: &str) -> String {
+    contended_write(tool, ENGINE_LOCK_CLAUSE)
 }
 
 /// A graph-swapping route refused because it would have thrown away unsaved

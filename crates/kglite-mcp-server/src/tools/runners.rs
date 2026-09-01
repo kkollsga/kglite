@@ -151,7 +151,17 @@ pub(crate) fn run_cypher_write(
                 }
                 active.lease_since = None;
             }
-            return Err(error.to_string());
+            // A disk-graph directory has a second lock in front of it —
+            // `<dir>/.kglite.lock`, taken by the engine at the first mutation —
+            // and its refusal lands here as a bare `WouldBlock` string rather
+            // than through `begin_write`. Give it the contended vocabulary the
+            // file lease already has, so a peer holding a disk directory reads
+            // like a peer holding a `.kgl`.
+            let message = error.to_string();
+            if is_engine_lock_contention(&message) {
+                return Err(refused_write_engine_lock("cypher_query"));
+            }
+            return Err(message);
         }
     };
     // A mutation with no RETURN yields no rows — acknowledge with a write
