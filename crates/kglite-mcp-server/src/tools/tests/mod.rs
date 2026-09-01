@@ -43,6 +43,7 @@ fn fresh_active() -> ActiveGraph {
         freshness_path: None,
         root: None,
         revs: None,
+        unpersisted_config: false,
         built_at: SystemTime::now(),
         generation: 0,
     }

@@ -365,13 +365,16 @@ pub fn register(
         let s = state.clone();
         server.register_typed_tool_fallible::<SaveGraphArgs, _>(
             "save_graph",
-            "Persist the active graph to its source .kgl file (single-graph mode only).",
-            move |_| {
+            "Persist the active graph to its source .kgl file (single-graph mode only). \
+             With nothing unsaved to write this is a no-op that reports \"Nothing to save\" \
+             and leaves the file untouched, so other servers reading the same graph are not \
+             made to re-read it; pass force=true to rewrite it anyway.",
+            move |args: SaveGraphArgs| {
                 s.ensure_graph_fresh();
                 // Mutable access: the save must go through the active
                 // graph's own Arc so `prepare_save`'s `Arc::make_mut` sees
                 // refcount 1 (no whole-graph deep copy per save).
-                s.with_active_mut(run_save)
+                s.with_active_mut(|g| run_save(g, args.force.unwrap_or(false)))
                     .unwrap_or_else(|| Err(NO_GRAPH.to_string()))
             },
         );

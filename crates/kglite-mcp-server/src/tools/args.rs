@@ -89,7 +89,14 @@ impl OverviewArgs {
 }
 
 #[derive(Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
-pub(crate) struct SaveGraphArgs {}
+pub(crate) struct SaveGraphArgs {
+    /// Rewrite the file even when this server has nothing unsaved — e.g. to
+    /// re-encode it with the running library version. Without it a save with
+    /// nothing to write returns "Nothing to save" and leaves the file alone,
+    /// so peers serving the same graph are not made to re-read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force: Option<bool>,
+}
 
 #[derive(Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
 pub(crate) struct LoadGraphArgs {

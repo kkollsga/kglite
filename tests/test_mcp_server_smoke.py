@@ -1113,14 +1113,20 @@ class TestWritableMode:
         _build_fixture_graph(src)
         mtime_before = src.stat().st_mtime
 
-        # save_graph is opt-in — see _write_savegraph_manifest. This
-        # is the in-memory `.kgl` round-trip; the disk-mode variant
-        # is in `test_mcp_server_python_entry.py`. Both are needed to
-        # cover the dispatch in `kglite::api::save_graph`.
-        manifest = _write_savegraph_manifest(tmp_path)
-        client = _spawn(["--graph", str(src), "--mcp-config", str(manifest)])
+        # The in-memory `.kgl` round-trip through the tool seam; disk-mode
+        # dispatch in `kglite::api::save_graph` is covered by the Rust suite
+        # (`tools/tests/freshness.rs::a_disk_save_does_not_make_the_next_call_reload_itself`).
+        # `--writable` registers save_graph as well as the mutation route, so
+        # the save has real unsaved work behind it — a save with nothing to
+        # write is a no-op (see test_a_clean_save_graph_is_a_no_op).
+        client = _spawn(["--graph", str(src), "--writable"])
         try:
             time.sleep(0.05)  # so save mtime is detectably newer
+            w = client.call_tool(
+                "cypher_query",
+                {"query": "CREATE (:Task {id: 't-save'})", "write_scope": ["Task"]},
+            )
+            assert not _is_error(w), _text_content(w)
             r = client.call_tool("save_graph")
             text = _text_content(r)
             assert "Saved" in text and "node" in text  # message format check
@@ -1130,6 +1136,58 @@ class TestWritableMode:
             # which this server has anything to protect.
             peer = kglite.open(str(src))
             peer.close()
+        finally:
+            client.shutdown()
+
+    def test_a_clean_save_graph_is_a_no_op(self, tmp_path: Path):
+        """A server with nothing unsaved must leave the file alone.
+
+        A rewrite that changes nothing still moves the file's identity, and
+        every peer serving the same `.kgl` then pays a full re-read on its
+        next call — half a second at 133 MB, per peer. The peer arm is the
+        point of the test: its footer generation must not advance."""
+        src = tmp_path / "clean.kgl"
+        _build_fixture_graph(src)
+        manifest = _write_savegraph_manifest(tmp_path)
+
+        peer = _spawn(["--graph", str(src), "--mcp-config", str(manifest)])
+        client = _spawn(["--graph", str(src), "--mcp-config", str(manifest)])
+        try:
+            probe = {"query": "MATCH (p:Person) RETURN count(p) AS c"}
+            peer_before = _footer_generation(_text_content(peer.call_tool("cypher_query", probe)))
+            stat_before = src.stat()
+            time.sleep(0.05)  # any rewrite would land a detectably newer mtime
+
+            r = client.call_tool("save_graph")
+            text = _text_content(r)
+            assert not _is_error(r), text
+            assert "Nothing to save" in text, text
+            assert "force=true" in text, text
+
+            after = src.stat()
+            assert (after.st_mtime_ns, after.st_size) == (stat_before.st_mtime_ns, stat_before.st_size), text
+            peer_after = _footer_generation(_text_content(peer.call_tool("cypher_query", probe)))
+            assert peer_after == peer_before, "a peer must not re-read a file nobody rewrote"
+        finally:
+            client.shutdown()
+            peer.shutdown()
+
+    def test_save_graph_force_rewrites_a_clean_file(self, tmp_path: Path):
+        """The escape hatch: re-encoding a clean file with the running library
+        version is a legitimate rewrite, and `force` is how it is asked for."""
+        src = tmp_path / "forced.kgl"
+        _build_fixture_graph(src)
+        manifest = _write_savegraph_manifest(tmp_path)
+
+        client = _spawn(["--graph", str(src), "--mcp-config", str(manifest)])
+        try:
+            mtime_before = src.stat().st_mtime_ns
+            time.sleep(0.05)
+            r = client.call_tool("save_graph", {"force": True})
+            text = _text_content(r)
+            assert not _is_error(r), text
+            assert "Saved" in text, text
+            assert src.stat().st_mtime_ns > mtime_before, text
         finally:
             client.shutdown()
 

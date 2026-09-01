@@ -730,9 +730,18 @@
     },
     {
       "name": "save_graph",
-      "description": "Persist the active graph to its source .kgl file (single-graph mode only).",
+      "description": "Persist the active graph to its source .kgl file (single-graph mode only). With nothing unsaved to write this is a no-op that reports \"Nothing to save\" and leaves the file untouched, so other servers reading the same graph are not made to re-read it; pass force=true to rewrite it anyway.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "force": {
+            "description": "Rewrite the file even when this server has nothing unsaved \u2014 e.g. to\nre-encode it with the running library version. Without it a save with\nnothing to write returns \"Nothing to save\" and leaves the file alone,\nso peers serving the same graph are not made to re-read it.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
         "title": "SaveGraphArgs",
         "type": "object"
       }
@@ -1213,9 +1222,18 @@
     },
     {
       "name": "save_graph",
-      "description": "Persist the active graph to its source .kgl file (single-graph mode only).",
+      "description": "Persist the active graph to its source .kgl file (single-graph mode only). With nothing unsaved to write this is a no-op that reports \"Nothing to save\" and leaves the file untouched, so other servers reading the same graph are not made to re-read it; pass force=true to rewrite it anyway.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "force": {
+            "description": "Rewrite the file even when this server has nothing unsaved \u2014 e.g. to\nre-encode it with the running library version. Without it a save with\nnothing to write returns \"Nothing to save\" and leaves the file alone,\nso peers serving the same graph are not made to re-read it.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
         "title": "SaveGraphArgs",
         "type": "object"
       }

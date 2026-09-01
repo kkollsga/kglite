@@ -288,21 +288,40 @@ pub(crate) fn parse_cypher_detail(v: Option<&DetailSelection>) -> CypherDetail {
 /// `Err` is a graph that was not persisted — no bound path, a file some other
 /// writer replaced since it was loaded, or a write the engine refused.
 ///
-/// A *clean* graph still publishes: a server that materialized a manifest
-/// ontology at boot has changed nothing the version counter can see, and this
-/// call is the only way that materialization reaches disk.
-pub(crate) fn run_save(graph: &mut ActiveGraph) -> Result<String, String> {
+/// A save with nothing to write is an `Ok` no-op that does not touch the file
+/// and does not take the lease. A rewrite moves the file's identity, and every
+/// peer serving the same graph then pays a full re-read on its next call — so
+/// the two things that *can* be unwritten are asked about explicitly: unsaved
+/// mutations ([`ActiveGraph::is_dirty`]) and boot configuration the version
+/// counter cannot see ([`ActiveGraph::unpersisted_config`], the manifest
+/// ontology). `force` is the escape hatch for a rewrite neither of those
+/// explains — re-encoding the file with the running library version.
+pub(crate) fn run_save(graph: &mut ActiveGraph, force: bool) -> Result<String, String> {
     let Some(path) = graph.source_path.as_ref() else {
         return Err("save_graph requires --graph mode (no source path bound).".to_string());
     };
     let path_str = path.to_string_lossy().into_owned();
-    let Some(ownership) = graph.ownership.as_mut() else {
+    // The deployment-shape refusal outranks the no-op: a server that will
+    // *never* write this file has to say so, whether or not it happens to have
+    // something to write today.
+    if graph.ownership.is_none() {
         return Err(format!(
             "save_graph refused: this server serves {path_str} read-only and never \
              writes it back. Use save_graph_as to write the active graph somewhere \
              else."
         ));
-    };
+    }
+    if !force && !graph.is_dirty() && !graph.unpersisted_config {
+        return Ok(format!(
+            "Nothing to save: {path_str} is clean and carries no unpersisted \
+             configuration, so the file was not touched. Pass force=true to \
+             rewrite it anyway."
+        ));
+    }
+    let ownership = graph
+        .ownership
+        .as_mut()
+        .expect("checked immediately above and nothing since could clear it");
     // `publish` takes the lease if this server is not already holding one,
     // proves the file is still the one this graph was read from, and hands the
     // lease back afterwards — a saved graph has nothing left to protect.
@@ -324,6 +343,9 @@ pub(crate) fn run_save(graph: &mut ActiveGraph) -> Result<String, String> {
     // The lease went back with the publish; the status on every later response
     // must not go on naming a hold that ended here.
     graph.lease_since = None;
+    // And the boot configuration is now in the file, so the next save has
+    // nothing left that the version counter cannot see.
+    graph.unpersisted_config = false;
     let path = path.clone();
     graph.arm_freshness_for(&path);
     // `compute_schema` only needs `&DirGraph` — no second make_mut.

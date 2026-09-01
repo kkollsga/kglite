@@ -63,6 +63,19 @@ pub(crate) struct ActiveGraph {
     /// agent knows unscoped queries span all these revs (the over-count trap)
     /// and can scope with `WHERE '<rev>' IN n.revs`.
     pub(crate) revs: Option<Vec<String>>,
+    /// Server-side configuration applied to the installed graph that no save
+    /// has written yet — set when a manifest ontology is applied at boot,
+    /// cleared by a publish.
+    ///
+    /// Boot configuration goes on deliberately without bumping the version
+    /// counter ([`GraphState::apply_bound_embedder`] uses the
+    /// lineage-preserving mutator so a materializing server still boots
+    /// clean), which leaves [`Self::is_dirty`] structurally blind to it. This
+    /// is the one bit that says "there is something here the file does not
+    /// have", so `save_graph` can be a no-op on everything else without
+    /// dropping the materialization on the floor. Re-derived on every install,
+    /// because every install re-applies the ontology.
+    pub(crate) unpersisted_config: bool,
     /// Wall-clock time this graph was built/loaded. Surfaced next to `root`
     /// so an agent can tell how fresh the active graph is.
     pub(crate) built_at: SystemTime,

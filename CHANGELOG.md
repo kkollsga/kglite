@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 ### Changed
 
+- **`save_graph` on a clean MCP server no longer rewrites the file.** A save
+  with nothing unsaved to write used to publish anyway, moving the `.kgl`'s
+  size, mtime and inode — and every peer server bound to the same file then
+  paid a full re-read on its next call to serve a graph whose bytes had not
+  changed (half a second at 133 MB, once per peer, on every such save). It now
+  returns `Nothing to save: <path> …` and leaves the file alone. The one thing
+  a clean save legitimately carried still gets through: a server that applied a
+  manifest ontology at boot (`extensions.ontology`, declared or materialized)
+  holds configuration the version counter cannot see, and its **first** save
+  writes that to disk exactly as before — the second one is the no-op. For the
+  remaining case, rewriting a clean file on purpose to re-encode it with the
+  running library version, `save_graph` takes a new `force=true` argument.
+
 - **The optional `fastembed` embedder backend moved from fastembed 5 to
   fastembed 6.** Nothing changes for a KGLite user: the same model names
   resolve to the same weights, and the backend is still opt-in behind the

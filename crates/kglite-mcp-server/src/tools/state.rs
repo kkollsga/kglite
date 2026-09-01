@@ -379,7 +379,7 @@ impl GraphState {
         // baseline below is taken *after* it, so a manifest ontology installed
         // (or materialized) on this graph is part of what "clean" means rather
         // than reading as an unsaved change nobody made.
-        self.apply_bound_embedder(&mut kg);
+        let unpersisted_config = self.apply_bound_embedder(&mut kg);
         let mut lease_since = eager_lease.is_some().then(SystemTime::now);
         let mut ownership = owns_writes.then(|| {
             WriteOwnership::new(
@@ -436,6 +436,7 @@ impl GraphState {
             loaded_identity: Some(loaded_identity),
             root: Some(path.to_path_buf()),
             revs: None,
+            unpersisted_config,
             built_at: SystemTime::now(),
             generation,
         });
@@ -516,6 +517,10 @@ impl GraphState {
         // A successful publish hands the lease back, so the status this graph
         // reports on every later response must stop claiming to hold one.
         active.lease_since = None;
+        // The published file carries the boot configuration too, and the save
+        // target is now that file — so a later `save_graph` has nothing left
+        // that the version counter cannot see.
+        active.unpersisted_config = false;
         active.source_path = Some(path.to_path_buf());
         active.arm_freshness_for(path);
         let path_str = path.to_string_lossy().into_owned();
@@ -571,7 +576,14 @@ impl GraphState {
     /// handle through here before publication — `KnowledgeGraph::from_arc`
     /// yields `embedder: None`, and a swap that skips this step silently
     /// disables `text_score()` for the rest of the process.
-    pub(crate) fn apply_bound_embedder(&self, kg: &mut KnowledgeGraph) {
+    ///
+    /// Returns whether a manifest ontology was applied — the caller stamps it
+    /// into [`ActiveGraph::unpersisted_config`], because the application is
+    /// deliberately invisible to the version counter and `save_graph` would
+    /// otherwise have no way to tell this graph from the file it was read
+    /// from. `true` covers `define` alone as well as `materialize`: both write
+    /// state the file does not carry.
+    pub(crate) fn apply_bound_embedder(&self, kg: &mut KnowledgeGraph) -> bool {
         let bound = read_lock(&self.embedder).as_ref().map(Arc::clone);
         if let Some(embedder) = bound {
             kg.set_embedder_native(embedder);
@@ -579,6 +591,7 @@ impl GraphState {
         // The manifest ontology rides the same seam: every install path
         // already routes through here before publication.
         let ontology = read_lock(&self.ontology).clone();
+        let applied = ontology.is_some();
         if let Some(bound) = ontology {
             // Lineage-preserving rather than a raw `Arc::make_mut`: a forced
             // clone here must re-adopt the disk writer authority and fold the
@@ -612,6 +625,7 @@ impl GraphState {
                 Err(e) => tracing::error!("manifest ontology rejected for this graph: {e}"),
             }
         }
+        applied
     }
 
     /// Bind the manifest-declared ontology; ["apply_bound_embedder"] installs

@@ -300,7 +300,10 @@ fn an_opened_disk_directory_takes_no_lease_until_it_writes() {
         "the first unsaved change takes the lease"
     );
 
-    state.with_active_mut(run_save).unwrap().unwrap();
+    state
+        .with_active_mut(|a| run_save(a, false))
+        .unwrap()
+        .unwrap();
     assert!(
         external_lease_is_available(&p),
         "publishing the generation gives the lease back — the dirty window is over"
@@ -365,7 +368,10 @@ fn a_legacy_flat_directory_keeps_the_eager_lease() {
         .with_active_mut(|a| write(a, "CREATE (:N {id:'local'})", None))
         .unwrap()
         .unwrap();
-    state.with_active_mut(run_save).unwrap().unwrap();
+    state
+        .with_active_mut(|a| run_save(a, false))
+        .unwrap()
+        .unwrap();
     assert!(
         !external_lease_is_available(&p),
         "the lease is pinned for the graph's lifetime, not released at the publish"
@@ -403,7 +409,10 @@ fn an_opened_path_backed_graph_takes_no_lease_until_it_writes() {
         "the first unsaved change takes the lease"
     );
 
-    state.with_active_mut(run_save).unwrap().unwrap();
+    state
+        .with_active_mut(|a| run_save(a, false))
+        .unwrap()
+        .unwrap();
     assert!(
         external_lease_is_available(&p),
         "publishing gives the lease back — the dirty window is over"
@@ -625,7 +634,7 @@ fn a_write_enabled_state_locks_the_served_file_only_while_it_is_dirty() {
         !external_lease_is_available(&p),
         "an unsaved change must refuse a second writer — that is the lost-update window"
     );
-    s.with_active_mut(run_save).unwrap().unwrap();
+    s.with_active_mut(|a| run_save(a, false)).unwrap().unwrap();
     assert!(
         external_lease_is_available(&p),
         "and the window closes at the save, not at process exit"
@@ -714,7 +723,10 @@ fn a_second_server_is_refused_by_name_until_the_first_one_saves() {
     // The refused server is still a working reader.
     assert_eq!(second.schema().unwrap().0, 1);
 
-    first.with_active_mut(run_save).unwrap().unwrap();
+    first
+        .with_active_mut(|a| run_save(a, false))
+        .unwrap()
+        .unwrap();
     // The second server was loaded from the pre-save bytes, so its write is
     // now refused for *staleness* rather than contention — and that refusal
     // names the reload, not the holder.
@@ -1179,7 +1191,7 @@ fn a_materializing_server_boots_clean_and_its_clean_save_persists_the_labels() {
         "and a clean server must not be holding the file"
     );
 
-    s.with_active_mut(run_save)
+    s.with_active_mut(|a| run_save(a, false))
         .unwrap()
         .expect("a clean graph still publishes");
     drop(s);
@@ -1344,4 +1356,150 @@ fn bound_embedder_survives_a_workspace_rebuild() {
         s.with_kg(|kg| kg.embedder().is_some()).unwrap(),
         "the boot-bound embedder must survive a workspace graph build"
     );
+}
+
+// ── clean save is a no-op ───────────────────────────────────────────────────
+
+/// Length + mtime of the served file: enough to tell a rewrite from a
+/// file nobody touched. `.kgl` publication is write-then-rename, so a
+/// rewrite moves both.
+fn file_stamp(path: &std::path::Path) -> (u64, std::time::SystemTime) {
+    let md = std::fs::metadata(path).expect("the served file exists");
+    (md.len(), md.modified().expect("an mtime"))
+}
+
+/// Long enough that a rewrite's mtime is distinguishable from the seed's on
+/// any filesystem this suite runs on.
+fn settle() {
+    std::thread::sleep(Duration::from_millis(20));
+}
+
+/// A server with nothing unsaved and no boot configuration must leave the file
+/// exactly as it found it — every peer serving the same `.kgl` pays a full
+/// re-read for a rewrite that changed nothing.
+#[test]
+fn a_clean_save_does_not_touch_the_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("clean_save.kgl");
+    seed_with_nodes(&p, 2);
+
+    let s = GraphState::default();
+    s.open_or_create(&p, None).unwrap();
+    assert!(!s.is_dirty(), "the fixture must boot clean");
+    let before = file_stamp(&p);
+    settle();
+
+    let msg = s
+        .with_active_mut(|a| run_save(a, false))
+        .unwrap()
+        .expect("a no-op save is a success, not a refusal");
+    assert!(msg.starts_with("Nothing to save:"), "{msg}");
+    assert!(msg.contains("force=true"), "{msg}");
+    assert_eq!(
+        file_stamp(&p),
+        before,
+        "a no-op save must not rewrite the file"
+    );
+    assert!(
+        external_lease_is_available(&p),
+        "and must not have taken the writer lease to decide that"
+    );
+}
+
+/// The escape hatch: re-encoding a file with the running library version is a
+/// legitimate rewrite of a clean graph, and `force` is how it is asked for.
+#[test]
+fn force_rewrites_a_clean_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("forced_save.kgl");
+    seed_with_nodes(&p, 2);
+
+    let s = GraphState::default();
+    s.open_or_create(&p, None).unwrap();
+    let before = file_stamp(&p);
+    settle();
+
+    let msg = s
+        .with_active_mut(|a| run_save(a, true))
+        .unwrap()
+        .expect("force must publish");
+    assert!(msg.starts_with("Saved "), "{msg}");
+    assert_ne!(file_stamp(&p), before, "force must rewrite the file");
+    assert!(
+        external_lease_is_available(&p),
+        "the publish hands the lease back"
+    );
+}
+
+/// The dirty path is unchanged: real unsaved work still writes, and still says
+/// so.
+#[test]
+fn a_dirty_save_still_writes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("dirty_save.kgl");
+    seed_with_nodes(&p, 2);
+
+    let s = GraphState::default();
+    s.open_or_create(&p, None).unwrap();
+    s.with_active_mut(|a| write(a, "CREATE (:N {id:'new'})", None))
+        .unwrap()
+        .unwrap();
+    let before = file_stamp(&p);
+    settle();
+
+    let msg = s
+        .with_active_mut(|a| run_save(a, false))
+        .unwrap()
+        .expect("a dirty save publishes");
+    assert!(msg.starts_with("Saved "), "{msg}");
+    assert_ne!(file_stamp(&p), before, "the unsaved node must reach disk");
+}
+
+/// Boot configuration earns exactly ONE rewrite. The first clean save carries
+/// the manifest ontology to disk (the reason clean saves published at all);
+/// the second has nothing left to write and must not touch the file again —
+/// otherwise every `save_graph` in a session re-runs the peer re-read cost.
+#[test]
+fn a_configured_servers_second_clean_save_is_a_no_op() {
+    for materialize in [true, false] {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("configured.kgl");
+        seed_people(&p, StorageMode::Memory);
+
+        let s = GraphState::default();
+        s.bind_ontology(agent_ontology(materialize));
+        s.open_or_create(&p, None).unwrap();
+        assert!(!s.is_dirty(), "manifest ontology is configuration");
+        let before = file_stamp(&p);
+        settle();
+
+        let first = s
+            .with_active_mut(|a| run_save(a, false))
+            .unwrap()
+            .expect("the pending configuration publishes");
+        assert!(
+            first.starts_with("Saved "),
+            "materialize={materialize}: {first}"
+        );
+        let after_first = file_stamp(&p);
+        assert_ne!(
+            after_first, before,
+            "materialize={materialize}: the configuration must reach disk"
+        );
+        settle();
+
+        let second = s
+            .with_active_mut(|a| run_save(a, false))
+            .unwrap()
+            .expect("the second save is a no-op, not a refusal");
+        assert!(
+            second.starts_with("Nothing to save:"),
+            "materialize={materialize}: {second}"
+        );
+        assert_eq!(
+            file_stamp(&p),
+            after_first,
+            "materialize={materialize}: the second save must not rewrite the file"
+        );
+    }
 }
