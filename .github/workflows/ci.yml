@@ -152,7 +152,7 @@ jobs:
           components: llvm-tools-preview
 
       - name: Install pinned cargo-llvm-cov
-        uses: taiki-e/install-action@v2.85.4
+        uses: taiki-e/install-action@v2.87.1
         with:
           tool: cargo-llvm-cov@0.8.7
 
@@ -409,7 +409,7 @@ jobs:
         with:
           toolchain: ${{ env.RUST_STABLE }}
       - name: Install pinned cargo-audit
-        uses: taiki-e/install-action@v2.85.4
+        uses: taiki-e/install-action@v2.87.1
         with:
           tool: cargo-audit@0.22.2
       - name: Deny unreviewed RustSec findings
@@ -1083,7 +1083,7 @@ jobs:
           cache: pip
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v5.6.0
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'
@@ -1196,13 +1196,13 @@ jobs:
         # 26, not the 22 floor: build.gradle.kts pins the Gradle toolchain to
         # JavaLanguageVersion.of(26) (compiling against --release 22), so the
         # build needs a 26 JDK present. Same version publish_java.yml uses.
-        uses: actions/setup-java@v5.6.0
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '26'
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v5
+        uses: gradle/actions/setup-gradle@v6
         with:
           # Pinned, and no wrapper in the repo — CI is the only place the
           # build's Gradle version is written down. Matches publish_java.yml.
