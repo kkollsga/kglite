@@ -149,7 +149,7 @@ embeds this same graph-serving surface.
 
 A second MCP surface is visual: while **kglite-visual** serves a `.kgl` in a
 browser window, the same port speaks MCP, so an agent can put a Cypher result
-on screen, expand it, and re-lay it out — driving the window you are watching.
+on screen, expand it, and re-lay it out: the agent drives the window you are watching.
 **→ [Agents and MCP](https://kglite-visual.readthedocs.io/en/latest/agents.html).**
 
 When you register it, point `command` at the **absolute path** to the binary
@@ -293,8 +293,8 @@ has a decision table for the server-shaped doorways.
 
 ## Ecosystem
 
-kglite is the engine. Four companion projects surround it — three build graphs
-it serves, one looks at them — each released and versioned on its own cadence:
+kglite is the engine. Four companion projects surround it, each released and
+versioned on its own cadence. Three build graphs it serves; one looks at them:
 
 - **[codingest](https://codingest.readthedocs.io)** parses codebases into
   code graphs (14 languages, web-framework route detection). Build with it,
