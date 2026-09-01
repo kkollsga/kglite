@@ -2128,6 +2128,7 @@ pub fn mcp_quickstart() -> String {
     <flags>
       --mcp-config FILE        explicit manifest path (otherwise auto-detected)
       --writable               allow Cypher mutations and graph lifecycle tools
+                               (or extensions.writable: true in the manifest)
       --selftest               verify startup, tools, and graph hydration
     </flags>
   </bundled_cli>

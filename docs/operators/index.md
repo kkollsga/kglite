@@ -13,8 +13,10 @@ Choose the smallest deployment surface that matches the client:
 
 1. Choose storage: memory for fastest small/medium graphs, mapped for mmap
    columns, disk for directory-backed CSR at very large scale.
-2. Decide read-only vs writable operation. MCP writes require `--writable`;
-   Bolt uses `--readonly` to reject writes.
+2. Decide read-only vs writable operation. MCP writes require `--writable` or
+   `extensions.writable: true` in the manifest — either alone; `builtins.save_graph:
+   true` registers only `save_graph` and leaves `cypher_query` read-only. Bolt
+   uses `--readonly` to reject writes.
 3. Use absolute graph/config paths and bind network listeners to loopback unless
    a trusted reverse proxy or host firewall provides the boundary.
 4. Configure Bolt authentication/TLS where exposed beyond localhost. MCP uses

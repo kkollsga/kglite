@@ -50,7 +50,7 @@ Details worth knowing before writing one:
   `ping` to `domain_ping` means the allowlist must say `domain_ping`.
 - **Naming a tool that is not registered in this boot is harmless.** Conditional
   routes (`github_api` without the `builtins.github` opt-in or without a token,
-  `load_graph` without `--writable`,
+  `load_graph` on a read-only server,
   `explore` on a non-code graph) can be listed safely, so one manifest works
   across environments.
 - **It only removes.** Listing a tool some other rule hid — `repo_management` in
@@ -127,9 +127,35 @@ kglite-mcp-server --graph /data/work.kgl --writable
 kglite-mcp-server --graph /data/new.kgl --storage memory --writable
 ```
 
-`--writable` enables mutation and the `load_graph`, `create_graph`, and
-`save_graph_as` lifecycle tools. `--storage memory|mapped|disk` is required when
-the `--graph` target does not yet exist, and on an existing graph it *converts*:
+A server is **write-enabled** when either `--writable` is passed on the command
+line or the manifest sets `extensions.writable: true`. They are one statement
+made two ways, and either alone enables mutation through `cypher_query` and
+registers `save_graph` plus the `load_graph`, `create_graph`, and
+`save_graph_as` lifecycle tools:
+
+```yaml
+extensions:
+  writable: true
+```
+
+`builtins.save_graph: true` is **not** a third spelling. On its own it registers
+`save_graph` and nothing else — it exists so a server can persist what it
+loaded, such as an ontology materialized from `extensions.ontology` at boot —
+and leaves `cypher_query` read-only. A mutation refused on such a server names
+both write-enabling spellings and says so.
+
+A misspelled key is the one failure this adds, and it fails safe: the server
+comes up read-only and the first mutation is refused. Boot also warns about any
+`extensions:` key this server does not read, listing the ones it does —
+`cypher_recipes`, `value_codecs`, `ontology`, `graph_watch`, `parallel`,
+`tools_allow`, `write_scope`, `csv_http_server`, `embedder`, `writable` — so
+`extensions.writeable: true` shows up in the log instead of silently doing
+nothing. It is a warning rather than a boot error because a skill's
+`applies_when: {extension_enabled: …}` predicate reads the same block and may
+legitimately name a key no reader here knows.
+
+`--storage memory|mapped|disk` is required when the `--graph` target does not
+yet exist, and on an existing graph it *converts*:
 a memory-saved graph booted with `--storage mapped` comes up mapped. A disk
 graph is a directory rather than a file, so converting into or out of disk mode
 has no in-place form and is refused at boot naming `enable_disk_mode()`. Omit
@@ -146,12 +172,17 @@ change**, not at boot:
 - A **read-only** server serving a `.kgl` that already exists never takes it.
   Any number of them can serve one file while a rebuilder republishes it in
   place.
-- A **write-enabled** server (`--writable`, or `builtins.save_graph: true`)
+- A **write-enabled** server (`--writable`, or `extensions.writable: true`)
   boots lease-free as well. The first mutating `cypher_query` acquires the
   lease, and it is held until `save_graph` writes the changes back,
   `save_graph_as` moves them elsewhere,
   `reload_graph(discard_unsaved=true)` drops them, or the process exits.
   Outside that window the server is an ordinary reader.
+- A server with **`builtins.save_graph: true` alone** has a read-only
+  `cypher_query`, so it never holds unsaved mutations and never opens a lease
+  window for them. It still owns the file: it takes the lease for the moment a
+  `save_graph` publishes — the boot-time ontology materialization that key
+  exists to persist — and hands it straight back.
 
 So several write-enabled servers — four MCP clients booted from one manifest,
 say — can serve the same graph and arbitrate per *write* rather than per
@@ -177,6 +208,17 @@ Writes that reach disk cannot silently overwrite each other either:
   last saved it. There is no merge between the two versions: `save_graph_as` to
   another path keeps this server's work, and
   `reload_graph(discard_unsaved=true)` drops it and serves the file as it is.
+- `save_graph` with nothing unsaved is a **no-op**: it answers `Nothing to
+  save: <path> is clean and carries no unpersisted configuration, so the file
+  was not touched.`, takes no lease, and leaves the file's identity alone — so
+  peers serving the same graph are not made to pay a full re-read for a save
+  that would have written the same graph back. Two things still get written.
+  Unsaved mutations, obviously; and configuration the version counter cannot
+  see, which today means a manifest ontology applied at boot
+  (`extensions.ontology`, declared or materialized) — such a server's **first**
+  save persists it and its second is the no-op. For a deliberate rewrite that
+  neither explains, such as re-encoding the file with the running library
+  version, pass `force=true`.
 - `save_graph_as` **to the bound path** is `save_graph` under another name,
   that lost-update check included. To a *different* path it also releases the
   source file's lease — the graph is not going back there, and this is the call
@@ -238,7 +280,12 @@ Operating notes:
   Deleting it does not release a live lock and does nothing for a dead one —
   the operating system releases the lease when the holder exits, crash
   included. All the deletion removes is the `<name>.kgl.lock-owner` record that
-  lets the next refusal name the holder.
+  lets the next refusal name the holder. That record also says how the last
+  holder left: a lease handed back cleanly appends a `released=<timestamp>` line
+  to it, and a record with no such line was left by a holder that died still
+  holding one. It is forensics, not liveness — whether a write waits is decided
+  by the lock, so a `released=`-less record beside a file nothing holds means
+  the last writer crashed, not that the graph is locked.
 - **A peer that merely *inspects* the graph with `kglite.open(path)` rewrites
   it.** `open()` is the writer's entry point: it takes the lease, and its
   `close()` (or `with`-block exit) writes the whole graph back even when
@@ -247,6 +294,18 @@ Operating notes:
   `save_graph` refused from then on. Inspect with `kglite.load(path)` or
   `kglite.open_session(path)`, which take neither the lease nor the save-back
   binding.
+- **A library `save()` takes no lease at all**, so the lease does not protect
+  this server from one. It is taken by `kglite.open()`, the CLI's eager save
+  paths, the Bolt server and this server; `KnowledgeGraph.save()`,
+  `kglite::api::io::save_graph` and the C ABI's save entry points write
+  whatever path they are given without asking for it. A script that does
+  `kglite.load(path)`, mutates in memory and calls `save(path)` therefore
+  publishes over a path this server is mid-write on. Nothing is lost from the
+  *file* — it holds a complete graph, and this server's own `save_graph` then
+  refuses because the file changed on disk — but the agent's unsaved work is
+  not in it and has to be redone. Any caller that may save to a path must hold
+  the lease across the whole read-modify-save interval: reach for
+  `kglite.open(path)`, not `load()` + `save()`.
 
 ### The source root `--graph` binds by default
 

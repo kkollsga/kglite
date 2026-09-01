@@ -77,8 +77,10 @@ access tools? Drop a manifest — see step 4 below or the
 
 ### Agent graph workbench (opt-in writes)
 
-Servers are read-only by default. Add `--writable` when the agent must mutate
-or switch graphs:
+Servers are read-only by default. A server is **write-enabled** when either
+`--writable` is passed on the command line or the manifest sets
+`extensions.writable: true` — one statement made two ways, either alone
+sufficient. Reach for it when the agent must mutate or switch graphs:
 
 ```bash
 # Open an existing graph with mutation + lifecycle tools.
@@ -89,10 +91,23 @@ kglite-mcp-server --graph /data/new.kgl --storage memory --writable
 # --storage mapped|disk may point at a directory-backed graph instead.
 ```
 
-Writable mode registers mutation-capable `cypher_query` plus `load_graph`,
-`create_graph`, and `save_graph_as`; persistence to the active target is also
-available. `--storage` is a creation choice, not a silent conversion of an
-existing graph. Keep the default read-only mode for untrusted clients.
+```yaml
+# the manifest half of the same switch
+extensions:
+  writable: true
+```
+
+Write-enabled mode registers mutation-capable `cypher_query` plus `save_graph`
+and the `load_graph`, `create_graph`, and `save_graph_as` lifecycle tools.
+`builtins.save_graph: true` is **not** a third spelling for it: on its own that
+key registers `save_graph` and nothing else, and `cypher_query` stays read-only.
+`--storage` is a creation choice, not a silent conversion of an existing graph.
+Keep the default read-only mode for untrusted clients.
+
+A mutation refused on a read-only server names both write-enabling spellings,
+and any `extensions:` key this server does not read is reported at boot beside
+the ones it does, so a misspelled `writable` is visible in the log rather than
+silently leaving the server read-only.
 
 When writes should be type-scoped, note who is doing the scoping. The
 `write_scope` argument on `cypher_query` is the *agent's* own declaration —
@@ -281,7 +296,8 @@ A manifest can declare several kinds of additions, all optional:
 | `extensions.csv_http_server` | Localhost listener that serves `FORMAT CSV` exports as URLs | None |
 | `extensions.value_codecs` | Position-scoped literal conversions (`'Q42'↔42`) bound to a property, applied after parsing | none (declarative; presence is opt-in) |
 | `workspace:` | Bind a local directory (or clone-and-track GitHub repos) as the active source root | None |
-| `builtins.save_graph: true` | Registers `save_graph` so the agent can persist mutations | None |
+| `extensions.writable: true` | Write-enables the server: mutation through `cypher_query`, plus `save_graph` and the `load_graph` / `create_graph` / `save_graph_as` lifecycle tools. Same statement as `--writable` | Full write access to the graph |
+| `builtins.save_graph: true` | Registers `save_graph` **only** — so a server can persist what it loaded (a boot-time ontology materialization, say). Does not enable mutation | None — `cypher_query` stays read-only |
 
 ### `source_root:` — first-class source-file access
 
@@ -696,9 +712,10 @@ Tools registered (visible in any MCP-aware agent):
 - `similar_sessions` — inline Cypher
 - `session_detail` — inline Cypher
 
-The exact list is mode-dependent. `save_graph` is registered only when the
-manifest opts in with `builtins.save_graph: true` or the server runs with
-`--writable`; write-enabled workbench mode also adds graph lifecycle tools.
+The exact list is mode-dependent. `save_graph` is registered when the manifest
+opts in with `builtins.save_graph: true`, or when the server is write-enabled
+(`--writable`, or `extensions.writable: true`); only the write-enabled spellings
+also open `cypher_query` to mutations and add the graph lifecycle tools.
 For mapping the agent's input onto your stored types (Wikidata
 `'Q42'↔42`, enum codes, date formats), see
 {doc}`../examples/manifest_value_codecs`. For full Rust integration, see
@@ -847,12 +864,25 @@ codingest project for the full build semantics.
 
 ### Mutable graphs
 
-`save_graph` is built in: when the manifest sets `builtins.save_graph: true`
-(single-graph mode), the tool registers automatically and persists
-post-mutation graph state to the source `.kgl` path. The mode banner
-above flips its `save_graph` line from "not registered (read-only)"
-to "registered. Call to persist CREATE / SET / DELETE mutations."
-when this is on.
+`save_graph` is built in: in single-graph mode it registers automatically when
+the manifest sets `builtins.save_graph: true`, or when the server is
+write-enabled (`--writable`, or `extensions.writable: true`), and it writes the
+active graph back to the source `.kgl` path. The mode banner above flips its
+`save_graph` line from "not registered (read-only)" to "registered. Call to
+persist CREATE / SET / DELETE mutations." when this is on.
+
+The two keys are not interchangeable. `builtins.save_graph: true` on its own
+registers the tool and nothing more — `cypher_query` still refuses every
+mutation, so what such a server has to persist is what it loaded, typically an
+ontology materialized from `extensions.ontology` at boot. Mutations need
+`--writable` or `extensions.writable: true`.
+
+A save with nothing unsaved to write is a no-op: it reports `Nothing to save:
+<path> is clean and carries no unpersisted configuration…` and leaves the file
+untouched, so other servers bound to the same graph are not made to re-read it
+for a rewrite of the same bytes. Unsaved mutations and a boot-applied manifest
+ontology both count as something to write. To rewrite a clean file deliberately
+— re-encoding it with the running library version, say — pass `force=true`.
 
 ### Semantic search (`text_score()`)
 
@@ -874,9 +904,11 @@ itself is in [Semantic Search](semantic-search.md).
 
 ### Security
 
-- **Read-only mode** rejects mutations at the Cypher level — set via
-  `graph.read_only(True)` before binding to the server, or use
-  single-graph mode with `builtins.save_graph: false` (the default).
+- **Read-only mode** rejects mutations at the Cypher level, and is the default:
+  a server is write-enabled only with `--writable` or `extensions.writable:
+  true`. `graph.read_only(True)` before binding enforces it at the graph itself.
+  `builtins.save_graph: false` (the default) is a separate switch — it decides
+  whether `save_graph` is registered, not whether `cypher_query` accepts writes.
 - **Path traversal** is blocked by the framework's source tools: the
   bundled `read_source` / `grep` / `list_source` canonicalise every
   path against the configured `source_root` before any I/O.
@@ -1018,8 +1050,14 @@ tool needs to register. Most common cases:
   `instructions` name the dropped roots.
 - `github_issues` / `github_api` missing — the manifest doesn't set
   `builtins.github: true` (the default), or no `GITHUB_TOKEN` in env.
-- `save_graph` missing — you're not in `--graph` mode OR the
-  manifest doesn't set `builtins.save_graph: true`.
+- `save_graph` missing — you're not in `--graph` mode, OR the manifest sets
+  neither `builtins.save_graph: true` nor `extensions.writable: true` and the
+  server was not started with `--writable`.
+- `load_graph` / `create_graph` / `save_graph_as` missing, or `cypher_query`
+  refusing a `CREATE` — the server is not write-enabled. Those need `--writable`
+  or `extensions.writable: true`; `builtins.save_graph: true` alone registers
+  `save_graph` and nothing else. Check the boot log for an unknown-`extensions:`-key
+  warning first — a misspelled `writable` leaves a silently read-only server.
 
 ### PyPI says "No matching distribution found" immediately after a release
 
@@ -1058,7 +1096,8 @@ the discriminator for `--graph` / `--workspace` / `--watch` /
 | `workspace.adopt_client_roots: true` | — | — | — | — | ✓ adopt the MCP-client-advertised root as a **fallback** when no explicit root is configured; explicit config always wins. **Pair it with `sandbox_root`** — an adopted root is proposed by an external party. See the deprecation note below. |
 | `tools[].cypher` | ✓ | ✓ (per active repo) | ✓ | — (no graph) | — |
 | `trust.allow_embedder` | parsed, required by `extensions.embedder` | parsed, required by matching extension | parsed, required by matching extension | parsed (no graph) | parsed (no graph) |
-| `builtins.save_graph: true` | ✓ (registers `save_graph`) | — (multiple graphs) | — | — | — |
+| `builtins.save_graph: true` | ✓ (registers `save_graph` only; `cypher_query` stays read-only) | — (multiple graphs) | — | — | — |
+| `extensions.writable: true` | ✓ (write-enables: mutation + `save_graph` + lifecycle tools; same as `--writable`) | — (multiple graphs) | — | — | — |
 
 > **`adopt_client_roots` rests on a deprecated protocol feature.** MCP `roots`
 > was deprecated in protocol revision `2026-07-28` (SEP-2577): *"New
@@ -1088,8 +1127,13 @@ the discriminator for `--graph` / `--workspace` / `--watch` /
 Unknown keys at the top level (or under `builtins:` / `workspace:` /
 `trust:` / `tools[]`) fail validation at boot with a
 non-zero exit and an `ERROR: <path>: unknown ... keys: [...]`
-message. Keys under `extensions:` are deliberately unvalidated —
-they're the downstream-binary passthrough zone.
+message. Keys under `extensions:` are unvalidated *by the framework* — they're
+the downstream-binary passthrough zone — but kglite validates the ones it reads
+and warns at boot about any it does not, naming the key and listing the known
+set (`cypher_recipes`, `value_codecs`, `ontology`, `graph_watch`, `parallel`,
+`tools_allow`, `write_scope`, `csv_http_server`, `embedder`, `writable`). A
+warning, not an error: a skill's `applies_when: {extension_enabled: …}`
+predicate may legitimately name a key no reader knows.
 
 ### Tool gating
 
@@ -1099,11 +1143,12 @@ will my agent see?"
 
 | Tool | Registered when | Notes |
 |---|---|---|
-| `cypher_query` | always | Returns inline rows or CSV URL — see "Tool response formats". |
+| `cypher_query` | always | Returns inline rows or CSV URL — see "Tool response formats". Accepts mutations only on a write-enabled server (`--writable` or `extensions.writable: true`); otherwise they are refused naming both spellings. |
 | `graph_overview` | always | Always available even with no graph: returns the no-graph message. |
 | `ping` | always | Liveness probe. |
 | `read_code_source` | always | Requires an active graph at call time (returns the no-graph message otherwise). |
-| `save_graph` | `--graph` mode AND `builtins.save_graph: true` | Other modes have no single graph to save back to. |
+| `save_graph` | `--graph` mode AND (`builtins.save_graph: true` OR write-enabled) | Other modes have no single graph to save back to. `builtins.save_graph: true` alone registers just this tool — it does not make `cypher_query` writable. A save with nothing unsaved is a no-op unless `force=true`. |
+| `load_graph` / `create_graph` / `save_graph_as` | write-enabled: `--writable` OR `extensions.writable: true` | The graph-lifecycle tools. `builtins.save_graph: true` does not register them. |
 | `read_source` / `grep` / `list_source` | always | All three register together. They *serve* only with a bound root (`--source-root`, `--graph` parent auto-bind, a manifest `source_root:` that resolves, or an active workspace repo); otherwise each call answers "no active source root". |
 | `repo_management` | `codingest-mcp --workspace` clone-tracker mode | Not registered in local-workspace mode; use `set_root_dir` there. |
 | `set_root_dir` | `workspace.kind: local` only | **Unbounded unless `workspace.sandbox_root` is set** (kglite 0.15.5+, mcp-methods 0.4.3+). Without that key a swap may point the server at any readable directory; `workspace.root` is the *starting* root, not a boundary. |
@@ -1301,12 +1346,34 @@ extensions:
 No trust gate — a codec is pure declarative data transformation (no code
 execution). A malformed block (bad regex, non-bijective map) is a boot error.
 
+#### `extensions.writable`
+
+```yaml
+extensions:
+  writable: true
+```
+
+A single boolean, and the manifest half of the write opt-in: `true` is the same
+statement `--writable` makes on the command line, and either alone write-enables
+the server — mutation through `cypher_query`, plus `save_graph` and the
+`load_graph` / `create_graph` / `save_graph_as` lifecycle tools. Absent means
+off. A non-boolean value fails the boot rather than being ignored, on the same
+reasoning as `extensions.tools_allow`: an escalation key that silently fails
+open is worse than none.
+
+It exists for the wrapper that owns the manifest but not the argv of the server
+it spawns. `builtins.save_graph: true` is not an alternative spelling — that key
+registers `save_graph` alone and leaves `cypher_query` read-only.
+
 #### `extensions.<other>` (passthrough)
 
 Any other key under `extensions:` parses cleanly and is preserved on
 the loaded `Manifest.extensions` dict. The framework does not
 validate inner shape. Downstream consumers (kglite-mcp-server, your
-own server binaries) read whatever they need from this map.
+own server binaries) read whatever they need from this map. kglite's
+own server warns at boot about any `extensions:` key it does not read,
+listing the ones it does, so a misspelling is visible in the log
+instead of quietly doing nothing.
 
 ### `tools[].cypher` template reference
 

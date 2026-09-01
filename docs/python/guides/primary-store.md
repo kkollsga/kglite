@@ -323,7 +323,7 @@ clause attached to a `MERGE`.
 
 ## What KGLite does not do
 
-**One process writes — and this is now enforced, not just documented.**
+**One process writes — and `kglite.open()` enforces it between openers.**
 `kglite.open(path)` takes an exclusive cross-process writer lease for as long
 as the graph can write back to `path`, so a second process opening the same
 path fails immediately with the holder's pid rather than quietly overwriting
@@ -338,8 +338,26 @@ number of processes can read a graph while one writes. The lease is an OS-owned
 lock, so a writer killed with `SIGKILL` releases it immediately — the leftover
 `<path>.lock` (the lock, always empty) and `<path>.lock-owner` (the pid and
 acquisition time, used to name a holder) are records, not the lock itself, and
-deleting them achieves nothing. `open(..., lock=False)` opts out for callers
-that coordinate writers some other way.
+deleting them achieves nothing. A lease handed back cleanly appends a
+`released=<timestamp>` line to the `.lock-owner` record, so a record without one
+was left by a holder that died still holding the lease — forensics after the
+fact, not a liveness signal, since the lock is what decides whether a writer
+waits. `open(..., lock=False)` opts out for callers that coordinate writers some
+other way.
+
+**The lease is taken by the entry points that claim a path, not by `save()`.**
+`kglite.open()`, the CLI's eager save paths, `kglite-bolt-server` and
+`kglite-mcp-server` take it; `KnowledgeGraph.save()` — and its Rust and C
+counterparts, `kglite::api::io::save_graph` and the C ABI save entries — does
+not. So a graph obtained from `kglite.load(path)`, mutated in memory and saved
+back, publishes straight over a path a lease holder is mid-write on. The file
+that results is a complete, valid graph; it is just the loader's, and whatever
+the holder had not saved is not in it. (A serving MCP server then refuses its
+own `save_graph` — the file changed under it — so the loss is the agent's
+unsaved work, not the file.) The rule the lease encodes is that **any caller
+that may save to a path holds the lease across the whole read-modify-save
+interval**, which is exactly what `open(path)` is for: `load()` + `save(path)`
+is a write that opted out of it.
 
 Taking the lease is also when `open()` cleans up after a writer that died
 mid-`save()`. A save writes a sibling `<name>.tmp.<pid>.<n>` and renames it into

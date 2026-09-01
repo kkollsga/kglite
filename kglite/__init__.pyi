@@ -1052,6 +1052,13 @@ def open(
         writes; they observe the last published snapshot. Only :func:`open` —
         the write-back entry point — claims ownership.
 
+        **A load-derived graph is outside the guarantee.** The lease binds
+        the entry points that claim a path — ``open()``, the CLI's eager saves,
+        the Bolt server, the MCP server — and :meth:`save()
+        <KnowledgeGraph.save>` itself takes none, so a graph obtained from
+        :func:`load` can save straight over a path a holder is mid-write on.
+        Open a path you may write to.
+
         **A viewer should not use these defaults.** ``open()`` defaults to a
         writer's posture: it attaches a WAL sidecar and takes the lease, so it
         writes ``<path>-wal`` and ``<path>.lock-owner`` next to a file you only
@@ -4282,6 +4289,17 @@ class KnowledgeGraph:
         first, or move the sidecar aside to discard them deliberately. A graph
         opened with ``durable=`` is never affected — its own checkpoint folds
         its log in.
+
+        **Saving does not take the writer lease.** The lease belongs to
+        :func:`kglite.open`, which holds it for as long as the graph can write
+        back to ``path``; ``save()`` itself writes whatever target it is given
+        without asking for it. So a graph obtained from :func:`kglite.load` can publish
+        over a path an ``open()`` holder — or a running MCP or Bolt server — is
+        mid-write on: the file that results is a complete graph, it is simply
+        this one, and whatever the holder had not yet saved is not in it. A
+        caller that may save to a path should hold the lease across the whole
+        read-modify-save interval, which is what ``kglite.open(path)`` does;
+        ``load()`` + ``save(path)`` is a write that opted out of it.
 
         Args:
             path: Output file path (typically ``*.kgl``). May be omitted if the

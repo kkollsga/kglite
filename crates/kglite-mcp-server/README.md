@@ -30,6 +30,12 @@ a graph workbench an agent can **plan and work inside**:
 kglite-mcp-server --graph contract.kgl --writable
 ```
 
+**Write-enabled** means exactly two things: `--writable` on the command line, or
+`extensions.writable: true` in the manifest. They are the same statement and
+either alone is enough. `builtins.save_graph: true` is not a third spelling — on
+its own it registers `save_graph` and nothing else, leaving `cypher_query`
+read-only.
+
 Now `cypher_query` accepts `CREATE`/`SET`/`DELETE`/`MERGE`, and three
 runtime tools appear:
 

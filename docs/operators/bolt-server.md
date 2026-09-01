@@ -409,10 +409,13 @@ switched automatically.
 - One writable server per graph. A server started without `--readonly` takes
   the same cross-process writer lease as `kglite.open()` *before* it reads the
   graph, and holds it until shutdown, so a second writable server — or a CLI
-  write, MCP server, or `kglite.open()` on that path — fails at startup naming
-  the holding process instead of racing it to overwrite at save time. The
-  refusal is immediate rather than a wait, so a supervisor's restart policy
-  governs the retry. `--readonly` servers take no lease and start alongside a
+  write, or `kglite.open()` on that path — fails at startup naming the holding
+  process instead of racing it to overwrite at save time. The refusal is
+  immediate rather than a wait, so a supervisor's restart policy governs the
+  retry. A write-enabled MCP server on that path boots fine and is refused at
+  its first mutation instead, because it takes the lease lazily; a library
+  `load()` + `save()` is refused nowhere, because `save()` takes no lease at all
+  (see [the MCP server's operating notes](mcp-server.md#the-writer-lease-and-several-servers-on-one-file)). `--readonly` servers take no lease and start alongside a
   live writer. Because the lease is exclusive, the graph's write-ahead sidecar
   has exactly one writer too.
 - Back up the complete graph before upgrades — including the `<graph>-wal`
