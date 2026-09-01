@@ -55,7 +55,11 @@ boltr = { version = "0.2", features = ["tls"] }
 # boltr enables tokio-rustls but doesn't pick a crypto provider —
 # we install `ring` at startup (see main.rs). `ring` is the more
 # battle-tested option; `aws-lc-rs` is the alternative.
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+# 0.23.22 is the tight floor for the workspace-unified tree, not this
+# server's own need: ureq 3 (reached via kglite's `fastembed` feature ->
+# fastembed 6 -> hf-hub 0.5) requires rustls ^0.23.22, and cargo unifies
+# rustls across all members.
+rustls = { version = "0.23.22", default-features = false, features = ["ring", "std"] }
 
 # Async trait sugar used by boltr's BoltBackend trait declaration.
 # 0.1.89 is the real workspace floor, not this crate's alone: kglite-mcp-server

@@ -79,12 +79,12 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
 
 [dependencies]
 petgraph = { version = "0.8.3", features = ["serde-1"] }
-# 5.9 is a real MINIMUM, not a floor-by-habit: the
-# `ort-download-binaries-native-tls` feature selected below was added in
-# fastembed 5.9.0 (5.0.x has `ort-download-binaries` and
-# `hf-hub-native-tls`, but not the native-tls ort variant). Declaring
-# plain "5" let a consumer resolve 5.0.1 and fail with "fastembed does
-# not have that feature". Found by the minimal-versions CI job.
+# 6.0 carries both features selected below; the 5.x-era hazard that made
+# the floor `5.9` (5.0.x lacks `ort-download-binaries-native-tls`) does not
+# recur inside 6.0.x, and 6.0.0 was compiled against this adapter to
+# confirm the floor is reachable. fastembed 6 replaced its `anyhow`-based
+# error type with a concrete `fastembed::Error`; the adapter stringifies
+# with Display, so the switch is source-compatible here.
 fastembed = { version = "6.0", optional = true, default-features = false, features = ["ort-download-binaries-native-tls", "hf-hub-native-tls"] }
 serde = { version = "1.0.229", features = ["derive", "rc"] }
 serde_json = "1.0.150"
@@ -113,7 +113,12 @@ rayon = "1.12"
 # the ~25x speedup of that CRC pass, which is the whole reason for the
 # dependency, disappears.
 crc32fast = "1.5"
-flate2 = "1.0.22"
+# 1.0.30 is the tight floor for the workspace-unified tree, not the
+# engine's own need: with the `fastembed` feature on, fastembed 6 pulls
+# hf-hub 0.5 -> ureq 3, and every ureq 3.x requires flate2 ^1.0.30. Cargo
+# unifies flate2 across the tree, so the old "1.0.22" made the whole
+# workspace unresolvable under direct-minimal-versions.
+flate2 = "1.0.30"
 zstd = "0.13"
 memmap2 = "0.9"
 # 0.2.182 is the tight floor for the workspace-unified tree, not a
@@ -143,7 +148,12 @@ rustc-hash = "2"
 stacker = "0.1.4"
 csv = "1.4"
 geojson = "1.0"
-indexmap = { version = "2.5.0", features = ["serde"] }
+# 2.6.0, not 2.5.0: 2.6.0 is the first release on hashbrown 0.15, and
+# 2.5.0's hashbrown ^0.14.1 is unsatisfiable alongside the ureq 3 subtree
+# that fastembed 6 -> hf-hub 0.5 introduces. Established by resolving each
+# candidate under direct-minimal-versions, not inferred: 2.5.0 fails, 2.6.0
+# resolves.
+indexmap = { version = "2.6.0", features = ["serde"] }
 
 # OKF loader YAML frontmatter parser — gated behind the `okf` feature.
 # `yaml-rust2` is a pure-Rust, actively-maintained YAML 1.2 parser (no
