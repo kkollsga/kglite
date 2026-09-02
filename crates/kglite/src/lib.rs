@@ -438,6 +438,14 @@ pub mod api {
         /// class.
         pub use crate::graph::dir_graph::indexes::IndexState;
         pub use crate::graph::introspection::bug_report::write_bug_report;
+        /// Per-node-type capability flags (`ts` / `loc` / `geo` / `vec`) —
+        /// the badge `describe()` renders, computed once here so a consumer
+        /// that draws its own schema view reads the same four facts instead of
+        /// re-deriving them from the timeseries/spatial/embedding configs.
+        /// [`TypeCapabilities`] is opaque: accessors + `flags_csv()`.
+        pub use crate::graph::introspection::capabilities::{
+            compute_type_capabilities, compute_type_capabilities_for, TypeCapabilities,
+        };
         /// What [`derive_edge_counts_from_triples`] folds a triple list into:
         /// per-edge-type totals plus each type's endpoint sets, so a caller
         /// that already holds the triples needs no second scan for either.

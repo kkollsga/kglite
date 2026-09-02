@@ -11,7 +11,29 @@ use super::describe::xml_escape;
 use super::schema_overview::compute_neighbors_schema;
 use super::{NeighborConnection, NeighborsSchema};
 
-pub(super) struct TypeCapabilities {
+/// What one node type supports, as the four independent facts `describe()`
+/// renders into the `Name[size,complexity,flags]` badge:
+///
+/// - **`ts`** — the type has a timeseries configuration
+///   ([`has_timeseries`](Self::has_timeseries)).
+/// - **`loc`** — cheap coordinates: a spatial config naming a location/point
+///   field, or a metadata field typed `point`
+///   ([`has_location`](Self::has_location)).
+/// - **`geo`** — WKT geometry: a spatial config naming a geometry/shape field
+///   ([`has_geometry`](Self::has_geometry)).
+/// - **`vec`** — at least one embedding store is registered for the type
+///   ([`has_embeddings`](Self::has_embeddings)).
+///
+/// `loc` and `geo` are **independent**: a type declaring lat/lon columns *and*
+/// a WKT field carries both, and a consumer that treats `geo` as implying no
+/// cheap coordinates will parse polygons to recover floats sitting next door.
+///
+/// The type is opaque: read it through the accessors or
+/// [`flags_csv`](Self::flags_csv), never by field, so a fifth capability is an
+/// additive change rather than a breaking one. Build the map with
+/// [`compute_type_capabilities`] (all types) or
+/// [`compute_type_capabilities_for`] (a named subset).
+pub struct TypeCapabilities {
     pub(super) has_timeseries: bool,
     pub(super) has_location: bool,
     pub(super) has_geometry: bool,
@@ -19,7 +41,33 @@ pub(super) struct TypeCapabilities {
 }
 
 impl TypeCapabilities {
-    pub(super) fn flags_csv(&self) -> String {
+    /// The type has a timeseries configuration (badge flag `ts`).
+    pub fn has_timeseries(&self) -> bool {
+        self.has_timeseries
+    }
+
+    /// The type carries plain coordinates — a location/point field in its
+    /// spatial config, or a metadata field typed `point` (badge flag `loc`).
+    pub fn has_location(&self) -> bool {
+        self.has_location
+    }
+
+    /// The type carries WKT geometry — a geometry/shape field in its spatial
+    /// config (badge flag `geo`). Independent of
+    /// [`has_location`](Self::has_location).
+    pub fn has_geometry(&self) -> bool {
+        self.has_geometry
+    }
+
+    /// At least one embedding store is registered for the type (badge flag
+    /// `vec`).
+    pub fn has_embeddings(&self) -> bool {
+        self.has_embeddings
+    }
+
+    /// The set flags as the comma-separated badge text `describe()` renders,
+    /// in the fixed order `ts,geo,loc,vec`; empty when the type supports none.
+    pub fn flags_csv(&self) -> String {
         let mut flags = Vec::new();
         if self.has_timeseries {
             flags.push("ts");
@@ -122,7 +170,11 @@ pub(super) fn children_counts(parent_types: &HashMap<String, String>) -> HashMap
     counts
 }
 
-pub(super) fn compute_type_capabilities(graph: &DirGraph) -> HashMap<String, TypeCapabilities> {
+/// [`TypeCapabilities`] for every node type in the graph, keyed by type name.
+/// Reads the registered configs (timeseries, spatial, embeddings) plus the
+/// declared property types — it never scans node data, so the cost is in the
+/// number of *types*, not nodes.
+pub fn compute_type_capabilities(graph: &DirGraph) -> HashMap<String, TypeCapabilities> {
     let mut caps: HashMap<String, TypeCapabilities> = HashMap::new();
 
     for node_type in graph.type_indices.keys() {
@@ -154,8 +206,11 @@ pub(super) fn compute_type_capabilities(graph: &DirGraph) -> HashMap<String, Typ
     caps
 }
 
-/// Detect capabilities for specific node types only (avoids scanning all types).
-pub(super) fn compute_type_capabilities_for(
+/// [`compute_type_capabilities`] restricted to `type_names` — same answer for
+/// those types, without walking every type in the graph. Names that are not
+/// node types of `graph` are skipped, so the result may be smaller than the
+/// request.
+pub fn compute_type_capabilities_for(
     graph: &DirGraph,
     type_names: &[&str],
 ) -> HashMap<String, TypeCapabilities> {
@@ -369,5 +424,42 @@ mod tests {
         assert_eq!(caps(false, false, true, false).flags_csv(), "geo");
         assert_eq!(caps(false, false, false, false).flags_csv(), "");
         assert_eq!(caps(true, true, true, true).flags_csv(), "ts,geo,loc,vec");
+    }
+
+    /// The accessors are the only way an out-of-crate consumer reads a
+    /// capability, so each one must answer for the same flag `flags_csv()`
+    /// emits — a swapped pair would send a downstream to the wrong column.
+    /// Swept over all 16 flag combinations.
+    #[test]
+    fn accessors_agree_with_flags_csv() {
+        for bits in 0u8..16 {
+            let c = caps(bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0);
+            let csv = c.flags_csv();
+            let flags: Vec<&str> = if csv.is_empty() {
+                Vec::new()
+            } else {
+                csv.split(',').collect()
+            };
+            assert_eq!(
+                c.has_timeseries(),
+                flags.contains(&"ts"),
+                "bits={bits}: has_timeseries vs `ts`"
+            );
+            assert_eq!(
+                c.has_geometry(),
+                flags.contains(&"geo"),
+                "bits={bits}: has_geometry vs `geo`"
+            );
+            assert_eq!(
+                c.has_location(),
+                flags.contains(&"loc"),
+                "bits={bits}: has_location vs `loc`"
+            );
+            assert_eq!(
+                c.has_embeddings(),
+                flags.contains(&"vec"),
+                "bits={bits}: has_embeddings vs `vec`"
+            );
+        }
     }
 }

@@ -1559,12 +1559,21 @@ pub kglite::api::introspection::SchemaOverview::edge_count: usize
 pub kglite::api::introspection::SchemaOverview::indexes: alloc::vec::Vec<alloc::string::String>
 pub kglite::api::introspection::SchemaOverview::node_count: usize
 pub kglite::api::introspection::SchemaOverview::node_types: alloc::vec::Vec<(alloc::string::String, kglite::api::introspection::NodeTypeOverview)>
+pub struct kglite::api::introspection::TypeCapabilities
+impl kglite::api::introspection::TypeCapabilities
+pub fn kglite::api::introspection::TypeCapabilities::flags_csv(&self) -> alloc::string::String
+pub fn kglite::api::introspection::TypeCapabilities::has_embeddings(&self) -> bool
+pub fn kglite::api::introspection::TypeCapabilities::has_geometry(&self) -> bool
+pub fn kglite::api::introspection::TypeCapabilities::has_location(&self) -> bool
+pub fn kglite::api::introspection::TypeCapabilities::has_timeseries(&self) -> bool
 pub const kglite::api::introspection::EXACT_PROPERTY_STATS_MAX_NODES: usize
 pub fn kglite::api::introspection::compute_connection_type_stats(graph: &kglite::api::DirGraph) -> alloc::vec::Vec<kglite::api::introspection::ConnectionTypeStats>
 pub fn kglite::api::introspection::compute_description(graph: &kglite::api::DirGraph, types: core::option::Option<&[alloc::string::String]>, connections: &kglite::api::introspection::ConnectionDetail, cypher: &kglite::api::introspection::CypherDetail, fluent: &kglite::api::introspection::FluentDetail, type_search: core::option::Option<&str>, max_pairs: core::option::Option<usize>, sample_truncate: core::option::Option<usize>) -> core::result::Result<alloc::string::String, alloc::string::String>
 pub fn kglite::api::introspection::compute_neighbors_schema(graph: &kglite::api::DirGraph, node_type: &str) -> core::result::Result<kglite::api::introspection::NeighborsSchema, alloc::string::String>
 pub fn kglite::api::introspection::compute_property_stats(graph: &kglite::api::DirGraph, node_type: &str, max_values: usize, sample_size: core::option::Option<usize>) -> core::result::Result<alloc::vec::Vec<kglite::api::introspection::PropertyStatInfo>, alloc::string::String>
 pub fn kglite::api::introspection::compute_schema(graph: &kglite::api::DirGraph) -> kglite::api::introspection::SchemaOverview
+pub fn kglite::api::introspection::compute_type_capabilities(graph: &kglite::api::DirGraph) -> std::collections::hash::map::HashMap<alloc::string::String, kglite::api::introspection::TypeCapabilities>
+pub fn kglite::api::introspection::compute_type_capabilities_for(graph: &kglite::api::DirGraph, type_names: &[&str]) -> std::collections::hash::map::HashMap<alloc::string::String, kglite::api::introspection::TypeCapabilities>
 pub fn kglite::api::introspection::compute_type_connectivity(graph: &kglite::api::DirGraph) -> alloc::vec::Vec<kglite::api::introspection::ConnectivityTriple>
 pub fn kglite::api::introspection::derive_edge_counts_from_triples(triples: &[kglite::api::introspection::ConnectivityTriple]) -> kglite::api::introspection::DerivedEdgeStats
 pub fn kglite::api::introspection::graph_scale(graph: &kglite::api::DirGraph) -> kglite::api::introspection::GraphScale
