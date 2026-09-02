@@ -75,6 +75,12 @@ const DEADLINE: Duration = Duration::from_millis(100);
 /// a bounded-vs-unbounded discriminator, not a latency budget.
 const MAX_ABORT: Duration = Duration::from_millis(1000);
 
+/// The work budget [`assert_budget_fires_first`] arms alongside `DEADLINE`.
+/// Two orders of magnitude under the million-row shapes it is pointed at, so
+/// the refusal lands in the first milliseconds of the run rather than in a
+/// race with the 100 ms clock.
+const BUDGET: usize = 10_000;
+
 fn no_params() -> HashMap<String, Value> {
     HashMap::new()
 }
@@ -253,6 +259,68 @@ fn assert_interrupt_is_observed(graph: &DirGraph, query: &str) {
         "{query}\nobserved its interrupt only after {elapsed:?}, ceiling {MAX_ABORT:?}"
     );
     println!("interrupt observed in {elapsed:?}: {query}");
+}
+
+/// With both guards armed, the work budget refuses the query before the
+/// deadline can time it out — and says so.
+///
+/// The two bound different resources: `max_work_units` bounds what the query
+/// *holds*, the deadline bounds how long it *runs*, and a runaway shape
+/// reaches the memory ceiling first. Measured downstream (kglite-visual,
+/// 2026-09) on three runaway shapes: a 2,000,000-unit budget fired at 1.3 s,
+/// 19.3 s and 3.3 s against a 30 s deadline, 3 of 3, and the deadline path
+/// could only be exercised at all by dropping the ceiling to 5 s.
+///
+/// Which one reports matters to the caller, because the two have opposite
+/// remedies: a budget refusal means narrow the pattern or raise
+/// `max_work_units`, a timeout means the query is slow. `exec_err`
+/// (`session/execute.rs`) classifies off the *interrupt state*, so a budget
+/// error raised after the deadline had already passed would be re-labelled a
+/// timeout — which is exactly what the `CypherTimeout` assertion below rules
+/// out, and why it is typed rather than a message match.
+///
+/// Read path only. `max_work_units.is_some()` also disqualifies a mutation
+/// from the checkpoint-free fast path (`can_skip_rollback_checkpoint`), so a
+/// mutation twin would be pinning that interaction on top of this one.
+fn assert_budget_fires_first(graph: &DirGraph, query: &str) {
+    let params = no_params();
+    let mut opts = ExecuteOptions::eager(&params);
+    opts.deadline = Some(Instant::now() + DEADLINE);
+    opts.max_work_units = Some(BUDGET);
+
+    let started = Instant::now();
+    let outcome = execute_read(graph, query, &opts);
+    let elapsed = started.elapsed();
+
+    match outcome {
+        Ok(result) => panic!(
+            "neither guard fired: {query}\nreturned {} rows in {elapsed:?} against a \
+             {BUDGET}-unit budget and a {DEADLINE:?} deadline",
+            result.result.rows.len()
+        ),
+        Err(e) => {
+            assert!(
+                !matches!(e, KgError::CypherTimeout { .. }),
+                "the deadline won the race for {query}: {e:?} ({e}) — with a budget this \
+                 small the refusal must arrive before {DEADLINE:?} elapses"
+            );
+            assert!(
+                matches!(e, KgError::CypherExecution { .. }),
+                "expected a budget refusal for {query}, got: {e:?} ({e})"
+            );
+            let message = e.to_string();
+            assert!(
+                message.contains("max_work_units"),
+                "the refusal must name the budget it broke, so the caller knows which \
+                 knob to turn; got: {message}"
+            );
+        }
+    }
+    assert!(
+        elapsed < MAX_ABORT,
+        "{query}\nrefused only after {elapsed:?}, ceiling {MAX_ABORT:?}"
+    );
+    println!("budget refusal in {elapsed:?}: {query}");
 }
 
 // ── The corpus ────────────────────────────────────────────────────────────
@@ -442,6 +510,17 @@ fn var_length_path_observes_an_interrupt() {
 fn algorithm_call_observes_an_interrupt() {
     let graph = fixture();
     assert_interrupt_is_observed(&graph, ALGORITHM_CALL);
+}
+
+// ── Budget vs deadline ────────────────────────────────────────────────────
+
+/// The multi-hop join is the shape the downstream OOM report was about, and
+/// the one whose 1,014,000 intermediate rows make it a memory problem before
+/// it is a time problem — so it is the shape that decides which guard reports.
+#[test]
+fn the_budget_refuses_before_the_deadline_times_out() {
+    let graph = fixture();
+    assert_budget_fires_first(&graph, MULTI_HOP_JOIN);
 }
 
 // ── Mutations ─────────────────────────────────────────────────────────────
