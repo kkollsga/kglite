@@ -343,6 +343,9 @@ pub fn kglite::api::blueprint::Connections::deserialize<__D>(__deserializer: __D
 pub struct kglite::api::blueprint::FkEdge
 pub kglite::api::blueprint::FkEdge::extra: indexmap::map::IndexMap<alloc::string::String, serde_json::value::Value>
 pub kglite::api::blueprint::FkEdge::fk: alloc::string::String
+pub kglite::api::blueprint::FkEdge::properties: alloc::vec::Vec<alloc::string::String>
+pub kglite::api::blueprint::FkEdge::property_types: indexmap::map::IndexMap<alloc::string::String, alloc::string::String>
+pub kglite::api::blueprint::FkEdge::rename: indexmap::map::IndexMap<alloc::string::String, alloc::string::String>
 pub kglite::api::blueprint::FkEdge::target: alloc::string::String
 impl kglite::api::blueprint::FkEdge
 pub fn kglite::api::blueprint::FkEdge::plain(target: alloc::string::String, fk: alloc::string::String) -> Self
