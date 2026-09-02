@@ -359,6 +359,59 @@ class TestManualNodes:
         assert len(result) == 3
 
 
+class TestManualNodeIdTypes:
+    """A CSV-less type is synthesised from the distinct values of every FK
+    column pointing at it. The FK edge that follows resolves its endpoint
+    against the same values, so the two must agree on the id's *type* — if
+    they don't, the edge finds nothing, vivifies a stub, and the type ends up
+    with two nodes per value.
+    """
+
+    def _build(self, tmp_path, city_ids):
+        persons = pd.DataFrame(
+            {
+                "person_id": [1, 2, 3],
+                "name": ["Alice", "Bob", "Charlie"],
+                "city_id": city_ids,
+            }
+        )
+        _write_csv(tmp_path / "persons.csv", persons)
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "Person": {
+                    "csv": "persons.csv",
+                    "pk": "person_id",
+                    "title": "name",
+                    "connections": {"fk_edges": {"LIVES_IN": {"target": "City", "fk": "city_id"}}},
+                },
+                "City": {"pk": "city_id"},
+            },
+        }
+        bp_path = tmp_path / "bp.json"
+        _write_blueprint(bp_path, bp)
+        return kglite.from_blueprint(str(bp_path), save=False)
+
+    def test_numeric_fk_makes_one_node_per_value(self, tmp_path):
+        g = self._build(tmp_path, [10, 20, 10])
+        assert len(list(g.cypher("MATCH (c:City) RETURN c.id"))) == 2
+
+    def test_numeric_fk_edges_reach_the_synthesised_nodes(self, tmp_path):
+        """Every edge must land on a real City, not on a stub the loader had
+        to invent because the id types disagreed."""
+        g = self._build(tmp_path, [10, 20, 10])
+        rows = list(
+            g.cypher(
+                "MATCH (p:Person)-[:LIVES_IN]->(c:City) WHERE c._provisional IS NULL RETURN p.title AS p ORDER BY p"
+            )
+        )
+        assert [r["p"] for r in rows] == ["Alice", "Bob", "Charlie"]
+
+    def test_text_fk_is_unaffected(self, tmp_path):
+        g = self._build(tmp_path, ["Oslo", "Bergen", "Oslo"])
+        assert len(list(g.cypher("MATCH (c:City) RETURN c.id"))) == 2
+
+
 class TestAutoId:
     def test_pk_auto_generates_sequential_ids(self, tmp_path):
         items = pd.DataFrame({"name": ["A", "B", "C"]})
@@ -1384,9 +1437,7 @@ class TestNodeLabels:
             {
                 "person_id": list(range(1, rows + 1)),
                 "name": [f"P{i}" for i in range(1, rows + 1)],
-                # Text ids on purpose: a numeric FK to a CSV-less type is a
-                # separate defect, fixed and covered on its own below.
-                "city_id": ["C10"] * rows,
+                "city_id": [10] * rows,
             }
         )
         _write_csv(tmp_path / "persons.csv", persons)
@@ -1439,17 +1490,37 @@ class TestNodeLabels:
         assert len(list(g.cypher("MATCH (n:Name) RETURN n.title"))) == 3
 
     def test_provisional_stubs_of_the_type_are_labelled(self, tmp_path):
-        """`City` gets no CSV; its nodes are stubs vivified by the FK edge. A
-        blueprint owns its type's labels, so the stubs carry them — otherwise
-        `MATCH (:Place)` would silently miss exactly the rows that came from
-        an edge rather than a row."""
-        bp_path = self._bp(tmp_path, ["Human"])
-        with open(bp_path, encoding="utf-8") as f:
-            bp = json.load(f)
-        bp["nodes"]["City"]["labels"] = ["Place"]
+        """A blueprint owns its type's labels. `City` has a CSV listing only
+        city 10, so the reference to 99 is vivified as a stub during the edge
+        phase — after the node phases. It must carry the label anyway, or
+        `MATCH (:Place)` silently misses exactly the nodes that arrived via an
+        edge rather than a row."""
+        cities = pd.DataFrame({"city_id": [10], "city_name": ["Oslo"]})
+        _write_csv(tmp_path / "cities.csv", cities)
+        persons = pd.DataFrame({"person_id": [1, 2], "name": ["A", "B"], "city_id": [10, 99]})
+        _write_csv(tmp_path / "persons.csv", persons)
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "Person": {
+                    "csv": "persons.csv",
+                    "pk": "person_id",
+                    "title": "name",
+                    "connections": {"fk_edges": {"LIVES_IN": {"target": "City", "fk": "city_id"}}},
+                },
+                "City": {
+                    "csv": "cities.csv",
+                    "pk": "city_id",
+                    "title": "city_name",
+                    "labels": ["Place"],
+                },
+            },
+        }
+        bp_path = tmp_path / "bp.json"
         _write_blueprint(bp_path, bp)
         g = kglite.from_blueprint(str(bp_path), save=False)
-        assert len(list(g.cypher("MATCH (n:Place) RETURN n.id"))) == 1
+        ids = sorted(r["c.id"] for r in g.cypher("MATCH (c:Place) RETURN c.id"))
+        assert ids == [10, 99], ids
 
     def test_streaming_and_buffered_agree(self, tmp_path, monkeypatch):
         """The streaming node loader is a RAM knob, so it must produce the same

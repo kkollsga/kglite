@@ -490,20 +490,19 @@ fn load_manual_nodes(
         let title = ms.spec.title.clone().unwrap_or_else(|| pk.clone());
 
         let mut df = DataFrame::new(Vec::new());
-        let values: Vec<String> = distinct.into_iter().collect();
-        let data = crate::datatypes::values::ColumnData::String(
-            values.iter().cloned().map(Some).collect(),
-        );
-        df.add_column(
-            pk.clone(),
-            crate::datatypes::values::ColumnType::String,
-            data,
-        )
-        .map_err(|e| format!("manual nodes: {}", e))?;
+        let values: Vec<Option<String>> = distinct.into_iter().map(Some).collect();
+        // The id column is typed by exactly the rule the FK-edge frame uses
+        // (`infer_id_type`), because these two frames must agree: the edge
+        // resolves its endpoint against the ids this call creates. Typed
+        // `String` unconditionally, a numeric FK produced a `"10"` node here
+        // and an unmatched `10` endpoint there — so the edge vivified a second
+        // node and the type carried two per value.
+        let id_type = infer_id_type(&values);
+        add_id_column(&mut df, &pk, values.clone(), id_type)
+            .map_err(|e| format!("manual nodes: {}", e))?;
         if title != pk {
-            let data2 = crate::datatypes::values::ColumnData::String(
-                values.into_iter().map(Some).collect(),
-            );
+            // The title is a display string whatever the id is.
+            let data2 = crate::datatypes::values::ColumnData::String(values);
             df.add_column(
                 title.clone(),
                 crate::datatypes::values::ColumnType::String,

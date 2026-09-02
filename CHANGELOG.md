@@ -43,6 +43,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   has it, or use `FkEdge::plain(target, fk)`. Deserialization is unaffected.
 
 ### Fixed
+- **A CSV-less blueprint node type with a numeric foreign key ended up with
+  two nodes per value.** The synthesised type's id column was always typed as
+  text, while the FK-edge frame types the same values numerically, so the edge
+  matched nothing, vivified a provisional stub, and left a `"10"` node beside a
+  `10` one — with every edge pointing at the stub. `MATCH (c:City) RETURN
+  count(c)` returned double, and joins through the real node returned nothing.
+  The synthesised id column now uses exactly the rule the edge frame uses.
+  Text keys were never affected.
 - **`from_blueprint()` lost parallel edges past the first chunk of a streamed
   edge CSV.** The junction-edge loader streams its CSV in chunks
   (`KGLITE_BLUEPRINT_JUNCTION_CHUNK_SIZE`, default 100k rows) and the streamed
