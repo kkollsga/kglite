@@ -52,8 +52,11 @@ internal — not a build bottleneck.
 Do not override `CARGO_TARGET_DIR`/`SCCACHE_DIR` per-plan or switch
 target/profile paths mid-plan merely because a build is slow; if the symlink
 is missing (fresh clone), recreate it before the first build. Cargo never
-garbage-collects the target dir — `make prune-target` (size-gated
-`cargo clean`, wired into the release skill) keeps it bounded. Alternating
+garbage-collects the target dir — `make prune-target` (`cargo clean` when the
+build volume drops below 40 GB free, or the dir meters 40+ GB, wired into the
+release skill) keeps it bounded, and every building target carries a
+`check-free-space` prerequisite that warns below 40 GB free and refuses below
+15 GB. Alternating
 `make dev` and a workspace `cargo test` leaves TWO full-size kglite rlib
 variants (maturin's single-manifest scope narrows the package set, which
 re-unifies one transitive dep's flags and forks the metadata hash — no
@@ -139,7 +142,10 @@ that crosses package boundaries; otherwise let GitHub CI parallelize them.
 
 **Dev-environment cleanliness — every file accumulation needs a gate.** Any
 path the tooling writes outside git must have a bound and an owner: `target/`
-→ `make prune-target` (40 GB size gate); regenerable artifacts and tool caches
+→ `make prune-target` (free-space gate: cleans below 40 GB free on the build
+volume, or above a 40 GB metered size — `du` undercounts APFS clone-shared
+cargo artifacts ~2×, so free space is the meter and `du` only a diagnostic);
+regenerable artifacts and tool caches
 (`.bench-current.json`, `docs/_build`, `.mypy_cache`, `.ruff_cache`,
 `.pytest_cache`, `.uv-cache`, stale ABI-variant extensions, `.DS_Store`) →
 `make prune-dev` (wired into the release skill); sccache → its 30 GiB config

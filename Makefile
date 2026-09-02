@@ -4,10 +4,51 @@
 SHELL := /bin/bash
 ACTIVATE := unset CONDA_PREFIX && source .venv/bin/activate
 
-.PHONY: dev dev-with-bin bundle-bin build-bolt-server test test-full test-rust test-core test-mcp test-cli test-py test-parity bench bench-save bench-compare bench-check bump-version check-release-hygiene release-preflight refresh-release-constants refresh-api-baseline docs-facts check-docs-facts neo4j-up neo4j-down neo4j-conformance bolt-conformance check clean fmt fmt-py clippy gate lint lint-policy lint-full lint-py source-quality rustsec-policy cov stubtest
+## Free space on the volume behind the cargo target dir, in whole GB.
+##
+## `du -sg` is NOT the meter: APFS clones the bulk of a cargo target dir, so
+## `du` charged 48 GB where `cargo clean` returned 95.1 GiB (2026-08-23, after
+## the internal disk hit zero twice mid-build). Only the volume's own free
+## space is immune to clone sharing.
+##
+## `df -Pk` rather than `df -g`: POSIX output on both BSD/macOS and GNU, which
+## rejects `-g`. The probe walks up to the nearest existing ancestor so a
+## not-yet-created target dir still measures its volume. FREE_GB overrides the
+## measurement — the seam the tests drive both branches through.
+FREE_GB :=
+#: Below this, a build is refused: a build that fills the volume corrupts the
+#: cache it is writing into, and takes the sccache dir beside it.
+FREE_FAIL_GB := 15
+#: Below this, a build warns. Also the free-space threshold at which
+#: `prune-target` cleans regardless of what `du` claims the dir weighs.
+FREE_WARN_GB := 40
+MEASURE_FREE_GB = link_target=$$(readlink target 2>/dev/null || true); \
+	dir=$${CARGO_TARGET_DIR:-$${link_target:-target}}; \
+	probe="$$dir"; \
+	while [ ! -e "$$probe" ] && [ "$$probe" != / ] && [ "$$probe" != . ]; do probe=$$(dirname "$$probe"); done; \
+	free_gb=$$(df -Pk "$$probe" 2>/dev/null | awk 'NR==2 {print int($$4/1048576)}'); \
+	if [ -n "$(FREE_GB)" ]; then free_gb=$(FREE_GB); fi
+
+## Pre-build free-space guard. An order-only prerequisite of every target that
+## compiles, so the refusal lands before cargo starts writing rather than as an
+## ENOSPC part-way through. Silent when the volume is healthy; a no-op when
+## `df` cannot answer, because a guard that cannot measure must not block.
+check-free-space:
+	@$(MEASURE_FREE_GB); \
+	if [ -z "$$free_gb" ]; then :; \
+	elif [ "$$free_gb" -lt $(FREE_FAIL_GB) ]; then \
+		echo "free space: $${free_gb} GB on the build volume (< $(FREE_FAIL_GB) GB) — refusing to build."; \
+		echo "  Run 'make prune-target', or free space by hand. A build that fills the volume"; \
+		echo "  corrupts the target dir and the sccache dir beside it."; \
+		exit 1; \
+	elif [ "$$free_gb" -lt $(FREE_WARN_GB) ]; then \
+		echo "free space: WARNING — $${free_gb} GB on the build volume (< $(FREE_WARN_GB) GB). Run 'make prune-target' soon."; \
+	fi
+
+.PHONY: check-free-space dev dev-with-bin bundle-bin build-bolt-server test test-full test-rust test-core test-mcp test-cli test-py test-parity bench bench-save bench-compare bench-check bump-version check-release-hygiene release-preflight refresh-release-constants refresh-api-baseline docs-facts check-docs-facts neo4j-up neo4j-down neo4j-conformance bolt-conformance check clean fmt fmt-py clippy gate lint lint-policy lint-full lint-py source-quality rustsec-policy cov stubtest
 
 ## Build and install the package into the local .venv
-dev:
+dev: | check-free-space
 	$(ACTIVATE) && maturin develop
 
 ## Dev install with the bundled `kglite-mcp-server` binary on PATH.
@@ -15,13 +56,13 @@ dev:
 ## `maturin develop`. The same sequence is what CI runs at wheel-build
 ## time. Use this if you want `which kglite-mcp-server` to resolve to
 ## the wheel-installed binary during local development.
-dev-with-bin: bundle-bin
+dev-with-bin: bundle-bin | check-free-space
 	$(ACTIVATE) && maturin develop --release
 
 ## Build the kglite-mcp-server binary and copy it into kglite/_bin/.
 ## Idempotent. Used by `dev-with-bin` locally and by the wheel-build
 ## workflow in CI.
-bundle-bin:
+bundle-bin: | check-free-space
 	cargo build --release -p kglite-mcp-server
 	mkdir -p kglite/_bin
 	cp target/release/kglite-mcp-server kglite/_bin/kglite-mcp-server
@@ -30,17 +71,17 @@ bundle-bin:
 test: test-rust test-py
 
 ## Run Rust unit tests only
-test-rust:
+test-rust: | check-free-space
 	$(ACTIVATE) && cargo test
 
 ## Fast package-scoped Rust suites for normal local development.
-test-core:
+test-core: | check-free-space
 	cargo test -p kglite --lib
 
-test-mcp:
+test-mcp: | check-free-space
 	cargo test -p kglite-mcp-server
 
-test-cli:
+test-cli: | check-free-space
 	cargo test -p kglite-cli
 
 ## Cross-storage-mode parity oracles + the .kgl golden-digest tripwire.
@@ -72,15 +113,15 @@ test-full: test-rust
 ## Run performance benchmarks (forces release build — saved baselines
 ## are release-built, so a dev-profile comparison shows ~15× false
 ## regressions across every test).
-bench:
+bench: | check-free-space
 	$(ACTIVATE) && maturin develop --release --quiet && pytest tests/benchmarks/ -v -m benchmark -s
 
 ## Save benchmark baseline for comparison (release build).
-bench-save:
+bench-save: | check-free-space
 	$(ACTIVATE) && maturin develop --release --quiet && pytest tests/benchmarks/test_bench_core.py -m benchmark --benchmark-save=baseline
 
 ## Compare current performance against saved baseline (release build).
-bench-compare:
+bench-compare: | check-free-space
 	$(ACTIVATE) && maturin develop --release --quiet && pytest tests/benchmarks/test_bench_core.py -m benchmark --benchmark-compare
 
 ## Perf regression gate: compare the tracked core benchmarks against
@@ -97,7 +138,7 @@ bench-compare:
 ## archaeology. That folder is local working state: CI never runs this target
 ## (its perf job calls scripts/compare_bench.py directly, without
 ## --record-history) and the script skips the append when the folder is absent.
-bench-check:
+bench-check: | check-free-space
 	$(ACTIVATE) && maturin develop --release --quiet \
 		&& pytest tests/benchmarks/test_bench_core.py -m benchmark \
 			--benchmark-min-rounds=100 --benchmark-warmup=on --benchmark-warmup-iterations=20 \
@@ -159,7 +200,7 @@ neo4j-conformance:
 
 ## Build the release kglite-bolt-server binary the `-m bolt` suites resolve.
 ## `tests/conftest.py` and `scripts/bolt_conformance.py` both point users here.
-build-bolt-server:
+build-bolt-server: | check-free-space
 	cargo build -p kglite-bolt-server --release
 
 ## On-demand Bolt wire round-trip check: runs the differential corpus through
@@ -311,11 +352,11 @@ lint-full: gate lint-policy
 	$(ACTIVATE) && python -m mypy.stubtest kglite --ignore-missing-stub --ignore-unused-allowlist --mypy-config-file mypy_stubtest.ini --allowlist stubtest_allowlist.txt
 
 ## Run tests with coverage report
-cov:
+cov: | check-free-space
 	$(ACTIVATE) && pytest tests/ -v --cov=kglite --cov-branch --cov-config=pyproject.toml --cov-report=term-missing
 
 ## Report-only coverage for the kglite core crate with default features
-cov-rust-core:
+cov-rust-core: | check-free-space
 	cargo llvm-cov --package kglite --lib --tests --ignore-filename-regex 'src/bin/' --lcov --output-path rust-core-coverage.lcov
 
 ## Check centralized production-source structure, complexity ceilings, and
@@ -372,11 +413,12 @@ prune-dev: prune-target
 
 PRUNE_TARGET_GB := 40
 prune-target:
-	@link_target=$$(readlink target 2>/dev/null || true); \
-	dir=$${CARGO_TARGET_DIR:-$${link_target:-target}}; \
+	@$(MEASURE_FREE_GB); \
 	size_gb=$$(du -sg "$$dir" 2>/dev/null | cut -f1); \
-	if [ "$${size_gb:-0}" -ge $(PRUNE_TARGET_GB) ]; then \
-		echo "target/ is $${size_gb} GB (>= $(PRUNE_TARGET_GB) GB) — running cargo clean"; \
+	files=$$(find "$$dir" -type f 2>/dev/null | wc -l | tr -d " "); \
+	echo "target/ ($$dir): du $${size_gb:-0} GB, $${files:-0} files; volume free $${free_gb:-unknown} GB"; \
+	if { [ -n "$$free_gb" ] && [ "$$free_gb" -lt $(FREE_WARN_GB) ]; } || [ "$${size_gb:-0}" -ge $(PRUNE_TARGET_GB) ]; then \
+		echo "below $(FREE_WARN_GB) GB free, or $(PRUNE_TARGET_GB)+ GB metered — running cargo clean"; \
 		mkdir -p "$$dir"; \
 		printf '%s\n' \
 			'Signature: 8a477f597d28d172789f06886806bc55' \
@@ -392,7 +434,7 @@ prune-target:
 			> "$$dir/CACHEDIR.TAG"; \
 		if [ -n "$$link_target" ] && [ ! -L target ]; then ln -s "$$link_target" target; fi; \
 	else \
-		echo "target/ is $${size_gb:-0} GB — under the $(PRUNE_TARGET_GB) GB prune threshold"; \
+		echo "volume has $${free_gb:-unknown} GB free and the dir meters under $(PRUNE_TARGET_GB) GB — no prune"; \
 	fi
 
 .PHONY: check-skill-mirrors
