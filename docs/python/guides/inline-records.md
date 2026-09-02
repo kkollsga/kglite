@@ -24,6 +24,12 @@ graph = kglite.from_records({
 }, on_missing_endpoint="vivify")
 ```
 
+The key sets above are closed — `nodes`, `connections` and
+`on_missing_endpoint` at the top level, and the per-spec keys shown. An unknown
+key raises a `ValueError` naming a near-miss where there is one, because a key
+the loader does not read would otherwise be dropped in silence: a spec written
+with `"relationships"` builds no relationships at all.
+
 JSON arrays/maps become native list/map values. `on_missing_endpoint` is:
 
 - `"vivify"` (default) — create provisional endpoint stubs.

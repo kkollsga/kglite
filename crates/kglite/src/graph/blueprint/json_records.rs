@@ -23,6 +23,12 @@
 //! }
 //! ```
 //!
+//! Those key sets are closed: an unknown key at the top level or in any node
+//! or connection spec is refused (with a "did you mean" suggestion when one is
+//! close), because a key this parser does not read is silently dropped — a
+//! spec written with `"relationships"` would build zero edges and report
+//! success.
+//!
 //! Column types are **inferred** from the record values (across all rows, via
 //! [`DataFrame::from_cypher_rows`]), so a JSON array becomes a native list
 //! property, an integer an `Int64`, etc. All graph mutation reuses the
@@ -60,6 +66,8 @@ pub fn from_records(graph: &mut DirGraph, spec: &Json) -> Result<RecordsReport, 
     let obj = spec
         .as_object()
         .ok_or_else(|| "from_records: top-level JSON must be an object".to_string())?;
+
+    reject_unknown_keys(obj, TOP_LEVEL_KEYS, "from_records")?;
 
     let endpoint_policy = parse_endpoint_policy(obj.get("on_missing_endpoint"))?;
     if endpoint_policy == MissingEndpointPolicy::Error {
@@ -112,6 +120,10 @@ fn load_node_spec(
     report: &mut RecordsReport,
 ) -> Result<(), String> {
     let ctx = || format!("from_records: nodes[{}]", idx);
+    // A non-object spec falls through to the required-field error below.
+    if let Some(obj) = spec.as_object() {
+        reject_unknown_keys(obj, NODE_SPEC_KEYS, &ctx())?;
+    }
     let node_type = required_str(spec, "type", &ctx)?;
     let id_field = required_str(spec, "id_field", &ctx)?;
     let title_field = optional_str(spec, "title_field");
@@ -150,6 +162,10 @@ fn load_connection_spec(
     report: &mut RecordsReport,
 ) -> Result<(), String> {
     let ctx = || format!("from_records: connections[{}]", idx);
+    // A non-object spec falls through to the required-field error below.
+    if let Some(obj) = spec.as_object() {
+        reject_unknown_keys(obj, CONNECTION_SPEC_KEYS, &ctx())?;
+    }
     let connection_type = required_str(spec, "type", &ctx)?;
     let source_type = required_str(spec, "source_type", &ctx)?;
     let source_id_field = required_str(spec, "source_id_field", &ctx)?;
@@ -204,6 +220,65 @@ fn load_connection_spec(
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
+
+/// The only keys a records spec may carry at its top level.
+///
+/// `on_missing_endpoint` is accepted here as well as taken as a binding
+/// argument: the Python shim injects the argument into the spec object before
+/// calling in (`kglite-py` `from_records_rust`).
+const TOP_LEVEL_KEYS: &[&str] = &["nodes", "connections", "on_missing_endpoint"];
+
+/// The only keys one entry of `nodes` may carry.
+const NODE_SPEC_KEYS: &[&str] = &[
+    "type",
+    "id_field",
+    "title_field",
+    "conflict_handling",
+    "records",
+];
+
+/// The only keys one entry of `connections` may carry.
+const CONNECTION_SPEC_KEYS: &[&str] = &[
+    "type",
+    "source_type",
+    "source_id_field",
+    "target_type",
+    "target_id_field",
+    "records",
+];
+
+/// Refuse the first key of `map` that `accepted` does not contain.
+///
+/// A key this parser does not read is otherwise dropped in silence and the
+/// build reports success on a graph the caller did not describe. The near-miss
+/// hint comes from the same
+/// [`did_you_mean`](crate::graph::mutation::validation::did_you_mean) the
+/// ontology and schema parsers use, and there is no escape-hatch prefix, for
+/// the same reason they have none.
+fn reject_unknown_keys(
+    map: &serde_json::Map<String, Json>,
+    accepted: &[&str],
+    ctx: &str,
+) -> Result<(), String> {
+    for key in map.keys() {
+        if accepted.contains(&key.as_str()) {
+            continue;
+        }
+        let suggestion = crate::graph::mutation::validation::did_you_mean(key, accepted);
+        if !suggestion.is_empty() {
+            return Err(format!("{ctx}: unknown key '{key}'.{suggestion}"));
+        }
+        let list = accepted
+            .iter()
+            .map(|k| format!("'{k}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "{ctx}: unknown key '{key}'. Accepted keys: {list}."
+        ));
+    }
+    Ok(())
+}
 
 fn parse_endpoint_policy(value: Option<&Json>) -> Result<MissingEndpointPolicy, String> {
     match value {

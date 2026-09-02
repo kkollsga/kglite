@@ -141,6 +141,27 @@ def test_missing_required_field_raises():
         kglite.from_records({"nodes": [{"type": "X", "records": [{"id": 1}]}]})
 
 
+def test_unknown_top_level_key_raises_naming_connections():
+    with pytest.raises(
+        ValueError,
+        match=r"unknown key 'relationships'\. Accepted keys: .*'connections'",
+    ):
+        kglite.from_records(
+            {
+                "nodes": [{"type": "Doc", "id_field": "id", "records": [{"id": 1}]}],
+                "relationships": [],
+            }
+        )
+
+
+def test_unknown_node_spec_key_suggests_the_near_miss():
+    with pytest.raises(
+        ValueError,
+        match=r"nodes\[0\]: unknown key 'id_feild'\. Did you mean 'id_field'\?",
+    ):
+        kglite.from_records({"nodes": [{"type": "Doc", "id_feild": "id", "records": [{"id": 1}]}]})
+
+
 def test_equivalent_to_add_nodes_add_connections():
     """from_records should match the equivalent imperative build."""
     kg_fr = kglite.from_records(_spec())

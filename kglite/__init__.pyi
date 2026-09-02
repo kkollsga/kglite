@@ -1444,6 +1444,11 @@ def from_records(
           ]
         }
 
+    Those key sets are closed. An unknown key — at the top level, or in a node
+    or connection spec — raises rather than being ignored, with a "did you
+    mean" suggestion when one is close: a spec written with ``"relationships"``
+    would otherwise build zero relationships and report success.
+
     Args:
         spec: The records spec as a ``dict`` or a JSON string.
         save: If set, save the built graph to this ``.kgl`` path. With
@@ -1461,7 +1466,8 @@ def from_records(
         A new KnowledgeGraph populated from the records.
 
     Raises:
-        ValueError: If the spec JSON is malformed or a required field is missing.
+        ValueError: If the spec JSON is malformed, a required field is missing,
+            or any key is not one this loader reads.
     """
     ...
 

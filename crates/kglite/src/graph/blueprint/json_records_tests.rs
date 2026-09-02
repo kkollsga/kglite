@@ -91,3 +91,105 @@ fn default_policy_still_vivifies_missing_non_null_endpoints() {
     assert_eq!(report.edges_dropped_missing_endpoint, 0);
     assert_eq!(graph.graph.node_count(), 3);
 }
+
+#[test]
+fn unknown_top_level_key_is_refused_and_names_the_accepted_set() {
+    let mut graph = DirGraph::new();
+
+    let error = from_records(
+        &mut graph,
+        &json!({
+            "nodes": [{"type": "Doc", "id_field": "id", "records": [{"id": 1}]}],
+            "relationships": [{
+                "type": "LINKS",
+                "source_type": "Doc",
+                "source_id_field": "source",
+                "target_type": "Doc",
+                "target_id_field": "target",
+                "records": [{"source": 1, "target": 1}]
+            }]
+        }),
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error,
+        "from_records: unknown key 'relationships'. Accepted keys: 'nodes', 'connections', 'on_missing_endpoint'."
+    );
+    assert_eq!(graph.graph.node_count(), 0);
+}
+
+#[test]
+fn unknown_node_spec_key_suggests_the_near_miss() {
+    let mut graph = DirGraph::new();
+
+    let error = from_records(
+        &mut graph,
+        &json!({"nodes": [{"type": "Doc", "id_feild": "id", "records": [{"id": 1}]}]}),
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error,
+        "from_records: nodes[0]: unknown key 'id_feild'. Did you mean 'id_field'?"
+    );
+    assert_eq!(graph.graph.node_count(), 0);
+}
+
+#[test]
+fn unknown_connection_spec_key_suggests_the_near_miss() {
+    let mut graph = DirGraph::new();
+
+    let error = from_records(
+        &mut graph,
+        &json!({
+            "nodes": [{"type": "Doc", "id_field": "id", "records": [{"id": 1}, {"id": 2}]}],
+            "connections": [{
+                "type": "LINKS",
+                "source_typ": "Doc",
+                "source_id_field": "source",
+                "target_type": "Doc",
+                "target_id_field": "target",
+                "records": [{"source": 1, "target": 2}]
+            }]
+        }),
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error,
+        "from_records: connections[0]: unknown key 'source_typ'. Did you mean 'source_type'?"
+    );
+    assert_eq!(graph.graph.edge_count(), 0);
+}
+
+#[test]
+fn every_accepted_key_still_builds() {
+    let mut graph = DirGraph::new();
+
+    let report = from_records(
+        &mut graph,
+        &json!({
+            "on_missing_endpoint": "error",
+            "nodes": [{
+                "type": "Doc",
+                "id_field": "id",
+                "title_field": "name",
+                "conflict_handling": "update",
+                "records": [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]
+            }],
+            "connections": [{
+                "type": "LINKS",
+                "source_type": "Doc",
+                "source_id_field": "source",
+                "target_type": "Doc",
+                "target_id_field": "target",
+                "records": [{"source": 1, "target": 2}]
+            }]
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(report.nodes_added, 2);
+    assert_eq!(report.edges_added, 1);
+}

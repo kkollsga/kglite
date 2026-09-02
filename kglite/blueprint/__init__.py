@@ -143,6 +143,10 @@ def from_records(
               ]
             }
 
+            Those key sets are closed: an unknown key at either level raises
+            a ``ValueError`` (naming a near-miss where there is one) rather
+            than being ignored.
+
         save: If set, save the built graph to this ``.kgl`` path. With
             ``storage="disk"`` pass ``path`` here too: the disk build
             leaves an unpublished working directory until something calls
