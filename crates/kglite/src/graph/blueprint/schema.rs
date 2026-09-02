@@ -62,7 +62,7 @@ impl Settings {
     }
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, Clone)]
 pub struct NodeSpec {
     #[serde(default)]
     pub csv: Option<String>,
@@ -136,14 +136,14 @@ impl JunctionEdge {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum TimeKey {
     Single(String),
     Composite(IndexMap<String, String>),
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct TimeseriesSpec {
     pub time_key: TimeKey,
     #[serde(default)]

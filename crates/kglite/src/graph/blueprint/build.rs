@@ -321,66 +321,16 @@ fn collect_specs(nodes: &IndexMap<String, NodeSpec>) -> (Vec<FlatSpec>, Vec<Flat
     (core, subs)
 }
 
+/// The flattening pass's per-type copy: everything the spec declares except
+/// its `sub_nodes`, which are flattened into their own `FlatSpec`s.
+///
+/// Struct-update syntax on purpose — a field-by-field copy silently drops any
+/// field added to `NodeSpec` later, and the loss shows up as a directive the
+/// blueprint declares and the build ignores.
 fn clone_without_subs(spec: &NodeSpec) -> NodeSpec {
     NodeSpec {
-        csv: spec.csv.clone(),
-        pk: spec.pk.clone(),
-        title: spec.title.clone(),
-        parent: spec.parent.clone(),
-        parent_fk: spec.parent_fk.clone(),
-        properties: spec.properties.clone(),
-        skipped: spec.skipped.clone(),
-        filter: spec.filter.clone(),
-        connections: super::schema::Connections {
-            fk_edges: spec
-                .connections
-                .fk_edges
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        k.clone(),
-                        super::schema::FkEdge {
-                            target: v.target.clone(),
-                            fk: v.fk.clone(),
-                        },
-                    )
-                })
-                .collect(),
-            junction_edges: spec
-                .connections
-                .junction_edges
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        k.clone(),
-                        super::schema::JunctionEdge {
-                            csv: v.csv.clone(),
-                            source_fk: v.source_fk.clone(),
-                            target: v.target.clone(),
-                            target_fk: v.target_fk.clone(),
-                            properties: v.properties.clone(),
-                            property_types: v.property_types.clone(),
-                            rename: v.rename.clone(),
-                        },
-                    )
-                })
-                .collect(),
-        },
         sub_nodes: IndexMap::new(),
-        timeseries: spec
-            .timeseries
-            .as_ref()
-            .map(|t| super::schema::TimeseriesSpec {
-                time_key: match &t.time_key {
-                    super::schema::TimeKey::Single(s) => super::schema::TimeKey::Single(s.clone()),
-                    super::schema::TimeKey::Composite(m) => {
-                        super::schema::TimeKey::Composite(m.clone())
-                    }
-                },
-                channels: t.channels.clone(),
-                resolution: t.resolution.clone(),
-                units: t.units.clone(),
-            }),
+        ..spec.clone()
     }
 }
 
@@ -1716,3 +1666,7 @@ fn dedupe_by_pk(raw: &RawCsv, pk_col: &str) -> RawCsv {
         nulls: new_nulls,
     }
 }
+
+#[cfg(test)]
+#[path = "build_spec_clone_tests.rs"]
+mod spec_clone_tests;

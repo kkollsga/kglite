@@ -141,31 +141,23 @@ pub fn run_filter(
     Ok(())
 }
 
-/// Helper added to NodeSpec for filter-into cloning. The source
-/// spec's `sub_nodes`, `timeseries`, and `parent`/`parent_fk` fields
-/// are intentionally NOT cloned to the new type — those are
-/// load-time directives tied to the original CSV, not properties of
-/// the filtered subset.
+/// The spec a `filter` op gives its `into:` type.
+///
+/// `sub_nodes`, `timeseries` and `parent`/`parent_fk` are dropped: they are
+/// load-time directives tied to the original CSV, not properties of the
+/// filtered subset. Everything else — including `connections` — comes across,
+/// because the subset has the same FK columns as its source, so OF_PERSON /
+/// INVOLVES_ISSUER / etc. resolve against the new type's rows, and a junction
+/// edge declared on the source (e.g. a chain-emitted NEXT_TX) is typically
+/// harmless and occasionally useful.
 impl super::super::schema::NodeSpec {
     fn clone_value_for_filter(&self) -> Self {
         super::super::schema::NodeSpec {
-            csv: self.csv.clone(),
-            pk: self.pk.clone(),
-            title: self.title.clone(),
             parent: None,
             parent_fk: None,
-            properties: self.properties.clone(),
-            skipped: self.skipped.clone(),
-            filter: self.filter.clone(),
-            // Copy connections from source. The filtered subset has
-            // the same FK columns as the source, so OF_PERSON /
-            // INVOLVES_ISSUER / etc. resolve correctly against the
-            // new node type's rows. Junction edges declared on the
-            // source (e.g. chain-emitted NEXT_TX) are also copied —
-            // typically harmless and occasionally useful.
-            connections: self.connections.clone(),
             sub_nodes: indexmap::IndexMap::new(),
             timeseries: None,
+            ..self.clone()
         }
     }
 }

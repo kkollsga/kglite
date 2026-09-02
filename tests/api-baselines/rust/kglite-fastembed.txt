@@ -285,6 +285,8 @@ pub fn kglite::api::blueprint::ComputeOp::deserialize<__D>(__deserializer: __D) 
 pub enum kglite::api::blueprint::TimeKey
 pub kglite::api::blueprint::TimeKey::Composite(indexmap::map::IndexMap<alloc::string::String, alloc::string::String>)
 pub kglite::api::blueprint::TimeKey::Single(alloc::string::String)
+impl core::clone::Clone for kglite::api::blueprint::TimeKey
+pub fn kglite::api::blueprint::TimeKey::clone(&self) -> kglite::api::blueprint::TimeKey
 impl core::fmt::Debug for kglite::api::blueprint::TimeKey
 pub fn kglite::api::blueprint::TimeKey::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl<'de> serde_core::de::Deserialize<'de> for kglite::api::blueprint::TimeKey
@@ -379,6 +381,8 @@ pub kglite::api::blueprint::NodeSpec::skipped: alloc::vec::Vec<alloc::string::St
 pub kglite::api::blueprint::NodeSpec::sub_nodes: indexmap::map::IndexMap<alloc::string::String, kglite::api::blueprint::NodeSpec>
 pub kglite::api::blueprint::NodeSpec::timeseries: core::option::Option<kglite::api::blueprint::TimeseriesSpec>
 pub kglite::api::blueprint::NodeSpec::title: core::option::Option<alloc::string::String>
+impl core::clone::Clone for kglite::api::blueprint::NodeSpec
+pub fn kglite::api::blueprint::NodeSpec::clone(&self) -> kglite::api::blueprint::NodeSpec
 impl core::default::Default for kglite::api::blueprint::NodeSpec
 pub fn kglite::api::blueprint::NodeSpec::default() -> kglite::api::blueprint::NodeSpec
 impl core::fmt::Debug for kglite::api::blueprint::NodeSpec
@@ -415,6 +419,8 @@ pub kglite::api::blueprint::TimeseriesSpec::channels: indexmap::map::IndexMap<al
 pub kglite::api::blueprint::TimeseriesSpec::resolution: core::option::Option<alloc::string::String>
 pub kglite::api::blueprint::TimeseriesSpec::time_key: kglite::api::blueprint::TimeKey
 pub kglite::api::blueprint::TimeseriesSpec::units: indexmap::map::IndexMap<alloc::string::String, alloc::string::String>
+impl core::clone::Clone for kglite::api::blueprint::TimeseriesSpec
+pub fn kglite::api::blueprint::TimeseriesSpec::clone(&self) -> kglite::api::blueprint::TimeseriesSpec
 impl core::fmt::Debug for kglite::api::blueprint::TimeseriesSpec
 pub fn kglite::api::blueprint::TimeseriesSpec::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl<'de> serde_core::de::Deserialize<'de> for kglite::api::blueprint::TimeseriesSpec
