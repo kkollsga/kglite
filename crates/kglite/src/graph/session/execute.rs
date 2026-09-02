@@ -230,16 +230,49 @@ fn is_cancelled(opts: &ExecuteOptions<'_>) -> bool {
         .is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
 }
 
-/// Map an executor error string to a typed [`KgError`]. When the caller's
-/// cooperative-cancellation flag is set, an aborted run is reported as
-/// [`KgError::Cancelled`] (the binding maps that to its interrupt type —
-/// `KeyboardInterrupt` in the Python wheel) rather than a misleading
-/// `CypherExecution`. `cancel == None`, every server binding, always takes
-/// the `CypherExecution` branch.
+/// Whether [`ExecuteOptions::deadline`] has passed.
+///
+/// Read only on an error path, so the clock read is free to the happy path.
+/// It is the *state* the executor aborted on, re-asked — deliberately not a
+/// match on the abort message, which is prose and drifts.
 #[inline]
-fn exec_err(opts: &ExecuteOptions<'_>, message: String) -> KgError {
+fn deadline_expired(opts: &ExecuteOptions<'_>) -> bool {
+    opts.deadline.is_some_and(|dl| Instant::now() > dl)
+}
+
+/// Build the typed timeout, sizing it from the same two quantities
+/// [`attach_diagnostics`] reports.
+fn timeout_err(opts: &ExecuteOptions<'_>, started: Instant, message: String) -> KgError {
+    KgError::CypherTimeout {
+        elapsed_ms: started.elapsed().as_millis() as u64,
+        limit_ms: opts
+            .deadline
+            .map(|dl| dl.saturating_duration_since(started).as_millis() as u64)
+            .unwrap_or(0),
+        message,
+    }
+}
+
+/// Map an executor error string to a typed [`KgError`], reading *why* the run
+/// stopped off the interrupt state rather than off the message:
+///
+/// 1. the cancel flag is raised → [`KgError::Cancelled`] (the binding maps
+///    that to its interrupt type — `KeyboardInterrupt` in the Python wheel);
+/// 2. the deadline has passed → [`KgError::CypherTimeout`], which is what
+///    every binding's timeout surface (`kglite.CypherTimeoutError`, Bolt's
+///    `TransactionTimedOut`, the C `CypherTimeout` status, HTTP 408) has
+///    always claimed to carry and, before this, never received;
+/// 3. otherwise → `CypherExecution`.
+///
+/// The deadline arm can only misattribute a failure that happens *after* the
+/// deadline passed but before the next poll would have aborted the run
+/// anyway — a query already over budget, reported as over budget.
+#[inline]
+fn exec_err(opts: &ExecuteOptions<'_>, started: Instant, message: String) -> KgError {
     if is_cancelled(opts) {
         KgError::Cancelled
+    } else if deadline_expired(opts) {
+        timeout_err(opts, started, message)
     } else {
         KgError::CypherExecution {
             message,
@@ -254,18 +287,30 @@ fn exec_err(opts: &ExecuteOptions<'_>, message: String) -> KgError {
 ///
 /// Cancellation keeps precedence: an interrupt is a user action and stays
 /// `KgError::Cancelled` regardless of what the aborted statement had parked.
+/// A parked violation outranks the deadline the other way round — the
+/// statement produced a real, reportable answer about the data, and a deadline
+/// that happened to be past by the time it did must not hide it.
 /// The park is drained on every path so nothing survives into a later run.
-fn mutation_err(graph: &mut DirGraph, opts: &ExecuteOptions<'_>, message: String) -> KgError {
+fn mutation_err(
+    graph: &mut DirGraph,
+    opts: &ExecuteOptions<'_>,
+    started: Instant,
+    message: String,
+) -> KgError {
     if is_cancelled(opts) {
         graph.clear_pending_constraint_violation();
         return KgError::Cancelled;
     }
-    graph
-        .take_constraint_error(&message)
-        .unwrap_or(KgError::CypherExecution {
-            message,
-            position: None,
-        })
+    if let Some(violation) = graph.take_constraint_error(&message) {
+        return violation;
+    }
+    if deadline_expired(opts) {
+        return timeout_err(opts, started, message);
+    }
+    KgError::CypherExecution {
+        message,
+        position: None,
+    }
 }
 
 /// Result of a successful execute. Wraps `CypherResult` with the
@@ -340,7 +385,7 @@ pub fn execute_read(
         .with_cancel(opts.cancel)
         .with_csv_import(opts.csv_import.clone())
         .execute(&parsed)
-        .map_err(|message| exec_err(opts, message))?;
+        .map_err(|message| exec_err(opts, started, message))?;
     // Encode codec'd-property result columns back to the typed form
     // (`42` → `'Q42'`). Eager rows only; lazy results (Python's streaming
     // path) materialize later and aren't covered — the configured consumer
@@ -509,7 +554,7 @@ pub fn execute_mut(
                 // Recover the structured violation *before* rolling back, so
                 // the typed error never depends on what a checkpoint restore
                 // does to the graph's transient fields.
-                let error = mutation_err(graph, opts, message);
+                let error = mutation_err(graph, opts, started, message);
                 checkpoint.rollback(graph);
                 return Err(error);
             }
@@ -538,7 +583,7 @@ pub fn execute_mut(
             .with_parallel(opts.parallel)
             .with_cancel(opts.cancel)
             .execute(&parsed)
-            .map_err(|message| exec_err(opts, message))?
+            .map_err(|message| exec_err(opts, started, message))?
     };
     // Encode codec'd-property result columns (e.g. `CREATE (...) RETURN n.id`
     // reads back `'Q42'`). Eager path only; see execute_read.

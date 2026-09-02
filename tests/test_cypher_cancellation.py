@@ -59,19 +59,40 @@ def _algo_graph(n=12_000):
 
 
 def test_scan_deadline_still_raises():
-    """A tiny timeout_ms aborts a scan (the pattern-matcher deadline works)."""
+    """A tiny timeout_ms aborts a scan (the pattern-matcher deadline works),
+    and it aborts as the typed timeout the class hierarchy advertises —
+    ``CypherTimeoutError``, not the generic ``CypherExecutionError`` sibling."""
     g = _scan_graph()
     t0 = time.time()
-    with pytest.raises(Exception):
+    with pytest.raises(kglite.CypherTimeoutError) as excinfo:
         g.cypher(SCAN_QUERY, timeout_ms=1)
     assert time.time() - t0 < 1.0  # bailed early, didn't run the whole scan
+    # The abort site's own hint survives the typing — the point of the message
+    # is that it names what to do about *this* deadline.
+    assert "timed out" in str(excinfo.value)
+    assert excinfo.value.code == "CypherTimeout"
 
 
 def test_algorithm_deadline_still_raises():
     """A tiny timeout_ms aborts a CALL algorithm (its iteration checkpoint)."""
     g = _algo_graph()
-    with pytest.raises(Exception):
+    with pytest.raises(kglite.CypherTimeoutError):
         g.cypher(BETWEENNESS_QUERY, timeout_ms=1)
+
+
+def test_mutation_deadline_raises_typed_timeout():
+    """The write path reports its deadline as a timeout too.
+
+    It used to report "Query interrupted" through its own poller, which the
+    session layer could only classify as ``CypherExecutionError`` — so a caller
+    catching ``CypherTimeoutError`` around a bulk write never caught anything.
+    """
+    g = kglite.KnowledgeGraph()
+    with pytest.raises(kglite.CypherTimeoutError) as excinfo:
+        g.cypher("UNWIND range(1, 4000000) AS i CREATE (:M {v: i})", timeout_ms=1)
+    assert "timed out" in str(excinfo.value)
+    # The abandoned statement rolled back; nothing partial survived.
+    assert g.cypher("MATCH (n:M) RETURN count(n) AS c").to_list()[0]["c"] == 0
 
 
 @requires_posix_sigint

@@ -131,8 +131,16 @@ impl Transaction {
                 // Typed exception, not the built-in PyTimeoutError.
                 return Err(crate::error_py::kg_to_pyerr(
                     crate::error::KgError::CypherTimeout {
+                        // The transaction's budget is a wall-clock instant the
+                        // core never saw a start for, so neither figure is
+                        // measurable here; `limit_ms == 0` suppresses the
+                        // "(elapsed …ms, limit …ms)" tail rather than showing
+                        // two zeroes.
                         elapsed_ms: 0,
                         limit_ms: 0,
+                        message: "Transaction deadline expired before the statement ran. \
+                                  Begin a new transaction, or raise timeout_ms on begin()."
+                            .to_string(),
                     },
                 ));
             }

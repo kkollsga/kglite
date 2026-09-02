@@ -51,7 +51,7 @@
 //! which is how that bug was found.
 
 use kglite::api::session::{execute_mut, execute_read, ExecuteOptions};
-use kglite::api::{DirGraph, Value};
+use kglite::api::{DirGraph, KgError, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -184,6 +184,14 @@ fn assert_deadline_is_observed(graph: &DirGraph, query: &str) {
             result.result.rows.len()
         ),
         Err(e) => {
+            // Typed, not textual: the deadline's whole point downstream is that
+            // it reaches `kglite.CypherTimeoutError` / Bolt's
+            // `TransactionTimedOut` / the C `CypherTimeout` status, and every
+            // one of those is keyed on this variant.
+            assert!(
+                matches!(e, KgError::CypherTimeout { .. }),
+                "expected a typed timeout for {query}, got: {e:?} ({e})"
+            );
             let message = e.to_string();
             assert!(
                 message.contains("timed out"),
@@ -203,7 +211,7 @@ fn assert_deadline_is_observed(graph: &DirGraph, query: &str) {
 /// The same contract driven by the cooperative-cancellation flag instead of the
 /// clock — the Ctrl-C path.
 ///
-/// The two share every check site: `CypherExecutor::check_deadline` and
+/// The two share every check site: `executor::check_interrupt` and
 /// `Interrupt::exceeded` each test the clock *and* the flag, and nothing polls
 /// one without the other. So parity needs a sample rather than a second full
 /// corpus, and the sample is chosen by *carrier* — one shape per distinct
@@ -234,10 +242,9 @@ fn assert_interrupt_is_observed(graph: &DirGraph, query: &str) {
             result.result.rows.len()
         ),
         Err(e) => {
-            let message = e.to_string().to_lowercase();
             assert!(
-                message.contains("cancel") || message.contains("interrupt"),
-                "expected a cancellation for {query}, got: {message}"
+                matches!(e, KgError::Cancelled),
+                "expected a typed cancellation for {query}, got: {e:?} ({e})"
             );
         }
     }
@@ -478,12 +485,17 @@ fn a_mutation_observes_its_deadline_and_rolls_back() {
     );
     let elapsed = started.elapsed();
 
-    let message = match outcome {
+    let error = match outcome {
         Ok(_) => {
             panic!("the mutation ran to completion past a {DEADLINE:?} deadline in {elapsed:?}")
         }
-        Err(e) => e.to_string().to_lowercase(),
+        Err(e) => e,
     };
+    assert!(
+        matches!(error, KgError::CypherTimeout { .. }),
+        "expected a typed timeout, got: {error:?} ({error})"
+    );
+    let message = error.to_string().to_lowercase();
     assert!(
         message.contains("timed out"),
         "expected a timeout, got: {message}"
@@ -531,13 +543,13 @@ fn a_mutation_observes_its_cancel_flag_and_rolls_back() {
     let elapsed = started.elapsed();
     raiser.join().expect("the interrupt thread must finish");
 
-    let message = match outcome {
+    let error = match outcome {
         Ok(_) => panic!("the mutation ran to completion past its cancel flag in {elapsed:?}"),
-        Err(e) => e.to_string().to_lowercase(),
+        Err(e) => e,
     };
     assert!(
-        message.contains("cancel"),
-        "expected a cancellation, got: {message}"
+        matches!(error, KgError::Cancelled),
+        "expected a typed cancellation, got: {error:?} ({error})"
     );
 
     let read_params = no_params();

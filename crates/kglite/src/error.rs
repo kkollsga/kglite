@@ -283,7 +283,19 @@ pub enum KgError {
     /// Cypher query exceeded its `timeout_ms` budget. Both elapsed and
     /// limit reported so the agent can decide whether to retry with a
     /// longer budget or rewrite the query.
-    CypherTimeout { elapsed_ms: u64, limit_ms: u64 },
+    ///
+    /// `message` is the abort site's own prose, which carries the hint that
+    /// applies to *where* the deadline fired — the generic
+    /// "anchor the query" advice from the executor's poll, the
+    /// "add an index on a predicate property" advice from an unanchored node
+    /// scan. `limit_ms == 0` means the deadline was not a per-query budget the
+    /// core could measure (the transaction-level pre-check), and the numbers
+    /// are then omitted from the rendered message rather than shown as zeroes.
+    CypherTimeout {
+        elapsed_ms: u64,
+        limit_ms: u64,
+        message: String,
+    },
 
     /// Cypher executor failure (mutation conflict, predicate panic,
     /// missing aggregate context, etc.). Optional position points at
@@ -533,11 +545,18 @@ impl fmt::Display for KgError {
             KgError::CypherTimeout {
                 elapsed_ms,
                 limit_ms,
-            } => write!(
-                f,
-                "Cypher query exceeded timeout: elapsed {}ms, limit {}ms",
-                elapsed_ms, limit_ms
-            ),
+                message,
+            } => {
+                if *limit_ms == 0 {
+                    write!(f, "{}", message)
+                } else {
+                    write!(
+                        f,
+                        "{} (elapsed {}ms, limit {}ms)",
+                        message, elapsed_ms, limit_ms
+                    )
+                }
+            }
             KgError::CypherExecution { message, position } => match position {
                 Some((l, c)) => write!(
                     f,

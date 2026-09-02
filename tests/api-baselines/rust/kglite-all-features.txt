@@ -2662,6 +2662,7 @@ pub kglite::api::KgError::CypherSyntax::message: alloc::string::String
 pub kglite::api::KgError::CypherTimeout
 pub kglite::api::KgError::CypherTimeout::elapsed_ms: u64
 pub kglite::api::KgError::CypherTimeout::limit_ms: u64
+pub kglite::api::KgError::CypherTimeout::message: alloc::string::String
 pub kglite::api::KgError::CypherTypeMismatch
 pub kglite::api::KgError::CypherTypeMismatch::context: alloc::string::String
 pub kglite::api::KgError::CypherTypeMismatch::expected: alloc::string::String
@@ -4565,6 +4566,7 @@ pub kglite::error::KgError::CypherSyntax::message: alloc::string::String
 pub kglite::error::KgError::CypherTimeout
 pub kglite::error::KgError::CypherTimeout::elapsed_ms: u64
 pub kglite::error::KgError::CypherTimeout::limit_ms: u64
+pub kglite::error::KgError::CypherTimeout::message: alloc::string::String
 pub kglite::error::KgError::CypherTypeMismatch
 pub kglite::error::KgError::CypherTypeMismatch::context: alloc::string::String
 pub kglite::error::KgError::CypherTypeMismatch::expected: alloc::string::String
