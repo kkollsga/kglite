@@ -211,6 +211,85 @@ def test_bench_id_index_invalidation_on_create(benchmark, scaled_graphs_no_pk, s
     benchmark.pedantic(write, rounds=OV_ROUNDS, iterations=1, warmup_rounds=OV_WARMUP_ROUNDS)
 
 
+# ── bulk ingest by repeated single CREATE ────────────────────────────
+#
+# Every cell above times *one* statement against a graph that is already big.
+# That is the wrong shape for the question a bulk ingest asks, which is whether
+# the Nth statement of a run costs what the first one did. kglite-visual
+# reported 4x the input (2k -> 20k single `CREATE` statements) taking 13.7x the
+# time, and no cell here could confirm or refute it: growth *within one run* is
+# invisible to a fixture that is built once and written to once per round.
+#
+# So these cells time the whole run and divide. `size` is the number of
+# statements, the graph starts empty, and the reported per-statement cost is
+# `min / size` (recorded in `extra_info`) — read the ratio across `size`, the
+# same way as the rest of this file. Flat means the run's own growth costs
+# nothing; a rising per-statement cost is the curve kglite-visual saw.
+#
+# Both arms exist because the id-index maintenance in `create_node`
+# (`executor/write.rs`) reaches different branches depending on whether a
+# declared primary key on `id` makes `check_identity_uniqueness`
+# (`executor/identity_fields.rs`) probe by id at all. With a key, the first
+# probe builds and caches the type's id index and every later CREATE inserts
+# into it incrementally; with no key nothing probes, so the index is never
+# cached and the invalidation branch is a no-op. The `no_pk` arm is therefore
+# **not** a duplicate of `test_bench_id_index_invalidation_on_create` above:
+# that cell pays the rebuild because its statement also does a `MATCH ... {id:
+# ...}` lookup, and these statements never look anything up.
+
+#: 2k / 8k / 20k reproduces the input range kglite-visual reported against
+#: (4x input) while keeping the largest arm at a few hundred ms per round.
+CREATE_BULK_SIZES = [2_000, 8_000, 20_000]
+
+#: `pedantic` again, for the same reason as `OV_ROUNDS`: one round here is
+#: thousands of statements, so auto-calibration would schedule a run measured
+#: in minutes. Ten rounds is enough for a stable `min` on a call this long.
+CREATE_BULK_ROUNDS = 10
+CREATE_BULK_WARMUP_ROUNDS = 1
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("size", CREATE_BULK_SIZES)
+@pytest.mark.parametrize("primary_key", [True, False], ids=["pk", "no_pk"])
+def test_bench_bulk_create_statements(benchmark, size, primary_key):
+    """`size` single-statement `CREATE`s into an empty in-memory graph."""
+    round_number = 0
+
+    def setup():
+        nonlocal round_number
+        round_number += 1
+        graph = KnowledgeGraph()
+        if primary_key:
+            graph.define_schema({"nodes": {"Item": {"primary_key": "id"}}})
+        # Each round writes a disjoint id range so the `pk` arm never trips the
+        # duplicate-primary-key refusal across rounds of a shared counter.
+        return (graph, round_number * (1 << 24)), {}
+
+    def ingest(graph: KnowledgeGraph, base: int) -> KnowledgeGraph:
+        for i in range(size):
+            graph.cypher(
+                "CREATE (:Item {id: $i, name: $n, qty: $q})",
+                params={"i": base + i, "n": f"item-{i}", "q": i % 977},
+            )
+        return graph
+
+    graph = benchmark.pedantic(
+        ingest,
+        setup=setup,
+        rounds=CREATE_BULK_ROUNDS,
+        iterations=1,
+        warmup_rounds=CREATE_BULK_WARMUP_ROUNDS,
+    )
+
+    assert graph.cypher("MATCH (n:Item) RETURN count(n) AS c").to_list()[0]["c"] == size, (
+        "every statement of the timed run must have landed, or the number is of "
+        "a shorter run than the one it is labelled with"
+    )
+    benchmark.extra_info["statements"] = size
+    benchmark.extra_info["primary_key_on_id"] = primary_key
+    benchmark.extra_info["us_per_statement_min"] = benchmark.stats["min"] * 1e6 / size
+
+
 # ── the shape gap: fresh graphs are not the graphs users write to ────
 #
 # No fixture above persists its graph, and that used to put every cell above on
