@@ -4489,6 +4489,14 @@ class KnowledgeGraph:
         budget raises an error; it is never truncated to it. To bound the rows
         you get back, write ``LIMIT`` in the query.
 
+        Because it is a hard refusal rather than a soft cap, size it from a
+        ``count(*)`` probe of the patterns you run and leave real headroom — a
+        query sitting at 97% of its budget today fails outright on slightly
+        larger data instead of merely slowing down. When a deadline is set too,
+        expect the budget to be what fires on a runaway pattern: the budget
+        bounds what a query holds and the deadline bounds how long it runs, and
+        an explosive expansion reaches the memory ceiling long before the clock.
+
         Args:
             max_work_units: Positive work-unit budget, or ``None`` (default) to
                 set no explicit budget, leaving the engine's own 10,000,000-unit
@@ -6139,9 +6147,13 @@ class KnowledgeGraph:
                 collection items and scan work across every execution path, so
                 it can far exceed the rows returned. Exceeding the budget
                 raises an error (never truncates); use ``LIMIT`` to bound the
-                rows you get back. Direct mutation calls are in-place; use
-                Session/Transaction for rollback. Defaults to
-                ``set_default_max_work_units()``.
+                rows you get back. Size it from a ``count(*)`` probe of the
+                pattern with headroom — it is a hard refusal, not a soft cap —
+                and note that with ``timeout_ms`` set too, the budget is
+                usually what fires on a runaway pattern, since it bounds what
+                the query holds while the deadline bounds how long it runs.
+                Direct mutation calls are in-place; use Session/Transaction for
+                rollback. Defaults to ``set_default_max_work_units()``.
             row_limit: Cap on the result rows this call **retains** — the
                 opposite number to ``max_work_units``, which bounds work and
                 raises. The query still runs to completion and still computes

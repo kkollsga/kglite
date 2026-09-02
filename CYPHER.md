@@ -1450,6 +1450,10 @@ Expand a list into rows:
 graph.cypher("UNWIND [1, 2, 3] AS x RETURN x, x * 2 AS doubled")
 ```
 
+`UNWIND` over a parameter is also the bulk-write route — `UNWIND $rows AS row
+CREATE (…)` writes thousands of nodes in one statement, paying the per-statement
+parse, plan, checkpoint and version-bump cost once instead of once per row.
+
 ## LOAD CSV
 
 Read a delimited file and pipe its rows through the rest of the query, in the

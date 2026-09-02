@@ -49,6 +49,28 @@ graph.cypher("""
 """)
 ```
 
+### Bulk ingest: one `UNWIND … CREATE`, not N `CREATE`s
+
+To write many rows, put them all through **one** statement:
+
+```python
+rows = [{"name": "Alice", "age": 30}, {"name": "Bob", "age": 26}]  # ... thousands
+
+graph.cypher(
+    "UNWIND $rows AS row CREATE (:Person {name: row.name, age: row.age})",
+    params={"rows": rows},
+)
+```
+
+The savings are per *statement*, not per row: the batched form parses and plans
+once, makes one rollback-checkpoint decision, and bumps the graph version once
+— and because the id index stays live for the whole statement, each row's
+insert stays O(1) instead of triggering a rebuild. Issuing the same writes as N
+separate `CREATE` calls pays all of that N times over. The
+[Data Loading guide](data-loading.md#write-throughput--pick-the-coarsest-path-that-fits)
+has the measured per-row costs and the coarser `add_nodes` / `add_connections`
+rung above this one.
+
 ## Transactions
 
 ```python
@@ -216,6 +238,19 @@ graph.set_default_max_work_units(10_000)
 `max_work_units` is a **work budget, not a row cap**. It counts every quantity
 the executor holds or walks on the way to an answer, so it can be far larger
 than the result. To bound the rows you get *back*, write `LIMIT`.
+
+**Size it from a probe, and leave headroom.** Run the pattern once as
+`count(*)` to learn roughly how much work it does, then budget well above that
+— the budget is a hard refusal, not a soft cap, so a query sitting at 97% of
+its budget today is one slightly larger dataset away from failing outright
+rather than returning a bit more slowly. If you also set `timeout_ms`, expect
+the **budget** to be what fires on a runaway pattern: the two bound different
+resources — the budget bounds what the query holds, the deadline bounds how
+long it runs — and a pattern that expands explosively hits the memory ceiling
+long before the clock. That is why the two errors have opposite remedies:
+`CypherExecutionError` naming `max_work_units` means narrow the pattern (or
+raise the budget), while `CypherTimeoutError` means the query is genuinely
+slow.
 
 In-memory graphs default to a generous deadline (shown in
 `diagnostics['timeout_ms']`); pass `timeout_ms=0` to disable it. When a query
