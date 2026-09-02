@@ -362,7 +362,7 @@ fn run_clause_pipeline(
     for (i, clause) in clauses.iter().enumerate() {
         // The mutation is atomic: aborting here discards the in-flight
         // changes, leaving the graph unchanged.
-        super::check_interrupt(&interrupt)?;
+        super::check_interrupt(interrupt)?;
         // Materialize Cypher's implicit start row for the clauses that consume
         // one. Deliberately lazy rather than seeding `ResultSet::new()` up
         // front: MATCH/OPTIONAL MATCH select their leading (scan) form over
