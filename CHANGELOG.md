@@ -6,6 +6,76 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+- **A fired query deadline now raises `CypherTimeoutError`, not
+  `CypherExecutionError`.** `KgError::CypherTimeout` was mapped by every
+  binding and constructed by none: `except kglite.CypherTimeoutError` around a
+  slow query caught nothing, and Bolt's `TransactionTimedOut`, the C
+  `CypherTimeout` status and HTTP 408 were unreachable. Both are siblings under
+  `CypherError`, so `except kglite.CypherError` is unaffected; callers matching
+  `CypherExecutionError` specifically for a timeout must add
+  `CypherTimeoutError`.
+- `KgError::CypherTimeout` gains a `message` field carrying the abort site's
+  hint, and its `elapsed_ms`/`limit_ms` are now real measurements (rendered
+  only when measurable). Rust callers constructing or destructuring the variant
+  exhaustively need updating.
+- **`save_graph(force=true)` now requires the write opt-in.** `force`
+  re-encodes the served `.kgl` and moves its identity, so every peer serving
+  the same graph pays a full re-read — it is offered only where mutations are
+  (`--writable` / `extensions.writable: true`) and refused on a server that
+  registers `save_graph` alone. A plain `save_graph` still publishes unsaved
+  changes and unpersisted boot configuration from such a server, which is why
+  `builtins.save_graph: true` exists on its own; `save_graph_as` is
+  unaffected. The tool description and the "Nothing to save" no-op stop
+  offering `force` where it would be refused.
+- A `save_graph` that wrote only boot configuration now says so — `wrote
+  manifest ontology (N classes, M managed labels); no data changes` — instead
+  of reporting a node count nothing moved.
+- The writer lease's `<path>.lock-owner` record writes `since=` and
+  `released=` in second-precision UTC (`Z`), the same form the MCP
+  `<active_graph>` footer prints. Older records carry a local offset and still
+  parse; no migration.
+- `from_records()` now refuses a spec key it does not read instead of ignoring
+  it. The accepted sets are closed — `nodes`, `connections`,
+  `on_missing_endpoint` at the top level, `type`/`id_field`/`title_field`/
+  `conflict_handling`/`records` per node spec, and `type`/`source_type`/
+  `source_id_field`/`target_type`/`target_id_field`/`records` per connection
+  spec — and an unknown key raises with a "did you mean" suggestion where one
+  is close, matching the ontology and schema parsers. A spec written with
+  `"relationships"` previously built zero relationships and reported success.
+
+### Added
+- `ServerExtensions::read_only()` pins an embedded MCP server read-only:
+  `--writable` and `extensions.writable: true` both stay inert for the life of
+  the process, and boot logs one warning naming the spelling it overrode. For
+  a binary that owns argv but not the manifest and must guarantee an immutable
+  served graph.
+- `kglite::api::introspection::TypeCapabilities` — the per-node-type
+  capability flags (`ts` / `loc` / `geo` / `vec`) that `describe()` renders —
+  is now public, as an opaque type read through `has_timeseries()` /
+  `has_location()` / `has_geometry()` / `has_embeddings()` / `flags_csv()`,
+  together with `compute_type_capabilities` and
+  `compute_type_capabilities_for`. Consumers drawing their own schema view no
+  longer re-derive the flags from the timeseries/spatial/embedding configs.
+
+### Fixed
+- A timed-out **write** reported "Query interrupted" instead of "Query timed
+  out": the mutation engine ran its own poller that collapsed deadline and
+  cancel into one message. Both engines now share one check, so a mutation
+  timeout is a timeout and a cancelled mutation is a cancellation.
+- A refused `save_graph` / `save_graph_as` no longer tells a clean server that
+  "your unsaved changes are still here and still queryable" — a save is
+  refusable with nothing unsaved (a `force` re-encode, a configuration
+  publish), and the clean case now says "Nothing was changed here".
+
+### Docs
+- Cypher guide: size `max_work_units` from a `count(*)` probe with headroom —
+  it is a hard refusal, not a soft cap — and note that a budget set alongside
+  a deadline is usually the guard that fires. Same guidance in the
+  `max_work_units` docstrings.
+- Cypher guide: new "Bulk ingest" section documenting `UNWIND $rows AS row
+  CREATE (...)` as the batched-write route, with the per-statement costs it
+  avoids.
 
 ## [0.16.20] - 2026-09-02
 ### Changed
