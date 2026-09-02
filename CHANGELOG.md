@@ -43,6 +43,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spec — and an unknown key raises with a "did you mean" suggestion where one
   is close, matching the ontology and schema parsers. A spec written with
   `"relationships"` previously built zero relationships and reported success.
+- Cypher guide: size `max_work_units` from a `count(*)` probe with headroom —
+  it is a hard refusal, not a soft cap — and note that a budget set alongside
+  a deadline is usually the guard that fires. Same guidance in the
+  `max_work_units` docstrings.
+- Cypher guide: new "Bulk ingest" section documenting `UNWIND $rows AS row
+  CREATE (...)` as the batched-write route, with the per-statement costs it
+  avoids.
 
 ### Added
 - `ServerExtensions::read_only()` pins an embedded MCP server read-only:
@@ -67,15 +74,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "your unsaved changes are still here and still queryable" — a save is
   refusable with nothing unsaved (a `force` re-encode, a configuration
   publish), and the clean case now says "Nothing was changed here".
-
-### Docs
-- Cypher guide: size `max_work_units` from a `count(*)` probe with headroom —
-  it is a hard refusal, not a soft cap — and note that a budget set alongside
-  a deadline is usually the guard that fires. Same guidance in the
-  `max_work_units` docstrings.
-- Cypher guide: new "Bulk ingest" section documenting `UNWIND $rows AS row
-  CREATE (...)` as the batched-write route, with the per-statement costs it
-  avoids.
 
 ## [0.16.20] - 2026-09-02
 ### Changed
