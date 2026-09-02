@@ -324,6 +324,94 @@ pub fn unknown_property_type_warnings(blueprint: &Blueprint) -> Vec<String> {
     warnings
 }
 
+/// One warning per key the blueprint parser does not read, at every level a
+/// user hand-writes: the top level, `settings`, each node and `sub_nodes`
+/// entry, and each `fk_edges` / `junction_edges` entry.
+///
+/// Such a key is dropped by serde and the build then reports success on a
+/// graph the author did not describe — a misspelled `"lables"` costs every
+/// label it carried and says nothing. Warn rather than fail: blueprints in the
+/// wild carry stray keys (ETL comments, provenance stamps) and must keep
+/// building, so the diagnostic goes in the report next to the ignored-type
+/// warnings.
+pub fn unknown_key_warnings(blueprint: &Blueprint) -> Vec<String> {
+    use super::schema::{
+        ACCEPTED_BLUEPRINT_KEYS, ACCEPTED_FK_EDGE_KEYS, ACCEPTED_JUNCTION_EDGE_KEYS,
+        ACCEPTED_NODE_KEYS, ACCEPTED_SETTINGS_KEYS,
+    };
+
+    fn check(
+        warnings: &mut Vec<String>,
+        where_: &str,
+        extra: &IndexMap<String, serde_json::Value>,
+        accepted: &[&str],
+    ) {
+        for key in extra.keys() {
+            let hint = crate::graph::mutation::validation::did_you_mean(key, accepted);
+            let hint = if hint.is_empty() {
+                let list = accepted
+                    .iter()
+                    .map(|k| format!("'{k}'"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(" Accepted keys: {list}.")
+            } else {
+                hint
+            };
+            warnings.push(format!(
+                "{where_}: unknown key '{key}' — the loader does not read it, so anything it \
+                 declares is ignored.{hint}"
+            ));
+        }
+    }
+
+    fn walk(warnings: &mut Vec<String>, node_type: &str, spec: &NodeSpec) {
+        check(
+            warnings,
+            &format!("node '{node_type}'"),
+            &spec.extra,
+            ACCEPTED_NODE_KEYS,
+        );
+        for (edge_type, fk) in &spec.connections.fk_edges {
+            check(
+                warnings,
+                &format!("fk_edge '{edge_type}' (node '{node_type}')"),
+                &fk.extra,
+                ACCEPTED_FK_EDGE_KEYS,
+            );
+        }
+        for (edge_type, junc) in &spec.connections.junction_edges {
+            check(
+                warnings,
+                &format!("junction '{edge_type}' (node '{node_type}')"),
+                &junc.extra,
+                ACCEPTED_JUNCTION_EDGE_KEYS,
+            );
+        }
+        for (sub_type, sub) in &spec.sub_nodes {
+            walk(warnings, sub_type, sub);
+        }
+    }
+
+    let mut warnings = Vec::new();
+    check(
+        &mut warnings,
+        "blueprint",
+        &blueprint.extra,
+        ACCEPTED_BLUEPRINT_KEYS,
+    );
+    check(
+        &mut warnings,
+        "settings",
+        &blueprint.settings.extra,
+        ACCEPTED_SETTINGS_KEYS,
+    );
+    for (node_type, spec) in &blueprint.nodes {
+        walk(&mut warnings, node_type, spec);
+    }
+    warnings
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -574,5 +662,147 @@ mod tests {
         }"#,
         );
         validate_compute(&bp).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod accepted_key_tests {
+    use super::*;
+    use serde_json::{json, Map, Value};
+
+    /// Every name in an `ACCEPTED_*` list, with a value of the right shape.
+    /// Kept beside the list it mirrors so the two move together.
+    fn fixture_values(level: &str) -> Vec<(&'static str, Value)> {
+        match level {
+            "blueprint" => vec![
+                ("settings", json!({})),
+                ("nodes", json!({})),
+                ("compute", json!([])),
+                ("ontology", json!(null)),
+            ],
+            // `root` and `output` are aliases; JSON cannot carry an alias
+            // and its canonical spelling in the same object, so they are
+            // substituted one at a time below.
+            "settings" => vec![
+                ("input_root", json!(".")),
+                ("root", json!(".")),
+                ("output_path", json!(".")),
+                ("output_file", json!("g.kgl")),
+                ("output", json!("g.kgl")),
+                ("auto_purge", json!(false)),
+            ],
+            "node" => vec![
+                ("csv", json!("p.csv")),
+                ("pk", json!("id")),
+                ("title", json!("name")),
+                ("parent", json!("Org")),
+                ("parent_fk", json!("org_id")),
+                ("properties", json!({})),
+                ("labels", json!([])),
+                ("skipped", json!([])),
+                ("filter", json!({})),
+                ("connections", json!({})),
+                ("sub_nodes", json!({})),
+                ("timeseries", json!(null)),
+            ],
+            "fk_edge" => vec![("target", json!("Org")), ("fk", json!("org_id"))],
+            "junction_edge" => vec![
+                ("csv", json!("k.csv")),
+                ("source_fk", json!("a")),
+                ("target", json!("Person")),
+                ("target_fk", json!("b")),
+                ("properties", json!([])),
+                ("property_types", json!({})),
+                ("rename", json!({})),
+            ],
+            other => panic!("no fixture for level {other}"),
+        }
+    }
+
+    /// `(alias, canonical)` pairs: the alias replaces its canonical spelling
+    /// rather than joining it, because serde rejects both in one object.
+    const ALIASES: &[(&str, &str)] = &[("root", "input_root"), ("output", "output_file")];
+
+    fn object(level: &str) -> Value {
+        object_with_alias(level, None)
+    }
+
+    fn object_with_alias(level: &str, alias: Option<(&str, &str)>) -> Value {
+        let mut map = Map::new();
+        for (key, value) in fixture_values(level) {
+            if ALIASES.iter().any(|(a, _)| *a == key) {
+                continue;
+            }
+            map.insert(key.to_string(), value);
+        }
+        if let Some((alias, canonical)) = alias {
+            let value = map
+                .remove(canonical)
+                .expect("alias substitutes a key the fixture holds");
+            map.insert(alias.to_string(), value);
+        }
+        Value::Object(map)
+    }
+
+    /// An `ACCEPTED_*` list exists only to name a near miss, so nothing makes
+    /// the compiler notice when it drifts from the struct beside it. A name
+    /// left in the list after the field is gone is the damaging direction: the
+    /// loader ignores that key, and the report suggests it as the fix.
+    ///
+    /// Set equality against the fixture forces a drifting list to be spelled
+    /// here too, and parsing the fixture object then lands the dead key in
+    /// `extra`, which the emptiness assertions catch.
+    #[test]
+    fn accepted_key_lists_name_only_keys_the_specs_read() {
+        use super::super::schema::{
+            ACCEPTED_BLUEPRINT_KEYS, ACCEPTED_FK_EDGE_KEYS, ACCEPTED_JUNCTION_EDGE_KEYS,
+            ACCEPTED_NODE_KEYS, ACCEPTED_SETTINGS_KEYS,
+        };
+        for (level, accepted) in [
+            ("blueprint", ACCEPTED_BLUEPRINT_KEYS),
+            ("settings", ACCEPTED_SETTINGS_KEYS),
+            ("node", ACCEPTED_NODE_KEYS),
+            ("fk_edge", ACCEPTED_FK_EDGE_KEYS),
+            ("junction_edge", ACCEPTED_JUNCTION_EDGE_KEYS),
+        ] {
+            let fixture: HashSet<&str> =
+                fixture_values(level).into_iter().map(|(k, _)| k).collect();
+            let listed: HashSet<&str> = accepted.iter().copied().collect();
+            assert_eq!(
+                listed, fixture,
+                "{level}: ACCEPTED list and this test's fixture disagree"
+            );
+        }
+
+        let blueprint: Value = object("blueprint");
+        let mut blueprint = blueprint;
+        blueprint["settings"] = object("settings");
+        let mut node = object("node");
+        node["connections"] = json!({
+            "fk_edges": {"IN_ORG": object("fk_edge")},
+            "junction_edges": {"KNOWS": object("junction_edge")},
+        });
+        node["sub_nodes"] = json!({"Alias": object("node")});
+        blueprint["nodes"] = json!({"Person": node});
+
+        let parsed: Blueprint =
+            serde_json::from_value(blueprint).expect("every accepted key parses");
+        assert!(
+            unknown_key_warnings(&parsed).is_empty(),
+            "a listed key did not reach its struct field: {:?}",
+            unknown_key_warnings(&parsed)
+        );
+
+        for (alias, canonical) in ALIASES {
+            let mut blueprint = object("blueprint");
+            blueprint["settings"] = object_with_alias("settings", Some((alias, canonical)));
+            let parsed: Blueprint =
+                serde_json::from_value(blueprint).expect("the alias parses on its own");
+            assert!(
+                unknown_key_warnings(&parsed).is_empty(),
+                "settings alias '{alias}' is not an accepted spelling: {:?}",
+                unknown_key_warnings(&parsed)
+            );
+        }
     }
 }

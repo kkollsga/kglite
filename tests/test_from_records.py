@@ -191,3 +191,58 @@ def test_equivalent_to_add_nodes_add_connections():
         kg_fr.cypher("MATCH (n:Person) RETURN count(n) AS c").to_dicts()
         == kg_imp.cypher("MATCH (n:Person) RETURN count(n) AS c").to_dicts()
     )
+
+
+def test_node_spec_labels_are_stamped():
+    """`labels` on a node spec is the from_records twin of the blueprint key:
+    every node of the type carries them, so a union query can name one label
+    instead of every type in it."""
+    kg = kglite.from_records(
+        {
+            "nodes": [
+                {
+                    "type": "Person",
+                    "id_field": "id",
+                    "labels": ["Human", "Agent"],
+                    "records": [{"id": 1}, {"id": 2}],
+                }
+            ]
+        }
+    )
+    assert len(list(kg.cypher("MATCH (n:Human) RETURN n.id"))) == 2
+    assert len(list(kg.cypher("MATCH (n:Agent) RETURN n.id"))) == 2
+
+
+def test_labels_reach_vivified_endpoint_stubs():
+    """A `vivify`d endpoint is a node of the declared type and must carry the
+    type's labels; otherwise `MATCH (:Place)` silently misses exactly the
+    nodes that arrived as an edge endpoint."""
+    kg = kglite.from_records(
+        {
+            "nodes": [
+                {"type": "Person", "id_field": "id", "records": [{"id": 1}]},
+                {
+                    "type": "City",
+                    "id_field": "id",
+                    "labels": ["Place"],
+                    "records": [{"id": 10}],
+                },
+            ],
+            "connections": [
+                {
+                    "type": "LIVES_IN",
+                    "source_type": "Person",
+                    "source_id_field": "src",
+                    "target_type": "City",
+                    "target_id_field": "tgt",
+                    "records": [{"src": 1, "tgt": 10}, {"src": 1, "tgt": 99}],
+                }
+            ],
+        }
+    )
+    assert len(list(kg.cypher("MATCH (n:Place) RETURN n.id"))) == 2
+
+
+def test_labels_must_be_an_array_of_strings():
+    with pytest.raises(ValueError, match=r"nodes\[0\]: 'labels' must be an array of strings"):
+        kglite.from_records({"nodes": [{"type": "Doc", "id_field": "id", "labels": "Text", "records": [{"id": 1}]}]})

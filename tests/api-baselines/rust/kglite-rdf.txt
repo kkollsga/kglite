@@ -303,6 +303,7 @@ impl<'de> serde_core::de::Deserialize<'de> for kglite::api::blueprint::Aggregate
 pub fn kglite::api::blueprint::AggregateEdge::deserialize<__D>(__deserializer: __D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
 pub struct kglite::api::blueprint::Blueprint
 pub kglite::api::blueprint::Blueprint::compute: alloc::vec::Vec<kglite::api::blueprint::ComputeOp>
+pub kglite::api::blueprint::Blueprint::extra: indexmap::map::IndexMap<alloc::string::String, serde_json::value::Value>
 pub kglite::api::blueprint::Blueprint::nodes: indexmap::map::IndexMap<alloc::string::String, kglite::api::blueprint::NodeSpec>
 pub kglite::api::blueprint::Blueprint::ontology: core::option::Option<alloc::string::String>
 pub kglite::api::blueprint::Blueprint::settings: kglite::api::blueprint::Settings
@@ -340,8 +341,11 @@ pub fn kglite::api::blueprint::Connections::fmt(&self, f: &mut core::fmt::Format
 impl<'de> serde_core::de::Deserialize<'de> for kglite::api::blueprint::Connections
 pub fn kglite::api::blueprint::Connections::deserialize<__D>(__deserializer: __D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
 pub struct kglite::api::blueprint::FkEdge
+pub kglite::api::blueprint::FkEdge::extra: indexmap::map::IndexMap<alloc::string::String, serde_json::value::Value>
 pub kglite::api::blueprint::FkEdge::fk: alloc::string::String
 pub kglite::api::blueprint::FkEdge::target: alloc::string::String
+impl kglite::api::blueprint::FkEdge
+pub fn kglite::api::blueprint::FkEdge::plain(target: alloc::string::String, fk: alloc::string::String) -> Self
 impl core::clone::Clone for kglite::api::blueprint::FkEdge
 pub fn kglite::api::blueprint::FkEdge::clone(&self) -> kglite::api::blueprint::FkEdge
 impl core::fmt::Debug for kglite::api::blueprint::FkEdge
@@ -355,6 +359,7 @@ pub kglite::api::blueprint::FlatSpec::parent: core::option::Option<alloc::string
 pub kglite::api::blueprint::FlatSpec::spec: kglite::api::blueprint::NodeSpec
 pub struct kglite::api::blueprint::JunctionEdge
 pub kglite::api::blueprint::JunctionEdge::csv: alloc::string::String
+pub kglite::api::blueprint::JunctionEdge::extra: indexmap::map::IndexMap<alloc::string::String, serde_json::value::Value>
 pub kglite::api::blueprint::JunctionEdge::properties: alloc::vec::Vec<alloc::string::String>
 pub kglite::api::blueprint::JunctionEdge::property_types: indexmap::map::IndexMap<alloc::string::String, alloc::string::String>
 pub kglite::api::blueprint::JunctionEdge::rename: indexmap::map::IndexMap<alloc::string::String, alloc::string::String>
@@ -372,7 +377,9 @@ pub fn kglite::api::blueprint::JunctionEdge::deserialize<__D>(__deserializer: __
 pub struct kglite::api::blueprint::NodeSpec
 pub kglite::api::blueprint::NodeSpec::connections: kglite::api::blueprint::Connections
 pub kglite::api::blueprint::NodeSpec::csv: core::option::Option<alloc::string::String>
+pub kglite::api::blueprint::NodeSpec::extra: indexmap::map::IndexMap<alloc::string::String, serde_json::value::Value>
 pub kglite::api::blueprint::NodeSpec::filter: indexmap::map::IndexMap<alloc::string::String, serde_json::value::Value>
+pub kglite::api::blueprint::NodeSpec::labels: alloc::vec::Vec<alloc::string::String>
 pub kglite::api::blueprint::NodeSpec::parent: core::option::Option<alloc::string::String>
 pub kglite::api::blueprint::NodeSpec::parent_fk: core::option::Option<alloc::string::String>
 pub kglite::api::blueprint::NodeSpec::pk: core::option::Option<alloc::string::String>
@@ -403,6 +410,7 @@ impl core::fmt::Debug for kglite::api::blueprint::RecordsReport
 pub fn kglite::api::blueprint::RecordsReport::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct kglite::api::blueprint::Settings
 pub kglite::api::blueprint::Settings::auto_purge: bool
+pub kglite::api::blueprint::Settings::extra: indexmap::map::IndexMap<alloc::string::String, serde_json::value::Value>
 pub kglite::api::blueprint::Settings::input_root: core::option::Option<alloc::string::String>
 pub kglite::api::blueprint::Settings::output_file: core::option::Option<alloc::string::String>
 pub kglite::api::blueprint::Settings::output_path: core::option::Option<alloc::string::String>

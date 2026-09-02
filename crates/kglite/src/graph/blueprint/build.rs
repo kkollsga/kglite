@@ -45,6 +45,12 @@ pub fn build(
     // at load time rather than midway through the build.
     super::validation::validate_compute(&blueprint)?;
 
+    // Captured before `apply_compute` rewrites the blueprint: the warning is
+    // about what the *author* wrote, and a compute-derived spec inherits its
+    // source's stray keys, which would report the same typo under a type name
+    // that appears in no file.
+    let unknown_keys = super::validation::unknown_key_warnings(&blueprint);
+
     let root = blueprint
         .settings
         .input_root
@@ -71,6 +77,7 @@ pub fn build(
         errors: Vec::new(),
         provisional_purged: 0,
     };
+    report.warnings.extend(unknown_keys);
     report
         .warnings
         .extend(super::validation::unknown_property_type_warnings(
@@ -202,6 +209,17 @@ pub fn build(
             );
         }
     }
+    // Phase 6b: declared secondary labels. After the edge phases and the
+    // purge, not straight after the node phases: an endpoint a CSV never
+    // provided is vivified as a stub *during* the edge phases, and a blueprint
+    // owns every node of the types it declares — labelling earlier would make
+    // `MATCH (:Place)` miss exactly the rows that arrived via an edge.
+    let t = std::time::Instant::now();
+    stamp_declared_labels(graph, &all_specs, &mut report)?;
+    if profile {
+        eprintln!("  stamp_declared_labels: {} ms", t.elapsed().as_millis());
+    }
+
     // Phase 7: ontology install + gate. Runs after every load phase and
     // before the caller can save, so an `enforcement: error` violation
     // means no `.kgl` is ever written (the save lives in the callers).
@@ -214,6 +232,42 @@ pub fn build(
     }
 
     Ok(report)
+}
+
+/// Stamp each spec's declared `labels` on every node of its type.
+///
+/// One `add_node_labels_bulk` call per (type, label): the bulk path merges
+/// into the label bucket once, where a per-node loop would be quadratic. The
+/// primary type name is skipped by that call itself, so a spec listing its own
+/// type among its labels is a no-op and not a duplicate.
+fn stamp_declared_labels(
+    graph: &mut DirGraph,
+    specs: &[&FlatSpec],
+    report: &mut BuildReport,
+) -> Result<(), String> {
+    for spec in specs {
+        if spec.spec.labels.is_empty() {
+            continue;
+        }
+        // Interning is fallible (name length / count ceilings), so validate
+        // the whole set before stamping any of it: a half-labelled type is
+        // worse than a refused build.
+        maintain::preflight_interner_names(graph, spec.spec.labels.iter().map(String::as_str))
+            .map_err(|e| format!("node '{}': labels: {}", spec.node_type, e))?;
+        let Some(nodes) = graph.type_indices.get(&spec.node_type) else {
+            report.warnings.push(format!(
+                "node '{}': declares labels {:?} but the build produced no nodes of that type",
+                spec.node_type, spec.spec.labels
+            ));
+            continue;
+        };
+        let indices: Vec<petgraph::graph::NodeIndex> = nodes.iter().collect();
+        for label in &spec.spec.labels {
+            let key = graph.interner.get_or_intern(label);
+            graph.add_node_labels_bulk(&indices, key);
+        }
+    }
+    Ok(())
 }
 
 /// Install the referenced ontology document and run the declaration audit
@@ -1001,21 +1055,12 @@ fn prep_fk_edges(spec: &FlatSpec, root: &Path, cache: &CsvCache) -> Option<Prepp
         .connections
         .fk_edges
         .iter()
-        .map(|(k, v)| {
-            (
-                k.clone(),
-                super::schema::FkEdge {
-                    target: v.target.clone(),
-                    fk: v.fk.clone(),
-                },
-            )
-        })
+        .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     if let (Some(parent_type), Some(parent_fk)) = (&spec.spec.parent, &spec.spec.parent_fk) {
         let edge_type = format!("OF_{}", parent_type.to_uppercase());
-        fk_edges.entry(edge_type).or_insert(super::schema::FkEdge {
-            target: parent_type.clone(),
-            fk: parent_fk.clone(),
+        fk_edges.entry(edge_type).or_insert_with(|| {
+            super::schema::FkEdge::plain(parent_type.clone(), parent_fk.clone())
         });
     }
     if fk_edges.is_empty() {
@@ -1235,21 +1280,12 @@ fn load_streamed_fk_edges(
         .connections
         .fk_edges
         .iter()
-        .map(|(k, v)| {
-            (
-                k.clone(),
-                super::schema::FkEdge {
-                    target: v.target.clone(),
-                    fk: v.fk.clone(),
-                },
-            )
-        })
+        .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     if let (Some(parent_type), Some(parent_fk)) = (&spec.spec.parent, &spec.spec.parent_fk) {
         let edge_type = format!("OF_{}", parent_type.to_uppercase());
-        fk_edges.entry(edge_type).or_insert(super::schema::FkEdge {
-            target: parent_type.clone(),
-            fk: parent_fk.clone(),
+        fk_edges.entry(edge_type).or_insert_with(|| {
+            super::schema::FkEdge::plain(parent_type.clone(), parent_fk.clone())
         });
     }
     if fk_edges.is_empty() {

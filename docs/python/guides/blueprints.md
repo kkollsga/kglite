@@ -128,6 +128,35 @@ a list as its JSON text and the generated blueprint declares it `"string"`, so
 re-importing that output gives you the text back, not a list. Declare `"list"`
 yourself in the re-import blueprint if you need one.
 
+### Labels
+
+`labels` stamps secondary labels on every node of a type, so a query can name
+one label instead of enumerating the types under it:
+
+```json
+{
+  "Disease":   {"csv": "diseases.csv",   "pk": "id", "labels": ["Condition"]},
+  "Phenotype": {"csv": "phenotypes.csv", "pk": "id", "labels": ["Condition"]}
+}
+```
+
+```cypher
+MATCH (c:Condition) RETURN count(c)
+```
+
+The rules:
+
+- The node type is the primary label and is stamped for you. Listing it in
+  `labels` is a no-op, not a duplicate.
+- **A blueprint owns every node of the types it declares.** Labels are stamped
+  after all node *and* edge phases, so a provisional stub — an endpoint some
+  edge referenced and no CSV supplied — carries them too. Without that,
+  `MATCH (:Condition)` would silently miss exactly the nodes that arrived via
+  an edge rather than a row.
+- `sub_nodes` entries take the key on the same terms.
+- If you merge blueprints with a deep-merge helper, note that arrays are
+  replaced wholesale rather than concatenated: the last `labels` array wins.
+
 ### Skipping Columns
 
 Use `skipped` to exclude columns you don't want stored as properties:

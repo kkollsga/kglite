@@ -1373,6 +1373,176 @@ class TestJunctionRename:
         assert "not in 'properties'" in err
 
 
+class TestNodeLabels:
+    """`labels` on a node spec stamps secondary labels on every node of the
+    type. Without it a blueprint can express `:Disease` and `:Phenotype` only
+    as separate node types, and a query over the union has to name each one.
+    """
+
+    def _bp(self, tmp_path, labels, sub_labels=None, rows=3):
+        persons = pd.DataFrame(
+            {
+                "person_id": list(range(1, rows + 1)),
+                "name": [f"P{i}" for i in range(1, rows + 1)],
+                # Text ids on purpose: a numeric FK to a CSV-less type is a
+                # separate defect, fixed and covered on its own below.
+                "city_id": ["C10"] * rows,
+            }
+        )
+        _write_csv(tmp_path / "persons.csv", persons)
+        person = {
+            "csv": "persons.csv",
+            "pk": "person_id",
+            "title": "name",
+            "connections": {"fk_edges": {"LIVES_IN": {"target": "City", "fk": "city_id"}}},
+        }
+        if labels is not None:
+            person["labels"] = labels
+        if sub_labels is not None:
+            aliases = pd.DataFrame(
+                {
+                    "person_id": list(range(1, rows + 1)),
+                    "alias": [f"a{i}" for i in range(1, rows + 1)],
+                }
+            )
+            _write_csv(tmp_path / "aliases.csv", aliases)
+            person["sub_nodes"] = {
+                "Alias": {
+                    "csv": "aliases.csv",
+                    "pk": "alias",
+                    "parent_fk": "person_id",
+                    "labels": sub_labels,
+                }
+            }
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {"Person": person, "City": {"pk": "city_id"}},
+        }
+        bp_path = tmp_path / "bp.json"
+        _write_blueprint(bp_path, bp)
+        return bp_path
+
+    def test_labels_are_visible_to_labels_and_to_a_label_match(self, tmp_path):
+        g = kglite.from_blueprint(str(self._bp(tmp_path, ["Human", "Agent"])), save=False)
+        rows = list(g.cypher("MATCH (p:Person) RETURN labels(p) AS l ORDER BY p.title"))
+        assert all(set(r["l"]) >= {"Person", "Human", "Agent"} for r in rows), rows
+        assert len(list(g.cypher("MATCH (n:Human) RETURN n.title"))) == 3
+        assert len(list(g.cypher("MATCH (n:Agent) RETURN n.title"))) == 3
+
+    def test_no_labels_key_stamps_nothing(self, tmp_path):
+        g = kglite.from_blueprint(str(self._bp(tmp_path, None)), save=False)
+        rows = list(g.cypher("MATCH (p:Person) RETURN labels(p) AS l"))
+        assert all(r["l"] == ["Person"] for r in rows), rows
+
+    def test_sub_node_labels_are_stamped_too(self, tmp_path):
+        g = kglite.from_blueprint(str(self._bp(tmp_path, ["Human"], sub_labels=["Name"])), save=False)
+        assert len(list(g.cypher("MATCH (n:Name) RETURN n.title"))) == 3
+
+    def test_provisional_stubs_of_the_type_are_labelled(self, tmp_path):
+        """`City` gets no CSV; its nodes are stubs vivified by the FK edge. A
+        blueprint owns its type's labels, so the stubs carry them — otherwise
+        `MATCH (:Place)` would silently miss exactly the rows that came from
+        an edge rather than a row."""
+        bp_path = self._bp(tmp_path, ["Human"])
+        with open(bp_path, encoding="utf-8") as f:
+            bp = json.load(f)
+        bp["nodes"]["City"]["labels"] = ["Place"]
+        _write_blueprint(bp_path, bp)
+        g = kglite.from_blueprint(str(bp_path), save=False)
+        assert len(list(g.cypher("MATCH (n:Place) RETURN n.id"))) == 1
+
+    def test_streaming_and_buffered_agree(self, tmp_path, monkeypatch):
+        """The streaming node loader is a RAM knob, so it must produce the same
+        labels as the buffered path."""
+        monkeypatch.setenv("KGLITE_BLUEPRINT_NODE_CHUNK_SIZE", "2")
+        monkeypatch.setenv("KGLITE_BLUEPRINT_STREAMING_THRESHOLD_MB", "0")
+        g = kglite.from_blueprint(str(self._bp(tmp_path, ["Human"], rows=7)), save=False)
+        assert len(list(g.cypher("MATCH (n:Human) RETURN n.title"))) == 7
+
+    def test_a_label_equal_to_the_type_is_not_an_error(self, tmp_path):
+        g = kglite.from_blueprint(str(self._bp(tmp_path, ["Person", "Human"])), save=False)
+        rows = list(g.cypher("MATCH (p:Person) RETURN labels(p) AS l"))
+        assert all(r["l"].count("Person") == 1 for r in rows), rows
+
+
+class TestUnknownSpecKeyWarning:
+    """A key the blueprint parser does not read was dropped in silence, and the
+    build reported success on a graph the author did not describe. `"lables"`
+    for `"labels"`, `"propertes"` for `"properties"` — the misspelling costs
+    every property or edge that key was carrying, with no diagnostic anywhere.
+    """
+
+    def _bp_with(self, tmp_path, mutate):
+        bp_path = _minimal_blueprint(tmp_path)
+        with open(bp_path, encoding="utf-8") as f:
+            bp = json.load(f)
+        mutate(bp)
+        _write_blueprint(bp_path, bp)
+        return bp_path
+
+    def test_unknown_top_level_key_warns(self, tmp_path, capfd):
+        def mutate(bp):
+            bp["nodez"] = {}
+
+        kglite.from_blueprint(str(self._bp_with(tmp_path, mutate)), verbose=True, save=False)
+        err = capfd.readouterr().err
+        assert "unknown key 'nodez'" in err
+        assert "Did you mean 'nodes'?" in err
+
+    def test_unknown_node_key_warns_with_a_near_miss_hint(self, tmp_path, capfd):
+        def mutate(bp):
+            bp["nodes"]["Person"]["propertes"] = {"age": "int"}
+
+        kglite.from_blueprint(str(self._bp_with(tmp_path, mutate)), verbose=True, save=False)
+        err = capfd.readouterr().err
+        assert "node 'Person'" in err
+        assert "unknown key 'propertes'" in err
+        assert "Did you mean 'properties'?" in err
+
+    def test_unknown_key_is_a_warning_not_an_error(self, tmp_path):
+        """Blueprints in the wild carry stray keys; the build must still run."""
+
+        def mutate(bp):
+            bp["nodes"]["Person"]["comment"] = "written by the ETL job"
+
+        g = kglite.from_blueprint(str(self._bp_with(tmp_path, mutate)), save=False)
+        assert len(list(g.cypher("MATCH (p:Person) RETURN p.name"))) == 3
+
+    def test_unknown_junction_edge_key_warns(self, tmp_path, capfd):
+        def mutate(bp):
+            junc = bp["nodes"]["Person"]["connections"]["junction_edges"]["KNOWS"]
+            junc["propertie_types"] = {}
+
+        kglite.from_blueprint(str(self._bp_with(tmp_path, mutate)), verbose=True, save=False)
+        err = capfd.readouterr().err
+        assert "junction 'KNOWS'" in err
+        assert "unknown key 'propertie_types'" in err
+
+    def test_unknown_fk_edge_key_warns(self, tmp_path, capfd):
+        def mutate(bp):
+            bp["nodes"]["Person"]["connections"]["fk_edges"] = {
+                "LIVES_IN": {"target": "Person", "fk": "person_id", "targt": "City"}
+            }
+
+        kglite.from_blueprint(str(self._bp_with(tmp_path, mutate)), verbose=True, save=False)
+        err = capfd.readouterr().err
+        assert "fk_edge 'LIVES_IN'" in err
+        assert "unknown key 'targt'" in err
+
+    def test_unknown_sub_node_key_warns(self, tmp_path, capfd):
+        def mutate(bp):
+            bp["nodes"]["Person"]["sub_nodes"] = {"Nickname": {"pk": "name", "parent_fq": "person_id"}}
+
+        kglite.from_blueprint(str(self._bp_with(tmp_path, mutate)), verbose=True, save=False)
+        err = capfd.readouterr().err
+        assert "node 'Nickname'" in err
+        assert "unknown key 'parent_fq'" in err
+
+    def test_a_clean_blueprint_says_nothing(self, tmp_path, capfd):
+        kglite.from_blueprint(str(_minimal_blueprint(tmp_path)), verbose=True, save=False)
+        assert "unknown key" not in capfd.readouterr().err
+
+
 class TestListColumnType:
     """`"list"` / `"array"` declares a JSON-array column. Without it, a
     blueprint that stores multi-valued cells (synonyms, aliases, cross-refs)

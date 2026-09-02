@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- **`labels` on a blueprint node spec and a `from_records` node spec.** A list
+  of secondary labels stamped on every node of the type, so a query over a
+  union of types names one label instead of each type. Stamped after the node
+  *and* edge phases, so a provisional stub vivified for an endpoint no record
+  or CSV supplied carries them too — a blueprint owns every node of the types
+  it declares. The type's own name in the list is a no-op, not a duplicate.
+- **Unknown keys in a blueprint spec are now reported.** A key the loader does
+  not read — at the top level, in `settings`, on a node or `sub_nodes` entry,
+  or on an `fk_edges` / `junction_edges` entry — was dropped by the parser and
+  the build reported success on a graph the author had not described; a
+  misspelled `"lables"` cost every label it carried and said nothing. Each one
+  now becomes a build-report warning with a near-miss suggestion. It stays a
+  warning, not an error, because blueprints in the wild carry stray keys and
+  must keep building. (`from_records`, whose key sets have always been closed,
+  still raises.)
 - **`"list"` / `"array"` property type for blueprint columns.** A CSV column
   whose cells are JSON arrays (`["a","b"]`) now loads as a list, in a node
   spec's `properties` and in a junction edge's `property_types`, so
@@ -18,6 +33,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   export still writes a list as its JSON text and declares it `"string"` in the
   generated blueprint; declare `"list"` in the re-import blueprint to get a
   list back.
+
+### Changed
+- **Rust API:** the blueprint spec structs gain fields, so a struct literal
+  that constructs one exhaustively no longer compiles. `Blueprint`, `Settings`,
+  `NodeSpec`, `FkEdge` and `JunctionEdge` each carry an `extra` map holding the
+  keys the parser does not read (the source of the new unknown-key warnings),
+  and `NodeSpec` carries `labels`. Add `..Default::default()` where the struct
+  has it, or use `FkEdge::plain(target, fk)`. Deserialization is unaffected.
 
 ### Fixed
 - **`from_blueprint()` lost parallel edges past the first chunk of a streamed

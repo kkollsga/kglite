@@ -282,7 +282,7 @@ fn get_column_types(df_data: &DataFrame) -> HashMap<String, String> {
     types
 }
 
-fn preflight_interner_names<'a>(
+pub(crate) fn preflight_interner_names<'a>(
     graph: &DirGraph,
     names: impl IntoIterator<Item = &'a str>,
 ) -> Result<(), String> {

@@ -89,6 +89,7 @@ fn load_records(
     endpoint_policy: MissingEndpointPolicy,
 ) -> Result<RecordsReport, String> {
     let mut report = RecordsReport::default();
+    let mut declared_labels: Vec<(String, Vec<String>)> = Vec::new();
 
     // ── Nodes ────────────────────────────────────────────────────────────
     if let Some(nodes) = obj.get("nodes") {
@@ -96,7 +97,8 @@ fn load_records(
             .as_array()
             .ok_or_else(|| "from_records: 'nodes' must be an array".to_string())?;
         for (i, node_spec) in arr.iter().enumerate() {
-            load_node_spec(graph, node_spec, i, &mut report)?;
+            let labels = load_node_spec(graph, node_spec, i, &mut report)?;
+            declared_labels.extend(labels);
         }
     }
 
@@ -110,15 +112,51 @@ fn load_records(
         }
     }
 
+    // After the connections, not between the two phases: `vivify` mints a stub
+    // for an endpoint no record supplied, and a spec's labels cover every node
+    // of the type it declares — otherwise `MATCH (:Place)` misses exactly the
+    // nodes that arrived as an endpoint rather than as a record.
+    stamp_declared_labels(graph, &declared_labels)?;
+
     Ok(report)
 }
 
+/// Stamp each node spec's declared `labels` on every node of its type.
+///
+/// One bulk call per (type, label) — see
+/// [`DirGraph::add_node_labels_bulk`](crate::graph::schema::DirGraph::add_node_labels_bulk)
+/// for why the per-node loop is quadratic. Interning is validated for the
+/// whole set first, so a name over the interner's ceiling refuses the load
+/// rather than leaving the type half-labelled.
+fn stamp_declared_labels(
+    graph: &mut DirGraph,
+    declared: &[(String, Vec<String>)],
+) -> Result<(), String> {
+    for (node_type, labels) in declared {
+        graph
+            .interner
+            .validate_names(labels.iter().map(String::as_str))
+            .map_err(|e| format!("from_records: node '{node_type}': labels: {e}"))?;
+        let Some(nodes) = graph.type_indices.get(node_type) else {
+            continue;
+        };
+        let indices: Vec<petgraph::graph::NodeIndex> = nodes.iter().collect();
+        for label in labels {
+            let key = graph.interner.get_or_intern(label);
+            graph.add_node_labels_bulk(&indices, key);
+        }
+    }
+    Ok(())
+}
+
+/// Returns the spec's `(type, labels)` when it declares any, for the stamping
+/// pass that runs once every spec — nodes *and* connections — has loaded.
 fn load_node_spec(
     graph: &mut DirGraph,
     spec: &Json,
     idx: usize,
     report: &mut RecordsReport,
-) -> Result<(), String> {
+) -> Result<Option<(String, Vec<String>)>, String> {
     let ctx = || format!("from_records: nodes[{}]", idx);
     // A non-object spec falls through to the required-field error below.
     if let Some(obj) = spec.as_object() {
@@ -129,9 +167,11 @@ fn load_node_spec(
     let title_field = optional_str(spec, "title_field");
     let conflict_handling = optional_str(spec, "conflict_handling");
 
+    let labels = optional_str_list(spec, "labels", &ctx)?;
+
     let records = records_array(spec, &ctx)?;
     if records.is_empty() {
-        return Ok(()); // nothing to add for this type
+        return Ok(None); // nothing to add for this type
     }
 
     // The id field always leads the column order so a record missing it
@@ -150,8 +190,36 @@ fn load_node_spec(
     .map_err(|e| format!("{}: {}", ctx(), e))?;
 
     report.nodes_added += rep.nodes_created + rep.nodes_updated;
-    report.node_types.push(node_type);
-    Ok(())
+    report.node_types.push(node_type.clone());
+    Ok(labels.map(|labels| (node_type, labels)))
+}
+
+/// Read an optional array-of-strings field. Refuses a non-array or a
+/// non-string element rather than skipping it: a spec that says `"labels":
+/// "Human"` means to label something, and dropping it silently is the failure
+/// this whole key exists to remove.
+fn optional_str_list(
+    spec: &Json,
+    field: &str,
+    ctx: &impl Fn() -> String,
+) -> Result<Option<Vec<String>>, String> {
+    let Some(value) = spec.get(field) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let arr = value
+        .as_array()
+        .ok_or_else(|| format!("{}: '{field}' must be an array of strings", ctx()))?;
+    let mut out = Vec::with_capacity(arr.len());
+    for item in arr {
+        let s = item
+            .as_str()
+            .ok_or_else(|| format!("{}: '{field}' must be an array of strings", ctx()))?;
+        out.push(s.to_string());
+    }
+    Ok(Some(out))
 }
 
 fn load_connection_spec(
@@ -233,6 +301,7 @@ const NODE_SPEC_KEYS: &[&str] = &[
     "type",
     "id_field",
     "title_field",
+    "labels",
     "conflict_handling",
     "records",
 ];

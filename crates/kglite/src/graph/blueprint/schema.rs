@@ -1,8 +1,17 @@
 //! Serde types for the blueprint JSON schema.
 //!
 //! See docs/python/guides/blueprints.md for the user-facing spec. These structs
-//! are lenient: unknown fields are allowed and missing fields default to
-//! empty where sensible, matching the behaviour of the old Python loader.
+//! are lenient: missing fields default to empty where sensible, matching the
+//! behaviour of the old Python loader, and an unrecognised field never fails
+//! the parse — blueprints in the wild carry stray keys and must keep building.
+//!
+//! Leniency is not silence, though. Each spec that a user hand-writes captures
+//! its unrecognised keys in an `extra` map, and
+//! [`super::validation::unknown_key_warnings`] turns them into build-report
+//! warnings with a near-miss hint. A dropped `"lables"` otherwise costs every
+//! label it carried and reports success. The `ACCEPTED_*_KEYS` lists below
+//! feed only that hint — `extra` already knows the key is unrecognised — and
+//! `accepted_key_lists_match_the_structs` keeps them in step with the fields.
 
 use indexmap::IndexMap;
 use serde::Deserialize;
@@ -31,6 +40,9 @@ pub struct Blueprint {
     /// fail the build after the full report — no output file is written.
     #[serde(default)]
     pub ontology: Option<String>,
+    /// Keys at the top level of the blueprint that this struct does not read.
+    #[serde(flatten)]
+    pub extra: IndexMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -46,7 +58,54 @@ pub struct Settings {
     /// are kept so no edge is lost; opt in to discard dangling refs.
     #[serde(default)]
     pub auto_purge: bool,
+    /// Keys under `settings` that this struct does not read.
+    #[serde(flatten)]
+    pub extra: IndexMap<String, serde_json::Value>,
 }
+
+/// Keys the blueprint's top level reads. Hint source only — see the module
+/// header.
+pub const ACCEPTED_BLUEPRINT_KEYS: &[&str] = &["settings", "nodes", "compute", "ontology"];
+
+/// Keys `settings` reads, including the `root` / `output` aliases.
+pub const ACCEPTED_SETTINGS_KEYS: &[&str] = &[
+    "input_root",
+    "root",
+    "output_path",
+    "output_file",
+    "output",
+    "auto_purge",
+];
+
+/// Keys a node spec (and a `sub_nodes` entry) reads.
+pub const ACCEPTED_NODE_KEYS: &[&str] = &[
+    "csv",
+    "pk",
+    "title",
+    "parent",
+    "parent_fk",
+    "properties",
+    "labels",
+    "skipped",
+    "filter",
+    "connections",
+    "sub_nodes",
+    "timeseries",
+];
+
+/// Keys an `fk_edges` entry reads.
+pub const ACCEPTED_FK_EDGE_KEYS: &[&str] = &["target", "fk"];
+
+/// Keys a `junction_edges` entry reads.
+pub const ACCEPTED_JUNCTION_EDGE_KEYS: &[&str] = &[
+    "csv",
+    "source_fk",
+    "target",
+    "target_fk",
+    "properties",
+    "property_types",
+    "rename",
+];
 
 impl Settings {
     /// Compute the absolute output path from `output_path` + `output_file`,
@@ -76,6 +135,11 @@ pub struct NodeSpec {
     pub parent_fk: Option<String>,
     #[serde(default)]
     pub properties: IndexMap<String, String>,
+    /// Secondary labels stamped on every node of this type. The type name is
+    /// the primary label and is never restamped, so listing it here is a
+    /// no-op rather than a duplicate.
+    #[serde(default)]
+    pub labels: Vec<String>,
     #[serde(default)]
     pub skipped: Vec<String>,
     #[serde(default)]
@@ -86,6 +150,9 @@ pub struct NodeSpec {
     pub sub_nodes: IndexMap<String, NodeSpec>,
     #[serde(default)]
     pub timeseries: Option<TimeseriesSpec>,
+    /// Keys on this node spec that this struct does not read.
+    #[serde(flatten)]
+    pub extra: IndexMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -100,6 +167,9 @@ pub struct Connections {
 pub struct FkEdge {
     pub target: String,
     pub fk: String,
+    /// Keys on this fk_edge that this struct does not read.
+    #[serde(flatten)]
+    pub extra: IndexMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -119,6 +189,21 @@ pub struct JunctionEdge {
     /// unknown_property_type_warnings`.
     #[serde(default)]
     pub rename: IndexMap<String, String>,
+    /// Keys on this junction_edge that this struct does not read.
+    #[serde(flatten)]
+    pub extra: IndexMap<String, serde_json::Value>,
+}
+
+impl FkEdge {
+    /// A `target` + `fk` edge with nothing else declared — the shape the
+    /// loader synthesises for a node spec's implicit `parent` edge.
+    pub fn plain(target: String, fk: String) -> Self {
+        FkEdge {
+            target,
+            fk,
+            extra: IndexMap::new(),
+        }
+    }
 }
 
 impl JunctionEdge {
@@ -132,6 +217,7 @@ impl JunctionEdge {
             properties: vec![],
             property_types: IndexMap::new(),
             rename: IndexMap::new(),
+            extra: IndexMap::new(),
         }
     }
 }

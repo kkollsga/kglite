@@ -30,6 +30,11 @@ key raises a `ValueError` naming a near-miss where there is one, because a key
 the loader does not read would otherwise be dropped in silence: a spec written
 with `"relationships"` builds no relationships at all.
 
+A node spec may also carry `"labels": ["Human", "Agent"]` — secondary labels
+stamped on every node of that type, including endpoint stubs `vivify` created
+for it, so `MATCH (:Human)` sees the whole type. Listing the type's own name is
+a no-op, not a duplicate.
+
 JSON arrays/maps become native list/map values. `on_missing_endpoint` is:
 
 - `"vivify"` (default) — create provisional endpoint stubs.

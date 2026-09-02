@@ -175,6 +175,7 @@ fn every_accepted_key_still_builds() {
                 "type": "Doc",
                 "id_field": "id",
                 "title_field": "name",
+                "labels": ["Text"],
                 "conflict_handling": "update",
                 "records": [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]
             }],
