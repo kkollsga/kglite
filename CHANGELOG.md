@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- **Properties on a blueprint FK edge.** An `fk_edges` entry now reads
+  `properties`, `property_types` and `rename`, the same three keys a junction
+  edge reads: the named columns of the source node's own CSV row are attached
+  to the edge the row produces. Only rows that produced an edge contribute —
+  a row whose FK cell was null drops with its properties rather than shifting
+  them onto the next edge. Declaring a column here never keeps it off the
+  node; `skipped` is still what does that. A declared column the CSV does not
+  have is reported and the edge is built without it.
 - **`labels` on a blueprint node spec and a `from_records` node spec.** A list
   of secondary labels stamped on every node of the type, so a query over a
   union of types names one label instead of each type. Stamped after the node
@@ -39,7 +47,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that constructs one exhaustively no longer compiles. `Blueprint`, `Settings`,
   `NodeSpec`, `FkEdge` and `JunctionEdge` each carry an `extra` map holding the
   keys the parser does not read (the source of the new unknown-key warnings),
-  and `NodeSpec` carries `labels`. Add `..Default::default()` where the struct
+  `NodeSpec` carries `labels`, and `FkEdge` carries `properties`,
+  `property_types` and `rename`. Add `..Default::default()` where the struct
   has it, or use `FkEdge::plain(target, fk)`. Deserialization is unaffected.
 
 ### Fixed

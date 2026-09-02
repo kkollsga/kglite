@@ -1426,6 +1426,249 @@ class TestJunctionRename:
         assert "not in 'properties'" in err
 
 
+class TestFkEdgeProperties:
+    """`properties` / `property_types` / `rename` on an fk_edge, mirroring a
+    junction edge. The columns come from the source node's own CSV row, so the
+    property values must follow the rows that survived the null-FK drop."""
+
+    def _bp(self, tmp_path, edge_extra=None, employees=None, skipped=None):
+        companies = pd.DataFrame({"company_id": [10, 20], "name": ["Acme", "Globex"]})
+        if employees is None:
+            employees = pd.DataFrame(
+                {
+                    "employee_id": [1, 2, 3],
+                    "name": ["Alice", "Bob", "Charlie"],
+                    "company_id": [10, 20, 10],
+                    "since": ["2001-01-01", "2002-02-02", "2003-03-03"],
+                    "role": ["Lead", "Member", "Member"],
+                    "level": [1, 2, 3],
+                }
+            )
+        _write_csv(tmp_path / "companies.csv", companies)
+        _write_csv(tmp_path / "employees.csv", employees)
+        edge = {"target": "Company", "fk": "company_id"}
+        if edge_extra:
+            edge.update(edge_extra)
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "Company": {"csv": "companies.csv", "pk": "company_id", "title": "name"},
+                "Employee": {
+                    "csv": "employees.csv",
+                    "pk": "employee_id",
+                    "title": "name",
+                    "skipped": skipped if skipped is not None else ["company_id"],
+                    "connections": {"fk_edges": {"WORKS_AT": edge}},
+                },
+            },
+        }
+        bp_path = tmp_path / "bp.json"
+        _write_blueprint(bp_path, bp)
+        return bp_path
+
+    def _edges(self, graph):
+        return graph.cypher(
+            "MATCH (e:Employee)-[r:WORKS_AT]->(c:Company) "
+            "RETURN e.name AS who, r.role AS role, r.since AS since ORDER BY who"
+        ).to_list()
+
+    def test_declared_properties_land_on_the_edge(self, tmp_path):
+        bp_path = self._bp(tmp_path, {"properties": ["role", "since"]})
+        rows = self._edges(from_blueprint(bp_path, save=False))
+        assert [r["who"] for r in rows] == ["Alice", "Bob", "Charlie"]
+        assert [r["role"] for r in rows] == ["Lead", "Member", "Member"]
+        assert [r["since"] for r in rows] == ["2001-01-01", "2002-02-02", "2003-03-03"]
+
+    def test_undeclared_columns_stay_off_the_edge(self, tmp_path):
+        bp_path = self._bp(tmp_path, {"properties": ["role"]})
+        rows = self._edges(from_blueprint(bp_path, save=False))
+        assert [r["role"] for r in rows] == ["Lead", "Member", "Member"]
+        assert all(r["since"] is None for r in rows)
+
+    def test_property_types_declare_the_column_type(self, tmp_path):
+        """Inference would make `level` an int; the declaration wins."""
+        bp_path = self._bp(
+            tmp_path,
+            {"properties": ["level"], "property_types": {"level": "string"}},
+        )
+        graph = from_blueprint(bp_path, save=False)
+        rows = graph.cypher(
+            "MATCH (e:Employee)-[r:WORKS_AT]->(:Company) RETURN r.level AS lvl ORDER BY e.name"
+        ).to_list()
+        assert [r["lvl"] for r in rows] == ["1", "2", "3"]
+
+    def test_rename_lands_the_property_under_the_new_name(self, tmp_path):
+        bp_path = self._bp(
+            tmp_path,
+            {"properties": ["since"], "rename": {"since": "validFrom"}},
+        )
+        graph = from_blueprint(bp_path, save=False)
+        rows = graph.cypher(
+            "MATCH (:Employee)-[r:WORKS_AT]->(:Company) RETURN r.validFrom AS vf, r.since AS old"
+        ).to_list()
+        assert len(rows) == 3
+        assert all(r["vf"] is not None for r in rows)
+        assert all(r["old"] is None for r in rows)
+
+    def test_rename_of_the_fk_column_reports_an_error(self, tmp_path, capfd):
+        bp_path = self._bp(
+            tmp_path,
+            {"properties": ["role"], "rename": {"company_id": "cid"}},
+        )
+        graph = from_blueprint(bp_path, save=False, verbose=True)
+        assert "rename of fk column" in capfd.readouterr().err
+        assert graph.cypher("MATCH ()-[r:WORKS_AT]->() RETURN count(r) AS c").to_list()[0]["c"] == 0
+
+    def test_rename_key_must_be_a_declared_property(self, tmp_path, capfd):
+        bp_path = self._bp(tmp_path, {"properties": ["role"], "rename": {"nosuch": "x"}})
+        from_blueprint(bp_path, save=False, verbose=True)
+        assert "not in 'properties'" in capfd.readouterr().err
+
+    def test_a_property_column_absent_from_the_csv_is_reported(self, tmp_path, capfd):
+        bp_path = self._bp(tmp_path, {"properties": ["role", "bonus"]})
+        graph = from_blueprint(bp_path, save=False)
+        err = capfd.readouterr().err
+        assert "bonus" in err
+        # The edge still builds, carrying the properties that do exist.
+        rows = self._edges(graph)
+        assert [r["role"] for r in rows] == ["Lead", "Member", "Member"]
+
+    def test_null_fk_rows_drop_with_their_properties(self, tmp_path):
+        """The row Bob sits on has no company; his `role` must not slide onto
+        Charlie's edge."""
+        employees = pd.DataFrame(
+            {
+                "employee_id": [1, 2, 3],
+                "name": ["Alice", "Bob", "Charlie"],
+                "company_id": [10, None, 20],
+                "since": ["2001-01-01", "2002-02-02", "2003-03-03"],
+                "role": ["Lead", "Ghost", "Member"],
+                "level": [1, 2, 3],
+            }
+        )
+        bp_path = self._bp(tmp_path, {"properties": ["role", "since"]}, employees=employees)
+        rows = self._edges(from_blueprint(bp_path, save=False))
+        assert [(r["who"], r["role"], r["since"]) for r in rows] == [
+            ("Alice", "Lead", "2001-01-01"),
+            ("Charlie", "Member", "2003-03-03"),
+        ]
+
+    def test_declaring_a_property_does_not_skip_it_from_the_node(self, tmp_path):
+        """The two landings are independent: `properties` copies the column onto
+        the edge, `skipped` is what keeps it off the node."""
+        bp_path = self._bp(tmp_path, {"properties": ["role"]}, skipped=["company_id"])
+        graph = from_blueprint(bp_path, save=False)
+        nodes = graph.cypher("MATCH (e:Employee) RETURN e.role AS role ORDER BY e.name").to_list()
+        assert [r["role"] for r in nodes] == ["Lead", "Member", "Member"]
+        edges = self._edges(graph)
+        assert [r["role"] for r in edges] == ["Lead", "Member", "Member"]
+
+    def test_a_self_reference_edge_carries_properties(self, tmp_path):
+        """`fk == pk` synthesises the target column; the property columns must
+        still line up with the rows behind it."""
+        bp_path = self._bp(
+            tmp_path,
+            {"target": "Employee", "fk": "employee_id", "properties": ["role"]},
+        )
+        graph = from_blueprint(bp_path, save=False)
+        rows = graph.cypher(
+            "MATCH (a:Employee)-[r:WORKS_AT]->(b:Employee) RETURN a.name AS who, r.role AS role ORDER BY who"
+        ).to_list()
+        assert [(r["who"], r["role"]) for r in rows] == [
+            ("Alice", "Lead"),
+            ("Bob", "Member"),
+            ("Charlie", "Member"),
+        ]
+
+    def test_streamed_and_buffered_agree(self, tmp_path, monkeypatch):
+        employees = pd.DataFrame(
+            {
+                "employee_id": list(range(1, 41)),
+                "name": [f"E{i:02d}" for i in range(1, 41)],
+                "company_id": [10 if i % 2 else 20 for i in range(1, 41)],
+                "since": [f"20{i:02d}-01-01" for i in range(1, 41)],
+                "role": [f"R{i}" for i in range(1, 41)],
+                "level": list(range(1, 41)),
+            }
+        )
+        bp_path = self._bp(
+            tmp_path,
+            {"properties": ["role", "since"], "rename": {"since": "validFrom"}},
+            employees=employees,
+        )
+
+        def build(threshold_mb, chunk_size):
+            monkeypatch.setenv("KGLITE_BLUEPRINT_STREAMING_THRESHOLD_MB", str(threshold_mb))
+            monkeypatch.setenv("KGLITE_BLUEPRINT_NODE_CHUNK_SIZE", str(chunk_size))
+            graph = from_blueprint(bp_path, save=False)
+            return graph.cypher(
+                "MATCH (e:Employee)-[r:WORKS_AT]->(:Company) "
+                "RETURN e.name AS who, r.role AS role, r.validFrom AS vf ORDER BY who"
+            ).to_list()
+
+        buffered = build(100, 1000)
+        assert len(buffered) == 40
+        assert buffered[0]["role"] == "R1"
+        for chunk_size in (7, 13, 40):
+            assert build(0, chunk_size) == buffered, f"chunk_size={chunk_size} changed the edge properties"
+
+    def _two_source_bp(self, tmp_path, with_properties):
+        """Two node types writing the same relationship type, each with repeated
+        (source, target) rows. Only the *first* add_connections call per
+        relationship keeps parallel edges, so anything that reorders or resizes
+        the FK frames shows up as a different count here."""
+        _write_csv(tmp_path / "companies.csv", pd.DataFrame({"company_id": [10], "name": ["Acme"]}))
+        for csv_name, id_col in (("employees.csv", "employee_id"), ("contractors.csv", "contractor_id")):
+            _write_csv(
+                tmp_path / csv_name,
+                pd.DataFrame(
+                    {
+                        id_col: [1, 1, 1],
+                        "name": ["X", "X", "X"],
+                        "company_id": [10, 10, 10],
+                        "role": ["a", "b", "c"],
+                    }
+                ),
+            )
+        edge = {"target": "Company", "fk": "company_id"}
+        if with_properties:
+            edge = dict(edge, properties=["role"])
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "Company": {"csv": "companies.csv", "pk": "company_id", "title": "name"},
+                "Employee": {
+                    "csv": "employees.csv",
+                    "pk": "employee_id",
+                    "title": "name",
+                    "connections": {"fk_edges": {"WORKS_AT": dict(edge)}},
+                },
+                "Contractor": {
+                    "csv": "contractors.csv",
+                    "pk": "contractor_id",
+                    "title": "name",
+                    "connections": {"fk_edges": {"WORKS_AT": dict(edge)}},
+                },
+            },
+        }
+        bp_path = tmp_path / ("bp_props.json" if with_properties else "bp_plain.json")
+        _write_blueprint(bp_path, bp)
+        return bp_path
+
+    def test_declaring_properties_does_not_change_parallel_edge_counts(self, tmp_path):
+        def count(with_properties):
+            graph = from_blueprint(self._two_source_bp(tmp_path, with_properties), save=False)
+            return graph.cypher("MATCH ()-[r:WORKS_AT]->(:Company) RETURN count(r) AS n").to_list()[0]["n"]
+
+        plain = count(False)
+        assert plain == 4, f"expected 3 parallel edges from the first spec + 1 deduped, got {plain}"
+        assert count(True) == plain
+
+        graph = from_blueprint(self._two_source_bp(tmp_path, True), save=False)
+        roles = graph.cypher("MATCH ()-[r:WORKS_AT]->(:Company) RETURN r.role AS role").to_list()
+        assert sum(1 for r in roles if r["role"] is not None) == plain
+
+
 class TestNodeLabels:
     """`labels` on a node spec stamps secondary labels on every node of the
     type. Without it a blueprint can express `:Disease` and `:Phenotype` only

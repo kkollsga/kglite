@@ -242,6 +242,51 @@ This creates `(Employee)-[:WORKS_AT]->(Company)` edges. The `fk` column in the s
 
 > **Tip:** Add FK columns to `skipped` if you don't want them stored as node properties — the edge already captures the relationship.
 
+### Properties on an FK Edge
+
+An `fk_edges` entry reads the same three property keys a junction edge does.
+The columns come from the source node's own row — the one that carried the FK
+value — so the edge can record *how* the two are related:
+
+```json
+{
+  "Employee": {
+    "csv": "employees.csv",
+    "pk": "employee_id",
+    "title": "name",
+    "skipped": ["company_id"],
+    "connections": {
+      "fk_edges": {
+        "WORKS_AT": {
+          "target": "Company",
+          "fk": "company_id",
+          "properties": ["role", "hired_on"],
+          "property_types": {"hired_on": "date"},
+          "rename": {"hired_on": "validFrom"}
+        }
+      }
+    }
+  }
+}
+```
+
+That builds `(Employee)-[:WORKS_AT {role: "Lead", validFrom: "2023-01-01"}]->(Company)`.
+The rules are the junction ones: `property_types` stays keyed by the **CSV**
+spelling, `rename` keys must be listed in `properties`, and neither the `fk`
+nor the `pk` column is renamable or declarable as a property — both are build
+errors that skip the edge. A property column the CSV does not have is reported
+and the edge is built without it.
+
+```{note}
+Declaring a column as an edge property never implicitly skips it from the
+node. The two landings are independent: `properties` copies the column onto
+the edge, `skipped` is what keeps it off the node. List the column in both if
+you want it only on the edge.
+```
+
+Rows whose FK cell is empty produce no edge, and their property values go with
+them — an edge's properties always come from the row that created it.
+
 ### Manual Nodes (No CSV)
 
 If you don't have a separate CSV for the target type, omit the `csv` field. The loader will automatically create nodes from the distinct FK values it finds:

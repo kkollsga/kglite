@@ -94,7 +94,8 @@ pub const ACCEPTED_NODE_KEYS: &[&str] = &[
 ];
 
 /// Keys an `fk_edges` entry reads.
-pub const ACCEPTED_FK_EDGE_KEYS: &[&str] = &["target", "fk"];
+pub const ACCEPTED_FK_EDGE_KEYS: &[&str] =
+    &["target", "fk", "properties", "property_types", "rename"];
 
 /// Keys a `junction_edges` entry reads.
 pub const ACCEPTED_JUNCTION_EDGE_KEYS: &[&str] = &[
@@ -167,6 +168,17 @@ pub struct Connections {
 pub struct FkEdge {
     pub target: String,
     pub fk: String,
+    /// Columns of the *source* node's CSV to attach to the edge, taken from
+    /// the same row the FK value came from. Listing a column here does not
+    /// keep it off the node — `skipped` is what does that.
+    #[serde(default)]
+    pub properties: Vec<String>,
+    #[serde(default)]
+    pub property_types: IndexMap<String, String>,
+    /// CSV column → edge property name, with the same rules as
+    /// [`JunctionEdge::rename`].
+    #[serde(default)]
+    pub rename: IndexMap<String, String>,
     /// Keys on this fk_edge that this struct does not read.
     #[serde(flatten)]
     pub extra: IndexMap<String, serde_json::Value>,
@@ -201,6 +213,9 @@ impl FkEdge {
         FkEdge {
             target,
             fk,
+            properties: vec![],
+            property_types: IndexMap::new(),
+            rename: IndexMap::new(),
             extra: IndexMap::new(),
         }
     }

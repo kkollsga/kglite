@@ -241,6 +241,30 @@ pub fn typed_dataframe(
     rename: &HashMap<String, String>,
     misparses: &mut ListMisparseTally,
 ) -> Result<DataFrame, String> {
+    let mut df = DataFrame::new(Vec::new());
+    append_typed_columns(
+        &mut df,
+        raw,
+        keep_columns,
+        declared_types,
+        rename,
+        misparses,
+    )?;
+    Ok(df)
+}
+
+/// `typed_dataframe`'s body, writing into a frame that already has columns.
+/// The FK-edge loader builds its source/target id pair first — those two are
+/// typed by id inference, not by the CSV's — and appends the declared
+/// property columns onto it.
+pub fn append_typed_columns(
+    df: &mut DataFrame,
+    raw: &RawCsv,
+    keep_columns: &[String],
+    declared_types: &HashMap<String, String>,
+    rename: &HashMap<String, String>,
+    misparses: &mut ListMisparseTally,
+) -> Result<(), String> {
     let mut columns: Vec<(String, ColumnType)> = Vec::with_capacity(keep_columns.len());
     let mut data: Vec<ColumnData> = Vec::with_capacity(keep_columns.len());
 
@@ -260,12 +284,11 @@ pub fn typed_dataframe(
         data.push(col_data);
     }
 
-    let mut df = DataFrame::new(Vec::new());
     for ((name, col_type), col_data) in columns.into_iter().zip(data) {
         df.add_column(name, col_type, col_data)
             .map_err(|e| format!("add_column failed: {}", e))?;
     }
-    Ok(df)
+    Ok(())
 }
 
 /// Map a blueprint type keyword to a KGLite `ColumnType`. Returns `None` for

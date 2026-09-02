@@ -1037,6 +1037,9 @@ struct PreppedFkEdges {
     /// Spec-level errors (e.g. missing FK column); surfaced after the serial
     /// consumer runs.
     errors: Vec<String>,
+    /// Spec-level warnings (list cells that were probably meant as several
+    /// values), surfaced alongside the errors.
+    warnings: Vec<String>,
 }
 
 struct PreppedFkEdge {
@@ -1091,6 +1094,7 @@ fn prep_fk_edges(spec: &FlatSpec, root: &Path, cache: &CsvCache) -> Option<Prepp
 
     let mut built = Vec::new();
     let mut errors = Vec::new();
+    let mut warnings = Vec::new();
 
     for (edge_type, edge) in &fk_edges {
         let Some(fk_idx) = raw.col_index(&edge.fk) else {
@@ -1107,8 +1111,16 @@ fn prep_fk_edges(spec: &FlatSpec, root: &Path, cache: &CsvCache) -> Option<Prepp
             ));
             continue;
         };
+        let props = match fk_edge_properties(edge_type, &spec.node_type, edge, &pk) {
+            Ok(p) => p,
+            Err(e) => {
+                errors.push(e);
+                continue;
+            }
+        };
 
-        let (target_col, df) = match fk_edge_frame(&raw, &pk, pk_idx, edge, fk_idx) {
+        let mut misparses = ListMisparseTally::default();
+        let frame = match fk_edge_frame(&raw, &pk, pk_idx, edge, fk_idx, &props, &mut misparses) {
             Ok(Some(frame)) => frame,
             Ok(None) => continue,
             Err(e) => {
@@ -1119,11 +1131,18 @@ fn prep_fk_edges(spec: &FlatSpec, root: &Path, cache: &CsvCache) -> Option<Prepp
                 continue;
             }
         };
+        warnings.extend(misparses.into_warnings(&format!(
+            "fk_edge '{edge_type}' (node '{}')",
+            spec.node_type
+        )));
+        for col in &frame.missing_properties {
+            errors.push(missing_fk_property_error(&spec.node_type, edge_type, col));
+        }
         built.push(PreppedFkEdge {
             edge_type: edge_type.clone(),
             target_type: edge.target.clone(),
-            target_col,
-            df,
+            target_col: frame.target_col,
+            df: frame.df,
         });
     }
 
@@ -1132,12 +1151,105 @@ fn prep_fk_edges(spec: &FlatSpec, root: &Path, cache: &CsvCache) -> Option<Prepp
         pk,
         edges: built,
         errors,
+        warnings,
     })
 }
 
+fn missing_fk_property_error(node_type: &str, edge_type: &str, column: &str) -> String {
+    format!(
+        "[{node_type}] fk_edge {edge_type}: property column '{column}' not found in the \
+         source CSV — the edge is built without it"
+    )
+}
+
+/// What one FK edge attaches to each edge besides the two ids: the source
+/// columns, their declared types and the name each lands under. Validated
+/// once per edge, then reused for every table (chunk) the edge is built from.
+struct FkEdgeProperties {
+    columns: Vec<String>,
+    /// Keyed by CSV column name, like a junction's `property_types` — the
+    /// rename applies to the output name only.
+    declared: HashMap<String, String>,
+    rename: HashMap<String, String>,
+}
+
+/// Validate one FK edge's `properties` / `property_types` / `rename` against
+/// the id columns the frame already carries. Same rules as a junction's:
+/// a rename key must be a declared property, an id column is not renamable,
+/// and no two columns may land under one name.
+fn fk_edge_properties(
+    edge_type: &str,
+    node_type: &str,
+    edge: &super::schema::FkEdge,
+    pk: &str,
+) -> Result<FkEdgeProperties, String> {
+    let target_col = fk_target_col(pk, &edge.fk);
+    let mut columns: Vec<String> = Vec::new();
+    for col in &edge.properties {
+        if col == pk || col == &edge.fk {
+            return Err(format!(
+                "[{node_type}] fk_edge {edge_type}: property '{col}' is an id column \
+                 (pk '{pk}', fk '{}'); the edge already carries it",
+                edge.fk
+            ));
+        }
+        if !columns.contains(col) {
+            columns.push(col.clone());
+        }
+    }
+
+    let mut rename: HashMap<String, String> = HashMap::new();
+    for (col, new_name) in &edge.rename {
+        if col == pk || col == &edge.fk {
+            return Err(format!(
+                "[{node_type}] fk_edge {edge_type}: rename of fk column '{col}' is not \
+                 supported — 'fk' and 'pk' name the CSV columns"
+            ));
+        }
+        if !columns.contains(col) {
+            return Err(format!(
+                "[{node_type}] fk_edge {edge_type}: rename key '{col}' is not in 'properties'"
+            ));
+        }
+        let collides = new_name == pk
+            || new_name == &target_col
+            || columns.iter().any(|c| c == new_name && c != col)
+            || rename.values().any(|v| v == new_name);
+        if collides {
+            return Err(format!(
+                "[{node_type}] fk_edge {edge_type}: rename target '{new_name}' collides with \
+                 another column"
+            ));
+        }
+        rename.insert(col.clone(), new_name.clone());
+    }
+
+    // An unrecognized type keyword falls through to inference, and
+    // `validation::unknown_property_type_warnings` already names it.
+    let declared = edge
+        .property_types
+        .iter()
+        .filter(|(_, ty)| map_blueprint_type(ty).is_some())
+        .map(|(col, ty)| (col.clone(), ty.clone()))
+        .collect();
+    Ok(FkEdgeProperties {
+        columns,
+        declared,
+        rename,
+    })
+}
+
+struct FkEdgeFrame {
+    target_col: String,
+    df: DataFrame,
+    /// Declared property columns this table does not have.
+    missing_properties: Vec<String>,
+}
+
 /// One FK edge's frame, built from one raw table: the target column's name
-/// plus the DataFrame `connect` consumes (source id + target id). `Ok(None)`
-/// when the table contributes no edge — every FK cell in it was null.
+/// plus the DataFrame `connect` consumes (source id, target id, and any
+/// declared edge properties). `Ok(None)` when the table contributes no edge —
+/// every FK cell in it was null.
 ///
 /// Shared by the buffered and the streaming loader so the two cannot drift:
 /// a chunk is just a shorter table, and both paths must derive an edge from
@@ -1148,39 +1260,98 @@ fn fk_edge_frame(
     pk_idx: usize,
     edge: &super::schema::FkEdge,
     fk_idx: usize,
-) -> Result<Option<(String, DataFrame)>, String> {
-    let (target_col, src_vals, tgt_vals) = build_fk_columns(raw, pk, &edge.fk, pk_idx, fk_idx);
-    if src_vals.is_empty() {
+    props: &FkEdgeProperties,
+    misparses: &mut ListMisparseTally,
+) -> Result<Option<FkEdgeFrame>, String> {
+    let cols = build_fk_columns(raw, pk, &edge.fk, pk_idx, fk_idx);
+    if cols.src.is_empty() {
         return Ok(None);
     }
-    let df = build_edge_df(pk, &target_col, src_vals, tgt_vals)?;
-    Ok(Some((target_col, df)))
+    let mut df = build_edge_df(pk, &cols.target_col, cols.src, cols.tgt)?;
+
+    let mut missing_properties = Vec::new();
+    let mut present = Vec::new();
+    for col in &props.columns {
+        if raw.col_index(col).is_some() {
+            present.push(col.clone());
+        } else {
+            missing_properties.push(col.clone());
+        }
+    }
+    if !present.is_empty() {
+        // Property values must follow the rows the ids came from: a row whose
+        // FK was null produced no edge, and its properties must not slide onto
+        // the next row's.
+        let subset;
+        let source: &RawCsv = if cols.rows.len() == raw.row_count() {
+            raw
+        } else {
+            subset = subset_rows(raw, &cols.rows);
+            &subset
+        };
+        super::csv_loader::append_typed_columns(
+            &mut df,
+            source,
+            &present,
+            &props.declared,
+            &props.rename,
+            misparses,
+        )?;
+    }
+
+    Ok(Some(FkEdgeFrame {
+        target_col: cols.target_col,
+        df,
+        missing_properties,
+    }))
 }
 
-fn build_fk_columns(
-    raw: &RawCsv,
-    pk: &str,
-    fk: &str,
-    pk_idx: usize,
-    fk_idx: usize,
-) -> (String, Vec<Option<String>>, Vec<Option<String>>) {
+/// A row-subset of `raw`, carrying the source row numbers so a diagnostic
+/// still names a row the author can find.
+fn subset_rows(raw: &RawCsv, rows: &[usize]) -> RawCsv {
+    RawCsv {
+        headers: raw.headers.clone(),
+        rows: rows.iter().map(|&r| raw.rows[r].clone()).collect(),
+        nulls: rows.iter().map(|&r| raw.nulls[r].clone()).collect(),
+        row_ids: rows.iter().map(|&r| raw.row_id(r)).collect(),
+    }
+}
+
+/// The edge frame's target column name. A self-reference (`fk == pk`) needs a
+/// synthesised one so the source and target columns differ.
+fn fk_target_col(pk: &str, fk: &str) -> String {
+    if pk == fk {
+        format!("_target_{}", fk)
+    } else {
+        fk.to_string()
+    }
+}
+
+struct FkColumns {
+    target_col: String,
+    src: Vec<Option<String>>,
+    tgt: Vec<Option<String>>,
+    /// Indices into `raw.rows` of the rows behind `src`/`tgt`, so property
+    /// columns can be built from exactly the rows that produced an edge.
+    rows: Vec<usize>,
+}
+
+fn build_fk_columns(raw: &RawCsv, pk: &str, fk: &str, pk_idx: usize, fk_idx: usize) -> FkColumns {
+    let target_col = fk_target_col(pk, fk);
+    let mut src = Vec::new();
+    let mut tgt = Vec::new();
+    let mut rows = Vec::new();
     // Keep only rows with a non-null target id.
     if pk == fk {
-        // Self-reference: synthesise _target_{fk} so source/target column names differ.
-        let target_col = format!("_target_{}", fk);
-        let mut src = Vec::new();
-        let mut tgt = Vec::new();
         for (r, row) in raw.rows.iter().enumerate() {
             if raw.nulls[r][pk_idx] {
                 continue;
             }
             src.push(Some(row[pk_idx].clone()));
             tgt.push(Some(row[pk_idx].clone()));
+            rows.push(r);
         }
-        (target_col, src, tgt)
     } else {
-        let mut src = Vec::new();
-        let mut tgt = Vec::new();
         for (r, row) in raw.rows.iter().enumerate() {
             if raw.nulls[r][fk_idx] {
                 continue;
@@ -1192,8 +1363,14 @@ fn build_fk_columns(
             };
             src.push(src_val);
             tgt.push(Some(row[fk_idx].clone()));
+            rows.push(r);
         }
-        (fk.to_string(), src, tgt)
+    }
+    FkColumns {
+        target_col,
+        src,
+        tgt,
+        rows,
     }
 }
 
@@ -1230,6 +1407,7 @@ fn load_fk_edges(
         for err in pfx.errors {
             report.errors.push(err);
         }
+        report.warnings.extend(pfx.warnings);
         for edge in pfx.edges {
             let t_c = std::time::Instant::now();
             let count = connect(
@@ -1334,10 +1512,27 @@ fn load_streamed_fk_edges(
     };
     let mut auto_pk_counter: u64 = 1;
 
+    // Validated once per edge, not once per chunk: a bad `rename` is a
+    // property of the spec, and an edge carrying one is skipped whole rather
+    // than half-built. An edge missing from this map is one such.
+    let mut edge_props: IndexMap<String, FkEdgeProperties> = IndexMap::new();
+    for (edge_type, edge) in &fk_edges {
+        match fk_edge_properties(edge_type, &spec.node_type, edge, &pk) {
+            Ok(props) => {
+                edge_props.insert(edge_type.clone(), props);
+            }
+            Err(e) => report.errors.push(e),
+        }
+    }
+
     // Track per-edge missing-column errors so we report each at most
     // once instead of once per chunk.
     let mut reported_missing_fk: HashSet<String> = HashSet::new();
     let mut reported_missing_pk: HashSet<String> = HashSet::new();
+    let mut reported_missing_prop: HashSet<(String, String)> = HashSet::new();
+    // One tally per edge across every chunk of this CSV — the junction
+    // loader's reason applies here too.
+    let mut misparses: IndexMap<String, ListMisparseTally> = IndexMap::new();
 
     for chunk_result in chunks {
         let mut raw = chunk_result.map_err(|e| format!("[{}] {}", spec.node_type, e))?;
@@ -1369,6 +1564,9 @@ fn load_streamed_fk_edges(
         };
 
         for (edge_type, edge) in &fk_edges {
+            let Some(props) = edge_props.get(edge_type) else {
+                continue;
+            };
             let Some(fk_idx) = raw.col_index(&edge.fk) else {
                 if reported_missing_fk.insert(edge_type.clone()) {
                     report.errors.push(format!(
@@ -1378,7 +1576,8 @@ fn load_streamed_fk_edges(
                 }
                 continue;
             };
-            let (target_col, df) = match fk_edge_frame(&raw, &pk, pk_idx, edge, fk_idx) {
+            let tally = misparses.entry(edge_type.clone()).or_default();
+            let frame = match fk_edge_frame(&raw, &pk, pk_idx, edge, fk_idx, props, tally) {
                 Ok(Some(frame)) => frame,
                 Ok(None) => continue,
                 Err(e) => {
@@ -1389,6 +1588,14 @@ fn load_streamed_fk_edges(
                     continue;
                 }
             };
+            for col in &frame.missing_properties {
+                if reported_missing_prop.insert((edge_type.clone(), col.clone())) {
+                    report
+                        .errors
+                        .push(missing_fk_property_error(&spec.node_type, edge_type, col));
+                }
+            }
+            let (target_col, df) = (frame.target_col, frame.df);
             let count = connect(
                 graph,
                 df,
@@ -1402,6 +1609,12 @@ fn load_streamed_fk_edges(
             )?;
             *report.edges_by_type.entry(edge_type.clone()).or_insert(0) += count;
         }
+    }
+    for (edge_type, tally) in misparses {
+        report.warnings.extend(tally.into_warnings(&format!(
+            "fk_edge '{edge_type}' (node '{}')",
+            spec.node_type
+        )));
     }
     Ok(())
 }

@@ -306,6 +306,14 @@ pub fn unknown_property_type_warnings(blueprint: &Blueprint) -> Vec<String> {
             "properties",
             &spec.properties,
         );
+        for (edge_type, fk) in &spec.connections.fk_edges {
+            check(
+                warnings,
+                &format!("fk_edge '{edge_type}' (node '{node_type}')"),
+                "property_types",
+                &fk.property_types,
+            );
+        }
         for (edge_type, junc) in &spec.connections.junction_edges {
             check(
                 warnings,
@@ -427,19 +435,28 @@ mod tests {
             r#"{"nodes": {"Person": {
                 "csv": "p.csv", "pk": "id",
                 "properties": {"age": "int", "geom": "geometry", "born": "birthDate"},
-                "connections": {"junction_edges": {"KNOWS": {
+                "connections": {
+                  "fk_edges": {"IN_ORG": {
+                    "target": "Org", "fk": "org_id",
+                    "properties": ["since"], "property_types": {"since": "sinceWhen"}
+                  }},
+                  "junction_edges": {"KNOWS": {
                     "csv": "k.csv", "source_fk": "a", "target": "Person", "target_fk": "b",
                     "property_types": {"from": "validFrom", "to": "renamedTo"}
-                }}},
+                  }}
+                },
                 "sub_nodes": {"Pet": {"csv": "pets.csv", "pk": "id",
                     "properties": {"kind": "sting"}}}
             }}}"#,
         );
         let warnings = unknown_property_type_warnings(&bp);
-        assert_eq!(warnings.len(), 3, "{warnings:?}");
+        assert_eq!(warnings.len(), 4, "{warnings:?}");
         assert!(warnings
             .iter()
             .any(|w| w.contains("'birthDate'") && w.contains("node 'Person'")));
+        assert!(warnings
+            .iter()
+            .any(|w| w.contains("'sinceWhen'") && w.contains("fk_edge 'IN_ORG'")));
         assert!(warnings
             .iter()
             .any(|w| w.contains("'renamedTo'") && w.contains("junction 'KNOWS'")));
@@ -705,7 +722,13 @@ mod accepted_key_tests {
                 ("sub_nodes", json!({})),
                 ("timeseries", json!(null)),
             ],
-            "fk_edge" => vec![("target", json!("Org")), ("fk", json!("org_id"))],
+            "fk_edge" => vec![
+                ("target", json!("Org")),
+                ("fk", json!("org_id")),
+                ("properties", json!([])),
+                ("property_types", json!({})),
+                ("rename", json!({})),
+            ],
             "junction_edge" => vec![
                 ("csv", json!("k.csv")),
                 ("source_fk", json!("a")),
