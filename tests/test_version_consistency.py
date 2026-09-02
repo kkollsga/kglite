@@ -745,6 +745,83 @@ def test_a_citation_alone_does_not_earn_a_note(ecosystem: Path) -> None:
     assert "SKIP   downstream" in out
 
 
+#: A per-release record file in codingest's shape: dated sections appended
+#: newest-first, each stating which engine that release's suite ran against.
+#: Only the newest entry tracks the current engine (the 2026-08-31 codingest
+#: note: rewriting the older ones falsifies the record).
+DATED_RELEASE_DOC = """# Parity
+
+## Release 0.2.13 — 2026-08-31
+
+A thin KGLite 0.14.3 frontend.
+
+## Release 0.2.11 — 2026-08-30
+
+A thin KGLite 0.14.4 frontend.
+
+## Release 0.2.9 — 2026-08-28
+
+A thin KGLite 0.14.2 frontend.
+"""
+
+
+def _stale_block(out: str) -> str:
+    """Just the STALE DOCUMENTED VERSIONS section of the report."""
+    marker = "== STALE DOCUMENTED VERSIONS"
+    if marker not in out:
+        return ""
+    return out.split(marker, 1)[1].split("\n== ", 1)[0]
+
+
+def test_older_dated_release_sections_are_not_flagged(ecosystem: Path) -> None:
+    _write(ecosystem / "downstream" / "PARITY.md", DATED_RELEASE_DOC)
+    code, out = run(ecosystem)
+    stale = _stale_block(out)
+    assert "0.14.4" not in stale, out
+    assert "0.14.2" not in stale, out
+    assert code == 0, out
+
+
+def test_the_newest_dated_release_section_is_still_flagged(ecosystem: Path) -> None:
+    """Non-vacuity: the exemption covers history, never the live entry."""
+    _write(ecosystem / "downstream" / "PARITY.md", DATED_RELEASE_DOC)
+    _, out = run(ecosystem)
+    assert "0.14.3" in _stale_block(out), out
+
+
+def test_suppression_marker_on_a_heading_exempts_its_section(ecosystem: Path) -> None:
+    _write(
+        ecosystem / "downstream" / "PARITY.md",
+        "# Parity\n\n"
+        "## Acceptance log <!-- version-check: ignore -->\n\n"
+        "A thin KGLite 0.14.4 frontend.\n\n"
+        "### Detail\n\n"
+        "A thin KGLite 0.14.3 frontend.\n\n"
+        "## Live\n\n"
+        "A thin KGLite 0.14.2 frontend.\n",
+    )
+    _, out = run(ecosystem)
+    stale = _stale_block(out)
+    assert "0.14.4" not in stale, out
+    assert "0.14.3" not in stale, out
+    assert "0.14.2" in stale, out
+
+
+@pytest.mark.parametrize(
+    "prose",
+    [
+        # codingest/PARITY.md's provenance sentence, verbatim in shape.
+        "The acceptance suite ran against the kglite 0.14.3 wheel.",
+        "Every digest here tested against kglite 0.14.3.",
+    ],
+)
+def test_ran_against_prose_is_a_citation(ecosystem: Path, prose: str) -> None:
+    _write(ecosystem / "downstream" / "PARITY.md", f"# Parity\n\n{prose}\n")
+    code, out = run(ecosystem)
+    assert "STALE DOCUMENTED VERSIONS" not in out, out
+    assert code == 0, out
+
+
 # --------------------------------------------------------------------------
 # 9. "Surface you actually reference" must cite code, not prose
 # --------------------------------------------------------------------------

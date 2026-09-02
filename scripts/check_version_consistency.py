@@ -777,7 +777,7 @@ _CITATION_CUES = re.compile(
     r"migrat(?:ed|ion|ing)|verified|was|were|used\s+to|since|as\s+of|onwards?|"
     r"previously|formerly|originally|earlier|historical\w*|history|no\s+longer|"
     r"already|first\s+appeared|described|correction|moved\s+from|"
-    r"upgraded\s+from|bumped\s+from)\b",
+    r"upgraded\s+from|bumped\s+from|ran(?:\s+against)?|tested\s+against)\b",
     re.IGNORECASE,
 )
 #: Cues that make a sentence a live requirement even if it is phrased in prose.
@@ -952,6 +952,79 @@ def scan_gradle(repo: str, path: Path, tracked: set[str]) -> list[Declaration]:
     return out
 
 
+# ---- markdown section state ------------------------------------------------
+#
+# A per-release record file (codingest's `PARITY.md`) states, under one dated
+# heading per release, which engine that release's acceptance suite ran
+# against. Only the newest such section is a claim about now; every older one is
+# the record, and three consecutive release notes asked codingest to rewrite it.
+# `is_version_citation` cannot reach this: `_prose_context` stops at a heading,
+# so the date that dates the statement is structurally invisible to it.
+
+#: A heading that opens a per-release record: ``## Release 0.2.11 — 2026-08-30``.
+#: A heading carrying an ISO date counts too, whatever it is titled.
+_RELEASE_HEADING = re.compile(r"^#+\s*Release\b.*\d", re.IGNORECASE)
+_HEADING = re.compile(r"^(#+)\s+(.*)$")
+#: The version inside a heading, read only to order sections against each other.
+_HEADING_VERSION = re.compile(r"\b(\d+)\.(\d+)(?:\.(\d+))?\b")
+
+
+def _heading_rank(text: str) -> tuple[str, tuple[int, ...]]:
+    """Sort key deciding which record section is the newest.
+
+    Date first: a per-release file dates its entries, and the versions in them
+    may belong to a different project than the one being checked. The version is
+    only the tiebreak, and it is read after the date is removed so that
+    ``2026-08-30`` cannot be mistaken for one.
+    """
+    date = _DATED_PROSE.search(text)
+    m = _HEADING_VERSION.search(_DATED_PROSE.sub(" ", text))
+    version = tuple(int(g or 0) for g in m.groups()) if m else (-1, -1, -1)
+    return (date.group(0) if date else "", version)
+
+
+def _doc_section_state(lines: list[str]) -> list[str | None]:
+    """Per-line ``"suppressed"`` / ``"citation"`` / ``None``, decided by heading.
+
+    A section runs from its heading to the next heading at the same or a
+    shallower level, so a subsection inherits its parent's state. Ties at the
+    newest rank all stay live — a record file that dates nothing gets no
+    exemption at all, which is the conservative direction.
+    """
+    records: set[int] = set()
+    ranks: dict[int, tuple[str, tuple[int, ...]]] = {}
+    in_fence = False
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        m = _HEADING.match(line)
+        if m and (_RELEASE_HEADING.match(line) or _DATED_PROSE.search(m.group(2))):
+            records.add(i)
+            ranks[i] = _heading_rank(m.group(2))
+    newest = max(ranks.values()) if ranks else None
+
+    states: list[str | None] = []
+    stack: list[tuple[int, str]] = []
+    in_fence = False
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+        elif not in_fence and (m := _HEADING.match(line)):
+            level = len(m.group(1))
+            while stack and stack[-1][0] >= level:
+                stack.pop()
+            if SUPPRESS_MARKER in line:
+                stack.append((level, "suppressed"))
+            elif i in records and ranks[i] != newest:
+                stack.append((level, "citation"))
+        kinds = {kind for _, kind in stack}
+        states.append("suppressed" if "suppressed" in kinds else ("citation" if "citation" in kinds else None))
+    return states
+
+
 def scan_docs(repo: str, path: Path, tracked: set[str]) -> list[Declaration]:
     """Docs that state a concrete version in prose.
 
@@ -973,8 +1046,12 @@ def scan_docs(repo: str, path: Path, tracked: set[str]) -> list[Declaration]:
     # block is always written in that order and nothing else names an
     # artifactId.
     pending_artifact: str | None = None
+    states = _doc_section_state(lines)
     for i, line in enumerate(lines, 1):
         s = line.strip()
+        state = states[i - 1]
+        if state == "suppressed":
+            continue
         if not s or s.startswith(("[", "|--", "---")) or SUPPRESS_MARKER in s:
             continue
         if _LEDGER_ROW.match(s):
@@ -1010,7 +1087,8 @@ def scan_docs(repo: str, path: Path, tracked: set[str]) -> list[Declaration]:
             # Prose is the only site where a version can be a *record* rather
             # than a requirement, so it is the only site that gets classified.
             # An install line is a declaration wherever it appears.
-            site = "docs-citation" if is_version_citation(lines, i - 1, m) else "docs"
+            record = state == "citation" or is_version_citation(lines, i - 1, m)
+            site = "docs-citation" if record else "docs"
             out.append(Declaration(repo, path, i, name, "=" + m.group("spec"), site, s[:200], metadata=False))
     return out
 
