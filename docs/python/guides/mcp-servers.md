@@ -881,8 +881,12 @@ A save with nothing unsaved to write is a no-op: it reports `Nothing to save:
 <path> is clean and carries no unpersisted configuration…` and leaves the file
 untouched, so other servers bound to the same graph are not made to re-read it
 for a rewrite of the same bytes. Unsaved mutations and a boot-applied manifest
-ontology both count as something to write. To rewrite a clean file deliberately
-— re-encoding it with the running library version, say — pass `force=true`.
+ontology both count as something to write, and a save that carried only the
+ontology says so (`wrote manifest ontology (N classes, M managed labels); no
+data changes`). To rewrite a clean file deliberately — re-encoding it with the
+running library version, say — pass `force=true`. That one needs the write
+opt-in: `force` re-encodes the file and moves its identity, so a server holding
+`builtins.save_graph: true` alone refuses it and says which setting enables it.
 
 ### Semantic search (`text_score()`)
 
@@ -1147,7 +1151,7 @@ will my agent see?"
 | `graph_overview` | always | Always available even with no graph: returns the no-graph message. |
 | `ping` | always | Liveness probe. |
 | `read_code_source` | always | Requires an active graph at call time (returns the no-graph message otherwise). |
-| `save_graph` | `--graph` mode AND (`builtins.save_graph: true` OR write-enabled) | Other modes have no single graph to save back to. `builtins.save_graph: true` alone registers just this tool — it does not make `cypher_query` writable. A save with nothing unsaved is a no-op unless `force=true`. |
+| `save_graph` | `--graph` mode AND (`builtins.save_graph: true` OR write-enabled) | Other modes have no single graph to save back to. `builtins.save_graph: true` alone registers just this tool — it does not make `cypher_query` writable. A save with nothing unsaved is a no-op unless `force=true`, and `force` itself needs the write opt-in. |
 | `load_graph` / `create_graph` / `save_graph_as` | write-enabled: `--writable` OR `extensions.writable: true` | The graph-lifecycle tools. `builtins.save_graph: true` does not register them. |
 | `read_source` / `grep` / `list_source` | always | All three register together. They *serve* only with a bound root (`--source-root`, `--graph` parent auto-bind, a manifest `source_root:` that resolves, or an active workspace repo); otherwise each call answers "no active source root". |
 | `repo_management` | `codingest-mcp --workspace` clone-tracker mode | Not registered in local-workspace mode; use `set_root_dir` there. |

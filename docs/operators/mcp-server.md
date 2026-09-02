@@ -216,9 +216,14 @@ Writes that reach disk cannot silently overwrite each other either:
   Unsaved mutations, obviously; and configuration the version counter cannot
   see, which today means a manifest ontology applied at boot
   (`extensions.ontology`, declared or materialized) — such a server's **first**
-  save persists it and its second is the no-op. For a deliberate rewrite that
-  neither explains, such as re-encoding the file with the running library
-  version, pass `force=true`.
+  save persists it and its second is the no-op, and its response names what it
+  wrote (`wrote manifest ontology (N classes, M managed labels); no data
+  changes`) rather than a node count nothing moved. For a deliberate rewrite
+  that neither explains, such as re-encoding the file with the running library
+  version, pass `force=true` — **only on a write-enabled server**. `force`
+  re-encodes the file and moves its identity, so it is offered where mutations
+  are (`--writable` / `extensions.writable: true`) and refused on a server that
+  registers `save_graph` alone.
 - `save_graph_as` **to the bound path** is `save_graph` under another name,
   that lost-update check included. To a *different* path it also releases the
   source file's lease — the graph is not going back there, and this is the call

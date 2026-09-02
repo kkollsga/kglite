@@ -301,7 +301,7 @@ fn an_opened_disk_directory_takes_no_lease_until_it_writes() {
     );
 
     state
-        .with_active_mut(|a| run_save(a, false))
+        .with_active_mut(|a| run_save(a, false, true))
         .unwrap()
         .unwrap();
     assert!(
@@ -369,7 +369,7 @@ fn a_legacy_flat_directory_keeps_the_eager_lease() {
         .unwrap()
         .unwrap();
     state
-        .with_active_mut(|a| run_save(a, false))
+        .with_active_mut(|a| run_save(a, false, true))
         .unwrap()
         .unwrap();
     assert!(
@@ -410,7 +410,7 @@ fn an_opened_path_backed_graph_takes_no_lease_until_it_writes() {
     );
 
     state
-        .with_active_mut(|a| run_save(a, false))
+        .with_active_mut(|a| run_save(a, false, true))
         .unwrap()
         .unwrap();
     assert!(
@@ -668,7 +668,9 @@ fn a_write_enabled_state_locks_the_served_file_only_while_it_is_dirty() {
         !external_lease_is_available(&p),
         "an unsaved change must refuse a second writer — that is the lost-update window"
     );
-    s.with_active_mut(|a| run_save(a, false)).unwrap().unwrap();
+    s.with_active_mut(|a| run_save(a, false, true))
+        .unwrap()
+        .unwrap();
     assert!(
         external_lease_is_available(&p),
         "and the window closes at the save, not at process exit"
@@ -758,7 +760,7 @@ fn a_second_server_is_refused_by_name_until_the_first_one_saves() {
     assert_eq!(second.schema().unwrap().0, 1);
 
     first
-        .with_active_mut(|a| run_save(a, false))
+        .with_active_mut(|a| run_save(a, false, true))
         .unwrap()
         .unwrap();
     // The second server was loaded from the pre-save bytes, so its write is
@@ -1225,7 +1227,7 @@ fn a_materializing_server_boots_clean_and_its_clean_save_persists_the_labels() {
         "and a clean server must not be holding the file"
     );
 
-    s.with_active_mut(|a| run_save(a, false))
+    s.with_active_mut(|a| run_save(a, false, true))
         .unwrap()
         .expect("a clean graph still publishes");
     drop(s);
@@ -1424,7 +1426,7 @@ fn a_clean_save_does_not_touch_the_file() {
     settle();
 
     let msg = s
-        .with_active_mut(|a| run_save(a, false))
+        .with_active_mut(|a| run_save(a, false, true))
         .unwrap()
         .expect("a no-op save is a success, not a refusal");
     assert!(msg.starts_with("Nothing to save:"), "{msg}");
@@ -1454,7 +1456,7 @@ fn force_rewrites_a_clean_file() {
     settle();
 
     let msg = s
-        .with_active_mut(|a| run_save(a, true))
+        .with_active_mut(|a| run_save(a, true, true))
         .unwrap()
         .expect("force must publish");
     assert!(msg.starts_with("Saved "), "{msg}");
@@ -1463,6 +1465,177 @@ fn force_rewrites_a_clean_file() {
         external_lease_is_available(&p),
         "the publish hands the lease back"
     );
+}
+
+/// The operator report this answers: a production manifest sets
+/// `builtins.save_graph: true` (so a boot-time ontology can be persisted) and
+/// nothing else, `cypher_query` refuses every mutation — and `save_graph`
+/// with `force=true` still re-encoded the served 133 MB file, moving its
+/// identity and making every peer re-read it. `force` is a mutation-shaped act
+/// and now needs the mutation flag.
+#[test]
+fn force_is_refused_on_a_server_that_is_not_write_enabled() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("read_only_force.kgl");
+    seed_with_nodes(&p, 2);
+
+    let s = GraphState::default();
+    s.open_or_create(&p, None).unwrap();
+    let before = file_stamp(&p);
+    settle();
+
+    let refusal = s
+        .with_active_mut(|a| run_save(a, true, false))
+        .unwrap()
+        .expect_err("force on a non-write-enabled server must be refused");
+    assert!(
+        refusal.contains("not write-enabled"),
+        "the refusal names the deployment shape: {refusal}"
+    );
+    assert!(
+        refusal.contains("extensions.writable: true"),
+        "and the setting that would enable it: {refusal}"
+    );
+    assert!(
+        refusal.contains("re-encodes"),
+        "and what force would have done: {refusal}"
+    );
+    assert_eq!(
+        file_stamp(&p),
+        before,
+        "a refused force must not have touched the file"
+    );
+    assert!(
+        external_lease_is_available(&p),
+        "and must not have taken the writer lease to refuse"
+    );
+}
+
+/// The same server's no-op must not advertise the escape hatch it would
+/// refuse: `Pass force=true to rewrite it anyway` is true only where mutations
+/// are enabled.
+#[test]
+fn a_non_writable_no_op_does_not_offer_force() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("read_only_noop.kgl");
+    seed_with_nodes(&p, 2);
+
+    let s = GraphState::default();
+    s.open_or_create(&p, None).unwrap();
+
+    let msg = s
+        .with_active_mut(|a| run_save(a, false, false))
+        .unwrap()
+        .expect("a no-op save is a success, not a refusal");
+    assert!(msg.starts_with("Nothing to save:"), "{msg}");
+    assert!(
+        !msg.contains("force=true"),
+        "a route this server refuses must not be offered: {msg}"
+    );
+}
+
+/// Persisting boot configuration is why `builtins.save_graph` exists without
+/// `writable`, so it stays allowed — and the response now says what it wrote,
+/// because "Saved (N nodes, M edges)" read as a data write to the operator who
+/// had made no data changes.
+#[test]
+fn a_non_writable_server_still_publishes_its_manifest_ontology() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("config_only.kgl");
+    seed_people(&p, StorageMode::Memory);
+
+    let s = GraphState::default();
+    s.bind_ontology(agent_ontology(true));
+    s.open_or_create(&p, None).unwrap();
+    assert!(
+        !s.is_dirty(),
+        "manifest ontology is configuration, not a change"
+    );
+    let before = file_stamp(&p);
+    settle();
+
+    let msg = s
+        .with_active_mut(|a| run_save(a, false, false))
+        .unwrap()
+        .expect("the boot configuration must still reach disk");
+    assert!(msg.starts_with("Saved "), "{msg}");
+    assert!(
+        msg.contains("manifest ontology"),
+        "the response names what it wrote: {msg}"
+    );
+    assert!(
+        msg.contains("2 classes"),
+        "including the ontology it carried: {msg}"
+    );
+    assert!(
+        msg.contains("no data changes"),
+        "and that no data moved: {msg}"
+    );
+    assert_ne!(file_stamp(&p), before, "the configuration reaches the file");
+}
+
+/// A save is refusable on a perfectly clean server — a `force` re-encode, a
+/// boot-configuration publish — and the refusal told that operator their
+/// unsaved changes were still here, inventing work they never did.
+#[test]
+fn a_save_refusal_only_claims_unsaved_work_when_there_is_some() {
+    let stale = kglite::api::io::WriteRefusal::Stale {
+        path: std::path::PathBuf::from("/tmp/peer.kgl"),
+    };
+
+    let dirty = refused_save("save_graph", &stale, true);
+    assert!(
+        dirty.contains("Your unsaved changes are still here"),
+        "{dirty}"
+    );
+    assert!(
+        dirty.contains("no merge between the two versions"),
+        "a holder of unsaved work is told the two ways out do not merge: {dirty}"
+    );
+
+    let clean = refused_save("save_graph", &stale, false);
+    assert!(clean.contains("Nothing was changed here"), "{clean}");
+    assert!(
+        !clean.contains("unsaved changes"),
+        "a clean server has no unsaved changes to reassure anyone about: {clean}"
+    );
+    assert!(
+        clean.contains("reload_graph"),
+        "and is still told the way out: {clean}"
+    );
+}
+
+/// The contended half of the same sentence, through the path that actually
+/// reaches it: a clean server whose `force` publish meets a peer holding the
+/// lease.
+#[test]
+fn a_contended_force_refusal_does_not_invent_unsaved_work() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("contended_force.kgl");
+    seed_with_nodes(&p, 2);
+
+    let s = GraphState::default();
+    s.open_or_create(&p, None).unwrap();
+    let before = file_stamp(&p);
+    settle();
+
+    let peer = kglite::api::io::GraphWriterLease::acquire(&p, Duration::ZERO)
+        .expect("no lease is held until the first mutation");
+    let refusal = s
+        .with_active_mut(|a| run_save(a, true, true))
+        .unwrap()
+        .expect_err("a held lease refuses the publish");
+    drop(peer);
+
+    assert!(
+        refusal.contains("Nothing was changed here"),
+        "the clean server is told nothing was lost: {refusal}"
+    );
+    assert!(
+        !refusal.contains("unsaved changes"),
+        "and not told about changes it does not have: {refusal}"
+    );
+    assert_eq!(file_stamp(&p), before, "a refused publish leaves the file");
 }
 
 /// The dirty path is unchanged: real unsaved work still writes, and still says
@@ -1482,7 +1655,7 @@ fn a_dirty_save_still_writes() {
     settle();
 
     let msg = s
-        .with_active_mut(|a| run_save(a, false))
+        .with_active_mut(|a| run_save(a, false, true))
         .unwrap()
         .expect("a dirty save publishes");
     assert!(msg.starts_with("Saved "), "{msg}");
@@ -1508,7 +1681,7 @@ fn a_configured_servers_second_clean_save_is_a_no_op() {
         settle();
 
         let first = s
-            .with_active_mut(|a| run_save(a, false))
+            .with_active_mut(|a| run_save(a, false, true))
             .unwrap()
             .expect("the pending configuration publishes");
         assert!(
@@ -1523,7 +1696,7 @@ fn a_configured_servers_second_clean_save_is_a_no_op() {
         settle();
 
         let second = s
-            .with_active_mut(|a| run_save(a, false))
+            .with_active_mut(|a| run_save(a, false, true))
             .unwrap()
             .expect("the second save is a no-op, not a refusal");
         assert!(

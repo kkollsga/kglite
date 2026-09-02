@@ -485,6 +485,9 @@ impl GraphState {
             return Err(NO_GRAPH.to_string());
         };
         let replacing_target = active.source_path.as_deref() != Some(path);
+        // Read before the publish: it is what picks the state sentence of a
+        // refusal, and `save_graph_as` is reachable on a perfectly clean graph.
+        let dirty = active.is_dirty();
         let identity = GraphFileIdentity::capture(path)
             .map_err(|e| format!("save_graph_as error: cannot read {}: {e}", path.display()))?;
         match active.ownership.as_mut() {
@@ -515,7 +518,7 @@ impl GraphState {
         // of a discarded clone. `compute_schema` only needs `&DirGraph`.
         ownership
             .publish(active.kg.dir_mut())
-            .map_err(|refusal| refused_save("save_graph_as", &refusal))?;
+            .map_err(|refusal| refused_save("save_graph_as", &refusal, dirty))?;
         // A successful publish hands the lease back, so the status this graph
         // reports on every later response must stop claiming to hold one.
         active.lease_since = None;

@@ -40,27 +40,39 @@ pub(crate) fn refused_write(tool: &str, refusal: &WriteRefusal) -> String {
 /// A save refused because the file moved underneath it.
 ///
 /// Deliberately different from [`refused_write`]'s stale arm: there, nothing
-/// is at stake and a reload is free; here the agent is holding unsaved work,
-/// so the two ways out are named explicitly — and so is the fact that neither
-/// of them merges.
-pub(crate) fn refused_save(tool: &str, refusal: &WriteRefusal) -> String {
+/// is at stake and a reload is free; here the agent may be holding unsaved
+/// work, so the two ways out are named explicitly — and so is the fact that
+/// neither of them merges.
+///
+/// `dirty` is the caller's [`ActiveGraph::is_dirty`]. A save is refusable on a
+/// perfectly clean server (a `force` re-encode, a boot-configuration publish),
+/// and telling that operator their "unsaved changes are still here" invented
+/// work they never did — so the clean branch says what the `cypher_query`
+/// refusals say instead.
+pub(crate) fn refused_save(tool: &str, refusal: &WriteRefusal, dirty: bool) -> String {
     match refusal {
         // The engine's directory lock refused the save before the file lease
         // ever came into it, so it arrives as an I/O failure rather than a
         // structured contention. Answering it in the contended voice is what
         // makes a disk collision read like a `.kgl` collision.
         WriteRefusal::Io(error) if is_engine_lock_contention(&error.to_string()) => {
-            contended_save(tool, ENGINE_LOCK_CLAUSE)
+            contended_save(tool, ENGINE_LOCK_CLAUSE, dirty)
         }
         WriteRefusal::Stale { path } => format!(
             "{tool} refused: {} changed on disk since you loaded it, so saving would \
-             overwrite whatever the other writer put there. Your unsaved changes are \
-             still here and still queryable. save_graph_as to a different path keeps \
-             them; reload_graph(discard_unsaved=true) drops them and serves the file \
-             on disk. There is no merge between the two versions.",
-            path.display()
+             overwrite whatever the other writer put there. {}",
+            path.display(),
+            if dirty {
+                "Your unsaved changes are still here and still queryable. save_graph_as \
+                 to a different path keeps them; reload_graph(discard_unsaved=true) drops \
+                 them and serves the file on disk. There is no merge between the two \
+                 versions."
+            } else {
+                "Nothing was changed here. Call reload_graph to serve the current file, \
+                 then retry the save."
+            }
         ),
-        WriteRefusal::Contended(details) => contended_save(tool, &details.error.to_string()),
+        WriteRefusal::Contended(details) => contended_save(tool, &details.error.to_string(), dirty),
         WriteRefusal::Io(error) => format!("{tool} error: {error}"),
     }
 }
@@ -81,12 +93,17 @@ fn contended_write(tool: &str, holder_clause: &str) -> String {
 }
 
 /// [`contended_write`]'s counterpart for a refused save — same two holders,
-/// and the save's own two ways out.
-fn contended_save(tool: &str, holder_clause: &str) -> String {
+/// and the save's own two ways out. `dirty` picks the state sentence; see
+/// [`refused_save`].
+fn contended_save(tool: &str, holder_clause: &str, dirty: bool) -> String {
+    let state = if dirty {
+        "Your unsaved changes are still here and still queryable."
+    } else {
+        "Nothing was changed here, and this graph is still readable — keep querying it."
+    };
     format!(
-        "{tool} refused: {holder_clause} Your unsaved changes are still here and still \
-         queryable. Retry once that server releases the file, or save_graph_as to \
-         a different path."
+        "{tool} refused: {holder_clause} {state} Retry once that server releases the file, \
+         or save_graph_as to a different path."
     )
 }
 

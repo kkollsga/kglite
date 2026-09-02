@@ -1219,7 +1219,10 @@ class TestWritableMode:
             text = _text_content(r)
             assert not _is_error(r), text
             assert "Nothing to save" in text, text
-            assert "force=true" in text, text
+            # This server registers `save_graph` without `extensions.writable`,
+            # so `force` is refused here (see the test below) and the no-op must
+            # not offer it.
+            assert "force=true" not in text, text
 
             after = src.stat()
             assert (after.st_mtime_ns, after.st_size) == (stat_before.st_mtime_ns, stat_before.st_size), text
@@ -1231,12 +1234,16 @@ class TestWritableMode:
 
     def test_save_graph_force_rewrites_a_clean_file(self, tmp_path: Path):
         """The escape hatch: re-encoding a clean file with the running library
-        version is a legitimate rewrite, and `force` is how it is asked for."""
+        version is a legitimate rewrite, and `force` is how it is asked for.
+
+        `--writable` because `force` is a mutation-shaped act and is offered
+        only where mutations are — the refusal on a server without it is the
+        test below."""
         src = tmp_path / "forced.kgl"
         _build_fixture_graph(src)
         manifest = _write_savegraph_manifest(tmp_path)
 
-        client = _spawn(["--graph", str(src), "--mcp-config", str(manifest)])
+        client = _spawn(["--graph", str(src), "--writable", "--mcp-config", str(manifest)])
         try:
             mtime_before = src.stat().st_mtime_ns
             time.sleep(0.05)
@@ -1245,6 +1252,36 @@ class TestWritableMode:
             assert not _is_error(r), text
             assert "Saved" in text, text
             assert src.stat().st_mtime_ns > mtime_before, text
+        finally:
+            client.shutdown()
+
+    def test_save_graph_force_is_refused_without_the_write_opt_in(self, tmp_path: Path):
+        """The operator's production shape: `builtins.save_graph: true` and no
+        `extensions.writable`, so `cypher_query` refuses every mutation — and
+        `save_graph {force: true}` still re-encoded the served file, moving its
+        identity and making every peer re-read 133 MB for a change nobody
+        asked for. Cross-process because the gate is wired at boot, from the
+        manifest the operator actually writes."""
+        src = tmp_path / "prod_shape.kgl"
+        _build_fixture_graph(src)
+        manifest = _write_savegraph_manifest(tmp_path)
+
+        client = _spawn(["--graph", str(src), "--mcp-config", str(manifest)])
+        try:
+            before = src.stat()
+            time.sleep(0.05)  # any rewrite would land a detectably newer mtime
+            r = client.call_tool("save_graph", {"force": True})
+            text = _text_content(r)
+            assert _is_error(r), text
+            assert "not write-enabled" in text, text
+            assert "extensions.writable: true" in text, text
+
+            after = src.stat()
+            assert (after.st_ino, after.st_size, after.st_mtime_ns) == (
+                before.st_ino,
+                before.st_size,
+                before.st_mtime_ns,
+            ), text
         finally:
             client.shutdown()
 

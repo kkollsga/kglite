@@ -126,7 +126,7 @@ fn a_save_does_not_make_the_next_call_reload_itself() {
         .expect("a graph is active")
         .expect("the write applies");
     state
-        .with_active_mut(|a| run_save(a, false))
+        .with_active_mut(|a| run_save(a, false, true))
         .expect("a graph is active")
         .expect("the save lands");
     let after_save = load_count(&state);
@@ -509,7 +509,7 @@ fn a_disk_save_does_not_make_the_next_call_reload_itself() {
         .expect("a graph is active")
         .expect("the write applies");
     state
-        .with_active_mut(|a| run_save(a, false))
+        .with_active_mut(|a| run_save(a, false, true))
         .expect("a graph is active")
         .expect("the save publishes a generation");
     let after_save = load_count(&state);

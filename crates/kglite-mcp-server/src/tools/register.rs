@@ -43,6 +43,25 @@ pub struct Builtins {
     pub temp_dir: Option<std::path::PathBuf>,
 }
 
+/// `save_graph`'s description on a write-enabled server. The two spellings
+/// differ only in the `force` sentence: `run_save` refuses `force=true` when
+/// mutations are off, and a description that advertised it anyway would send
+/// the agent at a route this deployment does not have.
+const SAVE_GRAPH_DESCRIPTION_WRITABLE: &str =
+    "Persist the active graph to its source .kgl file (single-graph mode only). With \
+     nothing unsaved to write this is a no-op that reports \"Nothing to save\" and leaves \
+     the file untouched, so other servers reading the same graph are not made to re-read \
+     it; pass force=true to rewrite it anyway.";
+
+/// [`SAVE_GRAPH_DESCRIPTION_WRITABLE`] for a server registered through
+/// `builtins.save_graph` alone — it may still publish unsaved changes and boot
+/// configuration, but not re-encode an unchanged file.
+const SAVE_GRAPH_DESCRIPTION_READ_ONLY: &str =
+    "Persist the active graph to its source .kgl file (single-graph mode only). With \
+     nothing unsaved to write this is a no-op that reports \"Nothing to save\" and leaves \
+     the file untouched, so other servers reading the same graph are not made to re-read \
+     it. force=true is refused on this server, which is not write-enabled.";
+
 /// Immutable MCP-layer additions to the bare `graph_overview` response.
 ///
 /// These describe the deployment, not the active graph, so they are captured
@@ -427,18 +446,24 @@ pub fn register(
     );
     if builtins.save_graph {
         let s = state.clone();
+        // `force` re-encodes the served file, which `run_save` offers only
+        // where mutations are — so the description advertises it only there
+        // too, rather than naming a route this deployment refuses.
+        let mutations_enabled = builtins.writable;
+        let description = if mutations_enabled {
+            SAVE_GRAPH_DESCRIPTION_WRITABLE
+        } else {
+            SAVE_GRAPH_DESCRIPTION_READ_ONLY
+        };
         server.register_typed_tool_fallible::<SaveGraphArgs, _>(
             "save_graph",
-            "Persist the active graph to its source .kgl file (single-graph mode only). \
-             With nothing unsaved to write this is a no-op that reports \"Nothing to save\" \
-             and leaves the file untouched, so other servers reading the same graph are not \
-             made to re-read it; pass force=true to rewrite it anyway.",
+            description,
             move |args: SaveGraphArgs| {
                 s.ensure_graph_fresh();
                 // Mutable access: the save must go through the active
                 // graph's own Arc so `prepare_save`'s `Arc::make_mut` sees
                 // refcount 1 (no whole-graph deep copy per save).
-                s.with_active_mut(|g| run_save(g, args.force.unwrap_or(false)))
+                s.with_active_mut(|g| run_save(g, args.force.unwrap_or(false), mutations_enabled))
                     .unwrap_or_else(|| Err(NO_GRAPH.to_string()))
             },
         );

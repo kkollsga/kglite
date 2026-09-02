@@ -296,7 +296,23 @@ pub(crate) fn parse_cypher_detail(v: Option<&DetailSelection>) -> CypherDetail {
 /// counter cannot see ([`ActiveGraph::unpersisted_config`], the manifest
 /// ontology). `force` is the escape hatch for a rewrite neither of those
 /// explains — re-encoding the file with the running library version.
-pub(crate) fn run_save(graph: &mut ActiveGraph, force: bool) -> Result<String, String> {
+///
+/// `mutations_enabled` is [`crate::tools::register::Builtins::writable`], and
+/// gates `force` alone. The two flags are deliberately distinct:
+/// `builtins.save_graph: true` on an otherwise read-only server exists so a
+/// boot-time ontology materialization reaches disk, and that publish stays
+/// allowed here. What a non-write-enabled server must not do is re-encode a
+/// file nothing asked to change — every peer serving the same graph pays a
+/// full re-read for it.
+///
+/// `save_graph_as` (`state.rs`) is deliberately *not* gated the same way: it
+/// writes a different file, so it costs the served graph's peers nothing and
+/// is the documented way out of every refusal here.
+pub(crate) fn run_save(
+    graph: &mut ActiveGraph,
+    force: bool,
+    mutations_enabled: bool,
+) -> Result<String, String> {
     let Some(path) = graph.source_path.as_ref() else {
         return Err("save_graph requires --graph mode (no source path bound).".to_string());
     };
@@ -311,11 +327,33 @@ pub(crate) fn run_save(graph: &mut ActiveGraph, force: bool) -> Result<String, S
              else."
         ));
     }
-    if !force && !graph.is_dirty() && !graph.unpersisted_config {
+    if force && !mutations_enabled {
+        return Err(format!(
+            "save_graph refused: force=true re-encodes {path_str} and moves its identity, \
+             so every other server serving this graph pays a full re-read for it. This \
+             server is not write-enabled, and force is only offered where mutations are. \
+             Nothing was changed here. A plain save_graph still writes unsaved changes and \
+             unpersisted boot configuration; set extensions.writable: true (or pass \
+             --writable) to enable force."
+        ));
+    }
+    // Read before the publish clears both: a save with nothing dirty behind it
+    // is writing the boot configuration and nothing else, and the response has
+    // to say that rather than report a node count nothing moved. `dirty` also
+    // picks the state sentence of a refusal raised by the publish below.
+    let dirty = graph.is_dirty();
+    let config_only = !dirty && graph.unpersisted_config;
+    if !force && !dirty && !graph.unpersisted_config {
         return Ok(format!(
             "Nothing to save: {path_str} is clean and carries no unpersisted \
-             configuration, so the file was not touched. Pass force=true to \
-             rewrite it anyway."
+             configuration, so the file was not touched.{}",
+            if mutations_enabled {
+                " Pass force=true to rewrite it anyway."
+            } else {
+                // Naming force here would advertise a route the gate above
+                // refuses on this deployment.
+                ""
+            }
         ));
     }
     let ownership = graph
@@ -339,7 +377,7 @@ pub(crate) fn run_save(graph: &mut ActiveGraph, force: bool) -> Result<String, S
     // landed in the discarded clone, so the next save paid it all again.
     ownership
         .publish(graph.kg.dir_mut())
-        .map_err(|refusal| refused_save("save_graph", &refusal))?;
+        .map_err(|refusal| refused_save("save_graph", &refusal, dirty))?;
     // The lease went back with the publish; the status on every later response
     // must not go on naming a hold that ended here.
     graph.lease_since = None;
@@ -348,6 +386,15 @@ pub(crate) fn run_save(graph: &mut ActiveGraph, force: bool) -> Result<String, S
     graph.unpersisted_config = false;
     let path = path.clone();
     graph.arm_freshness_for(&path);
+    if config_only {
+        let dir = graph.kg.dir();
+        return Ok(format!(
+            "Saved {path_str}: wrote manifest ontology ({} classes, {} managed labels); \
+             no data changes.",
+            dir.ontology.classes.len(),
+            dir.managed_labels.len()
+        ));
+    }
     // `compute_schema` only needs `&DirGraph` — no second make_mut.
     let overview = compute_schema(graph.kg.dir());
     Ok(format!(
