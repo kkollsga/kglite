@@ -264,8 +264,12 @@ fn publish_owner_record(owner_path: &Path, label: Option<&str>) {
 /// The one clock the owner record is written from. `since=` and `released=`
 /// are compared against each other by whoever reads the record, so they are
 /// formatted here rather than at two call sites that could drift apart.
+///
+/// Second-precision UTC, matching the MCP footer's `iso8601` stamp: an
+/// operator reads a refusal quoting this record next to that footer, and a
+/// local-time record put the same instant two hours away from it.
 fn record_timestamp() -> String {
-    chrono::Local::now().to_rfc3339()
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 /// Ownership details published to `<path>.lock-owner`, read back only on the
@@ -280,7 +284,8 @@ fn record_timestamp() -> String {
 pub struct LeaseHolder {
     /// The holding process id, when the record could be read.
     pub pid: Option<u32>,
-    /// RFC-3339 local timestamp of when the holder took the lease.
+    /// RFC-3339 timestamp of when the holder took the lease. Written in UTC;
+    /// records from before 0.16.21 carry a local offset, and both parse.
     pub since: Option<String>,
     /// Operator-facing name the holder published for itself, when it published
     /// one. Absent for every holder that took the lease without a label, and
@@ -1457,6 +1462,35 @@ mod tests {
             1,
             "record was {record:?}"
         );
+    }
+
+    /// The operator read `since=` beside the MCP footer's `iso8601` stamp of
+    /// the same instant and saw two hours between them. Both clocks are now
+    /// second-precision UTC, so the two strings are comparable by eye.
+    #[test]
+    fn owner_record_timestamps_are_utc() {
+        let tmp = tempfile::tempdir().unwrap();
+        let graph = tmp.path().join("utc.kgl");
+        let owner = writer_owner_path(&graph);
+
+        let lease = GraphWriterLease::acquire(&graph, Duration::ZERO).unwrap();
+        drop(lease);
+
+        let record = std::fs::read_to_string(&owner).unwrap();
+        for key in ["since", "released"] {
+            let value =
+                record_value(&record, key).unwrap_or_else(|| panic!("record was {record:?}"));
+            assert!(
+                value.ends_with('Z'),
+                "{key}={value:?} must be the UTC `Z` form the MCP footer prints"
+            );
+            assert!(
+                !value.contains('.'),
+                "{key}={value:?} must be second-precision, like the footer's iso8601"
+            );
+            chrono::DateTime::parse_from_rfc3339(&value)
+                .unwrap_or_else(|error| panic!("{key}={value:?} is not rfc3339: {error}"));
+        }
     }
 
     /// `Drop` is the only writer of the line, so a `SIGKILL`ed holder must
