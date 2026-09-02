@@ -144,6 +144,15 @@ loaded, such as an ontology materialized from `extensions.ontology` at boot —
 and leaves `cypher_query` read-only. A mutation refused on such a server names
 both write-enabling spellings and says so.
 
+One thing can outrank both spellings: a Rust binary that embeds this server as
+a library may pin it read-only (`ServerExtensions::read_only()`), which an
+operator cannot lift from either surface. That is deliberate — the embedder
+owns argv but not the manifest, and regenerates the graph from its own source
+of truth. Such a server logs one warning at boot naming the write opt-in it
+overrode, so `--writable` or `extensions.writable: true` doing nothing is
+visible in the log rather than a mystery. The stock `kglite-mcp-server` binary
+sets no pin; check the log if a wrapper binary refuses mutations you enabled.
+
 A misspelled key is the one failure this adds, and it fails safe: the server
 comes up read-only and the first mutation is refused. Boot also warns about any
 `extensions:` key this server does not read, listing the ones it does —

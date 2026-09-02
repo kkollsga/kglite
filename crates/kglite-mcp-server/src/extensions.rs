@@ -184,11 +184,30 @@ pub type DomainToolRegistrar =
 pub struct ServerExtensions {
     pub(crate) workspace_graph: Option<WorkspaceGraphHooks>,
     pub(crate) domain_tools: Option<Box<DomainToolRegistrar>>,
+    pub(crate) read_only: bool,
 }
 
 impl ServerExtensions {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Pin this server read-only: no manifest key and no CLI flag can open
+    /// `cypher_query` to mutations.
+    ///
+    /// The embedder owns argv but not the manifest — an operator editing the
+    /// sibling manifest can otherwise set `extensions.writable: true` and open
+    /// writes against a graph the embedder regenerates from its own source of
+    /// truth. Greping the manifest text for the key (the workaround this
+    /// replaces) duplicates the resolution and misses every spelling of it.
+    ///
+    /// Read-only is already the default; this is the *pin*, which is a
+    /// different statement — it also refuses the opt-in, and logs one boot
+    /// line naming the spelling it overrode so an operator who set the key
+    /// learns why it is inert.
+    pub fn read_only(mut self) -> Self {
+        self.read_only = true;
+        self
     }
 
     /// Inject an external producer for workspace build/watch paths.

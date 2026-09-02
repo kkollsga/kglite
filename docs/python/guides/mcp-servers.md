@@ -749,6 +749,11 @@ fn main() -> anyhow::Result<()> {
 }
 ```
 
+`ServerExtensions` also carries `read_only()`, which pins the server read-only
+regardless of `--writable` or `extensions.writable: true` — the guarantee an
+embedder that owns argv but not the manifest cannot otherwise make. See
+{doc}`../../rust/building-on-kglite`.
+
 The registry rejects names already owned by KGLite or manifest tools. Use
 `DomainGraphState::with_context` when the result needs both graph data and its
 identity: the borrowed graph, save target, and source root come from one
@@ -913,6 +918,14 @@ itself is in [Semantic Search](semantic-search.md).
   true`. `graph.read_only(True)` before binding enforces it at the graph itself.
   `builtins.save_graph: false` (the default) is a separate switch — it decides
   whether `save_graph` is registered, not whether `cypher_query` accepts writes.
+  A `save_graph`-only server may still publish unsaved changes and boot
+  configuration, but `save_graph {force: true}` — which re-encodes the file and
+  moves its identity — is refused without the write opt-in.
+- **A Rust binary embedding the server can pin it**: `ServerExtensions::new()
+  .read_only()` makes both `--writable` and `extensions.writable: true` inert
+  for the life of the process, and logs which spelling it overrode. Use it when
+  the embedder owns argv but not the manifest, so an operator editing the
+  sibling manifest cannot open writes against a graph the binary regenerates.
 - **Path traversal** is blocked by the framework's source tools: the
   bundled `read_source` / `grep` / `list_source` canonicalise every
   path against the configured `source_root` before any I/O.

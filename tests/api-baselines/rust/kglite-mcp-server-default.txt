@@ -49,6 +49,7 @@ pub fn kglite_mcp_server::DomainToolRegistry<'_>::register_typed_tool<T, F>(&mut
 pub struct kglite_mcp_server::ServerExtensions
 impl kglite_mcp_server::ServerExtensions
 pub fn kglite_mcp_server::ServerExtensions::new() -> Self
+pub fn kglite_mcp_server::ServerExtensions::read_only(self) -> Self
 pub fn kglite_mcp_server::ServerExtensions::with_domain_tools<F>(self, registrar: F) -> Self where F: for<'a> core::ops::function::Fn(&mut kglite_mcp_server::DomainToolRegistry<'a>) -> anyhow::Result<()> + core::marker::Send + core::marker::Sync + 'static
 pub fn kglite_mcp_server::ServerExtensions::with_workspace_graph(self, hooks: kglite_mcp_server::WorkspaceGraphHooks) -> Self
 impl core::default::Default for kglite_mcp_server::ServerExtensions

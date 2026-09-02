@@ -46,7 +46,7 @@ stability posture; kglite's CI locks against accidental drift on all of them.
 | Seam | What it is | Stability |
 |---|---|---|
 | **Engine facade** — `kglite::api::*` | The curated Rust surface: `DirGraph`, `Value`, `session::*`, `io::{save_graph, load_file}`, error types, `code_entities`. | Exact-baseline-locked in CI (cargo-public-api, pinned nightly). Additive within a minor line; deliberate breaks ship on a MINOR bump with a migration guide. See the [API reference](api-reference.md). |
-| **MCP server library** — `kglite-mcp-server` | `run`, `run_with_embedder_factory`, `run_with_extensions`, `WorkspaceGraphHooks`, `WorkspaceGraphRequest`, `WorkspaceGraphResult`, `WorkspaceGraphRelevance`, `ServerExtensions`, `DomainToolRegistry`, `DomainGraphState`, `DomainGraphContext`. The seams a producer/domain MCP server builds on. | Public-API baseline + hook/registrar-semantics unit tests. Same MINOR-break posture as the engine facade. |
+| **MCP server library** — `kglite-mcp-server` | `run`, `run_with_embedder_factory`, `run_with_extensions`, `WorkspaceGraphHooks`, `WorkspaceGraphRequest`, `WorkspaceGraphResult`, `WorkspaceGraphRelevance`, `ServerExtensions` (`with_workspace_graph`, `with_domain_tools`, `read_only`), `DomainToolRegistry`, `DomainGraphState`, `DomainGraphContext`. The seams a producer/domain MCP server builds on. | Public-API baseline + hook/registrar-semantics unit tests. Same MINOR-break posture as the engine facade. |
 | **`.kgl` file format** | The persisted graph format that handoff and all persistence use. | Writes RGF v6/Postcard; reads v6 and v5. v4/bincode and older containers are refused with a clear 0.13.4 conversion or rebuild message. A v6 file cannot be read by kglite 0.15.14 or earlier. |
 | **Python top-level** — `kglite.*` | `kglite.load`, `kglite.from_blueprint`, `kglite.from_records`, `KnowledgeGraph` methods. The P3 entry points and the P1 handoff target. | Contract-tested + stubtest against `kglite/__init__.pyi`. |
 | **C ABI** — `include/kglite.h` | The `extern "C"` surface for non-Rust bindings. | cbindgen header-drift check in CI; see the [C ABI guide](c-abi.md). |
@@ -206,6 +206,33 @@ default; mutations stay sequential; `KGLITE_QUERY_THREADS` sets the pool
 width). It is applied at the one read seam every route funnels through, so
 built-in `cypher_query`, manifest `tools[].cypher` templates, recipe routes,
 and a domain tool's `run_cypher` all inherit it without wiring of their own.
+
+### Pinning the server read-only
+
+`ServerExtensions::read_only()` is the one exception to that operator-surface
+rule, and it goes the other way: it is a builder method precisely *because* it
+must outrank the operator surfaces.
+
+```rust
+let extensions = ServerExtensions::new()
+    .with_workspace_graph(hooks)
+    .read_only();
+```
+
+Write access is normally opted into by an operator, through either `--writable`
+or `extensions.writable: true` — an OR, so a wrapper that owns the manifest and
+a bare binary launched with no manifest each have a way to say yes. An embedder
+that owns argv but not the manifest therefore has no way to guarantee a
+read-only surface: an operator editing the sibling manifest can open
+`cypher_query` to mutations against a graph the embedder regenerates from its
+own source of truth. `read_only()` is that guarantee. Both opt-in surfaces stay
+inert for the life of the process, and a server booted with one of them set
+logs a single warning naming the spelling it overrode, so the operator who
+typed it learns why it did nothing.
+
+Read-only is already the default; this is the *pin*, which is a different
+statement. Reach for it only when your binary's contract requires the served
+graph to be immutable — not merely to avoid setting the flag.
 
 ### Domain-tool composition
 

@@ -202,11 +202,19 @@ fn boot_manifest_writable(manifest: Option<&mcp_methods::server::Manifest>) -> R
 }
 
 /// Whether agents may mutate the served graph: `--writable` or
-/// `extensions.writable: true`.
+/// `extensions.writable: true`, unless the embedder pinned
+/// [`ServerExtensions::read_only`].
 ///
 /// **OR, not intersection**, for [`boot_parallel`]'s reason: a wrapper that
 /// owns the manifest but not argv, and a bare binary launched with no manifest
-/// at all, each need a working way to say yes.
+/// at all, each need a working way to say yes. The pin is the one veto, and it
+/// comes from the binary embedding this server — argv and the manifest are
+/// both operator surfaces, the pin is the embedder's own contract.
+///
+/// The two opt-in surfaces are read *separately* rather than OR-ed into one
+/// answer, because a pin that silently swallows them leaves the operator who
+/// set one staring at a read-only server with nothing in the log naming the
+/// key they typed.
 ///
 /// Resolved once at boot and threaded as a `bool` to every consumer — the
 /// write-scope warning, [`writer_lease_policy`], [`boot_builtins`] and the
@@ -216,8 +224,22 @@ fn boot_manifest_writable(manifest: Option<&mcp_methods::server::Manifest>) -> R
 fn boot_mutations_enabled(
     manifest: Option<&mcp_methods::server::Manifest>,
     cli: &Cli,
+    read_only_pin: bool,
 ) -> Result<bool> {
-    Ok(boot_manifest_writable(manifest)? || cli.writable)
+    let from_manifest = boot_manifest_writable(manifest)?;
+    let from_cli = cli.writable;
+    if read_only_pin && (from_manifest || from_cli) {
+        let overridden = match (from_manifest, from_cli) {
+            (true, true) => "extensions.writable: true and --writable",
+            (true, false) => "extensions.writable: true",
+            _ => "--writable",
+        };
+        tracing::warn!(
+            overridden,
+            "this build pins the server read-only, so the write opt-in is inert; mutations              stay refused"
+        );
+    }
+    Ok(!read_only_pin && (from_manifest || from_cli))
 }
 
 /// Fallback name for the lease record: the process that spawned this server.
@@ -633,6 +655,7 @@ struct BootExtensions {
 fn boot_extensions(
     manifest: Option<&mcp_methods::server::Manifest>,
     cli: &Cli,
+    read_only_pin: bool,
 ) -> Result<BootExtensions> {
     let unknown_keys = unknown_extension_keys(manifest);
     if !unknown_keys.is_empty() {
@@ -653,7 +676,7 @@ fn boot_extensions(
     let tools_allow = boot_tools_allow(manifest)?;
     // Carried as a `bool` from here on: the lease policy, the builtins and the
     // code-tool gate all read this one answer rather than re-deriving it.
-    let mutations_enabled = boot_mutations_enabled(manifest, cli)?;
+    let mutations_enabled = boot_mutations_enabled(manifest, cli, read_only_pin)?;
     let write_scope = boot_write_scope(manifest, cli, mutations_enabled)?;
     let parallel = boot_parallel(manifest, cli)?;
     if parallel {
@@ -686,6 +709,7 @@ pub(crate) async fn run_async(
     let ServerExtensions {
         workspace_graph,
         domain_tools,
+        read_only: read_only_pin,
     } = extensions;
     init_tracing();
     let mode = pick_mode(&cli);
@@ -698,7 +722,7 @@ pub(crate) async fn run_async(
         mutations_enabled,
         write_scope,
         parallel,
-    } = boot_extensions(manifest.as_ref(), &cli)?;
+    } = boot_extensions(manifest.as_ref(), &cli, read_only_pin)?;
     let recipe_catalog_summary = recipe_catalog.discovery_summary();
 
     // Manifest `workspace.kind: local` wins over CLI flags — promote before
@@ -966,7 +990,7 @@ mod boot_manifest_tests {
         assert_eq!(
             writer_lease_policy(
                 Some(&manifest_writable),
-                boot_mutations_enabled(Some(&manifest_writable), &read_only_cli)
+                boot_mutations_enabled(Some(&manifest_writable), &read_only_cli, false)
                     .expect("extensions.writable parses"),
             ),
             tools::WriterLeasePolicy::Exclusive,
@@ -986,30 +1010,32 @@ mod boot_manifest_tests {
         let flag_cli = Cli::parse_from(["kglite-mcp-server", "--graph", "g.kgl", "--writable"]);
 
         assert!(
-            !boot_mutations_enabled(None, &bare_cli).expect("no manifest parses"),
+            !boot_mutations_enabled(None, &bare_cli, false).expect("no manifest parses"),
             "neither surface set must leave the server read-only"
         );
         let bare = manifest_with(tmp.path(), "name: bare\n");
         assert!(
-            !boot_mutations_enabled(Some(&bare), &bare_cli).expect("bare manifest parses"),
+            !boot_mutations_enabled(Some(&bare), &bare_cli, false).expect("bare manifest parses"),
             "an absent key must leave the server read-only — otherwise the on-arm proves nothing"
         );
         let off = manifest_with(tmp.path(), "name: off\nextensions:\n  writable: false\n");
-        assert!(!boot_mutations_enabled(Some(&off), &bare_cli).expect("explicit false parses"));
+        assert!(
+            !boot_mutations_enabled(Some(&off), &bare_cli, false).expect("explicit false parses")
+        );
 
-        assert!(boot_mutations_enabled(None, &flag_cli).expect("flag alone parses"));
+        assert!(boot_mutations_enabled(None, &flag_cli, false).expect("flag alone parses"));
         let on = manifest_with(tmp.path(), "name: on\nextensions:\n  writable: true\n");
         assert!(
-            boot_mutations_enabled(Some(&on), &bare_cli).expect("explicit true parses"),
+            boot_mutations_enabled(Some(&on), &bare_cli, false).expect("explicit true parses"),
             "extensions.writable: true must reach the mutation gate; if this fails the key \
              is parsed and then dropped"
         );
         assert!(
-            boot_mutations_enabled(Some(&on), &flag_cli).expect("both parse"),
+            boot_mutations_enabled(Some(&on), &flag_cli, false).expect("both parse"),
             "flag + manifest is their OR — neither surface can switch the other off"
         );
         assert!(
-            boot_mutations_enabled(Some(&off), &flag_cli).expect("both parse"),
+            boot_mutations_enabled(Some(&off), &flag_cli, false).expect("both parse"),
             "an explicit manifest `false` does not veto the flag; the pair is an OR, and a \
              flag the operator typed on this launch is the more specific statement"
         );
@@ -1018,10 +1044,52 @@ mod boot_manifest_tests {
         // into this one — that fusion is the bug this split undoes.
         let saver = manifest_with(tmp.path(), "name: saver\nbuiltins:\n  save_graph: true\n");
         assert!(
-            !boot_mutations_enabled(Some(&saver), &bare_cli).expect("save_graph manifest parses"),
+            !boot_mutations_enabled(Some(&saver), &bare_cli, false)
+                .expect("save_graph manifest parses"),
             "builtins.save_graph: true registers save_graph; it does not open cypher_query \
              to mutations"
         );
+    }
+
+    /// The embedder's pin beats both operator surfaces.
+    ///
+    /// sonagram embeds this server with a closed `tools_allow` and owns argv
+    /// but not the manifest: an operator editing the sibling manifest could
+    /// set `extensions.writable: true` and open writes against a graph their
+    /// next build regenerates. The pin is the contract that makes that
+    /// impossible without the embedder re-implementing the resolution — the
+    /// text-grep workaround it replaces missed exactly this.
+    #[test]
+    fn the_read_only_pin_beats_every_write_opt_in() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bare_cli = Cli::parse_from(["kglite-mcp-server", "--graph", "g.kgl"]);
+        let flag_cli = Cli::parse_from(["kglite-mcp-server", "--graph", "g.kgl", "--writable"]);
+        let on = manifest_with(tmp.path(), "name: on\nextensions:\n  writable: true\n");
+
+        assert!(
+            !boot_mutations_enabled(None, &flag_cli, true).expect("flag alone parses"),
+            "--writable must not open a pinned server"
+        );
+        assert!(
+            !boot_mutations_enabled(Some(&on), &bare_cli, true).expect("manifest key parses"),
+            "extensions.writable: true must not open a pinned server — this is the exact \
+             case the embedder cannot see from argv"
+        );
+        assert!(
+            !boot_mutations_enabled(Some(&on), &flag_cli, true).expect("both parse"),
+            "both surfaces together must not open a pinned server"
+        );
+        assert!(
+            !boot_mutations_enabled(None, &bare_cli, true).expect("neither parses"),
+            "and neither leaves it read-only, as it already was"
+        );
+
+        // Non-vacuity: the same three inputs without the pin must all open.
+        // Without this, a `boot_mutations_enabled` returning `false`
+        // unconditionally would satisfy every assertion above.
+        assert!(boot_mutations_enabled(None, &flag_cli, false).expect("flag alone parses"));
+        assert!(boot_mutations_enabled(Some(&on), &bare_cli, false).expect("manifest parses"));
+        assert!(boot_mutations_enabled(Some(&on), &flag_cli, false).expect("both parse"));
     }
 
     /// The two predicates as the router sees them. `writable` gates
@@ -1037,7 +1105,7 @@ mod boot_manifest_tests {
 
         let resolve = |manifest: Option<&mcp_methods::server::Manifest>, cli: &Cli| {
             let mutations_enabled =
-                boot_mutations_enabled(manifest, cli).expect("manifest writable parses");
+                boot_mutations_enabled(manifest, cli, false).expect("manifest writable parses");
             let builtins = boot_builtins(manifest, mutations_enabled, &csv_off, tmp.path(), None);
             (builtins.writable, builtins.save_graph)
         };
@@ -1086,14 +1154,14 @@ mod boot_manifest_tests {
             tmp.path(),
             "name: word\nextensions:\n  writable: yes-please\n",
         );
-        let error = boot_mutations_enabled(Some(&word), &cli)
+        let error = boot_mutations_enabled(Some(&word), &cli, false)
             .expect_err("a non-boolean value must fail boot, not be ignored")
             .to_string();
         assert!(error.contains("must be a boolean"), "{error}");
 
         let null = manifest_with(tmp.path(), "name: null\nextensions:\n  writable:\n");
         assert!(
-            boot_mutations_enabled(Some(&null), &cli).is_err(),
+            boot_mutations_enabled(Some(&null), &cli, false).is_err(),
             "an empty (null) value is a typo, not `false`"
         );
 
@@ -1102,7 +1170,7 @@ mod boot_manifest_tests {
             "name: mapping\nextensions:\n  writable:\n    enabled: true\n",
         );
         assert!(
-            boot_mutations_enabled(Some(&mapping), &cli).is_err(),
+            boot_mutations_enabled(Some(&mapping), &cli, false).is_err(),
             "a mapping is a typo, not a truthy value"
         );
     }
