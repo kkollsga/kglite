@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- **A per-field evidence census in the ontology audit.**
+  `CALL ontology_audit({by: 'property'})` fans the `required_properties` and
+  `property_types` rules into one row per declared property — `violations` the
+  edges failing it, `total` the relationship's edges, `pct` the share lacking
+  it — including properties nothing fails, so a complete field is visible as
+  such. Every other rule keeps its aggregate row with a Null `property`. Note
+  the two breakdowns differ in kind: `domain_class` *partitions* a rule (its
+  rows sum back to `violations`), while `property` is a *census* — an edge
+  missing three declared properties counts under all three, so its rows sum to
+  at least the aggregate, never back to it.
+- **`edge_property_violation()` now yields `properties`**, the full list of
+  declared properties each flagged edge fails. `UNWIND` it for a per-field
+  tally.
 - **Properties on a blueprint FK edge.** An `fk_edges` entry now reads
   `properties`, `property_types` and `rename`, the same three keys a junction
   edge reads: the named columns of the source node's own CSV row are attached
@@ -43,6 +56,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   list back.
 
 ### Changed
+- **`ontology_audit()` gained a `property` column and
+  `edge_property_violation()` a `properties` column.** Both are additions to
+  the yielded column set: a bare `CALL` returns one more column than before,
+  and a query pinning the exact column set needs updating. Existing `YIELD`
+  lists, row counts and every other column are unchanged — `property` on
+  `edge_property_violation()` still names one property (now defined as the
+  first of `properties`), and its one-row-per-flagged-edge identity with the
+  scorecard's `violations + exempted` still holds.
 - **Rust API:** the blueprint spec structs gain fields, so a struct literal
   that constructs one exhaustively no longer compiles. `Blueprint`, `Settings`,
   `NodeSpec`, `FkEdge` and `JunctionEdge` each carry an `extra` map holding the

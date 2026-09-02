@@ -3238,10 +3238,11 @@ and read-only from Cypher:
 
 ```cypher
 SHOW ONTOLOGY
-CALL ontology_audit() YIELD rule, severity, violations, exempted, total, pct, domain_class
+CALL ontology_audit() YIELD rule, severity, violations, exempted, total, pct, domain_class, property
 CALL ontology_audit({by: 'domain_class'}) YIELD rule, domain_class, violations  -- per violating class
+CALL ontology_audit({by: 'property'}) YIELD rule, property, violations, pct     -- per declared property
 CALL type_domain_violation() YIELD source, target, rule   -- no-arg: checks every declaration
-CALL edge_property_violation() YIELD relationship, check, source, target, property, exempt
+CALL edge_property_violation() YIELD relationship, check, source, target, property, properties, exempt
 ```
 
 `SHOW ONTOLOGY` returns one row per declared class (`kind`, `name`, `is_a`,
@@ -3267,12 +3268,29 @@ edge's source for `domain` / `range` / `required_properties` /
 pair/triple shapes (`inverse`, `symmetric`, `transitive`) the first bound
 node — the source of the edge or chain whose partner is missing.
 
+`{by: 'property'}` answers the other follow-up — *which fields* are missing —
+by fanning the `required_properties` and `property_types` rules into one row
+per **declared** property: `violations` is the edges failing that property,
+`total` the relationship's edges, `pct` the share lacking it. Every other rule
+keeps its aggregate row with a Null `property`.
+
+The two breakdowns are different kinds of answer, and mixing them up
+double-counts. `domain_class` **partitions** a rule: every violating row has
+exactly one source class, so the rows sum back to the aggregate.
+`property` is a **census**: an edge missing three declared properties is
+counted under all three, so the rows sum to *at least* the aggregate and
+adding them up is not the rule's violation count. A declared property nothing
+fails still gets a row, at zero — "this field is complete" is what a census is
+for. Only one axis applies at a time; the column you did not ask for is Null.
+
 `edge_property_violation()` lists the individual edges behind the
 `required_properties` and `property_types` counts (the two declared checks
-with no rule procedure of their own): one row per flagged edge, `property`
-naming the first declared property it fails and `exempt` marking the rows an
-`exempt` declaration excuses, so a relationship's row count for a check equals
-that rule's `violations + exempted`. It takes no arguments.
+with no rule procedure of their own): one row per flagged edge, `properties`
+listing every declared property it fails, `property` the first of them, and
+`exempt` marking the rows an `exempt` declaration excuses — so a
+relationship's row count for a check equals that rule's
+`violations + exempted` however many properties one edge fails. `UNWIND` the
+list to count per property. It takes no arguments.
 
 The six declaration-backed rule procedures (`type_domain_violation`,
 `type_range_violation`, `missing_required_edge`, `cardinality_violation`,
@@ -3597,7 +3615,7 @@ below; do not infer absence from this shorter list.
 | **Procedures** | `CALL pagerank/betweenness/degree/closeness() YIELD node, score`, `CALL louvain/leiden() YIELD node, community [, level]` (multilevel, hierarchical — `leiden` guarantees well-connected communities), `CALL label_propagation() YIELD node, community`, `CALL connected_components() YIELD node, component`, `CALL k_core/coreness() YIELD node, coreness`, `CALL clustering_coefficient() YIELD node, coefficient`, `CALL cluster({method, ...}) YIELD node, cluster`, `CALL affected_tests({files: [...], max_depth?}) YIELD test_file, depth` (0.9.34+, code graphs), `CALL refresh_stats() YIELD src_type, edge_type, tgt_type, count` (0.9.35+, planner cardinality cache refresh), `CALL list_procedures()` |
 | **Scoped algorithms** | `connected_components`, `k_core`/`coreness`, and `clustering_coefficient` accept an optional `{node_type, relationship}` map to run over a subgraph — e.g. `CALL k_core({node_type: 'Person', relationship: ['KNOWS', 'OWNS']})`. Each field is a string or list of strings; omit the map for the whole graph. Computed lazily over the live graph (identical across memory/mapped/disk modes). |
 | **Schema** | `CALL db.labels() YIELD label`, `CALL db.relationshipTypes() YIELD relationshipType`, `CALL db.indexes() YIELD name, type, entityType, labelsOrTypes, properties, state` |
-| **Rule procedures** | `CALL orphan_node/self_loop/missing_required_edge/missing_inbound_edge/duplicate_title/duplicate_id/null_property({type[,edge\|property]}) YIELD node`, `CALL cycle_2step({type, edge}) YIELD node_a, node_b`, `CALL inverse_violation({rel_a, rel_b}) YIELD a, b`, `CALL transitivity_violation({rel}) YIELD a, b, c`, `CALL cardinality_violation({type, edge[, min, max]}) YIELD node, count`, `CALL type_domain_violation/type_range_violation({edge, expected_*}) YIELD source, target`, `CALL parallel_edges({edge}) YIELD a, b, count`, `CALL edge_property_violation() YIELD relationship, check, source, target, property, exempt` (ontology declarations only) |
+| **Rule procedures** | `CALL orphan_node/self_loop/missing_required_edge/missing_inbound_edge/duplicate_title/duplicate_id/null_property({type[,edge\|property]}) YIELD node`, `CALL cycle_2step({type, edge}) YIELD node_a, node_b`, `CALL inverse_violation({rel_a, rel_b}) YIELD a, b`, `CALL transitivity_violation({rel}) YIELD a, b, c`, `CALL cardinality_violation({type, edge[, min, max]}) YIELD node, count`, `CALL type_domain_violation/type_range_violation({edge, expected_*}) YIELD source, target`, `CALL parallel_edges({edge}) YIELD a, b, count`, `CALL edge_property_violation() YIELD relationship, check, source, target, property, properties, exempt` (ontology declarations only) |
 | **Operators** | `+`, `-`, `*`, `/`, `\|\|` (string concat), `=~` (regex, full-string), `IN`, `STARTS WITH`, `ENDS WITH`, `CONTAINS`, `IS NULL`, `IS NOT NULL` |
 
 ## Cypher Dialect Contract

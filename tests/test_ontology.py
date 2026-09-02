@@ -991,7 +991,16 @@ def test_audit_bare_call_gains_a_null_domain_class_column(school):
     rows = school.cypher("CALL ontology_audit()").to_list()
     assert len(rows) == 4
     assert all(r["domain_class"] is None for r in rows)
-    assert set(rows[0]) == {"rule", "severity", "violations", "exempted", "total", "pct", "domain_class"}
+    assert set(rows[0]) == {
+        "rule",
+        "severity",
+        "violations",
+        "exempted",
+        "total",
+        "pct",
+        "domain_class",
+        "property",
+    }
 
 
 def test_audit_by_param_is_validated(school):
@@ -1055,7 +1064,15 @@ def test_edge_property_violation_yields_column_subsets(mixed_props_graph):
     assert [r["check"] for r in checks] == ["property_types"] + ["required_properties"] * 3
     bare = mixed_props_graph.cypher("CALL edge_property_violation()").to_list()
     assert len(bare) == 4
-    assert set(bare[0]) == {"relationship", "check", "source", "target", "property", "exempt"}
+    assert set(bare[0]) == {
+        "relationship",
+        "check",
+        "source",
+        "target",
+        "property",
+        "properties",
+        "exempt",
+    }
     with pytest.raises(Exception, match="does not yield"):
         mixed_props_graph.cypher("CALL edge_property_violation() YIELD bogus RETURN bogus")
 
@@ -1066,6 +1083,166 @@ def test_edge_property_violation_refuses_params_and_a_bare_graph(mixed_props_gra
         mixed_props_graph.cypher("CALL edge_property_violation({edge: 'ENROLLED_IN'}) YIELD source RETURN source")
     with pytest.raises(Exception, match="define_ontology"):
         g.cypher("CALL edge_property_violation() YIELD source RETURN source")
+
+
+# ---- the per-property census ----------------------------------------------
+
+
+@pytest.fixture
+def multi_props_graph() -> KnowledgeGraph:
+    """One relationship, three declared properties, and an edge missing two of
+    them. A single-property fixture cannot tell a census from a partition."""
+    graph = KnowledgeGraph()
+    graph.cypher("CREATE (:Class {id: 1, title: 'C'})")
+    graph.cypher(
+        "CREATE (:Student {id: 1, title: 'A'}), (:Student {id: 2, title: 'B'}), (:Student {id: 3, title: 'D'})"
+    )
+    # A carries both; B is missing `grade`; D is missing `since` and `grade`.
+    # `code` is on all three, so it is the property nothing fails.
+    graph.cypher(
+        "MATCH (s:Student {id: 1}), (c:Class {id: 1}) "
+        "CREATE (s)-[:ENROLLED_IN {since: '2024', grade: 'A', code: 'X'}]->(c)"
+    )
+    graph.cypher(
+        "MATCH (s:Student {id: 2}), (c:Class {id: 1}) CREATE (s)-[:ENROLLED_IN {since: '2024', code: 'X'}]->(c)"
+    )
+    graph.cypher("MATCH (s:Student {id: 3}), (c:Class {id: 1}) CREATE (s)-[:ENROLLED_IN {code: 'X'}]->(c)")
+    return graph
+
+
+def _multi_decl(properties=("since", "grade"), extra=None):
+    rel = {"required_properties": list(properties), "enforcement": "error"}
+    if extra:
+        rel.update(extra)
+    return {"classes": {"Student": {}, "Class": {}}, "relationships": {"ENROLLED_IN": rel}}
+
+
+def _property_rows(graph):
+    return graph.cypher(
+        "CALL edge_property_violation() YIELD check, source, property, properties, exempt "
+        "RETURN check, source.title AS src, property, properties, exempt ORDER BY check, src"
+    ).to_list()
+
+
+def test_edge_property_violation_lists_every_failing_property(multi_props_graph):
+    multi_props_graph.define_ontology(_multi_decl())
+    rows = _property_rows(multi_props_graph)
+    assert [(r["src"], r["property"], r["properties"]) for r in rows] == [
+        ("B", "grade", ["grade"]),
+        ("D", "since", ["since", "grade"]),
+    ]
+    # `property` is the head of the list, which is what keeps the documented
+    # one-row-per-edge identity true.
+    assert all(r["property"] == r["properties"][0] for r in rows)
+
+
+def test_edge_property_violation_keeps_one_row_per_edge(multi_props_graph):
+    """The list column carries the extra properties; it must not split the
+    edge into a row per failing property, or the row count stops reconciling
+    with the scorecard."""
+    multi_props_graph.define_ontology(_multi_decl())
+    rows = _property_rows(multi_props_graph)
+    line = _audit(multi_props_graph)["ENROLLED_IN.required_properties"]
+    assert len(rows) == line["violations"] + line["exempted"] == 2
+
+
+def test_edge_property_violation_properties_unwinds(multi_props_graph):
+    multi_props_graph.define_ontology(_multi_decl())
+    counts = multi_props_graph.cypher(
+        "CALL edge_property_violation() YIELD properties UNWIND properties AS p RETURN p, count(*) AS n ORDER BY p"
+    ).to_list()
+    assert [(r["p"], r["n"]) for r in counts] == [("grade", 2), ("since", 1)]
+
+
+def test_edge_property_violation_bare_call_includes_properties(multi_props_graph):
+    multi_props_graph.define_ontology(_multi_decl())
+    bare = multi_props_graph.cypher("CALL edge_property_violation()").to_list()
+    assert set(bare[0]) == {
+        "relationship",
+        "check",
+        "source",
+        "target",
+        "property",
+        "properties",
+        "exempt",
+    }
+
+
+def _property_audit(graph, by="property"):
+    rows = graph.cypher(
+        f"CALL ontology_audit({{by: '{by}'}}) "
+        "YIELD rule, severity, violations, exempted, total, pct, domain_class, property RETURN *"
+    ).to_list()
+    out = {}
+    for row in rows:
+        out.setdefault(row["rule"], []).append(row)
+    return out
+
+
+def test_audit_by_property_is_a_census_not_a_partition(multi_props_graph):
+    multi_props_graph.define_ontology(_multi_decl())
+    aggregate = _audit(multi_props_graph)["ENROLLED_IN.required_properties"]
+    assert (aggregate["violations"], aggregate["total"]) == (2, 3)
+
+    fanned = _property_audit(multi_props_graph)["ENROLLED_IN.required_properties"]
+    assert [(r["property"], r["violations"], r["total"]) for r in fanned] == [
+        ("since", 1, 3),
+        ("grade", 2, 3),
+    ]
+    # The edge missing both counts under both, so the census oversums the
+    # aggregate rather than partitioning it — the contract the docs state.
+    assert sum(r["violations"] for r in fanned) == 3 > aggregate["violations"]
+    assert [r["pct"] for r in fanned] == [33.3, 66.7]
+    assert {(r["severity"], r["exempted"]) for r in fanned} == {("error", 0)}
+
+
+def test_audit_by_property_reports_a_property_nothing_fails(multi_props_graph):
+    """A complete field is the census's most useful answer; dropping it would
+    make a declared property indistinguishable from an undeclared one."""
+    multi_props_graph.define_ontology(_multi_decl(("since", "grade", "code")))
+    fanned = _property_audit(multi_props_graph)["ENROLLED_IN.required_properties"]
+    assert [(r["property"], r["violations"]) for r in fanned] == [
+        ("since", 1),
+        ("grade", 2),
+        ("code", 0),
+    ]
+
+
+def test_audit_by_property_covers_property_types_too(multi_props_graph):
+    multi_props_graph.define_ontology(_multi_decl(("since",), {"property_types": {"since": "int", "code": "int"}}))
+    fanned = _property_audit(multi_props_graph)["ENROLLED_IN.property_types"]
+    # `since` is a string on the two edges that carry it; `code` is a string
+    # on all three. `property_types` is a map, so its census is by name.
+    assert [(r["property"], r["violations"]) for r in fanned] == [("code", 3), ("since", 2)]
+
+
+def test_audit_by_property_leaves_other_rules_on_their_aggregate_line(multi_props_graph):
+    multi_props_graph.define_ontology(_multi_decl(("since", "grade"), {"domain": "Student", "range": "Class"}))
+    fanned = _property_audit(multi_props_graph)
+    assert [(r["property"], r["violations"]) for r in fanned["ENROLLED_IN.domain"]] == [(None, 0)]
+    assert [(r["property"], r["violations"]) for r in fanned["ENROLLED_IN.range"]] == [(None, 0)]
+
+
+def test_audit_breakdown_axes_do_not_mix(multi_props_graph):
+    multi_props_graph.define_ontology(_multi_decl())
+    by_property = _property_audit(multi_props_graph)["ENROLLED_IN.required_properties"]
+    assert all(r["domain_class"] is None for r in by_property)
+    by_class = _property_audit(multi_props_graph, by="domain_class")["ENROLLED_IN.required_properties"]
+    assert all(r["property"] is None for r in by_class)
+    assert [(r["domain_class"], r["violations"]) for r in by_class] == [("Student", 2)]
+
+
+def test_audit_bare_call_has_a_null_property_column(multi_props_graph):
+    multi_props_graph.define_ontology(_multi_decl())
+    rows = multi_props_graph.cypher("CALL ontology_audit()").to_list()
+    assert all(r["property"] is None for r in rows)
+
+
+def test_audit_by_property_is_an_accepted_value(school):
+    with pytest.raises(Exception, match="invalid 'by' value 'properties'"):
+        school.cypher("CALL ontology_audit({by: 'properties'}) YIELD rule RETURN rule")
+    rows = school.cypher("CALL ontology_audit({by: 'property'}) YIELD rule, property RETURN rule, property").to_list()
+    assert rows
 
 
 # ---- ancestry: the parent-pointer annotation, distinct from transitive ----

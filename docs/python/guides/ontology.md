@@ -173,7 +173,7 @@ aggregate) while `severity`, `exempted` and `total` keep their per-rule
 values. Exempted rows are left out, so a class whose every violation is
 excused gets no row at all, and a rule with nothing to break down keeps its
 single aggregate row. Without the parameter, `domain_class` is `None` on
-every row — a bare `CALL ontology_audit()` returns all seven columns either
+every row — a bare `CALL ontology_audit()` returns all eight columns either
 way.
 
 ```python
@@ -190,6 +190,34 @@ The domain-side class is the edge's source for `domain` / `range` /
 `required_properties` / `property_types`, the node itself for `required` /
 `cardinality`, and for the pair and triple shapes (`inverse`, `symmetric`,
 `transitive`) the first bound node.
+
+**Which fields are missing?** `{by: 'property'}` fans the
+`required_properties` and `property_types` rules into one row per **declared**
+property — `violations` is the edges failing that property, `total` the
+relationship's edges, `pct` the share lacking it. Every other rule keeps its
+aggregate row with a `None` property.
+
+```python
+for row in g.cypher(
+    "CALL ontology_audit({by: 'property'}) YIELD rule, property, violations, pct"
+):
+    print(row)
+# {'rule': 'ENROLLED_IN.required_properties', 'property': 'since', 'violations': 1, 'pct': 33.3}
+# {'rule': 'ENROLLED_IN.required_properties', 'property': 'grade', 'violations': 2, 'pct': 66.7}
+# {'rule': 'ENROLLED_IN.domain', 'property': None, 'violations': 0, 'pct': 0.0}
+```
+
+```{important}
+The two breakdowns answer different shapes of question, and reading one as
+the other double-counts. `domain_class` **partitions** a rule — every
+violating row has exactly one source class, so the rows sum back to the
+aggregate `violations`. `property` is a **census** — one edge missing three
+declared properties is counted under all three, so the rows sum to *at least*
+the aggregate and adding them up does not give the rule's violation count.
+A declared property nothing fails still gets a row, at zero; "this field is
+complete" is the answer a census is asked for. One axis applies at a time:
+the column you did not ask for is `None`.
+```
 
 ## The blueprint gate (observe → fix → enforce)
 
@@ -289,13 +317,21 @@ counts, with `exempt` marking which side of the line each row fell on:
 
 ```python
 for row in g.cypher("""
-    CALL edge_property_violation() YIELD check, source, property, exempt
-    RETURN check, source.id AS source, property, exempt
+    CALL edge_property_violation() YIELD check, source, property, properties, exempt
+    RETURN check, source.id AS source, property, properties, exempt
 """):
     print(row)
-# {'check': 'required_properties', 'source': 'PL002', 'property': 'validFrom', 'exempt': False}
-# {'check': 'required_properties', 'source': 'P900', 'property': 'validFrom', 'exempt': True}
+# {'check': 'required_properties', 'source': 'PL002', 'property': 'validFrom',
+#  'properties': ['validFrom'], 'exempt': False}
+# {'check': 'required_properties', 'source': 'P900', 'property': 'validFrom',
+#  'properties': ['validFrom', 'source'], 'exempt': True}
 ```
+
+`properties` lists every declared property the edge fails and `property` is
+the first of them, so an edge missing three is still one row and the listing
+keeps reconciling with the scorecard. `UNWIND properties AS p` when you want
+the per-field tally the row listing itself does not give you — or ask
+`ontology_audit({by: 'property'})` for it directly.
 
 At the blueprint gate the exempted count is reported, never dropped: every
 summary line carries a `(+N exempted)` tail, and a rule declared `error`
