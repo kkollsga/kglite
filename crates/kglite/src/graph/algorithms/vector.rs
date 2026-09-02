@@ -1747,10 +1747,13 @@ mod tests {
         }
     }
 
-    /// End-to-end: the whole-graph search on a mixed graph returns exactly the
-    /// exact scan's answer, index or not.
+    /// End-to-end: the whole-graph search on a mixed graph reaches the index
+    /// and recalls the exact scan's answer. The 600-node fixture is above
+    /// `HNSW_AUTO_MIN`, so the approximate path really runs — and an ANN index
+    /// only owes recall, not identity (`HnswIndex::build`), so identity is
+    /// asserted on the exact scan alone.
     #[test]
-    fn whole_graph_search_on_a_mixed_graph_matches_the_exact_scan() {
+    fn whole_graph_search_on_a_mixed_graph_recalls_the_exact_scan() {
         let (graph, docs) = one_embedded_type_graph(600, 600);
         let options = VectorSearchOptions::default()
             .with_top_k(5)
@@ -1773,9 +1776,16 @@ mod tests {
             &options.clone().with_exact(true),
         )
         .expect("whole-graph exact search");
-        assert_eq!(
-            approximate.iter().map(|r| r.node_idx).collect::<Vec<_>>(),
-            exact.iter().map(|r| r.node_idx).collect::<Vec<_>>()
+        let exact_ids = exact.iter().map(|r| r.node_idx).collect::<Vec<_>>();
+        let approximate_ids = approximate.iter().map(|r| r.node_idx).collect::<Vec<_>>();
+        let hits = approximate_ids
+            .iter()
+            .filter(|id| exact_ids.contains(id))
+            .count();
+        let recall = hits as f64 / exact_ids.len() as f64;
+        assert!(
+            recall >= 0.8,
+            "recall@5 too low: {recall} (approximate={approximate_ids:?}, exact={exact_ids:?})"
         );
         assert_eq!(
             exact.iter().map(|r| r.node_idx).collect::<Vec<_>>(),
