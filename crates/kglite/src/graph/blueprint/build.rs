@@ -1207,6 +1207,7 @@ fn load_fk_edges(
                 &edge.target_type,
                 &edge.target_col,
                 report,
+                maintain::InitialLoad::Detect,
             )?;
             t_connect += t_c.elapsed();
             *report
@@ -1287,6 +1288,16 @@ fn load_streamed_fk_edges(
 
     let csv_path = root.join(csv_rel);
     let chunk_size = node_chunk_size();
+    // Decided before the first chunk and reused for all of them: chunking this
+    // CSV bounds peak RAM, so it must not decide which rows become their own
+    // edge. See `maintain::InitialLoad`.
+    let initial_load: HashMap<String, maintain::InitialLoad> = fk_edges
+        .keys()
+        .map(|edge_type| {
+            let unseen = !graph.connection_type_metadata.contains_key(edge_type);
+            (edge_type.clone(), maintain::InitialLoad::Preset(unseen))
+        })
+        .collect();
     let chunks = read_csv_chunks(&csv_path, chunk_size)
         .map_err(|e| format!("[{}] {}", spec.node_type, e))?;
 
@@ -1366,6 +1377,7 @@ fn load_streamed_fk_edges(
                 &edge.target,
                 &target_col,
                 report,
+                initial_load[edge_type],
             )?;
             *report.edges_by_type.entry(edge_type.clone()).or_insert(0) += count;
         }
@@ -1469,8 +1481,9 @@ fn connect(
     target_type: &str,
     target_id_field: &str,
     report: &mut BuildReport,
+    initial_load: maintain::InitialLoad,
 ) -> Result<usize, String> {
-    match maintain::add_connections(
+    match maintain::add_connections_with_initial_load(
         graph,
         df,
         connection_type.to_string(),
@@ -1481,6 +1494,7 @@ fn connect(
         None,
         None,
         None,
+        initial_load,
     ) {
         Ok(r) => {
             if r.connections_skipped > 0 {
@@ -1563,6 +1577,13 @@ fn load_junction_edges(
                 }
             };
 
+            // Decided before the first chunk and reused for all of them:
+            // streaming this CSV bounds peak RAM, so it must not decide which
+            // of its rows become parallel edges. See `maintain::InitialLoad`.
+            let initial_load = maintain::InitialLoad::Preset(
+                !graph.connection_type_metadata.contains_key(edge_type),
+            );
+
             let chunks = match read_csv_chunks(&csv_path, chunk_size) {
                 Ok(it) => it,
                 Err(e) => {
@@ -1603,6 +1624,7 @@ fn load_junction_edges(
                     &junc.target,
                     &junc.target_fk,
                     report,
+                    initial_load,
                 )?;
                 *report.edges_by_type.entry(edge_type.clone()).or_insert(0) += count;
             }

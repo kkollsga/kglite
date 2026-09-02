@@ -728,7 +728,11 @@ impl ConnectionBatchProcessor {
         self.conflict_mode = mode;
     }
 
-    /// Skip edge existence checks (safe when this connection type has no existing edges)
+    /// Skip edge existence checks: every row becomes its own edge, parallel
+    /// ones included. Set for a load's first touch of a connection type, and
+    /// held across every chunk of a chunked load (`maintain::InitialLoad`) —
+    /// so "on" does not imply the type has no stored edges, only that this
+    /// load owns all of them.
     pub fn set_skip_existence_check(&mut self, skip: bool) {
         self.skip_existence_check = skip;
     }
@@ -806,8 +810,9 @@ impl ConnectionBatchProcessor {
         // (src, tgt) consolidate onto one edge.
         //
         // `skip_existence_check` (initial-load fast path) skips both the build
-        // and the per-edge lookup — there are no existing edges of this type,
-        // and within-chunk consolidation is the caller's job in that mode.
+        // and the per-edge lookup — the caller has declared this load owns
+        // every edge of the type, so nothing may fold, and within-chunk
+        // consolidation is the caller's job in that mode.
         let mut existing_lookup: HashMap<(NodeIndex, NodeIndex), EdgeIndex> = HashMap::new();
         if !self.skip_existence_check {
             let unique_sources: HashSet<NodeIndex> =

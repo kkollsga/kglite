@@ -948,6 +948,56 @@ class TestStreamingFkEdges:
         ]["n"]
         assert per_company == n_employees // n_companies
 
+    def _repeated_fk_bp(self, tmp_path, n_rows):
+        """One company, one employee, `n_rows` identical membership rows —
+        so every row builds the same (source, target) FK pair."""
+        _write_csv(tmp_path / "companies.csv", pd.DataFrame({"company_id": [0], "name": ["C0"]}))
+        _write_csv(
+            tmp_path / "employees.csv",
+            pd.DataFrame(
+                {
+                    "employee_id": [1] * n_rows,
+                    "name": ["E1"] * n_rows,
+                    "company_id": [0] * n_rows,
+                }
+            ),
+        )
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "Company": {"csv": "companies.csv", "pk": "company_id", "title": "name", "properties": {}},
+                "Employee": {
+                    "csv": "employees.csv",
+                    "pk": "employee_id",
+                    "title": "name",
+                    "properties": {},
+                    "connections": {"fk_edges": {"WORKS_AT": {"target": "Company", "fk": "company_id"}}},
+                },
+            },
+        }
+        _write_blueprint(tmp_path / "bp.json", bp)
+        return tmp_path / "bp.json"
+
+    def test_repeated_fk_rows_do_not_depend_on_the_chunk_size(self, tmp_path, monkeypatch):
+        """Streaming a node CSV bounds peak RAM; it must not decide how many
+        edges its FK rows produce. Before the fix the first chunk registered
+        the connection type and every later chunk merged its rows onto that
+        chunk's edges, so the edge count fell as the chunk size did."""
+        n_rows = 20
+        bp_path = self._repeated_fk_bp(tmp_path, n_rows)
+
+        def build(threshold_mb, chunk_size):
+            monkeypatch.setenv("KGLITE_BLUEPRINT_STREAMING_THRESHOLD_MB", str(threshold_mb))
+            monkeypatch.setenv("KGLITE_BLUEPRINT_NODE_CHUNK_SIZE", str(chunk_size))
+            graph = from_blueprint(bp_path, save=False)
+            return graph.cypher("MATCH (:Employee)-[r:WORKS_AT]->(:Company) RETURN count(r) AS n")[0]["n"]
+
+        # Buffered (one connect() call for the whole spec) is the reference.
+        buffered = build(100, 5)
+        assert buffered == n_rows
+        for chunk_size in (3, 5, 7, n_rows):
+            assert build(0, chunk_size) == buffered, f"streamed chunk_size={chunk_size} changed the edge count"
+
     def test_streamed_auto_pk_subnode_fk_edges(self, tmp_path, monkeypatch):
         """Sub-node with `pk:"auto"` + parent_fk emits OF_PARENT
         edges via streaming. Source ids must align between the node
@@ -1321,6 +1371,82 @@ class TestJunctionRename:
         from_blueprint(bp_path, save=False, verbose=True)
         err = capfd.readouterr().err
         assert "not in 'properties'" in err
+
+
+class TestJunctionChunkInvariance:
+    """The junction loader streams its CSV in chunks
+    (`KGLITE_BLUEPRINT_JUNCTION_CHUNK_SIZE`, default 100k rows) purely to bound
+    peak RAM. The chunk size is a performance knob, so the graph it produces
+    must not depend on it: a parallel edge (same endpoints and type, different
+    properties) that survives a one-chunk load has to survive a many-chunk one.
+    Regression for the silent row loss found downstream 2026-09-02, where a
+    117,160-row junction CSV landed 109,065 edges at the default chunk size and
+    all 117,160 with the chunking effectively disabled.
+    """
+
+    ROWS = 25
+
+    def _bp(self, tmp_path):
+        persons = pd.DataFrame({"person_id": [1, 2, 3], "name": ["Alice", "Bob", "Charlie"]})
+        _write_csv(tmp_path / "persons.csv", persons)
+        # Three endpoint pairs cycling over 25 rows: every pair recurs many
+        # times, and its repeats straddle every boundary a chunk size of 10
+        # draws. Each row carries a distinct `seq`, so a folded row is visible
+        # as a missing value, not just a missing count.
+        pairs = [(1, 2), (2, 3), (3, 1)]
+        knows = pd.DataFrame(
+            {
+                "source_id": [pairs[i % 3][0] for i in range(self.ROWS)],
+                "target_id": [pairs[i % 3][1] for i in range(self.ROWS)],
+                "seq": list(range(self.ROWS)),
+            }
+        )
+        _write_csv(tmp_path / "knows.csv", knows)
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "Person": {
+                    "csv": "persons.csv",
+                    "pk": "person_id",
+                    "title": "name",
+                    "properties": {},
+                    "connections": {
+                        "junction_edges": {
+                            "KNOWS": {
+                                "csv": "knows.csv",
+                                "source_fk": "source_id",
+                                "target": "Person",
+                                "target_fk": "target_id",
+                                "properties": ["seq"],
+                                "property_types": {"seq": "int"},
+                            }
+                        }
+                    },
+                }
+            },
+        }
+        bp_path = tmp_path / "blueprint.json"
+        _write_blueprint(bp_path, bp)
+        return bp_path
+
+    def _build(self, bp_path, monkeypatch, chunk_size):
+        monkeypatch.setenv("KGLITE_BLUEPRINT_JUNCTION_CHUNK_SIZE", str(chunk_size))
+        graph = from_blueprint(bp_path, save=False)
+        rows = graph.cypher("MATCH (:Person)-[r:KNOWS]->(:Person) RETURN r.seq AS seq").to_list()
+        return sorted(r["seq"] for r in rows)
+
+    def test_parallel_edges_survive_the_chunk_boundary(self, tmp_path, monkeypatch):
+        bp_path = self._bp(tmp_path)
+        chunked = self._build(bp_path, monkeypatch, 10)
+        assert chunked == list(range(self.ROWS))
+
+    def test_edge_set_is_the_same_at_every_chunk_size(self, tmp_path, monkeypatch):
+        bp_path = self._bp(tmp_path)
+        single = self._build(bp_path, monkeypatch, 1000)
+        for chunk_size in (1, 7, 10, 24):
+            assert self._build(bp_path, monkeypatch, chunk_size) == single, (
+                f"chunk_size={chunk_size} produced a different edge set"
+            )
 
 
 class TestOntologyGate:

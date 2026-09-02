@@ -1352,6 +1352,18 @@ def from_blueprint(
       ``MATCH ()-[r]->() RETURN count(r)``. When dedupe collapses input
       rows, the line is annotated as
       ``[T]: N edges (M input rows, K deduped)``.
+
+    **What dedupe collapses.** The first source to load a connection
+    type writes one edge per input row, so rows sharing a source and
+    target but differing in their properties stay separate parallel
+    edges. A *later* source feeding that same edge type (a second node
+    spec's FK edge, or a second junction CSV) merges instead: a row
+    whose endpoints already carry an edge of the type writes its
+    properties onto that edge rather than adding another, and those are
+    the rows the ``K deduped`` count reports. Reading a CSV in chunks
+    (``KGLITE_BLUEPRINT_JUNCTION_CHUNK_SIZE``,
+    ``KGLITE_BLUEPRINT_NODE_CHUNK_SIZE``) only bounds peak memory — it
+    never changes which edges a build produces.
     - **Warnings** (target node not found, null FK, type mismatch, etc.)
       are emitted as Python ``UserWarning`` objects (originating in Rust
       via PyO3). By default they reach **stderr**.

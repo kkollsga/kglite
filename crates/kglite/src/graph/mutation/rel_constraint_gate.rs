@@ -35,8 +35,8 @@
 //!
 //! | Caller | `skip_existence_check` | What the loader does | Gate models |
 //! |---|---|---|---|
-//! | `add_connections`, connection type absent from the metadata (initial load) | on | no lookup and no consolidation: **one relationship per row** (`batch.rs`, "within-chunk consolidation is the responsibility of the caller in that mode") | [`RowFolding::Independent`] |
-//! | `add_connections`, type already known | off | per-chunk lookup, mutated as rows land, so a row merges into a stored edge *or* into one an earlier row created | [`RowFolding::Merging`] with `read_stored` |
+//! | `add_connections`, the load's first touch of the connection type | on | no lookup and no consolidation: **one relationship per row** (`batch.rs`, "within-chunk consolidation is the responsibility of the caller in that mode") | [`RowFolding::Independent`] |
+//! | `add_connections`, type already loaded | off | per-chunk lookup, mutated as rows land, so a row merges into a stored edge *or* into one an earlier row created | [`RowFolding::Merging`] with `read_stored` |
 //! | `replace_connections` | delegates to the above | its delete drops the stored edges for these pairs first, but leaves the type in the metadata — so rows still consolidate with each other while nothing stored survives | [`RowFolding::Merging`] **without** `read_stored` (or `Independent` when the type is new) |
 
 use std::collections::{HashMap, HashSet};
@@ -90,8 +90,9 @@ pub(crate) enum RowFolding {
 
 impl RowFolding {
     /// The regime a plain `add_connections` will use. `skip_existence_check`
-    /// is the batch's own flag, set for the initial load of a connection type
-    /// nothing has written yet.
+    /// is the batch's own flag, set for a load's first touch of the connection
+    /// type — which a chunked caller pins across all of its chunks
+    /// (`maintain::InitialLoad`), so later chunks stay independent too.
     pub(crate) fn for_load(skip_existence_check: bool) -> Self {
         if skip_existence_check {
             RowFolding::Independent

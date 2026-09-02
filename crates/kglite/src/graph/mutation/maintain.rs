@@ -1122,6 +1122,23 @@ fn report_null_id_skips(errors: &mut Vec<String>, source: (usize, &str), target:
     }
 }
 
+/// How a call decides whether it may take the one-edge-per-row fast path:
+/// no existence lookup, so two rows sharing endpoints stay two parallel edges
+/// instead of folding onto one.
+///
+/// `Detect` reads the connection-type metadata, which is the right answer for
+/// a caller that hands over its whole frame in one call. A caller that streams
+/// one logical load in chunks must instead decide once, before its first
+/// chunk, and pass the answer here: the first chunk *registers* the connection
+/// type, so re-detecting flips every later chunk into merging and folds that
+/// load's parallel edges onto the edges the first chunk created — which makes
+/// the chunk size change the graph rather than only the peak RAM.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum InitialLoad {
+    Detect,
+    Preset(bool),
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn add_connections(
     graph: &mut DirGraph,
@@ -1134,6 +1151,38 @@ pub fn add_connections(
     source_title_field: Option<String>,
     target_title_field: Option<String>,
     conflict_handling: Option<String>,
+) -> Result<ConnectionOperationReport, String> {
+    add_connections_with_initial_load(
+        graph,
+        df_data,
+        connection_type,
+        source_type,
+        source_id_field,
+        target_type,
+        target_id_field,
+        source_title_field,
+        target_title_field,
+        conflict_handling,
+        InitialLoad::Detect,
+    )
+}
+
+/// [`add_connections`] with the initial-load decision supplied by the caller.
+/// Chunked loaders use it to keep one logical load on a single regime; see
+/// [`InitialLoad`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn add_connections_with_initial_load(
+    graph: &mut DirGraph,
+    df_data: DataFrame,
+    connection_type: String,
+    source_type: String,
+    source_id_field: String,
+    target_type: String,
+    target_id_field: String,
+    source_title_field: Option<String>,
+    target_title_field: Option<String>,
+    conflict_handling: Option<String>,
+    initial_load: InitialLoad,
 ) -> Result<ConnectionOperationReport, String> {
     let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
     let column_names = df_data.get_column_names();
@@ -1212,10 +1261,13 @@ pub fn add_connections(
     )?;
     let mut batch = ConnectionBatchProcessor::new(df_data.row_count());
     batch.set_conflict_mode(conflict_mode);
-    // Skip edge existence checks on initial load (no existing edges of this type)
-    let is_initial_load = !graph
-        .connection_type_metadata
-        .contains_key(&connection_type);
+    // Skip edge existence checks when this load owns every edge of the type.
+    let is_initial_load = match initial_load {
+        InitialLoad::Detect => !graph
+            .connection_type_metadata
+            .contains_key(&connection_type),
+        InitialLoad::Preset(initial) => initial,
+    };
     batch.set_skip_existence_check(is_initial_load);
 
     let mut skipped_count = skipped_null_source + skipped_null_target;

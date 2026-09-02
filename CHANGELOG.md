@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Fixed
+- **`from_blueprint()` lost parallel edges past the first chunk of a streamed
+  edge CSV.** The junction-edge loader streams its CSV in chunks
+  (`KGLITE_BLUEPRINT_JUNCTION_CHUNK_SIZE`, default 100k rows) and the streamed
+  FK-edge loader chunks its node CSV, but each chunk decided on its own whether
+  the connection type was new. The first chunk registered the type, so every
+  later chunk switched to merge-by-endpoints and folded its rows onto the edges
+  the first chunk had created — silently dropping rows *and* overwriting the
+  surviving edges' properties with later rows' values. A 117,160-row junction
+  CSV loaded 109,065 edges; raising the chunk size restored all 117,160. The
+  regime is now decided once per CSV and held for every chunk, so the chunk
+  size bounds peak RAM without changing the graph. Unchanged: a *second* load
+  into an already-loaded connection type (a second spec or CSV feeding the same
+  edge type) still merges by endpoints, as before.
 
 ## [0.16.21] - 2026-09-02
 ### Changed
