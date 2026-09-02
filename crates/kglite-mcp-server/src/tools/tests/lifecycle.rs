@@ -1638,6 +1638,105 @@ fn a_contended_force_refusal_does_not_invent_unsaved_work() {
     assert_eq!(file_stamp(&p), before, "a refused publish leaves the file");
 }
 
+/// The operator's second measurement: on a graph with nothing to write,
+/// `save_graph {force: true}` grew the file — +1,140 B from the writable
+/// server, +9,664 B from the read-only one, no content change. 0.16.14 shipped
+/// byte-deterministic `.kgl` writes, so two different deltas on the same bytes
+/// said the growth depended on *server state*.
+///
+/// It does, and the state is the manifest ontology: a server carrying one
+/// applies it at open, so its first publish writes an ontology + managed-label
+/// header the seeded file never had. That is a one-time cost of persisting
+/// configuration, not a nondeterministic writer — which is what this test
+/// pins: after the first publish, every later force-save of an unchanged graph
+/// is byte-identical, with and without an ontology.
+///
+/// If this ever fails on the no-ontology cell, the writer really is
+/// nondeterministic and the growth is a defect rather than a payload.
+#[test]
+fn a_forced_republish_is_byte_identical_after_the_first_one() {
+    // The deferred-index load path materializes indexes lazily and could
+    // serialize them in a different shape; it only fires with this set, so the
+    // identity claim below is about the eager path unless the env says
+    // otherwise.
+    assert!(
+        std::env::var_os("KGLITE_DEFER_INDEX_REBUILD").is_none(),
+        "this cell measures the eager index path; unset KGLITE_DEFER_INDEX_REBUILD"
+    );
+
+    // Measured on this fixture (907 B seeded, 2026-09-02): a declared-only
+    // ontology adds 89 B to the first publish, a materialized one 209 B, and a
+    // server with no ontology writes the seeded bytes back unchanged. All
+    // three are stable from the first publish onward — which is the claim.
+    for cell in [None, Some(false), Some(true)] {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("republish.kgl");
+        seed_people(&p, StorageMode::Memory);
+        let seeded = std::fs::read(&p).unwrap();
+
+        let first = force_save_through_a_fresh_state(&p, cell);
+        let second = force_save_through_a_fresh_state(&p, cell);
+        let third = force_save_through_a_fresh_state(&p, cell);
+
+        if cell.is_none() {
+            // The strongest arm, and the one that would expose a
+            // nondeterministic writer with nothing to blame it on: no
+            // ontology, no HNSW, so a force-save has literally nothing new to
+            // write and must reproduce the seeded bytes exactly.
+            assert_eq!(
+                first.len(),
+                seeded.len(),
+                "a server with no configuration must re-encode the seeded file to the same \
+                 size ({} B seeded, {} B republished)",
+                seeded.len(),
+                first.len()
+            );
+            assert_eq!(first, seeded, "and to the same bytes");
+        } else {
+            assert!(
+                first.len() > seeded.len(),
+                "cell={cell:?}: the manifest ontology is what the first publish adds; if it \
+                 stopped being written the configuration is being dropped"
+            );
+        }
+        assert_eq!(
+            first.len(),
+            second.len(),
+            "cell={cell:?}: the second force-save changed the file's size ({} → {}); the \
+             seeded file was {} B. A size that keeps moving on an unchanged graph is a \
+             nondeterministic writer, not a one-time configuration payload.",
+            first.len(),
+            second.len(),
+            seeded.len()
+        );
+        assert_eq!(
+            first, second,
+            "cell={cell:?}: two force-saves of an unchanged graph must produce identical bytes"
+        );
+        assert_eq!(second, third, "cell={cell:?}: and must keep doing so");
+    }
+}
+
+/// Open `path` in a fresh state, force-save, and return the file's bytes.
+/// `ontology` is `None` for no manifest ontology, or `Some(materialize)`.
+///
+/// Fresh state per publish on purpose: `unpersisted_config` is cleared by any
+/// publish and re-derived per install, so reusing one state would measure the
+/// second save of one server rather than the first save of the next one — and
+/// the operator's two deltas came from two servers.
+fn force_save_through_a_fresh_state(path: &std::path::Path, ontology: Option<bool>) -> Vec<u8> {
+    let s = GraphState::default();
+    if let Some(materialize) = ontology {
+        s.bind_ontology(agent_ontology(materialize));
+    }
+    s.open_or_create(path, None).unwrap();
+    s.with_active_mut(|a| run_save(a, true, true))
+        .unwrap()
+        .expect("force must publish");
+    drop(s);
+    std::fs::read(path).expect("the published file is readable")
+}
+
 /// The dirty path is unchanged: real unsaved work still writes, and still says
 /// so.
 #[test]
