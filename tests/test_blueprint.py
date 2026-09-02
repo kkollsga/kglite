@@ -1373,6 +1373,109 @@ class TestJunctionRename:
         assert "not in 'properties'" in err
 
 
+class TestListColumnType:
+    """`"list"` / `"array"` declares a JSON-array column. Without it, a
+    blueprint that stores multi-valued cells (synonyms, aliases, cross-refs)
+    has no way to say so: the value lands as one opaque string and every
+    downstream query that wants membership has to parse it again.
+    """
+
+    def _bp(self, tmp_path, synonyms, declared="list", junction_prop_type=None):
+        genes = pd.DataFrame({"gene_id": [1, 2], "name": ["adhE", "pfkA"]})
+        genes["synonyms"] = synonyms
+        _write_csv(tmp_path / "genes.csv", genes)
+        pathways = pd.DataFrame({"pathway_id": [10, 20], "label": ["glycolysis", "fermentation"]})
+        _write_csv(tmp_path / "pathways.csv", pathways)
+        member = pd.DataFrame(
+            {
+                "gene_id": [1, 2],
+                "pathway_id": [10, 20],
+                "evidence": ['["IDA","IMP"]', '["ISS"]'],
+            }
+        )
+        _write_csv(tmp_path / "member.csv", member)
+
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "Gene": {
+                    "csv": "genes.csv",
+                    "pk": "gene_id",
+                    "title": "name",
+                    "properties": {"synonyms": declared},
+                    "connections": {
+                        "junction_edges": {
+                            "MEMBER_OF": {
+                                "csv": "member.csv",
+                                "source_fk": "gene_id",
+                                "target": "Pathway",
+                                "target_fk": "pathway_id",
+                                "properties": ["evidence"],
+                                "property_types": ({"evidence": junction_prop_type} if junction_prop_type else {}),
+                            }
+                        }
+                    },
+                },
+                "Pathway": {"csv": "pathways.csv", "pk": "pathway_id", "title": "label"},
+            },
+        }
+        bp_path = tmp_path / "bp.json"
+        _write_blueprint(bp_path, bp)
+        return bp_path
+
+    def test_declared_list_column_lands_as_a_list(self, tmp_path):
+        bp_path = self._bp(tmp_path, ['["adhC","ADHE"]', '["pfk1"]'])
+        g = kglite.from_blueprint(str(bp_path), save=False)
+        rows = g.cypher("MATCH (n:Gene) RETURN n.name AS name, n.synonyms AS syn ORDER BY name")
+        assert [r["syn"] for r in rows] == [["adhC", "ADHE"], ["pfk1"]]
+
+    def test_list_column_is_queryable_element_wise(self, tmp_path):
+        bp_path = self._bp(tmp_path, ['["adhC","ADHE"]', '["pfk1"]'])
+        g = kglite.from_blueprint(str(bp_path), save=False)
+        rows = g.cypher("MATCH (n:Gene) WHERE 'ADHE' IN n.synonyms RETURN n.name AS name")
+        assert [r["name"] for r in rows] == ["adhE"]
+
+    def test_array_is_the_same_keyword(self, tmp_path):
+        bp_path = self._bp(tmp_path, ['["adhC"]', '["pfk1"]'], declared="array")
+        g = kglite.from_blueprint(str(bp_path), save=False)
+        rows = g.cypher("MATCH (n:Gene) RETURN n.synonyms AS syn ORDER BY n.name")
+        assert [r["syn"] for r in rows] == [["adhC"], ["pfk1"]]
+
+    def test_list_is_not_an_unknown_property_type(self, tmp_path, capfd):
+        bp_path = self._bp(tmp_path, ['["adhC"]', '["pfk1"]'])
+        kglite.from_blueprint(str(bp_path), verbose=True, save=False)
+        err = capfd.readouterr().err
+        assert "does not rename columns" not in err
+
+    def test_junction_property_types_accepts_list(self, tmp_path):
+        bp_path = self._bp(tmp_path, ['["adhC"]', '["pfk1"]'], junction_prop_type="list")
+        g = kglite.from_blueprint(str(bp_path), save=False)
+        rows = g.cypher(
+            "MATCH (:Gene)-[r:MEMBER_OF]->(:Pathway) RETURN r.evidence AS ev ORDER BY size(r.evidence) DESC"
+        )
+        assert [r["ev"] for r in rows] == [["IDA", "IMP"], ["ISS"]]
+
+    def test_separator_in_a_non_json_cell_warns(self, tmp_path, capfd):
+        """A `list` column whose cell is `a|b` is not a JSON array. It is
+        wrapped as a one-element list holding the whole string — a plausible
+        wrong answer, because the author plainly meant two values. Say so,
+        naming the column, the row and the cell."""
+        bp_path = self._bp(tmp_path, ["adhC|ADHE", '["pfk1"]'])
+        kglite.from_blueprint(str(bp_path), verbose=True, save=False)
+        err = capfd.readouterr().err
+        assert "synonyms" in err
+        assert "row 1" in err
+        assert "adhC|ADHE" in err
+
+    def test_a_plain_scalar_cell_does_not_warn(self, tmp_path, capfd):
+        """No separator, no ambiguity: a lone token is a one-element list and
+        the warning would be noise."""
+        bp_path = self._bp(tmp_path, ["adhC", '["pfk1"]'])
+        kglite.from_blueprint(str(bp_path), verbose=True, save=False)
+        err = capfd.readouterr().err
+        assert "not a JSON array" not in err
+
+
 class TestJunctionChunkInvariance:
     """The junction loader streams its CSV in chunks
     (`KGLITE_BLUEPRINT_JUNCTION_CHUNK_SIZE`, default 100k rows) purely to bound

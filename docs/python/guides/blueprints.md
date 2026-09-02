@@ -78,11 +78,55 @@ Available types:
 | `"float"` | float | Decimal numbers |
 | `"bool"` / `"boolean"` | boolean | Accepts true/false and common 1/0/yes/no forms |
 | `"date"` / `"datetime"` | date | Accepts `YYYY-MM-DD`, timestamp text, or epoch milliseconds; stores the date |
+| `"list"` / `"array"` | list | Cell is a JSON array, e.g. `["a","b"]` — see below |
 | `"validFrom"` / `"validTo"` | date | Date column plus temporal-role metadata |
 | `"geometry"` | WKT string | Uses existing WKT or converts `_geometry` GeoJSON in Rust |
 | `"location.lat"` / `"location.lon"` | float | Coordinates; may receive GeoJSON centroids |
 
 Columns not listed in `properties` are still loaded — they just use auto-detection. You only need to specify types when auto-detection gets it wrong.
+
+### List Columns
+
+A CSV cell holding several values is loaded as a list when you declare the column
+`"list"` (or `"array"`, the same keyword). The cell must be a **JSON array**:
+
+```csv
+gene_id,name,synonyms
+1,adhE,"[""adhC"",""ADHE""]"
+2,pfkA,"[""pfk1""]"
+```
+
+```json
+{"Gene": {"csv": "genes.csv", "pk": "gene_id", "properties": {"synonyms": "list"}}}
+```
+
+```cypher
+MATCH (g:Gene) WHERE 'ADHE' IN g.synonyms RETURN g.name
+```
+
+There is deliberately no delimiter option — no `"list:|"`, no `sep` key. A
+delimited column is ambiguous the moment a value contains the delimiter, and the
+blueprint has no way to say which values were escaped. Split the column into a
+JSON array in your export step instead.
+
+A cell that is not a JSON array becomes a **one-element** list holding the cell
+whole. That is right for a lone value and wrong for `adhC|ADHE`, so the build
+report warns when a non-array cell contains `|`, `;` or `,`, naming the column,
+how many cells are affected, and the first offending row and its text:
+
+```
+node 'Gene': column 'synonyms' is declared list but 1 cell(s) are not a JSON
+array and contain a separator ('|', ';' or ','); each was kept whole as a
+one-element list. First at row 1: 'adhC|ADHE'. Write list cells as JSON
+arrays, e.g. ["a","b"].
+```
+
+Junction-edge properties take the same keyword through `property_types`.
+
+CSV **export** is the one place lists do not round-trip exactly: `to_csv` writes
+a list as its JSON text and the generated blueprint declares it `"string"`, so
+re-importing that output gives you the text back, not a list. Declare `"list"`
+yourself in the re-import blueprint if you need one.
 
 ### Skipping Columns
 

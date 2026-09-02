@@ -13,7 +13,7 @@
 //!      no real row ever promoted are dropped with their edges.
 
 use super::csv_loader::{
-    map_blueprint_type, read_csv_chunks, read_csv_raw, typed_dataframe, RawCsv,
+    map_blueprint_type, read_csv_chunks, read_csv_raw, typed_dataframe, ListMisparseTally, RawCsv,
 };
 use super::filter::apply_filter;
 use super::geometry::{convert_geojson, has_spatial_properties, spatial_targets};
@@ -483,6 +483,9 @@ struct PreppedNode {
     title_arg: Option<String>,
     df: DataFrame,
     spatial_config: Option<SpatialConfig>,
+    /// Diagnostics raised while typing the columns. Prep runs under rayon and
+    /// has no `&mut BuildReport`, so they ride back to the serial phase.
+    warnings: Vec<String>,
     /// Full raw (pre-dedup) CSV + resolved timeseries spec, if this type
     /// has `timeseries` declared. Kept because `apply_timeseries` needs
     /// every row, not just the dedup'd node DataFrame.
@@ -592,7 +595,15 @@ fn prep_node_spec(
         .filter(|h| seen.insert(h.clone()))
         .collect();
 
-    let df = typed_dataframe(&raw_for_nodes, &keep, &declared, &HashMap::new())?;
+    let mut misparses = ListMisparseTally::default();
+    let df = typed_dataframe(
+        &raw_for_nodes,
+        &keep,
+        &declared,
+        &HashMap::new(),
+        &mut misparses,
+    )?;
+    let warnings = misparses.into_warnings(&format!("node '{}'", spec.node_type));
 
     let title_arg = if title_field != pk {
         Some(title_field.clone())
@@ -622,6 +633,7 @@ fn prep_node_spec(
         title_arg,
         df,
         spatial_config,
+        warnings,
         timeseries,
     }))
 }
@@ -665,6 +677,8 @@ fn load_node_specs(
                 continue;
             }
         };
+
+        report.warnings.extend(node.warnings);
 
         let t_a = std::time::Instant::now();
         let rep = maintain::add_nodes(
@@ -831,6 +845,9 @@ fn load_streamed_node_spec(
     // chunks are processed serially within a spec, and the first id is 1 to
     // match the buffered path's `1..=n`.
     let mut auto_pk_counter: u64 = 1;
+    // One tally for the whole CSV: a malformed list column is malformed in
+    // every chunk, and a per-chunk warning would repeat it once per 250k rows.
+    let mut misparses = ListMisparseTally::default();
 
     for chunk_result in chunks {
         let mut raw = chunk_result.map_err(|e| format!("[{}] {}", spec.node_type, e))?;
@@ -852,7 +869,7 @@ fn load_streamed_node_spec(
             }
         }
         let keep = streaming_keep_list(&raw, &pk, &title_field, &skip_set, &parent_fk_skip);
-        let df = typed_dataframe(&raw, &keep, &declared, &HashMap::new())
+        let df = typed_dataframe(&raw, &keep, &declared, &HashMap::new(), &mut misparses)
             .map_err(|e| format!("[{}] {}", spec.node_type, e))?;
         let rep = maintain::add_nodes(
             graph,
@@ -869,6 +886,9 @@ fn load_streamed_node_spec(
             .entry(spec.node_type.clone())
             .or_insert(0) += count;
     }
+    report
+        .warnings
+        .extend(misparses.into_warnings(&format!("node '{}'", spec.node_type)));
     Ok(())
 }
 
@@ -1543,6 +1563,10 @@ fn load_junction_edges(
                 }
             };
 
+            // One tally per junction CSV, not per chunk — see the node
+            // loader's for why.
+            let mut misparses = ListMisparseTally::default();
+
             for chunk_result in chunks {
                 let chunk = match chunk_result {
                     Ok(c) => c,
@@ -1559,7 +1583,13 @@ fn load_junction_edges(
                 if chunk_keep.is_empty() {
                     continue;
                 }
-                let df = match typed_dataframe(&chunk, &chunk_keep, &declared, &rename) {
+                let df = match typed_dataframe(
+                    &chunk,
+                    &chunk_keep,
+                    &declared,
+                    &rename,
+                    &mut misparses,
+                ) {
                     Ok(df) => df,
                     Err(e) => {
                         report.errors.push(format!("junction {}: {}", edge_type, e));
@@ -1579,6 +1609,10 @@ fn load_junction_edges(
                 )?;
                 *report.edges_by_type.entry(edge_type.clone()).or_insert(0) += count;
             }
+            report.warnings.extend(misparses.into_warnings(&format!(
+                "junction '{edge_type}' (node '{}')",
+                spec.node_type
+            )));
         }
     }
 
@@ -1634,6 +1668,7 @@ impl RawCsv {
             headers: self.headers.clone(),
             rows: self.rows.clone(),
             nulls: self.nulls.clone(),
+            row_ids: self.row_ids.clone(),
         }
     }
 }
@@ -1648,22 +1683,26 @@ fn dedupe_by_pk(raw: &RawCsv, pk_col: &str) -> RawCsv {
     let mut seen: HashSet<String> = HashSet::new();
     let mut new_rows = Vec::new();
     let mut new_nulls = Vec::new();
+    let mut new_row_ids = Vec::new();
     for r in 0..raw.row_count() {
         if raw.nulls[r][idx] {
             new_rows.push(raw.rows[r].clone());
             new_nulls.push(raw.nulls[r].clone());
+            new_row_ids.push(raw.row_id(r));
             continue;
         }
         let key = raw.rows[r][idx].clone();
         if seen.insert(key) {
             new_rows.push(raw.rows[r].clone());
             new_nulls.push(raw.nulls[r].clone());
+            new_row_ids.push(raw.row_id(r));
         }
     }
     RawCsv {
         headers: raw.headers.clone(),
         rows: new_rows,
         nulls: new_nulls,
+        row_ids: new_row_ids,
     }
 }
 

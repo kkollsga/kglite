@@ -141,6 +141,7 @@ pub fn drop_zero_time_components(raw: &mut RawCsv, spec: &TimeseriesSpec) {
 
     let mut new_rows = Vec::with_capacity(raw.row_count());
     let mut new_nulls = Vec::with_capacity(raw.row_count());
+    let mut new_row_ids = Vec::with_capacity(raw.row_count());
     for r in 0..raw.row_count() {
         let drop = zero_cols.iter().any(|&idx| {
             if raw.nulls[r][idx] {
@@ -151,10 +152,12 @@ pub fn drop_zero_time_components(raw: &mut RawCsv, spec: &TimeseriesSpec) {
         if !drop {
             new_rows.push(std::mem::take(&mut raw.rows[r]));
             new_nulls.push(std::mem::take(&mut raw.nulls[r]));
+            new_row_ids.push(raw.row_id(r));
         }
     }
     raw.rows = new_rows;
     raw.nulls = new_nulls;
+    raw.row_ids = new_row_ids;
 }
 
 /// Build per-node timeseries from raw rows. Returns `(node_key → NodeTimeseries)`

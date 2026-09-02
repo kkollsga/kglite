@@ -291,10 +291,10 @@ pub fn unknown_property_type_warnings(blueprint: &Blueprint) -> Vec<String> {
             if !is_known(ty) {
                 warnings.push(format!(
                     "{where_}: unknown {kind} value '{ty}' for column '{col}' — not a type \
-                     keyword (string|int|float|bool|date|datetime|validFrom|validTo) or spatial \
-                     target (geometry|location.lat|location.lon). The value is ignored and the \
-                     column type is inferred; note this map declares types, it does not rename \
-                     columns."
+                     keyword (string|int|float|bool|date|datetime|list|array|validFrom|validTo) \
+                     or spatial target (geometry|location.lat|location.lon). The value is \
+                     ignored and the column type is inferred; note this map declares types, it \
+                     does not rename columns."
                 ));
             }
         }

@@ -19,6 +19,11 @@ pub struct RawCsv {
     pub rows: Vec<Vec<String>>,
     /// Per-cell null flag (true = empty string in CSV). Same shape as `rows`.
     pub nulls: Vec<Vec<bool>>,
+    /// 1-based data-row number in the source file (the header is not counted),
+    /// carried per row so a diagnostic can name a row the *author* can find.
+    /// Filtering, dedupe and chunking all reorder or drop rows; anything that
+    /// does so must carry this along or its row numbers become fiction.
+    pub row_ids: Vec<usize>,
 }
 
 impl RawCsv {
@@ -29,6 +34,71 @@ impl RawCsv {
 
     pub fn row_count(&self) -> usize {
         self.rows.len()
+    }
+
+    /// Source-file row number for row `r`, or `r + 1` for a table built
+    /// without provenance (synthesised frames in tests).
+    pub fn row_id(&self, r: usize) -> usize {
+        self.row_ids.get(r).copied().unwrap_or(r + 1)
+    }
+}
+
+/// A cell in a `list`-declared column that is not a JSON array *and* carries a
+/// separator its author most likely meant as one.
+///
+/// A lone `adhC` is a one-element list and no one is surprised. `adhC|ADHE` is
+/// also a one-element list — holding the whole string — and that is a wrong
+/// answer the build would otherwise deliver in silence.
+fn looks_like_a_missed_list(cell: &str) -> bool {
+    if serde_json::from_str::<serde_json::Value>(cell)
+        .is_ok_and(|v| matches!(v, serde_json::Value::Array(_)))
+    {
+        return false;
+    }
+    cell.contains(['|', ';', ','])
+}
+
+/// Cells the list parser wrapped whole where their author probably meant
+/// several values, tallied per column across every chunk of one CSV.
+///
+/// One warning per column, not per cell: a malformed export usually has the
+/// whole column wrong, and a per-cell warning on a 100k-row file is a denial
+/// of service on the report.
+#[derive(Default)]
+pub struct ListMisparseTally {
+    hits: Vec<(String, usize, usize, String)>,
+}
+
+impl ListMisparseTally {
+    fn record(&mut self, column: &str, row_id: usize, cell: &str) {
+        if let Some(hit) = self.hits.iter_mut().find(|(c, _, _, _)| c == column) {
+            hit.1 += 1;
+            return;
+        }
+        self.hits
+            .push((column.to_string(), 1, row_id, cell.to_string()));
+    }
+
+    /// One line per affected column, naming the count, the first offending
+    /// row and its cell verbatim so the author can grep for it.
+    pub fn into_warnings(self, where_: &str) -> Vec<String> {
+        self.hits
+            .into_iter()
+            .map(|(column, count, row_id, cell)| {
+                let cell = if cell.chars().count() > 80 {
+                    let head: String = cell.chars().take(80).collect();
+                    format!("{head}…")
+                } else {
+                    cell
+                };
+                format!(
+                    "{where_}: column '{column}' is declared list but {count} cell(s) are not a \
+                     JSON array and contain a separator ('|', ';' or ','); each was kept whole \
+                     as a one-element list. First at row {row_id}: '{cell}'. Write list cells \
+                     as JSON arrays, e.g. [\"a\",\"b\"]."
+                )
+            })
+            .collect()
     }
 }
 
@@ -62,10 +132,12 @@ pub fn read_csv_chunks(
         .collect();
     let n_cols = headers.len();
     let path_buf = path.to_path_buf();
+    let mut next_row_id = 1usize;
 
     let iter = std::iter::from_fn(move || {
         let mut rows = Vec::with_capacity(chunk_size);
         let mut nulls = Vec::with_capacity(chunk_size);
+        let mut row_ids = Vec::with_capacity(chunk_size);
         for _ in 0..chunk_size {
             match rdr.records().next() {
                 Some(Ok(rec)) => {
@@ -85,6 +157,8 @@ pub fn read_csv_chunks(
                     }
                     rows.push(row);
                     nulls.push(nrow);
+                    row_ids.push(next_row_id);
+                    next_row_id += 1;
                 }
                 Some(Err(e)) => {
                     return Some(Err(format!("CSV row {}: {e}", path_buf.display())));
@@ -99,6 +173,7 @@ pub fn read_csv_chunks(
                 headers: headers.clone(),
                 rows,
                 nulls,
+                row_ids,
             }))
         }
     });
@@ -147,10 +222,12 @@ pub fn read_csv_raw(path: &Path) -> Result<RawCsv, String> {
         nulls.push(nrow);
     }
 
+    let row_ids = (1..=rows.len()).collect();
     Ok(RawCsv {
         headers,
         rows,
         nulls,
+        row_ids,
     })
 }
 
@@ -162,6 +239,7 @@ pub fn typed_dataframe(
     keep_columns: &[String],
     declared_types: &HashMap<String, String>,
     rename: &HashMap<String, String>,
+    misparses: &mut ListMisparseTally,
 ) -> Result<DataFrame, String> {
     let mut columns: Vec<(String, ColumnType)> = Vec::with_capacity(keep_columns.len());
     let mut data: Vec<ColumnData> = Vec::with_capacity(keep_columns.len());
@@ -176,7 +254,7 @@ pub fn typed_dataframe(
         // `declared_types` (and `col_index`) stay keyed by the CSV name;
         // only the output column carries the renamed spelling.
         let col_type = resolve_column_type(raw, src_idx, declared_types.get(name));
-        let col_data = build_column_data(raw, src_idx, &col_type)?;
+        let col_data = build_column_data(raw, src_idx, &col_type, name, misparses)?;
         let out_name = rename.get(name).cloned().unwrap_or_else(|| name.clone());
         columns.push((out_name, col_type));
         data.push(col_data);
@@ -199,6 +277,7 @@ pub fn map_blueprint_type(ty: &str) -> Option<ColumnType> {
         "float" => Some(ColumnType::Float64),
         "bool" | "boolean" => Some(ColumnType::Boolean),
         "date" | "datetime" | "validFrom" | "validTo" => Some(ColumnType::DateTime),
+        "list" | "array" => Some(ColumnType::List),
         _ => None,
     }
 }
@@ -255,6 +334,8 @@ fn build_column_data(
     raw: &RawCsv,
     src_idx: usize,
     col_type: &ColumnType,
+    column: &str,
+    misparses: &mut ListMisparseTally,
 ) -> Result<ColumnData, String> {
     let n = raw.row_count();
     match col_type {
@@ -361,9 +442,13 @@ fn build_column_data(
             Ok(ColumnData::UniqueId(out))
         }
         ColumnType::List => {
-            // CSV never *infers* a list — this arm only fires when a blueprint
-            // declares `column_types = {col: "list"}`. The cell is parsed as a
-            // JSON array (`["a","b"]`); a non-array cell becomes a 1-elem list.
+            // CSV never *infers* a list — this arm fires only where a
+            // blueprint declares `"list"` / `"array"` for the column, in a
+            // node spec's `properties` or a junction edge's `property_types`.
+            // The cell is parsed as a JSON array (`["a","b"]`); anything else
+            // becomes a one-element list, which is the right answer for a
+            // lone scalar and a plausible wrong one for `a|b` — hence the
+            // tally, which the build report turns into a warning.
             let mut out: Vec<Option<Vec<Value>>> = Vec::with_capacity(n);
             for (r, row) in raw.rows.iter().enumerate() {
                 if raw.nulls[r][src_idx] {
@@ -374,7 +459,11 @@ fn build_column_data(
                 if s.is_empty() {
                     out.push(None);
                 } else {
-                    out.push(Some(parse_list_cell(s)));
+                    let parsed = parse_list_cell(s);
+                    if looks_like_a_missed_list(s) {
+                        misparses.record(column, raw.row_id(r), s);
+                    }
+                    out.push(Some(parsed));
                 }
             }
             Ok(ColumnData::List(out))

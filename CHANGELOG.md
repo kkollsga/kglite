@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- **`"list"` / `"array"` property type for blueprint columns.** A CSV column
+  whose cells are JSON arrays (`["a","b"]`) now loads as a list, in a node
+  spec's `properties` and in a junction edge's `property_types`, so
+  `WHERE 'x' IN n.synonyms` works without re-parsing a string per row. Cells
+  must be JSON arrays; there is deliberately no delimiter option. A non-array
+  cell is kept whole as a one-element list — right for a lone value, wrong for
+  `a|b` — so the build report now warns per column when such a cell contains
+  `|`, `;` or `,`, naming the count and the first offending row and cell. CSV
+  export still writes a list as its JSON text and declares it `"string"` in the
+  generated blueprint; declare `"list"` in the re-import blueprint to get a
+  list back.
+
 ### Fixed
 - **`from_blueprint()` lost parallel edges past the first chunk of a streamed
   edge CSV.** The junction-edge loader streams its CSV in chunks

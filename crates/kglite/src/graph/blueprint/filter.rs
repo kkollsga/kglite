@@ -52,17 +52,21 @@ pub fn apply_filter(raw: &mut RawCsv, filt: &indexmap::IndexMap<String, Json>) {
         }
     }
 
-    // Compact
+    // Compact. `row_ids` travels with the rows so a later diagnostic still
+    // names the row number the author sees in the file.
     let mut new_rows = Vec::with_capacity(raw.row_count());
     let mut new_nulls = Vec::with_capacity(raw.row_count());
+    let mut new_row_ids = Vec::with_capacity(raw.row_count());
     for (r, k) in keep.iter().enumerate() {
         if *k {
             new_rows.push(std::mem::take(&mut raw.rows[r]));
             new_nulls.push(std::mem::take(&mut raw.nulls[r]));
+            new_row_ids.push(raw.row_id(r));
         }
     }
     raw.rows = new_rows;
     raw.nulls = new_nulls;
+    raw.row_ids = new_row_ids;
 }
 
 fn eval_op(op: &str, cell_null: bool, cell: &str, operand: &Json) -> bool {
