@@ -1108,18 +1108,16 @@ fn prep_fk_edges(spec: &FlatSpec, root: &Path, cache: &CsvCache) -> Option<Prepp
             continue;
         };
 
-        let (target_col, src_vals, tgt_vals) =
-            build_fk_columns(&raw, &pk, &edge.fk, pk_idx, fk_idx);
-        if src_vals.is_empty() {
-            continue;
-        }
-
-        let Ok(df) = build_edge_df(&pk, &target_col, src_vals, tgt_vals) else {
-            errors.push(format!(
-                "[{}] failed to build edge DataFrame for {}",
-                spec.node_type, edge_type
-            ));
-            continue;
+        let (target_col, df) = match fk_edge_frame(&raw, &pk, pk_idx, edge, fk_idx) {
+            Ok(Some(frame)) => frame,
+            Ok(None) => continue,
+            Err(e) => {
+                errors.push(format!(
+                    "[{}] failed to build edge DataFrame for {}: {}",
+                    spec.node_type, edge_type, e
+                ));
+                continue;
+            }
         };
         built.push(PreppedFkEdge {
             edge_type: edge_type.clone(),
@@ -1135,6 +1133,28 @@ fn prep_fk_edges(spec: &FlatSpec, root: &Path, cache: &CsvCache) -> Option<Prepp
         edges: built,
         errors,
     })
+}
+
+/// One FK edge's frame, built from one raw table: the target column's name
+/// plus the DataFrame `connect` consumes (source id + target id). `Ok(None)`
+/// when the table contributes no edge — every FK cell in it was null.
+///
+/// Shared by the buffered and the streaming loader so the two cannot drift:
+/// a chunk is just a shorter table, and both paths must derive an edge from
+/// one the same way.
+fn fk_edge_frame(
+    raw: &RawCsv,
+    pk: &str,
+    pk_idx: usize,
+    edge: &super::schema::FkEdge,
+    fk_idx: usize,
+) -> Result<Option<(String, DataFrame)>, String> {
+    let (target_col, src_vals, tgt_vals) = build_fk_columns(raw, pk, &edge.fk, pk_idx, fk_idx);
+    if src_vals.is_empty() {
+        return Ok(None);
+    }
+    let df = build_edge_df(pk, &target_col, src_vals, tgt_vals)?;
+    Ok(Some((target_col, df)))
 }
 
 fn build_fk_columns(
@@ -1358,13 +1378,9 @@ fn load_streamed_fk_edges(
                 }
                 continue;
             };
-            let (target_col, src_vals, tgt_vals) =
-                build_fk_columns(&raw, &pk, &edge.fk, pk_idx, fk_idx);
-            if src_vals.is_empty() {
-                continue;
-            }
-            let df = match build_edge_df(&pk, &target_col, src_vals, tgt_vals) {
-                Ok(df) => df,
+            let (target_col, df) = match fk_edge_frame(&raw, &pk, pk_idx, edge, fk_idx) {
+                Ok(Some(frame)) => frame,
+                Ok(None) => continue,
                 Err(e) => {
                     report.errors.push(format!(
                         "[{}] failed to build edge DataFrame for {}: {}",
