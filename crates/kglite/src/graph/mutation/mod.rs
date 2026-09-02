@@ -9,6 +9,7 @@ pub mod add_properties;
 pub mod batch;
 mod delete_state;
 mod edge_props;
+mod endpoints;
 pub mod extend;
 pub mod maintain;
 mod rel_constraint_gate;

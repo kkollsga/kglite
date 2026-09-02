@@ -213,7 +213,7 @@
       "classification": "transitional"
     },
     {
-      "identity": "crates/kglite/src/graph/blueprint/build.rs::fn:connect:fn connect( graph: &mut DirGraph, df: DataFrame, connection_type: &str, source_type: &str, source_id_field: &str, target_type: &str, target_id_field: &str, report: &mut BuildReport, ) -> Result<usize, String>::clippy::too_many_arguments",
+      "identity": "crates/kglite/src/graph/blueprint/build.rs::fn:connect:fn connect( graph: &mut DirGraph, df: DataFrame, connection_type: &str, source_type: &str, source_id_field: &str, target_type: &str, target_id_field: &str, report: &mut BuildReport, initial_load: maintain::InitialLoad, ) -> Result<usize, String>::clippy::too_many_arguments",
       "classification": "transitional"
     },
     {
@@ -426,6 +426,10 @@
     },
     {
       "identity": "crates/kglite/src/graph/mutation/maintain.rs::fn:add_connections:pub fn add_connections( graph: &mut DirGraph, df_data: DataFrame, connection_type: String, source_type: String, source_id_field: String, target_type: String, target_id_field: String, source_title_field: Option<String>, target_title_field: Option<String>, conflict_handling: Option<String>, ) -> Resul::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/mutation/maintain.rs::fn:add_connections_with_initial_load:pub(crate) fn add_connections_with_initial_load( graph: &mut DirGraph, df_data: DataFrame, connection_type: String, source_type: String, source_id_field: String, target_type: String, target_id_field: String, source_title_field: Option<String>, target_title_field: Option<String>, conflict_handling: O::clippy::too_many_arguments",
       "classification": "transitional"
     },
     {

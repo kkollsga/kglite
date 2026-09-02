@@ -1471,6 +1471,7 @@ fn add_id_column(
     df.add_column(name.to_string(), col_type, data)
 }
 
+// Thin adapter: the parameter list mirrors `add_connections_with_initial_load`.
 #[allow(clippy::too_many_arguments)]
 fn connect(
     graph: &mut DirGraph,
