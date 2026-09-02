@@ -48,8 +48,31 @@ impl Interrupt {
     /// atomic load (only if a cancel flag is set); both `None` → no cost.
     #[inline]
     pub fn exceeded(&self) -> bool {
+        self.deadline_expired() || self.is_cancelled()
+    }
+
+    /// The deadline half of [`Self::exceeded`], asked on its own.
+    ///
+    /// A caller that must report *why* a run aborted needs the two halves
+    /// separately: a passed deadline is a timeout ([`KgError::CypherTimeout`],
+    /// HTTP 408) and a raised flag is a cancellation
+    /// ([`KgError::Cancelled`], `KeyboardInterrupt` in the wheel), and
+    /// collapsing them is what made every deadline report as an execution
+    /// failure. Crate-internal: the split is a reporting concern, not part of
+    /// the abort contract public callers poll.
+    ///
+    /// [`KgError::CypherTimeout`]: crate::error::KgError::CypherTimeout
+    /// [`KgError::Cancelled`]: crate::error::KgError::Cancelled
+    #[inline]
+    pub(crate) fn deadline_expired(&self) -> bool {
         self.deadline.is_some_and(|dl| Instant::now() > dl)
-            || self.cancel.is_some_and(|c| c.load(Ordering::Relaxed))
+    }
+
+    /// The cancel-flag half of [`Self::exceeded`] — see
+    /// [`Self::deadline_expired`] for why the halves are separable.
+    #[inline]
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.cancel.is_some_and(|c| c.load(Ordering::Relaxed))
     }
 
     /// Whether a finite deadline is set (some algorithms gate scoped-vs-

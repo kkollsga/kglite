@@ -458,11 +458,11 @@ fn algorithm_call_observes_an_interrupt() {
 /// before the poll fired. A `SET` over 400,000 nodes runs 843 ms uncancelled
 /// and returns after 135 ms with the graph intact.
 ///
-/// The assertion on the message is loose on purpose: a timed-out mutation
-/// reports `"Query interrupted"` where a timed-out read reports `"Query timed
-/// out"`, so a caller cannot presently tell a mutation timeout from any other
-/// mutation failure. Pinning that text here would make correcting it look like
-/// a regression.
+/// The wording is pinned, and pinned to the *read* path's: both routes report
+/// through `executor::check_interrupt`, so a timed-out mutation says "timed
+/// out" and a cancelled one says "cancelled". Before that, the mutation engine
+/// ran its own poller reporting a flat "Query interrupted" for either, and a
+/// caller could not tell a mutation timeout from any other mutation failure.
 #[test]
 fn a_mutation_observes_its_deadline_and_rolls_back() {
     let mut graph = DirGraph::new();
@@ -485,8 +485,8 @@ fn a_mutation_observes_its_deadline_and_rolls_back() {
         Err(e) => e.to_string().to_lowercase(),
     };
     assert!(
-        message.contains("interrupt") || message.contains("timed out"),
-        "expected an interruption, got: {message}"
+        message.contains("timed out"),
+        "expected a timeout, got: {message}"
     );
 
     let read_params = no_params();
@@ -501,6 +501,57 @@ fn a_mutation_observes_its_deadline_and_rolls_back() {
         "the abandoned CREATE left {rows} nodes behind — the statement did not roll back"
     );
     println!("mutation abort in {elapsed:?}, {rows} nodes retained");
+}
+
+/// The mutation twin of [`assert_interrupt_is_observed`]: the same statement
+/// stopped by the cancel flag instead of the clock reports a *cancellation*,
+/// and still rolls back.
+///
+/// This is the pair that catches a regression to a collapsed poller: one
+/// carrier reporting the other's wording passes neither of these two tests.
+#[test]
+fn a_mutation_observes_its_cancel_flag_and_rolls_back() {
+    let flag: &'static AtomicBool = Box::leak(Box::new(AtomicBool::new(false)));
+    let mut graph = DirGraph::new();
+    let params = no_params();
+    let mut opts = ExecuteOptions::eager(&params);
+    opts.cancel = Some(flag);
+
+    let raiser = std::thread::spawn(move || {
+        std::thread::sleep(DEADLINE);
+        flag.store(true, Ordering::Relaxed);
+    });
+
+    let started = Instant::now();
+    let outcome = execute_mut(
+        &mut graph,
+        "UNWIND range(1, 400000) AS i CREATE (:M {v: i})",
+        &opts,
+    );
+    let elapsed = started.elapsed();
+    raiser.join().expect("the interrupt thread must finish");
+
+    let message = match outcome {
+        Ok(_) => panic!("the mutation ran to completion past its cancel flag in {elapsed:?}"),
+        Err(e) => e.to_string().to_lowercase(),
+    };
+    assert!(
+        message.contains("cancel"),
+        "expected a cancellation, got: {message}"
+    );
+
+    let read_params = no_params();
+    let read_opts = ExecuteOptions::eager(&read_params);
+    let rows = execute_read(&graph, "MATCH (n:M) RETURN n.v", &read_opts)
+        .expect("the graph is readable after the abandoned mutation")
+        .result
+        .rows
+        .len();
+    assert_eq!(
+        rows, 0,
+        "the cancelled CREATE left {rows} nodes behind — the statement did not roll back"
+    );
+    println!("mutation cancel in {elapsed:?}, {rows} nodes retained");
 }
 
 #[test]

@@ -193,10 +193,14 @@ impl MutationCtx<'_> {
     }
 }
 
+/// Poll the abort check at the read path's cadence — every
+/// `INTERRUPT_POLL_INTERVAL` units, starting before the first — and report
+/// through the read path's [`check_interrupt`](super::check_interrupt), so a
+/// timed-out write says "timed out" and a cancelled one says "cancelled".
 #[inline]
 fn check_interrupt_periodic(interrupt: &Interrupt, iteration: usize) -> Result<(), String> {
-    if iteration & (super::INTERRUPT_POLL_INTERVAL - 1) == 0 && interrupt.exceeded() {
-        return Err("Query interrupted".to_string());
+    if iteration & (super::INTERRUPT_POLL_INTERVAL - 1) == 0 {
+        super::check_interrupt(interrupt)?;
     }
     Ok(())
 }
@@ -356,11 +360,9 @@ fn run_clause_pipeline(
     let mut stream_established = !ctx.leading.is_empty();
 
     for (i, clause) in clauses.iter().enumerate() {
-        if interrupt.exceeded() {
-            // The mutation is atomic: aborting here discards the in-flight
-            // changes, leaving the graph unchanged.
-            return Err("Query interrupted".to_string());
-        }
+        // The mutation is atomic: aborting here discards the in-flight
+        // changes, leaving the graph unchanged.
+        super::check_interrupt(&interrupt)?;
         // Materialize Cypher's implicit start row for the clauses that consume
         // one. Deliberately lazy rather than seeding `ResultSet::new()` up
         // front: MATCH/OPTIONAL MATCH select their leading (scan) form over
