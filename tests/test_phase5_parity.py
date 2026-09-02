@@ -98,7 +98,7 @@ def test_graph_copy_cow_correctness_mapped():
 #: (run on each platform; the script writes whichever entry matches the
 #: current host).
 BINARY_SIZE_BASELINES = {
-    "darwin": 21_605_968,  # 0.16.20 darwin baseline
+    "darwin": 21_606_016,  # 0.16.21 darwin baseline
     "linux": 28_810_000,  # estimate: the post-code_tree Linux estimate (30.2 MB)
     # scaled by the same −4.6% the macOS loader removal measured. Both
     # removals deliberately recaptured DOWNWARD so the +10% budget guards
@@ -435,6 +435,14 @@ def test_binary_size_regression():
         tree; the MCP-server changes (manifest writable key, clean-save
         no-op, load/file-saved identity) live in the server binary, not here.
 
+
+      - 0.16.21:       21,606,016 bytes (≈20.6 MB). +48 bytes over 0.16.20:
+        the typed `KgError::CypherTimeout` (message field + real
+        elapsed/limit figures, shared executor interrupt check) and the
+        from_records unknown-key guard with its did-you-mean strings; the
+        MCP write-gate work (force opt-in, read_only pin, UTC owner record)
+        lives in the server binary, not here.
+
     Raising the baseline is a deliberate act — every bump should
     be accompanied by an updated growth note above. For a precise
     drilldown, run `cargo bloat --release --crates --filter kglite`.
@@ -466,7 +474,7 @@ def test_binary_size_regression():
     gate = int(baseline * 1.10)
     assert size <= gate, (
         f"{bin_path.name} = {size:,} bytes > gate {gate:,} "
-        f"(+10% over 0.16.20 {platform_key} baseline {baseline:,}). "
+        f"(+10% over 0.16.21 {platform_key} baseline {baseline:,}). "
         "Investigate what grew before raising the gate — see the "
         "growth note in this test's docstring for the breakdown shape."
     )

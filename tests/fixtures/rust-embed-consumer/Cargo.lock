@@ -665,7 +665,7 @@ dependencies = [
 
 [[package]]
 name = "kglite"
-version = "0.16.20"
+version = "0.16.21"
 dependencies = [
  "bzip2",
  "chrono",
