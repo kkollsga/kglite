@@ -19,9 +19,18 @@ is a same-machine longitudinal comparison. A hardware change resets the
 comparison window — pass `--releases-back 1` for the first release on new
 hardware.
 
+Every run also prints each capture's dispersion — the geometric mean of
+`median/min` over the common cells. `min` reports the best round a cell got, so
+two captures with different distribution shapes are not comparable by it: the
+0.16.17 anchor read +16.3% worst across 34/34 cells including the controls, and
+a wheel A/B proved it environmental (dispersion 1.044 -> 1.008). A shift beyond
+`DISPERSION_TOLERANCE_PCT` warns; it never changes the exit code, because a
+distribution shift is a reason to distrust the verdict, not a verdict.
+
 Usage:
     python scripts/check_perf_anchor.py [--releases-back N] [--threshold PCT]
         [--metric min|mean|median] [--current PATH] [--min-overlap N]
+        [--baselines-dir DIR]
 
 Exits non-zero when any common benchmark regressed more than the threshold
 against the anchor. Run at release time (`make bench-anchor`, wired into the
@@ -33,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 import re
 
@@ -41,19 +51,53 @@ BASELINES_DIR = REPO_ROOT / "tests" / "benchmarks" / "baselines"
 VERSION_RE = re.compile(r"^(\d+)_(\d+)_(\d+)\.json$")
 
 
-def release_baselines() -> list[tuple[tuple[int, int, int], Path]]:
+#: How far the two captures' `median/min` shape may differ before the min-based
+#: verdict below is suspect. The 0.16.17 anchor moved 1.044 -> 1.008 (-3.4%) and
+#: read as +16.3% worst-cell drift that a wheel A/B then disproved.
+DISPERSION_TOLERANCE_PCT = 3.0
+
+
+def release_baselines(directory: Path) -> list[tuple[tuple[int, int, int], Path]]:
     """All per-release (bare/macOS) baselines, oldest first."""
     found = []
-    for path in BASELINES_DIR.iterdir():
+    for path in directory.iterdir():
         match = VERSION_RE.match(path.name)
         if match:
             found.append((tuple(int(g) for g in match.groups()), path))
     return sorted(found)
 
 
-def load_metric(path: Path, metric: str) -> dict[str, float]:
+def load_stats(path: Path) -> dict[str, dict[str, float]]:
     data = json.loads(path.read_text(encoding="utf-8"))
-    return {b["name"]: b["stats"][metric] for b in data["benchmarks"]}
+    return {b["name"]: b["stats"] for b in data["benchmarks"]}
+
+
+def dispersion(stats: dict[str, dict[str, float]], names: list[str]) -> float | None:
+    """Geometric mean of ``median/min`` over ``names`` — the capture's tail shape.
+
+    Protocol item 4(b): `min` reports the best round a cell got, so a capture
+    whose fast tail collapses reads as a same-sized regression on *every* cell
+    at once, controls included, with no code having changed. Comparing this one
+    number between the two captures separates "the machine's distribution moved"
+    from "this code got slower". Computed over the common cells only, so a
+    changed benchmark set cannot move it on its own.
+
+    ``None`` when no cell carries both stats — legacy baselines hold only `min`,
+    and a fabricated 1.0 would read as a shift against a real capture.
+    """
+    ratios = []
+    for name in names:
+        cell = stats[name]
+        median, minimum = cell.get("median"), cell.get("min")
+        if median and minimum and minimum > 0:
+            ratios.append(median / minimum)
+    if not ratios:
+        return None
+    return math.exp(math.fsum(math.log(r) for r in ratios) / len(ratios))
+
+
+def _fmt_dispersion(value: float | None) -> str:
+    return f"{value:.3f}" if value is not None else "n/a"
 
 
 def main() -> int:
@@ -75,6 +119,12 @@ def main() -> int:
         help="Current baseline JSON (default: the highest-version per-release file).",
     )
     p.add_argument(
+        "--baselines-dir",
+        type=Path,
+        default=BASELINES_DIR,
+        help=f"Directory of per-release baselines (default: {BASELINES_DIR.relative_to(REPO_ROOT)}).",
+    )
+    p.add_argument(
         "--min-overlap",
         type=int,
         default=10,
@@ -82,7 +132,7 @@ def main() -> int:
     )
     args = p.parse_args()
 
-    releases = release_baselines()
+    releases = release_baselines(args.baselines_dir)
     if args.current is not None:
         current_path = args.current
         releases = [(v, path) for v, path in releases if path.resolve() != current_path.resolve()]
@@ -100,8 +150,10 @@ def main() -> int:
     anchor_index = max(0, len(releases) - args.releases_back)
     anchor_version, anchor_path = releases[anchor_index]
 
-    current = load_metric(current_path, args.metric)
-    anchor = load_metric(anchor_path, args.metric)
+    current_stats = load_stats(current_path)
+    anchor_stats = load_stats(anchor_path)
+    current = {name: cell[args.metric] for name, cell in current_stats.items()}
+    anchor = {name: cell[args.metric] for name, cell in anchor_stats.items()}
     common = sorted(set(current) & set(anchor))
     only_anchor = sorted(set(anchor) - set(current))
     only_current = sorted(set(current) - set(anchor))
@@ -116,6 +168,22 @@ def main() -> int:
     if len(common) < args.min_overlap:
         print(f"perf anchor: only {len(common)} common benchmark(s) (< {args.min_overlap}) — too few for a verdict")
         return 0
+
+    anchor_dispersion = dispersion(anchor_stats, common)
+    current_dispersion = dispersion(current_stats, common)
+    print(
+        f"  dispersion (geo-mean median/min over {len(common)} common cell(s)): "
+        f"anchor {_fmt_dispersion(anchor_dispersion)}, current {_fmt_dispersion(current_dispersion)}"
+    )
+    if anchor_dispersion is not None and current_dispersion is not None:
+        shift = (current_dispersion / anchor_dispersion - 1.0) * 100.0
+        if abs(shift) > DISPERSION_TOLERANCE_PCT:
+            print(
+                f"  WARNING: dispersion shifted {shift:+.1f}% (> {DISPERSION_TOLERANCE_PCT:.0f}%) between the two "
+                "captures. The two runs have different distribution shapes, so the "
+                f"{args.metric}-based deltas below may be reading the machine rather than the code — "
+                "cross-check with --metric median before treating any of them as drift."
+            )
 
     rows = sorted(((current[name] / anchor[name] - 1.0) * 100.0, name) for name in common)
     for pct, name in reversed(rows):
