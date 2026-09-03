@@ -5,6 +5,7 @@ Run with: make bench-save (to save a baseline) or make bench-compare (to compare
 """
 
 import inspect
+import json
 import sys
 from typing import NamedTuple
 
@@ -1262,3 +1263,143 @@ def test_exists_var_length_matches_fixed_hop(khop_social_graph):
     ).to_list()
 
     assert var_length == fixed == [{"witnessed": len(KHOP_SEED_IDS)}]
+
+
+# ---------------------------------------------------------------------------
+# Blueprint loader throughput
+# ---------------------------------------------------------------------------
+#
+# The blueprint loader had no gated cell at all: `make bench-check` runs this
+# module, and nothing in it touched `from_blueprint`. That made the loader's
+# whole read path — CSV parse, per-column typing, node upsert, FK-edge join,
+# junction chunking — free to regress silently, which is precisely the surface
+# the input-format work rewrites. These two cells are the baseline it is
+# measured against, and they are deliberately a *pair*: the buffered and the
+# streamed loaders are separate code paths that share nothing below the spec
+# dispatch, so one cell cannot see a regression in the other.
+#
+# The fixture is written once per module and the blueprint declares every
+# property type, which keeps the timed region on the loader rather than on
+# type inference the declarations skip.
+
+
+@pytest.fixture(scope="module")
+def blueprint_bench_dir(tmp_path_factory):
+    """A synthetic blueprint directory: 50k + 5k node rows, 50k junction rows.
+
+    Sized so a single build stays well above 10 ms (so `min` is a valid
+    statistic for this cell) while 100 rounds still finish in seconds. Every
+    key used here is one the 0.13.2 reference wheel accepts, because CI
+    benchmarks this same file against that wheel with `--require-exact-set`.
+    """
+    root = tmp_path_factory.mktemp("blueprint_bench")
+    n_a, n_b = 50_000, 5_000
+
+    pd.DataFrame(
+        {
+            "a_id": list(range(n_a)),
+            "a_title": [f"Alpha_{i}" for i in range(n_a)],
+            "a_count": [i % 997 for i in range(n_a)],
+            "a_score": [(i % 1000) / 8.0 for i in range(n_a)],
+            "a_tag": [f"tag_{i % 64}" for i in range(n_a)],
+            "b_id": [(i * 7919 + 13) % n_b for i in range(n_a)],
+        }
+    ).to_csv(root / "nodes_a.csv", index=False)
+
+    pd.DataFrame(
+        {
+            "b_id": list(range(n_b)),
+            "b_title": [f"Beta_{i}" for i in range(n_b)],
+            "b_rank": [i % 89 for i in range(n_b)],
+        }
+    ).to_csv(root / "nodes_b.csv", index=False)
+
+    # `src` is unique per row, so every (src, dst) pair is distinct and the
+    # edge count equals the row count — a dedupe change shows up as a count
+    # assertion failure rather than as a quiet timing shift.
+    pd.DataFrame(
+        {
+            "src": list(range(n_a)),
+            "dst": [(i * 104_729 + 7) % n_b for i in range(n_a)],
+            "weight": [(i % 500) / 4.0 for i in range(n_a)],
+            "kind": [f"kind_{i % 16}" for i in range(n_a)],
+        }
+    ).to_csv(root / "junction.csv", index=False)
+
+    blueprint = {
+        "settings": {"root": str(root)},
+        "nodes": {
+            "BenchB": {
+                "csv": "nodes_b.csv",
+                "pk": "b_id",
+                "title": "b_title",
+                "properties": {"b_rank": "int"},
+            },
+            "BenchA": {
+                "csv": "nodes_a.csv",
+                "pk": "a_id",
+                "title": "a_title",
+                "properties": {
+                    "a_count": "int",
+                    "a_score": "float",
+                    "a_tag": "string",
+                },
+                "connections": {
+                    "fk_edges": {"BELONGS_TO": {"target": "BenchB", "fk": "b_id"}},
+                    "junction_edges": {
+                        "RELATES_TO": {
+                            "csv": "junction.csv",
+                            "source_fk": "src",
+                            "target": "BenchB",
+                            "target_fk": "dst",
+                            "properties": ["weight", "kind"],
+                            "property_types": {"weight": "float", "kind": "string"},
+                        }
+                    },
+                },
+            },
+        },
+    }
+    path = root / "blueprint.json"
+    path.write_text(json.dumps(blueprint))
+    return str(path)
+
+
+def _assert_blueprint_bench_graph(graph):
+    """The shape every blueprint bench build must produce.
+
+    Both cells load the same fixture through different loaders, so the counts
+    are the parity check between them as well as the non-vacuity check on each.
+    """
+    assert graph.cypher("MATCH (n:BenchA) RETURN count(n) AS c").to_list() == [{"c": 50_000}]
+    assert graph.cypher("MATCH (n:BenchB) RETURN count(n) AS c").to_list() == [{"c": 5_000}]
+    assert graph.cypher("MATCH (:BenchA)-[r:BELONGS_TO]->(:BenchB) RETURN count(r) AS c").to_list() == [{"c": 50_000}]
+    assert graph.cypher("MATCH (:BenchA)-[r:RELATES_TO]->(:BenchB) RETURN count(r) AS c").to_list() == [{"c": 50_000}]
+
+
+@pytest.mark.benchmark
+def test_bench_blueprint_build(benchmark, blueprint_bench_dir):
+    """Buffered blueprint build: two node CSVs, an FK edge and a junction.
+
+    The timed region is the whole `from_blueprint` call — parse, read, type,
+    upsert, connect — with no save; the fixture writes the CSVs once.
+    """
+    graph = benchmark(kglite.from_blueprint, blueprint_bench_dir, save=False)
+    _assert_blueprint_bench_graph(graph)
+
+
+@pytest.mark.benchmark
+def test_bench_blueprint_build_streamed(benchmark, blueprint_bench_dir, monkeypatch):
+    """The same build forced down the streaming loader, with small chunks.
+
+    The three knobs are read per build call, so setting them here is enough:
+    the 0 MB threshold sends every streamable spec to the chunked loader, and
+    the chunk sizes make both the node and the junction loop run many chunks
+    rather than one — the multi-chunk dispatch is the thing this cell guards.
+    """
+    monkeypatch.setenv("KGLITE_BLUEPRINT_STREAMING_THRESHOLD_MB", "0")
+    monkeypatch.setenv("KGLITE_BLUEPRINT_NODE_CHUNK_SIZE", "10000")
+    monkeypatch.setenv("KGLITE_BLUEPRINT_JUNCTION_CHUNK_SIZE", "5000")
+
+    graph = benchmark(kglite.from_blueprint, blueprint_bench_dir, save=False)
+    _assert_blueprint_bench_graph(graph)

@@ -1333,6 +1333,80 @@
         "total": 0.9773327033108217,
         "iterations": 1
       }
+    },
+    {
+      "group": null,
+      "name": "test_bench_blueprint_build",
+      "fullname": "tests/benchmarks/test_bench_core.py::test_bench_blueprint_build",
+      "params": null,
+      "param": null,
+      "extra_info": {},
+      "options": {
+        "disable_gc": false,
+        "timer": "perf_counter",
+        "min_rounds": 100,
+        "max_time": 1.0,
+        "min_time": 5e-06,
+        "precision": null,
+        "confidence": null,
+        "warmup": 20
+      },
+      "stats": {
+        "min": 0.058955208005500026,
+        "max": 0.08637037500739098,
+        "mean": 0.07285304414079291,
+        "stddev": 0.005118393177636825,
+        "rounds": 100,
+        "median": 0.07298975050071022,
+        "iqr": 0.006195854002726264,
+        "q1": 0.06950791699637193,
+        "q3": 0.0757037709990982,
+        "iqr_outliers": 4,
+        "stddev_outliers": 21,
+        "outliers": "21;4",
+        "ld15iqr": 0.06239525000273716,
+        "hd15iqr": 0.0850529169983929,
+        "ops": 13.726262392926772,
+        "total": 7.285304414079292,
+        "iterations": 1
+      }
+    },
+    {
+      "group": null,
+      "name": "test_bench_blueprint_build_streamed",
+      "fullname": "tests/benchmarks/test_bench_core.py::test_bench_blueprint_build_streamed",
+      "params": null,
+      "param": null,
+      "extra_info": {},
+      "options": {
+        "disable_gc": false,
+        "timer": "perf_counter",
+        "min_rounds": 100,
+        "max_time": 1.0,
+        "min_time": 5e-06,
+        "precision": null,
+        "confidence": null,
+        "warmup": 20
+      },
+      "stats": {
+        "min": 0.0611083330004476,
+        "max": 0.06799725000746548,
+        "mean": 0.06149802161991829,
+        "stddev": 0.0006859999463795912,
+        "rounds": 100,
+        "median": 0.061383062493405305,
+        "iqr": 0.0003069995000259951,
+        "q1": 0.061269042002095375,
+        "q3": 0.06157604150212137,
+        "iqr_outliers": 1,
+        "stddev_outliers": 1,
+        "outliers": "1;1",
+        "ld15iqr": 0.0611083330004476,
+        "hd15iqr": 0.06799725000746548,
+        "ops": 16.2606856880761,
+        "total": 6.149802161991829,
+        "iterations": 1
+      }
     }
   ],
   "datetime": "2026-09-03T07:06:02.140216+00:00",

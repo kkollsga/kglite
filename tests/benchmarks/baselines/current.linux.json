@@ -1706,6 +1706,76 @@
         "total": 3.931600035337033,
         "iterations": 1
       }
+    },
+    {
+      "group": null,
+      "name": "test_bench_blueprint_build",
+      "fullname": "test_bench_core.py::test_bench_blueprint_build",
+      "params": null,
+      "param": null,
+      "extra_info": {},
+      "options": {
+        "disable_gc": false,
+        "timer": "perf_counter",
+        "min_rounds": 100,
+        "max_time": 1.0,
+        "min_time": 5e-06,
+        "warmup": 20
+      },
+      "stats": {
+        "min": 0.2744470637655468,
+        "max": 0.41661327237670776,
+        "mean": 0.33123810677161963,
+        "stddev": 0.02409873952773176,
+        "rounds": 100,
+        "median": 0.32722218749913734,
+        "iqr": 0.03191800756176235,
+        "q1": 0.315292736851552,
+        "q3": 0.3472107444133144,
+        "iqr_outliers": 2,
+        "stddev_outliers": 27,
+        "outliers": "27;2",
+        "ld15iqr": 0.2744470637655468,
+        "hd15iqr": 0.397048922436079,
+        "ops": 3.0189763181126827,
+        "total": 33.12381067716196,
+        "iterations": 1
+      }
+    },
+    {
+      "group": null,
+      "name": "test_bench_blueprint_build_streamed",
+      "fullname": "test_bench_core.py::test_bench_blueprint_build_streamed",
+      "params": null,
+      "param": null,
+      "extra_info": {},
+      "options": {
+        "disable_gc": false,
+        "timer": "perf_counter",
+        "min_rounds": 100,
+        "max_time": 1.0,
+        "min_time": 5e-06,
+        "warmup": 20
+      },
+      "stats": {
+        "min": 0.3660886125115212,
+        "max": 0.4100989737184136,
+        "mean": 0.37198108006802794,
+        "stddev": 0.008678042265287574,
+        "rounds": 100,
+        "median": 0.37049748059216653,
+        "iqr": 0.0024129611992975697,
+        "q1": 0.3685712062382663,
+        "q3": 0.37098416743756385,
+        "iqr_outliers": 7,
+        "stddev_outliers": 7,
+        "outliers": "7;7",
+        "ld15iqr": 0.3660886125115212,
+        "hd15iqr": 0.3918677724272129,
+        "ops": 2.688308770481337,
+        "total": 37.19810800680279,
+        "iterations": 1
+      }
     }
   ],
   "datetime": "2026-07-14T19:12:36.912653+00:00",
@@ -1729,7 +1799,9 @@
       "test_bench_exists_fixed_hop": "PROVISIONAL ESTIMATE, not a Linux measurement: kglite 0.13.2 captured on macOS/M4 2026-08-21, scaled by 3.9x (the widest Linux/macOS ratio observed across the 25 cells both files already share; median 2.83, range 1.90-3.88). Deliberately generous so an estimate cannot fire a false red on the 30% leg-2 gate; leg 1 (same-runner 0.13.2 reference, 20%) is what actually gates these cells until the real value lands. Replace from the first CI perf run's reference artifact, or let the next release's promote_linux_benchmark overwrite the file.",
       "test_bench_var_length_1_8_count_distinct": "PROVISIONAL ESTIMATE, not a Linux measurement: this tree captured on macOS/M4 2026-08-21 (two agreeing release runs), scaled by 3.9x \u2014 the same factor and the same reasoning as the five V1 cells above: the widest Linux/macOS ratio observed across the 25 cells both files already share (median 2.83, range 1.90-3.88), chosen generous so an estimate cannot fire a false red on the 30% leg-2 gate. Leg 1 (same-runner reference, 20%) is what actually gates this cell meanwhile. Replace from the first CI perf run's reference artifact, or let the next release's promote_linux_benchmark overwrite the file.",
       "test_bench_load_kgl": "PROVISIONAL ESTIMATE, not a Linux measurement: kglite 0.13.2 captured on macOS/M4 2026-08-22 (10.791 ms min, harness unmodified -- the cell runs as-written on the reference wheel, which is what makes it usable as a reference row), scaled by 3.9x on the same basis as the khop cells: the widest Linux/macOS ratio observed across the cells both files share. Deliberately generous so an estimate cannot fire a false red on the 30% leg-2 gate; leg 1 (same-runner 0.13.2 reference, 20%) is what actually gates this cell until the real value lands. Replace from the first CI perf run's reference artifact, or let the next release's promote_linux_benchmark overwrite the file.",
-      "test_bench_disk_dir_reopen_fresh": "PROVISIONAL ESTIMATE, not a Linux measurement: kglite 0.13.2 captured on macOS/M4 2026-08-22 (3.733 ms min, the slower of two agreeing runs [3.725 ms]; the harness ran unmodified on the reference wheel, which is what makes it usable as a reference row), scaled by 3.9x on the same basis as the other estimated rows in this file: the widest Linux/macOS ratio observed across the cells both files share. Deliberately generous so an estimate cannot fire a false red on the 30% leg-2 gate; leg 1 (same-runner 0.13.2 reference, 20%) is what actually gates this cell until the real value lands, and this build reopens the fixture roughly 4x faster than 0.13.2 does. Replace from the first CI perf run's reference artifact, or let the next release's promote_linux_benchmark overwrite the file."
+      "test_bench_disk_dir_reopen_fresh": "PROVISIONAL ESTIMATE, not a Linux measurement: kglite 0.13.2 captured on macOS/M4 2026-08-22 (3.733 ms min, the slower of two agreeing runs [3.725 ms]; the harness ran unmodified on the reference wheel, which is what makes it usable as a reference row), scaled by 3.9x on the same basis as the other estimated rows in this file: the widest Linux/macOS ratio observed across the cells both files share. Deliberately generous so an estimate cannot fire a false red on the 30% leg-2 gate; leg 1 (same-runner 0.13.2 reference, 20%) is what actually gates this cell until the real value lands, and this build reopens the fixture roughly 4x faster than 0.13.2 does. Replace from the first CI perf run's reference artifact, or let the next release's promote_linux_benchmark overwrite the file.",
+      "test_bench_blueprint_build": "PROVISIONAL ESTIMATE, not a Linux measurement: kglite 0.13.2 captured on macOS/M4 2026-09-04 (70.371 ms min, the slower of two agreeing runs [70.031 ms]; the harness ran unmodified on the reference wheel, which is what makes it usable as a reference row), scaled by 3.9x on the same basis as the other estimated rows in this file: the widest Linux/macOS ratio observed across the cells both files share. Deliberately generous so an estimate cannot fire a false red on the 30% leg-2 gate; leg 1 (same-runner 0.13.2 reference, 20%) is what actually gates this cell until the real value lands, and this build runs the buffered blueprint loader roughly 1.2x faster than 0.13.2 does. Replace from the first CI perf run's reference artifact, or let the next release's promote_linux_benchmark overwrite the file.",
+      "test_bench_blueprint_build_streamed": "PROVISIONAL ESTIMATE, not a Linux measurement: kglite 0.13.2 captured on macOS/M4 2026-09-04 (93.869 ms min, the slower of two agreeing runs [93.571 ms]; the harness ran unmodified on the reference wheel, which is what makes it usable as a reference row), scaled by 3.9x on the same basis as the other estimated rows in this file: the widest Linux/macOS ratio observed across the cells both files share. Deliberately generous so an estimate cannot fire a false red on the 30% leg-2 gate; leg 1 (same-runner 0.13.2 reference, 20%) is what actually gates this cell until the real value lands, and this build runs the streamed blueprint loader roughly 1.5x faster than 0.13.2 does. Replace from the first CI perf run's reference artifact, or let the next release's promote_linux_benchmark overwrite the file."
     }
   }
 }

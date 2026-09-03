@@ -65,4 +65,4 @@ Regenerate with `python scripts/render_docs_facts.py`. CI checks this file for d
 - CPU: `Apple M4`
 - Python: `CPython 3.14.3`
 - pytest-benchmark schema/plugin version: `5.3.0`
-- Recorded benchmarks: `34`
+- Recorded benchmarks: `36`
