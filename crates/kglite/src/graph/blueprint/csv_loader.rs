@@ -639,3 +639,566 @@ mod chunk_tests {
         assert_eq!(c.nulls[1], vec![true, true, true]);
     }
 }
+
+/// The typing half's golden target: exactly what `typed_dataframe` yields for
+/// each `ColumnType` arm, each inference outcome and each null shape.
+///
+/// Every future `RawCsv` producer (delimited, xlsx, a pandas frame) is
+/// required to land on these answers, so a change here is a change to what
+/// every input format means — not a test detail.
+#[cfg(test)]
+mod typing_tests {
+    use super::*;
+    use chrono::NaiveDate;
+
+    /// Build a `RawCsv` from literals. A cell that is the empty string is
+    /// null, matching what both file readers write into `nulls`.
+    fn raw(headers: &[&str], rows: &[&[&str]]) -> RawCsv {
+        let rows_v: Vec<Vec<String>> = rows
+            .iter()
+            .map(|r| r.iter().map(|s| s.to_string()).collect())
+            .collect();
+        let nulls = rows
+            .iter()
+            .map(|r| r.iter().map(|s| s.is_empty()).collect())
+            .collect();
+        RawCsv {
+            headers: headers.iter().map(|s| s.to_string()).collect(),
+            rows: rows_v,
+            nulls,
+            row_ids: (1..=rows.len()).collect(),
+        }
+    }
+
+    fn declared(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    fn keep(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// `typed_dataframe` with no rename and a throwaway tally.
+    fn typed(raw: &RawCsv, cols: &[&str], types: &[(&str, &str)]) -> DataFrame {
+        let mut tally = ListMisparseTally::default();
+        typed_dataframe(
+            raw,
+            &keep(cols),
+            &declared(types),
+            &HashMap::new(),
+            &mut tally,
+        )
+        .expect("typed_dataframe")
+    }
+
+    fn date(y: i32, m: u32, d: u32) -> Value {
+        Value::DateTime(NaiveDate::from_ymd_opt(y, m, d).unwrap())
+    }
+
+    #[test]
+    fn every_declared_keyword_maps_to_its_column_type() {
+        for (kw, want) in [
+            ("string", ColumnType::String),
+            ("str", ColumnType::String),
+            ("int", ColumnType::Int64),
+            ("integer", ColumnType::Int64),
+            ("float", ColumnType::Float64),
+            ("bool", ColumnType::Boolean),
+            ("boolean", ColumnType::Boolean),
+            ("date", ColumnType::DateTime),
+            ("datetime", ColumnType::DateTime),
+            ("validFrom", ColumnType::DateTime),
+            ("validTo", ColumnType::DateTime),
+            ("list", ColumnType::List),
+            ("array", ColumnType::List),
+        ] {
+            assert_eq!(map_blueprint_type(kw), Some(want), "keyword '{kw}'");
+        }
+        // Spatial / unknown keywords are not column types: `build.rs` filters
+        // them out of `declared`, so they fall through to inference.
+        for kw in ["geometry", "location.lat", "location.lon", "map", "nope"] {
+            assert_eq!(map_blueprint_type(kw), None, "keyword '{kw}'");
+        }
+    }
+
+    #[test]
+    fn declared_arms_carry_their_values() {
+        let r = raw(
+            &["s", "i", "f", "b", "d", "l"],
+            &[
+                &["x", "7", "1.5", "true", "2024-01-15", "[\"a\",\"b\"]"],
+                &["y", "-2", "-0.25", "no", "2024-02-29T13:45:01", "[1,2]"],
+            ],
+        );
+        let df = typed(
+            &r,
+            &["s", "i", "f", "b", "d", "l"],
+            &[
+                ("s", "string"),
+                ("i", "int"),
+                ("f", "float"),
+                ("b", "bool"),
+                ("d", "date"),
+                ("l", "list"),
+            ],
+        );
+        assert_eq!(df.row_count(), 2);
+        assert_eq!(df.get_column_type("s"), Some(ColumnType::String));
+        assert_eq!(df.get_column_type("i"), Some(ColumnType::Int64));
+        assert_eq!(df.get_column_type("f"), Some(ColumnType::Float64));
+        assert_eq!(df.get_column_type("b"), Some(ColumnType::Boolean));
+        assert_eq!(df.get_column_type("d"), Some(ColumnType::DateTime));
+        assert_eq!(df.get_column_type("l"), Some(ColumnType::List));
+
+        assert_eq!(df.get_value(0, "s"), Some(Value::String("x".into())));
+        assert_eq!(df.get_value(0, "i"), Some(Value::Int64(7)));
+        assert_eq!(df.get_value(1, "i"), Some(Value::Int64(-2)));
+        assert_eq!(df.get_value(0, "f"), Some(Value::Float64(1.5)));
+        assert_eq!(df.get_value(1, "f"), Some(Value::Float64(-0.25)));
+        assert_eq!(df.get_value(0, "b"), Some(Value::Boolean(true)));
+        assert_eq!(df.get_value(1, "b"), Some(Value::Boolean(false)));
+        assert_eq!(df.get_value(0, "d"), Some(date(2024, 1, 15)));
+        // A datetime cell keeps only its date half — the blueprint has no
+        // time-of-day column type.
+        assert_eq!(df.get_value(1, "d"), Some(date(2024, 2, 29)));
+        assert_eq!(
+            df.get_value(0, "l"),
+            Some(Value::List(vec![
+                Value::String("a".into()),
+                Value::String("b".into())
+            ]))
+        );
+        assert_eq!(
+            df.get_value(1, "l"),
+            Some(Value::List(vec![Value::Int64(1), Value::Int64(2)]))
+        );
+    }
+
+    #[test]
+    fn every_boolean_spelling_the_arm_accepts() {
+        let r = raw(
+            &["b"],
+            &[
+                &["true"],
+                &["TRUE"],
+                &["1"],
+                &["t"],
+                &["yes"],
+                &["Y"],
+                &["false"],
+                &["0"],
+                &["f"],
+                &["no"],
+                &["N"],
+                &["maybe"],
+            ],
+        );
+        let df = typed(&r, &["b"], &[("b", "bool")]);
+        let got: Vec<Option<Value>> = (0..df.row_count()).map(|i| df.get_value(i, "b")).collect();
+        let t = Some(Value::Boolean(true));
+        let f = Some(Value::Boolean(false));
+        assert_eq!(
+            got,
+            vec![
+                t.clone(),
+                t.clone(),
+                t.clone(),
+                t.clone(),
+                t.clone(),
+                t,
+                f.clone(),
+                f.clone(),
+                f.clone(),
+                f.clone(),
+                f,
+                // Anything else is null, not an error and not `false`.
+                None,
+            ]
+        );
+    }
+
+    #[test]
+    fn undeclared_columns_take_the_inferred_type() {
+        let r = raw(
+            &["i", "f", "b", "d", "s", "mixed"],
+            &[
+                &["1", "1.5", "true", "2024-01-15", "abc", "1"],
+                &["2", "2", "false", "2024-01-16", "def", "2.5"],
+            ],
+        );
+        let df = typed(&r, &["i", "f", "b", "d", "s", "mixed"], &[]);
+        assert_eq!(df.get_column_type("i"), Some(ColumnType::Int64));
+        assert_eq!(df.get_column_type("f"), Some(ColumnType::Float64));
+        assert_eq!(df.get_column_type("b"), Some(ColumnType::Boolean));
+        // Inference has no date rule: an ISO-date column stays text unless the
+        // blueprint declares it.
+        assert_eq!(df.get_column_type("d"), Some(ColumnType::String));
+        assert_eq!(df.get_column_type("s"), Some(ColumnType::String));
+        // int + float in one column widens to float.
+        assert_eq!(df.get_column_type("mixed"), Some(ColumnType::Float64));
+        assert_eq!(df.get_value(0, "mixed"), Some(Value::Float64(1.0)));
+        assert_eq!(
+            df.get_value(0, "d"),
+            Some(Value::String("2024-01-15".into()))
+        );
+    }
+
+    #[test]
+    fn inference_edge_cases() {
+        // All-null and all-empty columns fall back to String.
+        let r = raw(&["a", "b"], &[&["", ""], &["", ""]]);
+        let df = typed(&r, &["a", "b"], &[]);
+        assert_eq!(df.get_column_type("a"), Some(ColumnType::String));
+        assert_eq!(df.get_value(0, "a"), None);
+
+        // bool + int in one column: `saw_int` wins the ladder, and the bool
+        // cells then parse as neither int nor float, so they become null.
+        let r = raw(&["x"], &[&["true"], &["1"]]);
+        let df = typed(&r, &["x"], &[]);
+        assert_eq!(df.get_column_type("x"), Some(ColumnType::Int64));
+        assert_eq!(df.get_value(0, "x"), None);
+        assert_eq!(df.get_value(1, "x"), Some(Value::Int64(1)));
+
+        // A single text cell anywhere in the column makes the whole column
+        // text, whatever the majority looks like.
+        let r = raw(&["x"], &[&["1"], &["2"], &["oops"]]);
+        let df = typed(&r, &["x"], &[]);
+        assert_eq!(df.get_column_type("x"), Some(ColumnType::String));
+        assert_eq!(df.get_value(0, "x"), Some(Value::String("1".into())));
+    }
+
+    #[test]
+    fn null_empty_and_whitespace_cells_per_arm() {
+        // Column 0 is the empty (null) cell, column 1 is whitespace-only.
+        let r = raw(
+            &["s", "i", "f", "b", "d", "l"],
+            &[
+                &["", "", "", "", "", ""],
+                &["   ", "   ", "   ", "   ", "   ", "   "],
+            ],
+        );
+        let df = typed(
+            &r,
+            &["s", "i", "f", "b", "d", "l"],
+            &[
+                ("s", "string"),
+                ("i", "int"),
+                ("f", "float"),
+                ("b", "bool"),
+                ("d", "date"),
+                ("l", "list"),
+            ],
+        );
+        // Empty ≡ null in every arm.
+        for c in ["s", "i", "f", "b", "d", "l"] {
+            assert_eq!(df.get_value(0, c), None, "empty cell in '{c}'");
+        }
+        // Whitespace-only is null everywhere the arm trims — which is
+        // everywhere except `String`, the one arm that does not trim.
+        for c in ["i", "f", "b", "d", "l"] {
+            assert_eq!(df.get_value(1, c), None, "whitespace cell in '{c}'");
+        }
+        assert_eq!(df.get_value(1, "s"), Some(Value::String("   ".into())));
+    }
+
+    #[test]
+    fn the_string_arm_is_the_only_one_that_does_not_trim() {
+        let r = raw(
+            &["s", "i", "f", "b", "d"],
+            &[&[" x ", " 1 ", " 1.5 ", " true ", " 2024-01-15 "]],
+        );
+        let df = typed(
+            &r,
+            &["s", "i", "f", "b", "d"],
+            &[
+                ("s", "string"),
+                ("i", "int"),
+                ("f", "float"),
+                ("b", "bool"),
+                ("d", "date"),
+            ],
+        );
+        assert_eq!(df.get_value(0, "s"), Some(Value::String(" x ".into())));
+        assert_eq!(df.get_value(0, "i"), Some(Value::Int64(1)));
+        assert_eq!(df.get_value(0, "f"), Some(Value::Float64(1.5)));
+        assert_eq!(df.get_value(0, "b"), Some(Value::Boolean(true)));
+        assert_eq!(df.get_value(0, "d"), Some(date(2024, 1, 15)));
+        // Inference trims too, so a padded numeric column is still numeric.
+        let df = typed(&r, &["i"], &[]);
+        assert_eq!(df.get_column_type("i"), Some(ColumnType::Int64));
+    }
+
+    #[test]
+    fn int_declaration_takes_whole_number_floats_and_nulls_the_rest() {
+        let r = raw(
+            &["i"],
+            &[
+                &["1.0"],
+                &["-3.000"],
+                &["2.5"],
+                &["1e3"],
+                &["inf"],
+                &["NaN"],
+                &["abc"],
+                &["9223372036854775807"],
+            ],
+        );
+        let df = typed(&r, &["i"], &[("i", "int")]);
+        let got: Vec<Option<Value>> = (0..df.row_count()).map(|i| df.get_value(i, "i")).collect();
+        assert_eq!(
+            got,
+            vec![
+                Some(Value::Int64(1)),
+                Some(Value::Int64(-3)),
+                // Fractional, non-finite and non-numeric all become null —
+                // silently; there is no per-cell warning on this arm.
+                None,
+                Some(Value::Int64(1000)),
+                None,
+                None,
+                None,
+                Some(Value::Int64(i64::MAX)),
+            ]
+        );
+    }
+
+    #[test]
+    fn date_declaration_accepts_iso_and_epoch_millis() {
+        let r = raw(
+            &["d"],
+            &[
+                &["2021-01-01"],
+                &["2021-01-01 06:30:00"],
+                &["2021-01-01T06:30:00"],
+                // Bare digits under `date` are epoch milliseconds, so an id
+                // column mis-declared as a date silently becomes 1970.
+                &["1609459200000"],
+                &["1609459200000.0"],
+                &["7"],
+                &["not-a-date"],
+            ],
+        );
+        let df = typed(&r, &["d"], &[("d", "date")]);
+        let got: Vec<Option<Value>> = (0..df.row_count()).map(|i| df.get_value(i, "d")).collect();
+        assert_eq!(
+            got,
+            vec![
+                Some(date(2021, 1, 1)),
+                Some(date(2021, 1, 1)),
+                Some(date(2021, 1, 1)),
+                Some(date(2021, 1, 1)),
+                Some(date(2021, 1, 1)),
+                Some(date(1970, 1, 1)),
+                None,
+            ]
+        );
+    }
+
+    #[test]
+    fn list_cells_parse_json_and_wrap_anything_else() {
+        let r = raw(
+            &["l"],
+            &[
+                &["[\"a\",\"b\"]"],
+                &["[1,2.5,true,null]"],
+                &["[[1,2],{\"k\":1}]"],
+                &["lone"],
+                &["\"quoted\""],
+                &["[]"],
+            ],
+        );
+        let df = typed(&r, &["l"], &[("l", "list")]);
+        assert_eq!(
+            df.get_value(1, "l"),
+            Some(Value::List(vec![
+                Value::Int64(1),
+                Value::Float64(2.5),
+                Value::Boolean(true),
+                Value::Null,
+            ]))
+        );
+        // Nested arrays/objects are stringified, not kept as structure.
+        assert_eq!(
+            df.get_value(2, "l"),
+            Some(Value::List(vec![
+                Value::String("[1,2]".into()),
+                Value::String("{\"k\":1}".into()),
+            ]))
+        );
+        // A bare scalar is a one-element list, and so is a JSON string.
+        assert_eq!(
+            df.get_value(3, "l"),
+            Some(Value::List(vec![Value::String("lone".into())]))
+        );
+        assert_eq!(
+            df.get_value(4, "l"),
+            Some(Value::List(vec![Value::String("quoted".into())]))
+        );
+        assert_eq!(df.get_value(5, "l"), Some(Value::List(vec![])));
+    }
+
+    #[test]
+    fn a_separator_in_a_non_json_list_cell_is_tallied_once_per_column() {
+        let r = raw(
+            &["l"],
+            &[&["ok"], &["a|b"], &["c;d"], &["e,f"], &["[\"g,h\"]"]],
+        );
+        let mut tally = ListMisparseTally::default();
+        let df = typed_dataframe(
+            &r,
+            &keep(&["l"]),
+            &declared(&[("l", "list")]),
+            &HashMap::new(),
+            &mut tally,
+        )
+        .unwrap();
+        // The value is still kept whole — the tally is a warning, not a drop.
+        assert_eq!(
+            df.get_value(1, "l"),
+            Some(Value::List(vec![Value::String("a|b".into())]))
+        );
+        let warnings = tally.into_warnings("node 'T'");
+        assert_eq!(warnings.len(), 1, "one warning per column: {warnings:?}");
+        let w = &warnings[0];
+        assert!(
+            w.starts_with("node 'T': column 'l' is declared list but 3 cell(s)"),
+            "{w}"
+        );
+        // The first offending row is named by its source row id, with the
+        // cell verbatim so the author can grep for it.
+        assert!(w.contains("First at row 2: 'a|b'"), "{w}");
+        // A JSON array containing a comma is not a misparse.
+        assert!(!w.contains("g,h"), "{w}");
+    }
+
+    #[test]
+    fn the_tally_names_the_source_row_not_the_chunk_row() {
+        // A chunk carries the file's row ids, so a warning about a row in
+        // chunk 3 names the file row, not the chunk-local index.
+        let mut r = raw(&["l"], &[&["x|y"]]);
+        r.row_ids = vec![5001];
+        let mut tally = ListMisparseTally::default();
+        typed_dataframe(
+            &r,
+            &keep(&["l"]),
+            &declared(&[("l", "list")]),
+            &HashMap::new(),
+            &mut tally,
+        )
+        .unwrap();
+        assert!(
+            tally.into_warnings("j")[0].contains("First at row 5001"),
+            "row provenance lost"
+        );
+
+        // A table built without provenance falls back to the 1-based index.
+        let mut bare = raw(&["l"], &[&["p|q"], &["r|s"]]);
+        bare.row_ids.clear();
+        assert_eq!(bare.row_id(0), 1);
+        assert_eq!(bare.row_id(1), 2);
+    }
+
+    #[test]
+    fn a_long_misparse_cell_is_truncated_in_the_warning() {
+        let long: String = std::iter::repeat_n('z', 200).collect::<String>() + "|tail";
+        let r = raw(&["l"], &[&[long.as_str()]]);
+        let mut tally = ListMisparseTally::default();
+        typed_dataframe(
+            &r,
+            &keep(&["l"]),
+            &declared(&[("l", "list")]),
+            &HashMap::new(),
+            &mut tally,
+        )
+        .unwrap();
+        let w = tally.into_warnings("node 'T'").remove(0);
+        assert!(w.contains(&format!("{}…", "z".repeat(80))), "{w}");
+        assert!(!w.contains("tail"), "{w}");
+    }
+
+    #[test]
+    fn rename_moves_the_output_name_only() {
+        let r = raw(&["a", "b"], &[&["1", "x"]]);
+        let mut rename = HashMap::new();
+        rename.insert("a".to_string(), "renamed".to_string());
+        let mut tally = ListMisparseTally::default();
+        let df = typed_dataframe(
+            &r,
+            &keep(&["a", "b"]),
+            // `declared_types` stays keyed by the *source* name.
+            &declared(&[("a", "string")]),
+            &rename,
+            &mut tally,
+        )
+        .unwrap();
+        assert_eq!(df.get_column_names(), vec!["renamed", "b"]);
+        assert_eq!(df.get_column_type("renamed"), Some(ColumnType::String));
+        assert_eq!(df.get_value(0, "renamed"), Some(Value::String("1".into())));
+    }
+
+    #[test]
+    fn a_missing_keep_column_is_an_error_naming_the_headers() {
+        let r = raw(&["a"], &[&["1"]]);
+        let mut tally = ListMisparseTally::default();
+        let err = typed_dataframe(
+            &r,
+            &keep(&["nope"]),
+            &HashMap::new(),
+            &HashMap::new(),
+            &mut tally,
+        )
+        .unwrap_err();
+        assert!(err.contains("Column 'nope' not found"), "{err}");
+        assert!(err.contains("\"a\""), "{err}");
+    }
+
+    #[test]
+    fn append_typed_columns_extends_an_existing_frame() {
+        // The FK-edge loader builds its id pair first and appends properties.
+        let r = raw(&["p"], &[&["1"], &["2"]]);
+        let mut df = DataFrame::new(Vec::new());
+        df.add_column(
+            "src".to_string(),
+            ColumnType::UniqueId,
+            ColumnData::UniqueId(vec![Some(10), Some(11)]),
+        )
+        .unwrap();
+        let mut tally = ListMisparseTally::default();
+        append_typed_columns(
+            &mut df,
+            &r,
+            &keep(&["p"]),
+            &declared(&[("p", "int")]),
+            &HashMap::new(),
+            &mut tally,
+        )
+        .unwrap();
+        assert_eq!(df.get_column_names(), vec!["src", "p"]);
+        assert_eq!(df.get_value(1, "src"), Some(Value::UniqueId(11)));
+        assert_eq!(df.get_value(1, "p"), Some(Value::Int64(2)));
+    }
+
+    #[test]
+    fn the_arms_no_declaration_can_reach_still_return_full_length_columns() {
+        // `map_blueprint_type` has no keyword for UniqueId / Timestamp / Map
+        // and `infer_type` never yields them, so these arms are unreachable
+        // through a blueprint. They must still be shape-correct.
+        let r = raw(&["x"], &[&["7"], &[""], &["oops"]]);
+        let mut tally = ListMisparseTally::default();
+        match build_column_data(&r, 0, &ColumnType::UniqueId, "x", &mut tally).unwrap() {
+            ColumnData::UniqueId(v) => assert_eq!(v, vec![Some(7), None, None]),
+            other => panic!("wrong variant: {other:?}"),
+        }
+        match build_column_data(&r, 0, &ColumnType::Timestamp, "x", &mut tally).unwrap() {
+            ColumnData::Timestamp(v) => assert_eq!(v, vec![None, None, None]),
+            other => panic!("wrong variant: {other:?}"),
+        }
+        match build_column_data(&r, 0, &ColumnType::Map, "x", &mut tally).unwrap() {
+            ColumnData::Map(v) => assert_eq!(v.len(), 3),
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+}

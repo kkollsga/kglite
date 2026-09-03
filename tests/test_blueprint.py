@@ -2509,3 +2509,471 @@ class TestOntologyGate:
         _write_csv(tmp_path / "enrolled.csv", enrolled)
         graph = kglite.from_blueprint(str(bp_path), save=False)
         assert graph.shape[0] == 3
+
+
+# ── P0 status-quo pins ───────────────────────────────────────────────
+#
+# Everything below records what the CSV loader does *today*, ahead of the
+# producer-seam refactor that moves this code. A future input format (a
+# delimited file, an xlsx sheet, a pandas frame) has to land on the same
+# answers, so a diff here is a deliberate change of meaning — not a test
+# detail.
+
+
+def _write_text(path, text):
+    """Write a CSV verbatim — the exact bytes matter to these pins."""
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        f.write(text)
+
+
+class TestGeometryProperties:
+    """`geometry` / `location.lat` / `location.lon` through `from_blueprint`.
+
+    `crates/kglite/src/graph/blueprint/geometry.rs` had no test at any level
+    before this class: it parses the `_geometry` column's GeoJSON and writes
+    WKT + centroid back into the columns the spec's *property types* name.
+    """
+
+    SQUARE = '{"type":"Polygon","coordinates":[[[0,0],[2,0],[2,2],[0,2],[0,0]]]}'
+    POINT = '{"type":"Point","coordinates":[10.5,20.25]}'
+
+    def _bp(self, tmp_path, rows, properties):
+        _write_csv(tmp_path / "sites.csv", pd.DataFrame(rows))
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "Site": {
+                    "csv": "sites.csv",
+                    "pk": "id",
+                    "title": "name",
+                    "properties": properties,
+                }
+            },
+        }
+        _write_blueprint(tmp_path / "bp.json", bp)
+        return tmp_path / "bp.json"
+
+    def test_geojson_becomes_wkt_and_a_centroid(self, tmp_path):
+        bp_path = self._bp(
+            tmp_path,
+            {
+                "id": [1, 2],
+                "name": ["Square", "Point"],
+                "_geometry": [self.SQUARE, self.POINT],
+            },
+            {"wkt": "geometry", "lat": "location.lat", "lon": "location.lon"},
+        )
+        graph = from_blueprint(bp_path, save=False)
+        rows = graph.cypher(
+            "MATCH (s:Site) RETURN s.id AS i, s.wkt AS w, s.lat AS lat, s.lon AS lon ORDER BY i"
+        ).to_list()
+        assert rows[0]["w"] == "POLYGON((0 0,2 0,2 2,0 2,0 0))"
+        assert rows[0]["lat"] == pytest.approx(1.0)
+        assert rows[0]["lon"] == pytest.approx(1.0)
+        assert rows[1]["w"] == "POINT(10.5 20.25)"
+        assert rows[1]["lat"] == pytest.approx(20.25)
+        assert rows[1]["lon"] == pytest.approx(10.5)
+
+    def test_the_geojson_source_column_is_never_a_property(self, tmp_path):
+        bp_path = self._bp(
+            tmp_path,
+            {"id": [1], "name": ["Square"], "_geometry": [self.SQUARE]},
+            {"wkt": "geometry"},
+        )
+        graph = from_blueprint(bp_path, save=False)
+        props = graph.cypher("MATCH (s:Site) RETURN s").to_list()[0]["s"]["properties"]
+        assert "_geometry" not in props
+        assert props["wkt"] == "POLYGON((0 0,2 0,2 2,0 2,0 0))"
+
+    def test_a_missing_or_unparseable_geometry_cell_is_null(self, tmp_path):
+        bp_path = self._bp(
+            tmp_path,
+            {
+                "id": [1, 2, 3],
+                "name": ["ok", "empty", "junk"],
+                "_geometry": [self.SQUARE, "", "not json"],
+            },
+            {"wkt": "geometry", "lat": "location.lat", "lon": "location.lon"},
+        )
+        graph = from_blueprint(bp_path, save=False)
+        rows = graph.cypher("MATCH (s:Site) RETURN s.id AS i, s.wkt AS w, s.lat AS lat ORDER BY i").to_list()
+        assert rows[0]["w"] is not None
+        # A bad cell is dropped silently — no warning, no failed build.
+        assert rows[1]["w"] is None and rows[1]["lat"] is None
+        assert rows[2]["w"] is None and rows[2]["lat"] is None
+
+    def test_the_centroid_columns_are_inferred_not_declared(self, tmp_path):
+        """`location.lat` is not a `ColumnType`, so the synthesised column
+        goes through ordinary inference on its own text. Whole-number
+        centroids therefore land as ints, not floats."""
+        bp_path = self._bp(
+            tmp_path,
+            {"id": [1], "name": ["Square"], "_geometry": [self.SQUARE]},
+            {"lat": "location.lat", "lon": "location.lon"},
+        )
+        graph = from_blueprint(bp_path, save=False)
+        lat = graph.cypher("MATCH (s:Site) RETURN s.lat AS lat").to_list()[0]["lat"]
+        assert isinstance(lat, int) and not isinstance(lat, bool)
+
+    def test_without_a_geojson_column_a_wkt_column_passes_through(self, tmp_path):
+        """Mode 2 of geometry.rs: the CSV already holds WKT, so nothing is
+        converted and the column is stored as the string it is."""
+        bp_path = self._bp(
+            tmp_path,
+            {"id": [1], "name": ["Square"], "wkt": ["POLYGON((0 0,1 0,1 1,0 0))"]},
+            {"wkt": "geometry"},
+        )
+        graph = from_blueprint(bp_path, save=False)
+        got = graph.cypher("MATCH (s:Site) RETURN s.wkt AS w").to_list()[0]["w"]
+        assert got == "POLYGON((0 0,1 0,1 1,0 0))"
+
+
+class TestCsvShapeQuirks:
+    """Ragged rows, a UTF-8 BOM and CRLF endings, end to end."""
+
+    def _bp(self, tmp_path, text, properties=None):
+        _write_text(tmp_path / "p.csv", text)
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "P": {
+                    "csv": "p.csv",
+                    "pk": "id",
+                    "title": "name",
+                    "properties": properties or {},
+                }
+            },
+        }
+        _write_blueprint(tmp_path / "bp.json", bp)
+        return tmp_path / "bp.json"
+
+    def test_a_short_row_is_null_padded(self, tmp_path):
+        """The readers run the `csv` crate with `flexible(true)`: a row with
+        fewer fields than the header is padded with nulls, not rejected."""
+        bp_path = self._bp(
+            tmp_path,
+            "id,name,age\n1,Alice,30\n2,Bob\n",
+            {"age": "int"},
+        )
+        graph = from_blueprint(bp_path, save=False)
+        rows = graph.cypher("MATCH (p:P) RETURN p.id AS i, p.age AS a ORDER BY i").to_list()
+        assert rows == [{"i": 1, "a": 30}, {"i": 2, "a": None}]
+
+    def test_fields_past_the_header_width_are_dropped_silently(self, tmp_path):
+        """`flexible(true)`'s other half: the loader reads `0..headers.len()`
+        cells, so a trailing extra field vanishes with no warning. A producer
+        that emits a phantom trailing column (a `\\t|` line terminator, say)
+        gets away with it here and must not start failing loudly by accident."""
+        bp_path = self._bp(
+            tmp_path,
+            "id,name\n1,Alice\n2,Bob,EXTRA\n",
+        )
+        graph = from_blueprint(bp_path, save=False)
+        rows = graph.cypher("MATCH (p:P) RETURN p.id AS i, p.title AS t ORDER BY i").to_list()
+        assert rows == [{"i": 1, "t": "Alice"}, {"i": 2, "t": "Bob"}]
+
+    def test_a_utf8_bom_on_the_header_is_stripped(self, tmp_path):
+        """`csv` 1.4 strips a leading UTF-8 BOM itself, so `pk: "id"` resolves
+        against a BOM'd header. Any replacement reader must keep doing so."""
+        _write_text(tmp_path / "p.csv", "﻿id,name\n1,Alice\n")
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {"P": {"csv": "p.csv", "pk": "id", "title": "name", "properties": {}}},
+        }
+        _write_blueprint(tmp_path / "bp.json", bp)
+        assert open(tmp_path / "p.csv", "rb").read(3) == b"\xef\xbb\xbf"
+        graph = from_blueprint(tmp_path / "bp.json", save=False)
+        assert graph.cypher("MATCH (p:P) RETURN p.id AS i").to_list() == [{"i": 1}]
+
+    def test_crlf_line_endings_load(self, tmp_path):
+        bp_path = self._bp(tmp_path, "id,name\r\n1,Alice\r\n2,Bob\r\n")
+        graph = from_blueprint(bp_path, save=False)
+        rows = graph.cypher("MATCH (p:P) RETURN p.title AS t ORDER BY t").to_list()
+        # No stray \r rides along on the last column of a row.
+        assert [r["t"] for r in rows] == ["Alice", "Bob"]
+
+
+class TestTrimAndNullSemantics:
+    """Every typed arm trims its cell; `String` does not. Empty is null
+    everywhere; whitespace-only is null everywhere *except* string."""
+
+    def _graph(self, tmp_path, text):
+        _write_text(tmp_path / "p.csv", text)
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "P": {
+                    "csv": "p.csv",
+                    "pk": "id",
+                    "title": "id",
+                    "properties": {"s": "string", "n": "int"},
+                }
+            },
+        }
+        _write_blueprint(tmp_path / "bp.json", bp)
+        return from_blueprint(tmp_path / "bp.json", save=False)
+
+    def test_a_string_column_keeps_its_padding_and_an_int_column_does_not(self, tmp_path):
+        graph = self._graph(tmp_path, "id,s,n\n1, x , 1 \n")
+        row = graph.cypher("MATCH (p:P) RETURN p.s AS s, p.n AS n").to_list()[0]
+        assert row["s"] == " x "
+        assert row["n"] == 1
+
+    def test_empty_is_null_everywhere_whitespace_only_is_null_except_in_a_string(self, tmp_path):
+        graph = self._graph(tmp_path, "id,s,n\n1,,\n2,   ,   \n")
+        rows = graph.cypher("MATCH (p:P) RETURN p.id AS i, p.s AS s, p.n AS n ORDER BY i").to_list()
+        assert rows[0] == {"i": 1, "s": None, "n": None}
+        assert rows[1] == {"i": 2, "s": "   ", "n": None}
+
+
+class TestFeatureGoldens:
+    """`filter` and `timeseries` through `from_blueprint`, with the values
+    pinned rather than only the row counts."""
+
+    def test_spec_filter_removes_rows_before_any_node_is_made(self, tmp_path):
+        _write_csv(
+            tmp_path / "items.csv",
+            pd.DataFrame(
+                {
+                    "item_id": [1, 2, 3],
+                    "name": ["A", "B", "C"],
+                    "status": ["Active", "Inactive", "Active"],
+                    "score": [10, 20, 30],
+                }
+            ),
+        )
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "Item": {
+                    "csv": "items.csv",
+                    "pk": "item_id",
+                    "title": "name",
+                    "properties": {"status": "string", "score": "int"},
+                    "filter": {"status": "Active"},
+                }
+            },
+        }
+        _write_blueprint(tmp_path / "bp.json", bp)
+        graph = from_blueprint(tmp_path / "bp.json", save=False)
+        rows = graph.cypher("MATCH (i:Item) RETURN i.item_id AS id, i.title AS t, i.score AS s ORDER BY id").to_list()
+        assert rows == [{"id": 1, "t": "A", "s": 10}, {"id": 3, "t": "C", "s": 30}]
+        # The filtered row leaves no stub behind either.
+        assert graph.cypher("MATCH (i:Item) RETURN count(i) AS c").to_list()[0]["c"] == 2
+
+    def test_timeseries_channels_land_and_their_source_columns_do_not(self, tmp_path):
+        _write_csv(tmp_path / "fields.csv", pd.DataFrame({"field_id": [1, 2], "name": ["Troll", "Ekofisk"]}))
+        _write_csv(
+            tmp_path / "production.csv",
+            pd.DataFrame(
+                {
+                    "field_id": [1, 1, 1, 2, 2, 2],
+                    "name": ["Troll"] * 3 + ["Ekofisk"] * 3,
+                    "prfYear": [2020] * 6,
+                    "prfMonth": [1, 2, 3, 1, 2, 3],
+                    "prfOil": [1.0, 1.5, 2.0, 0.5, 0.6, 0.7],
+                }
+            ),
+        )
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "Field": {
+                    "csv": "fields.csv",
+                    "pk": "field_id",
+                    "title": "name",
+                    "properties": {},
+                    "sub_nodes": {
+                        "Production": {
+                            "csv": "production.csv",
+                            "pk": "field_id",
+                            "title": "name",
+                            "parent_fk": "field_id",
+                            "properties": {},
+                            "skipped": ["field_id", "name"],
+                            "timeseries": {
+                                "time_key": {"year": "prfYear", "month": "prfMonth"},
+                                "resolution": "month",
+                                "channels": {"oil": "prfOil"},
+                                "units": {"oil": "MSm3"},
+                            },
+                        }
+                    },
+                }
+            },
+        }
+        _write_blueprint(tmp_path / "bp.json", bp)
+        graph = from_blueprint(tmp_path / "bp.json", save=False)
+        # One node per pk, not one per input row.
+        assert graph.cypher("MATCH (p:Production) RETURN count(p) AS c").to_list()[0]["c"] == 2
+        rows = graph.cypher(
+            "MATCH (p:Production) RETURN p.title AS t, ts_sum(p.oil,'2020') AS year, "
+            "ts_sum(p.oil,'2020-02') AS feb ORDER BY t"
+        ).to_list()
+        assert rows[0]["t"] == "Ekofisk"
+        assert rows[0]["year"] == pytest.approx(1.8)
+        assert rows[0]["feb"] == pytest.approx(0.6)
+        assert rows[1]["year"] == pytest.approx(4.5)
+        assert rows[1]["feb"] == pytest.approx(1.5)
+        # The channel's source column and the time-key columns are consumed by
+        # the timeseries, not left behind as scalar properties.
+        raw = graph.cypher("MATCH (p:Production) RETURN p.prfOil AS o, p.prfYear AS y, p.prfMonth AS m").to_list()
+        assert all(r["o"] is None and r["y"] is None and r["m"] is None for r in raw)
+
+
+class TestTopLevelCompute:
+    """The top-level `compute` pipeline had no Python test at all. It is a
+    second, independent CSV reader/writer (`blueprint/compute/`) that rewrites
+    the blueprint to point at files under `<root>/computed/` before the five
+    load phases run."""
+
+    def _items(self, tmp_path):
+        _write_csv(
+            tmp_path / "t.csv",
+            pd.DataFrame(
+                {
+                    "id": [1, 2, 3],
+                    "code": ["P", "S", "P"],
+                    "shares": [100, 50, 25],
+                    "price": [10.0, 20.0, 4.0],
+                }
+            ),
+        )
+
+    def _bp(self, tmp_path, compute, nodes=None):
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "compute": compute,
+            "nodes": nodes
+            or {
+                "T": {
+                    "csv": "t.csv",
+                    "pk": "id",
+                    "title": "id",
+                    "properties": {"code": "string", "shares": "int", "price": "float"},
+                }
+            },
+        }
+        _write_blueprint(tmp_path / "bp.json", bp)
+        return tmp_path / "bp.json"
+
+    def test_derive_adds_a_computed_property_to_every_node(self, tmp_path):
+        self._items(tmp_path)
+        bp_path = self._bp(tmp_path, [{"op": "derive", "from": "T", "set": {"total": "shares * price"}}])
+        graph = from_blueprint(bp_path, save=False)
+        rows = graph.cypher("MATCH (t:T) RETURN t.id AS i, t.total AS total ORDER BY i").to_list()
+        assert [r["total"] for r in rows] == [
+            pytest.approx(1000.0),
+            pytest.approx(1000.0),
+            pytest.approx(100.0),
+        ]
+        # The op writes a real file next to the inputs and repoints the spec.
+        assert (tmp_path / "computed" / "T_derived.csv").exists()
+
+    def test_filter_op_copies_matching_rows_into_a_new_type(self, tmp_path):
+        self._items(tmp_path)
+        bp_path = self._bp(tmp_path, [{"op": "filter", "from": "T", "where": "code == 'P'", "into": "Buy"}])
+        graph = from_blueprint(bp_path, save=False)
+        # `into` copies: the source type keeps every row.
+        assert [r["i"] for r in graph.cypher("MATCH (t:T) RETURN t.id AS i ORDER BY i").to_list()] == [1, 2, 3]
+        assert [r["i"] for r in graph.cypher("MATCH (b:Buy) RETURN b.id AS i ORDER BY i").to_list()] == [1, 3]
+
+    def test_a_compute_op_whose_source_csv_is_missing_is_a_silent_no_op(self, tmp_path):
+        """Every primitive probes `csv_path.exists()` and returns `Ok(())` if
+        it is absent, so the build reports success and the derived property is
+        simply never there. Pinned because it is the trap for any input format
+        that is not a file on disk."""
+        bp_path = self._bp(
+            tmp_path,
+            [{"op": "derive", "from": "T", "set": {"total": "shares * price"}}],
+            nodes={"T": {"csv": "gone.csv", "pk": "id", "title": "id", "properties": {}}},
+        )
+        graph = from_blueprint(bp_path, save=False)
+        assert graph.cypher("MATCH (t:T) RETURN count(t) AS c").to_list()[0]["c"] == 0
+        assert not (tmp_path / "computed" / "T_derived.csv").exists()
+
+
+class TestJunctionDedupeRegime:
+    """The 0.16.22 dedupe regime, from the other side.
+
+    `load_one_junction_edge` decides once per junction CSV whether it *owns*
+    the edge type (`InitialLoad::Preset(!metadata.contains_key(edge_type))`)
+    and reuses that decision for every chunk. `TestJunctionChunkInvariance`
+    covers the owning source — its duplicate endpoint pairs stay parallel
+    edges at any chunk size. This class covers the half with no test: a
+    *second* source into the same edge type does not own it, so its duplicate
+    endpoint pairs merge into one edge instead.
+    """
+
+    def _bp(self, tmp_path):
+        _write_csv(tmp_path / "persons.csv", pd.DataFrame({"person_id": [1, 2, 3], "name": ["A", "B", "C"]}))
+        _write_csv(tmp_path / "companies.csv", pd.DataFrame({"company_id": [10], "name": ["Acme"]}))
+        # First source: three endpoint pairs, each twice.
+        _write_csv(
+            tmp_path / "first.csv",
+            pd.DataFrame({"s": [1, 1, 2, 2, 3, 3], "t": [2, 2, 3, 3, 1, 1], "seq": [1, 2, 3, 4, 5, 6]}),
+        )
+        # Second source into the same edge type: two endpoint pairs, each twice.
+        _write_csv(
+            tmp_path / "second.csv",
+            pd.DataFrame({"s": [10, 10, 10, 10], "t": [1, 1, 2, 2], "seq": [7, 8, 9, 10]}),
+        )
+
+        def junction(csv, target):
+            return {
+                "csv": csv,
+                "source_fk": "s",
+                "target": target,
+                "target_fk": "t",
+                "properties": ["seq"],
+                "property_types": {"seq": "int"},
+            }
+
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                # Declaration order decides which source owns LINK.
+                "Person": {
+                    "csv": "persons.csv",
+                    "pk": "person_id",
+                    "title": "name",
+                    "properties": {},
+                    "connections": {"junction_edges": {"LINK": junction("first.csv", "Person")}},
+                },
+                "Company": {
+                    "csv": "companies.csv",
+                    "pk": "company_id",
+                    "title": "name",
+                    "properties": {},
+                    "connections": {"junction_edges": {"LINK": junction("second.csv", "Person")}},
+                },
+            },
+        }
+        _write_blueprint(tmp_path / "bp.json", bp)
+        return tmp_path / "bp.json"
+
+    def _edges(self, bp_path, monkeypatch, chunk_size):
+        monkeypatch.setenv("KGLITE_BLUEPRINT_JUNCTION_CHUNK_SIZE", str(chunk_size))
+        graph = from_blueprint(bp_path, save=False)
+        return sorted(
+            (r["src"], r["seq"])
+            for r in graph.cypher("MATCH (a)-[r:LINK]->(b) RETURN head(labels(a)) AS src, r.seq AS seq").to_list()
+        )
+
+    def test_the_first_source_keeps_parallel_edges_and_the_second_merges(self, tmp_path, monkeypatch):
+        edges = self._edges(self._bp(tmp_path), monkeypatch, 1000)
+        person = [seq for src, seq in edges if src == "Person"]
+        company = [seq for src, seq in edges if src == "Company"]
+        # Owning source: one edge per input row, every `seq` present.
+        assert person == [1, 2, 3, 4, 5, 6]
+        # Second source: four rows, two endpoint pairs, two edges — the later
+        # row of each pair wins the property.
+        assert company == [8, 10]
+
+    def test_the_regime_does_not_move_with_the_chunk_size(self, tmp_path, monkeypatch):
+        bp_path = self._bp(tmp_path)
+        single = self._edges(bp_path, monkeypatch, 1000)
+        for chunk_size in (1, 3, 5):
+            assert self._edges(bp_path, monkeypatch, chunk_size) == single, (
+                f"chunk_size={chunk_size} produced a different edge set"
+            )
