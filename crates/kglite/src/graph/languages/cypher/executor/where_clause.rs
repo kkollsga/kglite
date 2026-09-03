@@ -690,10 +690,10 @@ impl<'a> CypherExecutor<'a> {
     /// Post-aggregation filters (HAVING, `WITH … WHERE`) have always dropped a
     /// row whose predicate could not be evaluated — that is how an unbound
     /// `OPTIONAL MATCH` binding and the aggregate-reference quirks behave, and
-    /// it stays. An uncompilable regex and an unbound `$parameter` are a
-    /// different animal: they are wrong for every row, and the unfused `WHERE`
-    /// path raises both, so swallowing them here answered an invalid query
-    /// with a silent empty result. See
+    /// it stays. An uncompilable regex, an unbound `$parameter` and a missing
+    /// retrieval lane are a different animal: they are wrong for every row, and
+    /// the unfused `WHERE` path raises all three, so swallowing them here
+    /// answered an invalid query with a silent empty result. See
     /// [`super::helpers::is_user_input_error`].
     pub(super) fn retain_rows_matching(
         &self,

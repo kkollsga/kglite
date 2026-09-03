@@ -88,6 +88,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   has it, or use `FkEdge::plain(target, fk)`. Deserialization is unaffected.
 
 ### Fixed
+- **Ranked retrieval on a property with no index answered zero rows instead of
+  raising.** `RETURN text_bm25(n, 'p', $q)` has always refused a property with
+  no text index, naming `build_text_index`; the documented fast path
+  `WHERE text_bm25(n, 'p', $q) > 0 ... ORDER BY text_bm25(...) DESC LIMIT k`
+  came back empty and silent, and `RETURN count(n)` over the same predicate
+  came back `0`. Both shapes are served by a fused scan whose `WHERE` filter
+  drops any row whose predicate will not evaluate — right for a row-level
+  failure, wrong for a missing index, which is wrong for every row and can
+  never become right. `vector_score()` on an unknown embedding store shared the
+  defect and is fixed with it. (`text_score()` did not: its embedder check runs
+  before any row is scanned.)
 - **`from_records()` ignored an `on_missing_endpoint` written in the spec.**
   It is a documented top-level spec key, but the Python entry point inserted
   its own argument default over it unconditionally, so a spec asking for

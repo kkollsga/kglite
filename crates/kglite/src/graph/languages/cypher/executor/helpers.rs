@@ -22,19 +22,23 @@ pub use super::super::ast::is_aggregate_expression;
 /// both surface as evaluation errors, and both must keep meaning "this row
 /// does not match".
 ///
-/// Two classes are not that. An uncompilable regex and an unbound
-/// `$parameter` are wrong for *every* row, no row can make them right, and the
-/// unfused path raises both — so swallowing them answered an invalid query
-/// with a silent empty result (or, worse, a zero count). They propagate; every
-/// other message keeps the historical behaviour byte-for-byte.
+/// Three classes are not that. An uncompilable regex, an unbound `$parameter`,
+/// and a retrieval lane the graph does not have (`text_bm25` on a property with
+/// no text index, `vector_score` on an unknown embedding store) are wrong for
+/// *every* row, no row can make them right, and the unfused path raises all
+/// three — so swallowing them answered an invalid query with a silent empty
+/// result (or, worse, a zero count). They propagate; every other message keeps
+/// the historical behaviour byte-for-byte.
 ///
 /// Each class is recognised beside where it is minted
 /// ([`super::regex_cache::is_compile_error`],
-/// [`super::expression::is_missing_parameter_error`]); this is the one place
-/// the fused filters ask about all of them.
+/// [`super::expression::is_missing_parameter_error`],
+/// [`super::scalar_functions::utility::is_missing_retrieval_source_error`]);
+/// this is the one place the fused filters ask about all of them.
 pub(super) fn is_user_input_error(message: &str) -> bool {
     super::regex_cache::is_compile_error(message)
         || super::expression::is_missing_parameter_error(message)
+        || super::scalar_functions::utility::is_missing_retrieval_source_error(message)
 }
 
 /// Variables a grouped aggregation still pins down on its output rows.
@@ -1556,7 +1560,7 @@ mod user_input_error_tests {
     };
 
     #[test]
-    fn both_propagating_classes_are_recognised() {
+    fn all_propagating_classes_are_recognised() {
         // Bound, not inlined: `clippy::invalid_regex` rejects a literal bad
         // pattern at `Regex::new`, and this test needs one.
         let bad = String::from("[");
@@ -1572,6 +1576,13 @@ mod user_input_error_tests {
             "{} (used as a label or relationship type)",
             missing_parameter_error("label")
         )));
+        // The retrieval lanes, spelled the way their own mints spell them.
+        assert!(is_user_input_error(
+            "text_bm25(): no text index on 'Doc.body'. BM25 ranking is opt-in"
+        ));
+        assert!(is_user_input_error(
+            "vector_score(): no embedding 'nope_emb' found for node type 'Doc'"
+        ));
     }
 
     #[test]
@@ -1581,6 +1592,9 @@ mod user_input_error_tests {
             "Cannot evaluate aggregate function in this context",
             "Variable 'x' not bound",
             "Unknown function: nope",
+            // A lane that *is* present but declines this row: null in, null
+            // out is a row fact, and the fused paths must keep dropping it.
+            "text_bm25(): third argument must be a query string",
             "",
         ] {
             assert!(!is_user_input_error(message), "{message}");

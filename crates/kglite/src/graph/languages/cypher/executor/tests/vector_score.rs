@@ -246,3 +246,60 @@ fn a_row_dependent_query_vector_is_prepared_per_row() {
         assert!((float(&row[0]) - 1.0).abs() < 1e-6, "{row:?}");
     }
 }
+
+// ── The fused scans must refuse an unknown embedding store ───────────────────
+//
+// The sibling of the `text_bm25` case in `text_bm25.rs`: `WHERE
+// vector_score(…) > 0 … ORDER BY … LIMIT k` reaches `FusedNodeScanTopK`, whose
+// WHERE filter drops a row it cannot evaluate. "No embedding of that name on
+// this type" is wrong for every row, so the fused plan answered zero rows where
+// the scalar raised.
+
+/// Optimise `query`, assert the planner really produced the fused clause the
+/// test is about, and return the error.
+fn fused_error(graph: &DirGraph, query: &str, claimed: fn(&Clause) -> bool) -> String {
+    let params = HashMap::new();
+    let mut parsed = parser::parse_cypher(query).expect("parses");
+    crate::graph::languages::cypher::planner::optimize(&mut parsed, graph, &params);
+    assert!(
+        parsed.clauses.iter().any(claimed),
+        "the pass did not claim this shape, so the assertion would be vacuous: {query}"
+    );
+    match CypherExecutor::with_params(graph, &params, None).execute(&parsed) {
+        Ok(result) => panic!("query unexpectedly succeeded: {query}\n  rows: {result:?}"),
+        Err(e) => e,
+    }
+}
+
+#[test]
+fn the_fused_top_k_scan_refuses_an_unknown_embedding_store() {
+    let graph = docs(&[("a", [1.0, 0.0]), ("b", [0.0, 1.0])]);
+
+    let message = fused_error(
+        &graph,
+        "MATCH (d:Doc) WHERE vector_score(d, 'nope_emb', [1.0, 0.0]) > 0 RETURN d.title AS t \
+         ORDER BY vector_score(d, 'nope_emb', [1.0, 0.0]) DESC LIMIT 5",
+        |clause| matches!(clause, Clause::FusedNodeScanTopK { .. }),
+    );
+
+    assert!(
+        message.contains("no embedding 'nope_emb' found for node type 'Doc'"),
+        "the fast path must raise what the scalar raises: {message}"
+    );
+}
+
+#[test]
+fn the_fused_scan_aggregate_refuses_an_unknown_embedding_store() {
+    let graph = docs(&[("a", [1.0, 0.0]), ("b", [0.0, 1.0])]);
+
+    let message = fused_error(
+        &graph,
+        "MATCH (d:Doc) WHERE vector_score(d, 'nope_emb', [1.0, 0.0]) > 0 RETURN count(d) AS c",
+        |clause| matches!(clause, Clause::FusedNodeScanAggregate { .. }),
+    );
+
+    assert!(
+        message.contains("no embedding 'nope_emb' found for node type 'Doc'"),
+        "a count must not answer zero where the scalar raises: {message}"
+    );
+}

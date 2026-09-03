@@ -740,6 +740,26 @@ class TestCypherVectorScore:
         with pytest.raises(kglite.KgError, match="dimension"):
             graph.cypher("MATCH (n:Article) RETURN vector_score(n, 'summary_emb', [1.0, 0.0]) AS score")
 
+    def test_ranked_retrieval_on_a_missing_store_refuses_rather_than_answering_empty(self, graph_with_embeddings):
+        """The sibling of the `text_bm25` case in test_text_index.py: this
+        shape is served by a fused scan whose WHERE filter drops a row it
+        cannot evaluate, so an unknown store answered zero rows while the same
+        call in a bare RETURN raised."""
+        graph = graph_with_embeddings
+        with pytest.raises(kglite.KgError, match="no embedding 'nope_emb'"):
+            graph.cypher(
+                "MATCH (n:Article) WHERE vector_score(n, 'nope_emb', [1.0, 0.0, 0.0]) > 0 "
+                "RETURN n.title AS title "
+                "ORDER BY vector_score(n, 'nope_emb', [1.0, 0.0, 0.0]) DESC LIMIT 5"
+            )
+
+    def test_a_count_over_a_missing_store_refuses_rather_than_answering_zero(self, graph_with_embeddings):
+        graph = graph_with_embeddings
+        with pytest.raises(kglite.KgError, match="no embedding 'nope_emb'"):
+            graph.cypher(
+                "MATCH (n:Article) WHERE vector_score(n, 'nope_emb', [1.0, 0.0, 0.0]) > 0 RETURN count(n) AS c"
+            )
+
 
 # ── embed_texts / search_text (text-level API) ────────────────────────────
 

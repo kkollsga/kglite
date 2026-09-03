@@ -741,10 +741,13 @@ impl ScanPred<'_> {
     /// A predicate that merely *does not evaluate* for a row — an unbound
     /// binding, an aggregate reference outside an aggregation — drops the row
     /// rather than failing the query, which is what these scans have always
-    /// done. An uncompilable regex and an unbound `$parameter` are not that:
-    /// they are wrong for every row, they can never become right, and the
-    /// unfused path raises both. Swallowing them turned an invalid pattern
-    /// into a silent empty result and an unbound parameter into a zero count.
+    /// done. An uncompilable regex, an unbound `$parameter` and a retrieval
+    /// lane the graph does not have (no text index over the property, no
+    /// embedding store of that name) are not that: they are wrong for every
+    /// row, they can never become right, and the unfused path raises all three.
+    /// Swallowing them turned an invalid pattern into a silent empty result, an
+    /// unbound parameter into a zero count, and the documented
+    /// `WHERE text_bm25(…) > 0 … ORDER BY … LIMIT k` shape into no rows at all.
     /// See [`super::helpers::is_user_input_error`].
     pub(super) fn keeps_row(
         &self,

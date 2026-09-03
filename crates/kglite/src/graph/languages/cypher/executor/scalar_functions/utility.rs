@@ -635,6 +635,28 @@ fn score_fuse_weight(weights: &[Value], position: usize) -> Result<f64, String> 
     Ok(weight)
 }
 
+/// Prefix of every [`missing_text_index_error`] message.
+const NO_TEXT_INDEX_PREFIX: &str = "text_bm25(): no text index on '";
+
+/// Prefix of every [`missing_embedding_error`] message.
+const NO_EMBEDDING_PREFIX: &str = "vector_score(): no embedding '";
+
+/// True when `message` reports a retrieval lane the graph does not have — no
+/// text index over the property, or no embedding store of that name.
+///
+/// The fused execution paths consult this (through
+/// [`super::super::helpers::is_user_input_error`]) before swallowing a
+/// predicate error. Neither message is about the row being tested: the lane is
+/// missing for every node of the type, no row can make it present, and the
+/// unfused path raises on the first one. Swallowing them answered the
+/// documented `WHERE text_bm25(…) > 0 … ORDER BY … LIMIT k` shape with zero
+/// rows, and the same predicate under `count()` with zero.
+pub(in crate::graph::languages::cypher::executor) fn is_missing_retrieval_source_error(
+    message: &str,
+) -> bool {
+    message.starts_with(NO_TEXT_INDEX_PREFIX) || message.starts_with(NO_EMBEDDING_PREFIX)
+}
+
 /// The error for `text_bm25(n, '<property>', …)` when the node's type carries no
 /// text index over that property.
 ///
@@ -644,7 +666,7 @@ fn score_fuse_weight(weights: &[Value], position: usize) -> Result<f64, String> 
 /// are any — a misspelled property is the likely reason to be here.
 fn missing_text_index_error(graph: &DirGraph, node_type: &str, prop_name: &str) -> String {
     let base = format!(
-        "text_bm25(): no text index on '{node_type}.{prop_name}'. BM25 ranking is opt-in — build \
+        "{NO_TEXT_INDEX_PREFIX}{node_type}.{prop_name}'. BM25 ranking is opt-in — build \
          one with build_text_index('{node_type}', '{prop_name}'); every binding reaches it \
          (Python, Rust, and the C ABI's kglite_session_build_text_index)."
     );
@@ -673,8 +695,7 @@ fn missing_text_index_error(graph: &DirGraph, node_type: &str, prop_name: &str) 
 /// they didn't use, so the message hands them both ways out. When the name is
 /// genuinely unknown there is nothing to suggest and the plain message stands.
 fn missing_embedding_error(graph: &DirGraph, node_type: &str, prop_name: &str) -> String {
-    let base =
-        format!("vector_score(): no embedding '{prop_name}' found for node type '{node_type}'");
+    let base = format!("{NO_EMBEDDING_PREFIX}{prop_name}' found for node type '{node_type}'");
     let suffixed = crate::graph::embeddings::store_name(prop_name);
     match graph.embedding_store(node_type, &suffixed) {
         Some(_) => format!(

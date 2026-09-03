@@ -482,3 +482,63 @@ fn a_stale_index_ranks_its_unindexed_rows_the_way_the_unoptimised_plan_does() {
     );
     assert_eq!(fused, scan);
 }
+
+// ── The fused scans must refuse an unindexed property ────────────────────────
+//
+// `WHERE text_bm25(…) > 0 … ORDER BY … LIMIT k` — the ranked-retrieval shape the
+// docs recommend — is claimed by `FusedNodeScanTopK`, whose WHERE filter drops
+// any row whose predicate cannot be evaluated. "No text index on this type" is
+// wrong for every row and no row can make it right, so dropping answered the
+// recommended query with zero rows and no error while the bare scalar raised.
+// Reported downstream on 0.16.21.
+
+/// Optimise `query`, assert the planner really produced the fused clause the
+/// test is about (an unfused plan would prove nothing), and return the error.
+fn fused_error(graph: &DirGraph, query: &str, claimed: fn(&Clause) -> bool) -> String {
+    let params = HashMap::new();
+    let mut parsed = parser::parse_cypher(query).expect("parses");
+    crate::graph::languages::cypher::planner::optimize(&mut parsed, graph, &params);
+    assert!(
+        parsed.clauses.iter().any(claimed),
+        "the pass did not claim this shape, so the assertion would be vacuous: {query}"
+    );
+    match CypherExecutor::with_params(graph, &params, None).execute(&parsed) {
+        Ok(result) => panic!("query unexpectedly succeeded: {query}\n  rows: {result:?}"),
+        Err(e) => e,
+    }
+}
+
+#[test]
+fn the_fused_top_k_scan_refuses_an_unindexed_property() {
+    let graph = docs(&[("a", "the quick brown fox"), ("b", "slow green turtles")]);
+
+    let message = fused_error(
+        &graph,
+        "MATCH (d:Doc) WHERE text_bm25(d, 'body', 'quick') > 0 RETURN d.title AS t \
+         ORDER BY text_bm25(d, 'body', 'quick') DESC LIMIT 5",
+        |clause| matches!(clause, Clause::FusedNodeScanTopK { .. }),
+    );
+
+    assert!(
+        message.contains("no text index on 'Doc.body'"),
+        "the fast path must raise what the scalar raises: {message}"
+    );
+}
+
+#[test]
+fn the_fused_scan_aggregate_refuses_an_unindexed_property() {
+    // The same swallow one clause over: a count of the matching rows came back
+    // as a confident zero.
+    let graph = docs(&[("a", "the quick brown fox"), ("b", "slow green turtles")]);
+
+    let message = fused_error(
+        &graph,
+        "MATCH (d:Doc) WHERE text_bm25(d, 'body', 'quick') > 0 RETURN count(d) AS c",
+        |clause| matches!(clause, Clause::FusedNodeScanAggregate { .. }),
+    );
+
+    assert!(
+        message.contains("no text index on 'Doc.body'"),
+        "a count must not answer zero where the scalar raises: {message}"
+    );
+}

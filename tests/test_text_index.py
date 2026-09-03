@@ -201,6 +201,49 @@ def test_disk_mode_refuses_and_names_the_modes_that_work(tmp_path) -> None:
         g.build_text_index("Doc", "body")
 
 
+# ── ranking on a property with no index ───────────────────────────────────
+#
+# The documented fast path is `WHERE text_bm25(...) > 0 ... ORDER BY
+# text_bm25(...) DESC LIMIT k`. It is served by a fused scan whose WHERE filter
+# drops any row whose predicate will not evaluate — so on a property with no
+# index it answered zero rows while the bare scalar raised. Reported downstream
+# on 0.16.21.
+
+UNINDEXED = "no text index on 'Doc.body'"
+
+
+def test_the_scalar_names_the_call_that_builds_the_index(graph) -> None:
+    with pytest.raises(kglite.KgError, match=UNINDEXED) as excinfo:
+        graph.cypher("MATCH (d:Doc) RETURN text_bm25(d, 'body', 'quick') AS s")
+
+    assert "build_text_index('Doc', 'body')" in str(excinfo.value)
+
+
+def test_the_ranked_retrieval_shape_refuses_rather_than_answering_empty(graph) -> None:
+    with pytest.raises(kglite.KgError, match=UNINDEXED):
+        graph.cypher(
+            "MATCH (d:Doc) WHERE text_bm25(d, 'body', 'quick') > 0 "
+            "RETURN d.name AS n ORDER BY text_bm25(d, 'body', 'quick') DESC LIMIT 5"
+        )
+
+
+def test_a_count_over_the_same_predicate_refuses_rather_than_answering_zero(graph) -> None:
+    with pytest.raises(kglite.KgError, match=UNINDEXED):
+        graph.cypher("MATCH (d:Doc) WHERE text_bm25(d, 'body', 'quick') > 0 RETURN count(d) AS c")
+
+
+def test_the_built_index_serves_the_same_shape(graph) -> None:
+    """The refusal must be about the missing index, not about the shape."""
+    graph.build_text_index("Doc", "body")
+
+    rows = graph.cypher(
+        "MATCH (d:Doc) WHERE text_bm25(d, 'body', 'quick') > 0 "
+        "RETURN d.name AS n ORDER BY text_bm25(d, 'body', 'quick') DESC LIMIT 5"
+    ).to_list()
+
+    assert [row["n"] for row in rows] == ["a", "b"]
+
+
 # ── catch-up (P10b) ───────────────────────────────────────────────────────
 #
 # The user-visible half of the freshness contract: how `SHOW INDEXES` reports
