@@ -8,9 +8,14 @@ use std::collections::HashMap;
 /// the start of the build (see `parse_in_parallel`) so serial phases that read
 /// the same input (node load + FK edges) never block on I/O. Junction edges
 /// bypass it entirely — see `load_junction_edges`.
+///
+/// A failed read is cached as the failure. Every phase reads a given input
+/// through here, so re-attempting it would parse a broken input once per
+/// consumer and report the same error several times — and for an input that
+/// is expensive to read, the retry costs as much as the successful path.
 #[derive(Default)]
 pub(super) struct CsvCache {
-    inner: std::sync::Mutex<HashMap<String, std::sync::Arc<RawCsv>>>,
+    inner: std::sync::Mutex<HashMap<String, Result<std::sync::Arc<RawCsv>, String>>>,
 }
 
 impl CsvCache {
@@ -22,34 +27,64 @@ impl CsvCache {
         {
             let guard = self.inner.lock().unwrap();
             if let Some(hit) = guard.get(name) {
-                return Ok(hit.clone());
+                return hit.clone();
             }
         }
-        let raw = registry.get(name)?.read_all()?;
-        let arc = std::sync::Arc::new(raw);
+        let result = registry
+            .get(name)
+            .and_then(|source| source.read_all())
+            .map(std::sync::Arc::new);
         self.inner
             .lock()
             .unwrap()
-            .insert(name.to_string(), arc.clone());
-        Ok(arc)
-    }
-
-    fn insert(&self, name: &str, raw: RawCsv) {
-        self.inner
-            .lock()
-            .unwrap()
-            .insert(name.to_string(), std::sync::Arc::new(raw));
+            .insert(name.to_string(), result.clone());
+        result
     }
 }
 
-/// Read all given inputs in parallel, populating the cache. Failures
-/// are silently skipped — the caller will see the `Err` again when it tries
-/// to look up that name serially (and can emit a targeted error then).
+/// Read all given inputs in parallel, populating the cache.
+///
+/// Both outcomes are stored: the phase that consumes an input gets the same
+/// `Err` this pass produced, with the same message, and reports it against
+/// the spec that owns the input.
 pub(super) fn parse_in_parallel(names: &[String], registry: &InputRegistry, cache: &CsvCache) {
     use rayon::prelude::*;
     names.par_iter().for_each(|name| {
-        if let Ok(raw) = registry.get(name).and_then(|s| s.read_all()) {
-            cache.insert(name, raw);
-        }
+        let _ = cache.get(registry, name);
     });
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::super::super::input::csv::CsvFile;
+    use super::super::super::input::test_double::CountingSource;
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::atomic::Ordering;
+
+    /// A read that fails is reported from the cache, not re-attempted: the
+    /// pre-pass and the serial phase together must open the input once.
+    #[test]
+    fn a_failed_read_is_cached_and_not_retried() {
+        let (counting, opens) = CountingSource::new(Box::new(CsvFile::new(
+            PathBuf::from("/nonexistent/definitely-not-here.csv"),
+            "missing.csv".to_string(),
+        )));
+        let mut registry = InputRegistry::default();
+        registry.insert("missing.csv", Box::new(counting));
+
+        let cache = CsvCache::default();
+        parse_in_parallel(&["missing.csv".to_string()], &registry, &cache);
+        let err = cache
+            .get(&registry, "missing.csv")
+            .err()
+            .expect("a file that is not there fails to read");
+
+        assert!(err.starts_with("CSV open missing.csv: "), "{err}");
+        assert_eq!(
+            opens.load(Ordering::SeqCst),
+            1,
+            "the pre-pass read is the only one"
+        );
+    }
 }
