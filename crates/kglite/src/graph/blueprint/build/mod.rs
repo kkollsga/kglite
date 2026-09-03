@@ -1,9 +1,9 @@
-//! Blueprint build orchestrator: JSON + CSVs → populated `DirGraph`.
+//! Blueprint build orchestrator: JSON + input tables → populated `DirGraph`.
 //!
 //! Phase order mirrors the Python loader:
-//!   1. Manual nodes — types without a CSV, synthesised from FK values
+//!   1. Manual nodes — types without an input, synthesised from FK values
 //!      referring to that type.
-//!   2. Core nodes — top-level node types with CSVs.
+//!   2. Core nodes — top-level node types with inputs.
 //!   3. Sub-nodes — types declared inside a parent spec's `sub_nodes`.
 //!   4. FK edges — single-column foreign keys on node CSVs (plus
 //!      implicit `parent` → `OF_{PARENT}` edges).
@@ -33,6 +33,7 @@ use manual::load_manual_nodes;
 use nodes::{load_node_specs, should_stream_spec};
 use specs::collect_specs;
 
+use super::input::{csv::CsvFile, InputRegistry};
 use super::schema::Blueprint;
 use crate::graph::mutation::maintain;
 use crate::graph::schema::{DirGraph, PROVISIONAL_KEY};
@@ -120,38 +121,12 @@ pub fn build(
         );
     }
 
-    // Phase 0: pre-parse node + sub-node CSV paths in parallel so later
-    // phases hit the cache without blocking on disk I/O.
-    //
-    // Junction-edge CSVs and streamable node specs are deliberately
-    // excluded — both are read on demand via `read_csv_chunks`, and
-    // pre-caching them would pin a full `RawCsv` for the whole build,
-    // re-introducing the RAM ceiling streaming exists to avoid.
-    let csv_cache: CsvCache = CsvCache::default();
-    let mut buffered_csv_paths: Vec<String> = Vec::new();
-    for s in core_specs.iter().chain(sub_specs.iter()) {
-        if should_stream_spec(s, &root) {
-            continue;
-        }
-        if let Some(p) = s.spec.csv.as_deref() {
-            buffered_csv_paths.push(p.to_string());
-        }
-    }
-    buffered_csv_paths.sort();
-    buffered_csv_paths.dedup();
-    let t_preparse = std::time::Instant::now();
-    parse_in_parallel(&buffered_csv_paths, &root, &csv_cache);
-    if profile {
-        eprintln!(
-            "  parse_in_parallel: {} ms ({} distinct files, streamed specs excluded)",
-            t_preparse.elapsed().as_millis(),
-            buffered_csv_paths.len()
-        );
-    }
+    // Phase 0: declare every input, then pre-read the buffered ones.
+    let (registry, csv_cache) = prepare_inputs(&core_specs, &sub_specs, &root, profile);
 
     // Phase 1: manual nodes.
     let t = std::time::Instant::now();
-    load_manual_nodes(graph, &core_specs, &sub_specs, &root, &mut report)?;
+    load_manual_nodes(graph, &core_specs, &sub_specs, &registry, &mut report)?;
     if profile {
         eprintln!("  load_manual_nodes: {} ms", t.elapsed().as_millis());
     }
@@ -160,7 +135,7 @@ pub fn build(
     load_node_specs(
         graph,
         &core_specs,
-        &root,
+        &registry,
         &csv_cache,
         &mut report,
         "core nodes",
@@ -172,7 +147,7 @@ pub fn build(
     load_node_specs(
         graph,
         &sub_specs,
-        &root,
+        &registry,
         &csv_cache,
         &mut report,
         "sub-nodes",
@@ -196,14 +171,14 @@ pub fn build(
     // Phase 4: FK edges
     let all_specs: Vec<&FlatSpec> = core_specs.iter().chain(sub_specs.iter()).collect();
     let t = std::time::Instant::now();
-    load_fk_edges(graph, &all_specs, &root, &csv_cache, &mut report)?;
+    load_fk_edges(graph, &all_specs, &registry, &csv_cache, &mut report)?;
     if profile {
         eprintln!("  load_fk_edges: {} ms", t.elapsed().as_millis());
     }
 
     // Phase 5: junction edges
     let t = std::time::Instant::now();
-    load_junction_edges(graph, &all_specs, &root, &csv_cache, &mut report)?;
+    load_junction_edges(graph, &all_specs, &registry, &csv_cache, &mut report)?;
     if profile {
         eprintln!("  load_junction_edges: {} ms", t.elapsed().as_millis());
     }
@@ -245,6 +220,77 @@ pub fn build(
     }
 
     Ok(report)
+}
+
+/// Declare every input the flattened specs name and pre-read the buffered
+/// ones in parallel, so serial phases that read the same input (node load +
+/// FK edges) never block on I/O.
+///
+/// Junction-edge inputs and streamable node specs are deliberately excluded
+/// from the pre-read — both are consumed on demand in chunks, and caching
+/// them would pin a full `RawCsv` for the whole build, re-introducing the RAM
+/// ceiling streaming exists to avoid.
+fn prepare_inputs(
+    core_specs: &[FlatSpec],
+    sub_specs: &[FlatSpec],
+    root: &Path,
+    profile: bool,
+) -> (InputRegistry, CsvCache) {
+    let registry = build_input_registry(core_specs, sub_specs, root);
+
+    let cache = CsvCache::default();
+    let mut buffered_inputs: Vec<String> = Vec::new();
+    for s in core_specs.iter().chain(sub_specs.iter()) {
+        if should_stream_spec(s, &registry) {
+            continue;
+        }
+        if let Some(name) = s.input.as_deref() {
+            buffered_inputs.push(name.to_string());
+        }
+    }
+    buffered_inputs.sort();
+    buffered_inputs.dedup();
+    let t_preparse = std::time::Instant::now();
+    parse_in_parallel(&buffered_inputs, &registry, &cache);
+    if profile {
+        eprintln!(
+            "  parse_in_parallel: {} ms ({} distinct files, streamed specs excluded)",
+            t_preparse.elapsed().as_millis(),
+            buffered_inputs.len()
+        );
+    }
+    (registry, cache)
+}
+
+/// Declare every input the flattened specs name — one entry per distinct
+/// name, node inputs and junction inputs alike. Called after `apply_compute`,
+/// because that pre-phase repoints specs at the files it generated.
+///
+/// The registry key is the name exactly as the blueprint wrote it, so two
+/// spellings of one file (`x.csv` and `./x.csv`) stay two inputs, as they
+/// always have; the cache is keyed the same way and inherits the same
+/// behaviour.
+fn build_input_registry(
+    core_specs: &[FlatSpec],
+    sub_specs: &[FlatSpec],
+    root: &Path,
+) -> InputRegistry {
+    let mut registry = InputRegistry::default();
+    let declare = |name: &str, registry: &mut InputRegistry| {
+        registry.insert(
+            name,
+            Box::new(CsvFile::new(root.join(name), name.to_string())),
+        );
+    };
+    for spec in core_specs.iter().chain(sub_specs.iter()) {
+        if let Some(name) = spec.input.as_deref() {
+            declare(name, &mut registry);
+        }
+        for junc in spec.spec.connections.junction_edges.values() {
+            declare(&junc.csv, &mut registry);
+        }
+    }
+    registry
 }
 
 /// Stamp each spec's declared `labels` on every node of its type.

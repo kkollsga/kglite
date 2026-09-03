@@ -1,11 +1,9 @@
-//! The raw string table every input format lands on, and the CSV reader that
-//! produces one.
+//! The raw string table every input format lands on.
 //!
 //! `RawCsv` is deliberately untyped: filtering, column renaming and
 //! synthesised columns all operate on strings, and `typing` turns the result
-//! into a `DataFrame` in one later pass.
-
-use std::path::Path;
+//! into a `DataFrame` in one later pass. The readers that produce one live
+//! behind the `Source` trait in `blueprint::input`.
 
 /// A raw CSV table: header + rows of strings. We keep the raw stage separate
 /// so filter / column renaming / synthesised columns can operate on strings
@@ -98,139 +96,16 @@ impl ListMisparseTally {
     }
 }
 
-/// Stream a CSV in fixed-size row chunks. Each yielded `RawCsv`
-/// carries the (shared) headers plus up to `chunk_size` rows. Empty
-/// chunks at end-of-file are not emitted. Peak RAM is bounded by
-/// `chunk_size * cols * avg_string_len`, independent of total file
-/// size — the right tool for multi-million-row inputs.
-///
-/// Used by `build::nodes::load_node_specs` for specs without timeseries
-/// (which needs all rows for grouping) and without manual node
-/// declarations. Buffered `read_csv_raw` remains the path for
-/// timeseries / dedupe-required specs.
-///
-/// Consumed by `build::junction::load_junction_edges` (E3+) for streaming
-/// junction-edge dispatch.
-pub fn read_csv_chunks(
-    path: &Path,
-    chunk_size: usize,
-) -> Result<Box<dyn Iterator<Item = Result<RawCsv, String>>>, String> {
-    let mut rdr = csv::ReaderBuilder::new()
-        .has_headers(true)
-        .flexible(true)
-        .from_path(path)
-        .map_err(|e| format!("CSV open {}: {e}", path.display()))?;
-    let headers: Vec<String> = rdr
-        .headers()
-        .map_err(|e| format!("CSV header {}: {e}", path.display()))?
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    let n_cols = headers.len();
-    let path_buf = path.to_path_buf();
-    let mut next_row_id = 1usize;
-
-    let iter = std::iter::from_fn(move || {
-        let mut rows = Vec::with_capacity(chunk_size);
-        let mut nulls = Vec::with_capacity(chunk_size);
-        let mut row_ids = Vec::with_capacity(chunk_size);
-        for _ in 0..chunk_size {
-            match rdr.records().next() {
-                Some(Ok(rec)) => {
-                    let mut row = Vec::with_capacity(n_cols);
-                    let mut nrow = Vec::with_capacity(n_cols);
-                    for i in 0..n_cols {
-                        match rec.get(i) {
-                            Some(s) if !s.is_empty() => {
-                                row.push(s.to_string());
-                                nrow.push(false);
-                            }
-                            _ => {
-                                row.push(String::new());
-                                nrow.push(true);
-                            }
-                        }
-                    }
-                    rows.push(row);
-                    nulls.push(nrow);
-                    row_ids.push(next_row_id);
-                    next_row_id += 1;
-                }
-                Some(Err(e)) => {
-                    return Some(Err(format!("CSV row {}: {e}", path_buf.display())));
-                }
-                None => break,
-            }
-        }
-        if rows.is_empty() {
-            None
-        } else {
-            Some(Ok(RawCsv {
-                headers: headers.clone(),
-                rows,
-                nulls,
-                row_ids,
-            }))
-        }
-    });
-    Ok(Box::new(iter))
-}
-
-/// Read a CSV file into a raw string table.
-pub fn read_csv_raw(path: &Path) -> Result<RawCsv, String> {
-    let mut rdr = csv::ReaderBuilder::new()
-        .has_headers(true)
-        .flexible(true)
-        .from_path(path)
-        .map_err(|e| format!("CSV open {}: {}", path.display(), e))?;
-
-    let headers: Vec<String> = rdr
-        .headers()
-        .map_err(|e| format!("CSV header {}: {}", path.display(), e))?
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-
-    let mut rows = Vec::new();
-    let mut nulls = Vec::new();
-    for rec in rdr.records() {
-        let rec = rec.map_err(|e| format!("CSV row {}: {}", path.display(), e))?;
-        let mut row = Vec::with_capacity(headers.len());
-        let mut nrow = Vec::with_capacity(headers.len());
-        for i in 0..headers.len() {
-            match rec.get(i) {
-                Some(s) => {
-                    if s.is_empty() {
-                        row.push(String::new());
-                        nrow.push(true);
-                    } else {
-                        row.push(s.to_string());
-                        nrow.push(false);
-                    }
-                }
-                None => {
-                    row.push(String::new());
-                    nrow.push(true);
-                }
-            }
-        }
-        rows.push(row);
-        nulls.push(nrow);
-    }
-
-    let row_ids = (1..=rows.len()).collect();
-    Ok(RawCsv {
-        headers,
-        rows,
-        nulls,
-        row_ids,
-    })
-}
-
 #[cfg(test)]
 mod chunk_tests {
-    use super::*;
+    use super::super::input::csv::CsvFile;
+    use super::super::input::Source;
+    use super::RawCsv;
     use std::io::Write;
+
+    fn csv_source(f: &tempfile::NamedTempFile) -> CsvFile {
+        CsvFile::new(f.path().to_path_buf(), "sample.csv".to_string())
+    }
 
     fn write_csv(content: &str) -> tempfile::NamedTempFile {
         let mut f = tempfile::NamedTempFile::new().unwrap();
@@ -241,7 +116,8 @@ mod chunk_tests {
     #[test]
     fn small_file_yields_single_chunk() {
         let f = write_csv("a,b\n1,2\n3,4\n");
-        let chunks: Vec<RawCsv> = read_csv_chunks(f.path(), 100)
+        let chunks: Vec<RawCsv> = csv_source(&f)
+            .chunks(100)
             .unwrap()
             .filter_map(Result::ok)
             .collect();
@@ -257,7 +133,8 @@ mod chunk_tests {
             content.push_str(&format!("{i},{i}\n"));
         }
         let f = write_csv(&content);
-        let chunks: Vec<RawCsv> = read_csv_chunks(f.path(), 1000)
+        let chunks: Vec<RawCsv> = csv_source(&f)
+            .chunks(1000)
             .unwrap()
             .filter_map(Result::ok)
             .collect();
@@ -276,7 +153,8 @@ mod chunk_tests {
     fn empty_chunk_at_end_is_dropped() {
         // Exactly chunk_size rows → 1 chunk, no trailing empty.
         let f = write_csv("a,b\n1,2\n3,4\n5,6\n");
-        let chunks: Vec<RawCsv> = read_csv_chunks(f.path(), 3)
+        let chunks: Vec<RawCsv> = csv_source(&f)
+            .chunks(3)
             .unwrap()
             .filter_map(Result::ok)
             .collect();
@@ -287,7 +165,8 @@ mod chunk_tests {
     #[test]
     fn header_only_yields_zero_chunks() {
         let f = write_csv("only,header\n");
-        let chunks: Vec<RawCsv> = read_csv_chunks(f.path(), 10)
+        let chunks: Vec<RawCsv> = csv_source(&f)
+            .chunks(10)
             .unwrap()
             .filter_map(Result::ok)
             .collect();
@@ -297,7 +176,8 @@ mod chunk_tests {
     #[test]
     fn chunks_carry_nulls_correctly() {
         let f = write_csv("a,b,c\n1,,3\n,,\n");
-        let chunks: Vec<RawCsv> = read_csv_chunks(f.path(), 100)
+        let chunks: Vec<RawCsv> = csv_source(&f)
+            .chunks(100)
             .unwrap()
             .filter_map(Result::ok)
             .collect();

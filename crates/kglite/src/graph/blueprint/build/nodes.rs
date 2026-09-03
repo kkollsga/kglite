@@ -3,7 +3,8 @@
 
 use super::super::filter::apply_filter;
 use super::super::geometry::{convert_geojson, has_spatial_properties, spatial_targets};
-use super::super::table::{read_csv_chunks, ListMisparseTally, RawCsv};
+use super::super::input::InputRegistry;
+use super::super::table::{ListMisparseTally, RawCsv};
 use super::super::timeseries as ts;
 use super::super::typing::{map_blueprint_type, typed_dataframe};
 use super::cache::CsvCache;
@@ -14,7 +15,6 @@ use crate::datatypes::values::DataFrame;
 use crate::graph::mutation::maintain;
 use crate::graph::schema::{DirGraph, SpatialConfig};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 
 /// Everything a single node spec produces — computed off-thread by
 /// `prep_node_spec`, then consumed sequentially by `load_node_specs`.
@@ -35,16 +35,16 @@ struct PreppedNode {
 
 fn prep_node_spec(
     spec: &FlatSpec,
-    root: &Path,
+    registry: &InputRegistry,
     cache: &CsvCache,
 ) -> Result<Option<PreppedNode>, String> {
     if spec.is_manual {
         return Ok(None);
     }
-    let Some(csv_rel) = spec.spec.csv.as_deref() else {
+    let Some(input) = spec.input.as_deref() else {
         return Ok(None);
     };
-    let raw_rc = match cache.get(root, csv_rel) {
+    let raw_rc = match cache.get(registry, input) {
         Ok(r) => r,
         Err(e) => return Err(format!("[{}] {}", spec.node_type, e)),
     };
@@ -182,7 +182,7 @@ fn prep_node_spec(
 pub(super) fn load_node_specs(
     graph: &mut DirGraph,
     specs: &[FlatSpec],
-    root: &Path,
+    registry: &InputRegistry,
     cache: &CsvCache,
     report: &mut BuildReport,
     _phase_name: &str,
@@ -190,19 +190,19 @@ pub(super) fn load_node_specs(
     use rayon::prelude::*;
     let profile = std::env::var("KGLITE_BLUEPRINT_PROFILE").is_ok();
 
-    // Streamable specs run a per-chunk `read_csv_chunks → typed_dataframe
+    // Streamable specs run a per-chunk `Source::chunks → typed_dataframe
     // → add_nodes` loop that bounds peak RAM by chunk size. Everything else
     // (timeseries, spatial, manual, and anything below the size threshold)
     // keeps the parallel-prep path — `should_stream_spec` carries why small
     // CSVs stay buffered.
     let (buffered, streamable): (Vec<&FlatSpec>, Vec<&FlatSpec>) =
-        specs.iter().partition(|s| !should_stream_spec(s, root));
+        specs.iter().partition(|s| !should_stream_spec(s, registry));
 
     // Buffered path: parallel prep, serial dispatch.
     let t_par = std::time::Instant::now();
     let prepped: Vec<Result<Option<PreppedNode>, String>> = buffered
         .par_iter()
-        .map(|spec| prep_node_spec(spec, root, cache))
+        .map(|spec| prep_node_spec(spec, registry, cache))
         .collect();
     let t_par_ms = t_par.elapsed().as_millis();
 
@@ -255,7 +255,7 @@ pub(super) fn load_node_specs(
     // the build.
     let t_stream = std::time::Instant::now();
     for spec in &streamable {
-        if let Err(e) = load_streamed_node_spec(graph, spec, root, report) {
+        if let Err(e) = load_streamed_node_spec(graph, spec, registry, report) {
             report.errors.push(e);
         }
     }
@@ -280,7 +280,7 @@ pub(super) fn load_node_specs(
 /// applied separately via `should_stream_spec`.
 ///
 /// Returns false for:
-/// - manual specs (no CSV — synthesised from FK targets)
+/// - manual specs (no input — synthesised from FK targets)
 /// - timeseries specs (need full row set for grouping + dedup-by-pk)
 /// - spatial specs (geometry conversion mutates RawCsv in-place)
 ///
@@ -291,7 +291,7 @@ fn is_streamable_node_spec(spec: &FlatSpec) -> bool {
     if spec.is_manual {
         return false;
     }
-    if spec.spec.csv.is_none() {
+    if spec.input.is_none() {
         return false;
     }
     if spec.spec.timeseries.is_some() {
@@ -305,8 +305,8 @@ fn is_streamable_node_spec(spec: &FlatSpec) -> bool {
 
 /// True iff this spec should actually flow through the streaming
 /// loader on the current build. Combines the semantic eligibility
-/// check (`is_streamable_node_spec`) with a file-size gate so
-/// small/medium CSVs stay on the (faster) buffered path.
+/// check (`is_streamable_node_spec`) with a size gate so
+/// small/medium inputs stay on the (faster) buffered path.
 ///
 /// The streaming dispatch carries ~20% overhead per spec vs the
 /// buffered parallel-prep on a single 500K-row CSV — fine on
@@ -315,19 +315,26 @@ fn is_streamable_node_spec(spec: &FlatSpec) -> bool {
 /// Threshold default: 100 MB, tunable via
 /// `KGLITE_BLUEPRINT_STREAMING_THRESHOLD_MB`.
 ///
-/// Falls back to the buffered path when the file can't be stat'd —
-/// that path's error reporting handles missing files.
-pub(super) fn should_stream_spec(spec: &FlatSpec, root: &Path) -> bool {
+/// Falls back to the buffered path for a source that cannot be chunked at
+/// all, and for one whose size is unknown — a file that can't be stat'd is
+/// usually one that isn't there, and the buffered path's error reporting
+/// handles that.
+pub(super) fn should_stream_spec(spec: &FlatSpec, registry: &InputRegistry) -> bool {
     if !is_streamable_node_spec(spec) {
         return false;
     }
-    let Some(csv_rel) = spec.spec.csv.as_deref() else {
+    let Some(input) = spec.input.as_deref() else {
         return false;
     };
-    let path = root.join(csv_rel);
-    match std::fs::metadata(&path) {
-        Ok(m) => m.len() >= streaming_threshold_bytes(),
-        Err(_) => false,
+    let Ok(source) = registry.get(input) else {
+        return false;
+    };
+    if !source.can_chunk() {
+        return false;
+    }
+    match source.size_hint() {
+        Some(bytes) => bytes >= streaming_threshold_bytes(),
+        None => false,
     }
 }
 
@@ -346,15 +353,16 @@ fn streaming_threshold_bytes() -> u64 {
 fn load_streamed_node_spec(
     graph: &mut DirGraph,
     spec: &FlatSpec,
-    root: &Path,
+    registry: &InputRegistry,
     report: &mut BuildReport,
 ) -> Result<(), String> {
-    let Some(csv_rel) = spec.spec.csv.as_deref() else {
+    let Some(input) = spec.input.as_deref() else {
         return Ok(());
     };
-    let csv_path = root.join(csv_rel);
     let chunk_size = node_chunk_size();
-    let chunks = read_csv_chunks(&csv_path, chunk_size)
+    let chunks = registry
+        .get(input)
+        .and_then(|s| s.chunks(chunk_size))
         .map_err(|e| format!("[{}] {}", spec.node_type, e))?;
 
     let raw_pk = spec.spec.pk.clone().unwrap_or_else(|| "id".to_string());
@@ -433,7 +441,7 @@ fn load_streamed_node_spec(
     Ok(())
 }
 
-/// Default streaming chunk size for node CSVs. ~250K rows × ~15
+/// Default streaming chunk size for node inputs. ~250K rows × ~15
 /// cols × ~30B avg string ≈ 110 MB peak per chunk — bounds RAM
 /// for large CSVs without paying the multi-chunk dispatch
 /// overhead on common medium files (1-spec, ≤250K rows fits in

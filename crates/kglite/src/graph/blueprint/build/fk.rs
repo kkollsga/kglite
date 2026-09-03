@@ -2,7 +2,8 @@
 //! `parent` → `OF_{PARENT}` edges, buffered or streamed.
 
 use super::super::filter::apply_filter;
-use super::super::table::{read_csv_chunks, ListMisparseTally, RawCsv};
+use super::super::input::InputRegistry;
+use super::super::table::{ListMisparseTally, RawCsv};
 use super::super::timeseries as ts;
 use super::super::typing::map_blueprint_type;
 use super::cache::CsvCache;
@@ -15,7 +16,6 @@ use crate::graph::mutation::maintain;
 use crate::graph::schema::DirGraph;
 use indexmap::IndexMap;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 
 struct PreppedFkEdges {
     source_type: String,
@@ -40,8 +40,12 @@ struct PreppedFkEdge {
     df: DataFrame,
 }
 
-fn prep_fk_edges(spec: &FlatSpec, root: &Path, cache: &CsvCache) -> Option<PreppedFkEdges> {
-    let csv_rel = spec.spec.csv.as_deref()?;
+fn prep_fk_edges(
+    spec: &FlatSpec,
+    registry: &InputRegistry,
+    cache: &CsvCache,
+) -> Option<PreppedFkEdges> {
+    let input = spec.input.as_deref()?;
 
     let mut fk_edges: IndexMap<String, super::super::schema::FkEdge> = spec
         .spec
@@ -60,7 +64,7 @@ fn prep_fk_edges(spec: &FlatSpec, root: &Path, cache: &CsvCache) -> Option<Prepp
         return None;
     }
 
-    let raw_rc = cache.get(root, csv_rel).ok()?;
+    let raw_rc = cache.get(registry, input).ok()?;
     let mut raw: RawCsv = (*raw_rc).clone_raw();
     if !spec.spec.filter.is_empty() {
         apply_filter(&mut raw, &spec.spec.filter);
@@ -357,7 +361,7 @@ fn build_fk_columns(raw: &RawCsv, pk: &str, fk: &str, pk_idx: usize, fk_idx: usi
 pub(super) fn load_fk_edges(
     graph: &mut DirGraph,
     specs: &[&FlatSpec],
-    root: &Path,
+    registry: &InputRegistry,
     cache: &CsvCache,
     report: &mut BuildReport,
 ) -> Result<(), String> {
@@ -370,13 +374,13 @@ pub(super) fn load_fk_edges(
     let (streamable, buffered): (Vec<&FlatSpec>, Vec<&FlatSpec>) = specs
         .iter()
         .copied()
-        .partition(|s| should_stream_spec(s, root));
+        .partition(|s| should_stream_spec(s, registry));
 
     // Buffered path: parallel prep, serial connect.
     let t_par = std::time::Instant::now();
     let prepped: Vec<Option<PreppedFkEdges>> = buffered
         .par_iter()
-        .map(|spec| prep_fk_edges(spec, root, cache))
+        .map(|spec| prep_fk_edges(spec, registry, cache))
         .collect();
     let t_par_ms = t_par.elapsed().as_millis();
 
@@ -412,7 +416,7 @@ pub(super) fn load_fk_edges(
     // Streaming path: same chain, one chunk at a time.
     let t_stream = std::time::Instant::now();
     for spec in &streamable {
-        if let Err(e) = load_streamed_fk_edges(graph, spec, root, report) {
+        if let Err(e) = load_streamed_fk_edges(graph, spec, registry, report) {
             report.errors.push(e);
         }
     }
@@ -443,10 +447,10 @@ pub(super) fn load_fk_edges(
 fn load_streamed_fk_edges(
     graph: &mut DirGraph,
     spec: &FlatSpec,
-    root: &Path,
+    registry: &InputRegistry,
     report: &mut BuildReport,
 ) -> Result<(), String> {
-    let Some(csv_rel) = spec.spec.csv.as_deref() else {
+    let Some(input) = spec.input.as_deref() else {
         return Ok(());
     };
 
@@ -469,10 +473,9 @@ fn load_streamed_fk_edges(
         return Ok(());
     }
 
-    let csv_path = root.join(csv_rel);
     let chunk_size = node_chunk_size();
     // Decided before the first chunk and reused for all of them: chunking this
-    // CSV bounds peak RAM, so it must not decide which rows become their own
+    // input bounds peak RAM, so it must not decide which rows become their own
     // edge. See `maintain::InitialLoad`.
     let initial_load: HashMap<String, maintain::InitialLoad> = fk_edges
         .keys()
@@ -481,7 +484,9 @@ fn load_streamed_fk_edges(
             (edge_type.clone(), maintain::InitialLoad::Preset(unseen))
         })
         .collect();
-    let chunks = read_csv_chunks(&csv_path, chunk_size)
+    let chunks = registry
+        .get(input)
+        .and_then(|s| s.chunks(chunk_size))
         .map_err(|e| format!("[{}] {}", spec.node_type, e))?;
 
     let raw_pk = spec.spec.pk.clone().unwrap_or_else(|| "id".to_string());

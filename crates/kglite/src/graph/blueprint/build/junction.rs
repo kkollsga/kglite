@@ -1,7 +1,8 @@
 //! Phase 5: junction edges — many-to-many CSVs with two FK columns and
 //! optional property columns, always streamed in row chunks.
 
-use super::super::table::{read_csv_chunks, ListMisparseTally, RawCsv};
+use super::super::input::InputRegistry;
+use super::super::table::{ListMisparseTally, RawCsv};
 use super::super::typing::{map_blueprint_type, typed_dataframe};
 use super::cache::CsvCache;
 use super::fk::connect;
@@ -11,7 +12,6 @@ use super::BuildReport;
 use crate::graph::mutation::maintain;
 use crate::graph::schema::DirGraph;
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
 
 // Streaming bounds peak RAM at chunk_size × cols × avg_string_len whatever
 // the junction CSV's total size — the 10M+ row junction tables (e.g. SEC
@@ -31,7 +31,7 @@ fn junction_chunk_size() -> usize {
 pub(super) fn load_junction_edges(
     graph: &mut DirGraph,
     specs: &[&FlatSpec],
-    root: &Path,
+    registry: &InputRegistry,
     _cache: &CsvCache,
     report: &mut BuildReport,
 ) -> Result<(), String> {
@@ -39,12 +39,12 @@ pub(super) fn load_junction_edges(
     let profile = std::env::var("KGLITE_BLUEPRINT_PROFILE").is_ok();
     let t_total = std::time::Instant::now();
 
-    // Junction CSVs are streamed, never cached: each is read exactly once,
+    // Junction inputs are streamed, never cached: each is read exactly once,
     // so the `CsvCache` that node specs rely on would buy nothing here —
     // hence the unused `_cache` parameter.
     for spec in specs {
         for (edge_type, junc) in &spec.spec.connections.junction_edges {
-            load_one_junction_edge(graph, spec, edge_type, junc, root, chunk_size, report)?;
+            load_one_junction_edge(graph, spec, edge_type, junc, registry, chunk_size, report)?;
         }
     }
 
@@ -66,7 +66,7 @@ fn load_one_junction_edge(
     spec: &FlatSpec,
     edge_type: &str,
     junc: &super::super::schema::JunctionEdge,
-    root: &Path,
+    registry: &InputRegistry,
     chunk_size: usize,
     report: &mut BuildReport,
 ) -> Result<(), String> {
@@ -99,14 +99,13 @@ fn load_one_junction_edge(
     };
 
     // Decided before the first chunk and reused for all of them: streaming
-    // this CSV bounds peak RAM, so it must not decide which of its rows become
+    // this input bounds peak RAM, so it must not decide which of its rows become
     // parallel edges. Per-type splitting rides on the same decision — every
     // group of every chunk gets this one value. See `maintain::InitialLoad`.
     let initial_load =
         maintain::InitialLoad::Preset(!graph.connection_type_metadata.contains_key(edge_type));
 
-    let csv_path = root.join(&junc.csv);
-    let chunks = match read_csv_chunks(&csv_path, chunk_size) {
+    let chunks = match registry.get(&junc.csv).and_then(|s| s.chunks(chunk_size)) {
         Ok(it) => it,
         Err(e) => {
             report.errors.push(format!("junction {}: {}", edge_type, e));
@@ -114,7 +113,7 @@ fn load_one_junction_edge(
         }
     };
 
-    // One tally per junction CSV, not per chunk — see the node loader's for
+    // One tally per junction input, not per chunk — see the node loader's for
     // why. Same for the unroutable-row counts.
     let mut misparses = ListMisparseTally::default();
     let mut unroutable: BTreeMap<String, usize> = BTreeMap::new();

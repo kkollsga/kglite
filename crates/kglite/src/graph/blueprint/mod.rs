@@ -6,6 +6,7 @@ pub mod compute;
 pub mod expr;
 pub mod filter;
 pub mod geometry;
+pub mod input;
 pub mod json_records;
 pub mod schema;
 pub mod table;

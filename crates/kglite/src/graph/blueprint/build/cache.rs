@@ -1,12 +1,12 @@
-//! Whole-file CSV cache shared by the serial build phases.
+//! Whole-table cache shared by the serial build phases.
 
-use super::super::table::{read_csv_raw, RawCsv};
+use super::super::input::InputRegistry;
+use super::super::table::RawCsv;
 use std::collections::HashMap;
-use std::path::Path;
 
-/// Cache of raw CSVs keyed by relative path. Populated in parallel at the
-/// start of the build (see `parse_in_parallel`) so serial phases that read
-/// the same CSV (node load + FK edges) never block on disk. Junction edges
+/// Cache of whole-read tables keyed by input name. Populated in parallel at
+/// the start of the build (see `parse_in_parallel`) so serial phases that read
+/// the same input (node load + FK edges) never block on I/O. Junction edges
 /// bypass it entirely — see `load_junction_edges`.
 #[derive(Default)]
 pub(super) struct CsvCache {
@@ -14,40 +14,42 @@ pub(super) struct CsvCache {
 }
 
 impl CsvCache {
-    pub(super) fn get(&self, root: &Path, rel: &str) -> Result<std::sync::Arc<RawCsv>, String> {
+    pub(super) fn get(
+        &self,
+        registry: &InputRegistry,
+        name: &str,
+    ) -> Result<std::sync::Arc<RawCsv>, String> {
         {
             let guard = self.inner.lock().unwrap();
-            if let Some(hit) = guard.get(rel) {
+            if let Some(hit) = guard.get(name) {
                 return Ok(hit.clone());
             }
         }
-        let full = root.join(rel);
-        let raw = read_csv_raw(&full)?;
+        let raw = registry.get(name)?.read_all()?;
         let arc = std::sync::Arc::new(raw);
         self.inner
             .lock()
             .unwrap()
-            .insert(rel.to_string(), arc.clone());
+            .insert(name.to_string(), arc.clone());
         Ok(arc)
     }
 
-    fn insert(&self, rel: &str, raw: RawCsv) {
+    fn insert(&self, name: &str, raw: RawCsv) {
         self.inner
             .lock()
             .unwrap()
-            .insert(rel.to_string(), std::sync::Arc::new(raw));
+            .insert(name.to_string(), std::sync::Arc::new(raw));
     }
 }
 
-/// Parse all given CSV paths in parallel, populating the cache. Failures
+/// Read all given inputs in parallel, populating the cache. Failures
 /// are silently skipped — the caller will see the `Err` again when it tries
-/// to look up that path serially (and can emit a targeted error then).
-pub(super) fn parse_in_parallel(paths: &[String], root: &Path, cache: &CsvCache) {
+/// to look up that name serially (and can emit a targeted error then).
+pub(super) fn parse_in_parallel(names: &[String], registry: &InputRegistry, cache: &CsvCache) {
     use rayon::prelude::*;
-    paths.par_iter().for_each(|rel| {
-        let full = root.join(rel);
-        if let Ok(raw) = read_csv_raw(&full) {
-            cache.insert(rel, raw);
+    names.par_iter().for_each(|name| {
+        if let Ok(raw) = registry.get(name).and_then(|s| s.read_all()) {
+            cache.insert(name, raw);
         }
     });
 }

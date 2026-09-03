@@ -1,7 +1,7 @@
-//! Phase 1: manual nodes — node types with no CSV of their own, synthesised
+//! Phase 1: manual nodes — node types with no input of their own, synthesised
 //! from the FK values of the specs that refer to them.
 
-use super::super::table::read_csv_raw;
+use super::super::input::InputRegistry;
 use super::fk::{add_id_column, infer_id_type};
 use super::specs::FlatSpec;
 use super::BuildReport;
@@ -9,13 +9,12 @@ use crate::datatypes::values::DataFrame;
 use crate::graph::mutation::maintain;
 use crate::graph::schema::DirGraph;
 use std::collections::HashSet;
-use std::path::Path;
 
 pub(super) fn load_manual_nodes(
     graph: &mut DirGraph,
     core: &[FlatSpec],
     subs: &[FlatSpec],
-    root: &Path,
+    registry: &InputRegistry,
     report: &mut BuildReport,
 ) -> Result<(), String> {
     let manual: Vec<&FlatSpec> = core.iter().filter(|s| s.is_manual).collect();
@@ -27,15 +26,14 @@ pub(super) fn load_manual_nodes(
         let mut distinct: HashSet<String> = HashSet::new();
         // Scan every spec's fk_edges for targets pointing at this manual type.
         for spec in core.iter().chain(subs.iter()) {
-            let Some(csv) = spec.spec.csv.as_deref() else {
+            let Some(input) = spec.input.as_deref() else {
                 continue;
             };
             for (_, edge) in &spec.spec.connections.fk_edges {
                 if edge.target != ms.node_type {
                     continue;
                 }
-                let full = root.join(csv);
-                let raw = match read_csv_raw(&full) {
+                let raw = match registry.get(input).and_then(|s| s.read_all()) {
                     Ok(r) => r,
                     Err(_) => continue,
                 };

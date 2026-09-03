@@ -356,6 +356,7 @@ pub fn kglite::api::blueprint::FkEdge::fmt(&self, f: &mut core::fmt::Formatter<'
 impl<'de> serde_core::de::Deserialize<'de> for kglite::api::blueprint::FkEdge
 pub fn kglite::api::blueprint::FkEdge::deserialize<__D>(__deserializer: __D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
 pub struct kglite::api::blueprint::FlatSpec
+pub kglite::api::blueprint::FlatSpec::input: core::option::Option<alloc::string::String>
 pub kglite::api::blueprint::FlatSpec::is_manual: bool
 pub kglite::api::blueprint::FlatSpec::node_type: alloc::string::String
 pub kglite::api::blueprint::FlatSpec::parent: core::option::Option<alloc::string::String>
