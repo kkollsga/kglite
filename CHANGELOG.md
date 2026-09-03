@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.16.22] - 2026-09-03
 ### Added
 - **One junction relationship over a union of target types.** A blueprint
   junction edge's `target` (and a `from_records` connection spec's

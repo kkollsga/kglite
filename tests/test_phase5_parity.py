@@ -98,7 +98,7 @@ def test_graph_copy_cow_correctness_mapped():
 #: (run on each platform; the script writes whichever entry matches the
 #: current host).
 BINARY_SIZE_BASELINES = {
-    "darwin": 21_606_016,  # 0.16.21 darwin baseline
+    "darwin": 21_688_704,  # 0.16.22 darwin baseline
     "linux": 28_810_000,  # estimate: the post-code_tree Linux estimate (30.2 MB)
     # scaled by the same −4.6% the macOS loader removal measured. Both
     # removals deliberately recaptured DOWNWARD so the +10% budget guards
@@ -443,6 +443,13 @@ def test_binary_size_regression():
         MCP write-gate work (force opt-in, read_only pin, UTC owner record)
         lives in the server binary, not here.
 
+
+      - 0.16.22:       21,688,704 bytes (≈20.7 MB, +82,688 over 0.16.21). The
+        blueprint loader gained FK-edge properties, node labels, a list column
+        type, union-target junction edges and a serde catch-all on five spec
+        structs for unknown-key reporting; the ontology audit gained a
+        per-property census. No new dependency.
+
     Raising the baseline is a deliberate act — every bump should
     be accompanied by an updated growth note above. For a precise
     drilldown, run `cargo bloat --release --crates --filter kglite`.
@@ -474,7 +481,7 @@ def test_binary_size_regression():
     gate = int(baseline * 1.10)
     assert size <= gate, (
         f"{bin_path.name} = {size:,} bytes > gate {gate:,} "
-        f"(+10% over 0.16.21 {platform_key} baseline {baseline:,}). "
+        f"(+10% over 0.16.22 {platform_key} baseline {baseline:,}). "
         "Investigate what grew before raising the gate — see the "
         "growth note in this test's docstring for the breakdown shape."
     )
