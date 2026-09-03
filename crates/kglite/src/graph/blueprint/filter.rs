@@ -4,7 +4,7 @@
 //! Filters operate on raw CSV strings so ordering is preserved: filter,
 //! then type-coerce.
 
-use super::csv_loader::RawCsv;
+use super::table::RawCsv;
 use serde_json::Value as Json;
 
 /// Apply all filter predicates in `filt`, retaining only rows where every

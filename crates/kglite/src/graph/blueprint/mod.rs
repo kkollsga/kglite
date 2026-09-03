@@ -3,11 +3,12 @@
 
 pub mod build;
 pub mod compute;
-pub mod csv_loader;
 pub mod expr;
 pub mod filter;
 pub mod geometry;
 pub mod json_records;
 pub mod schema;
+pub mod table;
 pub mod timeseries;
+pub mod typing;
 pub mod validation;

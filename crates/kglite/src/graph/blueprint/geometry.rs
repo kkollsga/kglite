@@ -7,7 +7,7 @@
 //!   parse with the `geojson` crate, convert to `geo::Geometry`, then
 //!   write WKT + centroid lat/lon back into the declared columns.
 
-use super::csv_loader::RawCsv;
+use super::table::RawCsv;
 use geo::Centroid;
 use indexmap::IndexMap;
 use rayon::prelude::*;

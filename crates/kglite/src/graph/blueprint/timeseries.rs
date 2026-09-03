@@ -4,8 +4,8 @@
 //! `timeseries_store` and `timeseries_configs` expect, plus the per-node
 //! grouping done by `add_nodes`'s PyO3 wrapper.
 
-use super::csv_loader::RawCsv;
 use super::schema::{TimeKey, TimeseriesSpec};
+use super::table::RawCsv;
 use crate::graph::features::timeseries::{
     date_from_ymd, parse_date_query, validate_resolution, NodeTimeseries, TimeseriesConfig,
 };

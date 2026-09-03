@@ -283,7 +283,7 @@ fn validate_iso_date(field: &str, val: &str) -> Result<(), String> {
 pub fn unknown_property_type_warnings(blueprint: &Blueprint) -> Vec<String> {
     let mut warnings = Vec::new();
     fn is_known(ty: &str) -> bool {
-        super::csv_loader::map_blueprint_type(ty).is_some()
+        super::typing::map_blueprint_type(ty).is_some()
             || matches!(ty, "geometry" | "location.lat" | "location.lon")
     }
     fn check(warnings: &mut Vec<String>, where_: &str, kind: &str, map: &IndexMap<String, String>) {
