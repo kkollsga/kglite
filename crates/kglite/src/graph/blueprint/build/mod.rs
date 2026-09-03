@@ -27,7 +27,7 @@ mod table_ops;
 
 pub use specs::FlatSpec;
 
-use cache::{parse_in_parallel, CsvCache};
+use cache::{parse_in_parallel, CsvCache, IdTypeCache};
 use fk::load_fk_edges;
 use junction::load_junction_edges;
 use manual::load_manual_nodes;
@@ -124,6 +124,9 @@ pub fn build(
 
     // Phase 0: declare every input, then pre-read the buffered ones.
     let (registry, csv_cache) = prepare_inputs(&core_specs, &sub_specs, &root, profile);
+    // Filled by the streamed node phase, read by the streamed FK phase — see
+    // `IdTypeCache`.
+    let id_types = IdTypeCache::default();
 
     // Phase 1: manual nodes.
     let t = std::time::Instant::now();
@@ -145,6 +148,7 @@ pub fn build(
         &core_specs,
         &registry,
         &csv_cache,
+        &id_types,
         &mut report,
         "core nodes",
     )?;
@@ -157,6 +161,7 @@ pub fn build(
         &sub_specs,
         &registry,
         &csv_cache,
+        &id_types,
         &mut report,
         "sub-nodes",
     )?;
@@ -179,7 +184,14 @@ pub fn build(
     // Phase 4: FK edges
     let all_specs: Vec<&FlatSpec> = core_specs.iter().chain(sub_specs.iter()).collect();
     let t = std::time::Instant::now();
-    load_fk_edges(graph, &all_specs, &registry, &csv_cache, &mut report)?;
+    load_fk_edges(
+        graph,
+        &all_specs,
+        &registry,
+        &csv_cache,
+        &id_types,
+        &mut report,
+    )?;
     if profile {
         eprintln!("  load_fk_edges: {} ms", t.elapsed().as_millis());
     }

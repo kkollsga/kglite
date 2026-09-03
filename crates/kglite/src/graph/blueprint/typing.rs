@@ -167,6 +167,49 @@ impl ColumnInference {
     }
 }
 
+/// Incremental id-column inference: `Int64` while every value seen parses as
+/// a whole number, `String` from the first one that does not.
+///
+/// Separate from [`ColumnInference`] because an id asks a different question —
+/// `"3.0"` is a valid integer id and `"true"` is not a boolean but a string id
+/// — and the two must not be conflated. Incremental for the same reason:
+/// deciding it per chunk makes the type depend on the chunk size.
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IdInference {
+    saw_non_integer: bool,
+}
+
+impl IdInference {
+    pub fn observe(&mut self, cell: &str) {
+        if self.saw_non_integer {
+            return;
+        }
+        let t = cell.trim();
+        if t.is_empty() || t.parse::<i64>().is_ok() {
+            return;
+        }
+        if let Ok(f) = t.parse::<f64>() {
+            if f.is_finite() && f.fract() == 0.0 {
+                return;
+            }
+        }
+        self.saw_non_integer = true;
+    }
+
+    /// True once no later value can change the answer.
+    pub fn is_settled(&self) -> bool {
+        self.saw_non_integer
+    }
+
+    pub fn resolve(&self) -> ColumnType {
+        if self.saw_non_integer {
+            ColumnType::String
+        } else {
+            ColumnType::Int64
+        }
+    }
+}
+
 /// The blueprint keyword naming an inferred type, so a resolved type can be
 /// handed back through the `declared_types` map the typing pass already takes.
 /// `None` for a type inference never produces.

@@ -6,8 +6,8 @@ use super::super::input::InputRegistry;
 use super::super::table::{ListMisparseTally, RawCsv};
 use super::super::timeseries as ts;
 use super::super::typing::map_blueprint_type;
-use super::cache::CsvCache;
-use super::nodes::{node_chunk_size, should_stream_spec};
+use super::cache::{CsvCache, IdTypeCache};
+use super::nodes::{fk_id_columns, node_chunk_size, should_stream_spec};
 use super::prepass;
 use super::specs::FlatSpec;
 use super::table_ops::subset_rows;
@@ -116,7 +116,16 @@ fn prep_fk_edges(
         };
 
         let mut misparses = ListMisparseTally::default();
-        let frame = match fk_edge_frame(&raw, &pk, pk_idx, edge, fk_idx, &props, &mut misparses) {
+        let frame = match fk_edge_frame(
+            &raw,
+            &pk,
+            pk_idx,
+            edge,
+            fk_idx,
+            &props,
+            &IdTypes(None),
+            &mut misparses,
+        ) {
             Ok(Some(frame)) => frame,
             Ok(None) => continue,
             Err(e) => {
@@ -257,13 +266,20 @@ fn fk_edge_frame(
     edge: &super::super::schema::FkEdge,
     fk_idx: usize,
     props: &FkEdgeProperties,
+    id_types: &IdTypes<'_>,
     misparses: &mut ListMisparseTally,
 ) -> Result<Option<FkEdgeFrame>, String> {
     let cols = build_fk_columns(raw, pk, &edge.fk, pk_idx, fk_idx);
     if cols.src.is_empty() {
         return Ok(None);
     }
-    let mut df = build_edge_df(pk, &cols.target_col, cols.src, cols.tgt)?;
+    let mut df = build_edge_df(
+        pk,
+        &cols.target_col,
+        cols.src,
+        cols.tgt,
+        id_types.for_columns(pk, &edge.fk),
+    )?;
 
     let mut missing_properties = Vec::new();
     let mut present = Vec::new();
@@ -364,6 +380,7 @@ pub(super) fn load_fk_edges(
     specs: &[&FlatSpec],
     registry: &InputRegistry,
     cache: &CsvCache,
+    id_types: &IdTypeCache,
     report: &mut BuildReport,
 ) -> Result<(), String> {
     use rayon::prelude::*;
@@ -417,7 +434,7 @@ pub(super) fn load_fk_edges(
     // Streaming path: same chain, one chunk at a time.
     let t_stream = std::time::Instant::now();
     for spec in &streamable {
-        if let Err(e) = load_streamed_fk_edges(graph, spec, registry, report) {
+        if let Err(e) = load_streamed_fk_edges(graph, spec, registry, id_types, report) {
             report.errors.push(e);
         }
     }
@@ -447,9 +464,16 @@ fn resolve_fk_property_types<'a>(
     source: &'a dyn super::super::input::Source,
     chunk_size: usize,
     spec: &FlatSpec,
+    id_columns: &[String],
     edge_props: &mut IndexMap<String, FkEdgeProperties>,
     report: &mut BuildReport,
-) -> Result<Box<dyn Iterator<Item = Result<RawCsv, String>> + 'a>, String> {
+) -> Result<
+    (
+        Box<dyn Iterator<Item = Result<RawCsv, String>> + 'a>,
+        IndexMap<String, crate::datatypes::values::ColumnType>,
+    ),
+    String,
+> {
     let mut seen: HashSet<&str> = HashSet::new();
     let mut wanted: Vec<String> = Vec::new();
     for props in edge_props.values() {
@@ -461,12 +485,19 @@ fn resolve_fk_property_types<'a>(
     }
 
     let filtered = !spec.spec.filter.is_empty();
-    let prepared = prepass::prepare_chunks(source, chunk_size, &HashMap::new(), !filtered, |raw| {
-        if filtered {
-            apply_filter(raw, &spec.spec.filter);
-        }
-        wanted.clone()
-    })
+    let prepared = prepass::prepare_chunks(
+        source,
+        chunk_size,
+        &HashMap::new(),
+        id_columns,
+        !filtered,
+        |raw| {
+            if filtered {
+                apply_filter(raw, &spec.spec.filter);
+            }
+            wanted.clone()
+        },
+    )
     .map_err(|e| format!("[{}] {}", spec.node_type, e))?;
     if let Some(w) = prepass::prepass_warning(
         &format!("fk_edge properties (node '{}')", spec.node_type),
@@ -481,7 +512,7 @@ fn resolve_fk_property_types<'a>(
             }
         }
     }
-    Ok(prepared.chunks)
+    Ok((prepared.chunks, prepared.resolved_ids))
 }
 
 /// Streaming FK-edge loader. Mirrors `load_streamed_node_spec`
@@ -497,6 +528,7 @@ fn load_streamed_fk_edges(
     graph: &mut DirGraph,
     spec: &FlatSpec,
     registry: &InputRegistry,
+    id_types: &IdTypeCache,
     report: &mut BuildReport,
 ) -> Result<(), String> {
     let Some(input) = spec.input.as_deref() else {
@@ -558,7 +590,25 @@ fn load_streamed_fk_edges(
         }
     }
 
-    let chunks = resolve_fk_property_types(source, chunk_size, spec, &mut edge_props, report)?;
+    // The endpoint columns of every edge, plus the source pk: their id type is
+    // resolved over the whole input, because deciding it per chunk splits one
+    // logical id space into an `Int64` half and a `String` half, and the half
+    // that does not match the target type's ids vivifies a duplicate stub node
+    // per value instead of finding the node that is already there.
+    //
+    // The node phase streamed this input first and published the answer, so
+    // the common case costs no read at all here.
+    let id_columns = fk_id_columns(spec, &pk);
+    let known = id_types.get(input, &id_columns);
+    let (chunks, resolved_ids) = resolve_fk_property_types(
+        source,
+        chunk_size,
+        spec,
+        if known.is_some() { &[] } else { &id_columns },
+        &mut edge_props,
+        report,
+    )?;
+    let resolved_ids = known.unwrap_or(resolved_ids);
 
     // Track per-edge missing-column errors so we report each at most
     // once instead of once per chunk.
@@ -612,7 +662,16 @@ fn load_streamed_fk_edges(
                 continue;
             };
             let tally = misparses.entry(edge_type.clone()).or_default();
-            let frame = match fk_edge_frame(&raw, &pk, pk_idx, edge, fk_idx, props, tally) {
+            let frame = match fk_edge_frame(
+                &raw,
+                &pk,
+                pk_idx,
+                edge,
+                fk_idx,
+                props,
+                &IdTypes(Some(&resolved_ids)),
+                tally,
+            ) {
                 Ok(Some(frame)) => frame,
                 Ok(None) => continue,
                 Err(e) => {
@@ -654,15 +713,40 @@ fn load_streamed_fk_edges(
     Ok(())
 }
 
+/// Id types resolved ahead of the frame, when the caller reads its input in
+/// chunks. `None` means "infer from the values in hand", which is what the
+/// buffered path does — there the values in hand are the whole column.
+struct IdTypes<'a>(Option<&'a IndexMap<String, crate::datatypes::values::ColumnType>>);
+
+impl IdTypes<'_> {
+    fn for_columns(
+        &self,
+        src: &str,
+        tgt: &str,
+    ) -> (
+        Option<crate::datatypes::values::ColumnType>,
+        Option<crate::datatypes::values::ColumnType>,
+    ) {
+        match self.0 {
+            Some(map) => (map.get(src).cloned(), map.get(tgt).cloned()),
+            None => (None, None),
+        }
+    }
+}
+
 fn build_edge_df(
     src_name: &str,
     tgt_name: &str,
     src: Vec<Option<String>>,
     tgt: Vec<Option<String>>,
+    resolved: (
+        Option<crate::datatypes::values::ColumnType>,
+        Option<crate::datatypes::values::ColumnType>,
+    ),
 ) -> Result<DataFrame, String> {
     // Decide column types: try i64, fall back to string.
-    let src_type = infer_id_type(&src);
-    let tgt_type = infer_id_type(&tgt);
+    let src_type = resolved.0.unwrap_or_else(|| infer_id_type(&src));
+    let tgt_type = resolved.1.unwrap_or_else(|| infer_id_type(&tgt));
     let mut df = DataFrame::new(Vec::new());
     add_id_column(&mut df, src_name, src, src_type)?;
     add_id_column(&mut df, tgt_name, tgt, tgt_type)?;
@@ -670,29 +754,16 @@ fn build_edge_df(
 }
 
 pub(super) fn infer_id_type(vals: &[Option<String>]) -> crate::datatypes::values::ColumnType {
-    let mut all_int = true;
+    let mut inference = super::super::typing::IdInference::default();
     for v in vals {
-        let Some(s) = v else { continue };
-        let t = s.trim();
-        if t.is_empty() {
-            continue;
+        if inference.is_settled() {
+            break;
         }
-        if t.parse::<i64>().is_ok() {
-            continue;
+        if let Some(s) = v {
+            inference.observe(s);
         }
-        if let Ok(f) = t.parse::<f64>() {
-            if f.is_finite() && f.fract() == 0.0 {
-                continue;
-            }
-        }
-        all_int = false;
-        break;
     }
-    if all_int {
-        crate::datatypes::values::ColumnType::Int64
-    } else {
-        crate::datatypes::values::ColumnType::String
-    }
+    inference.resolve()
 }
 
 pub(super) fn add_id_column(

@@ -2,6 +2,8 @@
 
 use super::super::input::InputRegistry;
 use super::super::table::RawCsv;
+use crate::datatypes::values::ColumnType;
+use indexmap::IndexMap;
 use std::collections::HashMap;
 
 /// Cache of whole-read tables keyed by input name. Populated in parallel at
@@ -86,5 +88,45 @@ mod cache_tests {
             1,
             "the pre-pass read is the only one"
         );
+    }
+}
+
+/// Id-column types resolved over a whole input, shared between the phases
+/// that read that input.
+///
+/// A spec's nodes and its FK edges stream the same file under the same
+/// predicate, and both need the same columns typed by the same rule. Without
+/// this the FK phase repeats the pass the node phase just made — one extra
+/// read of the input per spec, for an answer already computed.
+#[derive(Default)]
+pub(super) struct IdTypeCache {
+    inner: std::sync::Mutex<HashMap<String, IndexMap<String, ColumnType>>>,
+}
+
+impl IdTypeCache {
+    pub(super) fn insert(&self, input: &str, types: &IndexMap<String, ColumnType>) {
+        if types.is_empty() {
+            return;
+        }
+        self.inner
+            .lock()
+            .unwrap()
+            .insert(input.to_string(), types.clone());
+    }
+
+    /// The resolved types for `columns`, or `None` if any of them is missing —
+    /// a partial answer would leave one endpoint typed per chunk, which is the
+    /// defect this exists to prevent.
+    pub(super) fn get(
+        &self,
+        input: &str,
+        columns: &[String],
+    ) -> Option<IndexMap<String, ColumnType>> {
+        let guard = self.inner.lock().unwrap();
+        let known = guard.get(input)?;
+        columns
+            .iter()
+            .map(|c| known.get(c).map(|t| (c.clone(), t.clone())))
+            .collect()
     }
 }

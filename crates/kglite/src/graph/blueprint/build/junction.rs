@@ -120,7 +120,7 @@ fn load_one_junction_edge(
     // per-target grouping would otherwise type once per group.
     // No filter runs over a junction table, so the cheap column scan sees
     // exactly the rows the load does.
-    let prepared = match prepass::prepare_chunks(source, chunk_size, &declared, true, |raw| {
+    let prepared = match prepass::prepare_chunks(source, chunk_size, &declared, &[], true, |raw| {
         keep.iter()
             .filter(|p| raw.col_index(p).is_some())
             .cloned()

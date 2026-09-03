@@ -2434,6 +2434,162 @@ class TestUndeclaredTypeChunkInvariance:
         assert "Declaring them keeps the type stable" in err
 
 
+class TestFkIdTypeChunkInvariance:
+    """An FK column's id type must not move with the chunk size either.
+
+    `build_edge_df` typed the edge's endpoint columns from the values of the
+    chunk in front of it: a column that is integer-shaped for its first rows
+    and text afterwards came out `Int64` in the early chunks and `String` in
+    the late ones. The target nodes carry one of those two types, so the other
+    half of the rows matched nothing and vivified a *second*, provisional node
+    per id — a silent duplicate, not a missing edge.
+    """
+
+    ROWS = 30
+
+    def _bp(self, tmp_path):
+        refs = [str(i) for i in range(12)] + [f"x{i}" for i in range(12, self.ROWS)]
+        _write_csv(
+            tmp_path / "items.csv",
+            pd.DataFrame({"item_id": list(range(self.ROWS)), "name": [f"I{i}" for i in range(self.ROWS)], "ref": refs}),
+        )
+        _write_csv(
+            tmp_path / "refs.csv",
+            pd.DataFrame({"rid": refs, "rname": [f"R{r}" for r in refs]}),
+        )
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "Ref": {"csv": "refs.csv", "pk": "rid", "title": "rname", "properties": {}, "skipped": []},
+                # A manual type is fed from the same FK values, so both the
+                # loaded-target and synthesised-target routes are covered.
+                "Manual": {"pk": "name", "title": "name", "properties": {}, "skipped": []},
+                "Item": {
+                    "csv": "items.csv",
+                    "pk": "item_id",
+                    "title": "name",
+                    "properties": {},
+                    "skipped": [],
+                    "connections": {
+                        "fk_edges": {
+                            "REFERS_TO": {"target": "Ref", "fk": "ref"},
+                            "MANUAL_REF": {"target": "Manual", "fk": "ref"},
+                        }
+                    },
+                },
+            },
+        }
+        _write_blueprint(tmp_path / "bp.json", bp)
+        return tmp_path / "bp.json"
+
+    def _load(self, bp_path, monkeypatch, chunk):
+        for key in (
+            "KGLITE_BLUEPRINT_STREAMING_THRESHOLD_MB",
+            "KGLITE_BLUEPRINT_NODE_CHUNK_SIZE",
+            "KGLITE_BLUEPRINT_JUNCTION_CHUNK_SIZE",
+        ):
+            monkeypatch.delenv(key, raising=False)
+        if chunk is not None:
+            monkeypatch.setenv("KGLITE_BLUEPRINT_STREAMING_THRESHOLD_MB", "0")
+            monkeypatch.setenv("KGLITE_BLUEPRINT_NODE_CHUNK_SIZE", str(chunk))
+            monkeypatch.setenv("KGLITE_BLUEPRINT_JUNCTION_CHUNK_SIZE", str(chunk))
+        graph = from_blueprint(bp_path, save=False)
+
+        def count(q):
+            return graph.cypher(q).to_list()[0]["c"]
+
+        return {
+            "refs": count("MATCH (n:Ref) RETURN count(n) AS c"),
+            "manual": count("MATCH (n:Manual) RETURN count(n) AS c"),
+            "refers_to": count("MATCH (:Item)-[r:REFERS_TO]->(:Ref) RETURN count(r) AS c"),
+            "manual_ref": count("MATCH (:Item)-[r:MANUAL_REF]->(:Manual) RETURN count(r) AS c"),
+            "provisional": count("MATCH (n) WHERE n._provisional = true RETURN count(n) AS c"),
+        }
+
+    @pytest.mark.parametrize("chunk", [3, 10, 1000])
+    def test_fk_id_type_does_not_move_with_the_chunk_size(self, tmp_path, monkeypatch, chunk):
+        bp_path = self._bp(tmp_path)
+        buffered = self._load(bp_path, monkeypatch, None)
+        streamed = self._load(bp_path, monkeypatch, chunk)
+        assert streamed == buffered
+        # Non-vacuity: the fixture really does resolve every row to a real
+        # node, so a divergence shows up as duplicates, not as a shared zero.
+        assert buffered == {
+            "refs": self.ROWS,
+            "manual": self.ROWS,
+            "refers_to": self.ROWS,
+            "manual_ref": self.ROWS,
+            "provisional": 0,
+        }
+
+    def test_junction_endpoint_id_type_does_not_move_with_the_chunk_size(self, tmp_path, monkeypatch):
+        """The junction loader types its FK columns through the same
+        whole-input pre-pass; this pins that it does, endpoint ids included."""
+        refs = [str(i) for i in range(12)] + [f"x{i}" for i in range(12, self.ROWS)]
+        _write_csv(
+            tmp_path / "refs.csv",
+            pd.DataFrame({"rid": refs, "rname": [f"R{r}" for r in refs]}),
+        )
+        _write_csv(
+            tmp_path / "items.csv",
+            pd.DataFrame({"item_id": list(range(self.ROWS)), "name": [f"I{i}" for i in range(self.ROWS)]}),
+        )
+        _write_csv(
+            tmp_path / "links.csv",
+            pd.DataFrame({"src": list(range(self.ROWS)), "dst": refs}),
+        )
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "Ref": {"csv": "refs.csv", "pk": "rid", "title": "rname", "properties": {}, "skipped": []},
+                "Item": {
+                    "csv": "items.csv",
+                    "pk": "item_id",
+                    "title": "name",
+                    "properties": {},
+                    "skipped": [],
+                    "connections": {
+                        "junction_edges": {
+                            "LINKS_TO": {
+                                "csv": "links.csv",
+                                "source_fk": "src",
+                                "target": "Ref",
+                                "target_fk": "dst",
+                            }
+                        }
+                    },
+                },
+            },
+        }
+        _write_blueprint(tmp_path / "bp.json", bp)
+        bp_path = tmp_path / "bp.json"
+
+        def load(chunk):
+            for key in (
+                "KGLITE_BLUEPRINT_STREAMING_THRESHOLD_MB",
+                "KGLITE_BLUEPRINT_NODE_CHUNK_SIZE",
+                "KGLITE_BLUEPRINT_JUNCTION_CHUNK_SIZE",
+            ):
+                monkeypatch.delenv(key, raising=False)
+            if chunk is not None:
+                monkeypatch.setenv("KGLITE_BLUEPRINT_JUNCTION_CHUNK_SIZE", str(chunk))
+            graph = from_blueprint(bp_path, save=False)
+
+            def count(q):
+                return graph.cypher(q).to_list()[0]["c"]
+
+            return {
+                "refs": count("MATCH (n:Ref) RETURN count(n) AS c"),
+                "links": count("MATCH (:Item)-[r:LINKS_TO]->(:Ref) RETURN count(r) AS c"),
+                "provisional": count("MATCH (n) WHERE n._provisional = true RETURN count(n) AS c"),
+            }
+
+        whole = load(None)
+        assert whole == {"refs": self.ROWS, "links": self.ROWS, "provisional": 0}
+        for chunk in (3, 10, 1000):
+            assert load(chunk) == whole, f"chunk={chunk}"
+
+
 class TestJunctionChunkInvariance:
     """The junction loader streams its CSV in chunks
     (`KGLITE_BLUEPRINT_JUNCTION_CHUNK_SIZE`, default 100k rows) purely to bound

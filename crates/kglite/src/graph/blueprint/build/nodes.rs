@@ -7,7 +7,7 @@ use super::super::input::InputRegistry;
 use super::super::table::{ListMisparseTally, RawCsv};
 use super::super::timeseries as ts;
 use super::super::typing::{map_blueprint_type, typed_dataframe};
-use super::cache::CsvCache;
+use super::cache::{CsvCache, IdTypeCache};
 use super::prepass;
 use super::specs::FlatSpec;
 use super::table_ops::dedupe_by_pk;
@@ -185,6 +185,7 @@ pub(super) fn load_node_specs(
     specs: &[FlatSpec],
     registry: &InputRegistry,
     cache: &CsvCache,
+    id_types: &IdTypeCache,
     report: &mut BuildReport,
     _phase_name: &str,
 ) -> Result<(), String> {
@@ -256,7 +257,7 @@ pub(super) fn load_node_specs(
     // the build.
     let t_stream = std::time::Instant::now();
     for spec in &streamable {
-        if let Err(e) = load_streamed_node_spec(graph, spec, registry, report) {
+        if let Err(e) = load_streamed_node_spec(graph, spec, registry, id_types, report) {
             report.errors.push(e);
         }
     }
@@ -355,6 +356,7 @@ fn load_streamed_node_spec(
     graph: &mut DirGraph,
     spec: &FlatSpec,
     registry: &InputRegistry,
+    id_types: &IdTypeCache,
     report: &mut BuildReport,
 ) -> Result<(), String> {
     let Some(input) = spec.input.as_deref() else {
@@ -399,20 +401,35 @@ fn load_streamed_node_spec(
     // Types for the kept columns the blueprint did not declare, resolved over
     // the whole input before the first row is loaded — per-chunk inference
     // would make a column's type depend on the chunk size.
+    // The FK phase streams this same input under the same predicate and needs
+    // these columns typed by the id rule; folding them into this pass and
+    // publishing the answer saves it a whole read of the file.
+    let id_columns = fk_id_columns(spec, &pk);
     let filtered = !spec.spec.filter.is_empty();
-    let prepared = prepass::prepare_chunks(source, chunk_size, &declared, !filtered, |raw| {
-        if !spec.spec.filter.is_empty() {
-            apply_filter(raw, &spec.spec.filter);
-        }
-        streaming_keep_list(raw, &pk, &title_field, &skip_set, &parent_fk_skip)
-    })
+    let prepared = prepass::prepare_chunks(
+        source,
+        chunk_size,
+        &declared,
+        &id_columns,
+        !filtered,
+        |raw| {
+            if filtered {
+                apply_filter(raw, &spec.spec.filter);
+            }
+            streaming_keep_list(raw, &pk, &title_field, &skip_set, &parent_fk_skip)
+        },
+    )
     .map_err(|e| format!("[{}] {}", spec.node_type, e))?;
     if let Some(w) = prepass::prepass_warning(&format!("node '{}'", spec.node_type), &prepared) {
         report.warnings.push(w);
     }
     let prepass::Prepared {
-        resolved, chunks, ..
+        resolved,
+        resolved_ids,
+        chunks,
+        ..
     } = prepared;
+    id_types.insert(input, &resolved_ids);
     declared.extend(resolved);
 
     // Per-spec auto-pk counter. Plain `u64` (not atomic) is fine because
@@ -481,6 +498,30 @@ pub(super) fn node_chunk_size() -> usize {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(250_000)
+}
+
+/// The id columns the FK phase will type for this spec: its pk plus every
+/// declared FK column, including the implicit `parent` one.
+pub(super) fn fk_id_columns(spec: &FlatSpec, pk: &str) -> Vec<String> {
+    let mut columns = vec![pk.to_string()];
+    let declared_fks = spec
+        .spec
+        .connections
+        .fk_edges
+        .values()
+        .map(|e| e.fk.clone())
+        .chain(
+            spec.spec
+                .parent_fk
+                .clone()
+                .filter(|_| spec.spec.parent.is_some()),
+        );
+    for fk in declared_fks {
+        if !columns.contains(&fk) {
+            columns.push(fk);
+        }
+    }
+    columns
 }
 
 /// Build the keep-list for the streaming node loader. Mirrors the
