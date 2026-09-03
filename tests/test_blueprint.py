@@ -2319,6 +2319,121 @@ class TestJunctionUnionTargets:
         assert audit["ASSOCIATED_WITH.range"]["total"] == 3
 
 
+class TestUndeclaredTypeChunkInvariance:
+    """A column with no declared type must get the same type whatever the
+    chunk size.
+
+    The streamed loaders used to run `infer_type` per chunk, so an undeclared
+    column whose first rows are integers and whose later rows are text became
+    Int64 in the early chunks and String in the late ones — the property type
+    (and the value) depended on `KGLITE_BLUEPRINT_NODE_CHUNK_SIZE`, a knob
+    documented as bounding memory only. Confirmed by the 2026-09-03 probe.
+    """
+
+    ROWS = 30
+
+    def _bp(self, tmp_path):
+        # `code` is int-shaped for the first 12 rows and text afterwards, so
+        # any chunk boundary below 12 splits the two shapes; nothing declares
+        # its type. `ref` is the same shape on the FK column.
+        codes = [str(i) for i in range(12)] + [f"x{i}" for i in range(12, self.ROWS)]
+        items = pd.DataFrame(
+            {
+                "item_id": list(range(self.ROWS)),
+                "name": [f"Item_{i}" for i in range(self.ROWS)],
+                "code": codes,
+                "ref": codes,
+            }
+        )
+        _write_csv(tmp_path / "items.csv", items)
+        links = pd.DataFrame(
+            {
+                "src": list(range(self.ROWS)),
+                "dst": [(i + 1) % self.ROWS for i in range(self.ROWS)],
+                "note": codes,
+            }
+        )
+        _write_csv(tmp_path / "links.csv", links)
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "Ref": {"pk": "name", "title": "name", "properties": {}, "skipped": []},
+                "Item": {
+                    "csv": "items.csv",
+                    "pk": "item_id",
+                    "title": "name",
+                    # `code`, `ref` and the junction's `note` are deliberately
+                    # undeclared — that is what the pre-pass has to resolve.
+                    "properties": {},
+                    "skipped": [],
+                    "connections": {
+                        "fk_edges": {"REFERS_TO": {"target": "Ref", "fk": "ref", "properties": ["code"]}},
+                        "junction_edges": {
+                            "LINKS_TO": {
+                                "csv": "links.csv",
+                                "source_fk": "src",
+                                "target": "Item",
+                                "target_fk": "dst",
+                                "properties": ["note"],
+                            }
+                        },
+                    },
+                },
+            },
+        }
+        _write_blueprint(tmp_path / "bp.json", bp)
+        return tmp_path / "bp.json"
+
+    def _load(self, bp_path, monkeypatch, chunk):
+        if chunk is None:
+            monkeypatch.delenv("KGLITE_BLUEPRINT_STREAMING_THRESHOLD_MB", raising=False)
+            monkeypatch.delenv("KGLITE_BLUEPRINT_NODE_CHUNK_SIZE", raising=False)
+            monkeypatch.delenv("KGLITE_BLUEPRINT_JUNCTION_CHUNK_SIZE", raising=False)
+        else:
+            monkeypatch.setenv("KGLITE_BLUEPRINT_STREAMING_THRESHOLD_MB", "0")
+            monkeypatch.setenv("KGLITE_BLUEPRINT_NODE_CHUNK_SIZE", str(chunk))
+            monkeypatch.setenv("KGLITE_BLUEPRINT_JUNCTION_CHUNK_SIZE", str(chunk))
+        graph = from_blueprint(bp_path, save=False)
+        rows = graph.cypher("MATCH (i:Item) RETURN i.item_id AS id, i.code AS code ORDER BY id").to_list()
+        edges = graph.cypher(
+            "MATCH (a:Item)-[r:LINKS_TO]->(b:Item) RETURN a.item_id AS a, b.item_id AS b, r.note AS note ORDER BY a"
+        ).to_list()
+        fk = graph.cypher(
+            "MATCH (i:Item)-[r:REFERS_TO]->(:Ref) RETURN i.item_id AS id, r.code AS code ORDER BY id"
+        ).to_list()
+        return rows, edges, fk
+
+    @pytest.mark.parametrize("chunk", [5, 10, 100])
+    def test_undeclared_column_type_does_not_move_with_the_chunk_size(self, tmp_path, monkeypatch, chunk):
+        bp_path = self._bp(tmp_path)
+        buffered = self._load(bp_path, monkeypatch, None)
+        streamed = self._load(bp_path, monkeypatch, chunk)
+        # Values AND their Python types: `1` and `"1"` compare unequal here,
+        # which is the whole point.
+        assert [(r["id"], r["code"], type(r["code"]).__name__) for r in buffered[0]] == [
+            (r["id"], r["code"], type(r["code"]).__name__) for r in streamed[0]
+        ]
+        assert [(e["a"], e["b"], e["note"], type(e["note"]).__name__) for e in buffered[1]] == [
+            (e["a"], e["b"], e["note"], type(e["note"]).__name__) for e in streamed[1]
+        ]
+        assert [(r["id"], r["code"], type(r["code"]).__name__) for r in buffered[2]] == [
+            (r["id"], r["code"], type(r["code"]).__name__) for r in streamed[2]
+        ]
+
+    def test_the_prepass_warning_names_the_undeclared_columns(self, tmp_path, monkeypatch, capfd):
+        """The extra read is visible and actionable, not silent."""
+        bp_path = self._bp(tmp_path)
+        monkeypatch.setenv("KGLITE_BLUEPRINT_STREAMING_THRESHOLD_MB", "0")
+        monkeypatch.setenv("KGLITE_BLUEPRINT_NODE_CHUNK_SIZE", "10")
+        monkeypatch.setenv("KGLITE_BLUEPRINT_JUNCTION_CHUNK_SIZE", "10")
+        from_blueprint(bp_path, save=False, verbose=True)
+        err = capfd.readouterr().err
+        assert "node 'Item'" in err and "code" in err
+        assert "junction 'LINKS_TO'" in err and "note" in err
+        assert "fk_edge properties (node 'Item')" in err
+        assert "Declaring them keeps the type stable" in err
+
+
 class TestJunctionChunkInvariance:
     """The junction loader streams its CSV in chunks
     (`KGLITE_BLUEPRINT_JUNCTION_CHUNK_SIZE`, default 100k rows) purely to bound

@@ -94,43 +94,96 @@ fn resolve_column_type(raw: &RawCsv, src_idx: usize, declared: Option<&String>) 
     infer_type(raw, src_idx)
 }
 
-fn infer_type(raw: &RawCsv, src_idx: usize) -> ColumnType {
-    let mut saw_int = false;
-    let mut saw_float = false;
-    let mut saw_bool = false;
-    let mut saw_other = false;
+/// Incremental column-type inference.
+///
+/// The rule is `infer_type`'s, folded one cell at a time so a chunked input
+/// can be typed by a pre-pass over *every* chunk. Inferring per chunk instead
+/// makes a column's type depend on the chunk size — an undeclared
+/// int-then-text column came out `Int64` in the early chunks and `String` in
+/// the late ones, from a knob documented as bounding memory only.
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ColumnInference {
+    saw_int: bool,
+    saw_float: bool,
+    saw_bool: bool,
+    saw_other: bool,
+}
 
-    for (r, row) in raw.rows.iter().enumerate() {
-        if raw.nulls[r][src_idx] {
-            continue;
+impl ColumnInference {
+    /// Fold one cell in. Null/blank cells carry no evidence; once a cell has
+    /// been seen that is none of the three parseable shapes the answer is
+    /// `String` whatever follows, which is why the whole-table pass may stop
+    /// there and the two agree regardless.
+    pub fn observe(&mut self, cell: &str) {
+        if self.saw_other {
+            return;
         }
-        let s = row[src_idx].trim();
+        let s = cell.trim();
         if s.is_empty() {
-            continue;
+            return;
         }
         if s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("false") {
-            saw_bool = true;
+            self.saw_bool = true;
         } else if s.parse::<i64>().is_ok() {
-            saw_int = true;
+            self.saw_int = true;
         } else if s.parse::<f64>().is_ok() {
-            saw_float = true;
+            self.saw_float = true;
         } else {
-            saw_other = true;
-            break;
+            self.saw_other = true;
         }
     }
 
-    if saw_other {
-        ColumnType::String
-    } else if saw_float {
-        ColumnType::Float64
-    } else if saw_int {
-        ColumnType::Int64
-    } else if saw_bool {
-        ColumnType::Boolean
-    } else {
-        ColumnType::String
+    /// Fold in one table's column.
+    pub fn observe_column(&mut self, raw: &RawCsv, src_idx: usize) {
+        for (r, row) in raw.rows.iter().enumerate() {
+            if self.saw_other {
+                break;
+            }
+            if raw.nulls[r][src_idx] {
+                continue;
+            }
+            self.observe(&row[src_idx]);
+        }
     }
+
+    /// True once no further cell can change the answer: a cell outside the
+    /// three parseable shapes settles the column as `String`.
+    pub fn is_settled(&self) -> bool {
+        self.saw_other
+    }
+
+    pub fn resolve(&self) -> ColumnType {
+        if self.saw_other {
+            ColumnType::String
+        } else if self.saw_float {
+            ColumnType::Float64
+        } else if self.saw_int {
+            ColumnType::Int64
+        } else if self.saw_bool {
+            ColumnType::Boolean
+        } else {
+            ColumnType::String
+        }
+    }
+}
+
+/// The blueprint keyword naming an inferred type, so a resolved type can be
+/// handed back through the `declared_types` map the typing pass already takes.
+/// `None` for a type inference never produces.
+pub fn inferred_type_keyword(ct: &ColumnType) -> Option<&'static str> {
+    match ct {
+        ColumnType::String => Some("string"),
+        ColumnType::Int64 => Some("int"),
+        ColumnType::Float64 => Some("float"),
+        ColumnType::Boolean => Some("bool"),
+        _ => None,
+    }
+}
+
+fn infer_type(raw: &RawCsv, src_idx: usize) -> ColumnType {
+    let mut inference = ColumnInference::default();
+    inference.observe_column(raw, src_idx);
+    inference.resolve()
 }
 
 fn build_column_data(
@@ -892,6 +945,85 @@ mod typing_tests {
         match build_column_data(&r, 0, &ColumnType::Map, "x", &mut tally).unwrap() {
             ColumnData::Map(v) => assert_eq!(v.len(), 3),
             other => panic!("wrong variant: {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod incremental_inference_tests {
+    use super::*;
+
+    /// A deterministic xorshift, so the sweep is reproducible without a dep.
+    fn rng(seed: &mut u64) -> u64 {
+        *seed ^= *seed << 13;
+        *seed ^= *seed >> 7;
+        *seed ^= *seed << 17;
+        *seed
+    }
+
+    fn cell(pick: u64) -> String {
+        match pick % 7 {
+            0 => String::new(),
+            1 => " ".to_string(),
+            2 => (pick % 100).to_string(),
+            3 => format!("{}.5", pick % 50),
+            4 => "true".to_string(),
+            5 => "FALSE".to_string(),
+            _ => format!("x{}", pick % 30),
+        }
+    }
+
+    fn table(cells: &[String]) -> RawCsv {
+        RawCsv {
+            headers: vec!["c".to_string()],
+            rows: cells.iter().map(|c| vec![c.clone()]).collect(),
+            nulls: cells.iter().map(|c| vec![c.is_empty()]).collect(),
+            row_ids: (1..=cells.len()).collect(),
+        }
+    }
+
+    /// The pre-pass folds chunk by chunk; the buffered path types the whole
+    /// table at once. The two must not disagree for any table or any split —
+    /// that disagreement is exactly the defect this machinery removes.
+    #[test]
+    fn folding_chunk_by_chunk_matches_whole_table_inference() {
+        let mut seed = 0x5eed_1234_u64;
+        for case in 0..400 {
+            let n = (rng(&mut seed) % 24) as usize + 1;
+            let cells: Vec<String> = (0..n).map(|_| cell(rng(&mut seed))).collect();
+            let whole = infer_type(&table(&cells), 0);
+
+            // Random split points, plus the two degenerate ones.
+            let chunk = match case % 4 {
+                0 => 1,
+                1 => n,
+                _ => (rng(&mut seed) % n as u64) as usize + 1,
+            };
+            let mut folded = ColumnInference::default();
+            for part in cells.chunks(chunk) {
+                folded.observe_column(&table(part), 0);
+            }
+            assert_eq!(
+                folded.resolve(),
+                whole,
+                "case {case}: cells {cells:?} split at {chunk}"
+            );
+        }
+    }
+
+    /// The resolved type travels back through the `declared_types` map as a
+    /// keyword, so every type inference can produce must survive the
+    /// round-trip.
+    #[test]
+    fn every_inferable_type_round_trips_through_its_keyword() {
+        for ct in [
+            ColumnType::String,
+            ColumnType::Int64,
+            ColumnType::Float64,
+            ColumnType::Boolean,
+        ] {
+            let kw = inferred_type_keyword(&ct).expect("inference yields only these");
+            assert_eq!(map_blueprint_type(kw), Some(ct), "{kw}");
         }
     }
 }

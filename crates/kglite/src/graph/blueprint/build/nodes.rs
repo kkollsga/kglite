@@ -8,6 +8,7 @@ use super::super::table::{ListMisparseTally, RawCsv};
 use super::super::timeseries as ts;
 use super::super::typing::{map_blueprint_type, typed_dataframe};
 use super::cache::CsvCache;
+use super::prepass;
 use super::specs::FlatSpec;
 use super::table_ops::dedupe_by_pk;
 use super::BuildReport;
@@ -360,9 +361,8 @@ fn load_streamed_node_spec(
         return Ok(());
     };
     let chunk_size = node_chunk_size();
-    let chunks = registry
+    let source = registry
         .get(input)
-        .and_then(|s| s.chunks(chunk_size))
         .map_err(|e| format!("[{}] {}", spec.node_type, e))?;
 
     let raw_pk = spec.spec.pk.clone().unwrap_or_else(|| "id".to_string());
@@ -389,6 +389,30 @@ fn load_streamed_node_spec(
             declared.insert(col.clone(), ty.clone());
         }
     }
+    if is_auto_pk {
+        // The synthesised pk is a dense 1..N counter, which the buffered path
+        // infers as Int64 over any row set; naming it here keeps it out of the
+        // pre-pass, whose chunks do not carry the column at all.
+        declared.insert(pk.clone(), "int".to_string());
+    }
+
+    // Types for the kept columns the blueprint did not declare, resolved over
+    // the whole input before the first row is loaded — per-chunk inference
+    // would make a column's type depend on the chunk size.
+    let prepared = prepass::prepare_chunks(source, chunk_size, &declared, |raw| {
+        if !spec.spec.filter.is_empty() {
+            apply_filter(raw, &spec.spec.filter);
+        }
+        streaming_keep_list(raw, &pk, &title_field, &skip_set, &parent_fk_skip)
+    })
+    .map_err(|e| format!("[{}] {}", spec.node_type, e))?;
+    if let Some(w) = prepass::prepass_warning(&format!("node '{}'", spec.node_type), &prepared) {
+        report.warnings.push(w);
+    }
+    let prepass::Prepared {
+        resolved, chunks, ..
+    } = prepared;
+    declared.extend(resolved);
 
     // Per-spec auto-pk counter. Plain `u64` (not atomic) is fine because
     // chunks are processed serially within a spec, and the first id is 1 to

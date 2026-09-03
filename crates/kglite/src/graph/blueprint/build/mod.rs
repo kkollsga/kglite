@@ -21,6 +21,7 @@ mod fk;
 mod junction;
 mod manual;
 mod nodes;
+mod prepass;
 mod specs;
 mod table_ops;
 

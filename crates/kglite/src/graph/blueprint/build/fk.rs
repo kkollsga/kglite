@@ -8,6 +8,7 @@ use super::super::timeseries as ts;
 use super::super::typing::map_blueprint_type;
 use super::cache::CsvCache;
 use super::nodes::{node_chunk_size, should_stream_spec};
+use super::prepass;
 use super::specs::FlatSpec;
 use super::table_ops::subset_rows;
 use super::BuildReport;
@@ -435,6 +436,53 @@ pub(super) fn load_fk_edges(
     Ok(())
 }
 
+/// Type the edge property columns the blueprint left untyped, over the whole
+/// input, and return the chunk stream to load from.
+///
+/// Inferring them per chunk would make an edge property's type depend on the
+/// chunk size. One pass covers every edge — the inferred type of a column is a
+/// property of the data, not of the edge that reads it — and an edge that
+/// declared the column keeps its declaration.
+fn resolve_fk_property_types<'a>(
+    source: &'a dyn super::super::input::Source,
+    chunk_size: usize,
+    spec: &FlatSpec,
+    edge_props: &mut IndexMap<String, FkEdgeProperties>,
+    report: &mut BuildReport,
+) -> Result<Box<dyn Iterator<Item = Result<RawCsv, String>> + 'a>, String> {
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut wanted: Vec<String> = Vec::new();
+    for props in edge_props.values() {
+        for col in &props.columns {
+            if !props.declared.contains_key(col) && seen.insert(col.as_str()) {
+                wanted.push(col.clone());
+            }
+        }
+    }
+
+    let prepared = prepass::prepare_chunks(source, chunk_size, &HashMap::new(), |raw| {
+        if !spec.spec.filter.is_empty() {
+            apply_filter(raw, &spec.spec.filter);
+        }
+        wanted.clone()
+    })
+    .map_err(|e| format!("[{}] {}", spec.node_type, e))?;
+    if let Some(w) = prepass::prepass_warning(
+        &format!("fk_edge properties (node '{}')", spec.node_type),
+        &prepared,
+    ) {
+        report.warnings.push(w);
+    }
+    for props in edge_props.values_mut() {
+        for (col, keyword) in &prepared.resolved {
+            if props.columns.contains(col) && !props.declared.contains_key(col) {
+                props.declared.insert(col.clone(), keyword.clone());
+            }
+        }
+    }
+    Ok(prepared.chunks)
+}
+
 /// Streaming FK-edge loader. Mirrors `load_streamed_node_spec`
 /// row-handling, but each chunk emits one `connect()` call per declared
 /// FK edge, built with the same `build_fk_columns` + `build_edge_df`
@@ -484,9 +532,8 @@ fn load_streamed_fk_edges(
             (edge_type.clone(), maintain::InitialLoad::Preset(unseen))
         })
         .collect();
-    let chunks = registry
+    let source = registry
         .get(input)
-        .and_then(|s| s.chunks(chunk_size))
         .map_err(|e| format!("[{}] {}", spec.node_type, e))?;
 
     let raw_pk = spec.spec.pk.clone().unwrap_or_else(|| "id".to_string());
@@ -509,6 +556,8 @@ fn load_streamed_fk_edges(
             Err(e) => report.errors.push(e),
         }
     }
+
+    let chunks = resolve_fk_property_types(source, chunk_size, spec, &mut edge_props, report)?;
 
     // Track per-edge missing-column errors so we report each at most
     // once instead of once per chunk.

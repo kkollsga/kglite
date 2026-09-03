@@ -6,6 +6,7 @@ use super::super::table::{ListMisparseTally, RawCsv};
 use super::super::typing::{map_blueprint_type, typed_dataframe};
 use super::cache::CsvCache;
 use super::fk::connect;
+use super::prepass;
 use super::specs::FlatSpec;
 use super::table_ops::subset_rows;
 use super::BuildReport;
@@ -105,13 +106,40 @@ fn load_one_junction_edge(
     let initial_load =
         maintain::InitialLoad::Preset(!graph.connection_type_metadata.contains_key(edge_type));
 
-    let chunks = match registry.get(&junc.csv).and_then(|s| s.chunks(chunk_size)) {
-        Ok(it) => it,
+    let source = match registry.get(&junc.csv) {
+        Ok(s) => s,
         Err(e) => {
             report.errors.push(format!("junction {}: {}", edge_type, e));
             return Ok(());
         }
     };
+
+    // A junction is always chunked, so a kept column the blueprint did not
+    // type is resolved over the whole input first — including the two FK
+    // columns, whose type decides how each endpoint id is matched, and which
+    // per-target grouping would otherwise type once per group.
+    let prepared = match prepass::prepare_chunks(source, chunk_size, &declared, |raw| {
+        keep.iter()
+            .filter(|p| raw.col_index(p).is_some())
+            .cloned()
+            .collect()
+    }) {
+        Ok(p) => p,
+        Err(e) => {
+            report.errors.push(format!("junction {}: {}", edge_type, e));
+            return Ok(());
+        }
+    };
+    if let Some(w) = prepass::prepass_warning(
+        &format!("junction '{edge_type}' (node '{}')", spec.node_type),
+        &prepared,
+    ) {
+        report.warnings.push(w);
+    }
+    let prepass::Prepared {
+        resolved, chunks, ..
+    } = prepared;
+    declared.extend(resolved);
 
     // One tally per junction input, not per chunk — see the node loader's for
     // why. Same for the unroutable-row counts.
