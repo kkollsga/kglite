@@ -246,3 +246,95 @@ def test_labels_reach_vivified_endpoint_stubs():
 def test_labels_must_be_an_array_of_strings():
     with pytest.raises(ValueError, match=r"nodes\[0\]: 'labels' must be an array of strings"):
         kglite.from_records({"nodes": [{"type": "Doc", "id_field": "id", "labels": "Text", "records": [{"id": 1}]}]})
+
+
+def _union_spec(target_type, type_field=None, links=None):
+    if links is None:
+        links = [
+            {"src": "M1", "tgt": "D1", "kind": "Disease"},
+            {"src": "M1", "tgt": "P1", "kind": "Phenotype"},
+            {"src": "M2", "tgt": "E1", "kind": "Exposure"},
+        ]
+    conn = {
+        "type": "ASSOCIATED_WITH",
+        "source_type": "Microbe",
+        "source_id_field": "src",
+        "target_type": target_type,
+        "target_id_field": "tgt",
+        "records": links,
+    }
+    if type_field is not None:
+        conn["target_type_column"] = type_field
+    return {
+        "nodes": [
+            {"type": "Microbe", "id_field": "id", "records": [{"id": "M1"}, {"id": "M2"}]},
+            {"type": "Disease", "id_field": "id", "records": [{"id": "D1"}]},
+            {"type": "Phenotype", "id_field": "id", "records": [{"id": "P1"}]},
+            {"type": "Exposure", "id_field": "id", "records": [{"id": "E1"}]},
+        ],
+        "connections": [conn],
+    }
+
+
+def _landed(kg):
+    return sorted(
+        (r["src"], r["tgt"], r["t"])
+        for r in kg.cypher(
+            "MATCH (m:Microbe)-[:ASSOCIATED_WITH]->(x) RETURN m.id AS src, x.id AS tgt, head(labels(x)) AS t"
+        ).to_list()
+    )
+
+
+UNION_EXPECTED = [
+    ("M1", "D1", "Disease"),
+    ("M1", "P1", "Phenotype"),
+    ("M2", "E1", "Exposure"),
+]
+
+
+def test_target_type_list_routes_by_id_probe():
+    kg = kglite.from_records(_union_spec(["Disease", "Phenotype", "Exposure"]))
+    assert _landed(kg) == UNION_EXPECTED
+
+
+def test_target_type_column_routes_each_record():
+    kg = kglite.from_records(_union_spec(["Disease", "Phenotype", "Exposure"], type_field="kind"))
+    assert _landed(kg) == UNION_EXPECTED
+
+
+def test_a_record_naming_an_undeclared_target_type_raises():
+    """from_records is the strict sibling: its key sets are closed and its
+    values are too."""
+    links = [{"src": "M1", "tgt": "X1", "kind": "Chemical"}]
+    with pytest.raises(ValueError, match="'Chemical'"):
+        kglite.from_records(_union_spec(["Disease", "Phenotype"], type_field="kind", links=links))
+
+
+def test_a_record_missing_the_target_type_field_raises():
+    links = [{"src": "M1", "tgt": "D1"}]
+    with pytest.raises(ValueError, match="record has no string 'kind'"):
+        kglite.from_records(_union_spec(["Disease", "Phenotype"], type_field="kind", links=links))
+
+
+def test_a_string_target_type_is_unchanged():
+    links = [{"src": "M1", "tgt": "D1", "kind": "Disease"}]
+    kg = kglite.from_records(_union_spec("Disease", links=links))
+    assert _landed(kg) == [("M1", "D1", "Disease")]
+
+
+def test_an_empty_target_type_list_raises():
+    with pytest.raises(ValueError, match="'target_type' names no node type"):
+        kglite.from_records(_union_spec([]))
+
+
+def test_union_target_drop_policy_still_drops_the_unresolvable():
+    spec = _union_spec(
+        ["Disease", "Phenotype", "Exposure"],
+        type_field="kind",
+        links=[
+            {"src": "M1", "tgt": "D1", "kind": "Disease"},
+            {"src": "M1", "tgt": "Z9", "kind": "Phenotype"},
+        ],
+    )
+    kg = kglite.from_records(spec, on_missing_endpoint="drop")
+    assert _landed(kg) == [("M1", "D1", "Disease")]

@@ -726,7 +726,10 @@ mod tests {
         let pos = &bp.nodes["Position"];
         assert!(pos.connections.junction_edges.contains_key("OF_PERSON"));
         assert!(pos.connections.junction_edges.contains_key("AT_COMPANY"));
-        assert_eq!(pos.connections.junction_edges["OF_PERSON"].target, "Person");
+        assert_eq!(
+            pos.connections.junction_edges["OF_PERSON"].target,
+            vec!["Person"]
+        );
         assert_eq!(
             pos.connections.junction_edges["AT_COMPANY"].target_fk,
             "issuer"

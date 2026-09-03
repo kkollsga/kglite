@@ -19,6 +19,10 @@
 //!       "target_type": "Person", "target_id_field": "to",
 //!       "records": [ {"from": 1, "to": 2, "since": 2020} ] }
 //!   ],
+//!   // `target_type` also takes a list, for a relationship whose range is a
+//!   // union of types; `target_type_column` then names the field holding
+//!   // each record's target type, and without it the listed types are
+//!   // probed for the record's target id.
 //!   "on_missing_endpoint": "vivify"
 //! }
 //! ```
@@ -176,7 +180,8 @@ fn load_node_spec(
 
     // The id field always leads the column order so a record missing it
     // still produces a (null id) row that add_nodes' validity check catches.
-    let (columns, rows) = records_to_columns_rows(records, &[&id_field], &ctx)?;
+    let borrowed: Vec<&Json> = records.iter().collect();
+    let (columns, rows) = records_to_columns_rows(&borrowed, &[&id_field], &ctx)?;
     let df = DataFrame::from_cypher_rows(columns, rows).map_err(|e| format!("{}: {}", ctx(), e))?;
 
     let rep = maintain::add_nodes(
@@ -237,54 +242,159 @@ fn load_connection_spec(
     let connection_type = required_str(spec, "type", &ctx)?;
     let source_type = required_str(spec, "source_type", &ctx)?;
     let source_id_field = required_str(spec, "source_id_field", &ctx)?;
-    let target_type = required_str(spec, "target_type", &ctx)?;
+    let target_types = required_type_list(spec, "target_type", &ctx)?;
     let target_id_field = required_str(spec, "target_id_field", &ctx)?;
+    let type_field = optional_str(spec, "target_type_column");
 
     let records = records_array(spec, &ctx)?;
     if records.is_empty() {
         return Ok(());
     }
 
-    let (columns, rows) =
-        records_to_columns_rows(records, &[&source_id_field, &target_id_field], &ctx)?;
-    let df = DataFrame::from_cypher_rows(columns, rows).map_err(|e| format!("{}: {}", ctx(), e))?;
+    let groups = group_records_by_target(
+        graph,
+        records,
+        &target_types,
+        type_field.as_deref(),
+        &target_id_field,
+        &ctx,
+    )?;
 
-    match endpoint_policy {
-        MissingEndpointPolicy::Vivify => {
-            let rep = maintain::add_connections(
-                graph,
-                df,
-                connection_type.clone(),
-                source_type,
-                source_id_field,
-                target_type,
-                target_id_field,
-                None,
-                None,
-                None,
-            )
-            .map_err(|e| format!("{}: {}", ctx(), e))?;
-            report.edges_added += rep.connections_created;
-        }
-        MissingEndpointPolicy::Drop | MissingEndpointPolicy::Error => {
-            let edge_context = EdgeFrameContext {
-                connection_type: &connection_type,
-                source_type: &source_type,
-                source_id_field: &source_id_field,
-                target_type: &target_type,
-                target_id_field: &target_id_field,
-                connection_idx: idx,
-                endpoint_policy,
-            };
-            let edge_specs = edge_specs_from_frame(graph, &df, &edge_context)?;
-            let rep = maintain::add_edges_from_specs(graph, edge_specs)
+    for (target_type, group) in groups {
+        let (columns, rows) =
+            records_to_columns_rows(&group, &[&source_id_field, &target_id_field], &ctx)?;
+        let df =
+            DataFrame::from_cypher_rows(columns, rows).map_err(|e| format!("{}: {}", ctx(), e))?;
+
+        match endpoint_policy {
+            MissingEndpointPolicy::Vivify => {
+                let rep = maintain::add_connections(
+                    graph,
+                    df,
+                    connection_type.clone(),
+                    source_type.clone(),
+                    source_id_field.clone(),
+                    target_type.to_string(),
+                    target_id_field.clone(),
+                    None,
+                    None,
+                    None,
+                )
                 .map_err(|e| format!("{}: {}", ctx(), e))?;
-            report.edges_added += rep.connections_created;
-            report.edges_dropped_missing_endpoint += rep.skipped_missing_endpoint;
+                report.edges_added += rep.connections_created;
+            }
+            MissingEndpointPolicy::Drop | MissingEndpointPolicy::Error => {
+                let edge_context = EdgeFrameContext {
+                    connection_type: &connection_type,
+                    source_type: &source_type,
+                    source_id_field: &source_id_field,
+                    target_type,
+                    target_id_field: &target_id_field,
+                    connection_idx: idx,
+                    endpoint_policy,
+                };
+                let edge_specs = edge_specs_from_frame(graph, &df, &edge_context)?;
+                let rep = maintain::add_edges_from_specs(graph, edge_specs)
+                    .map_err(|e| format!("{}: {}", ctx(), e))?;
+                report.edges_added += rep.connections_created;
+                report.edges_dropped_missing_endpoint += rep.skipped_missing_endpoint;
+            }
         }
     }
     report.connection_types.push(connection_type);
     Ok(())
+}
+
+/// One connection spec's records grouped by the target type each routes to,
+/// in declaration order. The blueprint junction loader's union-target rules,
+/// on records instead of CSV rows: `target_type_column` names each record's
+/// type, and without it the declared types are probed for the record's target
+/// id, an id none has taking the first.
+///
+/// The one difference is what an unknown type value does. `from_records`
+/// key sets are closed and it raises where the blueprint loader warns, so a
+/// record naming a type outside the declaration is an error here.
+fn group_records_by_target<'a>(
+    graph: &DirGraph,
+    records: &'a [Json],
+    target_types: &'a [String],
+    type_field: Option<&str>,
+    target_id_field: &str,
+    ctx: &impl Fn() -> String,
+) -> Result<Vec<(&'a str, Vec<&'a Json>)>, String> {
+    if target_types.len() == 1 && type_field.is_none() {
+        return Ok(vec![(
+            target_types[0].as_str(),
+            records.iter().collect::<Vec<_>>(),
+        )]);
+    }
+    let mut groups: Vec<Vec<&Json>> = vec![Vec::new(); target_types.len()];
+    for rec in records {
+        let owner = match type_field {
+            Some(field) => {
+                let declared = rec.get(field).and_then(|v| v.as_str()).ok_or_else(|| {
+                    format!(
+                        "{}: record has no string '{field}' — 'target_type_column' names the \
+                         field holding each record's target type",
+                        ctx()
+                    )
+                })?;
+                target_types
+                    .iter()
+                    .position(|t| t == declared)
+                    .ok_or_else(|| {
+                        format!(
+                            "{}: record names target type '{declared}', which is not in \
+                             'target_type' ({})",
+                            ctx(),
+                            target_types.join(", ")
+                        )
+                    })?
+            }
+            None => {
+                let id = rec.get(target_id_field).map(json_to_value);
+                id.as_ref()
+                    .and_then(|v| {
+                        target_types
+                            .iter()
+                            .position(|t| graph.id_indices.lookup(t, v).is_some())
+                    })
+                    .unwrap_or(0)
+            }
+        };
+        groups[owner].push(rec);
+    }
+    Ok(target_types
+        .iter()
+        .zip(groups)
+        .filter(|(_, group)| !group.is_empty())
+        .map(|(t, group)| (t.as_str(), group))
+        .collect())
+}
+
+/// A required `"Type"` or `["TypeA", "TypeB"]` field.
+fn required_type_list(
+    spec: &Json,
+    key: &str,
+    ctx: &impl Fn() -> String,
+) -> Result<Vec<String>, String> {
+    match spec.get(key) {
+        Some(Json::String(s)) => Ok(vec![s.clone()]),
+        Some(Json::Array(items)) if !items.is_empty() => items
+            .iter()
+            .map(|item| {
+                item.as_str().map(str::to_string).ok_or_else(|| {
+                    format!("{}: '{key}' must be a string or an array of strings", ctx())
+                })
+            })
+            .collect(),
+        Some(Json::Array(_)) => Err(format!("{}: '{key}' names no node type", ctx())),
+        _ => Err(format!(
+            "{}: missing required string field '{}'",
+            ctx(),
+            key
+        )),
+    }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -312,6 +422,7 @@ const CONNECTION_SPEC_KEYS: &[&str] = &[
     "source_type",
     "source_id_field",
     "target_type",
+    "target_type_column",
     "target_id_field",
     "records",
 ];
@@ -484,7 +595,7 @@ fn records_array<'a>(spec: &'a Json, ctx: &impl Fn() -> String) -> Result<&'a Ve
 /// is `required` fields first (in the given order), then every other key in
 /// first-seen order. A record missing a column yields `Value::Null` there.
 fn records_to_columns_rows(
-    records: &[Json],
+    records: &[&Json],
     required: &[&str],
     ctx: &impl Fn() -> String,
 ) -> Result<(Vec<String>, Vec<Vec<Value>>), String> {

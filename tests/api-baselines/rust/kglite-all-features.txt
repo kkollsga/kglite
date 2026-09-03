@@ -367,8 +367,9 @@ pub kglite::api::blueprint::JunctionEdge::properties: alloc::vec::Vec<alloc::str
 pub kglite::api::blueprint::JunctionEdge::property_types: indexmap::map::IndexMap<alloc::string::String, alloc::string::String>
 pub kglite::api::blueprint::JunctionEdge::rename: indexmap::map::IndexMap<alloc::string::String, alloc::string::String>
 pub kglite::api::blueprint::JunctionEdge::source_fk: alloc::string::String
-pub kglite::api::blueprint::JunctionEdge::target: alloc::string::String
+pub kglite::api::blueprint::JunctionEdge::target: alloc::vec::Vec<alloc::string::String>
 pub kglite::api::blueprint::JunctionEdge::target_fk: alloc::string::String
+pub kglite::api::blueprint::JunctionEdge::target_type_column: core::option::Option<alloc::string::String>
 impl kglite::api::blueprint::JunctionEdge
 pub fn kglite::api::blueprint::JunctionEdge::computed(csv: alloc::string::String, source_fk: alloc::string::String, target: alloc::string::String, target_fk: alloc::string::String) -> Self
 impl core::clone::Clone for kglite::api::blueprint::JunctionEdge

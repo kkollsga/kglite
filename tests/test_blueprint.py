@@ -1960,6 +1960,164 @@ class TestListColumnType:
         assert "not a JSON array" not in err
 
 
+class TestJunctionUnionTargets:
+    """One junction relationship over a union of target types. A relation whose
+    range is an abstract class (Disease | Phenotype | Exposure) otherwise needs
+    one relationship name per concrete type, which no query and no ontology
+    declaration can put back together."""
+
+    TARGET_TYPES = ["Disease", "Phenotype", "Exposure"]
+
+    def _bp(self, tmp_path, target, type_column=None, links=None, properties=None):
+        _write_csv(tmp_path / "microbes.csv", pd.DataFrame({"id": ["M1", "M2"], "name": ["Mi1", "Mi2"]}))
+        _write_csv(tmp_path / "diseases.csv", pd.DataFrame({"id": ["D1"], "name": ["Dis1"]}))
+        _write_csv(tmp_path / "phenotypes.csv", pd.DataFrame({"id": ["P1"], "name": ["Phe1"]}))
+        _write_csv(tmp_path / "exposures.csv", pd.DataFrame({"id": ["E1"], "name": ["Exp1"]}))
+        if links is None:
+            links = [
+                {"source_id": "M1", "target_id": "D1", "target_type": "Disease", "score": 1},
+                {"source_id": "M1", "target_id": "P1", "target_type": "Phenotype", "score": 2},
+                {"source_id": "M2", "target_id": "E1", "target_type": "Exposure", "score": 3},
+            ]
+        _write_csv(tmp_path / "links.csv", pd.DataFrame(links))
+        junction = {
+            "csv": "links.csv",
+            "source_fk": "source_id",
+            "target": target,
+            "target_fk": "target_id",
+        }
+        if type_column is not None:
+            junction["target_type_column"] = type_column
+        if properties is not None:
+            junction["properties"] = properties
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "Microbe": {
+                    "csv": "microbes.csv",
+                    "pk": "id",
+                    "title": "name",
+                    "connections": {"junction_edges": {"ASSOCIATED_WITH": junction}},
+                },
+                "Disease": {"csv": "diseases.csv", "pk": "id", "title": "name"},
+                "Phenotype": {"csv": "phenotypes.csv", "pk": "id", "title": "name"},
+                "Exposure": {"csv": "exposures.csv", "pk": "id", "title": "name"},
+            },
+        }
+        bp_path = tmp_path / "bp.json"
+        _write_blueprint(bp_path, bp)
+        return bp_path
+
+    def _landed(self, graph):
+        return sorted(
+            (r["src"], r["tgt"], r["t"])
+            for r in graph.cypher(
+                "MATCH (m:Microbe)-[:ASSOCIATED_WITH]->(x) RETURN m.id AS src, x.id AS tgt, head(labels(x)) AS t"
+            ).to_list()
+        )
+
+    EXPECTED = [
+        ("M1", "D1", "Disease"),
+        ("M1", "P1", "Phenotype"),
+        ("M2", "E1", "Exposure"),
+    ]
+
+    def test_a_list_target_routes_each_row_by_its_id(self, tmp_path):
+        """No type column: the declared types are probed and the one that
+        already has the id wins."""
+        graph = from_blueprint(self._bp(tmp_path, self.TARGET_TYPES), save=False)
+        assert self._landed(graph) == self.EXPECTED
+
+    def test_target_type_column_routes_each_row_explicitly(self, tmp_path):
+        graph = from_blueprint(self._bp(tmp_path, self.TARGET_TYPES, type_column="target_type"), save=False)
+        assert self._landed(graph) == self.EXPECTED
+
+    def test_the_routing_column_is_not_an_edge_property(self, tmp_path):
+        graph = from_blueprint(self._bp(tmp_path, self.TARGET_TYPES, type_column="target_type"), save=False)
+        rows = graph.cypher("MATCH ()-[r:ASSOCIATED_WITH]->() RETURN r.target_type AS t").to_list()
+        assert all(r["t"] is None for r in rows)
+
+    def test_the_routing_column_is_a_property_when_declared(self, tmp_path):
+        graph = from_blueprint(
+            self._bp(tmp_path, self.TARGET_TYPES, type_column="target_type", properties=["target_type"]),
+            save=False,
+        )
+        rows = graph.cypher("MATCH ()-[r:ASSOCIATED_WITH]->() RETURN r.target_type AS t").to_list()
+        assert sorted(r["t"] for r in rows) == ["Disease", "Exposure", "Phenotype"]
+
+    def test_properties_survive_the_per_type_split(self, tmp_path):
+        graph = from_blueprint(
+            self._bp(tmp_path, self.TARGET_TYPES, type_column="target_type", properties=["score"]),
+            save=False,
+        )
+        rows = graph.cypher("MATCH (m:Microbe)-[r:ASSOCIATED_WITH]->(x) RETURN x.id AS tgt, r.score AS s").to_list()
+        assert sorted((r["tgt"], r["s"]) for r in rows) == [("D1", 1), ("E1", 3), ("P1", 2)]
+
+    def test_a_row_naming_an_undeclared_type_is_reported_and_skipped(self, tmp_path, capfd):
+        links = [
+            {"source_id": "M1", "target_id": "D1", "target_type": "Disease", "score": 1},
+            {"source_id": "M2", "target_id": "X1", "target_type": "Chemical", "score": 2},
+        ]
+        graph = from_blueprint(
+            self._bp(tmp_path, self.TARGET_TYPES, type_column="target_type", links=links),
+            save=False,
+            verbose=True,
+        )
+        err = capfd.readouterr().err
+        assert "Chemical" in err
+        assert self._landed(graph) == [("M1", "D1", "Disease")]
+
+    def test_an_id_no_declared_type_has_falls_to_the_first(self, tmp_path):
+        """The probe cannot invent a type, and dropping the row would lose an
+        edge — so the row takes the first declared type, where the existing
+        missing-endpoint policy vivifies its stub."""
+        links = [{"source_id": "M1", "target_id": "Z9", "target_type": "Disease", "score": 1}]
+        graph = from_blueprint(self._bp(tmp_path, self.TARGET_TYPES, links=links), save=False)
+        assert self._landed(graph) == [("M1", "Z9", "Disease")]
+
+    def test_chunking_does_not_change_the_routing(self, tmp_path, monkeypatch):
+        bp_path = self._bp(tmp_path, self.TARGET_TYPES, type_column="target_type")
+
+        def build(chunk_size):
+            monkeypatch.setenv("KGLITE_BLUEPRINT_JUNCTION_CHUNK_SIZE", str(chunk_size))
+            return self._landed(from_blueprint(bp_path, save=False))
+
+        for chunk_size in (1, 2, 3, 100):
+            assert build(chunk_size) == self.EXPECTED, f"chunk_size={chunk_size}"
+
+    def test_a_string_target_is_unchanged(self, tmp_path):
+        links = [{"source_id": "M1", "target_id": "D1", "target_type": "Disease", "score": 1}]
+        graph = from_blueprint(self._bp(tmp_path, "Disease", links=links), save=False)
+        assert self._landed(graph) == [("M1", "D1", "Disease")]
+
+    def test_a_routing_column_that_is_an_fk_is_an_error(self, tmp_path, capfd):
+        graph = from_blueprint(self._bp(tmp_path, self.TARGET_TYPES, type_column="target_id"), save=False, verbose=True)
+        assert "target_type_column" in capfd.readouterr().err
+        assert self._landed(graph) == []
+
+    def test_ontology_range_over_the_abstract_class_sees_no_violation(self, tmp_path):
+        """The point of the union form: one relationship whose range is the
+        abstract class, audited as one rule instead of three."""
+        graph = from_blueprint(self._bp(tmp_path, self.TARGET_TYPES), save=False)
+        graph.define_ontology(
+            {
+                "classes": {
+                    "Microbe": {},
+                    "Outcome": {"abstract": True},
+                    "Disease": {"is_a": "Outcome"},
+                    "Phenotype": {"is_a": "Outcome"},
+                    "Exposure": {"is_a": "Outcome"},
+                },
+                "relationships": {"ASSOCIATED_WITH": {"domain": "Microbe", "range": "Outcome", "enforcement": "error"}},
+            }
+        )
+        audit = {
+            r["rule"]: r for r in graph.cypher("CALL ontology_audit() YIELD rule, violations, total RETURN *").to_list()
+        }
+        assert audit["ASSOCIATED_WITH.range"]["violations"] == 0
+        assert audit["ASSOCIATED_WITH.range"]["total"] == 3
+
+
 class TestJunctionChunkInvariance:
     """The junction loader streams its CSV in chunks
     (`KGLITE_BLUEPRINT_JUNCTION_CHUNK_SIZE`, default 100k rows) purely to bound

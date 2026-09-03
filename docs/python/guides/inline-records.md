@@ -42,6 +42,28 @@ JSON arrays/maps become native list/map values. `on_missing_endpoint` is:
 - `"error"` — validate the complete input and fail atomically before applying
   any block when an endpoint is absent.
 
+A connection spec's `target_type` also takes a **list**, for a relationship
+whose range is a union of node types:
+
+```python
+{
+    "type": "ASSOCIATED_WITH",
+    "source_type": "Microbe",
+    "source_id_field": "source",
+    "target_type": ["Disease", "Phenotype", "Exposure"],
+    "target_type_column": "kind",
+    "target_id_field": "target",
+    "records": [{"source": "M1", "target": "D1", "kind": "Disease"}],
+}
+```
+
+`target_type_column` names the record field holding each record's target type;
+without it the listed types are probed for the record's target id and the first
+that has it wins, an id none has taking the first listed type. Values are
+closed like the keys are: a record naming a type outside the list raises,
+where the blueprint loader — whose CSVs are not authored by the caller in the
+same breath — warns and skips the row.
+
 Use `from_blueprint()` for repeatable CSV pipelines with compute operations;
 use DataFrame bulk loaders for already-tabular/high-volume Python data.
 

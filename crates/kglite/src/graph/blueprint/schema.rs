@@ -102,11 +102,30 @@ pub const ACCEPTED_JUNCTION_EDGE_KEYS: &[&str] = &[
     "csv",
     "source_fk",
     "target",
+    "target_type_column",
     "target_fk",
     "properties",
     "property_types",
     "rename",
 ];
+
+/// `"Disease"` or `["Disease", "Phenotype"]` — both land as a list, so the
+/// loader has one shape to read.
+fn string_or_string_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match OneOrMany::deserialize(deserializer)? {
+        OneOrMany::One(s) => vec![s],
+        OneOrMany::Many(v) => v,
+    })
+}
 
 impl Settings {
     /// Compute the absolute output path from `output_path` + `output_file`,
@@ -188,8 +207,22 @@ pub struct FkEdge {
 pub struct JunctionEdge {
     pub csv: String,
     pub source_fk: String,
-    pub target: String,
+    /// The node type(s) this relationship points at. A JSON string is the
+    /// one-type form; a list is the union form, for a relationship whose
+    /// range is an abstract class — without it such a relation needs one
+    /// relationship name per concrete type, which no query and no ontology
+    /// `range` declaration can put back together.
+    #[serde(deserialize_with = "string_or_string_list")]
+    pub target: Vec<String>,
     pub target_fk: String,
+    /// CSV column naming each row's target type, for the union form. Its
+    /// values must be among `target`; a row naming anything else is skipped
+    /// with a build warning rather than routed by guess. Without it, a union
+    /// `target` is resolved by probing the declared types for the row's
+    /// target id. Routing only — the column becomes an edge property just as
+    /// any other does, by being listed in `properties`.
+    #[serde(default)]
+    pub target_type_column: Option<String>,
     #[serde(default)]
     pub properties: Vec<String>,
     #[serde(default)]
@@ -227,8 +260,9 @@ impl JunctionEdge {
         JunctionEdge {
             csv,
             source_fk,
-            target,
+            target: vec![target],
             target_fk,
+            target_type_column: None,
             properties: vec![],
             property_types: IndexMap::new(),
             rename: IndexMap::new(),

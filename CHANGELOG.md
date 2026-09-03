@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- **One junction relationship over a union of target types.** A blueprint
+  junction edge's `target` (and a `from_records` connection spec's
+  `target_type`) now takes a list of node types as well as a single one, with
+  an optional `target_type_column` naming the column/field that holds each
+  row's target type. Without that column the declared types are probed for the
+  row's target id and the first that has it wins; an id none has takes the
+  first declared type, where the existing missing-endpoint handling vivifies
+  its stub. A relationship whose range is an abstract class no longer needs one
+  relationship name per concrete type, so it can be declared and audited as one
+  ontology rule. Junction edges only: an `fk_edges` entry still points at one
+  target type.
 - **A per-field evidence census in the ontology audit.**
   `CALL ontology_audit({by: 'property'})` fans the `required_properties` and
   `property_types` rules into one row per declared property — `violations` the
@@ -56,6 +67,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   list back.
 
 ### Changed
+- **Rust API:** `JunctionEdge::target` is now `Vec<String>` (it was
+  `String`) and the struct carries a `target_type_column` field. JSON
+  blueprints are unaffected — a plain `"target": "Disease"` string still
+  parses, into a one-element list.
 - **`ontology_audit()` gained a `property` column and
   `edge_property_violation()` a `properties` column.** Both are additions to
   the yielded column set: a bare `CALL` returns one more column than before,

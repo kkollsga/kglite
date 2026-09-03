@@ -733,6 +733,7 @@ mod accepted_key_tests {
                 ("csv", json!("k.csv")),
                 ("source_fk", json!("a")),
                 ("target", json!("Person")),
+                ("target_type_column", json!(null)),
                 ("target_fk", json!("b")),
                 ("properties", json!([])),
                 ("property_types", json!({})),

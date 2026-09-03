@@ -163,7 +163,8 @@ pub fn run_chain(
         JunctionEdge {
             csv: computed_rel,
             source_fk: src_col,
-            target: from.to_string(),
+            target: vec![from.to_string()],
+            target_type_column: None,
             target_fk: tgt_col,
             properties: vec!["step_index".to_string()],
             property_types: {
@@ -250,7 +251,7 @@ mod tests {
 
         // Junction registered.
         let junc = &bp.nodes["Txn"].connections.junction_edges["NEXT_TX"];
-        assert_eq!(junc.target, "Txn");
+        assert_eq!(junc.target, vec!["Txn"]);
         assert_eq!(junc.source_fk, "id_prev");
         assert_eq!(junc.target_fk, "id_next");
         assert!(junc.properties.contains(&"step_index".to_string()));

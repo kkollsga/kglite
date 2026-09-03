@@ -562,7 +562,7 @@ mod tests {
 
         // Junction edge registered on Txn.
         let edge = &bp.nodes["Txn"].connections.junction_edges["ON_DATE"];
-        assert_eq!(edge.target, "Date");
+        assert_eq!(edge.target, vec!["Date"]);
         assert_eq!(edge.target_fk, "iso");
     }
 

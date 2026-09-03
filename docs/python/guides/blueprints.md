@@ -353,6 +353,55 @@ For many-to-many relationships, use a separate lookup CSV. Suppose `project_assi
 
 Junction edges can carry properties — list them in `properties` and use `property_types` for type hints. This creates `(Employee)-[:ASSIGNED_TO {role: "Lead", assigned_date: ...}]->(Project)` edges.
 
+### A Junction Over a Union of Target Types
+
+When a relationship's range is an abstract class — `ASSOCIATED_WITH` pointing
+at a `Disease`, a `Phenotype` **or** an `Exposure` — `target` takes a list
+instead of a string:
+
+```json
+{
+  "ASSOCIATED_WITH": {
+    "csv": "associations.csv",
+    "source_fk": "microbe_id",
+    "target": ["Disease", "Phenotype", "Exposure"],
+    "target_type_column": "target_type",
+    "target_fk": "target_id"
+  }
+}
+```
+
+One relationship name, three target types. Without it the same data needs
+`ASSOCIATED_WITH_DISEASE` / `_PHENOTYPE` / `_EXPOSURE`, which no query and no
+ontology `range` declaration can put back together.
+
+Each row picks its target type one of two ways:
+
+- **`target_type_column`** names a CSV column holding the type per row. Its
+  values must be among the declared `target` types; a row naming anything else
+  builds no edge and the build report says how many rows named which value.
+  The column is routing only — it becomes an edge property the same way any
+  other column does, by being listed in `properties`.
+- **Without it**, the declared types are probed in order and the first that
+  already has a node with the row's target id wins. An id no declared type has
+  takes the *first* declared type, where the usual missing-endpoint handling
+  vivifies its stub — the edge is never dropped.
+
+Declare the union in the ontology as one relationship whose `range` is the
+abstract class, and `ontology_audit()` reports it as one rule:
+
+```json
+{"classes": {"Outcome": {"abstract": true}, "Disease": {"is_a": "Outcome"}},
+ "relationships": {"ASSOCIATED_WITH": {"domain": "Microbe", "range": "Outcome"}}}
+```
+
+```{note}
+Union targets are a junction-edge feature. An `fk_edges` entry still points at
+exactly one `target`: its rows come from the source node's own CSV, where a
+per-row target type would be a column of that node's table rather than of the
+relationship.
+```
+
 ### Renaming Junction Properties
 
 To store a column under a different property name, add a `rename` map. All
