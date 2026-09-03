@@ -320,6 +320,11 @@ impl CypherParser {
                 CypherToken::Star => parts.push("*".to_string()),
                 CypherToken::DotDot => parts.push("..".to_string()),
                 CypherToken::Dot => parts.push(".".to_string()),
+                // Relationship-type alternation, `[:A|B]`. Everything this
+                // extractor sees is one pattern, so a `|` in it can only be
+                // that — the comprehension separator the MATCH extractor
+                // breaks on cannot reach here.
+                CypherToken::Pipe => parts.push("|".to_string()),
                 CypherToken::Identifier(s) => parts.push(Self::quote_identifier(s)),
                 CypherToken::StringLit(s) => {
                     // Re-escape quotes so the pattern parser can re-tokenize correctly

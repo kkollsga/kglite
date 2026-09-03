@@ -73,6 +73,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   has it, or use `FkEdge::plain(target, fk)`. Deserialization is unaffected.
 
 ### Fixed
+- **Relationship alternation `[:A|B]` was rejected inside `EXISTS { }`,
+  `count { }` and `size(...)`.** `MATCH (n)-[:A|B]->()` has always parsed, but
+  the same pattern in a subquery failed with *"Unexpected token in EXISTS
+  pattern: |"* — the subquery's pattern re-serializer had no `|` case, so the
+  token never reached the pattern parser that understands alternation. Both
+  spellings (`EXISTS { pattern }` and `EXISTS { MATCH pattern }`) now return
+  what the equivalent `MATCH` returns.
 - **A CSV-less blueprint node type with a numeric foreign key ended up with
   two nodes per value.** The synthesised type's id column was always typed as
   text, while the FK-edge frame types the same values numerically, so the edge

@@ -438,6 +438,20 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (p) WHERE EXISTS((p)-[:KNOWS]->()) OR p:Company RETURN p.title AS title",
         None,
     ),
+    (
+        # Relationship alternation inside EXISTS { } — rejected by the parser
+        # until the subquery re-serializer learned `|`.
+        "exists_subquery_rel_alternation",
+        "social_graph",
+        "MATCH (p:Person) WHERE EXISTS { (p)-[:KNOWS|WORKS_AT]->() } RETURN p.title AS title",
+        None,
+    ),
+    (
+        "exists_subquery_rel_alternation_negated",
+        "social_graph",
+        "MATCH (p:Person) WHERE NOT EXISTS { (p)-[:KNOWS|WORKS_AT]->(:Company) } RETURN p.title AS title",
+        None,
+    ),
     # ── push_where_into_match ──
     ("where_eq", "social_graph", "MATCH (p:Person) WHERE p.city = 'Oslo' RETURN p.name AS n", None),
     ("where_gt", "social_graph", "MATCH (p:Person) WHERE p.age > 30 RETURN p.name AS n", None),

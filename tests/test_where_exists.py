@@ -777,3 +777,53 @@ class TestExistsWitnessCap:
             {"i": 1, "direct": False, "near": "y"},
             {"i": 2, "direct": True, "near": "y"},
         ]
+
+
+class TestExistsRelationshipAlternation:
+    """`[:A|B]` parses in a MATCH but was rejected inside `EXISTS { }`: the
+    subquery re-serializer had no `|` arm, so the token never reached the
+    pattern parser that has understood alternation all along."""
+
+    @pytest.fixture
+    def one_type_graph(self):
+        """Two nodes joined by `:A`. `:B` is declared in the query only —
+        an alternation branch that matches nothing must not change the
+        answer."""
+        graph = KnowledgeGraph()
+        graph.cypher("CREATE (:N {id: 1}), (:N {id: 2})")
+        graph.cypher("MATCH (a:N {id: 1}), (b:N {id: 2}) CREATE (a)-[:A]->(b)")
+        return graph
+
+    def test_exists_alternation_matches_the_match_form(self, one_type_graph):
+        expected = one_type_graph.cypher("MATCH (n:N)-[:A|B]->() RETURN n.id AS i ORDER BY i").to_list()
+        assert expected == [{"i": 1}]
+        for form in (
+            "MATCH (n:N) WHERE EXISTS { (n)-[:A|B]->() } RETURN n.id AS i ORDER BY i",
+            "MATCH (n:N) WHERE EXISTS { MATCH (n)-[:A|B]->() } RETURN n.id AS i ORDER BY i",
+        ):
+            assert one_type_graph.cypher(form).to_list() == expected, form
+
+    def test_alternation_of_two_live_types(self):
+        graph = KnowledgeGraph()
+        graph.cypher("CREATE (:N {id: 1}), (:N {id: 2}), (:N {id: 3}), (:N {id: 4})")
+        graph.cypher("MATCH (a:N {id: 1}), (b:N {id: 2}) CREATE (a)-[:A]->(b)")
+        graph.cypher("MATCH (a:N {id: 2}), (b:N {id: 3}) CREATE (a)-[:B]->(b)")
+        graph.cypher("MATCH (a:N {id: 3}), (b:N {id: 4}) CREATE (a)-[:C]->(b)")
+        rows = graph.cypher("MATCH (n:N) WHERE EXISTS { (n)-[:A|B]->() } RETURN n.id AS i ORDER BY i").to_list()
+        assert rows == [{"i": 1}, {"i": 2}]
+
+    def test_alternation_inside_count_and_size(self):
+        graph = KnowledgeGraph()
+        graph.cypher("CREATE (:N {id: 1}), (:N {id: 2}), (:N {id: 3})")
+        graph.cypher("MATCH (a:N {id: 1}), (b:N {id: 2}) CREATE (a)-[:A]->(b)")
+        graph.cypher("MATCH (a:N {id: 1}), (b:N {id: 3}) CREATE (a)-[:B]->(b)")
+        rows = graph.cypher(
+            "MATCH (n:N {id: 1}) RETURN count { (n)-[:A|B]->() } AS c, size((n)-[:A|B]->()) AS s"
+        ).to_list()
+        assert rows == [{"c": 2, "s": 2}]
+
+    def test_three_way_alternation_and_negation(self, one_type_graph):
+        rows = one_type_graph.cypher(
+            "MATCH (n:N) WHERE NOT EXISTS { (n)-[:A|B|C]->() } RETURN n.id AS i ORDER BY i"
+        ).to_list()
+        assert rows == [{"i": 2}]
