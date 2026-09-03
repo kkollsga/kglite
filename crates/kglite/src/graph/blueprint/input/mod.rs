@@ -75,6 +75,61 @@ impl InputRegistry {
     }
 }
 
+/// A `Source` wrapper that counts how many times a build opened the input,
+/// so a test can pin "read once" rather than trusting a timing.
+#[cfg(test)]
+pub mod test_double {
+    use super::{RawCsv, Source};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    pub struct CountingSource {
+        inner: Box<dyn Source>,
+        opens: Arc<AtomicUsize>,
+    }
+
+    impl CountingSource {
+        /// The wrapper plus the shared counter the test asserts on.
+        pub fn new(inner: Box<dyn Source>) -> (Self, Arc<AtomicUsize>) {
+            let opens = Arc::new(AtomicUsize::new(0));
+            (
+                Self {
+                    inner,
+                    opens: opens.clone(),
+                },
+                opens,
+            )
+        }
+    }
+
+    impl Source for CountingSource {
+        fn display_name(&self) -> &str {
+            self.inner.display_name()
+        }
+
+        fn size_hint(&self) -> Option<u64> {
+            self.inner.size_hint()
+        }
+
+        fn can_chunk(&self) -> bool {
+            self.inner.can_chunk()
+        }
+
+        fn read_all(&self) -> Result<RawCsv, String> {
+            self.opens.fetch_add(1, Ordering::SeqCst);
+            self.inner.read_all()
+        }
+
+        fn chunks(
+            &self,
+            chunk_size: usize,
+        ) -> Result<Box<dyn Iterator<Item = Result<RawCsv, String>> + '_>, String> {
+            self.opens.fetch_add(1, Ordering::SeqCst);
+            self.inner.chunks(chunk_size)
+        }
+    }
+}
+
 #[cfg(test)]
 mod registry_tests {
     use super::csv::CsvFile;

@@ -126,7 +126,14 @@ pub fn build(
 
     // Phase 1: manual nodes.
     let t = std::time::Instant::now();
-    load_manual_nodes(graph, &core_specs, &sub_specs, &registry, &mut report)?;
+    load_manual_nodes(
+        graph,
+        &core_specs,
+        &sub_specs,
+        &registry,
+        &csv_cache,
+        &mut report,
+    )?;
     if profile {
         eprintln!("  load_manual_nodes: {} ms", t.elapsed().as_millis());
     }

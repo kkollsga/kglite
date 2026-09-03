@@ -358,6 +358,57 @@ class TestManualNodes:
         )
         assert len(result) == 3
 
+    def test_two_manual_types_over_three_fk_edges_on_one_csv(self, tmp_path):
+        """Two manual types fed by three FK edges of the same source CSV.
+
+        The manual phase reads each referring input once and harvests every
+        manual-target FK column from that one table; this pins the graph that
+        pass must still produce.
+        """
+        items = pd.DataFrame(
+            {
+                "item_id": [1, 2, 3],
+                "owner": ["ann", "bob", "ann"],
+                "co_owner": ["bob", "cara", ""],
+                "tag": ["red", "blue", "red"],
+            }
+        )
+        _write_csv(tmp_path / "items.csv", items)
+
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "Owner": {"pk": "name", "title": "name", "properties": {}, "skipped": []},
+                "Tag": {"pk": "name", "title": "name", "properties": {}, "skipped": []},
+                "Item": {
+                    "csv": "items.csv",
+                    "pk": "item_id",
+                    "properties": {},
+                    "skipped": ["owner", "co_owner", "tag"],
+                    "connections": {
+                        "fk_edges": {
+                            "OWNED_BY": {"target": "Owner", "fk": "owner"},
+                            "CO_OWNED_BY": {"target": "Owner", "fk": "co_owner"},
+                            "TAGGED": {"target": "Tag", "fk": "tag"},
+                        }
+                    },
+                },
+            },
+        }
+        _write_blueprint(tmp_path / "bp.json", bp)
+        graph = from_blueprint(tmp_path / "bp.json", save=False)
+
+        owners = [r["o.title"] for r in graph.cypher("MATCH (o:Owner) RETURN o.title ORDER BY o.title")]
+        assert owners == ["ann", "bob", "cara"]
+        tags = [r["t.title"] for r in graph.cypher("MATCH (t:Tag) RETURN t.title ORDER BY t.title")]
+        assert tags == ["blue", "red"]
+        counts = {
+            e: graph.cypher(f"MATCH ()-[r:{e}]->() RETURN count(r) AS c").to_list()[0]["c"]
+            for e in ("OWNED_BY", "CO_OWNED_BY", "TAGGED")
+        }
+        # The empty co_owner cell is a null FK, so that row yields no edge.
+        assert counts == {"OWNED_BY": 3, "CO_OWNED_BY": 2, "TAGGED": 3}
+
 
 class TestManualNodeIdTypes:
     """A CSV-less type is synthesised from the distinct values of every FK
