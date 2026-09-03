@@ -338,3 +338,40 @@ def test_union_target_drop_policy_still_drops_the_unresolvable():
     )
     kg = kglite.from_records(spec, on_missing_endpoint="drop")
     assert _landed(kg) == [("M1", "D1", "Disease")]
+
+
+def _drop_probe_spec():
+    return {
+        "on_missing_endpoint": "drop",
+        "nodes": [{"type": "Doc", "id_field": "id", "records": [{"id": 1}, {"id": 2}]}],
+        "connections": [
+            {
+                "type": "LINKS",
+                "source_type": "Doc",
+                "source_id_field": "source",
+                "target_type": "Doc",
+                "target_id_field": "target",
+                "records": [{"source": 1, "target": 2}, {"source": 1, "target": 99}],
+            }
+        ],
+    }
+
+
+def test_on_missing_endpoint_in_the_spec_is_honoured():
+    """The guide lists `on_missing_endpoint` as a top-level spec key, and the
+    shim used to overwrite it with the argument's default — so a spec asking
+    for `drop` silently vivified instead."""
+    kg = kglite.from_records(_drop_probe_spec())
+    assert [r["i"] for r in kg.cypher("MATCH (n:Doc) RETURN n.id AS i ORDER BY i").to_list()] == [1, 2]
+
+
+def test_the_argument_overrides_the_spec_key():
+    kg = kglite.from_records(_drop_probe_spec(), on_missing_endpoint="vivify")
+    assert [r["i"] for r in kg.cypher("MATCH (n:Doc) RETURN n.id AS i ORDER BY i").to_list()] == [1, 2, 99]
+
+
+def test_neither_spelling_still_vivifies():
+    spec = _drop_probe_spec()
+    del spec["on_missing_endpoint"]
+    kg = kglite.from_records(spec)
+    assert [r["i"] for r in kg.cypher("MATCH (n:Doc) RETURN n.id AS i ORDER BY i").to_list()] == [1, 2, 99]

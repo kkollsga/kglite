@@ -116,7 +116,7 @@ def from_records(
     lock_schema: bool = False,
     storage: str = "default",
     path: Optional[str] = None,
-    on_missing_endpoint: str = "vivify",
+    on_missing_endpoint: Optional[str] = None,
 ) -> KnowledgeGraph:
     """Build a KnowledgeGraph from an inline JSON records spec.
 
@@ -154,9 +154,12 @@ def from_records(
         lock_schema: If True, lock the schema after building.
         storage: ``"default"`` (in-memory), ``"mapped"``, or ``"disk"``.
         path: Directory for disk storage (only used with ``storage="disk"``).
-        on_missing_endpoint: ``"vivify"`` (default) creates provisional stub
-            nodes, ``"drop"`` omits affected edges, and ``"error"`` rejects
-            the complete build without publishing partial changes.
+        on_missing_endpoint: ``"vivify"`` creates provisional stub nodes,
+            ``"drop"`` omits affected edges, and ``"error"`` rejects the
+            complete build without publishing partial changes. ``None`` (the
+            default) takes the spec's own ``on_missing_endpoint`` key, which
+            itself defaults to ``"vivify"``; passing the argument overrides
+            whatever the spec carries.
     """
     records_json = spec if isinstance(spec, str) else json.dumps(spec)
     graph = _from_records_rs(

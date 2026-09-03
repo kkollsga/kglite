@@ -1574,7 +1574,7 @@
     },
     "from_records": {
       "kind": "function",
-      "signature": "(spec: 'Union[dict, str]', *, save: 'Optional[str]' = None, lock_schema: 'bool' = False, storage: 'str' = 'default', path: 'Optional[str]' = None, on_missing_endpoint: 'str' = 'vivify') -> 'KnowledgeGraph'"
+      "signature": "(spec: 'Union[dict, str]', *, save: 'Optional[str]' = None, lock_schema: 'bool' = False, storage: 'str' = 'default', path: 'Optional[str]' = None, on_missing_endpoint: 'Optional[str]' = None) -> 'KnowledgeGraph'"
     },
     "get_query_warning_policy": {
       "kind": "function",

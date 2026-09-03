@@ -35,7 +35,9 @@ stamped on every node of that type, including endpoint stubs `vivify` created
 for it, so `MATCH (:Human)` sees the whole type. Listing the type's own name is
 a no-op, not a duplicate.
 
-JSON arrays/maps become native list/map values. `on_missing_endpoint` is:
+JSON arrays/maps become native list/map values. `on_missing_endpoint` can be
+written in the spec (as above) or passed as the argument, which overrides the
+spec's value when given; it is:
 
 - `"vivify"` (default) — create provisional endpoint stubs.
 - `"drop"` — skip relationships whose source/target is absent and report them.

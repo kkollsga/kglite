@@ -88,6 +88,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   has it, or use `FkEdge::plain(target, fk)`. Deserialization is unaffected.
 
 ### Fixed
+- **`from_records()` ignored an `on_missing_endpoint` written in the spec.**
+  It is a documented top-level spec key, but the Python entry point inserted
+  its own argument default over it unconditionally, so a spec asking for
+  `"drop"` or `"error"` silently vivified stubs instead. The argument now
+  defaults to `None` and is applied only when passed — where it still
+  overrides the spec — and the spec's own key is honoured otherwise. A caller
+  passing the argument, or neither spelling, sees no change.
 - **Relationship alternation `[:A|B]` was rejected inside `EXISTS { }`,
   `count { }` and `size(...)`.** `MATCH (n)-[:A|B]->()` has always parsed, but
   the same pattern in a subquery failed with *"Unexpected token in EXISTS
