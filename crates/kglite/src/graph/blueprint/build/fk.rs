@@ -460,8 +460,9 @@ fn resolve_fk_property_types<'a>(
         }
     }
 
-    let prepared = prepass::prepare_chunks(source, chunk_size, &HashMap::new(), |raw| {
-        if !spec.spec.filter.is_empty() {
+    let filtered = !spec.spec.filter.is_empty();
+    let prepared = prepass::prepare_chunks(source, chunk_size, &HashMap::new(), !filtered, |raw| {
+        if filtered {
             apply_filter(raw, &spec.spec.filter);
         }
         wanted.clone()

@@ -39,7 +39,44 @@ pub trait Source: Send + Sync {
         &self,
         chunk_size: usize,
     ) -> Result<Box<dyn Iterator<Item = Result<RawCsv, String>> + '_>, String>;
+
+    /// Visit the cells of `columns`, row by row, without materialising a
+    /// table. `visit` receives the index *into `columns`* and the cell text of
+    /// every non-empty cell, and returns false to stop the scan there.
+    ///
+    /// This is the read path for questions answered by looking at values and
+    /// nothing else — the loader's whole-input type inference. The default
+    /// goes through `chunks`, so a new format works before it is optimised;
+    /// an implementation that can project columns without building a table
+    /// (and without a `String` per cell) should override it.
+    fn scan_columns(
+        &self,
+        columns: &[&str],
+        visit: &mut dyn FnMut(usize, &str) -> bool,
+    ) -> Result<(), String> {
+        for chunk in self.chunks(SCAN_CHUNK_ROWS)? {
+            let raw = chunk?;
+            let indices: Vec<Option<usize>> =
+                columns.iter().map(|name| raw.col_index(name)).collect();
+            for r in 0..raw.row_count() {
+                for (slot, idx) in indices.iter().enumerate() {
+                    let Some(idx) = idx else { continue };
+                    if raw.nulls[r][*idx] {
+                        continue;
+                    }
+                    if !visit(slot, &raw.rows[r][*idx]) {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
+
+/// Chunk size the default `scan_columns` buffers with. Only the fallback path
+/// uses it: it bounds that path's peak RAM and nothing else.
+const SCAN_CHUNK_ROWS: usize = 65_536;
 
 /// The build's inputs, keyed by the name the blueprint refers to them by.
 ///
@@ -99,6 +136,36 @@ pub mod test_double {
                 },
                 opens,
             )
+        }
+    }
+
+    /// Wraps a `Source` but leaves `scan_columns` to the trait default, so a
+    /// test can compare an optimised override against the fallback every new
+    /// format starts on.
+    pub struct DefaultScanSource(pub Box<dyn Source>);
+
+    impl Source for DefaultScanSource {
+        fn display_name(&self) -> &str {
+            self.0.display_name()
+        }
+
+        fn size_hint(&self) -> Option<u64> {
+            self.0.size_hint()
+        }
+
+        fn can_chunk(&self) -> bool {
+            self.0.can_chunk()
+        }
+
+        fn read_all(&self) -> Result<RawCsv, String> {
+            self.0.read_all()
+        }
+
+        fn chunks(
+            &self,
+            chunk_size: usize,
+        ) -> Result<Box<dyn Iterator<Item = Result<RawCsv, String>> + '_>, String> {
+            self.0.chunks(chunk_size)
         }
     }
 
@@ -179,5 +246,96 @@ mod registry_tests {
             Box::new(CsvFile::new(PathBuf::from("two/a.csv"), "second".into())),
         );
         assert_eq!(reg.get("a.csv").unwrap().display_name(), "first");
+    }
+}
+
+#[cfg(test)]
+mod scan_tests {
+    use super::csv::CsvFile;
+    use super::test_double::DefaultScanSource;
+    use super::Source;
+    use std::io::Write;
+
+    fn write(content: &[u8]) -> tempfile::NamedTempFile {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(content).unwrap();
+        f.flush().unwrap();
+        f
+    }
+
+    fn csv_file(f: &tempfile::NamedTempFile) -> CsvFile {
+        CsvFile::new(f.path().to_path_buf(), "sample.csv".to_string())
+    }
+
+    fn collect(source: &dyn Source, columns: &[&str]) -> Vec<(usize, String)> {
+        let mut seen = Vec::new();
+        source
+            .scan_columns(columns, &mut |slot, cell| {
+                seen.push((slot, cell.to_string()));
+                true
+            })
+            .unwrap();
+        seen
+    }
+
+    /// The CSV override and the trait's chunk-based default must answer
+    /// identically — the optimisation is a read path, not a different rule.
+    #[test]
+    fn the_csv_override_sees_exactly_what_the_default_does() {
+        let mut content = String::from("a,b,c\n");
+        for i in 0..300 {
+            let b = if i % 5 == 0 {
+                String::new()
+            } else {
+                format!("b{i}")
+            };
+            content.push_str(&format!("{i},{b},   \n"));
+        }
+        let f = write(content.as_bytes());
+        let fast = collect(&csv_file(&f), &["a", "b", "missing"]);
+        let slow = collect(
+            &DefaultScanSource(Box::new(csv_file(&f))),
+            &["a", "b", "missing"],
+        );
+        assert_eq!(fast, slow);
+        // Non-vacuity: the scan saw the rows, skipped the empty cells, and
+        // never yielded the column that is not in the file.
+        assert_eq!(fast.len(), 300 + 240);
+        assert!(fast.iter().all(|(slot, _)| *slot < 2));
+    }
+
+    /// A sink that returns false stops the read there. The file's later rows
+    /// are not valid UTF-8, so a scan that kept going would fail instead of
+    /// returning `Ok`.
+    #[test]
+    fn the_csv_override_stops_before_reading_the_next_row() {
+        let mut content = b"a\nfirst\n".to_vec();
+        content.extend_from_slice(&[0xff, 0xfe, b'\n']);
+        let f = write(&content);
+
+        let mut visits = 0usize;
+        let result = csv_file(&f).scan_columns(&["a"], &mut |_, _| {
+            visits += 1;
+            false
+        });
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(visits, 1);
+    }
+
+    /// The default is chunk-granular — it materialises a chunk before it can
+    /// visit a cell — so what it guarantees is that the sink is not called
+    /// again once it has said stop.
+    #[test]
+    fn the_default_stops_calling_the_sink_when_it_says_stop() {
+        let f = write(b"a\n1\n2\n3\n4\n");
+        let source = DefaultScanSource(Box::new(csv_file(&f)));
+        let mut visits = 0usize;
+        source
+            .scan_columns(&["a"], &mut |_, _| {
+                visits += 1;
+                false
+            })
+            .unwrap();
+        assert_eq!(visits, 1);
     }
 }

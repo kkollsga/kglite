@@ -399,7 +399,8 @@ fn load_streamed_node_spec(
     // Types for the kept columns the blueprint did not declare, resolved over
     // the whole input before the first row is loaded — per-chunk inference
     // would make a column's type depend on the chunk size.
-    let prepared = prepass::prepare_chunks(source, chunk_size, &declared, |raw| {
+    let filtered = !spec.spec.filter.is_empty();
+    let prepared = prepass::prepare_chunks(source, chunk_size, &declared, !filtered, |raw| {
         if !spec.spec.filter.is_empty() {
             apply_filter(raw, &spec.spec.filter);
         }

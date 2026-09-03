@@ -44,6 +44,59 @@ impl Source for CsvFile {
     ) -> Result<Box<dyn Iterator<Item = Result<RawCsv, String>> + '_>, String> {
         read_csv_chunks(&self.path, self.display_name(), chunk_size)
     }
+
+    /// One reused `ByteRecord` for the whole file and a `&str` per requested
+    /// cell borrowed straight out of it: no table, no `String` per cell, and
+    /// the columns nobody asked for are never touched. The trait's default
+    /// answers the same question by building every row of every column.
+    fn scan_columns(
+        &self,
+        columns: &[&str],
+        visit: &mut dyn FnMut(usize, &str) -> bool,
+    ) -> Result<(), String> {
+        let mut rdr = ::csv::ReaderBuilder::new()
+            .has_headers(true)
+            .flexible(true)
+            .from_path(&self.path)
+            .map_err(|e| format!("CSV open {}: {e}", self.display))?;
+        let headers = rdr
+            .byte_headers()
+            .map_err(|e| format!("CSV header {}: {e}", self.display))?;
+        let indices: Vec<Option<usize>> = columns
+            .iter()
+            .map(|name| headers.iter().position(|h| h == name.as_bytes()))
+            .collect();
+        if indices.iter().all(Option::is_none) {
+            return Ok(());
+        }
+
+        let mut record = ::csv::ByteRecord::new();
+        loop {
+            let more = rdr
+                .read_byte_record(&mut record)
+                .map_err(|e| format!("CSV row {}: {e}", self.display))?;
+            if !more {
+                break;
+            }
+            for (slot, idx) in indices.iter().enumerate() {
+                let Some(idx) = idx else { continue };
+                let Some(bytes) = record.get(*idx) else {
+                    continue;
+                };
+                if bytes.is_empty() {
+                    continue;
+                }
+                // The table producers surface a non-UTF-8 field as a row
+                // error; so does this.
+                let cell = std::str::from_utf8(bytes)
+                    .map_err(|e| format!("CSV row {}: {e}", self.display))?;
+                if !visit(slot, cell) {
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Stream a CSV in fixed-size row chunks. Each yielded `RawCsv`

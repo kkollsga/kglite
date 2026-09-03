@@ -118,7 +118,9 @@ fn load_one_junction_edge(
     // type is resolved over the whole input first — including the two FK
     // columns, whose type decides how each endpoint id is matched, and which
     // per-target grouping would otherwise type once per group.
-    let prepared = match prepass::prepare_chunks(source, chunk_size, &declared, |raw| {
+    // No filter runs over a junction table, so the cheap column scan sees
+    // exactly the rows the load does.
+    let prepared = match prepass::prepare_chunks(source, chunk_size, &declared, true, |raw| {
         keep.iter()
             .filter(|p| raw.col_index(p).is_some())
             .cloned()

@@ -45,6 +45,7 @@ pub(super) fn prepare_chunks<'a, F>(
     source: &'a dyn Source,
     chunk_size: usize,
     declared: &HashMap<String, String>,
+    row_preserving: bool,
     mut prepare: F,
 ) -> Result<Prepared<'a>, String>
 where
@@ -83,19 +84,24 @@ where
         });
     };
 
-    // Genuinely multi-chunk with something to infer: fold the remaining chunks
-    // and load from a fresh pass.
+    // Genuinely multi-chunk with something to infer: read the undeclared
+    // columns once more, then load from a fresh pass.
     drop(first);
-    let mut pending = Some(second);
-    while let Some(chunk) = pending.take().or_else(|| stream.next()) {
-        if saturated(&inferences) {
-            // Every undeclared column has seen a cell that is not one of the
-            // parseable shapes; no later row can change the answer.
-            break;
+    if row_preserving {
+        scan_remaining(source, &mut inferences)?;
+    } else {
+        // `prepare` drops or rewrites rows, so the cells that count are only
+        // visible through it — a raw column scan would infer from rows the
+        // load never sees, and could widen a type the buffered path narrows.
+        let mut pending = Some(second);
+        while let Some(chunk) = pending.take().or_else(|| stream.next()) {
+            if settled(&inferences) {
+                break;
+            }
+            let mut raw = chunk?;
+            let keep = prepare(&mut raw);
+            observe(&mut inferences, &raw, &keep, declared);
         }
-        let mut raw = chunk?;
-        let keep = prepare(&mut raw);
-        observe(&mut inferences, &raw, &keep, declared);
     }
 
     Ok(Prepared {
@@ -103,6 +109,39 @@ where
         chunks: source.chunks(chunk_size)?,
         extra_pass: true,
     })
+}
+
+/// Fold the whole input into `inferences` through `Source::scan_columns`,
+/// which visits only these columns' cells and allocates nothing per cell —
+/// the pre-pass asks a question about values, so it should not pay for a
+/// table. The first chunk's evidence is already in `inferences`; re-reading
+/// those rows only re-confirms it.
+fn scan_remaining(
+    source: &dyn Source,
+    inferences: &mut IndexMap<String, ColumnInference>,
+) -> Result<(), String> {
+    let names: Vec<String> = inferences.keys().cloned().collect();
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let mut states: Vec<ColumnInference> = inferences.values().copied().collect();
+    let mut unsettled = states.iter().filter(|s| !s.is_settled()).count();
+
+    source.scan_columns(&refs, &mut |slot, cell| {
+        let state = &mut states[slot];
+        if state.is_settled() {
+            return unsettled > 0;
+        }
+        state.observe(cell);
+        if state.is_settled() {
+            unsettled -= 1;
+        }
+        // Nothing a later cell can say changes an all-settled answer.
+        unsettled > 0
+    })?;
+
+    for (state, slot) in states.into_iter().zip(inferences.values_mut()) {
+        *slot = state;
+    }
+    Ok(())
 }
 
 fn observe(
@@ -125,7 +164,7 @@ fn observe(
     }
 }
 
-fn saturated(inferences: &IndexMap<String, ColumnInference>) -> bool {
+fn settled(inferences: &IndexMap<String, ColumnInference>) -> bool {
     !inferences.is_empty() && inferences.values().all(|i| i.is_settled())
 }
 
