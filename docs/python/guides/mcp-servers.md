@@ -634,12 +634,15 @@ startup with a non-zero exit code. The recurring ones:
 | `ERROR: <path>: unknown top-level keys: ['foo']` | Typo or unsupported key in manifest. | Compare against the [top-level field list](#top-level-fields). |
 | `WARN … declared source_root does not resolve …` plus `source tools: unavailable (unresolved: "./data" → /abs/.../data)` — or `source tools: 2 root(s) serving, unresolved: …` — in the boot summary | The path is relative-to-yaml; it didn't land on a real directory. **The server still boots and serves its graph tools**; other declared roots keep serving, and only the named one is dropped. | Check the path; create the directory; or use `source_roots:` if you have multiple. Then restart. |
 | `ERROR: --mcp-config path does not exist: <path>` | Explicit `--mcp-config` value points at a missing file. | Check the path. Sibling auto-detect is `<basename>_mcp.yaml`. |
+| `Error: skill path "./pack" (resolved to /abs/.../pack) does not exist or is not a directory` | A `skills:` entry names a directory that isn't there. One bad entry fails the whole registry build, so tolerating it would serve the deployment with **every** skill gone — bundled ones included — while the graph tools answered normally. | Create the directory, or drop the entry. The auto-detected `<basename>.skills/` layer is separate and stays optional. |
 | `ERROR: extensions.value_codecs ... is not bijective` | A `map` codec has two keys mapping to the same value, so encode is ambiguous. | Make the `map:` one-to-one. |
 | `ERROR: value_codecs[i].match ... is not a valid regex` | A `regex` codec's `match` doesn't compile. | Fix the regex (anchor it for a full match). |
 
-Exit code 3 is reserved for manifest / validation errors; exit 1 for
-graph-file-not-found and for missing runtime dependencies. Wrapping
-scripts can branch on those.
+Every boot failure exits **1** — manifest and validation errors included.
+`2` is clap's own code for an unparseable command line (a misspelled flag),
+`0` is a clean exit, and the wheel entry point returns `130` on Ctrl-C. There
+is no separate code per failure class, so wrapping scripts branch on the
+message, not the code.
 
 ## End-to-end example: a conference catalog graph
 
