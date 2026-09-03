@@ -30,9 +30,18 @@ impl RawCsv {
         self.rows.len()
     }
 
-    /// Source-file row number for row `r`, or `r + 1` for a table built
-    /// without provenance (synthesised frames in tests).
+    /// Source-file row number for row `r`.
+    ///
+    /// `row_ids` shorter than `rows` is a producer bug — every warning that
+    /// names a row then names the wrong one, and nothing says so. Debug builds
+    /// assert; release falls back to `r + 1` rather than killing a build over
+    /// a diagnostic.
     pub fn row_id(&self, r: usize) -> usize {
+        debug_assert_eq!(
+            self.row_ids.len(),
+            self.rows.len(),
+            "row_ids must carry one source row number per row"
+        );
         self.row_ids.get(r).copied().unwrap_or(r + 1)
     }
 }
@@ -93,6 +102,38 @@ impl ListMisparseTally {
                 )
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod row_id_tests {
+    use super::RawCsv;
+
+    fn two_rows_one_id() -> RawCsv {
+        RawCsv {
+            headers: vec!["a".to_string()],
+            rows: vec![vec!["x".to_string()], vec!["y".to_string()]],
+            nulls: vec![vec![false], vec![false]],
+            row_ids: vec![7],
+        }
+    }
+
+    /// A producer that forgets provenance used to fail silently: the fallback
+    /// invented `r + 1`, so a warning named a row that is not the row. Debug
+    /// builds now stop on it; release keeps the fallback so a build never dies
+    /// over a diagnostic.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "row_ids")]
+    fn a_table_with_short_row_ids_panics_in_debug() {
+        let raw = two_rows_one_id();
+        let _ = raw.row_id(1);
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn a_table_with_short_row_ids_falls_back_in_release() {
+        assert_eq!(two_rows_one_id().row_id(1), 2);
     }
 }
 

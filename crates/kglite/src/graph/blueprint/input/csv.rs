@@ -114,6 +114,11 @@ fn read_csv_chunks(
         if rows.is_empty() {
             None
         } else {
+            debug_assert_eq!(
+                row_ids.len(),
+                rows.len(),
+                "every chunk row carries its source row number"
+            );
             Some(Ok(RawCsv {
                 headers: headers.clone(),
                 rows,
@@ -167,7 +172,12 @@ fn read_csv_raw(path: &Path, display: &str) -> Result<RawCsv, String> {
         nulls.push(nrow);
     }
 
-    let row_ids = (1..=rows.len()).collect();
+    let row_ids: Vec<usize> = (1..=rows.len()).collect();
+    debug_assert_eq!(
+        row_ids.len(),
+        rows.len(),
+        "every row carries its source row number"
+    );
     Ok(RawCsv {
         headers,
         rows,

@@ -792,12 +792,6 @@ mod typing_tests {
             tally.into_warnings("j")[0].contains("First at row 5001"),
             "row provenance lost"
         );
-
-        // A table built without provenance falls back to the 1-based index.
-        let mut bare = raw(&["l"], &[&["p|q"], &["r|s"]]);
-        bare.row_ids.clear();
-        assert_eq!(bare.row_id(0), 1);
-        assert_eq!(bare.row_id(1), 2);
     }
 
     #[test]
