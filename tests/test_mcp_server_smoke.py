@@ -2825,6 +2825,24 @@ class TestSelftest:
         # The count, not just the names.
         assert re.search(r"skills: \d+ served", out), out
 
+    def test_an_opted_in_manifest_that_resolves_nothing_reports_zero_and_still_passes(
+        self, graph_fixture: Path, tmp_path: Path
+    ):
+        """A pack with no `.md` files in it, and no `true` to pull the bundled
+        set in: legal (opt in now, add files later), so the run stays green —
+        but the count has to say zero, or this is indistinguishable from a
+        deployment whose skills all resolved."""
+        (tmp_path / "pack").mkdir()
+        manifest = tmp_path / "empty_pack_mcp.yaml"
+        manifest.write_text("name: Empty Pack\nskills:\n  - ./pack\n", encoding="utf-8")
+
+        rc, out = _run_selftest(["--graph", str(graph_fixture), "--mcp-config", str(manifest)])
+
+        assert rc == 0, out
+        assert "Selftest PASSED" in out
+        assert "\u2013 skills: 0 served" in out
+        assert "<manifest-basename>.skills/" in out
+
     def test_a_manifest_that_does_not_opt_in_gets_no_skills_line(self, graph_fixture: Path, tmp_path: Path):
         # Control: without this arm the line above could be printed for every
         # manifest, opted in or not.
