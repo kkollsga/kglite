@@ -1806,7 +1806,6 @@ fn load_junction_edges(
 /// Stream one junction CSV into edges. One `connect` call per (chunk, target
 /// type) — a single-target junction, which is every one written before the
 /// union form, has exactly one group and takes the same path it always did.
-#[allow(clippy::too_many_arguments)]
 fn load_one_junction_edge(
     graph: &mut DirGraph,
     spec: &FlatSpec,
