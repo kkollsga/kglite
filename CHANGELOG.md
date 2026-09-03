@@ -88,6 +88,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   has it, or use `FkEdge::plain(target, fk)`. Deserialization is unaffected.
 
 ### Fixed
+- **`from_records` no longer discards a node spec's `labels` when its
+  `records` list is empty.** A type whose nodes all arrive as vivified edge
+  endpoints declares no records of its own; that spec returned before its
+  labels reached the stamping pass, so the stubs carried only their type name
+  and `MATCH (n:Text)` found nothing — no warning, no error. The declaration
+  now stands whether or not the spec supplies rows, matching the blueprint
+  builder, which keeps every spec through its own label phase.
 - **A declared MCP skills pack that does not exist now fails the boot.** One
   bad path in a manifest's `skills:` list failed the whole registry build, and
   the server booted anyway with *every* skill gone — the bundled methodology

@@ -175,7 +175,12 @@ fn load_node_spec(
 
     let records = records_array(spec, &ctx)?;
     if records.is_empty() {
-        return Ok(None); // nothing to add for this type
+        // No rows to load, but the declaration still stands: every node of
+        // this type carries its labels, and those nodes can all arrive as
+        // vivified edge endpoints. Returning before the labels dropped them
+        // in silence — the blueprint builder keeps every spec through its
+        // own stamping phase for exactly this reason.
+        return Ok(labels.map(|labels| (node_type, labels)));
     }
 
     // The id field always leads the column order so a record missing it

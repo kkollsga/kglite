@@ -194,3 +194,43 @@ fn every_accepted_key_still_builds() {
     assert_eq!(report.nodes_added, 2);
     assert_eq!(report.edges_added, 1);
 }
+
+#[test]
+fn labels_survive_a_spec_whose_records_are_empty() {
+    // The nodes of a type can all arrive as vivified edge endpoints. The spec
+    // still declares that type's labels, so an empty `records` list must not
+    // discard them — that is the silent-directive-drop this key exists to end.
+    let mut graph = DirGraph::new();
+
+    from_records(
+        &mut graph,
+        &json!({
+            "nodes": [
+                {"type": "Doc", "id_field": "id", "labels": ["Text"], "records": []},
+                {"type": "Src", "id_field": "id", "records": [{"id": 1}]}
+            ],
+            "connections": [{
+                "type": "CITES",
+                "source_type": "Src",
+                "source_id_field": "s",
+                "target_type": "Doc",
+                "target_id_field": "t",
+                "records": [{"s": 1, "t": 7}]
+            }]
+        }),
+    )
+    .unwrap();
+
+    let doc = graph
+        .lookup_by_id_readonly("Doc", &Value::Int64(7))
+        .unwrap();
+    let labels: Vec<String> = graph
+        .node_labels(doc)
+        .into_iter()
+        .map(|k| graph.interner.resolve(k).to_string())
+        .collect();
+    assert!(
+        labels.iter().any(|l| l == "Text"),
+        "vivified Doc(7) carries {labels:?}, not the spec's declared 'Text'"
+    );
+}

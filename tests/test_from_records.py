@@ -243,6 +243,31 @@ def test_labels_reach_vivified_endpoint_stubs():
     assert len(list(kg.cypher("MATCH (n:Place) RETURN n.id"))) == 2
 
 
+def test_labels_survive_an_empty_records_list():
+    """A type whose nodes all arrive as vivified endpoints declares an empty
+    `records` list; its labels must still be stamped. They were dropped before
+    the stamping pass ever saw them, so `MATCH (n:Text)` found nothing."""
+    kg = kglite.from_records(
+        {
+            "nodes": [
+                {"type": "Doc", "id_field": "id", "labels": ["Text"], "records": []},
+                {"type": "Src", "id_field": "id", "records": [{"id": 1}]},
+            ],
+            "connections": [
+                {
+                    "type": "CITES",
+                    "source_type": "Src",
+                    "source_id_field": "s",
+                    "target_type": "Doc",
+                    "target_id_field": "t",
+                    "records": [{"s": 1, "t": 7}],
+                }
+            ],
+        }
+    )
+    assert [r["id"] for r in kg.cypher("MATCH (n:Text) RETURN n.id AS id").to_dicts()] == [7]
+
+
 def test_labels_must_be_an_array_of_strings():
     with pytest.raises(ValueError, match=r"nodes\[0\]: 'labels' must be an array of strings"):
         kglite.from_records({"nodes": [{"type": "Doc", "id_field": "id", "labels": "Text", "records": [{"id": 1}]}]})
