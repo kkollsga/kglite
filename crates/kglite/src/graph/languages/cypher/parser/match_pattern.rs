@@ -577,3 +577,81 @@ pub(super) fn backtick_quote(name: &str) -> String {
     out.push('`');
     out
 }
+
+#[cfg(test)]
+mod extractor_parity_tests {
+    use super::super::super::tokenizer::tokenize_cypher_with_positions;
+    use super::super::CypherParser;
+    use super::CypherToken;
+
+    /// A parser positioned at the first token of `pattern`.
+    fn parser_for(pattern: &str) -> CypherParser {
+        let positioned = tokenize_cypher_with_positions(pattern).expect("pattern tokenizes");
+        let keyword_lexemes = positioned.keyword_lexemes;
+        let tokens = positioned.tokens.into_iter().map(|(t, _)| t).collect();
+        CypherParser::with_keyword_lexemes(tokens, keyword_lexemes)
+    }
+
+    /// The two extractors join their parts differently (`""` vs `" "`), which
+    /// the pattern lexer does not care about; the token *set* is what must
+    /// agree.
+    fn squeeze(s: &str) -> String {
+        s.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    /// `MATCH (n)-[:A|B]->()` parsed while `EXISTS { (n)-[:A|B]->() }` did
+    /// not, because the two re-serializers of the *same* pattern grammar are
+    /// separate functions and only one had a `Pipe` arm. The bug is therefore
+    /// not "alternation": it is a token either side can forget, and the next
+    /// one costs another release. Nothing but this test makes the compiler,
+    /// or CI, notice the divergence — the arms were checked by eye when the
+    /// `|` was added.
+    ///
+    /// Each pattern is fed to both extractors and the results must agree on
+    /// acceptance *and* on the token stream produced. The error messages
+    /// differ by design ("MATCH pattern" vs "EXISTS pattern"), so only the
+    /// accept/reject verdict is compared on the failing side.
+    #[test]
+    fn the_two_pattern_extractors_agree_on_every_pattern_shape() {
+        for pattern in [
+            // Relationship-type alternation — the arm that was missing.
+            "(n)-[:A|B]->()",
+            "(n)-[r:A|B|C]->(m)",
+            // Variable-length, both bounds and the open form.
+            "(n)-[:R*1..3]->(m)",
+            "(n)-[:R*]->(m)",
+            // Direction tokens.
+            "(n)<-[:R]-(m)",
+            "(a)-[:R]-(b)",
+            // Inline property maps: braces, commas, literals of each kind.
+            "(n:Person{age:30,score:1.5,name:'ab',ok:true})",
+            // A parameter inside a pattern — the arm added for EXISTS once
+            // before, for the same reason.
+            "(n{id:$wanted})-[:R]->(m)",
+            // Reserved keywords in name position (label, rel type, map key).
+            "(n:CONTAINS)-[:CONTAINS]->(m{contains:1})",
+            // A literal word used as a name.
+            "(n{null:1,true:2})",
+            // Backticked identifiers and an escaped quote in a string.
+            "(`odd name`:`Weird Label`)-[:R]->(m{s:'it\\'s'})",
+        ] {
+            let via_match = parser_for(pattern).extract_pattern_string();
+            let via_subquery =
+                parser_for(pattern).extract_pattern_subquery_string(&CypherToken::RBrace);
+
+            assert_eq!(
+                via_match.is_ok(),
+                via_subquery.is_ok(),
+                "the extractors disagree on whether this is a pattern: {pattern}\n  \
+                 MATCH: {via_match:?}\n  EXISTS: {via_subquery:?}"
+            );
+            if let (Ok(m), Ok(s)) = (&via_match, &via_subquery) {
+                assert_eq!(
+                    squeeze(m),
+                    squeeze(s),
+                    "the extractors re-serialize this pattern differently: {pattern}"
+                );
+            }
+        }
+    }
+}

@@ -1612,6 +1612,38 @@ class TestFkEdgeProperties:
         for chunk_size in (7, 13, 40):
             assert build(0, chunk_size) == buffered, f"chunk_size={chunk_size} changed the edge properties"
 
+    def test_streamed_null_fk_rows_drop_with_their_properties(self, tmp_path, monkeypatch):
+        """`test_null_fk_rows_drop_with_their_properties` is buffered-only and
+        `test_streamed_and_buffered_agree` has no nulls, so the streaming
+        loader's own row-subset — indices into a *chunk*, not into the file —
+        was never exercised with a hole in it. A row's properties sliding onto
+        the next surviving row is a silent wrong answer, not a crash."""
+        n = 40
+        employees = pd.DataFrame(
+            {
+                "employee_id": list(range(1, n + 1)),
+                "name": [f"E{i:02d}" for i in range(1, n + 1)],
+                # Every third row has no company: the holes fall at different
+                # offsets in every chunk size below.
+                "company_id": [None if i % 3 == 0 else (10 if i % 2 else 20) for i in range(1, n + 1)],
+                "since": [f"20{i:02d}-01-01" for i in range(1, n + 1)],
+                "role": [f"R{i}" for i in range(1, n + 1)],
+                "level": list(range(1, n + 1)),
+            }
+        )
+        bp_path = self._bp(tmp_path, {"properties": ["role", "since"]}, employees=employees)
+
+        def build(threshold_mb, chunk_size):
+            monkeypatch.setenv("KGLITE_BLUEPRINT_STREAMING_THRESHOLD_MB", str(threshold_mb))
+            monkeypatch.setenv("KGLITE_BLUEPRINT_NODE_CHUNK_SIZE", str(chunk_size))
+            return self._edges(from_blueprint(bp_path, save=False))
+
+        buffered = build(100, 1000)
+        # Each surviving edge still carries its own row's property values.
+        assert [(r["who"], r["role"]) for r in buffered] == [(f"E{i:02d}", f"R{i}") for i in range(1, n + 1) if i % 3]
+        for chunk_size in (7, 13, 40):
+            assert build(0, chunk_size) == buffered, f"chunk_size={chunk_size} moved the edge properties"
+
     def _two_source_bp(self, tmp_path, with_properties):
         """Two node types writing the same relationship type, each with repeated
         (source, target) rows. Only the *first* add_connections call per
@@ -1951,6 +1983,15 @@ class TestListColumnType:
         assert "row 1" in err
         assert "adhC|ADHE" in err
 
+    def test_a_well_formed_array_does_not_warn_for_its_own_commas(self, tmp_path, capfd):
+        """The separator check runs only on cells that are not JSON. Drop that
+        guard and every multi-element list column warns about the commas
+        inside its own valid arrays — and no other test in this class reads
+        stderr on a well-formed multi-element cell."""
+        bp_path = self._bp(tmp_path, ['["adhC","ADHE"]', '["pfk1"]'])
+        kglite.from_blueprint(str(bp_path), verbose=True, save=False)
+        assert "not a JSON array" not in capfd.readouterr().err
+
     def test_a_plain_scalar_cell_does_not_warn(self, tmp_path, capfd):
         """No separator, no ambiguity: a lone token is a one-element list and
         the warning would be noise."""
@@ -1958,6 +1999,56 @@ class TestListColumnType:
         kglite.from_blueprint(str(bp_path), verbose=True, save=False)
         err = capfd.readouterr().err
         assert "not a JSON array" not in err
+
+    def _row_id_bp(self, tmp_path, filt=None):
+        """Six genes with the one malformed cell at *file* row 5. Everything the
+        loader does to the row vector between reading and typing — filtering,
+        chunking — must leave the reported row number the one the author reads
+        in the CSV, or the warning sends them to an innocent line."""
+        genes = pd.DataFrame(
+            {
+                "gene_id": [1, 2, 3, 4, 5, 6],
+                "name": [f"g{i}" for i in range(1, 7)],
+                "keep": ["no", "no", "no", "no", "yes", "yes"],
+                "synonyms": ['["a"]', '["b"]', '["c"]', '["d"]', "adhC|ADHE", '["f"]'],
+            }
+        )
+        _write_csv(tmp_path / "genes.csv", genes)
+        spec = {
+            "csv": "genes.csv",
+            "pk": "gene_id",
+            "title": "name",
+            "properties": {"synonyms": "list"},
+        }
+        if filt:
+            spec["filter"] = filt
+        bp = {"settings": {"root": str(tmp_path)}, "nodes": {"Gene": spec}}
+        bp_path = tmp_path / "bp.json"
+        _write_blueprint(bp_path, bp)
+        return bp_path
+
+    def test_the_reported_row_survives_a_filter(self, tmp_path, capfd):
+        """`filter` drops the four rows above the bad cell, leaving it at index
+        1 of the surviving rows. The warning must still say row 5."""
+        bp_path = self._row_id_bp(tmp_path, filt={"keep": "yes"})
+        g = kglite.from_blueprint(str(bp_path), verbose=True, save=False)
+        assert g.cypher("MATCH (n:Gene) RETURN count(n) AS n").to_list()[0]["n"] == 2
+        err = capfd.readouterr().err
+        assert "First at row 5:" in err, err
+
+    def test_the_reported_row_survives_chunking(self, tmp_path, capfd, monkeypatch):
+        """Streamed two rows to a chunk, the bad cell is the first row of the
+        third chunk; a chunk-local counter would call it row 1. The tally is
+        also per-CSV, so the column gets one line, not one per chunk."""
+        monkeypatch.setenv("KGLITE_BLUEPRINT_STREAMING_THRESHOLD_MB", "0")
+        monkeypatch.setenv("KGLITE_BLUEPRINT_NODE_CHUNK_SIZE", "2")
+        bp_path = self._row_id_bp(tmp_path)
+        g = kglite.from_blueprint(str(bp_path), verbose=True, save=False)
+        assert g.cypher("MATCH (n:Gene) RETURN count(n) AS n").to_list()[0]["n"] == 6
+        err = capfd.readouterr().err
+        assert err.count("not a JSON array") == 1, err
+        assert "1 cell(s)" in err, err
+        assert "First at row 5:" in err, err
 
 
 class TestJunctionUnionTargets:
@@ -2074,6 +2165,65 @@ class TestJunctionUnionTargets:
         links = [{"source_id": "M1", "target_id": "Z9", "target_type": "Disease", "score": 1}]
         graph = from_blueprint(self._bp(tmp_path, self.TARGET_TYPES, links=links), save=False)
         assert self._landed(graph) == [("M1", "Z9", "Disease")]
+
+    def _numeric_bp(self, tmp_path):
+        """The same union keyed by integer ids, and no type column — so every
+        row is routed by probing the declared types' id indices."""
+        _write_csv(tmp_path / "microbes.csv", pd.DataFrame({"id": [1, 2], "name": ["Mi1", "Mi2"]}))
+        _write_csv(tmp_path / "diseases.csv", pd.DataFrame({"id": [10], "name": ["Dis1"]}))
+        _write_csv(tmp_path / "phenotypes.csv", pd.DataFrame({"id": [20], "name": ["Phe1"]}))
+        _write_csv(tmp_path / "exposures.csv", pd.DataFrame({"id": [30], "name": ["Exp1"]}))
+        _write_csv(
+            tmp_path / "links.csv",
+            pd.DataFrame(
+                [
+                    {"source_id": 1, "target_id": 10},
+                    {"source_id": 1, "target_id": 20},
+                    {"source_id": 2, "target_id": 30},
+                ]
+            ),
+        )
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "Microbe": {
+                    "csv": "microbes.csv",
+                    "pk": "id",
+                    "title": "name",
+                    "connections": {
+                        "junction_edges": {
+                            "ASSOCIATED_WITH": {
+                                "csv": "links.csv",
+                                "source_fk": "source_id",
+                                "target": self.TARGET_TYPES,
+                                "target_fk": "target_id",
+                            }
+                        }
+                    },
+                },
+                "Disease": {"csv": "diseases.csv", "pk": "id", "title": "name"},
+                "Phenotype": {"csv": "phenotypes.csv", "pk": "id", "title": "name"},
+                "Exposure": {"csv": "exposures.csv", "pk": "id", "title": "name"},
+            },
+        }
+        bp_path = tmp_path / "bp_numeric.json"
+        _write_blueprint(bp_path, bp)
+        return bp_path
+
+    def test_the_probe_routes_numeric_ids(self, tmp_path):
+        """A numeric pk keys its id index by `Int64`, so a probe that compares
+        the raw CSV cell matches nothing and every row falls to the *first*
+        declared type — three edges, all on Disease, no error. Every other
+        union test uses text ids, which is the blind spot the CSV-less
+        numeric-FK defect sat in on this same branch."""
+        graph = from_blueprint(self._numeric_bp(tmp_path), save=False)
+        assert self._landed(graph) == [
+            (1, 10, "Disease"),
+            (1, 20, "Phenotype"),
+            (2, 30, "Exposure"),
+        ]
+        # No stub was invented for a target the probe failed to place.
+        assert graph.cypher("MATCH (n) WHERE n._provisional = true RETURN count(n) AS c").to_list()[0]["c"] == 0
 
     def test_chunking_does_not_change_the_routing(self, tmp_path, monkeypatch):
         bp_path = self._bp(tmp_path, self.TARGET_TYPES, type_column="target_type")
