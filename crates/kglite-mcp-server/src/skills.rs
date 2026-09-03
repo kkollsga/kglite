@@ -2,8 +2,9 @@
 //! the conditionally bundled recipe-query skill, and the graph-aware
 //! predicate evaluator that gates skills on the active graph's shape.
 
+use anyhow::{bail, Result};
 use mcp_methods::server::{
-    serve_prompts, BundledSkill, Manifest, McpServer, PredicateClause, ServerOptions,
+    serve_prompts, BundledSkill, Manifest, McpServer, PredicateClause, ServerOptions, SkillError,
     SkillPredicateEvaluator, SkillRegistry,
 };
 
@@ -35,13 +36,14 @@ pub(crate) const RECIPE_QUERIES_SKILL: &str = include_str!("../skills/recipe_que
 /// `read_code_source` on `graph_has_node_type: [Function, Class]` so it stays
 /// out of prompts/list when the active graph isn't a code-tree (legal-corpus /
 /// o&g / etc. deployments). A registry that fails to build disables skills for
-/// the session rather than failing boot.
+/// the session rather than failing boot — except for the one failure an
+/// operator can fix by reading the message; see [`report_registry_failure`].
 pub(crate) fn install_skills(
     server: &mut McpServer,
     manifest: &Manifest,
     graph_state: &GraphState,
     recipe_catalog_summary: Option<crate::recipe_queries::CatalogSummary>,
-) {
+) -> Result<()> {
     // Skill `.md` bodies live at `crates/kglite-mcp-server/skills/` — the
     // single canonical home. `cargo publish` only packages files inside
     // the crate dir, so they must live here (not behind a
@@ -91,9 +93,39 @@ pub(crate) fn install_skills(
             .finalise()
         });
     match registry_result {
-        Ok(registry) => serve_prompts(&registry, server),
-        Err(e) => {
-            tracing::warn!(error = %e, "skills registry build failed; skills disabled for this session");
+        Ok(registry) => {
+            serve_prompts(&registry, server);
+            Ok(())
+        }
+        Err(e) => report_registry_failure(e, &manifest.yaml_path),
+    }
+}
+
+/// Decide what a failed registry build costs: the boot, or a warning.
+///
+/// A declared pack directory that is not there is an operator typo, and one
+/// bad entry fails the *whole* build — the bundled methodology goes with it.
+/// Nothing else in the session says so: the graph tools still answer, and
+/// `--selftest` used to print PASSED over a server with every skill silently
+/// gone. `source_root:` reports its own version of this state; skills had no
+/// equivalent, so a missing pack refuses the boot and names both spellings of
+/// the path.
+///
+/// Everything else — an unparseable skill file, one over the size limit — stays
+/// a warning: those are content faults in files that do exist, they name
+/// themselves in the log, and taking a deployment down for one of them is a
+/// worse trade than serving it without skills.
+fn report_registry_failure(error: SkillError, yaml_path: &std::path::Path) -> Result<()> {
+    match error {
+        SkillError::PathNotFound { .. } => bail!(
+            "{error}. Declared by `skills:` in {}. Create the directory, or drop the entry \
+             — a skills path that is not there disables every skill in the session, \
+             bundled ones included.",
+            yaml_path.display()
+        ),
+        other => {
+            tracing::warn!(error = %other, "skills registry build failed; skills disabled for this session");
+            Ok(())
         }
     }
 }
@@ -167,6 +199,42 @@ impl SkillPredicateEvaluator for KglitePredicateEvaluator {
             // by the framework itself, not via this evaluator.
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod registry_failure_tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn a_missing_declared_pack_refuses_the_boot_and_names_both_spellings() {
+        // Both spellings, because the operator wrote one and the filesystem
+        // holds the other: a `./domain` that resolved somewhere unexpected is
+        // the same typo as a `./domian` that resolved exactly where asked.
+        let error = SkillError::PathNotFound {
+            raw: "./domain".to_string(),
+            resolved: PathBuf::from("/srv/deploy/domain"),
+        };
+
+        let message = report_registry_failure(error, Path::new("/srv/deploy/graph_mcp.yaml"))
+            .expect_err("a declared pack that is not there must fail boot")
+            .to_string();
+
+        assert!(message.contains("./domain"), "{message}");
+        assert!(message.contains("/srv/deploy/domain"), "{message}");
+        assert!(message.contains("/srv/deploy/graph_mcp.yaml"), "{message}");
+    }
+
+    #[test]
+    fn a_content_fault_in_a_file_that_exists_stays_a_warning() {
+        // The file is there and the log names it; refusing the whole
+        // deployment over one malformed skill is the worse trade.
+        let error = SkillError::MissingFrontmatter {
+            path: PathBuf::from("/srv/deploy/domain/broken.md"),
+        };
+
+        assert!(report_registry_failure(error, Path::new("/srv/deploy/graph_mcp.yaml")).is_ok());
     }
 }
 

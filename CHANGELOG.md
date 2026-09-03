@@ -88,6 +88,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   has it, or use `FkEdge::plain(target, fk)`. Deserialization is unaffected.
 
 ### Fixed
+- **A declared MCP skills pack that does not exist now fails the boot.** One
+  bad path in a manifest's `skills:` list failed the whole registry build, and
+  the server booted anyway with *every* skill gone — the bundled methodology
+  included — while the graph tools answered normally and `--selftest` printed
+  PASSED. The boot error names what was written and where it resolved to. A
+  content fault in a file that does exist (bad frontmatter, oversized body)
+  stays a warning. `--selftest` also prints the number of skills the session
+  serves, so an opted-in deployment that resolved nothing is visible; zero is
+  reported, not failed, because `skills: true` with files added later is a
+  legitimate configuration.
 - **Ranked retrieval on a property with no index answered zero rows instead of
   raising.** `RETURN text_bm25(n, 'p', $q)` has always refused a property with
   no text index, naming `build_text_index`; the documented fast path

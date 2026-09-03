@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import socket
 import subprocess
@@ -2789,6 +2790,51 @@ class TestSelftest:
         assert "✓ workspace activation" in out
         assert "✗ graph hydrates: No active graph" in out
         assert "Selftest FAILED" in out
+
+    def test_a_declared_skill_pack_that_is_missing_fails_boot_and_names_it(self, graph_fixture: Path, tmp_path: Path):
+        """One bad `skills:` path failed the whole registry build, which
+        disabled *every* skill including the bundled ones — and the server
+        booted, answered, and selftested green anyway."""
+        manifest = tmp_path / "missing_pack_mcp.yaml"
+        manifest.write_text("name: Missing Pack\nskills:\n  - true\n  - ./no-such-pack\n", encoding="utf-8")
+
+        rc, out = _run_selftest(["--graph", str(graph_fixture), "--mcp-config", str(manifest)])
+
+        assert rc != 0, out
+        assert "Selftest FAILED" in out
+        assert "\u2717 server initializes" in out
+        # Both spellings: what the operator wrote, and where it resolved to
+        # (mcp-methods joins without normalising, so the resolved form carries
+        # the manifest directory rather than a tidied absolute path).
+        assert "./no-such-pack" in out
+        assert str(tmp_path) in out
+        assert str(manifest) in out
+
+    def test_opted_in_skills_report_their_count(self, graph_fixture: Path, tmp_path: Path):
+        """`skills: true` with no pack of its own is legal — opt in now, add
+        files later — so the count is what makes a mis-keyed project directory
+        visible."""
+        manifest = tmp_path / "skills_mcp.yaml"
+        manifest.write_text("name: Skilled\nskills: true\n", encoding="utf-8")
+
+        rc, out = _run_selftest(["--graph", str(graph_fixture), "--mcp-config", str(manifest)])
+
+        assert rc == 0, out
+        assert "\u2713 skills:" in out
+        assert "cypher_query" in out
+        # The count, not just the names.
+        assert re.search(r"skills: \d+ served", out), out
+
+    def test_a_manifest_that_does_not_opt_in_gets_no_skills_line(self, graph_fixture: Path, tmp_path: Path):
+        # Control: without this arm the line above could be printed for every
+        # manifest, opted in or not.
+        manifest = tmp_path / "no_skills_mcp.yaml"
+        manifest.write_text("name: Unskilled\n", encoding="utf-8")
+
+        rc, out = _run_selftest(["--graph", str(graph_fixture), "--mcp-config", str(manifest)])
+
+        assert rc == 0, out
+        assert "skills:" not in out
 
     def test_nonempty_recipe_catalog_reports_both_routes(self, graph_fixture: Path, tmp_path: Path):
         manifest = tmp_path / "recipes_mcp.yaml"

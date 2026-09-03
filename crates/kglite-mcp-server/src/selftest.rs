@@ -32,7 +32,7 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 
-use mcp_methods::server::Manifest;
+use mcp_methods::server::{Manifest, SkillsSource};
 
 use super::{load_manifest, pick_mode, promote_local_workspace, Cli, Mode};
 
@@ -509,6 +509,58 @@ fn check_declared_source_roots(
     ));
 }
 
+/// 2c. skills — how many the session actually serves.
+///
+/// Opting in is one line and the payoff is invisible: skills ride tool
+/// *descriptions*, so a manifest that opts in and resolves nothing looks
+/// exactly like one that resolved everything. The commonest way to get there
+/// is a project directory keyed to the wrong basename — it is
+/// `<manifest>.skills/`, next to the YAML, not `<graph>.skills/` — and a count
+/// is what makes that visible. Zero is legal (opt in now, add files later), so
+/// it is yellow, not red.
+///
+/// Only manifests that opt in produce a line; `skills:` absent or `false` is a
+/// configuration choice and has no `prompts/list` to ask.
+fn check_skills(
+    rpc: &mut Rpc,
+    manifest: Option<&Manifest>,
+    checks: &mut Vec<(&'static str, Check)>,
+) {
+    if !manifest.is_some_and(|m| matches!(m.skills, SkillsSource::Sources(_))) {
+        return;
+    }
+    let names = match rpc.request("prompts/list", json!({})) {
+        Ok(result) => result
+            .get("prompts")
+            .and_then(Value::as_array)
+            .map(|ps| {
+                ps.iter()
+                    .filter_map(|p| p.get("name").and_then(Value::as_str).map(String::from))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+        Err(e) => {
+            checks.push(("skills", Check::Fail(truncate(&e.to_string(), 200))));
+            return;
+        }
+    };
+    if names.is_empty() {
+        checks.push((
+            "skills",
+            Check::Skip(
+                "0 served — `skills:` is on but no skill resolved; the project layer is \
+                 `<manifest-basename>.skills/` next to the YAML"
+                    .into(),
+            ),
+        ));
+        return;
+    }
+    checks.push((
+        "skills",
+        Check::Pass(format!("{} served: {}", names.len(), names.join(", "))),
+    ));
+}
+
 /// 3. github tools — informational, never a hard failure. Honest listing:
 ///    present iff the manifest opted in with `builtins.github: true` *and* a
 ///    token is reachable. Absence is the default, not a fault.
@@ -672,6 +724,7 @@ pub fn run_selftest(cli: &Cli, argv: &[OsString]) -> Result<()> {
     check_graph_tools(&names, &mut checks);
     check_recipe_tools(manifest.as_ref(), &names, &mut checks);
     check_declared_source_roots(manifest.as_ref(), &mut checks);
+    check_skills(&mut rpc, manifest.as_ref(), &mut checks);
     check_github_tools(&names, &mut checks);
 
     let local_activated = check_local_activation(&mut rpc, cli, &mode, &names, &mut checks)?;

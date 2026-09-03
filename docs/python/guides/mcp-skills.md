@@ -83,6 +83,12 @@ you can override a bundled skill by shipping one of the same `name`:
 3. **project layer** — a `<basename>.skills/` directory **next to your
    manifest**. For `my_graph_mcp.yaml` that's `my_graph_mcp.skills/`. This is
    the operator's home: drop skill files here, no code changes.
+   **The basename is the *manifest's*, not the graph's.** Serving
+   `taxa.kgl` from `my_graph_mcp.yaml` means `my_graph_mcp.skills/`;
+   a `taxa.skills/` directory is never looked at, is never reported as
+   missing (the layer is optional), and costs you every skill in it. If you
+   want a directory keyed to something else, name it under `skills:` — that
+   is layer 4, and a path there that does not exist is a boot error.
 4. **operator-declared paths** (highest) — extra directories listed in
    `skills:` (see next section).
 
@@ -96,6 +102,17 @@ you can override a bundled skill by shipping one of the same `name`:
 | `true` | On: kglite-bundled + framework defaults + the `<basename>.skills/` project layer. |
 | `"./path"` | On, and also load skills from `./path` (relative to the manifest). |
 | `[true, "./a", "./b"]` | List form: `true` = the bundled/default set, each string = an extra path. Use to combine the defaults with one or more operator packs. |
+
+A declared path that does not exist **fails the boot**, naming what you wrote
+and where it resolved to. One bad entry fails the whole registry build, so the
+alternative would be a server that runs with every skill silently gone —
+bundled ones included — while the graph tools answer normally. The
+auto-detected project layer (layer 3) is the opposite: optional, and silent
+when absent.
+
+`kglite-mcp-server --selftest` prints the number of skills the session actually
+serves, so an opted-in deployment that resolved nothing is visible without
+reading `prompts/list` by hand.
 
 ## Frontmatter schema
 

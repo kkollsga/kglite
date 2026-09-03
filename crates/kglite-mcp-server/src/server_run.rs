@@ -853,7 +853,7 @@ pub(crate) async fn run_async(
     // Bare-mode (no manifest) deployments get no skills — the `skills:`
     // declaration lives in the manifest.
     if let Some(m) = manifest.as_ref() {
-        install_skills(&mut server, m, &graph_state, recipe_catalog_summary);
+        install_skills(&mut server, m, &graph_state, recipe_catalog_summary)?;
     }
 
     print_boot_summary(
