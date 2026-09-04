@@ -175,6 +175,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   has it, or use `FkEdge::plain(target, fk)`. Deserialization is unaffected.
 
 ### Fixed
+- **Vector search no longer loses whole regions of a multi-core HNSW build.**
+  The parallel index build could leave one-way edges — a neighbour pointing at
+  a vector that pointed nowhere back — stranding up to 88 of 600 vectors where
+  no query could reach them, so an approximate search silently returned a
+  distant block instead of the nearest neighbours. Two causes: a vector
+  overwrote its own neighbour list, discarding reciprocal edges other threads
+  had just added, and the build handed each worker a contiguous block of
+  slots, seeding several mutually invisible regions of the graph at once.
+  Recall no longer depends on the machine's core count. Indexes already on
+  disk are unaffected in format but were built by the old path — rebuild one
+  (`build_index`) to get the repaired topology.
 - **`from_records` no longer discards a node spec's `labels` when its
   `records` list is empty.** A type whose nodes all arrive as vivified edge
   endpoints declares no records of its own; that spec returned before its

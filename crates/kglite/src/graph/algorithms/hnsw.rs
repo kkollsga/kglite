@@ -22,6 +22,7 @@ use rayon::prelude::*;
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::RwLock;
 
 /// Metric subset HNSW navigates over. A strict subset of [`DistanceMetric`] —
@@ -408,6 +409,13 @@ impl HnswIndex {
     /// resulting graph differs run-to-run (concurrency), but recall is
     /// statistically equivalent to a sequential build; the index is a
     /// rebuildable cache, so bit-for-bit reproducibility isn't a contract.
+    ///
+    /// "Statistically equivalent" is load-bearing and does not come for free:
+    /// slots are claimed in order from a shared counter, and a slot merges its
+    /// chosen neighbours into its own list instead of assigning them. Both are
+    /// there so the link graph stays *navigable*, not merely connected — see
+    /// the comments at each site, and
+    /// `concurrent_build_leaves_no_one_way_island`.
     pub fn build(
         data: &[f32],
         norms: &[f32],
@@ -451,7 +459,22 @@ impl HnswIndex {
             metric,
         };
 
-        (1..n as u32).into_par_iter().for_each(|slot| {
+        // Claim slots from one shared counter rather than letting rayon split
+        // `1..n` into contiguous per-thread blocks. The block split starts every
+        // worker at a *different* slot — and a slot is a position in the vector
+        // buffer, so the workers seed several mutually invisible regions of the
+        // graph at once and the losers of the entry-point race stay one-way
+        // islands (measured on a 600-point ramp: slots 0..4 reachable only
+        // through slot 75, the second block's first slot). Claiming in order
+        // keeps the in-flight window `num_threads` wide, so every insert sees
+        // essentially the same graph the sequential build would have shown it.
+        let next_slot = AtomicU32::new(1);
+        let workers = rayon::current_num_threads().max(1);
+        (0..workers).into_par_iter().for_each(|_| loop {
+            let slot = next_slot.fetch_add(1, Ordering::Relaxed);
+            if slot >= n as u32 {
+                break;
+            }
             insert_concurrent(slot, &ctx, &params, &node_levels, &links, &ep_state);
         });
 
@@ -919,11 +942,33 @@ fn insert_concurrent(
         let m_max = if lc == 0 { params.m * 2 } else { params.m };
         let selected = select_neighbors(ctx, slot, &w, params.m);
 
-        // Own links (this slot is owned solely by this thread — no contention).
+        // Own links. Unlike the sequential builder — where a slot is invisible
+        // until its insert finishes — every slot exists from the start here, so
+        // other threads reach this one as a neighbour and push reciprocal edges
+        // into this very list *while* this insert is searching. Assigning
+        // `selected` wholesale would drop those, leaving one-way edges: the
+        // neighbour still points here, nothing here points back, and whole
+        // regions become unreachable from the entry point (measured: 88 of 600
+        // slots stranded at 8 threads). Merge, then apply the same degree bound
+        // a reciprocal push does.
         {
             let mut g = links[slot as usize].write().unwrap();
             if lc < g.len() {
-                g[lc] = selected.clone();
+                for &id in &selected {
+                    if !g[lc].contains(&id) {
+                        g[lc].push(id);
+                    }
+                }
+                if g[lc].len() > m_max {
+                    let cands: Vec<Cand> = g[lc]
+                        .iter()
+                        .map(|&id| Cand {
+                            id,
+                            dist: ctx.dist_ids(slot, id),
+                        })
+                        .collect();
+                    g[lc] = select_neighbors(ctx, slot, &cands, m_max);
+                }
             }
         }
         // Bidirectional links + prune, one neighbour lock at a time.
@@ -1542,5 +1587,110 @@ mod tests {
             Some(HnswMetric::Euclidean)
         );
         assert_eq!(HnswMetric::from_distance(DistanceMetric::Poincare), None);
+    }
+
+    /// A ramp of collinear points: slot `i` sits at `(i, 1)`, so slot index *is*
+    /// position and the exact top-5 for a query at the origin is `0..5`. The
+    /// degenerate geometry is the point — it makes a one-way edge visible as a
+    /// stranded prefix instead of hiding in ANN noise.
+    fn ramp(n: usize) -> (Vec<f32>, Vec<f32>) {
+        let mut data = Vec::with_capacity(n * 2);
+        for i in 0..n {
+            data.push(i as f32);
+            data.push(1.0);
+        }
+        let norms = (0..n).map(|i| ((i * i) as f32 + 1.0).sqrt()).collect();
+        (data, norms)
+    }
+
+    /// Slots reachable from the entry point by following layer-0 links.
+    fn layer_zero_reach(index: &HnswIndex) -> usize {
+        let mut seen = vec![false; index.len];
+        let start = index
+            .entry_point
+            .expect("a non-empty index has an entry point") as usize;
+        seen[start] = true;
+        let mut stack = vec![start];
+        let mut count = 1;
+        while let Some(slot) = stack.pop() {
+            for &e in &index.links[slot][0] {
+                if !seen[e as usize] {
+                    seen[e as usize] = true;
+                    count += 1;
+                    stack.push(e as usize);
+                }
+            }
+        }
+        count
+    }
+
+    /// The concurrent build must not leave a one-way edge — a neighbour that
+    /// points at a slot the slot does not point back at. Two separate defects
+    /// produced them, both invisible on a single-threaded build and both
+    /// reproduced only under real thread pressure (hence the explicit pool; the
+    /// machine's default width is not a contract):
+    ///
+    /// * a slot **assigned** its chosen neighbours over its own list, discarding
+    ///   the reciprocal edges other threads had already pushed into it;
+    /// * `into_par_iter()` over the slot range handed each worker a *contiguous
+    ///   block*, so the workers seeded mutually invisible regions of the graph
+    ///   and the losers of the entry-point race never got linked back into.
+    ///
+    /// Each defect gets the detector that catches it. Reachability is sharp on
+    /// the first (512/600 at eight threads; 10/10 rounds red when the assignment
+    /// comes back). The second survives it — a graph can be connected and still
+    /// not navigable, and it left slots `0..5` reachable only through slot 75,
+    /// far outside any `ef_search` beam — so the one-way edge *count* is bounded
+    /// too: with block splitting restored it measured 599..806 over 24 rounds
+    /// against 116..237 here, so the 400 ceiling has ~1.7x margin either way.
+    /// The query contract is asserted last, as the thing users actually see.
+    #[test]
+    fn concurrent_build_leaves_no_one_way_island() {
+        const N: usize = 600;
+        let (data, norms) = ramp(N);
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(8)
+            .build()
+            .expect("build an eight-thread pool");
+
+        for round in 0..8 {
+            let index = pool.install(|| {
+                HnswIndex::build(
+                    &data,
+                    &norms,
+                    2,
+                    HnswMetric::Euclidean,
+                    HnswParams::default(),
+                    7,
+                )
+            });
+            assert_eq!(
+                layer_zero_reach(&index),
+                N,
+                "round {round}: layer 0 strands slots the entry point cannot reach"
+            );
+            let one_way = (0..N)
+                .flat_map(|slot| {
+                    index.links[slot][0]
+                        .iter()
+                        .map(move |&e| (slot as u32, e as usize))
+                })
+                .filter(|&(slot, e)| !index.links[e][0].contains(&slot))
+                .count();
+            assert!(
+                one_way <= 400,
+                "round {round}: {one_way} layer-0 edges point one way"
+            );
+            let hits = index
+                .search(&[0.0, 1.0], 1.0, 5, None, &data, &norms)
+                .iter()
+                .filter(|(slot, _)| (*slot as usize) < 5)
+                .count();
+            assert!(
+                hits >= 4,
+                "round {round}: recall@5 is {hits}/5, top-5 = {:?}",
+                index.search(&[0.0, 1.0], 1.0, 5, None, &data, &norms)
+            );
+        }
     }
 }
