@@ -8,7 +8,8 @@
     "fastembed": "public-api",
     "okf": "public-api",
     "parallel-bz2": "implementation-only",
-    "rdf": "public-api"
+    "rdf": "public-api",
+    "xlsx": "implementation-only"
   },
   "profiles": [
     {
