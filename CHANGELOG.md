@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.16.23] - 2026-09-04
 ### Added
 - **A blueprint declares its inputs once, in a `files:` section.** Each entry
   names an input (`{"path": "disease.csv", "format": "csv"}`) that node specs
@@ -83,6 +85,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wrapper prints. `Blueprint.files` / `FileSpec`, `NodeSpec.file`,
   `JunctionEdge.file` (its `csv` is now `Option`) and `input_name()` mirror
   the `files:` section. The C ABI's `kglite_blueprint_build` is unchanged.
+  `cargo semver-checks` against 0.16.22: `build` takes 4 parameters instead of
+  3, and five struct-literal-constructible types gained a public field
+  (`Blueprint.files`, `NodeSpec.file`, `JunctionEdge.file`, `FlatSpec.input`,
+  `BuildReport.edges_actual`) — a Rust embedder constructing those by literal
+  adds the field; a `..Default::default()` tail already covers `Blueprint`,
+  `NodeSpec` and `FileSpec`.
 - **Blueprint build warnings are Python `UserWarning`s, as the documentation
   has said since 0.9.1.** They were written straight to stderr, so nothing a
   caller could set up — `warnings.simplefilter`, `warnings.catch_warnings`,
