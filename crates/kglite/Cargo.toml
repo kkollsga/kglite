@@ -119,12 +119,12 @@ rayon = "1.12"
 # the ~25x speedup of that CRC pass, which is the whole reason for the
 # dependency, disappears.
 crc32fast = "1.5"
-# 1.0.30 is the tight floor for the workspace-unified tree, not the
-# engine's own need: with the `fastembed` feature on, fastembed 6 pulls
-# hf-hub 0.5 -> ureq 3, and every ureq 3.x requires flate2 ^1.0.30. Cargo
-# unifies flate2 across the tree, so the old "1.0.22" made the whole
+# 1.1 is the tight floor for the workspace-unified tree, not the engine's
+# own need: with the `xlsx` feature on, calamine 0.36 pulls zip 8.6, which
+# requires flate2 ^1.1 (ureq 3, under `fastembed`, needs ^1.0.30). Cargo
+# unifies flate2 across the tree, so a lower floor makes the whole
 # workspace unresolvable under direct-minimal-versions.
-flate2 = "1.0.30"
+flate2 = "1.1"
 zstd = "0.13"
 memmap2 = "0.9"
 # 0.2.182 is the tight floor for the workspace-unified tree, not a
