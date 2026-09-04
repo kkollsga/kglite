@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Cypher `abs()` reports integer overflow instead of panicking at the minimum
+  signed integer. `round()` handles extreme precision without narrowing wrap,
+  spurious infinity or NaN, including subnormal values and signed zero.
 - Save-as now transfers an open graph's writer lease and durable log together
   after a successful save. Failed saves retain the original home; the original
   file keeps its recovery data, and a destination with pending recovery is

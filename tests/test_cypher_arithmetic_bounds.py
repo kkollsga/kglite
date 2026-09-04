@@ -1,11 +1,68 @@
 """Regression tests for checked range and temporal arithmetic."""
 
+import math
+
 import pytest
 
 import kglite
 
 I64_MIN = -(2**63)
 I64_MAX = 2**63 - 1
+
+
+@pytest.mark.parametrize("optimize", [False, True])
+def test_abs_integer_minimum_is_a_typed_overflow(optimize):
+    graph = kglite.KnowledgeGraph()
+    with pytest.raises(kglite.CypherExecutionError, match="overflow"):
+        graph.cypher("RETURN abs($value) AS v", params={"value": I64_MIN}, disable_optimizer=not optimize)
+    for value in [I64_MIN + 1, -1, 0, I64_MAX]:
+        assert graph.cypher(
+            "RETURN abs($value) AS v", params={"value": value}, disable_optimizer=not optimize
+        ).scalar() == abs(value)
+
+
+@pytest.mark.parametrize("optimize", [False, True])
+@pytest.mark.parametrize(
+    ("value", "precision", "expected"),
+    [
+        (1.234, 309, 1.234),
+        (1.234, 2**32, 1.234),
+        (1.234, I64_MAX, 1.234),
+        (-1.234, -(2**32), -0.0),
+        (1.234, I64_MIN, 0.0),
+        (1.234, -324, 0.0),
+        (1e308, 2, 1e308),
+        (1.4e-309, 309, 1e-309),
+        (5e-324, 323, 0.0),
+        (5e-324, 324, 5e-324),
+        (-5e-324, 323, -0.0),
+        (1.234, 2.9, 1.23),
+        (1.8, None, 2.0),
+        (1.8, "ignored", 2.0),
+        (125.0, -1, 130.0),
+        (-125.0, -1, -130.0),
+        (1.79e308, -308, float("inf")),
+        (float("inf"), I64_MIN, float("inf")),
+        (-float("inf"), I64_MAX, -float("inf")),
+        (float("nan"), I64_MAX, float("nan")),
+    ],
+)
+def test_round_precision_boundaries_preserve_float_semantics(value, precision, expected, optimize):
+    result = (
+        kglite.KnowledgeGraph()
+        .cypher(
+            "RETURN round($value, $precision) AS v",
+            params={"value": value, "precision": precision},
+            disable_optimizer=not optimize,
+        )
+        .scalar()
+    )
+    if math.isnan(expected):
+        assert math.isnan(result)
+    else:
+        assert result == expected
+        if expected == 0:
+            assert math.copysign(1, result) == math.copysign(1, expected)
 
 
 @pytest.fixture

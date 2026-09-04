@@ -220,8 +220,8 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/scalar_functions/numeric.rs",
       "qualified_name": "crate::CypherExecutor<'a>::eval_numeric_fn",
-      "lines": 193,
-      "branches": 114,
+      "lines": 190,
+      "branches": 111,
       "nesting": 5
     },
     {
