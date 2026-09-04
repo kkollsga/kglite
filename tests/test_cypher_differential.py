@@ -41,15 +41,45 @@ import kglite
 #    OPTIONAL with no match, ORDER BY ties, DISTINCT, parameterized,
 #    multi-MATCH chains.
 #
-# The corpus deliberately skips vector_score / text_score and spatial
-# fusion — those depend on registered embedders or geometry data the shared
-# fixtures do not carry. They live in
-# tests/test_cypher_specialized_optimizer.py, which builds its own.
+# Spatial and embedder-driven trigger oracles live in the specialized suite.
+# Vector ordering regressions below use a small registered-vector fixture too,
+# so their exact trigger shapes remain available to the pass bisector.
 #: The fused shape itself, shared by the clean and the stale fixtures so those
 #: two entries differ only in the index state they run against.
 TEXT_BM25_TOP_K = "MATCH (d:Doc) RETURN d.id AS id, text_bm25(d, 'body', 'alpha beta') AS s ORDER BY s DESC LIMIT 3"
 
 DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
+    (
+        "vector_score_ascending_nulls",
+        "vector_order_graph",
+        "MATCH (d:Doc) RETURN d.id AS id, vector_score(d, 'summary_emb', [1.0,0.0]) AS s ORDER BY s ASC LIMIT 2",
+        None,
+    ),
+    (
+        "vector_score_descending_nulls",
+        "vector_order_graph",
+        "MATCH (d:Doc) RETURN d.id AS id, vector_score(d, 'summary_emb', [1.0,0.0]) AS s ORDER BY s DESC LIMIT 2",
+        None,
+    ),
+    (
+        "vector_score_explicit_nulls_last",
+        "vector_order_graph",
+        "MATCH (d:Doc) RETURN d.id AS id, vector_score(d, 'summary_emb', [1.0,0.0]) AS s "
+        "ORDER BY s DESC NULLS LAST LIMIT 4",
+        None,
+    ),
+    (
+        "text_score_ascending_nulls",
+        "vector_order_graph",
+        "MATCH (d:Doc) RETURN d.id AS id, text_score(d, 'summary', [1.0,0.0]) AS s ORDER BY s ASC LIMIT 2",
+        None,
+    ),
+    (
+        "text_score_descending_nulls",
+        "vector_order_graph",
+        "MATCH (d:Doc) RETURN d.id AS id, text_score(d, 'summary', [1.0,0.0]) AS s ORDER BY s DESC LIMIT 2",
+        None,
+    ),
     ("simple_match", "small_graph", "MATCH (p:Person) RETURN p.name AS n", None),
     ("simple_match_param", "small_graph", "MATCH (p:Person) WHERE p.age > $min RETURN p.name AS n", {"min": 30}),
     # Dynamic label / relationship type: the parameter is bound before the
@@ -3602,8 +3632,8 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         None,
     ),
     # ASC: least-relevant-first has no postings shortcut. Divergent while the
-    # decline fell through to the `vector_score` scan, which *drops*
-    # null-scoring rows instead of placing them.
+    # decline formerly fell through to a vector-scoring scan that dropped
+    # null rows instead of placing them.
     (
         "text_bm25_top_k_ascending",
         "text_index_graph",
@@ -3768,6 +3798,16 @@ def _staled_text_index_graph() -> kglite.KnowledgeGraph:
     graph = _build_text_index_graph(auto_refresh_limit=1)
     graph.cypher("CREATE (:Doc {id: 11, title: 'doc-11', body: 'alpha beta gamma delta'})")
     graph.cypher("CREATE (:Doc {id: 12, title: 'doc-12', body: 'alpha alpha alpha'})")
+    return graph
+
+
+@pytest.fixture
+def vector_order_graph() -> kglite.KnowledgeGraph:
+    import pandas as pd
+
+    graph = kglite.KnowledgeGraph()
+    graph.add_nodes(pd.DataFrame({"id": [0, 1, 2, 3], "summary": ["x"] * 4}), "Doc", "id")
+    graph.set_embeddings("Doc", "summary", {0: [1.0, 0.0], 1: [0.0, 1.0], 2: [-1.0, 0.0]})
     return graph
 
 

@@ -237,7 +237,9 @@ pub(crate) fn fuse_node_scan_top_k(
 
 /// Detect `RETURN ... vector_score(...) AS s ... ORDER BY s DESC LIMIT k`
 /// and replace with a fused clause that uses a min-heap (O(n log k) vs O(n log n))
-/// and projects RETURN expressions only for the k surviving rows.
+/// and projects RETURN expressions only for the k surviving rows. Decline ASC
+/// and NULLS LAST: HNSW narrows highest numeric scores, and the fused clause
+/// carries only the default DESC/null-first ordering.
 pub(crate) fn fuse_vector_score_order_limit(query: &mut CypherQuery) {
     let mut i = 0;
     while i + 2 < query.clauses.len() {
@@ -245,6 +247,12 @@ pub(crate) fn fuse_vector_score_order_limit(query: &mut CypherQuery) {
             i += 1;
             continue;
         };
+        // HNSW ranks highest scores only. Other directions/null placement use
+        // the generic top-k path, which retains their complete ordering contract.
+        if !shape.descending || shape.nulls != NullsPlacement::First {
+            i += 1;
+            continue;
+        }
         let return_clause = take_fused_shape(query, i);
         query.clauses.insert(
             i,
@@ -313,6 +321,7 @@ struct ScoredShape {
     /// Index of the RETURN item holding the scoring call.
     score_index: usize,
     descending: bool,
+    nulls: NullsPlacement,
     limit: usize,
 }
 
@@ -370,6 +379,7 @@ fn match_scored_order_limit(clauses: &[Clause], i: usize, function: &str) -> Opt
     Some(ScoredShape {
         score_index,
         descending: !o.items[0].ascending,
+        nulls: o.items[0].effective_nulls(),
         limit,
     })
 }

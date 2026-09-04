@@ -321,6 +321,50 @@ def test_vector_top_k_equal_scores_preserve_input_order():
     assert optimized == naive
 
 
+@pytest.mark.parametrize("indexed", [False, True])
+@pytest.mark.parametrize("missing", [None, 0, 3])
+@pytest.mark.parametrize("function", ["vector_score", "text_score"])
+@pytest.mark.parametrize(
+    "order", ["ASC", "DESC", "ASC NULLS FIRST", "ASC NULLS LAST", "DESC NULLS FIRST", "DESC NULLS LAST"]
+)
+@pytest.mark.parametrize("limit", [1, 2, 5])
+def test_vector_ordering_goldens(indexed, missing, function, order, limit):
+    graph = kglite.KnowledgeGraph()
+    count = 320 if indexed else 4
+    graph.add_nodes(
+        pd.DataFrame({"id": range(count), "title": [f"doc-{i}" for i in range(count)], "summary": ["x"] * count}),
+        "Doc",
+        "id",
+        "title",
+    )
+    vectors = {i: [0.0, 1.0] for i in range(count) if i != missing}
+    if missing != 0:
+        vectors[0] = [1.0, 0.0]
+    vectors[2] = [-1.0, 0.0]
+    if missing != 3:
+        vectors[3] = [-1.0, 0.0]
+    graph.set_embeddings("Doc", "summary", vectors)
+    if indexed:
+        graph.build_vector_index("Doc", "summary")
+    prop = "summary_emb" if function == "vector_score" else "summary"
+    query = (
+        f"MATCH (d:Doc) WHERE d.id < 4 RETURN d.id AS id, {function}(d, '{prop}', [1.0, 0.0]) AS score "
+        f"ORDER BY score {order} LIMIT {limit}"
+    )
+    ascending = order.startswith("ASC")
+    # The indexed DESC cutoff has distinct scores: approximate retrieval may
+    # choose either equal-scoring candidate at a cutoff. ASC still exercises ties.
+    expected = [2, 3, 1, 0] if ascending else [0, 1, 2, 3]
+    if missing is not None:
+        expected.remove(missing)
+        null_first = "NULLS FIRST" in order or (not ascending and "NULLS" not in order)
+        expected.insert(0 if null_first else len(expected), missing)
+    scores = {0: 1.0, 1: 0.0, 2: -1.0, 3: -1.0}
+    golden = [{"id": node, "score": None if node == missing else scores[node]} for node in expected[:limit]]
+    assert graph.cypher(query, disable_optimizer=True).to_list() == golden
+    assert graph.cypher(query).to_list() == golden
+
+
 def test_generic_top_k_equal_keys_preserve_input_order():
     graph = kglite.KnowledgeGraph()
     query = "UNWIND [0, 1, 2] AS id RETURN id, 1 AS score ORDER BY score DESC LIMIT 2"

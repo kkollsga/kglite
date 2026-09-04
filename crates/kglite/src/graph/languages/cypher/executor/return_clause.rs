@@ -7,7 +7,7 @@ use crate::datatypes::values::Value;
 use crate::graph::parallel::{self, ParallelInterrupt};
 use crate::graph::schema::EmbeddingStore;
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::HashMap;
 
 struct HnswScoreArgs {
     variable: String,
@@ -389,6 +389,9 @@ impl<'a> CypherExecutor<'a> {
         node_to_row.insert(first_idx.index(), 0);
         let mut ordered_whole_store = result_set.rows.len() == store.len()
             && store.slot_to_node.first() == Some(&first_idx.index());
+        if !ordered_whole_store && !store.node_to_slot.contains_key(&first_idx.index()) {
+            return None;
+        }
 
         for (row_index, row) in result_set.rows.iter().enumerate().skip(1) {
             let idx = *row.node_bindings.get(variable)?;
@@ -404,7 +407,12 @@ impl<'a> CypherExecutor<'a> {
                 .graph
                 .node_view(idx)?
                 .node_type_str(&self.graph.interner);
-            if current_type != node_type || node_to_row.insert(idx.index(), row_index).is_some() {
+            // Unembedded rows score NULL and precede numeric scores in DESC.
+            // ANN cannot omit them, even if it found enough numeric candidates.
+            if current_type != node_type
+                || !store.node_to_slot.contains_key(&idx.index())
+                || node_to_row.insert(idx.index(), row_index).is_some()
+            {
                 return None;
             }
         }
@@ -670,89 +678,19 @@ impl<'a> CypherExecutor<'a> {
             return Ok(rs);
         }
 
-        // Phase 1: Score all rows, keep top-k in a min-heap
-        self.check_deadline()?;
-        let mut heap: BinaryHeap<ScoredRowRef> = BinaryHeap::with_capacity(limit + 1);
-
-        for (i, row) in result_set.rows.iter().enumerate() {
-            let score_val = self.evaluate_expression(&score_expr, row)?;
-            let score = match score_val {
-                Value::Float64(f) => f,
-                Value::Int64(n) => n as f64,
-                Value::Null => continue, // skip rows without embeddings
-                _ => continue,
-            };
-            heap.push(ScoredRowRef { score, index: i });
-            if heap.len() > limit {
-                heap.pop(); // evict the smallest score
-            }
-        }
-
-        // Phase 2: Extract winners and sort by score
-        let mut winners: Vec<ScoredRowRef> = heap.into_vec();
-        if descending {
-            winners.sort_by(|a, b| {
-                b.score
-                    .partial_cmp(&a.score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| a.index.cmp(&b.index))
-            });
-        } else {
-            winners.sort_by(|a, b| {
-                a.score
-                    .partial_cmp(&b.score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| a.index.cmp(&b.index))
-            });
-        }
-
-        // Phase 3: Project RETURN expressions only for the k winners
-        let columns: Vec<String> = return_clause
-            .items
-            .iter()
-            .map(return_item_column_name)
-            .collect();
-
-        let folded_exprs: Vec<Expression> = return_clause
-            .items
-            .iter()
-            .enumerate()
-            .map(|(idx, item)| {
-                if idx == score_item_index {
-                    score_expr.clone() // reuse already-folded score expr
-                } else {
-                    self.fold_constants_expr(&item.expression)
-                }
-            })
-            .collect();
-
-        let mut rows = Vec::with_capacity(winners.len());
-        for winner in &winners {
-            let row = &result_set.rows[winner.index];
-            let mut projected = Bindings::with_capacity(return_clause.items.len());
-            for (j, item) in return_clause.items.iter().enumerate() {
-                let key = return_item_column_name(item);
-                let val = if j == score_item_index {
-                    // Use the pre-computed score instead of re-evaluating
-                    Value::Float64(winner.score)
-                } else {
-                    self.evaluate_expression(&folded_exprs[j], row)?
-                };
-                projected.insert(key, val);
-            }
-            rows.push(ResultRow {
-                node_bindings: row.node_bindings.clone(),
-                edge_bindings: row.edge_bindings.clone(),
-                path_bindings: row.path_bindings.clone(),
-                projected,
-            });
-        }
-
-        Ok(ResultSet {
-            rows,
-            columns,
-            lazy_return_items: None,
-        })
+        // The generic collector preserves NULLs and stable ties. Reusing it
+        // also keeps exact fallback aligned with ordinary ORDER BY semantics.
+        let sort_keys = [FusedSortKey {
+            expression: score_expr,
+            ascending: !descending,
+            nulls: if descending {
+                NullsPlacement::First
+            } else {
+                NullsPlacement::Last
+            },
+            return_item: Some(score_item_index),
+        }];
+        self.execute_fused_order_by_top_k(return_clause, &sort_keys, limit, result_set)
     }
     // ========================================================================
     // Fused RETURN text_bm25(...) + ORDER BY + LIMIT (postings-driven top-k)
@@ -761,13 +699,9 @@ impl<'a> CypherExecutor<'a> {
     /// Serve `RETURN ... text_bm25(n, p, q) AS s ... ORDER BY s DESC LIMIT k`
     /// from the text index's postings when it can, else rank every row.
     ///
-    /// The fallback is [`Self::execute_fused_order_by_top_k`] — the operator
-    /// that claimed this shape before this one existed — and not the
-    /// `vector_score` path's scan, which drops null-scoring rows instead of
-    /// placing them. A stale index scores unindexed rows null, and `ORDER BY
-    /// DESC` puts nulls *first*: routing the bail anywhere else would have made
-    /// a stale-index query answer differently from the same query with the
-    /// optimizer off.
+    /// The shared ordering fallback preserves null placement and stable ties.
+    /// A stale index scores unindexed rows null, so descending order must
+    /// retain those rows first unless the query requests NULLS LAST.
     pub(super) fn execute_fused_text_bm25_top_k(
         &self,
         return_clause: &ReturnClause,

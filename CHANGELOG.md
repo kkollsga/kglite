@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Vector/text-score top-k preserves ascending order and missing-embedding rows.
+  Explicit null placement uses the standard ordering path; HNSW falls back
+  when unembedded rows must participate in the result.
 - Cypher `abs()` reports integer overflow instead of panicking at the minimum
   signed integer. `round()` handles extreme precision without narrowing wrap,
   spurious infinity or NaN, including subnormal values and signed zero.

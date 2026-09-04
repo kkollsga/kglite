@@ -87,45 +87,6 @@ pub(super) struct NodeSpatialData {
 }
 
 // ============================================================================
-// Min-heap helper for top-k scoring
-// ============================================================================
-
-/// Min-heap entry for top-k scoring. Uses reverse ordering so
-/// `BinaryHeap` (max-heap) behaves as a min-heap — the lowest score
-/// gets popped first, naturally evicting the worst candidate at capacity k.
-pub(super) struct ScoredRowRef {
-    pub(super) score: f64,
-    pub(super) index: usize,
-}
-
-impl PartialEq for ScoredRowRef {
-    fn eq(&self, other: &Self) -> bool {
-        self.index == other.index
-    }
-}
-
-impl Eq for ScoredRowRef {}
-
-impl PartialOrd for ScoredRowRef {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for ScoredRowRef {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Reverse ordering: smaller score = higher priority (popped first from max-heap)
-        other
-            .score
-            .partial_cmp(&self.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            // At an equal-score cutoff, later input rows are worse and must
-            // be evicted first so fused top-K preserves stable ORDER BY.
-            .then_with(|| self.index.cmp(&other.index))
-    }
-}
-
-// ============================================================================
 // Executor
 // ============================================================================
 
