@@ -181,7 +181,7 @@ fn an_unknown_type_or_an_unindexable_property_errors_loudly() {
 
     let unknown_property = build_text_index(&mut graph, "Doc", "bdoy", None).unwrap_err();
     assert!(
-        unknown_property.contains("No 'Doc' node carries a string value for 'bdoy'"),
+        unknown_property.contains("No 'Doc' node carries text or a string/null list for 'bdoy'"),
         "{unknown_property}"
     );
     assert!(

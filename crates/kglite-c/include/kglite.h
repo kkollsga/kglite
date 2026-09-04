@@ -1640,9 +1640,11 @@ KgliteStatusCode kglite_session_save(struct KgliteSession *session,
  * route back. `SHOW INDEXES` reports the delta. Deleting a node prunes its
  * document immediately (a freed node slot is reused, and an orphaned document
  * would be inherited by its next owner); `vacuum` renumbers every node and
- * therefore drops text indexes wholesale. An empty string indexes as an empty
- * document; a property that is absent or holds a non-string is skipped and
- * counted in the report. The property is read through the same alias
+ * therefore drops text indexes wholesale. Strings and lists containing only
+ * strings/nulls each form one document; list members are space-separated and
+ * null members ignored. Empty strings and empty/all-null lists are empty
+ * documents. Absent values, other types, or any non-text/non-null list member
+ * skip the whole document and count in the report. Fields use the same alias
  * resolution a `MATCH` filter uses.
  *
  * The auto-refresh limit is not a parameter here: this signature is published

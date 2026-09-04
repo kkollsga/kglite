@@ -51,6 +51,9 @@
 //! inverted index over a Wikidata-scale disk graph is the RAM cliff that
 //! backend exists to avoid, and disk does not persist the HNSW index either.
 
+use std::borrow::Cow;
+
+use crate::datatypes::values::Value;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{RwLock, RwLockReadGuard};
 
@@ -61,20 +64,53 @@ use crate::graph::algorithms::text_index::TextIndex;
 use crate::graph::dir_graph::DirGraph;
 use crate::graph::index_freshness::{FreshnessDelta, IndexFreshness};
 use crate::graph::schema::InternedKey;
-use crate::graph::storage::{GraphRead, StrField};
+use crate::graph::storage::{GraphRead, NodeView, StrField};
 
 /// What a [`build_text_index`] call indexed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextIndexReport {
-    /// Documents in the index — nodes whose property held a string. An empty
-    /// string counts: it indexes as an empty document and participates in the
-    /// corpus statistics.
+    /// Documents in the index: strings or lists of strings/nulls. Empty text
+    /// and empty/all-null lists count in the corpus statistics.
     pub indexed: usize,
     /// Nodes of the type that produced no document, because the property was
-    /// absent or held a non-string value.
+    /// absent or held neither text nor a list containing only strings/nulls.
     pub skipped: usize,
     /// Distinct terms in the built vocabulary.
     pub terms: usize,
+}
+
+/// Strings stay borrowed; lists contribute one document with a separator
+/// between non-null members. Reject the entire list if any member is not text.
+fn document_text<'a>(
+    view: &NodeView<'a>,
+    node_type: &'a str,
+    field: &str,
+    key: InternedKey,
+) -> Option<Cow<'a, str>> {
+    match view.resolved_field_str(node_type, field, key) {
+        StrField::Str(text) => Some(text),
+        StrField::Absent => None,
+        StrField::NotString => {
+            let value = view.resolved_field(node_type, field, key)?;
+            let Value::List(items) = value.as_ref() else {
+                return None;
+            };
+            let mut text = String::new();
+            for item in items {
+                match item {
+                    Value::String(part) => {
+                        if !text.is_empty() {
+                            text.push(' ');
+                        }
+                        text.push_str(part);
+                    }
+                    Value::Null => {}
+                    _ => return None,
+                }
+            }
+            Some(Cow::Owned(text))
+        }
+    }
 }
 
 /// The index key for a `(node_type, property)` pair.
@@ -448,12 +484,12 @@ impl TextIndexStore {
                     .graph
                     .node_view(node)
                     .map(|view| {
-                        match view.resolved_field_str(node_type, &self.resolved_field, field_key) {
-                            StrField::Str(text) => {
+                        match document_text(&view, node_type, &self.resolved_field, field_key) {
+                            Some(text) => {
                                 index.add_doc(slot, text.as_ref());
                                 true
                             }
-                            StrField::NotString | StrField::Absent => false,
+                            None => false,
                         }
                     })
                     .unwrap_or(false),
@@ -472,7 +508,7 @@ impl TextIndexStore {
     /// The same bulk build [`build_text_index`] runs, reading the field this
     /// index resolved at *its* build rather than re-resolving — a refresh may
     /// not repoint the index at another column. The one thing it does not
-    /// borrow is that function's empty-index error: a type whose every string
+    /// borrow is that function's empty-index error: a type whose every document
     /// has since been cleared is a legitimately empty index here, and it is
     /// exactly what folding the same delta would have produced.
     fn rebuild(
@@ -490,9 +526,9 @@ impl TextIndexStore {
         let mut skipped = 0usize;
         *index = TextIndex::build(members.iter().filter_map(|node| {
             let view = graph.graph.node_view(*node)?;
-            match view.resolved_field_str(node_type, &self.resolved_field, field_key) {
-                StrField::Str(text) => Some((Self::slot(*node), text)),
-                StrField::NotString | StrField::Absent => {
+            match document_text(&view, node_type, &self.resolved_field, field_key) {
+                Some(text) => Some((Self::slot(*node), text)),
+                None => {
                     skipped += 1;
                     None
                 }
@@ -599,12 +635,11 @@ pub(crate) fn note_property_written(
 /// [`DEFAULT_AUTO_REFRESH_LIMIT`](crate::graph::index_freshness::DEFAULT_AUTO_REFRESH_LIMIT)
 /// for a first build.
 ///
-/// **What is skipped.** A node whose property is absent or holds a non-string
-/// produces no document and therefore never scores — a stringified number is
-/// not a document, and indexing one would let a text query rank rows whose
-/// property is not text at all. An **empty string is indexed**, as an empty
-/// document: it is a document with no terms, not a missing one, and it counts
-/// towards the corpus statistics.
+/// **Documents.** A string or list of strings/nulls produces one document;
+/// list members are separated by spaces and null members are ignored. Empty
+/// strings and empty/all-null lists are empty documents counted in corpus
+/// statistics. An absent property, another value type, or any non-string,
+/// non-null list member skips the whole document without stringification.
 ///
 /// Errors when the node type is unknown, when the graph is disk-backed, or —
 /// on a type that has nodes — when not one of them yielded a document, which is
@@ -645,9 +680,9 @@ pub fn build_text_index(
     let mut skipped = 0usize;
     let index = TextIndex::build(nodes.iter().filter_map(|node_idx| {
         let view = graph.graph.node_view(*node_idx)?;
-        match view.resolved_field_str(node_type, &field, key) {
-            StrField::Str(text) => Some((TextIndexStore::slot(*node_idx), text)),
-            StrField::NotString | StrField::Absent => {
+        match document_text(&view, node_type, &field, key) {
+            Some(text) => Some((TextIndexStore::slot(*node_idx), text)),
+            None => {
                 skipped += 1;
                 None
             }
@@ -656,9 +691,9 @@ pub fn build_text_index(
 
     if index.total_docs() == 0 && !nodes.is_empty() {
         return Err(format!(
-            "No '{node_type}' node carries a string value for '{property}' — all {} were \
-             absent or non-string, so there is nothing to index. Check the spelling, and note \
-             that BM25 indexes text: a numeric or list-valued property is not indexable.",
+            "No '{node_type}' node carries text or a string/null list for '{property}' — all {} were \
+             absent or not text documents, so there is nothing to index. Check the spelling, and note \
+             that numbers and lists containing non-text members are not indexable.",
             nodes.len()
         ));
     }

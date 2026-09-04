@@ -1,9 +1,7 @@
 """The BM25 text-index build surface — `build_text_index` / `drop_text_index`.
 
-Ranking itself has no query surface in this release; what is asserted here is
-the lifecycle a user can see: what a build reports, what it refuses, how it
-shows up in `SHOW INDEXES`, and which storage modes serve it. Scoring
-correctness lives in the Rust tests, against the reference oracle.
+These tests cover lifecycle, reports, refusal and storage modes. Query ranking
+is covered in test_text_bm25.py and list composition in test_text_lists.py.
 """
 
 from __future__ import annotations

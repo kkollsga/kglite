@@ -345,7 +345,7 @@ pub mod api {
     }
 
     /// Lexical (BM25) text-index lifecycle — how a binding gets a text index
-    /// *built*. `build_text_index` indexes one node type's string property,
+    /// *built*. `build_text_index` indexes one node type's text or string/null-list property,
     /// `drop_text_index` removes it, `has_text_index` / `list_text_indexes`
     /// report what exists, and `index_key` is the one place the
     /// `(node_type, property)` key is minted. Building is explicit and

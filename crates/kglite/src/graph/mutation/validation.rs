@@ -226,6 +226,7 @@ pub fn value_matches_type(value: &Value, expected_type: &str) -> bool {
                 Value::Float64(_) | Value::Int64(_) | Value::UniqueId(_)
             )
         }
+        "list" | "array" => matches!(value, Value::List(_)),
         "boolean" | "bool" => matches!(value, Value::Boolean(_)),
         "datetime" => matches!(value, Value::DateTime(_) | Value::Timestamp(_)),
         "date" => matches!(value, Value::DateTime(_)),
@@ -252,9 +253,6 @@ pub fn get_value_type_name(value: &Value) -> String {
         Value::Duration { .. } => "duration".to_string(),
         Value::Null => "null".to_string(),
         Value::NodeRef(_) => "noderef".to_string(),
-        // These typically appear in query results, not as
-        // stored properties. Validation that sees them is likely
-        // surfacing a bug; classify for the error message.
         Value::List(_) => "list".to_string(),
         Value::Map(_) => "map".to_string(),
         Value::Node(_) => "node".to_string(),

@@ -441,6 +441,8 @@ const PROPERTY_TYPE_NAMES: &[&str] = &[
     "timestamp",
     "uniqueid",
     "point",
+    "list",
+    "array",
     "any",
 ];
 
@@ -592,7 +594,7 @@ fn relationship_from_value(name: &str, value: &Value) -> Result<RelationshipDecl
                                 "relationship '{name}': 'property_types' entry \
                                  '{k}: {s}' names an unknown type — use one of \
                                  string, integer, float, boolean, date, \
-                                 datetime, timestamp, point, any"
+                                 datetime, timestamp, point, list (array), any"
                             ));
                         }
                         out.insert(k.to_string(), s.clone());

@@ -7462,7 +7462,7 @@ class KnowledgeGraph:
         property: str,
         auto_refresh_limit: Optional[int] = None,
     ) -> dict[str, Any]:
-        """Build a BM25 lexical index over a node type's string property, for
+        """Build a BM25 lexical index over a node type's text property, for
         keyword/full-text ranking.
 
         Query it with the Cypher scalar ``text_bm25(n, '<property>', '<query
@@ -7507,12 +7507,13 @@ class KnowledgeGraph:
         The index is keyed by the spelling you pass, not by what it resolves
         to.
 
-        **What is indexed.** Every node of the type whose property holds a
-        string. An **empty string is a document** — one with no terms, counted
-        in the corpus statistics. A node whose property is absent or holds a
-        non-string (a number, a list) is **skipped**: BM25 indexes text, and a
-        stringified number is not text. Skipped nodes are counted in the
-        return value.
+        **What is indexed.** A string or a list containing only strings and
+        nulls contributes one document. List members are separated by spaces;
+        null members are ignored and repeated words retain their frequency.
+        An empty string or empty/all-null list is an empty document counted in
+        corpus statistics. An absent property, another value type, or any
+        non-string/non-null member skips the whole document. Skipped nodes
+        are counted in the return value; values are never stringified.
 
         Tokenization is the character rule ``text_normalize()`` exposes:
         alphanumeric runs are terms, everything else separates, and terms are
@@ -7540,7 +7541,7 @@ class KnowledgeGraph:
 
         Args:
             node_type: The node type to index (e.g. ``'Article'``).
-            property: The string property to index (e.g. ``'body'``).
+            property: The text or string/null-list property to index (e.g. ``'body'``).
             auto_refresh_limit: How many changed documents a query will fold in
                 inline before it serves stale results and warns instead.
                 Defaults to 1000. It bounds a document *count*, not a duration —
@@ -7551,12 +7552,12 @@ class KnowledgeGraph:
 
         Returns:
             dict: ``{'indexed': int, 'skipped': int, 'terms': int}`` —
-            documents indexed, nodes skipped as absent/non-string, and the size
+            documents indexed, nodes skipped as absent/invalid text, and the size
             of the resulting vocabulary.
 
         Raises:
             ValueError: if the node type is unknown, the graph is disk-backed,
-                or the type has nodes but not one of them carries a string for
+                or the type has nodes but none carries text or a string/null list for
                 ``property`` (what a misspelled property name looks like). A
                 type with no nodes yet builds an empty index instead, so an
                 index can be declared before ingest.

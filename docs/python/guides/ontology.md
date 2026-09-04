@@ -76,6 +76,10 @@ Rules the declaration must satisfy (checked on install):
 - `cardinality` / `required` describe **outgoing** edges of the domain type.
 - `symmetric: True` lowers to an inverse check of the relationship against
   itself.
+- `property_types` accepts `list` (alias `array`, case-insensitive) for any
+  native list, including empty, mixed and nested lists. This checks the outer
+  container only; it does not declare an element type. Missing/null values are
+  left to `required_properties`.
 - `required_properties` and `property_types` are audited **per edge** of the
   relationship: a listed property must be present and non-null; a declared
   type is checked only on present values. Type names are validated at

@@ -72,11 +72,12 @@ print(report)
 `indexed` is the number of documents in the corpus, `skipped` the nodes passed
 over, and `terms` the size of the resulting vocabulary.
 
-**What counts as a document.** Every node of the type whose property holds a
-string — including the empty string, which indexes as a document with no terms
-and still counts in the corpus statistics. A node whose property is absent or
-holds a number, a list, or anything else non-string is **skipped** and counted
-in `skipped`: BM25 indexes text, and a stringified number is not text.
+**What counts as a document.** A string or list containing only strings and
+nulls produces one document. List members are separated by spaces, nulls are
+ignored, and repeated words retain their frequency. Empty strings and
+empty/all-null lists are empty documents counted in corpus statistics. An absent
+property, another type, or any non-string/non-null list member skips the whole
+document and is counted in `skipped`; values are never stringified.
 
 **What counts as a word.** Runs of alphanumeric characters are terms and
 everything else separates them; terms are lowercased per character. The rule is

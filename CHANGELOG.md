@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- BM25 indexes native lists of strings/nulls as one document across build, refresh,
+  and persistence; ontology property types accept `list` and `array`.
+
 ### Fixed
 - Vector/text-score top-k preserves ascending order and missing-embedding rows.
   Explicit null placement uses the standard ordering path; HNSW falls back
