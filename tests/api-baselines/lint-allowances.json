@@ -213,7 +213,7 @@
       "classification": "transitional"
     },
     {
-      "identity": "crates/kglite/src/graph/blueprint/build.rs::fn:connect:fn connect( graph: &mut DirGraph, df: DataFrame, connection_type: &str, source_type: &str, source_id_field: &str, target_type: &str, target_id_field: &str, report: &mut BuildReport, initial_load: maintain::InitialLoad, ) -> Result<usize, String>::clippy::too_many_arguments",
+      "identity": "crates/kglite/src/graph/blueprint/build/fk.rs::fn:connect:pub(super) fn connect( graph: &mut DirGraph, df: DataFrame, connection_type: &str, source_type: &str, source_id_field: &str, target_type: &str, target_id_field: &str, report: &mut BuildReport, initial_load: maintain::InitialLoad, ) -> Result<usize, String>::clippy::too_many_arguments",
       "classification": "transitional"
     },
     {
