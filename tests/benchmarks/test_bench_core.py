@@ -1361,7 +1361,7 @@ def blueprint_bench_dir(tmp_path_factory):
         },
     }
     path = root / "blueprint.json"
-    path.write_text(json.dumps(blueprint))
+    path.write_text(json.dumps(blueprint), encoding="utf-8")
     return str(path)
 
 
