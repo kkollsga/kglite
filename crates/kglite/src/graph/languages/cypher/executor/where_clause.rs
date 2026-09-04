@@ -1077,9 +1077,7 @@ impl<'a> CypherExecutor<'a> {
             _ => return None,
         };
 
-        if VectorScoreCache::key_for(args).is_none() {
-            return None;
-        }
+        VectorScoreCache::key_for(args)?;
         let tail = args[3..]
             .iter()
             .map(|expr| self.evaluate_expression(expr, &ResultRow::new()))
