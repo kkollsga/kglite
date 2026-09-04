@@ -140,16 +140,17 @@ def test_node_drilldown_rejects_parameters_unknown_yields_and_missing_ontology()
 @pytest.mark.parametrize("severity", ["error", "warn", "advisory"])
 @pytest.mark.parametrize("storage", ["memory", "disk"])
 def test_blueprint_enforces_node_contracts_before_publication(tmp_path, severity, recwarn, storage):
-    (tmp_path / "nodes.csv").write_text("id,title\n1,A\n")
+    (tmp_path / "nodes.csv").write_text("id,title\n1,A\n", encoding="utf-8")
     (tmp_path / "ontology.json").write_text(
-        json.dumps({"classes": {"Study": {"required_properties": ["design"], "enforcement": severity}}})
+        json.dumps({"classes": {"Study": {"required_properties": ["design"], "enforcement": severity}}}),
+        encoding="utf-8",
     )
     bp = {
         "settings": {"root": str(tmp_path), "output": "out.kgl"},
         "ontology": "ontology.json",
         "nodes": {"Study": {"csv": "nodes.csv", "pk": "id", "title": "title"}},
     }
-    (tmp_path / "blueprint.json").write_text(json.dumps(bp))
+    (tmp_path / "blueprint.json").write_text(json.dumps(bp), encoding="utf-8")
     options = {} if storage == "memory" else {"storage": "disk", "path": str(tmp_path / "disk-build")}
     if severity == "error":
         with pytest.raises(ValueError, match="node Study.required_properties: 1/1"):
