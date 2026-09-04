@@ -304,6 +304,7 @@ pub fn kglite::api::blueprint::AggregateEdge::deserialize<__D>(__deserializer: _
 pub struct kglite::api::blueprint::Blueprint
 pub kglite::api::blueprint::Blueprint::compute: alloc::vec::Vec<kglite::api::blueprint::ComputeOp>
 pub kglite::api::blueprint::Blueprint::extra: indexmap::map::IndexMap<alloc::string::String, serde_json::value::Value>
+pub kglite::api::blueprint::Blueprint::files: indexmap::map::IndexMap<alloc::string::String, kglite::api::blueprint::FileSpec>
 pub kglite::api::blueprint::Blueprint::nodes: indexmap::map::IndexMap<alloc::string::String, kglite::api::blueprint::NodeSpec>
 pub kglite::api::blueprint::Blueprint::ontology: core::option::Option<alloc::string::String>
 pub kglite::api::blueprint::Blueprint::settings: kglite::api::blueprint::Settings
@@ -313,12 +314,19 @@ impl core::fmt::Debug for kglite::api::blueprint::Blueprint
 pub fn kglite::api::blueprint::Blueprint::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl<'de> serde_core::de::Deserialize<'de> for kglite::api::blueprint::Blueprint
 pub fn kglite::api::blueprint::Blueprint::deserialize<__D>(__deserializer: __D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+pub struct kglite::api::blueprint::BuildInputs
+pub kglite::api::blueprint::BuildInputs::frames: std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::DataFrame>
+impl core::default::Default for kglite::api::blueprint::BuildInputs
+pub fn kglite::api::blueprint::BuildInputs::default() -> kglite::api::blueprint::BuildInputs
 pub struct kglite::api::blueprint::BuildReport
+pub kglite::api::blueprint::BuildReport::edges_actual: alloc::collections::btree::map::BTreeMap<alloc::string::String, usize>
 pub kglite::api::blueprint::BuildReport::edges_by_type: alloc::collections::btree::map::BTreeMap<alloc::string::String, usize>
 pub kglite::api::blueprint::BuildReport::errors: alloc::vec::Vec<alloc::string::String>
 pub kglite::api::blueprint::BuildReport::nodes_by_type: alloc::collections::btree::map::BTreeMap<alloc::string::String, usize>
 pub kglite::api::blueprint::BuildReport::provisional_purged: usize
 pub kglite::api::blueprint::BuildReport::warnings: alloc::vec::Vec<alloc::string::String>
+impl kglite::api::blueprint::BuildReport
+pub fn kglite::api::blueprint::BuildReport::render_text(&self, verbose: bool) -> alloc::string::String
 pub struct kglite::api::blueprint::CalendarLink
 pub kglite::api::blueprint::CalendarLink::date_col: alloc::string::String
 pub kglite::api::blueprint::CalendarLink::edge: alloc::string::String
@@ -340,6 +348,18 @@ impl core::fmt::Debug for kglite::api::blueprint::Connections
 pub fn kglite::api::blueprint::Connections::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl<'de> serde_core::de::Deserialize<'de> for kglite::api::blueprint::Connections
 pub fn kglite::api::blueprint::Connections::deserialize<__D>(__deserializer: __D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+pub struct kglite::api::blueprint::FileSpec
+pub kglite::api::blueprint::FileSpec::extra: indexmap::map::IndexMap<alloc::string::String, serde_json::value::Value>
+pub kglite::api::blueprint::FileSpec::format: alloc::string::String
+pub kglite::api::blueprint::FileSpec::path: core::option::Option<alloc::string::String>
+impl core::clone::Clone for kglite::api::blueprint::FileSpec
+pub fn kglite::api::blueprint::FileSpec::clone(&self) -> kglite::api::blueprint::FileSpec
+impl core::default::Default for kglite::api::blueprint::FileSpec
+pub fn kglite::api::blueprint::FileSpec::default() -> kglite::api::blueprint::FileSpec
+impl core::fmt::Debug for kglite::api::blueprint::FileSpec
+pub fn kglite::api::blueprint::FileSpec::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<'de> serde_core::de::Deserialize<'de> for kglite::api::blueprint::FileSpec
+pub fn kglite::api::blueprint::FileSpec::deserialize<__D>(__deserializer: __D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
 pub struct kglite::api::blueprint::FkEdge
 pub kglite::api::blueprint::FkEdge::extra: indexmap::map::IndexMap<alloc::string::String, serde_json::value::Value>
 pub kglite::api::blueprint::FkEdge::fk: alloc::string::String
@@ -362,8 +382,9 @@ pub kglite::api::blueprint::FlatSpec::node_type: alloc::string::String
 pub kglite::api::blueprint::FlatSpec::parent: core::option::Option<alloc::string::String>
 pub kglite::api::blueprint::FlatSpec::spec: kglite::api::blueprint::NodeSpec
 pub struct kglite::api::blueprint::JunctionEdge
-pub kglite::api::blueprint::JunctionEdge::csv: alloc::string::String
+pub kglite::api::blueprint::JunctionEdge::csv: core::option::Option<alloc::string::String>
 pub kglite::api::blueprint::JunctionEdge::extra: indexmap::map::IndexMap<alloc::string::String, serde_json::value::Value>
+pub kglite::api::blueprint::JunctionEdge::file: core::option::Option<alloc::string::String>
 pub kglite::api::blueprint::JunctionEdge::properties: alloc::vec::Vec<alloc::string::String>
 pub kglite::api::blueprint::JunctionEdge::property_types: indexmap::map::IndexMap<alloc::string::String, alloc::string::String>
 pub kglite::api::blueprint::JunctionEdge::rename: indexmap::map::IndexMap<alloc::string::String, alloc::string::String>
@@ -373,6 +394,8 @@ pub kglite::api::blueprint::JunctionEdge::target_fk: alloc::string::String
 pub kglite::api::blueprint::JunctionEdge::target_type_column: core::option::Option<alloc::string::String>
 impl kglite::api::blueprint::JunctionEdge
 pub fn kglite::api::blueprint::JunctionEdge::computed(csv: alloc::string::String, source_fk: alloc::string::String, target: alloc::string::String, target_fk: alloc::string::String) -> Self
+impl kglite::api::blueprint::JunctionEdge
+pub fn kglite::api::blueprint::JunctionEdge::input_name(&self) -> core::option::Option<&str>
 impl core::clone::Clone for kglite::api::blueprint::JunctionEdge
 pub fn kglite::api::blueprint::JunctionEdge::clone(&self) -> kglite::api::blueprint::JunctionEdge
 impl core::fmt::Debug for kglite::api::blueprint::JunctionEdge
@@ -383,6 +406,7 @@ pub struct kglite::api::blueprint::NodeSpec
 pub kglite::api::blueprint::NodeSpec::connections: kglite::api::blueprint::Connections
 pub kglite::api::blueprint::NodeSpec::csv: core::option::Option<alloc::string::String>
 pub kglite::api::blueprint::NodeSpec::extra: indexmap::map::IndexMap<alloc::string::String, serde_json::value::Value>
+pub kglite::api::blueprint::NodeSpec::file: core::option::Option<alloc::string::String>
 pub kglite::api::blueprint::NodeSpec::filter: indexmap::map::IndexMap<alloc::string::String, serde_json::value::Value>
 pub kglite::api::blueprint::NodeSpec::labels: alloc::vec::Vec<alloc::string::String>
 pub kglite::api::blueprint::NodeSpec::parent: core::option::Option<alloc::string::String>
@@ -393,6 +417,8 @@ pub kglite::api::blueprint::NodeSpec::skipped: alloc::vec::Vec<alloc::string::St
 pub kglite::api::blueprint::NodeSpec::sub_nodes: indexmap::map::IndexMap<alloc::string::String, kglite::api::blueprint::NodeSpec>
 pub kglite::api::blueprint::NodeSpec::timeseries: core::option::Option<kglite::api::blueprint::TimeseriesSpec>
 pub kglite::api::blueprint::NodeSpec::title: core::option::Option<alloc::string::String>
+impl kglite::api::blueprint::NodeSpec
+pub fn kglite::api::blueprint::NodeSpec::input_name(&self) -> core::option::Option<&str>
 impl core::clone::Clone for kglite::api::blueprint::NodeSpec
 pub fn kglite::api::blueprint::NodeSpec::clone(&self) -> kglite::api::blueprint::NodeSpec
 impl core::default::Default for kglite::api::blueprint::NodeSpec
@@ -438,7 +464,9 @@ impl core::fmt::Debug for kglite::api::blueprint::TimeseriesSpec
 pub fn kglite::api::blueprint::TimeseriesSpec::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl<'de> serde_core::de::Deserialize<'de> for kglite::api::blueprint::TimeseriesSpec
 pub fn kglite::api::blueprint::TimeseriesSpec::deserialize<__D>(__deserializer: __D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
-pub fn kglite::api::blueprint::build(graph: &mut kglite::api::DirGraph, blueprint: kglite::api::blueprint::Blueprint, blueprint_dir: &std::path::Path) -> core::result::Result<kglite::api::blueprint::BuildReport, alloc::string::String>
+pub fn kglite::api::blueprint::build(graph: &mut kglite::api::DirGraph, blueprint: kglite::api::blueprint::Blueprint, blueprint_dir: &std::path::Path, inputs: kglite::api::blueprint::BuildInputs) -> core::result::Result<kglite::api::blueprint::BuildReport, alloc::string::String>
+pub fn kglite::api::blueprint::declared_column_types(blueprint: &kglite::api::blueprint::Blueprint, input_name: &str) -> core::result::Result<indexmap::map::IndexMap<alloc::string::String, kglite::datatypes::values::ColumnType>, alloc::string::String>
+pub fn kglite::api::blueprint::from_blueprint(graph: &mut kglite::api::DirGraph, blueprint: kglite::api::blueprint::Blueprint, blueprint_dir: &std::path::Path, inputs: kglite::api::blueprint::BuildInputs) -> core::result::Result<(kglite::api::blueprint::BuildReport, core::option::Option<std::path::PathBuf>), alloc::string::String>
 pub fn kglite::api::blueprint::from_records(graph: &mut kglite::api::DirGraph, spec: &serde_json::value::Value) -> core::result::Result<kglite::api::blueprint::RecordsReport, alloc::string::String>
 pub fn kglite::api::blueprint::load_blueprint_file(path: &std::path::Path) -> core::result::Result<kglite::api::blueprint::Blueprint, alloc::string::String>
 pub mod kglite::api::cdc

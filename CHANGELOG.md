@@ -38,6 +38,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that was not declared, each raise a `ValueError` naming it.
 
 ### Changed
+- **Rust `kglite::api::blueprint` grew the input surface.** `build` takes a
+  fourth argument, `BuildInputs` (the frames a caller hands over; pass
+  `BuildInputs::default()` for a file-only build), and `from_blueprint` is
+  the whole lifecycle — build, then the resolved save destination — with
+  `BuildReport::render_text` rendering the progress summary the Python
+  wrapper prints. `Blueprint.files` / `FileSpec`, `NodeSpec.file`,
+  `JunctionEdge.file` (its `csv` is now `Option`) and `input_name()` mirror
+  the `files:` section. The C ABI's `kglite_blueprint_build` is unchanged.
 - **Blueprint build warnings are Python `UserWarning`s, as the documentation
   has said since 0.9.1.** They were written straight to stderr, so nothing a
   caller could set up — `warnings.simplefilter`, `warnings.catch_warnings`,
