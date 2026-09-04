@@ -75,6 +75,9 @@ class Registry:
                 raise QualificationError(f"reference {identity} must identify an accepted capture")
 
     def status(self, path: Path) -> str | None:
+        if self.directory != BASELINES_DIR.resolve():
+            if Registry(BASELINES_DIR, required=True).status(path) == "rejected":
+                return "rejected"
         sha = digest(path)
         record = self.data["captures"].get(path.name) if path.parent.resolve() == self.directory else None
         if record:

@@ -216,3 +216,17 @@ def test_candidate_qualification_in_its_own_directory_is_enforced(tmp_path):
     result = run("compare_bench.py", baseline, candidate)
     assert result.returncode == 2, result.stdout + result.stderr
     assert "rejected" in result.stderr
+
+
+def test_local_manifest_cannot_override_known_rejected_bytes(tmp_path):
+    original = ROOT / "tests/benchmarks/baselines/0_16_23.json"
+    candidate = tmp_path / "copied.json"
+    candidate.write_bytes(original.read_bytes())
+    reference = tmp_path / "reference.json"
+    data = json.loads(original.read_text(encoding="utf-8"))
+    data["datetime"] = "independent reference"
+    reference.write_text(json.dumps(data), encoding="utf-8")
+    manifest(tmp_path, {reference.name: "accepted", candidate.name: "pending"})
+    result = run("compare_bench.py", reference, candidate)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "rejected" in result.stderr
