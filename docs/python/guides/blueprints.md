@@ -626,7 +626,7 @@ with `"file"`:
 | Key | Description |
 |-----|-------------|
 | `path` | The file this input reads, resolved against `settings.root`. Required for a file-backed format. |
-| `format` | How to read it: `"csv"` (the default), `"delimited"` (below), or `"frame"` — an in-memory table passed to `from_blueprint(..., frames={...})`, which takes no `path`. Each format brings its own keys. |
+| `format` | How to read it: `"csv"` (the default), `"delimited"` (below), `"xlsx"` (below), or `"frame"` — an in-memory table passed to `from_blueprint(..., frames={...})`, which takes no `path`. Each format brings its own keys. |
 
 `"csv": "x.csv"` remains valid and is exactly shorthand for a `files` entry
 `{ "path": "x.csv", "format": "csv" }` named `x.csv`, so the two spellings
@@ -726,6 +726,101 @@ row of data — after `skip_lines`, comment lines, blank lines and the header ar
 gone — the same thing it counts for a CSV, not the physical line number. Read
 errors, which have no data row to attribute yet, name the physical line
 instead.
+
+### `format: "xlsx"` — worksheets, title blocks and wide matrices
+
+Published supplementary data arrives as Excel workbooks, and three of their
+habits break a reader that treats a sheet as a CSV in a different envelope: a
+title block above the header row, one numeric type for everything, and results
+laid out as a matrix rather than a table. An `xlsx` entry names the sheet and
+the header row, and `unpivot` reshapes the matrix.
+
+```json
+{
+  "settings": { "root": "./data" },
+  "files": {
+    "drugs":  { "path": "screen.xlsx", "format": "xlsx", "sheet": "drugs" },
+    "screen": {
+      "path": "screen.xlsx",
+      "format": "xlsx",
+      "sheet": "S3a. Adjusted p-values",
+      "header_row": 3,
+      "unpivot": {
+        "id_columns": ["prestwick_ID", "chemical_name", "drug_class", "n_hit"],
+        "name_to": "isolate",
+        "value_to": "adjusted_p"
+      }
+    }
+  },
+  "nodes": {
+    "Drug": {
+      "file": "drugs",
+      "pk": "prestwick_ID",
+      "title": "chemical_name",
+      "properties": { "atc_code": "string", "approved": "bool" },
+      "connections": {
+        "junction_edges": {
+          "INHIBITS": {
+            "file": "screen",
+            "source_fk": "prestwick_ID",
+            "target": "Isolate",
+            "target_fk": "isolate",
+            "properties": ["adjusted_p"]
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+| Key | Description |
+|-----|-------------|
+| `sheet` | The worksheet: its name, or its position in the workbook's tab order counting from 0. Default `0`, the first sheet. |
+| `header_row` | The physical row the column names are on, counting from 1 the way the spreadsheet's own row gutter does. Default `1`. Rows above it are dropped unread — that is where a title block goes. |
+| `unpivot` | `{ "id_columns": [...], "name_to": "...", "value_to": "..." }` — turns a wide matrix into rows. Below. |
+
+A column whose header cell is blank is dropped: nothing can reference it by
+name. Header names are trimmed, so `pk: "id"` resolves against a header cell
+someone left a trailing space in.
+
+**`unpivot` turns columns into rows.** The `id_columns` stay columns; every
+other named column becomes one output row per input row, carrying that
+column's header under `name_to` and its cell under `value_to`. The example
+above turns a 4-drug × 3-isolate matrix into the measured `(drug, isolate,
+p)` triples — which is exactly a junction table, so a junction edge reads it
+like any other.
+
+**An empty cell produces no unpivoted row.** A published screen matrix is
+sparse by construction: the pairs nobody measured are blank, and emitting a
+null-valued row for each of them would turn "not measured" into an edge. Only
+the cells that carry a value become rows.
+
+An `unpivot` naming an `id_columns` entry the header row does not have is
+refused, as is one whose `name_to` or `value_to` collides with an id column,
+and a misspelled key inside the `unpivot` object is an error rather than a
+warning — a dropped `id_columns` would unpivot the identifiers too and produce
+a table of the right shape and the wrong content.
+
+**Every number in a spreadsheet is a float.** Excel has one numeric type, so an
+id column reading `260, 261, …` is stored as `260.0, 261.0, …`. A cell whose
+value is a whole number is therefore written as an integer — `260`, not
+`260.0` — which is what keeps `source_fk`/`target_fk` joins matching (the
+Troubleshooting entry below is this trap arriving through a CSV instead). Above
+2^53 an `f64` can no longer tell consecutive integers apart, so a whole-number
+cell that large keeps its float spelling. Dates land as `2024-03-01`, or
+`2024-03-01T09:30:00` when the cell carries a time; booleans as `true` / `false`;
+a blank cell, and a cell the spreadsheet itself could not compute (`#DIV/0!`),
+are null — the second with one warning per column naming the sheet and the cell.
+
+Row numbers count **data rows** below the header, so a warning saying "row 12"
+means the twelfth row under `header_row`, not the twelfth row of the sheet.
+Every row an unpivot produced from one sheet row carries that row's number.
+
+**For Rust embedders: `xlsx` is a Cargo feature.** It pulls a zip reader and an
+XML parser, so the `kglite` crate leaves it off by default and a build without
+it refuses `"format": "xlsx"` by name. The Python wheel always has it; a Rust
+embedder adds `features = ["xlsx"]`.
 
 ## Settings Reference
 
@@ -921,6 +1016,8 @@ Rows with NaN in a foreign key column are silently skipped when creating edges. 
 ### Float IDs (e.g., `260.0` instead of `260`)
 
 Pandas reads integer columns with NaN as `float64`. The loader automatically coerces whole-number floats back to int for ID matching. No action needed.
+
+The same holds for a spreadsheet, where *every* number is a float: an `xlsx` input writes a whole-number cell as `260`, not `260.0`. It is only visible when you declare such a column `string` — then the text is what lands, and it is the integer.
 
 ### Filter not working
 

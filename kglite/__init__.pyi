@@ -1350,8 +1350,10 @@ def from_blueprint(
     ``"csv": "x.csv"`` is shorthand for one such entry. The formats it reads
     are ``csv``, ``delimited`` (any separator, with ``quote``, ``header``,
     ``columns``, ``skip_lines``, ``comment_prefix``, ``line_suffix``,
-    ``encoding`` and ``prefix_strip``) and ``frame`` (below); each brings its
-    own keys, and an unknown one is an error listing these.
+    ``encoding`` and ``prefix_strip``), ``xlsx`` (one worksheet, with
+    ``sheet``, ``header_row`` and ``unpivot`` for wide matrices) and ``frame``
+    (below); each brings its own keys, and an unknown one is an error listing
+    these.
 
     **Diagnostic output**:
 

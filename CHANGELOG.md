@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   several specs is written down once instead of at every one of them.
   `"csv": "x.csv"` stays valid and is exactly shorthand for a `files` entry
   named `x.csv`, so the two spellings build the same graph and mix freely.
-  The formats this release reads are `csv`, `delimited` and `frame`. The build refuses rather than
+  The formats this release reads are `csv`, `delimited`, `xlsx` and `frame`. The build refuses rather than
   guessing when a spec sets both `csv` and `file`, when `file` names an entry
   that is not declared, when an entry has no `path` or an unreadable `format`
   (both errors list what is accepted), and when an entry's name is already a
@@ -39,6 +39,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exactly as a CSV's do — short rows null-padded, fields past the header's
   width dropped, an empty cell null — and a warning's row number counts data
   rows, after the preamble, comments and header are gone.
+- **`"format": "xlsx"` — a worksheet as a blueprint input.** A `files` entry
+  declaring it reads one sheet of an Excel workbook, named by `sheet` (a sheet
+  name, or its position in the tab order counting from 0; default the first)
+  with `header_row` naming the physical row the column names are on, counting
+  from 1 (default 1) — so the title block published supplements put above their
+  header is dropped unread. `unpivot`
+  (`{"id_columns": [...], "name_to": "...", "value_to": "..."}`) turns a wide
+  result matrix into rows: the id columns stay columns and every other column
+  becomes one row per input row carrying its header and its cell, which is the
+  junction table such a matrix was always describing. An empty cell produces
+  **no** unpivoted row — a sparse screen matrix must not turn "not measured"
+  into an edge. Excel stores every number as a float, so a whole-number cell is
+  written as an integer (`260`, not `260.0`) up to 2^53, which is what keeps
+  `source_fk`/`target_fk` joins matching; dates land as `2024-03-01` and gain a
+  time only when the cell has one; booleans as `true`/`false`; blank cells, and
+  cells the spreadsheet itself could not compute (`#DIV/0!`), are null, the
+  latter with one warning per column naming the sheet and the cell. Row numbers
+  count data rows below the header. The reader is behind the `xlsx` Cargo
+  feature — the Python wheel always has it, and a Rust build without it refuses
+  the format by name and says which feature to add.
 - **`from_blueprint(..., frames={"name": df})` — an in-memory table as a
   blueprint input.** A `files` entry declaring `{"format": "frame"}` takes no
   `path`; its rows come from `frames["<entry name>"]`, and are consumed exactly

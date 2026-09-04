@@ -34,6 +34,8 @@ use manual::load_manual_nodes;
 use nodes::{load_node_specs, should_stream_spec};
 use specs::collect_specs;
 
+#[cfg(feature = "xlsx")]
+use super::input::xlsx::{XlsxConfig, XlsxFile};
 use super::input::{
     csv::CsvFile,
     delimited::{DelimitedConfig, DelimitedFile},
@@ -311,6 +313,11 @@ pub fn build(
         eprintln!("  load_junction_edges: {} ms", t.elapsed().as_millis());
     }
 
+    // Every input has now been read as far as this build will read it, so a
+    // reader that only learns of a problem by meeting it — a spreadsheet cell
+    // the sheet itself could not compute — has its findings to hand over.
+    report.warnings.extend(registry.read_warnings());
+
     finish_build(
         graph,
         &blueprint,
@@ -470,16 +477,21 @@ fn build_input_registry(
         let resolved = resolve_input_path(root, path);
         // `validate_inputs` has already checked the format is registered, and
         // `frame` was handled above, so what is left reads a file.
-        let source: Box<dyn Source> = if file.format == "delimited" {
-            // Validated once already by `validate_inputs`; the config is
-            // rebuilt here because this is the copy the reader keeps.
-            Box::new(DelimitedFile::new(
+        // Validated once already by `validate_inputs`; each config is rebuilt
+        // here because this is the copy its reader keeps.
+        let source: Box<dyn Source> = match file.format.as_str() {
+            "delimited" => Box::new(DelimitedFile::new(
                 resolved,
                 path.to_string(),
                 DelimitedConfig::from_spec(name, file)?,
-            ))
-        } else {
-            Box::new(CsvFile::new(resolved, path.to_string()))
+            )),
+            #[cfg(feature = "xlsx")]
+            "xlsx" => Box::new(XlsxFile::new(
+                resolved,
+                path.to_string(),
+                XlsxConfig::from_spec(name, file)?,
+            )),
+            _ => Box::new(CsvFile::new(resolved, path.to_string())),
         };
         registry.insert(name.clone(), source);
     }

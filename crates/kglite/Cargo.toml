@@ -70,6 +70,12 @@ okf = ["dep:yaml-rust2"]
 # RDF parser; `oxttl` + `oxrdf` are only in the dep tree when `rdf` is
 # enabled. Phase 1 covers the in-memory (Default) backend only.
 rdf = ["dep:oxttl", "dep:oxrdf"]
+# `xlsx` blueprint input format — reads `.xlsx` workbooks through `calamine`.
+# Off by default: calamine pulls a zip reader, an XML parser and a codepage
+# table (~10 transitive packages), which is exactly the compile-footprint
+# shape the 0.16.17 dependency trim removed from the bare crate. The Python
+# wheel enables it; a Rust embedder that needs spreadsheets opts in.
+xlsx = ["dep:calamine"]
 
 # `--cfg loom` is set manually when running the loom interleaving model
 # (tests/loom_session.rs); register it so normal builds don't warn (and
@@ -169,6 +175,17 @@ yaml-rust2 = { version = "0.12", optional = true }
 oxttl = { version = "0.2", optional = true }
 oxrdf = { version = "0.3", optional = true }
 
+# xlsx blueprint reader — gated behind the `xlsx` feature. `default-features
+# = false` is a no-op today (calamine's default feature set is empty) and is
+# written out so a future default cannot arrive silently; `dates` is the one
+# feature this reader needs — it is what makes `ExcelDateTime::as_datetime`
+# exist, i.e. the difference between a date cell and a floating-point serial
+# number. It resolves to the `chrono` this crate already depends on, so it
+# costs no package. `picture` (embedded images) is deliberately off.
+# 0.36.1 is the floor because it is the current release and calamine 0.36 is
+# the first series whose MSRV (1.88) this workspace already meets.
+calamine = { version = "0.36.1", default-features = false, features = ["dates"], optional = true }
+
 [target.'cfg(windows)'.dependencies]
 # 1.0.4, not "1": ignore 0.4.15 (via mcp-methods) requires same-file
 # ^1.0.4, and cargo unifies it workspace-wide. 1.0.1 was itself a floor
@@ -190,5 +207,5 @@ loom = "0.7"
 # missing (defaults are intentionally empty). `rustdoc-args` enables doc-cfg
 # annotations so feature-gated APIs are visually marked on the page.
 [package.metadata.docs.rs]
-features = ["fastembed", "okf", "rdf", "parallel-bz2"]
+features = ["fastembed", "okf", "rdf", "parallel-bz2", "xlsx"]
 rustdoc-args = ["--cfg", "docsrs"]

@@ -1,7 +1,9 @@
 """Tests for kglite.blueprint.from_blueprint()."""
 
+import functools
 import json
 from pathlib import Path
+import tempfile
 import warnings
 
 import pandas as pd
@@ -34,7 +36,43 @@ def _write_dmp(path, df):
 #: ``delimited`` entry, and ``dmp`` is the line engine — a multi-character
 #: delimiter, a line suffix and declared column names. A loader defect that
 #: lives in one producer and not the others shows up here as a disagreement.
-INPUT_FORMATS = ["csv", "tsv", "dmp"]
+INPUT_FORMATS = ["csv", "tsv", "dmp", "xlsx"]
+
+
+def _xlsx_writer():
+    """The pandas engine that can write `.xlsx` here, or ``None``.
+
+    Reading xlsx needs no Python package — the engine does it — but *writing*
+    one for a test does, and this repo deliberately ships no xlsx writer: the
+    committed `screen.xlsx` fixture was generated once, out of tree. So the
+    producer-parametrised tests, which have to write their own input, skip on
+    a plain checkout and run wherever a writer happens to be installed.
+    """
+    for engine in ("openpyxl", "xlsxwriter"):
+        try:
+            __import__(engine)
+        except ImportError:
+            continue
+        return engine
+    return None
+
+
+@functools.lru_cache(maxsize=1)
+def _xlsx_reader_present():
+    """Whether this extension was built with the `xlsx` Cargo feature.
+
+    There is no API that reports the feature set, and adding one for a test
+    would be a public surface nobody else wants; the loader already answers it,
+    because the unknown-format error lists exactly the formats compiled in.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        bp_path = Path(tmp) / "probe.json"
+        _write_blueprint(bp_path, {"files": {"x": {"path": "none.xlsx", "format": "xlsx"}}})
+        try:
+            from_blueprint(bp_path, save=False)
+        except ValueError as e:
+            return "unknown format 'xlsx'" not in str(e)
+    return True
 
 
 def _declare_input(fmt, files, root, name, df):
@@ -59,6 +97,13 @@ def _declare_input(fmt, files, root, name, df):
             "header": False,
             "columns": [str(c) for c in df.columns],
         }
+        return {"file": name}
+    if fmt == "xlsx":
+        engine = _xlsx_writer()
+        if engine is None:
+            pytest.skip("no xlsx writer (openpyxl / xlsxwriter) in the test environment")
+        df.to_excel(path, index=False, engine=engine)
+        files[name] = {"path": name, "format": "xlsx"}
         return {"file": name}
     raise AssertionError(f"unknown input format {fmt!r}")
 
@@ -3992,6 +4037,283 @@ class TestDelimitedInputs:
             )
         err = str(excinfo.value)
         assert "input 'taxa' (format 'delimited')" in err, err
+        assert "compute reads CSV files only" in err, err
+
+
+class TestXlsxInputs:
+    """`"format": "xlsx"` reads a worksheet of `screen.xlsx`, a committed
+    workbook in the shape published supplementary data actually arrives in: an
+    id column Excel stored as floats, a sheet whose header sits under two title
+    rows, and a wide drug-by-isolate p-value matrix that has to become a
+    junction table before it is a graph.
+
+    The reader is behind the `xlsx` Cargo feature; the wheel enables it, and
+    these skip on an extension built without it.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _require_the_xlsx_feature(self):
+        if not _xlsx_reader_present():
+            pytest.skip("this kglite build has no `xlsx` Cargo feature")
+
+    SCREEN_SHEET = "S3a. Adjusted p-values"
+    ID_COLUMNS = ["prestwick_ID", "chemical_name", "drug_class", "n_hit"]
+
+    def _build(self, tmp_path, bp, root=None):
+        bp.setdefault("settings", {})["root"] = str(root if root is not None else FIXTURES)
+        bp_path = tmp_path / "bp.json"
+        _write_blueprint(bp_path, bp)
+        return from_blueprint(bp_path, save=False)
+
+    def _screen_entry(self, **overrides):
+        entry = {
+            "path": "screen.xlsx",
+            "format": "xlsx",
+            "sheet": self.SCREEN_SHEET,
+            "header_row": 3,
+            "unpivot": {
+                "id_columns": list(self.ID_COLUMNS),
+                "name_to": "isolate",
+                "value_to": "adjusted_p",
+            },
+        }
+        entry.update(overrides)
+        return entry
+
+    def test_the_sheets_own_types_land_as_the_spreadsheet_stored_them(self, tmp_path):
+        """Excel has one numeric type, so `260` is stored as `260.0`. A reader
+        that stringifies it naively gives every drug a `260.0` key that no
+        `source_fk` will ever match — the guide's Troubleshooting entry."""
+        graph = self._build(
+            tmp_path,
+            {
+                "files": {"drugs": {"path": "screen.xlsx", "format": "xlsx", "sheet": "drugs"}},
+                "nodes": {
+                    "Drug": {
+                        "file": "drugs",
+                        "pk": "prestwick_ID",
+                        "title": "chemical_name",
+                        "properties": {
+                            "atc_code": "string",
+                            "approved": "bool",
+                            "approved_on": "date",
+                        },
+                    }
+                },
+            },
+        )
+        rows = graph.cypher(
+            "MATCH (d:Drug) RETURN d.prestwick_ID AS id, d.title AS name, d.atc_code AS atc, "
+            "d.approved AS approved, toString(d.approved_on) AS on ORDER BY id"
+        ).to_list()
+        assert [r["id"] for r in rows] == [260, 261, 262, 263]
+        assert rows[0] == {
+            "id": 260,
+            "name": "Amoxicillin",
+            "atc": "J01CA04",
+            "approved": True,
+            "on": "1998-05-12",
+        }
+        assert rows[2]["approved"] is False
+        # A blank cell is null, not the text "None" and not an empty string.
+        assert rows[2]["atc"] is None
+
+    def test_an_excel_integer_does_not_carry_its_decimal_point_into_text(self, tmp_path):
+        """The int-typed column above hides the rule — the loader's `int`
+        parser accepts a whole-number float either way. Declared as a string,
+        the stored text is what lands, and `260.0` is the id that matches
+        nothing in every downstream join."""
+        graph = self._build(
+            tmp_path,
+            {
+                "files": {"drugs": {"path": "screen.xlsx", "format": "xlsx", "sheet": "drugs"}},
+                "nodes": {
+                    "Drug": {
+                        "file": "drugs",
+                        "pk": "chemical_name",
+                        "properties": {"prestwick_ID": "string"},
+                    }
+                },
+            },
+        )
+        ids = [r["p"] for r in graph.cypher("MATCH (d:Drug) RETURN d.prestwick_ID AS p ORDER BY p").to_list()]
+        assert ids == ["260", "261", "262", "263"]
+
+    def test_an_unpivoted_matrix_becomes_a_junction(self, tmp_path, recwarn):
+        """One column per isolate is how a screen is published and the wrong
+        shape for a graph. `unpivot` turns 4 rows x 3 isolate columns into the
+        11 measured pairs — the blank cell produces no edge, because "not
+        measured" is not an inhibition."""
+        graph = self._build(
+            tmp_path,
+            {
+                "files": {
+                    "drugs": {"path": "screen.xlsx", "format": "xlsx", "sheet": "drugs"},
+                    "screen": self._screen_entry(),
+                },
+                "nodes": {
+                    "Drug": {
+                        "file": "drugs",
+                        "pk": "prestwick_ID",
+                        "title": "chemical_name",
+                        "connections": {
+                            "junction_edges": {
+                                "INHIBITS": {
+                                    "file": "screen",
+                                    "source_fk": "prestwick_ID",
+                                    "target": "Isolate",
+                                    "target_fk": "isolate",
+                                    "properties": ["adjusted_p"],
+                                }
+                            }
+                        },
+                    },
+                },
+            },
+        )
+        assert graph.cypher("MATCH ()-[r:INHIBITS]->() RETURN count(r) AS n").to_list()[0]["n"] == 11
+        # The unpivoted column headers are the target nodes — `Isolate` has no
+        # input of its own, so the junction vivifies one stub per distinct
+        # header, exactly as it does for a junction CSV's target column.
+        assert "3 stub node(s) vivified" in _warning_text(recwarn)
+        isolates = [r["t"] for r in graph.cypher("MATCH (i:Isolate) RETURN i.title AS t ORDER BY t").to_list()]
+        assert isolates == [
+            "Akkermansia muciniphila (NT5021)",
+            "Bacteroides fragilis (NT5003)",
+            "Escherichia coli (NT5078)",
+        ]
+        # Metformin's Bacteroides cell is blank, so that pair has no edge while
+        # its other two do.
+        pairs = graph.cypher(
+            "MATCH (d:Drug)-[r:INHIBITS]->(i:Isolate) WHERE d.title = 'Metformin' "
+            "RETURN i.title AS iso, r.adjusted_p AS p ORDER BY iso"
+        ).to_list()
+        assert pairs == [
+            {"iso": "Akkermansia muciniphila (NT5021)", "p": 0.4},
+            {"iso": "Escherichia coli (NT5078)", "p": 0.31},
+        ]
+
+    def test_the_default_sheet_is_the_first_and_a_position_names_it_too(self, tmp_path):
+        """`sheet` takes the workbook's tab order as well as a name, for a tab
+        whose title nobody wants written into a blueprint."""
+        bp = {
+            "files": {"drugs": {"path": "screen.xlsx", "format": "xlsx", "sheet": 0}},
+            "nodes": {"Drug": {"file": "drugs", "pk": "prestwick_ID", "title": "chemical_name"}},
+        }
+        by_index = self._build(tmp_path, bp)
+        assert by_index.cypher("MATCH (d:Drug) RETURN count(d) AS n").to_list()[0]["n"] == 4
+        # Omitting `sheet` entirely reads the same first sheet.
+        del bp["files"]["drugs"]["sheet"]
+        by_default = self._build(tmp_path, bp)
+        assert (
+            by_default.cypher("MATCH (d:Drug) RETURN d.title AS t ORDER BY t").to_list()
+            == by_index.cypher("MATCH (d:Drug) RETURN d.title AS t ORDER BY t").to_list()
+        )
+        # Non-vacuity: position 1 is a different sheet, whose row 1 is a title
+        # and which therefore has no `prestwick_ID` column at all.
+        bp["files"]["drugs"]["sheet"] = 1
+        with pytest.raises(ValueError, match="Available columns: \\[Supplementary Table S3a\\]"):
+            self._build(tmp_path, bp)
+
+    def test_a_missing_sheet_is_an_error_that_lists_the_workbooks_sheets(self, tmp_path, capfd):
+        """A tab renamed between two releases of a supplement is the common
+        way this fails, so the error has to say what the workbook does have."""
+        graph = self._build(
+            tmp_path,
+            {
+                "files": {"drugs": {"path": "screen.xlsx", "format": "xlsx", "sheet": "S3b"}},
+                "nodes": {"Drug": {"file": "drugs", "pk": "prestwick_ID"}},
+            },
+        )
+        err = capfd.readouterr().err
+        assert "no sheet named 'S3b'" in err, err
+        assert "'drugs'" in err and "'S3a. Adjusted p-values'" in err, err
+        # A spec that cannot be read is a reported error, not a dead build.
+        assert graph.cypher("MATCH (d:Drug) RETURN count(d) AS n").to_list()[0]["n"] == 0
+
+    def test_unpivot_refuses_an_id_column_the_sheet_does_not_have(self, tmp_path, capfd):
+        """A misspelled id column would otherwise be unpivoted along with the
+        value columns — a table of the right shape and the wrong content."""
+        graph = self._build(
+            tmp_path,
+            {
+                "files": {
+                    "screen": self._screen_entry(
+                        unpivot={
+                            "id_columns": ["prestwick_id"],
+                            "name_to": "isolate",
+                            "value_to": "adjusted_p",
+                        }
+                    )
+                },
+                "nodes": {"Isolate": {"file": "screen", "pk": "isolate"}},
+            },
+        )
+        err = capfd.readouterr().err
+        assert "id column 'prestwick_id'" in err, err
+        assert "'prestwick_ID'" in err, err
+        assert graph.cypher("MATCH (i:Isolate) RETURN count(i) AS n").to_list()[0]["n"] == 0
+
+    def test_a_stray_knob_on_an_xlsx_entry_is_a_warning(self, tmp_path, recwarn):
+        graph = self._build(
+            tmp_path,
+            {
+                "files": {
+                    "drugs": {
+                        "path": "screen.xlsx",
+                        "format": "xlsx",
+                        "sheet": "drugs",
+                        "delimiter": ",",
+                    }
+                },
+                "nodes": {"Drug": {"file": "drugs", "pk": "prestwick_ID"}},
+            },
+        )
+        assert graph.cypher("MATCH (d:Drug) RETURN count(d) AS n").to_list()[0]["n"] == 4
+        text = _warning_text(recwarn)
+        assert "unknown key 'delimiter'" in text, text
+        assert "format 'xlsx'" in text, text
+
+    def test_a_cell_the_spreadsheet_could_not_compute_is_null_and_warned_about(self, tmp_path, recwarn):
+        """A `#DIV/0!` cell holds no value, so it lands as null — and silently,
+        a whole column of them is a property nobody goes looking for. One
+        warning per column names the sheet and the first cell."""
+        graph = self._build(
+            tmp_path,
+            {
+                "files": {"calc": {"path": "screen.xlsx", "format": "xlsx", "sheet": "calc"}},
+                "nodes": {
+                    "Ratio": {
+                        "file": "calc",
+                        "pk": "prestwick_ID",
+                        "properties": {"ratio": "float"},
+                    }
+                },
+            },
+        )
+        rows = graph.cypher("MATCH (r:Ratio) RETURN r.prestwick_ID AS id, r.ratio AS v ORDER BY id").to_list()
+        assert rows == [{"id": 260, "v": None}, {"id": 261, "v": 0.5}, {"id": 262, "v": None}]
+        text = _warning_text(recwarn)
+        assert "sheet 'calc' column 'ratio'" in text, text
+        assert "cell B2 is #DIV/0!" in text, text
+        assert "(2 cells in this column)" in text, text
+
+    def test_a_compute_op_over_an_xlsx_input_is_refused(self, tmp_path):
+        """`compute` opens its source with a CSV reader outside the input
+        registry, so handed a workbook it would find no CSV, take its
+        missing-file branch, and report success on a build where the op never
+        ran."""
+        with pytest.raises(ValueError) as excinfo:
+            self._build(
+                tmp_path,
+                {
+                    "files": {"drugs": {"path": "screen.xlsx", "format": "xlsx", "sheet": "drugs"}},
+                    "nodes": {"Drug": {"file": "drugs", "pk": "prestwick_ID"}},
+                    "compute": [{"op": "derive", "from": "Drug", "set": {"x": "1"}}],
+                },
+            )
+        err = str(excinfo.value)
+        assert "input 'drugs' (format 'xlsx')" in err, err
         assert "compute reads CSV files only" in err, err
 
 

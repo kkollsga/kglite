@@ -36,8 +36,10 @@
 
 use super::super::schema::FileSpec;
 use super::super::table::{push_row, RawCsv};
+use super::knobs::{
+    first_duplicate, get_bool, get_string, get_string_list, get_string_map, get_usize, Extra,
+};
 use super::{FormatSpec, Source};
-use indexmap::IndexMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
@@ -113,113 +115,6 @@ pub struct DelimitedConfig {
     prefix_strip: Vec<(String, String)>,
 }
 
-/// What a value is, for an error that says what was written instead.
-fn json_kind(v: &serde_json::Value) -> &'static str {
-    match v {
-        serde_json::Value::Null => "null",
-        serde_json::Value::Bool(_) => "a boolean",
-        serde_json::Value::Number(_) => "a number",
-        serde_json::Value::String(_) => "a string",
-        serde_json::Value::Array(_) => "a list",
-        serde_json::Value::Object(_) => "an object",
-    }
-}
-
-type Extra = IndexMap<String, serde_json::Value>;
-
-fn get_string(name: &str, extra: &Extra, key: &str) -> Result<Option<String>, String> {
-    match extra.get(key) {
-        None => Ok(None),
-        Some(serde_json::Value::String(s)) => Ok(Some(s.clone())),
-        Some(v) => Err(format!(
-            "files '{name}': '{key}' must be a string, but it is {}.",
-            json_kind(v)
-        )),
-    }
-}
-
-fn get_bool(name: &str, extra: &Extra, key: &str) -> Result<Option<bool>, String> {
-    match extra.get(key) {
-        None => Ok(None),
-        Some(serde_json::Value::Bool(b)) => Ok(Some(*b)),
-        Some(v) => Err(format!(
-            "files '{name}': '{key}' must be true or false, but it is {}.",
-            json_kind(v)
-        )),
-    }
-}
-
-fn get_usize(name: &str, extra: &Extra, key: &str) -> Result<Option<usize>, String> {
-    match extra.get(key) {
-        None => Ok(None),
-        Some(serde_json::Value::Number(n)) => match n.as_u64() {
-            Some(n) => Ok(Some(n as usize)),
-            None => Err(format!(
-                "files '{name}': '{key}' must be a whole number of lines that is not negative, \
-                 but it is {n}."
-            )),
-        },
-        Some(v) => Err(format!(
-            "files '{name}': '{key}' must be a whole number of lines, but it is {}.",
-            json_kind(v)
-        )),
-    }
-}
-
-fn get_string_list(name: &str, extra: &Extra, key: &str) -> Result<Option<Vec<String>>, String> {
-    let Some(v) = extra.get(key) else {
-        return Ok(None);
-    };
-    let serde_json::Value::Array(items) = v else {
-        return Err(format!(
-            "files '{name}': '{key}' must be a list of column names, but it is {}.",
-            json_kind(v)
-        ));
-    };
-    let mut out = Vec::with_capacity(items.len());
-    for item in items {
-        match item {
-            serde_json::Value::String(s) => out.push(s.clone()),
-            other => {
-                return Err(format!(
-                    "files '{name}': every entry of '{key}' must be a column name, but one is {}.",
-                    json_kind(other)
-                ))
-            }
-        }
-    }
-    Ok(Some(out))
-}
-
-fn get_string_map(
-    name: &str,
-    extra: &Extra,
-    key: &str,
-) -> Result<Option<Vec<(String, String)>>, String> {
-    let Some(v) = extra.get(key) else {
-        return Ok(None);
-    };
-    let serde_json::Value::Object(map) = v else {
-        return Err(format!(
-            "files '{name}': '{key}' must be an object of column name → text, but it is {}.",
-            json_kind(v)
-        ));
-    };
-    let mut out = Vec::with_capacity(map.len());
-    for (column, value) in map {
-        match value {
-            serde_json::Value::String(s) => out.push((column.clone(), s.clone())),
-            other => {
-                return Err(format!(
-                    "files '{name}': '{key}' entry '{column}' must be text, but it is {}.",
-                    json_kind(other)
-                ))
-            }
-        }
-    }
-    Ok(Some(out))
-}
-
 impl DelimitedConfig {
     /// Read and check every knob of one `files` entry.
     ///
@@ -250,7 +145,7 @@ impl DelimitedConfig {
             delimiter,
             quote,
             columns,
-            skip_lines: get_usize(name, extra, "skip_lines")?.unwrap_or(0),
+            skip_lines: get_usize(name, extra, "skip_lines", "lines")?.unwrap_or(0),
             comment_prefix,
             line_suffix,
             encoding: Self::parse_encoding(name, extra)?,
@@ -367,15 +262,6 @@ impl DelimitedConfig {
             _ => None,
         }
     }
-}
-
-fn first_duplicate(names: &[String]) -> Option<&str> {
-    for (i, name) in names.iter().enumerate() {
-        if names[..i].iter().any(|earlier| earlier == name) {
-            return Some(name);
-        }
-    }
-    None
 }
 
 /// A delimited text file on disk. `display` is the name the blueprint referred

@@ -55,9 +55,8 @@ pub fn validate_compute(blueprint: &Blueprint) -> Result<(), String> {
 /// no CSV at the path, take its "missing file" branch, and report success on
 /// a build where the op never ran.
 ///
-/// Split from the walk so the rule is testable without a format that does not
-/// exist yet: in this build `csv` is the only registered format, so no
-/// blueprint reaching here can carry another one.
+/// Split from the walk so the rule is one function to point a test at, whatever
+/// the set of formats a given build compiled in.
 fn refuse_non_csv_compute_input(
     source_type: &str,
     input_name: &str,
@@ -99,6 +98,28 @@ fn check_compute_inputs(blueprint: &Blueprint, op: &ComputeOp) -> Result<(), Str
     Ok(())
 }
 
+/// The tail of the unknown-format error for a format this crate can read but
+/// this *build* did not compile in.
+///
+/// Without it the message is true and useless: `xlsx` is a real format, the
+/// blueprint is correct, and the only thing wrong is which Cargo features the
+/// binary was built with — which nothing else in the error mentions. The
+/// Python wheel always has it, so the reader who sees this is a Rust embedder
+/// or someone on a hand-built extension.
+fn gated_format_hint(format: &str) -> String {
+    const GATED: &[(&str, &str)] = &[("xlsx", "xlsx")];
+    if input_format(format).is_some() {
+        return String::new();
+    }
+    match GATED.iter().find(|(name, _)| *name == format) {
+        Some((_, feature)) => format!(
+            " '{format}' is one this crate reads, but only when built with the `{feature}` \
+             Cargo feature — rebuild kglite with it (the Python wheel has it)."
+        ),
+        None => String::new(),
+    }
+}
+
 /// Resolve every spec's input against the `files` section, before the build
 /// declares a registry from it.
 ///
@@ -112,9 +133,10 @@ pub fn validate_inputs(blueprint: &Blueprint) -> Result<(), String> {
     for (name, file) in &blueprint.files {
         if input_format(&file.format).is_none() {
             return Err(format!(
-                "files '{name}': unknown format '{}' — this build reads {}.",
+                "files '{name}': unknown format '{}' — this build reads {}.{}",
                 file.format,
-                input_format_names()
+                input_format_names(),
+                gated_format_hint(&file.format)
             ));
         }
         // Only a format that reads a file needs one. A `frame` entry's rows
@@ -1011,11 +1033,47 @@ mod input_tests {
     /// its keys would bury that one.
     #[test]
     fn an_unknown_format_suppresses_the_key_warning_and_fails_the_build() {
-        let bp = bp(r#"{"files": {"sheet": {"path": "s.xlsx", "format": "xlsx", "row": 2}}}"#);
+        let bp = bp(r#"{"files": {"t": {"path": "t.parquet", "format": "parquet", "row": 2}}}"#);
         assert!(unknown_key_warnings(&bp).is_empty());
         let err = validate_inputs(&bp).expect_err("an unreadable format fails the build");
-        assert!(err.contains("unknown format 'xlsx'"), "{err}");
+        assert!(err.contains("unknown format 'parquet'"), "{err}");
         assert!(err.contains("'csv'"), "{err}");
+        // A format nothing implements gets no rebuild advice — that would
+        // send the reader off to add a feature that does not exist.
+        assert!(!err.contains("Cargo feature"), "{err}");
+    }
+
+    /// A format this crate implements but this build did not compile in is a
+    /// different situation from a typo, and the message has to say so: the
+    /// blueprint is correct and the binary is the thing that is short.
+    #[cfg(not(feature = "xlsx"))]
+    #[test]
+    fn a_feature_gated_format_says_which_feature_is_missing() {
+        let bp = bp(r#"{"files": {"sheet": {"path": "s.xlsx", "format": "xlsx"}}}"#);
+        let err = validate_inputs(&bp).expect_err("an uncompiled format fails the build");
+        assert!(err.contains("unknown format 'xlsx'"), "{err}");
+        assert!(err.contains("`xlsx` Cargo feature"), "{err}");
+        assert!(err.contains("the Python wheel has it"), "{err}");
+    }
+
+    /// With the feature compiled in, `xlsx` is an ordinary format: it reads,
+    /// and a key it does not read warns the same way every other format's
+    /// stray key does.
+    #[cfg(feature = "xlsx")]
+    #[test]
+    fn a_stray_knob_on_an_xlsx_entry_warns_and_the_build_stands() {
+        let bp = bp(
+            r#"{"files": {"sheet": {"path": "s.xlsx", "format": "xlsx", "sheet": "drugs",
+                                    "header_rows": 3}}}"#,
+        );
+        validate_inputs(&bp).expect("a compiled-in format reads");
+        let warnings = unknown_key_warnings(&bp);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("unknown key 'header_rows'"),
+            "{warnings:?}"
+        );
+        assert!(warnings[0].contains("'header_row'"), "{warnings:?}");
     }
 
     /// A frame's rows are handed in by the caller, so the key that names a
@@ -1243,6 +1301,19 @@ mod accepted_key_tests {
                 ("encoding", json!("utf-8")),
                 ("prefix_strip", json!({"id": "x:"})),
             ],
+            // Keys a `"format": "xlsx"` entry reads. Compiled in only with the
+            // `xlsx` feature, and so is its fixture.
+            #[cfg(feature = "xlsx")]
+            "file_xlsx" => vec![
+                ("path", json!("screen.xlsx")),
+                ("format", json!("xlsx")),
+                ("sheet", json!("drugs")),
+                ("header_row", json!(1)),
+                (
+                    "unpivot",
+                    json!({"id_columns": ["id"], "name_to": "k", "value_to": "v"}),
+                ),
+            ],
             "junction_edge" => vec![
                 ("csv", json!("k.csv")),
                 ("file", json!(null)),
@@ -1325,6 +1396,8 @@ mod accepted_key_tests {
         use super::super::input::csv::ACCEPTED_FILE_KEYS_CSV;
         use super::super::input::delimited::ACCEPTED_FILE_KEYS_DELIMITED;
         use super::super::input::frame::ACCEPTED_FILE_KEYS_FRAME;
+        #[cfg(feature = "xlsx")]
+        use super::super::input::xlsx::ACCEPTED_FILE_KEYS_XLSX;
         use super::super::schema::{
             ACCEPTED_BLUEPRINT_KEYS, ACCEPTED_FK_EDGE_KEYS, ACCEPTED_JUNCTION_EDGE_KEYS,
             ACCEPTED_NODE_KEYS, ACCEPTED_SETTINGS_KEYS,
@@ -1335,6 +1408,8 @@ mod accepted_key_tests {
             ("file", ACCEPTED_FILE_KEYS_CSV),
             ("file_delimited", ACCEPTED_FILE_KEYS_DELIMITED),
             ("file_frame", ACCEPTED_FILE_KEYS_FRAME),
+            #[cfg(feature = "xlsx")]
+            ("file_xlsx", ACCEPTED_FILE_KEYS_XLSX),
             ("node", ACCEPTED_NODE_KEYS),
             ("fk_edge", ACCEPTED_FK_EDGE_KEYS),
             ("junction_edge", ACCEPTED_JUNCTION_EDGE_KEYS),
@@ -1351,11 +1426,16 @@ mod accepted_key_tests {
         let blueprint: Value = object("blueprint");
         let mut blueprint = blueprint;
         blueprint["settings"] = object("settings");
-        blueprint["files"] = json!({
+        let mut files = json!({
             "in": object("file"),
             "delim": object("file_delimited"),
             "rows": object("file_frame"),
         });
+        #[cfg(feature = "xlsx")]
+        {
+            files["sheet"] = object("file_xlsx");
+        }
+        blueprint["files"] = files;
         let mut node = object("node");
         node["connections"] = json!({
             "fk_edges": {"IN_ORG": object("fk_edge")},

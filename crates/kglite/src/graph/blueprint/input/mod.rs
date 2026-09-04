@@ -9,6 +9,9 @@
 pub mod csv;
 pub mod delimited;
 pub mod frame;
+pub mod knobs;
+#[cfg(feature = "xlsx")]
+pub mod xlsx;
 
 use super::table::RawCsv;
 use crate::datatypes::values::ColumnType;
@@ -56,7 +59,13 @@ pub fn accept_any_entry(_name: &str, _file: &super::schema::FileSpec) -> Result<
 
 /// Every format compiled into this build, in the order the diagnostics list
 /// them.
-pub const INPUT_FORMATS: &[FormatSpec] = &[csv::FORMAT, delimited::FORMAT, frame::FORMAT];
+pub const INPUT_FORMATS: &[FormatSpec] = &[
+    csv::FORMAT,
+    delimited::FORMAT,
+    frame::FORMAT,
+    #[cfg(feature = "xlsx")]
+    xlsx::FORMAT,
+];
 
 /// The registered format called `name`, or `None` — which is what makes an
 /// unknown `format` value a build error rather than a silently-ignored key.
@@ -127,6 +136,19 @@ pub trait Source: Send + Sync {
         HashMap::new()
     }
 
+    /// What this source noticed about its own data while reading it, drained
+    /// into the build report once every phase has run.
+    ///
+    /// Empty by default, and empty for a source nobody read: a text reader has
+    /// no opinion about a cell it never opened. A typed source can meet a cell
+    /// that carries no value at all — a spreadsheet's `#DIV/0!` — and that is
+    /// a null the author needs told about, which a `Source` cannot report at
+    /// the moment it happens because it has no report to write to and no idea
+    /// whether the column it is in is one the build even keeps.
+    fn read_warnings(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Visit the cells of `columns`, row by row, without materialising a
     /// table. `visit` receives the index *into `columns`* and the cell text of
     /// every non-empty cell, and returns false to stop the scan there.
@@ -179,6 +201,18 @@ impl InputRegistry {
     /// file named by two specs is one input, not two.
     pub fn insert(&mut self, name: impl Into<String>, source: Box<dyn Source>) {
         self.sources.entry(name.into()).or_insert(source);
+    }
+
+    /// Every declared source's `read_warnings`, in declaration order.
+    ///
+    /// Collected once, after the load phases: a source that reports per-read
+    /// findings only knows them after it has been read, and an input nobody
+    /// read contributes nothing.
+    pub fn read_warnings(&self) -> Vec<String> {
+        self.sources
+            .values()
+            .flat_map(|s| s.read_warnings())
+            .collect()
     }
 
     pub fn get(&self, name: &str) -> Result<&dyn Source, String> {

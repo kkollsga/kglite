@@ -82,9 +82,11 @@ pyo3 = { version = "0.29", features = ["multiple-pymethods", "chrono"] }
 # crate's source to avoid an extern-crate collision with this
 # crate's own `[lib] name = "kglite"` (the cdylib that becomes
 # the wheel's `kglite.abi3.so`).
-# The OKF + RDF format loaders are enabled unconditionally — they are
-# pure-Rust parsers (no network code) that the wheel always ships.
-kglite_core = { package = "kglite", path = "../kglite", features = ["okf", "rdf"] }
+# The OKF + RDF + xlsx format loaders are enabled unconditionally — they are
+# pure-Rust parsers (no network code) that the wheel always ships. `xlsx` is
+# what makes `{"format": "xlsx"}` a readable blueprint input here; without it
+# the loader refuses that format by name, which is the bare crate's default.
+kglite_core = { package = "kglite", path = "../kglite", features = ["okf", "rdf", "xlsx"] }
 
 # Shared CLI implementation. The standalone `kglite-cli` package builds the
 # same crate as a libpython-free binary; the main Python wheel calls its Rust
