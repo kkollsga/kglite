@@ -24,7 +24,8 @@ use std::collections::HashSet;
 use indexmap::IndexMap;
 
 use super::expr;
-use super::schema::{Blueprint, ComputeOp, NodeSpec};
+use super::input::{input_format, input_format_names};
+use super::schema::{Blueprint, ComputeOp, FileSpec, JunctionEdge, NodeSpec};
 
 /// Walk the compute pipeline and check every op. Mutates a
 /// growing `known_types` set so each op can be validated against
@@ -40,6 +41,182 @@ pub fn validate_compute(blueprint: &Blueprint) -> Result<(), String> {
 
     for (i, op) in blueprint.compute.iter().enumerate() {
         validate_op(op, &mut known, i).map_err(|e| format!("blueprint compute[{}]: {}", i, e))?;
+        check_compute_inputs(blueprint, op)
+            .map_err(|e| format!("blueprint compute[{}]: {}", i, e))?;
+    }
+    Ok(())
+}
+
+/// Refuse a compute op whose source type reads a non-CSV input.
+///
+/// `compute` is a CSV-shaping pre-phase that opens its source file with a CSV
+/// reader and writes a CSV back (`compute/derive.rs` and friends), entirely
+/// outside the input registry. Handed a spreadsheet or a frame it would find
+/// no CSV at the path, take its "missing file" branch, and report success on
+/// a build where the op never ran.
+///
+/// Split from the walk so the rule is testable without a format that does not
+/// exist yet: in this build `csv` is the only registered format, so no
+/// blueprint reaching here can carry another one.
+fn refuse_non_csv_compute_input(
+    source_type: &str,
+    input_name: &str,
+    format: &str,
+) -> Result<(), String> {
+    if format == "csv" {
+        return Ok(());
+    }
+    Err(format!(
+        "source type '{source_type}' reads input '{input_name}' (format '{format}'), but \
+         compute reads CSV files only. Materialise that input as CSV, or drop the compute op."
+    ))
+}
+
+/// Every source type an op reads, checked against the format of the input it
+/// reads from. A `csv` shorthand is a CSV by construction; a `file` reference
+/// carries whatever format its `files` entry declares.
+fn check_compute_inputs(blueprint: &Blueprint, op: &ComputeOp) -> Result<(), String> {
+    let sources: Vec<&str> = match op {
+        ComputeOp::Derive { from, .. }
+        | ComputeOp::Filter { from, .. }
+        | ComputeOp::Chain { from, .. }
+        | ComputeOp::Aggregate { from, .. } => vec![from.as_str()],
+        ComputeOp::Calendar { links, .. } => links.iter().map(|l| l.from.as_str()).collect(),
+    };
+    for source_type in sources {
+        let Some(spec) = super::compute::resolve_source_spec(blueprint, source_type) else {
+            continue;
+        };
+        // Only a `file` reference can name a non-CSV format. An undeclared
+        // name is `validate_inputs`' error to report, not this one's.
+        let Some(name) = spec.file.as_deref() else {
+            continue;
+        };
+        if let Some(file) = blueprint.files.get(name) {
+            refuse_non_csv_compute_input(source_type, name, &file.format)?;
+        }
+    }
+    Ok(())
+}
+
+/// Resolve every spec's input against the `files` section, before the build
+/// declares a registry from it.
+///
+/// Each rule here guards a way one input silently becomes another, or none:
+/// an unreadable format, an entry that says nothing about where its rows come
+/// from, a spec claiming two inputs, a name that resolves to nothing, and a
+/// `files` entry whose name is already a `csv` shorthand for a different file
+/// — the registry has one slot per name, so that last one would hand a spec
+/// the other file's rows and report success.
+pub fn validate_inputs(blueprint: &Blueprint) -> Result<(), String> {
+    for (name, file) in &blueprint.files {
+        if input_format(&file.format).is_none() {
+            return Err(format!(
+                "files '{name}': unknown format '{}' — this build reads {}.",
+                file.format,
+                input_format_names()
+            ));
+        }
+        if file.path.is_none() {
+            return Err(format!(
+                "files '{name}': no 'path' — a '{}' input must name the file it reads.",
+                file.format
+            ));
+        }
+    }
+
+    fn walk(blueprint: &Blueprint, node_type: &str, spec: &NodeSpec) -> Result<(), String> {
+        check_spec_input(
+            &format!("node '{node_type}'"),
+            spec.csv.as_deref(),
+            spec.file.as_deref(),
+            false,
+            &blueprint.files,
+        )?;
+        for (edge_type, junc) in &spec.connections.junction_edges {
+            check_junction_input(node_type, edge_type, junc, &blueprint.files)?;
+        }
+        for (sub_type, sub) in &spec.sub_nodes {
+            walk(blueprint, sub_type, sub)?;
+        }
+        Ok(())
+    }
+
+    for (node_type, spec) in &blueprint.nodes {
+        walk(blueprint, node_type, spec)?;
+    }
+    Ok(())
+}
+
+fn check_junction_input(
+    node_type: &str,
+    edge_type: &str,
+    junc: &JunctionEdge,
+    files: &IndexMap<String, FileSpec>,
+) -> Result<(), String> {
+    check_spec_input(
+        &format!("junction '{edge_type}' (node '{node_type}')"),
+        junc.csv.as_deref(),
+        junc.file.as_deref(),
+        true,
+        files,
+    )
+}
+
+/// The per-spec half of [`validate_inputs`]. `required` is true where an
+/// input is not optional — a junction has no rows without one, where a node
+/// type with neither is the manual form.
+fn check_spec_input(
+    where_: &str,
+    csv: Option<&str>,
+    file: Option<&str>,
+    required: bool,
+    files: &IndexMap<String, FileSpec>,
+) -> Result<(), String> {
+    match (csv, file) {
+        (Some(csv), Some(file)) => {
+            return Err(format!(
+                "{where_}: both 'csv' and 'file' are set ('{csv}' and '{file}') — a spec reads \
+                 one input. Keep 'file' and drop 'csv', or the other way round."
+            ));
+        }
+        (None, None) if required => {
+            return Err(format!(
+                "{where_}: neither 'csv' nor 'file' — a junction table has no rows without one."
+            ));
+        }
+        (None, Some(name)) if !files.contains_key(name) => {
+            let declared = if files.is_empty() {
+                "no inputs are declared in 'files'".to_string()
+            } else {
+                format!(
+                    "declared inputs: {}",
+                    files.keys().cloned().collect::<Vec<_>>().join(", ")
+                )
+            };
+            return Err(format!(
+                "{where_}: \"file\": \"{name}\" is not declared in 'files'; {declared}."
+            ));
+        }
+        (Some(csv), None) => {
+            // The shorthand registers the path string as the input's name, so
+            // a `files` entry of that name is the same registry slot. Reading
+            // the same file as CSV is what the author meant; anything else is
+            // two inputs contending for one name.
+            if let Some(entry) = files.get(csv) {
+                let same_file = entry.format == "csv" && entry.path.as_deref() == Some(csv);
+                if !same_file {
+                    return Err(format!(
+                        "{where_}: \"csv\": \"{csv}\" collides with the 'files' entry named \
+                         '{csv}', which reads '{}' as '{}'. Rename that entry, or reference it \
+                         with \"file\": \"{csv}\".",
+                        entry.path.as_deref().unwrap_or("<no path>"),
+                        entry.format
+                    ));
+                }
+            }
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -333,8 +510,13 @@ pub fn unknown_property_type_warnings(blueprint: &Blueprint) -> Vec<String> {
 }
 
 /// One warning per key the blueprint parser does not read, at every level a
-/// user hand-writes: the top level, `settings`, each node and `sub_nodes`
-/// entry, and each `fk_edges` / `junction_edges` entry.
+/// user hand-writes: the top level, `settings`, each `files` entry, each node
+/// and `sub_nodes` entry, and each `fk_edges` / `junction_edges` entry.
+///
+/// A `files` entry is checked against the accepted list *for its own format*
+/// — `delimiter` is a real key on a delimited input and a stray one on a CSV,
+/// so a single flat list would either accept every knob everywhere or reject
+/// the ones that work.
 ///
 /// Such a key is dropped by serde and the build then reports success on a
 /// graph the author did not describe — a misspelled `"lables"` costs every
@@ -414,6 +596,20 @@ pub fn unknown_key_warnings(blueprint: &Blueprint) -> Vec<String> {
         &blueprint.settings.extra,
         ACCEPTED_SETTINGS_KEYS,
     );
+    for (name, file) in &blueprint.files {
+        // An unrecognised format has no accepted list to check against, and
+        // `validate_inputs` refuses the build over it — warning about its keys
+        // as well would only bury that.
+        let Some(format) = input_format(&file.format) else {
+            continue;
+        };
+        check(
+            &mut warnings,
+            &format!("file '{name}' (format '{}')", file.format),
+            &file.extra,
+            format.accepted_keys,
+        );
+    }
     for (node_type, spec) in &blueprint.nodes {
         walk(&mut warnings, node_type, spec);
     }
@@ -683,6 +879,162 @@ mod tests {
 }
 
 #[cfg(test)]
+mod input_tests {
+    use super::*;
+
+    fn bp(s: &str) -> Blueprint {
+        serde_json::from_str(s).expect("blueprint JSON parse")
+    }
+
+    /// The warning names the accepted list *for that entry's format*, so a
+    /// knob that is real on another format still reads as stray here.
+    #[test]
+    fn a_stray_key_in_a_files_entry_warns_against_its_own_format() {
+        let bp = bp(r#"{"files": {"people": {"path": "p.csv", "delimiter": "\t"}}}"#);
+        let warnings = unknown_key_warnings(&bp);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        let w = &warnings[0];
+        assert!(w.contains("file 'people' (format 'csv')"), "{w}");
+        assert!(w.contains("unknown key 'delimiter'"), "{w}");
+        assert!(w.contains("Accepted keys: 'path', 'format'"), "{w}");
+    }
+
+    /// Every key `FileSpec` reads is silent — the check must not be warning
+    /// about the format key it just read.
+    #[test]
+    fn a_well_formed_files_entry_is_silent() {
+        let bp = bp(r#"{"files": {"people": {"path": "p.csv", "format": "csv"}}}"#);
+        assert!(unknown_key_warnings(&bp).is_empty());
+    }
+
+    /// An unknown format has no accepted list to check against, and
+    /// `validate_inputs` refuses the build over it; a second complaint about
+    /// its keys would bury that one.
+    #[test]
+    fn an_unknown_format_suppresses_the_key_warning_and_fails_the_build() {
+        let bp = bp(r#"{"files": {"sheet": {"path": "s.xlsx", "format": "xlsx", "row": 2}}}"#);
+        assert!(unknown_key_warnings(&bp).is_empty());
+        let err = validate_inputs(&bp).expect_err("an unreadable format fails the build");
+        assert!(err.contains("unknown format 'xlsx'"), "{err}");
+        assert!(err.contains("'csv'"), "{err}");
+    }
+
+    #[test]
+    fn a_csv_entry_must_name_a_path() {
+        let bp = bp(r#"{"files": {"people": {"format": "csv"}}}"#);
+        let err = validate_inputs(&bp).expect_err("an entry with no source fails");
+        assert!(err.contains("files 'people'"), "{err}");
+        assert!(err.contains("no 'path'"), "{err}");
+    }
+
+    #[test]
+    fn a_spec_reads_one_input_not_two() {
+        let bp = bp(r#"{"files": {"p": {"path": "p.csv"}},
+                "nodes": {"Person": {"csv": "p.csv", "file": "p", "pk": "id"}}}"#);
+        let err = validate_inputs(&bp).expect_err("csv + file on one spec fails");
+        assert!(err.contains("node 'Person'"), "{err}");
+        assert!(err.contains("both 'csv' and 'file'"), "{err}");
+    }
+
+    #[test]
+    fn an_undeclared_file_name_lists_the_declared_ones() {
+        let bp = bp(
+            r#"{"files": {"people": {"path": "p.csv"}, "orgs": {"path": "o.csv"}},
+                "nodes": {"Person": {"file": "pepole", "pk": "id"}}}"#,
+        );
+        let err = validate_inputs(&bp).expect_err("an undeclared name fails");
+        assert!(err.contains("\"file\": \"pepole\""), "{err}");
+        assert!(err.contains("declared inputs: people, orgs"), "{err}");
+    }
+
+    /// The registry has one slot per name and keeps the first source, so an
+    /// entry named after a different file's shorthand would hand that spec
+    /// the wrong rows and report success.
+    #[test]
+    fn an_entry_shadowing_a_shorthand_for_another_file_is_refused() {
+        let bp = bp(r#"{"files": {"p.csv": {"path": "other.csv"}},
+                "nodes": {"Person": {"csv": "p.csv", "pk": "id"}}}"#);
+        let err = validate_inputs(&bp).expect_err("two files, one registry name");
+        assert!(err.contains("collides"), "{err}");
+        assert!(err.contains("other.csv"), "{err}");
+    }
+
+    #[test]
+    fn an_entry_naming_the_same_file_as_the_shorthand_is_one_input() {
+        let bp = bp(r#"{"files": {"p.csv": {"path": "p.csv", "format": "csv"}},
+                "nodes": {"Person": {"csv": "p.csv", "pk": "id"}}}"#);
+        validate_inputs(&bp).expect("the same file under the same name is one input");
+    }
+
+    #[test]
+    fn a_junction_must_name_an_input() {
+        let bp = bp(
+            r#"{"nodes": {"Person": {"csv": "p.csv", "pk": "id", "connections": {
+                "junction_edges": {"KNOWS": {
+                    "source_fk": "a", "target": "Person", "target_fk": "b"}}}}}}"#,
+        );
+        let err = validate_inputs(&bp).expect_err("a junction with no table fails");
+        assert!(err.contains("junction 'KNOWS' (node 'Person')"), "{err}");
+        assert!(err.contains("neither 'csv' nor 'file'"), "{err}");
+    }
+
+    #[test]
+    fn a_sub_node_spec_is_walked_too() {
+        let bp = bp(r#"{"nodes": {"Person": {"csv": "p.csv", "pk": "id",
+                "sub_nodes": {"Pet": {"file": "nowhere", "pk": "id"}}}}}"#);
+        let err = validate_inputs(&bp).expect_err("a sub-node's input resolves too");
+        assert!(err.contains("node 'Pet'"), "{err}");
+    }
+
+    /// `compute` opens its source file with a CSV reader outside the input
+    /// registry, so a non-CSV input would leave the op silently unrun. In
+    /// this build `csv` is the only registered format, so the rule is
+    /// exercised on the function itself.
+    #[test]
+    fn compute_accepts_a_csv_input_and_refuses_any_other_format() {
+        refuse_non_csv_compute_input("Person", "people", "csv").expect("csv is what compute reads");
+        let err = refuse_non_csv_compute_input("Person", "sheet", "xlsx")
+            .expect_err("a non-CSV input is refused");
+        assert!(err.contains("'Person'"), "{err}");
+        assert!(err.contains("'sheet'"), "{err}");
+        assert!(err.contains("'xlsx'"), "{err}");
+        assert!(err.contains("compute reads CSV files only"), "{err}");
+    }
+
+    /// The wiring, reached through the public entry point: `validate_compute`
+    /// resolves each op's source type to its spec, its spec to a `files`
+    /// entry, and that entry's format to the rule above. (It runs before
+    /// `validate_inputs` would refuse the format outright, which is what lets
+    /// this test name one.)
+    #[test]
+    fn validate_compute_refuses_an_op_over_a_non_csv_input() {
+        let json = r#"{
+            "files": {"sheet": {"path": "s.xlsx", "format": "FORMAT"}},
+            "nodes": {"Person": {"file": "sheet", "pk": "id"}},
+            "compute": [{"op": "derive", "from": "Person", "set": {"n": "id * 2"}}]
+        }"#;
+        validate_compute(&bp(&json.replace("FORMAT", "csv"))).expect("a CSV input is fine");
+        let err = validate_compute(&bp(&json.replace("FORMAT", "xlsx")))
+            .expect_err("compute over a non-CSV input is refused");
+        assert!(err.contains("blueprint compute[0]"), "{err}");
+        assert!(err.contains("'xlsx'"), "{err}");
+    }
+
+    /// The calendar op reads its `links`, not a top-level `from`.
+    #[test]
+    fn validate_compute_checks_a_calendar_link_source() {
+        let bp = bp(r#"{
+            "files": {"sheet": {"path": "s.xlsx", "format": "xlsx"}},
+            "nodes": {"Tx": {"file": "sheet", "pk": "id"}},
+            "compute": [{"op": "calendar", "start": "2020-01-01", "end": "2020-01-02",
+                         "links": [{"from": "Tx", "date_col": "d", "edge": "ON"}]}]
+        }"#);
+        let err = validate_compute(&bp).expect_err("a calendar link source is checked");
+        assert!(err.contains("'Tx'"), "{err}");
+    }
+}
+
+#[cfg(test)]
 mod accepted_key_tests {
     use super::*;
     use serde_json::{json, Map, Value};
@@ -693,6 +1045,7 @@ mod accepted_key_tests {
         match level {
             "blueprint" => vec![
                 ("settings", json!({})),
+                ("files", json!({})),
                 ("nodes", json!({})),
                 ("compute", json!([])),
                 ("ontology", json!(null)),
@@ -710,6 +1063,7 @@ mod accepted_key_tests {
             ],
             "node" => vec![
                 ("csv", json!("p.csv")),
+                ("file", json!(null)),
                 ("pk", json!("id")),
                 ("title", json!("name")),
                 ("parent", json!("Org")),
@@ -729,8 +1083,13 @@ mod accepted_key_tests {
                 ("property_types", json!({})),
                 ("rename", json!({})),
             ],
+            // Keys a `files` entry with `"format": "csv"` reads. A second
+            // format adds a level of its own here rather than widening this
+            // one — the accepted list is per format, not per struct.
+            "file" => vec![("path", json!("x.csv")), ("format", json!("csv"))],
             "junction_edge" => vec![
                 ("csv", json!("k.csv")),
+                ("file", json!(null)),
                 ("source_fk", json!("a")),
                 ("target", json!("Person")),
                 ("target_type_column", json!(null)),
@@ -778,6 +1137,7 @@ mod accepted_key_tests {
     /// `extra`, which the emptiness assertions catch.
     #[test]
     fn accepted_key_lists_name_only_keys_the_specs_read() {
+        use super::super::input::csv::ACCEPTED_FILE_KEYS_CSV;
         use super::super::schema::{
             ACCEPTED_BLUEPRINT_KEYS, ACCEPTED_FK_EDGE_KEYS, ACCEPTED_JUNCTION_EDGE_KEYS,
             ACCEPTED_NODE_KEYS, ACCEPTED_SETTINGS_KEYS,
@@ -785,6 +1145,7 @@ mod accepted_key_tests {
         for (level, accepted) in [
             ("blueprint", ACCEPTED_BLUEPRINT_KEYS),
             ("settings", ACCEPTED_SETTINGS_KEYS),
+            ("file", ACCEPTED_FILE_KEYS_CSV),
             ("node", ACCEPTED_NODE_KEYS),
             ("fk_edge", ACCEPTED_FK_EDGE_KEYS),
             ("junction_edge", ACCEPTED_JUNCTION_EDGE_KEYS),
@@ -801,6 +1162,7 @@ mod accepted_key_tests {
         let blueprint: Value = object("blueprint");
         let mut blueprint = blueprint;
         blueprint["settings"] = object("settings");
+        blueprint["files"] = json!({"in": object("file")});
         let mut node = object("node");
         node["connections"] = json!({
             "fk_edges": {"IN_ORG": object("fk_edge")},

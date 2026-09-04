@@ -34,10 +34,11 @@ use manual::load_manual_nodes;
 use nodes::{load_node_specs, should_stream_spec};
 use specs::collect_specs;
 
-use super::input::{csv::CsvFile, InputRegistry};
-use super::schema::Blueprint;
+use super::input::{csv::CsvFile, resolve_input_path, InputRegistry};
+use super::schema::{Blueprint, FileSpec};
 use crate::graph::mutation::maintain;
 use crate::graph::schema::{DirGraph, PROVISIONAL_KEY};
+use indexmap::IndexMap;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -59,6 +60,9 @@ pub fn build(
     // expressions / dangling type refs / misplaced aggregate functions fail
     // at load time rather than midway through the build.
     super::validation::validate_compute(&blueprint)?;
+    // Every spec's input resolves to exactly one declared entry, before that
+    // declaration becomes a registry below.
+    super::validation::validate_inputs(&blueprint)?;
 
     // Captured before `apply_compute` rewrites the blueprint: the warning is
     // about what the *author* wrote, and a compute-derived spec inherits its
@@ -123,7 +127,8 @@ pub fn build(
     }
 
     // Phase 0: declare every input, then pre-read the buffered ones.
-    let (registry, csv_cache) = prepare_inputs(&core_specs, &sub_specs, &root, profile);
+    let (registry, csv_cache) =
+        prepare_inputs(&blueprint.files, &core_specs, &sub_specs, &root, profile);
     // Filled by the streamed node phase, read by the streamed FK phase — see
     // `IdTypeCache`.
     let id_types = IdTypeCache::default();
@@ -251,12 +256,13 @@ pub fn build(
 /// them would pin a full `RawCsv` for the whole build, re-introducing the RAM
 /// ceiling streaming exists to avoid.
 fn prepare_inputs(
+    files: &IndexMap<String, FileSpec>,
     core_specs: &[FlatSpec],
     sub_specs: &[FlatSpec],
     root: &Path,
     profile: bool,
 ) -> (InputRegistry, CsvCache) {
-    let registry = build_input_registry(core_specs, sub_specs, root);
+    let registry = build_input_registry(files, core_specs, sub_specs, root);
 
     let cache = CsvCache::default();
     let mut buffered_inputs: Vec<String> = Vec::new();
@@ -282,32 +288,62 @@ fn prepare_inputs(
     (registry, cache)
 }
 
-/// Declare every input the flattened specs name — one entry per distinct
-/// name, node inputs and junction inputs alike. Called after `apply_compute`,
-/// because that pre-phase repoints specs at the files it generated.
+/// Declare every input the build can read: one entry per `files` declaration,
+/// plus one synthetic entry per `csv` shorthand, which is an input declared
+/// inline and named by its own path.
 ///
-/// The registry key is the name exactly as the blueprint wrote it, so two
-/// spellings of one file (`x.csv` and `./x.csv`) stay two inputs, as they
-/// always have; the cache is keyed the same way and inherits the same
-/// behaviour.
+/// Called after `apply_compute`, because that pre-phase repoints specs at the
+/// files it generated (always as `csv` shorthands, so they arrive here as
+/// synthetic entries like any other).
+///
+/// The synthetic key is the shorthand string exactly as the blueprint wrote
+/// it, so two spellings of one file (`x.csv` and `./x.csv`) stay two inputs,
+/// as they always have; the cache is keyed the same way and inherits the same
+/// behaviour. Declarations are inserted first and the registry keeps the first
+/// source per name — a shorthand naming a declared entry's file is that one
+/// entry, and validation has already refused a name that would mean two
+/// different files.
 fn build_input_registry(
+    files: &IndexMap<String, FileSpec>,
     core_specs: &[FlatSpec],
     sub_specs: &[FlatSpec],
     root: &Path,
 ) -> InputRegistry {
     let mut registry = InputRegistry::default();
+    for (name, file) in files {
+        // `path`-less entries are refused by `validate_inputs` for every
+        // format this build reads.
+        let Some(path) = file.path.as_deref() else {
+            continue;
+        };
+        registry.insert(
+            name.clone(),
+            // One format today. A second one dispatches here on
+            // `file.format`, which validation has already checked is
+            // registered.
+            Box::new(CsvFile::new(
+                resolve_input_path(root, path),
+                path.to_string(),
+            )),
+        );
+    }
     let declare = |name: &str, registry: &mut InputRegistry| {
         registry.insert(
             name,
-            Box::new(CsvFile::new(root.join(name), name.to_string())),
+            Box::new(CsvFile::new(
+                resolve_input_path(root, name),
+                name.to_string(),
+            )),
         );
     };
     for spec in core_specs.iter().chain(sub_specs.iter()) {
-        if let Some(name) = spec.input.as_deref() {
+        if let Some(name) = spec.spec.csv.as_deref() {
             declare(name, &mut registry);
         }
         for junc in spec.spec.connections.junction_edges.values() {
-            declare(&junc.csv, &mut registry);
+            if let Some(name) = junc.csv.as_deref() {
+                declare(name, &mut registry);
+            }
         }
     }
     registry

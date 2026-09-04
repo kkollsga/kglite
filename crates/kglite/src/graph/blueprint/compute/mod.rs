@@ -19,6 +19,9 @@
 
 use std::path::Path;
 
+/// Compute opens and rewrites its source files itself, so it resolves paths
+/// the way the input registry does — one rule for where an input lives.
+pub(crate) use super::input::resolve_input_path;
 use super::schema::{Blueprint, ComputeOp};
 
 pub mod aggregate;
@@ -166,16 +169,6 @@ pub(crate) fn resolve_source_spec_mut<'a>(
         }
     }
     None
-}
-
-/// Resolve the on-disk path for a NodeSpec's CSV, relative to the
-/// blueprint root.
-pub(crate) fn resolve_csv_path(input_root: &Path, csv: &str) -> std::path::PathBuf {
-    if Path::new(csv).is_absolute() {
-        std::path::PathBuf::from(csv)
-    } else {
-        input_root.join(csv)
-    }
 }
 
 /// Convert a Value (from expression evaluation) to a CSV cell.

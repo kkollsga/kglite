@@ -21,7 +21,7 @@ use indexmap::IndexMap;
 
 use super::super::expr::value_cmp;
 use super::super::schema::{Blueprint, JunctionEdge};
-use super::{csv_cell_to_value, resolve_csv_path, resolve_source_spec, resolve_source_spec_mut};
+use super::{csv_cell_to_value, resolve_input_path, resolve_source_spec, resolve_source_spec_mut};
 
 pub fn run_chain(
     blueprint: &mut Blueprint,
@@ -44,7 +44,7 @@ pub fn run_chain(
             from
         )
     })?;
-    let csv_path = resolve_csv_path(input_root, &csv_rel);
+    let csv_path = resolve_input_path(input_root, &csv_rel);
 
     // Missing source CSV → no-op (loader-consistent behaviour for
     // partial datasets).
@@ -161,7 +161,8 @@ pub fn run_chain(
     spec_mut.connections.junction_edges.insert(
         edge_name.to_string(),
         JunctionEdge {
-            csv: computed_rel,
+            csv: Some(computed_rel),
+            file: None,
             source_fk: src_col,
             target: vec![from.to_string()],
             target_type_column: None,

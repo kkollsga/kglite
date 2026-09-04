@@ -11,9 +11,11 @@ pub struct FlatSpec {
     pub parent: Option<String>,
     pub is_manual: bool,
     /// Name of the input this spec's rows come from, as looked up in the
-    /// build's `InputRegistry`. This is the single place the schema's `csv`
-    /// key is read: the load phases resolve a *name*, never a path, so a
-    /// future non-file format needs no change below `build/`.
+    /// build's `InputRegistry`: the `files` entry the spec names, or the `csv`
+    /// shorthand, which the registry declares under the path string itself.
+    /// This is the single place those two keys are read — the load phases
+    /// resolve a *name*, never a path, so a future non-file format needs no
+    /// change below `build/`.
     pub input: Option<String>,
 }
 
@@ -21,13 +23,16 @@ pub(super) fn collect_specs(nodes: &IndexMap<String, NodeSpec>) -> (Vec<FlatSpec
     let mut core = Vec::new();
     let mut subs = Vec::new();
     for (name, spec) in nodes {
-        let is_manual = spec.csv.is_none();
+        let input = spec.input_name().map(str::to_string);
+        // A node type with no input at all is the manual form, synthesised
+        // from the FK values that refer to it.
+        let is_manual = input.is_none();
         core.push(FlatSpec {
             node_type: name.clone(),
             spec: clone_without_subs(spec),
             parent: None,
             is_manual,
-            input: spec.csv.clone(),
+            input,
         });
         for (sub_name, sub_spec) in &spec.sub_nodes {
             // Sub-nodes keep their raw `parent` field untouched — the
@@ -41,7 +46,7 @@ pub(super) fn collect_specs(nodes: &IndexMap<String, NodeSpec>) -> (Vec<FlatSpec
                 spec: sub_clone,
                 parent: Some(name.clone()),
                 is_manual: false,
-                input: sub_spec.csv.clone(),
+                input: sub_spec.input_name().map(str::to_string),
             });
         }
     }

@@ -106,7 +106,17 @@ fn load_one_junction_edge(
     let initial_load =
         maintain::InitialLoad::Preset(!graph.connection_type_metadata.contains_key(edge_type));
 
-    let source = match registry.get(&junc.csv) {
+    // `validate_inputs` refuses a junction declaring neither `csv` nor
+    // `file`, so this is the shape of that rule at the read site, not a
+    // second policy.
+    let Some(input_name) = junc.input_name() else {
+        report.errors.push(format!(
+            "junction {}: neither 'csv' nor 'file' names an input",
+            edge_type
+        ));
+        return Ok(());
+    };
+    let source = match registry.get(input_name) {
         Ok(s) => s,
         Err(e) => {
             report.errors.push(format!("junction {}: {}", edge_type, e));

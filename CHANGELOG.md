@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- **A blueprint declares its inputs once, in a `files:` section.** Each entry
+  names an input (`{"path": "disease.csv", "format": "csv"}`) that node specs
+  and junction edges reference with `"file": "<name>"`, so a file read by
+  several specs is written down once instead of at every one of them.
+  `"csv": "x.csv"` stays valid and is exactly shorthand for a `files` entry
+  named `x.csv`, so the two spellings build the same graph and mix freely.
+  `csv` is the only `format` this release reads. The build refuses rather than
+  guessing when a spec sets both `csv` and `file`, when `file` names an entry
+  that is not declared, when an entry has no `path` or an unreadable `format`
+  (both errors list what is accepted), and when an entry's name is already a
+  `csv` shorthand for a *different* file — the two would claim one input name.
+  A stray key inside an entry is a warning that names the accepted keys for
+  that entry's format. A `compute:` op over a non-CSV input is refused at load
+  time: compute reads and rewrites CSV files directly, and would otherwise
+  skip the op and report success.
 
 ## [0.16.22] - 2026-09-03
 ### Added

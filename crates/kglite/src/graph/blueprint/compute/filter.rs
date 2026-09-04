@@ -9,7 +9,7 @@ use std::path::Path;
 
 use super::super::expr::{self, Bindings, Value};
 use super::super::schema::Blueprint;
-use super::{csv_cell_to_value, resolve_csv_path, resolve_source_spec, resolve_source_spec_mut};
+use super::{csv_cell_to_value, resolve_input_path, resolve_source_spec, resolve_source_spec_mut};
 
 struct RowBindings<'a> {
     headers: &'a [String],
@@ -40,7 +40,7 @@ pub fn run_filter(
             from
         )
     })?;
-    let csv_path = resolve_csv_path(input_root, &csv_rel);
+    let csv_path = resolve_input_path(input_root, &csv_rel);
 
     // Missing source CSV → no-op (mirrors loader semantics for
     // partial datasets).

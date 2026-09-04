@@ -33,7 +33,7 @@ use indexmap::IndexMap;
 use super::super::expr::{self, value_cmp, Bindings, Expr, Value};
 use super::super::schema::{AggregateEdge, Blueprint, JunctionEdge, NodeSpec};
 use super::{
-    csv_cell_to_value, infer_value_type, resolve_csv_path, resolve_source_spec, value_to_csv_cell,
+    csv_cell_to_value, infer_value_type, resolve_input_path, resolve_source_spec, value_to_csv_cell,
 };
 
 struct RowBindings<'a> {
@@ -104,7 +104,7 @@ pub fn run_aggregate(
             from
         )
     })?;
-    let csv_path = resolve_csv_path(input_root, &csv_rel);
+    let csv_path = resolve_input_path(input_root, &csv_rel);
 
     // Mirror the rest of the blueprint loader: a missing source CSV
     // is not an error — the type simply contributes zero rows. The

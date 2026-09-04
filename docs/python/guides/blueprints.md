@@ -587,6 +587,70 @@ graph.select("Contract").valid_at("2024-06-15")
 graph.select("Contract").valid_during("2024-01-01", "2024-12-31")
 ```
 
+## Declaring Inputs
+
+`"csv": "diseases.csv"` on a node spec or a junction edge names an input
+inline. When several specs read the same file — a node type and the junction
+that links it, or two node types carved out of one table — the path is repeated
+at every one of them, and moving the file means editing each.
+
+A `files` section declares each input once by name; specs then reference it
+with `"file"`:
+
+```json
+{
+  "settings": { "root": "./data" },
+  "files": {
+    "diseases": { "path": "disease.csv", "format": "csv" },
+    "links":    { "path": "disease_gene.csv" }
+  },
+  "nodes": {
+    "Disease": {
+      "file": "diseases",
+      "pk": "id",
+      "connections": {
+        "junction_edges": {
+          "ASSOCIATED_WITH": {
+            "file": "links",
+            "source_fk": "disease_id",
+            "target": "Gene",
+            "target_fk": "gene_id"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+| Key | Description |
+|-----|-------------|
+| `path` | The file this input reads, resolved against `settings.root`. Required. |
+| `format` | How to read it. Defaults to `"csv"`, which is the only format this release reads; more are coming, and each will bring its own keys. |
+
+`"csv": "x.csv"` remains valid and is exactly shorthand for a `files` entry
+`{ "path": "x.csv", "format": "csv" }` named `x.csv`, so the two spellings
+build the same graph and the two styles mix freely in one blueprint. Two specs
+naming the same input — by `file` or by the same `csv` string — read one input,
+not two.
+
+The build refuses, rather than guessing, when:
+
+- a spec sets both `csv` and `file`;
+- `file` names an entry `files` does not declare (the error lists the ones it
+  does);
+- a `files` entry has no `path`;
+- a `files` entry's `format` is not one this build reads (the error lists
+  those);
+- a `files` entry is named after a `csv` shorthand that means a different file
+  — both would claim the same input name.
+
+A stray key inside a `files` entry is a warning, like stray keys elsewhere in a
+blueprint, and names the accepted keys for that entry's format.
+
+The `compute:` pipeline reads and rewrites CSV files directly, so a compute op
+whose source type reads a non-CSV input is refused at load time.
+
 ## Settings Reference
 
 ```json
@@ -600,7 +664,7 @@ graph.select("Contract").valid_during("2024-01-01", "2024-12-31")
 
 | Key | Description |
 |-----|-------------|
-| `root` (or `input_root`) | Base directory for resolving CSV paths. Defaults to `"."`. |
+| `root` (or `input_root`) | Base directory for resolving input paths — `files` entries and `csv` shorthands alike. Defaults to `"."`. |
 | `output` | Path to auto-save the graph to after loading. |
 | `output_path` | Alternative: output directory (combined with `output_file`). |
 | `output_file` | Alternative: output filename (combined with `output_path`). |

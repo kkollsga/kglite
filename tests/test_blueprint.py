@@ -3299,3 +3299,187 @@ class TestJunctionDedupeRegime:
             assert self._edges(bp_path, monkeypatch, chunk_size) == single, (
                 f"chunk_size={chunk_size} produced a different edge set"
             )
+
+
+class TestFilesSection:
+    """`files:` declares each input once by name; a spec references it with
+    `"file"`. `"csv": "x.csv"` stays the shorthand for a `files` entry
+    `{"path": "x.csv", "format": "csv"}`, so the two spellings must build the
+    same graph and share one registry slot.
+    """
+
+    def _data(self, tmp_path):
+        _write_csv(
+            tmp_path / "persons.csv",
+            pd.DataFrame({"person_id": [1, 2, 3], "name": ["Alice", "Bob", "Charlie"], "age": [28, 35, 42]}),
+        )
+        _write_csv(tmp_path / "knows.csv", pd.DataFrame({"source_id": [1, 2], "target_id": [2, 3]}))
+
+    def _build(self, tmp_path, bp, name="bp.json"):
+        _write_blueprint(tmp_path / name, bp)
+        return from_blueprint(tmp_path / name, save=False)
+
+    def _shorthand_bp(self, tmp_path):
+        return {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "Person": {
+                    "csv": "persons.csv",
+                    "pk": "person_id",
+                    "title": "name",
+                    "properties": {"age": "int"},
+                    "connections": {
+                        "junction_edges": {
+                            "KNOWS": {
+                                "csv": "knows.csv",
+                                "source_fk": "source_id",
+                                "target": "Person",
+                                "target_fk": "target_id",
+                            }
+                        }
+                    },
+                }
+            },
+        }
+
+    def _files_bp(self, tmp_path):
+        bp = self._shorthand_bp(tmp_path)
+        bp["files"] = {
+            "people": {"path": "persons.csv", "format": "csv"},
+            "acquaintances": {"path": "knows.csv"},
+        }
+        person = bp["nodes"]["Person"]
+        del person["csv"]
+        person["file"] = "people"
+        junc = person["connections"]["junction_edges"]["KNOWS"]
+        del junc["csv"]
+        junc["file"] = "acquaintances"
+        return bp
+
+    def _shape(self, graph):
+        nodes = graph.cypher("MATCH (p:Person) RETURN p.name AS name, p.age AS age ORDER BY name").to_list()
+        edges = graph.cypher("MATCH (a)-[:KNOWS]->(b) RETURN a.name AS a, b.name AS b ORDER BY a, b").to_list()
+        return nodes, edges
+
+    def test_a_files_blueprint_builds_the_same_graph_as_its_csv_shorthand_twin(self, tmp_path):
+        self._data(tmp_path)
+        shorthand = self._shape(self._build(tmp_path, self._shorthand_bp(tmp_path), "short.json"))
+        declared = self._shape(self._build(tmp_path, self._files_bp(tmp_path), "files.json"))
+        # Non-vacuity: the twin actually loaded rows, properties and edges.
+        assert shorthand[0] == [
+            {"name": "Alice", "age": 28},
+            {"name": "Bob", "age": 35},
+            {"name": "Charlie", "age": 42},
+        ]
+        assert len(shorthand[1]) == 2
+        assert declared == shorthand
+
+    def test_two_specs_read_one_declared_entry(self, tmp_path):
+        _write_csv(
+            tmp_path / "rows.csv",
+            pd.DataFrame({"id": [1, 2], "org": ["a", "b"], "kind": ["x", "y"]}),
+        )
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "files": {"rows": {"path": "rows.csv"}},
+            "nodes": {
+                "Person": {"file": "rows", "pk": "id", "properties": {"kind": "string"}},
+                "Org": {"file": "rows", "pk": "org", "properties": {}},
+            },
+        }
+        graph = self._build(tmp_path, bp)
+        assert len(graph.cypher("MATCH (p:Person) RETURN p.id").to_list()) == 2
+        assert sorted(r["id"] for r in graph.cypher("MATCH (o:Org) RETURN o.id AS id").to_list()) == ["a", "b"]
+
+    def test_a_junction_reads_a_declared_entry(self, tmp_path):
+        self._data(tmp_path)
+        bp = self._shorthand_bp(tmp_path)
+        bp["files"] = {"acquaintances": {"path": "knows.csv"}}
+        junc = bp["nodes"]["Person"]["connections"]["junction_edges"]["KNOWS"]
+        del junc["csv"]
+        junc["file"] = "acquaintances"
+        graph = self._build(tmp_path, bp)
+        assert len(graph.cypher("MATCH ()-[r:KNOWS]->() RETURN r").to_list()) == 2
+
+    def test_csv_and_file_on_one_spec_is_an_error(self, tmp_path):
+        self._data(tmp_path)
+        bp = self._shorthand_bp(tmp_path)
+        bp["files"] = {"people": {"path": "persons.csv"}}
+        bp["nodes"]["Person"]["file"] = "people"
+        with pytest.raises(ValueError) as exc:
+            self._build(tmp_path, bp)
+        assert "node 'Person'" in str(exc.value)
+        assert "'csv' and 'file'" in str(exc.value)
+
+    def test_csv_and_file_on_one_junction_is_an_error(self, tmp_path):
+        self._data(tmp_path)
+        bp = self._shorthand_bp(tmp_path)
+        bp["files"] = {"acquaintances": {"path": "knows.csv"}}
+        bp["nodes"]["Person"]["connections"]["junction_edges"]["KNOWS"]["file"] = "acquaintances"
+        with pytest.raises(ValueError) as exc:
+            self._build(tmp_path, bp)
+        assert "junction 'KNOWS'" in str(exc.value)
+        assert "'csv' and 'file'" in str(exc.value)
+
+    def test_an_undeclared_file_name_is_an_error_listing_the_declared_ones(self, tmp_path):
+        self._data(tmp_path)
+        bp = self._files_bp(tmp_path)
+        bp["nodes"]["Person"]["file"] = "pepole"
+        with pytest.raises(ValueError) as exc:
+            self._build(tmp_path, bp)
+        message = str(exc.value)
+        assert "node 'Person'" in message
+        assert '"file": "pepole"' in message
+        assert "people, acquaintances" in message
+
+    def test_a_declared_entry_without_a_path_is_an_error(self, tmp_path):
+        self._data(tmp_path)
+        bp = self._files_bp(tmp_path)
+        bp["files"]["people"] = {"format": "csv"}
+        with pytest.raises(ValueError) as exc:
+            self._build(tmp_path, bp)
+        assert "files 'people'" in str(exc.value)
+        assert "'path'" in str(exc.value)
+
+    def test_an_entry_name_that_shadows_a_different_shorthand_file_is_an_error(self, tmp_path):
+        self._data(tmp_path)
+        _write_csv(tmp_path / "other.csv", pd.DataFrame({"person_id": [9], "name": ["Zoe"]}))
+        bp = self._shorthand_bp(tmp_path)
+        # The shorthand and the entry name are the same string but mean two
+        # different files — one registry slot, two claimants.
+        bp["files"] = {"persons.csv": {"path": "other.csv"}}
+        with pytest.raises(ValueError) as exc:
+            self._build(tmp_path, bp)
+        message = str(exc.value)
+        assert "node 'Person'" in message
+        assert "persons.csv" in message
+        assert "other.csv" in message
+
+    def test_an_entry_naming_the_same_file_as_a_shorthand_is_one_input(self, tmp_path):
+        self._data(tmp_path)
+        bp = self._shorthand_bp(tmp_path)
+        bp["files"] = {"persons.csv": {"path": "persons.csv", "format": "csv"}}
+        graph = self._build(tmp_path, bp)
+        assert len(graph.cypher("MATCH (p:Person) RETURN p.name").to_list()) == 3
+
+    def test_an_unknown_format_lists_the_formats_this_build_reads(self, tmp_path):
+        self._data(tmp_path)
+        bp = self._files_bp(tmp_path)
+        bp["files"]["people"]["format"] = "parquet"
+        with pytest.raises(ValueError) as exc:
+            self._build(tmp_path, bp)
+        message = str(exc.value)
+        assert "'parquet'" in message
+        assert "csv" in message
+
+    def test_a_stray_key_in_a_declared_entry_warns_with_its_format(self, tmp_path, capfd):
+        self._data(tmp_path)
+        bp = self._files_bp(tmp_path)
+        bp["files"]["people"]["delimiter"] = "\t"
+        _write_blueprint(tmp_path / "bp.json", bp)
+        from_blueprint(tmp_path / "bp.json", save=False, verbose=True)
+        err = capfd.readouterr().err
+        assert "file 'people'" in err
+        assert "format 'csv'" in err
+        assert "unknown key 'delimiter'" in err
+        assert "'path', 'format'" in err

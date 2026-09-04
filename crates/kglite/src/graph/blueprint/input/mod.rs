@@ -10,6 +10,50 @@ pub mod csv;
 
 use super::table::RawCsv;
 use indexmap::IndexMap;
+use std::path::{Path, PathBuf};
+
+/// One input format this build can read, and the keys a `files` entry
+/// declaring it may carry.
+///
+/// A reader owns its `FormatSpec` and [`INPUT_FORMATS`] is the only place one
+/// is registered, so adding a format is one element here plus the module —
+/// and a Cargo-gated reader gates its element with the same `#[cfg]` that
+/// gates the module, which keeps the "formats this build reads" diagnostics
+/// honest about what was actually compiled in.
+pub struct FormatSpec {
+    pub name: &'static str,
+    pub accepted_keys: &'static [&'static str],
+}
+
+/// Every format compiled into this build, in the order the diagnostics list
+/// them.
+pub const INPUT_FORMATS: &[FormatSpec] = &[csv::FORMAT];
+
+/// The registered format called `name`, or `None` — which is what makes an
+/// unknown `format` value a build error rather than a silently-ignored key.
+pub fn input_format(name: &str) -> Option<&'static FormatSpec> {
+    INPUT_FORMATS.iter().find(|f| f.name == name)
+}
+
+/// `"csv"` today; the list a diagnostic quotes when it refuses a format.
+pub fn input_format_names() -> String {
+    INPUT_FORMATS
+        .iter()
+        .map(|f| format!("'{}'", f.name))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Where an input declared as `path` actually lives. Every reader and the
+/// compute pre-phase resolve through this one function, so a path that is
+/// already absolute escapes the root in exactly one way rather than two.
+pub(crate) fn resolve_input_path(root: &Path, path: &str) -> PathBuf {
+    if Path::new(path).is_absolute() {
+        PathBuf::from(path)
+    } else {
+        root.join(path)
+    }
+}
 
 /// One readable table, whatever it is stored as.
 ///

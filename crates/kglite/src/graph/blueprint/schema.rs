@@ -21,6 +21,11 @@ use std::path::PathBuf;
 pub struct Blueprint {
     #[serde(default)]
     pub settings: Settings,
+    /// Inputs declared once by name, referenced from a spec's `file`.
+    /// Declaration order is the order the "declared inputs" diagnostics list
+    /// them in, so the author reads back what they wrote.
+    #[serde(default)]
+    pub files: IndexMap<String, FileSpec>,
     /// Node specs, in blueprint-JSON order. Iteration order matters because
     /// the FK-edge phase writes parallel edges on the *first* call per
     /// connection type (then dedupes on subsequent calls). Alphabetical
@@ -63,9 +68,34 @@ pub struct Settings {
     pub extra: IndexMap<String, serde_json::Value>,
 }
 
+/// One declared input: where its rows come from and how to read them.
+///
+/// Which keys an entry may carry depends on its `format` — a delimited file's
+/// `delimiter` is meaningless on a spreadsheet — so the accepted list is per
+/// format and lives with the reader that owns it
+/// ([`super::input::FormatSpec`]), not in the `ACCEPTED_*` lists below, which
+/// are per struct.
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct FileSpec {
+    /// The file this input reads, resolved against `settings.root`. Optional
+    /// in the type because a later format supplies its rows another way; a
+    /// `csv` entry without one is a validation error.
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default = "default_input_format")]
+    pub format: String,
+    /// Keys on this `files` entry that this struct does not read.
+    #[serde(flatten)]
+    pub extra: IndexMap<String, serde_json::Value>,
+}
+
+fn default_input_format() -> String {
+    "csv".to_string()
+}
+
 /// Keys the blueprint's top level reads. Hint source only — see the module
 /// header.
-pub const ACCEPTED_BLUEPRINT_KEYS: &[&str] = &["settings", "nodes", "compute", "ontology"];
+pub const ACCEPTED_BLUEPRINT_KEYS: &[&str] = &["settings", "files", "nodes", "compute", "ontology"];
 
 /// Keys `settings` reads, including the `root` / `output` aliases.
 pub const ACCEPTED_SETTINGS_KEYS: &[&str] = &[
@@ -80,6 +110,7 @@ pub const ACCEPTED_SETTINGS_KEYS: &[&str] = &[
 /// Keys a node spec (and a `sub_nodes` entry) reads.
 pub const ACCEPTED_NODE_KEYS: &[&str] = &[
     "csv",
+    "file",
     "pk",
     "title",
     "parent",
@@ -100,6 +131,7 @@ pub const ACCEPTED_FK_EDGE_KEYS: &[&str] =
 /// Keys a `junction_edges` entry reads.
 pub const ACCEPTED_JUNCTION_EDGE_KEYS: &[&str] = &[
     "csv",
+    "file",
     "source_fk",
     "target",
     "target_type_column",
@@ -143,8 +175,13 @@ impl Settings {
 
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct NodeSpec {
+    /// Shorthand for a `files` entry named by the path itself. Mutually
+    /// exclusive with `file`; see [`NodeSpec::input_name`].
     #[serde(default)]
     pub csv: Option<String>,
+    /// Name of the `files` entry this spec's rows come from.
+    #[serde(default)]
+    pub file: Option<String>,
     #[serde(default)]
     pub pk: Option<String>,
     #[serde(default)]
@@ -205,7 +242,14 @@ pub struct FkEdge {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct JunctionEdge {
-    pub csv: String,
+    /// Shorthand for a `files` entry named by the path itself. Mutually
+    /// exclusive with `file`, and exactly one of the two must be set — a
+    /// junction table is not synthesisable the way a manual node type is.
+    #[serde(default)]
+    pub csv: Option<String>,
+    /// Name of the `files` entry this edge's rows come from.
+    #[serde(default)]
+    pub file: Option<String>,
     pub source_fk: String,
     /// The node type(s) this relationship points at. A JSON string is the
     /// one-type form; a list is the union form, for a relationship whose
@@ -239,6 +283,26 @@ pub struct JunctionEdge {
     pub extra: IndexMap<String, serde_json::Value>,
 }
 
+impl NodeSpec {
+    /// The registry name this spec's rows are read under: the `files` entry
+    /// it names, or the `csv` shorthand, which is registered under the path
+    /// string itself. `None` is a manual node type — one with no input at all.
+    ///
+    /// Validation has already refused a spec that sets both, so the order
+    /// here only decides which of two rejected spellings wins.
+    pub fn input_name(&self) -> Option<&str> {
+        self.file.as_deref().or(self.csv.as_deref())
+    }
+}
+
+impl JunctionEdge {
+    /// The registry name this edge's rows are read under. See
+    /// [`NodeSpec::input_name`]; validation refuses `None` here.
+    pub fn input_name(&self) -> Option<&str> {
+        self.file.as_deref().or(self.csv.as_deref())
+    }
+}
+
 impl FkEdge {
     /// A `target` + `fk` edge with nothing else declared — the shape the
     /// loader synthesises for a node spec's implicit `parent` edge.
@@ -258,7 +322,8 @@ impl JunctionEdge {
     /// Property-less edge over a compute-pipeline output CSV.
     pub fn computed(csv: String, source_fk: String, target: String, target_fk: String) -> Self {
         JunctionEdge {
-            csv,
+            csv: Some(csv),
+            file: None,
             source_fk,
             target: vec![target],
             target_fk,

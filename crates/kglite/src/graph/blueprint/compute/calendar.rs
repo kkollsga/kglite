@@ -14,7 +14,7 @@ use std::path::Path;
 use chrono::{Datelike, Duration, NaiveDate};
 
 use super::super::schema::{Blueprint, CalendarLink, JunctionEdge, NodeSpec};
-use super::{csv_cell_to_value, resolve_csv_path, resolve_source_spec, resolve_source_spec_mut};
+use super::{csv_cell_to_value, resolve_input_path, resolve_source_spec, resolve_source_spec_mut};
 
 #[allow(clippy::too_many_arguments)]
 pub fn run_calendar(
@@ -319,7 +319,7 @@ fn write_link(
         .csv
         .clone()
         .ok_or_else(|| format!("calendar link: source '{}' has no csv", link.from))?;
-    let src_csv_path = resolve_csv_path(input_root, &src_csv);
+    let src_csv_path = resolve_input_path(input_root, &src_csv);
 
     // Missing source CSV → skip this link silently (loader-consistent
     // behaviour for partial datasets).

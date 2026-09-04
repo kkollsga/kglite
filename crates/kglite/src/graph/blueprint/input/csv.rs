@@ -1,8 +1,17 @@
 //! The CSV `Source`: a delimited file on disk read through the `csv` crate.
 
 use super::super::table::RawCsv;
-use super::Source;
+use super::{FormatSpec, Source};
 use std::path::{Path, PathBuf};
+
+/// Keys a `files` entry with `"format": "csv"` reads. A CSV input has no
+/// knobs of its own — where the file is, is the whole declaration.
+pub const ACCEPTED_FILE_KEYS_CSV: &[&str] = &["path", "format"];
+
+pub const FORMAT: FormatSpec = FormatSpec {
+    name: "csv",
+    accepted_keys: ACCEPTED_FILE_KEYS_CSV,
+};
 
 /// A CSV file on disk. `display` is the name the blueprint referred to it by
 /// (a path relative to the input root), which is what diagnostics print —

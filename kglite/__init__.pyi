@@ -1341,8 +1341,11 @@ def from_blueprint(
     """Build a KnowledgeGraph from a JSON blueprint and CSV files.
 
     The blueprint JSON describes all node types, properties, connections,
-    timeseries, and data sources. CSV paths in the blueprint are resolved
-    relative to ``settings.root``.
+    timeseries, and data sources. Input paths in the blueprint — ``files``
+    entries and ``csv`` shorthands alike — are resolved relative to
+    ``settings.root``. A ``files`` section declares each input once by name
+    (``{"path": ..., "format": ...}``) for specs to reference with ``file``;
+    ``"csv": "x.csv"`` is shorthand for one such entry.
 
     **Diagnostic output**:
 

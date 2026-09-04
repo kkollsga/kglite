@@ -15,7 +15,7 @@ use std::path::Path;
 use super::super::expr::{self, Bindings, Value};
 use super::super::schema::Blueprint;
 use super::{
-    csv_cell_to_value, infer_value_type, resolve_csv_path, resolve_source_spec,
+    csv_cell_to_value, infer_value_type, resolve_input_path, resolve_source_spec,
     resolve_source_spec_mut, value_to_csv_cell,
 };
 
@@ -52,7 +52,7 @@ pub fn run_derive(
             from
         )
     })?;
-    let csv_path = resolve_csv_path(input_root, &csv_rel);
+    let csv_path = resolve_input_path(input_root, &csv_rel);
 
     // Missing source CSV → no-op. Mirrors the rest of the loader's
     // "missing CSV = zero rows" semantics so partial datasets still
