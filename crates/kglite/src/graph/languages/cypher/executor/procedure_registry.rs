@@ -227,8 +227,9 @@ pub(super) const PROCEDURES: &[ProcedureSpec] = &[
     ProcedureSpec {
         name: "ontology_audit",
         aliases: &[],
-        description: "Scorecard: one row per declared ontology check (violations, exempted, total, pct, declared severity). `exempted` counts rows an `exempt` declaration excuses; violations + exempted = everything flagged. {by: 'domain_class'} PARTITIONS each rule into one row per violating domain-side class (they sum back to the rule's violations). {by: 'property'} is a CENSUS of the required_properties/property_types rules: one row per declared property, including those nothing fails, and an edge missing several counts under each — so these rows sum to at least the aggregate, never back to it. One axis at a time; the unasked-for column is Null, as both are without the parameter",
+        description: "Scorecard: one row per declared node/edge ontology check, identified by entity_kind plus rule (violations, exempted, total, pct, declared severity). `exempted` counts rows an `exempt` declaration excuses; violations + exempted = everything flagged. {by: 'domain_class'} PARTITIONS each rule into one row per violating domain-side class (they sum back to the rule's violations). {by: 'property'} is a CENSUS of the required_properties/property_types rules: one row per declared property, including those nothing fails, and an entity missing several counts under each — so these rows sum to at least the aggregate, never back to it. One axis at a time; the unasked-for column is Null, as both are without the parameter",
         columns: &[
+            "entity_kind",
             "rule",
             "severity",
             "violations",
@@ -238,6 +239,12 @@ pub(super) const PROCEDURES: &[ProcedureSpec] = &[
             "domain_class",
             "property",
         ],
+    },
+    ProcedureSpec {
+        name: "node_property_violation",
+        aliases: &[],
+        description: "Class property violations, including declared descendants by primary type. One row per node per declaring class/check; properties lists every failed property. No parameters; node is a composable node binding.",
+        columns: &["class", "check", "node", "property", "properties"],
     },
     ProcedureSpec {
         name: "edge_property_violation",

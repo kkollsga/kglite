@@ -17,6 +17,8 @@ pub(crate) fn show_ontology_result_set(graph: &DirGraph) -> ResultSet {
         "abstract",
         "domain",
         "range",
+        "required_properties",
+        "property_types",
         "enforcement",
         "exempt",
         "description",
@@ -25,7 +27,7 @@ pub(crate) fn show_ontology_result_set(graph: &DirGraph) -> ResultSet {
     .map(|c| c.to_string())
     .collect();
     let opt = |v: &Option<String>| v.clone().map(Value::String).unwrap_or(Value::Null);
-    let mut push = |cells: [(&str, Value); 9]| {
+    let mut push = |cells: [(&str, Value); 11]| {
         let mut row = ResultRow::new();
         for (name, value) in cells {
             row.projected.insert(name.to_string(), value);
@@ -40,8 +42,27 @@ pub(crate) fn show_ontology_result_set(graph: &DirGraph) -> ResultSet {
             ("abstract", Value::Boolean(decl.is_abstract)),
             ("domain", Value::Null),
             ("range", Value::Null),
-            ("enforcement", Value::Null),
+            ("enforcement", Value::String(decl.enforcement_summary())),
             ("exempt", Value::Null),
+            (
+                "required_properties",
+                Value::List(
+                    decl.required_properties
+                        .iter()
+                        .cloned()
+                        .map(Value::String)
+                        .collect(),
+                ),
+            ),
+            (
+                "property_types",
+                Value::Map(
+                    decl.property_types
+                        .iter()
+                        .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                        .collect(),
+                ),
+            ),
             ("description", opt(&decl.description)),
         ]);
     }
@@ -55,6 +76,25 @@ pub(crate) fn show_ontology_result_set(graph: &DirGraph) -> ResultSet {
             ("range", opt(&decl.range)),
             ("enforcement", Value::String(decl.enforcement_summary())),
             ("exempt", opt(&decl.exempt_summary())),
+            (
+                "required_properties",
+                Value::List(
+                    decl.required_properties
+                        .iter()
+                        .cloned()
+                        .map(Value::String)
+                        .collect(),
+                ),
+            ),
+            (
+                "property_types",
+                Value::Map(
+                    decl.property_types
+                        .iter()
+                        .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                        .collect(),
+                ),
+            ),
             ("description", opt(&decl.description)),
         ]);
     }

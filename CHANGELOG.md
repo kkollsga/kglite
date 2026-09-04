@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Class declarations support required node properties, property types and enforcement,
+  inherited through primary classes. `node_property_violation()` lists failures;
+  `ontology_audit()` adds `entity_kind` and `SHOW ONTOLOGY` exposes property contracts.
+- Repeated required-property names no longer inflate node or edge audit counts.
+
 - BM25 indexes native lists of strings/nulls as one document across build, refresh,
   and persistence; ontology property types accept `list` and `array`.
 

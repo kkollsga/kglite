@@ -992,6 +992,7 @@ def test_audit_bare_call_gains_a_null_domain_class_column(school):
     assert len(rows) == 4
     assert all(r["domain_class"] is None for r in rows)
     assert set(rows[0]) == {
+        "entity_kind",
         "rule",
         "severity",
         "violations",
@@ -1281,7 +1282,7 @@ def test_ancestry_renders_in_describe_with_the_traversal_idiom(g):
 
 def test_show_ontology_renders_ancestry_the_way_it_renders_transitive(g):
     # Which is: not as a column. SHOW ONTOLOGY's relationship row is identity
-    # + endpoints + enforcement/exempt/description; no boolean annotation
+    # + endpoints + property contracts + enforcement/exempt/description; no boolean annotation
     # (required, transitive, symmetric, inverse_enforced) has ever had one,
     # and `ancestry` gets the same treatment — describe() is the surface that
     # carries it. Pinned so adding a column later is a deliberate act.
@@ -1294,6 +1295,8 @@ def test_show_ontology_renders_ancestry_the_way_it_renders_transitive(g):
         "abstract",
         "domain",
         "range",
+        "required_properties",
+        "property_types",
         "enforcement",
         "exempt",
         "description",

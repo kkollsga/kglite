@@ -4801,9 +4801,11 @@ class KnowledgeGraph:
 
         Semantics: ``is_a`` is a forest (single parent, no cycles);
         ``cardinality``/``required`` describe outgoing edges of the domain
-        type; ``required_properties`` (per-edge presence) and
-        ``property_types`` (per-edge type check of present values, names
-        validated on declare) are audited per edge; ``inverse_name`` is a
+        type; ``required_properties`` checks presence/non-null values and
+        ``property_types`` checks present non-null values. Class declarations
+        audit nodes; relationship declarations audit edges. Type names are
+        validated on declaration, including ``list``/``array`` for the outer
+        container only. ``inverse_name`` is a
         reading-direction alias only unless ``inverse_enforced: True`` opts
         into the physical-pairing check; ``enforcement`` is a severity
         (``advisory``/``warn``/``error``) or a per-check map
@@ -4830,6 +4832,23 @@ class KnowledgeGraph:
         the label namespace: an abstract class may not shadow a live node
         type. This is deliberately separate from ``set_parent_type`` —
         that map is presentation ownership, this one is semantic "kind of".
+
+        Class property contracts cover the primary class and its declared
+        descendants, independently for each declaring ancestor. Secondary
+        labels do not enroll a node. Properties use the actual node type's
+        id/title and loader aliases. Classes accept only the two property
+        checks in an enforcement map and do not accept edge exemptions.
+
+        ``CALL ontology_audit()`` adds ``entity_kind`` (``node``/``edge``);
+        use it with ``rule`` to distinguish a class and relationship with the
+        same name. Node totals count covered live nodes and exemptions are
+        zero. The property census includes zero-violation fields; a node
+        missing several fields counts once in the aggregate and once under
+        each missing field. ``CALL node_property_violation() YIELD class,
+        check, node, property, properties`` lists those nodes, one row per
+        declaring class/check, with all failed properties and their first
+        name. It takes no parameters. ``SHOW ONTOLOGY`` exposes
+        ``required_properties``, ``property_types`` and class enforcement.
 
         Replaces any previously declared ontology. Persisted by ``save()``.
 

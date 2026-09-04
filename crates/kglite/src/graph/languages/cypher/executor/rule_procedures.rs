@@ -26,7 +26,7 @@ use crate::graph::storage::GraphRead;
 /// beside the dispatcher that answers them so wiring a new rule procedure
 /// touches this file and the registry rather than the CALL clause. Every
 /// name here must be answered below: `ontology_audit` and
-/// `edge_property_violation` return from the early declaration-driven
+/// the node/edge property procedures return from the early declaration-driven
 /// branches, the rest from the final match, whose `unreachable!()` is the
 /// consequence of adding a name here and nowhere else.
 pub(super) const RULE_PROCEDURES: &[&str] = &[
@@ -46,6 +46,7 @@ pub(super) const RULE_PROCEDURES: &[&str] = &[
     "type_range_violation",
     "parallel_edges",
     "edge_property_violation",
+    "node_property_violation",
     "ontology_audit",
     "kg_knn",
 ];
@@ -75,6 +76,9 @@ pub(super) fn execute_rule_procedure(
     // parameter-driven twin to fall back to (`required_properties` /
     // `property_types` are declaration-only checks), so it dispatches here
     // rather than through `proc_check`.
+    if proc_name == "node_property_violation" {
+        return super::node_ontology::execute_node_property_violation(graph, params, yield_items);
+    }
     if proc_name == "edge_property_violation" {
         return super::ontology_procedures::execute_edge_property_violation(
             graph,

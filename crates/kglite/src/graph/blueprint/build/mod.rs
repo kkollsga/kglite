@@ -610,8 +610,8 @@ fn apply_ontology_gate(
             String::new()
         };
         let summary = format!(
-            "{}: {}/{} ({:.1}%) violations{tail}",
-            line.rule, line.violations, line.total, line.pct
+            "{} {}: {}/{} ({:.1}%) violations{tail}",
+            line.entity_kind, line.rule, line.violations, line.total, line.pct
         );
         match line.severity {
             Enforcement::Advisory => {}
@@ -624,7 +624,8 @@ fn apply_ontology_gate(
         return Err(format!(
             "ontology gate failed — {} contract(s) violated:\n  {}\nFix the data (or lower \
              the declaration's enforcement) and rebuild; drill into each rule with the \
-             matching CALL procedure (e.g. CALL type_domain_violation()).",
+             matching CALL procedure (node_property_violation for node properties, \
+             edge_property_violation for edge properties, or e.g. type_domain_violation).",
             errors.len(),
             errors.join("\n  ")
         ));

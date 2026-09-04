@@ -3010,8 +3010,12 @@ pub fn kglite::api::CardinalityDecl::deserialize<__D>(__deserializer: __D) -> co
 pub struct kglite::api::ClassDecl
 pub kglite::api::ClassDecl::by: core::option::Option<alloc::string::String>
 pub kglite::api::ClassDecl::description: core::option::Option<alloc::string::String>
+pub kglite::api::ClassDecl::enforcement: kglite::api::Enforcement
+pub kglite::api::ClassDecl::enforcement_overrides: alloc::collections::btree::map::BTreeMap<alloc::string::String, kglite::api::Enforcement>
 pub kglite::api::ClassDecl::is_a: core::option::Option<alloc::string::String>
 pub kglite::api::ClassDecl::is_abstract: bool
+pub kglite::api::ClassDecl::property_types: alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>
+pub kglite::api::ClassDecl::required_properties: alloc::vec::Vec<alloc::string::String>
 impl core::clone::Clone for kglite::api::ClassDecl
 pub fn kglite::api::ClassDecl::clone(&self) -> kglite::api::ClassDecl
 impl core::cmp::Eq for kglite::api::ClassDecl
