@@ -1,6 +1,7 @@
 """Tests for kglite.blueprint.from_blueprint()."""
 
 import json
+import warnings
 
 import pandas as pd
 import pytest
@@ -14,6 +15,17 @@ from kglite.blueprint import from_blueprint
 def _write_csv(path, df):
     """Write a DataFrame as CSV."""
     df.to_csv(path, index=False)
+
+
+def _warning_text(recwarn):
+    """Every warning a build emitted, joined into one blob.
+
+    Blueprint warnings are Python ``UserWarning`` objects — the contract the
+    ``from_blueprint`` docstring states — so pytest's ``recwarn`` fixture is
+    where they land, and they never reach stderr while it is recording. These
+    assertions read them there; ``report.errors`` still go to stderr.
+    """
+    return "\n".join(str(w.message) for w in recwarn)
 
 
 def _write_blueprint(path, bp):
@@ -137,25 +149,73 @@ class TestBasicLoading:
 
 
 class TestWarningCapture:
-    """0.9.1 #2 — Rust-emitted PyUserWarnings can be captured via the
-    standard Python `logging.captureWarnings(True)` pattern. The
-    `from_blueprint` docstring documents this; these tests pin the
-    behaviour so the docs can't drift unnoticed.
+    """A build's `report.warnings` reach Python as `UserWarning` objects, so
+    the standard filters route them — the contract the `from_blueprint`
+    docstring states.
+
+    Until 0.16.23 the wrapper `eprintln!`d them instead, and this class pinned
+    the claim by triggering a *`create_connections`* warning, which comes from
+    a different code path entirely: the documented behaviour was false and the
+    gate that guarded it could not fail.
     """
 
+    @staticmethod
+    def _blueprint_with_a_stray_key(tmp_path):
+        """A blueprint that builds and warns. `lables` is dropped by the
+        parser, so every label it declared is silently lost — exactly the
+        class of warning a caller wants to capture."""
+        bp_path = _minimal_blueprint(tmp_path)
+        with open(bp_path, encoding="utf-8") as f:
+            bp = json.load(f)
+        bp["nodes"]["Person"]["lables"] = ["Human"]
+        _write_blueprint(bp_path, bp)
+        return bp_path
+
+    def test_a_build_warning_is_a_user_warning(self, tmp_path):
+        bp_path = self._blueprint_with_a_stray_key(tmp_path)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            from_blueprint(bp_path, save=False)
+        messages = [str(w.message) for w in caught if issubclass(w.category, UserWarning)]
+        assert any("unknown key 'lables'" in m for m in messages), messages
+
+    def test_every_report_warning_is_its_own_warning(self, tmp_path):
+        """One warning per report entry, not one summary line: a filter or a
+        handler can only act on what arrives separately."""
+        bp_path = _minimal_blueprint(tmp_path)
+        with open(bp_path, encoding="utf-8") as f:
+            bp = json.load(f)
+        bp["nodes"]["Person"]["lables"] = ["Human"]
+        bp["nodes"]["Person"]["connections"]["junction_edges"]["KNOWS"]["propertys"] = []
+        _write_blueprint(bp_path, bp)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            from_blueprint(bp_path, save=False)
+        messages = [str(w.message) for w in caught]
+        assert any("unknown key 'lables'" in m for m in messages), messages
+        assert any("unknown key 'propertys'" in m for m in messages), messages
+
+    def test_a_silent_build_warns_at_all(self, tmp_path):
+        """`verbose=False` is about the progress summary, not the warnings —
+        a caller running silent still gets every one of them."""
+        bp_path = self._blueprint_with_a_stray_key(tmp_path)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            from_blueprint(bp_path, save=False, verbose=False)
+        assert any("unknown key 'lables'" in str(w.message) for w in caught)
+
     def test_logging_capture_warnings_pipeline(self, tmp_path):
-        """`logging.captureWarnings(True)` routes the Rust-emitted
-        UserWarning into the `py.warnings` logger, where it can be
-        sent to a file (or any other handler).
-        """
+        """`logging.captureWarnings(True)` routes the build's warnings into
+        the `py.warnings` logger, where they can be sent to a file (or any
+        other handler) — the pattern the docstring prints verbatim."""
         import logging
 
+        bp_path = self._blueprint_with_a_stray_key(tmp_path)
         log_path = tmp_path / "warnings.log"
-        # Snapshot py.warnings handlers so we can restore them
         py_warnings = logging.getLogger("py.warnings")
         prior_handlers = list(py_warnings.handlers)
         prior_level = py_warnings.level
-        prior_capture = logging.getLogger("py.warnings").propagate
+        prior_propagate = py_warnings.propagate
 
         try:
             logging.captureWarnings(True)
@@ -164,35 +224,24 @@ class TestWarningCapture:
             py_warnings.addHandler(handler)
             py_warnings.setLevel(logging.WARNING)
 
-            # Trigger a Rust-emitted PyUserWarning. The fluent
-            # `create_connections()` chain-discard guard is the
-            # cleanest reliable trigger.
-            g = kglite.KnowledgeGraph()
-            g.add_nodes(
-                pd.DataFrame([{"id": 1, "name": "A"}, {"id": 2, "name": "B"}]),
-                "P",
-                "id",
-                "name",
-            )
-            try:
-                g.select("P").create_connections("LINK")
-            except Exception:
-                pass  # the warning fires regardless of any subsequent error
+            with warnings.catch_warnings():
+                # pytest's own capture would otherwise take the warning before
+                # `captureWarnings` sees it.
+                warnings.simplefilter("always")
+                from_blueprint(bp_path, save=False, verbose=True)
 
             handler.flush()
             handler.close()
             py_warnings.removeHandler(handler)
         finally:
-            # Restore prior state so other tests aren't affected.
             logging.captureWarnings(False)
             py_warnings.handlers = prior_handlers
             py_warnings.setLevel(prior_level)
-            py_warnings.propagate = prior_capture
+            py_warnings.propagate = prior_propagate
 
         log_content = log_path.read_text(encoding="utf-8")
-        # The Rust-emitted UserWarning should appear in the log.
-        assert "create_connections" in log_content, (
-            f"py.warnings logger didn't capture the Rust UserWarning. Log: {log_content!r}"
+        assert "unknown key 'lables'" in log_content, (
+            f"py.warnings logger didn't capture the build warning. Log: {log_content!r}"
         )
 
 
@@ -1386,7 +1435,7 @@ class TestProvisionalNodes:
 
 
 class TestUnknownPropertyTypeWarning:
-    def test_unknown_type_value_warns(self, tmp_path, capfd):
+    def test_unknown_type_value_warns(self, tmp_path, recwarn):
         """A properties/property_types value that is neither a type keyword
         nor a spatial target was silently ignored (the rename-map trap);
         now the build report warns, naming column and value."""
@@ -1397,14 +1446,14 @@ class TestUnknownPropertyTypeWarning:
         _write_blueprint(bp_path, bp)
 
         kglite.from_blueprint(str(bp_path), verbose=True, save=False)
-        err = capfd.readouterr().err
+        err = _warning_text(recwarn)
         assert "renamedAge" in err
         assert "does not rename columns" in err
 
-    def test_known_values_stay_silent(self, tmp_path, capfd):
+    def test_known_values_stay_silent(self, tmp_path, recwarn):
         bp_path = _minimal_blueprint(tmp_path)
         kglite.from_blueprint(str(bp_path), verbose=True, save=False)
-        err = capfd.readouterr().err
+        err = _warning_text(recwarn)
         assert "does not rename columns" not in err
 
 
@@ -1877,21 +1926,21 @@ class TestUnknownSpecKeyWarning:
         _write_blueprint(bp_path, bp)
         return bp_path
 
-    def test_unknown_top_level_key_warns(self, tmp_path, capfd):
+    def test_unknown_top_level_key_warns(self, tmp_path, recwarn):
         def mutate(bp):
             bp["nodez"] = {}
 
         kglite.from_blueprint(str(self._bp_with(tmp_path, mutate)), verbose=True, save=False)
-        err = capfd.readouterr().err
+        err = _warning_text(recwarn)
         assert "unknown key 'nodez'" in err
         assert "Did you mean 'nodes'?" in err
 
-    def test_unknown_node_key_warns_with_a_near_miss_hint(self, tmp_path, capfd):
+    def test_unknown_node_key_warns_with_a_near_miss_hint(self, tmp_path, recwarn):
         def mutate(bp):
             bp["nodes"]["Person"]["propertes"] = {"age": "int"}
 
         kglite.from_blueprint(str(self._bp_with(tmp_path, mutate)), verbose=True, save=False)
-        err = capfd.readouterr().err
+        err = _warning_text(recwarn)
         assert "node 'Person'" in err
         assert "unknown key 'propertes'" in err
         assert "Did you mean 'properties'?" in err
@@ -1905,39 +1954,39 @@ class TestUnknownSpecKeyWarning:
         g = kglite.from_blueprint(str(self._bp_with(tmp_path, mutate)), save=False)
         assert len(list(g.cypher("MATCH (p:Person) RETURN p.name"))) == 3
 
-    def test_unknown_junction_edge_key_warns(self, tmp_path, capfd):
+    def test_unknown_junction_edge_key_warns(self, tmp_path, recwarn):
         def mutate(bp):
             junc = bp["nodes"]["Person"]["connections"]["junction_edges"]["KNOWS"]
             junc["propertie_types"] = {}
 
         kglite.from_blueprint(str(self._bp_with(tmp_path, mutate)), verbose=True, save=False)
-        err = capfd.readouterr().err
+        err = _warning_text(recwarn)
         assert "junction 'KNOWS'" in err
         assert "unknown key 'propertie_types'" in err
 
-    def test_unknown_fk_edge_key_warns(self, tmp_path, capfd):
+    def test_unknown_fk_edge_key_warns(self, tmp_path, recwarn):
         def mutate(bp):
             bp["nodes"]["Person"]["connections"]["fk_edges"] = {
                 "LIVES_IN": {"target": "Person", "fk": "person_id", "targt": "City"}
             }
 
         kglite.from_blueprint(str(self._bp_with(tmp_path, mutate)), verbose=True, save=False)
-        err = capfd.readouterr().err
+        err = _warning_text(recwarn)
         assert "fk_edge 'LIVES_IN'" in err
         assert "unknown key 'targt'" in err
 
-    def test_unknown_sub_node_key_warns(self, tmp_path, capfd):
+    def test_unknown_sub_node_key_warns(self, tmp_path, recwarn):
         def mutate(bp):
             bp["nodes"]["Person"]["sub_nodes"] = {"Nickname": {"pk": "name", "parent_fq": "person_id"}}
 
         kglite.from_blueprint(str(self._bp_with(tmp_path, mutate)), verbose=True, save=False)
-        err = capfd.readouterr().err
+        err = _warning_text(recwarn)
         assert "node 'Nickname'" in err
         assert "unknown key 'parent_fq'" in err
 
-    def test_a_clean_blueprint_says_nothing(self, tmp_path, capfd):
+    def test_a_clean_blueprint_says_nothing(self, tmp_path, recwarn):
         kglite.from_blueprint(str(_minimal_blueprint(tmp_path)), verbose=True, save=False)
-        assert "unknown key" not in capfd.readouterr().err
+        assert "unknown key" not in _warning_text(recwarn)
 
 
 class TestListColumnType:
@@ -2008,10 +2057,10 @@ class TestListColumnType:
         rows = g.cypher("MATCH (n:Gene) RETURN n.synonyms AS syn ORDER BY n.name")
         assert [r["syn"] for r in rows] == [["adhC"], ["pfk1"]]
 
-    def test_list_is_not_an_unknown_property_type(self, tmp_path, capfd):
+    def test_list_is_not_an_unknown_property_type(self, tmp_path, recwarn):
         bp_path = self._bp(tmp_path, ['["adhC"]', '["pfk1"]'])
         kglite.from_blueprint(str(bp_path), verbose=True, save=False)
-        err = capfd.readouterr().err
+        err = _warning_text(recwarn)
         assert "does not rename columns" not in err
 
     def test_junction_property_types_accepts_list(self, tmp_path):
@@ -2022,33 +2071,33 @@ class TestListColumnType:
         )
         assert [r["ev"] for r in rows] == [["IDA", "IMP"], ["ISS"]]
 
-    def test_separator_in_a_non_json_cell_warns(self, tmp_path, capfd):
+    def test_separator_in_a_non_json_cell_warns(self, tmp_path, recwarn):
         """A `list` column whose cell is `a|b` is not a JSON array. It is
         wrapped as a one-element list holding the whole string — a plausible
         wrong answer, because the author plainly meant two values. Say so,
         naming the column, the row and the cell."""
         bp_path = self._bp(tmp_path, ["adhC|ADHE", '["pfk1"]'])
         kglite.from_blueprint(str(bp_path), verbose=True, save=False)
-        err = capfd.readouterr().err
+        err = _warning_text(recwarn)
         assert "synonyms" in err
         assert "row 1" in err
         assert "adhC|ADHE" in err
 
-    def test_a_well_formed_array_does_not_warn_for_its_own_commas(self, tmp_path, capfd):
+    def test_a_well_formed_array_does_not_warn_for_its_own_commas(self, tmp_path, recwarn):
         """The separator check runs only on cells that are not JSON. Drop that
         guard and every multi-element list column warns about the commas
         inside its own valid arrays — and no other test in this class reads
         stderr on a well-formed multi-element cell."""
         bp_path = self._bp(tmp_path, ['["adhC","ADHE"]', '["pfk1"]'])
         kglite.from_blueprint(str(bp_path), verbose=True, save=False)
-        assert "not a JSON array" not in capfd.readouterr().err
+        assert "not a JSON array" not in _warning_text(recwarn)
 
-    def test_a_plain_scalar_cell_does_not_warn(self, tmp_path, capfd):
+    def test_a_plain_scalar_cell_does_not_warn(self, tmp_path, recwarn):
         """No separator, no ambiguity: a lone token is a one-element list and
         the warning would be noise."""
         bp_path = self._bp(tmp_path, ["adhC", '["pfk1"]'])
         kglite.from_blueprint(str(bp_path), verbose=True, save=False)
-        err = capfd.readouterr().err
+        err = _warning_text(recwarn)
         assert "not a JSON array" not in err
 
     def _row_id_bp(self, tmp_path, filt=None):
@@ -2078,16 +2127,16 @@ class TestListColumnType:
         _write_blueprint(bp_path, bp)
         return bp_path
 
-    def test_the_reported_row_survives_a_filter(self, tmp_path, capfd):
+    def test_the_reported_row_survives_a_filter(self, tmp_path, recwarn):
         """`filter` drops the four rows above the bad cell, leaving it at index
         1 of the surviving rows. The warning must still say row 5."""
         bp_path = self._row_id_bp(tmp_path, filt={"keep": "yes"})
         g = kglite.from_blueprint(str(bp_path), verbose=True, save=False)
         assert g.cypher("MATCH (n:Gene) RETURN count(n) AS n").to_list()[0]["n"] == 2
-        err = capfd.readouterr().err
+        err = _warning_text(recwarn)
         assert "First at row 5:" in err, err
 
-    def test_the_reported_row_survives_chunking(self, tmp_path, capfd, monkeypatch):
+    def test_the_reported_row_survives_chunking(self, tmp_path, recwarn, monkeypatch):
         """Streamed two rows to a chunk, the bad cell is the first row of the
         third chunk; a chunk-local counter would call it row 1. The tally is
         also per-CSV, so the column gets one line, not one per chunk."""
@@ -2096,7 +2145,7 @@ class TestListColumnType:
         bp_path = self._row_id_bp(tmp_path)
         g = kglite.from_blueprint(str(bp_path), verbose=True, save=False)
         assert g.cypher("MATCH (n:Gene) RETURN count(n) AS n").to_list()[0]["n"] == 6
-        err = capfd.readouterr().err
+        err = _warning_text(recwarn)
         assert err.count("not a JSON array") == 1, err
         assert "1 cell(s)" in err, err
         assert "First at row 5:" in err, err
@@ -2195,7 +2244,7 @@ class TestJunctionUnionTargets:
         rows = graph.cypher("MATCH (m:Microbe)-[r:ASSOCIATED_WITH]->(x) RETURN x.id AS tgt, r.score AS s").to_list()
         assert sorted((r["tgt"], r["s"]) for r in rows) == [("D1", 1), ("E1", 3), ("P1", 2)]
 
-    def test_a_row_naming_an_undeclared_type_is_reported_and_skipped(self, tmp_path, capfd):
+    def test_a_row_naming_an_undeclared_type_is_reported_and_skipped(self, tmp_path, recwarn):
         links = [
             {"source_id": "M1", "target_id": "D1", "target_type": "Disease", "score": 1},
             {"source_id": "M2", "target_id": "X1", "target_type": "Chemical", "score": 2},
@@ -2205,7 +2254,7 @@ class TestJunctionUnionTargets:
             save=False,
             verbose=True,
         )
-        err = capfd.readouterr().err
+        err = _warning_text(recwarn)
         assert "Chemical" in err
         assert self._landed(graph) == [("M1", "D1", "Disease")]
 
@@ -2420,14 +2469,14 @@ class TestUndeclaredTypeChunkInvariance:
             (r["id"], r["code"], type(r["code"]).__name__) for r in streamed[2]
         ]
 
-    def test_the_prepass_warning_names_the_undeclared_columns(self, tmp_path, monkeypatch, capfd):
+    def test_the_prepass_warning_names_the_undeclared_columns(self, tmp_path, monkeypatch, recwarn):
         """The extra read is visible and actionable, not silent."""
         bp_path = self._bp(tmp_path)
         monkeypatch.setenv("KGLITE_BLUEPRINT_STREAMING_THRESHOLD_MB", "0")
         monkeypatch.setenv("KGLITE_BLUEPRINT_NODE_CHUNK_SIZE", "10")
         monkeypatch.setenv("KGLITE_BLUEPRINT_JUNCTION_CHUNK_SIZE", "10")
         from_blueprint(bp_path, save=False, verbose=True)
-        err = capfd.readouterr().err
+        err = _warning_text(recwarn)
         assert "node 'Item'" in err and "code" in err
         assert "junction 'LINKS_TO'" in err and "note" in err
         assert "fk_edge properties (node 'Item')" in err
@@ -2722,18 +2771,18 @@ class TestOntologyGate:
             kglite.from_blueprint(str(bp_path))
         assert not (tmp_path / "out.kgl").exists()
 
-    def test_warn_enforcement_builds_and_reports(self, tmp_path, capfd):
+    def test_warn_enforcement_builds_and_reports(self, tmp_path, recwarn):
         bp_path = self._bp(tmp_path, "warn")
         graph = kglite.from_blueprint(str(bp_path), save=False, verbose=True)
-        err = capfd.readouterr().err
+        err = _warning_text(recwarn)
         assert "ENROLLED_IN.required: 1/2" in err
         # The ontology itself is installed and persisted with the graph.
         assert graph.ontology()["relationships"]["ENROLLED_IN"]["required"] is True
 
-    def test_advisory_enforcement_stays_silent(self, tmp_path, capfd):
+    def test_advisory_enforcement_stays_silent(self, tmp_path, recwarn):
         bp_path = self._bp(tmp_path, "advisory")
         graph = kglite.from_blueprint(str(bp_path), save=False, verbose=True)
-        err = capfd.readouterr().err
+        err = _warning_text(recwarn)
         assert "ENROLLED_IN.required" not in err
         # Still available on demand.
         rows = graph.cypher("CALL ontology_audit() YIELD rule, violations RETURN rule, violations").to_list()
@@ -2810,10 +2859,10 @@ class TestOntologyGate:
         with pytest.raises(ValueError, match="ontology gate failed"):
             kglite.from_blueprint(str(bp_path))
 
-    def test_exempted_source_class_passes_and_reports_the_tail(self, tmp_path, capfd):
+    def test_exempted_source_class_passes_and_reports_the_tail(self, tmp_path, recwarn):
         bp_path = self._bp_exempt(tmp_path, {"required_properties": ["Legacy"]})
         graph = kglite.from_blueprint(str(bp_path), save=False, verbose=True)
-        err = capfd.readouterr().err
+        err = _warning_text(recwarn)
         # Passing the gate must not hide the exempted rows: a zero-violation
         # line with an exempted tail is not the same as a clean graph.
         assert "ENROLLED_IN.required_properties: 0/3 (0.0%) violations (+1 exempted)" in err
@@ -3472,13 +3521,13 @@ class TestFilesSection:
         assert "'parquet'" in message
         assert "csv" in message
 
-    def test_a_stray_key_in_a_declared_entry_warns_with_its_format(self, tmp_path, capfd):
+    def test_a_stray_key_in_a_declared_entry_warns_with_its_format(self, tmp_path, recwarn):
         self._data(tmp_path)
         bp = self._files_bp(tmp_path)
         bp["files"]["people"]["delimiter"] = "\t"
         _write_blueprint(tmp_path / "bp.json", bp)
         from_blueprint(tmp_path / "bp.json", save=False, verbose=True)
-        err = capfd.readouterr().err
+        err = _warning_text(recwarn)
         assert "file 'people'" in err
         assert "format 'csv'" in err
         assert "unknown key 'delimiter'" in err
@@ -3682,7 +3731,7 @@ class TestFrameInputs:
         assert "frames= contains 'peple'" in str(exc.value)
         assert "not declared in `files`" in str(exc.value)
 
-    def test_a_path_on_a_frame_entry_warns(self, tmp_path, capfd):
+    def test_a_path_on_a_frame_entry_warns(self, tmp_path, recwarn):
         bp = self._blueprint(tmp_path, people_input="frame", knows_input="frame")
         bp["files"]["people"]["path"] = "persons.csv"
         self._build(
@@ -3691,7 +3740,7 @@ class TestFrameInputs:
             frames={"people": self._people(), "knows": self._knows()},
             verbose=True,
         )
-        err = capfd.readouterr().err
+        err = _warning_text(recwarn)
         assert "file 'people' (format 'frame')" in err
         assert "unknown key 'path'" in err
         assert "Accepted keys: 'format'" in err
@@ -3758,7 +3807,7 @@ class TestFrameInputs:
         values = self._values(tmp_path, df, "n", properties={"n": "string"})
         assert values == ["1", "2"]
 
-    def test_a_datetime_column_with_a_time_of_day_lands_as_text_with_a_warning(self, tmp_path, capfd):
+    def test_a_datetime_column_with_a_time_of_day_lands_as_text_with_a_warning(self, tmp_path, recwarn):
         df = pd.DataFrame(
             {
                 "id": [1, 2],
@@ -3771,7 +3820,7 @@ class TestFrameInputs:
             frames={"rows": df},
             verbose=True,
         )
-        err = capfd.readouterr().err
+        err = _warning_text(recwarn)
         assert "frame 'rows' column 'seen' has type timestamp" in err
         assert "cannot hold; stored as string" in err
         values = [r["v"] for r in graph.cypher("MATCH (r:Row) RETURN r.id AS id, r.seen AS v ORDER BY id")]

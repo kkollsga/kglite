@@ -82,20 +82,21 @@ pub fn from_blueprint_rust(
         .map_err(pyo3::exceptions::PyValueError::new_err)?;
 
     print!("{}", report.render_text(verbose));
-    if !report.warnings.is_empty() {
-        if verbose {
-            for w in &report.warnings {
-                eprintln!("warning: {}", w);
-            }
-        } else {
-            // Compact summary so callers running silent still know data
-            // quality issues exist.
-            eprintln!(
-                "{} blueprint warning(s) — pass verbose=True for details.",
-                report.warnings.len()
-            );
-        }
+    // One `UserWarning` per report entry, whatever `verbose` is: that is the
+    // contract the stub documents, and it is what makes `warnings.simplefilter`
+    // / `logging.captureWarnings` able to route them. A summary line counting
+    // them would be a second, uncapturable channel saying less.
+    for w in &report.warnings {
+        let message = std::ffi::CString::new(w.as_str()).unwrap_or_default();
+        PyErr::warn(
+            py,
+            py.get_type::<pyo3::exceptions::PyUserWarning>().as_any(),
+            message.as_c_str(),
+            1,
+        )?;
     }
+    // Errors are not warnings and stay on stderr: a per-spec failure has
+    // already been survived by the build, and the graph is returned regardless.
     for e in &report.errors {
         eprintln!("error: {}", e);
     }

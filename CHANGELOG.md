@@ -37,6 +37,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.to_pandas()`. A declared frame that was not supplied, and a supplied frame
   that was not declared, each raise a `ValueError` naming it.
 
+### Changed
+- **Blueprint build warnings are Python `UserWarning`s, as the documentation
+  has said since 0.9.1.** They were written straight to stderr, so nothing a
+  caller could set up — `warnings.simplefilter`, `warnings.catch_warnings`,
+  the `logging.captureWarnings` recipe the docstring prints — had any effect
+  on them. Each entry in the build report is now its own warning, whatever
+  `verbose` is; the "N blueprint warning(s) — pass verbose=True for details"
+  summary line is gone, because a count is not something a filter or a handler
+  can act on. Build *errors* still print to stderr unchanged.
+
 ## [0.16.22] - 2026-09-03
 ### Added
 - **One junction relationship over a union of target types.** A blueprint

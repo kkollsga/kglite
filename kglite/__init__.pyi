@@ -1370,9 +1370,17 @@ def from_blueprint(
       ``KGLITE_BLUEPRINT_NODE_CHUNK_SIZE``) only bounds peak memory — it
       never changes which edges a build produces.
 
-    - **Warnings** (target node not found, null FK, type mismatch, etc.)
-      are emitted as Python ``UserWarning`` objects (originating in Rust
-      via PyO3). By default they reach **stderr**.
+    - **Warnings** (stray keys, missed list cells, ontology findings, an
+      input type the blueprint cannot hold, …) are emitted as Python
+      ``UserWarning`` objects, one per entry in the build report, whatever
+      ``verbose`` is — ``verbose`` governs the progress summary, not the
+      warnings. By default they reach **stderr**, and every standard
+      mechanism (``warnings.simplefilter``, ``warnings.catch_warnings``,
+      ``logging.captureWarnings``) routes them.
+
+    - **Errors** — a spec the build survived but could not fully load (a
+      bad ``rename``, a property column the input does not have) — are
+      printed to **stderr** directly. The graph is still returned.
 
     To capture warnings to a file, use the standard Python pattern::
 
