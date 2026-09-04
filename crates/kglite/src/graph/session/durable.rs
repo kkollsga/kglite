@@ -321,7 +321,7 @@ impl Session {
                 .map_err(|error| error.to_string());
         };
         let target = Path::new(path);
-        let same = durability::same_checkpoint_path(
+        let same = crate::graph::io::open::same_existing_file(
             state.wal.path(),
             &crate::graph::wal::wal_path(target),
         )

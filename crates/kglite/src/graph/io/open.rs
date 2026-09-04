@@ -441,6 +441,20 @@ impl MetadataIdentity {
     }
 }
 
+/// Identity comparison for existing ownership sidecars, without reading their
+/// locked bytes. Missing files are not evidence that two owners share a target.
+pub(crate) fn same_existing_file(left: &Path, right: &Path) -> io::Result<bool> {
+    let capture = |path| match MetadataIdentity::capture(path) {
+        Ok((identity, _)) => Ok(Some(identity)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    };
+    Ok(match (capture(left)?, capture(right)?) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    })
+}
+
 /// Identity of a graph path at load/save time — the value a writer compares
 /// to decide whether the path is still the one its graph was read from.
 ///

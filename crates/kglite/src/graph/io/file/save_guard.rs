@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use crate::graph::dir_graph::DirGraph;
 use crate::graph::durability::{
-    ensure_save_target_recovered, prepare_save_as_target, same_checkpoint_path, DurableOpenError,
+    ensure_save_target_recovered, prepare_save_as_target, DurableOpenError,
 };
 use crate::graph::wal::{wal_path, DurabilityLevel};
 
@@ -69,7 +69,8 @@ pub(crate) fn ensure_target_recovered(
     };
     let path = std::path::Path::new(path);
     let owns_checkpoint = permit.map_or(Ok(false), |wal| {
-        same_checkpoint_path(&wal, &wal_path(path)).map_err(|e| SaveError::Io(e.to_string()))
+        crate::graph::io::open::same_existing_file(&wal, &wal_path(path))
+            .map_err(|e| SaveError::Io(e.to_string()))
     })?;
     if owns_checkpoint {
         ensure_save_target_recovered(path, graph.checkpoint_lsn)?;

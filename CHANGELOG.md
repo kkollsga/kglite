@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refused even when its log sequence is below the source's sequence. The shared
   save guard also protects Rust and C saves from unrelated replay stamps, and
   durable Rust sessions transfer future logging when saved to another path.
+  Filename case aliases retain their existing ownership, and a moved source
+  directory no longer prevents exporting a snapshot to a valid new destination.
 
 ## [0.16.23] - 2026-09-04
 ### Added

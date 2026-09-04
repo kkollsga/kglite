@@ -15,11 +15,14 @@ impl Clone for CheckpointPermit {
     }
 }
 
-/// Compare publication destinations without resolving the final component.
+/// Recognize identical publication paths or shared ownership sidecars.
 /// Atomic save replaces a final symlink or hardlink rather than its referent;
 /// parent-directory aliases, relative paths and `.` still name the same target.
+/// Existing lease/WAL sidecars also identify case aliases on case-insensitive
+/// filesystems, even before the first checkpoint exists. Without a sidecar,
+/// an ambiguous alias is conservatively treated as a new, unowned destination.
 pub fn same_checkpoint_path(left: &Path, right: &Path) -> io::Result<bool> {
-    fn destination(path: &Path) -> io::Result<PathBuf> {
+    fn destination(path: &Path) -> io::Result<Option<PathBuf>> {
         let name = path.file_name().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -27,12 +30,30 @@ pub fn same_checkpoint_path(left: &Path, right: &Path) -> io::Result<bool> {
             )
         })?;
         let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
+        // The remembered source may have moved. Its old directory is not a
+        // prerequisite for exporting the available snapshot to a new target.
         Ok(parent
             .unwrap_or_else(|| Path::new("."))
-            .canonicalize()?
-            .join(name))
+            .canonicalize()
+            .ok()
+            .map(|parent| parent.join(name)))
     }
-    Ok(destination(left)? == destination(right)?)
+    if left == right
+        || matches!((destination(left)?, destination(right)?), (Some(a), Some(b)) if a == b)
+    {
+        return Ok(true);
+    }
+    for suffix in [".lock", "-wal"] {
+        let sidecar = |path: &Path| {
+            let mut name = path.as_os_str().to_owned();
+            name.push(suffix);
+            PathBuf::from(name)
+        };
+        if crate::graph::io::open::same_existing_file(&sidecar(left), &sidecar(right))? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Prepare an independent save destination while its writer lease is held.

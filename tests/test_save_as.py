@@ -115,3 +115,51 @@ def test_lock_opt_out_stays_detached_on_save_as(tmp_path):
     g.cypher("CREATE (:Doc {id: 1})")
     g.save(target)
     assert ids(kglite.open(target)) == [1]
+
+
+@pytest.mark.parametrize("checkpoint_first", [False, True])
+def test_save_as_case_alias_keeps_its_own_lease(tmp_path, checkpoint_first):
+    source = tmp_path / "MixedName.kgl"
+    target = tmp_path / "mixedname.kgl"
+    graph = kglite.open(str(source))
+    if not (tmp_path / "mixedname.kgl.lock").exists():
+        pytest.skip("filesystem distinguishes case in names")
+    graph.cypher("CREATE (:Doc {id: 1})")
+    if checkpoint_first:
+        graph.save()
+    graph.save(str(target))
+    graph.cypher("CREATE (:Doc {id: 2})")
+    graph.save()
+    assert ids(kglite.load(str(source))) == [1, 2]
+
+
+def test_save_as_after_source_directory_moves(tmp_path):
+    old = tmp_path / "old"
+    old.mkdir()
+    graph = kglite.KnowledgeGraph()
+    graph.cypher("CREATE (:Doc {id: 1})")
+    graph.save(str(old / "source.kgl"))
+    old.rename(tmp_path / "moved")
+    graph.save(str(tmp_path / "target.kgl"))
+    assert ids(kglite.load(str(tmp_path / "target.kgl"))) == [1]
+
+
+@pytest.mark.parametrize("link", ["hard", "symbolic"])
+def test_final_component_link_is_a_separate_publication_target(tmp_path, link):
+    source = tmp_path / "source.kgl"
+    target = tmp_path / "target.kgl"
+    graph = kglite.open(str(source))
+    graph.cypher("CREATE (:Doc {id: 1})")
+    graph.save()
+    if link == "hard":
+        os.link(source, target)
+    else:
+        try:
+            target.symlink_to(source)
+        except OSError:
+            pytest.skip("filesystem does not permit symbolic links")
+    graph.save(str(target))
+    graph.cypher("CREATE (:Doc {id: 2})")
+    graph.save()
+    assert ids(kglite.load(str(source))) == [1]
+    assert ids(kglite.load(str(target))) == [1, 2]
