@@ -307,38 +307,46 @@ impl Session {
         Ok(())
     }
 
-    /// Checkpoint steps 1–2: flush the log, then stamp how far this checkpoint
-    /// will have consumed it into the graph about to be serialized. Returns
-    /// whether this session is durable (i.e. whether the epilogue runs).
-    pub(super) fn checkpoint_prologue(&self, graph: &mut Arc<DirGraph>) -> Result<bool, String> {
+    /// Save while the graph mutex is held; always take the durability mutex second.
+    /// A foreign destination gets a new log only after its checkpoint is published.
+    pub(super) fn save_checkpoint(
+        &self,
+        graph: &mut Arc<DirGraph>,
+        path: &str,
+        fsync: bool,
+    ) -> Result<(), String> {
         let mut slot = self.durable.lock().unwrap_or_else(|p| p.into_inner());
-        let Some(ds) = slot.as_mut() else {
-            return Ok(false);
+        let Some(state) = slot.as_mut() else {
+            return crate::graph::io::file::save_graph_with(graph, path, fsync)
+                .map_err(|error| error.to_string());
         };
-        // Flush-then-stamp, shared with every other owner of a log; the
-        // derivation and why the flush is load-bearing are in module order 3.
-        durability::checkpoint_prologue(&mut ds.wal, ds.next_lsn, Arc::make_mut(graph))
-            .map_err(|e| e.to_string())?;
-        Ok(true)
-    }
-
-    /// Checkpoint step 4: the `.kgl` now holds the full current state, so drop
-    /// the capture buffer (those ops are folded in) and truncate the log.
-    ///
-    /// Ordered after the save on purpose: the checkpoint is known to have
-    /// landed before the log that describes the same commits is destroyed, and
-    /// replay is idempotent, so a crash between the two costs only a harmless
-    /// re-apply on the next open.
-    pub(super) fn checkpoint_epilogue(&self, graph: &mut Arc<DirGraph>) -> Result<(), String> {
-        let mut slot = self.durable.lock().unwrap_or_else(|p| p.into_inner());
-        let Some(ds) = slot.as_mut() else {
-            return Ok(());
+        let target = Path::new(path);
+        let same = durability::same_checkpoint_path(
+            state.wal.path(),
+            &crate::graph::wal::wal_path(target),
+        )
+        .map_err(|error| error.to_string())?;
+        let new_wal = if same {
+            None
+        } else {
+            durability::prepare_save_as_target(target, state.level)
+                .map_err(|error| error.to_string())?
         };
-        durability::checkpoint_epilogue(&mut ds.wal, Arc::make_mut(graph))
-            .map_err(|e| e.to_string())?;
-        // The checkpoint just folded in everything a direct write left
-        // unlogged, so the log describes the graph again.
-        ds.diverged = false;
+        let previous_stamp = graph.checkpoint_lsn;
+        durability::checkpoint_prologue(&mut state.wal, state.next_lsn, Arc::make_mut(graph))
+            .map_err(|error| error.to_string())?;
+        if let Err(error) = crate::graph::io::file::save_graph_with(graph, path, true) {
+            Arc::make_mut(graph).checkpoint_lsn = previous_stamp;
+            return Err(error.to_string());
+        }
+        if let Some(wal) = new_wal {
+            state.wal = wal;
+            crate::graph::cdc::drain_at_commit(Arc::make_mut(graph));
+        } else {
+            durability::checkpoint_epilogue(&mut state.wal, Arc::make_mut(graph))
+                .map_err(|error| error.to_string())?;
+        }
+        state.diverged = false;
         Ok(())
     }
 
@@ -607,6 +615,41 @@ mod tests {
             count_nodes(&recovered.snapshot()),
             3,
             "checkpointed 2 + replayed 1"
+        );
+    }
+
+    #[test]
+    fn save_as_preserves_source_recovery_and_transfers_future_commits() {
+        for level in [DurabilityLevel::Full, DurabilityLevel::Normal] {
+            let temp = tempfile::tempdir().unwrap();
+            let source = temp.path().join("source.kgl");
+            let target = temp.path().join("target.kgl");
+            let session = reopen(&source, level).unwrap();
+            commit_query(&session, "CREATE (:N {id: 1})");
+            session.save(source.to_str().unwrap(), true).unwrap();
+            commit_query(&session, "CREATE (:N {id: 2})");
+            session.save(target.to_str().unwrap(), false).unwrap();
+            commit_query(&session, "CREATE (:N {id: 3})");
+            drop(session);
+            assert_eq!(count_nodes(&reopen(&source, level).unwrap().snapshot()), 2);
+            assert_eq!(count_nodes(&reopen(&target, level).unwrap().snapshot()), 3);
+        }
+    }
+
+    #[test]
+    fn failed_save_as_keeps_session_log_attached_to_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.kgl");
+        let session = fresh(&source);
+        commit_query(&session, "CREATE (:N {id: 1})");
+        session.save(source.to_str().unwrap(), true).unwrap();
+        let invalid = temp.path().join("missing/target.kgl");
+        assert!(session.save(invalid.to_str().unwrap(), true).is_err());
+        commit_query(&session, "CREATE (:N {id: 2})");
+        drop(session);
+        assert_eq!(
+            count_nodes(&reopen(&source, DurabilityLevel::Full).unwrap().snapshot()),
+            2
         );
     }
 

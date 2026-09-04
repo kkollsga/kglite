@@ -1227,6 +1227,7 @@ pub fn kglite::api::durable::checkpoint_epilogue(wal: &mut kglite::api::durable:
 pub fn kglite::api::durable::checkpoint_prologue(wal: &mut kglite::api::durable::Wal, next_lsn: u64, graph: &mut kglite::api::DirGraph) -> core::io::error::Result<()>
 pub fn kglite::api::durable::ensure_recovered(checkpoint_path: &std::path::Path, checkpoint_lsn: u64) -> core::result::Result<(), kglite::api::durable::DurableOpenError>
 pub fn kglite::api::durable::open_log(graph: &mut alloc::sync::Arc<kglite::api::DirGraph>, checkpoint_path: &std::path::Path, level: kglite::api::durable::DurabilityLevel) -> core::result::Result<core::option::Option<(kglite::api::durable::Wal, u64)>, kglite::api::durable::DurableOpenError>
+pub fn kglite::api::durable::prepare_save_as_target(checkpoint_path: &std::path::Path, level: kglite::api::durable::DurabilityLevel) -> core::result::Result<core::option::Option<kglite::api::durable::Wal>, kglite::api::durable::DurableOpenError>
 pub fn kglite::api::durable::recover(path: &std::path::Path) -> core::io::error::Result<alloc::vec::Vec<kglite::api::durable::WalFrame>>
 pub fn kglite::api::durable::resolve_ops(raw: &[kglite::api::durable::RawOp], graph: &impl kglite::api::GraphRead, interner: &kglite::api::StringInterner, secondary_labels: impl core::ops::function::Fn(petgraph::graph_impl::NodeIndex) -> alloc::vec::Vec<alloc::string::String>) -> alloc::vec::Vec<kglite::graph::wal::MutationOp>
 pub fn kglite::api::durable::wal_path(checkpoint: &std::path::Path) -> std::path::PathBuf
@@ -1858,6 +1859,7 @@ pub fn kglite::api::io::pass_a_scan(source: &kglite::api::storage::DiskGraph, sp
 pub fn kglite::api::io::pass_a_scan_to_file(source: &kglite::api::storage::DiskGraph, spec: &kglite::api::io::SubsetSpec, kept_edges_path: &std::path::Path) -> core::result::Result<kglite::graph::mutation::subgraph_streaming::PassAFileResult, alloc::string::String>
 pub fn kglite::api::io::prepare_kgl_write(graph: &mut alloc::sync::Arc<kglite::api::DirGraph>)
 pub fn kglite::api::io::prepare_save(graph: &mut alloc::sync::Arc<kglite::api::DirGraph>)
+pub fn kglite::api::io::same_checkpoint_path(left: &std::path::Path, right: &std::path::Path) -> core::io::error::Result<bool>
 pub fn kglite::api::io::save_graph(graph: &mut alloc::sync::Arc<kglite::api::DirGraph>, path: &str) -> core::result::Result<(), kglite::api::io::SaveError>
 pub fn kglite::api::io::save_graph_with(graph: &mut alloc::sync::Arc<kglite::api::DirGraph>, path: &str, fsync: bool) -> core::result::Result<(), kglite::api::io::SaveError>
 pub fn kglite::api::io::save_subset(source: &kglite::api::DirGraph, selection: &kglite::api::CowSelection, out_path: &std::path::Path) -> core::result::Result<(), alloc::string::String>

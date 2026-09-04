@@ -400,6 +400,8 @@ pub struct DirGraph {
     /// carry the same LSN as a fresh one.
     #[serde(default)]
     pub checkpoint_lsn: u64,
+    #[serde(skip)]
+    pub(crate) checkpoint_permit: crate::graph::durability::CheckpointPermit,
     /// What the last save recorded about the change log that was running then
     /// — see [`CdcHandoff`](crate::graph::cdc::CdcHandoff).
     ///
@@ -882,6 +884,7 @@ impl DirGraph {
             graph_instructions: HashMap::new(),
             user_schema_version: 0,
             checkpoint_lsn: 0,
+            checkpoint_permit: Default::default(),
             cdc_handoff: None,
             auto_vacuum_threshold: default_auto_vacuum_threshold(),
             auto_vacuums_run: 0,
@@ -955,6 +958,7 @@ impl DirGraph {
             graph_instructions: HashMap::new(),
             user_schema_version: 0,
             checkpoint_lsn: 0,
+            checkpoint_permit: Default::default(),
             cdc_handoff: None,
             auto_vacuum_threshold: default_auto_vacuum_threshold(),
             auto_vacuums_run: 0,

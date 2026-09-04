@@ -11,7 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Save-as now transfers an open graph's writer lease and durable log together
   after a successful save. Failed saves retain the original home; the original
   file keeps its recovery data, and a destination with pending recovery is
-  refused even when its log sequence is below the source's sequence.
+  refused even when its log sequence is below the source's sequence. The shared
+  save guard also protects Rust and C saves from unrelated replay stamps, and
+  durable Rust sessions transfer future logging when saved to another path.
 
 ## [0.16.23] - 2026-09-04
 ### Added

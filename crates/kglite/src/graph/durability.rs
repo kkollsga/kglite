@@ -63,6 +63,7 @@ use crate::graph::storage::recording::wrap_for_durability;
 use crate::graph::wal::{recover, wal_path, DurabilityLevel, Wal, WalFrame};
 
 mod save_as;
+pub(crate) use save_as::CheckpointPermit;
 pub use save_as::{prepare_save_as_target, same_checkpoint_path};
 
 /// Why [`open_log`] could not hand back a durability owner.
@@ -199,10 +200,13 @@ pub fn open_log(
 /// `next_lsn` is the LSN the *next* frame will carry, so the newest frame
 /// folded into this snapshot is `next_lsn - 1`. An owner that has logged
 /// nothing leaves the stamp at 0, i.e. replay everything, which is the ungated
-/// behaviour.
+/// behaviour. Preparation also grants one save permission to compare this
+/// stamp with this WAL. Cloning the graph drops that transient permission;
+/// a guarded save consumes it even if the destination refuses the save.
 pub fn checkpoint_prologue(wal: &mut Wal, next_lsn: u64, graph: &mut DirGraph) -> io::Result<()> {
     wal.sync()?;
     graph.checkpoint_lsn = next_lsn.saturating_sub(1);
+    graph.checkpoint_permit.0 = Some(wal.path().to_owned());
     Ok(())
 }
 

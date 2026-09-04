@@ -1,47 +1,19 @@
-//! The save side of the recovery rule: a checkpoint write must not strand
-//! write-ahead frames in front of itself.
+//! Saves must preserve recovery belonging to their destination.
 //!
-//! [`crate::graph::durability::ensure_recovered`] refuses an *open* that
-//! attaches no log over a live sidecar. That closes the route through
-//! [`open_or_create_graph`](crate::graph::io::open::open_or_create_graph), but
-//! not the one through [`load_file`](crate::graph::io::file::load_file), which
-//! is deliberately unguarded — it is the primitive durable recovery is built
-//! on, and the documented way to read a graph another process writes durably.
-//!
-//! So the same hazard still reaches the disk through the *other* end: `load`,
-//! mutate, `save` back over the path (`kglite.load()` + `save()`, or a
-//! non-durable `Session::save`). That save neither stamps `checkpoint_lsn` nor
-//! truncates the sidecar, so the frames outlive it and the next durable open
-//! replays them over the newer state — the saved value comes back overwritten
-//! by an older commit. Refusing at the save is what closes it without taking
-//! the read away.
-//!
-//! ## The rule
-//!
-//! A save to `path` is refused while `<path>-wal` holds frames whose `lsn` is
-//! greater than the `checkpoint_lsn` of the graph being written — which is
-//! exactly the set a later durable open would replay *over* the file this save
-//! is about to produce, because replay is gated on the `checkpoint_lsn` the
-//! `.kgl` carries.
-//!
-//! ## Why a durable owner's checkpoint is never caught by it
-//!
-//! Not by an exemption, but by the checkpoint's own ordering: step 2 stamps
-//! `checkpoint_lsn = next_lsn - 1` into the graph *before* the save
-//! ([`checkpoint_prologue`](crate::graph::durability::checkpoint_prologue)), so
-//! every frame in that owner's log sits at or below the stamp and the predicate
-//! is false by construction. The rule therefore needs no "is this the recording
-//! owner?" branch — and gets a property such a branch would have thrown away:
-//! a *recording* graph saved through some route that skipped the prologue
-//! strands its own frames exactly like a non-durable owner does, and is
-//! refused for it. Frames at or below the stamp are crash residue between the
-//! `.kgl` write and the truncation and are not grounds to refuse, exactly as in
-//! [`ensure_recovered`](crate::graph::durability::ensure_recovered).
+//! A shared checkpoint prologue grants one save permission to use its outgoing
+//! LSN against the actual WAL it flushed. Loaded stamps and foreign logs carry
+//! no such proof: those saves check the destination's own metadata and clear
+//! only frames already contained there before publishing the replacement.
+//! Clones and deserialization drop the transient permission. Every attempted
+//! guarded save consumes it, including refusals and failed writes.
 
 use std::sync::Arc;
 
 use crate::graph::dir_graph::DirGraph;
-use crate::graph::durability::{ensure_save_target_recovered, DurableOpenError};
+use crate::graph::durability::{
+    ensure_save_target_recovered, prepare_save_as_target, same_checkpoint_path, DurableOpenError,
+};
+use crate::graph::wal::{wal_path, DurabilityLevel};
 
 /// Why a save did not happen.
 ///
@@ -82,19 +54,28 @@ impl From<DurableOpenError> for SaveError {
     }
 }
 
-/// The guard every save runs before writing `path` (module docs for the rule).
-///
-/// **Cost, measured release-profile 2026-08-13** (min-of-N, machine under
-/// normal load): 3.2 µs when no sidecar exists — a failed `open`, and the
-/// overwhelmingly common case — against 5.5 ms for the whole save of even a
-/// one-node graph, i.e. 0.06%. When a sidecar *does* exist the scan is
-/// proportional to it: 27 µs for one frame, 1.7 ms for 10 000 frames
-/// (350 KB, ~0.17 µs/frame). That is the durable owner's own log at
-/// checkpoint time, and it is bounded by the same thing the checkpoint is:
-/// the truncation at the end of each checkpoint means the log only ever holds
-/// the frames written since the last one.
-pub(crate) fn ensure_target_recovered(graph: &Arc<DirGraph>, path: &str) -> Result<(), SaveError> {
-    ensure_save_target_recovered(std::path::Path::new(path), graph.checkpoint_lsn)?;
+/// Check recovery before any checkpoint replacement. The common path with no
+/// sidecar reads no checkpoint metadata and does not clone the graph.
+pub(crate) fn ensure_target_recovered(
+    graph: &mut Arc<DirGraph>,
+    path: &str,
+) -> Result<(), SaveError> {
+    // Consume before any fallible work, including guard refusal. A snapshot
+    // made after preparation loses the permit on CoW and must prepare again.
+    let permit = if graph.checkpoint_permit.0.is_some() {
+        Arc::make_mut(graph).checkpoint_permit.0.take()
+    } else {
+        None
+    };
+    let path = std::path::Path::new(path);
+    let owns_checkpoint = permit.map_or(Ok(false), |wal| {
+        same_checkpoint_path(&wal, &wal_path(path)).map_err(|e| SaveError::Io(e.to_string()))
+    })?;
+    if owns_checkpoint {
+        ensure_save_target_recovered(path, graph.checkpoint_lsn)?;
+    } else {
+        prepare_save_as_target(path, DurabilityLevel::Off)?;
+    }
     Ok(())
 }
 
@@ -200,6 +181,7 @@ mod tests {
         let residue = tmp.path().join("residue.kgl");
         let mut folded = graph_with_person(1);
         crate::graph::handle::make_dir_graph_mut(&mut folded).checkpoint_lsn = 7;
+        save_graph(&mut folded, &residue.to_string_lossy()).unwrap();
         Wal::open(wal_path(&residue), SyncMode::Barrier)
             .unwrap()
             .append(&person_frame(7, 9))
@@ -233,14 +215,69 @@ mod tests {
         assert!(path.exists());
     }
 
-    /// The durable owner's checkpoint, in the four-step order the format
-    /// requires, over its own live sidecar: the prologue stamps
-    /// `checkpoint_lsn` *before* the save, so its own frames are at or below
-    /// the stamp and the guard has nothing to refuse.
-    ///
-    /// This is what makes the guard safe without a "recording owner" branch —
-    /// and it is asserted here rather than left to the Python durability suite
-    /// because it is the ordering, not the graph's backend, that exempts it.
+    #[test]
+    fn foreign_replay_stamp_cannot_authorize_pending_destination_frames() {
+        for source_lsn in [1, 2, 9] {
+            let temp = tempfile::tempdir().unwrap();
+            let target = temp.path().join("target.kgl");
+            let mut existing = graph_with_person(1);
+            Arc::make_mut(&mut existing).checkpoint_lsn = 1;
+            save_graph(&mut existing, target.to_str().unwrap()).unwrap();
+            Wal::open(wal_path(&target), SyncMode::Barrier)
+                .unwrap()
+                .append(&person_frame(2, 2))
+                .unwrap();
+            let mut source = graph_with_person(9);
+            Arc::make_mut(&mut source).checkpoint_lsn = source_lsn;
+            assert!(matches!(
+                save_graph(&mut source, target.to_str().unwrap()),
+                Err(SaveError::Refused(_))
+            ));
+            let mut recovered = load_file(target.to_str().unwrap()).unwrap();
+            durability::open_log(&mut recovered, &target, DurabilityLevel::Full).unwrap();
+            assert_eq!(age_of(&mut recovered), Some(Value::Int64(2)));
+        }
+    }
+
+    #[test]
+    fn foreign_low_stamp_replaces_contained_residue_without_replay() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("target.kgl");
+        let mut existing = graph_with_person(1);
+        Arc::make_mut(&mut existing).checkpoint_lsn = 9;
+        save_graph(&mut existing, target.to_str().unwrap()).unwrap();
+        Wal::open(wal_path(&target), SyncMode::Barrier)
+            .unwrap()
+            .append(&person_frame(9, 1))
+            .unwrap();
+        let mut source = graph_with_person(3);
+        save_graph(&mut source, target.to_str().unwrap()).unwrap();
+        let mut recovered = load_file(target.to_str().unwrap()).unwrap();
+        durability::open_log(&mut recovered, &target, DurabilityLevel::Full).unwrap();
+        assert_eq!(age_of(&mut recovered), Some(Value::Int64(3)));
+    }
+
+    #[test]
+    fn checkpoint_permission_is_not_cloned_or_reused_after_refusal() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.kgl");
+        let target = temp.path().join("target.kgl");
+        let mut graph = graph_with_person(1);
+        let (mut wal, next) = durability::open_log(&mut graph, &source, DurabilityLevel::Full)
+            .unwrap()
+            .unwrap();
+        checkpoint_prologue(&mut wal, next, Arc::make_mut(&mut graph)).unwrap();
+        assert!(graph.as_ref().clone().checkpoint_permit.0.is_none());
+        Wal::open(wal_path(&target), SyncMode::Barrier)
+            .unwrap()
+            .append(&person_frame(1, 2))
+            .unwrap();
+        assert!(save_graph(&mut graph, target.to_str().unwrap()).is_err());
+        assert!(graph.checkpoint_permit.0.is_none());
+    }
+
+    /// An actual checkpoint preparation authorizes its own log, while a raw
+    /// replay stamp alone does not authorize another destination.
     #[test]
     fn a_durable_checkpoint_over_its_own_log_is_unaffected() {
         let tmp = tempfile::tempdir().unwrap();

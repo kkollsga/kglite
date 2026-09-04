@@ -1,8 +1,19 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use super::{read_sidecar, unreplayed, DurableOpenError};
+use super::{read_sidecar, unreplayed, DurableOpenError, DISCARD_EXIT};
 use crate::graph::wal::{wal_path, DurabilityLevel, SyncMode, Wal};
+
+/// A checkpoint preparation authorizes one save against one actual WAL.
+/// Clones and serialized graphs retain the replay stamp but never this authority.
+#[derive(Default)]
+pub(crate) struct CheckpointPermit(pub(crate) Option<PathBuf>);
+
+impl Clone for CheckpointPermit {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
 
 /// Compare publication destinations without resolving the final component.
 /// Atomic save replaces a final symlink or hardlink rather than its referent;
@@ -52,7 +63,8 @@ pub fn prepare_save_as_target(
         if unreplayed(&frames, checkpoint_lsn) {
             return Err(DurableOpenError::Refused(format!(
                 "the write-ahead log at '{}' holds commits its destination checkpoint \
-                 does not contain; open that destination durably to recover them before save-as",
+                 does not contain; open that destination at level 'full' or 'normal' to \
+                 recover them before save-as, {DISCARD_EXIT}",
                 wpath.display()
             )));
         }
