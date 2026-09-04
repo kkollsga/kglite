@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Save-as now transfers an open graph's writer lease and durable log together
+  after a successful save. Failed saves retain the original home; the original
+  file keeps its recovery data, and a destination with pending recovery is
+  refused even when its log sequence is below the source's sequence.
+
 ## [0.16.23] - 2026-09-04
 ### Added
 - **A blueprint declares its inputs once, in a `files:` section.** Each entry

@@ -4365,25 +4365,28 @@ class KnowledgeGraph:
         instead, naming the sidecar and the two ways out: reopen the path
         durably (``kglite.open(path, durable="full")``) to replay the commits
         first, or move the sidecar aside to discard them deliberately. A graph
-        opened with ``durable=`` is never affected — its own checkpoint folds
-        its log in.
+        saving to its own durable checkpoint folds its log in. Save-as checks
+        the destination against its own checkpoint, even when the source's
+        log-sequence numbers are higher.
 
-        **Saving does not take the writer lease.** The lease belongs to
-        :func:`kglite.open`, which holds it for as long as the graph can write
-        back to ``path``; ``save()`` itself writes whatever target it is given
-        without asking for it. So a graph obtained from :func:`kglite.load` can publish
-        over a path an ``open()`` holder — or a running MCP or Bolt server — is
-        mid-write on: the file that results is a complete graph, it is simply
-        this one, and whatever the holder had not yet saved is not in it. A
-        caller that may save to a path should hold the lease across the whole
-        read-modify-save interval, which is what ``kglite.open(path)`` does;
-        ``load()`` + ``save(path)`` is a write that opted out of it.
+        **Save-as transfers an existing writer lease and durable log.** A
+        handle from :func:`kglite.open` with locking enabled acquires the new
+        destination before saving. A competing writer refuses the save. After
+        success, the handle remembers the new path, logs future writes there,
+        and releases its old lease. The old file and its recovery log retain
+        writes committed before the handoff. A failed save leaves the original
+        home, lease and log attached.
+
+        Handles from :func:`kglite.load`, in-memory constructors, or
+        ``open(..., lock=False)`` continue to opt out of writer leases.
+        Their caller must coordinate writers across the read-modify-save
+        interval; an unlocked save can replace another writer's checkpoint.
 
         Args:
             path: Output file path (typically ``*.kgl``). May be omitted if the
                 graph was opened via :func:`kglite.open` or :func:`kglite.load`,
                 in which case it defaults to that origin file. Passing a path
-                updates the remembered target ("save as"). Raises ``ValueError``
+                updates the remembered target after success ("save as"). Raises ``ValueError``
                 if omitted and there is no remembered path.
             fsync: When ``True`` (default), flush the file and its parent
                 directory to disk before returning (durable against an OS/power

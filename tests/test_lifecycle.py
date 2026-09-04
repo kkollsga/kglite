@@ -46,7 +46,7 @@ def test_save_as_updates_remembered_path(tmp_path):
     # The remembered path is now b.kgl: a further mutation + bare save lands there.
     g.cypher("CREATE (:Person {id: 2})")
     g.save()
-    assert kglite.open(p2).cypher("MATCH (p) RETURN count(*) AS c").scalar() == 2
+    assert kglite.load(p2).cypher("MATCH (p) RETURN count(*) AS c").scalar() == 2
 
 
 def test_bare_save_without_path_raises():

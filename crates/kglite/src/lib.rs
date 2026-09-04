@@ -488,6 +488,7 @@ pub mod api {
     /// callbacks, embedding-vector file export/import, and streaming
     /// disk subset export.
     pub mod io {
+        pub use crate::graph::durability::same_checkpoint_path;
         pub use crate::graph::io::export::{
             to_csv, to_csv_dir, to_d3_json, to_gexf, to_graphml, to_text,
         };
@@ -656,7 +657,8 @@ pub mod api {
         /// that same refusal for an opener that attaches no log at all, and is
         /// already applied by `io::open_or_create_graph`.
         pub use crate::graph::durability::{
-            checkpoint_epilogue, checkpoint_prologue, ensure_recovered, open_log, DurableOpenError,
+            checkpoint_epilogue, checkpoint_prologue, ensure_recovered, open_log,
+            prepare_save_as_target, DurableOpenError,
         };
         pub use crate::graph::mutation::wal_replay::apply_frames;
         pub use crate::graph::storage::recording::{

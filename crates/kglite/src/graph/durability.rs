@@ -62,6 +62,9 @@ use crate::graph::mutation::wal_replay::apply_frames;
 use crate::graph::storage::recording::wrap_for_durability;
 use crate::graph::wal::{recover, wal_path, DurabilityLevel, Wal, WalFrame};
 
+mod save_as;
+pub use save_as::{prepare_save_as_target, same_checkpoint_path};
+
 /// Why [`open_log`] could not hand back a durability owner.
 ///
 /// Three categories rather than one string because bindings map them to

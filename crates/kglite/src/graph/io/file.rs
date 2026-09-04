@@ -2099,9 +2099,9 @@ pub(crate) fn read_metadata_head(buf: &[u8], origin: &str) -> io::Result<FileMet
 
 /// [`read_metadata_head`] against a file, reading only the header and the
 /// metadata block it declares — two short reads, no matter how large the graph.
-pub(crate) fn read_metadata_head_from_file(path: &str) -> io::Result<FileMetadata> {
-    let p = Path::new(path);
-    let mut file = File::open(path).map_err(|e| io_context("opening", p, e))?;
+pub(crate) fn read_metadata_head_from_file(path: impl AsRef<Path>) -> io::Result<FileMetadata> {
+    let p = path.as_ref();
+    let mut file = File::open(p).map_err(|e| io_context("opening", p, e))?;
     // `read` rather than `read_exact`: a file too short for the header is a
     // format refusal with the wording every other reader gives it, not an
     // `UnexpectedEof` a binding would classify as an I/O fault. Every refusal
@@ -2123,7 +2123,18 @@ pub(crate) fn read_metadata_head_from_file(path: &str) -> io::Result<FileMetadat
             buf.truncate(PORTABLE_HEADER_BYTES + read);
         }
     }
-    read_metadata_head(&buf, &format!("'{path}'"))
+    read_metadata_head(&buf, &format!("'{}'", p.display()))
+}
+
+pub(crate) fn checkpoint_lsn_from_file(path: &Path) -> io::Result<u64> {
+    if path.is_dir() {
+        let bytes = std::fs::read(path.join("metadata.json"))?;
+        let metadata: FileMetadata = serde_json::from_slice(&bytes)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        Ok(metadata.checkpoint_lsn)
+    } else {
+        Ok(read_metadata_head_from_file(path)?.checkpoint_lsn)
+    }
 }
 
 /// Fill as much of `buf` as the reader has, returning how many bytes landed.
