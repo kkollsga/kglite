@@ -19,7 +19,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 def _result(*names: str, system: str = "Linux", python: str = "3.12.9") -> dict:
     return {
-        "machine_info": {"system": system, "python_version": python},
+        "machine_info": {"system": system, "machine": "x86_64", "python_version": python},
         "benchmarks": [{"name": name, "stats": {"min": 1.0, "data": [1.0, 1.1]}} for name in names],
     }
 
@@ -68,6 +68,10 @@ def test_promotion_accepts_only_verified_reference_and_strips_samples(tmp_path: 
     )
 
     promote(reference_path, provenance_path, expected_path, versioned, current)
+    qualifications = json.loads((tmp_path / "qualifications.json").read_text(encoding="utf-8"))
+    assert qualifications["captures"][versioned.name]["status"] == "accepted"
+    assert qualifications["captures"][current.name]["sha256"] == qualifications["captures"][versioned.name]["sha256"]
+    assert qualifications["references"]["Linux/x86_64"] == versioned.name
     promoted = json.loads(versioned.read_text(encoding="utf-8"))
     assert versioned.read_text(encoding="utf-8") == current.read_text(encoding="utf-8")
     assert promoted["kglite_baseline"]["source_distribution"] == "kglite==0.13.2 (PyPI wheel)"

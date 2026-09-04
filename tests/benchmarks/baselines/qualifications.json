@@ -1,0 +1,45 @@
+{
+  "captures": {
+    "0_16_19.json": {
+      "evidence": "Adopted from the existing 2026-09-03 wheel/control investigation: two quiet 0.16.22 recaptures had fleet median -0.9%/+0.1% against this anchor; release history 5dc5582d records the capture issue.",
+      "platform": "Darwin/arm64",
+      "sha256": "f05fa6bcc8337512b89f517f4223d56b0d060c4a1d8440b729ece441ad5a8249",
+      "status": "accepted"
+    },
+    "0_16_22.json": {
+      "evidence": "Inflated capture at load 3.9-8.5; wheel A/B and two quiet recaptures established environmental inflation. Release history 5dc5582d.",
+      "platform": "Darwin/arm64",
+      "sha256": "ed8f0fc8ffc3388a9fa9d1660b28bb0eb36348b3d9da94293ee48a35e2e62a8e",
+      "status": "rejected"
+    },
+    "0_16_23.json": {
+      "evidence": "Inflated capture at load 10-17 with concurrent release builds; four cells read +100%, contradicted by a published 0.16.22-wheel A/B. Release record 2026-09-04.",
+      "platform": "Darwin/arm64",
+      "sha256": "1b23da8d130234e10ed261987e411a69da11a1f2f6feae6443b8f06a8c00f0f7",
+      "status": "rejected"
+    },
+    "current.json": {
+      "evidence": "Raw alias of the inflated 0.16.23 macOS capture; retained for historical workload identity, not reference eligibility.",
+      "platform": "Darwin/arm64",
+      "sha256": "1b23da8d130234e10ed261987e411a69da11a1f2f6feae6443b8f06a8c00f0f7",
+      "status": "rejected"
+    },
+    "current.linux.json": {
+      "evidence": "Preserved 36-cell CI secondary reference as of 0.16.23. Released 0.13.2 wheel provenance and cells_added caveats remain intact: 11 cells are provisional scaled estimates, not Linux measurements. The primary same-runner CI comparison remains authoritative for those cells.",
+      "platform": "Linux/x86_64",
+      "sha256": "808b62244434d859f9a4db7570dde2bca1a9ea9920c463321cbc27cb0a8f699a",
+      "status": "accepted"
+    },
+    "reference_0_16_23.linux.json": {
+      "evidence": "Preserved 36-cell CI secondary reference as of 0.16.23. Released 0.13.2 wheel provenance and cells_added caveats remain intact: 11 cells are provisional scaled estimates, not Linux measurements. The primary same-runner CI comparison remains authoritative for those cells.",
+      "platform": "Linux/x86_64",
+      "sha256": "808b62244434d859f9a4db7570dde2bca1a9ea9920c463321cbc27cb0a8f699a",
+      "status": "accepted"
+    }
+  },
+  "references": {
+    "Darwin/arm64": "0_16_19.json",
+    "Linux/x86_64": "reference_0_16_23.linux.json"
+  },
+  "schema_version": 1
+}

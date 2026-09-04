@@ -12,6 +12,11 @@ import subprocess
 import sys
 from typing import Any
 
+try:
+    from scripts.benchmark_qualification import Registry
+except ModuleNotFoundError:  # Direct script execution.
+    from benchmark_qualification import Registry
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT = REPO_ROOT / "docs" / "_generated" / "project-facts.md"
 
@@ -118,9 +123,14 @@ def _benchmark_facts() -> dict[str, Any]:
     path = REPO_ROOT / "tests" / "benchmarks" / "baselines" / "current.json"
     data = json.loads(path.read_text(encoding="utf-8"))
     machine = data["machine_info"]
+    registry = Registry(path.parent, required=True)
+    qualification = registry.data["captures"][path.name]["status"]
+    reference = registry.reference(path).name
     commit = data["commit_info"]
     cpu = machine.get("cpu") or {}
     return {
+        "qualification": qualification,
+        "reference": reference,
         "captured": data["datetime"],
         "harness": data["version"],
         "commit": commit["id"],
@@ -189,6 +199,8 @@ def render() -> str:
             f"- Python: `{benchmark['python']}`",
             f"- pytest-benchmark schema/plugin version: `{benchmark['harness']}`",
             f"- Recorded benchmarks: `{benchmark['count']}`",
+            f"- Reference qualification: `{benchmark['qualification']}`; "
+            f"approved comparison capture: `{benchmark['reference']}`",
             "",
         ]
     )

@@ -25,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and persistence; ontology property types accept `list` and `array`.
 
 ### Fixed
+- Performance gates select qualified, digest-bound references and reject known
+  inflated captures, missing platform identity and unusable comparisons. New
+  release captures remain pending until explicitly qualified; raw history stays intact.
 - Vector/text-score top-k preserves ascending order and missing-embedding rows.
   Explicit null placement uses the standard ordering path; HNSW falls back
   when unembedded rows must participate in the result.

@@ -48,6 +48,11 @@ from pathlib import Path
 import subprocess
 import sys
 
+try:
+    from scripts.benchmark_qualification import QualificationError, Registry, compatible, validate_measurements
+except ModuleNotFoundError:  # Direct script execution.
+    from benchmark_qualification import QualificationError, Registry, compatible, validate_measurements
+
 # Width of the "APPROACHING" watch band, in percentage points below the gate
 # threshold: a +20% gate reports every passing cell in +12%..+20%.
 #
@@ -194,8 +199,19 @@ def main() -> int:
         print(f"current missing: {args.current}", file=sys.stderr)
         return 2
 
-    baseline = _load(args.baseline)
-    current = _load(args.current)
+    try:
+        registry = Registry(args.baseline.parent)
+        registry.candidate(args.current)
+        Registry(args.current.parent).candidate(args.current)
+        args.baseline = registry.reference(args.baseline)
+        compatible(args.baseline, args.current)
+        baseline = _load(args.baseline)
+        current = _load(args.current)
+        validate_measurements(baseline, args.metric)
+        validate_measurements(current, args.metric)
+    except (QualificationError, OSError, ValueError) as error:
+        print(f"no valid perf verdict: {error}", file=sys.stderr)
+        return 2
 
     common = sorted(set(baseline) & set(current))
     only_baseline = sorted(set(baseline) - set(current))
@@ -264,8 +280,9 @@ def main() -> int:
             print(f"  - {name}: {delta:+.1f}%")
         print(
             "\nIf the regression is intentional (e.g. behaviour change worth the cost), "
-            "refresh the baseline via `make refresh-release-constants` and explain in "
-            "the CHANGELOG entry. Otherwise investigate before merging."
+            "capture via `make refresh-release-constants`, qualify the capture with "
+            "scripts/benchmark_qualification.py after repeat/control checks, and explain "
+            "the decision in CHANGELOG. Otherwise investigate before merging."
         )
     if args.record_history is not None:
         _append_gate_history(
