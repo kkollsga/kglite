@@ -360,6 +360,13 @@ jobs:
         run: |
           set -o pipefail
           cargo +nightly -Z direct-minimal-versions generate-lockfile 2>&1 | tee resolve.log
+          # Transitive crates resolve to their newest release here, and
+          # tinyvec 1.13.0 (published 2026-09-03) does not compile on stable:
+          # its `use alloc::vec::{self, Vec}` shadows the `vec!` macro it then
+          # invokes. Hold it at the last release that builds until a newer
+          # tinyvec compiles; this line is retired by removing it and seeing
+          # the job stay green.
+          cargo update -p tinyvec --precise 1.12.0 2>&1 | tee -a resolve.log
 
       - name: Build against the lowered lockfile
         id: build
