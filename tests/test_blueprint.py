@@ -1,6 +1,7 @@
 """Tests for kglite.blueprint.from_blueprint()."""
 
 import json
+from pathlib import Path
 import warnings
 
 import pandas as pd
@@ -9,12 +10,57 @@ import pytest
 import kglite
 from kglite.blueprint import from_blueprint
 
+# Real bytes from the public sources the `delimited` reader exists for.
+FIXTURES = Path(__file__).parent / "fixtures" / "blueprint"
+
 # ── Helpers ──────────────────────────────────────────────────────────
 
 
 def _write_csv(path, df):
     """Write a DataFrame as CSV."""
     df.to_csv(path, index=False)
+
+
+def _write_dmp(path, df):
+    """Write a DataFrame in NCBI `.dmp` shape: `\t|\t` between fields, every
+    line closed with `\t|`, no header row."""
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        for row in df.itertuples(index=False):
+            f.write("\t|\t".join("" if pd.isna(v) else str(v) for v in row) + "\t|\n")
+
+
+#: The input formats every chunk-invariance test runs through. ``csv`` is the
+#: `csv` crate behind the `csv` shorthand, ``tsv`` is the same crate behind a
+#: ``delimited`` entry, and ``dmp`` is the line engine — a multi-character
+#: delimiter, a line suffix and declared column names. A loader defect that
+#: lives in one producer and not the others shows up here as a disagreement.
+INPUT_FORMATS = ["csv", "tsv", "dmp"]
+
+
+def _declare_input(fmt, files, root, name, df):
+    """Write ``df`` to ``root/name`` in ``fmt``, declare it in ``files`` when
+    the format needs a ``files`` entry, and return the spec fragment that names
+    it (``{"csv": ...}`` or ``{"file": ...}``)."""
+    path = root / name
+    if fmt == "csv":
+        _write_csv(path, df)
+        return {"csv": name}
+    if fmt == "tsv":
+        df.to_csv(path, index=False, sep="\t")
+        files[name] = {"path": name, "format": "delimited", "delimiter": "\t"}
+        return {"file": name}
+    if fmt == "dmp":
+        _write_dmp(path, df)
+        files[name] = {
+            "path": name,
+            "format": "delimited",
+            "delimiter": "\t|\t",
+            "line_suffix": "\t|",
+            "header": False,
+            "columns": [str(c) for c in df.columns],
+        }
+        return {"file": name}
+    raise AssertionError(f"unknown input format {fmt!r}")
 
 
 def _warning_text(recwarn):
@@ -1043,7 +1089,8 @@ class TestStreamingFkEdges:
     pair. The streamed-parent CsvCache is bypassed, so peak RAM
     during the FK phase is bounded by chunk size."""
 
-    def test_multi_chunk_fk_edges(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("fmt", INPUT_FORMATS)
+    def test_multi_chunk_fk_edges(self, tmp_path, monkeypatch, fmt):
         monkeypatch.setenv("KGLITE_BLUEPRINT_NODE_CHUNK_SIZE", "50")
         monkeypatch.setenv("KGLITE_BLUEPRINT_STREAMING_THRESHOLD_MB", "0")
         n_companies = 20
@@ -1061,20 +1108,22 @@ class TestStreamingFkEdges:
                 "company_id": [i % n_companies for i in range(n_employees)],
             }
         )
-        _write_csv(tmp_path / "companies.csv", companies)
-        _write_csv(tmp_path / "employees.csv", employees)
+        files = {}
+        company_ref = _declare_input(fmt, files, tmp_path, "companies.csv", companies)
+        employee_ref = _declare_input(fmt, files, tmp_path, "employees.csv", employees)
         bp = {
             "settings": {"root": str(tmp_path)},
+            "files": files,
             "nodes": {
                 "Company": {
-                    "csv": "companies.csv",
+                    **company_ref,
                     "pk": "company_id",
                     "title": "name",
                     "properties": {},
                     "skipped": [],
                 },
                 "Employee": {
-                    "csv": "employees.csv",
+                    **employee_ref,
                     "pk": "employee_id",
                     "title": "name",
                     "properties": {},
@@ -1531,7 +1580,7 @@ class TestFkEdgeProperties:
     junction edge. The columns come from the source node's own CSV row, so the
     property values must follow the rows that survived the null-FK drop."""
 
-    def _bp(self, tmp_path, edge_extra=None, employees=None, skipped=None):
+    def _bp(self, tmp_path, edge_extra=None, employees=None, skipped=None, fmt="csv"):
         companies = pd.DataFrame({"company_id": [10, 20], "name": ["Acme", "Globex"]})
         if employees is None:
             employees = pd.DataFrame(
@@ -1544,17 +1593,19 @@ class TestFkEdgeProperties:
                     "level": [1, 2, 3],
                 }
             )
-        _write_csv(tmp_path / "companies.csv", companies)
-        _write_csv(tmp_path / "employees.csv", employees)
+        files = {}
+        company_ref = _declare_input(fmt, files, tmp_path, "companies.csv", companies)
+        employee_ref = _declare_input(fmt, files, tmp_path, "employees.csv", employees)
         edge = {"target": "Company", "fk": "company_id"}
         if edge_extra:
             edge.update(edge_extra)
         bp = {
             "settings": {"root": str(tmp_path)},
+            "files": files,
             "nodes": {
-                "Company": {"csv": "companies.csv", "pk": "company_id", "title": "name"},
+                "Company": {**company_ref, "pk": "company_id", "title": "name"},
                 "Employee": {
-                    "csv": "employees.csv",
+                    **employee_ref,
                     "pk": "employee_id",
                     "title": "name",
                     "skipped": skipped if skipped is not None else ["company_id"],
@@ -1680,7 +1731,8 @@ class TestFkEdgeProperties:
             ("Charlie", "Member"),
         ]
 
-    def test_streamed_and_buffered_agree(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("fmt", INPUT_FORMATS)
+    def test_streamed_and_buffered_agree(self, tmp_path, monkeypatch, fmt):
         employees = pd.DataFrame(
             {
                 "employee_id": list(range(1, 41)),
@@ -1695,6 +1747,7 @@ class TestFkEdgeProperties:
             tmp_path,
             {"properties": ["role", "since"], "rename": {"since": "validFrom"}},
             employees=employees,
+            fmt=fmt,
         )
 
         def build(threshold_mb, chunk_size):
@@ -1807,7 +1860,7 @@ class TestNodeLabels:
     as separate node types, and a query over the union has to name each one.
     """
 
-    def _bp(self, tmp_path, labels, sub_labels=None, rows=3):
+    def _bp(self, tmp_path, labels, sub_labels=None, rows=3, fmt="csv"):
         persons = pd.DataFrame(
             {
                 "person_id": list(range(1, rows + 1)),
@@ -1815,9 +1868,9 @@ class TestNodeLabels:
                 "city_id": [10] * rows,
             }
         )
-        _write_csv(tmp_path / "persons.csv", persons)
+        files = {}
         person = {
-            "csv": "persons.csv",
+            **_declare_input(fmt, files, tmp_path, "persons.csv", persons),
             "pk": "person_id",
             "title": "name",
             "connections": {"fk_edges": {"LIVES_IN": {"target": "City", "fk": "city_id"}}},
@@ -1831,10 +1884,9 @@ class TestNodeLabels:
                     "alias": [f"a{i}" for i in range(1, rows + 1)],
                 }
             )
-            _write_csv(tmp_path / "aliases.csv", aliases)
             person["sub_nodes"] = {
                 "Alias": {
-                    "csv": "aliases.csv",
+                    **_declare_input(fmt, files, tmp_path, "aliases.csv", aliases),
                     "pk": "alias",
                     "parent_fk": "person_id",
                     "labels": sub_labels,
@@ -1842,6 +1894,7 @@ class TestNodeLabels:
             }
         bp = {
             "settings": {"root": str(tmp_path)},
+            "files": files,
             "nodes": {"Person": person, "City": {"pk": "city_id"}},
         }
         bp_path = tmp_path / "bp.json"
@@ -1897,12 +1950,13 @@ class TestNodeLabels:
         ids = sorted(r["c.id"] for r in g.cypher("MATCH (c:Place) RETURN c.id"))
         assert ids == [10, 99], ids
 
-    def test_streaming_and_buffered_agree(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("fmt", INPUT_FORMATS)
+    def test_streaming_and_buffered_agree(self, tmp_path, monkeypatch, fmt):
         """The streaming node loader is a RAM knob, so it must produce the same
         labels as the buffered path."""
         monkeypatch.setenv("KGLITE_BLUEPRINT_NODE_CHUNK_SIZE", "2")
         monkeypatch.setenv("KGLITE_BLUEPRINT_STREAMING_THRESHOLD_MB", "0")
-        g = kglite.from_blueprint(str(self._bp(tmp_path, ["Human"], rows=7)), save=False)
+        g = kglite.from_blueprint(str(self._bp(tmp_path, ["Human"], rows=7, fmt=fmt)), save=False)
         assert len(list(g.cypher("MATCH (n:Human) RETURN n.title"))) == 7
 
     def test_a_label_equal_to_the_type_is_not_an_error(self, tmp_path):
@@ -2159,20 +2213,21 @@ class TestJunctionUnionTargets:
 
     TARGET_TYPES = ["Disease", "Phenotype", "Exposure"]
 
-    def _bp(self, tmp_path, target, type_column=None, links=None, properties=None):
-        _write_csv(tmp_path / "microbes.csv", pd.DataFrame({"id": ["M1", "M2"], "name": ["Mi1", "Mi2"]}))
-        _write_csv(tmp_path / "diseases.csv", pd.DataFrame({"id": ["D1"], "name": ["Dis1"]}))
-        _write_csv(tmp_path / "phenotypes.csv", pd.DataFrame({"id": ["P1"], "name": ["Phe1"]}))
-        _write_csv(tmp_path / "exposures.csv", pd.DataFrame({"id": ["E1"], "name": ["Exp1"]}))
+    def _bp(self, tmp_path, target, type_column=None, links=None, properties=None, fmt="csv"):
+        files = {}
+        write = lambda name, df: _declare_input(fmt, files, tmp_path, name, df)  # noqa: E731
+        microbe_ref = write("microbes.csv", pd.DataFrame({"id": ["M1", "M2"], "name": ["Mi1", "Mi2"]}))
+        disease_ref = write("diseases.csv", pd.DataFrame({"id": ["D1"], "name": ["Dis1"]}))
+        phenotype_ref = write("phenotypes.csv", pd.DataFrame({"id": ["P1"], "name": ["Phe1"]}))
+        exposure_ref = write("exposures.csv", pd.DataFrame({"id": ["E1"], "name": ["Exp1"]}))
         if links is None:
             links = [
                 {"source_id": "M1", "target_id": "D1", "target_type": "Disease", "score": 1},
                 {"source_id": "M1", "target_id": "P1", "target_type": "Phenotype", "score": 2},
                 {"source_id": "M2", "target_id": "E1", "target_type": "Exposure", "score": 3},
             ]
-        _write_csv(tmp_path / "links.csv", pd.DataFrame(links))
         junction = {
-            "csv": "links.csv",
+            **write("links.csv", pd.DataFrame(links)),
             "source_fk": "source_id",
             "target": target,
             "target_fk": "target_id",
@@ -2183,16 +2238,17 @@ class TestJunctionUnionTargets:
             junction["properties"] = properties
         bp = {
             "settings": {"root": str(tmp_path)},
+            "files": files,
             "nodes": {
                 "Microbe": {
-                    "csv": "microbes.csv",
+                    **microbe_ref,
                     "pk": "id",
                     "title": "name",
                     "connections": {"junction_edges": {"ASSOCIATED_WITH": junction}},
                 },
-                "Disease": {"csv": "diseases.csv", "pk": "id", "title": "name"},
-                "Phenotype": {"csv": "phenotypes.csv", "pk": "id", "title": "name"},
-                "Exposure": {"csv": "exposures.csv", "pk": "id", "title": "name"},
+                "Disease": {**disease_ref, "pk": "id", "title": "name"},
+                "Phenotype": {**phenotype_ref, "pk": "id", "title": "name"},
+                "Exposure": {**exposure_ref, "pk": "id", "title": "name"},
             },
         }
         bp_path = tmp_path / "bp.json"
@@ -2325,8 +2381,9 @@ class TestJunctionUnionTargets:
         # No stub was invented for a target the probe failed to place.
         assert graph.cypher("MATCH (n) WHERE n._provisional = true RETURN count(n) AS c").to_list()[0]["c"] == 0
 
-    def test_chunking_does_not_change_the_routing(self, tmp_path, monkeypatch):
-        bp_path = self._bp(tmp_path, self.TARGET_TYPES, type_column="target_type")
+    @pytest.mark.parametrize("fmt", INPUT_FORMATS)
+    def test_chunking_does_not_change_the_routing(self, tmp_path, monkeypatch, fmt):
+        bp_path = self._bp(tmp_path, self.TARGET_TYPES, type_column="target_type", fmt=fmt)
 
         def build(chunk_size):
             monkeypatch.setenv("KGLITE_BLUEPRINT_JUNCTION_CHUNK_SIZE", str(chunk_size))
@@ -2652,9 +2709,10 @@ class TestJunctionChunkInvariance:
 
     ROWS = 25
 
-    def _bp(self, tmp_path):
+    def _bp(self, tmp_path, fmt="csv"):
+        files = {}
         persons = pd.DataFrame({"person_id": [1, 2, 3], "name": ["Alice", "Bob", "Charlie"]})
-        _write_csv(tmp_path / "persons.csv", persons)
+        person_ref = _declare_input(fmt, files, tmp_path, "persons.csv", persons)
         # Three endpoint pairs cycling over 25 rows: every pair recurs many
         # times, and its repeats straddle every boundary a chunk size of 10
         # draws. Each row carries a distinct `seq`, so a folded row is visible
@@ -2667,19 +2725,20 @@ class TestJunctionChunkInvariance:
                 "seq": list(range(self.ROWS)),
             }
         )
-        _write_csv(tmp_path / "knows.csv", knows)
+        knows_ref = _declare_input(fmt, files, tmp_path, "knows.csv", knows)
         bp = {
             "settings": {"root": str(tmp_path)},
+            "files": files,
             "nodes": {
                 "Person": {
-                    "csv": "persons.csv",
+                    **person_ref,
                     "pk": "person_id",
                     "title": "name",
                     "properties": {},
                     "connections": {
                         "junction_edges": {
                             "KNOWS": {
-                                "csv": "knows.csv",
+                                **knows_ref,
                                 "source_fk": "source_id",
                                 "target": "Person",
                                 "target_fk": "target_id",
@@ -2706,8 +2765,9 @@ class TestJunctionChunkInvariance:
         chunked = self._build(bp_path, monkeypatch, 10)
         assert chunked == list(range(self.ROWS))
 
-    def test_edge_set_is_the_same_at_every_chunk_size(self, tmp_path, monkeypatch):
-        bp_path = self._bp(tmp_path)
+    @pytest.mark.parametrize("fmt", INPUT_FORMATS)
+    def test_edge_set_is_the_same_at_every_chunk_size(self, tmp_path, monkeypatch, fmt):
+        bp_path = self._bp(tmp_path, fmt=fmt)
         single = self._build(bp_path, monkeypatch, 1000)
         for chunk_size in (1, 7, 10, 24):
             assert self._build(bp_path, monkeypatch, chunk_size) == single, (
@@ -3532,6 +3592,407 @@ class TestFilesSection:
         assert "format 'csv'" in err
         assert "unknown key 'delimiter'" in err
         assert "'path', 'format'" in err
+
+
+class TestDelimitedInputs:
+    """`"format": "delimited"` reads the text tables public data actually ships:
+    NCBI's `\t|\t` taxonomy dumps with a `\t|` on every line, a CSV under a
+    licence preamble, headerless TSVs, and ids carrying a `cpd:` namespace.
+    Every fixture here is real bytes from those sources.
+    """
+
+    # The 18 fields of a `nodes.dmp` line, in order.
+    NODES_COLUMNS = [
+        "tax_id",
+        "parent_tax_id",
+        "rank",
+        "embl_code",
+        "division_id",
+        "inherited_div_flag",
+        "genetic_code_id",
+        "inherited_GC_flag",
+        "mito_genetic_code_id",
+        "inherited_MGC_flag",
+        "genbank_hidden_flag",
+        "hidden_subtree_root_flag",
+        "comments",
+        "plastid_genetic_code_id",
+        "inherited_PGC_flag",
+        "specified_species",
+        "hydrogenosome_genetic_code_id",
+        "inherited_HGC_flag",
+    ]
+    NAMES_COLUMNS = ["tax_id", "name_txt", "unique_name", "name_class"]
+
+    def _build(self, tmp_path, bp, root=None):
+        bp.setdefault("settings", {})["root"] = str(root if root is not None else FIXTURES)
+        bp_path = tmp_path / "bp.json"
+        _write_blueprint(bp_path, bp)
+        return from_blueprint(bp_path, save=False)
+
+    def _dmp_entry(self, path, columns):
+        return {
+            "path": path,
+            "format": "delimited",
+            "delimiter": "\t|\t",
+            "line_suffix": "\t|",
+            "header": False,
+            "columns": columns,
+        }
+
+    def test_an_ncbi_dump_builds_nodes_edges_and_a_clean_last_column(self, tmp_path):
+        """The `\t|` trailer sits on the last field of every line. Unstripped it
+        would ride into the last column's value, so `inherited_HGC_flag` coming
+        back as the integer 0 is what says the suffix went."""
+        graph = self._build(
+            tmp_path,
+            {
+                "files": {"taxa": self._dmp_entry("nodes.dmp", self.NODES_COLUMNS)},
+                "nodes": {
+                    "Taxon": {
+                        "file": "taxa",
+                        "pk": "tax_id",
+                        "properties": {"rank": "string", "inherited_HGC_flag": "int"},
+                        "connections": {"fk_edges": {"HAS_PARENT": {"target": "Taxon", "fk": "parent_tax_id"}}},
+                    }
+                },
+            },
+        )
+        rows = graph.cypher(
+            "MATCH (t:Taxon) WHERE t.rank IS NOT NULL "
+            "RETURN t.id AS id, t.rank AS rank, t.inherited_HGC_flag AS hgc ORDER BY id"
+        ).to_list()
+        assert len(rows) == 10
+        assert rows[0] == {"id": 1, "rank": "no rank", "hgc": 0}
+        assert [r["rank"] for r in rows[:4]] == ["no rank", "domain", "genus", "species"]
+        edges = graph.cypher("MATCH (:Taxon)-[r:HAS_PARENT]->(:Taxon) RETURN count(r) AS n").to_list()
+        assert edges[0]["n"] == 10
+
+    def test_a_second_spec_reads_the_same_delimiter_and_keeps_literal_quotes(self, tmp_path):
+        """`names.dmp` is a second `delimited` input in the same build, and one
+        of its names is `"Bacteria" Cavalier-Smith 1987`. The line engine has no
+        quoting, so the quotes are part of the value — a CSV reader would eat
+        them."""
+        graph = self._build(
+            tmp_path,
+            {
+                "files": {
+                    "taxa": self._dmp_entry("nodes.dmp", self.NODES_COLUMNS),
+                    "names": self._dmp_entry("names.dmp", self.NAMES_COLUMNS),
+                },
+                "nodes": {
+                    "Taxon": {"file": "taxa", "pk": "tax_id", "properties": {"rank": "string"}},
+                    "TaxonName": {
+                        "file": "names",
+                        "pk": "name_txt",
+                        "properties": {"name_class": "string"},
+                        "connections": {"fk_edges": {"NAME_OF": {"target": "Taxon", "fk": "tax_id"}}},
+                    },
+                },
+            },
+        )
+        authority = graph.cypher("MATCH (n:TaxonName) WHERE n.name_class = 'authority' RETURN n.id AS id").to_list()
+        assert [r["id"] for r in authority] == ['"Bacteria" Cavalier-Smith 1987']
+        linked = graph.cypher("MATCH (n:TaxonName)-[:NAME_OF]->(t:Taxon) WHERE t.id = 2 RETURN count(n) AS n").to_list()
+        assert linked[0]["n"] == 6
+
+    @pytest.mark.parametrize(
+        "preamble", [{"skip_lines": 1}, {"comment_prefix": "#"}], ids=["skip_lines", "comment_prefix"]
+    )
+    def test_a_licence_preamble_is_dropped_either_way(self, tmp_path, preamble):
+        """BugSigDB writes a licence line above the header. Counting it and
+        marking it are both spellings of the same drop, and the header must end
+        up on the same line under either."""
+        graph = self._build(
+            tmp_path,
+            {
+                "files": {
+                    "studies": {
+                        "path": "bugsigdb_preamble.csv",
+                        "format": "delimited",
+                        "delimiter": ",",
+                        **preamble,
+                    }
+                },
+                "nodes": {"Study": {"file": "studies", "pk": "BSDB ID", "properties": {"PMID": "string"}}},
+            },
+        )
+        rows = graph.cypher("MATCH (s:Study) RETURN s.id AS id, s.PMID AS pmid ORDER BY id").to_list()
+        assert [r["id"] for r in rows] == ["bsdb:11/1/1", "bsdb:12/1/1", "bsdb:13/1/1"]
+        # The third study's design holds a comma inside quotes. Quoting is the
+        # `csv` crate's, so the columns after it do not shift.
+        assert rows[2]["pmid"] == "31000002"
+
+    def test_a_headerless_tsv_takes_its_names_from_the_declaration(self, tmp_path):
+        """Reactome's mapping file has six columns and no header. `columns`
+        names them, and two node specs plus a junction all read the one entry."""
+        graph = self._build(
+            tmp_path,
+            {
+                "files": {
+                    "chebi": {
+                        "path": "chebi2reactome.tsv",
+                        "format": "delimited",
+                        "delimiter": "\t",
+                        "header": False,
+                        "columns": [
+                            "chebi_id",
+                            "pathway_id",
+                            "url",
+                            "pathway_name",
+                            "evidence_code",
+                            "species",
+                        ],
+                    }
+                },
+                "nodes": {
+                    "Pathway": {
+                        "file": "chebi",
+                        "pk": "pathway_id",
+                        "title": "pathway_name",
+                        "connections": {
+                            "junction_edges": {
+                                "HAS_COMPOUND": {
+                                    "file": "chebi",
+                                    "source_fk": "pathway_id",
+                                    "target": "Compound",
+                                    "target_fk": "chebi_id",
+                                    "properties": ["evidence_code"],
+                                }
+                            }
+                        },
+                    },
+                    "Compound": {"pk": "chebi_id"},
+                },
+            },
+        )
+        assert graph.cypher("MATCH (p:Pathway) RETURN count(p) AS n").to_list()[0]["n"] == 5
+        assert graph.cypher("MATCH (c:Compound) RETURN count(c) AS n").to_list()[0]["n"] == 2
+        rows = graph.cypher(
+            "MATCH (p:Pathway)-[r:HAS_COMPOUND]->(c:Compound) "
+            "RETURN p.id AS p, c.id AS c, p.title AS name, r.evidence_code AS ev ORDER BY p"
+        ).to_list()
+        assert len(rows) == 5
+        assert rows[-1] == {
+            "p": "R-HSA-9913143",
+            "c": 100241,
+            "name": "Antimicrobial resistance",
+            "ev": "TAS",
+        }
+
+    def test_prefix_strip_removes_the_kegg_namespaces(self, tmp_path):
+        """KEGG ships `path:map00010` / `cpd:C00022`. Stripping happens before
+        typing, so the ids that land are the ones every other KEGG file uses."""
+        graph = self._build(
+            tmp_path,
+            {
+                "files": {
+                    "link": {
+                        "path": "kegg_link.tsv",
+                        "format": "delimited",
+                        "delimiter": "\t",
+                        "header": False,
+                        "columns": ["pathway", "compound"],
+                        "prefix_strip": {"pathway": "path:", "compound": "cpd:"},
+                    }
+                },
+                "nodes": {
+                    "Pathway": {
+                        "file": "link",
+                        "pk": "pathway",
+                        "connections": {
+                            "junction_edges": {
+                                "HAS_COMPOUND": {
+                                    "file": "link",
+                                    "source_fk": "pathway",
+                                    "target": "Compound",
+                                    "target_fk": "compound",
+                                }
+                            }
+                        },
+                    },
+                    "Compound": {"file": "link", "pk": "compound"},
+                },
+            },
+        )
+        rows = graph.cypher(
+            "MATCH (p:Pathway)-[:HAS_COMPOUND]->(c:Compound) RETURN p.id AS p, c.id AS c ORDER BY c"
+        ).to_list()
+        assert [r["p"] for r in rows] == ["map00010"] * 5
+        assert [r["c"] for r in rows] == ["C00022", "C00024", "C00031", "C00033", "C00036"]
+
+    def _refused(self, tmp_path, entry, root=None):
+        with pytest.raises(ValueError) as excinfo:
+            self._build(
+                tmp_path,
+                {"files": {"x": entry}, "nodes": {"T": {"file": "x", "pk": "a"}}},
+                root=root,
+            )
+        return str(excinfo.value)
+
+    def test_columns_together_with_a_header_is_refused(self, tmp_path):
+        """Both spellings name the columns; accepting both would silently rename
+        the ones the file already has."""
+        err = self._refused(
+            tmp_path,
+            {"path": "kegg_link.tsv", "format": "delimited", "delimiter": "\t", "columns": ["a", "b"]},
+        )
+        assert "files 'x'" in err
+        assert 'together with "header": true' in err
+
+    def test_a_quote_with_a_multi_character_delimiter_is_refused(self, tmp_path):
+        err = self._refused(
+            tmp_path,
+            {
+                "path": "nodes.dmp",
+                "format": "delimited",
+                "delimiter": "\t|\t",
+                "quote": '"',
+                "header": False,
+                "columns": ["a"],
+            },
+        )
+        assert "cannot be used with the multi-character delimiter" in err
+
+    def test_an_unknown_encoding_names_the_two_this_build_reads(self, tmp_path):
+        err = self._refused(
+            tmp_path,
+            {"path": "kegg_link.tsv", "format": "delimited", "delimiter": "\t", "encoding": "utf-16"},
+        )
+        assert "utf-8" in err and "latin-1" in err
+
+    def test_a_latin1_file_decodes_its_high_bytes(self, tmp_path, capfd):
+        """0xE9 is `é` in latin-1 and not valid UTF-8 on its own. Declared, it
+        is a name; undeclared, the spec fails with an error naming the physical
+        line and the knob that fixes it — a read failure is per-spec, so the
+        build survives it and reports on stderr."""
+        (tmp_path / "people.csv").write_bytes(b"id,name\n1,Andr\xe9\n")
+        entry = {"path": "people.csv", "format": "delimited", "delimiter": ","}
+        spec = {"nodes": {"Person": {"file": "people", "pk": "id", "title": "name"}}}
+        graph = self._build(tmp_path, {"files": {"people": {**entry, "encoding": "latin-1"}}, **spec}, root=tmp_path)
+        assert graph.cypher("MATCH (p:Person) RETURN p.title AS t").to_list()[0]["t"] == "André"
+
+        capfd.readouterr()
+        graph = self._build(tmp_path, {"files": {"people": entry}, **spec}, root=tmp_path)
+        err = capfd.readouterr().err
+        assert "people.csv line 2" in err, err
+        assert "latin-1" in err, err
+        assert graph.cypher("MATCH (p:Person) RETURN count(p) AS n").to_list()[0]["n"] == 0
+
+    def test_a_bom_on_a_line_engine_header_still_resolves_the_pk(self, tmp_path):
+        """The `csv` crate strips a BOM for us; the line engine has to, or the
+        first column is named `\ufeffid` and `pk` matches nothing."""
+        (tmp_path / "bom.txt").write_bytes("\ufeffid<->name\n1<->Alice\n".encode("utf-8"))
+        graph = self._build(
+            tmp_path,
+            {
+                "files": {"bom": {"path": "bom.txt", "format": "delimited", "delimiter": "<->"}},
+                "nodes": {"Person": {"file": "bom", "pk": "id", "title": "name"}},
+            },
+            root=tmp_path,
+        )
+        assert graph.cypher("MATCH (p:Person) RETURN p.id AS id, p.title AS t").to_list() == [{"id": 1, "t": "Alice"}]
+
+    @pytest.mark.parametrize("fmt", ["tsv", "dmp"])
+    def test_crlf_line_endings_load(self, tmp_path, fmt):
+        people = pd.DataFrame({"id": [1, 2], "name": ["Alice", "Bob"]})
+        files = {}
+        ref = _declare_input(fmt, files, tmp_path, "people.txt", people)
+        (tmp_path / "people.txt").write_bytes(
+            (tmp_path / "people.txt").read_text(encoding="utf-8").replace("\n", "\r\n").encode("utf-8")
+        )
+        graph = self._build(
+            tmp_path,
+            {"files": files, "nodes": {"Person": {**ref, "pk": "id", "title": "name"}}},
+            root=tmp_path,
+        )
+        assert graph.cypher("MATCH (p:Person) RETURN p.title AS t ORDER BY t").to_list() == [
+            {"t": "Alice"},
+            {"t": "Bob"},
+        ]
+
+    @pytest.mark.parametrize("fmt", ["tsv", "dmp"])
+    def test_a_short_row_is_padded_and_extra_fields_are_dropped(self, tmp_path, fmt):
+        """The same rectangular rule the CSV reader has
+        (`TestCsvShapeQuirks`), so a producer swap cannot change how a ragged
+        file lands."""
+        sep, suffix = ("\t", "") if fmt == "tsv" else ("\t|\t", "\t|")
+        header = "" if fmt == "dmp" else sep.join(["id", "name", "city"]) + suffix + "\n"
+        body = sep.join(["1", "Alice"]) + suffix + "\n" + sep.join(["2", "Bob", "Oslo", "extra"]) + suffix + "\n"
+        (tmp_path / "people.txt").write_text(header + body, encoding="utf-8", newline="\n")
+        entry = {"path": "people.txt", "format": "delimited", "delimiter": sep}
+        if fmt == "dmp":
+            entry.update({"line_suffix": suffix, "header": False, "columns": ["id", "name", "city"]})
+        graph = self._build(
+            tmp_path,
+            {
+                "files": {"people": entry},
+                "nodes": {
+                    "Person": {
+                        "file": "people",
+                        "pk": "id",
+                        "title": "name",
+                        "properties": {"city": "string"},
+                    }
+                },
+            },
+            root=tmp_path,
+        )
+        rows = graph.cypher("MATCH (p:Person) RETURN p.id AS id, p.city AS city ORDER BY id").to_list()
+        assert rows == [{"id": 1, "city": None}, {"id": 2, "city": "Oslo"}]
+
+    def test_a_warning_names_the_data_row_not_the_physical_line(self, tmp_path, recwarn, monkeypatch):
+        """`row_ids` counts data rows after the preamble, the comments and the
+        header are gone — the same thing it counts for a CSV. Chunked two rows
+        at a time, a chunk-local counter would call the bad cell row 1."""
+        monkeypatch.setenv("KGLITE_BLUEPRINT_STREAMING_THRESHOLD_MB", "0")
+        monkeypatch.setenv("KGLITE_BLUEPRINT_NODE_CHUNK_SIZE", "2")
+        lines = [
+            "# licence line",
+            "gene_id\tsynonyms",
+            '1\t["a"]',
+            '2\t["b"]',
+            "3\tadhC|ADHE",
+            '4\t["d"]',
+        ]
+        (tmp_path / "genes.tsv").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+        graph = self._build(
+            tmp_path,
+            {
+                "files": {
+                    "genes": {
+                        "path": "genes.tsv",
+                        "format": "delimited",
+                        "delimiter": "\t",
+                        "skip_lines": 1,
+                    }
+                },
+                "nodes": {"Gene": {"file": "genes", "pk": "gene_id", "properties": {"synonyms": "list"}}},
+            },
+            root=tmp_path,
+        )
+        assert graph.cypher("MATCH (g:Gene) RETURN count(g) AS n").to_list()[0]["n"] == 4
+        text = _warning_text(recwarn)
+        assert "not a JSON array" in text, text
+        # Data row 3 — physical line 5 of the file.
+        assert "First at row 3:" in text, text
+
+    def test_a_compute_op_over_a_delimited_input_is_refused(self, tmp_path):
+        """`compute` opens its source with a CSV reader outside the input
+        registry, so it would read a `\t|\t` dump as one column and report
+        success."""
+        with pytest.raises(ValueError) as excinfo:
+            self._build(
+                tmp_path,
+                {
+                    "files": {"taxa": self._dmp_entry("nodes.dmp", self.NODES_COLUMNS)},
+                    "nodes": {"Taxon": {"file": "taxa", "pk": "tax_id"}},
+                    "compute": [{"op": "derive", "from": "Taxon", "set": {"x": "1"}}],
+                },
+            )
+        err = str(excinfo.value)
+        assert "input 'taxa' (format 'delimited')" in err, err
+        assert "compute reads CSV files only" in err, err
 
 
 class TestFrameInputs:

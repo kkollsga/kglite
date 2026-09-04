@@ -7,6 +7,7 @@
 //! implementation plus one registry entry — no change to the build phases.
 
 pub mod csv;
+pub mod delimited;
 pub mod frame;
 
 use super::table::RawCsv;
@@ -26,11 +27,36 @@ use std::path::{Path, PathBuf};
 pub struct FormatSpec {
     pub name: &'static str,
     pub accepted_keys: &'static [&'static str],
+    /// The subset of `accepted_keys` this reader takes out of
+    /// [`FileSpec::extra`](super::schema::FileSpec) rather than off a
+    /// `FileSpec` field.
+    ///
+    /// `FileSpec` holds what every format needs (`path`, `format`); a format's
+    /// own knobs stay in `extra` so that one spelled on the wrong format is
+    /// still an unread key the report can name. The unknown-key check consults
+    /// this list to tell "a knob this format reads" from "a key nothing
+    /// reads" — so a knob missing from it warns on the very format that
+    /// implements it.
+    pub knob_keys: &'static [&'static str],
+    /// Check one entry's knobs before any file is opened. A format with knobs
+    /// points this at its own reader's config constructor, so the rules that
+    /// decide whether a declaration is readable live with the code that reads
+    /// it and cannot drift from it.
+    pub validate_entry: ValidateEntry,
+}
+
+/// Signature of [`FormatSpec::validate_entry`].
+pub type ValidateEntry = fn(&str, &super::schema::FileSpec) -> Result<(), String>;
+
+/// The `validate_entry` of a format whose only keys are `FileSpec`'s own
+/// fields, which serde has already checked.
+pub fn accept_any_entry(_name: &str, _file: &super::schema::FileSpec) -> Result<(), String> {
+    Ok(())
 }
 
 /// Every format compiled into this build, in the order the diagnostics list
 /// them.
-pub const INPUT_FORMATS: &[FormatSpec] = &[csv::FORMAT, frame::FORMAT];
+pub const INPUT_FORMATS: &[FormatSpec] = &[csv::FORMAT, delimited::FORMAT, frame::FORMAT];
 
 /// The registered format called `name`, or `None` — which is what makes an
 /// unknown `format` value a build error rather than a silently-ignored key.

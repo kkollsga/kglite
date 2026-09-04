@@ -20,6 +20,33 @@ pub struct RawCsv {
     pub row_ids: Vec<usize>,
 }
 
+/// Append one row's cells to a table under construction, rectangular against
+/// `n_cols`.
+///
+/// The two shape rules every reader shares, in one place so a new format
+/// cannot quietly pick different ones: a row shorter than the header is
+/// null-padded, and fields past the header's width are dropped. Null is the
+/// empty cell — the whole pipeline's definition of missing.
+pub(super) fn push_row<'a>(
+    fields: impl Iterator<Item = &'a str>,
+    n_cols: usize,
+    rows: &mut Vec<Vec<String>>,
+    nulls: &mut Vec<Vec<bool>>,
+) {
+    let mut row = Vec::with_capacity(n_cols);
+    let mut nrow = Vec::with_capacity(n_cols);
+    for cell in fields.take(n_cols) {
+        nrow.push(cell.is_empty());
+        row.push(cell.to_string());
+    }
+    while row.len() < n_cols {
+        row.push(String::new());
+        nrow.push(true);
+    }
+    rows.push(row);
+    nulls.push(nrow);
+}
+
 impl RawCsv {
     /// Return the column index for `name`, or `None` if missing.
     pub fn col_index(&self, name: &str) -> Option<usize> {

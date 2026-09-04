@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   several specs is written down once instead of at every one of them.
   `"csv": "x.csv"` stays valid and is exactly shorthand for a `files` entry
   named `x.csv`, so the two spellings build the same graph and mix freely.
-  `csv` is the only `format` this release reads. The build refuses rather than
+  The formats this release reads are `csv`, `delimited` and `frame`. The build refuses rather than
   guessing when a spec sets both `csv` and `file`, when `file` names an entry
   that is not declared, when an entry has no `path` or an unreadable `format`
   (both errors list what is accepted), and when an entry's name is already a
@@ -22,6 +22,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that entry's format. A `compute:` op over a non-CSV input is refused at load
   time: compute reads and rewrites CSV files directly, and would otherwise
   skip the op and report success.
+- **`"format": "delimited"` — the text tables public data actually ships.** A
+  `files` entry declaring it reads a file whose columns are separated by a
+  `delimiter` of any length, with `quote`, `header`, `columns`, `skip_lines`,
+  `comment_prefix`, `line_suffix`, `encoding` and `prefix_strip` as optional
+  knobs. That covers NCBI's taxonomy dumps (`"delimiter": "\t|\t"` with
+  `"line_suffix": "\t|"`, so the trailer never becomes a phantom last column),
+  a CSV under a licence preamble (`"skip_lines": 1` or `"comment_prefix": "#"`),
+  headerless TSVs (`"header": false` with `"columns": [...]`), and ids carrying
+  a namespace (`"prefix_strip": {"compound": "cpd:"}`, applied before typing).
+  A single-character delimiter is read by the same `csv` reader the `csv`
+  format uses, so quoting behaves identically; a longer one is read line by
+  line with no quoting, and a `quote` beside it is refused rather than ignored.
+  A UTF-8 BOM is stripped either way. `encoding` reads `utf-8` (the default)
+  and `latin-1`; anything else is refused by name. Rows land rectangular
+  exactly as a CSV's do — short rows null-padded, fields past the header's
+  width dropped, an empty cell null — and a warning's row number counts data
+  rows, after the preamble, comments and header are gone.
 - **`from_blueprint(..., frames={"name": df})` — an in-memory table as a
   blueprint input.** A `files` entry declaring `{"format": "frame"}` takes no
   `path`; its rows come from `frames["<entry name>"]`, and are consumed exactly

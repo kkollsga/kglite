@@ -1347,7 +1347,11 @@ def from_blueprint(
     entries and ``csv`` shorthands alike — are resolved relative to
     ``settings.root``. A ``files`` section declares each input once by name
     (``{"path": ..., "format": ...}``) for specs to reference with ``file``;
-    ``"csv": "x.csv"`` is shorthand for one such entry.
+    ``"csv": "x.csv"`` is shorthand for one such entry. The formats it reads
+    are ``csv``, ``delimited`` (any separator, with ``quote``, ``header``,
+    ``columns``, ``skip_lines``, ``comment_prefix``, ``line_suffix``,
+    ``encoding`` and ``prefix_strip``) and ``frame`` (below); each brings its
+    own keys, and an unknown one is an error listing these.
 
     **Diagnostic output**:
 

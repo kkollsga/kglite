@@ -126,6 +126,10 @@ pub fn validate_inputs(blueprint: &Blueprint) -> Result<(), String> {
                 file.format
             ));
         }
+        // A format's own knobs are checked by the reader that owns them,
+        // before any file is opened: a declaration the reader cannot act on is
+        // a build error, not a surprise three phases later.
+        (format.validate_entry)(name, file)?;
     }
 
     fn walk(blueprint: &Blueprint, node_type: &str, spec: &NodeSpec) -> Result<(), String> {
@@ -539,7 +543,23 @@ pub fn unknown_key_warnings(blueprint: &Blueprint) -> Vec<String> {
         extra: &IndexMap<String, serde_json::Value>,
         accepted: &[&str],
     ) {
+        check_but(warnings, where_, extra, accepted, &[]);
+    }
+
+    /// `check`, minus the keys `read` names — the knobs a format's reader
+    /// takes out of `extra` itself. Everything else there is a key nothing
+    /// reads.
+    fn check_but(
+        warnings: &mut Vec<String>,
+        where_: &str,
+        extra: &IndexMap<String, serde_json::Value>,
+        accepted: &[&str],
+        read: &[&str],
+    ) {
         for key in extra.keys() {
+            if read.contains(&key.as_str()) {
+                continue;
+            }
             let hint = crate::graph::mutation::validation::did_you_mean(key, accepted);
             let hint = if hint.is_empty() {
                 let list = accepted
@@ -606,11 +626,12 @@ pub fn unknown_key_warnings(blueprint: &Blueprint) -> Vec<String> {
         let Some(format) = input_format(&file.format) else {
             continue;
         };
-        check(
+        check_but(
             &mut warnings,
             &format!("file '{name}' (format '{}')", file.format),
             &file.extra,
             format.accepted_keys,
+            format.knob_keys,
         );
         // `path` is a real `FileSpec` field, so serde reads it whatever the
         // format and it never lands in `extra`. On a format that does not
@@ -926,6 +947,65 @@ mod input_tests {
         assert!(unknown_key_warnings(&bp).is_empty());
     }
 
+    /// A knob the format's own reader takes out of `extra` is a key the
+    /// loader *does* read; warning about it would make every correct
+    /// declaration noisy.
+    #[test]
+    fn a_delimited_entrys_knobs_are_not_stray_keys() {
+        let bp = bp(
+            r#"{"files": {"taxa": {"path": "nodes.dmp", "format": "delimited",
+                "delimiter": "\t|\t", "line_suffix": "\t|", "header": false,
+                "columns": ["id", "parent"], "skip_lines": 0, "encoding": "utf-8",
+                "prefix_strip": {"id": "x:"}}}}"#,
+        );
+        validate_inputs(&bp).expect("a well-formed delimited entry");
+        assert!(
+            unknown_key_warnings(&bp).is_empty(),
+            "{:?}",
+            unknown_key_warnings(&bp)
+        );
+    }
+
+    #[test]
+    fn a_stray_key_on_a_delimited_entry_still_warns() {
+        let bp = bp(
+            r#"{"files": {"taxa": {"path": "x.tsv", "format": "delimited",
+                "delimiter": "\t", "sheet": 2}}}"#,
+        );
+        let warnings = unknown_key_warnings(&bp);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("file 'taxa' (format 'delimited')"),
+            "{warnings:?}"
+        );
+        assert!(warnings[0].contains("unknown key 'sheet'"), "{warnings:?}");
+    }
+
+    /// The reader's own rules are the build's rules: a declaration it could
+    /// not act on fails before a file is opened, not three phases later.
+    #[test]
+    fn a_delimited_entry_with_an_unreadable_declaration_fails_the_build() {
+        let bp = bp(r#"{"files": {"taxa": {"path": "x.tsv", "format": "delimited"}}}"#);
+        let err = validate_inputs(&bp).expect_err("a delimited entry needs a delimiter");
+        assert!(err.contains("files 'taxa'"), "{err}");
+        assert!(err.contains("needs a 'delimiter'"), "{err}");
+    }
+
+    /// `compute` opens its source with a CSV reader outside the registry, so
+    /// it would read a `\t|\t` dump as one comma-separated column and report
+    /// success.
+    #[test]
+    fn compute_over_a_delimited_input_is_refused() {
+        let bp = bp(
+            r#"{"files": {"taxa": {"path": "nodes.dmp", "format": "delimited", "delimiter": "\t"}},
+                "nodes": {"Taxon": {"file": "taxa", "pk": "id"}},
+                "compute": [{"op": "derive", "from": "Taxon", "set": {"x": "1"}}]}"#,
+        );
+        let err = validate_compute(&bp).expect_err("compute over a delimited input is refused");
+        assert!(err.contains("input 'taxa' (format 'delimited')"), "{err}");
+        assert!(err.contains("compute reads CSV files only"), "{err}");
+    }
+
     /// An unknown format has no accepted list to check against, and
     /// `validate_inputs` refuses the build over it; a second complaint about
     /// its keys would bury that one.
@@ -1148,6 +1228,21 @@ mod accepted_key_tests {
             // Keys a `"format": "frame"` entry reads. A frame has no `path`:
             // the caller hands its rows in under this entry's name.
             "file_frame" => vec![("format", json!("frame"))],
+            // Keys a `"format": "delimited"` entry reads. All but `path` and
+            // `format` are knobs its reader takes out of `extra`.
+            "file_delimited" => vec![
+                ("path", json!("nodes.dmp")),
+                ("format", json!("delimited")),
+                ("delimiter", json!("\t|\t")),
+                ("quote", json!(null)),
+                ("header", json!(false)),
+                ("columns", json!(["id", "parent"])),
+                ("skip_lines", json!(0)),
+                ("comment_prefix", json!("#")),
+                ("line_suffix", json!("\t|")),
+                ("encoding", json!("utf-8")),
+                ("prefix_strip", json!({"id": "x:"})),
+            ],
             "junction_edge" => vec![
                 ("csv", json!("k.csv")),
                 ("file", json!(null)),
@@ -1160,6 +1255,35 @@ mod accepted_key_tests {
                 ("rename", json!({})),
             ],
             other => panic!("no fixture for level {other}"),
+        }
+    }
+
+    /// `knob_keys` is what tells a format's own knob from a key nothing reads,
+    /// so a knob missing from it warns on the format that implements it, and a
+    /// name in it that is not accepted silences a genuinely stray key. Neither
+    /// mistake shows up as a compile error.
+    #[test]
+    fn every_formats_knob_keys_are_accepted_keys_minus_the_struct_fields() {
+        use super::super::input::INPUT_FORMATS;
+        // The two keys `FileSpec` itself reads; everything else an entry may
+        // carry has to be a knob its reader picks out of `extra`.
+        let struct_fields = ["path", "format"];
+        for format in INPUT_FORMATS {
+            let accepted: HashSet<&str> = format.accepted_keys.iter().copied().collect();
+            let knobs: HashSet<&str> = format.knob_keys.iter().copied().collect();
+            assert!(
+                knobs.is_subset(&accepted),
+                "format '{}': knob_keys names a key that is not accepted",
+                format.name
+            );
+            for key in &accepted {
+                assert!(
+                    knobs.contains(key) || struct_fields.contains(key),
+                    "format '{}': accepted key '{key}' is neither a FileSpec field nor a knob \
+                     its reader takes from `extra` — it would warn as a stray key",
+                    format.name
+                );
+            }
         }
     }
 
@@ -1199,6 +1323,7 @@ mod accepted_key_tests {
     #[test]
     fn accepted_key_lists_name_only_keys_the_specs_read() {
         use super::super::input::csv::ACCEPTED_FILE_KEYS_CSV;
+        use super::super::input::delimited::ACCEPTED_FILE_KEYS_DELIMITED;
         use super::super::input::frame::ACCEPTED_FILE_KEYS_FRAME;
         use super::super::schema::{
             ACCEPTED_BLUEPRINT_KEYS, ACCEPTED_FK_EDGE_KEYS, ACCEPTED_JUNCTION_EDGE_KEYS,
@@ -1208,6 +1333,7 @@ mod accepted_key_tests {
             ("blueprint", ACCEPTED_BLUEPRINT_KEYS),
             ("settings", ACCEPTED_SETTINGS_KEYS),
             ("file", ACCEPTED_FILE_KEYS_CSV),
+            ("file_delimited", ACCEPTED_FILE_KEYS_DELIMITED),
             ("file_frame", ACCEPTED_FILE_KEYS_FRAME),
             ("node", ACCEPTED_NODE_KEYS),
             ("fk_edge", ACCEPTED_FK_EDGE_KEYS),
@@ -1225,7 +1351,11 @@ mod accepted_key_tests {
         let blueprint: Value = object("blueprint");
         let mut blueprint = blueprint;
         blueprint["settings"] = object("settings");
-        blueprint["files"] = json!({"in": object("file"), "rows": object("file_frame")});
+        blueprint["files"] = json!({
+            "in": object("file"),
+            "delim": object("file_delimited"),
+            "rows": object("file_frame"),
+        });
         let mut node = object("node");
         node["connections"] = json!({
             "fk_edges": {"IN_ORG": object("fk_edge")},

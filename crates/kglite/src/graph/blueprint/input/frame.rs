@@ -39,7 +39,7 @@
 //! text.
 
 use super::super::table::RawCsv;
-use super::{FormatSpec, Source};
+use super::{accept_any_entry, FormatSpec, Source};
 use crate::datatypes::values::{ColumnType, DataFrame, Value};
 use std::collections::HashMap;
 
@@ -50,6 +50,8 @@ pub const ACCEPTED_FILE_KEYS_FRAME: &[&str] = &["format"];
 pub const FORMAT: FormatSpec = FormatSpec {
     name: "frame",
     accepted_keys: ACCEPTED_FILE_KEYS_FRAME,
+    knob_keys: &[],
+    validate_entry: accept_any_entry,
 };
 
 /// A materialised in-memory table. Unlike a file source it holds its whole

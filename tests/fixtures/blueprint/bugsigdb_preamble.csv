@@ -1,0 +1,5 @@
+# BugSigDB 2026-09-02_20:58_UTC, License: Creative Commons Attribution 4.0 International, URL: https://bugsigdb.org
+BSDB ID,Study,Study design,PMID,DOI,URL
+bsdb:11/1/1,Study 11,time series / longitudinal observational,NA,NA,NA
+bsdb:12/1/1,Study 12,case-control,31000001,10.1000/abc,https://doi.org/10.1000/abc
+bsdb:13/1/1,Study 13,"cross-sectional observational, not case-control",31000002,NA,NA

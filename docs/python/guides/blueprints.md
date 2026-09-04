@@ -625,8 +625,8 @@ with `"file"`:
 
 | Key | Description |
 |-----|-------------|
-| `path` | The file this input reads, resolved against `settings.root`. Required. |
-| `format` | How to read it. Defaults to `"csv"`, which is the only format this release reads; more are coming, and each will bring its own keys. |
+| `path` | The file this input reads, resolved against `settings.root`. Required for a file-backed format. |
+| `format` | How to read it: `"csv"` (the default), `"delimited"` (below), or `"frame"` — an in-memory table passed to `from_blueprint(..., frames={...})`, which takes no `path`. Each format brings its own keys. |
 
 `"csv": "x.csv"` remains valid and is exactly shorthand for a `files` entry
 `{ "path": "x.csv", "format": "csv" }` named `x.csv`, so the two spellings
@@ -650,6 +650,82 @@ blueprint, and names the accepted keys for that entry's format.
 
 The `compute:` pipeline reads and rewrites CSV files directly, so a compute op
 whose source type reads a non-CSV input is refused at load time.
+
+### `format: "delimited"` — separators, preambles and headerless files
+
+Public bulk data is full of tables a CSV reader cannot open. A `delimited`
+entry names the separator itself, so those files are read where they land
+instead of being pre-processed into CSV first.
+
+NCBI's taxonomy dump separates fields with `\t|\t` and closes every line with
+`\t|`, and has no header row:
+
+```json
+{
+  "files": {
+    "taxa": {
+      "path": "nodes.dmp",
+      "format": "delimited",
+      "delimiter": "\t|\t",
+      "line_suffix": "\t|",
+      "header": false,
+      "columns": ["tax_id", "parent_tax_id", "rank", "embl_code", "division_id"]
+    }
+  },
+  "nodes": {
+    "Taxon": {
+      "file": "taxa",
+      "pk": "tax_id",
+      "properties": { "rank": "string" },
+      "connections": {
+        "fk_edges": { "HAS_PARENT": { "target": "Taxon", "fk": "parent_tax_id" } }
+      }
+    }
+  }
+}
+```
+
+BugSigDB's export puts a licence line above the header. Count it, or mark it:
+
+```json
+{
+  "files": {
+    "studies": { "path": "full_dump.csv", "format": "delimited", "delimiter": ",", "skip_lines": 1 },
+    "same":    { "path": "full_dump.csv", "format": "delimited", "delimiter": ",", "comment_prefix": "#" }
+  }
+}
+```
+
+| Key | Description |
+|-----|-------------|
+| `delimiter` | The text between two fields. Required, any length — `","`, `"\t"`, `"\t|\t"`. |
+| `quote` | Quote character, a single ASCII character. Defaults to `"`. Only for a single-character `delimiter` (see below). |
+| `header` | `true` (default): the first surviving line names the columns. `false`: `columns` names them. |
+| `columns` | The column names, in order. Required with `"header": false`, and refused with `"header": true` — the two would name the columns twice. |
+| `skip_lines` | Physical lines dropped before anything else looks at the file. How a licence preamble goes. |
+| `comment_prefix` | Lines starting with this are dropped wherever they occur. |
+| `line_suffix` | Removed once from the end of every line, before splitting — so a `\t|` trailer never becomes a phantom last column. |
+| `encoding` | `"utf-8"` (default) or `"latin-1"`. Any other name is refused rather than mojibaked. |
+| `prefix_strip` | `{ "column": "prefix" }` — removed from the start of that column's cells, before typing. `cpd:C00022` becomes `C00022`. A cell without the prefix keeps its value, and a column the file does not have is ignored. |
+
+**One knob picks the engine.** A single-character `delimiter` is read by the
+same reader the `csv` format uses, so quoting, escapes and newlines inside
+quoted fields behave exactly as they do there. A longer one is read line by
+line with **no quoting at all** — no such convention exists for those files —
+and a `quote` declared beside it is refused rather than silently ignored.
+Everything else is shared: a UTF-8 BOM is stripped either way, and rows land
+rectangular exactly as a CSV's do — a short row is null-padded, fields past the
+header's width are dropped, and an empty cell is null.
+
+`skip_lines`, `comment_prefix` and `line_suffix` are applied line by line,
+before quoting, so a value spanning several lines inside quotes is not exempt
+from them.
+
+**Row numbers count data rows.** A warning saying "row 12" means the twelfth
+row of data — after `skip_lines`, comment lines, blank lines and the header are
+gone — the same thing it counts for a CSV, not the physical line number. Read
+errors, which have no data row to attribute yet, name the physical line
+instead.
 
 ## Settings Reference
 

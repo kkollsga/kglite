@@ -1,0 +1,8 @@
+1	|	all	|		|	synonym	|
+1	|	root	|		|	scientific name	|
+2	|	Bacteria	|	Bacteria <bacteria>	|	scientific name	|
+2	|	bacteria	|	bacteria <blast name>	|	blast name	|
+2	|	bacteria	|	bacteria <genbank common name>	|	genbank common name	|
+2	|	"Bacteria" Cavalier-Smith 1987	|		|	authority	|
+2	|	Bacteria (ex Cavalier-Smith 1987)	|		|	synonym	|
+2	|	Bacteria Woese et al. 2024	|		|	synonym	|

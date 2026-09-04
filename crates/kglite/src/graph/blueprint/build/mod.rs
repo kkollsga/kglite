@@ -34,7 +34,12 @@ use manual::load_manual_nodes;
 use nodes::{load_node_specs, should_stream_spec};
 use specs::collect_specs;
 
-use super::input::{csv::CsvFile, frame::FrameSource, resolve_input_path, InputRegistry};
+use super::input::{
+    csv::CsvFile,
+    delimited::{DelimitedConfig, DelimitedFile},
+    frame::FrameSource,
+    resolve_input_path, InputRegistry, Source,
+};
 use super::schema::{Blueprint, FileSpec};
 use crate::datatypes::values::DataFrame;
 use crate::graph::mutation::maintain;
@@ -462,15 +467,21 @@ fn build_input_registry(
         let Some(path) = file.path.as_deref() else {
             continue;
         };
-        registry.insert(
-            name.clone(),
-            // `validate_inputs` has already checked the format is registered,
-            // and `frame` was handled above, so what is left reads a file.
-            Box::new(CsvFile::new(
-                resolve_input_path(root, path),
+        let resolved = resolve_input_path(root, path);
+        // `validate_inputs` has already checked the format is registered, and
+        // `frame` was handled above, so what is left reads a file.
+        let source: Box<dyn Source> = if file.format == "delimited" {
+            // Validated once already by `validate_inputs`; the config is
+            // rebuilt here because this is the copy the reader keeps.
+            Box::new(DelimitedFile::new(
+                resolved,
                 path.to_string(),
-            )),
-        );
+                DelimitedConfig::from_spec(name, file)?,
+            ))
+        } else {
+            Box::new(CsvFile::new(resolved, path.to_string()))
+        };
+        registry.insert(name.clone(), source);
     }
     if !inputs.frames.is_empty() {
         let mut names: Vec<&str> = inputs.frames.keys().map(String::as_str).collect();

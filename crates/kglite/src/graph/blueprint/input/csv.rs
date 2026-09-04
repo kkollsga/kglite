@@ -1,7 +1,7 @@
 //! The CSV `Source`: a delimited file on disk read through the `csv` crate.
 
-use super::super::table::RawCsv;
-use super::{FormatSpec, Source};
+use super::super::table::{push_row, RawCsv};
+use super::{accept_any_entry, FormatSpec, Source};
 use std::path::{Path, PathBuf};
 
 /// Keys a `files` entry with `"format": "csv"` reads. A CSV input has no
@@ -11,6 +11,8 @@ pub const ACCEPTED_FILE_KEYS_CSV: &[&str] = &["path", "format"];
 pub const FORMAT: FormatSpec = FormatSpec {
     name: "csv",
     accepted_keys: ACCEPTED_FILE_KEYS_CSV,
+    knob_keys: &[],
+    validate_entry: accept_any_entry,
 };
 
 /// A CSV file on disk. `display` is the name the blueprint referred to it by
@@ -148,22 +150,7 @@ fn read_csv_chunks(
         for _ in 0..chunk_size {
             match rdr.records().next() {
                 Some(Ok(rec)) => {
-                    let mut row = Vec::with_capacity(n_cols);
-                    let mut nrow = Vec::with_capacity(n_cols);
-                    for i in 0..n_cols {
-                        match rec.get(i) {
-                            Some(s) if !s.is_empty() => {
-                                row.push(s.to_string());
-                                nrow.push(false);
-                            }
-                            _ => {
-                                row.push(String::new());
-                                nrow.push(true);
-                            }
-                        }
-                    }
-                    rows.push(row);
-                    nulls.push(nrow);
+                    push_row(rec.iter(), n_cols, &mut rows, &mut nulls);
                     row_ids.push(next_row_id);
                     next_row_id += 1;
                 }
@@ -211,27 +198,7 @@ fn read_csv_raw(path: &Path, display: &str) -> Result<RawCsv, String> {
     let mut nulls = Vec::new();
     for rec in rdr.records() {
         let rec = rec.map_err(|e| format!("CSV row {}: {}", display, e))?;
-        let mut row = Vec::with_capacity(headers.len());
-        let mut nrow = Vec::with_capacity(headers.len());
-        for i in 0..headers.len() {
-            match rec.get(i) {
-                Some(s) => {
-                    if s.is_empty() {
-                        row.push(String::new());
-                        nrow.push(true);
-                    } else {
-                        row.push(s.to_string());
-                        nrow.push(false);
-                    }
-                }
-                None => {
-                    row.push(String::new());
-                    nrow.push(true);
-                }
-            }
-        }
-        rows.push(row);
-        nulls.push(nrow);
+        push_row(rec.iter(), headers.len(), &mut rows, &mut nulls);
     }
 
     let row_ids: Vec<usize> = (1..=rows.len()).collect();
