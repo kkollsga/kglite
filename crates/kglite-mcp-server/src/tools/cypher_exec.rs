@@ -184,13 +184,7 @@ pub(crate) fn run_cypher_inner(
 /// The engine's non-fatal query warnings, rendered as a trailing block, or
 /// the empty string for a clean query.
 ///
-/// This is the whole point of D1p: the engine has always known that
-/// `MATCH (v:vessel)` on a graph of `Vessel`s returns nothing because of a
-/// typo, and said so — on **stderr**, which no MCP client ever sees. An agent
-/// got a confident "No results." and, measured against a 15-query
-/// self-correction harness, scored zero on every silently-wrong query. The
-/// block is appended by [`render_cypher_output`], the one seam every Cypher
-/// tool response (direct tool, manifest template, write ack) passes through.
+/// Warnings must reach the tool response: MCP clients do not see engine stderr.
 pub(crate) fn cypher_warning_block(result: &cypher::CypherResult) -> String {
     let warnings = match result.diagnostics.as_ref() {
         Some(diagnostics) if !diagnostics.warnings.is_empty() => &diagnostics.warnings,
@@ -205,10 +199,23 @@ pub(crate) fn cypher_warning_block(result: &cypher::CypherResult) -> String {
     out
 }
 
+/// Shared tail for row previews, CSV links and mutation acknowledgments.
+pub(crate) fn cypher_diagnostics_block(result: &cypher::CypherResult) -> String {
+    let mut out = cypher_warning_block(result);
+    if let Some(d) = &result.diagnostics {
+        if !d.retrieval.is_empty() {
+            out.push_str(&format!(
+                "\nretrieval: {}\n",
+                serde_json::json!(d.retrieval)
+            ));
+        }
+    }
+    out
+}
+
 /// Render a `CypherResult` for the MCP text surface: CSV (via the csv_http
 /// server, or inline capped at [`INLINE_CSV_ROW_LIMIT`] rows) or a 15-row
-/// inline preview, followed by the engine's warning block when the query
-/// earned one. Shared by the read path and the write path so both format
+/// inline preview, followed by execution diagnostics when present. Shared by the read path and the write path so both format
 /// results identically.
 pub(crate) fn render_cypher_output(
     result: &cypher::CypherResult,
@@ -216,7 +223,7 @@ pub(crate) fn render_cypher_output(
     csv_http: &crate::csv_http::CsvHttpState,
 ) -> Result<String, String> {
     render_cypher_body(result, output_csv, csv_http)
-        .map(|body| format!("{body}{}", cypher_warning_block(result)))
+        .map(|body| format!("{body}{}", cypher_diagnostics_block(result)))
 }
 
 fn render_cypher_body(

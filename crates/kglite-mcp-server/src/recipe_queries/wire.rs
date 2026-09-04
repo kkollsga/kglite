@@ -58,6 +58,8 @@ pub(crate) enum ListRecipeQueriesOutput {
 
 #[derive(Debug, Clone, Serialize, JsonSchema, PartialEq)]
 pub(crate) struct RecipeQueryResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<Value>,
     pub(super) columns: Vec<String>,
     pub(super) rows: Vec<Vec<Value>>,
     pub(super) row_count: usize,

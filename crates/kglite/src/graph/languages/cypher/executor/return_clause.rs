@@ -16,6 +16,11 @@ struct HnswScoreArgs {
     options: vector_options::VectorOptions,
 }
 
+enum HnswOutcome {
+    Indexed(ResultSet, RetrievalDiagnostics),
+    Exact(RetrievalDiagnostics),
+}
+
 struct HnswRowCoverage {
     node_to_row: HashMap<usize, usize>,
     ordered_whole_store: bool,
@@ -435,7 +440,7 @@ impl<'a> CypherExecutor<'a> {
         result_set: &ResultSet,
         return_clause: &ReturnClause,
         score_item_index: usize,
-    ) -> Result<Option<ResultSet>, String> {
+    ) -> Result<ResultSet, String> {
         let columns = return_clause
             .items
             .iter()
@@ -473,29 +478,19 @@ impl<'a> CypherExecutor<'a> {
                 projected,
             });
         }
-        Ok(Some(ResultSet {
+        Ok(ResultSet {
             rows,
             columns,
             lazy_return_items: None,
-        }))
+        })
     }
 
-    /// Fused path: compute vector_score for all rows using a min-heap of size k,
-    /// then project RETURN expressions only for the k surviving rows.
-    /// O(n log k) instead of O(n log n) sort + O(n) full projection.
-    /// HNSW-backed variant of the fused top-k. Returns `Some(result_set)` when
-    /// the score is `vector_score(var, prop, query [, metric])` over a single
-    /// indexed node type and the index can serve the query; otherwise `None`,
-    /// signalling the caller to run the exact per-row scan. The ANN step only
-    /// narrows *which* nodes get scored — survivors are re-scored with the same
-    /// `Scorer` as the exact path, so scores are on an identical scale.
-    ///
-    /// Only fires when an index exists (so it's the same opt-in approximate
-    /// behaviour the fluent API auto-uses — a graph with no `build_vector_index`
-    /// keeps exact Cypher search), and bails to exact for any shape it can't
-    /// faithfully serve: ASC order, mixed/unbound types, duplicate node
-    /// bindings, the Poincaré metric, a dimension mismatch, or a filtered row
-    /// set whose survivors underfill `limit`.
+    /// Use HNSW candidates only for constant selectors over one fully embedded,
+    /// duplicate-free row population and a compatible index metric. Re-score
+    /// survivors on the scalar score scale. Explicit exact policy bypasses
+    /// both index refresh and selection. Unsupported shape, stale index,
+    /// incompatible metric or filtered underfill delegates to the exact scan
+    /// with the actual decline reason; no hypothetical route is reported.
     fn try_hnsw_fused_top_k(
         &self,
         score_expr: &Expression,
@@ -504,25 +499,32 @@ impl<'a> CypherExecutor<'a> {
         result_set: &ResultSet,
         return_clause: &ReturnClause,
         score_item_index: usize,
-    ) -> Result<Option<ResultSet>, String> {
+    ) -> Result<HnswOutcome, String> {
         use crate::graph::algorithms::vector as vs;
+        let mut info = RetrievalDiagnostics::exact("unsupported_shape");
+        if let Expression::FunctionCall { args, .. } = score_expr {
+            if (3..=5).contains(&args.len()) {
+                info.requested_policy = self.requested_retrieval_policy(args)?;
+            }
+        }
 
         // ANN models "top-k most similar" — descending score, non-empty limit.
         if !descending || limit == 0 {
-            return Ok(None);
+            return Ok(HnswOutcome::Exact(info.fallback("unsupported_shape")));
         }
 
         let first_row = match result_set.rows.first() {
             Some(r) => r,
-            None => return Ok(None),
+            None => return Ok(HnswOutcome::Exact(info.fallback("unsupported_shape"))),
         };
         let args = match self.hnsw_score_args(score_expr, first_row)? {
             Some(args) => args,
-            None => return Ok(None),
+            None => return Ok(HnswOutcome::Exact(info.fallback("row_dependent_selectors"))),
         };
+        info.requested_policy = if args.options.exact { "exact" } else { "auto" }.into();
 
         if args.options.exact {
-            return Ok(None);
+            return Ok(HnswOutcome::Exact(info.fallback("forced_exact")));
         }
 
         // Resolve the first row's store before building membership. This lets
@@ -531,15 +533,15 @@ impl<'a> CypherExecutor<'a> {
         // a second store-sized HashMap lookup pass.
         let first_idx = match first_row.node_bindings.get(&args.variable) {
             Some(&idx) => idx,
-            None => return Ok(None),
+            None => return Ok(HnswOutcome::Exact(info.fallback("unsupported_shape"))),
         };
         let node_type = match self.graph.graph.node_view(first_idx) {
             Some(node) => node.node_type_str(&self.graph.interner).to_string(),
-            None => return Ok(None),
+            None => return Ok(HnswOutcome::Exact(info.fallback("unsupported_shape"))),
         };
         let store = match self.graph.embedding_store(&node_type, &args.property) {
             Some(store) => store,
-            None => return Ok(None),
+            None => return Ok(HnswOutcome::Exact(info.fallback("unsupported_shape"))),
         };
         let coverage = match self.hnsw_row_coverage(
             &args.variable,
@@ -549,8 +551,9 @@ impl<'a> CypherExecutor<'a> {
             result_set,
         ) {
             Some(coverage) => coverage,
-            None => return Ok(None),
+            None => return Ok(HnswOutcome::Exact(info.fallback("row_coverage"))),
         };
+        info.store = Some(format!("{node_type}.{}", args.property));
 
         let index = match store.index_for_query(self.graph.read_only) {
             Some(i) => i,
@@ -573,11 +576,16 @@ impl<'a> CypherExecutor<'a> {
                         store.auto_refresh_limit(),
                     ));
                 }
-                return Ok(None);
+                let reason = if store.has_index() {
+                    "stale_index"
+                } else {
+                    "no_index"
+                };
+                return Ok(HnswOutcome::Exact(info.fallback(reason)));
             }
         };
         if args.query.len() != store.dimension {
-            return Ok(None); // let the exact path raise the dimension error
+            return Ok(HnswOutcome::Exact(info.fallback("unsupported_shape"))); // let the exact path raise the dimension error
         }
         // Resolve metric: explicit > stored > cosine; Poincaré → exact.
         let metric =
@@ -585,11 +593,11 @@ impl<'a> CypherExecutor<'a> {
                 vs::DistanceMetric::from_name(store.metric.as_deref().unwrap_or("cosine"))
             }) {
                 Some(metric) => metric,
-                None => return Ok(None),
+                None => return Ok(HnswOutcome::Exact(info.fallback("unsupported_shape"))),
             };
         if crate::graph::algorithms::hnsw::HnswMetric::from_distance(metric) != Some(index.metric())
         {
-            return Ok(None);
+            return Ok(HnswOutcome::Exact(info.fallback("metric_mismatch")));
         }
 
         // HNSW search → membership filter → re-score for exact score scale.
@@ -632,16 +640,19 @@ impl<'a> CypherExecutor<'a> {
 
         // Filtered + underfilled (a tight WHERE ate the over-fetch) → exact scan.
         if !whole_store && scored.len() < limit {
-            return Ok(None);
+            return Ok(HnswOutcome::Exact(info.fallback("filtered_underfill")));
         }
 
-        self.project_hnsw_winners(
+        let result = self.project_hnsw_winners(
             scored,
             score_expr,
             result_set,
             return_clause,
             score_item_index,
-        )
+        )?;
+        info.actual_mode = "hnsw".into();
+        info.fallback_reason = None;
+        Ok(HnswOutcome::Indexed(result, info))
     }
 
     pub(super) fn execute_fused_vector_score_top_k(
@@ -674,7 +685,7 @@ impl<'a> CypherExecutor<'a> {
         // Returns None — and we fall through to the exact scan below — whenever
         // it isn't applicable (no index, unsupported metric, filtered+underfilled,
         // mixed types, duplicate node bindings, ASC order).
-        if let Some(rs) = self.try_hnsw_fused_top_k(
+        match self.try_hnsw_fused_top_k(
             &score_expr,
             descending,
             limit,
@@ -682,7 +693,11 @@ impl<'a> CypherExecutor<'a> {
             return_clause,
             score_item_index,
         )? {
-            return Ok(rs);
+            HnswOutcome::Indexed(rs, info) => {
+                self.record_retrieval(info);
+                return Ok(rs);
+            }
+            HnswOutcome::Exact(info) => self.record_retrieval(info),
         }
 
         // The generic collector preserves NULLs and stable ties. Reusing it
@@ -849,6 +864,7 @@ impl<'a> CypherExecutor<'a> {
             return_clause,
             score_item_index,
         )
+        .map(Some)
     }
 
     /// The slot each row binds, ascending — the row-index lookup the postings

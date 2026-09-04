@@ -160,6 +160,7 @@ pub(crate) struct MutationLimits {
 /// but never changes. Bundled so [`run_clause_pipeline`] can be called once
 /// per `LOAD CSV` batch without a ten-argument signature.
 pub(super) struct MutationCtx<'a> {
+    pub diagnostics: &'a std::sync::Mutex<QueryDiagnostics>,
     pub params: &'a HashMap<String, Value>,
     pub interrupt: &'a Interrupt,
     pub budget: &'a super::budget::ExecutionBudget,
@@ -183,6 +184,24 @@ struct FinalizeCtx {
 }
 
 impl MutationCtx<'_> {
+    fn absorb_runtime(&self, executor: &CypherExecutor<'_>) {
+        let mut result = CypherResult::empty();
+        executor.attach_runtime_diagnostics(&mut result);
+        if let Some(d) = result.diagnostics {
+            let mut target = self.diagnostics.lock().unwrap_or_else(|e| e.into_inner());
+            for record in d.retrieval {
+                if !target.retrieval.contains(&record) {
+                    target.retrieval.push(record);
+                }
+            }
+            for warning in d.warnings {
+                if !target.warnings.contains(&warning) {
+                    target.warnings.push(warning);
+                }
+            }
+        }
+    }
+
     /// Variables declared by everything before `clauses[i]`, including the
     /// stripped leading clauses.
     fn declared_before(&self, clauses: &[Clause], i: usize) -> std::collections::HashSet<String> {
@@ -247,6 +266,7 @@ pub(crate) fn execute_mutable_with_csv(
 
     let budget = super::budget::ExecutionBudget::new(limits.max_work_units);
 
+    let diagnostics = std::sync::Mutex::new(QueryDiagnostics::default());
     let mut stats = MutationStats::default();
     let profiling = query.profile;
     let mut profile_stats: Vec<ClauseStats> = Vec::new();
@@ -257,6 +277,7 @@ pub(crate) fn execute_mutable_with_csv(
     let result_set = if let Some(Clause::LoadCsv(load)) = query.clauses.first() {
         let suffix = &query.clauses[1..];
         let ctx = MutationCtx {
+            diagnostics: &diagnostics,
             params: &params,
             interrupt: &interrupt,
             budget: &budget,
@@ -280,6 +301,7 @@ pub(crate) fn execute_mutable_with_csv(
         })?
     } else {
         let ctx = MutationCtx {
+            diagnostics: &diagnostics,
             params: &params,
             interrupt: &interrupt,
             budget: &budget,
@@ -297,7 +319,7 @@ pub(crate) fn execute_mutable_with_csv(
         )?
     };
 
-    finalize_mutation(
+    let mut result = finalize_mutation(
         graph,
         query,
         FinalizeCtx {
@@ -309,7 +331,14 @@ pub(crate) fn execute_mutable_with_csv(
         result_set,
         stats,
         profiling.then_some(profile_stats),
-    )
+    )?;
+    let d = diagnostics.into_inner().unwrap_or_else(|e| e.into_inner());
+    let target = result
+        .diagnostics
+        .get_or_insert_with(QueryDiagnostics::default);
+    target.retrieval.extend(d.retrieval);
+    target.warnings.extend(d.warnings);
+    Ok(result)
 }
 
 /// Sum one batch's PROFILE rows into the accumulator.
@@ -453,6 +482,7 @@ fn run_clause_pipeline(
                     .with_csv_import(ctx.csv_import.clone());
                 let declared = ctx.declared_before(clauses, i);
                 result_set = executor.execute_call_subquery(import, body, result_set, &declared)?;
+                ctx.absorb_runtime(&executor);
             }
             // Change-capture lifecycle verbs run here, not on the read engine
             // (see `clause_is_mutation`); read CDC procedures fall through to
@@ -476,6 +506,7 @@ fn run_clause_pipeline(
                     .with_budget(budget.clone())
                     .with_csv_import(ctx.csv_import.clone());
                 result_set = executor.execute_single_clause(clause, result_set)?;
+                ctx.absorb_runtime(&executor);
             }
         }
 

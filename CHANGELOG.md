@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Actual vector retrieval diagnostics for ordinary queries and PROFILE, including
+  nested execution, with requested policy, execution mode and fallback reason.
+  Exposed through Python, MCP, C result/batch JSON and Bolt summary metadata.
+
 - `vector_score` and `text_score` accept a final `{exact: true}` options map to
   bypass HNSW. Omitted metrics resolve per node type; row-dependent selectors
   use exact scoring. Invalid vector arguments propagate through fused filters.

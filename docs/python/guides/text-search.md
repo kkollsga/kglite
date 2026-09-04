@@ -486,3 +486,9 @@ after those.
   `score_fuse()`, `SHOW INDEXES`, and the window functions RRF uses.
 - {doc}`data-loading` — getting the documents in before you index them.
 - {doc}`ai-agents` — exposing a retrieval graph to an agent.
+
+The returned view's `diagnostics["retrieval"]` reports the actual search route,
+including with `PROFILE`. `actual_mode="hnsw"` means approximate candidate
+selection ran; `actual_mode="exact"` includes a `fallback_reason` such as
+`forced_exact`, `no_index`, or `stale_index`. Records survive nested `CALL`
+and `UNION` queries. `EXPLAIN` reports requested policy without executing it.

@@ -632,20 +632,7 @@ impl ResultView {
             .unwrap_or_default()
     }
 
-    /// Lightweight execution diagnostics, or None when the backend
-    /// didn't populate them (mutation queries, EXPLAIN, transaction
-    /// paths).
-    ///
-    /// Returns a dict with ``elapsed_ms`` (wall-clock query duration),
-    /// ``timeout_ms`` (the deadline that was in effect, or None),
-    /// ``row_limit`` (the result-row cap in force, or None), ``total_rows``
-    /// (the exact row
-    /// count before ``row_limit`` truncated the result — set only when
-    /// truncation happened, so it doubles as the truncation flag) and
-    /// ``warnings`` (shortcut: the `warnings` property). Use this to tune
-    /// ``timeout_ms`` or move toward anchored queries when queries
-    /// approach the deadline, and to render "showing X of Y" when a cap
-    /// bit.
+    /// Execution timing, warnings, row limits and actual retrieval routes.
     #[getter]
     fn diagnostics(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         match &self.diagnostics {
@@ -665,6 +652,16 @@ impl ResultView {
                     None => dict.set_item("total_rows", py.None())?,
                 }
                 dict.set_item("warnings", d.warnings.clone())?;
+                let retrieval = pyo3::types::PyList::empty(py);
+                for record in &d.retrieval {
+                    let item = PyDict::new(py);
+                    item.set_item("requested_policy", &record.requested_policy)?;
+                    item.set_item("actual_mode", &record.actual_mode)?;
+                    item.set_item("fallback_reason", &record.fallback_reason)?;
+                    item.set_item("store", &record.store)?;
+                    retrieval.append(item)?;
+                }
+                dict.set_item("retrieval", retrieval)?;
                 Ok(dict.into_any().unbind())
             }
             None => Ok(py.None()),

@@ -2148,3 +2148,63 @@ fn lease_acquire_ex_reports_the_holder_as_json() {
     unsafe { kglite_writer_lease_free(lease) };
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn retrieval_diagnostics_survive_c_handles_and_batches() {
+    let session = seed_notes("CREATE (:Note {id:1, body:'a'}), (:Note {id:2, body:'b'})");
+    let (rc, _, _) = set_embeddings(
+        session,
+        "Note",
+        "body",
+        "[1,2]",
+        &[1., 0., 0., 1.],
+        2,
+        2,
+        None,
+    );
+    assert_eq!(rc, KgliteStatusCode::Ok);
+    let query = "MATCH (n:Note) RETURN vector_score(n,'body_emb',[1.0,0.0],{exact:true}) AS s ORDER BY s DESC LIMIT 1";
+    let query_c = CString::new(query).unwrap();
+    let mut result = std::ptr::null_mut();
+    let mut error = std::ptr::null();
+    let rc = unsafe {
+        kglite_session_execute_read(
+            session,
+            query_c.as_ptr(),
+            std::ptr::null(),
+            &mut result,
+            &mut error,
+        )
+    };
+    assert_eq!(rc, KgliteStatusCode::Ok);
+    let json = unsafe { kglite_c::kglite_cypher_result_diagnostics_json(result) };
+    unsafe { kglite_cypher_result_free(result) };
+    let diagnostics: serde_json::Value =
+        serde_json::from_str(unsafe { CStr::from_ptr(json).to_str().unwrap() }).unwrap();
+    assert_eq!(diagnostics["retrieval"][0]["actual_mode"], "exact");
+    assert_eq!(
+        diagnostics["retrieval"][0]["fallback_reason"],
+        "forced_exact"
+    );
+    unsafe { kglite_free_string(json) };
+    let batch = CString::new(
+        serde_json::json!([{ "query": query }, { "query": "RETURN 1 AS n" }]).to_string(),
+    )
+    .unwrap();
+    let mut output = std::ptr::null();
+    let rc = unsafe {
+        kglite_session_execute_read_batch(session, batch.as_ptr(), &mut output, &mut error)
+    };
+    assert_eq!(rc, KgliteStatusCode::Ok);
+    let batch: serde_json::Value =
+        serde_json::from_str(unsafe { CStr::from_ptr(output).to_str().unwrap() }).unwrap();
+    assert_eq!(
+        batch[0]["diagnostics"]["retrieval"],
+        diagnostics["retrieval"]
+    );
+    assert_eq!(batch[1]["diagnostics"]["retrieval"], serde_json::json!([]));
+    unsafe {
+        kglite_free_string(output);
+        kglite_session_free(session);
+    }
+}

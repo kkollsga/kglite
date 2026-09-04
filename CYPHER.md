@@ -3744,3 +3744,22 @@ compatible subset.
 | Constraint DDL | `IS UNIQUE`, `IS NOT NULL`, `IS NODE KEY`, `IS :: TYPE` — enforced on every write path | `CREATE CONSTRAINT … IS UNIQUE / IS NOT NULL / IS NODE KEY / IS :: TYPE` | `IS :: TYPE` accepts the type names with an exact KGLite value counterpart (`BOOLEAN`, `STRING`, `INTEGER`, `FLOAT`, `DATE`, `LOCAL DATETIME`, `DURATION`, `POINT`); lists, unions and zoned temporal types are rejected by name rather than approximated. Relationship constraints cover `IS NOT NULL` and `IS :: TYPE`; `IS UNIQUE` / `IS RELATIONSHIP KEY` on a relationship are refused, because KGLite has no single answer for when two relationships of a type are the same one. See [Cypher constraint DDL](#cypher-constraint-ddl) |
 | Constraint names | Stored, so `DROP CONSTRAINT <name>` works | User-assigned, unique per database | The opposite decision to index names above: a ported schema script almost always drops constraints by name, and the `.kgl` metadata section is JSON, so the field was free. A constraint declared without a name is addressable by its canonical descriptor |
 | `LOAD CSV` source | Local files only — `file://` URLs and filesystem paths, gated by a per-caller capability | `file://` plus `http(s)://`, gated by an import-directory setting | The engine ships no HTTP client (network dependencies were removed in 0.14.x), so there is nothing to fetch a URL with. Filesystem access is granted per caller: on for in-process use, off for Bolt clients unless the server was started with `--allow-csv-import <DIR>` |
+
+
+### Vector retrieval diagnostics
+
+Ordinary query results and `PROFILE` carry `diagnostics.retrieval`: distinct
+executed vector ranking routes, with `requested_policy` (`auto`, `exact`, or
+`per_row`), `actual_mode` (`hnsw` or `exact`), `fallback_reason`, and an optional
+`store` (`Type.embedding_property`). Reasons include `forced_exact`, `no_index`,
+`stale_index`, `metric_mismatch`, `filtered_underfill`, `row_coverage`,
+`row_dependent_selectors`, and `ordering_requires_exact`. A missing store means
+that execution did not establish one common store. Identical nested routes are
+coalesced; these records are not counters. `EXPLAIN` describes the requested
+policy only, without running search or claiming an actual route.
+
+Empty inputs and `LIMIT 0` record no retrieval. Scalar scoring inside arbitrary
+expressions remains exact and has no per-row telemetry. Python exposes these
+records in `ResultView.diagnostics`, MCP appends them to result text and includes
+them in recipe diagnostics, C exposes `kglite_cypher_result_diagnostics_json`
+and batch diagnostics, and Bolt includes `kglite.retrieval` in result summaries.

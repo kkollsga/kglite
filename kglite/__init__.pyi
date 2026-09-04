@@ -512,6 +512,17 @@ class ResultView:
 
         Returned dict keys:
 
+        - ``retrieval`` (list[dict]): distinct vector ranking routes executed,
+          including nested CALL, UNION and mutation pipelines. Available for
+          ordinary queries and PROFILE. Each record carries ``requested_policy``
+          (``auto``, ``exact``, or ``per_row``), ``actual_mode`` (``hnsw`` or
+          ``exact``), ``fallback_reason`` (a reason string, or None for HNSW),
+          and ``store`` (``Type.embedding_property`` when established, else None).
+          Repeated identical routes are coalesced; this is not a call counter.
+          Empty inputs, LIMIT 0, EXPLAIN and queries without an instrumented
+          vector ranking operator produce no records. Scalar scores inside
+          arbitrary expressions are exact computations, not ANN retrieval
+          operators, and do not produce per-row records.
         - ``elapsed_ms`` (int): wall-clock query duration in milliseconds.
         - ``timeout_ms`` (Optional[int]): the deadline that was in effect,
           or ``None`` when no deadline applied (memory graphs by default,

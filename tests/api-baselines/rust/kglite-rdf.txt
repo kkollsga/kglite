@@ -944,6 +944,7 @@ impl core::fmt::Debug for kglite::api::cypher::MutationStats
 pub fn kglite::api::cypher::MutationStats::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct kglite::api::cypher::QueryDiagnostics
 pub kglite::api::cypher::QueryDiagnostics::elapsed_ms: u64
+pub kglite::api::cypher::QueryDiagnostics::retrieval: alloc::vec::Vec<kglite::api::cypher::RetrievalDiagnostics>
 pub kglite::api::cypher::QueryDiagnostics::row_limit: core::option::Option<usize>
 pub kglite::api::cypher::QueryDiagnostics::timeout_ms: core::option::Option<u64>
 pub kglite::api::cypher::QueryDiagnostics::total_rows: core::option::Option<u64>
@@ -954,6 +955,8 @@ impl core::default::Default for kglite::api::cypher::QueryDiagnostics
 pub fn kglite::api::cypher::QueryDiagnostics::default() -> kglite::api::cypher::QueryDiagnostics
 impl core::fmt::Debug for kglite::api::cypher::QueryDiagnostics
 pub fn kglite::api::cypher::QueryDiagnostics::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl serde_core::ser::Serialize for kglite::api::cypher::QueryDiagnostics
+pub fn kglite::api::cypher::QueryDiagnostics::serialize<__S>(&self, __serializer: __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 pub struct kglite::api::cypher::QueryFeatures
 pub kglite::api::cypher::QueryFeatures::explain: bool
 pub kglite::api::cypher::QueryFeatures::format_csv: bool
@@ -982,6 +985,21 @@ impl core::clone::Clone for kglite::api::cypher::ResultRow
 pub fn kglite::api::cypher::ResultRow::clone(&self) -> kglite::api::cypher::ResultRow
 impl core::fmt::Debug for kglite::api::cypher::ResultRow
 pub fn kglite::api::cypher::ResultRow::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct kglite::api::cypher::RetrievalDiagnostics
+pub kglite::api::cypher::RetrievalDiagnostics::actual_mode: alloc::string::String
+pub kglite::api::cypher::RetrievalDiagnostics::fallback_reason: core::option::Option<alloc::string::String>
+pub kglite::api::cypher::RetrievalDiagnostics::requested_policy: alloc::string::String
+pub kglite::api::cypher::RetrievalDiagnostics::store: core::option::Option<alloc::string::String>
+impl core::clone::Clone for kglite::api::cypher::RetrievalDiagnostics
+pub fn kglite::api::cypher::RetrievalDiagnostics::clone(&self) -> kglite::api::cypher::RetrievalDiagnostics
+impl core::cmp::Eq for kglite::api::cypher::RetrievalDiagnostics
+impl core::cmp::PartialEq for kglite::api::cypher::RetrievalDiagnostics
+pub fn kglite::api::cypher::RetrievalDiagnostics::eq(&self, other: &kglite::api::cypher::RetrievalDiagnostics) -> bool
+impl core::fmt::Debug for kglite::api::cypher::RetrievalDiagnostics
+pub fn kglite::api::cypher::RetrievalDiagnostics::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for kglite::api::cypher::RetrievalDiagnostics
+impl serde_core::ser::Serialize for kglite::api::cypher::RetrievalDiagnostics
+pub fn kglite::api::cypher::RetrievalDiagnostics::serialize<__S>(&self, __serializer: __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 pub struct kglite::api::cypher::ReturnItem
 pub kglite::api::cypher::ReturnItem::alias: core::option::Option<alloc::string::String>
 pub kglite::api::cypher::ReturnItem::expression: kglite::api::cypher::Expression

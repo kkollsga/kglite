@@ -244,10 +244,13 @@ pub struct MutationStats {
 /// Lightweight diagnostics attached to every `CypherResult` — gives
 /// agents the signal they need to iterate without relying on PROFILE.
 ///
-/// Populated unconditionally. The cost is a single `Instant::now()` call
-/// pair and a handful of counter bumps, so always-on.
-#[derive(Debug, Clone, Default)]
+/// Populated unconditionally. Timing uses one clock pair; retrieval evidence
+/// is collected per operator, without synchronization on scalar scoring rows.
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct QueryDiagnostics {
+    /// Distinct vector retrieval routes actually executed, including nested queries.
+    /// Empty for EXPLAIN, empty inputs and queries without a vector retrieval operator.
+    pub retrieval: Vec<RetrievalDiagnostics>,
     /// Wall-clock time spent executing the query (parse + plan + execute).
     pub elapsed_ms: u64,
     /// Deadline that was in effect for this query, in milliseconds.
@@ -277,6 +280,20 @@ pub struct QueryDiagnostics {
     /// lower bound. `None` both when no cap applied and when the result fitted
     /// inside one.
     pub total_rows: Option<u64>,
+}
+
+/// One executed vector retrieval route. Repeated identical routes are coalesced;
+/// this is execution metadata, not a per-row or per-call counter.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RetrievalDiagnostics {
+    /// `auto`, `exact`, or `per_row` when options remain evaluated per row.
+    pub requested_policy: String,
+    /// `hnsw` for approximate candidate selection, otherwise `exact`.
+    pub actual_mode: String,
+    /// Why an exact route ran; absent when HNSW served the result.
+    pub fallback_reason: Option<String>,
+    /// `Type.embedding_property` when a single store was established.
+    pub store: Option<String>,
 }
 
 /// Side-channel lazy-evaluation descriptor. When set on a `CypherResult`,

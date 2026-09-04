@@ -578,9 +578,13 @@ impl BoltBackend for KgliteBackend {
         // step rows (step/operation/estimated_rows); forwarding those as
         // records left every plan-tab consumer (Neo4j Browser, G.V()) blank
         // and handed drivers records where the contract promises none.
-        // PROFILE stays a passthrough: the engine collects no per-operator
-        // statistics, and fabricating dbHits/rows would mislead — the
-        // Memgraph precedent (plan without profiling) is an accepted shape.
+        // Retrieval execution evidence uses namespaced summary metadata;
+        // no synthetic Neo4j dbHits counters are invented.
+        if let Some(d) = &result.diagnostics {
+            if !d.retrieval.is_empty() {
+                summary.insert("kglite.retrieval".into(), retrieval_metadata(&d.retrieval));
+            }
+        }
         let mut columns = result.columns;
         if strip_keyword_ci(trimmed, "explain").is_some() {
             if let Some(plan) = plan_from_explain_rows(&columns, &result.rows) {
@@ -1302,6 +1306,40 @@ impl KgliteBackend {
     }
 }
 
+fn retrieval_metadata(records: &[kglite::api::cypher::RetrievalDiagnostics]) -> BoltValue {
+    BoltValue::List(
+        records
+            .iter()
+            .map(|r| {
+                BoltValue::Dict(BoltDict::from([
+                    (
+                        "requested_policy".into(),
+                        BoltValue::String(r.requested_policy.clone()),
+                    ),
+                    (
+                        "actual_mode".into(),
+                        BoltValue::String(r.actual_mode.clone()),
+                    ),
+                    (
+                        "fallback_reason".into(),
+                        r.fallback_reason
+                            .clone()
+                            .map(BoltValue::String)
+                            .unwrap_or(BoltValue::Null),
+                    ),
+                    (
+                        "store".into(),
+                        r.store
+                            .clone()
+                            .map(BoltValue::String)
+                            .unwrap_or(BoltValue::Null),
+                    ),
+                ]))
+            })
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::intercepts::SHOW_DATABASES_COLUMNS;
@@ -1344,6 +1382,73 @@ mod tests {
                 .await
                 .expect("rollback disk transaction");
         }
+    }
+
+    #[tokio::test]
+    async fn retrieval_diagnostics_reach_bolt_summary() {
+        let mut graph = new_dir_graph_in_mode(StorageMode::Memory, None).unwrap();
+        let params = HashMap::new();
+        kglite::api::session::execute_mut(
+            &mut graph,
+            "CREATE (:Doc {id:1, body:'a'}), (:Doc {id:2, body:'b'})",
+            &kglite::api::session::ExecuteOptions::eager(&params),
+        )
+        .unwrap();
+        kglite::api::embeddings::set_embeddings(
+            &mut graph,
+            "Doc",
+            "body",
+            None,
+            vec![
+                (Value::Int64(1), vec![1., 0.]),
+                (Value::Int64(2), vec![0., 1.]),
+            ],
+        )
+        .unwrap();
+        let backend = KgliteBackend::new(
+            kglite::api::session::Session::new(graph),
+            unique_disk_path().join("memory.kgl"),
+            false,
+            "127.0.0.1:0".into(),
+            CsvImportPolicy::Denied,
+            ServerIdentity::default(),
+            None,
+        );
+        let handle = SessionHandle("retrieval".into());
+        let query = "MATCH (d:Doc) RETURN vector_score(d,'body_emb',[1.0,0.0],{exact:true}) AS s ORDER BY s DESC LIMIT 1";
+        let result = backend
+            .execute(&handle, query, &HashMap::new(), &BoltDict::new(), None)
+            .await
+            .unwrap();
+        let records = &result.summary["kglite.retrieval"];
+        let BoltValue::List(records) = records else {
+            panic!("expected retrieval list")
+        };
+        assert_eq!(records.len(), 1);
+        let BoltValue::Dict(record) = &records[0] else {
+            panic!("expected retrieval object")
+        };
+        assert_eq!(record["actual_mode"], BoltValue::String("exact".into()));
+        assert_eq!(
+            record["requested_policy"],
+            BoltValue::String("exact".into())
+        );
+        assert_eq!(
+            record["fallback_reason"],
+            BoltValue::String("forced_exact".into())
+        );
+        assert_eq!(record["store"], BoltValue::Null);
+        let clean = backend
+            .execute(
+                &handle,
+                "RETURN 1 AS n",
+                &HashMap::new(),
+                &BoltDict::new(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!clean.summary.contains_key("kglite.retrieval"));
     }
 
     #[tokio::test]

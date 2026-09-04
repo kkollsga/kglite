@@ -192,7 +192,18 @@ pub fn generate_explain_result(query: &CypherQuery, graph: &DirGraph) -> result:
         // row per eligible closure and an Expand row per variable-length edge
         // after its own row, and the column stays contiguous.
         let step = (rows.len() + 1) as i64;
-        let operation = executor::clause_display_name(clause);
+        let mut operation = executor::clause_display_name(clause);
+        if let Clause::FusedVectorScoreTopK {
+            return_clause,
+            score_item_index,
+            ..
+        } = clause
+        {
+            operation.push_str(&format!(
+                " [requested={}]",
+                requested_vector_policy(&return_clause.items[*score_item_index].expression)
+            ));
+        }
         let est = match clause {
             Clause::Match(m) | Clause::OptionalMatch(m) => estimate_match_rows(m, graph)
                 .map(|e| Value::Int64(e as i64))
@@ -302,5 +313,39 @@ mod var_length_expand_tests {
             ["Expand (:Person)<-[:KNOWS|LIKES*2..3]-()"]
         );
         assert_eq!(ops("MATCH (a)-[*]-(b) RETURN a"), ["Expand ()-[*1..10]-()"]);
+    }
+}
+
+/// EXPLAIN does not evaluate parameters or row expressions, and never claims an actual route.
+fn requested_vector_policy(expression: &Expression) -> &'static str {
+    let Expression::FunctionCall { args, .. } = expression else {
+        return "dynamic";
+    };
+    match args.last() {
+        Some(Expression::MapLiteral(items)) => {
+            match items
+                .iter()
+                .find(|(key, _)| key == "exact")
+                .map(|(_, value)| value)
+            {
+                Some(Expression::Literal(Value::Boolean(true))) => "exact",
+                None | Some(Expression::Literal(Value::Boolean(false))) => "auto",
+                _ => "dynamic",
+            }
+        }
+        Some(Expression::Literal(Value::Map(items))) => {
+            match items
+                .iter()
+                .find(|(key, _)| *key == "exact")
+                .map(|(_, value)| value)
+            {
+                Some(Value::Boolean(true)) => "exact",
+                None | Some(Value::Boolean(false)) => "auto",
+                _ => "dynamic",
+            }
+        }
+        _ if args.len() <= 3 => "auto",
+        Some(Expression::Literal(_)) if args.len() == 4 => "auto",
+        _ => "dynamic",
     }
 }

@@ -86,6 +86,7 @@ def test_diagnostics_shape_is_unchanged():
     g = _graph()
     diag = g.cypher("MATCH (n:Persn) RETURN n").diagnostics
     assert set(diag) == {
+        "retrieval",
         "elapsed_ms",
         "timeout_ms",
         "row_limit",

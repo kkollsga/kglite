@@ -1161,6 +1161,18 @@ KgliteStatusCode kglite_open_or_create_graph_in_mode(const char *path,
  const char *kglite_cypher_result_rows_json(const struct KgliteCypherResult *result);
 
 /**
+ * Return execution diagnostics as owned JSON, including actual retrieval routes.
+ * A live result with no diagnostics returns the JSON string `null`. A null
+ * handle or serialization failure returns a null pointer. Free the returned
+ * string with [`kglite_free_string`](crate::kglite_free_string); its lifetime
+ * is independent of the result handle.
+ *
+ * # Safety
+ * `result` must be null or a live result pointer, and must not be freed during this call.
+ */
+ const char *kglite_cypher_result_diagnostics_json(const struct KgliteCypherResult *result);
+
+/**
  * Return the number of rows in the result. Useful for callers
  * that want to size buffers before requesting the JSON blob.
  *
@@ -1404,7 +1416,7 @@ KgliteStatusCode kglite_session_execute_mut_opts(struct KgliteSession *session,
  * issues many small reads.
  *
  * On success `out_results_json` is set to an owned JSON string: an
- * array of `{"columns": [...], "rows": [{...}]}` objects, one per input
+ * array of `{"columns": [...], "rows": [{...}], "diagnostics": {...}}` objects, one per input
  * query in order, with the same natural-value encoding as
  * [`kglite_cypher_result_rows_json`]. Free it with
  * [`kglite_free_string`](crate::kglite_free_string).

@@ -1285,6 +1285,7 @@ impl<'a> CypherExecutor<'a> {
     ) -> Result<ResultSet, String> {
         // `None`, never `self.row_limit`: see `execute_with_cap`.
         let right_result = self.execute_with_cap(&clause.query, None)?;
+        self.absorb_diagnostics(&right_result);
 
         // All arms of a set operation must return the same column names, in the
         // same order — matching Neo4j ("All sub queries in an UNION must have
