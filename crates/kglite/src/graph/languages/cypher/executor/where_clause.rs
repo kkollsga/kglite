@@ -479,50 +479,7 @@ impl<'a> CypherExecutor<'a> {
 
         // Fast path: specialized vector_score filter bypasses expression evaluator
         if let Some((spec, remainder)) = self.try_extract_vector_score_filter(&folded_pred) {
-            let graph = self.graph;
-            result_set.rows.retain(|row| {
-                let idx = match row.node_bindings.get(&spec.variable) {
-                    Some(&idx) => idx,
-                    None => return false,
-                };
-                let node_type = match graph.graph.node_view(idx) {
-                    Some(n) => n.node_type_str(&graph.interner),
-                    None => return false,
-                };
-                let store = match graph.embedding_store(node_type, &spec.prop_name) {
-                    Some(s) => s,
-                    None => return false,
-                };
-                let (embedding, norm) = match store.get_embedding_with_norm(idx.index()) {
-                    Some(e) => e,
-                    None => return false,
-                };
-                let score = spec.scorer.score(&spec.query_vec, embedding, norm) as f64;
-                if spec.greater_than {
-                    if spec.inclusive {
-                        score >= spec.threshold
-                    } else {
-                        score > spec.threshold
-                    }
-                } else if spec.inclusive {
-                    score <= spec.threshold
-                } else {
-                    score < spec.threshold
-                }
-            });
-            self.check_deadline()?;
-            if let Some(rest) = remainder {
-                let mut keep = Vec::with_capacity(result_set.rows.len());
-                for row in result_set.rows {
-                    match self.evaluate_predicate(rest, &row) {
-                        Ok(true) => keep.push(row),
-                        Ok(false) => {}
-                        Err(e) => return Err(e),
-                    }
-                }
-                result_set.rows = keep;
-            }
-            return Ok(result_set);
+            return self.execute_vector_score_filter(&spec, remainder, result_set);
         }
 
         self.check_deadline()?;
@@ -934,6 +891,94 @@ impl<'a> CypherExecutor<'a> {
         }
     }
 
+    fn execute_vector_score_filter(
+        &self,
+        spec: &VectorScoreFilterSpec,
+        remainder: Option<&Predicate>,
+        mut result_set: ResultSet,
+    ) -> Result<ResultSet, String> {
+        self.retain_vector_score_rows(spec, &mut result_set)?;
+        self.check_deadline()?;
+        if let Some(rest) = remainder {
+            let mut keep = Vec::with_capacity(result_set.rows.len());
+            for row in result_set.rows {
+                match self.evaluate_predicate(rest, &row) {
+                    Ok(true) => keep.push(row),
+                    Ok(false) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            result_set.rows = keep;
+        }
+        Ok(result_set)
+    }
+
+    fn retain_vector_score_rows(
+        &self,
+        spec: &VectorScoreFilterSpec,
+        result_set: &mut ResultSet,
+    ) -> Result<(), String> {
+        let graph = self.graph;
+        let mut error = None;
+        result_set.rows.retain(|row| {
+        if error.is_some() {
+            return false;
+        }
+        let idx = match row.node_bindings.get(&spec.variable) {
+            Some(&idx) => idx,
+            None => return false,
+        };
+        let node_type = match graph.graph.node_view(idx) {
+            Some(n) => n.node_type_str(&graph.interner),
+            None => return false,
+        };
+        let store = match graph.embedding_store(node_type, &spec.prop_name) {
+            Some(s) => s,
+            None => {
+                error = Some(scalar_functions::utility::missing_embedding_error(graph, node_type, &spec.prop_name));
+                return false;
+            }
+        };
+        if spec.query_vec.len() != store.dimension {
+            error = Some(format!("vector_score(): query vector dimension {} does not match embedding dimension {}", spec.query_vec.len(), store.dimension));
+            return false;
+        }
+        let (embedding, norm) = match store.get_embedding_with_norm(idx.index()) {
+            Some(e) => e,
+            None => return false,
+        };
+        let scorer = if spec.metric.is_some() {
+            spec.scorer
+        } else {
+            let name = store.metric.as_deref().unwrap_or("cosine");
+            match vs::DistanceMetric::from_name(name) {
+                Some(vs::DistanceMetric::Cosine) => spec.scorer,
+                Some(metric) => vs::Scorer::new(metric, &spec.query_vec),
+                None => {
+                    error = Some(format!("vector_score(): unknown stored metric '{name}'"));
+                    return false;
+                }
+            }
+        };
+        let score = scorer.score(&spec.query_vec, embedding, norm) as f64;
+        if spec.greater_than {
+            if spec.inclusive {
+                score >= spec.threshold
+            } else {
+                score > spec.threshold
+            }
+        } else if spec.inclusive {
+            score <= spec.threshold
+        } else {
+            score < spec.threshold
+        }
+    });
+        if let Some(error) = error {
+            return Err(error);
+        }
+        Ok(())
+    }
+
     /// Try to extract a `vector_score(n, prop, vec [, metric]) {>|>=|<|<=} threshold`
     /// pattern from a (folded) predicate. Returns the spec and optional
     /// remainder predicate for the other AND conditions.
@@ -977,9 +1022,7 @@ impl<'a> CypherExecutor<'a> {
                 if let Some((spec, None)) = self.try_extract_vector_score_filter(left) {
                     return Some((spec, Some(right)));
                 }
-                if let Some((spec, None)) = self.try_extract_vector_score_filter(right) {
-                    return Some((spec, Some(left)));
-                }
+                // The left predicate may short-circuit an invalid vector call.
                 None
             }
             _ => None,
@@ -999,7 +1042,7 @@ impl<'a> CypherExecutor<'a> {
             Expression::FunctionCall { name, args, .. } => (name, args),
             _ => return None,
         };
-        if name != "vector_score" || args.len() < 3 || args.len() > 4 {
+        if name != "vector_score" || args.len() < 3 || args.len() > 5 {
             return None;
         }
 
@@ -1034,22 +1077,26 @@ impl<'a> CypherExecutor<'a> {
             _ => return None,
         };
 
-        // Optional metric (default cosine). An unrecognized name bails the fast
-        // path (None) so the general evaluator handles it.
-        let metric = if args.len() > 3 {
-            match &args[3] {
-                Expression::Literal(Value::String(s)) => vs::DistanceMetric::from_name(s)?,
-                _ => vs::DistanceMetric::Cosine,
-            }
-        } else {
-            vs::DistanceMetric::Cosine
-        };
-        let scorer = vs::Scorer::new(metric, &query_vec);
+        if VectorScoreCache::key_for(args).is_none() {
+            return None;
+        }
+        let tail = args[3..]
+            .iter()
+            .map(|expr| self.evaluate_expression(expr, &ResultRow::new()))
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?;
+        // A malformed options map must reach the evaluator's error channel.
+        let options = vector_options::parse(&tail).ok()?;
+        let scorer = vs::Scorer::new(
+            options.metric.unwrap_or(vs::DistanceMetric::Cosine),
+            &query_vec,
+        );
 
         Some(VectorScoreFilterSpec {
             variable,
             prop_name,
             query_vec,
+            metric: options.metric,
             scorer,
             threshold,
             greater_than,

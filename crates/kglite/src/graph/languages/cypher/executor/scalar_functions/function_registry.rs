@@ -788,7 +788,7 @@ pub(crate) const FUNCTIONS: &[FunctionSpec] = &[
         aliases: &[],
         category: "utility",
         description: "Similarity of a node's stored embedding to a query vector",
-        signature: "vector_score(node :: NODE, property :: STRING, queryVector :: LIST<FLOAT>, metric :: STRING?) :: FLOAT?",
+        signature: "vector_score(node :: NODE, property :: STRING, queryVector :: LIST<FLOAT> [, metric :: STRING] [, options :: MAP]) :: FLOAT?",
     },
     FunctionSpec {
         name: "embedding_norm",
@@ -816,7 +816,7 @@ pub(crate) const FUNCTIONS: &[FunctionSpec] = &[
         aliases: &[],
         category: "utility",
         description: "Similarity of a node's embedding to an embedded query string; requires set_embedder()",
-        signature: "text_score(node :: NODE, property :: STRING, query :: STRING) :: FLOAT?",
+        signature: "text_score(node :: NODE, property :: STRING, query :: STRING | LIST<FLOAT> [, metric :: STRING] [, options :: MAP]) :: FLOAT?",
     },
     FunctionSpec {
         name: "randomUUID",

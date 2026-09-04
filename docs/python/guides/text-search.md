@@ -422,6 +422,24 @@ directly when the magnitudes carry information you want. The
 [Cypher reference](../../reference/cypher-reference.md) carries the same recipe
 alongside the `score_fuse` semantics.
 
+## Request exact vector retrieval
+
+Pass a final options map to either score function:
+
+```cypher
+MATCH (a:Article)
+RETURN a.title AS title,
+       vector_score(a, 'body_emb', $qv, {exact: true}) AS score
+ORDER BY score DESC LIMIT 5
+```
+
+The map may be a query parameter. An explicit metric goes before it, for example
+`text_score(a, 'body', $query, 'cosine', {exact: true})`. `exact` must be boolean;
+unknown options are rejected. Exact execution does not use or refresh HNSW.
+Without this option, a compatible index may narrow candidates approximately;
+a filter alone does not guarantee an exact scan. Omitted metrics come from each
+node type's actual embedding store.
+
 ## The vector lane catches up the same way
 
 Freshness is one shared mechanism, so an HNSW vector index behaves like a text

@@ -487,7 +487,7 @@ graph.cypher("""
 | `text_bm25(n, prop, query)` | Lexical (BM25) relevance of the node's indexed text against a query string. Needs `build_text_index(node_type, property)`; `0.0` when the document shares no word with the query, `null` when the index has no document for that row |
 | `text_score(n, prop, query)` | Semantic similarity. A **list** `query` is scored directly as your query vector; a **string** `query` is embedded first (requires `set_embedder()`) |
 | `text_score(n, prop, query, metric)` | With explicit metric (`'cosine'`, `'dot_product'`, `'euclidean'`, `'poincare'`) |
-| `vector_score(n, prop, vector [, metric])` | Semantic similarity against a pre-computed embedding vector (pass a list of floats directly, no `set_embedder()` needed) |
+| `vector_score(n, prop, vector [, metric] [, options])` | Semantic similarity against a pre-computed embedding vector (pass a list of floats directly, no `set_embedder()` needed) |
 | `embedding_norm(n, prop)` | L2 norm of embedding vector (hierarchy depth in Poincaré space: 0=root, ~1=leaf) |
 | `score_fuse(s1, s2, … [, weights])` | Fuse ranked-lane scores into one — the mean of the signals that are **present**, or a weighted mean with a trailing list. A lane that could not score the row (`null`, `NaN`, `inf`) drops out of the average together with its weight; `null` only when every lane is absent |
 | `dot(a, b)` | Dot product of two list-valued vectors |
@@ -577,14 +577,24 @@ the `summary` column are scored as `vector_score(a, 'summary_emb', …)`.
 > argument must be bound to a string or a list; plan-time validation reports
 > the type of anything else.
 
-> **Index-accelerated top-k.** When an HNSW index is built
-> (`build_vector_index`), a whole-corpus top-k —
-> `RETURN vector_score(n, prop, q) AS s ORDER BY s DESC LIMIT k` (and the
-> `text_score` form) — auto-uses it, the same opt-in approximate path the
-> fluent API uses. Without an index, or for a selective `WHERE` that filters
-> the candidates, scoring is the exact brute-force scan. So building an index
-> speeds up "search the whole corpus by similarity"; a heavily-filtered query
-> stays exact.
+> **Retrieval policy.** `vector_score` and `text_score` accept an optional
+> final map: `{exact: true}` forces an exact scan without using or refreshing
+> HNSW. Put it fourth when omitting the metric, or fifth after an explicit
+> metric: `vector_score(n, 'summary_emb', $q, 'cosine', {exact: true})`.
+> A parameter-bound map works too. `exact` must be boolean, defaults to false,
+> and unknown options are errors. An omitted metric uses each actual node
+> type's store metric, defaulting to cosine if the store has none.
+>
+> **Index-accelerated top-k.** With default policy and an HNSW index,
+> `RETURN vector_score(n, prop, q) AS s ORDER BY s DESC LIMIT k` (or the
+> `text_score` form) can narrow candidates approximately, then score those
+> candidates exactly. ASC, explicit NULLS LAST, row-dependent selectors,
+> mixed/duplicate or unembedded bindings, incompatible metrics, unavailable
+> indexes and filtered candidate underfill use exact execution. Filters alone
+> do not guarantee an exact scan: request `{exact: true}` when that matters.
+> Missing per-node embeddings score null and retain ordinary ORDER BY null
+> placement. Invalid dimensions, metrics or options raise in filters as well
+> as projected scores.
 
 ### Lexical search — `text_bm25`
 
@@ -3609,7 +3619,7 @@ below; do not infer absence from this shorter list.
 | **Math** | `abs`, `ceil`/`ceiling`, `floor`, `round`, `sqrt`, `sign`, `log`/`ln`, `log10`, `exp`, `pow`, `pi`, `rand`, `randomUUID`, trig: `sin`/`cos`/`tan`/`asin`/`acos`/`atan`/`atan2`/`cot`/`haversin`/`degrees`/`radians` |
 | **Spatial** | `point(lat, lon)`, `distance(a, b)`, `contains(a, b)`, `intersects(a, b)`, `centroid(n)`, `area(n)`, `perimeter(n)`, `latitude(point)`, `longitude(point)` |
 | **Temporal** | `date(str)`/`datetime(str)`, `localdatetime()`/`localtime()`/`time()` (ISO strings), `date_diff(d1, d2)`, `date ± N` (days), `date - date` → int, `d.year`/`d.month`/`d.day`, `valid_at(...)`, `valid_during(...)` |
-| **Semantic** | `text_score(n, prop, query [, metric])` — scores a list `query` as a vector, embeds a string `query` via `set_embedder()`, cosine/dot_product/euclidean/poincare; `embedding_norm(n, prop)` — L2 norm (hierarchy depth) |
+| **Semantic** | `text_score(n, prop, query [, metric] [, options])` — scores a list `query` as a vector, embeds a string `query` via `set_embedder()`, cosine/dot_product/euclidean/poincare; `embedding_norm(n, prop)` — L2 norm (hierarchy depth) |
 | **Timeseries** | `ts_sum`, `ts_avg`, `ts_min`, `ts_max`, `ts_count`, `ts_at`, `ts_first`, `ts_last`, `ts_delta`, `ts_series` — date-string args with resolution validation |
 | **Mutations** | `CREATE (n:Label {props})`, `CREATE (a)-[:TYPE]->(b)`, `SET n.prop = expr`, `SET n += map`, `SET n = map`, `DELETE`, `DETACH DELETE`, `REMOVE n.prop`, `MERGE ... ON CREATE SET ... ON MATCH SET` |
 | **Procedures** | `CALL pagerank/betweenness/degree/closeness() YIELD node, score`, `CALL louvain/leiden() YIELD node, community [, level]` (multilevel, hierarchical — `leiden` guarantees well-connected communities), `CALL label_propagation() YIELD node, community`, `CALL connected_components() YIELD node, component`, `CALL k_core/coreness() YIELD node, coreness`, `CALL clustering_coefficient() YIELD node, coefficient`, `CALL cluster({method, ...}) YIELD node, cluster`, `CALL affected_tests({files: [...], max_depth?}) YIELD test_file, depth` (0.9.34+, code graphs), `CALL refresh_stats() YIELD src_type, edge_type, tgt_type, count` (0.9.35+, planner cardinality cache refresh), `CALL list_procedures()` |

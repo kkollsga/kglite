@@ -246,13 +246,6 @@
       "nesting": 5
     },
     {
-      "path": "crates/kglite/src/graph/languages/cypher/executor/scalar_functions/utility.rs",
-      "qualified_name": "crate::CypherExecutor<'a>::eval_utility_fn",
-      "lines": 214,
-      "branches": 49,
-      "nesting": 3
-    },
-    {
       "path": "crates/kglite/src/graph/languages/cypher/executor/where_clause.rs",
       "qualified_name": "crate::CypherExecutor<'a>::evaluate_predicate_tristate",
       "lines": 187,
@@ -262,8 +255,8 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/where_clause.rs",
       "qualified_name": "crate::CypherExecutor<'a>::execute_where",
-      "lines": 271,
-      "branches": 34,
+      "lines": 228,
+      "branches": 28,
       "nesting": 4
     },
     {

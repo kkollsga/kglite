@@ -22,23 +22,15 @@ pub use super::super::ast::is_aggregate_expression;
 /// both surface as evaluation errors, and both must keep meaning "this row
 /// does not match".
 ///
-/// Three classes are not that. An uncompilable regex, an unbound `$parameter`,
-/// and a retrieval lane the graph does not have (`text_bm25` on a property with
-/// no text index, `vector_score` on an unknown embedding store) are wrong for
-/// *every* row, no row can make them right, and the unfused path raises all
-/// three — so swallowing them answered an invalid query with a silent empty
-/// result (or, worse, a zero count). They propagate; every other message keeps
-/// the historical behaviour byte-for-byte.
-///
-/// Each class is recognised beside where it is minted
-/// ([`super::regex_cache::is_compile_error`],
-/// [`super::expression::is_missing_parameter_error`],
-/// [`super::scalar_functions::utility::is_missing_retrieval_source_error`]);
-/// this is the one place the fused filters ask about all of them.
+/// Invalid regexes, missing parameters/retrieval sources, and malformed
+/// vector arguments remain query errors. A fused filter must raise them just
+/// as scalar evaluation does; it must not report a silent empty result or zero
+/// count. Each recognizer lives beside the errors it classifies.
 pub(super) fn is_user_input_error(message: &str) -> bool {
     super::regex_cache::is_compile_error(message)
         || super::expression::is_missing_parameter_error(message)
         || super::scalar_functions::utility::is_missing_retrieval_source_error(message)
+        || super::scalar_functions::utility::is_vector_argument_error(message)
 }
 
 /// Variables a grouped aggregation still pins down on its output rows.

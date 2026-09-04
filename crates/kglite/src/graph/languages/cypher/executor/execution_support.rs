@@ -17,6 +17,7 @@ pub(super) struct VectorScoreFilterSpec {
     pub(super) variable: String,
     pub(super) prop_name: String,
     pub(super) query_vec: Vec<f32>,
+    pub(super) metric: Option<crate::graph::algorithms::vector::DistanceMetric>,
     pub(super) scorer: crate::graph::algorithms::vector::Scorer,
     pub(super) threshold: f64,
     pub(super) greater_than: bool,
@@ -92,8 +93,8 @@ pub(super) struct NodeSpatialData {
 
 /// Pre-computed `vector_score()` arguments for one call site.
 ///
-/// The property, query vector and metric are the same for every row of one
-/// call, so they are parsed once and reused — but *only* by a call that asked
+/// Arguments are reused for each call/store pair: an omitted metric belongs
+/// to the actual node type's store. Entries serve *only* a call that asked
 /// the same question. Until 0.16.9 this was a single unkeyed slot and the
 /// first call site's answer was served to every later `vector_score` in the
 /// query, so `RETURN vector_score(d, 'e', [1,0]), vector_score(d, 'e', [0,1])`
@@ -105,6 +106,7 @@ pub(super) struct VectorScoreCache {
     /// entry scores the row that prepared it and is never parked, because the
     /// next row's answer may differ.
     pub(super) keys: Option<Vec<ArgKey>>,
+    pub(super) node_type: String,
     pub(super) prop_name: String,
     pub(super) query_vec: Vec<f32>,
     pub(super) scorer: crate::graph::algorithms::vector::Scorer,
@@ -150,11 +152,11 @@ pub(super) struct VectorScoreCaches {
 
 impl VectorScoreCaches {
     /// The entry prepared for exactly these arguments, if one is parked.
-    pub(super) fn get(&self, args: &[Expression]) -> Option<&VectorScoreCache> {
+    pub(super) fn get(&self, args: &[Expression], node_type: &str) -> Option<&VectorScoreCache> {
         self.slots
             .iter()
             .filter_map(OnceLock::get)
-            .find(|entry| entry.matches(args))
+            .find(|entry| entry.node_type == node_type && entry.matches(args))
     }
 
     /// Park `entry` in the first free slot and hand back the parked reference.
@@ -220,6 +222,9 @@ pub(super) enum ArgKey {
     /// A list holding anything else (a property, an expression) stays keyless:
     /// its value belongs to one row.
     LiteralList(Vec<Value>),
+    /// Constant map members compare by borrow, including inside CASE where
+    /// conservative folding leaves the map expression intact.
+    Map(Vec<(String, ArgKey)>),
 }
 
 impl ArgKey {
@@ -230,6 +235,11 @@ impl ArgKey {
         match expr {
             Expression::Literal(value) => Some(ArgKey::Literal(value.clone())),
             Expression::Parameter(name) => Some(ArgKey::Param(name.clone())),
+            Expression::MapLiteral(items) => items
+                .iter()
+                .map(|(name, value)| Some((name.clone(), ArgKey::of(value)?)))
+                .collect::<Option<Vec<_>>>()
+                .map(ArgKey::Map),
             Expression::ListLiteral(items) => items
                 .iter()
                 .map(|item| match item {
@@ -246,6 +256,13 @@ impl ArgKey {
         match (self, expr) {
             (ArgKey::Literal(value), Expression::Literal(other)) => value == other,
             (ArgKey::Param(name), Expression::Parameter(other)) => name == other,
+            (ArgKey::Map(keys), Expression::MapLiteral(items)) => {
+                keys.len() == items.len()
+                    && keys
+                        .iter()
+                        .zip(items)
+                        .all(|((name, key), (other, value))| name == other && key.matches(value))
+            }
             // Compared element-wise against the expression, so a hit costs no
             // allocation — the per-row path this cache exists to avoid.
             (ArgKey::LiteralList(values), Expression::ListLiteral(items)) => values.len()

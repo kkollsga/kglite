@@ -303,3 +303,50 @@ fn the_fused_scan_aggregate_refuses_an_unknown_embedding_store() {
         "a count must not answer zero where the scalar raises: {message}"
     );
 }
+
+#[test]
+fn literal_options_maps_keep_one_preparation_inside_case() {
+    let graph = docs(&[("a", [1.0, 0.0]), ("b", [0.0, 1.0]), ("c", [1.0, 1.0])]);
+    assert_eq!(prepares(&graph,
+        "MATCH (d:Doc) RETURN CASE WHEN d.title = 'a' THEN 0 ELSE vector_score(d, 'summary_emb', [1.0,0.0], {exact:true}) END AS s"
+    ), 1);
+    VECTOR_SCORE_PREPARES.with(|count| count.set(0));
+    rows_with(
+        &graph,
+        "MATCH (d:Doc) RETURN vector_score(d, 'summary_emb', [1.0,0.0], $options) AS s",
+        HashMap::from([(
+            "options".to_string(),
+            Value::Map(
+                [("exact".to_string(), Value::Boolean(true))]
+                    .into_iter()
+                    .collect(),
+            ),
+        )]),
+    );
+    assert_eq!(VECTOR_SCORE_PREPARES.with(|count| count.get()), 1);
+}
+
+#[test]
+fn fused_scans_propagate_vector_argument_errors() {
+    let graph = docs(&[("a", [1.0, 0.0]), ("b", [0.0, 1.0])]);
+    for (arguments, expected) in [
+        ("[1.0]", "dimension"),
+        ("[1.0, 'bad']", "numeric"),
+        ("'[oops]'", "vector_score"),
+        ("[1.0,0.0], 'bad_metric'", "unknown metric"),
+        ("[1.0,0.0], {exact:1}", "exact"),
+    ] {
+        let predicate =
+            format!("MATCH (d:Doc) WHERE vector_score(d, 'summary_emb', {arguments}) > 0 ");
+        let error = fused_error(&graph, &(predicate.clone() + "RETURN count(d) AS c"), |c| {
+            matches!(c, Clause::FusedNodeScanAggregate { .. })
+        });
+        assert!(error.contains(expected), "{error}");
+        let error = fused_error(
+            &graph,
+            &(predicate + "RETURN d.title AS title ORDER BY title LIMIT 2"),
+            |c| matches!(c, Clause::FusedNodeScanTopK { .. }),
+        );
+        assert!(error.contains(expected), "{error}");
+    }
+}

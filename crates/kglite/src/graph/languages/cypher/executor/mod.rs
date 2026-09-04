@@ -1228,6 +1228,7 @@ mod table_procedures;
 #[cfg(test)]
 pub mod tests;
 pub mod transient_index;
+mod vector_options;
 pub mod where_clause;
 pub mod write;
 pub(crate) mod write_scope;

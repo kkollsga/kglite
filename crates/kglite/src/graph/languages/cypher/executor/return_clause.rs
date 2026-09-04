@@ -13,7 +13,7 @@ struct HnswScoreArgs {
     variable: String,
     property: String,
     query: Vec<f32>,
-    explicit_metric: Option<String>,
+    options: vector_options::VectorOptions,
 }
 
 struct HnswRowCoverage {
@@ -343,12 +343,18 @@ impl<'a> CypherExecutor<'a> {
     ) -> Result<Option<HnswScoreArgs>, String> {
         let args = match score_expr {
             Expression::FunctionCall { name, args, .. }
-                if name == "vector_score" && (3..=4).contains(&args.len()) =>
+                if name == "vector_score" && (3..=5).contains(&args.len()) =>
             {
                 args
             }
             _ => return Ok(None),
         };
+        // ANN cannot use the first row's selectors for every other row.
+        // This also recognizes constant options maps without broadly changing
+        // expression folding or accepting non-deterministic calls.
+        if VectorScoreCache::key_for(args).is_none() {
+            return Ok(None);
+        }
         let variable = match &args[0] {
             Expression::Variable(variable) => variable.clone(),
             _ => return Ok(None),
@@ -358,18 +364,16 @@ impl<'a> CypherExecutor<'a> {
             _ => return Ok(None),
         };
         let query = self.extract_float_list(&args[2], first_row)?;
-        let explicit_metric = match args.get(3) {
-            Some(expr) => match self.evaluate_expression(expr, first_row)? {
-                Value::String(metric) => Some(metric),
-                _ => None,
-            },
-            None => None,
-        };
+        let tail = args[3..]
+            .iter()
+            .map(|expr| self.evaluate_expression(expr, first_row))
+            .collect::<Result<Vec<_>, _>>()?;
+        let options = vector_options::parse(&tail)?;
         Ok(Some(HnswScoreArgs {
             variable,
             property,
             query,
-            explicit_metric,
+            options,
         }))
     }
 
@@ -517,6 +521,10 @@ impl<'a> CypherExecutor<'a> {
             None => return Ok(None),
         };
 
+        if args.options.exact {
+            return Ok(None);
+        }
+
         // Resolve the first row's store before building membership. This lets
         // the existing row walk prove the common ordered whole-store shape by
         // comparing each binding with the parallel slot_to_node entry, without
@@ -572,14 +580,13 @@ impl<'a> CypherExecutor<'a> {
             return Ok(None); // let the exact path raise the dimension error
         }
         // Resolve metric: explicit > stored > cosine; Poincaré → exact.
-        let metric_name = args
-            .explicit_metric
-            .or_else(|| store.metric.clone())
-            .unwrap_or_else(|| "cosine".to_string());
-        let metric = match vs::DistanceMetric::from_name(&metric_name) {
-            Some(m) => m,
-            None => return Ok(None),
-        };
+        let metric =
+            match args.options.metric.or_else(|| {
+                vs::DistanceMetric::from_name(store.metric.as_deref().unwrap_or("cosine"))
+            }) {
+                Some(metric) => metric,
+                None => return Ok(None),
+            };
         if crate::graph::algorithms::hnsw::HnswMetric::from_distance(metric) != Some(index.metric())
         {
             return Ok(None);

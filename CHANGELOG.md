@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `vector_score` and `text_score` accept a final `{exact: true}` options map to
+  bypass HNSW. Omitted metrics resolve per node type; row-dependent selectors
+  use exact scoring. Invalid vector arguments propagate through fused filters.
+
 - Class declarations support required node properties, property types and enforcement,
   inherited through primary classes. `node_property_violation()` lists failures;
   `ontology_audit()` adds `entity_kind` and `SHOW ONTOLOGY` exposes property contracts.
