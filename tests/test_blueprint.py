@@ -3483,3 +3483,309 @@ class TestFilesSection:
         assert "format 'csv'" in err
         assert "unknown key 'delimiter'" in err
         assert "'path', 'format'" in err
+
+
+class TestFrameInputs:
+    """`frames={"name": df}` — an in-memory table declared as a `files` entry
+    with `{"format": "frame"}`, consumed exactly like a read file.
+    """
+
+    @staticmethod
+    def _people():
+        return pd.DataFrame(
+            {
+                "person_id": [1, 2, 3],
+                "name": ["Alice", "Bob", "Charlie"],
+                "age": [28, 35, 42],
+                "score": [1.0, 2.5, 3.0],
+                "city": ["Oslo", "Bergen", "Oslo"],
+                # The FK edge is the *first* source into KNOWS; the junction
+                # below is the second and therefore merges, which is what puts
+                # a dedupe count in the summary both builds must agree on.
+                "buddy_id": [2, 3, 1],
+            }
+        )
+
+    @staticmethod
+    def _knows():
+        # The last row repeats (1, 2) so the build reports a dedupe.
+        return pd.DataFrame({"source_id": [1, 2, 1], "target_id": [2, 3, 2], "since": [2001, 2002, 2003]})
+
+    @classmethod
+    def _blueprint(cls, root, *, people_input, knows_input):
+        """One blueprint shape, with each of its two inputs declared either as
+        a CSV path or as a frame — so the only difference between the CSV and
+        the frame build is where the rows come from."""
+        files = {}
+        for name, kind, path in (
+            ("people", people_input, "persons.csv"),
+            ("knows", knows_input, "knows.csv"),
+        ):
+            files[name] = {"format": "frame"} if kind == "frame" else {"path": path, "format": "csv"}
+        return {
+            "settings": {"root": str(root)},
+            "files": files,
+            "nodes": {
+                "Person": {
+                    "file": "people",
+                    "pk": "person_id",
+                    "title": "name",
+                    "properties": {"age": "int", "city": "string"},
+                    "connections": {
+                        "fk_edges": {"KNOWS": {"target": "Person", "fk": "buddy_id"}},
+                        "junction_edges": {
+                            "KNOWS": {
+                                "file": "knows",
+                                "source_fk": "source_id",
+                                "target": "Person",
+                                "target_fk": "target_id",
+                                "properties": ["since"],
+                                "property_types": {"since": "int"},
+                            }
+                        },
+                    },
+                }
+            },
+        }
+
+    @classmethod
+    def _build(cls, tmp_path, bp, frames=None, **kwargs):
+        _write_blueprint(tmp_path / "bp.json", bp)
+        return from_blueprint(tmp_path / "bp.json", save=False, frames=frames, **kwargs)
+
+    @staticmethod
+    def _shape(graph):
+        """Everything a caller can observe about the built graph."""
+        nodes = list(
+            graph.cypher(
+                "MATCH (p:Person) RETURN p.person_id AS id, p.name AS name, "
+                "p.age AS age, p.score AS score, p.city AS city ORDER BY id"
+            )
+        )
+        edges = list(
+            graph.cypher(
+                "MATCH (a:Person)-[r:KNOWS]->(b:Person) "
+                "RETURN a.person_id AS s, b.person_id AS t, r.since AS since "
+                "ORDER BY s, t, since"
+            )
+        )
+        return nodes, edges
+
+    # ── Parity ───────────────────────────────────────────────────────
+
+    def test_a_frame_builds_the_same_graph_as_a_csv_of_the_same_data(self, tmp_path, capfd):
+        people, knows = self._people(), self._knows()
+        _write_csv(tmp_path / "persons.csv", people)
+        _write_csv(tmp_path / "knows.csv", knows)
+
+        csv_graph = self._build(
+            tmp_path,
+            self._blueprint(tmp_path, people_input="csv", knows_input="csv"),
+            verbose=True,
+        )
+        csv_out = capfd.readouterr().out
+
+        frame_graph = self._build(
+            tmp_path,
+            self._blueprint(tmp_path, people_input="frame", knows_input="frame"),
+            frames={"people": people, "knows": knows},
+            verbose=True,
+        )
+        frame_out = capfd.readouterr().out
+
+        assert self._shape(frame_graph) == self._shape(csv_graph)
+        assert frame_graph.node_type_counts() == csv_graph.node_type_counts()
+        assert list(frame_graph.cypher("MATCH ()-[r]->() RETURN type(r) AS t, count(r) AS n ORDER BY t")) == list(
+            csv_graph.cypher("MATCH ()-[r]->() RETURN type(r) AS t, count(r) AS n ORDER BY t")
+        )
+
+        # Same summary, dedupe line included — the third KNOWS row repeats
+        # (1, 2) in both builds.
+        def summary(text):
+            return [line for line in text.splitlines() if line.startswith("  [") or line.startswith("Loaded ")]
+
+        assert summary(frame_out) == summary(csv_out)
+        assert any("deduped" in line for line in summary(csv_out)), summary(csv_out)
+
+    @pytest.mark.parametrize("chunk", ["3", "1000"])
+    def test_a_frame_junction_is_chunk_invariant(self, tmp_path, monkeypatch, chunk):
+        """Chunking a frame slices a table that is already in memory; it must
+        no more change which edges are built than it does for a CSV."""
+        monkeypatch.setenv("KGLITE_BLUEPRINT_JUNCTION_CHUNK_SIZE", chunk)
+        people = self._people()
+        knows = pd.DataFrame(
+            {
+                "source_id": [1, 2, 3, 1, 2],
+                "target_id": [2, 3, 1, 3, 1],
+                "since": [2001, 2002, 2003, 2004, 2005],
+            }
+        )
+        graph = self._build(
+            tmp_path,
+            self._blueprint(tmp_path, people_input="frame", knows_input="frame"),
+            frames={"people": people, "knows": knows},
+        )
+        _, edges = self._shape(graph)
+        assert edges == [
+            {"s": 1, "t": 2, "since": 2001},
+            {"s": 1, "t": 3, "since": 2004},
+            {"s": 2, "t": 1, "since": 2005},
+            {"s": 2, "t": 3, "since": 2002},
+            {"s": 3, "t": 1, "since": 2003},
+        ]
+
+    def test_two_specs_may_read_one_frame(self, tmp_path):
+        rows = pd.DataFrame({"person_id": [1, 2], "name": ["Alice", "Bob"], "city": ["Oslo", "Bergen"]})
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "files": {"rows": {"format": "frame"}},
+            "nodes": {
+                "Person": {"file": "rows", "pk": "person_id", "title": "name"},
+                "City": {"file": "rows", "pk": "city", "title": "city"},
+            },
+        }
+        graph = self._build(tmp_path, bp, frames={"rows": rows})
+        counts = graph.node_type_counts()
+        assert counts["Person"] == 2
+        assert counts["City"] == 2
+
+    def test_nodes_from_a_csv_and_a_junction_from_a_frame(self, tmp_path):
+        _write_csv(tmp_path / "persons.csv", self._people())
+        bp = self._blueprint(tmp_path, people_input="csv", knows_input="frame")
+        graph = self._build(tmp_path, bp, frames={"knows": self._knows()})
+        _, edges = self._shape(graph)
+        # The FK edge loaded KNOWS first, so every junction row merges onto
+        # the edge already there; (1, 2) appears twice and the later row's
+        # property wins. 3 -> 1 is the FK edge no junction row touched.
+        assert edges == [
+            {"s": 1, "t": 2, "since": 2003},
+            {"s": 2, "t": 3, "since": 2002},
+            {"s": 3, "t": 1, "since": None},
+        ]
+
+    # ── Errors ───────────────────────────────────────────────────────
+
+    def test_a_declared_frame_that_was_not_supplied_names_itself(self, tmp_path):
+        _write_csv(tmp_path / "knows.csv", self._knows())
+        bp = self._blueprint(tmp_path, people_input="frame", knows_input="csv")
+        with pytest.raises(ValueError) as exc:
+            self._build(tmp_path, bp)
+        assert "frame 'people' is declared in `files`" in str(exc.value)
+        assert "was not passed in `frames=`" in str(exc.value)
+
+    def test_a_supplied_frame_that_was_not_declared_names_itself(self, tmp_path):
+        _write_csv(tmp_path / "persons.csv", self._people())
+        _write_csv(tmp_path / "knows.csv", self._knows())
+        bp = self._blueprint(tmp_path, people_input="csv", knows_input="csv")
+        with pytest.raises(ValueError) as exc:
+            self._build(tmp_path, bp, frames={"peple": self._people()})
+        assert "frames= contains 'peple'" in str(exc.value)
+        assert "not declared in `files`" in str(exc.value)
+
+    def test_a_path_on_a_frame_entry_warns(self, tmp_path, capfd):
+        bp = self._blueprint(tmp_path, people_input="frame", knows_input="frame")
+        bp["files"]["people"]["path"] = "persons.csv"
+        self._build(
+            tmp_path,
+            bp,
+            frames={"people": self._people(), "knows": self._knows()},
+            verbose=True,
+        )
+        err = capfd.readouterr().err
+        assert "file 'people' (format 'frame')" in err
+        assert "unknown key 'path'" in err
+        assert "Accepted keys: 'format'" in err
+
+    def test_a_compute_op_over_a_frame_fed_spec_is_refused(self, tmp_path):
+        """`compute` opens its source with a CSV reader outside the input
+        registry; over a frame it would take its missing-file branch and
+        report success on a build where the op never ran."""
+        bp = self._blueprint(tmp_path, people_input="frame", knows_input="frame")
+        bp["compute"] = [{"op": "derive", "from": "Person", "set": {"age_months": "age * 12"}}]
+        with pytest.raises(ValueError) as exc:
+            self._build(tmp_path, bp, frames={"people": self._people(), "knows": self._knows()})
+        message = str(exc.value)
+        assert "source type 'Person'" in message
+        assert "format 'frame'" in message
+        assert "compute reads CSV files only" in message
+
+    # ── Value fidelity ───────────────────────────────────────────────
+
+    @staticmethod
+    def _one_frame_blueprint(root, properties=None):
+        return {
+            "settings": {"root": str(root)},
+            "files": {"rows": {"format": "frame"}},
+            "nodes": {
+                "Row": {
+                    "file": "rows",
+                    "pk": "id",
+                    **({"properties": properties} if properties else {}),
+                }
+            },
+        }
+
+    def _values(self, tmp_path, df, column, properties=None):
+        graph = self._build(
+            tmp_path,
+            self._one_frame_blueprint(tmp_path, properties),
+            frames={"rows": df},
+        )
+        return [r["v"] for r in graph.cypher(f"MATCH (r:Row) RETURN r.id AS id, r.`{column}` AS v ORDER BY id")]
+
+    def test_a_python_list_column_becomes_a_list_property(self, tmp_path):
+        df = pd.DataFrame({"id": [1, 2], "tags": [["a", "b"], ["c"]]})
+        assert self._values(tmp_path, df, "tags") == [["a", "b"], ["c"]]
+
+    def test_nan_becomes_null(self, tmp_path):
+        df = pd.DataFrame({"id": [1, 2], "note": ["x", None]})
+        assert self._values(tmp_path, df, "note") == ["x", None]
+
+    def test_an_empty_string_becomes_null_as_it_would_in_a_csv(self, tmp_path):
+        df = pd.DataFrame({"id": [1, 2], "note": ["x", ""]})
+        assert self._values(tmp_path, df, "note") == ["x", None]
+
+    def test_an_undeclared_float_column_stays_a_float(self, tmp_path):
+        """Whole-number floats are the case that breaks: `1.0` printed as `1`
+        would be re-read as an int by the string table's inference."""
+        df = pd.DataFrame({"id": [1, 2], "ratio": [1.0, 2.0]})
+        values = self._values(tmp_path, df, "ratio")
+        assert values == [1.0, 2.0]
+        assert all(isinstance(v, float) for v in values), values
+
+    def test_a_declared_type_wins_over_the_frames_own(self, tmp_path):
+        df = pd.DataFrame({"id": [1, 2], "n": [1, 2]})
+        values = self._values(tmp_path, df, "n", properties={"n": "string"})
+        assert values == ["1", "2"]
+
+    def test_a_datetime_column_with_a_time_of_day_lands_as_text_with_a_warning(self, tmp_path, capfd):
+        df = pd.DataFrame(
+            {
+                "id": [1, 2],
+                "seen": pd.to_datetime(["2024-03-01 09:30:00", "2024-03-02 11:00:00"]),
+            }
+        )
+        graph = self._build(
+            tmp_path,
+            self._one_frame_blueprint(tmp_path),
+            frames={"rows": df},
+            verbose=True,
+        )
+        err = capfd.readouterr().err
+        assert "frame 'rows' column 'seen' has type timestamp" in err
+        assert "cannot hold; stored as string" in err
+        values = [r["v"] for r in graph.cypher("MATCH (r:Row) RETURN r.id AS id, r.seen AS v ORDER BY id")]
+        assert values == ["2024-03-01T09:30:00", "2024-03-02T11:00:00"]
+
+    def test_a_date_only_column_stays_a_date(self, tmp_path):
+        df = pd.DataFrame({"id": [1, 2], "day": pd.to_datetime(["2024-03-01", "2024-03-02"])})
+        assert [str(v) for v in self._values(tmp_path, df, "day")] == [
+            "2024-03-01",
+            "2024-03-02",
+        ]
+
+    def test_a_polars_frame_is_accepted_through_to_pandas(self, tmp_path):
+        polars = pytest.importorskip("polars")
+        df = polars.DataFrame({"id": [1, 2], "name": ["Alice", "Bob"]})
+        graph = self._build(tmp_path, self._one_frame_blueprint(tmp_path), frames={"rows": df})
+        assert graph.node_type_counts()["Row"] == 2

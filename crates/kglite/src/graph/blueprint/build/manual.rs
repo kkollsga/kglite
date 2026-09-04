@@ -232,6 +232,7 @@ mod manual_node_tests {
         let mut report = BuildReport {
             nodes_by_type: Default::default(),
             edges_by_type: Default::default(),
+            edges_actual: Default::default(),
             warnings: Vec::new(),
             errors: Vec::new(),
             provisional_purged: 0,

@@ -7,6 +7,7 @@ from typing import (
     Any,
     Callable,
     Literal,
+    Mapping,
     Optional,
     Protocol,
     Union,
@@ -1337,8 +1338,9 @@ def from_blueprint(
     lock_schema: bool = False,
     storage: str = "default",
     path: Optional[str] = None,
+    frames: Optional[Mapping[str, Any]] = None,
 ) -> KnowledgeGraph:
-    """Build a KnowledgeGraph from a JSON blueprint and CSV files.
+    """Build a KnowledgeGraph from a JSON blueprint and its declared inputs.
 
     The blueprint JSON describes all node types, properties, connections,
     timeseries, and data sources. Input paths in the blueprint — ``files``
@@ -1384,6 +1386,40 @@ def from_blueprint(
         graph = kglite.from_blueprint("blueprint.json", verbose=True)
         # All warnings now in blueprint.log instead of stderr.
 
+    **Frames — in-memory tables instead of files.** A ``files`` entry
+    declaring ``{"format": "frame"}`` takes no ``path``; its rows come from
+    ``frames["<entry name>"]``. A frame is consumed exactly like a read
+    file — same specs, filters, chunked junction loading, dedupe regime and
+    warnings — so the same blueprint builds the same graph from a CSV or
+    from a frame of the same data::
+
+        kglite.from_blueprint("bp.json", frames={"people": people_df})
+
+    Four things about that equivalence are worth knowing:
+
+    - **Types.** Each column is coerced to the type the blueprint declares
+      for it, through the same text path a CSV takes. Where the blueprint
+      declares nothing, the frame's own dtype is kept — a float column of
+      whole numbers stays a float. Two dtypes have no blueprint keyword:
+      a datetime-with-time-of-day and a dict column land as text, with one
+      warning per column naming them. A pandas integer column holding nulls
+      is a ``float64`` column, so declare ``"int"`` for it to come back as
+      an integer property.
+    - **Empty strings are nulls**, exactly as they are in a CSV. A cell
+      holding ``""`` becomes a missing property, not an empty one.
+    - **Files stream; frames do not.** A frame was already materialised
+      before the build began and is stringified whole, so peak memory is
+      roughly twice the frame set. Chunk-size knobs still bound what the
+      *loader* holds, not what the frame does.
+    - **Other frame libraries** work through ``.to_pandas()``: any value
+      that is not a pandas DataFrame but offers that method (polars,
+      pyarrow) is converted with it.
+
+    A frame declared in ``files`` but absent from ``frames=`` — or passed in
+    ``frames=`` without being declared — raises ``ValueError`` naming it. A
+    ``compute`` op over a frame-fed spec is refused: compute reshapes CSV
+    files on disk, outside the input registry.
+
     **Where the graph is saved.** A build has a save destination when the
     blueprint declares ``settings.output`` (or ``output_path`` +
     ``output_file``), or when ``storage="disk"`` was given a ``path`` — in
@@ -1405,14 +1441,17 @@ def from_blueprint(
         storage: ``"default"`` (in-memory), ``"mapped"`` (mmap columns),
             or ``"disk"`` (CSR + mmap). Disk requires ``path``.
         path: Directory for disk storage (only with ``storage="disk"``).
+        frames: In-memory tables keyed by the name of a ``files`` entry
+            declaring ``{"format": "frame"}``. See **Frames** above.
 
     Returns:
         A new KnowledgeGraph populated from the blueprint.
 
     Raises:
         FileNotFoundError: If the blueprint file is missing.
-        ValueError: If the blueprint JSON is malformed, or ``save=True``
-            was passed with no destination to write to.
+        ValueError: If the blueprint JSON is malformed, ``save=True``
+            was passed with no destination to write to, or a declared frame
+            was not supplied (or a supplied one was not declared).
 
     Example::
 

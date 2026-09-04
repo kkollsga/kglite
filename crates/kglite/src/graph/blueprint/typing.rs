@@ -85,6 +85,47 @@ pub fn map_blueprint_type(ty: &str) -> Option<ColumnType> {
     }
 }
 
+/// The blueprint keyword naming `ct`, or `None` where the vocabulary has no
+/// word for it (`UniqueId`, `Timestamp`, `Map`).
+///
+/// The inverse of [`map_blueprint_type`], so a type an input already knows can
+/// be handed to the typing pass through the same `declared_types` map a
+/// blueprint fills. Wider than [`inferred_type_keyword`], which answers only
+/// for the four types inference can produce.
+pub fn blueprint_type_keyword(ct: &ColumnType) -> Option<&'static str> {
+    match ct {
+        ColumnType::String => Some("string"),
+        ColumnType::Int64 => Some("int"),
+        ColumnType::Float64 => Some("float"),
+        ColumnType::Boolean => Some("bool"),
+        ColumnType::DateTime => Some("date"),
+        ColumnType::List => Some("list"),
+        ColumnType::UniqueId | ColumnType::Timestamp | ColumnType::Map => None,
+    }
+}
+
+/// Fill in, for every column `declared` does not name, the type the input
+/// itself knows — the middle rung of **declared → known → inferred**.
+///
+/// The blueprint wins where it speaks: a spec declaring `"string"` over a
+/// frame's int column gets a string property, the same as it would over a CSV.
+/// Where it is silent, an already-typed input answers instead of inference,
+/// which is both more faithful (a float column of whole numbers stays float)
+/// and cheaper (a typed column never reaches the whole-input pre-pass).
+pub fn overlay_known_types(
+    declared: &mut HashMap<String, String>,
+    known: &HashMap<String, ColumnType>,
+) {
+    for (col, ct) in known {
+        if declared.contains_key(col) {
+            continue;
+        }
+        if let Some(keyword) = blueprint_type_keyword(ct) {
+            declared.insert(col.clone(), keyword.to_string());
+        }
+    }
+}
+
 fn resolve_column_type(raw: &RawCsv, src_idx: usize, declared: Option<&String>) -> ColumnType {
     if let Some(ty) = declared {
         if let Some(ct) = map_blueprint_type(ty) {
@@ -1068,5 +1109,86 @@ mod incremental_inference_tests {
             let kw = inferred_type_keyword(&ct).expect("inference yields only these");
             assert_eq!(map_blueprint_type(kw), Some(ct), "{kw}");
         }
+    }
+
+    /// Every keyword `blueprint_type_keyword` hands back must be one
+    /// `map_blueprint_type` reads, or a known type would be handed to the
+    /// typing pass and silently ignored there.
+    #[test]
+    fn blueprint_type_keyword_round_trips_through_map_blueprint_type() {
+        for ct in [
+            ColumnType::String,
+            ColumnType::Int64,
+            ColumnType::Float64,
+            ColumnType::Boolean,
+            ColumnType::DateTime,
+            ColumnType::List,
+        ] {
+            let kw = blueprint_type_keyword(&ct).expect("the vocabulary names these");
+            assert_eq!(map_blueprint_type(kw), Some(ct), "{kw}");
+        }
+        for ct in [ColumnType::UniqueId, ColumnType::Timestamp, ColumnType::Map] {
+            assert_eq!(blueprint_type_keyword(&ct), None, "{ct:?}");
+        }
+    }
+
+    /// declared → known → inferred. The blueprint wins where it speaks; the
+    /// input's own type answers where it is silent; inference is what is left.
+    #[test]
+    fn a_kept_column_resolves_declared_then_known_then_inferred() {
+        let raw = RawCsv {
+            headers: vec!["d".into(), "k".into(), "i".into()],
+            rows: vec![vec!["1".into(), "1.0".into(), "7".into()]],
+            nulls: vec![vec![false, false, false]],
+            row_ids: vec![1],
+        };
+        let mut declared: HashMap<String, String> = HashMap::new();
+        declared.insert("d".to_string(), "string".to_string());
+
+        let mut known: HashMap<String, ColumnType> = HashMap::new();
+        // The input knows all three; only the undeclared ones may take it.
+        known.insert("d".to_string(), ColumnType::Int64);
+        known.insert("k".to_string(), ColumnType::Float64);
+        overlay_known_types(&mut declared, &known);
+
+        assert_eq!(
+            declared.get("d").map(String::as_str),
+            Some("string"),
+            "a declared column keeps the blueprint's type"
+        );
+        assert_eq!(
+            declared.get("k").map(String::as_str),
+            Some("float"),
+            "an undeclared column the input knows takes the input's type"
+        );
+        assert!(
+            !declared.contains_key("i"),
+            "a column nobody knows is left to inference"
+        );
+
+        let df = typed_dataframe(
+            &raw,
+            &["d".to_string(), "k".to_string(), "i".to_string()],
+            &declared,
+            &HashMap::new(),
+            &mut ListMisparseTally::default(),
+        )
+        .unwrap();
+        assert_eq!(df.get_column_type("d"), Some(ColumnType::String));
+        // Without the known type, "1.0" infers as Float64 too — the column
+        // that proves the rung is `i`, which inference makes an Int64.
+        assert_eq!(df.get_column_type("k"), Some(ColumnType::Float64));
+        assert_eq!(df.get_column_type("i"), Some(ColumnType::Int64));
+    }
+
+    /// A type the vocabulary cannot name is not overlaid: the column falls
+    /// through to inference rather than being dropped from the typing map.
+    #[test]
+    fn a_type_outside_the_vocabulary_is_not_overlaid() {
+        let mut declared: HashMap<String, String> = HashMap::new();
+        let mut known: HashMap<String, ColumnType> = HashMap::new();
+        known.insert("t".to_string(), ColumnType::Timestamp);
+        overlay_known_types(&mut declared, &known);
+        assert!(declared.is_empty());
     }
 }

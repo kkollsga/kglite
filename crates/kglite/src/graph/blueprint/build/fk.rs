@@ -65,6 +65,10 @@ fn prep_fk_edges(
         return None;
     }
 
+    let known_types = registry
+        .get(input)
+        .map(|s| s.known_column_types())
+        .unwrap_or_default();
     let raw_rc = cache.get(registry, input).ok()?;
     let mut raw: RawCsv = (*raw_rc).clone_raw();
     if !spec.spec.filter.is_empty() {
@@ -108,7 +112,10 @@ fn prep_fk_edges(
             continue;
         };
         let props = match fk_edge_properties(edge_type, &spec.node_type, edge, &pk) {
-            Ok(p) => p,
+            Ok(mut p) => {
+                super::super::typing::overlay_known_types(&mut p.declared, &known_types);
+                p
+            }
             Err(e) => {
                 errors.push(e);
                 continue;
@@ -119,9 +126,11 @@ fn prep_fk_edges(
         let frame = match fk_edge_frame(
             &raw,
             &pk,
-            pk_idx,
             edge,
-            fk_idx,
+            IdColumnIdx {
+                pk: pk_idx,
+                fk: fk_idx,
+            },
             &props,
             &IdTypes(None),
             &mut misparses,
@@ -244,6 +253,14 @@ fn fk_edge_properties(
     })
 }
 
+/// Where this edge's two id columns sit in the table it is built from. They
+/// are resolved once per (table, edge) and always travel together.
+#[derive(Clone, Copy)]
+struct IdColumnIdx {
+    pk: usize,
+    fk: usize,
+}
+
 struct FkEdgeFrame {
     target_col: String,
     df: DataFrame,
@@ -262,14 +279,13 @@ struct FkEdgeFrame {
 fn fk_edge_frame(
     raw: &RawCsv,
     pk: &str,
-    pk_idx: usize,
     edge: &super::super::schema::FkEdge,
-    fk_idx: usize,
+    idx: IdColumnIdx,
     props: &FkEdgeProperties,
     id_types: &IdTypes<'_>,
     misparses: &mut ListMisparseTally,
 ) -> Result<Option<FkEdgeFrame>, String> {
-    let cols = build_fk_columns(raw, pk, &edge.fk, pk_idx, fk_idx);
+    let cols = build_fk_columns(raw, pk, &edge.fk, idx.pk, idx.fk);
     if cols.src.is_empty() {
         return Ok(None);
     }
@@ -456,6 +472,14 @@ pub(super) fn load_fk_edges(
 /// Type the edge property columns the blueprint left untyped, over the whole
 /// input, and return the chunk stream to load from.
 ///
+/// What the pre-pass leaves the streamed FK loader: the chunk stream to load
+/// from, and the id type resolved for each endpoint column over the whole
+/// input.
+type PreparedFkChunks<'a> = (
+    Box<dyn Iterator<Item = Result<RawCsv, String>> + 'a>,
+    IndexMap<String, crate::datatypes::values::ColumnType>,
+);
+
 /// Inferring them per chunk would make an edge property's type depend on the
 /// chunk size. One pass covers every edge — the inferred type of a column is a
 /// property of the data, not of the edge that reads it — and an edge that
@@ -467,13 +491,7 @@ fn resolve_fk_property_types<'a>(
     id_columns: &[String],
     edge_props: &mut IndexMap<String, FkEdgeProperties>,
     report: &mut BuildReport,
-) -> Result<
-    (
-        Box<dyn Iterator<Item = Result<RawCsv, String>> + 'a>,
-        IndexMap<String, crate::datatypes::values::ColumnType>,
-    ),
-    String,
-> {
+) -> Result<PreparedFkChunks<'a>, String> {
     let mut seen: HashSet<&str> = HashSet::new();
     let mut wanted: Vec<String> = Vec::new();
     for props in edge_props.values() {
@@ -580,10 +598,12 @@ fn load_streamed_fk_edges(
     // Validated once per edge, not once per chunk: a bad `rename` is a
     // property of the spec, and an edge carrying one is skipped whole rather
     // than half-built. An edge missing from this map is one such.
+    let known_types = source.known_column_types();
     let mut edge_props: IndexMap<String, FkEdgeProperties> = IndexMap::new();
     for (edge_type, edge) in &fk_edges {
         match fk_edge_properties(edge_type, &spec.node_type, edge, &pk) {
-            Ok(props) => {
+            Ok(mut props) => {
+                super::super::typing::overlay_known_types(&mut props.declared, &known_types);
                 edge_props.insert(edge_type.clone(), props);
             }
             Err(e) => report.errors.push(e),
@@ -665,9 +685,11 @@ fn load_streamed_fk_edges(
             let frame = match fk_edge_frame(
                 &raw,
                 &pk,
-                pk_idx,
                 edge,
-                fk_idx,
+                IdColumnIdx {
+                    pk: pk_idx,
+                    fk: fk_idx,
+                },
                 props,
                 &IdTypes(Some(&resolved_ids)),
                 tally,

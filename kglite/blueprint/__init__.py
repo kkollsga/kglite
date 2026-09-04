@@ -1,4 +1,4 @@
-"""Build a KGLite knowledge graph from a JSON blueprint and CSV files.
+"""Build a KGLite knowledge graph from a JSON blueprint and its inputs.
 
 Usage::
 
@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Optional, Union
+from typing import Any, Mapping, Optional, Union
 
 from kglite.kglite import KnowledgeGraph
 from kglite.kglite import from_blueprint_rust as _from_blueprint_rs
@@ -55,8 +55,9 @@ def from_blueprint(
     lock_schema: bool = False,
     storage: str = "default",
     path: Optional[str] = None,
+    frames: Optional[Mapping[str, Any]] = None,
 ) -> KnowledgeGraph:
-    """Build a KnowledgeGraph from a JSON blueprint + CSV files.
+    """Build a KnowledgeGraph from a JSON blueprint + its declared inputs.
 
     Args:
         blueprint_path: Path to the blueprint JSON file.
@@ -72,6 +73,10 @@ def from_blueprint(
         storage: ``"default"`` (in-memory), ``"mapped"`` (mmap columns),
             or ``"disk"`` (CSR + mmap). Disk requires ``path``.
         path: Directory for disk storage (only used with ``storage="disk"``).
+        frames: In-memory tables, keyed by the name of a ``files`` entry
+            declaring ``{"format": "frame"}``. Values are pandas
+            DataFrames; anything else carrying ``.to_pandas()`` (a polars
+            frame, a pyarrow table) is converted through it.
 
     Raises:
         ValueError: If ``save=True`` was passed explicitly and neither
@@ -79,11 +84,16 @@ def from_blueprint(
     """
     if verbose:
         print(f"Loading blueprint from {blueprint_path}...")
+    if frames is not None:
+        # Duck-typed, so polars/pyarrow work without kglite importing either:
+        # a pandas DataFrame has no `.to_pandas()`, so this is a no-op for one.
+        frames = {name: (frame.to_pandas() if hasattr(frame, "to_pandas") else frame) for name, frame in frames.items()}
     graph, output_path = _from_blueprint_rs(
         str(blueprint_path),
         verbose=verbose,
         storage=storage if storage else "default",
         path=path,
+        frames=frames,
     )
     if verbose:
         counts = graph.node_type_counts()

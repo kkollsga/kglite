@@ -679,12 +679,15 @@ pub mod api {
     }
 
     /// Blueprint loader + builder — declarative graph construction
-    /// from a YAML/JSON spec + a directory of CSVs. The wheel's
-    /// `from_blueprint` and the C ABI's `kglite_blueprint_build` are both
-    /// thin wrappers around [`load_blueprint_file`] + [`build`].
+    /// from a JSON spec plus its declared inputs (CSV files, and frames the
+    /// caller hands over in [`BuildInputs`]). [`from_blueprint`] is the whole
+    /// lifecycle — build, then the resolved save destination; the C ABI's
+    /// `kglite_blueprint_build` uses the narrower [`load_blueprint_file`] +
+    /// [`build`] pair.
     pub mod blueprint {
-        pub use crate::graph::blueprint::build::{build, BuildReport, FlatSpec};
+        pub use crate::graph::blueprint::build::{build, BuildInputs, BuildReport, FlatSpec};
         pub use crate::graph::blueprint::json_records::{from_records, RecordsReport};
+        pub use crate::graph::blueprint::lifecycle::{declared_column_types, from_blueprint};
         pub use crate::graph::blueprint::schema::{
             load_blueprint_file, AggregateEdge, Blueprint, CalendarLink, ComputeOp, Connections,
             FkEdge, JunctionEdge, NodeSpec, Settings, TimeKey, TimeseriesSpec,

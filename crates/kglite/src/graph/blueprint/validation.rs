@@ -117,7 +117,10 @@ pub fn validate_inputs(blueprint: &Blueprint) -> Result<(), String> {
                 input_format_names()
             ));
         }
-        if file.path.is_none() {
+        // Only a format that reads a file needs one. A `frame` entry's rows
+        // are handed in by the caller, and `path` is not among its keys.
+        let format = input_format(&file.format).expect("checked above");
+        if format.accepted_keys.contains(&"path") && file.path.is_none() {
             return Err(format!(
                 "files '{name}': no 'path' — a '{}' input must name the file it reads.",
                 file.format
@@ -609,6 +612,22 @@ pub fn unknown_key_warnings(blueprint: &Blueprint) -> Vec<String> {
             &file.extra,
             format.accepted_keys,
         );
+        // `path` is a real `FileSpec` field, so serde reads it whatever the
+        // format and it never lands in `extra`. On a format that does not
+        // read one it is still a key the loader ignores, and it is exactly the
+        // key an author writes out of CSV habit.
+        if file.path.is_some() && !format.accepted_keys.contains(&"path") {
+            warnings.push(format!(
+                "file '{name}' (format '{}'): unknown key 'path' — the loader does not read it,                  so anything it declares is ignored. Accepted keys: {}.",
+                file.format,
+                format
+                    .accepted_keys
+                    .iter()
+                    .map(|k| format!("'{k}'"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
     }
     for (node_type, spec) in &blueprint.nodes {
         walk(&mut warnings, node_type, spec);
@@ -919,6 +938,45 @@ mod input_tests {
         assert!(err.contains("'csv'"), "{err}");
     }
 
+    /// A frame's rows are handed in by the caller, so the key that names a
+    /// file is not one of its keys — and requiring it would make every frame
+    /// entry declare a path nothing reads.
+    #[test]
+    fn a_frame_entry_needs_no_path() {
+        let bp = bp(r#"{"files": {"rows": {"format": "frame"}}}"#);
+        validate_inputs(&bp).expect("a frame entry names no file");
+        assert!(unknown_key_warnings(&bp).is_empty());
+    }
+
+    /// `path` is a real `FileSpec` field, so serde reads it whatever the
+    /// format and it never reaches `extra` — the check has to look at the
+    /// field itself or a CSV-habit `path` on a frame is silently ignored.
+    #[test]
+    fn a_path_on_a_frame_entry_is_a_stray_key() {
+        let bp = bp(r#"{"files": {"rows": {"format": "frame", "path": "rows.csv"}}}"#);
+        validate_inputs(&bp).expect("a stray key warns, it does not fail the build");
+        let warnings = unknown_key_warnings(&bp);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        let w = &warnings[0];
+        assert!(w.contains("file 'rows' (format 'frame')"), "{w}");
+        assert!(w.contains("unknown key 'path'"), "{w}");
+        assert!(w.contains("Accepted keys: 'format'"), "{w}");
+    }
+
+    /// The P3 refusal, over the format that made it reachable: `compute`
+    /// opens its source with a CSV reader outside the registry, and a frame
+    /// would take its "missing file" branch and report success.
+    #[test]
+    fn compute_over_a_frame_input_is_refused() {
+        let bp = bp(r#"{"files": {"rows": {"format": "frame"}},
+                "nodes": {"Person": {"file": "rows", "pk": "id"}},
+                "compute": [{"op": "derive", "from": "Person", "set": {"x": "1"}}]}"#);
+        let err = validate_compute(&bp).expect_err("compute over a frame is refused");
+        assert!(err.contains("source type 'Person'"), "{err}");
+        assert!(err.contains("input 'rows' (format 'frame')"), "{err}");
+        assert!(err.contains("compute reads CSV files only"), "{err}");
+    }
+
     #[test]
     fn a_csv_entry_must_name_a_path() {
         let bp = bp(r#"{"files": {"people": {"format": "csv"}}}"#);
@@ -1087,6 +1145,9 @@ mod accepted_key_tests {
             // format adds a level of its own here rather than widening this
             // one — the accepted list is per format, not per struct.
             "file" => vec![("path", json!("x.csv")), ("format", json!("csv"))],
+            // Keys a `"format": "frame"` entry reads. A frame has no `path`:
+            // the caller hands its rows in under this entry's name.
+            "file_frame" => vec![("format", json!("frame"))],
             "junction_edge" => vec![
                 ("csv", json!("k.csv")),
                 ("file", json!(null)),
@@ -1138,6 +1199,7 @@ mod accepted_key_tests {
     #[test]
     fn accepted_key_lists_name_only_keys_the_specs_read() {
         use super::super::input::csv::ACCEPTED_FILE_KEYS_CSV;
+        use super::super::input::frame::ACCEPTED_FILE_KEYS_FRAME;
         use super::super::schema::{
             ACCEPTED_BLUEPRINT_KEYS, ACCEPTED_FK_EDGE_KEYS, ACCEPTED_JUNCTION_EDGE_KEYS,
             ACCEPTED_NODE_KEYS, ACCEPTED_SETTINGS_KEYS,
@@ -1146,6 +1208,7 @@ mod accepted_key_tests {
             ("blueprint", ACCEPTED_BLUEPRINT_KEYS),
             ("settings", ACCEPTED_SETTINGS_KEYS),
             ("file", ACCEPTED_FILE_KEYS_CSV),
+            ("file_frame", ACCEPTED_FILE_KEYS_FRAME),
             ("node", ACCEPTED_NODE_KEYS),
             ("fk_edge", ACCEPTED_FK_EDGE_KEYS),
             ("junction_edge", ACCEPTED_JUNCTION_EDGE_KEYS),
@@ -1162,7 +1225,7 @@ mod accepted_key_tests {
         let blueprint: Value = object("blueprint");
         let mut blueprint = blueprint;
         blueprint["settings"] = object("settings");
-        blueprint["files"] = json!({"in": object("file")});
+        blueprint["files"] = json!({"in": object("file"), "rows": object("file_frame")});
         let mut node = object("node");
         node["connections"] = json!({
             "fk_edges": {"IN_ORG": object("fk_edge")},

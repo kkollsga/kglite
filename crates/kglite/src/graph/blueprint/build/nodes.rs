@@ -6,7 +6,7 @@ use super::super::geometry::{convert_geojson, has_spatial_properties, spatial_ta
 use super::super::input::InputRegistry;
 use super::super::table::{ListMisparseTally, RawCsv};
 use super::super::timeseries as ts;
-use super::super::typing::{map_blueprint_type, typed_dataframe};
+use super::super::typing::{map_blueprint_type, overlay_known_types, typed_dataframe};
 use super::cache::{CsvCache, IdTypeCache};
 use super::prepass;
 use super::specs::FlatSpec;
@@ -45,6 +45,9 @@ fn prep_node_spec(
     let Some(input) = spec.input.as_deref() else {
         return Ok(None);
     };
+    let source = registry
+        .get(input)
+        .map_err(|e| format!("[{}] {}", spec.node_type, e))?;
     let raw_rc = match cache.get(registry, input) {
         Ok(r) => r,
         Err(e) => return Err(format!("[{}] {}", spec.node_type, e)),
@@ -117,6 +120,7 @@ fn prep_node_spec(
             declared.insert(col.clone(), ty.clone());
         }
     }
+    overlay_known_types(&mut declared, &source.known_column_types());
 
     let keep: Vec<String> = raw
         .headers
@@ -391,6 +395,7 @@ fn load_streamed_node_spec(
             declared.insert(col.clone(), ty.clone());
         }
     }
+    overlay_known_types(&mut declared, &source.known_column_types());
     if is_auto_pk {
         // The synthesised pk is a dense 1..N counter, which the buffered path
         // infers as Int64 over any row set; naming it here keeps it out of the

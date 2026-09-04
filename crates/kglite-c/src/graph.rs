@@ -779,7 +779,15 @@ pub unsafe extern "C" fn kglite_blueprint_build(
                 }
             };
             let mut graph = DirGraph::new();
-            let report = match blueprint_build(&mut graph, blueprint, Path::new(dir)) {
+            // This symbol's signature is published, so it builds with no
+            // caller-supplied inputs; a frames-bearing variant would be a new
+            // symbol, not a new parameter here.
+            let report = match blueprint_build(
+                &mut graph,
+                blueprint,
+                Path::new(dir),
+                kglite::api::blueprint::BuildInputs::default(),
+            ) {
                 Ok(r) => r,
                 Err(e) => {
                     unsafe {

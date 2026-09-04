@@ -22,6 +22,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that entry's format. A `compute:` op over a non-CSV input is refused at load
   time: compute reads and rewrites CSV files directly, and would otherwise
   skip the op and report success.
+- **`from_blueprint(..., frames={"name": df})` — an in-memory table as a
+  blueprint input.** A `files` entry declaring `{"format": "frame"}` takes no
+  `path`; its rows come from `frames["<entry name>"]`, and are consumed exactly
+  like a read file: same specs, filters, chunked junction loading, dedupe
+  regime and warnings, so one blueprint builds the same graph from a CSV or
+  from a frame of the same data. Columns are coerced to the types the blueprint
+  declares; where it declares none, the frame's own dtype is kept, so a float
+  column of whole numbers stays a float and costs no inference pass. An empty
+  string is a null, as it is in a CSV. Column types outside the blueprint's
+  vocabulary (datetime-with-time-of-day, dicts) land as text with one warning
+  per column naming them. Files stream, frames do not — a frame is materialised
+  before the build. polars and pyarrow tables are accepted through
+  `.to_pandas()`. A declared frame that was not supplied, and a supplied frame
+  that was not declared, each raise a `ValueError` naming it.
 
 ## [0.16.22] - 2026-09-03
 ### Added

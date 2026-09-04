@@ -3,7 +3,7 @@
 
 use super::super::input::InputRegistry;
 use super::super::table::{ListMisparseTally, RawCsv};
-use super::super::typing::{map_blueprint_type, typed_dataframe};
+use super::super::typing::{map_blueprint_type, overlay_known_types, typed_dataframe};
 use super::cache::CsvCache;
 use super::fk::connect;
 use super::prepass;
@@ -123,6 +123,8 @@ fn load_one_junction_edge(
             return Ok(());
         }
     };
+
+    overlay_known_types(&mut declared, &source.known_column_types());
 
     // A junction is always chunked, so a kept column the blueprint did not
     // type is resolved over the whole input first — including the two FK

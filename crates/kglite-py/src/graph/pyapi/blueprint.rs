@@ -5,25 +5,30 @@
 //! invoked from the Python shim using the existing `KnowledgeGraph`
 //! methods — avoids duplicating the v3 save pipeline here.
 
+use crate::datatypes::on_invalid::OnInvalid;
+use crate::datatypes::py_in;
 use crate::graph::KnowledgeGraph;
 use kglite_core::api::blueprint;
+use kglite_core::datatypes::values::{ColumnType, DataFrame};
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use std::path::Path;
 use std::sync::Arc;
 
-/// Parse a JSON blueprint and build a `KnowledgeGraph` from its CSVs.
+/// Parse a JSON blueprint and build a `KnowledgeGraph` from its inputs.
 ///
-/// Returns `(graph, output_path_or_none)` — the Python shim saves and
-/// applies `lock_schema` on top. Exposed as `kglite.kglite.from_blueprint_rust`
-/// to avoid colliding with the user-facing `kglite.from_blueprint` wrapper.
+/// Returns `(graph, output_path_or_none)` — the Python shim saves and applies
+/// `lock_schema` on top. Exposed as `kglite.kglite.from_blueprint_rust` to
+/// avoid colliding with the user-facing `kglite.from_blueprint` wrapper.
 #[pyfunction]
-#[pyo3(signature = (blueprint_path, *, verbose=false, storage=None, path=None))]
+#[pyo3(signature = (blueprint_path, *, verbose=false, storage=None, path=None, frames=None))]
 pub fn from_blueprint_rust(
     py: Python<'_>,
     blueprint_path: String,
     verbose: bool,
     storage: Option<&str>,
     path: Option<&str>,
+    frames: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<(KnowledgeGraph, Option<String>)> {
     let bp_path = Path::new(&blueprint_path).to_path_buf();
     if !bp_path.exists() {
@@ -33,9 +38,22 @@ pub fn from_blueprint_rust(
         )));
     }
 
-    let (kg, output_path) = py
+    // Parsed under the GIL, before the build is detached: converting a pandas
+    // frame needs both the GIL and the blueprint's declared types, and the
+    // core decides which frames are missing or unexpected — this side only
+    // marshals what it was handed.
+    let parsed = blueprint::load_blueprint_file(&bp_path)
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+    let inputs = convert_frames(&parsed, frames)?;
+
+    let bp_dir = bp_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+
+    let (kg, report, output_path) = py
         .detach(
-            || -> Result<(KnowledgeGraph, Option<std::path::PathBuf>), String> {
+            || -> Result<(KnowledgeGraph, blueprint::BuildReport, Option<std::path::PathBuf>), String> {
                 // Construct the backing DirGraph with the requested storage
                 // mode via the shared core builder (one mode vocabulary across
                 // wheel / servers / C ABI). Empty string is treated as default.
@@ -46,98 +64,8 @@ pub fn from_blueprint_rust(
                 let mut graph =
                     kglite_core::api::storage::new_dir_graph_in_mode(mode, path.map(Path::new))?;
 
-                // Parse blueprint
-                let blueprint = blueprint::load_blueprint_file(&bp_path)?;
-                let output_path = blueprint
-                    .settings
-                    .resolved_output(bp_path.parent().unwrap_or_else(|| Path::new(".")));
-
-                // Run the build
-                let bp_dir = bp_path
-                    .parent()
-                    .unwrap_or_else(|| Path::new("."))
-                    .to_path_buf();
-                let report = blueprint::build(&mut graph, blueprint, &bp_dir)?;
-
-                if verbose {
-                    let n_total: usize = report.nodes_by_type.values().sum();
-                    // 0.9.1 #1: report.edges_by_type counts ATTEMPTED
-                    // edge writes from the blueprint pipeline. With the
-                    // default Update conflict handling, each duplicate
-                    // input row increments the counter but only one
-                    // edge ends up in the graph — so the report total
-                    // overcounts vs `MATCH ()-[r]->() RETURN count(r)`.
-                    // Query the actual graph edge counts here so the
-                    // verbose log matches reality. Difference is
-                    // surfaced as "(N input rows, M deduped)" when
-                    // non-zero.
-                    let actual_counts = graph.get_edge_type_counts();
-                    let e_actual: usize = actual_counts.values().sum();
-                    let e_input: usize = report.edges_by_type.values().sum();
-                    println!("Loading blueprint...");
-                    for (t, n) in &report.nodes_by_type {
-                        println!("  {}: {} nodes", t, n);
-                    }
-                    for (t, n_input) in &report.edges_by_type {
-                        let n_actual = actual_counts.get(t).copied().unwrap_or(0);
-                        if n_actual == *n_input {
-                            println!("  [{}]: {} edges", t, n_actual);
-                        } else {
-                            println!(
-                                "  [{}]: {} edges ({} input rows, {} deduped)",
-                                t,
-                                n_actual,
-                                n_input,
-                                n_input.saturating_sub(n_actual),
-                            );
-                        }
-                    }
-                    if e_actual == e_input {
-                        println!(
-                            "Loaded {} nodes ({} types), {} edges ({} types)",
-                            n_total,
-                            report.nodes_by_type.len(),
-                            e_actual,
-                            report.edges_by_type.len(),
-                        );
-                    } else {
-                        println!(
-                            "Loaded {} nodes ({} types), {} edges ({} types) — \
-                             {} input rows, {} deduped",
-                            n_total,
-                            report.nodes_by_type.len(),
-                            e_actual,
-                            report.edges_by_type.len(),
-                            e_input,
-                            e_input.saturating_sub(e_actual),
-                        );
-                    }
-                    if report.provisional_purged > 0 {
-                        println!(
-                            "  auto_purge: dropped {} unpromoted provisional stub node(s)",
-                            report.provisional_purged
-                        );
-                    }
-                }
-                if !report.warnings.is_empty() {
-                    if verbose {
-                        for w in &report.warnings {
-                            eprintln!("warning: {}", w);
-                        }
-                    } else {
-                        // Compact summary so callers running silent
-                        // still know data quality issues exist.
-                        eprintln!(
-                            "{} blueprint warning(s) — pass verbose=True for details.",
-                            report.warnings.len()
-                        );
-                    }
-                }
-                if !report.errors.is_empty() {
-                    for e in &report.errors {
-                        eprintln!("error: {}", e);
-                    }
-                }
+                let (report, output_path) =
+                    blueprint::from_blueprint(&mut graph, parsed, &bp_dir, inputs)?;
 
                 let kg = KnowledgeGraph {
                     inner: Arc::new(graph),
@@ -148,12 +76,122 @@ pub fn from_blueprint_rust(
                     default_row_limit: None,
                     lifecycle: crate::graph::GraphLifecycle::detached(),
                 };
-                Ok((kg, output_path))
+                Ok((kg, report, output_path))
             },
         )
         .map_err(pyo3::exceptions::PyValueError::new_err)?;
 
+    print!("{}", report.render_text(verbose));
+    if !report.warnings.is_empty() {
+        if verbose {
+            for w in &report.warnings {
+                eprintln!("warning: {}", w);
+            }
+        } else {
+            // Compact summary so callers running silent still know data
+            // quality issues exist.
+            eprintln!(
+                "{} blueprint warning(s) — pass verbose=True for details.",
+                report.warnings.len()
+            );
+        }
+    }
+    for e in &report.errors {
+        eprintln!("error: {}", e);
+    }
+
     Ok((kg, output_path.map(|p| p.to_string_lossy().into_owned())))
+}
+
+/// Convert every frame the caller passed into a core `DataFrame`, typed by
+/// what the blueprint declares for the input of that name.
+///
+/// A frame is coerced to the blueprint's declared property types — that is the
+/// contract, and it is what makes a `frames=` build produce the same graph as a
+/// CSV of the same data. Where the blueprint declares nothing, the frame's own
+/// dtype is kept and reported to the loader as a known column type.
+///
+/// Names are not checked here: a declared-but-missing or passed-but-undeclared
+/// frame is the core's error to phrase, and it phrases it once for every
+/// binding.
+fn convert_frames(
+    parsed: &blueprint::Blueprint,
+    frames: Option<&Bound<'_, PyDict>>,
+) -> PyResult<blueprint::BuildInputs> {
+    let mut inputs = blueprint::BuildInputs::default();
+    let Some(frames) = frames else {
+        return Ok(inputs);
+    };
+    for (key, value) in frames.iter() {
+        let name: String = key.extract().map_err(|_| {
+            pyo3::exceptions::PyTypeError::new_err(
+                "frames= keys must be strings naming a 'files' entry",
+            )
+        })?;
+        inputs
+            .frames
+            .insert(name.clone(), to_dataframe(parsed, &name, &value)?);
+    }
+    Ok(inputs)
+}
+
+fn to_dataframe(
+    parsed: &blueprint::Blueprint,
+    name: &str,
+    df: &Bound<'_, PyAny>,
+) -> PyResult<DataFrame> {
+    let columns: Vec<String> = df
+        .getattr("columns")
+        .and_then(|c| c.extract())
+        .map_err(|_| {
+            pyo3::exceptions::PyTypeError::new_err(format!(
+                "frames['{name}'] is not a DataFrame with string column names — pass a pandas \
+                 DataFrame (or anything with .to_pandas()) whose columns are strings"
+            ))
+        })?;
+
+    let declared = blueprint::declared_column_types(parsed, name)
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+    let types = PyDict::new(df.py());
+    for (column, ct) in &declared {
+        if let Some(keyword) = pandas_type_keyword(ct) {
+            types.set_item(column, keyword)?;
+        }
+    }
+
+    py_in::pandas_to_dataframe_with_options(
+        df,
+        // No id column is special here: the loader keys nodes off the string
+        // table like it does for a CSV, so nothing needs a `UniqueId` column.
+        &[],
+        &columns,
+        Some(&types),
+        // Off, matching `add_nodes`. A pandas integer column carrying nulls is
+        // a float64 column, and downcasting it here would also turn a genuine
+        // float column of whole numbers into ints — declare `"int"` in the
+        // blueprint to get an integer property back.
+        false,
+        // A frame is the caller's own data, and a mixed-dtype column silently
+        // stringified is exactly the surprise `on_invalid` exists to refuse.
+        OnInvalid::Error,
+    )
+}
+
+/// The type name `py_in` reads for a blueprint type. The blueprint's keyword
+/// vocabulary is wider (`str`, `integer`, `validFrom`, …) and `py_in`'s is a
+/// different set, so the `ColumnType` in between is what the two agree on.
+fn pandas_type_keyword(ct: &ColumnType) -> Option<&'static str> {
+    match ct {
+        ColumnType::String => Some("string"),
+        ColumnType::Int64 => Some("int"),
+        ColumnType::Float64 => Some("float"),
+        ColumnType::Boolean => Some("bool"),
+        ColumnType::DateTime => Some("date"),
+        ColumnType::List => Some("list"),
+        // `map_blueprint_type` yields none of these, so the arm is unreachable
+        // from a blueprint; leaving the column untyped is the honest fallback.
+        ColumnType::UniqueId | ColumnType::Timestamp | ColumnType::Map => None,
+    }
 }
 
 /// Build a `KnowledgeGraph` from an inline JSON records spec (nodes +

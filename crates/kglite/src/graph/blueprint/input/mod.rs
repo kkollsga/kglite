@@ -7,9 +7,12 @@
 //! implementation plus one registry entry — no change to the build phases.
 
 pub mod csv;
+pub mod frame;
 
 use super::table::RawCsv;
+use crate::datatypes::values::ColumnType;
 use indexmap::IndexMap;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// One input format this build can read, and the keys a `files` entry
@@ -27,7 +30,7 @@ pub struct FormatSpec {
 
 /// Every format compiled into this build, in the order the diagnostics list
 /// them.
-pub const INPUT_FORMATS: &[FormatSpec] = &[csv::FORMAT];
+pub const INPUT_FORMATS: &[FormatSpec] = &[csv::FORMAT, frame::FORMAT];
 
 /// The registered format called `name`, or `None` — which is what makes an
 /// unknown `format` value a build error rather than a silently-ignored key.
@@ -35,7 +38,7 @@ pub fn input_format(name: &str) -> Option<&'static FormatSpec> {
     INPUT_FORMATS.iter().find(|f| f.name == name)
 }
 
-/// `"csv"` today; the list a diagnostic quotes when it refuses a format.
+/// The list a diagnostic quotes when it refuses a format.
 pub fn input_format_names() -> String {
     INPUT_FORMATS
         .iter()
@@ -83,6 +86,20 @@ pub trait Source: Send + Sync {
         &self,
         chunk_size: usize,
     ) -> Result<Box<dyn Iterator<Item = Result<RawCsv, String>> + '_>, String>;
+
+    /// The types this input already knows for its own columns, in the
+    /// blueprint's type vocabulary.
+    ///
+    /// Empty by default: a text format knows nothing about its columns beyond
+    /// their spelling, which is why the loader infers them. A source that
+    /// arrives already typed (an in-memory frame, a spreadsheet's typed cells)
+    /// answers here, and the loader resolves each kept column as
+    /// **declared → known → inferred** — so a float column nobody declared
+    /// stays a float instead of being re-read out of its own text, and costs
+    /// no inference pass.
+    fn known_column_types(&self) -> HashMap<String, ColumnType> {
+        HashMap::new()
+    }
 
     /// Visit the cells of `columns`, row by row, without materialising a
     /// table. `visit` receives the index *into `columns`* and the cell text of
