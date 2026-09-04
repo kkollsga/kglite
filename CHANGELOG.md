@@ -51,7 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   junction table such a matrix was always describing. An empty cell produces
   **no** unpivoted row — a sparse screen matrix must not turn "not measured"
   into an edge. Excel stores every number as a float, so a whole-number cell is
-  written as an integer (`260`, not `260.0`) up to 2^53, which is what keeps
+  written as an integer (`260`, not `260.0`) below 2^53, which is what keeps
   `source_fk`/`target_fk` joins matching; dates land as `2024-03-01` and gain a
   time only when the cell has one; booleans as `true`/`false`; blank cells, and
   cells the spreadsheet itself could not compute (`#DIV/0!`), are null, the
@@ -91,6 +91,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `verbose` is; the "N blueprint warning(s) — pass verbose=True for details"
   summary line is gone, because a count is not something a filter or a handler
   can act on. Build *errors* still print to stderr unchanged.
+
+### Fixed
+- **Vector search no longer loses whole regions of a multi-core HNSW build.**
+  The parallel index build could leave one-way edges — a neighbour pointing at
+  a vector that pointed nowhere back — stranding up to 88 of 600 vectors where
+  no query could reach them, so an approximate search silently returned a
+  distant block instead of the nearest neighbours. Two causes: a vector
+  overwrote its own neighbour list, discarding reciprocal edges other threads
+  had just added, and the build handed each worker a contiguous block of
+  slots, seeding several mutually invisible regions of the graph at once.
+  Recall no longer depends on the machine's core count. Indexes already on
+  disk are unaffected in format but were built by the old path — rebuild one
+  (`build_index`) to get the repaired topology.
 
 ## [0.16.22] - 2026-09-03
 ### Added
@@ -175,17 +188,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   has it, or use `FkEdge::plain(target, fk)`. Deserialization is unaffected.
 
 ### Fixed
-- **Vector search no longer loses whole regions of a multi-core HNSW build.**
-  The parallel index build could leave one-way edges — a neighbour pointing at
-  a vector that pointed nowhere back — stranding up to 88 of 600 vectors where
-  no query could reach them, so an approximate search silently returned a
-  distant block instead of the nearest neighbours. Two causes: a vector
-  overwrote its own neighbour list, discarding reciprocal edges other threads
-  had just added, and the build handed each worker a contiguous block of
-  slots, seeding several mutually invisible regions of the graph at once.
-  Recall no longer depends on the machine's core count. Indexes already on
-  disk are unaffected in format but were built by the old path — rebuild one
-  (`build_index`) to get the repaired topology.
 - **`from_records` no longer discards a node spec's `labels` when its
   `records` list is empty.** A type whose nodes all arrive as vivified edge
   endpoints declares no records of its own; that spec returned before its
