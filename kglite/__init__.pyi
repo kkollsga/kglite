@@ -7510,15 +7510,15 @@ class KnowledgeGraph:
         ``SHOW INDEXES`` reports both facts, in its ``stale`` and ``delta``
         columns.
 
-        **What catching up costs.** Folding one document in is not a constant:
-        it inserts into the posting list of every term the document uses, and
-        those lists grow with the corpus, so the per-document cost rises as the
-        index does (measured 2026-08-25: 0.08 ms per document over a 20k-document
-        corpus, 0.4 ms over a 100k one). Past roughly 1500 documents that
-        overtakes a full rebuild, and the catch-up rebuilds instead — so a
-        refresh costs the cheaper of the two, never more than one rebuild, and
-        raising ``auto_refresh_limit`` well above that point buys rebuilds
-        rather than an ever-slower fold.
+        **What catching up costs.** The cost depends on the corpus and changed
+        content. Fewer than 100 index-relevant changes use direct posting
+        edits; larger deltas merge affected posting lists in batches. Indexes
+        below 20,000 documents rebuild above 1500 changes; larger indexes batch
+        through 5000 changes before rebuilding. These conservative boundaries
+        reflect the measured corpus sizes, and workloads vary. The
+        ``auto_refresh_limit`` is independent of this strategy: a delta above
+        that limit still serves stale results until an explicit rebuild or a
+        higher limit permits refresh.
 
         Catching up costs the *writes* almost nothing: creations are noticed by
         comparing one node slot against a watermark, so bulk ingest into an

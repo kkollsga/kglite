@@ -31,15 +31,15 @@ def test_list_documents_match_joined_text_and_skip_whole_invalid_lists(storage):
 
 
 @pytest.mark.parametrize("storage", ["memory", "mapped"])
-@pytest.mark.parametrize("count", [1, 1501])
+@pytest.mark.parametrize("count", [1, 128, 5001])
 def test_list_refresh_fold_and_rebuild_preserve_semantics(storage, count, tmp_path):
     g = kglite.KnowledgeGraph(**({"storage": storage} if storage != "memory" else {}))
     g.cypher("UNWIND range(1, $count) AS i CREATE (:Doc {id: i, body: 'original'})", params={"count": count})
-    g.build_text_index("Doc", "body", auto_refresh_limit=2000)
+    g.build_text_index("Doc", "body", auto_refresh_limit=6000)
     for value, expected in [(["new", "needle"], 1), (None, 0), ([None, "needle"], 1)]:
         g.cypher("MATCH (d:Doc) SET d.body = $body", params={"body": value})
         # Persist a pending delta, then exercise exactly the same extraction
-        # through incremental fold (one slot) or bulk refresh (1501 slots).
+        # through direct (1), batched (128), or rebuilt (5001) refresh.
         path = tmp_path / "pending.kgl"
         g.save(str(path))
         loaded = kglite.load(str(path))
@@ -61,3 +61,25 @@ def test_ontology_list_type_validates_container_shape(type_name):
     rows = g.cypher("CALL ontology_audit() YIELD rule, violations, total RETURN *").to_list()
     row = next(r for r in rows if r["rule"] == "LINK.property_types")
     assert (row["violations"], row["total"]) == (2, 7)
+
+
+def test_batched_mixed_documents_preserve_absolute_scores_and_null_order():
+    import math
+
+    g = kglite.KnowledgeGraph()
+    g.cypher("UNWIND range(0, 127) AS i CREATE (:Doc {id: i, body: 'old old'})")
+    assert g.build_text_index("Doc", "body")["indexed"] == 128
+    for start, body in [(0, ["alpha", None, "beta"]), (32, []), (64, None), (96, [1])]:
+        g.cypher(
+            "MATCH (d:Doc) WHERE d.id >= $start AND d.id < $end SET d.body = $body",
+            params={"start": start, "end": start + 32, "body": body},
+        )
+    score = math.log(2.0) * (1.0 * (1.2 + 1.0)) / (1.0 + 1.2 * (1.0 - 0.75 + 0.75 * 2.0))
+    expected = [{"id": i, "s": score if i < 32 else 0.0 if i < 64 else None} for i in range(128)]
+    rows = g.cypher("MATCH (d:Doc) RETURN d.id AS id, text_bm25(d, 'body', 'alpha') AS s ORDER BY id").to_list()
+    assert rows == expected
+    assert g.cypher("SHOW INDEXES").to_list()[0]["delta"] == 0
+    top = g.cypher(
+        "MATCH (d:Doc) RETURN d.id AS id, text_bm25(d, 'body', 'alpha') AS s ORDER BY s DESC LIMIT 3"
+    ).to_list()
+    assert top == expected[64:67]

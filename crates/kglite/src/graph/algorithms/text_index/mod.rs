@@ -63,6 +63,7 @@
 //! rather than on someone's million-document build.
 
 pub mod analyzer;
+mod batch;
 pub mod bm25;
 
 pub use analyzer::analyze;
@@ -217,8 +218,7 @@ impl TextIndex {
 
     /// Index `text` under `slot`, replacing whatever that slot held.
     ///
-    /// This is the whole refresh surface: a node created after the build and a
-    /// node whose indexed property was overwritten are both just `add_doc`.
+    /// Single-document refresh primitive for creation or replacement.
     /// Corpus statistics (`N`, `avgdl`, every term's document frequency) shift
     /// as documents arrive, so a document's score legitimately changes when
     /// *other* documents are added — that is BM25 working, not drift. Scores

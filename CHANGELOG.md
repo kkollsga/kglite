@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and persistence; ontology property types accept `list` and `array`.
 
 ### Changed
+
+- Batch text-index refreshes by affected term, retaining direct edits for small deltas and rebuilding large deltas. Exact scores and the public refresh ceiling are preserved.
 - Eligible BM25 top-k queries retrieve positive hits before constructing rows,
   preserving complete index membership, stable ties and scalar fallback behavior.
 

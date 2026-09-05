@@ -36,10 +36,9 @@
 //! ([`crate::graph::index_freshness`] owns that bookkeeping; this module owns
 //! the re-read). What a write costs an unindexed graph is one branch, and what
 //! it costs an indexed one is a slot comparison — no tokenization on the ingest
-//! path, ever. Folding is not free per document, though — a splice into every
-//! posting list the document's terms appear in, so it grows with the corpus —
-//! and past the measured crossover a catch-up rebuilds the index instead
-//! ([`rebuild_beats_folding`]).
+//! path, ever. Small changes use direct posting edits; larger deltas merge
+//! affected posting lists in batches, with a conservative rebuild boundary
+//! for still larger refreshes ([`rebuild_beats_folding`]).
 //!
 //! Deletes are the exception and are *not* staleness — a slot freed by
 //! `StableDiGraph` is handed to the next node created, so a document left
@@ -399,24 +398,14 @@ impl TextIndexStore {
     /// Each slot is re-read through the field the *build* resolved, so an alias
     /// map that moved since cannot silently repoint the index at another
     /// column. A slot whose node is gone, has changed type, or no longer holds
-    /// a string has its document removed — `add_doc` is an upsert, so a changed
-    /// one is simply overwritten.
+    /// a valid text document has its old document removed; valid replacements
+    /// overwrite the old content.
     ///
-    /// **Cost: bounded by a rebuild, not by delta x corpus.** Folding one
-    /// document splices into the postings list of each of its terms, and those
-    /// lists are as long as their terms are common, so per-document fold cost
-    /// grows with the corpus (measured: 0.075-0.17 ms at 20k documents,
-    /// 0.36-0.60 ms at 100k). Past [`FOLD_SLOTS_PER_REBUILD`] documents that
-    /// overtakes rebuilding the index outright, and this rebuilds instead —
-    /// see [`rebuild_beats_folding`] for the measurement and the constant.
-    /// Only the slots that would actually touch the index are counted, so a
-    /// bulk load of an unrelated node type never buys a rebuild.
-    ///
-    /// The two arms produce the same index and the same scores — the bulk
-    /// builder and `add_doc` are deliberately separate code paths, and the
-    /// freshness tests assert them against each other — but they are not
-    /// silent about which ran: the rebuild arm re-reads every node of the type
-    /// and therefore restates [`Self::skipped`], which a fold cannot.
+    /// Batched folds merge each affected posting list once; small deltas use
+    /// the direct primitive. Larger deltas use the conservative rebuild
+    /// boundaries in [`rebuild_beats_folding`]. Only slots
+    /// that touch this index count, so foreign-type loads cannot buy a rebuild.
+    /// The independent bulk builder restates [`Self::skipped`]; a fold cannot.
     pub fn refresh(&self, graph: &DirGraph, node_type: &str) -> usize {
         if graph.read_only {
             return 0;
@@ -431,21 +420,30 @@ impl TextIndexStore {
         let field_key = InternedKey::from_str(&self.resolved_field);
         let type_key = InternedKey::from_str(node_type);
 
-        let splices = delta
+        let changes = delta
             .slots()
             .filter(|slot| {
-                // A slot the fold would splice: a node of the indexed type is
-                // an upsert, and an indexed slot that is no longer one is a
-                // removal. Anything else costs one type lookup and no postings
-                // work at all.
+                // Foreign gaps do not require posting changes; an indexed
+                // slot whose node changed type still requires removal.
                 graph.graph.node_type_of(NodeIndex::new(*slot as usize)) == Some(type_key)
                     || index.contains_doc(*slot)
             })
             .count();
-        let seen = if rebuild_beats_folding(splices) {
+        let seen = if rebuild_beats_folding(changes, index.total_docs()) {
             self.rebuild(graph, node_type, &mut index, field_key)
-        } else {
+        } else if changes < BATCH_MIN_CHANGES {
             self.fold(graph, node_type, &delta, &mut index, type_key, field_key)
+        } else {
+            index.replace_batch(delta.slots().map(|slot| {
+                let node = NodeIndex::new(slot as usize);
+                let text = (graph.graph.node_type_of(node) == Some(type_key))
+                    .then(|| graph.graph.node_view(node))
+                    .flatten()
+                    .and_then(|view| {
+                        document_text(&view, node_type, &self.resolved_field, field_key)
+                    });
+                (slot, text)
+            }))
         };
 
         // Bumped for every claimed delta, not for every changed document: the
@@ -539,41 +537,25 @@ impl TextIndexStore {
     }
 }
 
-/// Slots one refresh may fold in before rebuilding the whole index is the
-/// cheaper of the two.
-///
-/// Measured 2026-08-25 (release profile, three agreeing runs) — see
-/// [`rebuild_beats_folding`] for the derivation.
+/// Direct edits won at 3/10 changes and batching won at 100 on both measured
+/// Zipf corpora (20k/100k documents). Retain the conservative lower boundary.
+pub(crate) const BATCH_MIN_CHANGES: usize = 100;
+
+/// Preserve the original upper boundary below the proven extended range.
 pub(crate) const FOLD_SLOTS_PER_REBUILD: usize = 1500;
 
-/// Whether rebuilding the index outright costs less than splicing `splices`
-/// documents into it one at a time.
-///
-/// **The measurement (2026-08-25, release, three agreeing runs).** Folding is
-/// not O(delta): [`TextIndex::add_doc`] inserts into each of the document's
-/// per-term postings lists, and a list is as long as its term's document
-/// frequency, so one folded document costs 0.075-0.17 ms over a 20k-document
-/// corpus and 0.36-0.60 ms over a 100k one — five times the corpus, five times
-/// the per-document cost. A full rebuild of the 100k corpus takes ~865 ms.
-///
-/// **Why the corpus is not a parameter.** Both sides scale linearly with the
-/// corpus — folding through the postings lengths, rebuilding through the
-/// documents it re-reads — so the corpus cancels and the break-even is an
-/// absolute number of documents: 865 ms / 0.36-0.60 ms = 1440-2400 folds at
-/// 100k, and 173 ms / 0.075-0.17 ms = 1020-2300 at 20k. The constant is the
-/// middle of that band. A proportional rule ("delta above 2% of the corpus")
-/// was rejected against the same table: it fires at 460 folds on a 20k corpus,
-/// where folding measured five times cheaper than the rebuild it would buy.
-///
-/// It is a cost *model*, not a tuned constant — it picks between two paths that
-/// produce the same index, so being wrong costs time and never an answer. Wrong
-/// low, a refresh pays at most one extra rebuild's worth of folding (1500 x
-/// 0.6 ms ~ 900 ms against 865 ms); wrong high, it pays a rebuild where folding
-/// would have been up to 1.6x cheaper. The worst case that matters is the one
-/// this bounds: without the switch, folding a 100k-document delta into a
-/// 100k-document corpus costs ~10 hours.
-fn rebuild_beats_folding(splices: usize) -> bool {
-    splices > FOLD_SLOTS_PER_REBUILD
+/// The extended range won on 20k/100k-document corpora; full replacement at
+/// 5000 documents favored rebuilding. Restrict the extension to measured sizes.
+pub(crate) const EXTENDED_FOLD_LIMIT: usize = 5000;
+pub(crate) const EXTENDED_FOLD_MIN_DOCS: usize = 20_000;
+
+fn rebuild_beats_folding(changes: usize, documents: usize) -> bool {
+    let limit = if documents >= EXTENDED_FOLD_MIN_DOCS {
+        EXTENDED_FOLD_LIMIT
+    } else {
+        FOLD_SLOTS_PER_REBUILD
+    };
+    changes > limit
 }
 
 /// The graph's node-slot bound, as the document slot space sees it.

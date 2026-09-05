@@ -249,16 +249,14 @@ print(small.cypher("SHOW INDEXES").to_df()[["stale", "delta"]].to_dict("records"
 
 The new node scored, nothing was rebuilt by hand, and the index came back clean.
 
-**`auto_refresh_limit` is a document count, not a time budget** — and it is worth
-knowing why, because it is the one place the honest number is not the flattering
-one. Folding one document in splices into the posting list of *every* term that
-document uses, and those lists grow with the corpus, so the per-document cost
-rises with index size (measured: 0.08 ms per document over a 20,000-document
-corpus, 0.4 ms over a 100,000-document one). Past roughly 1,500 documents,
-folding costs more than rebuilding the index outright — so the catch-up
-**rebuilds instead**. A refresh therefore costs the cheaper of the two and never
-more than one rebuild, whatever you set the limit to; raising the limit far above
-that crossover buys rebuilds, not an ever-slower fold.
+**`auto_refresh_limit` is a document count, not a time budget.** Catch-up cost
+also depends on corpus size and changed content. Fewer than 100 index-relevant
+changes use direct posting edits; larger deltas merge affected posting lists in
+batches. Indexes below 20,000 documents rebuild above 1,500 changes; larger
+indexes batch through 5,000 changes before rebuilding. These conservative
+boundaries reflect the measured corpus sizes, and workloads vary. The limit
+still decides whether to refresh at all: a delta above it is served stale even
+when a batch would be fast. Raising the limit can put a full rebuild in the query.
 
 **Over the limit, the index says so.** It serves what it has, scores the rows it
 has no document for `null`, and attaches a warning naming the delta and the call

@@ -468,7 +468,8 @@ def test_bench_text_index_refresh_delta(benchmark, refresh_corpus: TextCorpus, d
     `test_bench_text_bm25_top_k` measures, and the catch-up is whatever the
     first query after a change pays on top. The clean-query baseline is
     measured here, in this process, on this corpus, so the subtraction is not
-    across captures.
+    across captures. This overhead also includes any stale-index retrieval
+    fallback work; it is not a direct refresh-only measurement.
 
     Mean, not min (Performance protocol item 4a): each round is a distinct
     once-per-event cost, and `min` would report the cheapest refresh in a set
@@ -479,8 +480,8 @@ def test_bench_text_index_refresh_delta(benchmark, refresh_corpus: TextCorpus, d
     O(delta) or carries a corpus-scaled term is **recorded** across the two
     corpus sizes rather than asserted — `TextIndex::add_doc` splices into each
     term's postings vector, which is O(document frequency) per term, so a
-    corpus-scaled component is expected and a strict O(delta) assertion would
-    be a false claim.
+    corpus-scaled component can remain. Multi-document refresh merges affected
+    posting lists in batches; direct single-document edits still splice them.
     """
     corpus = refresh_corpus
     rng = np.random.default_rng(CORPUS_SEED + delta)
