@@ -17,7 +17,7 @@
 //!
 //! ## The orderings that are correctness, not preference
 //!
-//! 1. **Open: recover → replay → wrap → open-for-append** ([`open_log`]).
+//! 1. **Open: recover → replay → open-for-append → wrap** ([`open_log`]).
 //!    Replay must happen *before* the backend is wrapped for capture, or the
 //!    replay's own `GraphWrite` calls land in the capture buffer and get logged
 //!    a second time. Replay is gated on the loaded graph's `checkpoint_lsn`, so
@@ -60,7 +60,7 @@ use crate::graph::dir_graph::DirGraph;
 use crate::graph::handle::make_dir_graph_mut;
 use crate::graph::mutation::wal_replay::apply_frames;
 use crate::graph::storage::recording::wrap_for_durability;
-use crate::graph::wal::{recover, wal_path, DurabilityLevel, Wal, WalFrame};
+use crate::graph::wal::{recover, recover_for_append, wal_path, DurabilityLevel, Wal, WalFrame};
 
 mod save_as;
 pub(crate) use save_as::CheckpointPermit;
@@ -95,7 +95,7 @@ impl std::fmt::Display for DurableOpenError {
 impl std::error::Error for DurableOpenError {}
 
 /// Open the write-ahead log for `graph`, checkpointed at `checkpoint_path`,
-/// performing the full recover → replay → wrap → open-for-append ordering.
+/// performing the full recover → replay → open-for-append → wrap ordering.
 ///
 /// `checkpoint_path` is the `.kgl` path, not the log path; the sidecar is
 /// derived from it by [`wal_path`] exactly as every binding derives it, so a
@@ -127,11 +127,10 @@ pub fn open_log(
     level: DurabilityLevel,
 ) -> Result<Option<(Wal, u64)>, DurableOpenError> {
     let wpath = wal_path(checkpoint_path);
-    let frames = read_sidecar(&wpath)?;
     let checkpoint_lsn = graph.checkpoint_lsn;
 
     if !level.logs() {
-        if unreplayed(&frames, checkpoint_lsn) {
+        if unreplayed(&read_sidecar(&wpath)?, checkpoint_lsn) {
             return Err(DurableOpenError::Refused(format!(
                 "the write-ahead log at '{}' holds commits this checkpoint does not \
                  contain, and durability level 'off' would neither replay them nor keep \
@@ -156,6 +155,14 @@ pub fn open_log(
         ));
     }
 
+    // Reject non-tail damage before replay or capture ownership changes.
+    // Keep the scan's exact boundary so opening the writer need not rescan.
+    let recovered = recover_for_append(&wpath).map_err(|e| {
+        DurableOpenError::Io(format!(
+            "failed to read the write-ahead log at '{}': {e}",
+            wpath.display()
+        ))
+    })?;
     let sync = level
         .sync_mode()
         .expect("level.logs() is true, so sync_mode is Some");
@@ -163,24 +170,25 @@ pub fn open_log(
     let dir = make_dir_graph_mut(graph);
     // Replay BEFORE wrapping, or the replay's own writes enter the capture
     // buffer and the next commit logs them all over again.
-    let max_lsn = apply_frames(dir, &frames, checkpoint_lsn).map_err(DurableOpenError::Replay)?;
-    wrap_for_durability(dir);
+    let max_lsn =
+        apply_frames(dir, &recovered.frames, checkpoint_lsn).map_err(DurableOpenError::Replay)?;
     // With change data capture already enabled the graph was wrapped before the
     // replay ran, so the replayed writes sit in the capture buffer describing
     // frames this log already holds: handing them to the WAL at the next commit
     // would log every recovered write a second time. Drop them — and with them
     // the CDC events for changes no consumer of this stream saw happen live.
-    // (No-op on the ordinary path, where the wrap above created the buffer.)
+    // (No-op on the ordinary path, which is wrapped only after writer open.)
     if let Some(rg) = dir.graph.recording_mut() {
         let _ = rg.take_ops();
     }
 
-    let wal = Wal::open(wpath.clone(), sync).map_err(|e| {
+    let wal = Wal::open_recovered(wpath.clone(), sync, recovered).map_err(|e| {
         DurableOpenError::Io(format!(
             "failed to open the write-ahead log at '{}': {e}",
             wpath.display()
         ))
     })?;
+    wrap_for_durability(dir);
     Ok(Some((wal, max_lsn + 1)))
 }
 

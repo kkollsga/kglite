@@ -15,7 +15,7 @@
 //! the checkpoint. Only the second order below belongs to `Session`, because it
 //! is a property of how a session publishes a commit.
 //!
-//! 1. **Open: recover → replay → wrap → open-for-append.** Replay must happen
+//! 1. **Open: recover → replay → open-for-append → wrap.** Replay must happen
 //!    *before* the backend is wrapped for capture, or the replay's own
 //!    `GraphWrite` calls land in the capture buffer and get logged a second
 //!    time. Replay is gated on the loaded graph's `checkpoint_lsn`, so frames
@@ -116,7 +116,7 @@ pub(super) const DIRECT_WRITE_REFUSAL: &str =
 
 impl Session {
     /// Open `graph` as a **durable session** checkpointed at `checkpoint_path`,
-    /// performing the full recover → replay → wrap → open-for-append ordering
+    /// performing the full recover → replay → open-for-append → wrap ordering
     /// described in the module docs.
     ///
     /// `checkpoint_path` is the `.kgl` path, not the log path; the sidecar is

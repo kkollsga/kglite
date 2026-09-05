@@ -45,6 +45,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Durable reopen repairs an incomplete WAL tail before accepting new writes,
+  preventing later acknowledged writes from being hidden behind damaged bytes.
+  Unsupported formats, non-tail damage and files changed during recovery are refused.
 - Preserve signed 64-bit disk IDs on reload and streaming subset saves; unsupported identity types use lossless sidecars instead of becoming null.
 - Very large BM25 top-k limits allocate only for actual matching candidates,
   preventing integer overflow and oversized heap allocation.
