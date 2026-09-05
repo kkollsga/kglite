@@ -5,6 +5,10 @@
 
 use super::Interrupt;
 
+#[path = "clustering_geographic.rs"]
+mod geographic;
+pub(crate) use geographic::geographic_dbscan;
+
 /// A clustering assignment: original index in input array → cluster label.
 pub struct ClusterAssignment {
     pub index: usize,
@@ -20,8 +24,10 @@ pub fn euclidean_distance_matrix(features: &[Vec<f64>], interrupt: Interrupt) ->
     })
 }
 
-/// Compute pairwise Haversine (geodesic) distance matrix.
+/// Compute pairwise WGS84 geodesic distances using Karney's method.
 /// Each point is (lat, lon) in degrees. Returns distances in meters.
+// Retain the matrix helper as the compatibility/reference path for exact parity.
+#[allow(dead_code)]
 pub fn haversine_distance_matrix(points: &[(f64, f64)], interrupt: Interrupt) -> Vec<Vec<f64>> {
     let n = points.len();
     let mut dist = vec![vec![0.0; n]; n];
@@ -144,6 +150,15 @@ pub fn dbscan(
         );
     }
 
+    expand_dbscan(&neighbors, min_points, interrupt)
+}
+
+fn expand_dbscan(
+    neighbors: &[Vec<usize>],
+    min_points: usize,
+    interrupt: Interrupt,
+) -> Vec<ClusterAssignment> {
+    let n = neighbors.len();
     let mut labels: Vec<i64> = vec![-2; n]; // -2 = unvisited, -1 = noise
     let mut cluster_id: i64 = 0;
     let mut queued = Vec::new();

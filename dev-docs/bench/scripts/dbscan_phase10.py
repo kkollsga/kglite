@@ -13,6 +13,7 @@ import hashlib
 import importlib
 import json
 import lzma
+import math
 import os
 from pathlib import Path
 import platform
@@ -53,14 +54,36 @@ def release_provenance() -> dict:
     for crate in ("kglite", "kglite-py"):
         sources.append(ROOT / "crates" / crate / "Cargo.toml")
         sources.extend((ROOT / "crates" / crate / "src").rglob("*.rs"))
-    if artifact.stat().st_mtime_ns < max(path.stat().st_mtime_ns for path in sources):
-        raise RuntimeError("release artifact predates engine/wrapper source")
+    newer = [path for path in sources if path.stat().st_mtime_ns > artifact.stat().st_mtime_ns]
+    proof = comment_only_manifest_proof(newer, artifact) if newer else None
     return {
         "extension": str(extension),
         "release_artifact": str(artifact.resolve()),
         "sha256": sha(extension),
         "version": importlib.import_module("kglite").__version__,
+        "comment_only_manifest_proof": proof,
     }
+
+
+def comment_only_manifest_proof(newer: list[Path], artifact: Path) -> dict:
+    """Explicitly bind a reused release when only a manifest comment is newer."""
+    import tomllib
+
+    reference = os.environ.get("KGLITE_BENCH_RELEASE_REFERENCE")
+    manifest = ROOT / "crates/kglite-py/Cargo.toml"
+    if not reference or newer != [manifest]:
+        raise RuntimeError("release artifact predates engine/wrapper source; no matching manifest-only proof")
+    path = Path(reference).resolve()
+    prior = json.loads(lzma.decompress(path.read_bytes()))
+    if sha(artifact) != prior["release"]["sha256"]:
+        raise RuntimeError("reference does not identify this release artifact")
+    for name, digest in prior["source_sha256"].items():
+        if sha(ROOT / name) != digest:
+            raise RuntimeError(f"measured source changed since reference: {name}")
+    original = git("show", f"{prior['head']}:crates/kglite-py/Cargo.toml")
+    if tomllib.loads(original) != tomllib.loads(manifest.read_text()):
+        raise RuntimeError("manifest changes executable configuration")
+    return {"reference_sha256": sha(path), "parsed_manifest_identical": True, "measured_sources_identical": True}
 
 
 def case_data(name: str, n: int) -> tuple[dict, list[int], str]:
@@ -103,7 +126,16 @@ def case_data(name: str, n: int) -> tuple[dict, list[int], str]:
             ]
         )
         # 40 columns x at most 26 rows: all coordinates valid, widely separated.
-        coordinates = seeds + [(-60.0 + 3.0 * (i // 40), -150.0 + 7.0 * (i % 40)) for i in range(n - len(seeds))]
+        if n <= 1024:
+            grid = [(-60.0 + 3.0 * (i // 40), -150.0 + 7.0 * (i % 40)) for i in range(n - len(seeds))]
+        else:
+            # Larger memory probes stay inside valid global latitude/longitude bounds.
+            side = math.ceil(math.sqrt(n))
+            grid = [
+                (-80.0 + 160.0 * (i // side) / (side - 1), -179.0 + 358.0 * (i % side) / (side - 1))
+                for i in range(n - len(seeds))
+            ]
+        coordinates = seeds + grid
         expected = ([0, 0, 0, 1, 1, 1] if seeds else []) + [-1] * (n - len(seeds))
     return {"lat": [p[0] for p in coordinates], "lon": [p[1] for p in coordinates]}, expected, "eps: 3.0"
 
@@ -184,6 +216,7 @@ def main() -> None:
     parser.add_argument("--sizes", nargs="+", type=int, default=[128])
     parser.add_argument("--geo-sizes", nargs="+", type=int, help="optional separate geographic control sizes")
     parser.add_argument("--rounds", type=int, default=100)
+    parser.add_argument("--geo-large-rounds", type=int, help="rounds for geographic cells with at least 256 nodes")
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument("--reverse", action="store_true")
     parser.add_argument("--label", required=True)
@@ -198,6 +231,7 @@ def main() -> None:
         )
         and len(set(args.cases)) == len(args.cases)
         and 1 <= args.rounds <= 200
+        and (args.geo_large_rounds is None or 1 <= args.geo_large_rounds <= 200)
         and 0 <= args.warmup <= 20
     ):
         parser.error("use distinct bounded sizes/cases, 1..200 rounds and 0..20 warmup")
@@ -244,7 +278,10 @@ def main() -> None:
     }
     cells = []
     for name, n in schedule:
-        cells.append(measure(name, n, args.rounds, args.warmup))
+        rounds = (
+            args.geo_large_rounds if name.startswith("geo_") and n >= 256 and args.geo_large_rounds else args.rounds
+        )
+        cells.append(measure(name, n, rounds, args.warmup))
         print(f"Checked {name} n={n}", flush=True)
     metadata.update({"cells": cells, "load_end": os.getloadavg() if hasattr(os, "getloadavg") else None})
     raw = json.dumps(metadata, indent=2).encode()

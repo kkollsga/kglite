@@ -1143,19 +1143,12 @@ impl<'a> CypherExecutor<'a> {
             }
 
             let cluster_assignments = match method.as_str() {
-                "dbscan" => {
-                    let dm = crate::graph::algorithms::clustering::haversine_distance_matrix(
-                        &points,
-                        self.interrupt(),
-                    );
-                    self.check_deadline()?;
-                    crate::graph::algorithms::clustering::dbscan(
-                        &dm,
-                        eps,
-                        min_points,
-                        self.interrupt(),
-                    )
-                }
+                "dbscan" => crate::graph::algorithms::clustering::geographic_dbscan(
+                    &points,
+                    eps,
+                    min_points,
+                    self.interrupt(),
+                ),
                 "kmeans" => {
                     let features: Vec<Vec<f64>> =
                         points.iter().map(|(lat, lon)| vec![*lat, *lon]).collect();

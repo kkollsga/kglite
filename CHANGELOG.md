@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Geographic DBSCAN builds neighbors directly, avoiding the dense distance matrix while preserving exact WGS84 distances, cluster order and cancellation. Measured peak process memory at 4,096 points falls 35–55% with query time unchanged.
 - DBSCAN uses constant-time queue membership for faster dense clustering, preserving cluster labels and input order and avoiding membership allocation for all-noise inputs.
 - Release publication checks the exact core crate in the registry index immediately, replacing redundant fixed waits and search polling while blocking dependents on readiness failure.
 - Appending to shared typed columns reserves growth room during their required copy, preserving snapshots, nulls and existing allocation-failure fallbacks.
