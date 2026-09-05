@@ -80,7 +80,7 @@
     {
       "path": "crates/kglite/src/graph/blueprint/compute/aggregate.rs",
       "qualified_name": "crate::run_aggregate",
-      "lines": 225,
+      "lines": 219,
       "branches": 32,
       "nesting": 3
     },
@@ -164,8 +164,8 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/aggregation/materialized.rs",
       "qualified_name": "crate::CypherExecutor<'a>::evaluate_aggregate_with_rows",
-      "lines": 313,
-      "branches": 98,
+      "lines": 298,
+      "branches": 95,
       "nesting": 5
     },
     {

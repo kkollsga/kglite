@@ -64,7 +64,9 @@ fn value(graph: &mut DirGraph, id: i64, property: &str) -> Option<Value> {
         .graph
         .get_node_property(idx, InternedKey::from_str(property))
 }
-fn stored(graph: &DirGraph) -> Vec<(usize, Value, Value, Vec<(String, Value)>, Vec<String>)> {
+type StoredNodeState = (usize, Value, Value, Vec<(String, Value)>, Vec<String>);
+
+fn stored(graph: &DirGraph) -> Vec<StoredNodeState> {
     let _guard = graph.begin_read_pass();
     graph
         .graph

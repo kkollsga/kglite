@@ -250,13 +250,7 @@ pub fn run_aggregate(
         for c in components {
             row.push(c.clone());
         }
-        for (i, (prop, kind)) in classified.iter().enumerate() {
-            let v = finalize_state(&states[i], kind)?;
-            inferred_types
-                .entry(prop.clone())
-                .or_insert_with(|| infer_value_type(&v));
-            row.push(value_to_csv_cell(&v));
-        }
+        append_aggregate_cells(states, &classified, &mut inferred_types, &mut row)?;
         writer
             .write_record(&row)
             .map_err(|e| format!("aggregate: write row: {}", e))?;
@@ -490,6 +484,22 @@ fn update_state(state: &mut AggState, kind: &AggKind, ctx: &dyn Bindings) -> Res
                 state.first_value = Some(v);
             }
         }
+    }
+    Ok(())
+}
+
+fn append_aggregate_cells(
+    states: &[AggState],
+    classified: &[(String, AggKind)],
+    inferred_types: &mut HashMap<String, &'static str>,
+    row: &mut Vec<String>,
+) -> Result<(), String> {
+    for (i, (prop, kind)) in classified.iter().enumerate() {
+        let value = finalize_state(&states[i], kind)?;
+        inferred_types
+            .entry(prop.clone())
+            .or_insert_with(|| infer_value_type(&value));
+        row.push(value_to_csv_cell(&value));
     }
     Ok(())
 }
