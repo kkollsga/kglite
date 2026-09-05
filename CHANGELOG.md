@@ -24,6 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - BM25 indexes native lists of strings/nulls as one document across build, refresh,
   and persistence; ontology property types accept `list` and `array`.
 
+### Changed
+- Eligible indexed vector top-k queries construct only winning rows from an
+  initial typed MATCH, reducing Cypher overhead. Filtered, incomplete, stale,
+  exact and PROFILE queries retain their existing retrieval behavior.
+
 ### Fixed
 - Performance gates select qualified, digest-bound references and reject known
   inflated captures, missing platform identity and unusable comparisons. New

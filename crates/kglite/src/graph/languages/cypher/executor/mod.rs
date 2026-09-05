@@ -612,6 +612,16 @@ impl<'a> CypherExecutor<'a> {
                 continue;
             }
 
+            if i == 0 && !profiling && result_set.rows.is_empty() && result_set.columns.is_empty() {
+                if let Some(result) = self.try_hnsw_entry(&query.clauses)? {
+                    self.budget
+                        .check_rows(result.rows.len(), "HNSW retrieval")?;
+                    result_set = result;
+                    skip_clause[1] = true;
+                    continue;
+                }
+            }
+
             // WHERE-into-MATCH fusion: when MATCH is followed by WHERE, pass the
             // WHERE predicate to execute_match for inline filtering during expansion.
             // This prevents materializing millions of rows that WHERE would discard.
@@ -1149,6 +1159,7 @@ mod procedure_registry;
 pub mod refresh_stats;
 pub mod regex_cache;
 mod rel_constraint_ddl;
+mod retrieval;
 mod retrieval_diagnostics;
 pub mod return_clause;
 pub mod rev_procedures;

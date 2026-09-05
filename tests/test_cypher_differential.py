@@ -50,6 +50,12 @@ TEXT_BM25_TOP_K = "MATCH (d:Doc) RETURN d.id AS id, text_bm25(d, 'body', 'alpha 
 
 DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
     (
+        "vector_whole_type_index_entry",
+        "vector_index_entry_graph",
+        "MATCH (d:Doc) RETURN d.id AS id, vector_score(d, 'summary_emb', [1.0,0.0]) AS s ORDER BY s DESC LIMIT 3",
+        None,
+    ),
+    (
         "vector_score_ascending_nulls",
         "vector_order_graph",
         "MATCH (d:Doc) RETURN d.id AS id, vector_score(d, 'summary_emb', [1.0,0.0]) AS s ORDER BY s ASC LIMIT 2",
@@ -3808,6 +3814,22 @@ def vector_order_graph() -> kglite.KnowledgeGraph:
     graph = kglite.KnowledgeGraph()
     graph.add_nodes(pd.DataFrame({"id": [0, 1, 2, 3], "summary": ["x"] * 4}), "Doc", "id")
     graph.set_embeddings("Doc", "summary", {0: [1.0, 0.0], 1: [0.0, 1.0], 2: [-1.0, 0.0]})
+    return graph
+
+
+@pytest.fixture
+def vector_index_entry_graph(vector_order_graph) -> kglite.KnowledgeGraph:
+    # This separated three-vector corpus returns every member; verify that
+    # precondition before using ANN output as an exact differential oracle.
+    graph = vector_order_graph
+    graph.cypher("MATCH (d:Doc {id:3}) DETACH DELETE d")
+    graph.build_vector_index("Doc", "summary")
+    assert graph.cypher("MATCH (d:Doc) RETURN count(d) AS n").scalar() == 3
+    rows = graph.cypher(
+        "MATCH (d:Doc) RETURN d.id AS id, vector_score(d, 'summary_emb', [1.0,0.0]) AS s ORDER BY s DESC LIMIT 3"
+    )
+    assert rows.diagnostics["retrieval"][0]["actual_mode"] == "hnsw"
+    assert [row["id"] for row in rows] == [0, 1, 2]
     return graph
 
 

@@ -350,3 +350,52 @@ fn fused_scans_propagate_vector_argument_errors() {
         assert!(error.contains(expected), "{error}");
     }
 }
+
+#[test]
+fn whole_type_hnsw_entry_returns_winners_and_rejects_reordered_coverage() {
+    let vectors: Vec<_> = (0..128).map(|i| ("doc", [i as f32, 1.0])).collect();
+    let mut graph = docs(&vectors);
+    crate::graph::embeddings::build_vector_index(
+        &mut graph, "Doc", "summary", None, None, None, None, None,
+    )
+    .unwrap();
+    let params = HashMap::new();
+    let mut query = parser::parse_cypher(
+        "MATCH (d:Doc) RETURN d.id AS id, vector_score(d, 'summary_emb', [1.0,0.0]) AS s ORDER BY s DESC LIMIT 3",
+    )
+    .unwrap();
+    crate::graph::languages::cypher::planner::optimize(&mut query, &graph, &params);
+    let executor = CypherExecutor::with_params(&graph, &params, None);
+    let winners = executor
+        .try_hnsw_entry(&query.clauses)
+        .unwrap()
+        .expect("entry must run");
+    assert_eq!(winners.rows.len(), 3);
+    assert_eq!(
+        winners.rows[0].projected.get("id"),
+        Some(&Value::Int64(128))
+    );
+    assert_eq!(
+        winners.rows[0].node_bindings.get("d"),
+        Some(&petgraph::graph::NodeIndex::new(127))
+    );
+    let capped = CypherExecutor::with_params(&graph, &params, None).with_max_work_units(Some(64));
+    assert!(capped
+        .try_hnsw_entry(&query.clauses)
+        .unwrap_err()
+        .contains("64"));
+    let expired = CypherExecutor::with_params(&graph, &params, Some(Instant::now()));
+    assert!(expired.try_hnsw_entry(&query.clauses).is_err());
+    static CANCELLED: AtomicBool = AtomicBool::new(true);
+    let cancelled =
+        CypherExecutor::with_params(&graph, &params, None).with_cancel(Some(&CANCELLED));
+    assert!(cancelled.try_hnsw_entry(&query.clauses).is_err());
+    drop(executor);
+    // Equal cardinality is insufficient: type scan order decides stable ties.
+    graph
+        .type_indices
+        .entry_or_default("Doc".to_string())
+        .swap(0, 1);
+    let executor = CypherExecutor::with_params(&graph, &params, None);
+    assert!(executor.try_hnsw_entry(&query.clauses).unwrap().is_none());
+}
