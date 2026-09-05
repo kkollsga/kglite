@@ -110,7 +110,7 @@ fn v4_parallel_maps_update_delete_and_idempotent_replay() {
             (1, 2, Value::Int64(23))
         ]
     );
-    apply_frames(&mut checkpoint, &[f.clone()], 0).unwrap();
+    apply_frames(&mut checkpoint, std::slice::from_ref(&f), 0).unwrap();
     apply_frames(&mut checkpoint, &[f], 0).unwrap();
     assert_eq!(edges(&checkpoint), edges(&live));
     live.graph.remove_edge(added);
@@ -153,7 +153,7 @@ fn v4_node_recreation_clears_labels_edges_and_retains_new_parallel_group() {
     add(&mut live, 1, 2, 7);
     add(&mut live, 1, 2, 7);
     let f = frame(&mut live, 1);
-    apply_frames(&mut checkpoint, &[f.clone()], 0).unwrap();
+    apply_frames(&mut checkpoint, std::slice::from_ref(&f), 0).unwrap();
     apply_frames(&mut checkpoint, &[f], 0).unwrap();
     let idx = node(&mut checkpoint, 1);
     assert!(checkpoint.secondary_label_names(idx).is_empty());
@@ -606,7 +606,7 @@ fn v4_legacy_single_member_remains_valid_and_final_group_disambiguates() {
             lsn: 1,
             ops: vec![legacy_edge(remove)],
         };
-        apply_frames(&mut graph, &[legacy.clone()], 0).unwrap();
+        apply_frames(&mut graph, std::slice::from_ref(&legacy), 0).unwrap();
         assert_eq!(
             edges(&graph),
             if remove {
