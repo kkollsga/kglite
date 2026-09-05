@@ -44,7 +44,7 @@ use crate::graph::storage::GraphRead;
 
 /// `class_or_type` plus every declared class whose ancestor chain contains
 /// it — the accepted endpoint set a supertype declaration widens to.
-fn accepted_types(store: &OntologyStore, class_or_type: &str) -> Vec<String> {
+pub(super) fn accepted_types(store: &OntologyStore, class_or_type: &str) -> Vec<String> {
     let mut out = vec![class_or_type.to_string()];
     for name in store.classes.keys() {
         if store
@@ -136,6 +136,7 @@ fn edge_property_findings(
         DeclaredCheck::RequiredProperties | DeclaredCheck::PropertyTypes
     ));
     let required = check == DeclaredCheck::RequiredProperties;
+    let required_properties = unique_required_properties(&decl.required_properties);
     let exempted_types = exempt_source_types(&graph.ontology, decl.exempt_classes(check.name()));
     let key = InternedKey::from_str(edge_type);
     let mut out = Vec::new();
@@ -144,7 +145,7 @@ fn edge_property_findings(
             continue;
         }
         let failed: Vec<String> = if required {
-            decl.required_properties
+            required_properties
                 .iter()
                 .filter(|p| matches!(er.weight().get_property(p), None | Some(Value::Null)))
                 .cloned()
@@ -479,7 +480,7 @@ pub(super) fn no_arg_declaration_rows(
 /// The YIELD alias a procedure should project `name` under: the alias when
 /// the caller renamed the column, the column name otherwise, `None` when it
 /// wasn't yielded at all.
-fn yield_alias(yield_items: &[YieldItem], name: &str) -> Option<String> {
+pub(super) fn yield_alias(yield_items: &[YieldItem], name: &str) -> Option<String> {
     yield_items
         .iter()
         .find(|y| y.name == name)
@@ -496,7 +497,7 @@ const AUDIT_BY_VALUES: &[&str] = &["domain_class", "property"];
 /// missing three declared properties is counted under each of them, so the
 /// lines sum to at least the aggregate.
 #[derive(Clone, Copy, PartialEq)]
-enum AuditBreakdown {
+pub(super) enum AuditBreakdown {
     None,
     DomainClass,
     Property,
@@ -560,6 +561,10 @@ pub(super) fn execute_ontology_audit(
     let mut out = Vec::new();
     for line in audit_lines(graph, breakdown)? {
         let mut row = ResultRow::new();
+        if let Some(a) = alias("entity_kind") {
+            row.projected
+                .insert(a, Value::String(line.entity_kind.to_string()));
+        }
         if let Some(a) = alias("rule") {
             row.projected.insert(a, Value::String(line.rule));
         }
@@ -680,6 +685,7 @@ pub(super) fn execute_edge_property_violation(
 
 /// One scorecard line of [`audit_counts`].
 pub(crate) struct AuditLine {
+    pub(crate) entity_kind: &'static str,
     pub(crate) rule: String,
     /// The primary node type this line's violations share, when the caller
     /// asked for a per-class breakdown; `None` on an aggregate line.
@@ -704,6 +710,9 @@ pub(crate) struct AuditLine {
 /// gate, which acts on the `severity` this module only reports. One
 /// aggregate line per declared check.
 pub(crate) fn audit_counts(graph: &DirGraph) -> Result<Vec<AuditLine>, String> {
+    // Blueprint calls this outside the executor's read pass. Disk node/edge
+    // views must remain protected until all owned audit lines are collected.
+    let _read_pass = graph.begin_read_pass();
     audit_lines(graph, AuditBreakdown::None)
 }
 
@@ -744,6 +753,7 @@ fn audit_lines(graph: &DirGraph, breakdown: AuditBreakdown) -> Result<Vec<AuditL
             let line = |domain_class: Option<String>,
                         property: Option<String>,
                         violations: usize| AuditLine {
+                entity_kind: "edge",
                 rule: format!("{rel}.{}", check.name()),
                 domain_class,
                 property,
@@ -783,6 +793,7 @@ fn audit_lines(graph: &DirGraph, breakdown: AuditBreakdown) -> Result<Vec<AuditL
             }
         }
     }
+    out.extend(super::node_ontology::audit_lines(graph, breakdown));
     Ok(out)
 }
 
@@ -812,12 +823,23 @@ fn violations_by_domain_class(
     counts
 }
 
+/// A repeated declaration still names one property. Apply at read time too,
+/// because persisted or directly constructed declarations can contain repeats.
+pub(super) fn unique_required_properties(properties: &[String]) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    properties
+        .iter()
+        .filter(|p| seen.insert(*p))
+        .cloned()
+        .collect()
+}
+
 /// The properties a check declares, in the order it declares them:
 /// `required_properties` as listed, `property_types` by name (it is a map).
 /// Empty for every check that declares none.
 fn declared_property_names(decl: &RelationshipDecl, check: DeclaredCheck) -> Vec<String> {
     match check {
-        DeclaredCheck::RequiredProperties => decl.required_properties.clone(),
+        DeclaredCheck::RequiredProperties => unique_required_properties(&decl.required_properties),
         DeclaredCheck::PropertyTypes => decl.property_types.keys().cloned().collect(),
         _ => Vec::new(),
     }

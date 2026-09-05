@@ -626,3 +626,134 @@ fn kernel_constants_and_formula_match_hand_computed_bm25() {
     // the stopword work that v1 ships no stopword list for.
     assert!(index.score(0, &rare) > index.score(0, &common));
 }
+
+#[test]
+fn top_k_huge_limit_bounds_capacity_by_actual_candidates() {
+    let docs = corpus(&[(0, "needle"), (1, "needle"), (2, "other")]);
+    let index = TextIndex::build(docs.iter().map(|(slot, text)| (*slot, text)));
+    let query = index.prepare_query("needle");
+    let expected = sorted_by_rank(&index, &query);
+    assert_eq!(
+        expected.iter().map(|hit| hit.slot).collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+    // usize::MAX first makes the pre-fix debug failure a checked k+1 overflow,
+    // before any attempt to allocate an enormous buffer.
+    for limit in [usize::MAX, i64::MAX as usize] {
+        let hits = index.top_k(&query, limit);
+        assert_eq!(
+            hits.iter()
+                .map(|hit| (hit.slot, hit.score))
+                .collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|hit| (hit.slot, hit.score))
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+fn assert_batch_matches(index: &TextIndex, docs: &BTreeMap<u32, String>) {
+    index.validate().unwrap();
+    let rebuilt = TextIndex::build(docs.iter().map(|(slot, text)| (*slot, text)));
+    assert_eq!(snapshot(index), snapshot(&rebuilt));
+    let corpus: Vec<_> = docs
+        .iter()
+        .map(|(slot, text)| (*slot, text.clone()))
+        .collect();
+    for query in ["alpha beta gamma", "tromsø 日本", "old fresh temporary", ""] {
+        let prepared = index.prepare_query(query);
+        for (slot, score) in reference_scores(&corpus, query) {
+            assert_eq!(index.score(slot, &prepared), score, "slot {slot}: {query}");
+        }
+        assert_eq!(
+            index.top_k(&prepared, 1000),
+            rebuilt.top_k(&rebuilt.prepare_query(query), 1000)
+        );
+    }
+}
+
+#[test]
+fn batch_replacement_preserves_term_identity_empty_docs_and_sparse_order() {
+    let mut docs: BTreeMap<_, _> = corpus(&[(90, "alpha alpha"), (2, "beta"), (7, "old")])
+        .into_iter()
+        .collect();
+    let mut index = TextIndex::build(docs.iter().map(|(slot, text)| (*slot, text)));
+    // A previously freed ID may be reused, but IDs named by pending edits may
+    // not be retired while another document can still acquire that term.
+    index.add_doc(100, "temporary");
+    index.remove_doc(100);
+    let changes = [
+        (90, Some("beta")),
+        (2, Some("alpha alpha")),
+        (7, None),
+        (63, Some("fresh")),
+        (8, Some("")),
+        (101, None),
+    ];
+    assert_eq!(index.replace_batch(changes), changes.len());
+    for (slot, body) in changes {
+        if let Some(body) = body {
+            docs.insert(slot, body.to_string());
+        } else {
+            docs.remove(&slot);
+        }
+    }
+    assert!(index.contains_doc(8));
+    assert!(!index.contains_doc(7));
+    assert_batch_matches(&index, &docs);
+    assert_eq!(
+        index.replace_batch(std::iter::empty::<(u32, Option<&str>)>()),
+        0
+    );
+    assert_batch_matches(&index, &docs);
+}
+
+#[test]
+fn randomized_batch_replacement_matches_independent_build_and_naive_scores() {
+    let mut rng = Rng(0x41b_a7c4);
+    let mut docs = BTreeMap::new();
+    let mut index = TextIndex::new();
+    for _ in 0..120 {
+        let mut changes = BTreeMap::new();
+        for _ in 0..20 {
+            let slot = rng.below(80) as u32 * 7;
+            let body = (rng.below(4) != 0).then(|| random_text(&mut rng));
+            changes.insert(slot, body);
+        }
+        // Reverse sparse order is deliberately different from posting order.
+        let count = index.replace_batch(
+            changes
+                .iter()
+                .rev()
+                .map(|(slot, body)| (*slot, body.as_deref())),
+        );
+        assert_eq!(count, changes.len());
+        for (slot, body) in changes {
+            if let Some(body) = body {
+                docs.insert(slot, body);
+            } else {
+                docs.remove(&slot);
+            }
+        }
+        assert_batch_matches(&index, &docs);
+    }
+}
+
+#[test]
+fn batch_term_churn_reuses_retired_dictionary_slots() {
+    let mut index = TextIndex::new();
+    for generation in 0..200 {
+        let a = format!("word{generation} alpha");
+        let b = format!("other{generation} beta");
+        index.replace_batch([(4, Some(a.as_str())), (1, Some(b.as_str()))]);
+        index.validate().unwrap();
+        assert!(index.names.len() <= 6, "retired term IDs must be reused");
+        assert_eq!(index.ids.len(), 4);
+    }
+    index.replace_batch([(4, None::<&str>), (1, None)]);
+    assert_eq!(index.total_docs(), 0);
+    assert!(index.ids.is_empty());
+    assert_eq!(index.names.len(), index.free_ids.len());
+    index.validate().unwrap();
+}

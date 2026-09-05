@@ -457,7 +457,7 @@ fn a_disk_build_after_a_mutation_is_not_lost_with_the_workspace() {
     let root = tempfile::tempdir().unwrap();
 
     let mut graph = graph_for_mode(StorageMode::Disk, root.path());
-    graph.prepare_disk_mutation().unwrap();
+    graph.prepare_mutation().unwrap();
     load_ntriples(
         &mut graph,
         fixture.path().to_str().unwrap(),

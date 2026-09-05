@@ -301,7 +301,7 @@ impl MmapColumnStore {
             if self.read_null(&fc.nulls, row) {
                 return None;
             }
-            Some(Value::UniqueId(self.read_u32(&fc.data, row)))
+            Some(self.read_fixed_value(fc, row))
         }
     }
 
@@ -517,7 +517,10 @@ impl MmapColumnStore {
             if self.read_null(&fc.nulls, row) {
                 return None;
             }
-            Some(BorrowedValue::UniqueId(self.read_u32(&fc.data, row)))
+            Some(match fc.col_type {
+                ColType::Int64 => BorrowedValue::Int64(self.read_i64(&fc.data, row)),
+                _ => BorrowedValue::UniqueId(self.read_u32(&fc.data, row)),
+            })
         }
     }
 

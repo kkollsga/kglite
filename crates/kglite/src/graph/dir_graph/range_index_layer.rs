@@ -226,8 +226,8 @@ impl<K: Ord + Clone> LayeredRangeIndex<K> {
     }
 
     /// Fold the level stack back into one, for the levels this graph is the
-    /// last holder of. Called at write entry (`graph::handle`) beside the
-    /// other layered stores' compaction.
+    /// last holder of. Called at write entry or successful Session publication
+    /// (`graph::handle`) beside the other layered stores' compaction.
     pub fn try_compact(&mut self) {
         if self.levels.len() <= 1 {
             return;

@@ -153,7 +153,8 @@ pub struct DirGraph {
     /// Writes are the other half: `unique_claims` reads `unique_indices`, so a
     /// deferred graph would admit duplicates. Every route to a `&mut DirGraph`
     /// that can write materializes first — `handle::make_dir_graph_mut`,
-    /// `session::execute_mut`, and each index/constraint DDL entry point — so
+    /// `session::execute_mut`, direct mutation preparation, and each
+    /// index/constraint DDL entry point — so
     /// the index is complete *before* the write it must record.
     #[serde(skip)]
     pub(crate) indexes_deferred: bool,
@@ -400,6 +401,8 @@ pub struct DirGraph {
     /// carry the same LSN as a fresh one.
     #[serde(default)]
     pub checkpoint_lsn: u64,
+    #[serde(skip)]
+    pub(crate) checkpoint_permit: crate::graph::durability::CheckpointPermit,
     /// What the last save recorded about the change log that was running then
     /// — see [`CdcHandoff`](crate::graph::cdc::CdcHandoff).
     ///
@@ -882,6 +885,7 @@ impl DirGraph {
             graph_instructions: HashMap::new(),
             user_schema_version: 0,
             checkpoint_lsn: 0,
+            checkpoint_permit: Default::default(),
             cdc_handoff: None,
             auto_vacuum_threshold: default_auto_vacuum_threshold(),
             auto_vacuums_run: 0,
@@ -955,6 +959,7 @@ impl DirGraph {
             graph_instructions: HashMap::new(),
             user_schema_version: 0,
             checkpoint_lsn: 0,
+            checkpoint_permit: Default::default(),
             cdc_handoff: None,
             auto_vacuum_threshold: default_auto_vacuum_threshold(),
             auto_vacuums_run: 0,
@@ -1976,6 +1981,12 @@ impl DirGraph {
         self.materialize_indexes();
         self.rebuild_type_indices();
 
+        // Vacuum relocates physical occupants; retain declarations even for
+        // constrained types whose last node was removed.
+        if !self.unique_indices.is_empty() {
+            self.rebuild_all_unique_indices();
+        }
+
         // Lazy caches rebuild on next access.
         self.id_indices.clear();
         self.connection_types.clear();
@@ -2155,7 +2166,7 @@ impl DirGraph {
 
         // Rebuild the columnar stores: the old ones carry orphaned rows from
         // deleted nodes, and every row id the compaction just invalidated. The
-        // disable/enable cycle reads only live nodes, producing fresh
+        // rebuild reads only live nodes, producing fresh
         // `ColumnStore`s with no dead rows.
         //
         // Still gated, and the gate still has a false arm — narrowly. Every

@@ -365,7 +365,9 @@ impl<'a> CypherExecutor<'a> {
                         }
                         Ok(result)
                     }
-                    Value::String(s) => parse_json_float_list(&s),
+                    Value::String(s) => {
+                        parse_json_float_list(&s).map_err(|e| format!("vector_score(): {e}"))
+                    }
                     _ => Err("vector_score(): query vector must be a list of numbers".into()),
                 }
             }

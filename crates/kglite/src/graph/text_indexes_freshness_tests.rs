@@ -90,7 +90,7 @@ fn score_map(graph: &DirGraph, query: &str) -> Vec<(i64, Option<f64>)> {
 }
 
 /// The scores a wholesale rebuild of the same graph would produce. The oracle
-/// for every catch-up assertion: `build` and `add_doc` are deliberately
+/// for every catch-up assertion: `build` and batch replacement are deliberately
 /// separate code paths in `TextIndex`, so this is a real comparison.
 fn rebuild_scores(graph: &DirGraph, query: &str) -> Vec<(i64, Option<f64>)> {
     let mut rebuilt = graph.clone();
@@ -471,16 +471,12 @@ fn randomized_crud_with_refresh_stays_identical_to_a_rebuild() {
 
 // ── the fold-vs-rebuild cost switch ──────────────────────────────────
 //
-// Folding one document splices into every posting list its terms appear in,
-// so per-document cost grows with the corpus (P14, measured 2026-08-25). Past
-// the measured crossover a refresh rebuilds instead, and the two arms are
-// told apart here by what each *reads*: the fold re-reads exactly the delta,
-// the rebuild re-reads every member of the type — and only the rebuild can
-// restate the skipped count, because only it revisits the nodes the index
-// holds no document for.
+// Arms are distinguished by what they read: folds read the delta; rebuilds
+// read the type and restate skipped nodes. The latter is an observable contract
+// even while the conservative rebuild boundary remains unchanged.
 
-/// Add a `Doc` whose indexed property is absent: a node every *build* counts
-/// as skipped, and no fold ever revisits.
+/// A bodyless node is counted as skipped by a build. Folds leave that
+/// build-time count unchanged.
 fn push_bodyless_doc(graph: &mut DirGraph, id: i64) -> NodeIndex {
     let mut props = HashMap::new();
     props.insert("tag".to_string(), Value::String("no body".to_string()));
@@ -553,7 +549,7 @@ fn assert_refresh_arm(creations: usize, expect_rebuild: bool) {
         assert_eq!(
             store(&graph).skipped(),
             0,
-            "a fold never revisits a node it holds no document for"
+            "a fold preserves the build-time skipped count"
         );
     }
     assert!(
@@ -569,6 +565,11 @@ fn assert_refresh_arm(creations: usize, expect_rebuild: bool) {
 #[test]
 fn a_small_delta_folds_and_matches_a_rebuild() {
     assert_refresh_arm(10, false);
+}
+
+#[test]
+fn a_batch_delta_folds_and_matches_a_rebuild() {
+    assert_refresh_arm(BATCH_MIN_CHANGES, false);
 }
 
 #[test]
@@ -605,10 +606,109 @@ fn a_foreign_bulk_load_does_not_route_a_refresh_into_a_rebuild() {
 /// is: it decides between two correct paths, so what it owes is the measured
 /// crossover, not an answer.
 #[test]
-fn the_cost_switch_prefers_folding_up_to_the_measured_crossover() {
-    assert!(!rebuild_beats_folding(0));
-    assert!(!rebuild_beats_folding(1));
-    assert!(!rebuild_beats_folding(FOLD_SLOTS_PER_REBUILD));
-    assert!(rebuild_beats_folding(FOLD_SLOTS_PER_REBUILD + 1));
-    assert!(rebuild_beats_folding(usize::MAX));
+fn the_cost_switch_prefers_folding_up_to_the_conservative_boundary() {
+    for documents in [0, 5000, EXTENDED_FOLD_MIN_DOCS - 1] {
+        assert!(!rebuild_beats_folding(0, documents));
+        assert!(!rebuild_beats_folding(1, documents));
+        assert!(!rebuild_beats_folding(FOLD_SLOTS_PER_REBUILD, documents));
+        assert!(rebuild_beats_folding(FOLD_SLOTS_PER_REBUILD + 1, documents));
+    }
+    assert!(!rebuild_beats_folding(
+        EXTENDED_FOLD_LIMIT,
+        EXTENDED_FOLD_MIN_DOCS
+    ));
+    assert!(rebuild_beats_folding(
+        EXTENDED_FOLD_LIMIT + 1,
+        EXTENDED_FOLD_MIN_DOCS
+    ));
+    assert!(rebuild_beats_folding(usize::MAX, EXTENDED_FOLD_MIN_DOCS));
+}
+
+#[test]
+fn a_large_corpus_batches_through_the_extended_boundary() {
+    let mut graph = DirGraph::new();
+    for id in 0..EXTENDED_FOLD_MIN_DOCS {
+        push_doc(&mut graph, id as i64, "quick");
+    }
+    build_text_index(&mut graph, "Doc", "body", None).unwrap();
+    for offset in 0..EXTENDED_FOLD_LIMIT - 1 {
+        push_doc(
+            &mut graph,
+            (EXTENDED_FOLD_MIN_DOCS + offset) as i64,
+            "later",
+        );
+    }
+    push_bodyless_doc(&mut graph, 30_000);
+    assert_eq!(store(&graph).refresh(&graph, "Doc"), EXTENDED_FOLD_LIMIT);
+    assert_eq!(
+        store(&graph).skipped(),
+        0,
+        "a rebuild would restate the new skipped node"
+    );
+    assert_eq!(
+        store(&graph).documents(),
+        EXTENDED_FOLD_MIN_DOCS + EXTENDED_FOLD_LIMIT - 1
+    );
+    assert_matches_rebuild(&graph, "quick later");
+}
+
+#[test]
+fn a_pending_batch_forks_independently_with_dirty_recycled_and_foreign_slots() {
+    let (mut parent, nodes) = indexed_corpus();
+    for id in 4..=128 {
+        push_doc(&mut parent, id, "original");
+    }
+    run(&mut parent, "MATCH (d:Doc) SET d.body = 'alpha alpha'");
+    crate::graph::mutation::maintain::detach_delete_nodes(&mut parent, &HashSet::from([nodes[1]]));
+    assert_eq!(push_doc(&mut parent, 999, "beta"), nodes[1]);
+    push_doc(&mut parent, 1000, "gamma");
+    push_person(&mut parent, 2000);
+    assert_eq!(store(&parent).delta_size(&parent), 130);
+    let mut child = parent.clone();
+    run(&mut child, "MATCH (d:Doc) WHERE d.id = 1 SET d.body = null");
+    run(&mut child, "MATCH (d:Doc) WHERE d.id = 999 SET d.body = []");
+    let generation = store(&parent).generation();
+    assert_eq!(store(&child).refresh(&child, "Doc"), 130);
+    assert_eq!(store(&parent).generation(), generation);
+    assert!(store(&parent).is_stale(&parent));
+    assert_eq!(
+        store(&child).documents(),
+        128,
+        "empty list counts, null does not"
+    );
+    assert_matches_rebuild(&child, "alpha beta gamma");
+    assert_eq!(store(&parent).refresh(&parent, "Doc"), 130);
+    assert_eq!(store(&parent).documents(), 129);
+    assert_matches_rebuild(&parent, "alpha beta gamma");
+    assert_ne!(
+        score_map(&parent, "alpha beta"),
+        score_map(&child, "alpha beta")
+    );
+    assert!(!store(&child).is_stale(&child));
+}
+
+#[test]
+fn a_rolled_back_delete_batch_restores_every_pruned_document() {
+    let (mut graph, _) = indexed_corpus();
+    for id in 4..=128 {
+        push_doc(&mut graph, id, "quick marmoset");
+    }
+    build_text_index(&mut graph, "Doc", "body", None).unwrap();
+    let params = HashMap::new();
+    let failed = execute_mut(
+        &mut graph,
+        "MATCH (a:Doc), (b:Doc) WHERE a.id = 1 AND b.id <> 1 DELETE b SET a.id = 999",
+        &ExecuteOptions::eager(&params),
+    );
+    assert!(failed.is_err());
+    assert_eq!(graph.type_indices.get("Doc").unwrap().len(), 128);
+    assert_eq!(
+        store(&graph).documents(),
+        1,
+        "all 127 deletes must have pruned their documents before rollback"
+    );
+    assert_eq!(store(&graph).delta_size(&graph), 127);
+    assert_eq!(store(&graph).refresh(&graph, "Doc"), 127);
+    assert_eq!(store(&graph).documents(), 128);
+    assert_matches_rebuild(&graph, "quick marmoset");
 }

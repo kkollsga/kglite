@@ -308,11 +308,10 @@ Operating notes:
   `save_graph` refused from then on. Inspect with `kglite.load(path)` or
   `kglite.open_session(path)`, which take neither the lease nor the save-back
   binding.
-- **A library `save()` takes no lease at all**, so the lease does not protect
-  this server from one. It is taken by `kglite.open()`, the CLI's eager save
-  paths, the Bolt server and this server; `KnowledgeGraph.save()`,
-  `kglite::api::io::save_graph` and the C ABI's save entry points write
-  whatever path they are given without asking for it. A script that does
+- **An unlocked library save can replace this server's checkpoint.** Python
+  handles opened with locking transfer their lease on save-as. Handles from
+  `kglite.load()`, explicit `lock=False`, the raw Rust `save_graph` and C save
+  entry points still rely on the caller to coordinate writers. A script that does
   `kglite.load(path)`, mutates in memory and calls `save(path)` therefore
   publishes over a path this server is mid-write on. Nothing is lost from the
   *file* — it holds a complete graph, and this server's own `save_graph` then

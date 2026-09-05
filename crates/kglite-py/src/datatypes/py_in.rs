@@ -1,5 +1,7 @@
 // src/datatypes/py_in.rs
 use super::on_invalid::{self, OnInvalid};
+use super::py_value::is_numpy_ndarray;
+pub use super::py_value::py_value_to_value;
 use super::type_conversions::{to_bool, to_datetime, to_f64, to_i64, to_timestamp, to_u32};
 use super::values::{ColumnData, ColumnType, DataFrame, FilterCondition, Value};
 use pyo3::prelude::*;
@@ -370,18 +372,6 @@ fn py_cell_to_value_list(item: &Bound<'_, PyAny>) -> PyResult<Vec<Value>> {
         return py_cell_to_value_list(&as_list);
     }
     Ok(vec![py_value_to_value(item)?])
-}
-
-/// True when the object is a `numpy.ndarray`, checked structurally via the
-/// type's name + defining module so numpy is never imported when absent.
-fn is_numpy_ndarray(value: &Bound<'_, PyAny>) -> bool {
-    let ty = value.get_type();
-    ty.name().map(|n| n == "ndarray").unwrap_or(false)
-        && ty
-            .getattr("__module__")
-            .ok()
-            .and_then(|m| m.extract::<String>().ok())
-            .is_some_and(|m| m == "numpy" || m.starts_with("numpy."))
 }
 
 pub fn pandas_to_dataframe(
@@ -864,95 +854,4 @@ pub fn parse_sort_fields(
             }
         })
         .collect()
-}
-
-pub fn py_value_to_value(value: &Bound<'_, PyAny>) -> PyResult<Value> {
-    if value.is_none() {
-        return Ok(Value::Null);
-    }
-
-    // Check bool FIRST - Python bool is a subclass of int, so must check before numeric
-    if value.is_instance_of::<pyo3::types::PyBool>() {
-        if let Ok(b) = value.extract::<bool>() {
-            return Ok(Value::Boolean(b));
-        }
-    }
-
-    // numpy.ndarray → native List via `.tolist()` (multi-D nests through the
-    // list branch below). Checked before the numeric extracts because a
-    // size-1 float array would otherwise scalar-ize through `__float__`.
-    if is_numpy_ndarray(value) {
-        let as_list = value.call_method0("tolist")?;
-        return py_value_to_value(&as_list);
-    }
-
-    // Try numeric types before string (they fail fast without allocation)
-    if let Ok(i) = value.extract::<i64>() {
-        return Ok(Value::Int64(i));
-    }
-    if let Ok(f) = value.extract::<f64>() {
-        return Ok(Value::Float64(f));
-    }
-
-    // String extraction is expensive (allocates), so try last among common types
-    if let Ok(s) = value.extract::<String>() {
-        return Ok(Value::String(s));
-    }
-
-    // Fallback for other types
-    if let Ok(u) = value.extract::<u32>() {
-        return Ok(Value::UniqueId(u));
-    }
-
-    // datetime.datetime → Timestamp; datetime.date → DateTime.
-    // datetime IS-A date in Python, so check PyDateTime FIRST. Before
-    // this, a Python date/datetime property silently became Null.
-    if value.is_instance_of::<pyo3::types::PyDateTime>() {
-        if let Ok(dt) = value.extract::<chrono::NaiveDateTime>() {
-            return Ok(Value::Timestamp(dt));
-        }
-    }
-    if value.is_instance_of::<pyo3::types::PyDate>() {
-        if let Ok(d) = value.extract::<chrono::NaiveDate>() {
-            return Ok(Value::DateTime(d));
-        }
-    }
-
-    // dict → native Map (recursive). Enables `$m.prop`, and
-    // `UNWIND $rows AS r ... r.key` over a parameterised list of dicts — the
-    // common batch-insert/update shape. Without this a dict param became
-    // Value::Null and every `.key` access returned null.
-    if let Ok(dict) = value.cast::<pyo3::types::PyDict>() {
-        // Built as a pair buffer and sorted once: a Python dict arrives in
-        // insertion order, so an insert-sorted container would memmove per key
-        // on the common already-ordered-by-nothing case.
-        let mut pairs: Vec<(kglite_core::datatypes::PropKey, Value)> =
-            Vec::with_capacity(dict.len());
-        for (k, v) in dict.iter() {
-            let key: String = k.extract()?;
-            pairs.push((
-                kglite_core::datatypes::PropKey::from(key),
-                py_value_to_value(&v)?,
-            ));
-        }
-        return Ok(Value::Map(kglite_core::datatypes::PropMap::from_pairs(
-            pairs,
-        )));
-    }
-
-    // list / tuple → native Value::List (recursive). UNWIND, `IN`, and
-    // vector_score all accept a real `Value::List` (extract_float_list
-    // takes both that and the legacy JSON string), so a list of dicts
-    // unwinds into real maps instead of stringified nulls.
-    if let Ok(list) = value.cast::<pyo3::types::PyList>() {
-        let items: PyResult<Vec<Value>> =
-            list.iter().map(|item| py_value_to_value(&item)).collect();
-        return Ok(Value::List(items?));
-    }
-    if let Ok(tup) = value.cast::<pyo3::types::PyTuple>() {
-        let items: PyResult<Vec<Value>> = tup.iter().map(|item| py_value_to_value(&item)).collect();
-        return Ok(Value::List(items?));
-    }
-
-    Ok(Value::Null)
 }

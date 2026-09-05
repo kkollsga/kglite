@@ -17,6 +17,7 @@ use std::borrow::Cow;
 use std::io;
 use std::path::Path;
 use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 
 // ─── TypedColumn ─────────────────────────────────────────────────────────────
 
@@ -141,6 +142,78 @@ impl Clone for TypedColumn {
             },
             Self::Mixed { data } => Self::Mixed { data: data.clone() },
         }
+    }
+}
+
+impl TypedColumn {
+    /// Unique targets, including unique mappings, retain the existing push
+    /// path. Shared mapped columns clone to heap just like ordinary Clone;
+    /// declined reservations fall back to Arc::make_mut.
+    pub(super) fn make_mut_for_append<'a>(
+        handle: &'a mut Arc<Self>,
+        value: &Value,
+    ) -> &'a mut Self {
+        if Arc::strong_count(handle) > 1 {
+            // Weak-only sharing keeps Arc::make_mut's dissociation behavior.
+            if let Some(copied) = handle.try_clone_for_append(value) {
+                *handle = Arc::new(copied);
+            }
+        }
+        Arc::make_mut(handle)
+    }
+
+    fn try_clone_for_append(&self, value: &Value) -> Option<Self> {
+        macro_rules! scalar {
+            ($variant:ident, $data:ident, $nulls:ident) => {
+                Self::$variant {
+                    data: $data.try_clone_for_append(1)?,
+                    nulls: $nulls.try_clone_for_append(1)?,
+                }
+            };
+        }
+        let copied = match self {
+            Self::Int64 { data, nulls } if matches!(value, Value::Int64(_) | Value::Null) => {
+                scalar!(Int64, data, nulls)
+            }
+            Self::Float64 { data, nulls }
+                if matches!(value, Value::Float64(_) | Value::Int64(_) | Value::Null) =>
+            {
+                scalar!(Float64, data, nulls)
+            }
+            Self::UniqueId { data, nulls } if matches!(value, Value::UniqueId(_) | Value::Null) => {
+                scalar!(UniqueId, data, nulls)
+            }
+            Self::Bool { data, nulls } if matches!(value, Value::Boolean(_) | Value::Null) => {
+                scalar!(Bool, data, nulls)
+            }
+            Self::Date { data, nulls } if matches!(value, Value::DateTime(_) | Value::Null) => {
+                scalar!(Date, data, nulls)
+            }
+            Self::Str {
+                offsets,
+                data,
+                nulls,
+                relocated,
+            } if matches!(value, Value::String(_) | Value::Null) => {
+                let additional = if let Value::String(text) = value {
+                    text.len()
+                } else {
+                    0
+                };
+                Self::Str {
+                    offsets: offsets.try_clone_for_append(1)?,
+                    data: data.try_clone_for_append(additional)?,
+                    nulls: nulls.try_clone_for_append(1)?,
+                    relocated: relocated.clone(),
+                }
+            }
+            // Mixed values and typed demotion retain generic cloning and
+            // conversion rather than predicting their replacement storage.
+            _ => return None,
+        };
+        #[cfg(test)]
+        COLUMN_CLONES.set(COLUMN_CLONES.get() + 1);
+        Some(copied)
     }
 }
 
@@ -1105,3 +1178,6 @@ impl TypedColumn {
         }
     }
 }
+
+#[cfg(test)]
+mod append_capacity_tests;

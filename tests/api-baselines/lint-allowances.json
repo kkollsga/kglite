@@ -539,6 +539,10 @@
       "classification": "dead-code"
     },
     {
+      "identity": "crates/kglite/src/graph/algorithms/clustering.rs::fn:haversine_distance_matrix:pub fn haversine_distance_matrix(points: &[(f64, f64)], interrupt: Interrupt) -> Vec<Vec<f64>>::dead_code",
+      "classification": "dead-code"
+    },
+    {
       "identity": "crates/kglite/src/graph/algorithms/vector.rs::fn:cosine_similarity:pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32::dead_code",
       "classification": "dead-code"
     },

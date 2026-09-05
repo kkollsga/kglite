@@ -199,6 +199,9 @@ class CellResult:
     #: read-probe arm ran), and anything it raised.
     probe_ms: list[float] = field(default_factory=list)
     probe_errors: list[str] = field(default_factory=list)
+    #: Exact acknowledged identities and per-writer tails, recorded after latency clocks.
+    acknowledged_ids: list[int] = field(default_factory=list)
+    worker_results: list[dict] = field(default_factory=list)
 
     @property
     def committed_per_s(self) -> float:
@@ -361,6 +364,7 @@ def _run_cell(
         max_op_attempts = 1
         slowest_op_attempts = 1
         slowest_ms = -1.0
+        acknowledged_ids: list[int] = []
         # Wide enough that a fast K=100 cell cannot walk into the next
         # worker's ids and break the exact landed-count oracle.
         base_id = 1_000_000 + worker_id * 100_000_000
@@ -419,6 +423,7 @@ def _run_cell(
                     latencies.append(elapsed_ms)
                     commit_times.append(t_end)
                     committed += 1
+                    acknowledged_ids.extend(range(node_id, node_id + rows_per_tx))
                     max_op_attempts = max(max_op_attempts, op_attempts)
                     if elapsed_ms > slowest_ms:
                         slowest_ms = elapsed_ms
@@ -428,6 +433,20 @@ def _run_cell(
         except Exception as e:  # noqa: BLE001
             hard.append(f"session: {e!r}")
         with lock:
+            result.acknowledged_ids.extend(acknowledged_ids)
+            result.worker_results.append(
+                {
+                    "worker_id": worker_id,
+                    "committed": committed,
+                    "attempts": attempts,
+                    "exhausted_conflicts": exhausted,
+                    "mean_ms": sum(latencies) / len(latencies) if latencies else 0.0,
+                    "p99_ms": _percentile(latencies, 99),
+                    "max_ms": max(latencies, default=0.0),
+                    "max_op_attempts": max_op_attempts,
+                    "slowest_op_attempts": slowest_op_attempts,
+                }
+            )
             result.attempts += attempts
             result.committed += committed
             result.latencies_ms.extend(latencies)

@@ -434,7 +434,7 @@ unsafe fn execute_mut_impl(
 /// issues many small reads.
 ///
 /// On success `out_results_json` is set to an owned JSON string: an
-/// array of `{"columns": [...], "rows": [{...}]}` objects, one per input
+/// array of `{"columns": [...], "rows": [{...}], "diagnostics": {...}}` objects, one per input
 /// query in order, with the same natural-value encoding as
 /// [`kglite_cypher_result_rows_json`]. Free it with
 /// [`kglite_free_string`](crate::kglite_free_string).

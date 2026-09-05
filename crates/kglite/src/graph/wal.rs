@@ -27,9 +27,11 @@
 //! Ops are keyed by **stable logical identity**, never by petgraph
 //! `NodeIndex`/`EdgeIndex` (which do not survive checkpoint load or
 //! compaction). A node is `(node_type, id)`; an edge is
-//! `(conn_type, src, tgt)`. Both are unique in kglite's model, so the
-//! two state-changing shapes are an idempotent **upsert** (add-or-replace
-//! the full property set) and a **remove**. Idempotence means replaying a
+//! `(conn_type, src, tgt)` identifies a parallel-edge group, not one edge.
+//! v4 persists its complete ordered property-map sequence, including equal
+//! maps, and full node state with explicit incarnation resets. Legacy v2/v3
+//! edge upserts/removes retain their original single-edge semantics.
+//! Idempotence means replaying a
 //! frame twice is harmless — important for crash recovery, where the last
 //! frame before a crash may or may not have been applied to the snapshot.
 //!
@@ -37,7 +39,7 @@
 //!
 //! A frame is `[len: u32 LE][crc32: u32 LE][payload: codec(WalFrame)]`,
 //! emitted by a **single** `write_all` (see [`append_frame`]).
-//! The v2/v3 file headers select Postcard for every frame. Older headers
+//! The v2/v3/v4 file headers select Postcard for every frame. Older headers
 //! are rejected before any payload or torn-tail handling.
 //! A crash mid-append leaves a torn trailing frame; [`read_frames`] stops
 //! at the first short read or CRC mismatch and returns every frame up to
@@ -94,7 +96,12 @@ pub const WAL_MAGIC: [u8; 4] = *b"KWAL";
 /// discard* committed frames. The header bump converts that silent data
 /// loss into the loud "unsupported WAL format version" refusal such a
 /// build already implements.
-pub const WAL_FORMAT_VERSION: u8 = 3;
+///
+/// **v3 → v4** appends full-node and parallel-group state tags 5 and 6.
+/// Prior tags and payloads are unchanged. The header is upgraded before a
+/// new writer appends, so a v2/v3-only reader refuses rather than dropping
+/// unfamiliar committed operations as an undecodable tail.
+pub const WAL_FORMAT_VERSION: u8 = 4;
 
 /// Oldest WAL format this build can replay. Frames from any version in
 /// `MIN_READABLE_WAL_FORMAT_VERSION..=WAL_FORMAT_VERSION` decode with the
@@ -255,6 +262,25 @@ pub enum MutationOp {
         id: Value,
         labels: Vec<String>,
     },
+    /// Complete v4 node state. Reset severs the checkpoint incarnation first.
+    ReplaceNodeState {
+        node_type: String,
+        id: Value,
+        title: Value,
+        properties: Vec<(String, Value)>,
+        labels: Vec<String>,
+        reset: bool,
+    },
+    /// Complete v4 parallel group, including identical property maps.
+    /// Empty edges removes the group; nonempty groups require live endpoints.
+    ReplaceEdgeGroup {
+        conn_type: String,
+        src_type: String,
+        src_id: Value,
+        tgt_type: String,
+        tgt_id: Value,
+        edges: Vec<Vec<(String, Value)>>,
+    },
 }
 
 /// One committed mutation operation: the ops it produced, tagged with a
@@ -332,7 +358,18 @@ fn append_frame_with_codec(
     frame: &WalFrame,
     codec: crate::serde_codec::CodecVersion,
 ) -> io::Result<()> {
-    let payload = crate::serde_codec::encode_versioned(codec, frame, MAX_WAL_FRAME_BYTES)
+    append_frame_bounded(w, frame, codec, MAX_WAL_FRAME_BYTES)
+}
+
+// One envelope writer; the explicit bound lets tests reject a full group
+// without allocating a 4 GiB fixture. Production always passes the format cap.
+fn append_frame_bounded(
+    w: &mut impl Write,
+    frame: &WalFrame,
+    codec: crate::serde_codec::CodecVersion,
+    limit: u64,
+) -> io::Result<()> {
+    let payload = crate::serde_codec::encode_versioned(codec, frame, limit)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     let len = u32::try_from(payload.len())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "WAL frame exceeds 4 GiB"))?;
@@ -405,9 +442,44 @@ pub fn read_frames(r: impl Read, stream_len: u64) -> io::Result<Vec<WalFrame>> {
 /// this process's stderr — so the one place that decides *which* wording a
 /// given file earns is reachable from a test, rather than re-derived by one.
 fn read_frames_diagnosed(
-    mut r: impl Read,
+    r: impl Read,
     stream_len: u64,
 ) -> io::Result<(Vec<WalFrame>, Option<String>)> {
+    let read = scan_frames(r, stream_len)?;
+    Ok((read.frames, read.diagnostic))
+}
+
+#[derive(Clone, Copy)]
+struct ResumePoint {
+    version: u8,
+    stream_len: u64,
+    valid_bytes: u64,
+}
+
+struct FrameScan {
+    frames: Vec<WalFrame>,
+    diagnostic: Option<String>,
+    resume: ResumePoint,
+    non_tail_damage: bool,
+}
+
+impl FrameScan {
+    fn ensure_appendable(&self) -> io::Result<()> {
+        if self.non_tail_damage {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "WAL corruption at byte offset {} ends before EOF ({} bytes); refusing to append \
+                     or truncate non-tail damage. Recover the sidecar or move it aside explicitly.",
+                    self.resume.valid_bytes, self.resume.stream_len
+                ),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn scan_frames(mut r: impl Read, stream_len: u64) -> io::Result<FrameScan> {
     let version = read_header(&mut r)?;
     let codec = wal_codec(version)?;
 
@@ -428,13 +500,28 @@ fn read_frames_diagnosed(
             FrameStep::Corrupt(frame_len) => break Some((consumed, Some(consumed + frame_len))),
         }
     };
+    // A corrupt frame with a known end before EOF is not a trailing frame,
+    // even if the following bytes do not decode. Never search payload bytes
+    // for a guessed boundary; a torn prefix supplies no next boundary at all.
+    let non_tail_damage = stopped_at
+        .and_then(|(_, next)| next)
+        .is_some_and(|next| next < stream_len);
     let diagnostic = stopped_at.map(|(offset, resume)| {
         let trailing = resume.map_or(0, |next| {
             count_intact_frames(&mut r, stream_len, next, codec)
         });
         recovery_diagnostic(offset, stream_len, frames.len(), trailing)
     });
-    Ok((frames, diagnostic))
+    Ok(FrameScan {
+        frames,
+        diagnostic,
+        resume: ResumePoint {
+            version,
+            stream_len,
+            valid_bytes: consumed,
+        },
+        non_tail_damage,
+    })
 }
 
 /// What the bytes at one position in the frame walk turned out to be.
@@ -553,8 +640,8 @@ fn recovery_diagnostic(offset: u64, stream_len: u64, recovered: usize, trailing:
         return format!(
             "[kglite] WAL recovery stopped at a torn/corrupt frame at byte offset {offset} \
              (of {stream_len}); recovered {recovered} intact frame(s) before it. This is expected \
-             after a crash mid-commit; the torn tail is discarded and will be truncated at \
-             the next checkpoint."
+             after a crash mid-commit; the torn tail is discarded from recovered state. A writer repairs only a trailing \
+             frame before appending; it refuses damage with a known following frame boundary."
         );
     }
     let discarded = stream_len.saturating_sub(offset);
@@ -619,6 +706,103 @@ pub fn recover(path: &Path) -> io::Result<Vec<WalFrame>> {
     }
 }
 
+/// Recovery plus its verified append boundary, kept internal so callers
+/// cannot manufacture a truncation point. The durable owner holds its writer
+/// lease from this scan through `open_recovered`.
+pub(crate) struct WalRecovery {
+    pub(crate) frames: Vec<WalFrame>,
+    resume: Option<RecoveredBoundary>,
+}
+
+enum AppendBoundary {
+    Unscanned,
+    Missing,
+    Recovered(RecoveredBoundary),
+}
+
+impl AppendBoundary {
+    fn recovered(&self) -> Option<&RecoveredBoundary> {
+        match self {
+            Self::Recovered(recovered) => Some(recovered),
+            Self::Unscanned | Self::Missing => None,
+        }
+    }
+}
+
+struct RecoveredBoundary {
+    point: ResumePoint,
+    source: File,
+    modified: std::time::SystemTime,
+}
+
+/// Compare opened files, retaining the source handle so its identity cannot be
+/// recycled between recovery and append preparation.
+fn same_open_file(left: &File, right: &File) -> io::Result<bool> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let left = left.metadata()?;
+        let right = right.metadata()?;
+        Ok(left.dev() == right.dev() && left.ino() == right.ino())
+    }
+    #[cfg(windows)]
+    {
+        Ok(same_file::Handle::from_file(left.try_clone()?)?
+            == same_file::Handle::from_file(right.try_clone()?)?)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (left, right);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "WAL file identity verification is unsupported on this platform",
+        ))
+    }
+}
+
+fn verify_recovered_file(file: &File, recovered: &RecoveredBoundary) -> io::Result<()> {
+    let metadata = file.metadata()?;
+    if !same_open_file(file, &recovered.source)?
+        || metadata.len() != recovered.point.stream_len
+        || metadata.modified()? != recovered.modified
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "WAL identity or contents changed after recovery; refusing to append",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn recover_for_append(path: &Path) -> io::Result<WalRecovery> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(WalRecovery {
+                frames: Vec::new(),
+                resume: None,
+            });
+        }
+        Err(error) => return Err(error),
+    };
+    let metadata = file.metadata()?;
+    let read = scan_frames(BufReader::new(&file), metadata.len())?;
+    read.ensure_appendable()?;
+    if let Some(message) = read.diagnostic {
+        eprintln!("{message}");
+    }
+    let recovered = RecoveredBoundary {
+        point: read.resume,
+        source: file,
+        modified: metadata.modified()?,
+    };
+    verify_recovered_file(&recovered.source, &recovered)?;
+    Ok(WalRecovery {
+        frames: read.frames,
+        resume: Some(recovered),
+    })
+}
+
 /// Best-effort fsync of a file's parent directory, so a freshly created
 /// file's directory entry survives an OS/power crash (mirrors the
 /// directory-fsync step of `io/file.rs::write_kgl_with`). Errors are
@@ -660,22 +844,26 @@ fn truncate_to_header(file: &mut File) -> io::Result<()> {
 /// not.
 ///
 /// The classification rules applied below are documented on [`Wal::open`].
-fn prepare_wal_file(path: &Path) -> io::Result<()> {
+fn prepare_wal_file(path: &Path, boundary: &AppendBoundary) -> io::Result<File> {
     use std::io::{Seek, SeekFrom};
+    let recovered = boundary.recovered();
     let header_len = (WAL_MAGIC.len() + 1) as u64;
     let mut file = OpenOptions::new()
-        .create(true)
+        .create(matches!(boundary, AppendBoundary::Unscanned))
+        .create_new(matches!(boundary, AppendBoundary::Missing))
         .read(true)
         .write(true)
         .truncate(false)
         .open(path)?;
+    if let Some(recovered) = recovered {
+        verify_recovered_file(&file, recovered)?;
+    }
     let file_len = file.metadata()?.len();
-
     if file_len == 0 {
         write_header(&mut file)?;
         file.sync_all()?;
         sync_parent_dir(path);
-        return Ok(());
+        return Ok(file);
     }
 
     let mut header = [0u8; 5];
@@ -684,7 +872,8 @@ fn prepare_wal_file(path: &Path) -> io::Result<()> {
     let magic_ok = read_len >= WAL_MAGIC.len() && header[..4] == WAL_MAGIC;
 
     if file_len < header_len || (!magic_ok && file_len == header_len) {
-        return truncate_to_header(&mut file);
+        truncate_to_header(&mut file)?;
+        return Ok(file);
     }
     if !magic_ok {
         return Err(io::Error::new(
@@ -700,6 +889,22 @@ fn prepare_wal_file(path: &Path) -> io::Result<()> {
     // Reject an unreadable version before appending to it; the codec lookup
     // owns the actionable message.
     wal_codec(header[4])?;
+    let point = match recovered {
+        Some(recovered) if recovered.point.version == header[4] => recovered.point,
+        Some(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "WAL version changed after recovery; refusing to append",
+            ))
+        }
+        None => {
+            file.seek(SeekFrom::Start(0))?;
+            let read = scan_frames(BufReader::new(&mut file), file_len)?;
+            read.ensure_appendable()?;
+            read.resume
+        }
+    };
+    repair_tail(&file, point)?;
     if header[4] != WAL_FORMAT_VERSION {
         // A readable older version. We are about to append current-format
         // frames, so the header must advertise the newer version or a future
@@ -711,6 +916,16 @@ fn prepare_wal_file(path: &Path) -> io::Result<()> {
         file.seek(SeekFrom::Start(WAL_MAGIC.len() as u64))?;
         file.write_all(&[WAL_FORMAT_VERSION])?;
         file.sync_data()?;
+    }
+    Ok(file)
+}
+
+/// Truncation is synced before an append handle exists, even at Normal:
+/// later acknowledged frames must never sit behind a resurrected old tail.
+fn repair_tail(file: &File, point: ResumePoint) -> io::Result<()> {
+    if point.valid_bytes < point.stream_len {
+        file.set_len(point.valid_bytes)?;
+        file.sync_all()?;
     }
     Ok(())
 }
@@ -737,9 +952,9 @@ pub struct Wal {
 
 impl Wal {
     /// Open the WAL at `path` for appending, creating it with a fresh
-    /// header if absent. An existing WAL is opened in append mode with its
-    /// frames intact — call [`recover`] *before* opening if you need to
-    /// replay them.
+    /// header if absent. Verified frames are preserved; an unreadable trailing
+    /// frame is truncated and synced before appending. A corrupt frame ending
+    /// before EOF is refused. Call [`recover`] first if its frames need replay.
     ///
     /// The header is validated on open. A file too short to hold a full
     /// header, or a header-sized file with the wrong magic, can never
@@ -753,15 +968,43 @@ impl Wal {
     /// frames already present parse under the current schema unchanged.
     ///
     /// `sync` fixes the per-append durability behaviour for the life of the
-    /// handle; see [`SyncMode`]. Header maintenance always barriers
+    /// handle; see [`SyncMode`]. Header and tail repair always barrier
     /// regardless of the level — a WAL whose header might not exist after a
     /// crash could not be recovered at all, and it is paid once per open
     /// rather than once per commit.
     pub fn open(path: PathBuf, sync: SyncMode) -> io::Result<Self> {
-        // Header maintenance first, on an ordinary handle: the append handle
-        // below cannot portably truncate or seek-write (see `prepare_wal_file`).
-        prepare_wal_file(&path)?;
+        Self::open_at_boundary(path, sync, AppendBoundary::Unscanned)
+    }
+
+    pub(crate) fn open_recovered(
+        path: PathBuf,
+        sync: SyncMode,
+        recovered: WalRecovery,
+    ) -> io::Result<Self> {
+        Self::open_at_boundary(
+            path,
+            sync,
+            recovered
+                .resume
+                .map_or(AppendBoundary::Missing, AppendBoundary::Recovered),
+        )
+    }
+
+    fn open_at_boundary(
+        path: PathBuf,
+        sync: SyncMode,
+        boundary: AppendBoundary,
+    ) -> io::Result<Self> {
+        // Maintenance uses a read/write handle: append handles cannot portably
+        // truncate or seek-write. Reuse durable open's scan under its lease.
+        let maintained = prepare_wal_file(&path, &boundary)?;
         let file = OpenOptions::new().read(true).append(true).open(&path)?;
+        if !same_open_file(&file, &maintained)? {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "WAL identity changed before append open; refusing to append",
+            ));
+        }
         Ok(Self { file, path, sync })
     }
 
@@ -1588,3 +1831,11 @@ mod tests {
         assert_eq!(read_frames_all(bytes).unwrap(), vec![frame(1)]);
     }
 }
+
+#[cfg(test)]
+#[path = "wal_tail_tests.rs"]
+mod tail_tests;
+
+#[cfg(test)]
+#[path = "wal_v4_tests.rs"]
+mod v4_tests;

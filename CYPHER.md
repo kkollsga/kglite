@@ -230,7 +230,7 @@ graph.cypher("MATCH (n:Person) RETURN count(DISTINCT n.city) AS unique_cities")
 | Aggregate | Description |
 |---|---|
 | `count(expr)` / `count(*)` / `count(DISTINCT expr)` | Row or value count |
-| `sum(expr)` | Numeric sum (preserves Int64 when source is integer) |
+| `sum(expr)` | Numeric sum; all-integer inputs produce an exact Int64 result or an overflow error if the final result is out of range |
 | `avg(expr)` / `mean(expr)` / `average(expr)` | Arithmetic mean |
 | `min(expr)` / `max(expr)` | Minimum / maximum |
 | `collect(expr)` / `collect(DISTINCT expr)` | Gather values into a list |
@@ -487,7 +487,7 @@ graph.cypher("""
 | `text_bm25(n, prop, query)` | Lexical (BM25) relevance of the node's indexed text against a query string. Needs `build_text_index(node_type, property)`; `0.0` when the document shares no word with the query, `null` when the index has no document for that row |
 | `text_score(n, prop, query)` | Semantic similarity. A **list** `query` is scored directly as your query vector; a **string** `query` is embedded first (requires `set_embedder()`) |
 | `text_score(n, prop, query, metric)` | With explicit metric (`'cosine'`, `'dot_product'`, `'euclidean'`, `'poincare'`) |
-| `vector_score(n, prop, vector [, metric])` | Semantic similarity against a pre-computed embedding vector (pass a list of floats directly, no `set_embedder()` needed) |
+| `vector_score(n, prop, vector [, metric] [, options])` | Semantic similarity against a pre-computed embedding vector (pass a list of floats directly, no `set_embedder()` needed) |
 | `embedding_norm(n, prop)` | L2 norm of embedding vector (hierarchy depth in Poincaré space: 0=root, ~1=leaf) |
 | `score_fuse(s1, s2, … [, weights])` | Fuse ranked-lane scores into one — the mean of the signals that are **present**, or a weighted mean with a trailing list. A lane that could not score the row (`null`, `NaN`, `inf`) drops out of the average together with its weight; `null` only when every lane is absent |
 | `dot(a, b)` | Dot product of two list-valued vectors |
@@ -577,14 +577,24 @@ the `summary` column are scored as `vector_score(a, 'summary_emb', …)`.
 > argument must be bound to a string or a list; plan-time validation reports
 > the type of anything else.
 
-> **Index-accelerated top-k.** When an HNSW index is built
-> (`build_vector_index`), a whole-corpus top-k —
-> `RETURN vector_score(n, prop, q) AS s ORDER BY s DESC LIMIT k` (and the
-> `text_score` form) — auto-uses it, the same opt-in approximate path the
-> fluent API uses. Without an index, or for a selective `WHERE` that filters
-> the candidates, scoring is the exact brute-force scan. So building an index
-> speeds up "search the whole corpus by similarity"; a heavily-filtered query
-> stays exact.
+> **Retrieval policy.** `vector_score` and `text_score` accept an optional
+> final map: `{exact: true}` forces an exact scan without using or refreshing
+> HNSW. Put it fourth when omitting the metric, or fifth after an explicit
+> metric: `vector_score(n, 'summary_emb', $q, 'cosine', {exact: true})`.
+> A parameter-bound map works too. `exact` must be boolean, defaults to false,
+> and unknown options are errors. An omitted metric uses each actual node
+> type's store metric, defaulting to cosine if the store has none.
+>
+> **Index-accelerated top-k.** With default policy and an HNSW index,
+> `RETURN vector_score(n, prop, q) AS s ORDER BY s DESC LIMIT k` (or the
+> `text_score` form) can narrow candidates approximately, then score those
+> candidates exactly. ASC, explicit NULLS LAST, row-dependent selectors,
+> mixed/duplicate or unembedded bindings, incompatible metrics, unavailable
+> indexes and filtered candidate underfill use exact execution. Filters alone
+> do not guarantee an exact scan: request `{exact: true}` when that matters.
+> Missing per-node embeddings score null and retain ordinary ORDER BY null
+> placement. Invalid dimensions, metrics or options raise in filters as well
+> as projected scores.
 
 ### Lexical search — `text_bm25`
 
@@ -3238,18 +3248,22 @@ and read-only from Cypher:
 
 ```cypher
 SHOW ONTOLOGY
-CALL ontology_audit() YIELD rule, severity, violations, exempted, total, pct, domain_class, property
+CALL ontology_audit() YIELD entity_kind, rule, severity, violations, exempted, total, pct, domain_class, property
 CALL ontology_audit({by: 'domain_class'}) YIELD rule, domain_class, violations  -- per violating class
 CALL ontology_audit({by: 'property'}) YIELD rule, property, violations, pct     -- per declared property
 CALL type_domain_violation() YIELD source, target, rule   -- no-arg: checks every declaration
 CALL edge_property_violation() YIELD relationship, check, source, target, property, properties, exempt
+CALL node_property_violation() YIELD class, check, node, property, properties
 ```
 
 `SHOW ONTOLOGY` returns one row per declared class (`kind`, `name`, `is_a`,
-`abstract`, `description`) and relationship (`kind`, `name`, `domain`,
-`range`, `enforcement`, `exempt`, `description`); zero rows when nothing is
+`abstract`, `description`, `required_properties`, `property_types`, `enforcement`)
+and relationship (`kind`, `name`, `domain`,
+`range`, `required_properties`, `property_types`, `enforcement`, `exempt`,
+`description`); zero rows when nothing is
 declared. `ontology_audit()` is the scorecard: one row per declared check with
-its violation count, denominator, percentage, and declared severity
+its violation count, denominator, percentage, and declared severity. `entity_kind`
+is `node` for class contracts and `edge` for relationship checks. Severity is
 (`advisory` / `warn` / `error` — acted on by blueprint builds, reported
 everywhere else). `exempted` counts the rows a declaration's `exempt` classes
 excuse: they are left out of `violations` (and so out of the severity the gate
@@ -3263,21 +3277,23 @@ its violations come from. `violations` and `pct` are then that class's share
 out, so a class whose every violation is excused gets no row at all; a rule
 with no violations to break down keeps its single aggregate row. Without the
 parameter, `domain_class` is Null on every row. The domain-side class is the
-edge's source for `domain` / `range` / `required_properties` /
+edge's source for relationship `domain` / `range` / `required_properties` /
 `property_types`, the node itself for `required` / `cardinality`, and for the
 pair/triple shapes (`inverse`, `symmetric`, `transitive`) the first bound
-node — the source of the edge or chain whose partner is missing.
+node — the source of the edge or chain whose partner is missing. Class property
+contracts partition by the violating node's primary type.
 
 `{by: 'property'}` answers the other follow-up — *which fields* are missing —
 by fanning the `required_properties` and `property_types` rules into one row
-per **declared** property: `violations` is the edges failing that property,
-`total` the relationship's edges, `pct` the share lacking it. Every other rule
+per **declared** property: `violations` counts the nodes or edges failing that
+property, `total` the rule's covered nodes or relationship edges, and `pct` the
+share failing it. Every other rule
 keeps its aggregate row with a Null `property`.
 
 The two breakdowns are different kinds of answer, and mixing them up
 double-counts. `domain_class` **partitions** a rule: every violating row has
 exactly one source class, so the rows sum back to the aggregate.
-`property` is a **census**: an edge missing three declared properties is
+`property` is a **census**: a node or edge missing three declared properties is
 counted under all three, so the rows sum to *at least* the aggregate and
 adding them up is not the rule's violation count. A declared property nothing
 fails still gets a row, at zero — "this field is complete" is what a census is
@@ -3291,6 +3307,12 @@ listing every declared property it fails, `property` the first of them, and
 relationship's row count for a check equals that rule's
 `violations + exempted` however many properties one edge fails. `UNWIND` the
 list to count per property. It takes no arguments.
+
+`node_property_violation()` is the corresponding no-argument class-contract
+drill-down. Each row names the declaring class, check, node and failed properties;
+inherited contracts apply through the node's primary class ancestry. It has no
+edge endpoints or exemption column. Required properties reject missing/null values;
+type checks use the shared property-type grammar, including outer `list`/`array`.
 
 The six declaration-backed rule procedures (`type_domain_violation`,
 `type_range_violation`, `missing_required_edge`, `cardinality_violation`,
@@ -3609,7 +3631,7 @@ below; do not infer absence from this shorter list.
 | **Math** | `abs`, `ceil`/`ceiling`, `floor`, `round`, `sqrt`, `sign`, `log`/`ln`, `log10`, `exp`, `pow`, `pi`, `rand`, `randomUUID`, trig: `sin`/`cos`/`tan`/`asin`/`acos`/`atan`/`atan2`/`cot`/`haversin`/`degrees`/`radians` |
 | **Spatial** | `point(lat, lon)`, `distance(a, b)`, `contains(a, b)`, `intersects(a, b)`, `centroid(n)`, `area(n)`, `perimeter(n)`, `latitude(point)`, `longitude(point)` |
 | **Temporal** | `date(str)`/`datetime(str)`, `localdatetime()`/`localtime()`/`time()` (ISO strings), `date_diff(d1, d2)`, `date ± N` (days), `date - date` → int, `d.year`/`d.month`/`d.day`, `valid_at(...)`, `valid_during(...)` |
-| **Semantic** | `text_score(n, prop, query [, metric])` — scores a list `query` as a vector, embeds a string `query` via `set_embedder()`, cosine/dot_product/euclidean/poincare; `embedding_norm(n, prop)` — L2 norm (hierarchy depth) |
+| **Semantic** | `text_score(n, prop, query [, metric] [, options])` — scores a list `query` as a vector, embeds a string `query` via `set_embedder()`, cosine/dot_product/euclidean/poincare; `embedding_norm(n, prop)` — L2 norm (hierarchy depth) |
 | **Timeseries** | `ts_sum`, `ts_avg`, `ts_min`, `ts_max`, `ts_count`, `ts_at`, `ts_first`, `ts_last`, `ts_delta`, `ts_series` — date-string args with resolution validation |
 | **Mutations** | `CREATE (n:Label {props})`, `CREATE (a)-[:TYPE]->(b)`, `SET n.prop = expr`, `SET n += map`, `SET n = map`, `DELETE`, `DETACH DELETE`, `REMOVE n.prop`, `MERGE ... ON CREATE SET ... ON MATCH SET` |
 | **Procedures** | `CALL pagerank/betweenness/degree/closeness() YIELD node, score`, `CALL louvain/leiden() YIELD node, community [, level]` (multilevel, hierarchical — `leiden` guarantees well-connected communities), `CALL label_propagation() YIELD node, community`, `CALL connected_components() YIELD node, component`, `CALL k_core/coreness() YIELD node, coreness`, `CALL clustering_coefficient() YIELD node, coefficient`, `CALL cluster({method, ...}) YIELD node, cluster`, `CALL affected_tests({files: [...], max_depth?}) YIELD test_file, depth` (0.9.34+, code graphs), `CALL refresh_stats() YIELD src_type, edge_type, tgt_type, count` (0.9.35+, planner cardinality cache refresh), `CALL list_procedures()` |
@@ -3734,3 +3756,22 @@ compatible subset.
 | Constraint DDL | `IS UNIQUE`, `IS NOT NULL`, `IS NODE KEY`, `IS :: TYPE` — enforced on every write path | `CREATE CONSTRAINT … IS UNIQUE / IS NOT NULL / IS NODE KEY / IS :: TYPE` | `IS :: TYPE` accepts the type names with an exact KGLite value counterpart (`BOOLEAN`, `STRING`, `INTEGER`, `FLOAT`, `DATE`, `LOCAL DATETIME`, `DURATION`, `POINT`); lists, unions and zoned temporal types are rejected by name rather than approximated. Relationship constraints cover `IS NOT NULL` and `IS :: TYPE`; `IS UNIQUE` / `IS RELATIONSHIP KEY` on a relationship are refused, because KGLite has no single answer for when two relationships of a type are the same one. See [Cypher constraint DDL](#cypher-constraint-ddl) |
 | Constraint names | Stored, so `DROP CONSTRAINT <name>` works | User-assigned, unique per database | The opposite decision to index names above: a ported schema script almost always drops constraints by name, and the `.kgl` metadata section is JSON, so the field was free. A constraint declared without a name is addressable by its canonical descriptor |
 | `LOAD CSV` source | Local files only — `file://` URLs and filesystem paths, gated by a per-caller capability | `file://` plus `http(s)://`, gated by an import-directory setting | The engine ships no HTTP client (network dependencies were removed in 0.14.x), so there is nothing to fetch a URL with. Filesystem access is granted per caller: on for in-process use, off for Bolt clients unless the server was started with `--allow-csv-import <DIR>` |
+
+
+### Vector retrieval diagnostics
+
+Ordinary query results and `PROFILE` carry `diagnostics.retrieval`: distinct
+executed vector ranking routes, with `requested_policy` (`auto`, `exact`, or
+`per_row`), `actual_mode` (`hnsw` or `exact`), `fallback_reason`, and an optional
+`store` (`Type.embedding_property`). Reasons include `forced_exact`, `no_index`,
+`stale_index`, `metric_mismatch`, `filtered_underfill`, `row_coverage`,
+`row_dependent_selectors`, and `ordering_requires_exact`. A missing store means
+that execution did not establish one common store. Identical nested routes are
+coalesced; these records are not counters. `EXPLAIN` describes the requested
+policy only, without running search or claiming an actual route.
+
+Empty inputs and `LIMIT 0` record no retrieval. Scalar scoring inside arbitrary
+expressions remains exact and has no per-row telemetry. Python exposes these
+records in `ResultView.diagnostics`, MCP appends them to result text and includes
+them in recipe diagnostics, C exposes `kglite_cypher_result_diagnostics_json`
+and batch diagnostics, and Bolt includes `kglite.retrieval` in result summaries.

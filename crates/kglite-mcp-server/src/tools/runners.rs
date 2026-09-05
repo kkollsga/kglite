@@ -183,7 +183,7 @@ pub(crate) fn run_cypher_write(
         return Ok(format!(
             "{}{}{}",
             format_mutation_ack(&outcome.result),
-            cypher_warning_block(&outcome.result),
+            cypher_diagnostics_block(&outcome.result),
             // The read path has self-identified its graph since the footer
             // shipped; a write needs it more, not less — an agent that mutates
             // the wrong graph has no later call that can tell it so.

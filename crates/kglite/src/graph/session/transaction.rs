@@ -251,7 +251,10 @@ impl Session {
     /// flush the log → stamp `checkpoint_lsn` into the graph being written →
     /// write the `.kgl` → drop the capture buffer and truncate the log. The
     /// `graph::session::durable` module documents why each step sits where it
-    /// does.
+    /// does. Saving to a different destination transfers future logging there
+    /// after successful publication and preserves the original recovery log.
+    /// The caller must hold the destination writer lease before save-as and
+    /// retain it for the remaining session lifetime, as with open_durable.
     ///
     /// `fsync=false` is **overridden to true** on a durable session, silently
     /// and deliberately: the checkpoint destroys the log that would otherwise
@@ -261,13 +264,7 @@ impl Session {
     /// contract is stated here.)
     pub fn save(&self, path: &str, fsync: bool) -> Result<(), String> {
         let mut guard = self.graph.lock().unwrap_or_else(|p| p.into_inner());
-        let durable = self.checkpoint_prologue(&mut guard)?;
-        crate::graph::io::file::save_graph_with(&mut guard, path, fsync || durable)
-            .map_err(|e| e.to_string())?;
-        if durable {
-            self.checkpoint_epilogue(&mut guard)?;
-        }
-        Ok(())
+        self.save_checkpoint(&mut guard, path, fsync)
     }
 
     /// Begin a new read-write transaction. The snapshot is taken
@@ -339,6 +336,11 @@ impl Session {
         let new_version = current_version + 1;
         working.set_version(new_version);
         *guard = Arc::new(working);
+        // Assignment drops the former owner before checking layer ownership.
+        // Retained snapshots still prevent their shared bases from being folded.
+        if let Some(published) = Arc::get_mut(&mut guard) {
+            crate::graph::handle::compact_dir_graph(published);
+        }
         CommitOutcome::Committed { new_version }
     }
 

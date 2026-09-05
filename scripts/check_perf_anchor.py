@@ -46,6 +46,11 @@ import math
 from pathlib import Path
 import re
 
+try:
+    from scripts.benchmark_qualification import QualificationError, Registry, compatible, digest, validate_measurements
+except ModuleNotFoundError:  # Direct script execution.
+    from benchmark_qualification import QualificationError, Registry, compatible, digest, validate_measurements
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BASELINES_DIR = REPO_ROOT / "tests" / "benchmarks" / "baselines"
 VERSION_RE = re.compile(r"^(\d+)_(\d+)_(\d+)\.json$")
@@ -100,6 +105,36 @@ def _fmt_dispersion(value: float | None) -> str:
     return f"{value:.3f}" if value is not None else "n/a"
 
 
+def select_captures(directory: Path, explicit: Path | None, releases_back: int) -> tuple[Path, Path]:
+    if releases_back < 1:
+        raise QualificationError("releases-back must be positive")
+    registry = Registry(directory, required=True)
+    releases = release_baselines(directory)
+    if explicit is None and not releases:
+        raise QualificationError("no qualified reference: no per-release captures")
+    current = explicit if explicit is not None else releases[-1][1]
+    registry.candidate(current)
+    Registry(current.parent).candidate(current)
+    current_digest = digest(current)
+    identities = [version for version, path in releases if digest(path) == current_digest]
+    match = VERSION_RE.match(current.name)
+    if match:
+        identities.append(tuple(int(value) for value in match.groups()))
+    cutoff = min(identities) if identities else None
+    releases = [
+        (v, path) for v, path in releases if path.resolve() != current.resolve() and (cutoff is None or v < cutoff)
+    ]
+    if not releases:
+        raise QualificationError("no qualified reference before the candidate")
+    target = max(0, len(releases) - releases_back)
+    for _, path in reversed(releases[: target + 1]):
+        status = registry.status(path)
+        if status == "accepted":
+            return current, path
+        print(f"perf anchor: excluding {path.name}: {status or 'unregistered'}")
+    raise QualificationError("no qualified reference at or before the chronological anchor")
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument(
@@ -128,30 +163,21 @@ def main() -> int:
         "--min-overlap",
         type=int,
         default=10,
-        help="Minimum common benchmarks for a verdict (default: 10); below this, report and pass.",
+        help="Minimum common benchmarks for a verdict (default: 10); below this, fail without a verdict.",
     )
     args = p.parse_args()
 
-    releases = release_baselines(args.baselines_dir)
-    if args.current is not None:
-        current_path = args.current
-        releases = [(v, path) for v, path in releases if path.resolve() != current_path.resolve()]
-    else:
-        if not releases:
-            print("perf anchor: no per-release baselines found — nothing to compare")
-            return 0
-        _, current_path = releases[-1]
-        releases = releases[:-1]
+    try:
+        current_path, anchor_path = select_captures(args.baselines_dir, args.current, args.releases_back)
+        compatible(anchor_path, current_path)
+        current_stats = load_stats(current_path)
+        anchor_stats = load_stats(anchor_path)
+        validate_measurements(current_stats, args.metric)
+        validate_measurements(anchor_stats, args.metric)
+    except (QualificationError, OSError, ValueError) as error:
+        print(f"perf anchor: no valid verdict: {error}")
+        return 2
 
-    if not releases:
-        print(f"perf anchor: {current_path.name} is the only per-release baseline — nothing to compare")
-        return 0
-
-    anchor_index = max(0, len(releases) - args.releases_back)
-    anchor_version, anchor_path = releases[anchor_index]
-
-    current_stats = load_stats(current_path)
-    anchor_stats = load_stats(anchor_path)
     current = {name: cell[args.metric] for name, cell in current_stats.items()}
     anchor = {name: cell[args.metric] for name, cell in anchor_stats.items()}
     common = sorted(set(current) & set(anchor))
@@ -165,9 +191,9 @@ def main() -> int:
     if only_current:
         print(f"  {len(only_current)} benchmark(s) newer than the anchor (no longitudinal view yet)")
 
-    if len(common) < args.min_overlap:
+    if len(common) < max(1, args.min_overlap):
         print(f"perf anchor: only {len(common)} common benchmark(s) (< {args.min_overlap}) — too few for a verdict")
-        return 0
+        return 2
 
     anchor_dispersion = dispersion(anchor_stats, common)
     current_dispersion = dispersion(current_stats, common)

@@ -41,15 +41,184 @@ import kglite
 #    OPTIONAL with no match, ORDER BY ties, DISTINCT, parameterized,
 #    multi-MATCH chains.
 #
-# The corpus deliberately skips vector_score / text_score and spatial
-# fusion — those depend on registered embedders or geometry data the shared
-# fixtures do not carry. They live in
-# tests/test_cypher_specialized_optimizer.py, which builds its own.
+# Spatial and embedder-driven trigger oracles live in the specialized suite.
+# Vector ordering regressions below use a small registered-vector fixture too,
+# so their exact trigger shapes remain available to the pass bisector.
 #: The fused shape itself, shared by the clean and the stale fixtures so those
 #: two entries differ only in the index state they run against.
 TEXT_BM25_TOP_K = "MATCH (d:Doc) RETURN d.id AS id, text_bm25(d, 'body', 'alpha beta') AS s ORDER BY s DESC LIMIT 3"
 
+
+def _predicate_index_graph(kind):
+    graph = kglite.KnowledgeGraph()
+    graph.cypher("CREATE(:N{id:-1,v:'sentinel',tag:'same'})").to_list()
+    graph.cypher(
+        "UNWIND $rows AS r CREATE(:N{id:r.id,v:r.v,tag:'same'})",
+        params={
+            "rows": [
+                {"id": 0, "v": 1},
+                {"id": 1, "v": 1.0},
+                {"id": 2, "v": 2},
+                {"id": 3, "v": 1.5},
+                {"id": 4, "v": 2**53 + 1},
+            ]
+        },
+    ).to_list()
+    graph.cypher("MATCH(n:N{id:-1}) DELETE n").to_list()
+    rows = graph.cypher("MATCH(n:N) RETURN n.id AS id,n.v AS v ORDER BY id").to_list()
+    assert [(row["id"], type(row["v"])) for row in rows] == [(0, int), (1, float), (2, int), (3, float), (4, int)]
+    if kind == "point":
+        graph.create_index("N", "v")
+    elif kind == "range":
+        graph.create_range_index("N", "v")
+    else:
+        graph.create_composite_index("N", ["tag", "v"])
+    return graph
+
+
+@pytest.fixture
+def predicate_point_index_graph():
+    return _predicate_index_graph("point")
+
+
+@pytest.fixture
+def predicate_range_index_graph():
+    return _predicate_index_graph("range")
+
+
+@pytest.fixture
+def predicate_composite_index_graph():
+    return _predicate_index_graph("composite")
+
+
+@pytest.fixture
+def predicate_soft_alias_index_graph():
+    graph = kglite.KnowledgeGraph()
+    graph.cypher("CREATE(:N{id:1,name:'Ann'}),(:N{id:2,title:'Ann'})").to_list()
+    graph.create_range_index("N", "name")
+    return graph
+
+
 DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
+    (
+        "predicate_index_equality",
+        "predicate_point_index_graph",
+        "MATCH(n:N) WHERE n.v=1.0 RETURN n.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "predicate_index_in_numeric",
+        "predicate_point_index_graph",
+        "MATCH(n:N) WHERE n.v IN [1.0,2] RETURN n.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "predicate_index_in_declined_large",
+        "predicate_point_index_graph",
+        "MATCH(n:N) WHERE n.v IN [1,9007199254740993] RETURN n.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "predicate_index_in_declined_container",
+        "predicate_point_index_graph",
+        "MATCH(n:N) WHERE n.v IN [1,[null]] RETURN n.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "predicate_index_range_inclusive",
+        "predicate_range_index_graph",
+        "MATCH(n:N) WHERE n.v >= 1.0 AND n.v <= 1.0 RETURN n.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "predicate_index_range_exclusive",
+        "predicate_range_index_graph",
+        "MATCH(n:N) WHERE n.v > 1 AND n.v < 2.0 RETURN n.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "predicate_index_composite_equivalence",
+        "predicate_composite_index_graph",
+        "MATCH(n:N) WHERE n.tag='same' AND n.v=1.0 RETURN n.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "predicate_index_composite_parameter_equivalence",
+        "predicate_composite_index_graph",
+        "MATCH(n:N) WHERE n.v=$value AND n.tag=$tag RETURN n.id AS id ORDER BY id",
+        {"value": 1.0, "tag": '["same"]'},
+    ),
+    (
+        "predicate_index_soft_alias_range",
+        "predicate_soft_alias_index_graph",
+        "MATCH(n:N) WHERE n.name >= 'A' RETURN n.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "sum_large_integer_cancellation",
+        "social_graph",
+        "UNWIND [9007199254740993,-9007199254740992] AS x RETURN sum(x) AS s",
+        None,
+    ),
+    (
+        "sum_distinct_large_integer_groups",
+        "social_graph",
+        "UNWIND [{g:1,v:9007199254740993},{g:1,v:-9007199254740992},{g:2,v:7}] AS r "
+        "RETURN r.g AS g,sum(DISTINCT r.v) AS s ORDER BY g",
+        None,
+    ),
+    (
+        "vector_whole_type_exact_entry",
+        "vector_index_entry_graph",
+        "MATCH (d:Doc) RETURN d.id AS id, vector_score(d, 'summary_emb', [1.0,0.0], "
+        "{exact:true}) AS s ORDER BY s DESC LIMIT 3",
+        None,
+    ),
+    (
+        "vector_whole_type_exact_second_score",
+        "vector_index_entry_graph",
+        "MATCH (d:Doc) RETURN d.id AS id, vector_score(d, 'summary_emb', [1.0,0.0], "
+        "{exact:true}) AS first, vector_score(d, 'summary_emb', [0.0,1.0], {exact:true}) AS "
+        "second ORDER BY second DESC LIMIT 2",
+        None,
+    ),
+    (
+        "vector_whole_type_index_entry",
+        "vector_index_entry_graph",
+        "MATCH (d:Doc) RETURN d.id AS id, vector_score(d, 'summary_emb', [1.0,0.0]) AS s ORDER BY s DESC LIMIT 3",
+        None,
+    ),
+    (
+        "vector_score_ascending_nulls",
+        "vector_order_graph",
+        "MATCH (d:Doc) RETURN d.id AS id, vector_score(d, 'summary_emb', [1.0,0.0]) AS s ORDER BY s ASC LIMIT 2",
+        None,
+    ),
+    (
+        "vector_score_descending_nulls",
+        "vector_order_graph",
+        "MATCH (d:Doc) RETURN d.id AS id, vector_score(d, 'summary_emb', [1.0,0.0]) AS s ORDER BY s DESC LIMIT 2",
+        None,
+    ),
+    (
+        "vector_score_explicit_nulls_last",
+        "vector_order_graph",
+        "MATCH (d:Doc) RETURN d.id AS id, vector_score(d, 'summary_emb', [1.0,0.0]) AS s "
+        "ORDER BY s DESC NULLS LAST LIMIT 4",
+        None,
+    ),
+    (
+        "text_score_ascending_nulls",
+        "vector_order_graph",
+        "MATCH (d:Doc) RETURN d.id AS id, text_score(d, 'summary', [1.0,0.0]) AS s ORDER BY s ASC LIMIT 2",
+        None,
+    ),
+    (
+        "text_score_descending_nulls",
+        "vector_order_graph",
+        "MATCH (d:Doc) RETURN d.id AS id, text_score(d, 'summary', [1.0,0.0]) AS s ORDER BY s DESC LIMIT 2",
+        None,
+    ),
     ("simple_match", "small_graph", "MATCH (p:Person) RETURN p.name AS n", None),
     ("simple_match_param", "small_graph", "MATCH (p:Person) WHERE p.age > $min RETURN p.name AS n", {"min": 30}),
     # Dynamic label / relationship type: the parameter is bound before the
@@ -497,6 +666,18 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "or_chain_reversed_literals",
         "social_graph",
         "MATCH (p:Person) WHERE 'Oslo' = p.city OR 'Bergen' = p.city RETURN p.name AS n",
+        None,
+    ),
+    (
+        "recursive_null_equality_and_case",
+        "social_graph",
+        "RETURN [null]=[null] AS eq,[null]<>[1] AS ne, CASE [null] WHEN [null] THEN 1 ELSE 0 END AS branch",
+        None,
+    ),
+    (
+        "recursive_null_hashed_membership",
+        "social_graph",
+        "RETURN [null] IN [[1],[2],[3],[4],[5],[6],[7],[8],[9]] AS hit",
         None,
     ),
     # ── extract_pushable_rel_predicates ──
@@ -3591,6 +3772,15 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
     # shapes below were run against the unoptimized path while the operator was
     # being written; the last two were *divergent* and are here because of it.
     ("text_bm25_top_k", "text_index_graph", TEXT_BM25_TOP_K, None),
+    ("text_bm25_complete_top_k", "complete_text_index_graph", TEXT_BM25_TOP_K, None),
+    # Nine index documents and nine rows can still be different sets: the
+    # absent-body row must win DESC even when the excluded document scores zero.
+    (
+        "text_bm25_top_k_equal_cardinality_missing_member",
+        "text_index_graph",
+        "MATCH (d:Doc) WHERE d.id <> 9 RETURN d.id AS id, text_bm25(d, 'body', 'alpha') AS s ORDER BY s DESC LIMIT 1",
+        None,
+    ),
     # A `WHERE` makes the rows a subset of the corpus, which the postings path
     # cannot answer from (the index ranks documents the subset may not contain)
     # — it declines, and this pins that the decline is still the right answer.
@@ -3602,8 +3792,8 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         None,
     ),
     # ASC: least-relevant-first has no postings shortcut. Divergent while the
-    # decline fell through to the `vector_score` scan, which *drops*
-    # null-scoring rows instead of placing them.
+    # decline formerly fell through to a vector-scoring scan that dropped
+    # null rows instead of placing them.
     (
         "text_bm25_top_k_ascending",
         "text_index_graph",
@@ -3772,8 +3962,42 @@ def _staled_text_index_graph() -> kglite.KnowledgeGraph:
 
 
 @pytest.fixture
+def vector_order_graph() -> kglite.KnowledgeGraph:
+    import pandas as pd
+
+    graph = kglite.KnowledgeGraph()
+    graph.add_nodes(pd.DataFrame({"id": [0, 1, 2, 3], "summary": ["x"] * 4}), "Doc", "id")
+    graph.set_embeddings("Doc", "summary", {0: [1.0, 0.0], 1: [0.0, 1.0], 2: [-1.0, 0.0]})
+    return graph
+
+
+@pytest.fixture
+def vector_index_entry_graph(vector_order_graph) -> kglite.KnowledgeGraph:
+    # This separated three-vector corpus returns every member; verify that
+    # precondition before using ANN output as an exact differential oracle.
+    graph = vector_order_graph
+    graph.cypher("MATCH (d:Doc {id:3}) DETACH DELETE d")
+    graph.build_vector_index("Doc", "summary")
+    assert graph.cypher("MATCH (d:Doc) RETURN count(d) AS n").scalar() == 3
+    rows = graph.cypher(
+        "MATCH (d:Doc) RETURN d.id AS id, vector_score(d, 'summary_emb', [1.0,0.0]) AS s ORDER BY s DESC LIMIT 3"
+    )
+    assert rows.diagnostics["retrieval"][0]["actual_mode"] == "hnsw"
+    assert [row["id"] for row in rows] == [0, 1, 2]
+    return graph
+
+
+@pytest.fixture
 def text_index_graph() -> kglite.KnowledgeGraph:
     return _build_text_index_graph()
+
+
+@pytest.fixture
+def complete_text_index_graph() -> kglite.KnowledgeGraph:
+    graph = _build_text_index_graph()
+    graph.cypher("MATCH (d:Doc) WHERE d.id = 10 DELETE d")
+    graph.build_text_index("Doc", "body")
+    return graph
 
 
 @pytest.fixture

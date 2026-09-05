@@ -61,6 +61,11 @@ import subprocess
 import sys
 import tempfile
 
+try:
+    from scripts.benchmark_qualification import record_capture
+except ModuleNotFoundError:  # Direct script execution.
+    from benchmark_qualification import record_capture
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PHASE4_TEST = REPO_ROOT / "tests" / "test_phase4_parity.py"
 PHASE5_TEST = REPO_ROOT / "tests" / "test_phase5_parity.py"
@@ -304,7 +309,8 @@ def refresh_perf_baseline(version: str) -> tuple[bool, str]:
     current = BASELINES_DIR / f"current{plat_suffix}.json"
 
     if target.exists():
-        return False, f"perf baseline {target.name} already present (delete it to force re-capture)"
+        record_capture(target, evidence="Existing release capture; qualification retained or pending review.")
+        return False, f"perf capture {target.name} already present; qualification preserved"
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_json = Path(tmp) / "bench.json"
@@ -336,7 +342,12 @@ def refresh_perf_baseline(version: str) -> tuple[bool, str]:
 
     target.write_text(json.dumps(data, indent=2), encoding="utf-8", newline="\n")
     shutil.copyfile(target, current)
-    return True, f"perf baseline written to {target.relative_to(REPO_ROOT)} (also copied to current.json)"
+    record_capture(target, alias=current, evidence="New release capture; awaiting control/measurement qualification.")
+    return True, (
+        f"raw perf capture written to {target.relative_to(REPO_ROOT)} and {current.name}; "
+        "qualification pending, approved reference unchanged. After reviewing controls and repeat runs, "
+        "use scripts/benchmark_qualification.py CAPTURE --status accepted --evidence REASON --promote."
+    )
 
 
 # ── orchestration ──────────────────────────────────────────────────────

@@ -34,7 +34,7 @@
 //! merely not *faster*.
 
 use super::super::ast::{ComparisonOp, Expression, Predicate};
-use super::helpers::evaluate_comparison;
+use super::helpers::evaluate_comparison_tristate;
 use super::CypherExecutor;
 use crate::datatypes::values::Value;
 use crate::graph::core::filtering::str_values_equal;
@@ -703,10 +703,7 @@ impl ScanPred<'_> {
             } => {
                 let left = left.eval(executor, runtime, node, row)?;
                 let right = right.eval(executor, runtime, node, row)?;
-                if matches!(left, Value::Null) || matches!(right, Value::Null) {
-                    return Ok(None);
-                }
-                evaluate_comparison(&left, operator, &right).map(Some)
+                evaluate_comparison_tristate(&left, operator, &right)
             }
             ScanPred::IsNull(expr) => Ok(Some(matches!(
                 expr.eval(executor, runtime, node, row)?,
@@ -718,16 +715,7 @@ impl ScanPred<'_> {
             ))),
             ScanPred::InLiteralSet { expr, values } => {
                 let value = expr.eval(executor, runtime, node, row)?;
-                if matches!(value, Value::Null) {
-                    return Ok(None);
-                }
-                if values.matches(&value) {
-                    return Ok(Some(true));
-                }
-                if values.has_null() {
-                    return Ok(None);
-                }
-                Ok(Some(false))
+                Ok(values.kleene_contains(&value))
             }
             ScanPred::StrCmp { slot, op, needle } => {
                 Self::eval_str_cmp(runtime, node, *slot, *op, needle)
@@ -793,7 +781,7 @@ impl ScanPred<'_> {
                 }
                 let needle = Value::String(needle.to_string());
                 match op.as_comparison() {
-                    Some(operator) => evaluate_comparison(&value, &operator, &needle).map(Some),
+                    Some(operator) => evaluate_comparison_tristate(&value, &operator, &needle),
                     // The text predicates answer `false` for a non-string
                     // left-hand side (their `_ => Ok(Some(false))` arm).
                     None => Ok(Some(false)),
@@ -802,3 +790,7 @@ impl ScanPred<'_> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "scan_membership_tests.rs"]
+mod membership_tests;

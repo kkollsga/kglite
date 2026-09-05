@@ -630,70 +630,80 @@ impl KnowledgeGraph {
                     )
                 })?,
         };
-        // Remember the target so a later bare save() / auto-save-on-close
-        // writes back to the same file ("save as" updates the home path).
-        self.lifecycle.source_path = Some(std::path::PathBuf::from(&effective));
-        let path: &str = &effective;
-
-        // Checkpoint steps 1–2, shared with every other owner of a log
-        // (`kglite::api::durable::checkpoint_prologue`): flush frames that are
-        // still only in the OS page cache — load-bearing under
-        // `durable="normal"`, where a crash in the write→truncate window would
-        // otherwise leave a *prefix* whose replay rolls properties back over
-        // this newer checkpoint — and then stamp how far this checkpoint has
-        // consumed the log, so a reopen can *gate* replay instead of trusting
-        // the log's extent. Any ops still sitting in the capture buffer are
-        // folded in by the serialize below and then dropped un-logged, so they
-        // consume no LSN and the stamp's arithmetic stays exact.
-        if let Some(ds) = self.lifecycle.durable.as_mut() {
-            let next_lsn = ds.next_lsn;
-            kglite_core::api::durable::checkpoint_prologue(
-                &mut ds.wal,
-                next_lsn,
-                get_graph_mut(&mut self.inner),
-            )
-            .map_err(file_io_err)?;
-        }
-
-        // Mode-aware durable save lives in core (`save_graph_with`): disk dir
-        // vs in-memory `.kgl`, columnar consolidation, atomic temp+rename,
-        // file + directory fsync. Routing through the one shared dispatch
-        // keeps the wheel / MCP server / C ABI from drifting.
-        //
-        // The dispatch also enforces the write-ahead rule: a save that would
-        // strand committed frames in front of the checkpoint it writes is
-        // refused before the file is touched. That refusal is a `ValueError`
-        // — the class every other durability refusal raises, and the one a
-        // caller catches to mean "this path is not a safe target as it
-        // stands" — while a genuine write failure stays an `IOError`.
-        let inner = &mut self.inner;
-        py.detach(move || io::save_graph_with(inner, path, fsync))
-            .map_err(|error| match error {
-                io::SaveError::Refused(message) => {
-                    PyErr::new::<pyo3::exceptions::PyValueError, _>(message)
+        py.detach(|| -> Result<(), io::SaveError> {
+            use kglite_core::api::durable::{self, DurabilityLevel};
+            use std::path::Path;
+            let io_error = |error: std::io::Error| io::SaveError::Io(error.to_string());
+            let same_target = self
+                .lifecycle
+                .source_path
+                .as_ref()
+                .map_or(Ok(false), |source| {
+                    io::same_checkpoint_path(source, Path::new(&effective)).map_err(io_error)
+                })?;
+            // Keep the original sidecar spelling for equivalent publication paths.
+            let target = if same_target {
+                self.lifecycle.source_path.as_ref().unwrap().clone()
+            } else {
+                effective.into()
+            };
+            let target_lease = if !same_target && self.lifecycle.writer_lease.is_some() {
+                Some(
+                    io::GraphWriterLease::acquire(&target, std::time::Duration::ZERO)
+                        .map_err(io_error)?,
+                )
+            } else {
+                None
+            };
+            let level = self
+                .lifecycle
+                .durable
+                .as_ref()
+                .map_or(DurabilityLevel::Off, |state| state.level);
+            let target_wal = if same_target {
+                None
+            } else {
+                durable::prepare_save_as_target(&target, level)?
+            };
+            let previous_stamp = self.inner.checkpoint_lsn;
+            if let Some(state) = self.lifecycle.durable.as_mut() {
+                durable::checkpoint_prologue(
+                    &mut state.wal,
+                    state.next_lsn,
+                    get_graph_mut(&mut self.inner),
+                )
+                .map_err(io_error)?;
+            }
+            if let Err(error) =
+                io::save_graph_with(&mut self.inner, &target.to_string_lossy(), fsync)
+            {
+                Arc::make_mut(&mut self.inner).checkpoint_lsn = previous_stamp;
+                return Err(error);
+            }
+            if same_target {
+                if let Some(state) = self.lifecycle.durable.as_mut() {
+                    durable::checkpoint_epilogue(&mut state.wal, Arc::make_mut(&mut self.inner))
+                        .map_err(io_error)?;
                 }
-                io::SaveError::Io(message) => file_io_err(std::io::Error::other(message)),
-            })?;
-
-        // Checkpoint step 4 (`kglite::api::durable::checkpoint_epilogue`): the
-        // .kgl now holds the full current state, so discard the capture buffer
-        // (those ops are folded in) and truncate the WAL. Order matters — the
-        // .kgl write above succeeded before we truncate, and replay is
-        // idempotent, so a crash between the two only costs a harmless re-apply
-        // on the next open. `next_lsn` is deliberately left climbing across the
-        // truncation: restarting it at 1 would make every post-checkpoint frame
-        // reuse an LSN a pre-checkpoint frame already spent, and the stamp above
-        // could never tell a stale frame from a fresh one.
-        if let Some(ds) = self.lifecycle.durable.as_mut() {
-            // `Arc::make_mut` rather than `get_graph_mut`: draining a capture
-            // buffer the save already folded in changes nothing a reader could
-            // observe, so it does not warrant a version bump.
-            kglite_core::api::durable::checkpoint_epilogue(
-                &mut ds.wal,
-                Arc::make_mut(&mut self.inner),
-            )
-            .map_err(file_io_err)?;
-        }
+            } else {
+                // The original WAL still describes its original checkpoint. Truncating
+                // it here would destroy source recovery. The new WAL was emptied before
+                // publication, so the handoff has no fallible work after the save.
+                if let Some(state) = self.lifecycle.durable.as_mut() {
+                    state.wal = target_wal.expect("logging destination prepared above");
+                    kglite_core::api::cdc::drain_at_commit(Arc::make_mut(&mut self.inner));
+                }
+                self.lifecycle.writer_lease = target_lease;
+                self.lifecycle.source_path = Some(target);
+            }
+            Ok(())
+        })
+        .map_err(|error| match error {
+            io::SaveError::Refused(message) => {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(message)
+            }
+            io::SaveError::Io(message) => file_io_err(std::io::Error::other(message)),
+        })?;
         Ok(())
     }
 
@@ -1620,76 +1630,9 @@ impl KnowledgeGraph {
         py_out::pattern_matches_to_pylist(py, &matches, &self.inner)
     }
 
-    /// Execute a Cypher query — read **or write** — against the graph.
-    ///
-    /// Reads: MATCH, WHERE, RETURN, ORDER BY, LIMIT, SKIP, WITH,
-    /// OPTIONAL MATCH, UNWIND, UNION, and aggregation functions
-    /// (count, sum, avg, min, max, collect, std).
-    ///
-    /// Writes: CREATE, MERGE, SET, REMOVE, DELETE, DETACH DELETE, FOREACH,
-    /// and schema DDL (CREATE/DROP INDEX, CREATE/DROP CONSTRAINT). Mutation
-    /// statistics land on `graph.last_mutation_stats`. A direct mutation call
-    /// executes **in place**: if a later clause, timeout, or row-budget check
-    /// fails, earlier mutations may remain visible — use `session()` or
-    /// `begin()` when failure must roll back.
-    ///
-    /// The MATCH clause uses the same pattern syntax as match_pattern().
-    /// WHERE supports AND/OR/NOT, comparisons (=, <>, <, <=, >, >=),
-    /// IS NULL, IS NOT NULL, IN, STARTS WITH, ENDS WITH, CONTAINS.
-    /// RETURN supports property access (n.prop), aliases (AS), aggregation,
-    /// and DISTINCT.
-    ///
-    /// Args:
-    ///     query: The Cypher query string
-    ///     timeout_ms: Deadline in milliseconds. If omitted, uses
-    ///         `set_default_timeout()` when set, otherwise the built-in
-    ///         default of 180_000 ms (3 min). Pass `0` to disable the
-    ///         deadline entirely for this call.
-    ///     max_work_units: Work budget for the query, not a result-row cap;
-    ///         exceeding it is an error. Defaults to
-    ///         `set_default_max_work_units()`.
-    ///     row_limit: Cap on the result rows kept — the query still runs in
-    ///         full and only retention stops at the cap, so a truncated
-    ///         result is the first N of the answer (the genuine top-N under
-    ///         ORDER BY). Truncation is never silent: it warns, and
-    ///         `diagnostics` carries `row_limit` plus the exact
-    ///         pre-truncation `total_rows`. Defaults to
-    ///         `set_default_row_limit()`.
-    ///     write_scope: Role-scoped write whitelist (integrity, not secrecy)
-    ///         — e.g. a coding role may write ["Plan", "Task"] but not
-    ///         research-owned "Algorithm" nodes. `None` (default) =
-    ///         unrestricted; `[]` denies every mutation. Every **node** write
-    ///         (CREATE, MERGE's create arm, SET n.p, SET n += {...},
-    ///         SET n:Label, REMOVE n.p, REMOVE n:Label, DELETE n,
-    ///         DETACH DELETE n, and node-type index/constraint DDL) is judged
-    ///         by the node's *stored* type, never a pattern label, so label
-    ///         smuggling cannot widen the scope. A **relationship** write
-    ///         (CREATE (a)-[:R]->(b), DELETE r, SET r.p, REMOVE r.p) is
-    ///         allowed iff at least one endpoint's stored type is in scope;
-    ///         DETACH DELETE's incident-edge collateral is authorized by the
-    ///         node delete. Outside the perimeter, deliberately: relationship
-    ///         *constraint* DDL, db.cdc.enable/disable, and the bulk loaders
-    ///         add_nodes/add_connections.
-    ///     git_sha, modified_by: Freshness provenance stamped alongside
-    ///         `updated_at` on types that declare `auto_timestamp`.
-    ///
-    /// Returns:
-    ///     A dict with 'columns' (list of column names) and 'rows'
-    ///     (list of row dicts mapping column name to value).
-    ///
-    /// Example:
-    ///     ```python
-    ///     result = graph.cypher('''
-    ///         MATCH (p:Person)-[:KNOWS]->(f:Person)
-    ///         WHERE p.age > 25
-    ///         RETURN p.name AS person, count(f) AS friends
-    ///         ORDER BY friends DESC
-    ///         LIMIT 10
-    ///     ''')
-    ///     for row in result:
-    ///         print(f"{row['person']}: {row['friends']} friends")
-    ///     ```
+    /// Run Cypher reads and writes; write_scope limits mutations such as DETACH DELETE by stored type; return a ResultView or a DataFrame when to_df=True.
     #[pyo3(signature = (query, *, to_df=false, params=None, timeout_ms=None, max_work_units=None, row_limit=None, streaming=true, parallel=false, disable_optimizer=false, disabled_passes=None, write_scope=None, git_sha=None, modified_by=None))]
+    // Shared keyword-only query options preserve parity across Python entry points.
     #[allow(clippy::too_many_arguments)]
     // The detached closure preserves the engine's structured KgError until PyErr conversion.
     #[allow(clippy::result_large_err)]

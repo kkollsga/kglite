@@ -105,6 +105,14 @@ pub struct ClassDecl {
     pub is_abstract: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_properties: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub property_types: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Enforcement::is_default")]
+    pub enforcement: Enforcement,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub enforcement_overrides: BTreeMap<String, Enforcement>,
     /// Documentation-only discriminator property name (unenforced).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub by: Option<String>,
@@ -163,6 +171,31 @@ pub struct RelationshipDecl {
     pub description: Option<String>,
 }
 
+fn enforcement_summary(base: Enforcement, overrides: &BTreeMap<String, Enforcement>) -> String {
+    let base = base.as_str().to_string();
+    if overrides.is_empty() {
+        return base;
+    }
+    let overrides: Vec<String> = overrides
+        .iter()
+        .map(|(check, severity)| format!("{check}={}", severity.as_str()))
+        .collect();
+    format!("{base}; {}", overrides.join(", "))
+}
+
+impl ClassDecl {
+    pub(crate) fn enforcement_for(&self, check: &str) -> Enforcement {
+        self.enforcement_overrides
+            .get(check)
+            .copied()
+            .unwrap_or(self.enforcement)
+    }
+
+    pub(crate) fn enforcement_summary(&self) -> String {
+        enforcement_summary(self.enforcement, &self.enforcement_overrides)
+    }
+}
+
 impl RelationshipDecl {
     /// The severity governing one check of this declaration.
     pub fn enforcement_for(&self, check: &str) -> Enforcement {
@@ -177,16 +210,7 @@ impl RelationshipDecl {
     /// declaration whose overrides raise a check above its base severity can
     /// never read as the bare base in one of them.
     pub(crate) fn enforcement_summary(&self) -> String {
-        let base = self.enforcement.as_str().to_string();
-        if self.enforcement_overrides.is_empty() {
-            return base;
-        }
-        let overrides: Vec<String> = self
-            .enforcement_overrides
-            .iter()
-            .map(|(check, sev)| format!("{check}={}", sev.as_str()))
-            .collect();
-        format!("{base}; {}", overrides.join(", "))
+        enforcement_summary(self.enforcement, &self.enforcement_overrides)
     }
 
     /// Source classes exempted from `check`; empty when none are.
@@ -441,6 +465,8 @@ const PROPERTY_TYPE_NAMES: &[&str] = &[
     "timestamp",
     "uniqueid",
     "point",
+    "list",
+    "array",
     "any",
 ];
 
@@ -467,7 +493,16 @@ pub const CHECK_NAMES: &[&str] = &[
 /// `transitive`).
 pub const EXEMPTABLE_CHECKS: &[&str] = &["required_properties", "property_types"];
 
-const CLASS_KEYS: &[&str] = &["is_a", "abstract", "description", "by"];
+pub(crate) const NODE_CHECK_NAMES: &[&str] = &["required_properties", "property_types"];
+const CLASS_KEYS: &[&str] = &[
+    "is_a",
+    "abstract",
+    "description",
+    "by",
+    "required_properties",
+    "property_types",
+    "enforcement",
+];
 const REL_KEYS: &[&str] = &[
     "domain",
     "range",
@@ -485,10 +520,120 @@ const REL_KEYS: &[&str] = &[
     "description",
 ];
 
+fn parse_enforcement(
+    map: &crate::datatypes::PropMap,
+    context: &str,
+    checks: &[&str],
+) -> Result<(Enforcement, BTreeMap<String, Enforcement>), String> {
+    let severity = |s: &str| -> Result<Enforcement, String> {
+        match s {
+            "advisory" => Ok(Enforcement::Advisory),
+            "warn" => Ok(Enforcement::Warn),
+            "error" => Ok(Enforcement::Error),
+            other => Err(format!(
+                "{context}: enforcement '{other}' is not one of \
+                 'advisory', 'warn', 'error'"
+            )),
+        }
+    };
+    let parsed = match map.get("enforcement") {
+        None => (Enforcement::Advisory, BTreeMap::new()),
+        Some(Value::String(s)) => (severity(s)?, BTreeMap::new()),
+        // Map form: per-check severities; unlisted checks keep the
+        // advisory base.
+        Some(other) => match as_map(other) {
+            Some(per_check) => {
+                let mut overrides = BTreeMap::new();
+                for (check, sv) in per_check {
+                    if !checks.contains(&check) {
+                        return Err(format!(
+                            "{context}: enforcement key '{check}' \
+                             is not a check — use one of {checks:?}"
+                        ));
+                    }
+                    let Value::String(sv) = sv else {
+                        return Err(format!(
+                            "{context}: enforcement['{check}'] \
+                             must be a severity string"
+                        ));
+                    };
+                    overrides.insert(check.to_string(), severity(sv)?);
+                }
+                (Enforcement::Advisory, overrides)
+            }
+            None => {
+                return Err(format!(
+                    "{context}: 'enforcement' must be a severity \
+                     string or a {{check: severity}} map"
+                ))
+            }
+        },
+    };
+    Ok(parsed)
+}
+
+fn parse_property_contract(
+    map: &crate::datatypes::PropMap,
+    context: &str,
+) -> Result<(Vec<String>, BTreeMap<String, String>), String> {
+    let required_properties = match map.get("required_properties") {
+        None => Vec::new(),
+        Some(Value::List(items)) => items
+            .iter()
+            .map(|v| match v {
+                Value::String(s) => Ok(s.clone()),
+                _ => Err(format!(
+                    "{context}: 'required_properties' entries must be strings"
+                )),
+            })
+            .collect::<Result<_, _>>()?,
+        Some(_) => return Err(format!("{context}: 'required_properties' must be a list")),
+    };
+    let property_types = match map.get("property_types") {
+        None => BTreeMap::new(),
+        Some(v) => {
+            let types =
+                as_map(v).ok_or_else(|| format!("{context}: 'property_types' must be a map"))?;
+            let mut out = BTreeMap::new();
+            for (k, tv) in types {
+                match tv {
+                    Value::String(s) => {
+                        // value_matches_type is permissive on unknown names,
+                        // so a typo here would otherwise never fail anything.
+                        if !PROPERTY_TYPE_NAMES.contains(&s.to_lowercase().as_str()) {
+                            return Err(format!(
+                                "{context}: 'property_types' entry \
+                                 '{k}: {s}' names an unknown type — use one of \
+                                 string, integer, float, boolean, date, \
+                                 datetime, timestamp, point, list (array), any"
+                            ));
+                        }
+                        out.insert(k.to_string(), s.clone());
+                    }
+                    _ => {
+                        return Err(format!(
+                            "{context}: 'property_types' values must be strings"
+                        ))
+                    }
+                }
+            }
+            out
+        }
+    };
+    Ok((required_properties, property_types))
+}
+
 fn class_from_value(name: &str, value: &Value) -> Result<ClassDecl, String> {
     let map = as_map(value).ok_or_else(|| format!("class '{name}' must be a map"))?;
-    reject_unknown(map, CLASS_KEYS, &format!("class '{name}'"))?;
+    let context = format!("class '{name}'");
+    reject_unknown(map, CLASS_KEYS, &context)?;
+    let (required_properties, property_types) = parse_property_contract(map, &context)?;
+    let (enforcement, enforcement_overrides) = parse_enforcement(map, &context, NODE_CHECK_NAMES)?;
     Ok(ClassDecl {
+        required_properties,
+        property_types,
+        enforcement,
+        enforcement_overrides,
         is_a: opt_string(map, "is_a", name)?,
         is_abstract: opt_bool(map, "abstract", name)?,
         description: opt_string(map, "description", name)?,
@@ -499,50 +644,8 @@ fn class_from_value(name: &str, value: &Value) -> Result<ClassDecl, String> {
 fn relationship_from_value(name: &str, value: &Value) -> Result<RelationshipDecl, String> {
     let map = as_map(value).ok_or_else(|| format!("relationship '{name}' must be a map"))?;
     reject_unknown(map, REL_KEYS, &format!("relationship '{name}'"))?;
-    let severity = |s: &str| -> Result<Enforcement, String> {
-        match s {
-            "advisory" => Ok(Enforcement::Advisory),
-            "warn" => Ok(Enforcement::Warn),
-            "error" => Ok(Enforcement::Error),
-            other => Err(format!(
-                "relationship '{name}': enforcement '{other}' is not one of \
-                 'advisory', 'warn', 'error'"
-            )),
-        }
-    };
-    let (enforcement, enforcement_overrides) = match map.get("enforcement") {
-        None => (Enforcement::Advisory, BTreeMap::new()),
-        Some(Value::String(s)) => (severity(s)?, BTreeMap::new()),
-        // Map form: per-check severities; unlisted checks keep the
-        // advisory base.
-        Some(other) => match as_map(other) {
-            Some(per_check) => {
-                let mut overrides = BTreeMap::new();
-                for (check, sv) in per_check {
-                    if !CHECK_NAMES.contains(&check) {
-                        return Err(format!(
-                            "relationship '{name}': enforcement key '{check}' \
-                             is not a check — use one of {CHECK_NAMES:?}"
-                        ));
-                    }
-                    let Value::String(sv) = sv else {
-                        return Err(format!(
-                            "relationship '{name}': enforcement['{check}'] \
-                             must be a severity string"
-                        ));
-                    };
-                    overrides.insert(check.to_string(), severity(sv)?);
-                }
-                (Enforcement::Advisory, overrides)
-            }
-            None => {
-                return Err(format!(
-                    "relationship '{name}': 'enforcement' must be a severity \
-                     string or a {{check: severity}} map"
-                ))
-            }
-        },
-    };
+    let context = format!("relationship '{name}'");
+    let (enforcement, enforcement_overrides) = parse_enforcement(map, &context, CHECK_NAMES)?;
     let cardinality = match map.get("cardinality") {
         None => None,
         Some(v) => {
@@ -559,54 +662,7 @@ fn relationship_from_value(name: &str, value: &Value) -> Result<RelationshipDecl
             })
         }
     };
-    let required_properties = match map.get("required_properties") {
-        None => Vec::new(),
-        Some(Value::List(items)) => items
-            .iter()
-            .map(|v| match v {
-                Value::String(s) => Ok(s.clone()),
-                _ => Err(format!(
-                    "relationship '{name}': 'required_properties' entries must be strings"
-                )),
-            })
-            .collect::<Result<_, _>>()?,
-        Some(_) => {
-            return Err(format!(
-                "relationship '{name}': 'required_properties' must be a list"
-            ))
-        }
-    };
-    let property_types = match map.get("property_types") {
-        None => BTreeMap::new(),
-        Some(v) => {
-            let types = as_map(v)
-                .ok_or_else(|| format!("relationship '{name}': 'property_types' must be a map"))?;
-            let mut out = BTreeMap::new();
-            for (k, tv) in types {
-                match tv {
-                    Value::String(s) => {
-                        // value_matches_type is permissive on unknown names,
-                        // so a typo here would otherwise never fail anything.
-                        if !PROPERTY_TYPE_NAMES.contains(&s.to_lowercase().as_str()) {
-                            return Err(format!(
-                                "relationship '{name}': 'property_types' entry \
-                                 '{k}: {s}' names an unknown type — use one of \
-                                 string, integer, float, boolean, date, \
-                                 datetime, timestamp, point, any"
-                            ));
-                        }
-                        out.insert(k.to_string(), s.clone());
-                    }
-                    _ => {
-                        return Err(format!(
-                            "relationship '{name}': 'property_types' values must be strings"
-                        ))
-                    }
-                }
-            }
-            out
-        }
-    };
+    let (required_properties, property_types) = parse_property_contract(map, &context)?;
     let inverse_name = opt_string(map, "inverse_name", name)?;
     let inverse_enforced = opt_bool(map, "inverse_enforced", name)?;
     if inverse_enforced && inverse_name.is_none() {

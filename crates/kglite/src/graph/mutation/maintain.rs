@@ -620,7 +620,7 @@ pub fn add_nodes(
     preflight_interner_names(graph, interned_names)?;
     graph.reject_abstract_batch_type(&node_type)?;
     graph
-        .prepare_disk_mutation()
+        .prepare_mutation()
         .map_err(|e| format!("disk mutation lease failed: {e}"))?;
     let conflict_mode = parse_conflict_mode(conflict_handling.as_deref())?;
 
@@ -864,7 +864,7 @@ pub fn add_edges_from_specs(
     }
     preflight_interner_names(graph, interned_names)?;
     graph
-        .prepare_disk_mutation()
+        .prepare_mutation()
         .map_err(|e| format!("disk mutation lease failed: {e}"))?;
 
     // BTreeMap, not HashMap: group order decides edge-creation order.
@@ -1020,7 +1020,7 @@ pub(crate) fn add_connections_with_initial_load(
     interned_names.extend(column_names.iter().map(String::as_str));
     preflight_interner_names(graph, interned_names)?;
     graph
-        .prepare_disk_mutation()
+        .prepare_mutation()
         .map_err(|e| format!("disk mutation lease failed: {e}"))?;
     let conflict_mode = parse_conflict_mode(conflict_handling.as_deref())?;
 
@@ -1654,7 +1654,7 @@ pub fn replace_connections(
     interned_names.extend(column_names.iter().map(String::as_str));
     preflight_interner_names(graph, interned_names)?;
     graph
-        .prepare_disk_mutation()
+        .prepare_mutation()
         .map_err(|e| format!("disk mutation lease failed: {e}"))?;
     // --- Validate column presence BEFORE deleting (atomicity-by-validation) ---
     let available_cols: Vec<_> = df_data.get_column_names();
@@ -1875,7 +1875,7 @@ pub fn create_connections(
 ) -> Result<ConnectionOperationReport, String> {
     let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
     graph
-        .prepare_disk_mutation()
+        .prepare_mutation()
         .map_err(|e| format!("disk mutation lease failed: {e}"))?;
     let conflict_mode = match conflict_handling.as_deref() {
         Some("replace") => ConflictHandling::Replace,
@@ -2162,7 +2162,7 @@ pub fn update_node_properties(
         return Err("No nodes to update".to_string());
     }
     graph
-        .prepare_disk_mutation()
+        .prepare_mutation()
         .map_err(|e| format!("disk mutation lease failed: {e}"))?;
 
     let start_time = std::time::Instant::now();

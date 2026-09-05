@@ -451,10 +451,10 @@ impl TypeIndexStore {
     /// Fold every bucket's level stack back into one, for the buckets this
     /// graph is the last holder of.
     ///
-    /// Called at write entry alongside the backend's and `id_indices`'
-    /// compaction, so "hold a view, write, drop the view, write again" returns
-    /// to the flat representation on the next write. Per bucket this is an
-    /// `Arc::get_mut` probe plus an O(delta) merge.
+    /// Called at write entry or successful Session publication alongside the
+    /// backend's and `id_indices`' compaction, so "hold a view, write, drop the
+    /// view, write again" returns to the flat representation on the next write. Per
+    /// bucket this is an `Arc::get_mut` probe plus an O(delta) merge.
     pub fn try_compact(&mut self) {
         for bucket in self.overlay.values_mut() {
             bucket.try_compact();
@@ -623,18 +623,11 @@ impl TypeIndexStore {
 
     /// Locate `members` in `name`'s bucket, ascending by position.
     ///
-    /// **The delete path's fast lane.** A `DETACH DELETE` used to reach this
-    /// store only through [`retain_in_type`](Self::retain_in_type), which walks
-    /// every member of the type and probes a `HashSet` for each one — 4.0 ms to
-    /// remove a single node from a 1M-row bucket, and quadratic in a delete
-    /// loop. Membership is resolvable in O(k log N) instead, via the
-    /// sortedness invariant [`TypeNodesRef::binary_search_idx`] documents.
-    ///
-    /// Returns `None` — meaning "use the retain" — whenever that invariant does
-    /// not hold for one of the members. A freed `NodeIndex` slot reused by a
-    /// later create is appended out of order, so the invariant is a fast path,
-    /// never a guarantee. A position that *is* found is always right: the
-    /// search only reports `Ok` for an element that compares equal.
+    /// Binary search handles sorted buckets. A reused low `NodeIndex` is
+    /// appended out of order, so a miss also checks the last slot: deleting a
+    /// just-created node can then avoid a full-bucket retain. Both searches
+    /// return only verified equal-member coordinates; other misses return
+    /// `None` for the caller's order-preserving retain fallback.
     ///
     /// Promotes the bucket into a flat, owned overlay entry (as the retain
     /// does), which is what makes the returned positions valid coordinates for
@@ -654,12 +647,17 @@ impl TypeIndexStore {
         let bucket = self.entry_or_default(name.to_string());
         let mut hits: Vec<(usize, NodeIndex)> = Vec::with_capacity(members.len());
         for member in members {
-            hits.push((bucket.binary_search(member).ok()?, *member));
+            let position = bucket.binary_search(member).ok().or_else(|| {
+                bucket
+                    .last()
+                    .filter(|last| *last == member)
+                    .map(|_| bucket.len() - 1)
+            })?;
+            hits.push((position, *member));
         }
         hits.sort_unstable();
-        // Two doomed members resolving to one position means the bucket holds a
-        // duplicate the search collapsed; the retain removes every occurrence,
-        // so hand it back rather than removing one of them.
+        // Repeated requested coordinates cannot be removed twice. Preserve the
+        // retain fallback instead of returning an ambiguous removal plan.
         let unique = hits.windows(2).all(|pair| pair[0].0 != pair[1].0);
         unique.then_some(hits)
     }

@@ -1385,23 +1385,26 @@ impl DirGraph {
         violations
     }
 
+    pub(super) fn rebuild_all_unique_indices(&mut self) {
+        let node_types = self
+            .unique_indices
+            .keys()
+            .map(|(node_type, _)| node_type.clone())
+            .collect();
+        self.rebuild_unique_indices_for_types(&node_types);
+    }
+
     /// Recompute the unique-occupancy maps of every declared constraint on
     /// `node_types`, from live data.
     ///
-    /// The statement-rollback counterpart of
-    /// [`Self::rebuild_unique_indices_from_keys`]. `unique_indices` is parked by
-    /// `rollback::swap_data_scale`, so a journal rollback leaves the *failed
-    /// statement's* occupancy in place while the data underneath is restored;
-    /// the claims the statement added or released have to be recomputed, or the
-    /// graph keeps a phantom occupant (a permanent spurious
-    /// `ConstraintViolationError` for a value nothing holds) or has silently
-    /// released one (a real duplicate admitted on the next write).
+    /// Reindex repairs physical occupants after vacuum relocates nodes. A
+    /// statement rollback also needs this: it restores data while leaving the
+    /// failed statement's occupancy parked in place, causing phantom or missing
+    /// claims unless the touched types are rebuilt.
     ///
-    /// Scoped to the types the replay touched, so an untouched or unconstrained
-    /// type costs nothing and an unconstrained graph returns immediately.
-    /// Duplicates are not reported: the restored data is the pre-statement data,
-    /// which the write path already accepted, so a contested tuple here could
-    /// only be a pre-existing violation the load path already surfaced.
+    /// Untouched types cost nothing and an unconstrained graph returns
+    /// immediately. Duplicates are not reported here: maintenance preserves
+    /// already accepted data, including violations surfaced by the load path.
     pub(super) fn rebuild_unique_indices_for_types(&mut self, node_types: &HashSet<String>) {
         if node_types.is_empty() || self.unique_indices.is_empty() {
             return;

@@ -123,6 +123,11 @@ impl DirGraph {
             properties: PropertyStorage::Columnar(ColumnarRow::new(row_id)),
         };
         let idx = GraphWrite::add_node(&mut self.graph, node_data);
+        if let Some(recording) = self.graph.recording_mut() {
+            if recording.is_wal_owner() {
+                recording.note_wal_node_identity(idx, node_type_key, id.clone(), true);
+            }
+        }
         // A no-op on the heap backends (the row id is already in the node's
         // `PropertyStorage`); on disk it re-stamps the slot, which is where
         // disk reads resolve the row from.

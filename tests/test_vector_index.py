@@ -514,7 +514,7 @@ class TestHnswInCypher:
         )
 
         exact = [row["id"] for row in g.cypher(mixed_query, params={"q": query})]
-        assert exact == [32, 33, 34, 35, 36]
+        assert exact == [320, 321, 322, 323, 324]  # DESC places NULL scores first.
 
         g.build_vector_index("Doc", "summary", metric="euclidean")
         approximate = [row["id"] for row in g.cypher(mixed_query, params={"q": query})]

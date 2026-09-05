@@ -669,8 +669,8 @@ const AGG_QUERIES_EXTRA: &[&str] = &[
 /// parallel == serial, with **exact row order** and exact values.
 ///
 /// `collect` is the order-sensitive one: it concatenates its group's values in
-/// row order, and the partitioned grouping pass keeps every group's row-index
-/// list globally ascending precisely so that list is unchanged. A set
+/// row order, and sequential grouping keeps each group's row indices in
+/// that order while indexed parallel evaluation preserves group order. A set
 /// comparison would not see a `collect` that came back permuted.
 #[test]
 fn parallel_aggregation_matches_serial_in_order() {
@@ -693,48 +693,49 @@ fn parallel_aggregation_matches_serial_in_order() {
     );
 }
 
-/// The carried first row must be the group's **globally** first, not the first
-/// its partition happened to see.
-///
-/// `carry_group_bindings` copies the grouping variables' node bindings off
-/// `rows[row_indices[0]]`, and a trailing `ORDER BY` on that variable's
-/// property is what makes the choice observable. Red-first: reverse the merge
-/// order, or prepend rather than append a partition's indices, and this fails
-/// while every count/sum assertion above stays green.
+/// Exact carried binding and list-order oracles on serial and parallel group
+/// evaluation. The fixture has `value`, not `nid`; sorting an absent property
+/// would make the carried-first-row obligation vacuous.
 #[test]
 fn parallel_aggregation_carries_the_global_first_row() {
     let _meter = meter_guard();
-    let graph = linked_graph(PARALLEL_MIN_ROWS_COMPILED * 2);
-    // `nid` ascends with scan order, so the group's globally first row has the
-    // smallest one — a partition-local first would carry a larger `nid` for
-    // every group except the one the first partition opened.
-    // `collect` keeps this on the materialized path (the streaming pipeline
-    // declines it); the trailing ORDER BY reads a property of the *carried*
-    // grouping variable, which is only resolvable from the row the group kept.
-    // `toUpper(...)` makes the group key an *evaluated* one, so each surrogate
-    // group holds thousands of rows rather than a single node — a bare
-    // `b.cat` key is a `NodeProp` surrogate per distinct node, one row each,
-    // and nothing about index order is then observable. `collect` exposes the
-    // row order inside a group, and the trailing ORDER BY reads a property of
-    // the *carried* grouping variable, which is only resolvable from the row
-    // the group kept.
-    let query = "MATCH (a:Item)-[:LINKS]->(b:Item) \
-                 RETURN toUpper(b.cat) AS c, collect(a.value) AS v ORDER BY b.nid ASC";
-    let before = parallel_aggregations();
-    let serial = run(&graph, query, false);
-    let parallel = run(&graph, query, true);
-    assert!(
-        parallel_aggregations() > before,
-        "the query did not fan out its grouping pass"
-    );
-    assert_eq!(
-        serial.rows, parallel.rows,
-        "the partitioned grouping pass carried a partition-local first row"
-    );
-    assert!(
-        serial.rows.len() > 1,
-        "need several groups to be meaningful"
-    );
+    let n = PARALLEL_MIN_ROWS_COMPILED * 2;
+    let graph = linked_graph(n);
+    let mut expected: Vec<(usize, Vec<Value>)> = Vec::new();
+    for i in 0..n {
+        let dst = (i * 7 + 13) % n;
+        let key = Value::String(format!("CAT_{}", dst % 7));
+        if let Some((_, row)) = expected.iter_mut().find(|(_, row)| row[0] == key) {
+            let Value::List(values) = &mut row[1] else {
+                unreachable!()
+            };
+            values.push(Value::Int64((i % 1000) as i64));
+        } else {
+            expected.push((
+                dst % 1000,
+                vec![key, Value::List(vec![Value::Int64((i % 1000) as i64)])],
+            ));
+        }
+    }
+    expected.sort_by_key(|(carried, _)| *carried);
+    for mixed in [false, true] {
+        let extra = if mixed { ",median(a.value) AS m" } else { "" };
+        let query = format!("MATCH(a:Item)-[:LINKS]->(b:Item) RETURN toUpper(b.cat) AS c,collect(a.value) AS v{extra} ORDER BY b.value ASC");
+        let serial = run(&graph, &query, false);
+        let before = parallel_aggregations();
+        let opted_in = run(&graph, &query, true);
+        assert_eq!(parallel_aggregations() - before, 1);
+        assert_eq!(serial.rows, opted_in.rows);
+        let observed: Vec<Vec<Value>> = opted_in.rows.iter().map(|r| r[..2].to_vec()).collect();
+        assert_eq!(
+            observed,
+            expected
+                .iter()
+                .map(|(_, row)| row.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(expected.len() > 1);
+    }
 }
 
 /// The gate and the opt-in, both directions.
@@ -758,7 +759,7 @@ fn aggregation_respects_the_gate_and_the_opt_in() {
     assert_eq!(
         parallel_aggregations(),
         before,
-        "parallel=false fanned out its grouping pass"
+        "parallel=false fanned out evaluation across groups"
     );
 }
 
@@ -852,5 +853,90 @@ fn regex_predicate_matches_across_modes() {
         let parallel = run(&graph, query, true);
         assert_eq!(serial.rows, parallel.rows, "regex diverged: {query}");
         assert!(!serial.rows.is_empty(), "vacuous fixture for {query}");
+    }
+}
+
+fn exact_sum_graph(cancel: bool) -> DirGraph {
+    use crate::datatypes::DataFrame;
+    let n = PARALLEL_MIN_ROWS_COMPILED + 1;
+    let columns = ["nid", "name", "value", "group"]
+        .map(str::to_string)
+        .to_vec();
+    let rows = (0..n)
+        .map(|i| {
+            let value = if i == 0 {
+                i64::MAX
+            } else if i == 1 {
+                1
+            } else if cancel && i == n - 1 {
+                -i64::MAX
+            } else {
+                0
+            };
+            vec![
+                Value::Int64(i as i64),
+                Value::String(format!("N{i}")),
+                Value::Int64(value),
+                Value::Int64(i64::from(i == 2)),
+            ]
+        })
+        .collect();
+    let frame = DataFrame::from_cypher_rows(columns, rows).unwrap();
+    let mut graph = DirGraph::new();
+    crate::graph::mutation::maintain::add_nodes(
+        &mut graph,
+        frame,
+        "Item".to_string(),
+        "nid".to_string(),
+        Some("name".to_string()),
+        None,
+    )
+    .unwrap();
+    graph
+}
+
+#[test]
+fn exact_sum_parallel_partition_overflow_cancels_before_finalization() {
+    let _meter = meter_guard();
+    let graph = exact_sum_graph(true);
+    let query = "MATCH(n:Item) RETURN sum(n.value) AS s";
+    let before = parallel_scans();
+    assert_eq!(run(&graph, query, false).rows, vec![vec![Value::Int64(1)]]);
+    assert_eq!(parallel_scans(), before, "serial control must not fan out");
+    assert_eq!(run(&graph, query, true).rows, vec![vec![Value::Int64(1)]]);
+    assert!(
+        parallel_scans() > before,
+        "the exact aggregate must actually fan out"
+    );
+    assert_eq!(
+        run(
+            &graph,
+            "MATCH(n:Item) RETURN n.group AS g,sum(n.value) AS s ORDER BY g",
+            true
+        )
+        .rows,
+        vec![
+            vec![Value::Int64(0), Value::Int64(1)],
+            vec![Value::Int64(1), Value::Int64(0)]
+        ]
+    );
+}
+
+#[test]
+fn exact_sum_parallel_final_overflow_returns_no_partial_result() {
+    let _meter = meter_guard();
+    let graph = exact_sum_graph(false);
+    let params = HashMap::new();
+    let mut query = parser::parse_cypher("MATCH(n:Item) RETURN sum(n.value) AS s").unwrap();
+    crate::graph::languages::cypher::planner::optimize(&mut query, &graph, &params);
+    for parallel in [false, true] {
+        let before = parallel_scans();
+        let result = CypherExecutor::with_params(&graph, &params, None)
+            .with_parallel(parallel)
+            .execute(&query);
+        assert!(result.unwrap_err().contains("Integer overflow in sum"));
+        if parallel {
+            assert!(parallel_scans() > before);
+        }
     }
 }

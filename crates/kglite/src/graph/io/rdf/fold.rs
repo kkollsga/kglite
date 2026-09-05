@@ -91,19 +91,17 @@ fn parse_xsd_date(value: &str) -> Option<NaiveDate> {
 }
 
 /// Parse an `xsd:dateTime` to a [`Value::Timestamp`]. Tries RFC 3339
-/// first (handles fractional seconds + offsets), then a plain
-/// `%Y-%m-%dT%H:%M:%S` after stripping fractional seconds and any
-/// timezone suffix. If only the date portion parses, returns a
+/// first (normalizes offsets to UTC), then a wall-clock form with optional
+/// fractional seconds after stripping any timezone suffix. Both timestamp
+/// paths preserve nanoseconds. If only the date portion parses, returns a
 /// [`Value::DateTime`]; otherwise falls back to a string.
 fn parse_xsd_datetime(value: &str) -> Value {
     // RFC 3339 covers `2020-01-01T12:30:00Z` and offset forms.
     if let Ok(dt) = DateTime::parse_from_rfc3339(value) {
         return Value::Timestamp(dt.naive_utc());
     }
-    // Strip timezone + fractional seconds, then parse the wall clock.
     let base = strip_tz_suffix(value);
-    let base = base.split('.').next().unwrap_or(base);
-    if let Ok(dt) = NaiveDateTime::parse_from_str(base, "%Y-%m-%dT%H:%M:%S") {
+    if let Ok(dt) = NaiveDateTime::parse_from_str(base, "%Y-%m-%dT%H:%M:%S%.f") {
         return Value::Timestamp(dt);
     }
     // Degrade to a date if that's all we have.
@@ -228,6 +226,55 @@ mod tests {
             Value::Timestamp(_) => {}
             other => panic!("expected Timestamp, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn unzoned_datetime_preserves_exact_fraction() {
+        let date = NaiveDate::from_ymd_opt(2025, 1, 2).unwrap();
+        for (lexical, nanos) in [
+            ("2025-01-02T03:04:05", 0),
+            ("2025-01-02T03:04:05.1", 100_000_000),
+            ("2025-01-02T03:04:05.123456", 123_456_000),
+            ("2025-01-02T03:04:05.123456789", 123_456_789),
+        ] {
+            let expected = date.and_hms_nano_opt(3, 4, 5, nanos).unwrap();
+            assert_eq!(
+                datatype_to_value(lexical, &xsd("dateTime")),
+                Value::Timestamp(expected),
+                "{lexical}"
+            );
+        }
+    }
+
+    #[test]
+    fn zoned_datetime_preserves_fraction_and_utc_day() {
+        for (lexical, day, hour, nanos) in [
+            ("2025-01-02T00:30:05.123456Z", 2, 0, 123_456_000),
+            ("2025-01-02T00:30:05.123456789+02:00", 1, 22, 123_456_789),
+            ("2025-01-02T23:30:05.123456789-05:00", 3, 4, 123_456_789),
+        ] {
+            let expected = NaiveDate::from_ymd_opt(2025, 1, day)
+                .unwrap()
+                .and_hms_nano_opt(hour, 30, 5, nanos)
+                .unwrap();
+            assert_eq!(
+                datatype_to_value(lexical, &xsd("dateTime")),
+                Value::Timestamp(expected),
+                "{lexical}"
+            );
+        }
+    }
+
+    #[test]
+    fn datetime_date_and_string_fallbacks_remain() {
+        assert_eq!(
+            datatype_to_value("2025-01-02", &xsd("dateTime")),
+            Value::DateTime(NaiveDate::from_ymd_opt(2025, 1, 2).unwrap())
+        );
+        assert_eq!(
+            datatype_to_value("unspecified", &xsd("dateTime")),
+            Value::String("unspecified".to_string())
+        );
     }
 
     #[test]

@@ -1,5 +1,5 @@
 //! Cypher scalar functions — utility category. Split out of the monolithic
-//! `evaluate_scalar_function` dispatcher; arms are verbatim. Routed from
+//! `evaluate_scalar_function` dispatcher. Routed from
 //! `super::evaluate_scalar_function`; returns `Ok(None)` when `name` is not
 //! one of this category's functions so the dispatcher tries the next.
 use super::super::helpers::*;
@@ -18,69 +18,7 @@ impl<'a> CypherExecutor<'a> {
         row: &ResultRow,
     ) -> Result<Option<Value>, String> {
         let result: Result<Value, String> = match name {
-            "vector_score" => {
-                if args.len() < 3 || args.len() > 4 {
-                    return Err(
-                        "vector_score() requires 3-4 arguments: (node, property, query_vector [, metric])"
-                            .into(),
-                    );
-                }
-
-                // Arg 0: node variable → resolve to NodeIndex (changes per row)
-                let node_idx = match &args[0] {
-                    Expression::Variable(var) => match row.node_bindings.get(var) {
-                        Some(&idx) => idx,
-                        None => return Ok(Some(Value::Null)),
-                    },
-                    _ => {
-                        return Err("vector_score(): first argument must be a node variable".into())
-                    }
-                };
-
-                // The constant arguments, parsed once per call site — or per
-                // row when this call's arguments are row-dependent, or when
-                // every cache slot already belongs to another call site.
-                let uncached;
-                let c = match self.vs_cache.get(args) {
-                    Some(cached) => cached,
-                    None => match self.vs_cache.park(self.prepare_vector_score(args, row)?) {
-                        Ok(parked) => parked,
-                        Err(entry) => {
-                            uncached = entry;
-                            &uncached
-                        }
-                    },
-                };
-
-                // Per-row: look up node type → embedding store → compute similarity
-                let node_type = match self.graph.graph.node_view(node_idx) {
-                    Some(n) => n.node_type_str(&self.graph.interner),
-                    None => return Ok(Some(Value::Null)),
-                };
-
-                let store = match self.graph.embedding_store(node_type, &c.prop_name) {
-                    Some(s) => s,
-                    None => {
-                        return Err(missing_embedding_error(self.graph, node_type, &c.prop_name))
-                    }
-                };
-
-                if c.query_vec.len() != store.dimension {
-                    return Err(format!(
-                        "vector_score(): query vector dimension {} does not match embedding dimension {}",
-                        c.query_vec.len(),
-                        store.dimension
-                    ));
-                }
-
-                match store.get_embedding_with_norm(node_idx.index()) {
-                    Some((embedding, norm)) => {
-                        let score = c.scorer.score(&c.query_vec, embedding, norm);
-                        Ok(Value::Float64(score as f64))
-                    }
-                    None => Ok(Value::Null),
-                }
-            }
+            "vector_score" => self.eval_vector_score(args, row),
             // text_bm25(n, 'property', 'query text') — BM25 relevance of one
             // row's document against a query, or null when that row has no
             // document. Lives in `utility` rather than `string` because it is
@@ -346,6 +284,75 @@ impl CypherExecutor<'_> {
         scored
     }
 
+    fn eval_vector_score(&self, args: &[Expression], row: &ResultRow) -> Result<Value, String> {
+        if args.len() < 3 || args.len() > 5 {
+            return Err(
+                "vector_score() requires 3-5 arguments: (node, property, query_vector [, metric] [, options])"
+                    .into(),
+            );
+        }
+
+        // Arg 0: node variable → resolve to NodeIndex (changes per row)
+        let node_idx = match &args[0] {
+            Expression::Variable(var) => match row.node_bindings.get(var) {
+                Some(&idx) => idx,
+                None => return Ok(Value::Null),
+            },
+            _ => return Err("vector_score(): first argument must be a node variable".into()),
+        };
+
+        // Per-row: look up node type → embedding store → compute similarity
+        let node_type = match self.graph.graph.node_view(node_idx) {
+            Some(n) => n.node_type_str(&self.graph.interner),
+            None => return Ok(Value::Null),
+        };
+
+        // The constant arguments, parsed once per call site — or per
+        // row when this call's arguments are row-dependent, or when
+        // every cache slot already belongs to another call site.
+        let uncached;
+        let c = match self.vs_cache.get(args, node_type) {
+            Some(cached) => cached,
+            None => match self
+                .vs_cache
+                .park(self.prepare_vector_score(args, row, node_type)?)
+            {
+                Ok(parked) => parked,
+                Err(entry) => {
+                    uncached = entry;
+                    &uncached
+                }
+            },
+        };
+
+        let store = match self.graph.embedding_store(node_type, &c.prop_name) {
+            Some(s) => s,
+            None => return Err(missing_embedding_error(self.graph, node_type, &c.prop_name)),
+        };
+
+        Self::check_vector_score_dimension(c.query_vec.len(), store.dimension)?;
+
+        match store.get_embedding_with_norm(node_idx.index()) {
+            Some((embedding, norm)) => {
+                let score = c.scorer.score(&c.query_vec, embedding, norm);
+                Ok(Value::Float64(score as f64))
+            }
+            None => Ok(Value::Null),
+        }
+    }
+
+    pub(in crate::graph::languages::cypher::executor) fn check_vector_score_dimension(
+        query_dimension: usize,
+        embedding_dimension: usize,
+    ) -> Result<(), String> {
+        if query_dimension != embedding_dimension {
+            return Err(format!(
+                "vector_score(): query vector dimension {query_dimension} does not match embedding dimension {embedding_dimension}",
+            ));
+        }
+        Ok(())
+    }
+
     /// Parse `vector_score()`'s constant arguments — property name, query
     /// vector, and the metric (explicit argument, else the store's own, else
     /// cosine).
@@ -353,10 +360,11 @@ impl CypherExecutor<'_> {
     /// The returned entry carries the key it was prepared under, so the caller
     /// can park it for the rest of the scan; a row-dependent argument yields a
     /// keyless entry that scores this row only.
-    fn prepare_vector_score(
+    pub(in crate::graph::languages::cypher::executor) fn prepare_vector_score(
         &self,
         args: &[Expression],
         row: &ResultRow,
+        node_type: &str,
     ) -> Result<VectorScoreCache, String> {
         #[cfg(test)]
         VECTOR_SCORE_PREPARES.with(|count| count.set(count.get() + 1));
@@ -368,28 +376,27 @@ impl CypherExecutor<'_> {
             }
         };
         let query_vec = self.extract_float_list(&args[2], row)?;
-        let metric_name = if args.len() > 3 {
-            match self.evaluate_expression(&args[3], row)? {
-                Value::String(s) => s,
-                _ => "cosine".to_string(),
+        let tail = args[3..]
+            .iter()
+            .map(|expr| self.evaluate_expression(expr, row))
+            .collect::<Result<Vec<_>, _>>()?;
+        let options = super::super::vector_options::parse(&tail)?;
+        let store = self
+            .graph
+            .embedding_store(node_type, &prop_name)
+            .ok_or_else(|| missing_embedding_error(self.graph, node_type, &prop_name))?;
+        let metric = match options.metric {
+            Some(metric) => metric,
+            None => {
+                let name = store.metric.as_deref().unwrap_or("cosine");
+                vs::DistanceMetric::from_name(name)
+                    .ok_or_else(|| format!("vector_score(): unknown stored metric '{name}'"))?
             }
-        } else {
-            self.graph
-                .embeddings
-                .iter()
-                .find(|((_, pn), _)| pn == &prop_name)
-                .and_then(|(_, store)| store.metric.clone())
-                .unwrap_or_else(|| "cosine".to_string())
         };
-        let metric = vs::DistanceMetric::from_name(&metric_name).ok_or_else(|| {
-            format!(
-                "vector_score(): unknown metric '{}'. Use 'cosine', 'dot_product', 'euclidean', or 'poincare'.",
-                metric_name
-            )
-        })?;
         let scorer = vs::Scorer::new(metric, &query_vec);
         Ok(VectorScoreCache {
             keys: VectorScoreCache::key_for(args),
+            node_type: node_type.to_string(),
             prop_name,
             query_vec,
             scorer,
@@ -657,6 +664,14 @@ pub(in crate::graph::languages::cypher::executor) fn is_missing_retrieval_source
     message.starts_with(NO_TEXT_INDEX_PREFIX) || message.starts_with(NO_EMBEDDING_PREFIX)
 }
 
+/// Vector shape, metric and options failures are query errors even when
+/// reached through a fused predicate instead of a projected scalar call.
+pub(in crate::graph::languages::cypher::executor) fn is_vector_argument_error(
+    message: &str,
+) -> bool {
+    message.starts_with("vector_score():") || message.starts_with("vector_score() requires")
+}
+
 /// The error for `text_bm25(n, '<property>', …)` when the node's type carries no
 /// text index over that property.
 ///
@@ -694,7 +709,11 @@ fn missing_text_index_error(graph: &DirGraph, node_type: &str, prop_name: &str) 
 /// name here gets an error naming a store that does exist under the spelling
 /// they didn't use, so the message hands them both ways out. When the name is
 /// genuinely unknown there is nothing to suggest and the plain message stands.
-fn missing_embedding_error(graph: &DirGraph, node_type: &str, prop_name: &str) -> String {
+pub(in crate::graph::languages::cypher::executor) fn missing_embedding_error(
+    graph: &DirGraph,
+    node_type: &str,
+    prop_name: &str,
+) -> String {
     let base = format!("{NO_EMBEDDING_PREFIX}{prop_name}' found for node type '{node_type}'");
     let suffixed = crate::graph::embeddings::store_name(prop_name);
     match graph.embedding_store(node_type, &suffixed) {

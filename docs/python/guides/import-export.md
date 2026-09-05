@@ -46,7 +46,10 @@ with kglite.open("app.kgl") as g:
 ```
 
 - `save()` with no argument writes to the remembered path; passing a path
-  (`save("other.kgl")`) updates the remembered target ("save as"). A graph built
+  (`save("other.kgl")`) updates the remembered target after success ("save as").
+  An owned writer transfers its lease and durable log to that destination;
+  pending source writes remain recoverable from the original file, and failed
+  saves keep the original home. A graph built
   in memory with no path raises `ValueError` if you call `save()` with no path.
 - `kglite.load(path)` also remembers its path, so bare `save()` works after a load.
 - The context manager **skips the save if the block raised** — the on-disk file

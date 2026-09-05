@@ -7,7 +7,7 @@ before users do.
 
 Tests are skipped when the binary isn't built. Build it with::
 
-    cargo build -p kglite-mcp-server --release
+    cargo build -p kglite-mcp-server
 
 GitHub-token-gated tool registration is exercised with synthetic tokens.
 Requests to the live GitHub API additionally require the explicit
@@ -39,7 +39,7 @@ import kglite
 from tests.conftest import binary_skip_reason, workspace_binary
 
 BINARY = workspace_binary("kglite-mcp-server")
-_SKIP_REASON = binary_skip_reason("kglite-mcp-server", BINARY, "cargo build -p kglite-mcp-server --release")
+_SKIP_REASON = binary_skip_reason("kglite-mcp-server", BINARY, "cargo build -p kglite-mcp-server")
 
 pytestmark = pytest.mark.skipif(_SKIP_REASON is not None, reason=_SKIP_REASON or "")
 
@@ -1867,10 +1867,20 @@ class TestYamlManifest:
         for envelope in (listing, result):
             assert envelope["structuredContent"] == json.loads(_text_content(envelope))
         assert listing["structuredContent"]["recipes"][0]["query_count"] == 1
+        elapsed = result["structuredContent"]["result"]["diagnostics"]["elapsed_ms"]
+        assert isinstance(elapsed, int) and elapsed >= 0
         assert result["structuredContent"]["result"] == {
             "columns": ["people"],
             "rows": [[4]],
             "row_count": 1,
+            "diagnostics": {
+                "elapsed_ms": elapsed,
+                "retrieval": [],
+                "row_limit": None,
+                "timeout_ms": None,
+                "total_rows": None,
+                "warnings": [],
+            },
         }
 
     def test_bare_overview_adds_prefix_then_catalog_hint(self, graph_with_manifest: Path):

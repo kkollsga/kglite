@@ -944,6 +944,7 @@ impl core::fmt::Debug for kglite::api::cypher::MutationStats
 pub fn kglite::api::cypher::MutationStats::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct kglite::api::cypher::QueryDiagnostics
 pub kglite::api::cypher::QueryDiagnostics::elapsed_ms: u64
+pub kglite::api::cypher::QueryDiagnostics::retrieval: alloc::vec::Vec<kglite::api::cypher::RetrievalDiagnostics>
 pub kglite::api::cypher::QueryDiagnostics::row_limit: core::option::Option<usize>
 pub kglite::api::cypher::QueryDiagnostics::timeout_ms: core::option::Option<u64>
 pub kglite::api::cypher::QueryDiagnostics::total_rows: core::option::Option<u64>
@@ -954,6 +955,8 @@ impl core::default::Default for kglite::api::cypher::QueryDiagnostics
 pub fn kglite::api::cypher::QueryDiagnostics::default() -> kglite::api::cypher::QueryDiagnostics
 impl core::fmt::Debug for kglite::api::cypher::QueryDiagnostics
 pub fn kglite::api::cypher::QueryDiagnostics::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl serde_core::ser::Serialize for kglite::api::cypher::QueryDiagnostics
+pub fn kglite::api::cypher::QueryDiagnostics::serialize<__S>(&self, __serializer: __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 pub struct kglite::api::cypher::QueryFeatures
 pub kglite::api::cypher::QueryFeatures::explain: bool
 pub kglite::api::cypher::QueryFeatures::format_csv: bool
@@ -982,6 +985,21 @@ impl core::clone::Clone for kglite::api::cypher::ResultRow
 pub fn kglite::api::cypher::ResultRow::clone(&self) -> kglite::api::cypher::ResultRow
 impl core::fmt::Debug for kglite::api::cypher::ResultRow
 pub fn kglite::api::cypher::ResultRow::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct kglite::api::cypher::RetrievalDiagnostics
+pub kglite::api::cypher::RetrievalDiagnostics::actual_mode: alloc::string::String
+pub kglite::api::cypher::RetrievalDiagnostics::fallback_reason: core::option::Option<alloc::string::String>
+pub kglite::api::cypher::RetrievalDiagnostics::requested_policy: alloc::string::String
+pub kglite::api::cypher::RetrievalDiagnostics::store: core::option::Option<alloc::string::String>
+impl core::clone::Clone for kglite::api::cypher::RetrievalDiagnostics
+pub fn kglite::api::cypher::RetrievalDiagnostics::clone(&self) -> kglite::api::cypher::RetrievalDiagnostics
+impl core::cmp::Eq for kglite::api::cypher::RetrievalDiagnostics
+impl core::cmp::PartialEq for kglite::api::cypher::RetrievalDiagnostics
+pub fn kglite::api::cypher::RetrievalDiagnostics::eq(&self, other: &kglite::api::cypher::RetrievalDiagnostics) -> bool
+impl core::fmt::Debug for kglite::api::cypher::RetrievalDiagnostics
+pub fn kglite::api::cypher::RetrievalDiagnostics::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for kglite::api::cypher::RetrievalDiagnostics
+impl serde_core::ser::Serialize for kglite::api::cypher::RetrievalDiagnostics
+pub fn kglite::api::cypher::RetrievalDiagnostics::serialize<__S>(&self, __serializer: __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 pub struct kglite::api::cypher::ReturnItem
 pub kglite::api::cypher::ReturnItem::alias: core::option::Option<alloc::string::String>
 pub kglite::api::cypher::ReturnItem::expression: kglite::api::cypher::Expression
@@ -1078,6 +1096,19 @@ pub kglite::api::durable::RawOp::RemoveNode::node_type: kglite::api::InternedKey
 pub kglite::api::durable::RawOp::SetNodeLabels(petgraph::graph_impl::NodeIndex, core::option::Option<alloc::boxed::Box<kglite::api::durable::BeforeImage>>)
 pub kglite::api::durable::RawOp::UpsertEdge(petgraph::graph_impl::EdgeIndex, kglite::api::durable::CaptureOrigin, core::option::Option<alloc::boxed::Box<kglite::api::durable::BeforeImage>>)
 pub kglite::api::durable::RawOp::UpsertNode(petgraph::graph_impl::NodeIndex, kglite::api::durable::CaptureOrigin, core::option::Option<alloc::boxed::Box<kglite::api::durable::BeforeImage>>)
+pub kglite::api::durable::RawOp::WalGroup
+pub kglite::api::durable::RawOp::WalGroup::conn_type: kglite::api::InternedKey
+pub kglite::api::durable::RawOp::WalGroup::source: petgraph::graph_impl::NodeIndex
+pub kglite::api::durable::RawOp::WalGroup::src_id: kglite::datatypes::values::Value
+pub kglite::api::durable::RawOp::WalGroup::src_type: kglite::api::InternedKey
+pub kglite::api::durable::RawOp::WalGroup::target: petgraph::graph_impl::NodeIndex
+pub kglite::api::durable::RawOp::WalGroup::tgt_id: kglite::datatypes::values::Value
+pub kglite::api::durable::RawOp::WalGroup::tgt_type: kglite::api::InternedKey
+pub kglite::api::durable::RawOp::WalNode
+pub kglite::api::durable::RawOp::WalNode::id: kglite::datatypes::values::Value
+pub kglite::api::durable::RawOp::WalNode::idx: petgraph::graph_impl::NodeIndex
+pub kglite::api::durable::RawOp::WalNode::node_type: kglite::api::InternedKey
+pub kglite::api::durable::RawOp::WalNode::reset: bool
 impl core::clone::Clone for kglite::api::durable::RawOp
 pub fn kglite::api::durable::RawOp::clone(&self) -> kglite::api::durable::RawOp
 impl core::cmp::PartialEq for kglite::api::durable::RawOp
@@ -1227,10 +1258,11 @@ pub fn kglite::api::durable::checkpoint_epilogue(wal: &mut kglite::api::durable:
 pub fn kglite::api::durable::checkpoint_prologue(wal: &mut kglite::api::durable::Wal, next_lsn: u64, graph: &mut kglite::api::DirGraph) -> core::io::error::Result<()>
 pub fn kglite::api::durable::ensure_recovered(checkpoint_path: &std::path::Path, checkpoint_lsn: u64) -> core::result::Result<(), kglite::api::durable::DurableOpenError>
 pub fn kglite::api::durable::open_log(graph: &mut alloc::sync::Arc<kglite::api::DirGraph>, checkpoint_path: &std::path::Path, level: kglite::api::durable::DurabilityLevel) -> core::result::Result<core::option::Option<(kglite::api::durable::Wal, u64)>, kglite::api::durable::DurableOpenError>
+pub fn kglite::api::durable::prepare_save_as_target(checkpoint_path: &std::path::Path, level: kglite::api::durable::DurabilityLevel) -> core::result::Result<core::option::Option<kglite::api::durable::Wal>, kglite::api::durable::DurableOpenError>
 pub fn kglite::api::durable::recover(path: &std::path::Path) -> core::io::error::Result<alloc::vec::Vec<kglite::api::durable::WalFrame>>
 pub fn kglite::api::durable::resolve_ops(raw: &[kglite::api::durable::RawOp], graph: &impl kglite::api::GraphRead, interner: &kglite::api::StringInterner, secondary_labels: impl core::ops::function::Fn(petgraph::graph_impl::NodeIndex) -> alloc::vec::Vec<alloc::string::String>) -> alloc::vec::Vec<kglite::graph::wal::MutationOp>
 pub fn kglite::api::durable::wal_path(checkpoint: &std::path::Path) -> std::path::PathBuf
-pub fn kglite::api::durable::wrap_for_durability(dir: &mut kglite::api::DirGraph)
+pub fn kglite::api::durable::wrap_for_durability(dir: &mut kglite::api::DirGraph) -> core::result::Result<(), kglite::api::durable::DurableOpenError>
 pub mod kglite::api::embeddings
 pub struct kglite::api::embeddings::EmbeddingIngestReport
 pub kglite::api::embeddings::EmbeddingIngestReport::dimension: usize
@@ -1858,6 +1890,7 @@ pub fn kglite::api::io::pass_a_scan(source: &kglite::api::storage::DiskGraph, sp
 pub fn kglite::api::io::pass_a_scan_to_file(source: &kglite::api::storage::DiskGraph, spec: &kglite::api::io::SubsetSpec, kept_edges_path: &std::path::Path) -> core::result::Result<kglite::graph::mutation::subgraph_streaming::PassAFileResult, alloc::string::String>
 pub fn kglite::api::io::prepare_kgl_write(graph: &mut alloc::sync::Arc<kglite::api::DirGraph>)
 pub fn kglite::api::io::prepare_save(graph: &mut alloc::sync::Arc<kglite::api::DirGraph>)
+pub fn kglite::api::io::same_checkpoint_path(left: &std::path::Path, right: &std::path::Path) -> core::io::error::Result<bool>
 pub fn kglite::api::io::save_graph(graph: &mut alloc::sync::Arc<kglite::api::DirGraph>, path: &str) -> core::result::Result<(), kglite::api::io::SaveError>
 pub fn kglite::api::io::save_graph_with(graph: &mut alloc::sync::Arc<kglite::api::DirGraph>, path: &str, fsync: bool) -> core::result::Result<(), kglite::api::io::SaveError>
 pub fn kglite::api::io::save_subset(source: &kglite::api::DirGraph, selection: &kglite::api::CowSelection, out_path: &std::path::Path) -> core::result::Result<(), alloc::string::String>
@@ -2993,8 +3026,12 @@ pub fn kglite::api::CardinalityDecl::deserialize<__D>(__deserializer: __D) -> co
 pub struct kglite::api::ClassDecl
 pub kglite::api::ClassDecl::by: core::option::Option<alloc::string::String>
 pub kglite::api::ClassDecl::description: core::option::Option<alloc::string::String>
+pub kglite::api::ClassDecl::enforcement: kglite::api::Enforcement
+pub kglite::api::ClassDecl::enforcement_overrides: alloc::collections::btree::map::BTreeMap<alloc::string::String, kglite::api::Enforcement>
 pub kglite::api::ClassDecl::is_a: core::option::Option<alloc::string::String>
 pub kglite::api::ClassDecl::is_abstract: bool
+pub kglite::api::ClassDecl::property_types: alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>
+pub kglite::api::ClassDecl::required_properties: alloc::vec::Vec<alloc::string::String>
 impl core::clone::Clone for kglite::api::ClassDecl
 pub fn kglite::api::ClassDecl::clone(&self) -> kglite::api::ClassDecl
 impl core::cmp::Eq for kglite::api::ClassDecl

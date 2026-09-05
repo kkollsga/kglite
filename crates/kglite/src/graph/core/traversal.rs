@@ -1452,7 +1452,7 @@ fn cluster_traversal(
         return Err("No nodes remain after type filter for clustering".into());
     }
 
-    // Check if features are spatial (latitude, longitude) — use haversine distance matrix
+    // Configured latitude/longitude features use WGS84 geodesic distances.
     let source_type = graph
         .node_view(nodes[0])
         .map(|n| n.node_type_str(&graph.interner).to_string())
@@ -1500,8 +1500,7 @@ fn cluster_traversal(
             let eps_val =
                 eps.ok_or("method='cluster' with algorithm='dbscan' requires eps parameter")?;
             let min_pts = min_samples.unwrap_or(5);
-            let distances = if is_spatial {
-                // Extract lat/lon columns for haversine
+            if is_spatial {
                 let lat_idx = features
                     .iter()
                     .position(|f| {
@@ -1524,24 +1523,26 @@ fn cluster_traversal(
                     .iter()
                     .map(|row| (row[lat_idx], row[lon_idx]))
                     .collect();
-                crate::graph::algorithms::clustering::haversine_distance_matrix(
+                crate::graph::algorithms::clustering::geographic_dbscan(
                     &coords,
+                    eps_val,
+                    min_pts,
                     crate::graph::algorithms::Interrupt::default(),
                 )
             } else {
                 let mut feat_clone = feature_matrix.clone();
                 crate::graph::algorithms::clustering::normalize_features(&mut feat_clone);
-                crate::graph::algorithms::clustering::euclidean_distance_matrix(
+                let distances = crate::graph::algorithms::clustering::euclidean_distance_matrix(
                     &feat_clone,
                     crate::graph::algorithms::Interrupt::default(),
+                );
+                crate::graph::algorithms::clustering::dbscan(
+                    &distances,
+                    eps_val,
+                    min_pts,
+                    crate::graph::algorithms::Interrupt::default(),
                 )
-            };
-            crate::graph::algorithms::clustering::dbscan(
-                &distances,
-                eps_val,
-                min_pts,
-                crate::graph::algorithms::Interrupt::default(),
-            )
+            }
         }
         _ => {
             return Err(format!(

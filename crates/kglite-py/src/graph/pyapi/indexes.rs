@@ -494,7 +494,7 @@ impl KnowledgeGraph {
         }
     }
 
-    /// Build a BM25 lexical index over a node type's string property.
+    /// Build a BM25 lexical index over a node type's text or string/null-list property.
     #[pyo3(signature = (node_type, property, auto_refresh_limit = None))]
     fn build_text_index(
         &mut self,

@@ -287,13 +287,9 @@ typedef struct KgliteCypherResult {
  * returned by a `kglite_embedder_*_new` factory and not yet
  * freed. Calling twice on the same pointer is UB.
  *
- * **Do NOT free** an embedder that has been handed to
- * [`kglite_session_set_embedder`] — the session retains a clone
- * of the inner Arc; you may free your handle after the call to
- * set_embedder (the Arc keeps the embedder alive until the
- * session drops). For symmetry with other handles, the safest
- * pattern is: factory → set_embedder → free_embedder. Once the
- * Arc is shared, the original handle is no longer special.
+ * [`kglite_session_set_embedder`] borrows this handle and clones the inner
+ * Arc. The caller retains ownership and must free the handle exactly once,
+ * including after a successful attachment; the session's clone stays alive.
  */
  void kglite_embedder_free(struct KgliteEmbedder *embedder);
 
@@ -334,8 +330,8 @@ KgliteStatusCode kglite_session_set_embedder(struct KgliteSession *session,
  *   See fastembed-rs's TextEmbedding::list_supported_models() for
  *   the full list.
  * - `out_embedder` (out, owned): on success, set to an embedder
- *   handle. Caller must free via [`kglite_embedder_free`] (or
- *   transfer ownership via [`kglite_session_set_embedder`]).
+ *   handle. Caller must free via [`kglite_embedder_free`], including after
+ *   attaching it with [`kglite_session_set_embedder`], which borrows it.
  * - `out_error_msg` (out, owned, may be null): on failure, set to
  *   an owned error string.
  *
@@ -1161,6 +1157,18 @@ KgliteStatusCode kglite_open_or_create_graph_in_mode(const char *path,
  const char *kglite_cypher_result_rows_json(const struct KgliteCypherResult *result);
 
 /**
+ * Return execution diagnostics as owned JSON, including actual retrieval routes.
+ * A live result with no diagnostics returns the JSON string `null`. A null
+ * handle or serialization failure returns a null pointer. Free the returned
+ * string with [`kglite_free_string`](crate::kglite_free_string); its lifetime
+ * is independent of the result handle.
+ *
+ * # Safety
+ * `result` must be null or a live result pointer, and must not be freed during this call.
+ */
+ const char *kglite_cypher_result_diagnostics_json(const struct KgliteCypherResult *result);
+
+/**
  * Return the number of rows in the result. Useful for callers
  * that want to size buffers before requesting the JSON blob.
  *
@@ -1404,7 +1412,7 @@ KgliteStatusCode kglite_session_execute_mut_opts(struct KgliteSession *session,
  * issues many small reads.
  *
  * On success `out_results_json` is set to an owned JSON string: an
- * array of `{"columns": [...], "rows": [{...}]}` objects, one per input
+ * array of `{"columns": [...], "rows": [{...}], "diagnostics": {...}}` objects, one per input
  * query in order, with the same natural-value encoding as
  * [`kglite_cypher_result_rows_json`]. Free it with
  * [`kglite_free_string`](crate::kglite_free_string).
@@ -1640,9 +1648,11 @@ KgliteStatusCode kglite_session_save(struct KgliteSession *session,
  * route back. `SHOW INDEXES` reports the delta. Deleting a node prunes its
  * document immediately (a freed node slot is reused, and an orphaned document
  * would be inherited by its next owner); `vacuum` renumbers every node and
- * therefore drops text indexes wholesale. An empty string indexes as an empty
- * document; a property that is absent or holds a non-string is skipped and
- * counted in the report. The property is read through the same alias
+ * therefore drops text indexes wholesale. Strings and lists containing only
+ * strings/nulls each form one document; list members are space-separated and
+ * null members ignored. Empty strings and empty/all-null lists are empty
+ * documents. Absent values, other types, or any non-text/non-null list member
+ * skip the whole document and count in the report. Fields use the same alias
  * resolution a `MATCH` filter uses.
  *
  * The auto-refresh limit is not a parameter here: this signature is published

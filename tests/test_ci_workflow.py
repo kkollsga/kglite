@@ -1148,6 +1148,34 @@ CRATE_PUBLISH_GATES = {
 PYPI_PUBLISH_DECISIONS = {"should_publish_wheels", "should_publish_cli_wheels"}
 
 
+def test_crate_dependents_require_bounded_index_readiness_without_cosmetic_waits() -> None:
+    publish = _release_job("publish-crates")
+    command = 'python3 scripts/wait_kglite_index.py "$VERSION"'
+    readiness = _step_running(publish, command)
+    dependents = {gate for gate in CRATE_PUBLISH_GATES.values() if gate != "should_publish_kglite"}
+    assert set(str(readiness["if"]).split(" || ")) == {
+        f"needs.version-check.outputs.{gate} == 'true'" for gate in dependents
+    }
+    assert readiness["timeout-minutes"] == 3
+    assert readiness["env"]["VERSION"] == "${{ needs.version-check.outputs.version }}"
+    assert not readiness.get("continue-on-error", False)
+    assert list(_step_commands(readiness)) == [command]
+
+    steps = publish["steps"]
+    position = steps.index(readiness)
+    for publish_command, gate in CRATE_PUBLISH_GATES.items():
+        publish_position = steps.index(_step_running(publish, publish_command))
+        if gate == "should_publish_kglite":
+            assert publish_position < position
+        else:
+            assert position < publish_position
+
+    for line in _command_lines(publish):
+        tokens = _tokens(line)
+        assert tokens[:1] != ["sleep"], "Independent publishes need no settling sleeps"
+        assert tokens[:2] != ["cargo", "search"], "Search results do not establish index readiness"
+
+
 def test_crates_publish_waits_for_the_must_pass_wheel_legs() -> None:
     """crates.io must not publish while the wheel matrix is broken.
 

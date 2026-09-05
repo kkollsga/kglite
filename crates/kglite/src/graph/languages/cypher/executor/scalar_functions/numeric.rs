@@ -1,7 +1,4 @@
-//! Cypher scalar functions — numeric category. Split out of the monolithic
-//! `evaluate_scalar_function` dispatcher; arms are verbatim. Routed from
-//! `super::evaluate_scalar_function`; returns `Ok(None)` when `name` is not
-//! one of this category's functions so the dispatcher tries the next.
+//! Cypher scalar numeric functions.
 use super::super::helpers::*;
 use super::super::*;
 use crate::datatypes::values::Value;
@@ -25,7 +22,10 @@ impl<'a> CypherExecutor<'a> {
             "abs" => {
                 let val = self.evaluate_expression(super::first_arg(name, args)?, row)?;
                 match val {
-                    Value::Int64(n) => Ok(Value::Int64(n.abs())),
+                    Value::Int64(n) => n
+                        .checked_abs()
+                        .map(Value::Int64)
+                        .ok_or_else(|| "Integer overflow in abs()".to_string()),
                     Value::Float64(f) => Ok(Value::Float64(f.abs())),
                     Value::Null => Ok(Value::Null),
                     _ => match value_to_f64(&val) {
@@ -62,13 +62,7 @@ impl<'a> CypherExecutor<'a> {
                         Some(f) => {
                             if args.len() >= 2 {
                                 let prec = self.evaluate_expression(&args[1], row)?;
-                                let d = match &prec {
-                                    Value::Int64(i) => *i as i32,
-                                    Value::Float64(fl) => *fl as i32,
-                                    _ => 0,
-                                };
-                                let factor = 10f64.powi(d);
-                                Ok(Value::Float64((f * factor).round() / factor))
+                                Ok(Value::Float64(round_decimal(f, decimal_precision(&prec))))
                             } else {
                                 Ok(Value::Float64(f.round()))
                             }
@@ -199,5 +193,40 @@ impl<'a> CypherExecutor<'a> {
             _ => return Ok(None),
         };
         result.map(Some)
+    }
+}
+
+// Clamp before narrowing, keeping fractional truncation and nonnumeric/default
+// precision behavior. Beyond these bounds decimal rounding cannot change a
+// finite f64 except to signed zero at the negative end.
+fn decimal_precision(value: &Value) -> i32 {
+    match value {
+        Value::Int64(value) => (*value).clamp(-309, 324) as i32,
+        Value::Float64(value) => value.clamp(-309.0, 324.0) as i32,
+        _ => 0,
+    }
+}
+
+fn round_decimal(value: f64, precision: i32) -> f64 {
+    if !value.is_finite() || precision >= 324 {
+        return value;
+    }
+    if precision <= -309 {
+        return 0.0_f64.copysign(value);
+    }
+    if precision < 0 {
+        let factor = 10f64.powi(-precision);
+        return (value / factor).round() * factor;
+    }
+    // 10^309 overflows, but subnormals still round at precisions 309..323.
+    // Split the scale rather than creating an infinite factor. If the scaled
+    // value overflows, the quantum is already below this input's f64 spacing.
+    let base = 10f64.powi(precision.min(308));
+    let extra = 10f64.powi((precision - 308).max(0));
+    let scaled = value * base * extra;
+    if !scaled.is_finite() {
+        value
+    } else {
+        scaled.round() / extra / base
     }
 }

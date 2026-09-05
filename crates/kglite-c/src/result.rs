@@ -62,12 +62,13 @@ pub(crate) fn rows_to_json_array(result: &CypherResult) -> Vec<serde_json::Value
     rows
 }
 
-/// Build a full `{"columns": [...], "rows": [{...}]}` JSON object for a
+/// Build a `columns`/`rows`/`diagnostics` JSON object for a
 /// result — the per-query element of a batch-execute result array.
 pub(crate) fn result_to_json_object(result: &CypherResult) -> serde_json::Value {
     serde_json::json!({
         "columns": result.columns,
         "rows": rows_to_json_array(result),
+        "diagnostics": result.diagnostics,
     })
 }
 
@@ -131,6 +132,30 @@ pub unsafe extern "C" fn kglite_cypher_result_rows_json(
         let rows = rows_to_json_array(&state.inner);
         match serde_json::to_string(&rows) {
             Ok(s) => alloc_c_string(&s),
+            Err(_) => std::ptr::null(),
+        }
+    })
+}
+
+/// Return execution diagnostics as owned JSON, including actual retrieval routes.
+/// A live result with no diagnostics returns the JSON string `null`. A null
+/// handle or serialization failure returns a null pointer. Free the returned
+/// string with [`kglite_free_string`](crate::kglite_free_string); its lifetime
+/// is independent of the result handle.
+///
+/// # Safety
+/// `result` must be null or a live result pointer, and must not be freed during this call.
+#[no_mangle]
+pub unsafe extern "C" fn kglite_cypher_result_diagnostics_json(
+    result: *const KgliteCypherResult,
+) -> *const c_char {
+    crate::ffi::value_boundary(std::ptr::null(), || {
+        if result.is_null() {
+            return std::ptr::null();
+        }
+        let state = unsafe { ResultState::from_handle(result) };
+        match serde_json::to_string(&state.inner.diagnostics) {
+            Ok(json) => alloc_c_string(&json),
             Err(_) => std::ptr::null(),
         }
     })
@@ -224,7 +249,24 @@ mod tests {
     }
 
     #[test]
+    fn absent_diagnostics_are_owned_json_null() {
+        let result = fixture_result();
+        let json = unsafe { kglite_cypher_result_diagnostics_json(result) };
+        unsafe {
+            kglite_cypher_result_free(result);
+        }
+        assert_eq!(
+            unsafe { std::ffi::CStr::from_ptr(json).to_str().unwrap() },
+            "null"
+        );
+        unsafe {
+            crate::kglite_free_string(json);
+        }
+    }
+
+    #[test]
     fn null_safe_accessors() {
+        assert!(unsafe { kglite_cypher_result_diagnostics_json(std::ptr::null()) }.is_null());
         assert!(unsafe { kglite_cypher_result_columns_json(std::ptr::null()) }.is_null());
         assert!(unsafe { kglite_cypher_result_rows_json(std::ptr::null()) }.is_null());
         assert_eq!(

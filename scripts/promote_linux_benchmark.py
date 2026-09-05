@@ -11,8 +11,10 @@ from typing import Any
 
 try:
     from scripts.benchmark_provenance import benchmark_names, sha256
+    from scripts.benchmark_qualification import qualify, record_capture
 except ModuleNotFoundError:  # Direct `python scripts/promote_linux_benchmark.py` execution.
     from benchmark_provenance import benchmark_names, sha256
+    from benchmark_qualification import qualify, record_capture
 
 
 def promote(
@@ -59,8 +61,16 @@ def promote(
         "github": provenance["github"],
     }
     rendered = json.dumps(promoted, indent=2) + "\n"
+    if versioned_output.exists() and versioned_output.read_text(encoding="utf-8") != rendered:
+        raise ValueError("preserve historical captures: choose a new versioned-output filename")
     versioned_output.write_text(rendered, encoding="utf-8", newline="\n")
     current_output.write_text(rendered, encoding="utf-8", newline="\n")
+    evidence = (
+        f"Verified released kglite=={reference_version} Linux/Python3.12 wheel "
+        "and complete workload; provenance retained in kglite_baseline."
+    )
+    record_capture(versioned_output, alias=current_output, evidence=evidence)
+    qualify(versioned_output, "accepted", evidence, promote=True)
 
 
 def main() -> int:

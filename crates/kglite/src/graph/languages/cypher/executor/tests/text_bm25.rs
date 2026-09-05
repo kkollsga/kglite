@@ -542,3 +542,179 @@ fn the_fused_scan_aggregate_refuses_an_unindexed_property() {
         "a count must not answer zero where the scalar raises: {message}"
     );
 }
+
+#[test]
+fn fused_bm25_equal_cardinality_requires_actual_index_membership() {
+    let mut graph = docs(&[("positive", "needle"), ("excluded", "other")]);
+    let node = NodeData::new(
+        Value::UniqueId(99),
+        Value::String("missing".to_owned()),
+        "Doc".to_owned(),
+        HashMap::new(),
+        &mut graph.interner,
+    );
+    let index = graph.graph.add_node(node);
+    graph
+        .type_indices
+        .entry_or_default("Doc".to_owned())
+        .push(index);
+    build_text_index(&mut graph, "Doc", "body", None).unwrap();
+    let (fused, scalar) = ranked_both_ways(
+        &graph,
+        "MATCH (d:Doc) WHERE d.title <> 'excluded' RETURN d.title AS t, \
+         text_bm25(d, 'body', 'needle') AS score ORDER BY score DESC LIMIT 1",
+    );
+    let expected = vec![("missing".to_owned(), Value::Null)];
+    assert_eq!(scalar, expected);
+    assert_eq!(fused, expected);
+}
+
+fn bm25_entry_plan(graph: &DirGraph, query: &str) -> CypherQuery {
+    let mut parsed = parser::parse_cypher(query).unwrap();
+    crate::graph::languages::cypher::planner::optimize(&mut parsed, graph, &HashMap::new());
+    assert!(parsed
+        .clauses
+        .iter()
+        .any(|clause| matches!(clause, Clause::FusedTextBm25TopK { .. })));
+    parsed
+}
+
+#[test]
+fn whole_type_bm25_entry_preserves_exact_scores_ties_and_budget() {
+    let mut graph = docs(&[("a", "needle"), ("b", "needle"), ("c", "other")]);
+    build_text_index(&mut graph, "Doc", "body", None).unwrap();
+    let statement = "MATCH (d:Doc) RETURN d.title AS t, text_bm25(d, 'body', 'needle') AS s, \
+        text_bm25(d, 'body', 'needle') AS same ORDER BY s DESC LIMIT 2";
+    let query = bm25_entry_plan(&graph, statement);
+    let params = HashMap::new();
+    let executor = CypherExecutor::with_params(&graph, &params, None);
+    let winners = executor
+        .try_retrieval_entry(&query.clauses)
+        .unwrap()
+        .expect("BM25 entry must run");
+    let actual: Vec<_> = winners
+        .rows
+        .iter()
+        .map(|row| {
+            assert_eq!(row.projected.get("s"), row.projected.get("same"));
+            vec![
+                row.projected.get("t").unwrap().clone(),
+                row.projected.get("s").unwrap().clone(),
+                row.projected.get("same").unwrap().clone(),
+            ]
+        })
+        .collect();
+    let expected = run(&graph, statement).rows;
+    assert_eq!(
+        expected
+            .iter()
+            .map(|row| row[0].clone())
+            .collect::<Vec<_>>(),
+        vec![Value::String("a".into()), Value::String("b".into())]
+    );
+    assert_eq!(actual, expected);
+    let capped = CypherExecutor::with_params(&graph, &params, None).with_max_work_units(Some(2));
+    let message = capped.try_retrieval_entry(&query.clauses).unwrap_err();
+    assert!(
+        message.contains("MATCH") && message.contains('2'),
+        "{message}"
+    );
+    let expired = CypherExecutor::with_params(&graph, &params, Some(Instant::now()));
+    assert!(expired.try_retrieval_entry(&query.clauses).is_err());
+    static CANCELLED: AtomicBool = AtomicBool::new(true);
+    let cancelled =
+        CypherExecutor::with_params(&graph, &params, None).with_cancel(Some(&CANCELLED));
+    assert!(cancelled.try_retrieval_entry(&query.clauses).is_err());
+}
+
+#[test]
+fn whole_type_bm25_entry_declines_underfill_unsupported_and_reordered_populations() {
+    let mut graph = docs(&[("a", "needle"), ("b", "needle"), ("c", "other")]);
+    build_text_index(&mut graph, "Doc", "body", None).unwrap();
+    let params = HashMap::new();
+    for (prefix, property, term, ordering, limit) in [
+        ("MATCH (d:Doc)", "'body'", "'needle'", "DESC", 3),
+        ("MATCH (d:Doc)", "'body'", "'unknown'", "DESC", 1),
+        ("MATCH (d:Doc)", "'absent'", "'needle'", "DESC", 1),
+        ("MATCH (d:Doc)", "'body'", "d.title", "DESC", 1),
+        ("MATCH (d:Doc)", "'body'", "'needle'", "ASC", 1),
+        ("MATCH (d:Doc)", "'body'", "'needle'", "DESC NULLS LAST", 1),
+        (
+            "MATCH (d:Doc) WHERE d.title <> 'c'",
+            "'body'",
+            "'needle'",
+            "DESC",
+            1,
+        ),
+    ] {
+        let query = bm25_entry_plan(&graph, &format!("{prefix} RETURN d.title AS t, text_bm25(d, {property}, {term}) AS s ORDER BY s {ordering} LIMIT {limit}"));
+        assert!(CypherExecutor::with_params(&graph, &params, None)
+            .try_retrieval_entry(&query.clauses)
+            .unwrap()
+            .is_none());
+    }
+    let query = bm25_entry_plan(&graph, "MATCH (d:Doc) RETURN d.title AS t, text_bm25(d, 'body', 'needle') AS s ORDER BY s DESC LIMIT 1");
+    graph.type_indices.entry_or_default("Doc".into()).swap(0, 1);
+    assert!(CypherExecutor::with_params(&graph, &params, None)
+        .try_retrieval_entry(&query.clauses)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn whole_type_bm25_entry_declines_stale_without_refreshing() {
+    let mut graph = docs(&[("a", "needle"), ("b", "other")]);
+    build_text_index(&mut graph, "Doc", "body", None).unwrap();
+    let query = bm25_entry_plan(&graph, "MATCH (d:Doc) RETURN d.title AS t, text_bm25(d, 'body', 'needle') AS s ORDER BY s DESC LIMIT 1");
+    let update =
+        parser::parse_cypher("MATCH (d:Doc) WHERE d.title = 'b' SET d.body = 'needle needle'")
+            .unwrap();
+    execute_mutable(
+        &mut graph,
+        &update,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
+    let store = crate::graph::text_indexes::text_index_store(&graph, "Doc", "body").unwrap();
+    assert!(store.is_stale(&graph));
+    let generation = store.generation();
+    let params = HashMap::new();
+    assert!(CypherExecutor::with_params(&graph, &params, None)
+        .try_retrieval_entry(&query.clauses)
+        .unwrap()
+        .is_none());
+    assert!(store.is_stale(&graph));
+    assert_eq!(store.generation(), generation);
+}
+
+#[test]
+fn fused_bm25_huge_limit_declines_before_postings_capacity_allocation() {
+    let mut graph = docs(&[("positive", "needle"), ("excluded", "other")]);
+    build_text_index(&mut graph, "Doc", "body", None).unwrap();
+    let query = "MATCH (d:Doc) RETURN d.title AS t, text_bm25(d, 'body', 'needle') AS s \
+        ORDER BY s DESC LIMIT 9223372036854775807";
+    let (fused, scalar) = ranked_both_ways(&graph, query);
+    assert_eq!(fused, scalar);
+    assert_eq!(fused.len(), 2);
+    assert_eq!(fused[1], ("excluded".into(), Value::Float64(0.0)));
+
+    let node = NodeData::new(
+        Value::UniqueId(99),
+        Value::String("missing".into()),
+        "Doc".into(),
+        HashMap::new(),
+        &mut graph.interner,
+    );
+    let index = graph.graph.add_node(node);
+    graph
+        .type_indices
+        .entry_or_default("Doc".into())
+        .push(index);
+    build_text_index(&mut graph, "Doc", "body", None).unwrap();
+    let query = query.replace("RETURN", "WHERE d.title <> 'excluded' RETURN");
+    let (fused, scalar) = ranked_both_ways(&graph, &query);
+    assert_eq!(fused, scalar);
+    assert_eq!(fused.len(), 2);
+    assert_eq!(fused[0], ("missing".into(), Value::Null));
+}

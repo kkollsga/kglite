@@ -5,6 +5,14 @@ regenerated from; `AGENTS.md` and `.agents/` are generated adapters (and
 `.claude/skills/` is the authority for `.agents/skills/`). Edit the authority
 and regenerate in the same action — never edit an adapter.
 
+## Doctrine adoption
+
+Follow `../doctrine/learn-from-us.md` → Doctrine sync procedure at planning or
+release entry. Versioned corrections apply to KGLite even when made in doctrine
+first. Merge into the declared authority and regenerate adapters; preserve local
+improvements. A missing marker requires an adoption audit. Planned/deferred work
+does not advance `dev-docs/.doctrine-synced`. Snapshotting never performs sync.
+
 ## Build & test
 
 ```bash
@@ -160,13 +168,12 @@ regression corpus, not a cache.
 parent folder.** An agent that needs an isolated tree creates it as
 `git worktree add ../KGLite-worktrees/<name> <branch>`: a sibling *directory*
 of the repo, holding all of them, not a scattered `../KGLite-<name>` beside
-the real projects in `Rust/`. `KGLite-worktrees/` exists **only while
-worktrees are in progress**, and the release flow empties it — for each
-worktree, the outstanding actions are migrated into `dev-docs/todos.md`
-(branch name, state, what remains), then `git worktree remove` + `git worktree
-prune`; the empty `KGLite-worktrees/` directory is deleted at the end. **A
-worktree with uncommitted work is never removed without its `git diff` saved
-under `dev-docs/` first and a `todos.md` entry pointing at it.** Note that a
+the real projects in `Rust/`. Release cleanup reclaims inactive trees through
+`.claude/skills/dev-docs-cleanup/SKILL.md` §6. Preserve and verify commits,
+staged/unstaged changes, untracked contents and valuable ignored files before
+removal; a bare `git diff` is incomplete. A detached HEAD needs a recovery ref
+or bundle. Keep active, dirty or ambiguous trees and remove the parent directory
+only if empty. Note that a
 fresh worktree does **not** inherit `target` — that is a symlink to
 `/Volumes/EksternalHome/coding-cache/cargo-targets/KGLite` in this repo (see
 "Build the smallest touched surface"), and a worktree missing it cold-builds
@@ -525,13 +532,12 @@ notes (named `YYYY-MM-DD-from-<sender>-<topic>.md`); `inbox/read/` is the
 archive. The inbox is gitignored (`/inbox/`) — it's local working state, not
 committed.
 
-**When a message has been actioned, move it from `inbox/unread/`
-to `inbox/read/`.** "Actioned" means the work shipped, the bug was verified
-fixed, or it's a no-action acknowledgement — not merely read. `unread/`
-must reflect only what still needs doing, so a stale "you still have unread
-mail" never hides a genuinely open item among resolved ones. Append a
-one-line `## Status (kglite, <date>): …` footer to substantive work-items
-before moving, so `inbox/read/` carries the resolution record.
+**Triage before archiving.** Preserve durable evidence and track unresolved
+work through `read-inbox` and `add-todo`. Archival means triage is recorded, not
+that every action shipped. Verify destination records, append a completed Status
+record with an explicit UTC archive time, then move without overwriting. Keep
+messages with no durable owner unread. Purge only completed, verified records
+whose archive-based grace period expired; retain legacy/unmarked records.
 
 **Route to the party who can act.** A note only belongs in another project's
 inbox (e.g. `../mcp-methods/inbox/`, `../../mcp-servers/inbox/`) if it carries an
@@ -557,8 +563,9 @@ channel (`gh`, raw API, MCP tool, or otherwise).
    the other issue goes here>") — otherwise what posts must be byte-identical
    to what was shown.
 2. The user replies with an unambiguous affirmative about *that* draft
-   ("post it", "yes"), in the turn(s) immediately following it. If any other
-   work or topic intervenes, re-show and re-ask.
+   ("post it", "yes"). That authorization remains valid for the same draft
+   and action until completed, revoked or materially changed; intervening work
+   alone does not require another approval.
 3. The approval covers exactly one publication event. A follow-up comment, a
    second issue, an edit, a reaction — each needs its own pass through steps
    1–2.
@@ -573,8 +580,9 @@ services must state read-only.
 
 Routine dev flow in this project's own repos (branch pushes, PR
 descriptions/checklists on our own PRs) is governed by the push rules below,
-not this section. Local inbox notes to sibling projects are local files, not
-posts.
+not this section. Local inbox notes also require authorization for their
+recipient and purpose; a review or incoming message alone does not authorize
+sending. Existing authorization need not be repeated.
 
 When in doubt there is no doubt: it's banned. The cost of one extra prompt is
 trivial; an unauthorized public post under the user's name is not.
@@ -712,4 +720,4 @@ When a plan has Steps 1 / 2 / 3 / …:
    the `RUST_STABLE` toolchain-pin match). Per push, not per phase; a red
    there costs seconds locally and a full 20-job round-trip in CI.
 6. **End with a perf gate — only if the plan touched perf-sensitive paths** (`core/pattern_matching/`, `cypher/executor/`, storage hot paths). Then run new + existing benchmarks per the Performance protocol above before the final release commit, and record the numbers in the release commit message or `[x.y.z]` CHANGELOG block. Fix regressions before the release commit, not in a follow-up. A plan that touched none of those paths skips this — CI's Linux perf gate and the release-time baseline capture cover it.
-7. **Final commit is the version bump + CHANGELOG promotion.** No earlier phase touches `Cargo.toml`. User pushes once.
+7. **Shipping is a separate release request.** Implementation phases may edit manifest dependencies/features, but do not bump package versions or promote the release CHANGELOG. The release request authorizes its publish push.

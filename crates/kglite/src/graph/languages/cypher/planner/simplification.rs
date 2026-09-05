@@ -812,10 +812,10 @@ impl TextScoreCollector {
         args: &mut [Expression],
         params: &HashMap<String, Value>,
     ) -> Result<(), String> {
-        if args.len() != 3 && args.len() != 4 {
+        if !(3..=5).contains(&args.len()) {
             return Err(
                 "text_score() requires 3 arguments: (node, text_column, query_text) \
-                 with optional 4th metric argument"
+                 with optional metric and final options map"
                     .into(),
             );
         }

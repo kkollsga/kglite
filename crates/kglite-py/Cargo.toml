@@ -34,11 +34,9 @@ publish = false
 # are enabled unconditionally via the `kglite_core` dep's feature list.
 default = ["abi3", "mcp-server"]
 python-extension = ["pyo3/extension-module"]
-# Single-cdylib-for-many-Pythons mode. On by default so existing
-# `cargo build` / `cargo install` / `maturin develop` flows behave
-# exactly as before. The wheel-build workflow disables this with
-# `--no-default-features --features python-extension` to produce
-# per-Python-version wheels alongside the bundled binary.
+# One cdylib serves Python 3.10+; release wheels keep this default.
+# Diagnostic builds can disable abi3 with
+# `--no-default-features --features python-extension` for a per-interpreter build.
 abi3 = ["pyo3/abi3-py310"]
 # Bundled in-process MCP server (`_run_mcp_server` + the `kglite-mcp-server`
 # console script). On by default; a diagnostic build drops it.

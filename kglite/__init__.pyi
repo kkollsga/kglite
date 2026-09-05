@@ -512,6 +512,17 @@ class ResultView:
 
         Returned dict keys:
 
+        - ``retrieval`` (list[dict]): distinct vector ranking routes executed,
+          including nested CALL, UNION and mutation pipelines. Available for
+          ordinary queries and PROFILE. Each record carries ``requested_policy``
+          (``auto``, ``exact``, or ``per_row``), ``actual_mode`` (``hnsw`` or
+          ``exact``), ``fallback_reason`` (a reason string, or None for HNSW),
+          and ``store`` (``Type.embedding_property`` when established, else None).
+          Repeated identical routes are coalesced; this is not a call counter.
+          Empty inputs, LIMIT 0, EXPLAIN and queries without an instrumented
+          vector ranking operator produce no records. Scalar scores inside
+          arbitrary expressions are exact computations, not ANN retrieval
+          operators, and do not produce per-row records.
         - ``elapsed_ms`` (int): wall-clock query duration in milliseconds.
         - ``timeout_ms`` (Optional[int]): the deadline that was in effect,
           or ``None`` when no deadline applied (memory graphs by default,
@@ -4365,25 +4376,28 @@ class KnowledgeGraph:
         instead, naming the sidecar and the two ways out: reopen the path
         durably (``kglite.open(path, durable="full")``) to replay the commits
         first, or move the sidecar aside to discard them deliberately. A graph
-        opened with ``durable=`` is never affected — its own checkpoint folds
-        its log in.
+        saving to its own durable checkpoint folds its log in. Save-as checks
+        the destination against its own checkpoint, even when the source's
+        log-sequence numbers are higher.
 
-        **Saving does not take the writer lease.** The lease belongs to
-        :func:`kglite.open`, which holds it for as long as the graph can write
-        back to ``path``; ``save()`` itself writes whatever target it is given
-        without asking for it. So a graph obtained from :func:`kglite.load` can publish
-        over a path an ``open()`` holder — or a running MCP or Bolt server — is
-        mid-write on: the file that results is a complete graph, it is simply
-        this one, and whatever the holder had not yet saved is not in it. A
-        caller that may save to a path should hold the lease across the whole
-        read-modify-save interval, which is what ``kglite.open(path)`` does;
-        ``load()`` + ``save(path)`` is a write that opted out of it.
+        **Save-as transfers an existing writer lease and durable log.** A
+        handle from :func:`kglite.open` with locking enabled acquires the new
+        destination before saving. A competing writer refuses the save. After
+        success, the handle remembers the new path, logs future writes there,
+        and releases its old lease. The old file and its recovery log retain
+        writes committed before the handoff. A failed save leaves the original
+        home, lease and log attached.
+
+        Handles from :func:`kglite.load`, in-memory constructors, or
+        ``open(..., lock=False)`` continue to opt out of writer leases.
+        Their caller must coordinate writers across the read-modify-save
+        interval; an unlocked save can replace another writer's checkpoint.
 
         Args:
             path: Output file path (typically ``*.kgl``). May be omitted if the
                 graph was opened via :func:`kglite.open` or :func:`kglite.load`,
                 in which case it defaults to that origin file. Passing a path
-                updates the remembered target ("save as"). Raises ``ValueError``
+                updates the remembered target after success ("save as"). Raises ``ValueError``
                 if omitted and there is no remembered path.
             fsync: When ``True`` (default), flush the file and its parent
                 directory to disk before returning (durable against an OS/power
@@ -4798,9 +4812,11 @@ class KnowledgeGraph:
 
         Semantics: ``is_a`` is a forest (single parent, no cycles);
         ``cardinality``/``required`` describe outgoing edges of the domain
-        type; ``required_properties`` (per-edge presence) and
-        ``property_types`` (per-edge type check of present values, names
-        validated on declare) are audited per edge; ``inverse_name`` is a
+        type; ``required_properties`` checks presence/non-null values and
+        ``property_types`` checks present non-null values. Class declarations
+        audit nodes; relationship declarations audit edges. Type names are
+        validated on declaration, including ``list``/``array`` for the outer
+        container only. ``inverse_name`` is a
         reading-direction alias only unless ``inverse_enforced: True`` opts
         into the physical-pairing check; ``enforcement`` is a severity
         (``advisory``/``warn``/``error``) or a per-check map
@@ -4827,6 +4843,23 @@ class KnowledgeGraph:
         the label namespace: an abstract class may not shadow a live node
         type. This is deliberately separate from ``set_parent_type`` —
         that map is presentation ownership, this one is semantic "kind of".
+
+        Class property contracts cover the primary class and its declared
+        descendants, independently for each declaring ancestor. Secondary
+        labels do not enroll a node. Properties use the actual node type's
+        id/title and loader aliases. Classes accept only the two property
+        checks in an enforcement map and do not accept edge exemptions.
+
+        ``CALL ontology_audit()`` adds ``entity_kind`` (``node``/``edge``);
+        use it with ``rule`` to distinguish a class and relationship with the
+        same name. Node totals count covered live nodes and exemptions are
+        zero. The property census includes zero-violation fields; a node
+        missing several fields counts once in the aggregate and once under
+        each missing field. ``CALL node_property_violation() YIELD class,
+        check, node, property, properties`` lists those nodes, one row per
+        declaring class/check, with all failed properties and their first
+        name. It takes no parameters. ``SHOW ONTOLOGY`` exposes
+        ``required_properties``, ``property_types`` and class enforcement.
 
         Replaces any previously declared ontology. Persisted by ``save()``.
 
@@ -6206,6 +6239,15 @@ class KnowledgeGraph:
                 and call ``ResultView.to_df()`` when you want both the frame
                 and ``rv.warnings``.
             params: Optional parameter dict for ``$param`` substitution.
+                Datetimes with a UTC offset normalize to UTC and return as
+                naive datetimes, preserving microseconds; naive datetimes and
+                pure dates retain their existing meaning. Container values
+                allow at most 64 active list, tuple, dict or ndarray expansions
+                (an ndarray and its converted list each count). Recursive
+                containers raise ``ValueError``; exceeding this depth raises
+                ``RecursionError``. Shared acyclic values are allowed. These
+                conversion rules also apply to Session, FrozenGraph and
+                Transaction query parameters.
                 A parameter can supply a **value** or a **name**: labels and
                 relationship types accept ``$label`` / ``$(label)`` too
                 (``MATCH (n:$label)``, ``-[:$type]->``, ``CREATE (n:$label)``,
@@ -7459,7 +7501,7 @@ class KnowledgeGraph:
         property: str,
         auto_refresh_limit: Optional[int] = None,
     ) -> dict[str, Any]:
-        """Build a BM25 lexical index over a node type's string property, for
+        """Build a BM25 lexical index over a node type's text property, for
         keyword/full-text ranking.
 
         Query it with the Cypher scalar ``text_bm25(n, '<property>', '<query
@@ -7477,15 +7519,15 @@ class KnowledgeGraph:
         ``SHOW INDEXES`` reports both facts, in its ``stale`` and ``delta``
         columns.
 
-        **What catching up costs.** Folding one document in is not a constant:
-        it inserts into the posting list of every term the document uses, and
-        those lists grow with the corpus, so the per-document cost rises as the
-        index does (measured 2026-08-25: 0.08 ms per document over a 20k-document
-        corpus, 0.4 ms over a 100k one). Past roughly 1500 documents that
-        overtakes a full rebuild, and the catch-up rebuilds instead — so a
-        refresh costs the cheaper of the two, never more than one rebuild, and
-        raising ``auto_refresh_limit`` well above that point buys rebuilds
-        rather than an ever-slower fold.
+        **What catching up costs.** The cost depends on the corpus and changed
+        content. Fewer than 100 index-relevant changes use direct posting
+        edits; larger deltas merge affected posting lists in batches. Indexes
+        below 20,000 documents rebuild above 1500 changes; larger indexes batch
+        through 5000 changes before rebuilding. These conservative boundaries
+        reflect the measured corpus sizes, and workloads vary. The
+        ``auto_refresh_limit`` is independent of this strategy: a delta above
+        that limit still serves stale results until an explicit rebuild or a
+        higher limit permits refresh.
 
         Catching up costs the *writes* almost nothing: creations are noticed by
         comparing one node slot against a watermark, so bulk ingest into an
@@ -7504,12 +7546,13 @@ class KnowledgeGraph:
         The index is keyed by the spelling you pass, not by what it resolves
         to.
 
-        **What is indexed.** Every node of the type whose property holds a
-        string. An **empty string is a document** — one with no terms, counted
-        in the corpus statistics. A node whose property is absent or holds a
-        non-string (a number, a list) is **skipped**: BM25 indexes text, and a
-        stringified number is not text. Skipped nodes are counted in the
-        return value.
+        **What is indexed.** A string or a list containing only strings and
+        nulls contributes one document. List members are separated by spaces;
+        null members are ignored and repeated words retain their frequency.
+        An empty string or empty/all-null list is an empty document counted in
+        corpus statistics. An absent property, another value type, or any
+        non-string/non-null member skips the whole document. Skipped nodes
+        are counted in the return value; values are never stringified.
 
         Tokenization is the character rule ``text_normalize()`` exposes:
         alphanumeric runs are terms, everything else separates, and terms are
@@ -7537,7 +7580,7 @@ class KnowledgeGraph:
 
         Args:
             node_type: The node type to index (e.g. ``'Article'``).
-            property: The string property to index (e.g. ``'body'``).
+            property: The text or string/null-list property to index (e.g. ``'body'``).
             auto_refresh_limit: How many changed documents a query will fold in
                 inline before it serves stale results and warns instead.
                 Defaults to 1000. It bounds a document *count*, not a duration —
@@ -7548,12 +7591,12 @@ class KnowledgeGraph:
 
         Returns:
             dict: ``{'indexed': int, 'skipped': int, 'terms': int}`` —
-            documents indexed, nodes skipped as absent/non-string, and the size
+            documents indexed, nodes skipped as absent/invalid text, and the size
             of the resulting vocabulary.
 
         Raises:
             ValueError: if the node type is unknown, the graph is disk-backed,
-                or the type has nodes but not one of them carries a string for
+                or the type has nodes but none carries text or a string/null list for
                 ``property`` (what a misspelled property name looks like). A
                 type with no nodes yet builds an empty index instead, so an
                 index can be declared before ingest.

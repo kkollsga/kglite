@@ -76,6 +76,8 @@ enum AggKind {
 struct AggState {
     count: i64,
     sum: f64,
+    integer_sum: crate::graph::core::numeric_sum::IntegerSum,
+    saw_float: bool,
     n_for_avg: u64,
     min: Option<Value>,
     max: Option<Value>,
@@ -248,13 +250,7 @@ pub fn run_aggregate(
         for c in components {
             row.push(c.clone());
         }
-        for (i, (prop, kind)) in classified.iter().enumerate() {
-            let v = finalize_state(&states[i], kind);
-            inferred_types
-                .entry(prop.clone())
-                .or_insert_with(|| infer_value_type(&v));
-            row.push(value_to_csv_cell(&v));
-        }
+        append_aggregate_cells(states, &classified, &mut inferred_types, &mut row)?;
         writer
             .write_record(&row)
             .map_err(|e| format!("aggregate: write row: {}", e))?;
@@ -406,15 +402,18 @@ fn update_state(state: &mut AggState, kind: &AggKind, ctx: &dyn Bindings) -> Res
             match v {
                 Value::Int(i) => {
                     state.sum += i as f64;
+                    state.integer_sum.add(i);
                     state.n_for_avg += 1;
                 }
                 Value::Float(f) if f.is_finite() => {
                     state.sum += f;
+                    state.saw_float = true;
                     state.n_for_avg += 1;
                 }
                 Value::Null => {}
                 Value::Bool(b) => {
                     state.sum += if b { 1.0 } else { 0.0 };
+                    state.integer_sum.add(i64::from(b));
                     state.n_for_avg += 1;
                 }
                 _ => {} // Non-numeric values skipped.
@@ -489,14 +488,36 @@ fn update_state(state: &mut AggState, kind: &AggKind, ctx: &dyn Bindings) -> Res
     Ok(())
 }
 
-fn finalize_state(state: &AggState, kind: &AggKind) -> Value {
-    match kind {
+fn append_aggregate_cells(
+    states: &[AggState],
+    classified: &[(String, AggKind)],
+    inferred_types: &mut HashMap<String, &'static str>,
+    row: &mut Vec<String>,
+) -> Result<(), String> {
+    for (i, (prop, kind)) in classified.iter().enumerate() {
+        let value = finalize_state(&states[i], kind)?;
+        inferred_types
+            .entry(prop.clone())
+            .or_insert_with(|| infer_value_type(&value));
+        row.push(value_to_csv_cell(&value));
+    }
+    Ok(())
+}
+
+fn finalize_state(state: &AggState, kind: &AggKind) -> Result<Value, String> {
+    Ok(match kind {
         AggKind::Count => Value::Int(state.count),
         AggKind::CountDistinct(_) => Value::Int(state.distinct.len() as i64),
         AggKind::Sum(_) => {
             if state.n_for_avg == 0 {
                 Value::Null
-            } else if state.sum.fract() == 0.0 {
+            } else if !state.saw_float {
+                Value::Int(state.integer_sum.finish()?)
+            } else if state.sum.fract() == 0.0
+                && state.sum >= i64::MIN as f64
+                && state.sum < -(i64::MIN as f64)
+            {
+                // Preserve integral-float output typing only when representable.
                 Value::Int(state.sum as i64)
             } else {
                 Value::Float(state.sum)
@@ -514,7 +535,7 @@ fn finalize_state(state: &AggState, kind: &AggKind) -> Value {
         AggKind::First { .. } => state.first_value.clone().unwrap_or(Value::Null),
         AggKind::Last { .. } => state.last_value.clone().unwrap_or(Value::Null),
         AggKind::RowLevel(_) => state.first_value.clone().unwrap_or(Value::Null),
-    }
+    })
 }
 
 fn sanitize(s: &str) -> String {
@@ -813,5 +834,81 @@ mod tests {
         // Total buy value: 10*5 + 20*5 = 50 + 100 = 150 (sells skipped)
         let out = fs::read_to_string(tmp.path().join("computed/aggregate_Buys.csv")).unwrap();
         assert!(out.contains(",A,150"), "{}", out);
+    }
+
+    fn sum_state(values: &[Value]) -> Result<Value, String> {
+        let kind = AggKind::Sum(expr::parse("v").unwrap());
+        let headers = vec!["v".to_string()];
+        let mut state = AggState::default();
+        for value in values {
+            let cells = [value.clone()];
+            update_state(
+                &mut state,
+                &kind,
+                &RowBindings {
+                    headers: &headers,
+                    values: &cells,
+                },
+            )?;
+        }
+        finalize_state(&state, &kind)
+    }
+
+    #[test]
+    fn blueprint_sum_preserves_empty_bool_float_and_exact_integer_policies() {
+        assert!(matches!(sum_state(&[]).unwrap(), Value::Null));
+        assert!(matches!(
+            sum_state(&[Value::Bool(true), Value::Bool(false)]).unwrap(),
+            Value::Int(1)
+        ));
+        assert!(matches!(
+            sum_state(&[Value::Float(1.5), Value::Float(0.5)]).unwrap(),
+            Value::Int(2)
+        ));
+        assert!(matches!(
+            sum_state(&[Value::Float(f64::INFINITY)]).unwrap(),
+            Value::Null
+        ));
+        assert!(matches!(
+            sum_state(&[
+                Value::Int(9_007_199_254_740_993),
+                Value::Int(-9_007_199_254_740_992)
+            ])
+            .unwrap(),
+            Value::Int(1)
+        ));
+        assert!(matches!(
+            sum_state(&[Value::Int(i64::MAX), Value::Int(1), Value::Int(-i64::MAX)]).unwrap(),
+            Value::Int(1)
+        ));
+        assert!(sum_state(&[Value::Int(i64::MAX), Value::Int(1)])
+            .unwrap_err()
+            .contains("Integer overflow in sum"));
+        assert!(matches!(
+            sum_state(&[Value::Float(9_223_372_036_854_775_808.0)]).unwrap(),
+            Value::Float(_)
+        ));
+    }
+
+    #[test]
+    fn blueprint_sum_overflow_propagates_from_csv_emission() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_csv(
+            &tmp.path().join("t.csv"),
+            "id,group,value\n1,A,9223372036854775807\n2,A,1\n",
+        );
+        let mut blueprint = make_bp("t.csv", "id", &[("group", "string"), ("value", "int")]);
+        let agg = IndexMap::from([("total".to_string(), "sum(value)".to_string())]);
+        let result = run_aggregate(
+            &mut blueprint,
+            tmp.path(),
+            "T",
+            &["group".to_string()],
+            "Summary",
+            &agg,
+            &[],
+        );
+        assert!(result.unwrap_err().contains("Integer overflow in sum"));
+        assert!(!blueprint.nodes.contains_key("Summary"));
     }
 }

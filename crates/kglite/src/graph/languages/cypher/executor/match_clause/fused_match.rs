@@ -2066,17 +2066,10 @@ impl<'a> CypherExecutor<'a> {
                             // back empty.
                             if acc.numeric_counts[ai] == 0 {
                                 Value::Int64(0)
+                            } else if acc.sum_was_int[ai] {
+                                Value::Int64(acc.integer_sums[ai].finish()?)
                             } else {
-                                // Integer-typed iff every numeric
-                                // input was an `Int64` and the total is
-                                // whole — the streaming path's rule.
-                                let is_int =
-                                    acc.sum_was_int[ai] && acc.sums[ai].fract() == 0.0;
-                                if is_int {
-                                    Value::Int64(acc.sums[ai] as i64)
-                                } else {
-                                    Value::Float64(acc.sums[ai])
-                                }
+                                Value::Float64(acc.sums[ai])
                             }
                         }
                         "avg" | "mean" | "average" => {

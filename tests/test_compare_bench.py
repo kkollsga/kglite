@@ -18,10 +18,11 @@ def _write_result(path: Path, names: list[str] | dict[str, float]) -> None:
     path.write_text(
         json.dumps(
             {
+                "machine_info": {"system": "Darwin", "machine": "arm64"},
                 "benchmarks": [
                     {"name": name, "stats": {"min": value, "mean": value, "median": value}}
                     for name, value in values.items()
-                ]
+                ],
             }
         ),
         encoding="utf-8",

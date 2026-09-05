@@ -158,17 +158,18 @@ failure that costs data.
 
 ## How durability works
 
-With durability on, every committed mutation is appended to a
-`<path>-wal` sidecar file and `fsync`'d to stable storage **before the call
-returns**. A mutation that has returned is guaranteed to survive a hard crash.
+With the default `durable="full"`, every committed mutation is appended to a
+`<path>-wal` sidecar and barriered to stable storage **before the call returns**.
+`durable="normal"` writes the log without that per-commit barrier; use `sync()`
+when a power-safe point is required.
 
 How it fits together:
 
 - **Each mutation** → one WAL frame, written before the call returns. Under
   `"full"` the frame is also barriered to stable storage per commit; that
-  barrier is the durability cost, and it bounds write latency by device
-  latency rather than engine speed (see "Cost and tuning" below). Under
-  `"normal"` the frame is written but not barriered.
+  barrier adds device latency to the engine and WAL-encoding work (see
+  "Cost and tuning" below). Under `"normal"` the same frame is encoded and
+  written but not barriered.
 - **`save()`** → writes a full checkpoint (`.kgl`) and **truncates the WAL**.
   The checkpoint is the new baseline; the WAL starts empty again.
 - **`open(...)`** → loads the last checkpoint, then **replays**
@@ -177,6 +178,26 @@ How it fits together:
 
 So the on-disk state is always "last checkpoint + replayable tail", and reopen
 folds the two back together automatically.
+
+### WAL format compatibility
+
+The current writer uses WAL format **4**; the reader decodes formats **2–4**.
+Format 4 records complete node state and the complete property-map multiplicity
+of each affected parallel-relationship group. This changes the WAL sidecar,
+not the `.kgl` checkpoint format. A readable older WAL header is upgraded
+before new frames are appended. Readers limited to formats 2/3 refuse the
+format 4 header, rather than interpreting unfamiliar frames as a torn tail.
+
+Legacy formats 2/3 lack a discriminator for individual parallel relationships.
+If a surviving legacy edge action matches multiple checkpoint relationships,
+recovery refuses the ambiguity instead of choosing one. A later format 4 group
+snapshot can supply the complete final state. This does not reconstruct
+parallel members already lost by an earlier replay or information absent from
+the old log. Unambiguous legacy operations remain readable.
+
+Durable adoption also refuses duplicate exact `(primary type, id)` identities
+before taking ownership or changing the WAL. This admission check does not
+change the existing Cypher CREATE identity policy.
 
 ### Crash recovery in practice
 
@@ -267,17 +288,16 @@ model.
 
 ## Cost and tuning
 
-- **`"full"` is barrier-bound, not engine-bound.** A workload of many small
-  committed transactions spends its time waiting on the disk to confirm each
-  barrier, not in KGLite. This is the price of power-loss safety and is
-  inherent to any WAL database. The cost scales with the *number* of commits
-  and with device latency, not with graph size, and reads pay nothing at all.
-- **`"normal"` is the level to try before you reach for `"off"`.** It writes
-  the same log frame and skips only the barrier, so it costs roughly what an
-  unlogged write costs while still losing nothing to a crashing process. If
-  you were about to disable durability purely for write throughput, this is
-  almost always the better answer — and `sync()` gives you power-safe points
-  wherever you actually need them.
+- **`"full"` adds a barrier per commit.** Device latency can dominate small
+  writes, but it is only one component of their cost. WAL encoding scales
+  with the affected node state and the complete parallel-relationship groups
+  sharing the same type, source and target. Updating one member records the
+  final property maps of every member in that group; finding them also
+  traverses adjacency. Ordinary reads do not write or barrier the WAL.
+- **`"normal"` skips only the barrier.** It retains the same state capture,
+  encoding and log writes as `"full"`, including the cost of large parallel
+  groups. It preserves process-crash recovery; `sync()` supplies a power-safe
+  point when needed.
 - **On macOS, `"full"` buys more than SQLite's default does.** KGLite's
   barrier is `F_FULLFSYNC`, which flushes the drive's own write cache;
   SQLite's default `synchronous=FULL` issues a plain `fsync`, which on macOS
@@ -287,7 +307,9 @@ model.
 - **Batch where you can.** One `cypher()` that creates 1,000 nodes is one
   `fsync`; 1,000 separate `cypher()` calls are 1,000 `fsync`s. Group related
   mutations into a single statement (or a transaction — see
-  {doc}`/python/transactions`) when they logically commit together.
+  {doc}`/python/transactions`) when they logically commit together. Within a
+  committed batch, each affected relationship group contributes one final
+  snapshot, even when several mutations touched it.
 - **Checkpoint to bound recovery time.** Reopen replays every WAL frame since
   the last `save()`. Replay is fast (frames are folded into net per-entity state
   and the index rebuilt once), but a periodic `save()` keeps the WAL short and

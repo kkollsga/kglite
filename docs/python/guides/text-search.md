@@ -72,11 +72,12 @@ print(report)
 `indexed` is the number of documents in the corpus, `skipped` the nodes passed
 over, and `terms` the size of the resulting vocabulary.
 
-**What counts as a document.** Every node of the type whose property holds a
-string — including the empty string, which indexes as a document with no terms
-and still counts in the corpus statistics. A node whose property is absent or
-holds a number, a list, or anything else non-string is **skipped** and counted
-in `skipped`: BM25 indexes text, and a stringified number is not text.
+**What counts as a document.** A string or list containing only strings and
+nulls produces one document. List members are separated by spaces, nulls are
+ignored, and repeated words retain their frequency. Empty strings and
+empty/all-null lists are empty documents counted in corpus statistics. An absent
+property, another type, or any non-string/non-null list member skips the whole
+document and is counted in `skipped`; values are never stringified.
 
 **What counts as a word.** Runs of alphanumeric characters are terms and
 everything else separates them; terms are lowercased per character. The rule is
@@ -248,16 +249,14 @@ print(small.cypher("SHOW INDEXES").to_df()[["stale", "delta"]].to_dict("records"
 
 The new node scored, nothing was rebuilt by hand, and the index came back clean.
 
-**`auto_refresh_limit` is a document count, not a time budget** — and it is worth
-knowing why, because it is the one place the honest number is not the flattering
-one. Folding one document in splices into the posting list of *every* term that
-document uses, and those lists grow with the corpus, so the per-document cost
-rises with index size (measured: 0.08 ms per document over a 20,000-document
-corpus, 0.4 ms over a 100,000-document one). Past roughly 1,500 documents,
-folding costs more than rebuilding the index outright — so the catch-up
-**rebuilds instead**. A refresh therefore costs the cheaper of the two and never
-more than one rebuild, whatever you set the limit to; raising the limit far above
-that crossover buys rebuilds, not an ever-slower fold.
+**`auto_refresh_limit` is a document count, not a time budget.** Catch-up cost
+also depends on corpus size and changed content. Fewer than 100 index-relevant
+changes use direct posting edits; larger deltas merge affected posting lists in
+batches. Indexes below 20,000 documents rebuild above 1,500 changes; larger
+indexes batch through 5,000 changes before rebuilding. These conservative
+boundaries reflect the measured corpus sizes, and workloads vary. The limit
+still decides whether to refresh at all: a delta above it is served stale even
+when a batch would be fast. Raising the limit can put a full rebuild in the query.
 
 **Over the limit, the index says so.** It serves what it has, scores the rows it
 has no document for `null`, and attaches a warning naming the delta and the call
@@ -421,6 +420,24 @@ directly when the magnitudes carry information you want. The
 [Cypher reference](../../reference/cypher-reference.md) carries the same recipe
 alongside the `score_fuse` semantics.
 
+## Request exact vector retrieval
+
+Pass a final options map to either score function:
+
+```cypher
+MATCH (a:Article)
+RETURN a.title AS title,
+       vector_score(a, 'body_emb', $qv, {exact: true}) AS score
+ORDER BY score DESC LIMIT 5
+```
+
+The map may be a query parameter. An explicit metric goes before it, for example
+`text_score(a, 'body', $query, 'cosine', {exact: true})`. `exact` must be boolean;
+unknown options are rejected. Exact execution does not use or refresh HNSW.
+Without this option, a compatible index may narrow candidates approximately;
+a filter alone does not guarantee an exact scan. Omitted metrics come from each
+node type's actual embedding store.
+
 ## The vector lane catches up the same way
 
 Freshness is one shared mechanism, so an HNSW vector index behaves like a text
@@ -467,3 +484,9 @@ after those.
   `score_fuse()`, `SHOW INDEXES`, and the window functions RRF uses.
 - {doc}`data-loading` — getting the documents in before you index them.
 - {doc}`ai-agents` — exposing a retrieval graph to an agent.
+
+The returned view's `diagnostics["retrieval"]` reports the actual search route,
+including with `PROFILE`. `actual_mode="hnsw"` means approximate candidate
+selection ran; `actual_mode="exact"` includes a `fallback_reason` such as
+`forced_exact`, `no_index`, or `stale_index`. Records survive nested `CALL`
+and `UNION` queries. `EXPLAIN` reports requested policy without executing it.

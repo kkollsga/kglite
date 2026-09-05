@@ -36,7 +36,15 @@ def _capture(path: Path, timings: dict[str, float], dispersion: float | None = 1
             stats["median"] = value * dispersion
             stats["mean"] = value * dispersion
         benchmarks.append({"name": name, "fullname": f"tests/benchmarks/x.py::{name}", "stats": stats})
-    path.write_text(json.dumps({"benchmarks": benchmarks}), encoding="utf-8")
+    path.write_text(
+        json.dumps(
+            {"machine_info": {"system": "Darwin", "machine": "arm64"}, "datetime": path.stem, "benchmarks": benchmarks}
+        ),
+        encoding="utf-8",
+    )
+    from scripts.benchmark_qualification import qualify
+
+    qualify(path, "accepted", "Synthetic reference for regression gate tests")
 
 
 def run(baselines: Path, *args: str) -> tuple[int, str]:

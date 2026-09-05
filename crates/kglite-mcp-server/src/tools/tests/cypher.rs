@@ -691,3 +691,54 @@ fn the_inline_csv_cap_tracks_the_recipe_row_limit() {
         crate::recipe_queries::RECIPE_RESULT_ROW_LIMIT
     );
 }
+
+#[test]
+fn retrieval_diagnostics_reach_preview_csv_and_write_ack() {
+    let mut active = fresh_active();
+    let graph = kglite::api::make_dir_graph_mut(active.kg.dir_mut());
+    let params = HashMap::new();
+    kglite::api::session::execute_mut(
+        graph,
+        "CREATE (:Doc {id:1, body:'a'}), (:Doc {id:2, body:'b'})",
+        &kglite::api::session::ExecuteOptions::eager(&params),
+    )
+    .unwrap();
+    kglite::api::embeddings::set_embeddings(
+        graph,
+        "Doc",
+        "body",
+        None,
+        vec![
+            (Value::Int64(1), vec![1., 0.]),
+            (Value::Int64(2), vec![0., 1.]),
+        ],
+    )
+    .unwrap();
+    let query = "MATCH (d:Doc) RETURN vector_score(d,'body_emb',[1.0,0.0],{exact:true}) AS s ORDER BY s DESC LIMIT 1";
+    let ack = write_pinned(
+        &mut active,
+        &format!("CALL {{ {query} }} WITH s WHERE s < 0 CREATE (:Log {{id:s}})"),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(ack.starts_with("OK (no changes)"), "{ack}");
+    assert!(ack.contains("forced_exact"), "{ack}");
+    let state = state_with_active(active);
+    for suffix in ["", " FORMAT CSV"] {
+        let text = state
+            .run_cypher_template(
+                &format!("{query}{suffix}"),
+                &serde_json::Map::new(),
+                CSV_OFF,
+            )
+            .unwrap();
+        assert!(text.contains("retrieval:"), "{text}");
+        assert!(text.contains("\"actual_mode\":\"exact\""), "{text}");
+        assert!(text.contains("\"requested_policy\":\"exact\""), "{text}");
+    }
+    let clean = state
+        .run_cypher_template("RETURN 1 AS n", &serde_json::Map::new(), CSV_OFF)
+        .unwrap();
+    assert!(!clean.contains("retrieval:"), "{clean}");
+}

@@ -128,6 +128,7 @@ impl DistinctValues {
 struct AggState {
     count: i64,
     sum: f64,
+    integer_sum: crate::graph::core::numeric_sum::IntegerSum,
     sum_was_int: bool,
     sum_seen_value: bool,
     min: Option<Value>,
@@ -145,6 +146,7 @@ impl AggState {
         AggState {
             count: 0,
             sum: 0.0,
+            integer_sum: crate::graph::core::numeric_sum::IntegerSum::default(),
             sum_was_int: true,
             sum_seen_value: false,
             min: None,
@@ -185,12 +187,15 @@ impl AggState {
             AggKind::Sum | AggKind::Avg => {
                 if let Some(f) = value_to_f64(&val) {
                     self.sum += f;
+                    if let Value::Int64(integer) = val {
+                        self.integer_sum.add(integer);
+                    }
                     self.count += 1;
                     self.sum_seen_value = true;
                     // `sum()` is integer-typed only when every numeric
                     // input was an `Int64` — UniqueId and other numeric
                     // variants force the result to Float64. The
-                    // materialized (`collect_numeric_values_typed`) and
+                    // materialized (`sum_numeric_values`) and
                     // fused-scan accumulators apply the identical rule,
                     // so all three paths agree on the result shape.
                     if !matches!(val, Value::Int64(_)) {
@@ -230,6 +235,7 @@ impl AggState {
     fn merge(&mut self, other: AggState) {
         self.count += other.count;
         self.sum += other.sum;
+        self.integer_sum.merge(other.integer_sum);
         if other.sum_seen_value {
             self.sum_seen_value = true;
             if !other.sum_was_int {
@@ -258,16 +264,16 @@ impl AggState {
     /// value sets while adding the sums — so folding each row as it arrived
     /// made `sum(DISTINCT n.v)` grouped by `n.g` add every row again (`[1, 1,
     /// 2]` summed to 4), while the same query without a group key answered 3.
-    fn finalize(&self, spec: &AggSpec) -> Value {
+    fn finalize(&self, spec: &AggSpec) -> Result<Value, String> {
         match spec.kind {
             // `count(DISTINCT *)` is row-distinctness, not value-distinctness:
             // it never populated a set, so it stays on the running count.
-            AggKind::CountStar => Value::Int64(self.count),
+            AggKind::CountStar => Ok(Value::Int64(self.count)),
             AggKind::Count if spec.distinct => {
                 let n = self.distinct_nodes.as_ref().map(|s| s.len()).unwrap_or(0)
                     + self.distinct_edges.as_ref().map(|s| s.len()).unwrap_or(0)
                     + self.distinct_values.as_ref().map(|s| s.len()).unwrap_or(0);
-                Value::Int64(n as i64)
+                Ok(Value::Int64(n as i64))
             }
             AggKind::Sum | AggKind::Avg | AggKind::Min | AggKind::Max if spec.distinct => {
                 let mut folded = AggState::plain();
@@ -284,14 +290,14 @@ impl AggState {
 
     /// `finalize` for a state that already holds the running totals — the
     /// non-DISTINCT case, and the fold of a DISTINCT aggregate's value set.
-    fn finalize_plain(&self, kind: AggKind) -> Value {
-        match kind {
+    fn finalize_plain(&self, kind: AggKind) -> Result<Value, String> {
+        Ok(match kind {
             AggKind::CountStar | AggKind::Count => Value::Int64(self.count),
             AggKind::Sum => {
                 if !self.sum_seen_value {
                     Value::Int64(0)
-                } else if self.sum_was_int && self.sum.fract() == 0.0 {
-                    Value::Int64(self.sum as i64)
+                } else if self.sum_was_int {
+                    Value::Int64(self.integer_sum.finish()?)
                 } else {
                     Value::Float64(self.sum)
                 }
@@ -305,7 +311,7 @@ impl AggState {
             }
             AggKind::Min => self.min.clone().unwrap_or(Value::Null),
             AggKind::Max => self.max.clone().unwrap_or(Value::Null),
-        }
+        })
     }
 }
 
@@ -566,7 +572,7 @@ pub fn apply<'q>(
         }
         for (ai, spec) in specs.iter().enumerate() {
             let key = return_item_column_name(&return_clause.items[agg_indices[ai]]);
-            projected.insert(key, acc.states[ai].finalize(spec));
+            projected.insert(key, acc.states[ai].finalize(spec)?);
         }
 
         let mut row = ResultRow::from_projected(projected);
@@ -582,7 +588,7 @@ pub fn apply<'q>(
         for (ai, spec) in specs.iter().enumerate() {
             let key = return_item_column_name(&return_clause.items[agg_indices[ai]]);
             let empty_state = AggState::new(spec);
-            projected.insert(key, empty_state.finalize(spec));
+            projected.insert(key, empty_state.finalize(spec)?);
         }
         output_rows.push(ResultRow::from_projected(projected));
     }

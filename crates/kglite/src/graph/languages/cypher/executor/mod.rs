@@ -210,6 +210,7 @@ pub struct CypherExecutor<'a> {
     /// regions). Contention is nil: a warning is pushed at most once per CALL
     /// clause, never per row.
     runtime_warnings: Mutex<Vec<String>>,
+    runtime_retrieval: Mutex<Vec<RetrievalDiagnostics>>,
     /// Holds the disk materialization arenas alive for this executor's
     /// lifetime (arena protocol in `storage/disk/graph.rs`, enforced by a
     /// debug assert). Acquired in the constructor so EVERY read this
@@ -245,6 +246,7 @@ impl<'a> CypherExecutor<'a> {
             parallel: false,
             csv_import: load_csv::CsvImportPolicy::Denied,
             runtime_warnings: Mutex::new(Vec::new()),
+            runtime_retrieval: Mutex::new(Vec::new()),
             _arena_guard: graph.graph.begin_query(),
             row_limit: None,
         }
@@ -469,74 +471,8 @@ impl<'a> CypherExecutor<'a> {
         if query.profile {
             result.profile = Some(profile_stats);
         }
-        let warnings = self.take_runtime_warnings();
-        if !warnings.is_empty() {
-            result
-                .diagnostics
-                .get_or_insert_with(QueryDiagnostics::default)
-                .warnings
-                .extend(warnings);
-        }
+        self.attach_runtime_diagnostics(&mut result);
         Ok(result)
-    }
-
-    /// Record a non-fatal execution-time warning, and echo it to stderr for
-    /// interactive users (the same one-computation/two-consumers split
-    /// `session::execute::prepare` applies to the schema warnings).
-    ///
-    /// Repeats are dropped: a correlated `CALL {}` body re-executes its CALL
-    /// clause once per outer row, and the same mis-spelled relationship type
-    /// is one fact about the query however many rows re-discover it.
-    pub(super) fn warn(&self, message: String) {
-        let mut warnings = self
-            .runtime_warnings
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if warnings.contains(&message) {
-            return;
-        }
-        super::emit_query_warnings(std::slice::from_ref(&message));
-        warnings.push(message);
-    }
-
-    /// Move a nested executor's warnings onto this one. A `CALL {}` body runs
-    /// on its own executor, so without this its procedure warnings would be
-    /// dropped when that executor is.
-    pub(super) fn absorb_warnings(&self, nested: &CypherExecutor<'_>) {
-        for warning in nested.take_runtime_warnings() {
-            self.warn_absorbed(warning);
-        }
-    }
-
-    /// Absorb one already-emitted warning: recorded (de-duplicated) but not
-    /// re-printed — stderr saw it when the nested executor raised it.
-    fn warn_absorbed(&self, message: String) {
-        let mut warnings = self
-            .runtime_warnings
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !warnings.contains(&message) {
-            warnings.push(message);
-        }
-    }
-
-    /// Absorb the warnings a nested [`Self::execute`] parked on its result.
-    pub(super) fn absorb_diagnostics(&self, nested: &CypherResult) {
-        let Some(diagnostics) = nested.diagnostics.as_ref() else {
-            return;
-        };
-        for warning in &diagnostics.warnings {
-            self.warn_absorbed(warning.clone());
-        }
-    }
-
-    fn take_runtime_warnings(&self) -> Vec<String> {
-        std::mem::take(
-            &mut *self
-                .runtime_warnings
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()),
-        )
     }
 
     /// Drive a read-only `LOAD CSV` pipeline: strip the leading clause, then
@@ -674,6 +610,20 @@ impl<'a> CypherExecutor<'a> {
                     });
                 }
                 continue;
+            }
+
+            if i == 0 && !profiling && result_set.rows.is_empty() && result_set.columns.is_empty() {
+                if let Some(result) = self.try_retrieval_entry(&query.clauses)? {
+                    let operator = if matches!(query.clauses[1], Clause::FusedTextBm25TopK { .. }) {
+                        "FusedTextBm25TopK"
+                    } else {
+                        "vector retrieval"
+                    };
+                    self.budget.check_rows(result.rows.len(), operator)?;
+                    result_set = result;
+                    skip_clause[1] = true;
+                    continue;
+                }
             }
 
             // WHERE-into-MATCH fusion: when MATCH is followed by WHERE, pass the
@@ -1057,7 +1007,10 @@ impl<'a> CypherExecutor<'a> {
                 return_clause,
                 sort_keys,
                 limit,
-            } => self.execute_fused_order_by_top_k(return_clause, sort_keys, *limit, result_set),
+            } => {
+                self.record_exact_ordering(sort_keys, &result_set, *limit)?;
+                self.execute_fused_order_by_top_k(return_clause, sort_keys, *limit, result_set)
+            }
             Clause::FusedMatchReturnAggregate {
                 match_clause,
                 return_clause,
@@ -1203,12 +1156,16 @@ mod interrupt;
 pub mod load_csv;
 pub mod match_clause;
 pub mod match_execution;
+mod node_ontology;
 pub(crate) mod ontology_procedures;
 pub(crate) mod ordering;
 mod procedure_registry;
 pub mod refresh_stats;
 pub mod regex_cache;
 mod rel_constraint_ddl;
+mod retrieval;
+mod retrieval_diagnostics;
+mod retrieval_text;
 pub mod return_clause;
 pub mod rev_procedures;
 pub mod rule_procedures;
@@ -1227,6 +1184,7 @@ mod table_procedures;
 #[cfg(test)]
 pub mod tests;
 pub mod transient_index;
+mod vector_options;
 pub mod where_clause;
 pub mod write;
 pub(crate) mod write_scope;

@@ -76,13 +76,17 @@ Rules the declaration must satisfy (checked on install):
 - `cardinality` / `required` describe **outgoing** edges of the domain type.
 - `symmetric: True` lowers to an inverse check of the relationship against
   itself.
-- `required_properties` and `property_types` are audited **per edge** of the
-  relationship: a listed property must be present and non-null; a declared
-  type is checked only on present values. Type names are validated at
-  declaration time (the matcher is permissive, so a typo would otherwise
-  never fail anything). Both name the **stored** property, so when a
-  blueprint renames a loaded column (`rename` on a junction edge — see
-  {doc}`blueprints`) declare the name it lands under, not the CSV column.
+- `property_types` accepts `list` (alias `array`, case-insensitive) for any
+  native list, including empty, mixed and nested lists. This checks the outer
+  container only; it does not declare an element type. Missing/null values are
+  left to `required_properties`.
+- `required_properties` and `property_types` apply to nodes in class
+  declarations and to edges in relationship declarations. Required values
+  must be present and non-null; type checks ignore absent/null values. Repeated
+  required names count once. Type names are validated on declaration. Edge
+  properties use stored names, including a blueprint's renamed output column.
+  Node properties use the actual primary type's loader aliases and id/title
+  resolution.
 - `inverse_name` is a **reading-direction alias** — no second edge exists or
   is implied, and it enrolls no check. `inverse_enforced: True` opts into
   auditing physical pairing (each edge must have a stored inverse partner);
@@ -102,6 +106,47 @@ Rules the declaration must satisfy (checked on install):
 `g.ontology()` returns the store as a dict, `g.clear_ontology()` removes it
 (withdrawing any materialized labels first). The store persists in the
 `.kgl` and travels with `save_subset` / `to_subgraph`.
+
+## Node property contracts
+
+```python
+g.define_ontology({"classes": {
+    "Study": {"required_properties": ["design", "tags"],
+              "property_types": {"tags": "list"},
+              "enforcement": {"required_properties": "error"}},
+    "Trial": {"is_a": "Study", "required_properties": ["registration"]},
+}})
+```
+
+Each declaring class governs nodes whose primary class is itself or a declared
+descendant. Parent and child contracts are independent and additive; unrelated
+secondary labels do not enroll a node. Class enforcement accepts only
+`required_properties` and `property_types`, defaults to advisory, and has no
+edge-style exemptions. Blueprint builds apply the same warn/error behavior to
+node contracts before publishing output.
+
+`CALL ontology_audit()` returns `entity_kind` (`node` or `edge`) beside `rule`.
+Together they identify a rule even when a class and relationship have the same
+name. A node rule's denominator is its covered live nodes, exemptions are zero,
+and an empty denominator yields zero violations and `0.0` percent. Property
+breakdowns count a node under every failed field, including zero-count declared
+fields; aggregate counts count that node once. Domain-class breakdowns group
+violations by actual primary type.
+
+```cypher
+CALL node_property_violation()
+YIELD class, check, node, property, properties
+RETURN class, check, node.id AS id, properties
+```
+
+This procedure takes no parameters. It returns one row per violating node per
+declaring class/check; `properties` lists all failed fields and `property` is the
+first. The node binding composes with subsequent query clauses. No ontology is
+an error; an ontology without node contracts returns no findings.
+
+`SHOW ONTOLOGY` exposes `required_properties`, `property_types`, and enforcement
+for classes and relationships. The contracts persist with the graph; legacy
+class declarations without these fields retain empty/advisory defaults.
 
 ## Reading it back
 
@@ -173,7 +218,8 @@ aggregate) while `severity`, `exempted` and `total` keep their per-rule
 values. Exempted rows are left out, so a class whose every violation is
 excused gets no row at all, and a rule with nothing to break down keeps its
 single aggregate row. Without the parameter, `domain_class` is `None` on
-every row — a bare `CALL ontology_audit()` returns all eight columns either
+every row — a bare `CALL ontology_audit()` returns all nine columns, including
+`entity_kind` to distinguish node and edge rules, either
 way.
 
 ```python
@@ -193,9 +239,9 @@ The domain-side class is the edge's source for `domain` / `range` /
 
 **Which fields are missing?** `{by: 'property'}` fans the
 `required_properties` and `property_types` rules into one row per **declared**
-property — `violations` is the edges failing that property, `total` the
-relationship's edges, `pct` the share lacking it. Every other rule keeps its
-aggregate row with a `None` property.
+property — `violations` counts the nodes or edges failing that property, `total` the
+rule's covered nodes or relationship edges, and `pct` the share failing it.
+Every other rule keeps its aggregate row with a `None` property.
 
 ```python
 for row in g.cypher(
@@ -211,7 +257,7 @@ for row in g.cypher(
 The two breakdowns answer different shapes of question, and reading one as
 the other double-counts. `domain_class` **partitions** a rule — every
 violating row has exactly one source class, so the rows sum back to the
-aggregate `violations`. `property` is a **census** — one edge missing three
+aggregate `violations`. `property` is a **census** — one node or edge missing three
 declared properties is counted under all three, so the rows sum to *at least*
 the aggregate and adding them up does not give the rule's violation count.
 A declared property nothing fails still gets a row, at zero; "this field is

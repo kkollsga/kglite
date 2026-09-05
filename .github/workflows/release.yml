@@ -741,7 +741,7 @@ jobs:
           workspaces: ". -> target"
           shared-key: "publish-${{ needs.version-check.outputs.version }}"
 
-      # 1. Publish kglite (the core crate).
+      # Publish kglite (the core crate).
       # `--locked` honours Cargo.lock for reproducibility.
       # CI has already unpacked the generated crate outside the workspace and
       # compiled its public `parallel-bz2` feature against registry deps.
@@ -751,67 +751,25 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish -p kglite --locked
 
-      # 2. Wait for crates.io's sparse index to surface the new
-      # kglite version. The first version of this step polled
-      # /api/v1/crates/kglite/<version> for HTTP=200 — that hit
-      # crates.io's rate limit (30 requests in 10 min from the
-      # same runner IP) and started getting HTTP=403, mistaken for
-      # "not yet". Fixed by switching to a fixed sleep + an actual
-      # `cargo` operation as the readiness probe. `cargo search`
-      # against the sparse index uses the same resolver path the
-      # downstream `cargo publish -p ...` will use, so once it
-      # finds our crate the next publish will too.
-      - name: Wait for crates.io index propagation (kglite)
-        if: needs.version-check.outputs.should_publish_kglite == 'true' && (needs.version-check.outputs.should_publish_bolt == 'true' || needs.version-check.outputs.should_publish_mcp == 'true' || needs.version-check.outputs.should_publish_c == 'true')
-        run: |
-          VERSION="${{ needs.version-check.outputs.version }}"
-          # crates.io's own docs note "an index update can take up
-          # to 1 minute". 90s buys headroom without burning CI time.
-          echo "Sleeping 90s for crates.io index propagation of kglite $VERSION..."
-          sleep 90
-          # Confirm via cargo's own resolver — if this finds the
-          # version, downstream `cargo publish -p kglite-bolt-server`
-          # will resolve `kglite = "0.10"` to it.
-          for i in $(seq 1 5); do
-            if cargo search kglite --limit 1 2>&1 | grep -E "^kglite = \"$VERSION\""; then
-              echo "kglite $VERSION visible to cargo resolver (attempt $i)"
-              exit 0
-            fi
-            echo "Not yet visible to cargo resolver (attempt $i), waiting 30s..."
-            sleep 30
-          done
-          echo "WARNING: cargo search didn't find kglite $VERSION after 90s + 5×30s."
-          # Backticks stay escaped: unescaped, this double-quoted string is a
-          # command substitution and the "explanation" runs a bare
-          # `cargo publish` against whatever package cargo picks by default.
-          echo "Proceeding anyway — \`cargo publish\` for the next crate will surface a"
-          echo "real error if the index isn't ready."
+      # Cargo's post-upload poll can time out without failing the publish.
+      # Check the exact index version before any dependent, including repair runs.
+      - name: Confirm kglite index readiness
+        if: needs.version-check.outputs.should_publish_bolt == 'true' || needs.version-check.outputs.should_publish_mcp == 'true' || needs.version-check.outputs.should_publish_c == 'true' || needs.version-check.outputs.should_publish_cli == 'true'
+        timeout-minutes: 3
+        env:
+          VERSION: ${{ needs.version-check.outputs.version }}
+        run: python3 scripts/wait_kglite_index.py "$VERSION"
 
-      # 3. Publish kglite-bolt-server. Skipped if its version is
-      # already on crates.io (bolt-server may bump independently of
-      # kglite).
+      # Publish kglite-bolt-server. Skipped when already on crates.io
+      # during a repair run.
       - name: Publish kglite-bolt-server
         if: needs.version-check.outputs.should_publish_bolt == 'true'
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish -p kglite-bolt-server --locked
 
-      # 4. (Optional) Wait for kglite-bolt-server to surface in the
-      # crates.io index. mcp-server doesn't depend on bolt-server,
-      # so this isn't strictly required for correctness — but it
-      # gives the index a settling window before the next publish.
-      # Only fires when BOTH bolt and mcp are publishing this run.
-      - name: Wait for crates.io index propagation (kglite-bolt-server)
-        if: needs.version-check.outputs.should_publish_bolt == 'true' && needs.version-check.outputs.should_publish_mcp == 'true'
-        run: |
-          # mcp-server doesn't depend on bolt-server, so this wait
-          # is purely cosmetic spacing. 60s sleep, no API polling
-          # (see the kglite wait step's comment for the 403/rate-limit
-          # rationale).
-          sleep 60
-
-      # 5. Publish kglite-mcp-server. Skipped if its version is
-      # already on crates.io (mcp-server may bump independently).
+      # Publish kglite-mcp-server. Skipped when already on crates.io
+      # during a repair run.
       # Pyo3 is no longer in the dep tree as of 0.10.1 — see the
       # lift in `kglite::api::handle::*`.
       - name: Publish kglite-mcp-server
@@ -820,15 +778,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish -p kglite-mcp-server --locked
 
-      # 6. (Optional) Wait before publishing kglite-c. Like the
-      # bolt → mcp wait above, this is cosmetic spacing — kglite-c
-      # only depends on `kglite`, not on bolt-server or mcp-server.
-      # Only fires when BOTH mcp and c are publishing this run.
-      - name: Wait for crates.io index propagation (kglite-mcp-server)
-        if: needs.version-check.outputs.should_publish_mcp == 'true' && needs.version-check.outputs.should_publish_c == 'true'
-        run: sleep 60
-
-      # 7. Publish kglite-c (C ABI crate for non-Rust bindings).
+      # Publish kglite-c (C ABI crate for non-Rust bindings).
       # Skipped if its version is already on crates.io. The cdylib +
       # staticlib artifacts are NOT published here — crates.io
       # publishes the source crate; consumers run `cargo build` to
@@ -841,11 +791,8 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish -p kglite-c --locked
 
-      # 8. Publish kglite-cli (the `kglite` interactive shell binary).
-      # Depends only on `kglite`, so no extra index-propagation wait is
-      # needed beyond the kglite one above (and when only kglite-cli is
-      # new in a later run, kglite is already on crates.io). Skipped if
-      # its version is already published.
+      # Publish kglite-cli (the `kglite` interactive shell binary).
+      # Skipped if its version is already published.
       - name: Publish kglite-cli
         if: needs.version-check.outputs.should_publish_cli == 'true'
         env:

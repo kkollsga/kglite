@@ -560,6 +560,28 @@ impl KnowledgeGraph {
     }
 }
 
+/// Fold only independently owned backend/index layers. Publication callers must
+/// release the old graph owner first; each layer still protects retained readers.
+/// This changes representation only, without writer lineage or version changes.
+pub(crate) fn compact_dir_graph(graph: &mut DirGraph) {
+    graph.graph.try_compact();
+    compact_dir_graph_indices(graph);
+}
+
+fn compact_dir_graph_indices(graph: &mut DirGraph) {
+    graph.id_indices.try_compact();
+    graph.type_indices.try_compact();
+    for index in graph.property_indices.values_mut() {
+        index.try_compact();
+    }
+    for index in graph.composite_indices.values_mut() {
+        index.try_compact();
+    }
+    for index in graph.range_indices.values_mut() {
+        index.try_compact();
+    }
+}
+
 /// Copy-on-write access that preserves disk writer authority when a shared
 /// snapshot forces a clone. Does not change the graph version; callers that
 /// perform semantic mutations should use [`make_dir_graph_mut`].
@@ -579,12 +601,7 @@ pub fn make_dir_graph_mut_preserving_lineage(arc: &mut Arc<DirGraph>) -> &mut Di
     if let Some(parent) = parent {
         graph.graph.adopt_shared_writer_lineage(&parent.graph);
     }
-    // Compaction point. If this graph is a copy-on-write overlay and
-    // the reader that forced the fork has since dropped, fold the delta back
-    // into the base here and return to the flat representation. This is the
-    // earliest moment the writer can observe the reader's departure —
-    // `Arc::get_mut` succeeding *is* that observation — so "hold a view, write,
-    // drop the view, write again" self-heals on the very next write.
+    // A departed reader permits folding; a retained base stays shared.
     graph.graph.try_compact();
     // ...and the mirror image: this graph may itself be somebody else's base
     // (`g.copy()` forks *from* `g`), in which case writing in place would edit a
@@ -592,24 +609,7 @@ pub fn make_dir_graph_mut_preserving_lineage(arc: &mut Arc<DirGraph>) -> &mut Di
     // over the shared base too — one `Arc::get_mut` probe when nothing is
     // shared, which is the steady state.
     graph.graph.ensure_writable();
-    // The same fold for `id_indices`, whose entries layer over a shared base
-    // of their own: `Arc::get_mut` plus an O(delta) merge per entry.
-    graph.id_indices.try_compact();
-    // ...and for `type_indices`, whose buckets are stacks of shared levels.
-    graph.type_indices.try_compact();
-    // ...and the three user index families, over their `value -> members` maps
-    // (`dir_graph/index_layer.rs`, and `dir_graph/range_index_layer.rs` for the
-    // ordered one). The loops do not run at all on the overwhelmingly common
-    // graph that has no user index.
-    for index in graph.property_indices.values_mut() {
-        index.try_compact();
-    }
-    for index in graph.composite_indices.values_mut() {
-        index.try_compact();
-    }
-    for index in graph.range_indices.values_mut() {
-        index.try_compact();
-    }
+    compact_dir_graph_indices(graph);
     graph
 }
 

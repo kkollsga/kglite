@@ -425,3 +425,27 @@ fn cypher_result(columns: Vec<&str>, rows: Vec<Vec<KgliteValue>>) -> CypherResul
         lazy: None,
     }
 }
+
+#[test]
+fn retrieval_diagnostics_survive_recipe_serialization() {
+    let catalog = catalog("RETURN $name AS name");
+    let query = catalog.get("review").unwrap().get("lookup").unwrap();
+    let mut result = cypher_result(vec!["s"], vec![vec![KgliteValue::Float64(1.0)]]);
+    let mut diagnostics = kglite::api::cypher::QueryDiagnostics::default();
+    diagnostics
+        .retrieval
+        .push(kglite::api::cypher::RetrievalDiagnostics {
+            requested_policy: "auto".into(),
+            actual_mode: "hnsw".into(),
+            fallback_reason: None,
+            store: Some("Doc.body_emb".into()),
+        });
+    result.diagnostics = Some(diagnostics);
+    let output = serde_json::to_value(serialize_success(&args(false), query, &result)).unwrap();
+    assert_eq!(
+        output["result"]["diagnostics"]["retrieval"],
+        json!([
+            {"requested_policy":"auto","actual_mode":"hnsw","fallback_reason":null,"store":"Doc.body_emb"}
+        ])
+    );
+}

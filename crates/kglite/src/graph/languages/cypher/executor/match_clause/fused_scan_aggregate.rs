@@ -291,6 +291,7 @@ struct InlineAccumulators {
     /// property into a float on the fused path only.
     sum_was_int: Vec<bool>,
     sums: Vec<f64>,
+    integer_sums: Vec<crate::graph::core::numeric_sum::IntegerSum>,
     mins: Vec<Option<Value>>,
     maxs: Vec<Option<Value>>,
     /// Per-aggregate value set for `count(DISTINCT …)`; `None` for the rest.
@@ -305,6 +306,7 @@ impl InlineAccumulators {
             numeric_counts: vec![0i64; width],
             sum_was_int: vec![true; width],
             sums: vec![0.0f64; width],
+            integer_sums: vec![crate::graph::core::numeric_sum::IntegerSum::default(); width],
             mins: vec![None; width],
             maxs: vec![None; width],
             distinct_sets: agg_is_distinct
@@ -320,14 +322,15 @@ impl InlineAccumulators {
     /// `count`/`sum` add, `min`/`max` take the extreme under the same
     /// `total_order` the row path uses, and `count(DISTINCT …)` unions the
     /// value sets. `avg` is derived from `sums`/`counts` at emission, so it
-    /// merges for free. Nothing here reads row order, which is why the
-    /// partitioned scan returns byte-identical results.
+    /// merges from those two totals. Integer SUM remains exact across
+    /// partitions; floating arithmetic retains its existing reduction order.
     fn merge(&mut self, other: InlineAccumulators) {
         for (ai, count) in other.counts.iter().enumerate() {
             self.counts[ai] += count;
             self.numeric_counts[ai] += other.numeric_counts[ai];
             self.sum_was_int[ai] &= other.sum_was_int[ai];
             self.sums[ai] += other.sums[ai];
+            self.integer_sums[ai].merge(other.integer_sums[ai]);
         }
         for (ai, min) in other.mins.into_iter().enumerate() {
             if let Some(val) = min {
@@ -393,6 +396,9 @@ impl InlineAccumulators {
         if let Some(f) = value_to_f64(val) {
             self.numeric_counts[ai] += 1;
             self.sums[ai] += f;
+            if let Value::Int64(integer) = val {
+                self.integer_sums[ai].add(*integer);
+            }
             // UniqueId and Float64 both force a Float64 sum, as they do on the
             // streaming path.
             if !matches!(val, Value::Int64(_)) {

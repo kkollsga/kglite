@@ -141,6 +141,7 @@ pub(super) fn serialize_success(
         recipe: args.recipe.clone(),
         query: args.query.clone(),
         result: RecipeQueryResult {
+            diagnostics: result.diagnostics.as_ref().map(|d| serde_json::json!(d)),
             columns: result.columns.clone(),
             rows,
             row_count: result.rows.len(),

@@ -88,7 +88,10 @@ Contract points a binding has to honour:
 - **`save` is the checkpoint**: flush the log, stamp `checkpoint_lsn`, write
   the file, truncate the log. Its signature is unchanged, and it forces
   `fsync` on a durable session because it destroys the log that would
-  otherwise still describe those commits.
+  otherwise still describe those commits. Saving to a different path preserves
+  the original log and transfers subsequent logging after the new checkpoint
+  succeeds. Hold the destination writer lease before save-as and keep it for
+  the session's remaining lifetime; sessions leave lease ownership to callers.
 - **`write()` / `transact` are not logged paths** and are unsupported on a
   durable session. Taking one anyway latches the session: every later
   durability operation fails loudly until a checkpoint folds the direct write

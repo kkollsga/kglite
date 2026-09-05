@@ -7,6 +7,105 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Actual vector retrieval diagnostics for ordinary queries and PROFILE, including
+  nested execution, with requested policy, execution mode and fallback reason.
+  Exposed through Python, MCP, C result/batch JSON and Bolt summary metadata.
+
+- `vector_score` and `text_score` accept a final `{exact: true}` options map to
+  bypass HNSW. Omitted metrics resolve per node type; row-dependent selectors
+  use exact scoring. Invalid vector arguments propagate through fused filters.
+
+- Class declarations support required node properties, property types and enforcement,
+  inherited through primary classes. `node_property_violation()` lists failures;
+  `ontology_audit()` adds `entity_kind` and `SHOW ONTOLOGY` exposes property contracts.
+- Repeated required-property names no longer inflate node or edge audit counts.
+
+- BM25 indexes native lists of strings/nulls as one document across build, refresh,
+  and persistence; ontology property types accept `list` and `array`.
+
+### Changed
+
+- New writes use WAL format 4 for complete node and parallel-relationship state;
+  readers decode formats 2–4 and older readers refuse the new WAL header. The
+  `.kgl` checkpoint format is unchanged. Rust `wrap_for_durability` callers now
+  handle a `Result` when claiming durable capture ownership.
+- Geographic DBSCAN builds neighbors directly, avoiding the dense distance matrix while preserving exact WGS84 distances, cluster order and cancellation. Measured peak process memory at 4,096 points falls 35–55% with query time unchanged.
+- DBSCAN uses constant-time queue membership for faster dense clustering, preserving cluster labels and input order and avoiding membership allocation for all-noise inputs.
+- Release publication checks the exact core crate in the registry index immediately, replacing redundant fixed waits and search polling while blocking dependents on readiness failure.
+- Appending to shared typed columns reserves growth room during their required copy, preserving snapshots, nulls and existing allocation-failure fallbacks.
+- Successful Session commits fold uniquely owned transaction overlays after publication, preserving retained snapshots and durable logging order.
+- Deleting a just-created node in a reused low slot avoids a full type-bucket scan, preserving survivor order and rollback coordinates.
+- Batch text-index refreshes by affected term, retaining direct edits for small deltas and rebuilding large deltas. Exact scores and the public refresh ceiling are preserved.
+- Eligible BM25 top-k queries retrieve positive hits before constructing rows,
+  preserving complete index membership, stable ties and scalar fallback behavior.
+
+- Eligible exact vector top-k queries score contiguous embedding slots and retain
+  only winning rows, preserving scalar scores, stable ties and retrieval diagnostics.
+
+- Eligible indexed vector top-k queries construct only winning rows from an
+  initial typed MATCH, reducing Cypher overhead. Filtered, incomplete, stale,
+  exact and PROFILE queries retain their existing retrieval behavior.
+
+### Fixed
+
+- Durable replay preserves equal parallel relationships and selected member
+  updates/deletions. Known-ambiguous legacy parallel-edge actions and duplicate
+  logical identities at durable adoption are refused instead of silently
+  choosing a member or merging identities.
+- Direct writes to reloaded graphs enforce deferred indexes and constraints.
+  Disk saves preserve declared indexes, including deferred definitions.
+- MERGE uses MATCH's ordinary-property equality and field resolution, preventing
+  duplicate nodes across numeric types, wrapped strings and stored name fields.
+- Recursive list and map predicates preserve unknown results from nested nulls,
+  including prepared `IN` and negation. Numeric index candidates now follow
+  predicate equality and range semantics; unsupported domains fall back to a
+  complete scan instead of omitting matching rows.
+- C embedder ownership documentation now consistently states that attaching a
+  handle borrows it; callers must still free their handle exactly once.
+- Recovery preserves exact typed identities and properties, clears old labels
+  and relationships when a node is recreated, and validates constraint transfers
+  against the final state. Rejected recovery leaves the caller and saved data
+  unchanged. Reloaded disk graphs retain declared indexes and uniqueness rules.
+- Integer SUM retains exact values across query execution paths and blueprint
+  aggregation. Final results outside signed 64-bit range report an overflow
+  error; intermediate sums may exceed that range and cancel before completion.
+- Python parameter conversion detects recursive containers and limits active
+  container depth to 64, while preserving ordinary shared containers. Aware
+  datetimes normalize to UTC with their time and fractional seconds intact.
+- RDF dateTime values without a timezone retain fractional seconds, including
+  nanoseconds, instead of silently truncating them.
+- Durable reopen repairs an incomplete WAL tail before accepting new writes,
+  preventing later acknowledged writes from being hidden behind damaged bytes.
+  Unsupported formats, non-tail damage and files changed during recovery are refused.
+- Preserve signed 64-bit disk IDs on reload and streaming subset saves; unsupported identity types use lossless sidecars instead of becoming null.
+- Very large BM25 top-k limits allocate only for actual matching candidates,
+  preventing integer overflow and oversized heap allocation.
+
+- BM25 top-k retains NULL-scoring rows when a filtered population has the same
+  size as its text index but includes nodes without indexed text.
+
+- Vacuum and reindex rebuild UNIQUE and NODE KEY occupancy after node slots move,
+  preventing false conflicts and duplicate values admitted after compaction.
+
+- Performance gates select qualified, digest-bound references and reject known
+  inflated captures, missing platform identity and unusable comparisons. New
+  release captures remain pending until explicitly qualified; raw history stays intact.
+- Vector/text-score top-k preserves ascending order and missing-embedding rows.
+  Explicit null placement uses the standard ordering path; HNSW falls back
+  when unembedded rows must participate in the result.
+- Cypher `abs()` reports integer overflow instead of panicking at the minimum
+  signed integer. `round()` handles extreme precision without narrowing wrap,
+  spurious infinity or NaN, including subnormal values and signed zero.
+- Save-as now transfers an open graph's writer lease and durable log together
+  after a successful save. Failed saves retain the original home; the original
+  file keeps its recovery data, and a destination with pending recovery is
+  refused even when its log sequence is below the source's sequence. The shared
+  save guard also protects Rust and C saves from unrelated replay stamps, and
+  durable Rust sessions transfer future logging when saved to another path.
+  Filename case aliases retain their existing ownership, and a moved source
+  directory no longer prevents exporting a snapshot to a valid new destination.
+
 ## [0.16.23] - 2026-09-04
 ### Added
 - **A blueprint declares its inputs once, in a `files:` section.** Each entry

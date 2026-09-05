@@ -3,7 +3,7 @@
 //! A single-node `DETACH DELETE` used to walk the whole bucket with a hashed
 //! set probe per member (`retain_in_type`), so deleting one node from a 1M-row
 //! type cost milliseconds. These pin the replacement: locate the doomed
-//! members by the store's sortedness invariant, then close the gaps with a
+//! members by verified bucket coordinates, then close the gaps with a
 //! memmove — **preserving bucket order**, which is the scan order an
 //! un-`ORDER BY`'d `MATCH` returns and the coordinate system the statement
 //! journal's `BucketRemoved` entries are recorded in.
@@ -85,29 +85,67 @@ fn removing_every_member_empties_the_bucket() {
     assert!(bucket(&store, "T").is_empty());
 }
 
-/// A bucket that lost the sortedness invariant — which happens as soon as a
-/// freed `NodeIndex` slot is reused by a later create — must decline the fast
-/// path rather than remove the wrong member. The caller falls back to the
-/// full-bucket retain.
+/// A misplaced member outside the last slot still uses the full retain.
 #[test]
-fn an_out_of_order_bucket_declines_the_positional_path() {
-    // Slot 1 was freed and reused, so it was appended after 2.
-    let mut store = seeded(&[0, 2, 1]);
-    assert!(
-        store.positions_of("T", &[NodeIndex::new(1)]).is_none(),
-        "a member the binary search cannot locate must decline, not guess"
+fn an_out_of_order_interior_member_declines_the_positional_path() {
+    let mut store = seeded(&[1, 2, 3, 0, 4, 5, 6, 7]);
+    assert!(bucket(&store, "T")
+        .binary_search(&NodeIndex::new(0))
+        .is_err());
+    assert!(store.positions_of("T", &[NodeIndex::new(0)]).is_none());
+    store.retain_in_type("T", |member| *member != NodeIndex::new(0));
+    assert_eq!(
+        bucket(&store, "T"),
+        (1..8).map(NodeIndex::new).collect::<Vec<_>>()
     );
-    // The members the search *can* still locate are handled normally.
-    let hits = store.positions_of("T", &[NodeIndex::new(0)]).unwrap();
-    assert_eq!(hits, vec![(0, NodeIndex::new(0))]);
+}
+
+/// A reused low slot at the tail is found without sorting live scan order.
+#[test]
+fn a_reused_tail_resolves_exact_coordinates_and_preserves_a_reader() {
+    let mut store = seeded(&[10, 11, 12, 0]);
+    let reader = store.clone();
+    assert!(bucket(&store, "T")
+        .binary_search(&NodeIndex::new(0))
+        .is_err());
+    let hits = store
+        .positions_of("T", &[NodeIndex::new(0)])
+        .expect("verified tail hit");
+    assert_eq!(hits, vec![(3, NodeIndex::new(0))]);
     store.remove_positions("T", &hits);
     assert_eq!(
         bucket(&store, "T"),
-        vec![2, 1]
-            .into_iter()
-            .map(NodeIndex::new)
-            .collect::<Vec<_>>()
+        (10..13).map(NodeIndex::new).collect::<Vec<_>>()
     );
+    assert_eq!(bucket(&reader, "T"), [10, 11, 12, 0].map(NodeIndex::new));
+}
+
+#[test]
+fn a_tail_hit_combines_with_sorted_hits_without_reordering_survivors() {
+    let mut store = seeded(&[10, 11, 12, 13, 14, 0]);
+    let hits = store
+        .positions_of("T", &[NodeIndex::new(0), NodeIndex::new(11)])
+        .unwrap();
+    assert_eq!(hits, vec![(1, NodeIndex::new(11)), (5, NodeIndex::new(0))]);
+    store.remove_positions("T", &hits);
+    assert_eq!(bucket(&store, "T"), [10, 12, 13, 14].map(NodeIndex::new));
+}
+
+#[test]
+fn tail_search_preserves_missing_empty_and_duplicate_request_fallbacks() {
+    let mut store = seeded(&[10, 11, 12, 0]);
+    let before = bucket(&store, "T");
+    for requested in [vec![0, 0], vec![0, 99], vec![99]] {
+        let requested: Vec<_> = requested.into_iter().map(NodeIndex::new).collect();
+        assert!(store.positions_of("T", &requested).is_none());
+        assert_eq!(bucket(&store, "T"), before);
+    }
+    store.entry_or_default("Empty".into());
+    assert!(store.positions_of("Empty", &[NodeIndex::new(0)]).is_none());
+    let mut singleton = seeded(&[0]);
+    assert!(singleton
+        .positions_of("T", &[NodeIndex::new(0), NodeIndex::new(0)])
+        .is_none());
 }
 
 /// A type with no bucket declines; it must not be materialized as an empty

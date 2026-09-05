@@ -17,7 +17,7 @@
 //!
 //! ## The orderings that are correctness, not preference
 //!
-//! 1. **Open: recover → replay → wrap → open-for-append** ([`open_log`]).
+//! 1. **Open: recover → replay → open-for-append → wrap** ([`open_log`]).
 //!    Replay must happen *before* the backend is wrapped for capture, or the
 //!    replay's own `GraphWrite` calls land in the capture buffer and get logged
 //!    a second time. Replay is gated on the loaded graph's `checkpoint_lsn`, so
@@ -58,9 +58,12 @@ use std::sync::Arc;
 
 use crate::graph::dir_graph::DirGraph;
 use crate::graph::handle::make_dir_graph_mut;
-use crate::graph::mutation::wal_replay::apply_frames;
-use crate::graph::storage::recording::wrap_for_durability;
-use crate::graph::wal::{recover, wal_path, DurabilityLevel, Wal, WalFrame};
+use crate::graph::mutation::wal_replay::prepare_replay;
+use crate::graph::wal::{recover, recover_for_append, wal_path, DurabilityLevel, Wal, WalFrame};
+
+mod save_as;
+pub(crate) use save_as::CheckpointPermit;
+pub use save_as::{prepare_save_as_target, same_checkpoint_path};
 
 /// Why [`open_log`] could not hand back a durability owner.
 ///
@@ -76,7 +79,7 @@ pub enum DurableOpenError {
     /// The recovered frames could not be applied to the checkpoint.
     Replay(String),
     /// The open is structurally unsafe and was refused: unreplayed frames at
-    /// level `off`, or a graph another durability owner already holds.
+    /// level `off`, another durability owner, or duplicate exact logical node IDs.
     Refused(String),
 }
 
@@ -91,7 +94,7 @@ impl std::fmt::Display for DurableOpenError {
 impl std::error::Error for DurableOpenError {}
 
 /// Open the write-ahead log for `graph`, checkpointed at `checkpoint_path`,
-/// performing the full recover → replay → wrap → open-for-append ordering.
+/// performing the full recover → replay → open-for-append → wrap ordering.
 ///
 /// `checkpoint_path` is the `.kgl` path, not the log path; the sidecar is
 /// derived from it by [`wal_path`] exactly as every binding derives it, so a
@@ -111,6 +114,9 @@ impl std::error::Error for DurableOpenError {}
 ///   `checkpoint_lsn` the other's frames sit below, so replay silently drops
 ///   committed data. A wrapper installed by change data capture alone claims no
 ///   ownership and does not refuse.
+/// - **Duplicate exact `(primary type, id)` identities** — WAL operations cannot
+///   distinguish their nodes. Admission is checked before sidecar changes and
+///   again on the prepared recovered state before publishing ownership.
 ///
 /// **Disk-mode graphs are the caller's refusal, not this function's.** A disk
 /// graph commits by publishing an immutable generation, so it keeps no logical
@@ -123,11 +129,10 @@ pub fn open_log(
     level: DurabilityLevel,
 ) -> Result<Option<(Wal, u64)>, DurableOpenError> {
     let wpath = wal_path(checkpoint_path);
-    let frames = read_sidecar(&wpath)?;
     let checkpoint_lsn = graph.checkpoint_lsn;
 
     if !level.logs() {
-        if unreplayed(&frames, checkpoint_lsn) {
+        if unreplayed(&read_sidecar(&wpath)?, checkpoint_lsn) {
             return Err(DurableOpenError::Refused(format!(
                 "the write-ahead log at '{}' holds commits this checkpoint does not \
                  contain, and durability level 'off' would neither replay them nor keep \
@@ -152,32 +157,83 @@ pub fn open_log(
         ));
     }
 
+    validate_durable_identities(graph)?;
+
+    // Reject non-tail damage before replay or capture ownership changes.
+    // Keep the scan's exact boundary so opening the writer need not rescan.
+    let recovered = recover_for_append(&wpath).map_err(|e| {
+        DurableOpenError::Io(format!(
+            "failed to read the write-ahead log at '{}': {e}",
+            wpath.display()
+        ))
+    })?;
     let sync = level
         .sync_mode()
         .expect("level.logs() is true, so sync_mode is Some");
 
+    // Recovery remains unpublished until tail repair and append-open succeed.
+    // Cloning the checkpoint is unnecessary when no frame changes its state.
+    let (prepared, max_lsn) = prepare_replay(graph, &recovered.frames, checkpoint_lsn)
+        .map_err(DurableOpenError::Replay)?;
+
+    if let Some(prepared) = &prepared {
+        validate_durable_identities(prepared)?;
+    }
+
+    finish_recovered_open(graph, prepared, max_lsn, || {
+        Wal::open_recovered(wpath.clone(), sync, recovered).map_err(|e| {
+            DurableOpenError::Io(format!(
+                "failed to open the write-ahead log at '{}': {e}",
+                wpath.display()
+            ))
+        })
+    })
+    .map(Some)
+}
+
+pub(crate) fn validate_durable_identities(graph: &DirGraph) -> Result<(), DurableOpenError> {
+    use crate::graph::storage::GraphRead;
+    let _guard = graph.begin_read_pass();
+    let mut seen = std::collections::HashSet::new();
+    for idx in graph.graph.node_indices() {
+        let Some(kind) = graph.graph.node_type_of(idx) else {
+            continue;
+        };
+        let Some(id) = graph.graph.get_node_id(idx) else {
+            continue;
+        };
+        if !seen.insert((kind, id.clone())) {
+            return Err(DurableOpenError::Refused(format!(
+                "duplicate logical node identity in type '{}' with id {:?}; durability requires one node per exact (primary type, id). Open non-durably and assign distinct identities or remove duplicates before enabling durability",
+                graph.interner.resolve(kind), id
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The publication boundary is after the last fallible file operation. Keeping
+/// it together also makes an injected open/repair failure testable without
+/// depending on OS permissions, effective uid, or filesystem fault injection.
+fn finish_recovered_open(
+    graph: &mut Arc<DirGraph>,
+    prepared: Option<DirGraph>,
+    max_lsn: u64,
+    open_writer: impl FnOnce() -> Result<Wal, DurableOpenError>,
+) -> Result<(Wal, u64), DurableOpenError> {
+    let wal = open_writer()?;
+    if let Some(prepared) = prepared {
+        *graph = Arc::new(prepared);
+    }
     let dir = make_dir_graph_mut(graph);
-    // Replay BEFORE wrapping, or the replay's own writes enter the capture
-    // buffer and the next commit logs them all over again.
-    let max_lsn = apply_frames(dir, &frames, checkpoint_lsn).map_err(DurableOpenError::Replay)?;
-    wrap_for_durability(dir);
-    // With change data capture already enabled the graph was wrapped before the
-    // replay ran, so the replayed writes sit in the capture buffer describing
-    // frames this log already holds: handing them to the WAL at the next commit
-    // would log every recovered write a second time. Drop them — and with them
-    // the CDC events for changes no consumer of this stream saw happen live.
-    // (No-op on the ordinary path, where the wrap above created the buffer.)
+    // A preexisting CDC wrapper captured replay's writes only in the working
+    // copy. Drop those historical events after writer-open, never on failure.
     if let Some(rg) = dir.graph.recording_mut() {
         let _ = rg.take_ops();
     }
-
-    let wal = Wal::open(wpath.clone(), sync).map_err(|e| {
-        DurableOpenError::Io(format!(
-            "failed to open the write-ahead log at '{}': {e}",
-            wpath.display()
-        ))
-    })?;
-    Ok(Some((wal, max_lsn + 1)))
+    // Admission was validated before the writer-open/publication boundary.
+    dir.graph.wrap_for_durability();
+    Ok((wal, max_lsn + 1))
 }
 
 /// Checkpoint steps 1–2: flush the log, then stamp how far this checkpoint
@@ -196,10 +252,13 @@ pub fn open_log(
 /// `next_lsn` is the LSN the *next* frame will carry, so the newest frame
 /// folded into this snapshot is `next_lsn - 1`. An owner that has logged
 /// nothing leaves the stamp at 0, i.e. replay everything, which is the ungated
-/// behaviour.
+/// behaviour. Preparation also grants one save permission to compare this
+/// stamp with this WAL. Cloning the graph drops that transient permission;
+/// a guarded save consumes it even if the destination refuses the save.
 pub fn checkpoint_prologue(wal: &mut Wal, next_lsn: u64, graph: &mut DirGraph) -> io::Result<()> {
     wal.sync()?;
     graph.checkpoint_lsn = next_lsn.saturating_sub(1);
+    graph.checkpoint_permit.0 = Some(wal.path().to_owned());
     Ok(())
 }
 
@@ -478,3 +537,7 @@ mod recording_over_a_fork_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "durability/open_atomicity_tests.rs"]
+mod open_atomicity_tests;

@@ -70,13 +70,9 @@ impl EmbedderState {
 /// returned by a `kglite_embedder_*_new` factory and not yet
 /// freed. Calling twice on the same pointer is UB.
 ///
-/// **Do NOT free** an embedder that has been handed to
-/// [`kglite_session_set_embedder`] — the session retains a clone
-/// of the inner Arc; you may free your handle after the call to
-/// set_embedder (the Arc keeps the embedder alive until the
-/// session drops). For symmetry with other handles, the safest
-/// pattern is: factory → set_embedder → free_embedder. Once the
-/// Arc is shared, the original handle is no longer special.
+/// [`kglite_session_set_embedder`] borrows this handle and clones the inner
+/// Arc. The caller retains ownership and must free the handle exactly once,
+/// including after a successful attachment; the session's clone stays alive.
 #[no_mangle]
 pub unsafe extern "C" fn kglite_embedder_free(embedder: *mut KgliteEmbedder) {
     crate::ffi::void_boundary(|| unsafe { EmbedderState::free_handle(embedder) });
@@ -138,8 +134,8 @@ pub unsafe extern "C" fn kglite_session_set_embedder(
 ///   See fastembed-rs's TextEmbedding::list_supported_models() for
 ///   the full list.
 /// - `out_embedder` (out, owned): on success, set to an embedder
-///   handle. Caller must free via [`kglite_embedder_free`] (or
-///   transfer ownership via [`kglite_session_set_embedder`]).
+///   handle. Caller must free via [`kglite_embedder_free`], including after
+///   attaching it with [`kglite_session_set_embedder`], which borrows it.
 /// - `out_error_msg` (out, owned, may be null): on failure, set to
 ///   an owned error string.
 ///

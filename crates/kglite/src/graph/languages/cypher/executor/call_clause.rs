@@ -1143,19 +1143,12 @@ impl<'a> CypherExecutor<'a> {
             }
 
             let cluster_assignments = match method.as_str() {
-                "dbscan" => {
-                    let dm = crate::graph::algorithms::clustering::haversine_distance_matrix(
-                        &points,
-                        self.interrupt(),
-                    );
-                    self.check_deadline()?;
-                    crate::graph::algorithms::clustering::dbscan(
-                        &dm,
-                        eps,
-                        min_points,
-                        self.interrupt(),
-                    )
-                }
+                "dbscan" => crate::graph::algorithms::clustering::geographic_dbscan(
+                    &points,
+                    eps,
+                    min_points,
+                    self.interrupt(),
+                ),
                 "kmeans" => {
                     let features: Vec<Vec<f64>> =
                         points.iter().map(|(lat, lon)| vec![*lat, *lon]).collect();
@@ -1285,6 +1278,7 @@ impl<'a> CypherExecutor<'a> {
     ) -> Result<ResultSet, String> {
         // `None`, never `self.row_limit`: see `execute_with_cap`.
         let right_result = self.execute_with_cap(&clause.query, None)?;
+        self.absorb_diagnostics(&right_result);
 
         // All arms of a set operation must return the same column names, in the
         // same order — matching Neo4j ("All sub queries in an UNION must have

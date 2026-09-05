@@ -18,7 +18,7 @@ Marker assignment is per-function so the expensive checks stay opt-in:
     (needs the release extension built; CI's `python-tests` job
     already builds a release wheel with maturin, so it plugs in there).
   - `test_dead_code_check` — `@pytest.mark.parity` (runs
-    `cargo clippy --release`, ~30s).
+    `cargo clippy -- -D dead_code` in the default/debug profile).
 
 Run: pytest tests/test_phase5_parity.py -m parity        (functional)
      pytest tests/test_phase5_parity.py -m binary_size   (release-build gate)
@@ -500,7 +500,7 @@ def test_dead_code_check():
     """`cargo clippy -- -D dead_code` flags nothing in the graph module."""
 
     result = subprocess.run(
-        ["cargo", "clippy", "--release", "--", "-D", "dead_code"],
+        ["cargo", "clippy", "--", "-D", "dead_code"],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
