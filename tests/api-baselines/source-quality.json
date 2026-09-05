@@ -157,7 +157,7 @@
     {
       "path": "crates/kglite/src/graph/io/unified_columns.rs",
       "qualified_name": "crate::write_unified_columns",
-      "lines": 324,
+      "lines": 322,
       "branches": 27,
       "nesting": 3
     },
