@@ -1,13 +1,10 @@
 """Bolt overhead + throughput characterization benchmarks.
 
-These quantify the Bolt-server wire tax on top of the direct kglite
-`cypher()` call. Numbers go into `docs/operators/bolt-server.md` and
-become a regression gate once a release captures baselines.
+These characterize client-visible delivery and transaction costs. Isolating
+transport overhead requires the same graph, query and complete consumption
+on the direct and Bolt paths; different query shapes are not a wire-cost oracle.
 
 Run with: `pytest tests/benchmarks/test_bench_bolt.py -m benchmark -v`
-
-No baselines captured here (the bolt-server hasn't shipped a release
-yet). When it does, `make refresh-release-constants` picks these up.
 
 Fixtures: spawn a single bolt-server per module to amortize the
 ~50 ms boot cost across all benchmarks.
@@ -45,9 +42,8 @@ def _bench_server(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("bolt_bench")
     fixture_path = tmp / "bench.kgl"
 
-    # 10k Person + 30k KNOWS — matches the B.3 baseline shape so
-    # bolt overhead can be compared against the existing
-    # test_bench_return_node_10k / test_bench_return_node_rel_node_100.
+    # Shared fixture for matched direct/Bolt delivery probes. Graph shape alone
+    # does not make the other benchmark queries equivalent workloads.
     n = 10_000
     g = kglite.KnowledgeGraph()
     nodes = pd.DataFrame(
@@ -105,8 +101,8 @@ def test_bench_bolt_run_overhead_vs_direct(benchmark, _bench_driver):
     Bolt session. Reuses the driver — the measured cost is just one
     RUN/PULL round trip + result materialization on the driver side.
 
-    Compare against `test_bench_return_node_rel_node_100` (the direct
-    pyapi version) to derive the Bolt wire tax in microseconds."""
+    This consume-only query differs from the direct node/relationship benchmark;
+    subtracting their timings would not isolate wire overhead."""
     session = _bench_driver.session()
     try:
 
@@ -135,8 +131,7 @@ def test_bench_bolt_pull_10k_scalars(benchmark, _bench_driver):
 
 def test_bench_bolt_pull_10k_nodes(benchmark, _bench_driver):
     """Cost of streaming 10k Node structs (Value::Node → BoltNode
-    encoding). Compare against `test_bench_return_node_10k` for the
-    wire tax on the full Node projection path."""
+    encoding), including Python driver decoding and full record iteration."""
     session = _bench_driver.session()
     try:
 

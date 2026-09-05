@@ -1,11 +1,11 @@
 //! `kglite::api::Value` ↔ `boltr::types::BoltValue` adapter.
 //!
 //! `to_bolt` handles ALL outbound variants (scalars, collections,
-//! temporal/spatial, Node, Relationship, Path); only `Value::NodeRef`
-//! returns an error (it's an internal placeholder that shouldn't reach
-//! the boundary). `from_bolt` rejects inbound Node/Rel/Path (drivers
+//! temporal/spatial, Node, Relationship, Path). `Value::NodeRef` and malformed
+//! paths return errors: internal placeholders and invalid graph structure must
+//! not reach the boundary. `from_bolt` rejects inbound Node/Rel/Path (drivers
 //! don't pass those as parameters), inbound time-of-day variants
-//! (kglite has date-only precision today), inbound Bytes (no Value
+//! (kglite has no standalone time-of-day variant), inbound Bytes (no Value
 //! variant), and inbound Point3D (kglite has only Point2D).
 //!
 //! # Mapping table (the implementer's spec)
@@ -78,7 +78,7 @@ pub fn to_bolt(value: &Value) -> Result<BoltValue, BoltError> {
             // resolves to the wrong impl in some chrono versions.
             // SAFETY: 1970-01-01 is a valid Gregorian date — the only way
             // `from_ymd_opt` returns None is on out-of-range/invalid input
-            // (year 0, month 13, day 32, etc.). This expect is infallible.
+            // (month 13, day 32, etc.). This expect is infallible.
             let epoch =
                 chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("1970-01-01 is a valid date");
             Ok(BoltValue::Date(BoltDate {
@@ -250,8 +250,8 @@ fn path_to_bolt_path(p: &kglite::api::PathValue) -> Result<BoltPath, BoltError> 
 ///
 /// Returns `BoltError::Protocol` on inbound variants that don't make
 /// sense in a parameter context: graph structures (Node/Relationship/
-/// Path — drivers never pass these), time-of-day temporals (kglite has
-/// date-only precision today), Bytes (no `Value` variant), or Point3D
+/// Path — drivers never pass these), time-of-day temporals (no standalone
+/// time-of-day `Value` variant), Bytes (no `Value` variant), or Point3D
 /// (kglite has only 2D points).
 pub fn from_bolt(value: &BoltValue) -> Result<Value, BoltError> {
     match value {
@@ -295,7 +295,7 @@ pub fn from_bolt(value: &BoltValue) -> Result<Value, BoltError> {
         BoltValue::Date(d) => {
             // SAFETY: 1970-01-01 is a valid Gregorian date — the only way
             // `from_ymd_opt` returns None is on out-of-range/invalid input
-            // (year 0, month 13, day 32, etc.). This expect is infallible.
+            // (month 13, day 32, etc.). This expect is infallible.
             let epoch =
                 chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("1970-01-01 is a valid date");
             let date = epoch
