@@ -28,8 +28,8 @@ PERSONS = 800_000
 # the runtime cost-class gate.
 SCAN_AGG_COUNT = "MATCH (p:Person) WHERE p.score > 0.5 RETURN count(*) AS n"
 
-# Same scan, grouped on a low-cardinality column: adds per-partition group maps
-# and a merge, which is what the partitioned design has to pay for.
+# Same scan, grouped on a low-cardinality column: grouping and evaluation
+# costs are included in this whole-query control.
 SCAN_AGG_GROUPED = "MATCH (p:Person) WHERE p.score > 0.5 RETURN p.joined_year AS y, count(*) AS n, avg(p.age) AS a"
 
 
@@ -68,7 +68,7 @@ def test_bench_parallel_scan_agg_count(benchmark, parallel_graph, parallel):
 @pytest.mark.benchmark
 @pytest.mark.parametrize("parallel", [False, True], ids=["serial", "parallel"])
 def test_bench_parallel_scan_agg_grouped(benchmark, parallel_graph, parallel):
-    """Grouped aggregate — pays the per-partition map + deterministic merge."""
+    """Grouped aggregate — includes grouping and deterministic emission."""
     benchmark(parallel_graph.cypher, SCAN_AGG_GROUPED, parallel=parallel)
 
 
@@ -122,9 +122,9 @@ def test_bench_parallel_scan_filter_project(benchmark, parallel_graph, parallel)
 #
 # `collect` / `median` / `percentile_cont` are declined by the streaming
 # aggregate, which is what routes these to the materialized grouping path —
-# the one Q4 partitions. Cardinality is the axis that matters: the grouping
-# pass merges one partial map per partition, so many groups means a bigger
-# merge, and few groups means the across-group evaluation has few tasks.
+# with sequential grouping followed by eligible evaluation across groups.
+# Cardinality controls task count and work per group; the grouping pass itself
+# does not fan out.
 
 AGG_LOW_CARD = "MATCH (p:Person) RETURN p.joined_year AS y, collect(p.age) AS ages"
 AGG_MID_CARD = "MATCH (p:Person) RETURN p.city AS c, collect(p.age) AS ages"

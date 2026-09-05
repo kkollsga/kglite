@@ -669,8 +669,8 @@ const AGG_QUERIES_EXTRA: &[&str] = &[
 /// parallel == serial, with **exact row order** and exact values.
 ///
 /// `collect` is the order-sensitive one: it concatenates its group's values in
-/// row order, and the partitioned grouping pass keeps every group's row-index
-/// list globally ascending precisely so that list is unchanged. A set
+/// row order, and sequential grouping keeps each group's row indices in
+/// that order while indexed parallel evaluation preserves group order. A set
 /// comparison would not see a `collect` that came back permuted.
 #[test]
 fn parallel_aggregation_matches_serial_in_order() {
@@ -693,48 +693,49 @@ fn parallel_aggregation_matches_serial_in_order() {
     );
 }
 
-/// The carried first row must be the group's **globally** first, not the first
-/// its partition happened to see.
-///
-/// `carry_group_bindings` copies the grouping variables' node bindings off
-/// `rows[row_indices[0]]`, and a trailing `ORDER BY` on that variable's
-/// property is what makes the choice observable. Red-first: reverse the merge
-/// order, or prepend rather than append a partition's indices, and this fails
-/// while every count/sum assertion above stays green.
+/// Exact carried binding and list-order oracles on serial and parallel group
+/// evaluation. The fixture has `value`, not `nid`; sorting an absent property
+/// would make the carried-first-row obligation vacuous.
 #[test]
 fn parallel_aggregation_carries_the_global_first_row() {
     let _meter = meter_guard();
-    let graph = linked_graph(PARALLEL_MIN_ROWS_COMPILED * 2);
-    // `nid` ascends with scan order, so the group's globally first row has the
-    // smallest one — a partition-local first would carry a larger `nid` for
-    // every group except the one the first partition opened.
-    // `collect` keeps this on the materialized path (the streaming pipeline
-    // declines it); the trailing ORDER BY reads a property of the *carried*
-    // grouping variable, which is only resolvable from the row the group kept.
-    // `toUpper(...)` makes the group key an *evaluated* one, so each surrogate
-    // group holds thousands of rows rather than a single node — a bare
-    // `b.cat` key is a `NodeProp` surrogate per distinct node, one row each,
-    // and nothing about index order is then observable. `collect` exposes the
-    // row order inside a group, and the trailing ORDER BY reads a property of
-    // the *carried* grouping variable, which is only resolvable from the row
-    // the group kept.
-    let query = "MATCH (a:Item)-[:LINKS]->(b:Item) \
-                 RETURN toUpper(b.cat) AS c, collect(a.value) AS v ORDER BY b.nid ASC";
-    let before = parallel_aggregations();
-    let serial = run(&graph, query, false);
-    let parallel = run(&graph, query, true);
-    assert!(
-        parallel_aggregations() > before,
-        "the query did not fan out its grouping pass"
-    );
-    assert_eq!(
-        serial.rows, parallel.rows,
-        "the partitioned grouping pass carried a partition-local first row"
-    );
-    assert!(
-        serial.rows.len() > 1,
-        "need several groups to be meaningful"
-    );
+    let n = PARALLEL_MIN_ROWS_COMPILED * 2;
+    let graph = linked_graph(n);
+    let mut expected: Vec<(usize, Vec<Value>)> = Vec::new();
+    for i in 0..n {
+        let dst = (i * 7 + 13) % n;
+        let key = Value::String(format!("CAT_{}", dst % 7));
+        if let Some((_, row)) = expected.iter_mut().find(|(_, row)| row[0] == key) {
+            let Value::List(values) = &mut row[1] else {
+                unreachable!()
+            };
+            values.push(Value::Int64((i % 1000) as i64));
+        } else {
+            expected.push((
+                dst % 1000,
+                vec![key, Value::List(vec![Value::Int64((i % 1000) as i64)])],
+            ));
+        }
+    }
+    expected.sort_by_key(|(carried, _)| *carried);
+    for mixed in [false, true] {
+        let extra = if mixed { ",median(a.value) AS m" } else { "" };
+        let query = format!("MATCH(a:Item)-[:LINKS]->(b:Item) RETURN toUpper(b.cat) AS c,collect(a.value) AS v{extra} ORDER BY b.value ASC");
+        let serial = run(&graph, &query, false);
+        let before = parallel_aggregations();
+        let opted_in = run(&graph, &query, true);
+        assert_eq!(parallel_aggregations() - before, 1);
+        assert_eq!(serial.rows, opted_in.rows);
+        let observed: Vec<Vec<Value>> = opted_in.rows.iter().map(|r| r[..2].to_vec()).collect();
+        assert_eq!(
+            observed,
+            expected
+                .iter()
+                .map(|(_, row)| row.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(expected.len() > 1);
+    }
 }
 
 /// The gate and the opt-in, both directions.
@@ -758,7 +759,7 @@ fn aggregation_respects_the_gate_and_the_opt_in() {
     assert_eq!(
         parallel_aggregations(),
         before,
-        "parallel=false fanned out its grouping pass"
+        "parallel=false fanned out evaluation across groups"
     );
 }
 
