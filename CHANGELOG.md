@@ -39,6 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exact and PROFILE queries retain their existing retrieval behavior.
 
 ### Fixed
+
+- Preserve signed 64-bit disk IDs on reload and streaming subset saves; unsupported identity types use lossless sidecars instead of becoming null.
 - Very large BM25 top-k limits allocate only for actual matching candidates,
   preventing integer overflow and oversized heap allocation.
 

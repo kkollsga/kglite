@@ -494,15 +494,21 @@ impl ColumnStore {
         Ok(())
     }
 
-    /// Type tag of the id column if known: `"string"` or `"uniqueid"`
-    /// for the typed cases, `"mixed"` for heterogeneous ids, or
-    /// `None` if there is no id column at all. External writers
+    /// Type tag of the id column, including the fixed width of an mmap base,
+    /// `"mixed"` for heterogeneous ids, or `None` if there is no id column. External writers
     /// (`save_subset_streaming_disk`'s TypeWriter) use this to open a
     /// matching column file format on the dest side.
     pub fn id_type_str(&self) -> Option<&'static str> {
         if let Some(ref ms) = self.mmap_store {
             return Some(if ms.id_is_string {
                 "string"
+            } else if ms.id_fixed.as_ref().is_some_and(|column| {
+                matches!(
+                    column.col_type,
+                    crate::graph::storage::type_build_meta::ColType::Int64
+                )
+            }) {
+                "int64"
             } else {
                 "uniqueid"
             });

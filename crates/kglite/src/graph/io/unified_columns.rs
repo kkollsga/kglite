@@ -19,8 +19,8 @@
 //! 4. Emit `seg_000/columns_meta.json` with the per-type
 //!    [`ColumnTypeMeta`].
 //!
-//! Types whose `ColumnStore` contains a `TypedColumn::Mixed` cannot be
-//! represented in the mmap layout and are returned in
+//! Mixed properties and identity types unsupported by the mmap layout
+//! are returned in
 //! `unhandled_types` so the caller falls back to the legacy zstd
 //! sidecar for those.
 
@@ -47,8 +47,7 @@ pub struct WriteResult {
     /// Types successfully encoded into `seg_000/columns.bin`. The
     /// caller should skip sidecar emission for these.
     pub written: HashSet<String>,
-    /// Types containing `TypedColumn::Mixed` columns (or otherwise
-    /// unrepresentable in the mmap layout). Caller falls back to the
+    /// Types with columns unrepresentable in the mmap layout. Caller uses the
     /// legacy zstd sidecar path for these.
     pub unhandled: HashSet<String>,
 }
@@ -95,11 +94,9 @@ pub fn write_unified_columns(
     for type_name in type_names {
         let store = &column_stores[type_name];
 
-        // Mixed-column check — abort planning for this type if any
-        // schema-slot column is Mixed. Id/title columns are also
-        // checked (they should be Str / UniqueId, but defensively).
-        let has_mixed = store_has_mixed(store);
-        if has_mixed {
+        // The unified identity layout supports string or fixed integer IDs
+        // and string titles. Other representations use lossless sidecars.
+        if store_needs_sidecar(store) {
             unhandled.insert(type_name.clone());
             continue;
         }
@@ -157,8 +154,8 @@ pub fn write_unified_columns(
             };
             match col {
                 TypedColumn::Mixed { .. } => {
-                    // Defensive — should have been caught by store_has_mixed.
-                    unreachable!("Mixed column slipped past store_has_mixed");
+                    // Defensive — should have been caught by store_needs_sidecar.
+                    unreachable!("Mixed column slipped past store_needs_sidecar");
                 }
                 TypedColumn::Int64 { data, nulls } => {
                     let (data_r, c) = plan_region(cursor, data.as_raw_bytes());
@@ -476,7 +473,7 @@ fn pack_str_column(
     (new_data, new_offsets, nulls_bytes)
 }
 
-fn store_has_mixed(store: &ColumnStore) -> bool {
+fn store_needs_sidecar(store: &ColumnStore) -> bool {
     if store
         .columns_ref()
         .any(|c| matches!(c, TypedColumn::Mixed { .. }))
@@ -484,12 +481,15 @@ fn store_has_mixed(store: &ColumnStore) -> bool {
         return true;
     }
     if let Some(c) = store.id_column_ref() {
-        if matches!(c, TypedColumn::Mixed { .. }) {
+        if !matches!(
+            c,
+            TypedColumn::Str { .. } | TypedColumn::UniqueId { .. } | TypedColumn::Int64 { .. }
+        ) {
             return true;
         }
     }
     if let Some(c) = store.title_column_ref() {
-        if matches!(c, TypedColumn::Mixed { .. }) {
+        if !matches!(c, TypedColumn::Str { .. }) {
             return true;
         }
     }
@@ -543,6 +543,10 @@ fn extract_title_column(store: &ColumnStore) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
         _ => (Vec::new(), Vec::new(), Vec::new()),
     }
 }
+
+#[cfg(test)]
+#[path = "unified_columns_identity_tests.rs"]
+mod identity_tests;
 
 #[cfg(test)]
 mod tests {

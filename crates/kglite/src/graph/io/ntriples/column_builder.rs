@@ -133,7 +133,16 @@ impl ColumnTypeMeta {
             id_is_string: self.id_is_string,
             id_fixed: if !self.id_is_string {
                 Some(FixedColumnMeta {
-                    col_type: ColType::UniqueId,
+                    // Native RDF IDs occupy four bytes; unified saves also emit
+                    // Int64 IDs. Region lengths exclude alignment padding, so
+                    // existing eight-byte arrays are unambiguous without a tag.
+                    col_type: if self.row_count != 0
+                        && (self.row_count as usize).checked_mul(8) == Some(self.id_data.len)
+                    {
+                        ColType::Int64
+                    } else {
+                        ColType::UniqueId
+                    },
                     data: self.id_data.to_region(),
                     nulls: self.id_nulls.to_region(),
                 })
