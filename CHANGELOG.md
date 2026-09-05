@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Deleting a just-created node in a reused low slot avoids a full type-bucket scan, preserving survivor order and rollback coordinates.
 - Batch text-index refreshes by affected term, retaining direct edits for small deltas and rebuilding large deltas. Exact scores and the public refresh ceiling are preserved.
 - Eligible BM25 top-k queries retrieve positive hits before constructing rows,
   preserving complete index membership, stable ties and scalar fallback behavior.
