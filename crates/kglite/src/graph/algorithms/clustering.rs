@@ -122,7 +122,7 @@ pub fn normalize_features(features: &mut [Vec<f64>]) {
 ///
 /// - `distances`: Pre-computed NxN symmetric distance matrix
 /// - `eps`: Maximum distance for neighborhood membership
-/// - `min_points`: Minimum neighborhood size to form a core point
+/// - `min_points`: Minimum number of other neighbors to form a core point
 ///
 /// Returns cluster assignments. Noise points get cluster = -1.
 pub fn dbscan(
@@ -132,7 +132,6 @@ pub fn dbscan(
     interrupt: Interrupt,
 ) -> Vec<ClusterAssignment> {
     let n = distances.len();
-    // Build neighbor lists
     let mut neighbors: Vec<Vec<usize>> = Vec::with_capacity(n);
     for (i, distances_from_i) in distances.iter().enumerate() {
         if i & 0x3FF == 0 && interrupt.exceeded() {
@@ -147,6 +146,7 @@ pub fn dbscan(
 
     let mut labels: Vec<i64> = vec![-2; n]; // -2 = unvisited, -1 = noise
     let mut cluster_id: i64 = 0;
+    let mut queued = Vec::new();
 
     for i in 0..n {
         if i & 0x3FF == 0 && interrupt.exceeded() {
@@ -161,7 +161,13 @@ pub fn dbscan(
         }
         // Expand cluster from core point i
         labels[i] = cluster_id;
+        if queued.is_empty() {
+            queued.resize(n, false);
+        }
         let mut queue: Vec<usize> = neighbors[i].clone();
+        for &index in &queue {
+            queued[index] = true;
+        }
         let mut qi = 0;
         while qi < queue.len() {
             if qi & 0x3FF == 0 && interrupt.exceeded() {
@@ -179,11 +185,16 @@ pub fn dbscan(
             if neighbors[q].len() >= min_points {
                 // q is also a core point — expand
                 for &nb in &neighbors[q] {
-                    if (labels[nb] == -2 || labels[nb] == -1) && !queue.contains(&nb) {
+                    if (labels[nb] == -2 || labels[nb] == -1) && !queued[nb] {
+                        queued[nb] = true;
                         queue.push(nb);
                     }
                 }
             }
+        }
+        // Reset only this cluster's queue, avoiding an N-sized clear per seed.
+        for index in queue {
+            queued[index] = false;
         }
         cluster_id += 1;
     }
@@ -502,3 +513,7 @@ mod tests {
         assert!(dm[0][1] > 250_000.0 && dm[0][1] < 350_000.0);
     }
 }
+
+#[cfg(test)]
+#[path = "clustering_dbscan_tests.rs"]
+mod dbscan_tests;
