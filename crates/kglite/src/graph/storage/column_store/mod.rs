@@ -53,9 +53,8 @@ pub struct ColumnStore {
     /// Read through the slice (the `Arc` derefs); mutate through
     /// [`Self::column_mut`] / [`Self::columns_mut`], or — where a method
     /// already holds the element ([`Self::push_row`], [`Self::set_at_slot`])
-    /// — the identical `Arc::make_mut` on that element. What must never
-    /// happen is an `Arc::make_mut` on the store itself: that copies every
-    /// column of the type.
+    /// — the identical `Arc::make_mut` on that element. Store-level cloning
+    /// shares these handles; deep copies stay limited to mutated columns.
     columns: Vec<Arc<TypedColumn>>,
     row_count: u32,
     /// Tombstone bitmap: true = row deleted
@@ -124,10 +123,10 @@ thread_local! {
     /// Closes the blind spot its siblings share: `BACKEND_CLONE_NODES`
     /// (`storage/backend.rs`) counts nodes copied by a *backend* clone and
     /// `JOURNAL_NODE_PRE_IMAGES` (`storage/undo.rs`) counts `NodeData`
-    /// pre-images, but a columnar property lives in a per-type
-    /// `Arc<ColumnStore>` the backend owns — `Arc::make_mut` on it copies every
-    /// column of the type while both counters read zero. A whole write-perf
-    /// program measured this path without seeing the copy.
+    /// pre-images. A per-type store clone shares its column Arcs but copies
+    /// the tombstone vector; subsequent column mutation can deep-copy those
+    /// columns while both backend/journal counters remain zero. The separate
+    /// column counter measures those copies.
     static COLUMN_STORE_CLONES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 
     /// Rows appended by [`ColumnStore::push_row`] since the last reset.
@@ -1369,8 +1368,7 @@ impl ColumnStore {
     /// the per-column `Arc` defers until a write actually lands on it.
     ///
     /// [`Self::push_row`] and [`Self::set_at_slot`] inline the identical
-    /// element-level `Arc::make_mut`; what must never happen is an
-    /// `Arc::make_mut` on the *store*, which copies every column of the type.
+    /// element-level `Arc::make_mut`, preserving unrelated shared columns.
     #[inline]
     fn column_mut(&mut self, slot: usize) -> Option<&mut TypedColumn> {
         self.columns.get_mut(slot).map(Arc::make_mut)
