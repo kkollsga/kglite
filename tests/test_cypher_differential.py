@@ -50,6 +50,19 @@ TEXT_BM25_TOP_K = "MATCH (d:Doc) RETURN d.id AS id, text_bm25(d, 'body', 'alpha 
 
 DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
     (
+        "sum_large_integer_cancellation",
+        "social_graph",
+        "UNWIND [9007199254740993,-9007199254740992] AS x RETURN sum(x) AS s",
+        None,
+    ),
+    (
+        "sum_distinct_large_integer_groups",
+        "social_graph",
+        "UNWIND [{g:1,v:9007199254740993},{g:1,v:-9007199254740992},{g:2,v:7}] AS r "
+        "RETURN r.g AS g,sum(DISTINCT r.v) AS s ORDER BY g",
+        None,
+    ),
+    (
         "vector_whole_type_exact_entry",
         "vector_index_entry_graph",
         "MATCH (d:Doc) RETURN d.id AS id, vector_score(d, 'summary_emb', [1.0,0.0], "

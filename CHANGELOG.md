@@ -45,6 +45,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Integer SUM retains exact values across query execution paths and blueprint
+  aggregation. Final results outside signed 64-bit range report an overflow
+  error; intermediate sums may exceed that range and cancel before completion.
 - Python parameter conversion detects recursive containers and limits active
   container depth to 64, while preserving ordinary shared containers. Aware
   datetimes normalize to UTC with their time and fractional seconds intact.

@@ -230,7 +230,7 @@ graph.cypher("MATCH (n:Person) RETURN count(DISTINCT n.city) AS unique_cities")
 | Aggregate | Description |
 |---|---|
 | `count(expr)` / `count(*)` / `count(DISTINCT expr)` | Row or value count |
-| `sum(expr)` | Numeric sum (preserves Int64 when source is integer) |
+| `sum(expr)` | Numeric sum; all-integer inputs produce an exact Int64 result or an overflow error if the final result is out of range |
 | `avg(expr)` / `mean(expr)` / `average(expr)` | Arithmetic mean |
 | `min(expr)` / `max(expr)` | Minimum / maximum |
 | `collect(expr)` / `collect(DISTINCT expr)` | Gather values into a list |

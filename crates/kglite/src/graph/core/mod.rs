@@ -10,6 +10,7 @@ pub mod data_retrieval;
 pub mod filtering;
 pub mod iterators;
 pub mod membership;
+pub(crate) mod numeric_sum;
 pub mod pattern_matching;
 pub mod statistics;
 pub mod traversal;

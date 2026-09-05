@@ -855,3 +855,88 @@ fn regex_predicate_matches_across_modes() {
         assert!(!serial.rows.is_empty(), "vacuous fixture for {query}");
     }
 }
+
+fn exact_sum_graph(cancel: bool) -> DirGraph {
+    use crate::datatypes::DataFrame;
+    let n = PARALLEL_MIN_ROWS_COMPILED + 1;
+    let columns = ["nid", "name", "value", "group"]
+        .map(str::to_string)
+        .to_vec();
+    let rows = (0..n)
+        .map(|i| {
+            let value = if i == 0 {
+                i64::MAX
+            } else if i == 1 {
+                1
+            } else if cancel && i == n - 1 {
+                -i64::MAX
+            } else {
+                0
+            };
+            vec![
+                Value::Int64(i as i64),
+                Value::String(format!("N{i}")),
+                Value::Int64(value),
+                Value::Int64(i64::from(i == 2)),
+            ]
+        })
+        .collect();
+    let frame = DataFrame::from_cypher_rows(columns, rows).unwrap();
+    let mut graph = DirGraph::new();
+    crate::graph::mutation::maintain::add_nodes(
+        &mut graph,
+        frame,
+        "Item".to_string(),
+        "nid".to_string(),
+        Some("name".to_string()),
+        None,
+    )
+    .unwrap();
+    graph
+}
+
+#[test]
+fn exact_sum_parallel_partition_overflow_cancels_before_finalization() {
+    let _meter = meter_guard();
+    let graph = exact_sum_graph(true);
+    let query = "MATCH(n:Item) RETURN sum(n.value) AS s";
+    let before = parallel_scans();
+    assert_eq!(run(&graph, query, false).rows, vec![vec![Value::Int64(1)]]);
+    assert_eq!(parallel_scans(), before, "serial control must not fan out");
+    assert_eq!(run(&graph, query, true).rows, vec![vec![Value::Int64(1)]]);
+    assert!(
+        parallel_scans() > before,
+        "the exact aggregate must actually fan out"
+    );
+    assert_eq!(
+        run(
+            &graph,
+            "MATCH(n:Item) RETURN n.group AS g,sum(n.value) AS s ORDER BY g",
+            true
+        )
+        .rows,
+        vec![
+            vec![Value::Int64(0), Value::Int64(1)],
+            vec![Value::Int64(1), Value::Int64(0)]
+        ]
+    );
+}
+
+#[test]
+fn exact_sum_parallel_final_overflow_returns_no_partial_result() {
+    let _meter = meter_guard();
+    let graph = exact_sum_graph(false);
+    let params = HashMap::new();
+    let mut query = parser::parse_cypher("MATCH(n:Item) RETURN sum(n.value) AS s").unwrap();
+    crate::graph::languages::cypher::planner::optimize(&mut query, &graph, &params);
+    for parallel in [false, true] {
+        let before = parallel_scans();
+        let result = CypherExecutor::with_params(&graph, &params, None)
+            .with_parallel(parallel)
+            .execute(&query);
+        assert!(result.unwrap_err().contains("Integer overflow in sum"));
+        if parallel {
+            assert!(parallel_scans() > before);
+        }
+    }
+}

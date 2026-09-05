@@ -487,22 +487,7 @@ impl<'a> CypherExecutor<'a> {
                 distinct,
             } => match name.as_str() {
                 "count" => self.eval_count_aggregate(args, rows, *distinct),
-                "sum" => {
-                    let (values, all_int) =
-                        self.collect_numeric_values_typed(&args[0], rows, *distinct)?;
-                    if values.is_empty() {
-                        Ok(Value::Int64(0))
-                    } else {
-                        let total: f64 = values.iter().sum();
-                        // Integer-typed iff every numeric input was an Int64
-                        // and the total is whole — the streaming path's rule.
-                        if all_int && total.fract() == 0.0 {
-                            Ok(Value::Int64(total as i64))
-                        } else {
-                            Ok(Value::Float64(total))
-                        }
-                    }
-                }
+                "sum" => self.sum_numeric_values(&args[0], rows, *distinct),
                 "avg" | "mean" | "average" => {
                     let values = self.collect_numeric_values(&args[0], rows, *distinct)?;
                     if values.is_empty() {
@@ -794,6 +779,10 @@ impl<'a> CypherExecutor<'a> {
         }
         if let Some(row) = rows.first() {
             self.evaluate_expression(expr, row)
+        } else if Self::is_row_independent(expr) {
+            // An empty aggregate still has a result row: constant children
+            // retain their values without inventing an input binding.
+            self.evaluate_expression(expr, &ResultRow::new())
         } else {
             Ok(Value::Null)
         }
@@ -949,12 +938,13 @@ impl<'a> CypherExecutor<'a> {
             Expression::PredicateExpr(pred) => Expression::PredicateExpr(Box::new(
                 self.substitute_in_predicate(pred, rows, synth, counter)?,
             )),
-            Expression::ExprPropertyAccess { expr: inner, property } => {
-                Expression::ExprPropertyAccess {
-                    expr: Box::new(self.bind_aggregate_child(inner, rows, synth, counter)?),
-                    property: property.clone(),
-                }
-            }
+            Expression::ExprPropertyAccess {
+                expr: inner,
+                property,
+            } => Expression::ExprPropertyAccess {
+                expr: Box::new(self.bind_aggregate_child(inner, rows, synth, counter)?),
+                property: property.clone(),
+            },
             _ => return Ok(None),
         };
         Ok(Some(rewritten))
@@ -1014,53 +1004,60 @@ impl<'a> CypherExecutor<'a> {
         rows: &[&ResultRow],
         distinct: bool,
     ) -> Result<Vec<f64>, String> {
-        Ok(self.collect_numeric_values_typed(expr, rows, distinct)?.0)
+        let mut values = Vec::new();
+        self.visit_numeric_values(expr, rows, distinct, |_, value| values.push(value))?;
+        Ok(values)
     }
 
-    /// `collect_numeric_values`, plus whether *every* collected value was an
-    /// `Int64`.
-    ///
-    /// That flag is `sum()`'s integer-vs-float decision, and it is the same
-    /// rule the streaming (`stream::aggregate::AggState::sum_was_int`) and
-    /// fused-scan (`match_clause::fused_match`) accumulators apply: integer
-    /// iff no non-`Int64` numeric ever contributed. Non-numeric values and
-    /// nulls are skipped by all three, so they neither add to the sum nor
-    /// change its type. Deliberately *not* a probe of the first row: a
-    /// leading `'x'` or `null` says nothing about the numerics behind it, and
-    /// reading it made the same data sum to `Float64` here and `Int64` on the
-    /// other two paths.
-    pub(super) fn collect_numeric_values_typed(
+    fn sum_numeric_values(
         &self,
         expr: &Expression,
         rows: &[&ResultRow],
         distinct: bool,
-    ) -> Result<(Vec<f64>, bool), String> {
-        let mut values = Vec::new();
+    ) -> Result<Value, String> {
+        let mut integers = crate::graph::core::numeric_sum::IntegerSum::default();
+        // Match Iterator::sum::<f64>: a lone negative zero stays negative.
+        let mut floating = -0.0;
         let mut all_int = true;
+        self.visit_numeric_values(expr, rows, distinct, |value, number| {
+            floating += number;
+            if let Value::Int64(integer) = value {
+                integers.add(*integer);
+            } else {
+                all_int = false;
+            }
+        })?;
+        if all_int {
+            Ok(Value::Int64(integers.finish()?))
+        } else {
+            Ok(Value::Float64(floating))
+        }
+    }
+
+    /// Keep numeric admission and DISTINCT Value identity shared while SUM
+    /// retains original integers and floating statistics consume f64 values.
+    fn visit_numeric_values(
+        &self,
+        expr: &Expression,
+        rows: &[&ResultRow],
+        distinct: bool,
+        mut visit: impl FnMut(&Value, f64),
+    ) -> Result<(), String> {
         let mut seen: FxHashSet<Value> = FxHashSet::default();
 
         for (row_idx, row) in rows.iter().enumerate() {
             self.check_interrupt_periodic(row_idx)?;
             let val = self.evaluate_expression(expr, row)?;
-            if let Some(f) = value_to_f64(&val) {
-                // DISTINCT keys on the `Value`, not on the `f64` it coerces
-                // to: `Int64(1)` and `Float64(1.0)` share a bit pattern but
-                // are two values everywhere else in the engine (`RETURN
-                // DISTINCT`, `count(DISTINCT …)`, the streaming aggregate),
-                // and `0.0` / `-0.0` are one value here and two under the
-                // bits. Keying on the bits made the same query answer `3`
-                // through this path and `4.0` through the streaming one.
+            if let Some(number) = value_to_f64(&val) {
+                // DISTINCT uses structural Value identity, not the coerced
+                // number: integer1 and float1.0 remain distinct inputs.
                 if distinct && !seen.insert(val.clone()) {
                     continue;
                 }
-                if !matches!(val, Value::Int64(_)) {
-                    all_int = false;
-                }
-                values.push(f);
+                visit(&val, number);
             }
         }
-
-        Ok((values, all_int))
+        Ok(())
     }
 
     /// Single-pass multi-aggregate: when all aggregates in a group are simple
@@ -1123,6 +1120,7 @@ impl<'a> CypherExecutor<'a> {
         let n = specs.len();
         let mut counts = vec![0i64; n];
         let mut sums = vec![0.0f64; n];
+        let mut integer_sums = vec![crate::graph::core::numeric_sum::IntegerSum::default(); n];
         // Per-spec: has every numeric that contributed to `sums` been an
         // `Int64`? `sum()`'s result type, under the same rule the streaming
         // and fused-scan accumulators use.
@@ -1168,6 +1166,9 @@ impl<'a> CypherExecutor<'a> {
                         let val = &eval_buf[spec_expr_idx[si]];
                         if let Some(f) = value_to_f64(val) {
                             sums[si] += f;
+                            if let Value::Int64(integer) = val {
+                                integer_sums[si].add(*integer);
+                            }
                             counts[si] += 1;
                             if !matches!(val, Value::Int64(_)) {
                                 sums_were_int[si] = false;
@@ -1216,10 +1217,11 @@ impl<'a> CypherExecutor<'a> {
             &specs,
             &counts,
             &sums,
+            &integer_sums,
             &sums_were_int,
             &mut mins,
             &mut maxs,
-        )))
+        )?))
     }
 
     /// Evaluate `count(...)` over a materialized group's rows.
@@ -1371,9 +1373,8 @@ impl<'a> CypherExecutor<'a> {
         let winner = counts
             .into_values()
             .max_by(|a, b| {
-                a.1.cmp(&b.1).then_with(|| {
-                    format!("{:?}", b.0).cmp(&format!("{:?}", a.0))
-                })
+                a.1.cmp(&b.1)
+                    .then_with(|| format!("{:?}", b.0).cmp(&format!("{:?}", a.0)))
             })
             .map(|(v, _)| v)
             .unwrap_or(Value::Null);
@@ -1406,10 +1407,11 @@ fn emit_fused_aggregate_results(
     specs: &[FusedAggSpec<'_>],
     counts: &[i64],
     sums: &[f64],
+    integer_sums: &[crate::graph::core::numeric_sum::IntegerSum],
     sums_were_int: &[bool],
     mins: &mut [Option<Value>],
     maxs: &mut [Option<Value>],
-) -> Vec<(String, Value)> {
+) -> Result<Vec<(String, Value)>, String> {
     let mut results = Vec::with_capacity(specs.len());
     for (si, spec) in specs.iter().enumerate() {
         let val = match spec.kind {
@@ -1418,10 +1420,8 @@ fn emit_fused_aggregate_results(
                 if counts[si] == 0 {
                     Value::Int64(0)
                 } else {
-                    // Integer-typed iff every numeric input was an Int64
-                    // and the total is whole — the streaming path's rule.
-                    if sums_were_int[si] && sums[si].fract() == 0.0 {
-                        Value::Int64(sums[si] as i64)
+                    if sums_were_int[si] {
+                        Value::Int64(integer_sums[si].finish()?)
                     } else {
                         Value::Float64(sums[si])
                     }
@@ -1439,5 +1439,5 @@ fn emit_fused_aggregate_results(
         };
         results.push((spec.col_name.clone(), val));
     }
-    results
+    Ok(results)
 }
