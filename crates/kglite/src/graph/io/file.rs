@@ -1487,8 +1487,8 @@ pub fn load_file_with(path: &str, options: &LoadOptions) -> io::Result<Arc<DirGr
                 ));
             }
         }
-        // A disk graph's indexes live on disk and are never rebuilt at load, so
-        // `defer_index_rebuild` has nothing to defer here.
+        // Disk identity indexes stay mapped; optional heap index and constraint
+        // declarations are always deferred until the first write.
         return load_disk_dir(p);
     }
 
@@ -1782,6 +1782,10 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
     log_stage("type_connectivity_load", t);
 
     load_disk_sidecars(dir, &mut graph)?;
+
+    // Keep declared heap indexes visible without rebuilding large disk graphs
+    // at open. The existing write boundary materializes their enforcement.
+    graph.defer_index_rebuild_from_keys();
 
     // Backfill the connection_types O(1)-lookup cache from the loaded metadata.
     // Left empty, `has_connection_type`'s metadata-fallback branch is correct on

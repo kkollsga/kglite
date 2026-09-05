@@ -9,7 +9,9 @@
 //! The column *element* (layout, push, spill, materialise) is in
 //! [`typed_column`]; the store around it is here.
 
+mod exact_values;
 mod typed_column;
+pub(crate) use exact_values::ExactValueColumns;
 
 pub use typed_column::TypedColumn;
 #[cfg(test)]

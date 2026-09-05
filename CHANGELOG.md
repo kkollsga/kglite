@@ -45,6 +45,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Recovery preserves exact typed identities and properties, clears old labels
+  and relationships when a node is recreated, and validates constraint transfers
+  against the final state. Rejected recovery leaves the caller and saved data
+  unchanged. Reloaded disk graphs retain declared indexes and uniqueness rules.
 - Integer SUM retains exact values across query execution paths and blueprint
   aggregation. Final results outside signed 64-bit range report an overflow
   error; intermediate sums may exceed that range and cancel before completion.

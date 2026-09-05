@@ -58,7 +58,7 @@ use std::sync::Arc;
 
 use crate::graph::dir_graph::DirGraph;
 use crate::graph::handle::make_dir_graph_mut;
-use crate::graph::mutation::wal_replay::apply_frames;
+use crate::graph::mutation::wal_replay::prepare_replay;
 use crate::graph::storage::recording::wrap_for_durability;
 use crate::graph::wal::{recover, recover_for_append, wal_path, DurabilityLevel, Wal, WalFrame};
 
@@ -167,29 +167,43 @@ pub fn open_log(
         .sync_mode()
         .expect("level.logs() is true, so sync_mode is Some");
 
+    // Recovery remains unpublished until tail repair and append-open succeed.
+    // Cloning the checkpoint is unnecessary when no frame changes its state.
+    let (prepared, max_lsn) = prepare_replay(graph, &recovered.frames, checkpoint_lsn)
+        .map_err(DurableOpenError::Replay)?;
+
+    finish_recovered_open(graph, prepared, max_lsn, || {
+        Wal::open_recovered(wpath.clone(), sync, recovered).map_err(|e| {
+            DurableOpenError::Io(format!(
+                "failed to open the write-ahead log at '{}': {e}",
+                wpath.display()
+            ))
+        })
+    })
+    .map(Some)
+}
+
+/// The publication boundary is after the last fallible file operation. Keeping
+/// it together also makes an injected open/repair failure testable without
+/// depending on OS permissions, effective uid, or filesystem fault injection.
+fn finish_recovered_open(
+    graph: &mut Arc<DirGraph>,
+    prepared: Option<DirGraph>,
+    max_lsn: u64,
+    open_writer: impl FnOnce() -> Result<Wal, DurableOpenError>,
+) -> Result<(Wal, u64), DurableOpenError> {
+    let wal = open_writer()?;
+    if let Some(prepared) = prepared {
+        *graph = Arc::new(prepared);
+    }
     let dir = make_dir_graph_mut(graph);
-    // Replay BEFORE wrapping, or the replay's own writes enter the capture
-    // buffer and the next commit logs them all over again.
-    let max_lsn =
-        apply_frames(dir, &recovered.frames, checkpoint_lsn).map_err(DurableOpenError::Replay)?;
-    // With change data capture already enabled the graph was wrapped before the
-    // replay ran, so the replayed writes sit in the capture buffer describing
-    // frames this log already holds: handing them to the WAL at the next commit
-    // would log every recovered write a second time. Drop them — and with them
-    // the CDC events for changes no consumer of this stream saw happen live.
-    // (No-op on the ordinary path, which is wrapped only after writer open.)
+    // A preexisting CDC wrapper captured replay's writes only in the working
+    // copy. Drop those historical events after writer-open, never on failure.
     if let Some(rg) = dir.graph.recording_mut() {
         let _ = rg.take_ops();
     }
-
-    let wal = Wal::open_recovered(wpath.clone(), sync, recovered).map_err(|e| {
-        DurableOpenError::Io(format!(
-            "failed to open the write-ahead log at '{}': {e}",
-            wpath.display()
-        ))
-    })?;
     wrap_for_durability(dir);
-    Ok(Some((wal, max_lsn + 1)))
+    Ok((wal, max_lsn + 1))
 }
 
 /// Checkpoint steps 1–2: flush the log, then stamp how far this checkpoint
@@ -493,3 +507,7 @@ mod recording_over_a_fork_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "durability/open_atomicity_tests.rs"]
+mod open_atomicity_tests;
