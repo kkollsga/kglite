@@ -2187,13 +2187,19 @@ fn try_match_merge_pattern(
 
                 let node_matches_all = |idx: NodeIndex, props: &[(&str, Value)]| -> bool {
                     if let Some(node) = graph.graph.node_view(idx) {
+                        let node_type = node.node_type_str(&graph.interner);
                         props.iter().all(|(key, expected)| {
-                            let value = if *key == "name" || *key == "title" {
-                                node.get_field_ref("title")
-                            } else {
-                                node.get_field_ref(key)
-                            };
-                            value.as_deref() == Some(expected)
+                            let value =
+                                node.resolved_field(node_type, key, InternedKey::from_str(key));
+                            value.as_deref().is_some_and(|value| {
+                                if *key == "id" {
+                                    // Identity matching keeps its normalization policy;
+                                    // ordinary properties use Cypher predicate equality.
+                                    value == expected
+                                } else {
+                                    crate::graph::core::filtering::values_equal(value, expected)
+                                }
+                            })
                         })
                     } else {
                         false
@@ -2256,7 +2262,7 @@ fn try_match_merge_pattern(
                             let values: Vec<Value> =
                                 indexable.iter().map(|(_, v)| (*v).clone()).collect();
                             if let Some(candidates) =
-                                graph.lookup_by_composite_index(label, &names, &values)
+                                graph.lookup_by_composite_predicate(label, &names, &values)
                             {
                                 for &idx in &candidates {
                                     if node_matches_all(idx, &expected_props) {

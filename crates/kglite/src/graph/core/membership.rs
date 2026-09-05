@@ -19,9 +19,9 @@
 //! `Float64`) and treats a single-element JSON list string (`["Oslo"]`) as
 //! equal to its inner string. A structural set misses every one of those.
 //!
-//! [`MembershipSet`] closes the gap: each element is normalized to a key
-//! that folds exactly the way `values_equal` compares, so one hash probe
-//! answers the question that the linear scan answered.
+//! [`MembershipSet`] indexes scalar equivalence and retains container and
+//! large-numeric residuals. A scalar hit is decisive; a residual miss must
+//! preserve unknown from recursive NULL comparisons.
 //!
 //! # Normalization rules (must mirror [`values_equal`] exactly)
 //!
@@ -53,15 +53,13 @@
 //! `values_equal` scan as before — identical work to the pre-index code, so
 //! a short `IN ['a', 'b']` cannot regress by paying for hashing.
 //!
-//! # NULL is the caller's business
-//!
-//! `MembershipSet` answers one question — *did any element equal this
-//! value?* — and never returns a three-valued result. Each site keeps its own
-//! Kleene policy and reads [`MembershipSet::has_null`] when it needs to
-//! distinguish "no match" from "unknown".
+//! [`MembershipSet::kleene_contains`] retains UNKNOWN, including nested NULL;
+//! [`MembershipSet::matches`] is its true-only adapter for matching sites.
 
 use crate::datatypes::Value;
-use crate::graph::core::filtering::{json_single_element_string, values_equal};
+use crate::graph::core::filtering::{
+    json_single_element_string, predicate_values_equal, values_equal,
+};
 use chrono::{NaiveDate, NaiveDateTime};
 use rustc_hash::FxHashSet;
 use std::sync::Arc;
@@ -138,13 +136,13 @@ impl MembershipSet {
     #[inline]
     pub fn matches(&self, value: &Value) -> bool {
         match &self.index {
-            Some(index) => index.matches(value),
+            Some(index) => index.kleene_contains(value) == Some(true),
             None => self.values.iter().any(|v| values_equal(value, v)),
         }
     }
 
-    /// True when the list contains a `Null` element — the input every
-    /// site's three-valued rule needs to tell "no match" from "unknown".
+    /// True when the list contains a top-level `Null` element. Nested
+    /// unknown comparisons are resolved by `kleene_contains` instead.
     #[inline]
     pub fn has_null(&self) -> bool {
         self.has_null
@@ -166,21 +164,21 @@ impl MembershipSet {
     /// ```text
     /// NULL IN anything                    -> UNKNOWN
     /// x IN [..]  match present            -> true    (NULLs immaterial)
-    /// x IN [..]  no match, list has NULL  -> UNKNOWN
-    /// x IN [..]  no match, no NULL        -> false
+    /// x IN [..]  no match, unknown comparison -> UNKNOWN
+    /// x IN [..]  every comparison false  -> false
     /// ```
     #[inline]
     pub fn kleene_contains(&self, value: &Value) -> Option<bool> {
         if matches!(value, Value::Null) {
             return None;
         }
-        if self.matches(value) {
-            return Some(true);
+        match &self.index {
+            None => kleene_contains_linear(value, &self.values),
+            Some(index) => match index.kleene_contains(value) {
+                Some(false) if self.has_null => None,
+                result => result,
+            },
         }
-        if self.has_null {
-            return None;
-        }
-        Some(false)
     }
 }
 
@@ -207,19 +205,15 @@ pub fn kleene_contains_linear(value: &Value, items: &[Value]) -> Option<bool> {
     }
 }
 
-/// One element's contribution to `value IN <list>`: `None` when the element
-/// is NULL (which makes a non-match UNKNOWN rather than false), otherwise
-/// whether it equals `value`.
+/// One element's recursive predicate contribution to `value IN <list>`.
+/// A top-level or nested NULL can make a non-match UNKNOWN.
 ///
 /// The per-element rule of the three-valued IN, factored out so a site that
 /// must evaluate its list lazily (per-row expressions) shares the policy with
 /// the indexed sites instead of restating it.
 #[inline]
 pub fn probe_element(value: &Value, element: &Value) -> Option<bool> {
-    if matches!(element, Value::Null) {
-        return None;
-    }
-    Some(values_equal(value, element))
+    predicate_values_equal(value, element)
 }
 
 impl std::ops::Deref for MembershipSet {
@@ -253,19 +247,19 @@ impl FromIterator<Value> for MembershipSet {
 
 impl MembershipIndex {
     #[inline]
-    fn matches(&self, value: &Value) -> bool {
+    fn kleene_contains(&self, value: &Value) -> Option<bool> {
         if let Value::String(s) = value {
             if self.strings.contains(s.as_str())
                 || json_single_element_string(s).is_some_and(|inner| self.strings.contains(inner))
             {
-                return true;
+                return Some(true);
             }
         } else if let Some(key) = scalar_key(value) {
             if self.scalars.contains(&key) {
-                return true;
+                return Some(true);
             }
         }
-        !self.residual.is_empty() && self.residual.iter().any(|v| values_equal(value, v))
+        kleene_contains_linear(value, &self.residual)
     }
 }
 

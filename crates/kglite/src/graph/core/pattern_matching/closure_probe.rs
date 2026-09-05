@@ -64,16 +64,16 @@ pub(crate) fn live_closure_members<'a>(graph: &'a DirGraph, node_type: &'a str) 
 ///   total — a partial union would silently drop rows.
 ///
 /// `props` are property *names*, because EXPLAIN sees an AST, not resolved
-/// `PropertyMatcher` values, and because eligibility does not depend on the
-/// value being probed.
+/// `PropertyMatcher` values. This gate proves declaration coverage only;
+/// runtime must also accept every query value or fall back for the full union.
 ///
 /// Deliberately narrower than what `try_index_lookup` can serve: a composite
 /// index over the pattern's whole property set, a range index, and a
 /// disk-persistent property index all answer at runtime but do not count as
 /// coverage here. Each would have to be re-checked value-side (the persistent
 /// store is string-only and reports an all-null block as "no index"), and the
-/// point of the shared predicate is that the plan row and the runtime gate
-/// read the same answer.
+/// shared predicate describes structural eligibility, not final value-side
+/// admission. A runtime decline must never become a partial union.
 pub(crate) fn closure_probe_members(
     graph: &DirGraph,
     node_type: &str,

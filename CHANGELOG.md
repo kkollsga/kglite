@@ -45,6 +45,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- MERGE uses MATCH's ordinary-property equality and field resolution, preventing
+  duplicate nodes across numeric types, wrapped strings and stored name fields.
+- Recursive list and map predicates preserve unknown results from nested nulls,
+  including prepared `IN` and negation. Numeric index candidates now follow
+  predicate equality and range semantics; unsupported domains fall back to a
+  complete scan instead of omitting matching rows.
 - C embedder ownership documentation now consistently states that attaching a
   handle borrows it; callers must still free their handle exactly once.
 - Recovery preserves exact typed identities and properties, clears old labels

@@ -347,13 +347,28 @@ pub(super) fn evaluate_comparison(
     op: &ComparisonOp,
     right: &Value,
 ) -> Result<bool, String> {
-    // Three-valued logic: comparisons involving Null propagate Null → false
-    // (except IS NULL / IS NOT NULL which are handled elsewhere, and
-    // Equals/NotEquals which handle Null explicitly via values_equal).
-    match op {
-        ComparisonOp::Equals => Ok(crate::graph::core::filtering::values_equal(left, right)),
-        ComparisonOp::NotEquals => Ok(!crate::graph::core::filtering::values_equal(left, right)),
-        _ if matches!(left, Value::Null) || matches!(right, Value::Null) => Ok(false),
+    Ok(evaluate_comparison_tristate(left, op, right)? == Some(true))
+}
+
+pub(super) fn evaluate_comparison_tristate(
+    left: &Value,
+    op: &ComparisonOp,
+    right: &Value,
+) -> Result<Option<bool>, String> {
+    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+        return Ok(None);
+    }
+    let result = match op {
+        ComparisonOp::Equals => {
+            return Ok(crate::graph::core::filtering::predicate_values_equal(
+                left, right,
+            ));
+        }
+        ComparisonOp::NotEquals => {
+            return Ok(
+                crate::graph::core::filtering::predicate_values_equal(left, right).map(|v| !v),
+            );
+        }
         ComparisonOp::LessThan => Ok(crate::graph::core::filtering::compare_values(left, right)
             == Some(std::cmp::Ordering::Less)),
         ComparisonOp::LessThanEq => Ok(matches!(
@@ -380,7 +395,8 @@ pub(super) fn evaluate_comparison(
             }
             _ => Ok(false),
         },
-    }
+    };
+    result.map(Some)
 }
 
 /// Resolve a node property to an owned `Value`, resolving id-/title-field

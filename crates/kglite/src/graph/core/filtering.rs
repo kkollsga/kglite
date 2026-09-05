@@ -121,20 +121,63 @@ fn collect_regex_patterns(condition: &FilterCondition, cache: &mut HashMap<Strin
     }
 }
 
-/// Equality with Int64/Float64/UniqueId cross-type conversion, matching
-/// Python's loose typing.
+/// True-only adapter for matching sites that discard an unknown predicate.
 pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
-    // Cypher three-valued logic: NULL ≠ anything (including NULL).
-    if matches!(a, Value::Null) || matches!(b, Value::Null) {
-        return false;
+    match (a, b) {
+        (Value::Null, _) | (_, Value::Null) => false,
+        (Value::List(_), Value::List(_)) | (Value::Map(_), Value::Map(_)) => {
+            predicate_values_equal(a, b) == Some(true)
+        }
+        _ => scalar_values_equal(a, b),
     }
-    // `Value`'s `==` is *total* equality — NaN equals NaN, so a `HashSet` key
-    // agrees with `sort`+`dedup` (grouping and DISTINCT want exactly that).
-    // Cypher's `=` is IEEE instead: NaN equals nothing, itself included. The
-    // two relations differ only at a NaN leaf, so one check re-applies IEEE
-    // here — and only after `==` already matched, keeping it off the miss path
-    // that scans spend their time on. `MembershipSet` mirrors the rule by
-    // giving a NaN element no key.
+}
+
+/// Cypher predicate equality is recursive and nullable; Value's structural
+/// equality remains the identity used by DISTINCT, grouping and storage keys.
+pub(crate) fn predicate_values_equal(a: &Value, b: &Value) -> Option<bool> {
+    match (a, b) {
+        (Value::Null, _) | (_, Value::Null) => None,
+        (Value::List(a), Value::List(b)) => {
+            if a.len() != b.len() {
+                return Some(false);
+            }
+            all_predicate_equal(a.iter().zip(b).map(|(a, b)| predicate_values_equal(a, b)))
+        }
+        (Value::Map(a), Value::Map(b)) => {
+            if a.len() != b.len() {
+                return Some(false);
+            }
+            all_predicate_equal(a.iter().zip(b.iter()).map(|((ak, av), (bk, bv))| {
+                if ak != bk {
+                    Some(false)
+                } else {
+                    predicate_values_equal(av, bv)
+                }
+            }))
+        }
+        _ => Some(scalar_values_equal(a, b)),
+    }
+}
+
+fn all_predicate_equal(values: impl Iterator<Item = Option<bool>>) -> Option<bool> {
+    let mut unknown = false;
+    for value in values {
+        match value {
+            Some(false) => return Some(false),
+            None => unknown = true,
+            Some(true) => {}
+        }
+    }
+    if unknown {
+        None
+    } else {
+        Some(true)
+    }
+}
+
+fn scalar_values_equal(a: &Value, b: &Value) -> bool {
+    // Preserve scalar coercion and identity-bearing node/relationship/path
+    // behavior. Structural NaN identity must not become predicate equality.
     if a == b {
         return !a.contains_nan();
     }
@@ -524,11 +567,7 @@ fn indexed_equality_candidates(
     }
     let mut matching_nodes: Vec<NodeIndex> = Vec::new();
     for node_type in node_types {
-        matching_nodes.extend(
-            graph
-                .lookup_by_index(node_type, property, target_value)
-                .unwrap_or_default(),
-        );
+        matching_nodes.extend(graph.lookup_by_index(node_type, property, target_value)?);
     }
     if input_is_one_full_type {
         return Some(matching_nodes);
@@ -596,7 +635,7 @@ fn filter_nodes_by_conditions(
         })
         .collect();
 
-    if equality_conditions.len() >= 2 {
+    if equality_conditions.len() >= 2 && node_types.len() == 1 {
         let eq_properties: Vec<String> = equality_conditions
             .iter()
             .map(|(k, _)| (*k).clone())
@@ -621,7 +660,7 @@ fn filter_nodes_by_conditions(
                         .collect();
 
                     if let Some(matching_nodes) =
-                        graph.lookup_by_composite_index(node_type, index_properties, &values)
+                        graph.lookup_by_composite_predicate(node_type, index_properties, &values)
                     {
                         let indexed_set: HashSet<_> = matching_nodes.iter().copied().collect();
                         let original_set: HashSet<_> = nodes.iter().copied().collect();
@@ -701,28 +740,25 @@ fn filter_nodes_by_conditions(
         };
 
         if let Some((lower, upper)) = bounds {
-            for node_type in &node_types {
-                if let Some(matching) = graph.lookup_range(node_type, property, lower, upper) {
-                    let indexed_set: HashSet<_> = matching.iter().copied().collect();
-                    let original_set: HashSet<_> = nodes.iter().copied().collect();
-                    let candidates: Vec<_> =
-                        indexed_set.intersection(&original_set).copied().collect();
+            let complete: Option<Vec<Vec<NodeIndex>>> = node_types
+                .iter()
+                .map(|node_type| graph.lookup_range(node_type, property, lower, upper))
+                .collect();
+            if let Some(matching) = complete {
+                let indexed_set: HashSet<_> = matching.into_iter().flatten().collect();
+                let original_set: HashSet<_> = nodes.iter().copied().collect();
+                let candidates: Vec<_> = indexed_set.intersection(&original_set).copied().collect();
 
-                    let remaining_conditions: HashMap<_, _> = conditions
-                        .iter()
-                        .filter(|(k, _)| *k != property)
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect();
+                let remaining_conditions: HashMap<_, _> = conditions
+                    .iter()
+                    .filter(|(k, _)| *k != property)
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
 
-                    if remaining_conditions.is_empty() {
-                        return candidates;
-                    } else {
-                        return filter_nodes_by_conditions(
-                            graph,
-                            candidates,
-                            &remaining_conditions,
-                        );
-                    }
+                if remaining_conditions.is_empty() {
+                    return candidates;
+                } else {
+                    return filter_nodes_by_conditions(graph, candidates, &remaining_conditions);
                 }
             }
         }
@@ -1753,3 +1789,7 @@ mod tests {
         assert_eq!(parse_date_string(""), None);
     }
 }
+
+#[cfg(test)]
+#[path = "predicate_equality_tests.rs"]
+mod predicate_equality_tests;

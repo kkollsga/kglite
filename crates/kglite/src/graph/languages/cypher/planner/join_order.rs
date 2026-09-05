@@ -212,12 +212,18 @@ pub(super) fn estimate_node_selectivity(
                             }
                             if graph.index_answers_point_lookup(nt, prop) {
                                 let mut hits = HashSet::new();
+                                let mut complete = true;
                                 for value in vals {
-                                    if let Some(indices) = graph.lookup_by_index(nt, prop, value) {
-                                        hits.extend(indices);
-                                    }
+                                    let Some(indices) = graph.lookup_by_index(nt, prop, value)
+                                    else {
+                                        complete = false;
+                                        break;
+                                    };
+                                    hits.extend(indices);
                                 }
-                                return hits.len().saturating_add(secondary_count);
+                                if complete {
+                                    return hits.len().saturating_add(secondary_count);
+                                }
                             }
                         }
                         _ => {}

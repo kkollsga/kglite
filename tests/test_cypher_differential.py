@@ -48,7 +48,112 @@ import kglite
 #: two entries differ only in the index state they run against.
 TEXT_BM25_TOP_K = "MATCH (d:Doc) RETURN d.id AS id, text_bm25(d, 'body', 'alpha beta') AS s ORDER BY s DESC LIMIT 3"
 
+
+def _predicate_index_graph(kind):
+    graph = kglite.KnowledgeGraph()
+    graph.cypher("CREATE(:N{id:-1,v:'sentinel',tag:'same'})").to_list()
+    graph.cypher(
+        "UNWIND $rows AS r CREATE(:N{id:r.id,v:r.v,tag:'same'})",
+        params={
+            "rows": [
+                {"id": 0, "v": 1},
+                {"id": 1, "v": 1.0},
+                {"id": 2, "v": 2},
+                {"id": 3, "v": 1.5},
+                {"id": 4, "v": 2**53 + 1},
+            ]
+        },
+    ).to_list()
+    graph.cypher("MATCH(n:N{id:-1}) DELETE n").to_list()
+    rows = graph.cypher("MATCH(n:N) RETURN n.id AS id,n.v AS v ORDER BY id").to_list()
+    assert [(row["id"], type(row["v"])) for row in rows] == [(0, int), (1, float), (2, int), (3, float), (4, int)]
+    if kind == "point":
+        graph.create_index("N", "v")
+    elif kind == "range":
+        graph.create_range_index("N", "v")
+    else:
+        graph.create_composite_index("N", ["tag", "v"])
+    return graph
+
+
+@pytest.fixture
+def predicate_point_index_graph():
+    return _predicate_index_graph("point")
+
+
+@pytest.fixture
+def predicate_range_index_graph():
+    return _predicate_index_graph("range")
+
+
+@pytest.fixture
+def predicate_composite_index_graph():
+    return _predicate_index_graph("composite")
+
+
+@pytest.fixture
+def predicate_soft_alias_index_graph():
+    graph = kglite.KnowledgeGraph()
+    graph.cypher("CREATE(:N{id:1,name:'Ann'}),(:N{id:2,title:'Ann'})").to_list()
+    graph.create_range_index("N", "name")
+    return graph
+
+
 DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
+    (
+        "predicate_index_equality",
+        "predicate_point_index_graph",
+        "MATCH(n:N) WHERE n.v=1.0 RETURN n.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "predicate_index_in_numeric",
+        "predicate_point_index_graph",
+        "MATCH(n:N) WHERE n.v IN [1.0,2] RETURN n.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "predicate_index_in_declined_large",
+        "predicate_point_index_graph",
+        "MATCH(n:N) WHERE n.v IN [1,9007199254740993] RETURN n.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "predicate_index_in_declined_container",
+        "predicate_point_index_graph",
+        "MATCH(n:N) WHERE n.v IN [1,[null]] RETURN n.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "predicate_index_range_inclusive",
+        "predicate_range_index_graph",
+        "MATCH(n:N) WHERE n.v >= 1.0 AND n.v <= 1.0 RETURN n.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "predicate_index_range_exclusive",
+        "predicate_range_index_graph",
+        "MATCH(n:N) WHERE n.v > 1 AND n.v < 2.0 RETURN n.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "predicate_index_composite_equivalence",
+        "predicate_composite_index_graph",
+        "MATCH(n:N) WHERE n.tag='same' AND n.v=1.0 RETURN n.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "predicate_index_composite_parameter_equivalence",
+        "predicate_composite_index_graph",
+        "MATCH(n:N) WHERE n.v=$value AND n.tag=$tag RETURN n.id AS id ORDER BY id",
+        {"value": 1.0, "tag": '["same"]'},
+    ),
+    (
+        "predicate_index_soft_alias_range",
+        "predicate_soft_alias_index_graph",
+        "MATCH(n:N) WHERE n.name >= 'A' RETURN n.id AS id ORDER BY id",
+        None,
+    ),
     (
         "sum_large_integer_cancellation",
         "social_graph",
@@ -561,6 +666,18 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "or_chain_reversed_literals",
         "social_graph",
         "MATCH (p:Person) WHERE 'Oslo' = p.city OR 'Bergen' = p.city RETURN p.name AS n",
+        None,
+    ),
+    (
+        "recursive_null_equality_and_case",
+        "social_graph",
+        "RETURN [null]=[null] AS eq,[null]<>[1] AS ne, CASE [null] WHEN [null] THEN 1 ELSE 0 END AS branch",
+        None,
+    ),
+    (
+        "recursive_null_hashed_membership",
+        "social_graph",
+        "RETURN [null] IN [[1],[2],[3],[4],[5],[6],[7],[8],[9]] AS hit",
         None,
     ),
     # ── extract_pushable_rel_predicates ──

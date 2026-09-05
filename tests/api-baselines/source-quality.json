@@ -101,8 +101,8 @@
     {
       "path": "crates/kglite/src/graph/core/filtering.rs",
       "qualified_name": "crate::filter_nodes_by_conditions",
-      "lines": 221,
-      "branches": 26,
+      "lines": 218,
+      "branches": 25,
       "nesting": 6
     },
     {
@@ -248,15 +248,15 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/where_clause.rs",
       "qualified_name": "crate::CypherExecutor<'a>::evaluate_predicate_tristate",
-      "lines": 187,
-      "branches": 68,
+      "lines": 173,
+      "branches": 64,
       "nesting": 3
     },
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/where_clause.rs",
       "qualified_name": "crate::CypherExecutor<'a>::execute_where",
       "lines": 228,
-      "branches": 28,
+      "branches": 27,
       "nesting": 4
     },
     {

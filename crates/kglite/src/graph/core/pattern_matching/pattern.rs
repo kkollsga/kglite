@@ -376,8 +376,13 @@ impl RelEdgePredicate {
             RelEdgePredicate::Property { prop, op, value } => match get_prop(prop) {
                 Some(Value::Null) | None => None,
                 Some(v) => Some(match op {
-                    PropOp::Eq => crate::graph::core::filtering::values_equal(&v, value),
-                    PropOp::Ne => !crate::graph::core::filtering::values_equal(&v, value),
+                    PropOp::Eq => {
+                        return crate::graph::core::filtering::predicate_values_equal(&v, value)
+                    }
+                    PropOp::Ne => {
+                        return crate::graph::core::filtering::predicate_values_equal(&v, value)
+                            .map(|v| !v)
+                    }
                     PropOp::Gt => matches!(
                         crate::graph::core::filtering::compare_values(&v, value),
                         Some(std::cmp::Ordering::Greater)
@@ -609,6 +614,33 @@ mod tests {
             let negated = RelEdgePredicate::Not(Box::new(property(op)));
             assert!(!eval_with(&negated, &|_| None));
             assert!(!eval_with(&negated, &|_| Some(Value::Null)));
+        }
+    }
+
+    #[test]
+    fn relationship_nested_null_survives_negation() {
+        for op in [PropOp::Eq, PropOp::Ne] {
+            let predicate = RelEdgePredicate::Property {
+                prop: "tag".into(),
+                op,
+                value: Value::List(vec![Value::Int64(1)]),
+            };
+            let read = |_: &str| Some(Value::List(vec![Value::Null]));
+            assert_eq!(
+                predicate.eval_nullable(
+                    InternedKey::from_str("R"),
+                    true,
+                    NodeIndex::new(0),
+                    NodeIndex::new(1),
+                    &read
+                ),
+                None
+            );
+            assert!(!eval_with(&predicate, &read));
+            assert!(!eval_with(
+                &RelEdgePredicate::Not(Box::new(predicate)),
+                &read
+            ));
         }
     }
 

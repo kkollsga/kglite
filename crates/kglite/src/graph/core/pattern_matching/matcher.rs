@@ -1,5 +1,6 @@
 use crate::datatypes::values::Value;
 use crate::graph::core::filtering::{compare_values, str_values_equal, values_equal};
+use crate::graph::dir_graph::indexes::predicate_queries::string_index_hits;
 use crate::graph::languages::cypher::executor::budget::MatchCeiling;
 use crate::graph::languages::cypher::result::Bindings;
 use crate::graph::schema::{DirGraph, InternedKey, NodeData};
@@ -636,10 +637,8 @@ impl<'a> PatternExecutor<'a> {
                 None
             };
 
-            // Primary-type indexes remain complete even when another label
-            // elsewhere in the graph has secondary carriers. If this queried
-            // label itself has secondary carriers, union their filtered scan
-            // with the indexed primary hits instead of scanning every primary.
+            // Only this label's secondary carriers affect primary-index completeness.
+            // Union their filtered scan with indexed hits instead of scanning every primary.
             if let Some(ref props) = pattern.properties {
                 if let Some(hit) = self.try_closure_probe(node_type, props, &extra_keys) {
                     return hit;
@@ -724,9 +723,11 @@ impl<'a> PatternExecutor<'a> {
                 match matcher {
                     PropertyMatcher::Equals(Value::String(s)) => {
                         for idx_name in &alias_candidates {
-                            if let Some(candidates) =
-                                self.graph.graph.lookup_by_property_eq_any_type(idx_name, s)
-                            {
+                            if let Some(candidates) = string_index_hits(s, |key| {
+                                self.graph
+                                    .graph
+                                    .lookup_by_property_eq_any_type(idx_name, key)
+                            }) {
                                 if props.len() == 1 {
                                     return Ok(candidates);
                                 }
@@ -1120,8 +1121,8 @@ impl<'a> PatternExecutor<'a> {
         let mut out: Vec<NodeIndex> = Vec::new();
         for branch in alts {
             let Some(hits) = self.try_index_lookup(branch, props) else {
-                // Unreachable for a covered branch. Kept as the fallback that
-                // makes a coverage miscount slow rather than wrong.
+                // Declaration coverage does not prove a query value's domain.
+                // Decline the whole union if any branch cannot answer it.
                 return self.scan_label_union(alts, Some(props), extra_keys);
             };
             out.extend(hits);
@@ -1188,8 +1189,8 @@ impl<'a> PatternExecutor<'a> {
     }
 
     /// Eligibility comes from the shared predicate, which the EXPLAIN
-    /// renderer reads too — so a `ClosureProbe` plan row and the probe that
-    /// actually runs cannot disagree about *when*. The property names handed
+    /// renderer reads too. Runtime additionally proves the query value's
+    /// key domain and may decline an unsupported value. The property names handed
     /// to it are the pattern's equality keys, matching what
     /// `closure_probe_ops` reads off the AST, plus the parameterised
     /// equalities whose value is bound here (EXPLAIN cannot see those, so it
@@ -1209,9 +1210,8 @@ impl<'a> PatternExecutor<'a> {
         let members = closure_probe::closure_probe_members(self.graph, node_type, &equality_props)?;
         let mut out = Vec::new();
         for member in members {
-            // Per-primary-type buckets are disjoint, so the union needs no
-            // dedup. The `?` is unreachable for an eligible member and stays
-            // as the fallback that keeps a coverage miscount slow, not wrong.
+            // Per-primary-type buckets are disjoint. Coverage is structural;
+            // unsupported query values still decline the entire union here.
             out.extend(self.try_index_lookup(&member, props)?);
         }
         Some(out)
@@ -1228,9 +1228,9 @@ impl<'a> PatternExecutor<'a> {
             match matcher {
                 PropertyMatcher::Equals(Value::String(s)) => {
                     for alias in &aliases {
-                        if let Some(candidates) =
-                            self.graph.graph.lookup_by_property_eq_any_type(alias, s)
-                        {
+                        if let Some(candidates) = string_index_hits(s, |key| {
+                            self.graph.graph.lookup_by_property_eq_any_type(alias, key)
+                        }) {
                             let filtered: Vec<NodeIndex> = candidates
                                 .into_iter()
                                 .filter(|&idx| self.graph.graph.node_type_of(idx) == Some(expected))
@@ -1319,9 +1319,7 @@ impl<'a> PatternExecutor<'a> {
                 }
                 let mut result = Vec::with_capacity(values.len());
                 for val in values {
-                    if let Some(indices) = self.graph.lookup_by_index(node_type, prop_name, val) {
-                        result.extend(indices);
-                    }
+                    result.extend(self.graph.lookup_by_index(node_type, prop_name, val)?);
                 }
                 dedup_candidates(&mut result);
                 if props.len() > 1 {
@@ -1444,7 +1442,7 @@ impl<'a> PatternExecutor<'a> {
             let values: Vec<Value> = equality_props.iter().map(|(_, v)| (*v).clone()).collect();
             if let Some(results) = self
                 .graph
-                .lookup_by_composite_index(node_type, &names, &values)
+                .lookup_by_composite_predicate(node_type, &names, &values)
             {
                 if equality_props.len() == props.len() {
                     return Some(results);
@@ -1478,7 +1476,9 @@ impl<'a> PatternExecutor<'a> {
         // are indexable today.
         for (prop, value) in &equality_props {
             if let Value::String(s) = value {
-                if let Some(results) = self.graph.graph.lookup_by_property_eq(node_type, prop, s) {
+                if let Some(results) = string_index_hits(s, |key| {
+                    self.graph.graph.lookup_by_property_eq(node_type, prop, key)
+                }) {
                     if equality_props.len() == 1 && props.len() == 1 {
                         return Some(results);
                     }
@@ -1542,9 +1542,8 @@ impl<'a> PatternExecutor<'a> {
             };
             if let Some((lo, hi)) = bounds {
                 if let Some(results) = self.graph.lookup_range(node_type, prop, lo, hi) {
-                    if props.len() == 1 {
-                        return Some(results);
-                    }
+                    // Range candidates preserve the shared ordering policy;
+                    // MATCH must still reject NULL and apply its own predicates.
                     let filtered = results
                         .into_iter()
                         .filter(|&idx| self.node_matches_properties(idx, props))

@@ -289,16 +289,17 @@ impl<'a> CypherExecutor<'a> {
         for (variable, property, values) in &in_filters {
             if let Some(node_type) = self.infer_node_type(variable, &result_set) {
                 let mut index_set: HashSet<petgraph::graph::NodeIndex> = HashSet::new();
-                let mut any_indexed = false;
+                let mut complete = !values.is_empty();
                 for val in values {
-                    if let Some(matching_indices) =
+                    let Some(matching_indices) =
                         self.graph.lookup_by_index(&node_type, property, val)
-                    {
-                        any_indexed = true;
-                        index_set.extend(matching_indices);
-                    }
+                    else {
+                        complete = false;
+                        break;
+                    };
+                    index_set.extend(matching_indices);
                 }
-                if any_indexed {
+                if complete {
                     self.retain_indexed_rows(&mut result_set, variable, &node_type, &index_set);
                 }
             }
@@ -477,7 +478,6 @@ impl<'a> CypherExecutor<'a> {
             return Ok(result_set);
         }
 
-        // Fast path: specialized vector_score filter bypasses expression evaluator
         if let Some((spec, remainder)) = self.try_extract_vector_score_filter(&folded_pred) {
             return self.execute_vector_score_filter(&spec, remainder, result_set);
         }
@@ -716,10 +716,7 @@ impl<'a> CypherExecutor<'a> {
             } => {
                 let left_val = self.evaluate_expression(left, row)?;
                 let right_val = self.evaluate_expression(right, row)?;
-                if matches!(left_val, Value::Null) || matches!(right_val, Value::Null) {
-                    return Ok(None);
-                }
-                evaluate_comparison(&left_val, operator, &right_val).map(Some)
+                evaluate_comparison_tristate(&left_val, operator, &right_val)
             }
             Predicate::And(left, right) => {
                 // Kleene AND: FALSE absorbs (short-circuits even past NULL);
@@ -805,21 +802,10 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
             Predicate::InLiteralSet { expr, values } => {
-                // Same Kleene rules as Predicate::In; the difference is that
-                // `values` is a pre-built MembershipSet, so both the match and
-                // the no-match answer cost one coercion-normalized probe —
-                // and the NULL element is a flag read rather than a scan.
+                // Prepared scalar keys avoid rescanning scalar literals;
+                // residual containers retain recursive unknown comparisons.
                 let val = self.evaluate_expression(expr, row)?;
-                if matches!(val, Value::Null) {
-                    return Ok(None);
-                }
-                if values.matches(&val) {
-                    return Ok(Some(true));
-                }
-                if values.has_null() {
-                    return Ok(None);
-                }
-                Ok(Some(false))
+                Ok(values.kleene_contains(&val))
             }
             Predicate::StartsWith { expr, pattern } => {
                 let val = self.evaluate_expression(expr, row)?;

@@ -8,6 +8,9 @@
 
 use std::collections::HashMap;
 
+#[path = "index_predicates.rs"]
+pub(crate) mod predicate_queries;
+
 use super::index_layer::LayeredIndex;
 use super::range_index_layer::LayeredRangeIndex;
 use super::{DirGraph, IndexStats};
@@ -440,7 +443,9 @@ impl DirGraph {
     /// bucket as "proven empty" rather than "no index built", and for a
     /// closure probe to count the member as covered.
     ///
-    /// See [`Self::point_lookup_index_key`] for what "can answer" excludes.
+    /// This is declaration/alias coverage only. A particular query value
+    /// may still decline in `lookup_by_index`; callers must propagate None.
+    /// See [`Self::point_lookup_index_key`] for spelling exclusions.
     pub(crate) fn index_answers_point_lookup(&self, node_type: &str, property: &str) -> bool {
         self.point_lookup_index_key(node_type, property).is_some()
     }
@@ -459,9 +464,9 @@ impl DirGraph {
     /// most one member's index, so a union that declined on any member's
     /// value-miss declined structurally.
     ///
-    /// The composite and range stores keep the older `None`-on-miss shape.
-    /// That is safe (their callers fall through to a scan that re-derives the
-    /// same answer) and is why neither counts as closure-probe coverage.
+    /// Predicate-equivalent numeric/string keys are unioned without changing
+    /// stored Value identity. Unsupported domains decline rather than treating
+    /// a structural bucket miss (or hit) as a complete predicate answer.
     pub fn lookup_by_index(
         &self,
         node_type: &str,
@@ -470,13 +475,16 @@ impl DirGraph {
     ) -> Option<Vec<NodeIndex>> {
         let index_key = self.point_lookup_index_key(node_type, property)?;
         let key = (node_type.to_string(), index_key.to_string());
-        Some(
-            self.property_indices
-                .get(&key)
-                .and_then(|idx| idx.get(value))
-                .cloned()
-                .unwrap_or_default(),
-        )
+        let keys = predicate_queries::equality_keys(value)?;
+        let index = self.property_indices.get(&key)?;
+        let mut hits = Vec::new();
+        for key in keys {
+            if let Some(bucket) = index.get(&key) {
+                hits.extend_from_slice(bucket);
+            }
+        }
+        predicate_queries::dedup_hits(&mut hits);
+        Some(hits)
     }
 
     pub fn get_index_stats(&self, node_type: &str, property: &str) -> Option<IndexStats> {
@@ -544,13 +552,26 @@ impl DirGraph {
         lower: std::ops::Bound<&Value>,
         upper: std::ops::Bound<&Value>,
     ) -> Option<Vec<NodeIndex>> {
+        // Stored-property indexes omit structural soft-alias fallback values.
+        // A final predicate filter cannot recover those absent candidates.
+        if crate::graph::schema::soft_alias_fallback(self.resolve_alias(node_type, property))
+            .is_some()
+        {
+            return None;
+        }
         let key = (node_type.to_string(), property.to_string());
-        self.range_indices.get(&key).map(|btree| {
-            btree
-                .range((lower, upper))
-                .flat_map(|(_, indices)| indices.iter().copied())
-                .collect()
-        })
+        let btree = self.range_indices.get(&key)?;
+        let ranges = predicate_queries::numeric_ranges(lower, upper)?;
+        let mut hits = Vec::new();
+        for (lo, hi) in &ranges {
+            for (value, indices) in btree.range((lo.as_ref(), hi.as_ref())) {
+                if predicate_queries::within_bounds(value, lower, upper) {
+                    hits.extend_from_slice(indices);
+                }
+            }
+        }
+        predicate_queries::dedup_hits(&mut hits);
+        Some(hits)
     }
 
     // ========================================================================
@@ -697,6 +718,42 @@ impl DirGraph {
             .get(&key)
             .and_then(|idx| idx.get(&composite_value))
             .cloned()
+    }
+
+    /// Union every bounded predicate-equivalent tuple from one complete
+    /// index. Unsupported domains and soft-alias fallbacks use a scan.
+    pub(crate) fn lookup_by_composite_predicate(
+        &self,
+        node_type: &str,
+        properties: &[String],
+        values: &[Value],
+    ) -> Option<Vec<NodeIndex>> {
+        if properties.len() != values.len()
+            || properties.iter().any(|property| {
+                crate::graph::schema::soft_alias_fallback(self.resolve_alias(node_type, property))
+                    .is_some()
+            })
+        {
+            return None;
+        }
+        if properties.windows(2).any(|w| w[0] > w[1]) {
+            let mut pairs: Vec<_> = properties.iter().zip(values).collect();
+            pairs.sort_unstable_by(|a, b| a.0.cmp(b.0));
+            let names: Vec<_> = pairs.iter().map(|(name, _)| (*name).clone()).collect();
+            let values: Vec<_> = pairs.iter().map(|(_, value)| (*value).clone()).collect();
+            return self.lookup_by_composite_predicate(node_type, &names, &values);
+        }
+        let key = (node_type.to_string(), properties.to_vec());
+        let index = self.composite_indices.get(&key)?;
+        let tuples = predicate_queries::composite_keys(values)?;
+        let mut hits = Vec::new();
+        for tuple in tuples {
+            if let Some(bucket) = index.get(&CompositeValue(tuple)) {
+                hits.extend_from_slice(bucket);
+            }
+        }
+        predicate_queries::dedup_hits(&mut hits);
+        Some(hits)
     }
 
     /// Property order is not significant.
@@ -1596,3 +1653,7 @@ impl DirGraph {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "index_predicate_tests.rs"]
+mod index_predicate_tests;
