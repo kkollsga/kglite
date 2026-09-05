@@ -54,6 +54,8 @@ pub use self::execute::{execute_mut, execute_read, ExecuteOptions, ExecuteOutcom
 pub use self::transaction::{CommitOutcome, Session, Transaction};
 
 #[cfg(test)]
+mod append_capacity_tests;
+#[cfg(test)]
 mod compaction_tests;
 pub(crate) mod durable;
 pub(crate) mod execute;

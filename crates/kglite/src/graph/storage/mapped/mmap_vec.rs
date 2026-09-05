@@ -21,6 +21,26 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+/// Copy once into append growth room; an unrepresentable or refused reserve
+/// declines so the caller can retain its ordinary clone/push failure behavior.
+fn copy_with_append_capacity<T: Copy>(source: &[T], additional: usize) -> Option<Vec<T>> {
+    let needed = source.len().checked_add(additional)?;
+    let capacity = if additional == 0 {
+        needed
+    } else {
+        let minimum = match std::mem::size_of::<T>() {
+            1 => 8,
+            size if size <= 1024 => 4,
+            _ => 1,
+        };
+        needed.max(source.len().checked_mul(2)?).max(minimum)
+    };
+    let mut data = Vec::new();
+    data.try_reserve_exact(capacity).ok()?;
+    data.extend_from_slice(source);
+    Some(data)
+}
+
 fn capacity_bytes<T>(count: usize) -> io::Result<usize> {
     count.checked_mul(std::mem::size_of::<T>()).ok_or_else(|| {
         io::Error::new(
@@ -88,7 +108,18 @@ pub(crate) enum FailurePoint {
 
 #[cfg(test)]
 thread_local! {
+    static HEAP_APPEND_GROWTHS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static FAILURE_POINTS: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_heap_append_growths() {
+    HEAP_APPEND_GROWTHS.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn heap_append_growths() -> usize {
+    HEAP_APPEND_GROWTHS.get()
 }
 
 #[cfg(test)]
@@ -177,6 +208,12 @@ impl<T: MmapPod> MmapOrVec<T> {
     /// Create a heap-backed buffer from an existing Vec.
     pub fn from_vec(data: Vec<T>) -> Self {
         MmapOrVec::Heap { data }
+    }
+
+    pub(crate) fn try_clone_for_append(&self, additional: usize) -> Option<Self> {
+        Some(Self::Heap {
+            data: copy_with_append_capacity(self.as_slice(), additional)?,
+        })
     }
 
     /// Create a file-backed buffer pre-sized to `count` elements.
@@ -499,10 +536,16 @@ impl<T: MmapPod> MmapOrVec<T> {
     pub fn try_push(&mut self, value: T) -> io::Result<()> {
         match self {
             MmapOrVec::Heap { data } => {
+                #[cfg(test)]
+                let capacity = data.capacity();
                 injected_failure(8)?;
                 data.try_reserve(1)
                     .map_err(|error| io::Error::other(format!("heap reserve failed: {error}")))?;
                 data.push(value);
+                #[cfg(test)]
+                if data.capacity() > capacity {
+                    HEAP_APPEND_GROWTHS.set(HEAP_APPEND_GROWTHS.get() + 1);
+                }
             }
             MmapOrVec::Mapped {
                 mmap,
@@ -985,6 +1028,12 @@ impl MmapBytes {
         MmapBytes::Heap { data: Vec::new() }
     }
 
+    pub(crate) fn try_clone_for_append(&self, additional: usize) -> Option<Self> {
+        Some(Self::Heap {
+            data: copy_with_append_capacity(self.slice(0, self.len()), additional)?,
+        })
+    }
+
     pub fn mapped(path: &Path, initial_cap: usize) -> io::Result<Self> {
         let cap = initial_cap.max(4096);
         let file = OpenOptions::new()
@@ -1049,7 +1098,15 @@ impl MmapBytes {
     pub fn extend(&mut self, bytes: &[u8]) -> io::Result<usize> {
         let start = self.len();
         match self {
-            MmapBytes::Heap { data } => data.extend_from_slice(bytes),
+            MmapBytes::Heap { data } => {
+                #[cfg(test)]
+                let capacity = data.capacity();
+                data.extend_from_slice(bytes);
+                #[cfg(test)]
+                if data.capacity() > capacity {
+                    HEAP_APPEND_GROWTHS.set(HEAP_APPEND_GROWTHS.get() + 1);
+                }
+            }
             MmapBytes::Mapped {
                 mmap,
                 len,

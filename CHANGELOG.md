@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Appending to shared typed columns reserves growth room during their required copy, preserving snapshots, nulls and existing allocation-failure fallbacks.
 - Successful Session commits fold uniquely owned transaction overlays after publication, preserving retained snapshots and durable logging order.
 - Deleting a just-created node in a reused low slot avoids a full type-bucket scan, preserving survivor order and rollback coordinates.
 - Batch text-index refreshes by affected term, retaining direct edits for small deltas and rebuilding large deltas. Exact scores and the public refresh ceiling are preserved.

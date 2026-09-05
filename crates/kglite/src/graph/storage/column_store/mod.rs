@@ -51,9 +51,8 @@ pub struct ColumnStore {
     /// graph whose unshared write costs 4.5 µs.
     ///
     /// Read through the slice (the `Arc` derefs); mutate through
-    /// [`Self::column_mut`] / [`Self::columns_mut`], or — where a method
-    /// already holds the element ([`Self::push_row`], [`Self::set_at_slot`])
-    /// — the identical `Arc::make_mut` on that element. Store-level cloning
+    /// [`Self::column_mut`] / [`Self::columns_mut`], or the append-specific
+    /// clone helper when a new row needs growth room. Store-level cloning
     /// shares these handles; deep copies stay limited to mutated columns.
     columns: Vec<Arc<TypedColumn>>,
     row_count: u32,
@@ -322,9 +321,10 @@ impl ColumnStore {
     /// A heterogeneous id set still demotes to `Mixed` through the fallback.
     pub fn push_id(&mut self, value: &Value) {
         self.spillable_growth = true;
-        let col = Arc::make_mut(
+        let col = TypedColumn::make_mut_for_append(
             self.id_column
                 .get_or_insert_with(|| Arc::new(TypedColumn::for_value(value))),
+            value,
         );
         if col.push(value).is_err() {
             // Type mismatch or storage growth failure: this API is
@@ -341,14 +341,17 @@ impl ColumnStore {
     /// Push a node title value into the title column. Creates a Str column if None.
     pub fn push_title(&mut self, value: &Value) {
         self.spillable_growth = true;
-        let col = Arc::make_mut(self.title_column.get_or_insert_with(|| {
-            Arc::new(TypedColumn::Str {
-                offsets: MmapOrVec::from_vec(vec![0u64]),
-                data: MmapBytes::new(),
-                nulls: MmapOrVec::new(),
-                relocated: rustc_hash::FxHashMap::default(),
-            })
-        }));
+        let col = TypedColumn::make_mut_for_append(
+            self.title_column.get_or_insert_with(|| {
+                Arc::new(TypedColumn::Str {
+                    offsets: MmapOrVec::from_vec(vec![0u64]),
+                    data: MmapBytes::new(),
+                    nulls: MmapOrVec::new(),
+                    relocated: rustc_hash::FxHashMap::default(),
+                })
+            }),
+            value,
+        );
         if col.push(value).is_err() {
             // Type mismatch or storage growth failure: explicit heap fallback.
             let mut mixed = Vec::with_capacity(col.len() + 1);
@@ -659,9 +662,13 @@ impl ColumnStore {
         }
 
         for (slot, &value_index) in slot_values.iter().enumerate() {
-            let col = Arc::make_mut(&mut self.columns[slot]);
+            let value = if value_index == NONE {
+                &Value::Null
+            } else {
+                &values[value_index as usize].1
+            };
+            let col = TypedColumn::make_mut_for_append(&mut self.columns[slot], value);
             if value_index != NONE {
-                let value = &values[value_index as usize].1;
                 if col.push(value).is_err() {
                     // Type mismatch or storage growth failure: preserve the
                     // row through the infallible heap-backed fallback.
@@ -1367,8 +1374,8 @@ impl ColumnStore {
     /// Privatise the column at `slot`, then hand out `&mut` — the deep copy
     /// the per-column `Arc` defers until a write actually lands on it.
     ///
-    /// [`Self::push_row`] and [`Self::set_at_slot`] inline the identical
-    /// element-level `Arc::make_mut`, preserving unrelated shared columns.
+    /// [`Self::set_at_slot`] uses the same element-level Arc::make_mut;
+    /// append paths reserve growth room while preserving unrelated columns.
     #[inline]
     fn column_mut(&mut self, slot: usize) -> Option<&mut TypedColumn> {
         self.columns.get_mut(slot).map(Arc::make_mut)
