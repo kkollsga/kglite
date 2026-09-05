@@ -32,7 +32,7 @@ def bm25_entry_corpus(request):
 
 
 CASES = [(frequency, k) for frequency in ("rare", "medium", "common") for k in (10, 100)]
-CASES += [(route, 10) for route in ("underfilled", "unknown", "filtered", "profile", "create", "property")]
+CASES += [(route, 10) for route in ("equal", "underfilled", "unknown", "filtered", "profile", "create", "property")]
 
 
 @pytest.mark.benchmark
@@ -42,9 +42,9 @@ def test_bench_bm25_retrieval_entry(benchmark, bm25_entry_corpus, route, k):
     frequency = route if route in queries else "medium"
     statement = QUERY
     params = {"q": queries[frequency], "k": k}
-    if route == "underfilled":
+    if route in {"equal", "underfilled"}:
         frequency = "rare"
-        k = sum(row["score"] > 0 for row in oracles[frequency]) + 1
+        k = sum(row["score"] > 0 for row in oracles[frequency]) + (route == "underfilled")
         params = {"q": queries[frequency], "k": k}
     elif route == "unknown":
         params["q"] = "zzabsentterm"
@@ -64,7 +64,7 @@ def test_bench_bm25_retrieval_entry(benchmark, bm25_entry_corpus, route, k):
     statement = statement.replace("$k", str(k))
     if route != "property":
         plan = corpus.graph.cypher("EXPLAIN " + statement.removeprefix("PROFILE "), params=params).to_list()
-        assert any(row["operation"] == "FusedTextBm25TopK" for row in plan)
+        assert any(row["operation"] == "FusedTextBm25TopK" for row in plan) == (k > 0)
 
     def run():
         result = corpus.graph.cypher(statement, params=params)
@@ -107,3 +107,25 @@ def test_bench_bm25_entry_first_after_delta(benchmark, bm25_entry_corpus):
     expected = corpus.graph.cypher(QUERY.replace("$k", "10"), params=params, disable_optimizer=True).to_list()
     assert result == expected
     benchmark.extra_info.update(documents=corpus.docs, route="first_after_delta", statistic="mean")
+
+
+@pytest.mark.benchmark
+def test_bench_bm25_entry_missing_document(benchmark, bm25_entry_corpus):
+    corpus, queries, _ = bm25_entry_corpus
+    missing_id = corpus.docs + 1
+    corpus.graph.cypher("CREATE (:Doc {id:$id})", params={"id": missing_id})
+    statement = QUERY.replace("$k", "10")
+    params = {"q": queries["medium"]}
+    # The untimed scalar oracle also consumes the creation delta, leaving a
+    # clean index with one fewer document than the type's candidate population.
+    expected = corpus.graph.cypher(statement, params=params, disable_optimizer=True).to_list()
+    assert expected[0] == {"id": missing_id, "score": None}
+    plan = corpus.graph.cypher("EXPLAIN " + statement, params=params).to_list()
+    assert any(row["operation"] == "FusedTextBm25TopK" for row in plan)
+
+    def run():
+        return corpus.graph.cypher(statement, params=params).to_list()
+
+    result = benchmark.pedantic(run, rounds=200, iterations=1, warmup_rounds=20)
+    assert result == expected
+    benchmark.extra_info.update(documents=corpus.docs, route="missing_document", statistic="min unless heavy tailed")

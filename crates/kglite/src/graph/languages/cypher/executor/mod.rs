@@ -614,8 +614,12 @@ impl<'a> CypherExecutor<'a> {
 
             if i == 0 && !profiling && result_set.rows.is_empty() && result_set.columns.is_empty() {
                 if let Some(result) = self.try_retrieval_entry(&query.clauses)? {
-                    self.budget
-                        .check_rows(result.rows.len(), "vector retrieval")?;
+                    let operator = if matches!(query.clauses[1], Clause::FusedTextBm25TopK { .. }) {
+                        "FusedTextBm25TopK"
+                    } else {
+                        "vector retrieval"
+                    };
+                    self.budget.check_rows(result.rows.len(), operator)?;
                     result_set = result;
                     skip_clause[1] = true;
                     continue;
@@ -1161,6 +1165,7 @@ pub mod regex_cache;
 mod rel_constraint_ddl;
 mod retrieval;
 mod retrieval_diagnostics;
+mod retrieval_text;
 pub mod return_clause;
 pub mod rev_procedures;
 pub mod rule_procedures;

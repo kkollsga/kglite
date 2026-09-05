@@ -1,4 +1,4 @@
-//! Vector retrieval over materialized rows or a proven whole type.
+//! Retrieval over materialized rows or a proven whole type.
 
 use super::helpers::*;
 use super::ordering::{SortSpec, TopKCollector};
@@ -24,19 +24,29 @@ struct HnswRowCoverage {
     ordered_whole_store: bool,
 }
 
-enum RetrievalPopulation<'r> {
+pub(super) enum RetrievalPopulation<'r> {
     Rows(&'r ResultSet),
     WholeType {
         nodes: TypeNodesRef<'r>,
         variable: &'r str,
+        node_type: &'r str,
     },
 }
 
 impl RetrievalPopulation<'_> {
-    fn row(&self, index: usize) -> std::borrow::Cow<'_, ResultRow> {
+    pub(super) fn len(&self) -> usize {
+        match self {
+            Self::Rows(rows) => rows.rows.len(),
+            Self::WholeType { nodes, .. } => nodes.len(),
+        }
+    }
+
+    pub(super) fn row(&self, index: usize) -> std::borrow::Cow<'_, ResultRow> {
         match self {
             Self::Rows(rows) => std::borrow::Cow::Borrowed(&rows.rows[index]),
-            Self::WholeType { nodes, variable } => {
+            Self::WholeType {
+                nodes, variable, ..
+            } => {
                 let mut row = ResultRow::new();
                 row.node_bindings.insert(
                     (*variable).to_owned(),
@@ -80,25 +90,41 @@ impl<'a> CypherExecutor<'a> {
         Some((variable, node_type))
     }
 
-    /// Admit a typed score/top-k pipeline only when its whole-store coverage
-    /// can be proved. Automatic stale-index policy stays on the established
-    /// materialized route; forced exact never probes or refreshes an index.
+    /// A trial entry shares the MATCH exclusions and never performs stale
+    /// index maintenance before deciding whether the established route owns it.
     pub(super) fn try_retrieval_entry(
         &self,
         clauses: &[Clause],
     ) -> Result<Option<ResultSet>, String> {
-        let [Clause::Match(matched), Clause::FusedVectorScoreTopK {
-            return_clause,
-            score_item_index,
-            descending: true,
-            limit,
-        }, ..] = clauses
-        else {
-            return Ok(None);
-        };
-        if *limit == 0 {
-            return Ok(None);
+        match clauses {
+            [Clause::Match(matched), Clause::FusedVectorScoreTopK {
+                return_clause,
+                score_item_index,
+                descending: true,
+                limit,
+            }, ..] => {
+                self.try_vector_retrieval_entry(matched, return_clause, *score_item_index, *limit)
+            }
+            [Clause::Match(matched), Clause::FusedTextBm25TopK {
+                return_clause,
+                score_item_index,
+                sort_keys,
+                limit,
+            }, ..] => self.try_text_retrieval_entry(
+                matched,
+                return_clause,
+                *score_item_index,
+                sort_keys,
+                *limit,
+            ),
+            _ => Ok(None),
         }
+    }
+
+    pub(super) fn plain_retrieval_population<'q>(
+        &'q self,
+        matched: &'q MatchClause,
+    ) -> Result<Option<RetrievalPopulation<'q>>, String> {
         let Some((variable, node_type)) = self.plain_retrieval_type(matched) else {
             return Ok(None);
         };
@@ -110,14 +136,41 @@ impl<'a> CypherExecutor<'a> {
         }
         self.budget.check_work(nodes.len(), "MATCH")?;
         self.check_deadline()?;
+        Ok(Some(RetrievalPopulation::WholeType {
+            nodes,
+            variable,
+            node_type,
+        }))
+    }
+
+    fn try_vector_retrieval_entry(
+        &self,
+        matched: &MatchClause,
+        return_clause: &ReturnClause,
+        score_item_index: usize,
+        limit: usize,
+    ) -> Result<Option<ResultSet>, String> {
+        if limit == 0 {
+            return Ok(None);
+        }
+        let Some(population) = self.plain_retrieval_population(matched)? else {
+            return Ok(None);
+        };
+        let RetrievalPopulation::WholeType {
+            variable,
+            node_type,
+            ..
+        } = &population
+        else {
+            unreachable!("plain retrieval population is a whole type");
+        };
         let score_expr =
-            self.fold_constants_expr(&return_clause.items[*score_item_index].expression);
-        let population = RetrievalPopulation::WholeType { nodes, variable };
+            self.fold_constants_expr(&return_clause.items[score_item_index].expression);
         let seed = population.row(0);
         let Some(args) = self.constant_vector_args(&score_expr, &seed)? else {
             return Ok(None);
         };
-        if args.variable != variable {
+        if args.variable != *variable {
             return Ok(None);
         }
         let Some(store) = self.graph.embedding_store(node_type, &args.property) else {
@@ -127,10 +180,10 @@ impl<'a> CypherExecutor<'a> {
             return self.try_exact_vector_entry(
                 &args,
                 &score_expr,
-                *limit,
+                limit,
                 &population,
                 return_clause,
-                *score_item_index,
+                score_item_index,
             );
         }
         // A pending refresh belongs to the established route, including its
@@ -141,10 +194,10 @@ impl<'a> CypherExecutor<'a> {
         match self.try_hnsw_fused_top_k(
             &score_expr,
             true,
-            *limit,
+            limit,
             &population,
             return_clause,
-            *score_item_index,
+            score_item_index,
         )? {
             HnswOutcome::Indexed(result, info) => {
                 self.record_retrieval(info);
@@ -377,28 +430,7 @@ impl<'a> CypherExecutor<'a> {
         })
     }
 
-    /// Project RETURN expressions for HNSW winners using their pre-computed
-    /// exact-scale scores. This mirrors Phase 3 of the exact fused path.
-    pub(super) fn project_hnsw_winners(
-        &self,
-        scored: Vec<(usize, f64)>,
-        score_expr: &Expression,
-        result_set: &ResultSet,
-        return_clause: &ReturnClause,
-        score_item_index: usize,
-    ) -> Result<ResultSet, String> {
-        self.project_retrieval_winners(
-            scored
-                .into_iter()
-                .map(|(position, score)| (position, Value::Float64(score))),
-            score_expr,
-            &RetrievalPopulation::Rows(result_set),
-            return_clause,
-            score_item_index,
-        )
-    }
-
-    fn project_retrieval_winners(
+    pub(super) fn project_retrieval_winners(
         &self,
         scored: impl ExactSizeIterator<Item = (usize, Value)>,
         score_expr: &Expression,

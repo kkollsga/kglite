@@ -192,7 +192,8 @@ impl TextIndex {
         candidates.sort_unstable();
         candidates.dedup();
 
-        let mut heap: BinaryHeap<ScoredDoc> = BinaryHeap::with_capacity(k + 1);
+        let capacity = k.saturating_add(1).min(candidates.len());
+        let mut heap: BinaryHeap<ScoredDoc> = BinaryHeap::with_capacity(capacity);
         for slot in candidates {
             heap.push(ScoredDoc {
                 slot,

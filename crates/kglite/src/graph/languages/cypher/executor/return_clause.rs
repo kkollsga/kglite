@@ -2,6 +2,7 @@
 
 use super::helpers::*;
 use super::ordering::{compare_sort_keys, SortSpec, TopKCollector};
+use super::retrieval::RetrievalPopulation;
 use super::*;
 use crate::datatypes::values::Value;
 use crate::graph::parallel::{self, ParallelInterrupt};
@@ -341,7 +342,7 @@ impl<'a> CypherExecutor<'a> {
                 &score_expr,
                 descending,
                 limit,
-                &result_set,
+                &RetrievalPopulation::Rows(&result_set),
                 return_clause,
                 score_item_index,
             )? {
@@ -349,162 +350,6 @@ impl<'a> CypherExecutor<'a> {
             }
         }
         self.execute_fused_order_by_top_k(return_clause, sort_keys, limit, result_set)
-    }
-
-    /// Postings fast path: ask the index for its own top-k instead of scoring
-    /// every row.
-    ///
-    /// Row-at-a-time scoring is O(corpus) for *every* query however selective —
-    /// measured on a 100k-document corpus, a query whose rarest term occurs in
-    /// 27 documents cost the same as one containing a near-stopword. The
-    /// postings lists of the query's own terms name the only documents that can
-    /// score above zero, so this path's cost follows the query.
-    ///
-    /// **Exactness.** [`TextIndex::top_k`] scores each candidate through the
-    /// same `score()` the scalar calls, in the same summation order, so the
-    /// scores are bit-identical to the scan's — and it orders by score
-    /// descending, then *slot* ascending. Under the coverage contract below,
-    /// row index and slot rise together, so that is the scan's own
-    /// score-then-row-index order and the two paths return the same rows in the
-    /// same sequence, ties included.
-    ///
-    /// **Why-bail** (each returns `None` and costs a scan, never an answer):
-    ///
-    /// * ASC order or `LIMIT 0` — BM25 ranks best-first; least-relevant-first
-    ///   has no index shortcut.
-    /// * A property or query argument that varies per row: the index answers
-    ///   one query, not one per row.
-    /// * Rows that do not bind the scored variable to distinct nodes of a
-    ///   single type, or that do not arrive in ascending slot order — the
-    ///   tie-break equality above depends on both.
-    /// * Rows that are not the whole indexed corpus (`documents()`). A filtered
-    ///   subset may contain unindexed rows, which score *null* and which the
-    ///   ranking places by a rule the postings never see; and a doc the index
-    ///   ranks highly may not be in the subset at all.
-    /// * Fewer than `limit` documents share a term with the query. The scan
-    ///   fills the remaining slots with documents that score exactly `0.0`;
-    ///   the postings never yield those, so the short answer would be missing
-    ///   rows the unfused pipeline returns.
-    fn try_text_index_fused_top_k(
-        &self,
-        score_expr: &Expression,
-        descending: bool,
-        limit: usize,
-        result_set: &ResultSet,
-        return_clause: &ReturnClause,
-        score_item_index: usize,
-    ) -> Result<Option<ResultSet>, String> {
-        if !descending || limit == 0 {
-            return Ok(None);
-        }
-        let Some(first_row) = result_set.rows.first() else {
-            return Ok(None);
-        };
-        let Expression::FunctionCall { name, args, .. } = score_expr else {
-            return Ok(None);
-        };
-        if name != "text_bm25" || args.len() != 3 {
-            return Ok(None);
-        }
-        let Expression::Variable(variable) = &args[0] else {
-            return Ok(None);
-        };
-        // Same key the scalar's cache is built on: `Some` exactly when the
-        // argument is row-independent.
-        if ArgKey::of(&args[1]).is_none() || ArgKey::of(&args[2]).is_none() {
-            return Ok(None);
-        }
-
-        let Some(&first_idx) = first_row.node_bindings.get(variable) else {
-            return Ok(None);
-        };
-        let Some(node) = self.graph.graph.node_view(first_idx) else {
-            return Ok(None);
-        };
-        let node_type = node.node_type_str(&self.graph.interner).to_string();
-
-        // Shared with the scalar, so a fused query and a per-row one see the
-        // same staleness policy: the same auto-refresh, the same warning, and
-        // the same loud error when no index exists at all.
-        let cache = self.prepare_text_bm25(args, first_row, &node_type)?;
-        if cache.query_text.is_none() {
-            return Ok(None); // null query text — every row is null
-        }
-        let Some(store) =
-            crate::graph::text_indexes::text_index_store(self.graph, &node_type, &cache.prop_name)
-        else {
-            return Ok(None);
-        };
-
-        let view = store.read();
-        if store.generation() != cache.generation || view.documents() != result_set.rows.len() {
-            return Ok(None);
-        }
-        let Some(slots) = self.text_row_slots(variable, &node_type, result_set, &view) else {
-            return Ok(None);
-        };
-        let scored: Vec<(usize, f64)> = view
-            .top_k(&cache.prepared, limit)
-            .into_iter()
-            .filter_map(|(node, score)| {
-                slots
-                    .binary_search(&(node.index() as u32))
-                    .ok()
-                    .map(|row| (row, score))
-            })
-            .collect();
-        drop(view);
-
-        if scored.len() < limit {
-            return Ok(None);
-        }
-        self.project_hnsw_winners(
-            scored,
-            score_expr,
-            result_set,
-            return_clause,
-            score_item_index,
-        )
-        .map(Some)
-    }
-
-    /// The slot each row binds, ascending — the row-index lookup the postings
-    /// path needs, and the proof it is allowed to use it.
-    ///
-    /// Ascending is not incidental: it is what makes the index's
-    /// score-then-slot ranking identical to the scan's score-then-row-index
-    /// ranking, and it makes this vector `binary_search`able as a
-    /// slot-to-row-index map. Reordered or recycled type slots send the query
-    /// to the scan. Membership in the guarded index, together with equal
-    /// document count, proves there are no unindexed NULL-scoring rows.
-    /// Strictly ascending also rules out a row set that binds one node twice.
-    ///
-    /// Runs once per query over every row, so it is deliberately built from the
-    /// cheapest primitives available: a `Vec` push rather than a hash insert,
-    /// and an interned type-key comparison rather than resolving each node's
-    /// type back to a string. Measured on a 100k-document corpus, the string
-    /// form of this walk cost ~6 ms — most of what the operator had just saved.
-    fn text_row_slots(
-        &self,
-        variable: &str,
-        node_type: &str,
-        result_set: &ResultSet,
-        view: &crate::graph::text_indexes::TextIndexRead<'_>,
-    ) -> Option<Vec<u32>> {
-        let type_key = crate::api::InternedKey::from_str(node_type);
-        let mut slots = Vec::with_capacity(result_set.rows.len());
-        for row in &result_set.rows {
-            let node = *row.node_bindings.get(variable)?;
-            let slot = node.index() as u32;
-            if slots.last().is_some_and(|&previous| previous >= slot) {
-                return None;
-            }
-            if self.graph.graph.node_type_of(node) != Some(type_key) || !view.contains_node(node) {
-                return None;
-            }
-            slots.push(slot);
-        }
-        Some(slots)
     }
 
     // ========================================================================

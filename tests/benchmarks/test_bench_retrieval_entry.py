@@ -55,7 +55,7 @@ def test_bench_retrieval_entry(benchmark, entry_corpus, route):
         def run():
             return graph.cypher(statement, params=params).to_list()
 
-    result = benchmark.pedantic(run, rounds=100, iterations=1, warmup_rounds=20)
+    result = benchmark.pedantic(run, rounds=200, iterations=1, warmup_rounds=20)
     assert result
     if route in {"cypher", "profile", "filtered"}:
         assert result == expected

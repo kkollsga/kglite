@@ -25,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and persistence; ontology property types accept `list` and `array`.
 
 ### Changed
+- Eligible BM25 top-k queries retrieve positive hits before constructing rows,
+  preserving complete index membership, stable ties and scalar fallback behavior.
+
 - Eligible exact vector top-k queries score contiguous embedding slots and retain
   only winning rows, preserving scalar scores, stable ties and retrieval diagnostics.
 
@@ -33,6 +36,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exact and PROFILE queries retain their existing retrieval behavior.
 
 ### Fixed
+- Very large BM25 top-k limits allocate only for actual matching candidates,
+  preventing integer overflow and oversized heap allocation.
+
 - BM25 top-k retains NULL-scoring rows when a filtered population has the same
   size as its text index but includes nodes without indexed text.
 

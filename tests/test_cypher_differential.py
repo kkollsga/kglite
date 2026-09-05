@@ -3642,6 +3642,7 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
     # shapes below were run against the unoptimized path while the operator was
     # being written; the last two were *divergent* and are here because of it.
     ("text_bm25_top_k", "text_index_graph", TEXT_BM25_TOP_K, None),
+    ("text_bm25_complete_top_k", "complete_text_index_graph", TEXT_BM25_TOP_K, None),
     # Nine index documents and nine rows can still be different sets: the
     # absent-body row must win DESC even when the excluded document scores zero.
     (
@@ -3859,6 +3860,14 @@ def vector_index_entry_graph(vector_order_graph) -> kglite.KnowledgeGraph:
 @pytest.fixture
 def text_index_graph() -> kglite.KnowledgeGraph:
     return _build_text_index_graph()
+
+
+@pytest.fixture
+def complete_text_index_graph() -> kglite.KnowledgeGraph:
+    graph = _build_text_index_graph()
+    graph.cypher("MATCH (d:Doc) WHERE d.id = 10 DELETE d")
+    graph.build_text_index("Doc", "body")
+    return graph
 
 
 @pytest.fixture

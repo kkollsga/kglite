@@ -626,3 +626,29 @@ fn kernel_constants_and_formula_match_hand_computed_bm25() {
     // the stopword work that v1 ships no stopword list for.
     assert!(index.score(0, &rare) > index.score(0, &common));
 }
+
+#[test]
+fn top_k_huge_limit_bounds_capacity_by_actual_candidates() {
+    let docs = corpus(&[(0, "needle"), (1, "needle"), (2, "other")]);
+    let index = TextIndex::build(docs.iter().map(|(slot, text)| (*slot, text)));
+    let query = index.prepare_query("needle");
+    let expected = sorted_by_rank(&index, &query);
+    assert_eq!(
+        expected.iter().map(|hit| hit.slot).collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+    // usize::MAX first makes the pre-fix debug failure a checked k+1 overflow,
+    // before any attempt to allocate an enormous buffer.
+    for limit in [usize::MAX, i64::MAX as usize] {
+        let hits = index.top_k(&query, limit);
+        assert_eq!(
+            hits.iter()
+                .map(|hit| (hit.slot, hit.score))
+                .collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|hit| (hit.slot, hit.score))
+                .collect::<Vec<_>>()
+        );
+    }
+}
