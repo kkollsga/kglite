@@ -206,6 +206,29 @@ mod maintenance_tests {
     }
 
     #[test]
+    fn test_reindex_rebuilds_unique_occupants_including_empty_types() {
+        let mut g = make_test_graph(3, false);
+        g.create_unique_constraint("Person", &["age"]).unwrap();
+        let key = ("Person".to_string(), vec!["age".to_string()]);
+        let declarations = g.list_unique_constraints();
+        // A maintenance caller can relocate/delete storage before reindexing;
+        // both phantom occupants and missing live claims must be repaired.
+        g.graph.remove_node(NodeIndex::new(0));
+        g.unique_indices.get_mut(&key).unwrap().clear();
+        g.reindex();
+        assert_eq!(g.unique_indices[&key].len(), 2);
+        assert!(g.unique_indices[&key]
+            .values()
+            .all(|idx| *idx != NodeIndex::new(0)));
+        for idx in [NodeIndex::new(1), NodeIndex::new(2)] {
+            g.graph.remove_node(idx);
+        }
+        g.reindex();
+        assert_eq!(g.list_unique_constraints(), declarations);
+        assert!(g.unique_indices[&key].is_empty());
+    }
+
+    #[test]
     fn test_reindex_clears_id_indices() {
         let mut g = make_test_graph(3, false);
         g.build_id_index("Person");

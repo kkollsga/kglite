@@ -1980,6 +1980,12 @@ impl DirGraph {
         self.materialize_indexes();
         self.rebuild_type_indices();
 
+        // Vacuum relocates physical occupants; retain declarations even for
+        // constrained types whose last node was removed.
+        if !self.unique_indices.is_empty() {
+            self.rebuild_all_unique_indices();
+        }
+
         // Lazy caches rebuild on next access.
         self.id_indices.clear();
         self.connection_types.clear();

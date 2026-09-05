@@ -30,6 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exact and PROFILE queries retain their existing retrieval behavior.
 
 ### Fixed
+- Vacuum and reindex rebuild UNIQUE and NODE KEY occupancy after node slots move,
+  preventing false conflicts and duplicate values admitted after compaction.
+
 - Performance gates select qualified, digest-bound references and reject known
   inflated captures, missing platform identity and unusable comparisons. New
   release captures remain pending until explicitly qualified; raw history stays intact.
