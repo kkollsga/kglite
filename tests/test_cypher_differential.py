@@ -50,6 +50,21 @@ TEXT_BM25_TOP_K = "MATCH (d:Doc) RETURN d.id AS id, text_bm25(d, 'body', 'alpha 
 
 DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
     (
+        "vector_whole_type_exact_entry",
+        "vector_index_entry_graph",
+        "MATCH (d:Doc) RETURN d.id AS id, vector_score(d, 'summary_emb', [1.0,0.0], "
+        "{exact:true}) AS s ORDER BY s DESC LIMIT 3",
+        None,
+    ),
+    (
+        "vector_whole_type_exact_second_score",
+        "vector_index_entry_graph",
+        "MATCH (d:Doc) RETURN d.id AS id, vector_score(d, 'summary_emb', [1.0,0.0], "
+        "{exact:true}) AS first, vector_score(d, 'summary_emb', [0.0,1.0], {exact:true}) AS "
+        "second ORDER BY second DESC LIMIT 2",
+        None,
+    ),
+    (
         "vector_whole_type_index_entry",
         "vector_index_entry_graph",
         "MATCH (d:Doc) RETURN d.id AS id, vector_score(d, 'summary_emb', [1.0,0.0]) AS s ORDER BY s DESC LIMIT 3",

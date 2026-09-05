@@ -25,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and persistence; ontology property types accept `list` and `array`.
 
 ### Changed
+- Eligible exact vector top-k queries score contiguous embedding slots and retain
+  only winning rows, preserving scalar scores, stable ties and retrieval diagnostics.
+
 - Eligible indexed vector top-k queries construct only winning rows from an
   initial typed MATCH, reducing Cypher overhead. Filtered, incomplete, stale,
   exact and PROFILE queries retain their existing retrieval behavior.

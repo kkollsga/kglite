@@ -613,9 +613,9 @@ impl<'a> CypherExecutor<'a> {
             }
 
             if i == 0 && !profiling && result_set.rows.is_empty() && result_set.columns.is_empty() {
-                if let Some(result) = self.try_hnsw_entry(&query.clauses)? {
+                if let Some(result) = self.try_retrieval_entry(&query.clauses)? {
                     self.budget
-                        .check_rows(result.rows.len(), "HNSW retrieval")?;
+                        .check_rows(result.rows.len(), "vector retrieval")?;
                     result_set = result;
                     skip_clause[1] = true;
                     continue;

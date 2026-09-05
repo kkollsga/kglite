@@ -330,13 +330,7 @@ impl CypherExecutor<'_> {
             None => return Err(missing_embedding_error(self.graph, node_type, &c.prop_name)),
         };
 
-        if c.query_vec.len() != store.dimension {
-            return Err(format!(
-                "vector_score(): query vector dimension {} does not match embedding dimension {}",
-                c.query_vec.len(),
-                store.dimension
-            ));
-        }
+        Self::check_vector_score_dimension(c.query_vec.len(), store.dimension)?;
 
         match store.get_embedding_with_norm(node_idx.index()) {
             Some((embedding, norm)) => {
@@ -347,6 +341,18 @@ impl CypherExecutor<'_> {
         }
     }
 
+    pub(in crate::graph::languages::cypher::executor) fn check_vector_score_dimension(
+        query_dimension: usize,
+        embedding_dimension: usize,
+    ) -> Result<(), String> {
+        if query_dimension != embedding_dimension {
+            return Err(format!(
+                "vector_score(): query vector dimension {query_dimension} does not match embedding dimension {embedding_dimension}",
+            ));
+        }
+        Ok(())
+    }
+
     /// Parse `vector_score()`'s constant arguments — property name, query
     /// vector, and the metric (explicit argument, else the store's own, else
     /// cosine).
@@ -354,7 +360,7 @@ impl CypherExecutor<'_> {
     /// The returned entry carries the key it was prepared under, so the caller
     /// can park it for the rest of the scan; a row-dependent argument yields a
     /// keyless entry that scores this row only.
-    fn prepare_vector_score(
+    pub(in crate::graph::languages::cypher::executor) fn prepare_vector_score(
         &self,
         args: &[Expression],
         row: &ResultRow,
