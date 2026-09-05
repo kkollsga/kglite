@@ -1096,6 +1096,19 @@ pub kglite::api::durable::RawOp::RemoveNode::node_type: kglite::api::InternedKey
 pub kglite::api::durable::RawOp::SetNodeLabels(petgraph::graph_impl::NodeIndex, core::option::Option<alloc::boxed::Box<kglite::api::durable::BeforeImage>>)
 pub kglite::api::durable::RawOp::UpsertEdge(petgraph::graph_impl::EdgeIndex, kglite::api::durable::CaptureOrigin, core::option::Option<alloc::boxed::Box<kglite::api::durable::BeforeImage>>)
 pub kglite::api::durable::RawOp::UpsertNode(petgraph::graph_impl::NodeIndex, kglite::api::durable::CaptureOrigin, core::option::Option<alloc::boxed::Box<kglite::api::durable::BeforeImage>>)
+pub kglite::api::durable::RawOp::WalGroup
+pub kglite::api::durable::RawOp::WalGroup::conn_type: kglite::api::InternedKey
+pub kglite::api::durable::RawOp::WalGroup::source: petgraph::graph_impl::NodeIndex
+pub kglite::api::durable::RawOp::WalGroup::src_id: kglite::datatypes::values::Value
+pub kglite::api::durable::RawOp::WalGroup::src_type: kglite::api::InternedKey
+pub kglite::api::durable::RawOp::WalGroup::target: petgraph::graph_impl::NodeIndex
+pub kglite::api::durable::RawOp::WalGroup::tgt_id: kglite::datatypes::values::Value
+pub kglite::api::durable::RawOp::WalGroup::tgt_type: kglite::api::InternedKey
+pub kglite::api::durable::RawOp::WalNode
+pub kglite::api::durable::RawOp::WalNode::id: kglite::datatypes::values::Value
+pub kglite::api::durable::RawOp::WalNode::idx: petgraph::graph_impl::NodeIndex
+pub kglite::api::durable::RawOp::WalNode::node_type: kglite::api::InternedKey
+pub kglite::api::durable::RawOp::WalNode::reset: bool
 impl core::clone::Clone for kglite::api::durable::RawOp
 pub fn kglite::api::durable::RawOp::clone(&self) -> kglite::api::durable::RawOp
 impl core::cmp::PartialEq for kglite::api::durable::RawOp
@@ -1249,7 +1262,7 @@ pub fn kglite::api::durable::prepare_save_as_target(checkpoint_path: &std::path:
 pub fn kglite::api::durable::recover(path: &std::path::Path) -> core::io::error::Result<alloc::vec::Vec<kglite::api::durable::WalFrame>>
 pub fn kglite::api::durable::resolve_ops(raw: &[kglite::api::durable::RawOp], graph: &impl kglite::api::GraphRead, interner: &kglite::api::StringInterner, secondary_labels: impl core::ops::function::Fn(petgraph::graph_impl::NodeIndex) -> alloc::vec::Vec<alloc::string::String>) -> alloc::vec::Vec<kglite::graph::wal::MutationOp>
 pub fn kglite::api::durable::wal_path(checkpoint: &std::path::Path) -> std::path::PathBuf
-pub fn kglite::api::durable::wrap_for_durability(dir: &mut kglite::api::DirGraph)
+pub fn kglite::api::durable::wrap_for_durability(dir: &mut kglite::api::DirGraph) -> core::result::Result<(), kglite::api::durable::DurableOpenError>
 pub mod kglite::api::embeddings
 pub struct kglite::api::embeddings::EmbeddingIngestReport
 pub kglite::api::embeddings::EmbeddingIngestReport::dimension: usize

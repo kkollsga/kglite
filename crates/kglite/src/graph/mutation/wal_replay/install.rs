@@ -166,7 +166,7 @@ fn vivify_legacy_endpoints(
     let mut seen = HashSet::new();
     let mut rows = Vec::new();
     for (key, state) in &plan.edges {
-        if state.properties.is_none() || !plan.edge_survives(key, state) {
+        if state.group.is_some() || state.properties.is_none() || !plan.edge_survives(key, state) {
             continue;
         }
         for key in [
@@ -226,6 +226,10 @@ fn apply_edges(
         if !plan.edge_survives(key, state) {
             continue;
         }
+        if let Some(group) = &state.group {
+            replace_group(graph, key, group, identities, created)?;
+            continue;
+        }
         let Some((source, target)) = endpoints(identities, key) else {
             if state.properties.is_some() {
                 return Err(format!("WAL replay has missing endpoints for {}", key.0));
@@ -240,11 +244,14 @@ fn apply_edges(
                 .edges_connecting(source, target)
                 .filter(|edge| edge.weight().connection_type == connection_type)
                 .map(|edge| edge.id());
-            if state.properties.is_none() {
-                edges.next()
-            } else {
-                edges.last()
+            let first = edges.next();
+            if edges.next().is_some() {
+                return Err(format!(
+                    "ambiguous legacy WAL edge action for {} from {}({:?}) to {}({:?}): multiple matching relationships have no v2/v3 edge discriminator; refusing recovery without complete group state",
+                    key.0, key.1, key.2, key.3, key.4
+                ));
             }
+            first
         };
         if state.reset && state.properties.is_some() {
             if let Some(idx) = existing.take() {
@@ -329,4 +336,69 @@ fn prepare_exact_columns(graph: &mut DirGraph, node_type: &str, rows: &[Row]) {
         .unwrap_or_default();
     store.prepare_exact_values(&incoming, &metadata, &graph.interner);
     graph.install_column_store(node_type, Arc::new(store));
+}
+
+/// Reconcile the complete v4 group by exact property-map identity and count.
+/// Matching members keep legacy-invalid-value eligibility. Identical remove /
+/// recreate is intentionally indistinguishable in a final-state snapshot;
+/// ordinary writes still validate a newly introduced invalid member. Endpoint
+/// resets already detached all old incidences before reaching this function.
+fn replace_group(
+    graph: &mut DirGraph,
+    key: &EdgeKey,
+    rows: &[Properties],
+    identities: &Identities,
+    created: &mut Created,
+) -> Result<(), String> {
+    let Some((source, target)) = endpoints(identities, key) else {
+        return if rows.is_empty() {
+            Ok(())
+        } else {
+            Err(format!("WAL v4 group {} has missing endpoints", key.0))
+        };
+    };
+    let kind = graph.interner.get_or_intern(&key.0);
+    let mut existing: HashMap<
+        Vec<(crate::graph::schema::InternedKey, Value)>,
+        Vec<petgraph::graph::EdgeIndex>,
+    > = HashMap::new();
+    {
+        let _guard = graph.begin_read_pass();
+        for edge in graph
+            .graph
+            .edges_connecting(source, target)
+            .filter(|e| e.weight().connection_type == kind)
+        {
+            let mut properties = edge.weight().properties.clone();
+            properties.sort_unstable_by_key(|(key, _)| key.as_u64());
+            existing.entry(properties).or_default().push(edge.id());
+        }
+    }
+    let mut additions = Vec::new();
+    for props in rows {
+        let mut properties: Vec<_> = props
+            .iter()
+            .map(|(k, v)| (graph.interner.get_or_intern(k), v.clone()))
+            .collect();
+        properties.sort_unstable_by_key(|(key, _)| key.as_u64());
+        if existing.get_mut(&properties).and_then(Vec::pop).is_none() {
+            additions.push(properties);
+        }
+        let metadata = props
+            .iter()
+            .map(|(k, v)| (k.clone(), v.type_name().to_string()))
+            .collect();
+        graph.upsert_connection_type_metadata(&key.0, &key.1, &key.3, metadata);
+    }
+    for edge in existing.into_values().flatten() {
+        graph.graph.remove_edge(edge);
+    }
+    for properties in additions {
+        let idx = graph
+            .graph
+            .add_edge(source, target, EdgeData::new_interned(kind, properties));
+        created.edges.insert(idx);
+    }
+    graph.graph.flush_pending_writes();
+    Ok(())
 }

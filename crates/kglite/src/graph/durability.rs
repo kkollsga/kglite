@@ -59,7 +59,6 @@ use std::sync::Arc;
 use crate::graph::dir_graph::DirGraph;
 use crate::graph::handle::make_dir_graph_mut;
 use crate::graph::mutation::wal_replay::prepare_replay;
-use crate::graph::storage::recording::wrap_for_durability;
 use crate::graph::wal::{recover, recover_for_append, wal_path, DurabilityLevel, Wal, WalFrame};
 
 mod save_as;
@@ -80,7 +79,7 @@ pub enum DurableOpenError {
     /// The recovered frames could not be applied to the checkpoint.
     Replay(String),
     /// The open is structurally unsafe and was refused: unreplayed frames at
-    /// level `off`, or a graph another durability owner already holds.
+    /// level `off`, another durability owner, or duplicate exact logical node IDs.
     Refused(String),
 }
 
@@ -115,6 +114,9 @@ impl std::error::Error for DurableOpenError {}
 ///   `checkpoint_lsn` the other's frames sit below, so replay silently drops
 ///   committed data. A wrapper installed by change data capture alone claims no
 ///   ownership and does not refuse.
+/// - **Duplicate exact `(primary type, id)` identities** — WAL operations cannot
+///   distinguish their nodes. Admission is checked before sidecar changes and
+///   again on the prepared recovered state before publishing ownership.
 ///
 /// **Disk-mode graphs are the caller's refusal, not this function's.** A disk
 /// graph commits by publishing an immutable generation, so it keeps no logical
@@ -155,6 +157,8 @@ pub fn open_log(
         ));
     }
 
+    validate_durable_identities(graph)?;
+
     // Reject non-tail damage before replay or capture ownership changes.
     // Keep the scan's exact boundary so opening the writer need not rescan.
     let recovered = recover_for_append(&wpath).map_err(|e| {
@@ -172,6 +176,10 @@ pub fn open_log(
     let (prepared, max_lsn) = prepare_replay(graph, &recovered.frames, checkpoint_lsn)
         .map_err(DurableOpenError::Replay)?;
 
+    if let Some(prepared) = &prepared {
+        validate_durable_identities(prepared)?;
+    }
+
     finish_recovered_open(graph, prepared, max_lsn, || {
         Wal::open_recovered(wpath.clone(), sync, recovered).map_err(|e| {
             DurableOpenError::Io(format!(
@@ -181,6 +189,27 @@ pub fn open_log(
         })
     })
     .map(Some)
+}
+
+pub(crate) fn validate_durable_identities(graph: &DirGraph) -> Result<(), DurableOpenError> {
+    use crate::graph::storage::GraphRead;
+    let _guard = graph.begin_read_pass();
+    let mut seen = std::collections::HashSet::new();
+    for idx in graph.graph.node_indices() {
+        let Some(kind) = graph.graph.node_type_of(idx) else {
+            continue;
+        };
+        let Some(id) = graph.graph.get_node_id(idx) else {
+            continue;
+        };
+        if !seen.insert((kind, id.clone())) {
+            return Err(DurableOpenError::Refused(format!(
+                "duplicate logical node identity in type '{}' with id {:?}; durability requires one node per exact (primary type, id). Open non-durably and assign distinct identities or remove duplicates before enabling durability",
+                graph.interner.resolve(kind), id
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// The publication boundary is after the last fallible file operation. Keeping
@@ -202,7 +231,8 @@ fn finish_recovered_open(
     if let Some(rg) = dir.graph.recording_mut() {
         let _ = rg.take_ops();
     }
-    wrap_for_durability(dir);
+    // Admission was validated before the writer-open/publication boundary.
+    dir.graph.wrap_for_durability();
     Ok((wal, max_lsn + 1))
 }
 

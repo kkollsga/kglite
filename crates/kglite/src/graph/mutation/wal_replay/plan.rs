@@ -19,6 +19,7 @@ pub(super) struct NodeState {
 pub(super) struct EdgeState {
     pub properties: Option<Properties>,
     pub reset: bool,
+    pub group: Option<Vec<Properties>>,
     source_generation: u64,
     target_generation: u64,
 }
@@ -58,6 +59,42 @@ impl ReplayPlan {
 
     fn fold_op(&mut self, op: &MutationOp) {
         match op {
+            MutationOp::ReplaceNodeState {
+                node_type,
+                id,
+                title,
+                properties,
+                labels,
+                reset,
+            } => {
+                let node = self.node_mut((node_type.clone(), id.clone()));
+                if *reset {
+                    node.reset = true;
+                    node.generation += 1;
+                }
+                node.row = Some((title.clone(), properties.clone()));
+                node.removed = false;
+                node.labels = Some(labels.clone());
+            }
+            MutationOp::ReplaceEdgeGroup {
+                conn_type,
+                src_type,
+                src_id,
+                tgt_type,
+                tgt_id,
+                edges,
+            } => {
+                let key = (
+                    conn_type.clone(),
+                    src_type.clone(),
+                    src_id.clone(),
+                    tgt_type.clone(),
+                    tgt_id.clone(),
+                );
+                self.fold_edge(key.clone(), None);
+                let slot = self.edge_slots[&key];
+                self.edges[slot].1.group = Some(edges.clone());
+            }
             MutationOp::UpsertNode {
                 node_type,
                 id,
@@ -130,6 +167,7 @@ impl ReplayPlan {
             .is_some_and(|&slot| self.edges[slot].1.reset);
         let state = EdgeState {
             reset: properties.is_none() || prior_reset,
+            group: None,
             properties,
             source_generation: self.generation(&(key.1.clone(), key.2.clone())),
             target_generation: self.generation(&(key.3.clone(), key.4.clone())),

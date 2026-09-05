@@ -255,6 +255,11 @@ impl BatchProcessor {
                 properties: PropertyStorage::Columnar(ColumnarRow::new(row_id)),
             };
             let node_idx = GraphWrite::add_node(&mut graph.graph, node_data);
+            if let Some(recording) = graph.graph.recording_mut() {
+                if recording.is_wal_owner() {
+                    recording.note_wal_node_identity(node_idx, type_key, creation.id.clone(), true);
+                }
+            }
 
             deferred_columnar.push((node_idx, row_id));
 
@@ -1067,7 +1072,7 @@ mod wal_amplification_tests {
     use crate::graph::mutation::maintain::add_nodes;
     use crate::graph::schema::GraphBackend;
     use crate::graph::storage::mode::{new_dir_graph_in_mode, StorageMode};
-    use crate::graph::storage::recording::{resolve_ops, RecordingGraph};
+    use crate::graph::storage::recording::resolve_ops;
     use crate::graph::storage::GraphRead;
     use crate::graph::wal::{append_frame, WalFrame};
 
@@ -1075,10 +1080,8 @@ mod wal_amplification_tests {
     /// return `(number of resolved WAL ops, encoded frame bytes)`.
     fn wal_cost_of_appending(n: i64) -> (usize, usize) {
         let mut dir = new_dir_graph_in_mode(StorageMode::Mapped, None).expect("mapped graph");
-        // Wrap the mapped backend exactly as `setup_durable` does, so the
-        // capture seam under test is the real one.
-        let inner = std::mem::replace(&mut dir.graph, GraphBackend::new());
-        dir.graph = GraphBackend::Recording(Box::new(RecordingGraph::new(inner)));
+        // Exercise the actual WAL owner, including v4 logical markers.
+        crate::graph::storage::recording::wrap_for_durability(&mut dir).unwrap();
         assert!(
             dir.graph.is_mapped(),
             "the sweeps under test are mapped-only"
@@ -1114,6 +1117,18 @@ mod wal_amplification_tests {
             dir.secondary_label_names(idx)
         });
         let op_count = ops.len();
+        let mut ids: Vec<_> = ops
+            .iter()
+            .map(|op| match op {
+                crate::graph::wal::MutationOp::ReplaceNodeState {
+                    id: Value::Int64(id),
+                    ..
+                } => *id,
+                _ => panic!("real WAL bulk capture must carry exact v4 identities"),
+            })
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, (0..n).collect::<Vec<_>>());
 
         let mut encoded = Vec::new();
         append_frame(&mut encoded, &WalFrame { lsn: 1, ops }).expect("frame encodes");

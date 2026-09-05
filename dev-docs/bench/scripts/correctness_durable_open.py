@@ -24,7 +24,7 @@ parser.add_argument("--warmup", type=int, default=20)
 parser.add_argument("--reference-manifest", type=Path)
 args = parser.parse_args()
 if args.reference_manifest:
-    reference = json.loads(args.reference_manifest.read_text())
+    reference = json.loads(args.reference_manifest.read_text(encoding="utf-8"))
     assert reference["profile"] == "release" and reference["source_clean"] and reference["exit_code"] == 0
     extension = Path(importlib.import_module("kglite.kglite").__file__)
     suffix = ".dylib" if sys.platform == "darwin" else ".so"
@@ -88,6 +88,7 @@ args.output.write_text(
         },
         indent=2,
     )
-    + "\n"
+    + "\n",
+    encoding="utf-8",
 )
 print(json.dumps({"cells": len(cells), "oracles_passed": True}))

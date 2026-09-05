@@ -26,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- New writes use WAL format 4 for complete node and parallel-relationship state;
+  readers decode formats 2–4 and older readers refuse the new WAL header. The
+  `.kgl` checkpoint format is unchanged. Rust `wrap_for_durability` callers now
+  handle a `Result` when claiming durable capture ownership.
 - Geographic DBSCAN builds neighbors directly, avoiding the dense distance matrix while preserving exact WGS84 distances, cluster order and cancellation. Measured peak process memory at 4,096 points falls 35–55% with query time unchanged.
 - DBSCAN uses constant-time queue membership for faster dense clustering, preserving cluster labels and input order and avoiding membership allocation for all-noise inputs.
 - Release publication checks the exact core crate in the registry index immediately, replacing redundant fixed waits and search polling while blocking dependents on readiness failure.
@@ -45,6 +49,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Durable replay preserves equal parallel relationships and selected member
+  updates/deletions. Known-ambiguous legacy parallel-edge actions and duplicate
+  logical identities at durable adoption are refused instead of silently
+  choosing a member or merging identities.
 - Direct writes to reloaded graphs enforce deferred indexes and constraints.
   Disk saves preserve declared indexes, including deferred definitions.
 - MERGE uses MATCH's ordinary-property equality and field resolution, preventing

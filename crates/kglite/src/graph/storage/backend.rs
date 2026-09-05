@@ -201,9 +201,9 @@ impl GraphBackend {
         }
     }
 
-    /// Wrap this backend in the write-capture layer, idempotently. See
-    /// [`crate::graph::storage::recording::wrap_for_durability`] for the
-    /// `DirGraph`-shaped entry point every binding calls.
+    /// Claim capture after DirGraph identity admission. The public entry is
+    /// [`crate::graph::storage::recording::wrap_for_durability`]; durable-open
+    /// publication also calls here after its pre-file/pre-publication checks.
     pub(crate) fn wrap_for_durability(&mut self) {
         self.wrap_for_capture();
         if let GraphBackend::Recording(rg) = self {

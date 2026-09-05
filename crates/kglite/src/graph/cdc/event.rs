@@ -201,6 +201,7 @@ pub(super) fn events_from_raw(
 
     for op in raw {
         match op {
+            RawOp::WalNode { .. } | RawOp::WalGroup { .. } => {}
             RawOp::UpsertNode(idx, origin, before) => stage_upsert(
                 &mut entries,
                 &mut slots,

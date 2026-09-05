@@ -27,9 +27,11 @@
 //! Ops are keyed by **stable logical identity**, never by petgraph
 //! `NodeIndex`/`EdgeIndex` (which do not survive checkpoint load or
 //! compaction). A node is `(node_type, id)`; an edge is
-//! `(conn_type, src, tgt)`. Both are unique in kglite's model, so the
-//! two state-changing shapes are an idempotent **upsert** (add-or-replace
-//! the full property set) and a **remove**. Idempotence means replaying a
+//! `(conn_type, src, tgt)` identifies a parallel-edge group, not one edge.
+//! v4 persists its complete ordered property-map sequence, including equal
+//! maps, and full node state with explicit incarnation resets. Legacy v2/v3
+//! edge upserts/removes retain their original single-edge semantics.
+//! Idempotence means replaying a
 //! frame twice is harmless — important for crash recovery, where the last
 //! frame before a crash may or may not have been applied to the snapshot.
 //!
@@ -37,7 +39,7 @@
 //!
 //! A frame is `[len: u32 LE][crc32: u32 LE][payload: codec(WalFrame)]`,
 //! emitted by a **single** `write_all` (see [`append_frame`]).
-//! The v2/v3 file headers select Postcard for every frame. Older headers
+//! The v2/v3/v4 file headers select Postcard for every frame. Older headers
 //! are rejected before any payload or torn-tail handling.
 //! A crash mid-append leaves a torn trailing frame; [`read_frames`] stops
 //! at the first short read or CRC mismatch and returns every frame up to
@@ -94,7 +96,12 @@ pub const WAL_MAGIC: [u8; 4] = *b"KWAL";
 /// discard* committed frames. The header bump converts that silent data
 /// loss into the loud "unsupported WAL format version" refusal such a
 /// build already implements.
-pub const WAL_FORMAT_VERSION: u8 = 3;
+///
+/// **v3 → v4** appends full-node and parallel-group state tags 5 and 6.
+/// Prior tags and payloads are unchanged. The header is upgraded before a
+/// new writer appends, so a v2/v3-only reader refuses rather than dropping
+/// unfamiliar committed operations as an undecodable tail.
+pub const WAL_FORMAT_VERSION: u8 = 4;
 
 /// Oldest WAL format this build can replay. Frames from any version in
 /// `MIN_READABLE_WAL_FORMAT_VERSION..=WAL_FORMAT_VERSION` decode with the
@@ -255,6 +262,25 @@ pub enum MutationOp {
         id: Value,
         labels: Vec<String>,
     },
+    /// Complete v4 node state. Reset severs the checkpoint incarnation first.
+    ReplaceNodeState {
+        node_type: String,
+        id: Value,
+        title: Value,
+        properties: Vec<(String, Value)>,
+        labels: Vec<String>,
+        reset: bool,
+    },
+    /// Complete v4 parallel group, including identical property maps.
+    /// Empty edges removes the group; nonempty groups require live endpoints.
+    ReplaceEdgeGroup {
+        conn_type: String,
+        src_type: String,
+        src_id: Value,
+        tgt_type: String,
+        tgt_id: Value,
+        edges: Vec<Vec<(String, Value)>>,
+    },
 }
 
 /// One committed mutation operation: the ops it produced, tagged with a
@@ -332,7 +358,18 @@ fn append_frame_with_codec(
     frame: &WalFrame,
     codec: crate::serde_codec::CodecVersion,
 ) -> io::Result<()> {
-    let payload = crate::serde_codec::encode_versioned(codec, frame, MAX_WAL_FRAME_BYTES)
+    append_frame_bounded(w, frame, codec, MAX_WAL_FRAME_BYTES)
+}
+
+// One envelope writer; the explicit bound lets tests reject a full group
+// without allocating a 4 GiB fixture. Production always passes the format cap.
+fn append_frame_bounded(
+    w: &mut impl Write,
+    frame: &WalFrame,
+    codec: crate::serde_codec::CodecVersion,
+    limit: u64,
+) -> io::Result<()> {
+    let payload = crate::serde_codec::encode_versioned(codec, frame, limit)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     let len = u32::try_from(payload.len())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "WAL frame exceeds 4 GiB"))?;
@@ -1798,3 +1835,7 @@ mod tests {
 #[cfg(test)]
 #[path = "wal_tail_tests.rs"]
 mod tail_tests;
+
+#[cfg(test)]
+#[path = "wal_v4_tests.rs"]
+mod v4_tests;

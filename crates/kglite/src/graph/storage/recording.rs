@@ -17,15 +17,11 @@
 //!
 //! The backend stores **interned** node-type / property keys; resolving
 //! them to strings needs the `DirGraph`'s `StringInterner`, which the
-//! backend does not own. So writes buffer *raw* ops keyed by
-//! `NodeIndex`/`EdgeIndex` + `InternedKey`, and [`resolve_ops`] — run at
-//! flush, where the interner is in scope — turns them into the
-//! string-keyed, identity-keyed [`crate::graph::wal::MutationOp`]s the
-//! WAL persists. Upserts are captured as a placeholder index and
-//! resolved against the *final* post-batch node/edge state (so an
-//! add-then-SET yields two identical whole-entity upserts, idempotent on
-//! replay; an add-then-remove drops the upsert and keeps the remove).
-//! Removes capture their logical `(type, id)` *before* the entry vanishes.
+//! backend does not own. CDC keeps index-keyed ops and before-images. Durable
+//! capture also appends logical node/group touches to that same rollback-
+//! truncated sequence, before deletion or slot reuse can erase identity.
+//! [`resolve_ops`] normalizes those touches into v4 final node/group snapshots;
+//! raw sequences without WAL markers retain the legacy resolver semantics.
 //!
 //! ## `Send + Sync` without a `Mutex`
 //!
@@ -43,16 +39,15 @@ use petgraph::Direction;
 use std::collections::HashMap;
 use std::time::Instant;
 
+#[path = "recording/wal_capture.rs"]
+mod wal_capture;
+
 /// Which `GraphWrite` method produced an upsert: the entity came into
 /// existence (`add_node` / `add_edge`) or an existing one was mutated.
 ///
-/// **In-memory capture state only** — never reaches a
-/// [`WalFrame`](crate::graph::wal::WalFrame), because
-/// [`MutationOp::UpsertNode`] is add-or-replace either way (which is what makes
-/// replay idempotent). Change data capture *does* care — "created" and
-/// "updated" are different events, and the method boundary is the only place
-/// that knows which one happened — so keeping the marker here rather than in
-/// `MutationOp` lets CDC distinguish them without moving `WAL_FORMAT_VERSION`.
+/// CDC distinguishes creation from update at the mutation boundary. WAL v4
+/// also captures a separate logical reset marker for node incarnations; this
+/// enum remains raw capture state rather than a serialized tag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureOrigin {
     /// `add_node` / `add_edge` — the entity did not exist before this op.
@@ -91,9 +86,8 @@ pub struct BeforeImage {
 
 /// Identity of an entity within one capture batch, for first-touch dedup.
 ///
-/// The storage address, matching `cdc::event`'s collapse key and for the same
-/// reason: it is stable for the batch's lifetime and cheap to hash, while
-/// logical identity is `PartialEq`-only by design (it carries floats).
+/// CDC collapses touches by storage address. Slot reuse is handled explicitly
+/// by `forget_slot`; a reused address must not inherit the old before-image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum BeforeSlot {
     Node(u32),
@@ -145,6 +139,24 @@ pub enum RawOp {
     /// op — idempotent on replay, not merged into one. Dropped at resolve
     /// time if the node was later removed.
     SetNodeLabels(NodeIndex, Option<Box<BeforeImage>>),
+    /// WAL-only logical identity captured before physical slots can be reused.
+    /// CDC ignores these records; sharing the op sequence preserves rollback.
+    WalNode {
+        idx: NodeIndex,
+        node_type: InternedKey,
+        id: Value,
+        reset: bool,
+    },
+    /// WAL-only group identity; endpoint slots are validated hints at drain.
+    WalGroup {
+        source: NodeIndex,
+        target: NodeIndex,
+        conn_type: InternedKey,
+        src_type: InternedKey,
+        src_id: Value,
+        tgt_type: InternedKey,
+        tgt_id: Value,
+    },
 }
 
 /// Where an entity's first-touch image lives in the op buffer.
@@ -188,6 +200,7 @@ fn op_image(op: &RawOp) -> Option<&BeforeImage> {
         | RawOp::SetNodeLabels(_, before)
         | RawOp::RemoveNode { before, .. }
         | RawOp::RemoveEdge { before, .. } => before.as_deref(),
+        RawOp::WalNode { .. } | RawOp::WalGroup { .. } => None,
     }
 }
 
@@ -199,6 +212,7 @@ fn op_image_mut(op: &mut RawOp) -> Option<&mut BeforeImage> {
         | RawOp::SetNodeLabels(_, before)
         | RawOp::RemoveNode { before, .. }
         | RawOp::RemoveEdge { before, .. } => before.as_deref_mut(),
+        RawOp::WalNode { .. } | RawOp::WalGroup { .. } => None,
     }
 }
 
@@ -426,6 +440,7 @@ impl<G: GraphRead> RecordingGraph<G> {
     }
 
     fn push_node_upsert(&mut self, idx: NodeIndex, origin: CaptureOrigin) {
+        self.note_wal_node(idx, origin == CaptureOrigin::Create);
         let before = self.take_node_image(idx);
         if before.is_some() {
             self.record_image_site(BeforeSlot::Node(node_slot(idx)), self.ops.len());
@@ -434,6 +449,7 @@ impl<G: GraphRead> RecordingGraph<G> {
     }
 
     fn push_edge_upsert(&mut self, idx: EdgeIndex, origin: CaptureOrigin) {
+        self.note_wal_group(idx);
         let before = self.take_edge_image(idx);
         if before.is_some() {
             self.record_image_site(BeforeSlot::Edge(edge_slot(idx)), self.ops.len());
@@ -554,6 +570,7 @@ impl<G: GraphRead> RecordingGraph<G> {
     /// instead. Resolved at flush like any other index-keyed op.
     #[inline]
     pub fn note_node_labels(&mut self, idx: NodeIndex) {
+        self.note_wal_node(idx, false);
         let before = self.take_node_image(idx);
         if before.is_some() {
             self.record_image_site(BeforeSlot::Node(node_slot(idx)), self.ops.len());
@@ -663,7 +680,9 @@ impl<G: GraphRead + Clone> Clone for RecordingGraph<G> {
 
 /// Wrap `dir`'s backend in the [`RecordingGraph`] write-capture layer so every
 /// mutation that crosses the `GraphWrite` seam is buffered for the WAL.
-/// Idempotent — an already-wrapped graph is left alone.
+/// Returns an error before changing ownership if two nodes have the same exact
+/// `(primary type, id)`. Callers must handle this admission result. CDC-only
+/// recording remains permissive; a validated existing wrapper is retained.
 ///
 /// Storage-mode-agnostic by construction: the wrapper wraps the
 /// [`GraphBackend`](crate::graph::storage::backend::GraphBackend) *enum* rather
@@ -672,30 +691,38 @@ impl<G: GraphRead + Clone> Clone for RecordingGraph<G> {
 /// logical WAL at all.) Core rather than per-binding because
 /// `Session::open_durable` and every non-Rust binding that opens a durable
 /// graph needs exactly this, byte for byte.
-pub fn wrap_for_durability(dir: &mut crate::graph::dir_graph::DirGraph) {
+pub fn wrap_for_durability(
+    dir: &mut crate::graph::dir_graph::DirGraph,
+) -> Result<(), crate::graph::durability::DurableOpenError> {
+    crate::graph::durability::validate_durable_identities(dir)?;
     dir.graph.wrap_for_durability();
+    Ok(())
 }
 
-/// Resolve buffered [`RawOp`]s into string-keyed, identity-keyed
-/// [`MutationOp`]s, reading final node/edge state from `graph` and
-/// resolving interned keys through `interner`. Upserts whose node/edge
-/// no longer exists (removed later in the same batch) are dropped — the
-/// corresponding remove op already captures the final state.
+/// Resolve capture for persistence. WAL-marked sequences become v4 full node
+/// and parallel-group snapshots, emitted after deduplicating logical touches.
+/// Unmarked raw sequences retain the v2/v3 resolver used by standalone capture
+/// consumers. This does not transform CDC's raw events or before-images.
 ///
-/// `secondary_labels` yields a node's current secondary labels by name, ordered
-/// as `DirGraph::node_labels` orders them. A callback rather than a field read
-/// because labels are not backend state: they live in
-/// `DirGraph::secondary_label_index`, above the `graph` given here. Callers
-/// pass `DirGraph::secondary_label_names`.
+/// `secondary_labels` reads the final label set from `DirGraph`, above the
+/// backend. Node/group slots are only hints in the v4 path; captured logical
+/// identities prevent deletion/reuse from redirecting a prior touch.
 pub fn resolve_ops(
     raw: &[RawOp],
     graph: &impl GraphRead,
     interner: &StringInterner,
     secondary_labels: impl Fn(NodeIndex) -> Vec<String>,
 ) -> Vec<MutationOp> {
+    if raw
+        .iter()
+        .any(|op| matches!(op, RawOp::WalNode { .. } | RawOp::WalGroup { .. }))
+    {
+        return wal_capture::resolve(raw, graph, interner, secondary_labels);
+    }
     let mut out = Vec::with_capacity(raw.len());
     for op in raw {
         match op {
+            RawOp::WalNode { .. } | RawOp::WalGroup { .. } => unreachable!("handled above"),
             RawOp::UpsertNode(idx, _, _) => {
                 if let Some(nd) = graph.node_view(*idx) {
                     out.push(MutationOp::UpsertNode {
@@ -1237,7 +1264,13 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
 
     #[inline]
     fn add_node(&mut self, data: NodeData) -> NodeIndex {
+        // Bulk column stores are detached here. Their caller supplies the
+        // exact identity immediately after add; never capture the Null sentinel.
+        let inline = data.properties.columnar_row_id().is_none();
         let idx = self.inner.add_node(data);
+        if inline {
+            self.note_wal_node(idx, true);
+        }
         self.forget_slot(BeforeSlot::Node(node_slot(idx)));
         // A create has nothing before it; the `None` is the fact, not a gap.
         self.ops
@@ -1247,6 +1280,8 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
 
     #[inline]
     fn remove_node(&mut self, idx: NodeIndex) -> Option<NodeData> {
+        self.note_wal_node(idx, false);
+        self.note_wal_incident_groups(idx);
         // Capture the logical identity before the node vanishes.
         let identity = self
             .inner
@@ -1275,6 +1310,7 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
     #[inline]
     fn add_edge(&mut self, a: NodeIndex, b: NodeIndex, data: EdgeData) -> EdgeIndex {
         let eidx = self.inner.add_edge(a, b, data);
+        self.note_wal_group(eidx);
         self.forget_slot(BeforeSlot::Edge(edge_slot(eidx)));
         self.ops
             .push(RawOp::UpsertEdge(eidx, CaptureOrigin::Create, None));
@@ -1283,6 +1319,7 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
 
     #[inline]
     fn remove_edge(&mut self, idx: EdgeIndex) -> Option<EdgeData> {
+        self.note_wal_group(idx);
         // Capture conn type + both endpoints' logical identity before the
         // edge vanishes.
         let identity = self.inner.edge_endpoints(idx).and_then(|(a, b)| {
