@@ -1630,8 +1630,9 @@ impl KnowledgeGraph {
         py_out::pattern_matches_to_pylist(py, &matches, &self.inner)
     }
 
-    /// Execute a Cypher query, returning a ResultView or a DataFrame when to_df=True.
+    /// Run Cypher reads and writes; write_scope limits mutations such as DETACH DELETE by stored type; return a ResultView or a DataFrame when to_df=True.
     #[pyo3(signature = (query, *, to_df=false, params=None, timeout_ms=None, max_work_units=None, row_limit=None, streaming=true, parallel=false, disable_optimizer=false, disabled_passes=None, write_scope=None, git_sha=None, modified_by=None))]
+    // Shared keyword-only query options preserve parity across Python entry points.
     #[allow(clippy::too_many_arguments)]
     // The detached closure preserves the engine's structured KgError until PyErr conversion.
     #[allow(clippy::result_large_err)]
