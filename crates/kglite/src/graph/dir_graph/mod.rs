@@ -2165,7 +2165,7 @@ impl DirGraph {
 
         // Rebuild the columnar stores: the old ones carry orphaned rows from
         // deleted nodes, and every row id the compaction just invalidated. The
-        // disable/enable cycle reads only live nodes, producing fresh
+        // rebuild reads only live nodes, producing fresh
         // `ColumnStore`s with no dead rows.
         //
         // Still gated, and the gate still has a false arm — narrowly. Every
