@@ -192,10 +192,10 @@ impl TypeBucket {
 
     /// Fold the levels back into one when this graph is their last holder.
     ///
-    /// Called at write entry, so "hold a view, write, drop the view, write
-    /// again" returns to the flat representation on the very next write. A
-    /// still-shared leading level is left alone and only the owned suffix
-    /// merges, which bounds the depth without copying the base.
+    /// Called at write entry or successful Session publication, so "hold a view,
+    /// write, drop the view, write again" returns to the flat representation on the
+    /// very next write. A still-shared leading level is left alone and only the
+    /// owned suffix merges, which bounds the depth without copying the base.
     pub fn try_compact(&mut self) {
         if self.levels.len() <= 1 {
             return;

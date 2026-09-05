@@ -336,6 +336,11 @@ impl Session {
         let new_version = current_version + 1;
         working.set_version(new_version);
         *guard = Arc::new(working);
+        // Assignment drops the former owner before checking layer ownership.
+        // Retained snapshots still prevent their shared bases from being folded.
+        if let Some(published) = Arc::get_mut(&mut guard) {
+            crate::graph::handle::compact_dir_graph(published);
+        }
         CommitOutcome::Committed { new_version }
     }
 

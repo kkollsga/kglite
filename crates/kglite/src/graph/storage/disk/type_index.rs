@@ -451,10 +451,10 @@ impl TypeIndexStore {
     /// Fold every bucket's level stack back into one, for the buckets this
     /// graph is the last holder of.
     ///
-    /// Called at write entry alongside the backend's and `id_indices`'
-    /// compaction, so "hold a view, write, drop the view, write again" returns
-    /// to the flat representation on the next write. Per bucket this is an
-    /// `Arc::get_mut` probe plus an O(delta) merge.
+    /// Called at write entry or successful Session publication alongside the
+    /// backend's and `id_indices`' compaction, so "hold a view, write, drop the
+    /// view, write again" returns to the flat representation on the next write. Per
+    /// bucket this is an `Arc::get_mut` probe plus an O(delta) merge.
     pub fn try_compact(&mut self) {
         for bucket in self.overlay.values_mut() {
             bucket.try_compact();

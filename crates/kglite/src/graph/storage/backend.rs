@@ -379,12 +379,8 @@ impl GraphBackend {
 
     /// Fold an overlay back into its base when this writer is the last holder.
     ///
-    /// **Called at write entry** (`handle::make_dir_graph_mut_preserving_lineage`),
-    /// the earliest moment a writer can observe that the reader has gone —
-    /// `Arc::get_mut` succeeding *is* that observation. So "hold a view, write,
-    /// drop the view, write again" returns to the flat representation on the
-    /// next write, with no timer and no bookkeeping. A no-op on every other
-    /// variant, and on `Forked` while a reader is still live.
+    /// Called at handle write entry and after Session publication drops its old
+    /// owner. A no-op on other variants and while a reader still holds the base.
     pub(crate) fn try_compact(&mut self) {
         if let GraphBackend::Recording(rg) = self {
             rg.inner_mut().try_compact();

@@ -729,13 +729,14 @@ impl IdIndexStore {
 
     /// Fold every shared base back in where this graph is its last holder.
     ///
-    /// Called at write entry beside `GraphBackend::try_compact`, so the
-    /// "hold a view, write, drop the view, write again" sequence returns to the
-    /// flat representation on the very next write. Per entry the fold is a plain
-    /// map overwrite: unlike the topology overlay there is no slot to predict,
-    /// because the delta already recorded the real `NodeIndex` values the graph
-    /// handed out. What it must not do is edit a base another graph is reading,
-    /// which is what `Arc::get_mut` inside `TypeEntry::try_compact` gates.
+    /// Called at write entry or successful Session publication beside
+    /// `GraphBackend::try_compact`, so the "hold a view, write, drop the view,
+    /// write again" sequence returns to the flat representation on the very next
+    /// write. Per entry the fold is a plain map overwrite: unlike the topology
+    /// overlay there is no slot to predict, because the delta already recorded the
+    /// real `NodeIndex` values the graph handed out. What it must not do is edit a
+    /// base another graph is reading, which is what `Arc::get_mut` inside
+    /// `TypeEntry::try_compact` gates.
     pub fn try_compact(&mut self) {
         for entry in self.overlay.get_mut().unwrap().values_mut() {
             entry.try_compact();

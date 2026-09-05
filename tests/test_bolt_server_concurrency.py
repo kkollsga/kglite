@@ -230,11 +230,11 @@ def test_sustained_mixed_load_5_seconds(bolt_server):
                             op_counter[0] += 1
                     except Exception as e:  # noqa: BLE001
                         with errors_lock:
-                            errors.append(repr(e))
+                            errors.append(str(e))
                             return
         except Exception as e:  # noqa: BLE001
             with errors_lock:
-                errors.append(f"session-open: {e!r}")
+                errors.append(f"session-open: {e}")
 
     def worker_write(driver, worker_id: int):
         try:
@@ -243,7 +243,8 @@ def test_sustained_mixed_load_5_seconds(bolt_server):
                 while not stop_event.is_set():
                     try:
                         tx = session.begin_transaction()
-                        nid = 7000 + worker_id * 1000 + local_seq
+                        # Interleaving stays disjoint when either writer passes 1000 commits.
+                        nid = 7000 + 2 * local_seq + worker_id
                         tx.run(f"CREATE (:Person {{id: {nid}, title: 'w{worker_id}-{local_seq}'}})")
                         tx.commit()
                         with counter_lock:
@@ -260,11 +261,11 @@ def test_sustained_mixed_load_5_seconds(bolt_server):
                                 pass
                             continue
                         with errors_lock:
-                            errors.append(repr(e))
+                            errors.append(str(e))
                             return
         except Exception as e:  # noqa: BLE001
             with errors_lock:
-                errors.append(f"session-open: {e!r}")
+                errors.append(f"session-open: {e}")
 
     with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
         with ThreadPoolExecutor(max_workers=8) as pool:
