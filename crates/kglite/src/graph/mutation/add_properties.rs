@@ -48,7 +48,7 @@ pub fn add_properties(
 ) -> Result<AddPropertiesReport, String> {
     let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
     graph
-        .prepare_disk_mutation()
+        .prepare_mutation()
         .map_err(|e| format!("disk mutation lease failed: {e}"))?;
     let level_count = selection.get_level_count();
     if level_count == 0 {

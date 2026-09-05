@@ -659,7 +659,7 @@ fn generation_preserves_edge_property_snapshots_and_rebases_writer() {
     let mut writer = DirGraph::new();
     add_docs(&mut writer, &[1, 2]);
     writer.enable_disk_mode().unwrap();
-    writer.prepare_disk_mutation().unwrap();
+    writer.prepare_mutation().unwrap();
     let source = writer
         .lookup_by_id_readonly("Doc", &Value::Int64(1))
         .unwrap();
@@ -681,7 +681,7 @@ fn generation_preserves_edge_property_snapshots_and_rebases_writer() {
     let held_reader = crate::graph::io::file::load_file(path).unwrap();
     assert_eq!(edge_score(&held_reader), Some(Value::Int64(1)));
 
-    writer.prepare_disk_mutation().unwrap();
+    writer.prepare_mutation().unwrap();
     let edge = GraphWrite::edge_weight_mut(&mut writer.graph, EdgeIndex::new(0)).unwrap();
     edge.properties
         .iter_mut()
@@ -705,7 +705,7 @@ fn generation_round_trips_node_and_edge_add_delete_overlays() {
     let mut writer = DirGraph::new();
     add_docs(&mut writer, &[1, 2, 3]);
     writer.enable_disk_mode().unwrap();
-    writer.prepare_disk_mutation().unwrap();
+    writer.prepare_mutation().unwrap();
     let nodes: Vec<_> = [1, 2, 3]
         .into_iter()
         .map(|id| {
@@ -725,7 +725,7 @@ fn generation_round_trips_node_and_edge_add_delete_overlays() {
     let frozen_tree = snapshot_files(&first_snapshot);
     let held_reader = crate::graph::io::file::load_file(path).unwrap();
 
-    writer.prepare_disk_mutation().unwrap();
+    writer.prepare_mutation().unwrap();
     GraphWrite::remove_edge(&mut writer.graph, EdgeIndex::new(0)).unwrap();
     crate::graph::mutation::maintain::detach_delete_nodes(
         &mut writer,

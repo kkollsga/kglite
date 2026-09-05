@@ -45,6 +45,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Direct writes to reloaded graphs enforce deferred indexes and constraints.
+  Disk saves preserve declared indexes, including deferred definitions.
 - MERGE uses MATCH's ordinary-property equality and field resolution, preventing
   duplicate nodes across numeric types, wrapped strings and stored name fields.
 - Recursive list and map predicates preserve unknown results from nested nulls,

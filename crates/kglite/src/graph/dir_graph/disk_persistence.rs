@@ -201,14 +201,16 @@ impl DirGraph {
         Ok(())
     }
 
-    /// Acquire the disk-writer lease before creating a mutation overlay. The
-    /// lease is held for the dirty window only: [`Self::save_disk`] releases
-    /// it once the publish has rebased the handle onto the new generation.
-    /// Memory and mapped backends are unaffected.
-    pub(crate) fn prepare_disk_mutation(&mut self) -> std::io::Result<()> {
+    /// Prepare a direct mutation by materializing deferred index declarations.
+    /// Disk graphs acquire their writer lease and workspace first, so a refused
+    /// writer leaves the deferred state untouched. The lease lasts until
+    /// [`Self::save_disk`] rebases the handle onto the published generation.
+    /// Already-materialized memory and mapped graphs only check the flag.
+    pub(crate) fn prepare_mutation(&mut self) -> std::io::Result<()> {
         if let GraphBackend::Disk(disk) = &mut self.graph {
             disk.prepare_mutation()?;
         }
+        self.materialize_indexes();
         Ok(())
     }
 
@@ -239,7 +241,7 @@ impl DirGraph {
     /// a delete are not reclaimed by either — a disk graph's node capacity only
     /// shrinks when the directory is rebuilt from a fresh ingest.
     pub fn compact_disk(&mut self) -> Result<usize, String> {
-        self.prepare_disk_mutation()
+        self.prepare_mutation()
             .map_err(|e| format!("disk mutation lease failed: {e}"))?;
         match &mut self.graph {
             GraphBackend::Disk(ref mut dg) => dg.compact().map_err(|e| e.to_string()),
@@ -330,6 +332,8 @@ impl DirGraph {
         // a sidecar. Skipped when the graph has no secondaries
         // (single-label disk graphs pay zero extra bytes).
         crate::graph::io::file::write_secondary_labels_bin(dir, self)?;
+        // Snapshot live declarations; a deferred graph retains its loaded lists.
+        self.populate_index_keys();
         let mut meta = crate::graph::io::file::build_disk_metadata(self);
         crate::graph::io::file::strip_type_connectivity(&mut meta);
         crate::graph::io::file::strip_heavy_metadata(&mut meta);
@@ -672,3 +676,7 @@ impl DirGraph {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "disk_deferred_tests.rs"]
+mod disk_deferred_tests;

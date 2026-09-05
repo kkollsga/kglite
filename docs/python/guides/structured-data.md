@@ -74,8 +74,10 @@ add_nodes row 37: line_items[37].qty: expected integer, got String
 Plain scalar type strings (`"qty": "int"` outside a shape) remain advisory
 exactly as before — declaring a *shape* is the opt-in to enforcement. A
 structured-looking declaration that does not parse fails `define_schema`
-rather than silently becoming advisory. WAL replay never validates: the
-log is authoritative.
+rather than silently becoming advisory. Recovery does not repeat structured
+shape checks on values already admitted to the log. It does validate the final
+state against declared uniqueness, required-property and property-type
+constraints, preserving unchanged violations from the loaded checkpoint.
 
 `describe()` renders the declared shape per property (or, without a
 declaration, a shape inferred from one sampled value, flagged

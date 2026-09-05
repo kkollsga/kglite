@@ -153,7 +153,8 @@ pub struct DirGraph {
     /// Writes are the other half: `unique_claims` reads `unique_indices`, so a
     /// deferred graph would admit duplicates. Every route to a `&mut DirGraph`
     /// that can write materializes first — `handle::make_dir_graph_mut`,
-    /// `session::execute_mut`, and each index/constraint DDL entry point — so
+    /// `session::execute_mut`, direct mutation preparation, and each
+    /// index/constraint DDL entry point — so
     /// the index is complete *before* the write it must record.
     #[serde(skip)]
     pub(crate) indexes_deferred: bool,

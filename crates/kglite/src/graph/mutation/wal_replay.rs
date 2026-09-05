@@ -49,7 +49,7 @@ pub(crate) fn prepare_replay(
     let mut working = graph.clone();
     working.graph.adopt_shared_writer_lineage(&graph.graph);
     working
-        .prepare_disk_mutation()
+        .prepare_mutation()
         .map_err(|e| format!("disk mutation lease failed: {e}"))?;
     working.materialize_indexes();
     let before = validate::ConstraintState::capture(&working, &plan, &Default::default());

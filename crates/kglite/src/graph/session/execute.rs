@@ -516,7 +516,7 @@ pub fn execute_mut(
     };
 
     if is_mutation {
-        if let Err(error) = graph.prepare_disk_mutation() {
+        if let Err(error) = graph.prepare_mutation() {
             checkpoint.rollback(graph);
             return Err(KgError::FileIo(error));
         }
