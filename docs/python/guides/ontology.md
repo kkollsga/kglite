@@ -218,7 +218,8 @@ aggregate) while `severity`, `exempted` and `total` keep their per-rule
 values. Exempted rows are left out, so a class whose every violation is
 excused gets no row at all, and a rule with nothing to break down keeps its
 single aggregate row. Without the parameter, `domain_class` is `None` on
-every row — a bare `CALL ontology_audit()` returns all eight columns either
+every row — a bare `CALL ontology_audit()` returns all nine columns, including
+`entity_kind` to distinguish node and edge rules, either
 way.
 
 ```python
@@ -239,8 +240,8 @@ The domain-side class is the edge's source for `domain` / `range` /
 **Which fields are missing?** `{by: 'property'}` fans the
 `required_properties` and `property_types` rules into one row per **declared**
 property — `violations` counts the nodes or edges failing that property, `total` the
-relationship's edges, `pct` the share lacking it. Every other rule keeps its
-aggregate row with a `None` property.
+rule's covered nodes or relationship edges, and `pct` the share failing it.
+Every other rule keeps its aggregate row with a `None` property.
 
 ```python
 for row in g.cypher(

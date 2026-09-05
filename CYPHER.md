@@ -3248,18 +3248,22 @@ and read-only from Cypher:
 
 ```cypher
 SHOW ONTOLOGY
-CALL ontology_audit() YIELD rule, severity, violations, exempted, total, pct, domain_class, property
+CALL ontology_audit() YIELD entity_kind, rule, severity, violations, exempted, total, pct, domain_class, property
 CALL ontology_audit({by: 'domain_class'}) YIELD rule, domain_class, violations  -- per violating class
 CALL ontology_audit({by: 'property'}) YIELD rule, property, violations, pct     -- per declared property
 CALL type_domain_violation() YIELD source, target, rule   -- no-arg: checks every declaration
 CALL edge_property_violation() YIELD relationship, check, source, target, property, properties, exempt
+CALL node_property_violation() YIELD class, check, node, property, properties
 ```
 
 `SHOW ONTOLOGY` returns one row per declared class (`kind`, `name`, `is_a`,
-`abstract`, `description`) and relationship (`kind`, `name`, `domain`,
-`range`, `enforcement`, `exempt`, `description`); zero rows when nothing is
+`abstract`, `description`, `required_properties`, `property_types`, `enforcement`)
+and relationship (`kind`, `name`, `domain`,
+`range`, `required_properties`, `property_types`, `enforcement`, `exempt`,
+`description`); zero rows when nothing is
 declared. `ontology_audit()` is the scorecard: one row per declared check with
-its violation count, denominator, percentage, and declared severity
+its violation count, denominator, percentage, and declared severity. `entity_kind`
+is `node` for class contracts and `edge` for relationship checks. Severity is
 (`advisory` / `warn` / `error` — acted on by blueprint builds, reported
 everywhere else). `exempted` counts the rows a declaration's `exempt` classes
 excuse: they are left out of `violations` (and so out of the severity the gate
@@ -3273,21 +3277,23 @@ its violations come from. `violations` and `pct` are then that class's share
 out, so a class whose every violation is excused gets no row at all; a rule
 with no violations to break down keeps its single aggregate row. Without the
 parameter, `domain_class` is Null on every row. The domain-side class is the
-edge's source for `domain` / `range` / `required_properties` /
+edge's source for relationship `domain` / `range` / `required_properties` /
 `property_types`, the node itself for `required` / `cardinality`, and for the
 pair/triple shapes (`inverse`, `symmetric`, `transitive`) the first bound
-node — the source of the edge or chain whose partner is missing.
+node — the source of the edge or chain whose partner is missing. Class property
+contracts partition by the violating node's primary type.
 
 `{by: 'property'}` answers the other follow-up — *which fields* are missing —
 by fanning the `required_properties` and `property_types` rules into one row
-per **declared** property: `violations` is the edges failing that property,
-`total` the relationship's edges, `pct` the share lacking it. Every other rule
+per **declared** property: `violations` counts the nodes or edges failing that
+property, `total` the rule's covered nodes or relationship edges, and `pct` the
+share failing it. Every other rule
 keeps its aggregate row with a Null `property`.
 
 The two breakdowns are different kinds of answer, and mixing them up
 double-counts. `domain_class` **partitions** a rule: every violating row has
 exactly one source class, so the rows sum back to the aggregate.
-`property` is a **census**: an edge missing three declared properties is
+`property` is a **census**: a node or edge missing three declared properties is
 counted under all three, so the rows sum to *at least* the aggregate and
 adding them up is not the rule's violation count. A declared property nothing
 fails still gets a row, at zero — "this field is complete" is what a census is
@@ -3301,6 +3307,12 @@ listing every declared property it fails, `property` the first of them, and
 relationship's row count for a check equals that rule's
 `violations + exempted` however many properties one edge fails. `UNWIND` the
 list to count per property. It takes no arguments.
+
+`node_property_violation()` is the corresponding no-argument class-contract
+drill-down. Each row names the declaring class, check, node and failed properties;
+inherited contracts apply through the node's primary class ancestry. It has no
+edge endpoints or exemption column. Required properties reject missing/null values;
+type checks use the shared property-type grammar, including outer `list`/`array`.
 
 The six declaration-backed rule procedures (`type_domain_violation`,
 `type_range_violation`, `missing_required_edge`, `cardinality_violation`,
