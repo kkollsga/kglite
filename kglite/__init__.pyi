@@ -6239,6 +6239,15 @@ class KnowledgeGraph:
                 and call ``ResultView.to_df()`` when you want both the frame
                 and ``rv.warnings``.
             params: Optional parameter dict for ``$param`` substitution.
+                Datetimes with a UTC offset normalize to UTC and return as
+                naive datetimes, preserving microseconds; naive datetimes and
+                pure dates retain their existing meaning. Container values
+                allow at most 64 active list, tuple, dict or ndarray expansions
+                (an ndarray and its converted list each count). Recursive
+                containers raise ``ValueError``; exceeding this depth raises
+                ``RecursionError``. Shared acyclic values are allowed. These
+                conversion rules also apply to Session, FrozenGraph and
+                Transaction query parameters.
                 A parameter can supply a **value** or a **name**: labels and
                 relationship types accept ``$label`` / ``$(label)`` too
                 (``MATCH (n:$label)``, ``-[:$type]->``, ``CREATE (n:$label)``,

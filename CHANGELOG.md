@@ -45,6 +45,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Python parameter conversion detects recursive containers and limits active
+  container depth to 64, while preserving ordinary shared containers. Aware
+  datetimes normalize to UTC with their time and fractional seconds intact.
 - RDF dateTime values without a timezone retain fractional seconds, including
   nanoseconds, instead of silently truncating them.
 - Durable reopen repairs an incomplete WAL tail before accepting new writes,

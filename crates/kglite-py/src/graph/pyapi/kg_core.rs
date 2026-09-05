@@ -1630,75 +1630,7 @@ impl KnowledgeGraph {
         py_out::pattern_matches_to_pylist(py, &matches, &self.inner)
     }
 
-    /// Execute a Cypher query — read **or write** — against the graph.
-    ///
-    /// Reads: MATCH, WHERE, RETURN, ORDER BY, LIMIT, SKIP, WITH,
-    /// OPTIONAL MATCH, UNWIND, UNION, and aggregation functions
-    /// (count, sum, avg, min, max, collect, std).
-    ///
-    /// Writes: CREATE, MERGE, SET, REMOVE, DELETE, DETACH DELETE, FOREACH,
-    /// and schema DDL (CREATE/DROP INDEX, CREATE/DROP CONSTRAINT). Mutation
-    /// statistics land on `graph.last_mutation_stats`. A direct mutation call
-    /// executes **in place**: if a later clause, timeout, or row-budget check
-    /// fails, earlier mutations may remain visible — use `session()` or
-    /// `begin()` when failure must roll back.
-    ///
-    /// The MATCH clause uses the same pattern syntax as match_pattern().
-    /// WHERE supports AND/OR/NOT, comparisons (=, <>, <, <=, >, >=),
-    /// IS NULL, IS NOT NULL, IN, STARTS WITH, ENDS WITH, CONTAINS.
-    /// RETURN supports property access (n.prop), aliases (AS), aggregation,
-    /// and DISTINCT.
-    ///
-    /// Args:
-    ///     query: The Cypher query string
-    ///     timeout_ms: Deadline in milliseconds. If omitted, uses
-    ///         `set_default_timeout()` when set, otherwise the built-in
-    ///         default of 180_000 ms (3 min). Pass `0` to disable the
-    ///         deadline entirely for this call.
-    ///     max_work_units: Work budget for the query, not a result-row cap;
-    ///         exceeding it is an error. Defaults to
-    ///         `set_default_max_work_units()`.
-    ///     row_limit: Cap on the result rows kept — the query still runs in
-    ///         full and only retention stops at the cap, so a truncated
-    ///         result is the first N of the answer (the genuine top-N under
-    ///         ORDER BY). Truncation is never silent: it warns, and
-    ///         `diagnostics` carries `row_limit` plus the exact
-    ///         pre-truncation `total_rows`. Defaults to
-    ///         `set_default_row_limit()`.
-    ///     write_scope: Role-scoped write whitelist (integrity, not secrecy)
-    ///         — e.g. a coding role may write ["Plan", "Task"] but not
-    ///         research-owned "Algorithm" nodes. `None` (default) =
-    ///         unrestricted; `[]` denies every mutation. Every **node** write
-    ///         (CREATE, MERGE's create arm, SET n.p, SET n += {...},
-    ///         SET n:Label, REMOVE n.p, REMOVE n:Label, DELETE n,
-    ///         DETACH DELETE n, and node-type index/constraint DDL) is judged
-    ///         by the node's *stored* type, never a pattern label, so label
-    ///         smuggling cannot widen the scope. A **relationship** write
-    ///         (CREATE (a)-[:R]->(b), DELETE r, SET r.p, REMOVE r.p) is
-    ///         allowed iff at least one endpoint's stored type is in scope;
-    ///         DETACH DELETE's incident-edge collateral is authorized by the
-    ///         node delete. Outside the perimeter, deliberately: relationship
-    ///         *constraint* DDL, db.cdc.enable/disable, and the bulk loaders
-    ///         add_nodes/add_connections.
-    ///     git_sha, modified_by: Freshness provenance stamped alongside
-    ///         `updated_at` on types that declare `auto_timestamp`.
-    ///
-    /// Returns:
-    ///     A dict with 'columns' (list of column names) and 'rows'
-    ///     (list of row dicts mapping column name to value).
-    ///
-    /// Example:
-    ///     ```python
-    ///     result = graph.cypher('''
-    ///         MATCH (p:Person)-[:KNOWS]->(f:Person)
-    ///         WHERE p.age > 25
-    ///         RETURN p.name AS person, count(f) AS friends
-    ///         ORDER BY friends DESC
-    ///         LIMIT 10
-    ///     ''')
-    ///     for row in result:
-    ///         print(f"{row['person']}: {row['friends']} friends")
-    ///     ```
+    /// Execute a Cypher query, returning a ResultView or a DataFrame when to_df=True.
     #[pyo3(signature = (query, *, to_df=false, params=None, timeout_ms=None, max_work_units=None, row_limit=None, streaming=true, parallel=false, disable_optimizer=false, disabled_passes=None, write_scope=None, git_sha=None, modified_by=None))]
     #[allow(clippy::too_many_arguments)]
     // The detached closure preserves the engine's structured KgError until PyErr conversion.
