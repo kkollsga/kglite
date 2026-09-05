@@ -3642,6 +3642,14 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
     # shapes below were run against the unoptimized path while the operator was
     # being written; the last two were *divergent* and are here because of it.
     ("text_bm25_top_k", "text_index_graph", TEXT_BM25_TOP_K, None),
+    # Nine index documents and nine rows can still be different sets: the
+    # absent-body row must win DESC even when the excluded document scores zero.
+    (
+        "text_bm25_top_k_equal_cardinality_missing_member",
+        "text_index_graph",
+        "MATCH (d:Doc) WHERE d.id <> 9 RETURN d.id AS id, text_bm25(d, 'body', 'alpha') AS s ORDER BY s DESC LIMIT 1",
+        None,
+    ),
     # A `WHERE` makes the rows a subset of the corpus, which the postings path
     # cannot answer from (the index ranks documents the subset may not contain)
     # — it declines, and this pins that the decline is still the right answer.

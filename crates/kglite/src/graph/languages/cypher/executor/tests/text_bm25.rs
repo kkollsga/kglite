@@ -542,3 +542,29 @@ fn the_fused_scan_aggregate_refuses_an_unindexed_property() {
         "a count must not answer zero where the scalar raises: {message}"
     );
 }
+
+#[test]
+fn fused_bm25_equal_cardinality_requires_actual_index_membership() {
+    let mut graph = docs(&[("positive", "needle"), ("excluded", "other")]);
+    let node = NodeData::new(
+        Value::UniqueId(99),
+        Value::String("missing".to_owned()),
+        "Doc".to_owned(),
+        HashMap::new(),
+        &mut graph.interner,
+    );
+    let index = graph.graph.add_node(node);
+    graph
+        .type_indices
+        .entry_or_default("Doc".to_owned())
+        .push(index);
+    build_text_index(&mut graph, "Doc", "body", None).unwrap();
+    let (fused, scalar) = ranked_both_ways(
+        &graph,
+        "MATCH (d:Doc) WHERE d.title <> 'excluded' RETURN d.title AS t, \
+         text_bm25(d, 'body', 'needle') AS score ORDER BY score DESC LIMIT 1",
+    );
+    let expected = vec![("missing".to_owned(), Value::Null)];
+    assert_eq!(scalar, expected);
+    assert_eq!(fused, expected);
+}

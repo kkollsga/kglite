@@ -440,7 +440,7 @@ impl<'a> CypherExecutor<'a> {
         if store.generation() != cache.generation || view.documents() != result_set.rows.len() {
             return Ok(None);
         }
-        let Some(slots) = self.text_row_slots(variable, &node_type, result_set) else {
+        let Some(slots) = self.text_row_slots(variable, &node_type, result_set, &view) else {
             return Ok(None);
         };
         let scored: Vec<(usize, f64)> = view
@@ -474,8 +474,9 @@ impl<'a> CypherExecutor<'a> {
     /// Ascending is not incidental: it is what makes the index's
     /// score-then-slot ranking identical to the scan's score-then-row-index
     /// ranking, and it makes this vector `binary_search`able as a
-    /// slot-to-row-index map. `MATCH (n:Type)` produces rows in that order;
-    /// anything that reorders them upstream sends the query to the scan.
+    /// slot-to-row-index map. Reordered or recycled type slots send the query
+    /// to the scan. Membership in the guarded index, together with equal
+    /// document count, proves there are no unindexed NULL-scoring rows.
     /// Strictly ascending also rules out a row set that binds one node twice.
     ///
     /// Runs once per query over every row, so it is deliberately built from the
@@ -488,20 +489,17 @@ impl<'a> CypherExecutor<'a> {
         variable: &str,
         node_type: &str,
         result_set: &ResultSet,
+        view: &crate::graph::text_indexes::TextIndexRead<'_>,
     ) -> Option<Vec<u32>> {
         let type_key = crate::api::InternedKey::from_str(node_type);
         let mut slots = Vec::with_capacity(result_set.rows.len());
         for row in &result_set.rows {
-            let slot = row.node_bindings.get(variable)?.index() as u32;
+            let node = *row.node_bindings.get(variable)?;
+            let slot = node.index() as u32;
             if slots.last().is_some_and(|&previous| previous >= slot) {
                 return None;
             }
-            if self
-                .graph
-                .graph
-                .node_type_of(petgraph::graph::NodeIndex::new(slot as usize))
-                != Some(type_key)
-            {
+            if self.graph.graph.node_type_of(node) != Some(type_key) || !view.contains_node(node) {
                 return None;
             }
             slots.push(slot);

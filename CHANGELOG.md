@@ -33,6 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exact and PROFILE queries retain their existing retrieval behavior.
 
 ### Fixed
+- BM25 top-k retains NULL-scoring rows when a filtered population has the same
+  size as its text index but includes nodes without indexed text.
+
 - Vacuum and reindex rebuild UNIQUE and NODE KEY occupancy after node slots move,
   preventing false conflicts and duplicate values admitted after compaction.
 
