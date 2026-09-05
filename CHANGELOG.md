@@ -45,6 +45,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- RDF dateTime values without a timezone retain fractional seconds, including
+  nanoseconds, instead of silently truncating them.
 - Durable reopen repairs an incomplete WAL tail before accepting new writes,
   preventing later acknowledged writes from being hidden behind damaged bytes.
   Unsupported formats, non-tail damage and files changed during recovery are refused.
