@@ -45,6 +45,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- C embedder ownership documentation now consistently states that attaching a
+  handle borrows it; callers must still free their handle exactly once.
 - Recovery preserves exact typed identities and properties, clears old labels
   and relationships when a node is recreated, and validates constraint transfers
   against the final state. Rejected recovery leaves the caller and saved data
