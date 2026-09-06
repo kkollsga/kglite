@@ -66,6 +66,10 @@ but serve different roles in the executor:
   stored ordinary value. Structural node and relationship IDs remain identity;
   property admission never rewrites them.
 
+  Every endpoint snapshot written by one Cypher statement reads the statement's
+  source view. A title update produced by one matched row therefore cannot
+  change the endpoint title snapshotted by another row in that statement.
+
   Low-level Rust `GraphWrite` mutators remain a raw escape hatch. A caller that
   supplies `Value::NodeRef` there must keep it in its originating view and must
   normalize it before persistence or transfer. New-write admission does not

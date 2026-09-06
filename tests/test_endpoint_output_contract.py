@@ -82,11 +82,15 @@ def test_cli_endpoint_json_uses_the_same_resolved_output(endpoint_graph, tmp_pat
     assert json.loads(process.stdout) == [{"result": ["Alpha", "Beta"]}]
 
 
-def test_ordinary_title_reference_chain_keeps_terminal_title():
+def test_ordinary_title_reference_chain_snapshots_statement_source_titles():
     graph = kglite.KnowledgeGraph()
     graph.cypher(
         "CREATE (a:Item {id:1,title:'Alpha'}),(b:Item {id:2,title:'Beta'}),"
         "(c:Item {id:3,title:'Terminal'}),(a)-[:LINK]->(b),(b)-[:LINK]->(c)"
     )
     graph.cypher("MATCH (a:Item)-[r:LINK]->(:Item) SET a.title=endNode(r)")
-    assert graph.cypher("MATCH (a:Item {id:1}) RETURN a.title AS title").scalar() == "Terminal"
+    assert graph.cypher("MATCH (a:Item) RETURN a.id AS id,a.title AS title ORDER BY id").to_list() == [
+        {"id": 1, "title": "Beta"},
+        {"id": 2, "title": "Terminal"},
+        {"id": 3, "title": "Terminal"},
+    ]
