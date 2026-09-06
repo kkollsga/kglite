@@ -108,9 +108,12 @@ except kglite.CypherError as exc:
 ```
 
 A timed-out Cypher query raises `CypherTimeoutError`; it does not return a
-partial `ResultView`. For rollback-safe mutations, execute the query through
-a {doc}`Transaction or Session <transactions>` rather than directly on
-`KnowledgeGraph`.
+partial `ResultView`. Mutation execution restores a statement checkpoint on an
+execution error, timeout, or work-budget refusal, including direct
+`KnowledgeGraph.cypher()` calls. Previously successful statements remain intact.
+Use an explicit {doc}`Transaction <transactions>` when several statements must
+commit or roll back together. This is an execution guarantee, not rollback of
+later application-side result conversion or consumer errors.
 
 For a broad engine boundary:
 

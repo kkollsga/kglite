@@ -744,11 +744,6 @@ impl KnowledgeGraph {
     }
 
     /// Export the current selection as a pandas DataFrame.
-    ///
-    /// Each node becomes a row with columns for title, type, id, and all properties.
-    /// Nodes of different types may have different properties. Missing integer
-    /// values use nullable Int64; mixed columns containing integers use object
-    /// to preserve exact cells. Other columns follow pandas missing-value rules.
     #[pyo3(signature = (*, include_type=true, include_id=true))]
     fn to_df(&self, py: Python<'_>, include_type: bool, include_id: bool) -> PyResult<Py<PyAny>> {
         let _arena_guard = self.inner.begin_read_pass(); // disk arena guard (no-op on memory/mapped)

@@ -1,12 +1,15 @@
 package io.github.kkollsga.kglite;
 
 /**
- * Every failure the kglite wrapper reports, engine-side or wrapper-side.
+ * Engine failures and classified wrapper failures.
+ *
+ * <p>Conventional Java argument and lifecycle errors retain their native
+ * exception types, such as {@link IllegalStateException} for a closed handle.
  *
  * <p>Unchecked on purpose: a Cypher syntax error or a corrupt graph file is a
  * bug or an operational fault, not a control-flow branch a caller writes
- * {@code catch} for on every statement. The one failure a caller genuinely
- * retries around — a contended writer lease — has its own subclass,
+ * {@code catch} for on every statement. A contended writer lease has its own
+ * subclass,
  * {@link WriterLeaseHeldException}, so it can be caught without catching
  * everything else.
  *

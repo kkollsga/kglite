@@ -104,9 +104,9 @@ test-py:
 ## benchmark/parity/stress/model_download/binary_size/bolt/bolt_stress).
 ## Still excludes benchmark (needs pytest-benchmark), stress (30GB-scale),
 ## model_download (multi-GB weights), binary_size (needs the release
-## cdylib) and bolt_stress (slow, opt-in). The bolt tests skip silently
-## unless target/release/kglite-bolt-server exists — build it first via
-## `cargo build --release -p kglite-bolt-server`.
+## cdylib) and bolt_stress (slow, opt-in). Bolt fixtures select the newest
+## debug/release server and skip with a rebuild reason if unavailable or stale.
+## For local correctness, build it with `cargo build -p kglite-bolt-server`.
 test-full: test-rust
 	$(ACTIVATE) && pytest tests/ -v -m "not benchmark and not stress and not model_download and not binary_size and not bolt_stress"
 

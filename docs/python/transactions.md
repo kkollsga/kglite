@@ -5,7 +5,7 @@ contract you need:
 
 | Surface | Use when | Failure behavior |
 |---|---|---|
-| `graph.cypher(...)` | one-owner, simple direct work | executes in place; a late error/timeout may leave earlier mutations visible |
+| `graph.cypher(...)` | one-owner, simple direct work | a failed Cypher statement restores its earlier writes; earlier successful statements remain |
 | `graph.begin()` | several operations must commit or roll back together | isolated copy-on-write transaction with OCC at commit |
 | `graph.session()` | threads/tasks share one live graph | reads use snapshots; writes serialize and atomically swap on success |
 
@@ -40,6 +40,38 @@ Transaction deadlines and query deadlines raise
 `kglite.CypherTimeoutError`. Read-only transactions reject mutations. Nested
 transactions/savepoints, last-writer-wins, and multi-graph atomic commits are
 not supported.
+
+## Statement rollback
+
+Each Cypher statement restores its changes if execution fails, including a late
+work-budget refusal after a write. This applies to direct graph calls, sessions,
+and transactions. Catching a statement error inside a transaction preserves its
+previous successful statements; committing afterward does not publish the failed
+statement's writes. Result retention limits do not abort or undo successful
+writes. Signal-based cancellation is exposed separately by each binding.
+
+```python
+import kglite
+
+graph = kglite.KnowledgeGraph()
+graph.cypher("CREATE (:N {id: 1, v: 1})")
+try:
+    graph.cypher(
+        "MATCH (n:N) SET n.v=2 WITH n "
+        "UNWIND range(1,n.v*10) AS i RETURN i",
+        max_work_units=5,
+    )
+except kglite.CypherExecutionError as exc:
+    assert exc.code == "CypherExecution"
+    assert "20 work units" in str(exc)
+else:
+    raise AssertionError("expected the dependent range to exceed the work budget")
+assert graph.cypher("MATCH (n:N) RETURN n.v").scalar() == 1
+```
+
+The range depends on the updated value, so this example exercises an error after
+`SET` executes. An explicit transaction is needed to roll back multiple
+successful statements as a group, not to make one statement rollback-safe.
 
 ## Shared sessions
 

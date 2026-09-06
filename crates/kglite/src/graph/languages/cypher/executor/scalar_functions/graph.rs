@@ -300,9 +300,9 @@ impl<'a> CypherExecutor<'a> {
                 // keys(n) or keys(r) — return property names as a list.
                 //
                 // Emits `Value::List(Vec<Value::String>)`.
-                // For nodes, derive the key set from `materialize_node_value`
-                // so it exactly matches `keys(properties(n))` and the property
-                // dict carried by `RETURN n`: virtual id/title/type, every
+                // For nodes, use the shared collector so the key set matches
+                // the map returned by `properties(n)` and carried by
+                // `RETURN n`: virtual id/title/type, every
                 // user-set property, the alias-recovered columns (non-literal
                 // `unique_id_field`/`node_title_field`), and — on the columnar
                 // (disk/mapped) backends — the per-type metadata columns that a

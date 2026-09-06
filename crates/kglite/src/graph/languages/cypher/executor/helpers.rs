@@ -534,9 +534,8 @@ pub(super) fn node_to_map_value(node: NodeView<'_>) -> Value {
 
 /// What a node materialisation collects.
 ///
-/// `keys(n)` and `properties(n)` must agree on the key set exactly — the whole
-/// contract of `keys(n)` is that it equals `keys(properties(n))` — so the two
-/// share one collection pass ([`collect_node_properties`]) and differ only in
+/// `keys(n)` must equal the key set of the map returned by `properties(n)`.
+/// The two share one collection pass ([`collect_node_properties`]) and differ only in
 /// what they keep from it. A `keys(n)` that walked the node on its own would be
 /// a second copy of the null-omission, soft-alias and completion rules, free to
 /// drift from the first.
@@ -765,8 +764,8 @@ pub(crate) fn materialize_node_value(
 /// The sorted, de-duplicated key set of [`materialize_node_value`]'s property
 /// map — without building a single `Value` that only the map would have kept.
 ///
-/// `keys(n)` is defined as `keys(properties(n))`, so this runs the *same*
-/// collection pass through a names-only sink rather than walking the node
+/// `keys(n)` returns the names in the `properties(n)` result map. It runs the
+/// same collection pass through a names-only sink rather than walking the node
 /// again: on a 30-column type the map route allocated 34 tree nodes and cloned
 /// 30 values per node to then throw all of them away.
 pub(crate) fn materialize_node_keys(

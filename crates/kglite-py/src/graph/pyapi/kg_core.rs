@@ -1715,13 +1715,9 @@ impl KnowledgeGraph {
                 embedder: embedder_for_opts,
                 // value_codecs are an MCP-manifest feature, unused on this path.
                 value_codecs: None,
-                // Cancellation is deliberately NOT wired on the live-KG path:
-                // it mutates the single-owner graph *in place* (no working-copy
-                // rollback), so aborting mid-write would leave partial state.
-                // For interruptible + atomic mutations use a Session
-                // (`g.session().execute(...)`) or a Transaction — both run on a
-                // copy-on-write working graph that's discarded on abort. The
-                // deadline still bounds this path.
+                // Direct mutation does not install a SIGINT cancellation flag.
+                // Deadline and work-budget failures still restore the shared
+                // statement checkpoint; signal support is a wrapper policy.
                 cancel: None,
                 write_scope: write_scope_set.as_ref(),
                 git_sha: git_sha.as_deref(),

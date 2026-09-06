@@ -1159,34 +1159,8 @@ impl KnowledgeGraph {
 #[pymethods]
 impl KnowledgeGraph {
     /// Add nodes from a pandas DataFrame.
-    ///
-    /// Declared integer text is exact within signed Int64, including whole
-    /// decimal/scientific forms; invalid cells become NULL. Surrounding scalar
-    /// whitespace is ignored. Direct date aliases YYYY/MM/DD, DD-MM-YYYY and
-    /// MM/DD/YYYY remain supported separately from blueprint CSV grammar.
-    /// Aware timestamp cells normalize to naive UTC; explicit dates retain the
-    /// local calendar date. Rounded numeric floats cannot recover lost digits.
-    ///
-    /// Args:
-    ///     data: DataFrame containing node data.
-    ///     node_type: Label for this set of nodes (e.g. 'Person').
-    ///     unique_id_field: Column used as unique identifier. String and integer IDs
-    ///         are auto-detected from the DataFrame dtype.
-    ///     node_title_field: Column used as display title. Defaults to unique_id_field.
-    ///     columns: Whitelist of columns to include. None = all.
-    ///     conflict_handling: 'update' (default), 'replace', 'skip', 'preserve',
-    ///         or 'sum'.
-    ///     skip_columns: Columns to exclude from properties.
-    ///     column_types: Override column type detection: {'col': 'string'|'integer'|'float'|'datetime'|'uniqueid'}.
-    ///     nullable_int_downcast: When True, Float64 columns whose non-null
-    ///         values are all integer-valued (e.g. `pd.NA`-bearing ints that
-    ///         pandas auto-promoted to float64) are silently downcast to Int64.
-    ///         Default False — explicit opt-in protects existing callers.
-    ///
-    /// Returns:
-    ///     dict with 'nodes_created', 'nodes_updated', 'nodes_skipped',
-    ///     'processing_time_ms', 'has_errors', and optionally 'errors'.
     #[pyo3(signature = (data, node_type, unique_id_field, node_title_field=None, columns=None, conflict_handling=None, skip_columns=None, column_types=None, timeseries=None, nullable_int_downcast=false, labels=None, managed_reload=false, git_sha=None, modified_by=None, on_invalid="warn"))]
+    // The public Python loader exposes independently optional ingestion controls.
     #[allow(clippy::too_many_arguments)]
     fn add_nodes(
         &mut self,
@@ -1396,57 +1370,9 @@ impl KnowledgeGraph {
         build_extend_report_dict(py, &result)
     }
 
-    /// Add connections (edges) between existing nodes.
-    ///
-    /// DataFrame scalar conversion matches add_nodes: declared integer strings
-    /// are exact within Int64 and aware timestamp cells normalize to naive UTC.
-    ///
-    /// Two modes — supply **either** `data` (a pandas DataFrame) **or** `query`
-    /// (a Cypher string whose RETURN columns provide source/target IDs):
-    ///
-    /// ```python
-    /// # From DataFrame (existing API):
-    /// graph.add_connections(df, "KNOWS", "Person", "src_id", "Person", "tgt_id")
-    ///
-    /// # From Cypher query (new):
-    /// graph.add_connections(
-    ///     None, "ENCLOSES", "Play", "play_id", "StructuralElement", "struct_id",
-    ///     query="MATCH (p:Play), (s:StructuralElement) WHERE contains(p, s) "
-    ///           "RETURN DISTINCT p.id AS play_id, s.id AS struct_id",
-    /// )
-    ///
-    /// # With extra static properties stamped onto every edge:
-    /// graph.add_connections(
-    ///     None, "HC_IN_FORMATION", "Discovery", "src", "Stratigraphy", "tgt",
-    ///     query="MATCH ... RETURN d.id AS src, s.id AS tgt",
-    ///     extra_properties={"hc_rank": 1},
-    /// )
-    /// ```
-    ///
-    /// Args:
-    ///     data: DataFrame containing connection data, or None when using query.
-    ///     connection_type: Label for this connection type (e.g. 'KNOWS').
-    ///     source_type: Node type of the source nodes.
-    ///     source_id_field: Column containing source node IDs.
-    ///     target_type: Node type of the target nodes.
-    ///     target_id_field: Column containing target node IDs.
-    ///     source_title_field: Optional column to update source node titles.
-    ///     target_title_field: Optional column to update target node titles.
-    ///     columns: Optional edge-property whitelist (data mode only). None keeps all
-    ///         non-skipped DataFrame columns, matching add_nodes.
-    ///     skip_columns: Columns to exclude from edge properties (data mode only).
-    ///     conflict_handling: 'update' (default), 'replace', 'skip', 'preserve',
-    ///         or 'sum'.
-    ///     column_types: Override column type detection (data mode only).
-    ///     query: Cypher query string (alternative to data). Must be a read-only
-    ///         query that RETURNs columns matching source_id_field and target_id_field.
-    ///     extra_properties: Dict of static properties to add to every edge created
-    ///         from the query results (query mode only).
-    ///
-    /// Returns:
-    ///     dict with 'connections_created', 'connections_skipped',
-    ///     'processing_time_ms', 'has_errors', and optionally 'errors'.
+    /// Add connections from a DataFrame or read-only Cypher query.
     #[pyo3(signature = (data, connection_type, source_type, source_id_field, target_type, target_id_field, source_title_field=None, target_title_field=None, columns=None, skip_columns=None, conflict_handling=None, column_types=None, query=None, extra_properties=None, git_sha=None, modified_by=None, on_invalid="warn"))]
+    // The public Python loader supports DataFrame and query modes with optional controls.
     #[allow(clippy::too_many_arguments)]
     fn add_connections(
         &mut self,

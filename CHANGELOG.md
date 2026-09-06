@@ -38,6 +38,14 @@ before upgrading.
   its microsecond precision. Bolt rejects timestamps it cannot represent instead
   of emitting an invalid nanosecond field.
 
+- Align exception handling, read-only transaction failures and C status names
+  with runtime behavior. Add an executable statement-rollback example and clarify
+  which earlier transaction writes survive a later statement failure.
+- Document endpoint projection, timestamp precision, exact DataFrame conversion,
+  text-index list input and blueprint inference at their public API boundaries.
+  Document the existing stored endpoint-reference limitation under node deletion,
+  slot reuse and in-memory or mapped compaction.
+
 ### Changed
 
 - Python snapshots, sessions, cursors and transactions capture query defaults

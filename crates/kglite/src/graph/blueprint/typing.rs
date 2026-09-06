@@ -3,8 +3,8 @@
 //! Pandas is entirely absent. Columns are parsed to typed vectors in one
 //! pass over the table. Declared blueprint types (`"string"`, `"int"`,
 //! `"float"`, `"bool"`, `"date"`, `"datetime"`) win over inference; any
-//! column without an explicit type falls back to light inference on
-//! the first non-empty cell in each column.
+//! column without an explicit type is inferred from its non-null cells.
+//! Inference stops once a value settles the column as string.
 
 mod integer;
 pub mod scalar;

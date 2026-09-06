@@ -270,18 +270,16 @@ def test_return_path_record_is_byte_exact(mode, tmp_path):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Artifact 2 — keys(n) == keys(properties(n))
+# Artifact 2 — keys(n) == the keys of the properties(n) result map
 #
-# Currently only a doc-comment invariant on `PropertySink`
-# (crates/kglite/src/graph/languages/cypher/executor/helpers.rs). The two sinks
-# share one collection pass precisely so they cannot drift; nothing asserted it.
+# The two PropertySink implementations share one collection pass; compare
+# their public outputs so names-only and value materialisation cannot drift.
 #
 # The corpus covers, explicitly and separately:
 #   * aliased id/title columns (pid -> id, name -> title)
 #   * COLUMNAR-stored nodes  (bulk `add_nodes`)
-#   * MAP-stored nodes       (Cypher `CREATE`) — the C2 lesson: on mapped mode
-#                             a Cypher-created node is Map-stored, not columnar,
-#                             and takes a different branch through the collector
+#   * Cypher-created nodes  (a separate insertion path; the native coverage
+#                             guard pins the actual storage branches)
 #   * null-valued properties (the omission rule must apply to BOTH sinks)
 #   * secondary labels
 # ═══════════════════════════════════════════════════════════════════════════
@@ -307,7 +305,7 @@ def _corpus_graph(mode: str, tmp_path) -> KnowledgeGraph:
 @pytest.mark.parametrize("mode", STORAGE_MODES)
 @pytest.mark.parametrize("label", ["Person", "Gadget", "Widget"])
 def test_keys_equals_keys_of_properties(mode, label, tmp_path):
-    """The `keys(n) == keys(properties(n))` invariant, over the type corpus.
+    """The `keys(n) == the keys of the properties(n) result map` invariant, over the type corpus.
 
     `keys(n)` runs a names-only sink over the same collection pass that builds
     `properties(n)`. If N2 changes the value sink's container without changing
@@ -321,9 +319,9 @@ def test_keys_equals_keys_of_properties(mode, label, tmp_path):
         keys = row["k"]
         props = row["p"]
         assert sorted(keys) == sorted(props.keys()), (
-            f"mode={mode} label={label}: keys(n) != keys(properties(n)).\n"
+            f"mode={mode} label={label}: keys(n) != the keys of the properties(n) result map.\n"
             f"  keys(n)              = {sorted(keys)}\n"
-            f"  keys(properties(n))  = {sorted(props.keys())}\n"
+            f"  the keys of the properties(n) result map  = {sorted(props.keys())}\n"
             f"  only in keys(n)      = {sorted(set(keys) - set(props))}\n"
             f"  only in properties(n)= {sorted(set(props) - set(keys))}"
         )

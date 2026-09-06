@@ -59,6 +59,10 @@ but serve different roles in the executor:
   Resolution changes output values, not stored properties, structural IDs,
   predicate identity, grouping keys or distinct-value counts. Two distinct
   references with equal titles can therefore appear as duplicate output titles.
+  Stored references carry physical slots: node deletion/reuse or memory/mapped
+  vacuum can retarget them. Output resolution does not repair this limitation.
+  Store stable scalar properties instead when a value must survive these changes
+  (for example, copy an application ID or title string rather than `startNode(r)`).
   Raw executor and graph-data consumers use `api::session::resolve_noderefs`
   or the borrowed single-value `resolve_noderef_value` helper themselves.
 - **`Node(Box<NodeValue>)`** — a materialised graph value with the
@@ -179,10 +183,11 @@ The current `.kgl` format is an RGF v6 binary container:
 
 `Value` serialises via `serde` with a discriminant tagged by
 variant position. The order in `crates/kglite/src/datatypes/values.rs` is
-intentionally stable for the first 9 variants (Null=0 .. Duration=8)
+intentionally stable for the first 10 variants (UniqueId=0 .. Duration=9;
+Null=7, NodeRef=8)
 so future enum changes append at the end (Timestamp is discriminant 15).
 The container and codec tags make compatibility explicit: the current reader
-selects v5/Postcard by header and refuses v4/bincode or older containers rather
+selects v6 or v5/Postcard by header and refuses v4/bincode or older containers rather
 than guessing. Kglite 0.13.4 is the conversion bridge for pre-0.14 artifacts.
 
 The `tests/test_phase4_parity.py::test_kgl_v3_golden_hash` byte-level

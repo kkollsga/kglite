@@ -84,11 +84,11 @@ impl LeaseState {
 ///
 /// # Errors
 ///
-/// - `KGLITE_ERR_NULL_POINTER` — `path` or `out_lease` is null
-/// - `KGLITE_ERR_INVALID_UTF8` — `path` isn't valid UTF-8
+/// - `KGLITE_STATUS_CODE_NULL_POINTER` — `path` or `out_lease` is null
+/// - `KGLITE_STATUS_CODE_INVALID_UTF8` — `path` isn't valid UTF-8
 /// - `KGLITE_STATUS_CODE_WRITER_LEASE_HELD` — someone else holds it; the
 ///   message names them. Retriable as-is.
-/// - `KGLITE_ERR_FILE_IO` / `KGLITE_ERR_FILE_NOT_FOUND` — the lock sidecar
+/// - `KGLITE_STATUS_CODE_FILE_IO` / `KGLITE_STATUS_CODE_FILE_NOT_FOUND` — the lock sidecar
 ///   could not be created (unwritable or missing parent directory)
 ///
 /// # Safety
@@ -290,13 +290,13 @@ pub unsafe extern "C" fn kglite_writer_lease_free(lease: *mut KgliteWriterLease)
 ///
 /// # Errors
 ///
-/// - `KGLITE_ERR_NULL_POINTER` — `path` or `out_graph` is null
-/// - `KGLITE_ERR_INVALID_UTF8` — `path` / `mode` isn't valid UTF-8
-/// - `KGLITE_ERR_FILE_NOT_FOUND` — the path is absent and `mode` was null,
+/// - `KGLITE_STATUS_CODE_NULL_POINTER` — `path` or `out_graph` is null
+/// - `KGLITE_STATUS_CODE_INVALID_UTF8` — `path` / `mode` isn't valid UTF-8
+/// - `KGLITE_STATUS_CODE_FILE_NOT_FOUND` — the path is absent and `mode` was null,
 ///   so there was no mode to create it in
-/// - `KGLITE_ERR_INVALID_ARGUMENT` — unknown mode string, or a conversion
+/// - `KGLITE_STATUS_CODE_INVALID_ARGUMENT` — unknown mode string, or a conversion
 ///   that cannot happen in place (either disk direction)
-/// - `KGLITE_ERR_FILE_FORMAT` / `KGLITE_ERR_FILE_IO` — as
+/// - `KGLITE_STATUS_CODE_FILE_FORMAT` / `KGLITE_STATUS_CODE_FILE_IO` — as
 ///   [`kglite_load_file`](crate::kglite_load_file)
 ///
 /// # Safety

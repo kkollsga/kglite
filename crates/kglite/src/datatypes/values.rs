@@ -45,7 +45,8 @@ pub enum Value {
     Null,
     /// Internal: petgraph NodeIndex reference, used to preserve node identity
     /// through collect() → index → WITH → property access pipelines.
-    /// Never persisted — only exists during Cypher execution.
+    /// SET can store this physical-slot reference in properties; persistence
+    /// does not make it stable across slot reuse or node remapping.
     NodeRef(u32),
     /// Calendar duration: months + days + seconds (Neo4j shape).
     /// Calendar units (months, years) and clock units (days, hours,
@@ -75,8 +76,8 @@ pub enum Value {
     /// Boxed because [`NodeValue`] is large (id + labels + props map)
     /// and Node values are rarer than scalars.
     ///
-    /// [`Value::NodeRef`] stays the transient internal handle; it is
-    /// materialised into a `Node` at projection time.
+    /// This owns the projected labels and properties. A [`Value::NodeRef`]
+    /// instead resolves to a title at the public output boundary.
     Node(Box<NodeValue>),
     /// A materialised graph relationship — the projection result for
     /// `RETURN r` where `r` is a relationship variable.

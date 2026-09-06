@@ -47,10 +47,10 @@ use std::ffi::c_char;
 ///
 /// # Errors
 ///
-/// - `KGLITE_ERR_NULL_POINTER` — `session`, `node_type`, `property`, or
+/// - `KGLITE_STATUS_CODE_NULL_POINTER` — `session`, `node_type`, `property`, or
 ///   `out_report_json` is null.
-/// - `KGLITE_ERR_INVALID_UTF8` — a string argument is not valid UTF-8.
-/// - `KGLITE_ERR_INVALID_ARGUMENT` — the node type is unknown, the graph is
+/// - `KGLITE_STATUS_CODE_INVALID_UTF8` — a string argument is not valid UTF-8.
+/// - `KGLITE_STATUS_CODE_INVALID_ARGUMENT` — the node type is unknown, the graph is
 ///   disk-backed (the index is heap-resident, so disk mode refuses), or the
 ///   type has nodes and none of them carries a string for `property`; the
 ///   message explains which.

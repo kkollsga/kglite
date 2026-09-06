@@ -274,7 +274,7 @@ fn keys_equals_keys_of_properties_golden() {
         let prop_names: Vec<&str> = props.keys().collect();
         assert_eq!(
             key_names, prop_names,
-            "keys(n) != keys(properties(n)) — the shared collection pass has \
+            "keys(n) != the keys of the properties(n) result map — the shared collection pass has \
              forked between its names-only and value sinks"
         );
     }
@@ -382,7 +382,7 @@ fn mixed_type_projection_golden() {
     }
 }
 
-/// Coverage guard for the `keys(n) == keys(properties(n))` corpus.
+/// Coverage guard for the `keys(n) == the keys of the properties(n) result map` corpus.
 ///
 /// # What this pins, and why it is not what the plan assumed
 ///
@@ -499,7 +499,7 @@ fn keys_invariant_holds_across_both_property_storage_shapes() {
                 assert_eq!(
                     key_names,
                     props.keys().collect::<Vec<_>>(),
-                    "mode={mode:?}: keys(n) != keys(properties(n)) for a {label} node"
+                    "mode={mode:?}: keys(n) != the keys of the properties(n) result map for a {label} node"
                 );
             }
         }

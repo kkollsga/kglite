@@ -407,6 +407,13 @@ class ResultView:
     Returned by ``cypher()``, centrality methods, ``collect()`` (flat),
     and ``sample()``.
 
+    Endpoint references, including those nested in lists, maps or entity
+    properties, resolve to titles against the executing view. Structural node
+    and relationship IDs remain IDs. Python ``datetime`` values preserve
+    microsecond resolution; finer internal timestamp digits are not representable.
+    See :doc:`Value projection </python/value-projection>` for reference identity,
+    missing/cyclic references and fractional timestamp output across formats.
+
     Data is only converted to Python objects when you actually access rows
     (via iteration, indexing, ``to_list()``, or ``to_df()``). This makes
     ``cypher()`` calls fast even for large result sets — the cost is deferred
@@ -625,6 +632,12 @@ class ResultView:
         Integer columns containing NULL use pandas nullable ``Int64``. Mixed
         columns containing integers use ``object`` to preserve values and types.
         Other columns follow pandas inference; float NULLs can become NaN.
+        Column order and nested values are preserved.
+
+        Example::
+
+            df = r.to_df()
+            df.plot(x='year', y='count')
         """
         ...
 
@@ -2156,7 +2169,9 @@ class KnowledgeGraph:
                 stub node, not skipped, and is unaffected by this setting.
 
         Returns:
-            Operation report dict with ``connections_created``, ``connections_skipped``, etc.
+            Operation report dict with ``connections_created``,
+            ``connections_skipped``, ``processing_time_ms``, ``has_errors``,
+            and optionally ``errors``.
         """
         ...
 
@@ -4819,7 +4834,8 @@ class KnowledgeGraph:
         Preserves exact integer cells before restoring the column order and dtypes recorded by
         :meth:`set_table_property` (columns that held nulls come back as
         pandas nullable dtypes, e.g. ``Int64``). A node without the property
-        yields an empty frame with the registered columns.
+        yields an empty frame with the registered columns. Unsupported recorded
+        dtypes retain a safe inferred representation.
 
         Raises:
             ValueError: No such node.
@@ -6280,10 +6296,11 @@ class KnowledgeGraph:
         reads and work on a read-only graph. See the "Cypher constraint DDL"
         section of ``CYPHER.md``.
 
-        Direct mutation calls execute in place: if a later clause, timeout, or
-        row-budget check fails, earlier mutations may remain visible. Use
-        :meth:`KnowledgeGraph.session` or :meth:`KnowledgeGraph.begin` when
-        failure must roll back. Property and composite indexes are maintained.
+        A Cypher statement is atomic: an execution error, timeout, or work-budget
+        refusal restores the graph to its state before that statement, including
+        property and composite indexes. Use :meth:`KnowledgeGraph.begin` to make
+        several successful statements commit or roll back together;
+        :meth:`KnowledgeGraph.session` provides coordinated concurrent access.
 
         **FORMAT CSV**: Append ``FORMAT CSV`` to any query to get results as
         a CSV string instead of a ResultView. Good for large result transfers
@@ -6338,8 +6355,8 @@ class KnowledgeGraph:
                 and note that with ``timeout_ms`` set too, the budget is
                 usually what fires on a runaway pattern, since it bounds what
                 the query holds while the deadline bounds how long it runs.
-                Direct mutation calls are in-place; use Session/Transaction for
-                rollback. Defaults to ``set_default_max_work_units()``.
+                A refusal during mutation execution restores that statement's
+                earlier writes. Defaults to ``set_default_max_work_units()``.
             row_limit: Cap on the result rows this call **retains** — the
                 opposite number to ``max_work_units``, which bounds work and
                 raises. The query still runs to completion and still computes
@@ -6437,7 +6454,10 @@ class KnowledgeGraph:
         Returns:
             ResultView by default, DataFrame when ``to_df=True``,
             or CSV string when the query ends with ``FORMAT CSV``. Only the
-            ResultView carries ``diagnostics`` / ``warnings``.
+            ResultView carries ``diagnostics`` / ``warnings``. Python result
+            values follow :class:`ResultView`'s endpoint-reference and timestamp
+            conversion contract; format-specific details are in
+            :doc:`Value projection </python/value-projection>`.
 
         Raises:
             KeyboardInterrupt: If a long-running read is interrupted with
@@ -7970,7 +7990,7 @@ class Transaction:
 
     Read-only transactions (``begin_read()``):
         - O(1) creation cost (Arc reference, no deep clone).
-        - Mutations are rejected with ``RuntimeError``.
+        - Mutations are rejected with :class:`ArgumentError` (code ``InvalidArgument``).
         - ``commit()`` is a no-op; ``rollback()`` releases the snapshot.
     """
 

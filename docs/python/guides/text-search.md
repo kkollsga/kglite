@@ -144,8 +144,8 @@ Two results are deliberately different answers:
 
 - **`0.0`** — the document was searched and shares no word with the query.
 - **`null`** — the index holds no document for that row: it was created after
-  the build and has not been caught up yet, or its property is absent or not a
-  string.
+  the build and has not been caught up yet, or its property is absent or is
+  neither text nor a list containing only text and nulls.
 
 Collapsing them would make an index that is quietly behind the graph look like
 a corpus with no matches. Ties break by node id, so an unchanged corpus returns

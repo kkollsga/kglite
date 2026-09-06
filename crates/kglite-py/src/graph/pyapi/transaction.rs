@@ -227,11 +227,9 @@ impl Transaction {
             disabled_passes: None,
             embedder: None,
             value_codecs: None,
-            // Cancellation is NOT wired on the transaction path: `working_mut`
-            // mutates in place when the graph is uniquely held, so an aborted
-            // mutation isn't reliably rolled back (a Ctrl-C could leave partial
-            // state). For interruptible + atomic mutations use `Session.execute`
-            // (separate working copy + atomic-swap commit). The deadline applies.
+            // This wrapper does not install a SIGINT cancellation flag.
+            // Deadline and work-budget failures still restore the shared
+            // statement checkpoint, including an existing working fork.
             cancel: None,
             write_scope: write_scope_set.as_ref(),
             git_sha: git_sha.as_deref(),

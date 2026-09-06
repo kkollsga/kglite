@@ -128,12 +128,18 @@ Levels, per-level loss windows and the measured cost of each are in
 
 ## Cancellation and rollback
 
-Deadlines/max-row budgets return typed errors. Cancellation is a
-binding-provided flag with the lifetime required by `ExecuteOptions`; do not
-pass a short-lived request-local reference where the API requires a static
-flag. Direct `execute_mut` mutates its graph in place. For rollback on failure,
-execute against a transaction working fork or use the `Session` writer path and
-publish only on success.
+Deadlines and work-unit budgets return typed errors; `row_limit` caps retained
+output with diagnostics and does not cancel execution. A supported cooperative
+cancellation flag has the lifetime required by `ExecuteOptions`; do not pass a
+short-lived request-local reference where the API requires a static flag.
+
+Direct `execute_mut` restores a statement checkpoint when mutation execution
+fails, including deadline, work-budget, and supplied cancellation failures.
+The same guarantee applies inside an already-materialised transaction working
+fork: earlier successful statements remain. Use a transaction for atomic
+publication of several statements, and a `Session` for coordinated writers and
+snapshot readers. Bindings choose whether their signal model supplies a
+cancellation flag; a missing flag does not disable timeout/budget rollback.
 
 ## Lazy results
 

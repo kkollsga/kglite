@@ -115,10 +115,10 @@ pub extern "C" fn kglite_graph_new() -> *mut KgliteGraph {
 ///
 /// # Errors
 ///
-/// - `KGLITE_ERR_NULL_POINTER` — `mode` or `out_graph` is null
-/// - `KGLITE_ERR_INVALID_UTF8` — `mode` / `path` isn't valid UTF-8
-/// - `KGLITE_ERR_INVALID_ARGUMENT` — unknown mode, or `"disk"` with no path
-/// - `KGLITE_ERR_FILE_IO` — failed to create the disk-graph directory
+/// - `KGLITE_STATUS_CODE_NULL_POINTER` — `mode` or `out_graph` is null
+/// - `KGLITE_STATUS_CODE_INVALID_UTF8` — `mode` / `path` isn't valid UTF-8
+/// - `KGLITE_STATUS_CODE_INVALID_ARGUMENT` — unknown mode, or `"disk"` with no path
+/// - `KGLITE_STATUS_CODE_FILE_IO` — failed to create the disk-graph directory
 ///
 /// # Safety
 ///
@@ -228,7 +228,7 @@ fn fail_new_in_mode(
 ///
 /// # Errors
 ///
-/// - `KGLITE_ERR_NULL_POINTER` — `graph` or `out_mode` is null
+/// - `KGLITE_STATUS_CODE_NULL_POINTER` — `graph` or `out_mode` is null
 ///
 /// # Safety
 ///
@@ -276,12 +276,12 @@ pub unsafe extern "C" fn kglite_graph_storage_mode(
 ///
 /// # Errors
 ///
-/// - `KGLITE_ERR_NULL_POINTER` — `path` or `out_graph` is null
-/// - `KGLITE_ERR_INVALID_UTF8` — `path` isn't valid UTF-8
-/// - `KGLITE_ERR_FILE_NOT_FOUND` — `path` doesn't exist
-/// - `KGLITE_ERR_FILE_FORMAT` — file isn't a valid `.kgl` /
+/// - `KGLITE_STATUS_CODE_NULL_POINTER` — `path` or `out_graph` is null
+/// - `KGLITE_STATUS_CODE_INVALID_UTF8` — `path` isn't valid UTF-8
+/// - `KGLITE_STATUS_CODE_FILE_NOT_FOUND` — `path` doesn't exist
+/// - `KGLITE_STATUS_CODE_FILE_FORMAT` — file isn't a valid `.kgl` /
 ///   disk-graph directory
-/// - `KGLITE_ERR_FILE_IO` — I/O failure during read
+/// - `KGLITE_STATUS_CODE_FILE_IO` — I/O failure during read
 ///
 /// # Safety
 ///
@@ -385,12 +385,12 @@ pub(crate) fn classify_io_error(err: &std::io::Error) -> (KgliteStatusCode, Stri
 ///
 /// # Errors
 ///
-/// - `KGLITE_ERR_NULL_POINTER` — `path` or `out_graph` is null
-/// - `KGLITE_ERR_INVALID_UTF8` — a string argument isn't valid UTF-8
-/// - `KGLITE_ERR_INVALID_ARGUMENT` — a `*_json` arg isn't a JSON string
+/// - `KGLITE_STATUS_CODE_NULL_POINTER` — `path` or `out_graph` is null
+/// - `KGLITE_STATUS_CODE_INVALID_UTF8` — a string argument isn't valid UTF-8
+/// - `KGLITE_STATUS_CODE_INVALID_ARGUMENT` — a `*_json` arg isn't a JSON string
 ///   array, or the file extension isn't a supported RDF format
-/// - `KGLITE_ERR_FILE_NOT_FOUND` — `path` doesn't exist
-/// - `KGLITE_ERR_FILE_FORMAT` — a parse error in the RDF
+/// - `KGLITE_STATUS_CODE_FILE_NOT_FOUND` — `path` doesn't exist
+/// - `KGLITE_STATUS_CODE_FILE_FORMAT` — a parse error in the RDF
 ///
 /// # Safety
 ///
@@ -564,9 +564,9 @@ fn classify_rdf_error(msg: &str) -> KgliteStatusCode {
 ///
 /// # Errors
 ///
-/// - `KGLITE_ERR_NULL_POINTER` — `graph` or `path` is null
-/// - `KGLITE_ERR_INVALID_UTF8` — `path` isn't valid UTF-8
-/// - `KGLITE_ERR_FILE_IO` — write failed
+/// - `KGLITE_STATUS_CODE_NULL_POINTER` — `graph` or `path` is null
+/// - `KGLITE_STATUS_CODE_INVALID_UTF8` — `path` isn't valid UTF-8
+/// - `KGLITE_STATUS_CODE_FILE_IO` — write failed
 ///
 /// # Safety
 ///
@@ -1080,10 +1080,10 @@ mod tests {
         unsafe { crate::kglite_free_string(err) };
     }
 
-    /// The documented contract of this entry point: `KGLITE_ERR_FILE_FORMAT`
+    /// The documented contract of this entry point: `KGLITE_STATUS_CODE_FILE_FORMAT`
     /// means "the file isn't a valid `.kgl`". It is derived from the loader's
     /// `io::ErrorKind`, so a refusal the loader classified as anything but
-    /// `InvalidData` reaches a C consumer as `KGLITE_ERR_FILE_IO` — an I/O
+    /// `InvalidData` reaches a C consumer as `KGLITE_STATUS_CODE_FILE_IO` — an I/O
     /// fault it might retry — which is what every bad-magic, wrong-version and
     /// deliberate-format-break refusal did until 0.16.15.
     #[test]

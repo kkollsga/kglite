@@ -86,7 +86,7 @@ impl SessionState {
 ///
 /// # Errors
 ///
-/// - `KGLITE_ERR_NULL_POINTER` — `graph` or `out_session` is null
+/// - `KGLITE_STATUS_CODE_NULL_POINTER` — `graph` or `out_session` is null
 ///
 /// **The graph handle is consumed only on `Ok`; on any error the caller
 /// retains ownership and must still free it** with
@@ -694,9 +694,9 @@ pub unsafe extern "C" fn kglite_create_edges_batch(
 ///
 /// # Errors
 ///
-/// - `KGLITE_ERR_NULL_POINTER` — `session` or `path` is null
-/// - `KGLITE_ERR_INVALID_UTF8` — `path` isn't valid UTF-8
-/// - `KGLITE_ERR_FILE_IO` — the write failed
+/// - `KGLITE_STATUS_CODE_NULL_POINTER` — `session` or `path` is null
+/// - `KGLITE_STATUS_CODE_INVALID_UTF8` — `path` isn't valid UTF-8
+/// - `KGLITE_STATUS_CODE_FILE_IO` — the write failed
 ///
 /// # Safety
 ///

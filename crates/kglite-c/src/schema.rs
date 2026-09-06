@@ -97,12 +97,12 @@ fn parse_mode(mode: *const c_char) -> Result<SchemaInstall, String> {
 ///
 /// # Errors
 ///
-/// - `KGLITE_ERR_NULL_POINTER` — `session` or `schema_json` is null.
-/// - `KGLITE_ERR_INVALID_UTF8` — `schema_json` is not valid UTF-8.
-/// - `KGLITE_ERR_INVALID_ARGUMENT` — the JSON did not parse, the document is
+/// - `KGLITE_STATUS_CODE_NULL_POINTER` — `session` or `schema_json` is null.
+/// - `KGLITE_STATUS_CODE_INVALID_UTF8` — `schema_json` is not valid UTF-8.
+/// - `KGLITE_STATUS_CODE_INVALID_ARGUMENT` — the JSON did not parse, the document is
 ///   not in the dialect above, or `mode` is not `"merge"` / `"replace"`; the
 ///   message says which.
-/// - A constraint status (`KGLITE_ERR_CONSTRAINT_VIOLATION` and friends) when
+/// - A constraint status (`KGLITE_STATUS_CODE_CONSTRAINT_VIOLATION` and friends) when
 ///   existing data violates a declared constraint; the message names it.
 ///
 /// **The schema is not durable until saved.** Call

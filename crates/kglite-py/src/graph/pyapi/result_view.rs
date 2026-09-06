@@ -858,17 +858,6 @@ impl ResultView {
     }
 
     /// Materialize as a pandas DataFrame without rounding supported integers.
-    ///
-    /// Integer/NULL columns use nullable Int64; heterogeneous columns containing
-    /// integers use object. Other columns follow pandas inference, including
-    /// float NULLs becoming NaN. Column order and nested values are preserved.
-    ///
-    /// Example::
-    ///
-    /// ```text
-    /// df = r.to_df()
-    /// df.plot(x='year', y='count')
-    /// ```
     fn to_df(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if self.lazy.is_some() {
             // DataFrame consumes every cell — force lazy materialisation.

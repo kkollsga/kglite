@@ -165,10 +165,7 @@ impl KnowledgeGraph {
         Ok(row_count)
     }
 
-    /// Reconstruct a table-valued property as a pandas DataFrame, restoring
-    /// stored column order and dtypes from exact cells, before pandas inference
-    /// can round nullable integers. Unsupported recorded dtypes retain a safe
-    /// inferred representation.
+    /// Reconstruct a table-valued property as a pandas DataFrame.
     #[pyo3(signature = (node_type, node_id, property))]
     fn get_table_property(
         &self,

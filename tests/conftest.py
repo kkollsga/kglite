@@ -120,15 +120,15 @@ def binary_skip_reason(name: str, binary: Path, build_hint: str) -> str | None:
 # call `_spawn_bolt_server`/`_teardown_bolt_server` directly for custom
 # scenarios.
 #
-# The fixtures gracefully skip if the binary isn't built — `make
-# build-bolt-server` (or `cargo build -p kglite-bolt-server --release`)
-# is the standard way to materialize it.
+# Fixtures select the newest debug/release binary and skip with a rebuild
+# reason when it is unavailable or stale. Build debug for local correctness:
+# `cargo build -p kglite-bolt-server`.
 
 _BOLT_BINARY = workspace_binary("kglite-bolt-server")
 _BOLT_SKIP_REASON = binary_skip_reason(
     "kglite-bolt-server",
     _BOLT_BINARY,
-    "cargo build -p kglite-bolt-server --release",
+    "cargo build -p kglite-bolt-server",
 )
 
 
@@ -265,7 +265,7 @@ def _bolt_binary_available() -> bool:
 
 @pytest.fixture
 def bolt_binary_path() -> Path:
-    """The expected path of the release-built kglite-bolt-server binary.
+    """The newest built debug/release kglite-bolt-server binary path.
     Tests that need it should skip if `_bolt_binary_available()` is False.
     """
     return _BOLT_BINARY

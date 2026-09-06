@@ -163,11 +163,11 @@ unsafe fn emit_ingest(
 ///
 /// # Errors
 ///
-/// - `KGLITE_ERR_NULL_POINTER` — `session`, `node_type`, `text_column`,
+/// - `KGLITE_STATUS_CODE_NULL_POINTER` — `session`, `node_type`, `text_column`,
 ///   `ids_json`, or `out_report_json` is null (or `vectors` is null with
 ///   `count > 0`).
-/// - `KGLITE_ERR_INVALID_UTF8` — a string argument is not valid UTF-8.
-/// - `KGLITE_ERR_INVALID_ARGUMENT` — `ids_json` is not a JSON array of exactly
+/// - `KGLITE_STATUS_CODE_INVALID_UTF8` — a string argument is not valid UTF-8.
+/// - `KGLITE_STATUS_CODE_INVALID_ARGUMENT` — `ids_json` is not a JSON array of exactly
 ///   `count` ids, `dim == 0` with `count > 0`, or the engine rejected the batch
 ///   (unknown node type, inconsistent dimension, unknown metric); the message
 ///   explains which.
@@ -353,10 +353,10 @@ unsafe fn ingest_impl(
 ///
 /// # Errors
 ///
-/// - `KGLITE_ERR_NULL_POINTER` — `session`, `node_type`, `text_column`, or
+/// - `KGLITE_STATUS_CODE_NULL_POINTER` — `session`, `node_type`, `text_column`, or
 ///   `out_report_json` is null.
-/// - `KGLITE_ERR_INVALID_UTF8` — a string argument is not valid UTF-8.
-/// - `KGLITE_ERR_INVALID_ARGUMENT` — no store to index, an unknown or
+/// - `KGLITE_STATUS_CODE_INVALID_UTF8` — a string argument is not valid UTF-8.
+/// - `KGLITE_STATUS_CODE_INVALID_ARGUMENT` — no store to index, an unknown or
 ///   non-indexable metric; the message explains which.
 ///
 /// # Safety
@@ -465,7 +465,7 @@ pub unsafe extern "C" fn kglite_session_build_vector_index(
 ///
 /// # Errors
 ///
-/// - `KGLITE_ERR_NULL_POINTER` — `session` or `out_report_json` is null.
+/// - `KGLITE_STATUS_CODE_NULL_POINTER` — `session` or `out_report_json` is null.
 ///
 /// # Safety
 ///

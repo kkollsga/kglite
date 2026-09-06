@@ -384,11 +384,11 @@ KgliteStatusCode kglite_embedder_fastembed_new(const char *model_name,
  *
  * # Errors
  *
- * - `KGLITE_ERR_NULL_POINTER` — `session`, `node_type`, `text_column`,
+ * - `KGLITE_STATUS_CODE_NULL_POINTER` — `session`, `node_type`, `text_column`,
  *   `ids_json`, or `out_report_json` is null (or `vectors` is null with
  *   `count > 0`).
- * - `KGLITE_ERR_INVALID_UTF8` — a string argument is not valid UTF-8.
- * - `KGLITE_ERR_INVALID_ARGUMENT` — `ids_json` is not a JSON array of exactly
+ * - `KGLITE_STATUS_CODE_INVALID_UTF8` — a string argument is not valid UTF-8.
+ * - `KGLITE_STATUS_CODE_INVALID_ARGUMENT` — `ids_json` is not a JSON array of exactly
  *   `count` ids, `dim == 0` with `count > 0`, or the engine rejected the batch
  *   (unknown node type, inconsistent dimension, unknown metric); the message
  *   explains which.
@@ -471,10 +471,10 @@ KgliteStatusCode kglite_session_add_embeddings(struct KgliteSession *session,
  *
  * # Errors
  *
- * - `KGLITE_ERR_NULL_POINTER` — `session`, `node_type`, `text_column`, or
+ * - `KGLITE_STATUS_CODE_NULL_POINTER` — `session`, `node_type`, `text_column`, or
  *   `out_report_json` is null.
- * - `KGLITE_ERR_INVALID_UTF8` — a string argument is not valid UTF-8.
- * - `KGLITE_ERR_INVALID_ARGUMENT` — no store to index, an unknown or
+ * - `KGLITE_STATUS_CODE_INVALID_UTF8` — a string argument is not valid UTF-8.
+ * - `KGLITE_STATUS_CODE_INVALID_ARGUMENT` — no store to index, an unknown or
  *   non-indexable metric; the message explains which.
  *
  * # Safety
@@ -513,7 +513,7 @@ KgliteStatusCode kglite_session_build_vector_index(struct KgliteSession *session
  *
  * # Errors
  *
- * - `KGLITE_ERR_NULL_POINTER` — `session` or `out_report_json` is null.
+ * - `KGLITE_STATUS_CODE_NULL_POINTER` — `session` or `out_report_json` is null.
  *
  * # Safety
  *
@@ -575,10 +575,10 @@ KgliteStatusCode kglite_session_list_embeddings(const struct KgliteSession *sess
  *
  * # Errors
  *
- * - `KGLITE_ERR_NULL_POINTER` — `mode` or `out_graph` is null
- * - `KGLITE_ERR_INVALID_UTF8` — `mode` / `path` isn't valid UTF-8
- * - `KGLITE_ERR_INVALID_ARGUMENT` — unknown mode, or `"disk"` with no path
- * - `KGLITE_ERR_FILE_IO` — failed to create the disk-graph directory
+ * - `KGLITE_STATUS_CODE_NULL_POINTER` — `mode` or `out_graph` is null
+ * - `KGLITE_STATUS_CODE_INVALID_UTF8` — `mode` / `path` isn't valid UTF-8
+ * - `KGLITE_STATUS_CODE_INVALID_ARGUMENT` — unknown mode, or `"disk"` with no path
+ * - `KGLITE_STATUS_CODE_FILE_IO` — failed to create the disk-graph directory
  *
  * # Safety
  *
@@ -622,7 +622,7 @@ KgliteStatusCode kglite_graph_new_in_mode(const char *mode,
  *
  * # Errors
  *
- * - `KGLITE_ERR_NULL_POINTER` — `graph` or `out_mode` is null
+ * - `KGLITE_STATUS_CODE_NULL_POINTER` — `graph` or `out_mode` is null
  *
  * # Safety
  *
@@ -654,12 +654,12 @@ KgliteStatusCode kglite_graph_storage_mode(struct KgliteGraph *graph,
  *
  * # Errors
  *
- * - `KGLITE_ERR_NULL_POINTER` — `path` or `out_graph` is null
- * - `KGLITE_ERR_INVALID_UTF8` — `path` isn't valid UTF-8
- * - `KGLITE_ERR_FILE_NOT_FOUND` — `path` doesn't exist
- * - `KGLITE_ERR_FILE_FORMAT` — file isn't a valid `.kgl` /
+ * - `KGLITE_STATUS_CODE_NULL_POINTER` — `path` or `out_graph` is null
+ * - `KGLITE_STATUS_CODE_INVALID_UTF8` — `path` isn't valid UTF-8
+ * - `KGLITE_STATUS_CODE_FILE_NOT_FOUND` — `path` doesn't exist
+ * - `KGLITE_STATUS_CODE_FILE_FORMAT` — file isn't a valid `.kgl` /
  *   disk-graph directory
- * - `KGLITE_ERR_FILE_IO` — I/O failure during read
+ * - `KGLITE_STATUS_CODE_FILE_IO` — I/O failure during read
  *
  * # Safety
  *
@@ -710,12 +710,12 @@ KgliteStatusCode kglite_load_file(const char *path,
  *
  * # Errors
  *
- * - `KGLITE_ERR_NULL_POINTER` — `path` or `out_graph` is null
- * - `KGLITE_ERR_INVALID_UTF8` — a string argument isn't valid UTF-8
- * - `KGLITE_ERR_INVALID_ARGUMENT` — a `*_json` arg isn't a JSON string
+ * - `KGLITE_STATUS_CODE_NULL_POINTER` — `path` or `out_graph` is null
+ * - `KGLITE_STATUS_CODE_INVALID_UTF8` — a string argument isn't valid UTF-8
+ * - `KGLITE_STATUS_CODE_INVALID_ARGUMENT` — a `*_json` arg isn't a JSON string
  *   array, or the file extension isn't a supported RDF format
- * - `KGLITE_ERR_FILE_NOT_FOUND` — `path` doesn't exist
- * - `KGLITE_ERR_FILE_FORMAT` — a parse error in the RDF
+ * - `KGLITE_STATUS_CODE_FILE_NOT_FOUND` — `path` doesn't exist
+ * - `KGLITE_STATUS_CODE_FILE_FORMAT` — a parse error in the RDF
  *
  * # Safety
  *
@@ -758,9 +758,9 @@ KgliteStatusCode kglite_load_rdf(const char *path,
  *
  * # Errors
  *
- * - `KGLITE_ERR_NULL_POINTER` — `graph` or `path` is null
- * - `KGLITE_ERR_INVALID_UTF8` — `path` isn't valid UTF-8
- * - `KGLITE_ERR_FILE_IO` — write failed
+ * - `KGLITE_STATUS_CODE_NULL_POINTER` — `graph` or `path` is null
+ * - `KGLITE_STATUS_CODE_INVALID_UTF8` — `path` isn't valid UTF-8
+ * - `KGLITE_STATUS_CODE_FILE_IO` — write failed
  *
  * # Safety
  *
@@ -964,11 +964,11 @@ KgliteStatusCode kglite_compute_schema_json(struct KgliteGraph *graph,
  *
  * # Errors
  *
- * - `KGLITE_ERR_NULL_POINTER` — `path` or `out_lease` is null
- * - `KGLITE_ERR_INVALID_UTF8` — `path` isn't valid UTF-8
+ * - `KGLITE_STATUS_CODE_NULL_POINTER` — `path` or `out_lease` is null
+ * - `KGLITE_STATUS_CODE_INVALID_UTF8` — `path` isn't valid UTF-8
  * - `KGLITE_STATUS_CODE_WRITER_LEASE_HELD` — someone else holds it; the
  *   message names them. Retriable as-is.
- * - `KGLITE_ERR_FILE_IO` / `KGLITE_ERR_FILE_NOT_FOUND` — the lock sidecar
+ * - `KGLITE_STATUS_CODE_FILE_IO` / `KGLITE_STATUS_CODE_FILE_NOT_FOUND` — the lock sidecar
  *   could not be created (unwritable or missing parent directory)
  *
  * # Safety
@@ -1094,13 +1094,13 @@ KgliteStatusCode kglite_writer_lease_acquire_ex(const char *path,
  *
  * # Errors
  *
- * - `KGLITE_ERR_NULL_POINTER` — `path` or `out_graph` is null
- * - `KGLITE_ERR_INVALID_UTF8` — `path` / `mode` isn't valid UTF-8
- * - `KGLITE_ERR_FILE_NOT_FOUND` — the path is absent and `mode` was null,
+ * - `KGLITE_STATUS_CODE_NULL_POINTER` — `path` or `out_graph` is null
+ * - `KGLITE_STATUS_CODE_INVALID_UTF8` — `path` / `mode` isn't valid UTF-8
+ * - `KGLITE_STATUS_CODE_FILE_NOT_FOUND` — the path is absent and `mode` was null,
  *   so there was no mode to create it in
- * - `KGLITE_ERR_INVALID_ARGUMENT` — unknown mode string, or a conversion
+ * - `KGLITE_STATUS_CODE_INVALID_ARGUMENT` — unknown mode string, or a conversion
  *   that cannot happen in place (either disk direction)
- * - `KGLITE_ERR_FILE_FORMAT` / `KGLITE_ERR_FILE_IO` — as
+ * - `KGLITE_STATUS_CODE_FILE_FORMAT` / `KGLITE_STATUS_CODE_FILE_IO` — as
  *   [`kglite_load_file`](crate::kglite_load_file)
  *
  * # Safety
@@ -1241,12 +1241,12 @@ KgliteStatusCode kglite_open_or_create_graph_in_mode(const char *path,
  *
  * # Errors
  *
- * - `KGLITE_ERR_NULL_POINTER` — `session` or `schema_json` is null.
- * - `KGLITE_ERR_INVALID_UTF8` — `schema_json` is not valid UTF-8.
- * - `KGLITE_ERR_INVALID_ARGUMENT` — the JSON did not parse, the document is
+ * - `KGLITE_STATUS_CODE_NULL_POINTER` — `session` or `schema_json` is null.
+ * - `KGLITE_STATUS_CODE_INVALID_UTF8` — `schema_json` is not valid UTF-8.
+ * - `KGLITE_STATUS_CODE_INVALID_ARGUMENT` — the JSON did not parse, the document is
  *   not in the dialect above, or `mode` is not `"merge"` / `"replace"`; the
  *   message says which.
- * - A constraint status (`KGLITE_ERR_CONSTRAINT_VIOLATION` and friends) when
+ * - A constraint status (`KGLITE_STATUS_CODE_CONSTRAINT_VIOLATION` and friends) when
  *   existing data violates a declared constraint; the message names it.
  *
  * **The schema is not durable until saved.** Call
@@ -1281,7 +1281,7 @@ KgliteStatusCode kglite_define_schema(struct KgliteSession *session,
  *
  * # Errors
  *
- * - `KGLITE_ERR_NULL_POINTER` — `graph` or `out_session` is null
+ * - `KGLITE_STATUS_CODE_NULL_POINTER` — `graph` or `out_session` is null
  *
  * **The graph handle is consumed only on `Ok`; on any error the caller
  * retains ownership and must still free it** with
@@ -1525,9 +1525,9 @@ KgliteStatusCode kglite_create_edges_batch(struct KgliteSession *session,
  *
  * # Errors
  *
- * - `KGLITE_ERR_NULL_POINTER` — `session` or `path` is null
- * - `KGLITE_ERR_INVALID_UTF8` — `path` isn't valid UTF-8
- * - `KGLITE_ERR_FILE_IO` — the write failed
+ * - `KGLITE_STATUS_CODE_NULL_POINTER` — `session` or `path` is null
+ * - `KGLITE_STATUS_CODE_INVALID_UTF8` — `path` isn't valid UTF-8
+ * - `KGLITE_STATUS_CODE_FILE_IO` — the write failed
  *
  * # Safety
  *
@@ -1665,10 +1665,10 @@ KgliteStatusCode kglite_session_save(struct KgliteSession *session,
  *
  * # Errors
  *
- * - `KGLITE_ERR_NULL_POINTER` — `session`, `node_type`, `property`, or
+ * - `KGLITE_STATUS_CODE_NULL_POINTER` — `session`, `node_type`, `property`, or
  *   `out_report_json` is null.
- * - `KGLITE_ERR_INVALID_UTF8` — a string argument is not valid UTF-8.
- * - `KGLITE_ERR_INVALID_ARGUMENT` — the node type is unknown, the graph is
+ * - `KGLITE_STATUS_CODE_INVALID_UTF8` — a string argument is not valid UTF-8.
+ * - `KGLITE_STATUS_CODE_INVALID_ARGUMENT` — the node type is unknown, the graph is
  *   disk-backed (the index is heap-resident, so disk mode refuses), or the
  *   type has nodes and none of them carries a string for `property`; the
  *   message explains which.

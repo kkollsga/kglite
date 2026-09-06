@@ -74,7 +74,7 @@ pyo3::create_exception!(
     kglite,
     KgError,
     pyo3::exceptions::PyException,
-    "Base class for every kglite-raised exception. Catch this to handle any kglite error."
+    "Base class for typed KGLite engine failures."
 );
 
 // ── Cypher pipeline ──────────────────────────────────────────────────
