@@ -437,11 +437,11 @@
       "classification": "transitional"
     },
     {
-      "identity": "crates/kglite/src/graph/mutation/maintain.rs::fn:add_connections_with_initial_load:pub(crate) fn add_connections_with_initial_load( graph: &mut DirGraph, df_data: DataFrame, connection_type: String, source_type: String, source_id_field: String, target_type: String, target_id_field: String, source_title_field: Option<String>, target_title_field: Option<String>, conflict_handling: O::clippy::too_many_arguments",
+      "identity": "crates/kglite/src/graph/mutation/maintain.rs::fn:add_connections_with_initial_load:pub(crate) fn add_connections_with_initial_load( graph: &mut DirGraph, mut df_data: DataFrame, connection_type: String, source_type: String, source_id_field: String, target_type: String, target_id_field: String, source_title_field: Option<String>, target_title_field: Option<String>, conflict_handlin::clippy::too_many_arguments",
       "classification": "transitional"
     },
     {
-      "identity": "crates/kglite/src/graph/mutation/maintain.rs::fn:gate_batch:fn gate_batch( graph: &mut DirGraph, node_type: &str, df_data: &DataFrame, columns: Option<&ConstraintColumns>, pk_enforced: bool, id_idx: usize, title_idx: usize, unique_id_field: &str, title_field: &str, ) -> Result<(), String>::clippy::too_many_arguments",
+      "identity": "crates/kglite/src/graph/mutation/maintain.rs::fn:gate_batch:fn gate_batch( graph: &mut DirGraph, node_type: &str, df_data: &DataFrame, columns: Option<&ConstraintColumns>, pk_enforced: bool, id_idx: usize, title_idx: usize, unique_id_field: &str, title_field: &str, derived_titles: Option<&[Value]>, ) -> Result<(), String>::clippy::too_many_arguments",
       "classification": "transitional"
     },
     {
