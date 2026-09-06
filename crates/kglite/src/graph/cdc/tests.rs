@@ -13,7 +13,7 @@ use crate::graph::session::execute::{execute_mut, ExecuteOptions};
 use crate::graph::session::Session;
 use crate::graph::storage::mode::{new_dir_graph_in_mode, StorageMode};
 use crate::graph::storage::GraphRead;
-use crate::graph::wal::{DurabilityLevel, WAL_FORMAT_VERSION};
+use crate::graph::wal::DurabilityLevel;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -944,15 +944,54 @@ fn a_durable_commit_that_could_not_be_logged_publishes_nothing() {
     assert_eq!(since(&session.snapshot(), from).len(), 1);
 }
 
-/// CDC changes no on-disk format. The WAL's create/update distinction lives in
-/// the in-memory capture buffer precisely so this constant does not move.
+/// CDC origin and before-images are raw capture metadata. Unmarked capture
+/// still resolves to the same legacy payload regardless of that metadata;
+/// unrelated WAL revisions are pinned by the WAL compatibility tests.
 #[test]
-fn cdc_does_not_move_the_wal_format_version() {
-    assert_eq!(
-        WAL_FORMAT_VERSION, 3,
-        "CDC derives create-vs-update from an in-memory capture marker; if this \
-         constant moved, a `MutationOp` gained a field it did not need"
-    );
+fn cdc_metadata_does_not_change_legacy_wal_payload() {
+    use crate::graph::storage::interner::InternedKey;
+    use crate::graph::storage::recording::{resolve_ops, BeforeImage, CaptureOrigin, RawOp};
+    use crate::graph::wal::{append_frame, MutationOp, WalFrame};
+
+    let mut graph = DirGraph::new();
+    run(&mut graph, "CREATE (:Item {id: 1, name: 'after'})");
+    let idx = graph.graph.node_indices().next().expect("one node");
+    let before = BeforeImage {
+        title: Value::String("old title".into()),
+        properties: vec![(
+            InternedKey::from_str("name"),
+            Value::String("before".into()),
+        )],
+        labels: Some(vec!["OldLabel".into()]),
+    };
+    let expected = vec![MutationOp::UpsertNode {
+        node_type: "Item".into(),
+        id: Value::Int64(1),
+        title: Value::String("after".into()),
+        properties: vec![("name".into(), Value::String("after".into()))],
+    }];
+    // A fixed LSN and one property avoid sequence and map-order differences.
+    // No header/version byte is compared: CDC does not own the global format.
+    let encode = |ops| {
+        let mut bytes = Vec::new();
+        append_frame(&mut bytes, &WalFrame { lsn: 42, ops }).expect("encode frame");
+        bytes
+    };
+    let expected_bytes = encode(expected.clone());
+    for (origin, image) in [
+        (CaptureOrigin::Create, None),
+        (CaptureOrigin::Update, None),
+        (CaptureOrigin::Update, Some(Box::new(before))),
+    ] {
+        let raw = [RawOp::UpsertNode(idx, origin, image)];
+        let ops = resolve_ops(&raw, &graph.graph, &graph.interner, |_| Vec::new());
+        assert_eq!(ops, expected, "CDC metadata must not enter the legacy op");
+        assert_eq!(
+            encode(ops),
+            expected_bytes,
+            "CDC metadata must not enter its bytes"
+        );
+    }
 }
 
 // ── before-images (CdcEnrichment::Full) ──────────────────────────────
