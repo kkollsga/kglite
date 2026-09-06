@@ -54,6 +54,7 @@ pub fn rows_to_dataframe(
 ) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
     let col_order = PyList::empty(py);
+    let native_dtypes = PyDict::new(py);
 
     let col_keys: Vec<Py<PyAny>> = columns
         .iter()
@@ -62,29 +63,82 @@ pub fn rows_to_dataframe(
 
     for (i, key) in col_keys.iter().enumerate() {
         let col_list = PyList::empty(py);
+        let mut kinds = 0_u8;
         for row in rows {
-            if let Some(pv) = row.get(i) {
+            let value = row.get(i);
+            kinds |= dataframe_value_kind(value);
+            if let Some(pv) = value {
                 col_list.append(py_out::value_to_py(py, pv)?)?;
             } else {
                 col_list.append(py.None())?;
             }
         }
+        native_dtypes.set_item(key, dataframe_integer_dtype(kinds))?;
         dict.set_item(key, col_list)?;
         col_order.append(key)?;
     }
 
-    let pd = py.import("pandas")?;
+    crate::datatypes::pandas_out::dataframe(
+        py,
+        dict.as_any(),
+        Some(&col_order),
+        None,
+        Some(&native_dtypes),
+    )
+}
 
-    if rows.is_empty() {
-        let kwargs = PyDict::new(py);
-        kwargs.set_item("columns", col_order)?;
-        return pd
-            .call_method("DataFrame", (), Some(&kwargs))
-            .map(|df| df.unbind());
+fn dataframe_integer_dtype(kinds: u8) -> Option<&'static str> {
+    match kinds {
+        3 => Some("Int64"),
+        5 | 7 => Some("object"),
+        _ => None,
     }
+}
 
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("columns", col_order)?;
-    pd.call_method("DataFrame", (dict,), Some(&kwargs))
-        .map(|df| df.unbind())
+// Match emitted Python scalar types, not core predicate equality. UniqueId and
+// the unresolved NodeRef fallback emit integers; absent cells emit None.
+fn dataframe_value_kind(value: Option<&Value>) -> u8 {
+    match value {
+        Some(Value::Int64(_) | Value::UniqueId(_) | Value::NodeRef(_)) => 1,
+        Some(Value::Null) | None => 2,
+        _ => 4,
+    }
+}
+
+#[cfg(test)]
+mod dataframe_dtype_tests {
+    use super::*;
+
+    #[test]
+    fn hints_follow_emitted_integer_null_and_other_types() {
+        for value in [
+            Value::Int64(i64::MAX),
+            Value::UniqueId(7),
+            Value::NodeRef(9),
+        ] {
+            let integer = dataframe_value_kind(Some(&value));
+            assert_eq!(integer, 1);
+            assert_eq!(dataframe_integer_dtype(integer), None);
+            assert_eq!(
+                dataframe_integer_dtype(integer | dataframe_value_kind(None)),
+                Some("Int64")
+            );
+            assert_eq!(
+                dataframe_integer_dtype(integer | dataframe_value_kind(Some(&Value::Null))),
+                Some("Int64")
+            );
+            for other in [
+                Value::Boolean(true),
+                Value::Float64(1.5),
+                Value::String("x".into()),
+            ] {
+                let mixed = integer | dataframe_value_kind(Some(&other));
+                assert_eq!(dataframe_integer_dtype(mixed), Some("object"));
+                assert_eq!(dataframe_integer_dtype(mixed | 2), Some("object"));
+            }
+        }
+        for kind in [0, 2, 4, 6] {
+            assert_eq!(dataframe_integer_dtype(kind), None);
+        }
+    }
 }

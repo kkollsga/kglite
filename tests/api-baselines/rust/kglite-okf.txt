@@ -248,6 +248,11 @@ pub fn kglite::api::algorithms::shortest_path_weighted(graph: &kglite::api::DirG
 pub fn kglite::api::algorithms::vector_search(graph: &kglite::api::DirGraph, selection: &kglite::api::CurrentSelection, embedding_property: &str, query_vector: &[f32], options: &kglite::api::algorithms::VectorSearchOptions) -> core::result::Result<alloc::vec::Vec<kglite::api::algorithms::VectorSearchResult>, alloc::string::String>
 pub fn kglite::api::algorithms::weakly_connected_components(graph: &kglite::api::DirGraph, deadline: kglite::api::algorithms::Interrupt) -> core::result::Result<alloc::vec::Vec<alloc::vec::Vec<petgraph::graph_impl::NodeIndex>>, alloc::string::String>
 pub mod kglite::api::blueprint
+pub mod kglite::api::blueprint::scalar
+pub fn kglite::api::blueprint::scalar::parse_boolean(text: &str) -> core::option::Option<bool>
+pub fn kglite::api::blueprint::scalar::parse_date(text: &str) -> core::option::Option<chrono::naive::date::NaiveDate>
+pub fn kglite::api::blueprint::scalar::parse_float(text: &str) -> core::option::Option<f64>
+pub fn kglite::api::blueprint::scalar::parse_integer(text: &str) -> core::option::Option<i64>
 pub enum kglite::api::blueprint::ComputeOp
 pub kglite::api::blueprint::ComputeOp::Aggregate
 pub kglite::api::blueprint::ComputeOp::Aggregate::agg: indexmap::map::IndexMap<alloc::string::String, alloc::string::String>

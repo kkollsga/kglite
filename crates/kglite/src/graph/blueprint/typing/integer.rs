@@ -2,7 +2,7 @@
 
 /// Preserve whole-number CSV spellings without rounding through f64. Invalid,
 /// fractional and out-of-range cells retain the typed loader's NULL policy.
-pub(super) fn parse_exact_i64(text: &str) -> Option<i64> {
+pub fn parse_exact_i64(text: &str) -> Option<i64> {
     let text = text.trim();
     if let Ok(value) = text.parse::<i64>() {
         return Some(value);

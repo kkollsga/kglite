@@ -166,7 +166,9 @@ impl KnowledgeGraph {
     }
 
     /// Reconstruct a table-valued property as a pandas DataFrame, restoring
-    /// stored column order and dtypes.
+    /// stored column order and dtypes from exact cells, before pandas inference
+    /// can round nullable integers. Unsupported recorded dtypes retain a safe
+    /// inferred representation.
     #[pyo3(signature = (node_type, node_id, property))]
     fn get_table_property(
         &self,
@@ -208,37 +210,27 @@ fn build_frame(
     node_type: &str,
     property: &str,
 ) -> PyResult<Py<PyAny>> {
-    let pandas = py.import("pandas")?;
     let meta = kg
         .inner
         .table_property_meta
         .get(&table_meta_key(node_type, property));
-    let kwargs = PyDict::new(py);
+    let columns = meta
+        .map(|meta| PyList::new(py, &meta.columns))
+        .transpose()?;
+    let dtypes = PyDict::new(py);
     if let Some(meta) = meta {
-        kwargs.set_item("columns", PyList::new(py, &meta.columns)?)?;
-    }
-    let df = pandas
-        .getattr("DataFrame")
-        .and_then(|ctor| ctor.call((rows,), Some(&kwargs)))?;
-    if let Some(meta) = meta {
-        // Restore dtypes; columns that held nulls use pandas nullable
-        // dtypes so NaN-coerced integers come back as integers.
         for (name, dtype) in &meta.dtypes {
             let target = if meta.nullable.contains(name) {
                 match dtype.as_str() {
-                    "int64" => "Int64".to_string(),
-                    "bool" => "boolean".to_string(),
-                    other => other.to_string(),
+                    "int64" => "Int64",
+                    "bool" => "boolean",
+                    other => other,
                 }
             } else {
-                dtype.clone()
+                dtype.as_str()
             };
-            if let Ok(col) = df.get_item(name) {
-                if let Ok(cast) = col.call_method1("astype", (target.as_str(),)) {
-                    df.set_item(name, cast)?;
-                }
-            }
+            dtypes.set_item(name, target)?;
         }
     }
-    Ok(df.into())
+    crate::datatypes::pandas_out::dataframe(py, rows, columns.as_ref(), Some(&dtypes), None)
 }

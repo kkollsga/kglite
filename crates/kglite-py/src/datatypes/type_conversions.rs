@@ -1,6 +1,8 @@
 // src/datatypes/type_conversions.rs
 use chrono::{NaiveDate, NaiveDateTime};
+use kglite_core::api::blueprint::scalar;
 use pyo3::prelude::*;
+use pyo3::types::{PyDateTime, PyInt};
 use pyo3::Bound;
 
 pub fn to_u32(value: &Bound<'_, PyAny>) -> Option<u32> {
@@ -34,31 +36,26 @@ pub fn to_u32(value: &Bound<'_, PyAny>) -> Option<u32> {
 }
 
 pub fn to_i64(value: &Bound<'_, PyAny>) -> Option<i64> {
-    if value.is_none() {
+    if let Ok(text) = value.extract::<String>() {
+        return scalar::parse_integer(&text);
+    }
+    if let Ok(value) = value.extract::<i64>() {
+        return Some(value);
+    }
+    // A Python integer outside Int64 must not round back into range as f64.
+    if value.is_instance_of::<PyInt>() {
         return None;
     }
-    if let Ok(val) = value.extract::<i64>() {
-        return Some(val);
-    }
-    if let Ok(val) = value.extract::<f64>() {
-        if val.fract() == 0.0 && val >= i64::MIN as f64 && val <= i64::MAX as f64 {
-            return Some(val as i64);
-        }
-    }
-    if let Ok(s) = value.extract::<String>() {
-        if let Ok(val) = s.parse::<i64>() {
-            return Some(val);
-        }
-        if let Ok(val) = s.parse::<f64>() {
-            if val.fract() == 0.0 && val >= i64::MIN as f64 && val <= i64::MAX as f64 {
-                return Some(val as i64);
-            }
-        }
-    }
-    None
+    // i64::MAX rounds to 2^63 as f64: the upper bound must be exclusive.
+    let number = value.extract::<f64>().ok()?;
+    (number.is_finite()
+        && number.fract() == 0.0
+        && number >= i64::MIN as f64
+        && number < -(i64::MIN as f64))
+        .then_some(number as i64)
 }
 
-pub fn to_f64(value: &Bound<'_, PyAny>) -> Option<f64> {
+pub fn to_f64(value: &Bound<'_, PyAny>, csv_text: bool) -> Option<f64> {
     if value.is_none() {
         return None;
     }
@@ -71,18 +68,13 @@ pub fn to_f64(value: &Bound<'_, PyAny>) -> Option<f64> {
     if let Ok(val) = value.extract::<i64>() {
         return Some(val as f64);
     }
-    if let Ok(s) = value.extract::<String>() {
-        if let Ok(val) = s.parse::<f64>() {
-            if val.is_nan() {
-                return None;
-            }
-            return Some(val);
-        }
+    if let Ok(text) = value.extract::<String>() {
+        return scalar::parse_float(&text).filter(|v| csv_text || !v.is_nan());
     }
     None
 }
 
-pub fn to_datetime(value: &Bound<'_, PyAny>) -> Option<NaiveDate> {
+pub fn to_datetime(value: &Bound<'_, PyAny>, csv_text: bool) -> Option<NaiveDate> {
     if value.is_none() {
         return None;
     }
@@ -100,23 +92,17 @@ pub fn to_datetime(value: &Bound<'_, PyAny>) -> Option<NaiveDate> {
             }
         }
 
-        // Try to parse string dates (ISO format: YYYY-MM-DD)
-        if let Ok(s) = value.extract::<String>() {
-            // Try ISO format first (YYYY-MM-DD)
-            if let Ok(date) = NaiveDate::parse_from_str(&s, "%Y-%m-%d") {
-                return Some(date);
+        if let Ok(text) = value.extract::<String>() {
+            if csv_text {
+                return scalar::parse_date(&text);
             }
-            // Try with slashes (YYYY/MM/DD)
-            if let Ok(date) = NaiveDate::parse_from_str(&s, "%Y/%m/%d") {
-                return Some(date);
-            }
-            // Try DD-MM-YYYY
-            if let Ok(date) = NaiveDate::parse_from_str(&s, "%d-%m-%Y") {
-                return Some(date);
-            }
-            // Try MM/DD/YYYY
-            if let Ok(date) = NaiveDate::parse_from_str(&s, "%m/%d/%Y") {
-                return Some(date);
+            // Direct loaders retain their historical date aliases. Blueprint
+            // declared text above uses the CSV grammar without those aliases.
+            let text = text.trim();
+            for format in ["%Y-%m-%d", "%Y/%m/%d", "%d-%m-%Y", "%m/%d/%Y"] {
+                if let Ok(date) = NaiveDate::parse_from_str(text, format) {
+                    return Some(date);
+                }
             }
         }
 
@@ -132,10 +118,8 @@ pub fn to_timestamp(value: &Bound<'_, PyAny>) -> Option<NaiveDateTime> {
         return None;
     }
 
-    // pandas.Timestamp / datetime.datetime subclass datetime, so pyo3's chrono
-    // conversion handles them directly.
-    if let Ok(dt) = value.extract::<NaiveDateTime>() {
-        return Some(dt);
+    if let Ok(datetime) = value.cast::<PyDateTime>() {
+        return super::py_value::datetime_to_utc_naive(datetime).ok();
     }
 
     Python::attach(|_py| {
@@ -197,12 +181,8 @@ pub fn to_bool(value: &Bound<'_, PyAny>) -> Option<bool> {
     if let Ok(b) = value.extract::<bool>() {
         return Some(b);
     }
-    if let Ok(s) = value.str() {
-        match s.to_string().to_lowercase().as_str() {
-            "true" | "1" | "yes" | "t" | "y" => return Some(true),
-            "false" | "0" | "no" | "f" | "n" => return Some(false),
-            _ => return None,
-        }
+    if let Ok(text) = value.str() {
+        return scalar::parse_boolean(&text.to_string());
     }
     None
 }

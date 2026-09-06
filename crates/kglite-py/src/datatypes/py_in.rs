@@ -162,7 +162,11 @@ fn parse_in_condition(val: &Bound<'_, PyAny>) -> PyResult<FilterCondition> {
     }
 }
 
-fn convert_pandas_series(series: &Bound<'_, PyAny>, col_type: ColumnType) -> PyResult<ColumnData> {
+fn convert_pandas_series(
+    series: &Bound<'_, PyAny>,
+    col_type: ColumnType,
+    csv_text: bool,
+) -> PyResult<ColumnData> {
     let length = series.len()?;
 
     // Get the null mask from pandas — this correctly handles None, np.nan, pd.NA, pd.NaT
@@ -179,7 +183,6 @@ fn convert_pandas_series(series: &Bound<'_, PyAny>, col_type: ColumnType) -> PyR
 
     match col_type {
         ColumnType::Float64 => {
-            // Fast path: try batch extraction (works when column has no mixed types)
             match py_list.extract::<Vec<Option<f64>>>() {
                 Ok(mut values) => {
                     // Apply null mask — pandas NaN extracts as Some(NaN), not None
@@ -191,7 +194,6 @@ fn convert_pandas_series(series: &Bound<'_, PyAny>, col_type: ColumnType) -> PyR
                     Ok(ColumnData::Float64(values))
                 }
                 Err(_) => {
-                    // Fallback: per-element with null mask (mixed types or special values)
                     let py_list = py_list.cast::<PyList>()?;
                     let mut vec = Vec::with_capacity(length);
                     for (i, &is_null) in null_mask.iter().enumerate() {
@@ -199,7 +201,7 @@ fn convert_pandas_series(series: &Bound<'_, PyAny>, col_type: ColumnType) -> PyR
                             vec.push(None);
                         } else {
                             let item = py_list.get_item(i)?;
-                            vec.push(to_f64(&item));
+                            vec.push(to_f64(&item, csv_text));
                         }
                     }
                     Ok(ColumnData::Float64(vec))
@@ -207,7 +209,6 @@ fn convert_pandas_series(series: &Bound<'_, PyAny>, col_type: ColumnType) -> PyR
             }
         }
         ColumnType::Boolean => {
-            // Fast path: try batch extraction
             match py_list.extract::<Vec<Option<bool>>>() {
                 Ok(mut values) => {
                     // Apply null mask — pd.NA may not extract as None
@@ -234,7 +235,6 @@ fn convert_pandas_series(series: &Bound<'_, PyAny>, col_type: ColumnType) -> PyR
             }
         }
         ColumnType::String => {
-            // Fast path: try batch extraction
             match py_list.extract::<Vec<Option<String>>>() {
                 Ok(mut values) => {
                     // Apply null mask for safety
@@ -297,7 +297,7 @@ fn convert_pandas_series(series: &Bound<'_, PyAny>, col_type: ColumnType) -> PyR
                     vec.push(None);
                 } else {
                     let item = py_list.get_item(i)?;
-                    vec.push(to_datetime(&item));
+                    vec.push(to_datetime(&item, csv_text));
                 }
             }
             Ok(ColumnData::DateTime(vec))
@@ -410,6 +410,43 @@ pub fn pandas_to_dataframe_with_options(
     nullable_int_downcast: bool,
     on_invalid: OnInvalid,
 ) -> PyResult<DataFrame> {
+    pandas_to_dataframe_with_text_policy(
+        df,
+        unique_id_fields,
+        column_names,
+        column_types,
+        nullable_int_downcast,
+        on_invalid,
+        false,
+    )
+}
+
+/// Blueprint declared strings follow CSV grammar; native cells retain their types.
+pub fn pandas_to_blueprint_dataframe(
+    df: &Bound<'_, PyAny>,
+    column_names: &[String],
+    column_types: &Bound<'_, PyDict>,
+) -> PyResult<DataFrame> {
+    pandas_to_dataframe_with_text_policy(
+        df,
+        &[],
+        column_names,
+        Some(column_types),
+        false,
+        OnInvalid::Error,
+        true,
+    )
+}
+
+fn pandas_to_dataframe_with_text_policy(
+    df: &Bound<'_, PyAny>,
+    unique_id_fields: &[String],
+    column_names: &[String],
+    column_types: Option<&Bound<'_, PyDict>>,
+    nullable_int_downcast: bool,
+    on_invalid: OnInvalid,
+    csv_text: bool,
+) -> PyResult<DataFrame> {
     // Reset index to ensure contiguous positional access.
     // Handles filtered/deduped DataFrames with non-contiguous indexes.
     let kwargs = pyo3::types::PyDict::new(df.py());
@@ -478,7 +515,12 @@ pub fn pandas_to_dataframe_with_options(
                 determine_column_type(&series, col_name, on_invalid)?
             };
 
-            let data = convert_pandas_series(&series, col_type.clone())?;
+            let declared_text = csv_text
+                && column_types
+                    .map(|types| types.contains(col_name))
+                    .transpose()?
+                    .unwrap_or(false);
+            let data = convert_pandas_series(&series, col_type.clone(), declared_text)?;
             // Optional: downcast Float64 columns whose non-null values are
             // all integer-valued. Pandas turns nullable int columns into
             // float64 when nulls are present; this restores the integer
@@ -514,10 +556,10 @@ fn try_downcast_float_to_int(col_type: ColumnType, data: ColumnData) -> (ColumnT
         return (ColumnType::Float64, ColumnData::Float64(values));
     }
     let i64_min = i64::MIN as f64;
-    let i64_max = i64::MAX as f64;
+    let i64_exclusive_max = -(i64::MIN as f64);
     let convertible = values.iter().all(|opt| match opt {
         None => true,
-        Some(v) => v.is_finite() && v.fract() == 0.0 && *v >= i64_min && *v <= i64_max,
+        Some(v) => v.is_finite() && v.fract() == 0.0 && *v >= i64_min && *v < i64_exclusive_max,
     });
     if !convertible {
         return (ColumnType::Float64, ColumnData::Float64(values));

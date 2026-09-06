@@ -5,7 +5,6 @@
 //! invoked from the Python shim using the existing `KnowledgeGraph`
 //! methods — avoids duplicating the v3 save pipeline here.
 
-use crate::datatypes::on_invalid::OnInvalid;
 use crate::datatypes::py_in;
 use crate::graph::KnowledgeGraph;
 use kglite_core::api::blueprint;
@@ -160,22 +159,9 @@ fn to_dataframe(
         }
     }
 
-    py_in::pandas_to_dataframe_with_options(
-        df,
-        // No id column is special here: the loader keys nodes off the string
-        // table like it does for a CSV, so nothing needs a `UniqueId` column.
-        &[],
-        &columns,
-        Some(&types),
-        // Off, matching `add_nodes`. A pandas integer column carrying nulls is
-        // a float64 column, and downcasting it here would also turn a genuine
-        // float column of whole numbers into ints — declare `"int"` in the
-        // blueprint to get an integer property back.
-        false,
-        // A frame is the caller's own data, and a mixed-dtype column silently
-        // stringified is exactly the surprise `on_invalid` exists to refuse.
-        OnInvalid::Error,
-    )
+    // No identity special casing or implicit float downcast: declarations
+    // control text grammar, while undeclared/native cells keep their dtype.
+    py_in::pandas_to_blueprint_dataframe(df, &columns, &types)
 }
 
 /// The type name `py_in` reads for a blueprint type. The blueprint's keyword

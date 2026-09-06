@@ -1160,6 +1160,13 @@ impl KnowledgeGraph {
 impl KnowledgeGraph {
     /// Add nodes from a pandas DataFrame.
     ///
+    /// Declared integer text is exact within signed Int64, including whole
+    /// decimal/scientific forms; invalid cells become NULL. Surrounding scalar
+    /// whitespace is ignored. Direct date aliases YYYY/MM/DD, DD-MM-YYYY and
+    /// MM/DD/YYYY remain supported separately from blueprint CSV grammar.
+    /// Aware timestamp cells normalize to naive UTC; explicit dates retain the
+    /// local calendar date. Rounded numeric floats cannot recover lost digits.
+    ///
     /// Args:
     ///     data: DataFrame containing node data.
     ///     node_type: Label for this set of nodes (e.g. 'Person').
@@ -1390,6 +1397,9 @@ impl KnowledgeGraph {
     }
 
     /// Add connections (edges) between existing nodes.
+    ///
+    /// DataFrame scalar conversion matches add_nodes: declared integer strings
+    /// are exact within Int64 and aware timestamp cells normalize to naive UTC.
     ///
     /// Two modes — supply **either** `data` (a pandas DataFrame) **or** `query`
     /// (a Cypher string whose RETURN columns provide source/target IDs):

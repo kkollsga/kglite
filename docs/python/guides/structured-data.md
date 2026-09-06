@@ -152,3 +152,31 @@ kglite.attach_rows(g, "Order", "order-1", items,
   produces the same `list`/`map` values).
 - {doc}`ontology` — declared semantics for the *types and relationships*
   themselves.
+
+
+### Exact scalar and DataFrame values
+
+Declared integer strings, including whole decimal/scientific spellings, must
+fit signed Int64 exactly. For example, `"9007199254740993.0"` becomes
+`9007199254740993`; `"9007199254740993.1"` becomes NULL. This parsing is shared
+by CSV blueprint cells and declared frame/direct-loader integer cells.
+Whitespace around declared scalar text is ignored. Invalid declared cells keep
+the tolerant NULL policy. A float already rounded before ingestion cannot be
+reconstructed from its former text spelling.
+
+Result DataFrames select dtypes from exact cells before pandas inference:
+integer/NULL columns use nullable `Int64`, and mixed columns containing integers
+use `object`. Other columns keep pandas inference and missing-value conventions.
+Table properties apply stored dtype metadata from those same exact cells.
+Do not use a DataFrame's dtype name alone as a value-preservation check:
+
+```python
+r = graph.cypher("UNWIND $values AS v RETURN v", params={"values": [9007199254740993, None]})
+assert int(r.to_df()["v"].iloc[0]) == 9007199254740993
+```
+
+Aware Python datetime cells normalize to naive UTC, just like query parameters
+and nested maps/lists. Explicit date-only loading retains the local calendar
+date. Direct date loading keeps its historical `YYYY/MM/DD`, `DD-MM-YYYY` and
+`MM/DD/YYYY` aliases; blueprint declared date strings use the CSV grammar
+(ISO date/datetime or epoch milliseconds).

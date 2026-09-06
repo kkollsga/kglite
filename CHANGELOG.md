@@ -20,6 +20,16 @@ before upgrading.
   source graph's change stream. Write through the owning graph or use `copy()`
   for independent data and capture.
 
+- Declared integer inputs preserve exact decimal values above 2^53 and reject
+  fractional or out-of-range values as NULL. Blueprint CSV and DataFrame scalar
+  text now share integer, Boolean, float and date parsing rules.
+- DataFrame output preserves nullable and mixed integer values before pandas
+  inference, including table properties and fluent results. Lists of empty maps
+  retain their row count when read as a table.
+- Aware Python datetime inputs normalize to UTC consistently across scalar
+  properties and nested query parameters; explicit date inputs keep their local
+  calendar date.
+
 ### Changed
 
 - Python snapshots, sessions, cursors and transactions capture query defaults
@@ -30,6 +40,10 @@ before upgrading.
 - After close or context exit, `save()` needs an explicit path. `save(path)`
   retains the existing unlocked snapshot-save behavior. A graph context manager
   checkpoints on clean exit; it does not roll back WAL commits on exceptions.
+
+- Nullable integer DataFrame columns use pandas `Int64`; mixed columns containing
+  integers use `object` to retain exact values and types. Blueprint textual `NaN`
+  now matches CSV floating-point NaN; native pandas missing values remain NULL.
 
 ## [0.16.24] - 2026-09-06
 

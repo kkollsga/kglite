@@ -853,7 +853,11 @@ impl ResultView {
         })
     }
 
-    /// Materialize as a pandas DataFrame.
+    /// Materialize as a pandas DataFrame without rounding supported integers.
+    ///
+    /// Integer/NULL columns use nullable Int64; heterogeneous columns containing
+    /// integers use object. Other columns follow pandas inference, including
+    /// float NULLs becoming NaN. Column order and nested values are preserved.
     ///
     /// Example::
     ///

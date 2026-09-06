@@ -76,7 +76,10 @@ def from_blueprint(
         frames: In-memory tables, keyed by the name of a ``files`` entry
             declaring ``{"format": "frame"}``. Values are pandas
             DataFrames; anything else carrying ``.to_pandas()`` (a polars
-            frame, a pyarrow table) is converted through it.
+            frame, a pyarrow table) is converted through it. Declared scalar
+            strings use CSV parsing, including whitespace and exact signed
+            integer decimal/scientific forms. Invalid declared cells become
+            NULL; undeclared columns retain dtype-based inference.
 
     Raises:
         ValueError: If ``save=True`` was passed explicitly and neither

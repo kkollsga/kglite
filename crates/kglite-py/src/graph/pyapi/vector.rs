@@ -197,7 +197,6 @@ impl KnowledgeGraph {
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         if to_df.unwrap_or(false) {
-            let pandas = py.import("pandas")?;
             let records: Vec<Py<PyAny>> = results
                 .iter()
                 .filter_map(|r| self.inner.graph.node_view(r.node_idx).map(|node| (r, node)))
@@ -222,8 +221,7 @@ impl KnowledgeGraph {
                 })
                 .collect::<PyResult<_>>()?;
             let py_list = PyList::new(py, &records)?;
-            let df = pandas.call_method1("DataFrame", (py_list,))?;
-            return df.into_py_any(py);
+            return crate::datatypes::pandas_out::dataframe(py, py_list.as_any(), None, None, None);
         }
 
         let py_list = PyList::empty(py);

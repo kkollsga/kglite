@@ -694,6 +694,7 @@ pub mod api {
             load_blueprint_file, AggregateEdge, Blueprint, CalendarLink, ComputeOp, Connections,
             FileSpec, FkEdge, JunctionEdge, NodeSpec, Settings, TimeKey, TimeseriesSpec,
         };
+        pub use crate::graph::blueprint::typing::scalar;
     }
 
     /// Cypher parser + planner + executor primitives. Downstream

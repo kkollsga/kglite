@@ -620,7 +620,12 @@ class ResultView:
         ...
 
     def to_df(self) -> pd.DataFrame:
-        """Convert to a pandas DataFrame."""
+        """Convert to a pandas DataFrame without rounding supported integers.
+
+        Integer columns containing NULL use pandas nullable ``Int64``. Mixed
+        columns containing integers use ``object`` to preserve values and types.
+        Other columns follow pandas inference; float NULLs can become NaN.
+        """
         ...
 
     def to_gdf(
@@ -1423,7 +1428,12 @@ def from_blueprint(
     Four things about that equivalence are worth knowing:
 
     - **Types.** Each column is coerced to the type the blueprint declares
-      for it, through the same text path a CSV takes. Where the blueprint
+      for it. Declared scalar strings use the CSV grammar: surrounding
+      whitespace is ignored for integer, float, Boolean and date values.
+      Integer decimal/scientific strings must represent an exact signed 64-bit
+      integer; fractional/out-of-range/invalid values become NULL. Numeric
+      floats already rounded by a caller cannot recover the original spelling.
+      Where the blueprint
       declares nothing, the frame's own dtype is kept — a float column of
       whole numbers stays a float. Two dtypes have no blueprint keyword:
       a datetime-with-time-of-day and a dict column land as text, with one
@@ -1920,6 +1930,16 @@ class KnowledgeGraph:
     ) -> dict[str, Any]:
         """Add nodes from a DataFrame.
 
+
+        Declared integer strings accept exact whole decimal/scientific forms
+        within signed Int64 bounds; malformed, fractional or out-of-range cells
+        become NULL. Declared scalar text ignores surrounding whitespace.
+        Direct date loading also accepts YYYY/MM/DD, DD-MM-YYYY and MM/DD/YYYY;
+        these compatibility aliases are not blueprint CSV date spellings.
+        Aware Python timestamps normalize to naive UTC; explicitly date-only
+        columns preserve the local calendar date. Already-rounded float input
+        cannot recover its original integer spelling.
+
         String and integer IDs are auto-detected from the DataFrame dtype.
         Non-contiguous DataFrame indexes (e.g. from filtering) are handled
         automatically.
@@ -2066,6 +2086,9 @@ class KnowledgeGraph:
         on_invalid: Literal["warn", "error", "skip"] = "warn",
     ) -> dict[str, Any]:
         """Add connections (edges) between existing nodes.
+
+        DataFrame scalar conversion follows :meth:`add_nodes`, including exact
+        declared integer strings and aware timestamp normalization to naive UTC.
 
         Two modes — supply **either** ``data`` (a pandas DataFrame) **or**
         ``query`` (a Cypher string whose RETURN columns provide source/target IDs).
@@ -2680,7 +2703,9 @@ class KnowledgeGraph:
         """Export current selection as a pandas DataFrame.
 
         Each node becomes a row with columns for title, type, id, and all
-        properties. Missing properties across different node types become None.
+        properties. Missing integer values use nullable ``Int64``. Mixed columns
+        containing integers use ``object``; other columns follow pandas
+        missing-value conventions. Values are preserved before dtype inference.
 
         ``id``, ``title`` and ``type`` come from the node's canonical identity.
         A node may also *store* a property under one of those names —
@@ -4791,7 +4816,7 @@ class KnowledgeGraph:
     def get_table_property(self, node_type: str, node_id: Any, property: str) -> Any:
         """Reconstruct a table-valued property as a pandas DataFrame.
 
-        Restores the column order and dtypes recorded by
+        Preserves exact integer cells before restoring the column order and dtypes recorded by
         :meth:`set_table_property` (columns that held nulls come back as
         pandas nullable dtypes, e.g. ``Int64``). A node without the property
         yields an empty frame with the registered columns.

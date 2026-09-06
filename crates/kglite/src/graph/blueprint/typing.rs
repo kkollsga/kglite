@@ -7,6 +7,8 @@
 //! the first non-empty cell in each column.
 
 mod integer;
+pub mod scalar;
+use scalar::parse_date as parse_date_cell;
 
 use super::table::{looks_like_a_missed_list, ListMisparseTally, RawCsv};
 use crate::datatypes::values::{ColumnData, ColumnType, DataFrame, Value};
@@ -288,7 +290,7 @@ fn build_column_data(
                     out.push(None);
                     continue;
                 }
-                out.push(integer::parse_exact_i64(&row[src_idx]));
+                out.push(scalar::parse_integer(&row[src_idx]));
             }
             Ok(ColumnData::Int64(out))
         }
@@ -299,12 +301,7 @@ fn build_column_data(
                     out.push(None);
                     continue;
                 }
-                let s = row[src_idx].trim();
-                if s.is_empty() {
-                    out.push(None);
-                } else {
-                    out.push(s.parse::<f64>().ok());
-                }
+                out.push(scalar::parse_float(&row[src_idx]));
             }
             Ok(ColumnData::Float64(out))
         }
@@ -315,13 +312,7 @@ fn build_column_data(
                     out.push(None);
                     continue;
                 }
-                let s = row[src_idx].trim();
-                match s.to_ascii_lowercase().as_str() {
-                    "true" | "1" | "t" | "yes" | "y" => out.push(Some(true)),
-                    "false" | "0" | "f" | "no" | "n" => out.push(Some(false)),
-                    "" => out.push(None),
-                    _ => out.push(None),
-                }
+                out.push(scalar::parse_boolean(&row[src_idx]));
             }
             Ok(ColumnData::Boolean(out))
         }
@@ -425,39 +416,6 @@ fn json_scalar_to_value(j: &serde_json::Value) -> Value {
         serde_json::Value::String(s) => Value::String(s.clone()),
         other => Value::String(other.to_string()),
     }
-}
-
-/// Parse a date cell. Accepts ISO dates, ISO datetimes, and epoch milliseconds.
-/// The Python loader fed epoch-ms values (strings of digits) through
-/// `pd.to_datetime(unit="ms")` — mirror that behaviour.
-fn parse_date_cell(s: &str) -> Option<NaiveDate> {
-    if s.is_empty() {
-        return None;
-    }
-    if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-        return Some(d);
-    }
-    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
-        return Some(dt.date());
-    }
-    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
-        return Some(dt.date());
-    }
-    // Epoch millis — e.g. "1609459200000"
-    if let Ok(ms) = s.parse::<i64>() {
-        if let Some(dt) = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms) {
-            return Some(dt.date_naive());
-        }
-    }
-    // Floating-point epoch ms — e.g. "1609459200000.0"
-    if let Ok(ms) = s.parse::<f64>() {
-        if ms.is_finite() {
-            if let Some(dt) = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms as i64) {
-                return Some(dt.date_naive());
-            }
-        }
-    }
-    None
 }
 
 /// The typing half's golden target: exactly what `typed_dataframe` yields for

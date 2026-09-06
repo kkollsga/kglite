@@ -1147,15 +1147,13 @@ pub(crate) fn centrality_results_to_dataframe(
         }
     }
 
-    let pd = py.import("pandas")?;
     let data = PyDict::new(py);
     data.set_item("type", PyList::new(py, &types)?)?;
     data.set_item("title", PyList::new(py, &titles)?)?;
     data.set_item("id", PyList::new(py, &ids)?)?;
     data.set_item("score", PyList::new(py, &scores)?)?;
 
-    let df = pd.call_method1("DataFrame", (data,))?;
-    Ok(df.unbind())
+    crate::datatypes::pandas_out::dataframe(py, data.as_any(), None, None, None)
 }
 
 /// Convert community detection results to a Python dict: `communities`

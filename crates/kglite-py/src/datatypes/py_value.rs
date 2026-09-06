@@ -102,7 +102,7 @@ fn convert_value(value: &Bound<'_, PyAny>, state: &mut ConversionState) -> PyRes
     }
     // datetime is a date subclass: failure must not degrade to a date-only value.
     if let Ok(dt) = value.cast::<PyDateTime>() {
-        return convert_datetime(dt);
+        return datetime_to_utc_naive(dt).map(Value::Timestamp);
     }
     if value.is_instance_of::<PyDate>() {
         if let Ok(d) = value.extract::<chrono::NaiveDate>() {
@@ -147,11 +147,11 @@ fn convert_dict(dict: &Bound<'_, PyDict>, state: &mut ConversionState) -> PyResu
     )))
 }
 
-fn convert_datetime(value: &Bound<'_, PyDateTime>) -> PyResult<Value> {
+pub(super) fn datetime_to_utc_naive(
+    value: &Bound<'_, PyDateTime>,
+) -> PyResult<chrono::NaiveDateTime> {
     if value.get_tzinfo().is_none() {
-        return value
-            .extract::<chrono::NaiveDateTime>()
-            .map(Value::Timestamp);
+        return value.extract::<chrono::NaiveDateTime>();
     }
     // A tzinfo whose utcoffset(dt) is None is naive by Python's definition.
     // Let datetime normalize aware values; extracting FixedOffset from tzinfo
@@ -166,7 +166,6 @@ fn convert_datetime(value: &Bound<'_, PyDateTime>) -> PyResult<Value> {
     normalized
         .call_method("replace", (), Some(&kwargs))?
         .extract::<chrono::NaiveDateTime>()
-        .map(Value::Timestamp)
 }
 
 #[cfg(test)]
