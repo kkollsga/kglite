@@ -89,6 +89,26 @@ committed state and publishes with an atomic pointer swap, so failed execution
 does not expose a partial working copy. Readers take stable snapshots; readers
 already in flight keep seeing their prior snapshot while a write lands.
 
+## Captured embedding services
+
+`freeze()`, `session()`, `begin()`, and `begin_read()` capture the embedding
+model registered on the source graph when the handle is created. Session
+snapshots and cursors inherit that binding. Replacing or unbinding the source
+model affects newly created handles only. This captures the model object, not a
+deep copy of its mutable weights or callback state, so mutations inside that
+same object remain visible. Model bindings are runtime services and are not
+stored in `.kgl` files; register them again after loading.
+
+The captured model powers `text_score()` in read queries and in expressions
+within mutation queries. A Session write that invokes a Python model uses an
+isolated working copy, allowing its callback to read the same Session's
+committed snapshot. Re-entering a write on that Session from the callback
+raises `kglite.ArgumentError` with code `InvalidArgument` before waiting for the
+writer lock. A callback error rolls back the current statement while leaving
+the handle usable. Python exposes no value-codec registration on these handles;
+native callers pass codecs per execution, and configured protocol servers
+forward their own runtime service.
+
 ## Storage and protocol bindings
 
 Transactions and sessions use the same core implementation for memory, mapped,
@@ -110,7 +130,8 @@ explicit begin/commit handle.
 `freeze()`, `session()`, `begin()` and `begin_read()` capture the source graph's
 query timeout, work budget and row cap. Session snapshots/cursors inherit that
 captured policy. Changing the original graph's defaults affects newly created
-handles, not existing snapshots or transactions.
+handles, not existing snapshots or transactions. Embedding services follow the
+separate capture contract above; they are not part of these three query defaults.
 
 | Option | Omitted or `None` | Explicit zero |
 |---|---|---|

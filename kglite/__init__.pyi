@@ -4530,7 +4530,9 @@ class KnowledgeGraph:
 
         Query timeout, work-budget and row-limit defaults are captured now. Later
         changes to the source defaults do not affect this snapshot. Per-call options
-        override the captured defaults.
+        override the captured defaults. The current embedding-model binding is
+        captured too; later source replacement or unbinding does not affect the
+        snapshot, while mutable state inside that same model object remains shared.
         """
         ...
 
@@ -4551,9 +4553,12 @@ class KnowledgeGraph:
         keep mutating the original graph after handing out a ``Session``.
 
         The Session captures the three query defaults at creation, independently of
-        later source changes. It acquires no source persistence authority. Sessions
-        from active durable owners or graphs with change data capture support reads;
-        use the owning KnowledgeGraph for captured writes.
+        later source changes. It also captures the current embedding-model binding:
+        replacing or unbinding the source binding does not affect the Session, while
+        mutable state inside that same model object remains shared. It acquires no
+        source persistence authority. Sessions from active durable owners or graphs
+        with change data capture support reads; use the owning KnowledgeGraph for
+        captured writes.
         """
         ...
 
@@ -7347,6 +7352,12 @@ class KnowledgeGraph:
         registered model automatically.  The model is **not** serialized —
         call ``set_embedder()`` again after deserializing.
 
+        ``freeze()``, ``session()``, ``begin()`` and ``begin_read()`` capture
+        the currently registered model binding when the handle is created.
+        Replacing or unbinding the source model does not alter an existing
+        handle. The captured object itself is shared rather than deep-copied,
+        so later changes to mutable model state remain visible through it.
+
         If the model has optional ``load()`` / ``unload()`` methods, they are
         called automatically around each embedding operation.
 
@@ -7736,7 +7747,10 @@ class KnowledgeGraph:
                 # auto-commits on success, auto-rollbacks on exception
 
         Query defaults are captured at begin. ``timeout_ms=0`` gives no transaction
-        lifetime deadline; per-query timeouts cannot extend a positive lifetime.
+        lifetime deadline; per-query timeouts cannot extend a positive lifetime. The
+        current embedding-model binding is captured at begin, so ``text_score()``
+        works in reads and mutation expressions even if the source later replaces or
+        unbinds its model. Mutable state inside that model object remains shared.
         Closing/exiting the owning persisted graph revokes this transaction's right
         to commit writes. Its data remains readable and rollback remains available.
         """
@@ -7761,7 +7775,10 @@ class KnowledgeGraph:
                 # auto-closes on exit (no commit needed)
 
         Query defaults are captured at begin. ``timeout_ms=0`` gives no transaction
-        lifetime deadline. Read snapshots remain valid after the source closes.
+        lifetime deadline. The current embedding-model binding is captured at begin;
+        later source replacement or unbinding does not affect the transaction, while
+        mutable state inside that model object remains shared. Read snapshots remain
+        valid after the source closes.
         """
         ...
 
@@ -7778,7 +7795,9 @@ class Session:
 
     The ``Session`` is an independent owner seeded from the source graph's
     state; once either side mutates, copy-on-write forks them. Treat the
-    ``Session`` as the live store after creating it.
+    ``Session`` as the live store after creating it. Its embedding-model binding
+    is captured at creation and inherited by snapshots and cursors. The binding
+    is runtime-only and is not serialized with graph data.
     """
 
     def cypher(
@@ -7849,6 +7868,13 @@ class Session:
         working-copy materialisation), so mixed traffic can route through
         ``execute()`` safely. Returns the query result (rows for
         ``... RETURN``, otherwise mutation stats).
+
+        ``text_score()`` can be used in reads and mutation expressions. A write
+        that invokes the captured Python model runs against an isolated working
+        copy; a callback may read this Session's committed snapshot. Re-entering
+        a write on the same Session from that callback raises
+        :class:`ArgumentError` (code ``InvalidArgument``) before waiting for the
+        writer lock. Callback failures preserve the pre-statement state.
 
         ``row_limit`` caps the rows the call **retains** — the query still runs
         in full and only retention stops at the cap, so the rows kept are the
@@ -7930,6 +7956,10 @@ class FrozenGraph:
     "build → freeze → share → swap" model: build a graph, freeze it, serve
     concurrent readers, and atomically swap in a new ``freeze()`` when the data
     changes.
+
+    The source's embedding-model binding is captured with the snapshot. Later
+    source replacement or unbinding does not alter it; mutable state inside the
+    captured model object remains shared. Model bindings are not serialized.
     """
 
     def cypher(
@@ -7980,6 +8010,11 @@ class Transaction:
     Created via :meth:`KnowledgeGraph.begin` (read-write) or
     :meth:`KnowledgeGraph.begin_read` (read-only).
 
+    Creation captures the source's embedding-model binding. ``text_score()``
+    therefore works in reads and mutation expressions even if the source later
+    replaces or unbinds its model. The model object is shared rather than
+    deep-copied, and the binding is not graph serialization metadata.
+
     Read-write transactions:
         - **Snapshot isolation**: ``begin()`` is O(1); the first mutation
           creates a working fork. Memory/mapped modes clone then, while disk
@@ -8017,6 +8052,8 @@ class Transaction:
 
         Same interface as :meth:`KnowledgeGraph.cypher` but operates on
         the transaction's working copy (or Arc snapshot for read-only).
+        ``text_score()`` uses the model binding captured at ``begin()`` or
+        ``begin_read()`` in both reads and mutation expressions.
 
         Args:
             query: Cypher query string. Supports ``EXPLAIN`` and ``PROFILE`` prefixes.

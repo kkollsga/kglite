@@ -18,8 +18,9 @@
 //!   (`Arc::clone`), drop the lock, and run GIL-free. Any number of threads
 //!   read the same `Session` in parallel, lock-free during execution.
 //! - **Writes** (`execute`) serialise behind a writer lock held across the
-//!   whole mutation. The core Session mutates its Arc in place when no reader
-//!   snapshot is alive and copy-on-write forks once otherwise. The writer lock makes concurrent writes
+//!   whole mutation. Without an embedder, the core Session mutates its Arc in
+//!   place when uniquely owned. Callback-capable writes use a transaction fork
+//!   outside the core graph lock so callbacks can read committed state. Concurrent writes
 //!   *compose* — writer B's `begin()` snapshots writer A's committed state, so
 //!   B builds on A's changes rather than racing and silently overwriting them
 //!   (the lost-update failure mode of a naive shared mutable handle). Readers
@@ -54,7 +55,8 @@ use crate::graph::pyapi::result_view::ResultView;
 use crate::graph::DirGraph;
 use crate::util::EnterKg;
 use kglite_core::api::session::{
-    execute_mut, execute_read, CsvImportPolicy, ExecuteOptions, Session as CoreSession,
+    execute_mut, execute_read, CommitOutcome, CsvImportPolicy, ExecuteOptions,
+    Session as CoreSession,
 };
 use kglite_core::api::GraphRead;
 
@@ -63,6 +65,7 @@ use kglite_core::api::GraphRead;
 /// Build or load a graph with a `KnowledgeGraph`, call `.session()`, then
 /// share the `Session` across threads: concurrent `cypher()` reads run
 /// lock-free; `execute()` writes serialise behind the Session's writer lock.
+/// The source embedder binding is captured at Session creation.
 #[pyclass(module = "kglite", frozen)]
 pub struct Session {
     defaults: QueryDefaults,
@@ -73,6 +76,35 @@ pub struct Session {
     /// concurrent `execute()` calls compose (each sees prior commits) instead
     /// of racing into a lost update. Readers never touch it.
     pub(crate) write_lock: Mutex<()>,
+}
+
+thread_local! {
+    static CALLBACK_WRITES: std::cell::RefCell<std::collections::HashSet<usize>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+/// A callback may read committed state but cannot wait on its own writer lock.
+struct CallbackWriteGuard(usize);
+
+impl CallbackWriteGuard {
+    fn enter(session: &Session) -> PyResult<Self> {
+        let key = std::ptr::from_ref(session) as usize;
+        if CALLBACK_WRITES.with(|active| active.borrow_mut().insert(key)) {
+            Ok(Self(key))
+        } else {
+            Err(crate::error_py::kg_to_pyerr(KgError::Argument(
+                "An embedding callback cannot re-enter writes on the same Session; \
+                 read its committed snapshot instead."
+                    .to_string(),
+            )))
+        }
+    }
+}
+
+impl Drop for CallbackWriteGuard {
+    fn drop(&mut self) {
+        CALLBACK_WRITES.with(|active| active.borrow_mut().remove(&self.0));
+    }
 }
 
 /// Decode an optional Python params dict into a native param map under the
@@ -155,6 +187,12 @@ impl Session {
         }
     }
 
+    fn read_snapshot(&self, py: Python<'_>) -> Arc<DirGraph> {
+        // A writer or its Python callback may need the GIL before releasing
+        // the core graph mutex, so no attached caller may block on it.
+        py.detach(|| self.inner.snapshot())
+    }
+
     /// Read path: snapshot → GIL-free `execute_read` → marshal. Shared by
     /// `cypher` and `execute`'s non-mutation fast path (so a read passed to
     /// `execute` never materialises a working copy).
@@ -167,7 +205,7 @@ impl Session {
         param_map: HashMap<String, Value>,
         qopts: QueryOpts,
     ) -> PyResult<Py<PyAny>> {
-        let inner = self.inner.snapshot();
+        let inner = self.read_snapshot(py);
         let embedder = self.embedder.clone();
         let query_owned = query.to_string();
         let deadline = qopts.deadline;
@@ -196,9 +234,9 @@ impl Session {
         marshal_result(py, result, qopts.to_df, qopts.output_csv)
     }
 
-    /// Write path: take the writer lock, then hold the core Session's mutable
-    /// guard for the complete GIL-free mutation. This avoids the old
-    /// begin-created Arc clone that made the unique-owner path unreachable.
+    /// Serialize writes; callback-capable execution releases the core mutex
+    /// while operating on a transaction fork. Ordinary writes retain the
+    /// unique-owner path without a begin-created Arc clone.
     // The detached closure preserves the engine's structured KgError until PyErr conversion.
     #[allow(clippy::result_large_err)]
     fn run_write(
@@ -208,6 +246,11 @@ impl Session {
         param_map: HashMap<String, Value>,
         qopts: QueryOpts,
     ) -> PyResult<Py<PyAny>> {
+        let _callback_write = self
+            .embedder
+            .as_ref()
+            .map(|_| CallbackWriteGuard::enter(self))
+            .transpose()?;
         let core = &self.inner;
         let source_authority = self.source_authority.clone();
         let write_lock = &self.write_lock;
@@ -218,9 +261,7 @@ impl Session {
         let write_scope = qopts.write_scope;
         let git_sha = qopts.git_sha;
         let modified_by = qopts.modified_by;
-        // Mutations don't take an embedder snapshot (matches the live
-        // KnowledgeGraph mutation path — text_score in a write is atypical and
-        // would force a GIL re-acquire inside the detached block).
+        let embedder = self.embedder.clone();
         let result = py.enter_kg(move |cancel| -> Result<cypher::CypherResult, KgError> {
             // Acquire the writer lock *with the GIL released* (we are
             // already inside py.detach). Locking before the detach
@@ -266,7 +307,7 @@ impl Session {
                 lazy_eligible: false,
                 parallel: false,
                 disabled_passes: None,
-                embedder: None,
+                embedder,
                 value_codecs: None,
                 cancel,
                 write_scope: write_scope.as_ref(),
@@ -274,9 +315,38 @@ impl Session {
                 modified_by: modified_by.as_deref(),
                 csv_import: CsvImportPolicy::LocalFilesystem,
             };
-            let outcome = execute_mut(&mut graph, &query_owned, &opts)?;
-            Ok(outcome.result)
+            if opts.embedder.is_none() {
+                return Ok(execute_mut(&mut graph, &query_owned, &opts)?.result);
+            }
+            // Python callbacks see the committed graph. Retain only the
+            // writer lock while preparing/executing the isolated statement.
+            drop(graph);
+            let mut tx = core.begin();
+            let base_version = tx.base_version();
+            let working = tx.working_mut()?;
+            let result = execute_mut(working, &query_owned, &opts)?.result;
+            if working.version() == base_version {
+                return Ok(result);
+            }
+            match core.commit(tx, true) {
+                CommitOutcome::Committed { .. } | CommitOutcome::NoWritesNoOp => Ok(result),
+                CommitOutcome::ConflictDetected {
+                    current_version,
+                    base_version,
+                } => Err(KgError::TransactionConflict {
+                    current_version,
+                    base_version,
+                }),
+                CommitOutcome::DurabilityFailed { error } => {
+                    Err(KgError::FileIo(std::io::Error::other(error)))
+                }
+                other => Err(KgError::Internal {
+                    message: format!("Unexpected Session commit outcome: {other:?}"),
+                    location: "Session::run_write",
+                }),
+            }
         })?;
+        drop(_callback_write);
         marshal_result(py, result, qopts.to_df, qopts.output_csv)
     }
 }
@@ -365,6 +435,8 @@ impl Session {
     /// A read-only query passed to `execute()` is fast-pathed to the read
     /// path (no working-copy materialisation), so it is always safe to route
     /// mixed traffic through `execute()`.
+    /// Callback-bearing writes use an isolated working copy: callbacks may
+    /// read committed Session state, while same-Session writes are refused.
     ///
     /// Args:
     ///     query: A Cypher query string (read or write).
@@ -432,8 +504,8 @@ impl Session {
     /// if the `Session` is later written to (copy-on-write forks the writer).
     /// Use this to hold a consistent multi-query view, or to hand a fixed
     /// read snapshot to a pool of readers.
-    fn snapshot(&self) -> FrozenGraph {
-        FrozenGraph::with_defaults(self.inner.snapshot(), self.embedder.clone(), self.defaults)
+    fn snapshot(&self, py: Python<'_>) -> FrozenGraph {
+        FrozenGraph::with_defaults(self.read_snapshot(py), self.embedder.clone(), self.defaults)
     }
 
     /// Spawn a per-thread **query cursor**: a `KnowledgeGraph` bound to a
@@ -451,8 +523,8 @@ impl Session {
     /// as of now, and any mutation on the cursor is isolated via copy-on-write
     /// (it does not write back to the `Session`). To pick up later session
     /// writes, take a fresh `cursor()`.
-    fn cursor(&self) -> crate::graph::KnowledgeGraph {
-        let mut kg = crate::graph::KnowledgeGraph::from_arc(self.inner.snapshot());
+    fn cursor(&self, py: Python<'_>) -> crate::graph::KnowledgeGraph {
+        let mut kg = crate::graph::KnowledgeGraph::from_arc(self.read_snapshot(py));
         self.defaults.apply_to(&mut kg);
         kg.lifecycle.orphaned_from_cdc = kg.inner.cdc_enabled();
         if kg.inner.owns_wal_capture() {
@@ -474,28 +546,28 @@ impl Session {
 
     /// Monotonic version of the current graph. Bumped by each committed
     /// write. Useful for cheap "did anything change?" checks.
-    fn version(&self) -> u64 {
-        self.inner.version()
+    fn version(&self, py: Python<'_>) -> u64 {
+        self.read_snapshot(py).version()
     }
 
     /// Number of nodes in the current snapshot.
-    fn node_count(&self) -> usize {
-        self.inner.snapshot().graph.node_count()
+    fn node_count(&self, py: Python<'_>) -> usize {
+        self.read_snapshot(py).graph.node_count()
     }
 
     /// Node type names present in the current snapshot.
     #[getter]
-    fn node_types(&self) -> Vec<String> {
-        self.inner.snapshot().get_node_types()
+    fn node_types(&self, py: Python<'_>) -> Vec<String> {
+        self.read_snapshot(py).get_node_types()
     }
 
-    fn __repr__(&self) -> String {
-        let snap = self.inner.snapshot();
+    fn __repr__(&self, py: Python<'_>) -> String {
+        let snap = self.read_snapshot(py);
         format!(
             "Session(nodes={}, types={}, version={})",
             snap.graph.node_count(),
             snap.get_node_types().len(),
-            self.inner.version(),
+            snap.version(),
         )
     }
 }

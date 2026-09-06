@@ -105,7 +105,7 @@ pub struct ExecuteOptions<'a> {
     /// allocation, and the common case.
     pub disabled_passes: Option<&'a HashSet<String>>,
     /// Embedder for `text_score()` queries. A `text_score()` query with `None`
-    /// here fails with `KgError::Argument("text_score requires embedder ...")`.
+    /// here fails with `KgError::CypherExecution`.
     pub embedder: Option<Arc<dyn Embedder>>,
     /// Optional operator-declared value codecs. When set, query-side
     /// literals bound to a codec'd property are decoded before

@@ -46,6 +46,12 @@ before upgrading.
   Document the existing stored endpoint-reference limitation under node deletion,
   slot reuse and in-memory or mapped compaction.
 
+- Python transactions now retain the embedding-model binding captured at
+  `begin()`/`begin_read()`, and `text_score()` works in mutation expressions on
+  graphs, sessions and transactions. Session embedding callbacks may read the
+  committed Session snapshot; same-Session callback writes fail explicitly
+  instead of deadlocking, and callback errors preserve statement state.
+
 ### Changed
 
 - Rust `load_rdf` now requires a fresh empty in-memory destination without

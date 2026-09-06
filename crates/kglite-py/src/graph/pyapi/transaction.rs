@@ -18,6 +18,7 @@ use std::sync::Arc;
 /// Created by `graph.begin()`, provides a separate `DirGraph` that can be
 /// modified without affecting the original. Call `commit()` to apply changes
 /// back, or let it drop to discard.
+/// The source embedder binding is captured by `begin()` or `begin_read()`.
 ///
 /// ## Isolation semantics
 ///
@@ -61,6 +62,8 @@ use std::sync::Arc;
 pub struct Transaction {
     pub(crate) defaults: super::query_defaults::QueryDefaults,
     pub(crate) ownership_epoch: u64,
+    /// Execution binding captured when begin/begin_read takes its snapshot.
+    pub(crate) embedder: Option<Arc<dyn crate::graph::embedder::Embedder>>,
     /// Back-reference to the owning KnowledgeGraph (for commit).
     pub(crate) owner: Py<KnowledgeGraph>,
     /// The engine transaction holding the snapshot/working/CoW/OCC state.
@@ -87,6 +90,7 @@ impl Transaction {
     /// original graph, and become visible to other readers only at `commit()`;
     /// `rollback()` discards them. Read queries also operate on the working
     /// copy (seeing uncommitted changes).
+    /// `text_score()` uses the captured embedder in reads and mutations.
     ///
     /// Args:
     ///     query: A Cypher query string.
@@ -225,7 +229,7 @@ impl Transaction {
             lazy_eligible: false,
             parallel: false,
             disabled_passes: None,
-            embedder: None,
+            embedder: self.embedder.clone(),
             value_codecs: None,
             // This wrapper does not install a SIGINT cancellation flag.
             // Deadline and work-budget failures still restore the shared
@@ -237,25 +241,27 @@ impl Transaction {
             csv_import: CsvImportPolicy::LocalFilesystem,
         };
 
-        let result = if is_mut {
-            // `working_mut` materialises the backend-specific working copy on
-            // first mutation and rejects writes on a read-only tx — both in core.
-            let working = tx.working_mut().map_err(crate::error_py::kg_to_pyerr)?;
-            kglite_core::api::session::execute_mut(working, query, &opts)
-                .map_err(crate::error_py::kg_to_pyerr)?
-                .result
-        } else {
-            // `current()` returns the working copy if materialised, else the
-            // snapshot — so reads see uncommitted changes.
-            let graph = tx.current().ok_or_else(|| -> PyErr {
-                crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(
-                    "Transaction already committed or rolled back".to_string(),
-                ))
-            })?;
-            kglite_core::api::session::execute_read(graph, query, &opts)
-                .map_err(crate::error_py::kg_to_pyerr)?
-                .result
+        // A Python-backed embedder needs to reacquire the GIL; keep the
+        // existing no-service execution path and cancellation policy intact.
+        let mut execute = || -> Result<cypher::CypherResult, crate::error::KgError> {
+            if is_mut {
+                let working = tx.working_mut()?;
+                Ok(kglite_core::api::session::execute_mut(working, query, &opts)?.result)
+            } else {
+                let graph = tx.current().ok_or_else(|| {
+                    crate::error::KgError::Argument(
+                        "Transaction already committed or rolled back".to_string(),
+                    )
+                })?;
+                Ok(kglite_core::api::session::execute_read(graph, query, &opts)?.result)
+            }
         };
+        let result = if opts.embedder.is_some() {
+            py.detach(execute)
+        } else {
+            execute()
+        }
+        .map_err(crate::error_py::kg_to_pyerr)?;
 
         crate::warning_policy::announce(py, result.diagnostics.as_ref())?;
         if pre_parsed.explain {

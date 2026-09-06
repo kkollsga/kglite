@@ -22,6 +22,13 @@ cancellation, write scope, and write provenance. Start with
 `ExecuteOptions::eager(&params)` and override only the options the binding
 actually exposes.
 
+An embedder passed in `ExecuteOptions` is available to `text_score()` in both
+read and mutation execution. Omitting it when a query needs `text_score()`
+returns `KgError::CypherExecution`. Value codecs are likewise execution
+services: native callers pass them for each execution, while a protocol wrapper
+may retain configured codecs and forward them. Neither service is graph
+serialization metadata.
+
 The core runs to completion on the calling thread. Bindings own async runtimes,
 transport, logging, iteration/chunking, error presentation, embedder lifecycle,
 and value conversion.
@@ -118,7 +125,11 @@ Levels, per-level loss windows and the measured cost of each are in
 
 - Python exposes direct `KnowledgeGraph`, explicit `Session`,
   `open_session`, `begin`, and `begin_read`; it is not GIL-dependent at the
-  core boundary.
+  core boundary. Derived Python handles capture the current embedder `Arc`;
+  replacing the source binding does not retarget them, while mutable state in
+  the shared model object remains visible. Session callback-bearing writes use
+  a transaction working copy so callbacks may read committed Session state;
+  same-Session callback writes are refused before the writer lock.
 - Bolt shares `Arc<Session>` across connections and keeps per-Bolt-session
   transaction state.
 - MCP uses the same session pipeline for graph tools and optional writable

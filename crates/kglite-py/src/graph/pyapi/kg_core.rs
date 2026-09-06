@@ -816,6 +816,7 @@ impl KnowledgeGraph {
     /// data. This is the "build → freeze → share → swap" model — build a
     /// graph cheaply, freeze it, serve concurrent readers, and swap in a new
     /// `freeze()` when the data changes.
+    /// The current embedder binding is captured with the snapshot.
     fn freeze(&self) -> crate::graph::pyapi::frozen::FrozenGraph {
         crate::graph::pyapi::frozen::FrozenGraph::with_defaults(
             std::sync::Arc::clone(&self.inner),
@@ -838,6 +839,7 @@ impl KnowledgeGraph {
     /// mutates, copy-on-write forks them. The intended model is "build /
     /// load with a `KnowledgeGraph`, then `.session()` and serve every thread
     /// through the `Session`" — don't keep mutating the original graph after.
+    /// The current embedder binding is captured with the Session.
     fn session(&self) -> crate::graph::pyapi::session::Session {
         crate::graph::pyapi::session::Session::with_defaults(
             std::sync::Arc::clone(&self.inner),
@@ -1699,10 +1701,8 @@ impl KnowledgeGraph {
                 .try_borrow_mut()
                 .map_err(|_| concurrent_access_pyerr())?;
             this.check_durable_owner()?;
+            let embedder_for_opts = this.embedder.clone();
             let graph = get_graph_mut(&mut this.inner);
-
-            let embedder_for_opts: Option<std::sync::Arc<dyn crate::graph::embedder::Embedder>> =
-                None; // mutations don't typically use text_score; skip the embedder snapshot
 
             let opts = kglite_core::api::session::ExecuteOptions {
                 params: &param_map,
@@ -1725,8 +1725,7 @@ impl KnowledgeGraph {
                 csv_import: CsvImportPolicy::LocalFilesystem,
             };
 
-            let outcome = kglite_core::api::session::execute_mut(graph, query, &opts)
-                .map_err(crate::error_py::kg_to_pyerr)?;
+            let outcome = execute_mut_with_embedder(py, graph, query, &opts)?;
             let result = outcome.result;
             // Announce before the output shape is chosen — a CSV string and a
             // DataFrame cannot carry diagnostics, so this is their only channel.
@@ -1860,6 +1859,7 @@ impl KnowledgeGraph {
     /// read-only-then-commit transaction pays nothing. Embeddings, indexes and
     /// timeseries are part of `DirGraph` and are cloned with it, so that copy
     /// covers the whole graph — budget for it on an embedding-heavy graph.
+    /// The current embedder binding is captured at begin.
     ///
     /// Can also be used as a context manager:
     ///
@@ -1890,6 +1890,7 @@ impl KnowledgeGraph {
                 kglite_core::api::session::Session::from_arc(Arc::clone(&kg.inner)).begin(),
                 kg.query_defaults(),
                 kg.lifecycle.epoch(),
+                kg.embedder.clone(),
             ))
         })?;
         let deadline = super::query_defaults::deadline_from(timeout_ms);
@@ -1898,6 +1899,7 @@ impl KnowledgeGraph {
             inner: Some(core_tx.0),
             defaults: core_tx.1,
             ownership_epoch: core_tx.2,
+            embedder: core_tx.3,
             deadline,
         })
     }
@@ -1909,6 +1911,7 @@ impl KnowledgeGraph {
     ///
     /// Ideal for concurrent read-heavy workloads (e.g. MCP server agents)
     /// where you want a consistent snapshot without the cost of a full clone.
+    /// The current embedder binding is captured at begin.
     ///
     /// Can also be used as a context manager:
     ///
@@ -1928,6 +1931,7 @@ impl KnowledgeGraph {
                 kglite_core::api::session::Session::from_arc(Arc::clone(&kg.inner)).begin_read(),
                 kg.query_defaults(),
                 kg.lifecycle.epoch(),
+                kg.embedder.clone(),
             ))
         })?;
         let deadline = super::query_defaults::deadline_from(timeout_ms);
@@ -1936,6 +1940,7 @@ impl KnowledgeGraph {
             inner: Some(core_tx.0),
             defaults: core_tx.1,
             ownership_epoch: core_tx.2,
+            embedder: core_tx.3,
             deadline,
         })
     }
@@ -2159,4 +2164,20 @@ fn build_disabled_passes(
         }
     }
     Ok(set)
+}
+
+/// Python-backed embedders reacquire the GIL during query preparation.
+fn execute_mut_with_embedder(
+    py: Python<'_>,
+    graph: &mut kglite_core::api::DirGraph,
+    query: &str,
+    opts: &kglite_core::api::session::ExecuteOptions<'_>,
+) -> PyResult<kglite_core::api::session::ExecuteOutcome> {
+    let mut execute = || kglite_core::api::session::execute_mut(graph, query, opts);
+    if opts.embedder.is_some() {
+        py.detach(execute)
+    } else {
+        execute()
+    }
+    .map_err(crate::error_py::kg_to_pyerr)
 }
