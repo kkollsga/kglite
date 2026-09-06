@@ -3,11 +3,14 @@
 //!
 //! Reads the source NodeSpec's CSV, evaluates each `set` expression
 //! per row, appends the result as new column(s), writes the
-//! augmented CSV to `computed/{from}_derived.csv`, and rewires the
-//! NodeSpec to consume the new file. New properties are typed by
-//! inferring from the first non-null result.
+//! augmented CSV to an allocated path under `computed/`, and rewires the
+//! NodeSpec to consume the new file. New property types reconcile all
+//! expression results; nulls carry no type evidence.
 
-use super::sanitize_filename;
+use super::super::schema::ComputeOp;
+use super::output::StagedCsv;
+use super::paths::{ComputePaths, Output};
+use super::values::ComputedType;
 use indexmap::IndexMap;
 use std::collections::HashMap;
 use std::path::Path;
@@ -15,8 +18,8 @@ use std::path::Path;
 use super::super::expr::{self, Bindings, Value};
 use super::super::schema::Blueprint;
 use super::{
-    csv_cell_to_value, infer_value_type, resolve_input_path, resolve_source_spec,
-    resolve_source_spec_mut, value_to_csv_cell,
+    csv_cell_to_value, resolve_input_path, resolve_source_spec, resolve_source_spec_mut,
+    value_to_csv_cell,
 };
 
 /// Per-row Bindings impl backed by a header-indexed Vec of Values.
@@ -36,11 +39,23 @@ impl<'a> Bindings for RowBindings<'a> {
     }
 }
 
+// Preserve standalone allocation entry; pipeline dispatch shares its allocated paths.
+#[allow(dead_code)]
 pub fn run_derive(
     blueprint: &mut Blueprint,
     input_root: &Path,
     from: &str,
     set: &IndexMap<String, String>,
+) -> Result<(), String> {
+    run_derive_allocated(blueprint, input_root, from, set, None)
+}
+
+pub(super) fn run_derive_allocated(
+    blueprint: &mut Blueprint,
+    input_root: &Path,
+    from: &str,
+    set: &IndexMap<String, String>,
+    paths: Option<&ComputePaths>,
 ) -> Result<(), String> {
     // 1. Resolve source NodeSpec + CSV path. `from` may name a
     //    top-level type or a sub-node — both are valid targets.
@@ -89,17 +104,21 @@ pub fn run_derive(
         declared_types.insert(col.clone(), ty.clone());
     }
 
-    let output_path = input_root
-        .join("computed")
-        .join(format!("{}_derived.csv", sanitize_filename(from)));
-    if let Some(parent) = output_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("derive: create {}: {}", parent.display(), e))?;
-    }
-    let mut writer = csv::WriterBuilder::new()
-        .quote_style(csv::QuoteStyle::Necessary)
-        .from_path(&output_path)
-        .map_err(|e| format!("derive: open {}: {}", output_path.display(), e))?;
+    let owned_paths;
+    let paths = if let Some(paths) = paths {
+        paths
+    } else {
+        let operation = ComputeOp::Derive {
+            from: from.to_string(),
+            set: set.clone(),
+        };
+        owned_paths = ComputePaths::new(blueprint, input_root, std::slice::from_ref(&operation))?;
+        &owned_paths
+    };
+    let computed_rel = paths.relative(&Output::Derive(from.to_string()));
+    let output_path = input_root.join(&computed_rel);
+    let mut staged = StagedCsv::new(&output_path, "derive")?;
+    let writer = staged.writer();
 
     // Augmented header = original headers + new derived columns
     // (in declared order). If a derived name collides with an
@@ -111,9 +130,7 @@ pub fn run_derive(
         .write_record(&out_headers)
         .map_err(|e| format!("derive: write header: {}", e))?;
 
-    // First-non-null result type per new column, for blueprint
-    // property typing later.
-    let mut inferred_types: HashMap<String, &'static str> = HashMap::new();
+    let mut inferred_types: HashMap<String, ComputedType> = HashMap::new();
     let mut row_values: Vec<Value> = Vec::with_capacity(headers.len());
 
     for record_result in reader.records() {
@@ -137,9 +154,7 @@ pub fn run_derive(
         for (prop, ast) in &compiled {
             let v = expr::eval(ast, &bindings)
                 .map_err(|e| format!("derive '{}': eval: {}", prop, e))?;
-            inferred_types
-                .entry(prop.clone())
-                .or_insert_with(|| infer_value_type(&v));
+            inferred_types.entry(prop.clone()).or_default().observe(&v);
             derived_values.push(v);
         }
 
@@ -162,19 +177,18 @@ pub fn run_derive(
             .write_record(&out_row)
             .map_err(|e| format!("derive: write row: {}", e))?;
     }
-    writer
-        .flush()
-        .map_err(|e| format!("derive: flush: {}", e))?;
-    drop(writer);
+    drop(reader);
+    staged.publish()?;
 
     // 4. Rewire the blueprint's NodeSpec to consume the augmented
     //    CSV + register the new property types.
-    let computed_rel = format!("computed/{}_derived.csv", sanitize_filename(from));
     let spec_mut = resolve_source_spec_mut(blueprint, from)
         .expect("source spec disappeared between resolve and mutate");
     spec_mut.csv = Some(computed_rel);
     for (prop, _) in &compiled {
-        let ty = inferred_types.get(prop).copied().unwrap_or("string");
+        let ty = inferred_types
+            .get(prop)
+            .map_or("string", ComputedType::resolve);
         spec_mut.properties.insert(prop.clone(), ty.to_string());
     }
 
@@ -364,6 +378,36 @@ mod tests {
             sub.properties.get("total_value"),
             Some(&"float".to_string())
         );
+    }
+
+    #[test]
+    fn failed_successive_derive_preserves_completed_source_and_schema() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("t.csv");
+        let original = "id,v\n0,0\n1,1\n2,2\n";
+        write_csv(&source, original);
+        let mut bp = make_blueprint("t.csv", &[("v", "int")]);
+        let first = IndexMap::from([("first".to_string(), "v + 1".to_string())]);
+        run_derive(&mut bp, tmp.path(), "T", &first).unwrap();
+        let output = tmp.path().join("computed/T_derived.csv");
+        let completed = fs::read(&output).unwrap();
+        let properties = bp.nodes["T"].properties.clone();
+        let csv = bp.nodes["T"].csv.clone();
+
+        // Two valid records precede a normal expression error. No partial
+        // second-step output may replace the first completed derivation.
+        let second = IndexMap::from([("second".to_string(), "10 / (2 - v)".to_string())]);
+        let error = run_derive(&mut bp, tmp.path(), "T", &second).unwrap_err();
+        assert!(error.contains("division by zero"), "{error}");
+        assert_eq!(fs::read(&output).unwrap(), completed);
+        assert_eq!(fs::read_to_string(source).unwrap(), original);
+        assert_eq!(bp.nodes["T"].properties, properties);
+        assert_eq!(bp.nodes["T"].csv, csv);
+        let entries = fs::read_dir(tmp.path().join("computed"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, vec![std::ffi::OsString::from("T_derived.csv")]);
     }
 
     #[test]

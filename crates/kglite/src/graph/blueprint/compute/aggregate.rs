@@ -14,10 +14,9 @@
 //!   order-sensitive picks
 //!
 //! Outputs:
-//! - `computed/aggregate_{into}.csv` — one row per group with
-//!   pk = composite of group_by values, joined by `_`
-//! - `computed/aggregate_{into}_{edge}.csv` per declared
-//!   `edges[]` entry — junction edges to the group-key targets
+//! - An allocated CSV under `computed/` — one row per group with
+//!   pk = `group:` followed by the JSON string tuple of group_by values
+//! Declared FK edges reference group-key columns in this same summary CSV.
 //!
 //! Plus a synthesised `NodeSpec[into]` registered in the
 //! blueprint so the standard Phase 2/3 loader picks up the
@@ -25,6 +24,8 @@
 //! entry registered on `NodeSpec[into].connections.junction_edges`
 //! so Phase 5 wires the FK edges.
 
+use super::super::schema::ComputeOp;
+use super::paths::{ComputePaths, Output};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -32,9 +33,9 @@ use indexmap::IndexMap;
 
 use super::super::expr::{self, value_cmp, Bindings, Expr, Value};
 use super::super::schema::{AggregateEdge, Blueprint, JunctionEdge, NodeSpec};
-use super::{
-    csv_cell_to_value, infer_value_type, resolve_input_path, resolve_source_spec, value_to_csv_cell,
-};
+use super::output::StagedCsv;
+use super::values::{group_id, group_key, ComputedType, GroupKey};
+use super::{csv_cell_to_value, resolve_input_path, resolve_source_spec, value_to_csv_cell};
 
 struct RowBindings<'a> {
     headers: &'a [String],
@@ -88,6 +89,8 @@ struct AggState {
     distinct: HashSet<String>,
 }
 
+// Preserve standalone allocation entry; pipeline dispatch shares its allocated paths.
+#[allow(dead_code)]
 pub fn run_aggregate(
     blueprint: &mut Blueprint,
     input_root: &Path,
@@ -96,6 +99,23 @@ pub fn run_aggregate(
     into: &str,
     agg: &IndexMap<String, String>,
     edges: &[AggregateEdge],
+) -> Result<(), String> {
+    run_aggregate_allocated(
+        blueprint, input_root, from, group_by, into, agg, edges, None,
+    )
+}
+
+// The allocated entry mirrors the existing compute primitive arguments.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn run_aggregate_allocated(
+    blueprint: &mut Blueprint,
+    input_root: &Path,
+    from: &str,
+    group_by: &[String],
+    into: &str,
+    agg: &IndexMap<String, String>,
+    edges: &[AggregateEdge],
+    paths: Option<&ComputePaths>,
 ) -> Result<(), String> {
     let spec = resolve_source_spec(blueprint, from)
         .ok_or_else(|| format!("aggregate: source type '{}' not declared", from))?;
@@ -115,6 +135,8 @@ pub fn run_aggregate(
     if !csv_path.exists() {
         return Ok(());
     }
+
+    validate_group_edges(group_by, edges)?;
 
     // 1. Parse + classify each agg expression.
     let mut classified: Vec<(String, AggKind)> = Vec::with_capacity(agg.len());
@@ -153,12 +175,8 @@ pub fn run_aggregate(
     // 3. Single pass over CSV: build per-group state via HashMap
     //    for O(1) avg per-row lookup. Output is sorted at the end
     //    so test/CSV determinism survives.
-    let mut groups: HashMap<String, (Vec<String>, Vec<AggState>)> = HashMap::new();
+    let mut groups: HashMap<GroupKey, Vec<AggState>> = HashMap::new();
     let mut row_values: Vec<Value> = Vec::with_capacity(headers.len());
-    // Reused per-row group_key buffer — avoids one String allocation
-    // per row on the hot path (only one new allocation per *new*
-    // group, when we promote this into the map).
-    let mut group_key_buf = String::new();
     let n_aggs = classified.len();
 
     for record_result in reader.records() {
@@ -172,31 +190,9 @@ pub fn run_aggregate(
             ));
         }
 
-        // Compose the group key into the reused buffer (no alloc
-        // unless its capacity is exceeded).
-        group_key_buf.clear();
-        for (k, &i) in group_indices.iter().enumerate() {
-            if k > 0 {
-                group_key_buf.push('\u{1F}');
-            }
-            group_key_buf.push_str(record.get(i).unwrap_or(""));
-        }
-
-        let states = if let Some(entry) = groups.get_mut(&group_key_buf) {
-            &mut entry.1
-        } else {
-            // Cold path: new group. One String alloc for the key,
-            // one Vec<String> for the components, one Vec<AggState>
-            // sized to the agg count.
-            let key = group_key_buf.clone();
-            let components: Vec<String> = group_indices
-                .iter()
-                .map(|&i| record.get(i).unwrap_or("").to_string())
-                .collect();
-            let states: Vec<AggState> = (0..n_aggs).map(|_| AggState::default()).collect();
-            groups.insert(key.clone(), (components, states));
-            &mut groups.get_mut(&key).unwrap().1
-        };
+        let states = groups
+            .entry(group_key(&record, &group_indices))
+            .or_insert_with(|| (0..n_aggs).map(|_| AggState::default()).collect());
 
         let bindings = RowBindings {
             headers: &headers,
@@ -210,15 +206,24 @@ pub fn run_aggregate(
     }
 
     // 4. Emit summary CSV.
-    let into_safe = sanitize(into);
-    let computed = input_root.join("computed");
-    std::fs::create_dir_all(&computed)
-        .map_err(|e| format!("aggregate: create {}: {}", computed.display(), e))?;
-    let out_path = computed.join(format!("aggregate_{}.csv", into_safe));
-    let mut writer = csv::WriterBuilder::new()
-        .quote_style(csv::QuoteStyle::Necessary)
-        .from_path(&out_path)
-        .map_err(|e| format!("aggregate: open {}: {}", out_path.display(), e))?;
+    let owned_paths;
+    let paths = if let Some(paths) = paths {
+        paths
+    } else {
+        let operation = ComputeOp::Aggregate {
+            from: from.to_string(),
+            group_by: group_by.to_vec(),
+            into: into.to_string(),
+            agg: agg.clone(),
+            edges: edges.to_vec(),
+        };
+        owned_paths = ComputePaths::new(blueprint, input_root, std::slice::from_ref(&operation))?;
+        &owned_paths
+    };
+    let computed_rel = paths.relative(&Output::Aggregate(into.to_string()));
+    let out_path = input_root.join(&computed_rel);
+    let mut staged = StagedCsv::new(&out_path, "aggregate")?;
+    let writer = staged.writer();
 
     // Header: composite-pk + group_by cols + each agg property
     let pk_col = format!("{}_id", sanitize(into).to_lowercase());
@@ -233,21 +238,20 @@ pub fn run_aggregate(
         .write_record(&hdr)
         .map_err(|e| format!("aggregate: write header: {}", e))?;
 
-    // For property-type inference (first non-null per agg col):
-    let mut inferred_types: HashMap<String, &'static str> = HashMap::new();
+    let mut inferred_types: HashMap<String, ComputedType> = HashMap::new();
 
     // Sort keys for deterministic CSV order (HashMap iteration is
     // randomised). Sort cost is O(g log g) for g = group count —
     // dominated by the per-row work for large inputs.
-    let mut sorted_keys: Vec<&String> = groups.keys().collect();
+    let mut sorted_keys: Vec<&GroupKey> = groups.keys().collect();
     sorted_keys.sort();
 
     for key in sorted_keys {
-        let (components, states) = &groups[key];
-        let pk_value = key.replace('\u{1F}', "_");
+        let states = &groups[key];
+        let pk_value = group_id(key)?;
         let mut row: Vec<String> = Vec::with_capacity(hdr.len());
         row.push(pk_value);
-        for c in components {
+        for c in key {
             row.push(c.clone());
         }
         append_aggregate_cells(states, &classified, &mut inferred_types, &mut row)?;
@@ -255,14 +259,10 @@ pub fn run_aggregate(
             .write_record(&row)
             .map_err(|e| format!("aggregate: write row: {}", e))?;
     }
-    writer
-        .flush()
-        .map_err(|e| format!("aggregate: flush: {}", e))?;
-    drop(writer);
 
-    // 5. Register the summary NodeSpec.
+    // 5. Prepare the summary NodeSpec before publishing output.
     let mut into_spec = NodeSpec {
-        csv: Some(format!("computed/aggregate_{}.csv", into_safe)),
+        csv: Some(computed_rel.clone()),
         pk: Some(pk_col.clone()),
         title: Some(pk_col.clone()),
         ..NodeSpec::default()
@@ -276,26 +276,18 @@ pub fn run_aggregate(
         into_spec.properties.insert(g.clone(), ty);
     }
     for (prop, _) in &classified {
-        let ty = inferred_types.get(prop).copied().unwrap_or("string");
+        let ty = inferred_types
+            .get(prop)
+            .map_or("string", ComputedType::resolve);
         into_spec.properties.insert(prop.clone(), ty.to_string());
     }
 
     // 6. FK edges from summary → group-key targets.
     for edge in edges {
-        // The summary CSV carries the group-by cols → use one of
-        // those as the FK column. Validation already ensured the
-        // edge.fk matches a group_by column name; we additionally
-        // assert here.
-        if !group_by.iter().any(|g| g == &edge.fk) {
-            return Err(format!(
-                "aggregate edge '{}': fk '{}' must be one of group_by {:?}",
-                edge.edge, edge.fk, group_by
-            ));
-        }
         into_spec.connections.junction_edges.insert(
             edge.edge.clone(),
             JunctionEdge::computed(
-                format!("computed/aggregate_{}.csv", into_safe),
+                computed_rel.clone(),
                 pk_col.clone(),
                 edge.to.clone(),
                 edge.fk.clone(),
@@ -303,8 +295,23 @@ pub fn run_aggregate(
         );
     }
 
+    drop(reader);
+    staged.publish()?;
     blueprint.nodes.insert(into.to_string(), into_spec);
 
+    Ok(())
+}
+
+/// A summary FK must address a group column. Refuse before opening output.
+fn validate_group_edges(group_by: &[String], edges: &[AggregateEdge]) -> Result<(), String> {
+    for edge in edges {
+        if !group_by.iter().any(|group| group == &edge.fk) {
+            return Err(format!(
+                "aggregate edge '{}': fk '{}' must be one of group_by {:?}",
+                edge.edge, edge.fk, group_by
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -491,14 +498,15 @@ fn update_state(state: &mut AggState, kind: &AggKind, ctx: &dyn Bindings) -> Res
 fn append_aggregate_cells(
     states: &[AggState],
     classified: &[(String, AggKind)],
-    inferred_types: &mut HashMap<String, &'static str>,
+    inferred_types: &mut HashMap<String, ComputedType>,
     row: &mut Vec<String>,
 ) -> Result<(), String> {
     for (i, (prop, kind)) in classified.iter().enumerate() {
         let value = finalize_state(&states[i], kind)?;
         inferred_types
             .entry(prop.clone())
-            .or_insert_with(|| infer_value_type(&value));
+            .or_default()
+            .observe(&value);
         row.push(value_to_csv_cell(&value));
     }
     Ok(())
@@ -910,5 +918,83 @@ mod tests {
         );
         assert!(result.unwrap_err().contains("Integer overflow in sum"));
         assert!(!blueprint.nodes.contains_key("Summary"));
+    }
+
+    fn assert_failed_repeat_preserves_summary(invalid_fk: bool) {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("t.csv");
+        let original = "id,g,bucket,v\n1,a,x,9223372036854775807\n2,b,x,1\n";
+        write_csv(&source, original);
+        let mut bp = make_bp(
+            "t.csv",
+            "id",
+            &[("g", "string"), ("bucket", "string"), ("v", "int")],
+        );
+        run_aggregate(
+            &mut bp,
+            tmp.path(),
+            "T",
+            &["g".into(), "bucket".into()],
+            "Totals",
+            &IndexMap::from([("s".into(), "sum(v)".into())]),
+            &[],
+        )
+        .unwrap();
+        let summary = tmp.path().join("computed/aggregate_Totals.csv");
+        let before = fs::read(&summary).unwrap();
+        let schema = format!("{bp:?}");
+        let edges = if invalid_fk {
+            vec![AggregateEdge {
+                to: "T".into(),
+                fk: "missing".into(),
+                edge: "BAD".into(),
+            }]
+        } else {
+            vec![]
+        };
+        let expression = if invalid_fk { "count(*)" } else { "sum(s)" };
+        let error = run_aggregate(
+            &mut bp,
+            tmp.path(),
+            "Totals",
+            &["bucket".into()],
+            "Totals",
+            &IndexMap::from([("s".into(), expression.into())]),
+            &edges,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains(if invalid_fk {
+                "must be one of group_by"
+            } else {
+                "Integer overflow in sum"
+            }),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read(&summary).unwrap(),
+            before,
+            "failed step replaced its active source"
+        );
+        assert_eq!(format!("{bp:?}"), schema);
+        assert_eq!(fs::read_to_string(source).unwrap(), original);
+        let files: Vec<_> = fs::read_dir(tmp.path().join("computed"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            files,
+            vec![std::ffi::OsString::from("aggregate_Totals.csv")]
+        );
+    }
+
+    #[test]
+    fn repeated_aggregate_overflow_preserves_completed_input_and_schema() {
+        assert_failed_repeat_preserves_summary(false);
+    }
+
+    #[test]
+    fn invalid_aggregate_fk_preserves_completed_input_and_schema() {
+        assert_failed_repeat_preserves_summary(true);
     }
 }

@@ -6,6 +6,8 @@
 //! column without an explicit type falls back to light inference on
 //! the first non-empty cell in each column.
 
+mod integer;
+
 use super::table::{looks_like_a_missed_list, ListMisparseTally, RawCsv};
 use crate::datatypes::values::{ColumnData, ColumnType, DataFrame, Value};
 use chrono::NaiveDate;
@@ -286,25 +288,7 @@ fn build_column_data(
                     out.push(None);
                     continue;
                 }
-                let s = row[src_idx].trim();
-                if s.is_empty() {
-                    out.push(None);
-                } else if let Ok(v) = s.parse::<i64>() {
-                    out.push(Some(v));
-                } else if let Ok(v) = s.parse::<f64>() {
-                    // Pandas-style: whole-number float → int
-                    if v.is_finite()
-                        && v.fract() == 0.0
-                        && v >= i64::MIN as f64
-                        && v <= i64::MAX as f64
-                    {
-                        out.push(Some(v as i64));
-                    } else {
-                        out.push(None);
-                    }
-                } else {
-                    out.push(None);
-                }
+                out.push(integer::parse_exact_i64(&row[src_idx]));
             }
             Ok(ColumnData::Int64(out))
         }

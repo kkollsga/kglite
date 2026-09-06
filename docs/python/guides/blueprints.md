@@ -890,6 +890,27 @@ processes graph construction in dependency order. Compute operations are
 (ordered group edges), `calendar` (Date hierarchy/linking), and `aggregate`
 (summary nodes/edges). Later operations can consume earlier outputs.
 
+Aggregate node IDs are `group:` followed by a compact JSON array of the raw
+`group_by` strings, for example `group:["a_b","c"]`. Each distinct tuple has a
+stable ID independent of row order and other groups. Raw group properties and
+foreign-key columns keep their original values. This replaces the former
+underscore-joined IDs for **every newly computed aggregate**, including a single
+column; existing saved graphs are not rewritten. Use the group properties to
+map older generated IDs when rebuilding graphs.
+
+Derived and aggregate property types reconcile all expression results. Nulls
+carry no type evidence; integer and float results widen to float. This uses
+normal floating-point conversion, which may round integers above 2^53. Strings
+remain strings (including `"001"`), while incompatible kinds such as boolean
+plus numeric values use text. An all-null result column also uses text. Computed
+lists retain their existing text representation.
+
+A derive writes a temporary sibling CSV and replaces its generated destination
+only after reading and writing all records successfully. Successive derives on
+the same type can consume that destination safely. An expression, read or write
+failure preserves the previous completed CSV; earlier compute steps are not
+rolled back as one transaction.
+
 Graph construction then has five steps:
 
 1. **Manual nodes** — types without `csv` (created from distinct FK values found across all CSVs)
@@ -1033,3 +1054,31 @@ Blueprint GeoJSON → WKT/centroid conversion runs in Rust and needs no Shapely.
 Supply `_geometry` only for GeoJSON conversion; existing WKT and plain lat/lon
 columns are accepted directly. Shapely remains optional for Python-side
 geometry objects and GeoDataFrame helpers outside the blueprint loader.
+
+
+Computed CSV paths are allocated together for the pipeline. Ordinary unique
+names keep their familiar filenames. Sanitized-name collisions, case-only
+collisions, and names already used by inputs or existing files receive distinct
+mapped names; the loader uses those exact paths. A later step can replace its
+own completed output within that invocation. Running a fresh pipeline again may
+allocate new output filenames so earlier files remain untouched; logical node
+and relationship identities do not depend on those filenames. Calling a compute
+primitive directly uses the same input-preserving rule for that single call.
+
+Calendar `in_month_edge` and `in_quarter_edge` register the generated junction
+files, linking every Date row to its Month and Quarter respectively. The
+unsupported `in_year_edge` option remains an explicit error.
+
+Multiple calendars in one compute pipeline share the union of their generated
+Month/Quarter keys. A hierarchy already supplied by your blueprint, or changed
+by an intervening derive/filter/chain step, cannot be replaced by a later
+calendar. That operation reports an error before writing its calendar files;
+use a separate hierarchy design when the generated one needs custom metadata.
+The calendar date type also cannot equal its own requested hierarchy type.
+
+Calendar links validate source headers and rows before replacing shared
+hierarchies. Existing linked CSVs are read twice to keep memory bounded; links
+from same-step generated types are checked against their known columns.
+Completed steps are preserved on these semantic errors. Calendar generation
+is not an atomic transaction across multiple files, and concurrent input-file
+changes are outside this guarantee.

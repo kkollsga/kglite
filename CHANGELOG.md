@@ -26,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Newly computed aggregate IDs use tagged JSON tuples (`group:[...]`) to keep
+  grouping components distinct. All newly generated aggregate IDs change;
+  existing saved graphs are not rewritten.
 - New writes use WAL format 4 for complete node and parallel-relationship state;
   readers decode formats 2–4 and older readers refuse the new WAL header. The
   `.kgl` checkpoint format is unchanged. Rust `wrap_for_durability` callers now
@@ -49,6 +52,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Blueprint derive and aggregate columns reconcile every computed value before
+  loading, preserving null neutrality and fractional results. Declared integer
+  cells parse decimal/scientific whole values exactly; fractional or out-of-range
+  cells retain the existing null policy.
+- Computed CSV outputs no longer overwrite colliding inputs or other outputs;
+  repeated derive, filter and aggregate steps preserve completed data on errors.
+  Calendar hierarchy relationships load correctly, and multiple calendars retain
+  their shared Month/Quarter nodes without replacing unrelated or edited data.
 - Undirected patterns bind each self-loop relationship once, including fused
   counts and lowered variable-length paths. Endpoint predicates recognize a
   self-loop's node as both endpoints; degree retains its two-incidence meaning.

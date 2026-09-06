@@ -29,12 +29,11 @@ pub mod calendar;
 pub mod chain;
 pub mod derive;
 pub mod filter;
+mod output;
+mod paths;
+mod values;
 
-/// Sanitize a string for use in a generated filename — keep
-/// `[A-Za-z0-9_]`, replace everything else with `_`. Shared by every
-/// compute primitive that names output CSVs after a node type or
-/// property name. Consolidated 0.9.53 from per-file copies in
-/// `derive.rs`, `chain.rs`, `filter.rs`.
+/// Preferred filename spelling only; ComputePaths resolves collisions and reserves inputs.
 pub(super) fn sanitize_filename(s: &str) -> String {
     s.chars()
         .map(|c| {
@@ -66,30 +65,54 @@ pub fn apply_compute(blueprint: &mut Blueprint, input_root: &Path) -> Result<(),
         )
     })?;
 
+    let paths = paths::ComputePaths::new(blueprint, input_root, &blueprint.compute)?;
+
     // Move ops out of the blueprint so we can iterate them while
     // mutating the rest of the blueprint structure.
     let ops = std::mem::take(&mut blueprint.compute);
     for (i, op) in ops.iter().enumerate() {
-        dispatch(op, blueprint, input_root)
+        dispatch(op, blueprint, input_root, &paths)
             .map_err(|e| format!("compute[{}] ({}): {}", i, op_name(op), e))?;
     }
     Ok(())
 }
 
-fn dispatch(op: &ComputeOp, blueprint: &mut Blueprint, input_root: &Path) -> Result<(), String> {
+fn dispatch(
+    op: &ComputeOp,
+    blueprint: &mut Blueprint,
+    input_root: &Path,
+    paths: &paths::ComputePaths,
+) -> Result<(), String> {
     match op {
-        ComputeOp::Derive { from, set } => derive::run_derive(blueprint, input_root, from, set),
+        ComputeOp::Derive { from, set } => {
+            derive::run_derive_allocated(blueprint, input_root, from, set, Some(paths))
+        }
         ComputeOp::Filter {
             from,
             where_expr,
             into,
-        } => filter::run_filter(blueprint, input_root, from, where_expr, into.as_deref()),
+        } => filter::run_filter_allocated(
+            blueprint,
+            input_root,
+            from,
+            where_expr,
+            into.as_deref(),
+            Some(paths),
+        ),
         ComputeOp::Chain {
             from,
             group_by,
             order_by,
             edge,
-        } => chain::run_chain(blueprint, input_root, from, group_by, order_by, edge),
+        } => chain::run_chain_allocated(
+            blueprint,
+            input_root,
+            from,
+            group_by,
+            order_by,
+            edge,
+            Some(paths),
+        ),
         ComputeOp::Calendar {
             node_type,
             start,
@@ -99,7 +122,7 @@ fn dispatch(op: &ComputeOp, blueprint: &mut Blueprint, input_root: &Path) -> Res
             in_quarter_edge,
             in_year_edge,
             links,
-        } => calendar::run_calendar(
+        } => calendar::run_calendar_allocated(
             blueprint,
             input_root,
             node_type,
@@ -110,6 +133,7 @@ fn dispatch(op: &ComputeOp, blueprint: &mut Blueprint, input_root: &Path) -> Res
             in_quarter_edge.as_deref(),
             in_year_edge.as_deref(),
             links,
+            Some(paths),
         ),
         ComputeOp::Aggregate {
             from,
@@ -117,7 +141,16 @@ fn dispatch(op: &ComputeOp, blueprint: &mut Blueprint, input_root: &Path) -> Res
             into,
             agg,
             edges,
-        } => aggregate::run_aggregate(blueprint, input_root, from, group_by, into, agg, edges),
+        } => aggregate::run_aggregate_allocated(
+            blueprint,
+            input_root,
+            from,
+            group_by,
+            into,
+            agg,
+            edges,
+            Some(paths),
+        ),
     }
 }
 
@@ -236,20 +269,5 @@ pub(crate) fn csv_cell_to_value(cell: &str, declared_type: Option<&str>) -> supe
                 Value::String(cell.to_string())
             }
         }
-    }
-}
-
-/// Infer a blueprint type string ("int" / "float" / "string" /
-/// "bool") from a Value. Used by `derive` to declare new property
-/// types after computing them.
-pub(crate) fn infer_value_type(v: &super::expr::Value) -> &'static str {
-    use super::expr::Value;
-    match v {
-        Value::Int(_) => "int",
-        Value::Float(_) => "float",
-        Value::Bool(_) => "bool",
-        Value::String(_) => "string",
-        Value::List(_) => "string",
-        Value::Null => "string",
     }
 }

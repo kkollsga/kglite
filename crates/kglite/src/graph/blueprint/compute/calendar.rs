@@ -8,6 +8,9 @@
 //! source type gets a junction CSV that connects its rows to the
 //! matching Date node by ISO-date string equality.
 
+use super::super::schema::ComputeOp;
+use super::output::StagedCsv;
+use super::paths::{ComputePaths, Output};
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -16,7 +19,10 @@ use chrono::{Datelike, Duration, NaiveDate};
 use super::super::schema::{Blueprint, CalendarLink, JunctionEdge, NodeSpec};
 use super::{csv_cell_to_value, resolve_input_path, resolve_source_spec, resolve_source_spec_mut};
 
+// Public calendar parameters mirror its declared compute operation.
 #[allow(clippy::too_many_arguments)]
+// Preserve standalone allocation entry; pipeline dispatch shares its allocated paths.
+#[allow(dead_code)]
 pub fn run_calendar(
     blueprint: &mut Blueprint,
     input_root: &Path,
@@ -29,37 +35,70 @@ pub fn run_calendar(
     in_year_edge: Option<&str>,
     links: &[CalendarLink],
 ) -> Result<(), String> {
-    // Refused before anything is written: nothing generates :Year nodes or the
-    // hierarchy junction, so accepting the field would load a blueprint whose
-    // declared `(:Date)-[:IN_YEAR]->(:Year)` shape is simply absent from the
-    // graph, with no error to say so.
-    if let Some(edge_name) = in_year_edge {
-        return Err(format!(
-            "calendar: 'in_year_edge' (requested '{edge_name}') is not implemented — \
-             no :Year nodes and no '{edge_name}' edges would be generated. \
-             Use 'in_month_edge' / 'in_quarter_edge', which are implemented, or \
-             group on the Date node's own 'year' property (MATCH (d:{node_type}) \
-             RETURN d.year)."
-        ));
-    }
+    run_calendar_allocated(
+        blueprint,
+        input_root,
+        node_type,
+        start,
+        end,
+        next_edge,
+        in_month_edge,
+        in_quarter_edge,
+        in_year_edge,
+        links,
+        None,
+    )
+}
 
-    let start_d = NaiveDate::parse_from_str(start, "%Y-%m-%d")
-        .map_err(|e| format!("calendar: invalid start '{}': {}", start, e))?;
-    let end_d = NaiveDate::parse_from_str(end, "%Y-%m-%d")
-        .map_err(|e| format!("calendar: invalid end '{}': {}", end, e))?;
-    if start_d > end_d {
-        return Err(format!(
-            "calendar: start ({}) must be <= end ({})",
-            start, end
-        ));
-    }
+// The allocated entry mirrors the existing compute primitive arguments.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn run_calendar_allocated(
+    blueprint: &mut Blueprint,
+    input_root: &Path,
+    node_type: &str,
+    start: &str,
+    end: &str,
+    next_edge: &str,
+    in_month_edge: Option<&str>,
+    in_quarter_edge: Option<&str>,
+    in_year_edge: Option<&str>,
+    links: &[CalendarLink],
+    paths: Option<&ComputePaths>,
+) -> Result<(), String> {
+    let (start_d, end_d) = calendar_bounds(node_type, start, end, in_year_edge)?;
 
+    let owned_paths;
+    let paths = if let Some(paths) = paths {
+        paths
+    } else {
+        let operation = ComputeOp::Calendar {
+            node_type: node_type.to_string(),
+            start: start.to_string(),
+            end: end.to_string(),
+            next_edge: next_edge.to_string(),
+            in_month_edge: in_month_edge.map(str::to_string),
+            in_quarter_edge: in_quarter_edge.map(str::to_string),
+            in_year_edge: in_year_edge.map(str::to_string),
+            links: links.to_vec(),
+        };
+        owned_paths = ComputePaths::new(blueprint, input_root, std::slice::from_ref(&operation))?;
+        &owned_paths
+    };
+    validate_hierarchy_ownership(blueprint, node_type, in_month_edge, in_quarter_edge, paths)?;
+    preflight_links(
+        blueprint,
+        input_root,
+        node_type,
+        in_month_edge,
+        in_quarter_edge,
+        links,
+    )?;
     let computed = input_root.join("computed");
     std::fs::create_dir_all(&computed)
         .map_err(|e| format!("calendar: create {}: {}", computed.display(), e))?;
 
-    // 1. Date node CSV — one row per day.
-    let date_csv_path = computed.join(format!("calendar_{}.csv", sanitize(node_type)));
+    let date_rel = paths.relative(&Output::CalendarNode(node_type.to_string()));
+    let date_csv_path = input_root.join(&date_rel);
     let mut date_writer = csv::WriterBuilder::new()
         .from_path(&date_csv_path)
         .map_err(|e| format!("calendar: open {}: {}", date_csv_path.display(), e))?;
@@ -96,12 +135,11 @@ pub fn run_calendar(
         .map_err(|e| format!("calendar: flush Date: {}", e))?;
     drop(date_writer);
 
-    // 2. NEXT_DAY junction CSV.
-    let next_csv_path = computed.join(format!(
-        "calendar_{}_{}.csv",
-        sanitize(node_type),
-        sanitize(next_edge)
+    let next_rel = paths.relative(&Output::CalendarNext(
+        node_type.to_string(),
+        next_edge.to_string(),
     ));
+    let next_csv_path = input_root.join(&next_rel);
     let mut nd_writer = csv::WriterBuilder::new()
         .from_path(&next_csv_path)
         .map_err(|e| format!("calendar: open {}: {}", next_csv_path.display(), e))?;
@@ -124,9 +162,8 @@ pub fn run_calendar(
         .map_err(|e| format!("calendar: flush NEXT_DAY: {}", e))?;
     drop(nd_writer);
 
-    // 3. Register Date NodeSpec + NEXT_DAY junction.
     let mut date_spec = NodeSpec {
-        csv: Some(format!("computed/calendar_{}.csv", sanitize(node_type))),
+        csv: Some(date_rel),
         pk: Some("iso".to_string()),
         title: Some("iso".to_string()),
         ..NodeSpec::default()
@@ -143,21 +180,15 @@ pub fn run_calendar(
     date_spec.connections.junction_edges.insert(
         next_edge.to_string(),
         JunctionEdge::computed(
-            format!(
-                "computed/calendar_{}_{}.csv",
-                sanitize(node_type),
-                sanitize(next_edge)
-            ),
+            next_rel,
             "iso".to_string(),
             node_type.to_string(),
             "next_iso".to_string(),
         ),
     );
 
-    // 4. Hierarchy nodes — only when the corresponding edge is
-    //    declared.
     if let Some(edge_name) = in_month_edge {
-        write_hierarchy(
+        let junction = write_hierarchy(
             blueprint,
             input_root,
             "Month",
@@ -167,10 +198,15 @@ pub fn run_calendar(
             "iso",
             "month_iso",
             |iso| iso.get(..7).unwrap_or("").to_string(),
+            paths,
         )?;
+        date_spec
+            .connections
+            .junction_edges
+            .insert(edge_name.to_string(), junction);
     }
     if let Some(edge_name) = in_quarter_edge {
-        write_hierarchy(
+        let junction = write_hierarchy(
             blueprint,
             input_root,
             "Quarter",
@@ -184,16 +220,81 @@ pub fn run_calendar(
                 let q = (m - 1) / 3 + 1;
                 format!("{}-Q{}", iso.get(..4).unwrap_or(""), q)
             },
+            paths,
         )?;
+        date_spec
+            .connections
+            .junction_edges
+            .insert(edge_name.to_string(), junction);
     }
 
     blueprint.nodes.insert(node_type.to_string(), date_spec);
 
-    // 5. Link edges — connect existing source-type rows to Date.
     for link in links {
-        write_link(blueprint, input_root, node_type, link)?;
+        write_link(blueprint, input_root, node_type, link, paths)?;
     }
 
+    Ok(())
+}
+
+fn calendar_bounds(
+    node_type: &str,
+    start: &str,
+    end: &str,
+    in_year_edge: Option<&str>,
+) -> Result<(NaiveDate, NaiveDate), String> {
+    // Refused before anything is written: nothing generates :Year nodes or the
+    // hierarchy junction, so accepting the field would load a blueprint whose
+    // declared `(:Date)-[:IN_YEAR]->(:Year)` shape is simply absent from the
+    // graph, with no error to say so.
+    if let Some(edge_name) = in_year_edge {
+        return Err(format!(
+            "calendar: 'in_year_edge' (requested '{edge_name}') is not implemented — \
+             no :Year nodes and no '{edge_name}' edges would be generated. \
+             Use 'in_month_edge' / 'in_quarter_edge', which are implemented, or \
+             group on the Date node's own 'year' property (MATCH (d:{node_type}) \
+             RETURN d.year)."
+        ));
+    }
+
+    let start_d = NaiveDate::parse_from_str(start, "%Y-%m-%d")
+        .map_err(|e| format!("calendar: invalid start '{}': {}", start, e))?;
+    let end_d = NaiveDate::parse_from_str(end, "%Y-%m-%d")
+        .map_err(|e| format!("calendar: invalid end '{}': {}", end, e))?;
+    if start_d > end_d {
+        return Err(format!(
+            "calendar: start ({}) must be <= end ({})",
+            start, end
+        ));
+    }
+
+    Ok((start_d, end_d))
+}
+
+fn validate_hierarchy_ownership(
+    blueprint: &Blueprint,
+    date_type: &str,
+    in_month_edge: Option<&str>,
+    in_quarter_edge: Option<&str>,
+    paths: &ComputePaths,
+) -> Result<(), String> {
+    for (name, requested) in [("Month", in_month_edge), ("Quarter", in_quarter_edge)] {
+        if requested.is_none() {
+            continue;
+        }
+        if date_type == name {
+            return Err(format!(
+                "calendar: date type '{date_type}' collides with its requested hierarchy type"
+            ));
+        }
+        if resolve_source_spec(blueprint, name)
+            .is_some_and(|spec| !paths.owns_hierarchy(name, spec))
+        {
+            return Err(format!(
+                "calendar: hierarchy type '{name}' collides with an existing unrelated type"
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -209,16 +310,16 @@ fn write_hierarchy<F>(
     date_pk_col: &str,
     hier_fk_col: &str,
     key_from_iso: F,
-) -> Result<(), String>
+    paths: &ComputePaths,
+) -> Result<JunctionEdge, String>
 where
     F: Fn(&str) -> String,
 {
-    let computed = input_root.join("computed");
-    // Hier node CSV: just pk (key).
-    let node_csv_path = computed.join(format!("calendar_{}.csv", sanitize(hier_type)));
-    let mut w = csv::WriterBuilder::new()
-        .from_path(&node_csv_path)
-        .map_err(|e| format!("calendar: open {}: {}", node_csv_path.display(), e))?;
+    let keys = paths.hierarchy_keys(hier_type, keys);
+    let node_rel = paths.relative(&Output::CalendarNode(hier_type.to_string()));
+    let node_csv_path = input_root.join(&node_rel);
+    let mut stage = StagedCsv::new(&node_csv_path, "calendar")?;
+    let w = stage.writer();
     w.write_record([hier_fk_col])
         .map_err(|e| format!("calendar: write hier header: {}", e))?;
     let mut sorted = keys.clone();
@@ -227,16 +328,15 @@ where
         w.write_record([k.as_str()])
             .map_err(|e| format!("calendar: write hier row: {}", e))?;
     }
-    w.flush()
-        .map_err(|e| format!("calendar: flush hier: {}", e))?;
-    drop(w);
+    stage.publish()?;
 
     // Junction CSV: (date_iso, hier_key).
-    let junc_csv_path = computed.join(format!(
-        "calendar_{}_{}.csv",
-        sanitize(date_type),
-        sanitize(edge_name)
+    let junc_rel = paths.relative(&Output::CalendarHierarchy(
+        date_type.to_string(),
+        hier_type.to_string(),
+        edge_name.to_string(),
     ));
+    let junc_csv_path = input_root.join(&junc_rel);
     let mut jw = csv::WriterBuilder::new()
         .from_path(&junc_csv_path)
         .map_err(|e| format!("calendar: open {}: {}", junc_csv_path.display(), e))?;
@@ -245,7 +345,8 @@ where
     // We need to walk all dates again to compute their hier key —
     // re-read the date CSV we just wrote. Cheap (a few thousand
     // rows per decade).
-    let date_csv_path = computed.join(format!("calendar_{}.csv", sanitize(date_type)));
+    let date_csv_path =
+        input_root.join(paths.relative(&Output::CalendarNode(date_type.to_string())));
     let mut rdr = csv::ReaderBuilder::new()
         .from_path(&date_csv_path)
         .map_err(|e| format!("calendar: reopen date csv: {}", e))?;
@@ -271,33 +372,115 @@ where
     drop(jw);
 
     let node_spec = NodeSpec {
-        csv: Some(format!("computed/calendar_{}.csv", sanitize(hier_type))),
+        csv: Some(node_rel),
         pk: Some(hier_fk_col.to_string()),
         title: Some(hier_fk_col.to_string()),
         ..NodeSpec::default()
     };
     blueprint.nodes.insert(hier_type.to_string(), node_spec);
+    paths.publish_hierarchy_keys(hier_type, hier_fk_col, keys);
 
-    // Attach the junction edge to the Date NodeSpec — created
-    // after this helper returns, but the IndexMap insert later
-    // appends the edge correctly. We register it on a placeholder
-    // NodeSpec here and merge in the caller.
-    // Simpler approach: register the junction directly on a side
-    // channel and let the caller insert it. To avoid plumbing,
-    // we just store it inline on the date spec by mutating
-    // blueprint.nodes[date_type] AFTER the caller adds it.
-    // Since this helper runs BEFORE blueprint.nodes.insert(date_type),
-    // we stage the junction in the caller's date_spec via a return.
-    // Simplest: store it in a temporary side-map. But we have a
-    // mutable Blueprint already — so insert a placeholder type now,
-    // add the junction to it, and the caller's later `insert` will
-    // overwrite the placeholder while preserving the junctions if
-    // they merge them. To avoid complexity, we just register the
-    // junction on a side-channel via the blueprint's `compute`
-    // (already drained — but its slot is empty so reusing is
-    // confusing). Cleanest fix: caller passes us a mutable ref to
-    // the date_spec being built. Refactor below.
-    let _ = junc_csv_path; // silence unused warning if branch skipped
+    Ok(JunctionEdge::computed(
+        junc_rel,
+        date_pk_col.to_string(),
+        hier_type.to_string(),
+        hier_fk_col.to_string(),
+    ))
+}
+
+fn link_columns(
+    headers: &csv::StringRecord,
+    pk: &str,
+    date_col: &str,
+) -> Result<(usize, usize), String> {
+    let pk_index = headers
+        .iter()
+        .position(|h| h == pk)
+        .ok_or_else(|| format!("calendar link: pk '{pk}' not in source headers"))?;
+    let date_index = headers
+        .iter()
+        .position(|h| h == date_col)
+        .ok_or_else(|| format!("calendar link: date_col '{date_col}' not in source headers"))?;
+    Ok((pk_index, date_index))
+}
+
+struct LinkSource {
+    reader: csv::Reader<std::fs::File>,
+    pk: String,
+    date_type: Option<String>,
+}
+
+fn open_link_source(
+    blueprint: &Blueprint,
+    input_root: &Path,
+    link: &CalendarLink,
+) -> Result<Option<LinkSource>, String> {
+    let spec = resolve_source_spec(blueprint, &link.from)
+        .ok_or_else(|| format!("calendar link: unknown source type '{}'", link.from))?;
+    let pk = spec
+        .pk
+        .clone()
+        .ok_or_else(|| format!("calendar link: source '{}' has no pk", link.from))?;
+    let csv = spec
+        .csv
+        .as_ref()
+        .ok_or_else(|| format!("calendar link: source '{}' has no csv", link.from))?;
+    let path = resolve_input_path(input_root, csv);
+    // Partial datasets skip absent linked inputs, as the loader does.
+    if !path.exists() {
+        return Ok(None);
+    }
+    let reader = csv::ReaderBuilder::new()
+        .from_path(&path)
+        .map_err(|e| format!("calendar link: open {}: {e}", path.display()))?;
+    Ok(Some(LinkSource {
+        reader,
+        pk,
+        date_type: spec.properties.get(&link.date_col).cloned(),
+    }))
+}
+
+fn preflight_links(
+    blueprint: &Blueprint,
+    input_root: &Path,
+    date_type: &str,
+    in_month_edge: Option<&str>,
+    in_quarter_edge: Option<&str>,
+    links: &[CalendarLink],
+) -> Result<(), String> {
+    for link in links {
+        let generated = if link.from == date_type {
+            Some((
+                "iso",
+                vec!["iso", "year", "month", "day", "quarter", "weekday"],
+            ))
+        } else if link.from == "Month" && in_month_edge.is_some() {
+            Some(("month_iso", vec!["month_iso"]))
+        } else if link.from == "Quarter" && in_quarter_edge.is_some() {
+            Some(("quarter_iso", vec!["quarter_iso"]))
+        } else {
+            None
+        };
+        if let Some((pk, columns)) = generated {
+            link_columns(&csv::StringRecord::from(columns), pk, &link.date_col)?;
+        } else if let Some(LinkSource { mut reader, pk, .. }) =
+            open_link_source(blueprint, input_root, link)?
+        {
+            link_columns(
+                reader
+                    .headers()
+                    .map_err(|e| format!("calendar link: header: {e}"))?,
+                &pk,
+                &link.date_col,
+            )?;
+            // A second streaming read avoids retaining every link row. Semantic CSV
+            // errors are found before replacing shared hierarchies; this is not
+            // multi-file I/O atomicity or protection against concurrent input changes.
+            for row in reader.records() {
+                row.map_err(|e| format!("calendar link: row: {e}"))?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -308,59 +491,36 @@ fn write_link(
     input_root: &Path,
     date_type: &str,
     link: &CalendarLink,
+    paths: &ComputePaths,
 ) -> Result<(), String> {
-    let src_spec = resolve_source_spec(blueprint, &link.from)
-        .ok_or_else(|| format!("calendar link: unknown source type '{}'", link.from))?;
-    let src_pk = src_spec
-        .pk
-        .clone()
-        .ok_or_else(|| format!("calendar link: source '{}' has no pk", link.from))?;
-    let src_csv = src_spec
-        .csv
-        .clone()
-        .ok_or_else(|| format!("calendar link: source '{}' has no csv", link.from))?;
-    let src_csv_path = resolve_input_path(input_root, &src_csv);
-
-    // Missing source CSV → skip this link silently (loader-consistent
-    // behaviour for partial datasets).
-    if !src_csv_path.exists() {
+    let Some(LinkSource {
+        mut reader,
+        pk: src_pk,
+        date_type: date_type_param,
+    }) = open_link_source(blueprint, input_root, link)?
+    else {
         return Ok(());
-    }
+    };
+    let (src_pk_idx, date_idx) = link_columns(
+        reader
+            .headers()
+            .map_err(|e| format!("calendar link: header: {e}"))?,
+        &src_pk,
+        &link.date_col,
+    )?;
 
-    let date_type_param = src_spec.properties.get(&link.date_col).cloned();
-
-    let mut reader = csv::ReaderBuilder::new()
-        .from_path(&src_csv_path)
-        .map_err(|e| format!("calendar link: open {}: {}", src_csv_path.display(), e))?;
-    let headers: Vec<String> = reader
-        .headers()
-        .map_err(|e| format!("calendar link: header: {}", e))?
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    let src_pk_idx = headers
-        .iter()
-        .position(|h| h == &src_pk)
-        .ok_or_else(|| format!("calendar link: pk '{}' not in source headers", src_pk))?;
-    let date_idx = headers
-        .iter()
-        .position(|h| h == &link.date_col)
-        .ok_or_else(|| {
-            format!(
-                "calendar link: date_col '{}' not in source headers",
-                link.date_col
-            )
-        })?;
-
-    let junc_path = input_root.join("computed").join(format!(
-        "calendar_link_{}_{}.csv",
-        sanitize(&link.from),
-        sanitize(&link.edge)
+    let computed_rel = paths.relative(&Output::CalendarLink(
+        link.from.clone(),
+        date_type.to_string(),
+        link.edge.clone(),
     ));
+    let junc_path = input_root.join(&computed_rel);
     let mut w = csv::WriterBuilder::new()
         .from_path(&junc_path)
         .map_err(|e| format!("calendar link: open {}: {}", junc_path.display(), e))?;
-    w.write_record([src_pk.as_str(), "iso"])
+    // A source PK named iso still needs a distinct target column in the junction.
+    let target_fk = if src_pk == "iso" { "date_iso" } else { "iso" };
+    w.write_record([src_pk.as_str(), target_fk])
         .map_err(|e| format!("calendar link: write header: {}", e))?;
 
     for r in reader.records() {
@@ -386,11 +546,6 @@ fn write_link(
 
     // Register the junction edge on the SOURCE node spec so it
     // points TO Date.
-    let computed_rel = format!(
-        "computed/calendar_link_{}_{}.csv",
-        sanitize(&link.from),
-        sanitize(&link.edge)
-    );
     let src_mut = resolve_source_spec_mut(blueprint, &link.from)
         .expect("calendar link source spec disappeared between resolve and mutate");
     src_mut.connections.junction_edges.insert(
@@ -399,7 +554,7 @@ fn write_link(
             computed_rel,
             src_pk,
             date_type.to_string(),
-            "iso".to_string(),
+            target_fk.to_string(),
         ),
     );
     Ok(())
@@ -424,22 +579,250 @@ fn normalise_to_iso(s: &str) -> String {
     }
 }
 
-fn sanitize(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn calendar_refuses_intervening_hierarchy_edits_without_losing_completed_state() {
+        for middle in [
+            serde_json::json!({"op":"derive","from":"Month","set":{"tag":"\"kept\""}}),
+            serde_json::json!({"op":"chain","from":"Month","group_by":["month_iso"],"order_by":"month_iso","edge":"NEXT_MONTH"}),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut bp: Blueprint = serde_json::from_value(serde_json::json!({"compute":[
+                {"op":"calendar","type":"DateA","start":"2026-01-31","end":"2026-02-01","in_month_edge":"IN_MONTH"},
+                middle,
+                {"op":"calendar","type":"DateB","start":"2026-04-01","end":"2026-04-01","in_month_edge":"IN_MONTH"}
+            ]})).unwrap();
+            let ops = std::mem::take(&mut bp.compute);
+            let paths = ComputePaths::new(&bp, tmp.path(), &ops).unwrap();
+            for op in &ops[..2] {
+                super::super::dispatch(op, &mut bp, tmp.path(), &paths).unwrap();
+            }
+            let before = format!("{bp:?}");
+            let files: Vec<_> = fs::read_dir(tmp.path().join("computed"))
+                .unwrap()
+                .map(|e| {
+                    let path = e.unwrap().path();
+                    let bytes = fs::read(&path).unwrap();
+                    (path, bytes)
+                })
+                .collect();
+            let err = super::super::dispatch(&ops[2], &mut bp, tmp.path(), &paths).unwrap_err();
+            assert!(err.contains("collides with"), "{err}");
+            assert_eq!(format!("{bp:?}"), before);
+            for (path, bytes) in &files {
+                assert_eq!(&fs::read(path).unwrap(), bytes);
+            }
+            assert_eq!(
+                fs::read_dir(tmp.path().join("computed")).unwrap().count(),
+                files.len()
+            );
+            assert!(bp.nodes["DateA"]
+                .connections
+                .junction_edges
+                .contains_key("IN_MONTH"));
+            let month = &bp.nodes["Month"];
+            assert!(
+                month.properties.contains_key("tag")
+                    || month.connections.junction_edges.contains_key("NEXT_MONTH")
+            );
+        }
+    }
+
+    #[test]
+    fn calendar_link_semantic_errors_preserve_prior_calendar_outputs() {
+        for (source, expected) in [
+            ("id,other\n1,2026-02-01\n", "date_col"),
+            ("id,date\n1,2026-02-01\n2,2026-02-02,extra\n", "row:"),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            fs::write(tmp.path().join("s.csv"), source).unwrap();
+            let mut bp: Blueprint = serde_json::from_value(serde_json::json!({"nodes":{"S":{"csv":"s.csv","pk":"id"}},"compute":[
+                {"op":"calendar","type":"DateA","start":"2026-01-01","end":"2026-01-01","in_month_edge":"IN_MONTH"},
+                {"op":"calendar","type":"DateB","start":"2026-02-01","end":"2026-02-01","in_month_edge":"IN_MONTH","links":[{"from":"S","date_col":"date","edge":"ON_DATE"}]}
+            ]})).unwrap();
+            let ops = std::mem::take(&mut bp.compute);
+            let paths = ComputePaths::new(&bp, tmp.path(), &ops).unwrap();
+            super::super::dispatch(&ops[0], &mut bp, tmp.path(), &paths).unwrap();
+            let before = format!("{bp:?}");
+            let files: Vec<_> = fs::read_dir(tmp.path().join("computed"))
+                .unwrap()
+                .map(|e| {
+                    let path = e.unwrap().path();
+                    let bytes = fs::read(&path).unwrap();
+                    (path, bytes)
+                })
+                .collect();
+            let err = super::super::dispatch(&ops[1], &mut bp, tmp.path(), &paths).unwrap_err();
+            assert!(err.contains(expected), "{err}");
+            assert_eq!(format!("{bp:?}"), before);
+            assert_eq!(
+                fs::read_to_string(tmp.path().join("s.csv")).unwrap(),
+                source
+            );
+            for (path, bytes) in &files {
+                assert_eq!(&fs::read(path).unwrap(), bytes);
+            }
+            assert_eq!(
+                fs::read_dir(tmp.path().join("computed")).unwrap().count(),
+                files.len()
+            );
+            assert_eq!(paths.hierarchy_keys("Month", vec![]), vec!["2026-01"]);
+        }
+    }
+
+    #[test]
+    fn calendar_preflights_known_generated_link_headers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut bp = Blueprint::default();
+        let links = [
+            CalendarLink {
+                from: "Date".into(),
+                date_col: "iso".into(),
+                edge: "SELF_DATE".into(),
+            },
+            CalendarLink {
+                from: "Month".into(),
+                date_col: "month_iso".into(),
+                edge: "MONTH_DATE".into(),
+            },
+        ];
+        run_calendar(
+            &mut bp,
+            tmp.path(),
+            "Date",
+            "2026-01-01",
+            "2026-01-02",
+            "NEXT_DAY",
+            Some("IN_MONTH"),
+            None,
+            None,
+            &links,
+        )
+        .unwrap();
+        let date_link = &bp.nodes["Date"].connections.junction_edges["SELF_DATE"];
+        assert_eq!(
+            fs::read_to_string(tmp.path().join(date_link.csv.as_ref().unwrap())).unwrap(),
+            "iso,date_iso\n2026-01-01,2026-01-01\n2026-01-02,2026-01-02\n"
+        );
+        assert_eq!(date_link.source_fk, "iso");
+        assert_eq!(date_link.target_fk, "date_iso");
+        let month_link = &bp.nodes["Month"].connections.junction_edges["MONTH_DATE"];
+        assert_eq!(
+            fs::read_to_string(tmp.path().join(month_link.csv.as_ref().unwrap())).unwrap(),
+            "month_iso,iso\n"
+        );
+    }
+
+    #[test]
+    fn calendar_hierarchy_ownership_is_limited_to_one_compute_invocation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut bp: Blueprint = serde_json::from_value(serde_json::json!({
+            "nodes": {}, "compute": [
+                {"op":"calendar","type":"DateA","start":"2026-01-01","end":"2026-01-01","in_month_edge":"IN_MONTH","in_quarter_edge":"IN_QUARTER"},
+                {"op":"calendar","type":"DateB","start":"2026-04-01","end":"2026-04-01","in_month_edge":"IN_MONTH","in_quarter_edge":"IN_QUARTER"}
+            ]
+        })).unwrap();
+        super::super::apply_compute(&mut bp, tmp.path()).unwrap();
+        for (name, expected) in [
+            ("Month", vec!["2026-01", "2026-04"]),
+            ("Quarter", vec!["2026-Q1", "2026-Q2"]),
+        ] {
+            let path = tmp.path().join(bp.nodes[name].csv.as_ref().unwrap());
+            let mut reader = csv::Reader::from_path(path).unwrap();
+            let keys: Vec<String> = reader
+                .records()
+                .map(|r| r.unwrap()[0].to_string())
+                .collect();
+            assert_eq!(keys, expected);
+        }
+        let before = format!("{bp:?}");
+        let err = run_calendar(
+            &mut bp,
+            tmp.path(),
+            "DateC",
+            "2026-07-01",
+            "2026-07-01",
+            "NEXT_DAY",
+            Some("IN_MONTH"),
+            None,
+            None,
+            &[],
+        )
+        .unwrap_err();
+        assert!(err.contains("existing unrelated type"));
+        assert_eq!(format!("{bp:?}"), before);
+        assert!(!tmp.path().join("computed/calendar_DateC.csv").exists());
+        let empty = tempfile::tempdir().unwrap();
+        let err = run_calendar(
+            &mut Blueprint::default(),
+            empty.path(),
+            "Month",
+            "2026-01-01",
+            "2026-01-01",
+            "NEXT_DAY",
+            Some("IN_MONTH"),
+            None,
+            None,
+            &[],
+        )
+        .unwrap_err();
+        assert!(err.contains("requested hierarchy type"));
+        assert!(!empty.path().join("computed").exists());
+    }
+
+    #[test]
+    fn calendar_registers_exact_month_and_quarter_junctions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut bp = Blueprint::default();
+        run_calendar(
+            &mut bp,
+            tmp.path(),
+            "Date",
+            "2026-01-30",
+            "2026-02-01",
+            "NEXT_DAY",
+            Some("IN_MONTH"),
+            Some("IN_QUARTER"),
+            None,
+            &[],
+        )
+        .unwrap();
+        for (edge, target, fk, expected) in [
+            (
+                "IN_MONTH",
+                "Month",
+                "month_iso",
+                vec!["2026-01", "2026-01", "2026-02"],
+            ),
+            (
+                "IN_QUARTER",
+                "Quarter",
+                "quarter_iso",
+                vec!["2026-Q1", "2026-Q1", "2026-Q1"],
+            ),
+        ] {
+            let junction = &bp.nodes["Date"].connections.junction_edges[edge];
+            assert_eq!(junction.target, vec![target.to_string()]);
+            assert_eq!(junction.source_fk, "iso");
+            assert_eq!(junction.target_fk, fk);
+            let path = tmp.path().join(junction.csv.as_ref().unwrap());
+            let mut csv = csv::Reader::from_path(path).unwrap();
+            let rows: Vec<_> = csv.records().map(Result::unwrap).collect();
+            assert_eq!(rows.len(), 3);
+            for ((row, date), target_value) in rows
+                .iter()
+                .zip(["2026-01-30", "2026-01-31", "2026-02-01"])
+                .zip(expected)
+            {
+                assert_eq!(&row[0], date);
+                assert_eq!(&row[1], target_value);
+            }
+        }
+    }
 
     #[test]
     fn calendar_emits_date_csv_and_next_day_chain() {

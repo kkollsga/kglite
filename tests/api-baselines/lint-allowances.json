@@ -217,11 +217,19 @@
       "classification": "transitional"
     },
     {
+      "identity": "crates/kglite/src/graph/blueprint/compute/aggregate.rs::fn:run_aggregate_allocated:pub(super) fn run_aggregate_allocated( blueprint: &mut Blueprint, input_root: &Path, from: &str, group_by: &[String], into: &str, agg: &IndexMap<String, String>, edges: &[AggregateEdge], paths: Option<&ComputePaths>, ) -> Result<(), String>::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
       "identity": "crates/kglite/src/graph/blueprint/compute/calendar.rs::fn:run_calendar:pub fn run_calendar( blueprint: &mut Blueprint, input_root: &Path, node_type: &str, start: &str, end: &str, next_edge: &str, in_month_edge: Option<&str>, in_quarter_edge: Option<&str>, in_year_edge: Option<&str>, links: &[CalendarLink], ) -> Result<(), String>::clippy::too_many_arguments",
       "classification": "transitional"
     },
     {
-      "identity": "crates/kglite/src/graph/blueprint/compute/calendar.rs::fn:write_hierarchy:fn write_hierarchy<F>( blueprint: &mut Blueprint, input_root: &Path, hier_type: &str, keys: Vec<String>, date_type: &str, edge_name: &str, date_pk_col: &str, hier_fk_col: &str, key_from_iso: F, ) -> Result<(), String> where F: Fn(&str) -> String,::clippy::too_many_arguments",
+      "identity": "crates/kglite/src/graph/blueprint/compute/calendar.rs::fn:run_calendar_allocated:pub(super) fn run_calendar_allocated( blueprint: &mut Blueprint, input_root: &Path, node_type: &str, start: &str, end: &str, next_edge: &str, in_month_edge: Option<&str>, in_quarter_edge: Option<&str>, in_year_edge: Option<&str>, links: &[CalendarLink], paths: Option<&ComputePaths>, ) -> Result<(), ::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/blueprint/compute/calendar.rs::fn:write_hierarchy:fn write_hierarchy<F>( blueprint: &mut Blueprint, input_root: &Path, hier_type: &str, keys: Vec<String>, date_type: &str, edge_name: &str, date_pk_col: &str, hier_fk_col: &str, key_from_iso: F, paths: &ComputePaths, ) -> Result<JunctionEdge, String> where F: Fn(&str) -> String,::clippy::too_many_arguments",
       "classification": "transitional"
     },
     {
@@ -544,6 +552,26 @@
     },
     {
       "identity": "crates/kglite/src/graph/algorithms/vector.rs::fn:cosine_similarity:pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/blueprint/compute/aggregate.rs::fn:run_aggregate:pub fn run_aggregate( blueprint: &mut Blueprint, input_root: &Path, from: &str, group_by: &[String], into: &str, agg: &IndexMap<String, String>, edges: &[AggregateEdge], ) -> Result<(), String>::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/blueprint/compute/calendar.rs::fn:run_calendar:pub fn run_calendar( blueprint: &mut Blueprint, input_root: &Path, node_type: &str, start: &str, end: &str, next_edge: &str, in_month_edge: Option<&str>, in_quarter_edge: Option<&str>, in_year_edge: Option<&str>, links: &[CalendarLink], ) -> Result<(), String>::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/blueprint/compute/chain.rs::fn:run_chain:pub fn run_chain( blueprint: &mut Blueprint, input_root: &Path, from: &str, group_by: &[String], order_by: &str, edge_name: &str, ) -> Result<(), String>::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/blueprint/compute/derive.rs::fn:run_derive:pub fn run_derive( blueprint: &mut Blueprint, input_root: &Path, from: &str, set: &IndexMap<String, String>, ) -> Result<(), String>::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/blueprint/compute/filter.rs::fn:run_filter:pub fn run_filter( blueprint: &mut Blueprint, input_root: &Path, from: &str, where_expr: &str, into: Option<&str>, ) -> Result<(), String>::dead_code",
       "classification": "dead-code"
     },
     {

@@ -3,8 +3,7 @@
 //!
 //! Reads the source CSV, groups rows by the composite key
 //! `group_by`, sorts each group by `order_by`, emits one edge per
-//! adjacent pair into a junction CSV
-//! (`computed/chain_{edge}.csv`), and registers the junction in
+//! adjacent pair into an allocated junction CSV under `computed/`, and registers it in
 //! the source NodeSpec's `connections.junction_edges` so the
 //! standard Phase 5 loader picks it up.
 //!
@@ -13,7 +12,10 @@
 //! ordered by quarter). Domain-agnostic — any temporal/ordered
 //! sequence within a partition of a node type.
 
-use super::sanitize_filename;
+use super::super::schema::ComputeOp;
+use super::paths::{ComputePaths, Output};
+
+use super::values::{group_key, GroupKey};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -23,6 +25,8 @@ use super::super::expr::value_cmp;
 use super::super::schema::{Blueprint, JunctionEdge};
 use super::{csv_cell_to_value, resolve_input_path, resolve_source_spec, resolve_source_spec_mut};
 
+// Preserve standalone allocation entry; pipeline dispatch shares its allocated paths.
+#[allow(dead_code)]
 pub fn run_chain(
     blueprint: &mut Blueprint,
     input_root: &Path,
@@ -30,6 +34,20 @@ pub fn run_chain(
     group_by: &[String],
     order_by: &str,
     edge_name: &str,
+) -> Result<(), String> {
+    run_chain_allocated(
+        blueprint, input_root, from, group_by, order_by, edge_name, None,
+    )
+}
+
+pub(super) fn run_chain_allocated(
+    blueprint: &mut Blueprint,
+    input_root: &Path,
+    from: &str,
+    group_by: &[String],
+    order_by: &str,
+    edge_name: &str,
+    paths: Option<&ComputePaths>,
 ) -> Result<(), String> {
     let spec = resolve_source_spec(blueprint, from)
         .ok_or_else(|| format!("chain: source type '{}' not declared", from))?;
@@ -87,10 +105,8 @@ pub fn run_chain(
     // lexicographically which works for YYYY-MM-DD).
     let order_type: Option<String> = spec.properties.get(order_by).cloned();
 
-    // Group rows by (group_by tuple) → Vec<(order_value, pk)>.
-    // Stable BTreeMap keyed by the joined group string for
-    // deterministic iteration order.
-    let mut groups: BTreeMap<String, Vec<(super::super::expr::Value, String)>> = BTreeMap::new();
+    // Tuple ordering is deterministic without merging embedded separators.
+    let mut groups: BTreeMap<GroupKey, Vec<(super::super::expr::Value, String)>> = BTreeMap::new();
 
     for record_result in reader.records() {
         let record = record_result.map_err(|e| format!("chain: csv row: {}", e))?;
@@ -101,14 +117,8 @@ pub fn run_chain(
         let order_cell = record.get(order_idx).unwrap_or("");
         let order_val = csv_cell_to_value(order_cell, order_type.as_deref());
 
-        let group_key: String = group_indices
-            .iter()
-            .map(|&i| record.get(i).unwrap_or("").to_string())
-            .collect::<Vec<_>>()
-            .join("\u{1F}");
-
         groups
-            .entry(group_key)
+            .entry(group_key(&record, &group_indices))
             .or_default()
             .push((order_val, pk_val));
     }
@@ -116,9 +126,21 @@ pub fn run_chain(
     // Emit junction CSV. Use synthesised column names that won't
     // collide with the source PK column for the self-referential
     // case (Transaction → Transaction via NEXT_TX).
-    let output_path = input_root
-        .join("computed")
-        .join(format!("chain_{}.csv", sanitize_filename(edge_name)));
+    let owned_paths;
+    let paths = if let Some(paths) = paths {
+        paths
+    } else {
+        let operation = ComputeOp::Chain {
+            from: from.to_string(),
+            group_by: group_by.to_vec(),
+            order_by: order_by.to_string(),
+            edge: edge_name.to_string(),
+        };
+        owned_paths = ComputePaths::new(blueprint, input_root, std::slice::from_ref(&operation))?;
+        &owned_paths
+    };
+    let computed_rel = paths.relative(&Output::Chain(from.to_string(), edge_name.to_string()));
+    let output_path = input_root.join(&computed_rel);
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("chain: create {}: {}", parent.display(), e))?;
@@ -155,7 +177,6 @@ pub fn run_chain(
 
     // Register the junction edge so the standard Phase 5 loader
     // picks up the new CSV.
-    let computed_rel = format!("computed/chain_{}.csv", sanitize_filename(edge_name));
     let spec_mut = resolve_source_spec_mut(blueprint, from)
         .expect("source spec disappeared between resolve and mutate");
     spec_mut.connections.junction_edges.insert(

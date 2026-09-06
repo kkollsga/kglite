@@ -78,13 +78,6 @@
       "nesting": 5
     },
     {
-      "path": "crates/kglite/src/graph/blueprint/compute/aggregate.rs",
-      "qualified_name": "crate::run_aggregate",
-      "lines": 219,
-      "branches": 32,
-      "nesting": 3
-    },
-    {
       "path": "crates/kglite/src/graph/blueprint/expr.rs",
       "qualified_name": "crate::call_builtin",
       "lines": 153,

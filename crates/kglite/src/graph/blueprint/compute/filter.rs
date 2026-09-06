@@ -3,7 +3,9 @@
 //! (b) mutate the source type in place (when `into` is omitted —
 //!     non-matching rows are dropped).
 
-use super::sanitize_filename;
+use super::super::schema::ComputeOp;
+use super::output::StagedCsv;
+use super::paths::{ComputePaths, Output};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -25,12 +27,25 @@ impl<'a> Bindings for RowBindings<'a> {
     }
 }
 
+// Preserve standalone allocation entry; pipeline dispatch shares its allocated paths.
+#[allow(dead_code)]
 pub fn run_filter(
     blueprint: &mut Blueprint,
     input_root: &Path,
     from: &str,
     where_expr: &str,
     into: Option<&str>,
+) -> Result<(), String> {
+    run_filter_allocated(blueprint, input_root, from, where_expr, into, None)
+}
+
+pub(super) fn run_filter_allocated(
+    blueprint: &mut Blueprint,
+    input_root: &Path,
+    from: &str,
+    where_expr: &str,
+    into: Option<&str>,
+    paths: Option<&ComputePaths>,
 ) -> Result<(), String> {
     let spec = resolve_source_spec(blueprint, from)
         .ok_or_else(|| format!("source type '{}' not declared in blueprint", from))?;
@@ -70,18 +85,22 @@ pub fn run_filter(
     // Output path + label depend on whether we're creating a new
     // type or rewriting the source in place.
     let output_label = into.unwrap_or(from);
-    let output_path = input_root
-        .join("computed")
-        .join(format!("{}_filtered.csv", sanitize_filename(output_label)));
-    if let Some(parent) = output_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("filter: create {}: {}", parent.display(), e))?;
-    }
-
-    let mut writer = csv::WriterBuilder::new()
-        .quote_style(csv::QuoteStyle::Necessary)
-        .from_path(&output_path)
-        .map_err(|e| format!("filter: open {}: {}", output_path.display(), e))?;
+    let owned_paths;
+    let paths = if let Some(paths) = paths {
+        paths
+    } else {
+        let operation = ComputeOp::Filter {
+            from: from.to_string(),
+            where_expr: where_expr.to_string(),
+            into: into.map(str::to_string),
+        };
+        owned_paths = ComputePaths::new(blueprint, input_root, std::slice::from_ref(&operation))?;
+        &owned_paths
+    };
+    let computed_rel = paths.relative(&Output::Filter(output_label.to_string()));
+    let output_path = input_root.join(&computed_rel);
+    let mut staged = StagedCsv::new(&output_path, "filter")?;
+    let writer = staged.writer();
     writer
         .write_record(&headers)
         .map_err(|e| format!("filter: write header: {}", e))?;
@@ -115,12 +134,8 @@ pub fn run_filter(
             .map_err(|e| format!("filter: write row: {}", e))?;
         kept += 1;
     }
-    writer
-        .flush()
-        .map_err(|e| format!("filter: flush: {}", e))?;
-    drop(writer);
-
-    let computed_rel = format!("computed/{}_filtered.csv", sanitize_filename(output_label));
+    drop(reader);
+    staged.publish()?;
 
     if let Some(new_type) = into {
         // Mode (a): copy matching rows into a new node type. The
@@ -262,5 +277,50 @@ mod tests {
         // Only id=3 (value=500) matches.
         assert_eq!(lines.len(), 2);
         assert!(lines[1].contains(",500"));
+    }
+
+    #[test]
+    fn successive_filter_preserves_records_beyond_reader_buffer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut original = String::from("id,v,text\n");
+        for i in 0..5000 {
+            original.push_str(&format!("{i},{i},ordinary-record-{i:05}\n"));
+        }
+        assert!(original.len() > 100_000);
+        let source = tmp.path().join("t.csv");
+        write_csv(&source, &original);
+        let mut bp = make_blueprint("t.csv", &[("v", "int"), ("text", "string")]);
+        run_filter(&mut bp, tmp.path(), "T", "v >= 0", None).unwrap();
+        let output = tmp.path().join("computed/T_filtered.csv");
+        let completed = fs::read(&output).unwrap();
+        run_filter(&mut bp, tmp.path(), "T", "v < 5000", None).unwrap();
+        assert_eq!(fs::read(&output).unwrap(), completed);
+        let current = tmp.path().join(bp.nodes["T"].csv.as_ref().unwrap());
+        assert_ne!(current, output);
+        assert_eq!(fs::read(current).unwrap(), completed);
+        assert_eq!(fs::read_to_string(source).unwrap(), original);
+    }
+
+    #[test]
+    fn failed_successive_filter_preserves_completed_input_and_schema() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("t.csv");
+        let original = "id,v\n0,0\n1,1\n2,2\n";
+        write_csv(&source, original);
+        let mut bp = make_blueprint("t.csv", &[("v", "int")]);
+        run_filter(&mut bp, tmp.path(), "T", "v >= 0", None).unwrap();
+        let output = tmp.path().join("computed/T_filtered.csv");
+        let completed = fs::read(&output).unwrap();
+        let schema = format!("{bp:?}");
+        let error = run_filter(&mut bp, tmp.path(), "T", "10 / (2 - v) > 0", None).unwrap_err();
+        assert!(error.contains("division by zero"), "{error}");
+        assert_eq!(fs::read(&output).unwrap(), completed);
+        assert_eq!(format!("{bp:?}"), schema);
+        assert_eq!(fs::read_to_string(source).unwrap(), original);
+        let files: Vec<_> = fs::read_dir(tmp.path().join("computed"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(files, vec![std::ffi::OsString::from("T_filtered.csv")]);
     }
 }
