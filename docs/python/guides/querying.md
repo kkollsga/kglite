@@ -122,6 +122,11 @@ n3.difference(m3)               # nodes in n3 but not m3
 n3.symmetric_difference(m3)     # nodes in exactly one (XOR)
 ```
 
+Both operands must be selections over the same immutable graph view. Sibling
+selections derived from one graph are compatible. Copies, unrelated graphs,
+and selections retained across a copy-on-write mutation or vacuum are separate
+views because their physical node slots are not interchangeable.
+
 ## Retrieving Results
 
 ```python

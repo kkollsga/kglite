@@ -1676,6 +1676,7 @@ def outline(
     root: Any,
     edge: str,
     *,
+    root_type: Optional[str] = None,
     max_depth: Optional[int] = None,
     body: Optional[str] = None,
 ) -> str:
@@ -1683,9 +1684,11 @@ def outline(
 
     A projection of the graph into the "open and skim" view it otherwise lacks:
     a BFS from the node whose id is ``root`` following outgoing ``edge``-typed
-    edges, rendered as an indented markdown-style outline (each node once, at
-    first discovery; labelled by title, falling back to id). Backed by the
-    engine's ``CALL outline(...)`` procedure, which yields the tree structure.
+    edges, rendered as an indented markdown-style outline (each physical node
+    once, at first discovery; labelled by title, falling back to id). Backed by
+    the engine's ``CALL outline(...)`` procedure, whose typed id columns and
+    result-local reconstruction tokens keep equal or unhashable public id
+    values distinct. The tokens are not persistent ids.
 
     Example::
 
@@ -1698,10 +1701,11 @@ def outline(
         graph: The graph to project.
         root: Identity (``id``) of the root node.
         edge: Connection type to follow (outgoing).
-        max_depth: Optional descent bound (0 = just the root).
+        root_type: Primary node type when ``root`` alone is ambiguous.
+        max_depth: Optional non-negative descent bound (0 = just the root).
 
     Returns:
-        The outline text (empty string if ``root`` has no node).
+        The outline text. Missing or ambiguous roots raise an explicit error.
     """
     ...
 
@@ -4794,7 +4798,7 @@ class KnowledgeGraph:
     # ====================================================================
 
     def union(self, other: KnowledgeGraph) -> KnowledgeGraph:
-        """Combine selections from both graphs (set union).
+        """Combine selections from the same immutable graph view (set union).
 
         Returns:
             A new KnowledgeGraph with nodes from either selection.
@@ -4802,7 +4806,7 @@ class KnowledgeGraph:
         ...
 
     def intersection(self, other: KnowledgeGraph) -> KnowledgeGraph:
-        """Keep only nodes present in both selections (set intersection).
+        """Keep shared nodes from the same immutable graph view (set intersection).
 
         Returns:
             A new KnowledgeGraph with only shared nodes.
@@ -4810,7 +4814,7 @@ class KnowledgeGraph:
         ...
 
     def difference(self, other: KnowledgeGraph) -> KnowledgeGraph:
-        """Keep nodes in ``self`` but not in ``other`` (set difference).
+        """Subtract a selection from the same immutable graph view.
 
         Returns:
             A new KnowledgeGraph with the difference.
@@ -4818,7 +4822,7 @@ class KnowledgeGraph:
         ...
 
     def symmetric_difference(self, other: KnowledgeGraph) -> KnowledgeGraph:
-        """Keep nodes in exactly one of the selections (symmetric difference).
+        """Keep exclusive nodes from the same immutable graph view.
 
         Returns:
             A new KnowledgeGraph with nodes exclusive to each side.

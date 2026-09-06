@@ -1229,6 +1229,62 @@ impl DirGraph {
             .lookup_or_build(node_type, id, || self.compute_id_index(node_type))
     }
 
+    /// Resolve outline's exact id spelling (plus its one accepted
+    /// `Int64`→`UniqueId` bridge) when the existing id index proves complete
+    /// for the live primary-type bucket. `None` asks the caller to scan.
+    pub(crate) fn outline_id_candidates(
+        &self,
+        node_type: &str,
+        requested: &Value,
+    ) -> Option<Vec<NodeIndex>> {
+        let members = self.type_indices.get(node_type)?;
+        if !self.id_indices.contains_key(node_type) {
+            return None;
+        }
+        let (exact, indexed_len) = self
+            .id_indices
+            .lookup_exact_with_len(node_type, requested)?;
+        if indexed_len != members.len() {
+            return None;
+        }
+
+        let mut candidates = Vec::with_capacity(2);
+        if let Some(index) = exact {
+            candidates.push(index);
+        }
+        if let Value::Int64(value) = requested {
+            if let Ok(value) = u32::try_from(*value) {
+                let bridged = Value::UniqueId(value);
+                if let Some((Some(index), len)) =
+                    self.id_indices.lookup_exact_with_len(node_type, &bridged)
+                {
+                    if len != indexed_len {
+                        return None;
+                    }
+                    if !candidates.contains(&index) {
+                        candidates.push(index);
+                    }
+                }
+            }
+        }
+
+        let expected_type = InternedKey::from_str(node_type);
+        for &index in &candidates {
+            let node = self.graph.node_view(index)?;
+            if node.node_type() != expected_type
+                || !(node.id().as_ref() == requested
+                    || matches!(
+                        (node.id().as_ref(), requested),
+                        (Value::UniqueId(left), Value::Int64(right))
+                            if *right >= 0 && u32::try_from(*right) == Ok(*left)
+                    ))
+            {
+                return None;
+            }
+        }
+        Some(candidates)
+    }
+
     pub fn has_connection_type(&self, connection_type: &str) -> bool {
         if !self.connection_types.is_empty() {
             return self

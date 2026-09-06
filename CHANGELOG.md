@@ -66,6 +66,15 @@ before upgrading.
 - Fluent grouped, connection and calculation dictionaries retain all entries
   when parent, selected-node or endpoint presentation labels collide, including
   labels that already resemble generated suffixes or metadata keys.
+- Selection set operations reject operands from different immutable graph
+  views instead of interpreting unrelated physical node slots as shared nodes.
+- `CALL outline` and `kglite.outline` preserve node identity when ids compare
+  equal or are unhashable in Python, using typed id columns and result-local
+  node tokens. They reject ambiguous roots unless `root_type` selects a unique
+  node and enforce non-negative depth bounds without cycling. Release measurements
+  against 0.16.24 show 33–39% slower ordinary 100–1,000-node outline rendering;
+  without a current ID index, exact root-ambiguity detection scans the complete
+  primary-type bucket (about 0.09–0.11 ms at 10,000 nodes in the release probe).
 
 ### Changed
 

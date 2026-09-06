@@ -154,6 +154,17 @@ impl From<TypeIdIndex> for TypeEntry {
 }
 
 impl TypeEntry {
+    pub(crate) fn get_exact(&self, id: &Value) -> Option<NodeIndex> {
+        match self {
+            TypeEntry::Owned(index) => index.get_exact(id),
+            TypeEntry::Layered { base, delta, .. } => match delta.get_exact(id) {
+                Some(idx) if idx == tombstone() => None,
+                Some(idx) => Some(idx),
+                None => base.get_exact(id),
+            },
+        }
+    }
+
     #[inline]
     pub fn get(&self, id: &Value) -> Option<NodeIndex> {
         match self {

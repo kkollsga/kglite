@@ -103,6 +103,28 @@ struct BaseEntry {
 }
 
 impl IdIndexBase {
+    fn lookup_exact(&self, name: &str, id: &Value) -> Option<NodeIndex> {
+        let entry = self.dir.get(name)?;
+        if entry.variant == 0 {
+            let Value::UniqueId(wanted) = id else {
+                return None;
+            };
+            let start = usize::try_from(entry.payload_off).ok()?;
+            let keys_end = start.checked_add(entry.num_entries as usize * 4)?;
+            let position = le_u32_binary_search(self.mmap.get(start..keys_end)?, *wanted)?;
+            return Some(NodeIndex::new(read_le_u32(
+                self.mmap
+                    .get(keys_end..keys_end + entry.num_entries as usize * 4)?,
+                position,
+            )? as usize));
+        }
+        self.general_map(name, entry)?.get(id).copied()
+    }
+
+    fn entry_len(&self, name: &str) -> Option<usize> {
+        Some(self.dir.get(name)?.num_entries as usize)
+    }
+
     /// Load `id_indices.bin` from `dir`. Returns `Ok(None)` if absent, shorter
     /// than the header, or magic mismatch.
     pub fn load_from(dir: &Path, interner: &StringInterner) -> std::io::Result<Option<Self>> {
@@ -524,6 +546,27 @@ impl IdIndexStore {
                 None
             }
         })
+    }
+
+    /// Exact stored-value lookup plus the live entry count, after the caller
+    /// has ensured this type's index exists. Kept internal for outline root
+    /// disambiguation; ordinary id lookup retains its numeric normalization.
+    pub(crate) fn lookup_exact_with_len(
+        &self,
+        name: &str,
+        id: &Value,
+    ) -> Option<(Option<NodeIndex>, usize)> {
+        {
+            let overlay = self.overlay.read().unwrap();
+            if let Some(index) = overlay.get(name) {
+                return Some((index.get_exact(id), index.len()));
+            }
+        }
+        if self.removed.contains(name) {
+            return None;
+        }
+        let base = self.base.as_deref()?;
+        Some((base.lookup_exact(name, id), base.entry_len(name)?))
     }
 
     /// Borrow `source`'s and `target`'s **overlay-resident** id indices in

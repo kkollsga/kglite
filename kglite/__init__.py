@@ -303,17 +303,22 @@ def outline(
     root,
     edge: str,
     *,
+    root_type: str | None = None,
     max_depth: int | None = None,
     body: str | None = None,
 ) -> str:
     """Render the spanning tree from ``root`` along ``edge`` as a nested outline.
 
     A *projection* of the graph — the "open and skim" view a graph otherwise
-    lacks. The engine's ``CALL outline`` yields the tree structure (node, depth,
-    parent_id); this renders it as an indented markdown-style outline. Follows
-    outgoing ``edge``-typed edges from the node whose id is ``root``; each node
-    appears once (at first discovery, so a DAG renders as a tree). Nodes are
-    labelled by title (falling back to id). ``max_depth`` bounds the descent.
+    lacks. The engine's ``CALL outline`` yields the tree structure, typed ids,
+    and result-local reconstruction tokens, which are not persistent ids; this
+    renders it as an indented markdown-style outline. Follows outgoing
+    ``edge``-typed edges from the node whose id is
+    ``root``; pass ``root_type`` when that public id names nodes of multiple
+    primary types. Ambiguous and missing roots raise an explicit error. Each
+    physical node appears once (at first discovery, so a DAG renders as a
+    tree). Nodes are labelled by title (falling back to id). ``max_depth`` is a
+    non-negative descent bound.
     Pass ``body="<prop>"`` to indent each node's prose property under its bullet
     (this is the "markdown body" view — prose lives in a plain string property,
     not a special engine field).
@@ -327,16 +332,20 @@ def outline(
         #   - Write the handlers
 
     Returns:
-        The outline text (empty string if ``root`` has no node).
+        The outline text.
     """
     md = "" if max_depth is None else ", max_depth: $md"
+    rt = "" if root_type is None else ", root_type: $root_type"
     body_col = f", node.{_cypher_identifier(body, kind='body property')} AS body" if body else ""
     q = (
-        f"CALL outline({{root: $root, edge: $edge{md}}}) "
-        "YIELD node, depth, parent_id "
-        f"RETURN node.id AS id, node.title AS title, parent_id AS parent_id{body_col}"
+        f"CALL outline({{root: $root{rt}, edge: $edge{md}}}) "
+        "YIELD node, node_id_type, node_token, parent_token "
+        "RETURN node.id AS id, node.title AS title, node_id_type, node_token, parent_token"
+        f"{body_col}"
     )
     params = {"root": root, "edge": edge}
+    if root_type is not None:
+        params["root_type"] = root_type
     if max_depth is not None:
         params["md"] = max_depth
     rows = graph.cypher(q, params=params).to_dicts()
@@ -344,30 +353,43 @@ def outline(
         return ""
 
     children: dict = {}
-    root_id = None
+    root_key = None
     for r in rows:
-        children.setdefault(r["parent_id"], []).append(r)
-        if r["parent_id"] is None:
-            root_id = r["id"]
+        node_key = r["node_token"]
+        if r["parent_token"] is None:
+            root_key = node_key
+        else:
+            children.setdefault(r["parent_token"], []).append(r)
 
-    label = {r["id"]: (r["title"] if r["title"] is not None else r["id"]) for r in rows}
-    bodies = {r["id"]: r.get("body") for r in rows} if body else {}
+    def identity(row):
+        return row["node_token"]
+
+    label = {identity(r): (r["title"] if r["title"] is not None else r["id"]) for r in rows}
+    bodies = {identity(r): r.get("body") for r in rows} if body else {}
     lines: list = []
 
     # Iterative depth-first walk — CALL outline yields unbounded depth, so
     # a recursive renderer would hit RecursionError past ~1000 levels.
-    if root_id is not None:
-        stack: list = [(root_id, 0)]
+    if root_key is not None:
+        stack: list = [(root_key, 0)]
+        rendered = set()
         while stack:
-            node_id, depth = stack.pop()
-            lines.append("  " * depth + f"- {label.get(node_id, node_id)}")
-            prose = bodies.get(node_id)
+            node_key, depth = stack.pop()
+            if node_key in rendered:
+                continue
+            rendered.add(node_key)
+            lines.append("  " * depth + f"- {label.get(node_key, node_key)}")
+            prose = bodies.get(node_key)
             if prose:
                 for prose_line in str(prose).splitlines():
                     lines.append("  " * (depth + 1) + prose_line)
             # Push in reverse so children pop in sorted order.
-            for child in sorted(children.get(node_id, []), key=lambda x: str(x["id"]), reverse=True):
-                stack.append((child["id"], depth + 1))
+            for child in sorted(
+                children.get(node_key, []),
+                key=lambda x: (str(x["id"]), x["node_id_type"], x["node_token"]),
+                reverse=True,
+            ):
+                stack.append((identity(child), depth + 1))
     return "\n".join(lines)
 
 

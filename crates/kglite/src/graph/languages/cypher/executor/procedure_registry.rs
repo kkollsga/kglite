@@ -179,8 +179,18 @@ pub(super) const PROCEDURES: &[ProcedureSpec] = &[
     ProcedureSpec {
         name: "outline",
         aliases: &[],
-        description: "Projection: BFS spanning tree from node id {root} along {edge} — the tree structure (render with kglite.outline)",
-        columns: &["node", "depth", "parent_id"],
+        description: "Projection: BFS spanning tree from node id {root} and optional {root_type} along {edge} — typed ids plus result-local identity tokens (render with kglite.outline)",
+        columns: &[
+            "node",
+            "depth",
+            "parent_id",
+            "node_type",
+            "node_id_type",
+            "parent_type",
+            "parent_id_type",
+            "node_token",
+            "parent_token",
+        ],
     },
     ProcedureSpec {
         name: "inverse_violation",

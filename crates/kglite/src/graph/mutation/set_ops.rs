@@ -5,7 +5,10 @@ use crate::graph::schema::CurrentSelection;
 use petgraph::graph::NodeIndex;
 use std::collections::HashSet;
 
-/// Perform union of two selections - combines all nodes from both selections
+/// Perform union of two selections - combines all nodes from both selections.
+///
+/// Both selections must come from the same immutable [`crate::graph::DirGraph`]
+/// view; `CurrentSelection` stores physical node slots without graph provenance.
 pub fn union_selections(
     target: &mut CurrentSelection,
     source: &CurrentSelection,
@@ -35,7 +38,10 @@ pub fn union_selections(
     Ok(())
 }
 
-/// Perform intersection of two selections - keeps only nodes present in both
+/// Perform intersection of two selections - keeps only nodes present in both.
+///
+/// Both selections must come from the same immutable [`crate::graph::DirGraph`]
+/// view; `CurrentSelection` stores physical node slots without graph provenance.
 pub fn intersection_selections(
     target: &mut CurrentSelection,
     source: &CurrentSelection,
@@ -68,7 +74,10 @@ pub fn intersection_selections(
     Ok(())
 }
 
-/// Perform difference of two selections - keeps nodes in target but not in source
+/// Perform difference of two selections - keeps nodes in target but not in source.
+///
+/// Both selections must come from the same immutable [`crate::graph::DirGraph`]
+/// view; `CurrentSelection` stores physical node slots without graph provenance.
 pub fn difference_selections(
     target: &mut CurrentSelection,
     source: &CurrentSelection,
@@ -101,7 +110,10 @@ pub fn difference_selections(
     Ok(())
 }
 
-/// Perform symmetric difference of two selections - keeps nodes in either but not both
+/// Perform symmetric difference of two selections - keeps nodes in either but not both.
+///
+/// Both selections must come from the same immutable [`crate::graph::DirGraph`]
+/// view; `CurrentSelection` stores physical node slots without graph provenance.
 pub fn symmetric_difference_selections(
     target: &mut CurrentSelection,
     source: &CurrentSelection,

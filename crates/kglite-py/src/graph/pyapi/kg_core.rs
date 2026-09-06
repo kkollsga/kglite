@@ -151,6 +151,16 @@ fn set_fields(d: &Bound<'_, PyDict>, fields: &[(&str, ProgressValue)]) -> PyResu
     Ok(())
 }
 
+fn require_same_immutable_view(left: &KnowledgeGraph, right: &KnowledgeGraph) -> PyResult<()> {
+    if Arc::ptr_eq(&left.inner, &right.inner) {
+        Ok(())
+    } else {
+        Err(pyo3::exceptions::PyValueError::new_err(
+            "set operations require selections from the same immutable graph view",
+        ))
+    }
+}
+
 #[pymethods]
 impl KnowledgeGraph {
     // ================================================================
@@ -1100,6 +1110,7 @@ impl KnowledgeGraph {
     /// Perform union of two selections - combines all nodes from both selections
     /// Returns a new KnowledgeGraph with the union of both selections
     fn union(&self, other: &Self) -> PyResult<Self> {
+        require_same_immutable_view(self, other)?;
         self.derive_with(|_inner, cursor| {
             kglite_core::api::fluent::union_selections(
                 &mut cursor.selection,
@@ -1112,6 +1123,7 @@ impl KnowledgeGraph {
     /// Perform intersection of two selections - keeps only nodes present in both
     /// Returns a new KnowledgeGraph with only nodes that exist in both selections
     fn intersection(&self, other: &Self) -> PyResult<Self> {
+        require_same_immutable_view(self, other)?;
         self.derive_with(|_inner, cursor| {
             kglite_core::api::fluent::intersection_selections(
                 &mut cursor.selection,
@@ -1124,6 +1136,7 @@ impl KnowledgeGraph {
     /// Perform difference of two selections - keeps nodes in self but not in other
     /// Returns a new KnowledgeGraph with nodes from self that are not in other
     fn difference(&self, other: &Self) -> PyResult<Self> {
+        require_same_immutable_view(self, other)?;
         self.derive_with(|_inner, cursor| {
             kglite_core::api::fluent::difference_selections(
                 &mut cursor.selection,
@@ -1136,6 +1149,7 @@ impl KnowledgeGraph {
     /// Perform symmetric difference of two selections - keeps nodes in either but not both
     /// Returns a new KnowledgeGraph with nodes that are in exactly one of the selections
     fn symmetric_difference(&self, other: &Self) -> PyResult<Self> {
+        require_same_immutable_view(self, other)?;
         self.derive_with(|_inner, cursor| {
             kglite_core::api::fluent::symmetric_difference_selections(
                 &mut cursor.selection,

@@ -356,6 +356,15 @@ pub enum TypeIdIndex {
 }
 
 impl TypeIdIndex {
+    /// Look up only the stored `Value` spelling, without numeric normalization.
+    pub(crate) fn get_exact(&self, id: &Value) -> Option<NodeIndex> {
+        match (self, id) {
+            (TypeIdIndex::Integer(map), Value::UniqueId(value)) => map.get(value).copied(),
+            (TypeIdIndex::Integer(_), _) => None,
+            (TypeIdIndex::General(map), value) => map.get(value).copied(),
+        }
+    }
+
     /// Look up a node by ID value, with type coercion.
     pub fn get(&self, id: &Value) -> Option<NodeIndex> {
         match self {

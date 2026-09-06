@@ -818,7 +818,12 @@ const RULE_PARAM_SCHEMAS: &[(&str, &[(&str, bool)])] = &[
     ("duplicate_id", &[("type", true)]),
     (
         "outline",
-        &[("root", true), ("edge", true), ("max_depth", false)],
+        &[
+            ("root", true),
+            ("root_type", false),
+            ("edge", true),
+            ("max_depth", false),
+        ],
     ),
     ("inverse_violation", &[("rel_a", true), ("rel_b", true)]),
     (
@@ -898,14 +903,17 @@ fn has_edge_of_type(
         .any(|er| er.weight().connection_type == edge_type_key)
 }
 
-/// `CALL outline({root, edge, max_depth?}) YIELD node, depth, parent_id`
+/// `CALL outline({root, root_type?, edge, max_depth?})`
 ///
 /// BFS from the node whose id is `root`, following outgoing `edge`-typed edges,
 /// yielding the spanning tree — each reachable node once, at its first-discovery
-/// `depth` (0 = root), with `parent_id` the id of the node it was reached from
-/// (`null` for the root). This is the tree **structure**; render it as a nested
-/// outline / markdown document in the binding layer (`g.outline(...)`) — the
-/// engine stays a query engine. `max_depth` (optional) bounds the descent.
+/// `depth` (0 = root). The appended type columns describe ids without relying
+/// on Python equality, while `node_token` / `parent_token` carry physical slots
+/// that are reconstruction keys only within this result, not persistent ids.
+/// `root_type` selects between nodes of different primary types whose ids
+/// compare equal; an ambiguous root is refused. This is the tree **structure**; render it as a nested outline /
+/// markdown document in the binding layer (`g.outline(...)`) — the engine stays
+/// a query engine. `max_depth` (optional) is a non-negative descent bound.
 ///
 /// @procedure: outline
 pub(super) fn execute_outline(
@@ -919,75 +927,213 @@ pub(super) fn execute_outline(
     let root_id = params
         .get("root")
         .ok_or_else(|| "CALL outline: missing required parameter 'root'".to_string())?;
-    let max_depth = match params.get("max_depth") {
-        Some(Value::Int64(n)) => *n as usize,
-        Some(other) => {
-            return Err(format!(
-                "CALL outline: 'max_depth' must be an integer, got {}",
-                other.type_name()
-            ))
-        }
-        None => usize::MAX,
-    };
+    let root_type = optional_string_param(params, "root_type", "outline")?;
+    let max_depth = outline_max_depth(params)?;
     let edge_key = InternedKey::from_str(&edge_type);
-    let root = graph
-        .graph
-        .node_indices()
-        .find(|&i| {
-            graph
-                .graph
-                .node_view(i)
-                .map(|n| n.id().as_ref() == root_id)
-                .unwrap_or(false)
-        })
-        .ok_or_else(|| {
-            format!(
-                "CALL outline: no node with id {}",
-                crate::datatypes::values::raw_string(root_id)
-            )
-        })?;
+    let root = resolve_outline_root(graph, root_id, root_type.as_deref())?;
 
     let mut rows = Vec::new();
     let mut visited: HashSet<NodeIndex> = HashSet::new();
-    let mut queue: VecDeque<(NodeIndex, usize, Value)> = VecDeque::new();
+    let mut queue: VecDeque<(NodeIndex, usize, Option<NodeIndex>)> = VecDeque::new();
     visited.insert(root);
-    queue.push_back((root, 0, Value::Null));
-    while let Some((nidx, depth, parent_id)) = queue.pop_front() {
-        let mut row = ResultRow::new();
-        for item in yield_items {
-            let alias = item.alias.as_deref().unwrap_or(&item.name);
-            match item.name.as_str() {
-                "node" => {
-                    row.node_bindings.insert(alias.to_string(), nidx);
-                }
-                "depth" => {
-                    row.projected
-                        .insert(alias.to_string(), Value::Int64(depth as i64));
-                }
-                "parent_id" => {
-                    row.projected.insert(alias.to_string(), parent_id.clone());
-                }
-                _ => {}
-            }
-        }
-        rows.push(row);
+    queue.push_back((root, 0, None));
+    while let Some((nidx, depth, parent)) = queue.pop_front() {
+        rows.push(outline_result_row(graph, yield_items, nidx, depth, parent)?);
         if depth < max_depth {
-            let this_id = graph
-                .graph
-                .node_view(nidx)
-                .map(|n| n.id().into_owned())
-                .unwrap_or(Value::Null);
             for er in graph.graph.edges_directed(nidx, Direction::Outgoing) {
                 if er.weight().connection_type == edge_key {
                     let child = er.target();
                     if visited.insert(child) {
-                        queue.push_back((child, depth + 1, this_id.clone()));
+                        queue.push_back((child, depth + 1, Some(nidx)));
                     }
                 }
             }
         }
     }
     Ok(rows)
+}
+
+fn outline_max_depth(params: &HashMap<String, Value>) -> Result<usize, String> {
+    match params.get("max_depth") {
+        Some(Value::Int64(n)) if *n >= 0 => Ok(*n as usize),
+        Some(Value::Int64(_)) => Err("CALL outline: 'max_depth' must be non-negative".to_string()),
+        Some(other) => Err(format!(
+            "CALL outline: 'max_depth' must be an integer, got {}",
+            other.type_name()
+        )),
+        None => Ok(usize::MAX),
+    }
+}
+
+fn resolve_outline_root(
+    graph: &DirGraph,
+    root_id: &Value,
+    root_type: Option<&str>,
+) -> Result<NodeIndex, String> {
+    let types: Vec<&str> = match root_type {
+        Some(node_type) => vec![node_type],
+        None => graph.type_indices.keys().collect(),
+    };
+    let mut roots = Vec::new();
+    for node_type in types {
+        match graph.outline_id_candidates(node_type, root_id) {
+            Some(mut candidates) => roots.append(&mut candidates),
+            None => {
+                let Some(members) = graph.type_indices.get(node_type) else {
+                    continue;
+                };
+                roots.extend(members.iter().filter(|&index| {
+                    graph
+                        .graph
+                        .node_view(index)
+                        .is_some_and(|node| outline_root_matches(node.id().as_ref(), root_id))
+                }));
+            }
+        }
+        if roots.len() > 1 {
+            break;
+        }
+    }
+    if roots.is_empty() {
+        return Err(format!(
+            "CALL outline: no node with id {}{}",
+            crate::datatypes::values::raw_string(root_id),
+            root_type
+                .map(|kind| format!(" and root_type '{kind}'"))
+                .unwrap_or_default()
+        ));
+    }
+    if roots.len() > 1 {
+        return Err(if let Some(kind) = root_type {
+            format!(
+                "CALL outline: root {} with root_type '{kind}' is ambiguous",
+                crate::datatypes::values::raw_string(root_id),
+            )
+        } else {
+            format!(
+                "CALL outline: root {} is ambiguous; pass root_type to select one node",
+                crate::datatypes::values::raw_string(root_id),
+            )
+        });
+    }
+    Ok(roots[0])
+}
+
+struct OutlineIdentity {
+    id: Option<Value>,
+    node_type: Option<Value>,
+    id_type: Option<Value>,
+}
+
+fn outline_identity(
+    graph: &DirGraph,
+    nidx: NodeIndex,
+    role: &str,
+    need_id: bool,
+    need_node_type: bool,
+    need_id_type: bool,
+) -> Result<OutlineIdentity, String> {
+    let node = graph
+        .graph
+        .node_view(nidx)
+        .ok_or_else(|| format!("CALL outline: {role} disappeared during traversal"))?;
+    let id = node.id();
+    Ok(OutlineIdentity {
+        id_type: need_id_type.then(|| Value::String(id.type_name().to_string())),
+        id: need_id.then(|| id.into_owned()),
+        node_type: need_node_type
+            .then(|| Value::String(node.node_type_str(&graph.interner).to_string())),
+    })
+}
+
+fn outline_result_row(
+    graph: &DirGraph,
+    yield_items: &[YieldItem],
+    nidx: NodeIndex,
+    depth: usize,
+    parent_idx: Option<NodeIndex>,
+) -> Result<ResultRow, String> {
+    let needs_node_type = yield_items.iter().any(|item| item.name == "node_type");
+    let needs_node_id_type = yield_items.iter().any(|item| item.name == "node_id_type");
+    let needs_parent_id = yield_items.iter().any(|item| item.name == "parent_id");
+    let needs_parent_type = yield_items.iter().any(|item| item.name == "parent_type");
+    let needs_parent_id_type = yield_items.iter().any(|item| item.name == "parent_id_type");
+    let node = (needs_node_type || needs_node_id_type)
+        .then(|| {
+            outline_identity(
+                graph,
+                nidx,
+                "node",
+                false,
+                needs_node_type,
+                needs_node_id_type,
+            )
+        })
+        .transpose()?;
+    let parent =
+        if parent_idx.is_some() && (needs_parent_id || needs_parent_type || needs_parent_id_type) {
+            parent_idx
+                .map(|index| {
+                    outline_identity(
+                        graph,
+                        index,
+                        "parent",
+                        needs_parent_id,
+                        needs_parent_type,
+                        needs_parent_id_type,
+                    )
+                })
+                .transpose()?
+        } else {
+            None
+        };
+    let mut row = ResultRow::new();
+    for item in yield_items {
+        let alias = item.alias.as_deref().unwrap_or(&item.name);
+        let value = match item.name.as_str() {
+            "node" => {
+                row.node_bindings.insert(alias.to_string(), nidx);
+                continue;
+            }
+            "depth" => Value::Int64(depth as i64),
+            "parent_id" => parent
+                .as_ref()
+                .and_then(|identity| identity.id.clone())
+                .unwrap_or(Value::Null),
+            "node_type" => node
+                .as_ref()
+                .and_then(|identity| identity.node_type.clone())
+                .unwrap_or(Value::Null),
+            "node_id_type" => node
+                .as_ref()
+                .and_then(|identity| identity.id_type.clone())
+                .unwrap_or(Value::Null),
+            "parent_type" => parent
+                .as_ref()
+                .and_then(|identity| identity.node_type.clone())
+                .unwrap_or(Value::Null),
+            "parent_id_type" => parent
+                .as_ref()
+                .and_then(|identity| identity.id_type.clone())
+                .unwrap_or(Value::Null),
+            "node_token" => Value::Int64(nidx.index() as i64),
+            "parent_token" => {
+                parent_idx.map_or(Value::Null, |index| Value::Int64(index.index() as i64))
+            }
+            _ => continue,
+        };
+        row.projected.insert(alias.to_string(), value);
+    }
+    Ok(row)
+}
+
+fn outline_root_matches(candidate: &Value, requested: &Value) -> bool {
+    candidate == requested
+        || matches!(
+            (candidate, requested),
+            (Value::UniqueId(left), Value::Int64(right))
+                if *right >= 0 && u32::try_from(*right) == Ok(*left)
+        )
 }
 
 fn title_of(graph: &DirGraph, nidx: NodeIndex) -> Option<String> {
