@@ -26,7 +26,7 @@ impl GraphState {
         args: &serde_json::Map<String, serde_json::Value>,
         csv_http: &crate::csv_http::CsvHttpState,
     ) -> Result<String, String> {
-        match self.execute_cypher_read(template, params_from_json(Some(args))) {
+        match self.execute_cypher_read(template, params_from_json(Some(args))?) {
             Ok(outcome) => render_cypher_output(
                 &outcome.result,
                 outcome.output_format == cypher::OutputFormat::Csv,
@@ -81,33 +81,17 @@ impl GraphState {
     }
 }
 
-/// Convert a `serde_json::Value` into a Cypher param `Value`. Mirrors
-/// the Python boundary's `py_value_to_value` for the JSON subset.
-///
-/// As of the 2026-05-25 binding-framework lift this is a 1-line
-/// delegate to `kglite::api::param::json_value_to_kglite_value`,
-/// which any REST/gRPC binding can call directly.
-pub(crate) fn json_to_value(v: &serde_json::Value) -> Value {
-    kglite::api::param::json_value_to_kglite_value(v)
-}
-
 /// Build the engine's parameter map from a tool call's JSON object.
 ///
-/// One conversion for both parameter sources: the manifest template route,
-/// which has bound `$name` placeholders since it shipped, and the
-/// `cypher_query` tools' `params` argument, which until now had none — so
-/// `$param` was unbindable over MCP by construction while `describe()`'s own
-/// examples taught the inline-map form that needs it. `None` is the
-/// no-parameters call and yields an empty map.
+/// Query admission rejects integer tokens outside `i64` and explicit numeric
+/// tokens outside finite `f64`, preserving the nested JSON path in the error.
 pub(crate) fn params_from_json(
     args: Option<&serde_json::Map<String, serde_json::Value>>,
-) -> HashMap<String, Value> {
-    args.map(|args| {
-        args.iter()
-            .map(|(k, v)| (k.clone(), json_to_value(v)))
-            .collect()
-    })
-    .unwrap_or_default()
+) -> Result<HashMap<String, Value>, String> {
+    args.map(kglite::api::param::json_object_to_query_value_map)
+        .transpose()
+        .map(|params| params.unwrap_or_default())
+        .map_err(|error| error.to_string())
 }
 
 /// The boot-decided engine settings a Cypher route applies to every

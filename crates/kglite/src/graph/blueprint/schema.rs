@@ -451,5 +451,19 @@ fn default_next_day_edge() -> String {
 pub fn load_blueprint_file(path: &std::path::Path) -> Result<Blueprint, String> {
     let bytes = std::fs::read(path)
         .map_err(|e| format!("Blueprint file not found: {}: {}", path.display(), e))?;
-    serde_json::from_slice(&bytes).map_err(|e| format!("Invalid blueprint JSON: {}", e))
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|e| format!("Invalid blueprint JSON: {e}"))?;
+    if contains_number_outside_f64(&parsed) {
+        return Err("Invalid blueprint JSON: number out of range".to_string());
+    }
+    serde_json::from_slice(&bytes).map_err(|e| format!("Invalid blueprint JSON: {e}"))
+}
+
+fn contains_number_outside_f64(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Number(number) => number.as_f64().is_none(),
+        serde_json::Value::Array(items) => items.iter().any(contains_number_outside_f64),
+        serde_json::Value::Object(map) => map.values().any(contains_number_outside_f64),
+        _ => false,
+    }
 }

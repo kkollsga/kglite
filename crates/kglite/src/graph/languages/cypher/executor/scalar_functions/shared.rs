@@ -71,8 +71,8 @@ geom, or wkt for WKT; latitude+longitude or lat+lon for points).";
 
 /// Recursively convert a parsed `serde_json::Value` into a kglite `Value`.
 /// Objects become `Value::Map`, arrays `Value::List`; integers that fit i64
-/// stay `Int64`, other numbers become `Float64`. Backs the `parse_json()`
-/// Cypher function.
+/// stay `Int64`, finite other numbers become `Float64`, and numbers outside
+/// finite `f64` become `Null`. Backs the `parse_json()` Cypher function.
 pub(super) fn json_to_value(j: &serde_json::Value) -> Value {
     match j {
         serde_json::Value::Null => Value::Null,
@@ -81,7 +81,9 @@ pub(super) fn json_to_value(j: &serde_json::Value) -> Value {
             if let Some(i) = n.as_i64() {
                 Value::Int64(i)
             } else {
-                Value::Float64(n.as_f64().unwrap_or(f64::NAN))
+                n.as_f64()
+                    .filter(|value| value.is_finite())
+                    .map_or(Value::Null, Value::Float64)
             }
         }
         serde_json::Value::String(s) => Value::String(s.clone()),

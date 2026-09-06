@@ -22,6 +22,9 @@
 //! footers); these tests assert it byte-for-byte against the seam that
 //! renders it, so the envelope can flip without the prose moving.
 
+use std::collections::HashMap;
+
+use kglite::api::Value;
 use mcp_methods::server::McpServer;
 use rmcp::model::{CallToolRequestParams, CallToolResult};
 use rmcp::ServiceExt;
@@ -102,6 +105,61 @@ fn assert_success(result: &CallToolResult) -> String {
         text_of(result)
     );
     text_of(result)
+}
+
+#[tokio::test]
+async fn registered_query_routes_reject_integer_overflow_before_writes() {
+    let overflow: serde_json::Value = serde_json::from_str(
+        r#"{"query":"RETURN $outer","params":{"outer":[{"value":1267650600228229401496703205376}]}}"#,
+    )
+    .unwrap();
+    let read = call(
+        kglite_server(state_with_active(fresh_active()), Builtins::default()),
+        "cypher_query",
+        overflow,
+    )
+    .await;
+    assert_eq!(read.is_error, Some(true));
+    assert!(text_of(&read).contains("$.outer[0].value"));
+
+    let state = state_with_active(fresh_active());
+    let invalid_write: serde_json::Value = serde_json::from_str(
+        r#"{"query":"CREATE (:Rejected {id: $value})","params":{"value":1267650600228229401496703205376}}"#,
+    )
+    .unwrap();
+    let rejected = call(
+        kglite_server(state.clone(), writable_builtins()),
+        "cypher_query",
+        invalid_write,
+    )
+    .await;
+    assert_eq!(rejected.is_error, Some(true));
+    assert!(text_of(&rejected).contains("$.value"));
+    let count = state
+        .execute_cypher_read(
+            "MATCH (n:Rejected) RETURN count(n) AS count",
+            HashMap::new(),
+        )
+        .unwrap();
+    assert!(matches!(count.result.rows[0][0], Value::Int64(0)));
+
+    let accepted = call(
+        kglite_server(state.clone(), writable_builtins()),
+        "cypher_query",
+        json!({
+            "query": "CREATE (:Accepted {id: $value})",
+            "params": {"value": 1}
+        }),
+    )
+    .await;
+    assert_success(&accepted);
+    let count = state
+        .execute_cypher_read(
+            "MATCH (n:Accepted) RETURN count(n) AS count",
+            HashMap::new(),
+        )
+        .unwrap();
+    assert!(matches!(count.result.rows[0][0], Value::Int64(1)));
 }
 
 // ─────────────────────────────── isError: true ───────────────────────────

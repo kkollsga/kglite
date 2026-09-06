@@ -424,6 +424,12 @@ KGLite does not validate that schema or compare it with the template's
 when dispatching a call. Missing or incompatible values surface through the
 normal Cypher execution error response.
 
+JSON numeric parameters are still admitted exactly before execution. Integer
+tokens at any nesting depth must fit the signed 64-bit range; decimal and
+exponent tokens must fit a finite 64-bit float. A refusal names its nested
+array/object path. The same rule applies to the built-in `cypher_query`, these
+manifest templates and recipe variables.
+
 Manifest Cypher tools cap output at 15 rows / 2k chars. For full
 result exports, agents use the bundled `cypher_query` with
 `FORMAT CSV`.
@@ -489,6 +495,8 @@ Supported schema keywords are deliberately limited to `type`, `properties`,
 `additionalProperties`, and `description`; unsupported keywords fail boot.
 `type` may be a supported type name or an array such as
 `[string, "null"]`. Integer values must fit KGLite's signed 64-bit range.
+Decimal and exponent values must fit a finite 64-bit float. Equivalent finite
+spellings such as `1.0` and `1e0` compare as the same numeric enum value.
 
 Successful execution returns MCP `structuredContent`; the text content is the
 same serialized JSON for clients that only expose text:
@@ -535,6 +543,8 @@ contains a stable category, the closest KGLite error code, safe message, and
 position when available. Multi-revision misuse and an unknown revision use
 the distinct `multi_revision_graph_required` and `unknown_revision`
 categories rather than collapsing into a generic execution failure.
+Numeric admission failures use `invalid_variables`; each
+`details.issues[]` entry retains its `path`, stable `category`, and message.
 
 Recipes are narrow convenience operations. Use raw `cypher_query` for broader
 entity kinds, different relationships, deeper/unbounded paths, or any question

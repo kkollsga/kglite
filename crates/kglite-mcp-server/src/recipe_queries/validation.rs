@@ -224,12 +224,23 @@ pub(super) fn validate_exact_i64_recursive(
     issues: &mut Vec<VariableIssue>,
 ) {
     match value {
-        Value::Number(number) if number.as_i64().is_none() && number.as_u64().is_some() => {
-            issues.push(VariableIssue::new(
-                path,
-                VariableIssueKind::IntegerRange,
-                format!("{path} integer is outside KGLite's exact signed 64-bit range"),
-            ));
+        Value::Number(number) if number.as_i64().is_none() && !number.is_f64() => {
+            let float_syntax = number
+                .to_string()
+                .bytes()
+                .any(|byte| matches!(byte, b'.' | b'e' | b'E'));
+            let (kind, message) = if float_syntax {
+                (
+                    VariableIssueKind::WrongType,
+                    format!("{path} must be a finite 64-bit float"),
+                )
+            } else {
+                (
+                    VariableIssueKind::IntegerRange,
+                    format!("{path} integer is outside KGLite's exact signed 64-bit range"),
+                )
+            };
+            issues.push(VariableIssue::new(path, kind, message));
         }
         Value::Array(items) => {
             for (index, item) in items.iter().enumerate() {
@@ -242,6 +253,22 @@ pub(super) fn validate_exact_i64_recursive(
             }
         }
         _ => {}
+    }
+}
+
+pub(super) fn query_conversion_error(
+    error: kglite::api::param::JsonQueryParameterError,
+) -> VariablesValidationError {
+    let kind = match error.kind() {
+        kglite::api::param::JsonQueryParameterErrorKind::IntegerOutOfRange => {
+            VariableIssueKind::IntegerRange
+        }
+        kglite::api::param::JsonQueryParameterErrorKind::NonFiniteFloat => {
+            VariableIssueKind::WrongType
+        }
+    };
+    VariablesValidationError {
+        issues: vec![VariableIssue::new(error.path(), kind, error.to_string())],
     }
 }
 
@@ -512,6 +539,18 @@ mod tests {
     }
 
     #[test]
+    fn numeric_enum_equality_ignores_equivalent_float_lexemes() {
+        let schema_value: Value =
+            serde_json::from_str(r#"{"value":{"type":"object","enum":[{"nested":[1.0]}]}}"#)
+                .unwrap();
+        let schema = compile(schema_value, json!(["value"]));
+        let variables: Value = serde_json::from_str(r#"{"value":{"nested":[1e0]}}"#).unwrap();
+        schema
+            .validate_variables(variables.as_object().unwrap())
+            .unwrap();
+    }
+
+    #[test]
     fn rejects_integers_outside_i64_at_boot_and_runtime_without_f64_conversion() {
         let overflow = json!(9223372036854775808_u64);
         let schema_error = ParameterSchema::compile_root(
@@ -534,6 +573,28 @@ mod tests {
             .issues
             .iter()
             .any(|issue| issue.kind == VariableIssueKind::IntegerRange));
+
+        for raw in [
+            r#"{"value":1267650600228229401496703205376}"#,
+            r#"{"value":-1267650600228229401496703205376}"#,
+        ] {
+            let variables: Value = serde_json::from_str(raw).unwrap();
+            let error = schema
+                .validate_variables(variables.as_object().unwrap())
+                .unwrap_err();
+            assert!(error
+                .issues
+                .iter()
+                .any(|issue| issue.kind == VariableIssueKind::IntegerRange));
+        }
+        let nonfinite: Value = serde_json::from_str(r#"{"value":1e400}"#).unwrap();
+        let error = schema
+            .validate_variables(nonfinite.as_object().unwrap())
+            .unwrap_err();
+        assert!(error
+            .issues
+            .iter()
+            .any(|issue| issue.kind == VariableIssueKind::WrongType));
     }
 
     #[test]

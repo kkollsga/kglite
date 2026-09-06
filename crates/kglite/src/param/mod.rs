@@ -29,6 +29,164 @@ pub fn json_object_to_value_map(
         .collect()
 }
 
+/// The reason a JSON query parameter cannot be represented by [`Value`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JsonQueryParameterErrorKind {
+    /// An integer token is outside the signed 64-bit range.
+    IntegerOutOfRange,
+    /// A decimal or exponent token is outside the finite `f64` range.
+    NonFiniteFloat,
+}
+
+/// A rejected JSON query parameter, including its object/array path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JsonQueryParameterError {
+    path: String,
+    kind: JsonQueryParameterErrorKind,
+}
+
+impl JsonQueryParameterError {
+    /// JSON-path-like location rooted at `$`.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Stable rejection category.
+    pub fn kind(&self) -> JsonQueryParameterErrorKind {
+        self.kind
+    }
+}
+
+impl std::fmt::Display for JsonQueryParameterError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let reason = match self.kind {
+            JsonQueryParameterErrorKind::IntegerOutOfRange => {
+                "integer is outside the signed 64-bit range"
+            }
+            JsonQueryParameterErrorKind::NonFiniteFloat => {
+                "number is outside the finite 64-bit float range"
+            }
+        };
+        write!(formatter, "Query parameter {} {reason}", self.path)
+    }
+}
+
+impl std::error::Error for JsonQueryParameterError {}
+
+enum QueryConversionError {
+    IntegerOutOfRange,
+    NonFiniteFloat,
+    AtIndex(usize, Box<Self>),
+    AtKey(String, Box<Self>),
+}
+
+impl QueryConversionError {
+    fn into_public(self) -> JsonQueryParameterError {
+        let mut path = "$".to_string();
+        let mut error = self;
+        loop {
+            error = match error {
+                Self::AtIndex(index, inner) => {
+                    path.push_str(&format!("[{index}]"));
+                    *inner
+                }
+                Self::AtKey(key, inner) => {
+                    if key
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+                    {
+                        path.push('.');
+                        path.push_str(&key);
+                    } else {
+                        path.push('[');
+                        path.push_str(
+                            &serde_json::to_string(&key)
+                                .expect("serializing a JSON object key cannot fail"),
+                        );
+                        path.push(']');
+                    }
+                    *inner
+                }
+                Self::IntegerOutOfRange => {
+                    return JsonQueryParameterError {
+                        path,
+                        kind: JsonQueryParameterErrorKind::IntegerOutOfRange,
+                    };
+                }
+                Self::NonFiniteFloat => {
+                    return JsonQueryParameterError {
+                        path,
+                        kind: JsonQueryParameterErrorKind::NonFiniteFloat,
+                    };
+                }
+            };
+        }
+    }
+}
+
+/// Convert a JSON object used as a query parameter map without losing numbers.
+///
+/// Integer tokens must fit `i64`. Decimal/exponent tokens must fit finite
+/// `f64`. Arrays and objects recurse; path strings are assembled only when a
+/// child is rejected.
+pub fn json_object_to_query_value_map(
+    map: &serde_json::Map<String, serde_json::Value>,
+) -> Result<HashMap<String, Value>, JsonQueryParameterError> {
+    map.iter()
+        .map(|(key, value)| {
+            convert_query_value(value)
+                .map(|value| (key.clone(), value))
+                .map_err(|error| QueryConversionError::AtKey(key.clone(), Box::new(error)))
+        })
+        .collect::<Result<HashMap<_, _>, _>>()
+        .map_err(QueryConversionError::into_public)
+}
+
+fn convert_query_value(v: &serde_json::Value) -> Result<Value, QueryConversionError> {
+    match v {
+        serde_json::Value::Null => Ok(Value::Null),
+        serde_json::Value::Bool(value) => Ok(Value::Boolean(*value)),
+        serde_json::Value::Number(number) => {
+            if let Some(integer) = number.as_i64() {
+                return Ok(Value::Int64(integer));
+            }
+            if number.is_f64() {
+                return Ok(Value::Float64(
+                    number.as_f64().expect("is_f64 guarantees a finite value"),
+                ));
+            }
+            if number
+                .to_string()
+                .bytes()
+                .any(|byte| matches!(byte, b'.' | b'e' | b'E'))
+            {
+                Err(QueryConversionError::NonFiniteFloat)
+            } else {
+                Err(QueryConversionError::IntegerOutOfRange)
+            }
+        }
+        serde_json::Value::String(value) => Ok(Value::String(value.clone())),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                convert_query_value(value)
+                    .map_err(|error| QueryConversionError::AtIndex(index, Box::new(error)))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::List),
+        serde_json::Value::Object(map) => map
+            .iter()
+            .map(|(key, value)| {
+                convert_query_value(value)
+                    .map(|value| (key.clone(), value))
+                    .map_err(|error| QueryConversionError::AtKey(key.clone(), Box::new(error)))
+            })
+            .collect::<Result<crate::datatypes::PropMap, _>>()
+            .map(Value::Map),
+    }
+}
+
 /// Convert a JSON value to a Cypher `Value`. Scalars map directly;
 /// arrays and objects map recursively to `Value::List` / `Value::Map`.
 ///
@@ -41,13 +199,10 @@ pub fn json_object_to_value_map(
 /// - JSON array → `Value::List` (recursing element-wise)
 /// - JSON object → `Value::Map` (recursing value-wise)
 ///
-/// **Integer range limitation:** `Value` has no unsigned 64-bit variant
-/// (only `Int64` / `Float64`), so an integer in `(i64::MAX, u64::MAX]` has
-/// no exact representation and falls through to a lossy `Value::Float64`.
-/// This is consistent across the codebase (every numeric path shares the
-/// same `Value` enum), so equal inputs still compare equal; an exact fix
-/// would require a `Value::UInt64` variant (a `.kgl`-format change). In
-/// practice 63-bit ids (e.g. Snowflake) fit `i64` and are unaffected.
+/// This converter is intentionally tolerant for declared ingestion and
+/// non-query JSON parsing: an integer outside `i64` falls through to `f64`.
+/// Query entry points must use [`json_object_to_query_value_map`], which rejects
+/// an integer token that cannot be represented exactly.
 ///
 /// Agents/bindings pass JSON-shaped tool args; the executor receives
 /// `HashMap<String, Value>` parameters. Compose multiple calls via
@@ -604,5 +759,73 @@ mod temporal_now_contract_tests {
                 "{actual} is outside {before}..={after}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod strict_query_parameter_tests {
+    use super::*;
+
+    fn parsed_object(source: &str) -> serde_json::Map<String, serde_json::Value> {
+        serde_json::from_str::<serde_json::Value>(source)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn checked_json_query_numbers_preserve_integer_and_float_spelling() {
+        let params = json_object_to_query_value_map(&parsed_object(
+            r#"{"min":-9223372036854775808,"max":9223372036854775807,"decimal":9223372036854775808.0,"exponent":1e30}"#,
+        ))
+        .unwrap();
+        assert!(matches!(params["min"], Value::Int64(i64::MIN)));
+        assert!(matches!(params["max"], Value::Int64(i64::MAX)));
+        assert!(matches!(params["decimal"], Value::Float64(_)));
+        assert!(matches!(params["exponent"], Value::Float64(_)));
+    }
+
+    #[test]
+    fn checked_json_query_numbers_reject_integer_overflow_with_nested_paths() {
+        for (source, path) in [
+            (r#"{"value":1267650600228229401496703205376}"#, "$.value"),
+            (
+                r#"{"rows":[{"value":-1267650600228229401496703205376}]}"#,
+                "$.rows[0].value",
+            ),
+        ] {
+            let error = json_object_to_query_value_map(&parsed_object(source)).unwrap_err();
+            assert_eq!(error.path(), path);
+            assert_eq!(error.kind(), JsonQueryParameterErrorKind::IntegerOutOfRange);
+        }
+    }
+
+    #[test]
+    fn checked_json_query_error_paths_escape_unsafe_object_keys() {
+        let error = json_object_to_query_value_map(&parsed_object(
+            r#"{"a\u0000b":1267650600228229401496703205376}"#,
+        ))
+        .unwrap_err();
+        assert_eq!(error.path(), r#"$["a\u0000b"]"#);
+        assert!(!error.to_string().contains('\0'));
+    }
+
+    #[test]
+    fn checked_json_query_numbers_reject_nonfinite_exponents() {
+        let error =
+            json_object_to_query_value_map(&parsed_object(r#"{"value":1e400}"#)).unwrap_err();
+        assert_eq!(error.path(), "$.value");
+        assert_eq!(error.kind(), JsonQueryParameterErrorKind::NonFiniteFloat);
+    }
+
+    #[test]
+    fn tolerant_json_conversion_still_accepts_large_integer_tokens() {
+        let value: serde_json::Value =
+            serde_json::from_str("1267650600228229401496703205376").unwrap();
+        assert!(matches!(
+            json_value_to_kglite_value(&value),
+            Value::Float64(_)
+        ));
     }
 }

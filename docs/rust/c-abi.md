@@ -116,6 +116,14 @@ transaction handles; do not invent wrapper calls such as
 `kglite_session_begin`. A future ABI revision should add them only with a real
 consumer and an ownership/error contract.
 
+Query parameter JSON is checked recursively before execution. Integer tokens
+must fit signed 64-bit; decimal or exponent tokens must fit a finite 64-bit
+float. A refusal returns `KGLITE_STATUS_CODE_INVALID_ARGUMENT`, leaves the
+result output null, and, when the caller supplies `out_error_msg`, returns an
+owned message naming the nested parameter path. Free that message with
+`kglite_free_string`. This applies to single, options and batch query calls;
+edge/property ingestion keeps its declared tolerant conversion policy.
+
 ## Result access
 
 Results remain owned by `KgliteCypherResult` until

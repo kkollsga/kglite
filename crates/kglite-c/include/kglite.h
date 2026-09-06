@@ -1310,7 +1310,9 @@ KgliteStatusCode kglite_define_schema(struct KgliteSession *session,
  * - `session` (in, borrowed): the session.
  * - `query` (in, borrowed): UTF-8 Cypher query, null-terminated.
  * - `params_json` (in, borrowed, may be null): JSON object of
- *   parameter bindings. Pass null or `"{}"` for no params.
+ *   parameter bindings. Pass null or `"{}"` for no params. Integer tokens at
+ *   any nesting depth must fit signed 64-bit; decimal/exponent tokens must fit
+ *   a finite 64-bit float.
  * - `out_result` (out, owned): on success, set to the result
  *   handle; caller must free via [`kglite_cypher_result_free`].
  * - `out_error_msg` (out, owned, may be null): on failure, set
@@ -1321,7 +1323,10 @@ KgliteStatusCode kglite_define_schema(struct KgliteSession *session,
  *
  * Any `KgErrorCode` variant — Cypher syntax / type mismatch /
  * timeout / execution error / node-not-found / argument
- * validation. The error message describes the specific failure.
+ * validation. An unrepresentable numeric parameter returns
+ * `KGLITE_STATUS_CODE_INVALID_ARGUMENT`; when `out_error_msg` is non-null, its
+ * owned message identifies the nested parameter path. The caller frees that
+ * message with [`kglite_free_string`](crate::kglite_free_string).
  *
  * # Safety
  *
@@ -1409,7 +1414,10 @@ KgliteStatusCode kglite_session_execute_mut_opts(struct KgliteSession *session,
  * "params": {...}}` (the `params` key is optional). Every query sees
  * the same snapshot, taken once up front — cheaper and more consistent
  * than N separate [`kglite_session_execute_read`] calls when a binding
- * issues many small reads.
+ * issues many small reads. Each `params` object follows the exact numeric
+ * admission and owned-error-message contract of
+ * [`kglite_session_execute_read`]; its message also identifies the batch
+ * entry.
  *
  * On success `out_results_json` is set to an owned JSON string: an
  * array of `{"columns": [...], "rows": [{...}], "diagnostics": {...}}` objects, one per input

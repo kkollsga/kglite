@@ -33,6 +33,13 @@ before upgrading.
   unsupported objects at any nesting depth instead of rounding or replacing
   them with NULL. Mixed integer/float Cypher predicates compare exactly beyond
   2^53, and `toInteger()` returns NULL for non-finite or out-of-range floats.
+- JSON query parameters accepted through the Rust API, C ABI and MCP direct,
+  template and recipe routes now reject integer tokens outside the signed
+  64-bit range instead of rounding them to floats. Decimal or exponent tokens
+  must fit a finite 64-bit float. Rejections retain the nested array/object
+  path; C callers receive `InvalidArgument` plus an owned message when they
+  supply `out_error_msg`. Declared property ingestion and Cypher `parse_json()`
+  keep their existing tolerant conversion behavior.
 
 - Endpoint values now resolve consistently in eager and lazy query results,
   nested containers and direct Python graph outputs, using the executing graph

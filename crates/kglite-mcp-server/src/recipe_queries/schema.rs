@@ -357,7 +357,7 @@ fn parse_number_keyword(
             let number = value
                 .as_number()
                 .ok_or_else(|| anyhow::anyhow!("{path}.{keyword} must be a number"))?;
-            reject_out_of_range_integer(number, &format!("{path}.{keyword}"))?;
+            validate_numeric_bound(number, &format!("{path}.{keyword}"))?;
             Ok(number.clone())
         })
         .transpose()
@@ -410,9 +410,72 @@ fn validate_keyword_applicability(
     Ok(())
 }
 
-fn reject_out_of_range_integer(number: &Number, path: &str) -> Result<()> {
-    if number.as_i64().is_none() && number.as_u64().is_some() {
-        bail!("{path} integer is outside KGLite's exact signed 64-bit range");
+fn validate_numeric_bound(number: &Number, path: &str) -> Result<()> {
+    if number.as_i64().is_some() || number.is_f64() {
+        return Ok(());
     }
-    Ok(())
+    if number
+        .to_string()
+        .bytes()
+        .any(|byte| matches!(byte, b'.' | b'e' | b'E'))
+    {
+        bail!("{path} must be a finite 64-bit float");
+    }
+    bail!("{path} integer is outside KGLite's exact signed 64-bit range")
+}
+
+#[cfg(test)]
+mod numeric_bound_tests {
+    use super::*;
+
+    fn schema_with_bounds(bounds: &str) -> Value {
+        serde_json::from_str(&format!(
+            r#"{{
+                "type":"object",
+                "properties":{{"value":{{"type":"number",{bounds}}}}},
+                "required":["value"],
+                "additionalProperties":false
+            }}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn numeric_bounds_reject_unrepresentable_json_numbers() {
+        for (bounds, path, reason) in [
+            (
+                r#""minimum":1e400"#,
+                "parameters.properties.value.minimum",
+                "finite 64-bit float",
+            ),
+            (
+                r#""maximum":1267650600228229401496703205376"#,
+                "parameters.properties.value.maximum",
+                "signed 64-bit range",
+            ),
+            (
+                r#""minimum":-1267650600228229401496703205376"#,
+                "parameters.properties.value.minimum",
+                "signed 64-bit range",
+            ),
+        ] {
+            let error =
+                ParameterSchema::compile_root(&schema_with_bounds(bounds), &["value".to_string()])
+                    .unwrap_err();
+            let message = error.to_string();
+            assert!(message.contains(path), "{message}");
+            assert!(message.contains(reason), "{message}");
+        }
+    }
+
+    #[test]
+    fn numeric_bounds_accept_signed_limits_and_finite_explicit_floats() {
+        for bounds in [
+            r#""minimum":-9223372036854775808,"maximum":9223372036854775807"#,
+            r#""minimum":-1e300,"maximum":1e300"#,
+        ] {
+            ParameterSchema::compile_root(&schema_with_bounds(bounds), &["value".to_string()])
+                .unwrap();
+        }
+    }
 }

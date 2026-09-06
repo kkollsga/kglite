@@ -11,7 +11,9 @@ use crate::result::{result_to_json_object, KgliteCypherResult, ResultState};
 use crate::status::KgliteStatusCode;
 use crate::strings::alloc_c_string;
 use kglite::api::mutation::{add_edges_from_specs, EdgeSpec};
-use kglite::api::param::{json_object_to_value_map, json_value_to_kglite_value};
+use kglite::api::param::{
+    json_object_to_query_value_map, json_object_to_value_map, json_value_to_kglite_value,
+};
 use kglite::api::session::{execute_mut, execute_read, ExecuteOptions, Session};
 use kglite::api::{Embedder, Value};
 use std::collections::HashMap;
@@ -134,7 +136,9 @@ pub unsafe extern "C" fn kglite_session_new(
 /// - `session` (in, borrowed): the session.
 /// - `query` (in, borrowed): UTF-8 Cypher query, null-terminated.
 /// - `params_json` (in, borrowed, may be null): JSON object of
-///   parameter bindings. Pass null or `"{}"` for no params.
+///   parameter bindings. Pass null or `"{}"` for no params. Integer tokens at
+///   any nesting depth must fit signed 64-bit; decimal/exponent tokens must fit
+///   a finite 64-bit float.
 /// - `out_result` (out, owned): on success, set to the result
 ///   handle; caller must free via [`kglite_cypher_result_free`].
 /// - `out_error_msg` (out, owned, may be null): on failure, set
@@ -145,7 +149,10 @@ pub unsafe extern "C" fn kglite_session_new(
 ///
 /// Any `KgErrorCode` variant — Cypher syntax / type mismatch /
 /// timeout / execution error / node-not-found / argument
-/// validation. The error message describes the specific failure.
+/// validation. An unrepresentable numeric parameter returns
+/// `KGLITE_STATUS_CODE_INVALID_ARGUMENT`; when `out_error_msg` is non-null, its
+/// owned message identifies the nested parameter path. The caller frees that
+/// message with [`kglite_free_string`](crate::kglite_free_string).
 ///
 /// # Safety
 ///
@@ -172,7 +179,7 @@ pub unsafe extern "C" fn kglite_session_execute_read(
             };
             let params = match parse_params_json(params_json) {
                 Ok(p) => p,
-                Err(rc) => return rc,
+                Err(error) => return report_query_param_error(error, out_error_msg),
             };
 
             let session_state = unsafe { SessionState::from_handle(session) };
@@ -246,7 +253,7 @@ pub unsafe extern "C" fn kglite_session_execute_read_opts(
             };
             let params = match parse_params_json(params_json) {
                 Ok(p) => p,
-                Err(rc) => return rc,
+                Err(error) => return report_query_param_error(error, out_error_msg),
             };
 
             let session_state = unsafe { SessionState::from_handle(session) };
@@ -369,7 +376,7 @@ unsafe fn execute_mut_impl(
             };
             let params = match parse_params_json(params_json) {
                 Ok(p) => p,
-                Err(rc) => return rc,
+                Err(error) => return report_query_param_error(error, out_error_msg),
             };
 
             // The ABI signature is `*mut`, but the handle is only borrowed
@@ -431,7 +438,10 @@ unsafe fn execute_mut_impl(
 /// "params": {...}}` (the `params` key is optional). Every query sees
 /// the same snapshot, taken once up front — cheaper and more consistent
 /// than N separate [`kglite_session_execute_read`] calls when a binding
-/// issues many small reads.
+/// issues many small reads. Each `params` object follows the exact numeric
+/// admission and owned-error-message contract of
+/// [`kglite_session_execute_read`]; its message also identifies the batch
+/// entry.
 ///
 /// On success `out_results_json` is set to an owned JSON string: an
 /// array of `{"columns": [...], "rows": [{...}], "diagnostics": {...}}` objects, one per input
@@ -464,7 +474,7 @@ pub unsafe extern "C" fn kglite_session_execute_read_batch(
             }
             let queries = match parse_batch_queries(queries_json) {
                 Ok(q) => q,
-                Err(rc) => return rc,
+                Err(error) => return report_query_param_error(error, out_error_msg),
             };
             let session_state = unsafe { SessionState::from_handle(session) };
             let snapshot = session_state.inner.snapshot();
@@ -532,7 +542,7 @@ pub unsafe extern "C" fn kglite_session_execute_mut_batch(
             }
             let queries = match parse_batch_queries(queries_json) {
                 Ok(q) => q,
-                Err(rc) => return rc,
+                Err(error) => return report_query_param_error(error, out_error_msg),
             };
             let session_state = unsafe { SessionState::from_handle(session) };
             let transaction: Result<Vec<serde_json::Value>, Box<kglite::api::KgError>> =
@@ -766,37 +776,75 @@ impl SessionState {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct QueryParamDecodeError {
+    code: KgliteStatusCode,
+    message: String,
+}
+
+impl QueryParamDecodeError {
+    fn new(code: KgliteStatusCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+fn report_query_param_error(
+    error: QueryParamDecodeError,
+    out_error_msg: *mut *const c_char,
+) -> KgliteStatusCode {
+    if !out_error_msg.is_null() {
+        unsafe {
+            *out_error_msg = alloc_c_string(&error.message);
+        }
+    }
+    error.code
+}
+
 /// Parse a JSON-string params argument into a HashMap. Null / empty /
 /// `null` / `{}` → empty map; a JSON object → its converted map. Any other
 /// top-level shape (array, scalar) → `InvalidArgument`.
 fn parse_params_json(
     params_json: *const c_char,
-) -> Result<HashMap<String, Value>, KgliteStatusCode> {
+) -> Result<HashMap<String, Value>, QueryParamDecodeError> {
     if params_json.is_null() {
         return Ok(HashMap::new());
     }
     let s = match unsafe { CStr::from_ptr(params_json) }.to_str() {
         Ok(s) => s,
-        Err(_) => return Err(KgliteStatusCode::InvalidUtf8),
+        Err(_) => {
+            return Err(QueryParamDecodeError::new(
+                KgliteStatusCode::InvalidUtf8,
+                "params_json is not valid UTF-8",
+            ));
+        }
     };
     if s.is_empty() {
         return Ok(HashMap::new());
     }
     let parsed: serde_json::Value = match serde_json::from_str(s) {
         Ok(v) => v,
-        Err(_) => return Err(KgliteStatusCode::InvalidArgument),
+        Err(error) => {
+            return Err(QueryParamDecodeError::new(
+                KgliteStatusCode::InvalidArgument,
+                format!("params_json is not valid JSON: {error}"),
+            ));
+        }
     };
     match parsed {
-        serde_json::Value::Object(obj) => Ok(json_object_to_value_map(&obj)),
+        serde_json::Value::Object(obj) => json_object_to_query_value_map(&obj).map_err(|error| {
+            QueryParamDecodeError::new(KgliteStatusCode::InvalidArgument, error.to_string())
+        }),
         serde_json::Value::Null => Ok(HashMap::new()),
-        _ => Err(KgliteStatusCode::InvalidArgument),
+        _ => Err(QueryParamDecodeError::new(
+            KgliteStatusCode::InvalidArgument,
+            "params_json must be a JSON object or null",
+        )),
     }
 }
 
-/// Read an optional JSON-object field (`params` / `props`) off a batch
-/// entry and build its `Value` map: absent / null → empty map; an object →
-/// the converted map; any other shape → `InvalidArgument`. Shared by the
-/// batch-query and edge-spec parsers so the two stay byte-identical.
 fn optional_object_map(
     obj: &serde_json::Map<String, serde_json::Value>,
     key: &str,
@@ -808,35 +856,85 @@ fn optional_object_map(
     }
 }
 
+fn optional_query_params_map(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Result<HashMap<String, Value>, QueryParamDecodeError> {
+    match obj.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(HashMap::new()),
+        Some(serde_json::Value::Object(params)) => {
+            json_object_to_query_value_map(params).map_err(|error| {
+                QueryParamDecodeError::new(KgliteStatusCode::InvalidArgument, error.to_string())
+            })
+        }
+        Some(_) => Err(QueryParamDecodeError::new(
+            KgliteStatusCode::InvalidArgument,
+            format!("{key} must be a JSON object or null"),
+        )),
+    }
+}
+
 type BatchQuery = (String, HashMap<String, Value>);
 
 /// Parse a batch `queries_json` argument into `(query, params)` pairs — the
 /// shape published on [`kglite_session_execute_read_batch`]. Any other shape →
 /// `InvalidArgument`. Assumes `queries_json` is non-null (callers check).
-fn parse_batch_queries(queries_json: *const c_char) -> Result<Vec<BatchQuery>, KgliteStatusCode> {
+fn parse_batch_queries(
+    queries_json: *const c_char,
+) -> Result<Vec<BatchQuery>, QueryParamDecodeError> {
     let s = match unsafe { CStr::from_ptr(queries_json) }.to_str() {
         Ok(s) => s,
-        Err(_) => return Err(KgliteStatusCode::InvalidUtf8),
+        Err(_) => {
+            return Err(QueryParamDecodeError::new(
+                KgliteStatusCode::InvalidUtf8,
+                "queries_json is not valid UTF-8",
+            ));
+        }
     };
     let parsed: serde_json::Value = match serde_json::from_str(s) {
         Ok(v) => v,
-        Err(_) => return Err(KgliteStatusCode::InvalidArgument),
+        Err(error) => {
+            return Err(QueryParamDecodeError::new(
+                KgliteStatusCode::InvalidArgument,
+                format!("queries_json is not valid JSON: {error}"),
+            ));
+        }
     };
     let arr = match parsed.as_array() {
         Some(a) => a,
-        None => return Err(KgliteStatusCode::InvalidArgument),
+        None => {
+            return Err(QueryParamDecodeError::new(
+                KgliteStatusCode::InvalidArgument,
+                "queries_json must be a JSON array",
+            ));
+        }
     };
     let mut out = Vec::with_capacity(arr.len());
-    for item in arr {
+    for (index, item) in arr.iter().enumerate() {
         let obj = match item.as_object() {
             Some(o) => o,
-            None => return Err(KgliteStatusCode::InvalidArgument),
+            None => {
+                return Err(QueryParamDecodeError::new(
+                    KgliteStatusCode::InvalidArgument,
+                    format!("queries_json[{index}] must be a JSON object"),
+                ));
+            }
         };
         let query = match obj.get("query").and_then(|v| v.as_str()) {
             Some(q) => q.to_string(),
-            None => return Err(KgliteStatusCode::InvalidArgument),
+            None => {
+                return Err(QueryParamDecodeError::new(
+                    KgliteStatusCode::InvalidArgument,
+                    format!("queries_json[{index}].query must be a string"),
+                ));
+            }
         };
-        let params = optional_object_map(obj, "params")?;
+        let params = optional_query_params_map(obj, "params").map_err(|error| {
+            QueryParamDecodeError::new(
+                error.code,
+                format!("queries_json[{index}].params: {}", error.message),
+            )
+        })?;
         out.push((query, params));
     }
     Ok(out)
@@ -918,7 +1016,7 @@ mod tests {
     fn parse_params_array_is_invalid_argument() {
         let s = CString::new("[1, 2, 3]").unwrap();
         let err = parse_params_json(s.as_ptr()).unwrap_err();
-        assert_eq!(err, KgliteStatusCode::InvalidArgument);
+        assert_eq!(err.code, KgliteStatusCode::InvalidArgument);
     }
 
     /// The documented ownership-on-failure contract: a rejected
@@ -1122,6 +1220,199 @@ mod tests {
             "no edge batch may be lost to a concurrent execute_mut"
         );
 
+        unsafe { kglite_session_free(session) };
+    }
+
+    #[test]
+    fn query_json_rejects_unrepresentable_numbers_without_changing_edge_ingestion() {
+        for raw in [
+            r#"{"value":1267650600228229401496703205376}"#,
+            r#"{"nested":{"value":-1267650600228229401496703205376}}"#,
+            r#"{"value":1e400}"#,
+        ] {
+            let params = CString::new(raw).unwrap();
+            assert_eq!(
+                parse_params_json(params.as_ptr()).unwrap_err().code,
+                KgliteStatusCode::InvalidArgument
+            );
+        }
+
+        let batch = CString::new(
+            r#"[{"query":"RETURN $value","params":{"value":1267650600228229401496703205376}}]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            parse_batch_queries(batch.as_ptr()).unwrap_err().code,
+            KgliteStatusCode::InvalidArgument
+        );
+
+        let edge: serde_json::Value =
+            serde_json::from_str(r#"{"props":{"value":1267650600228229401496703205376}}"#).unwrap();
+        let props = optional_object_map(edge.as_object().unwrap(), "props").unwrap();
+        assert!(matches!(props["value"], Value::Float64(_)));
+    }
+
+    fn assert_query_param_path(
+        invoke: impl FnOnce(*mut *mut KgliteCypherResult, *mut *const c_char) -> KgliteStatusCode,
+    ) {
+        let mut result = std::ptr::dangling_mut();
+        let mut error = std::ptr::null();
+        let status = invoke(&mut result, &mut error);
+        assert_eq!(status, KgliteStatusCode::InvalidArgument);
+        assert!(result.is_null());
+        assert!(!error.is_null(), "parameter refusal must explain itself");
+        let message = unsafe { CStr::from_ptr(error) }
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(message.contains("$.outer[0].value"), "{message}");
+        unsafe { crate::kglite_free_string(error) };
+    }
+
+    #[test]
+    fn every_c_query_entry_reports_and_owns_strict_parameter_errors() {
+        let session = new_test_session();
+        let query = CString::new("RETURN $outer").unwrap();
+        let mutating_query = CString::new("CREATE (:Rejected {id: $outer})").unwrap();
+        let params_json = r#"{"outer":[{"value":1267650600228229401496703205376}]}"#;
+        let params = CString::new(params_json).unwrap();
+
+        assert_query_param_path(|result, error| unsafe {
+            kglite_session_execute_read(session, query.as_ptr(), params.as_ptr(), result, error)
+        });
+        assert_query_param_path(|result, error| unsafe {
+            kglite_session_execute_read_opts(
+                session,
+                query.as_ptr(),
+                params.as_ptr(),
+                0,
+                0,
+                result,
+                error,
+            )
+        });
+        assert_query_param_path(|result, error| unsafe {
+            kglite_session_execute_mut(
+                session,
+                mutating_query.as_ptr(),
+                params.as_ptr(),
+                result,
+                error,
+            )
+        });
+        assert_query_param_path(|result, error| unsafe {
+            kglite_session_execute_mut_opts(
+                session,
+                mutating_query.as_ptr(),
+                params.as_ptr(),
+                0,
+                0,
+                result,
+                error,
+            )
+        });
+
+        let batch = CString::new(format!(
+            r#"[{{"query":"RETURN $outer","params":{}}}]"#,
+            params_json
+        ))
+        .unwrap();
+        let mut output = std::ptr::null();
+        let mut error = std::ptr::null();
+        let status = unsafe {
+            kglite_session_execute_read_batch(session, batch.as_ptr(), &mut output, &mut error)
+        };
+        assert_eq!(status, KgliteStatusCode::InvalidArgument);
+        assert!(output.is_null());
+        assert!(!error.is_null());
+        let message = unsafe { CStr::from_ptr(error) }
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(message.contains("$.outer[0].value"), "{message}");
+        unsafe { crate::kglite_free_string(error) };
+
+        let mut output = std::ptr::null();
+        let mut error = std::ptr::null();
+        let status = unsafe {
+            kglite_session_execute_mut_batch(session, batch.as_ptr(), &mut output, &mut error)
+        };
+        assert_eq!(status, KgliteStatusCode::InvalidArgument);
+        assert!(output.is_null());
+        assert!(!error.is_null());
+        let message = unsafe { CStr::from_ptr(error) }
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(message.contains("$.outer[0].value"), "{message}");
+        unsafe { crate::kglite_free_string(error) };
+
+        let mut result = std::ptr::dangling_mut();
+        let status = unsafe {
+            kglite_session_execute_read(
+                session,
+                query.as_ptr(),
+                params.as_ptr(),
+                &mut result,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, KgliteStatusCode::InvalidArgument);
+        assert!(result.is_null());
+
+        assert_eq!(
+            count(session, "MATCH (n:Rejected) RETURN count(n) AS c"),
+            0,
+            "failed admission must happen before either write entry mutates"
+        );
+        let valid_query = CString::new("CREATE (:Accepted {id: $id})").unwrap();
+        let valid_params = CString::new(r#"{"id":1}"#).unwrap();
+        let mut valid_result = std::ptr::null_mut();
+        let mut valid_error = std::ptr::null();
+        let status = unsafe {
+            kglite_session_execute_mut(
+                session,
+                valid_query.as_ptr(),
+                valid_params.as_ptr(),
+                &mut valid_result,
+                &mut valid_error,
+            )
+        };
+        assert_eq!(status, KgliteStatusCode::Ok);
+        assert!(!valid_result.is_null());
+        assert!(valid_error.is_null());
+        unsafe { crate::kglite_cypher_result_free(valid_result) };
+        assert_eq!(
+            count(session, "MATCH (n:Accepted) RETURN count(n) AS c"),
+            1,
+            "representable query parameters still reach the write path"
+        );
+
+        unsafe { kglite_session_free(session) };
+    }
+
+    #[test]
+    fn strict_parameter_error_escapes_nul_in_object_key_for_c_message() {
+        let session = new_test_session();
+        let query = CString::new("RETURN $value").unwrap();
+        let params = CString::new(r#"{"a\u0000b":1267650600228229401496703205376}"#).unwrap();
+        let mut result = std::ptr::dangling_mut();
+        let mut error = std::ptr::null();
+        let status = unsafe {
+            kglite_session_execute_read(
+                session,
+                query.as_ptr(),
+                params.as_ptr(),
+                &mut result,
+                &mut error,
+            )
+        };
+        assert_eq!(status, KgliteStatusCode::InvalidArgument);
+        assert!(result.is_null());
+        assert!(!error.is_null());
+        let message = unsafe { CStr::from_ptr(error) }.to_str().unwrap();
+        assert!(message.contains(r#"$["a\u0000b"]"#), "{message}");
+        unsafe { crate::kglite_free_string(error) };
         unsafe { kglite_session_free(session) };
     }
 }

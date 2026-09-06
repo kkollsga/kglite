@@ -398,7 +398,10 @@ pub fn register(
                     git_sha: git_sha.as_deref(),
                     modified_by: modified_by.as_deref(),
                 };
-                let params = params_from_json(args.params.as_ref());
+                let params = match params_from_json(args.params.as_ref()) {
+                    Ok(params) => params,
+                    Err(error) => return map_body(Err(error), |body| s.with_rebuild_warning(body)),
+                };
                 let body = s
                     .with_active_mut(|active| {
                         run_cypher_write(active, &args.query, params, authz, policy, &csv)
@@ -416,7 +419,10 @@ pub fn register(
                 let csv = csv.clone();
                 s.ensure_graph_fresh();
                 let policy = s.exec_policy();
-                let params = params_from_json(args.params.as_ref());
+                let params = match params_from_json(args.params.as_ref()) {
+                    Ok(params) => params,
+                    Err(error) => return map_body(Err(error), |body| s.with_rebuild_warning(body)),
+                };
                 let body = s
                     .with_active(|g| run_cypher_tool(g, &args.query, params, policy, &csv))
                     .unwrap_or_else(|| Err(NO_GRAPH.to_string()));

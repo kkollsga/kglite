@@ -2079,6 +2079,34 @@ pub fn kglite::api::mutation::replace_connections(graph: &mut kglite::api::DirGr
 pub fn kglite::api::mutation::update_node_properties(graph: &mut kglite::api::DirGraph, nodes: &[(core::option::Option<petgraph::graph_impl::NodeIndex>, kglite::datatypes::values::Value)], property: &str) -> core::result::Result<kglite::api::mutation::NodeOperationReport, alloc::string::String>
 pub fn kglite::api::mutation::validate_graph(graph: &kglite::api::DirGraph, schema: &kglite::api::SchemaDefinition, strict: bool) -> alloc::vec::Vec<kglite::api::ValidationError>
 pub mod kglite::api::param
+pub enum kglite::api::param::JsonQueryParameterErrorKind
+pub kglite::api::param::JsonQueryParameterErrorKind::IntegerOutOfRange
+pub kglite::api::param::JsonQueryParameterErrorKind::NonFiniteFloat
+impl core::clone::Clone for kglite::param::JsonQueryParameterErrorKind
+pub fn kglite::param::JsonQueryParameterErrorKind::clone(&self) -> kglite::param::JsonQueryParameterErrorKind
+impl core::cmp::Eq for kglite::param::JsonQueryParameterErrorKind
+impl core::cmp::PartialEq for kglite::param::JsonQueryParameterErrorKind
+pub fn kglite::param::JsonQueryParameterErrorKind::eq(&self, other: &kglite::param::JsonQueryParameterErrorKind) -> bool
+impl core::fmt::Debug for kglite::param::JsonQueryParameterErrorKind
+pub fn kglite::param::JsonQueryParameterErrorKind::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for kglite::param::JsonQueryParameterErrorKind
+impl core::marker::StructuralPartialEq for kglite::param::JsonQueryParameterErrorKind
+pub struct kglite::api::param::JsonQueryParameterError
+impl kglite::param::JsonQueryParameterError
+pub fn kglite::param::JsonQueryParameterError::kind(&self) -> kglite::param::JsonQueryParameterErrorKind
+pub fn kglite::param::JsonQueryParameterError::path(&self) -> &str
+impl core::clone::Clone for kglite::param::JsonQueryParameterError
+pub fn kglite::param::JsonQueryParameterError::clone(&self) -> kglite::param::JsonQueryParameterError
+impl core::cmp::Eq for kglite::param::JsonQueryParameterError
+impl core::cmp::PartialEq for kglite::param::JsonQueryParameterError
+pub fn kglite::param::JsonQueryParameterError::eq(&self, other: &kglite::param::JsonQueryParameterError) -> bool
+impl core::error::Error for kglite::param::JsonQueryParameterError
+impl core::fmt::Debug for kglite::param::JsonQueryParameterError
+pub fn kglite::param::JsonQueryParameterError::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for kglite::param::JsonQueryParameterError
+pub fn kglite::param::JsonQueryParameterError::fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for kglite::param::JsonQueryParameterError
+pub fn kglite::api::param::json_object_to_query_value_map(map: &serde_json::map::Map<alloc::string::String, serde_json::value::Value>) -> core::result::Result<std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>, kglite::param::JsonQueryParameterError>
 pub fn kglite::api::param::json_object_to_value_map(map: &serde_json::map::Map<alloc::string::String, serde_json::value::Value>) -> std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>
 pub fn kglite::api::param::json_value_to_kglite_value(v: &serde_json::value::Value) -> kglite::datatypes::values::Value
 pub fn kglite::api::param::kglite_value_to_json(v: &kglite::datatypes::values::Value) -> serde_json::value::Value
@@ -4789,6 +4817,34 @@ pub const kglite::graphgen::EDGE_TYPES: &[kglite::graphgen::EdgeType]
 pub const kglite::graphgen::NODE_TYPES: &[kglite::graphgen::NodeType]
 pub fn kglite::graphgen::generate_to_dir(cfg: &kglite::graphgen::GraphGenConfig, out_dir: &std::path::Path) -> core::io::error::Result<kglite::graphgen::GraphGenStats>
 pub mod kglite::param
+pub enum kglite::param::JsonQueryParameterErrorKind
+pub kglite::param::JsonQueryParameterErrorKind::IntegerOutOfRange
+pub kglite::param::JsonQueryParameterErrorKind::NonFiniteFloat
+impl core::clone::Clone for kglite::param::JsonQueryParameterErrorKind
+pub fn kglite::param::JsonQueryParameterErrorKind::clone(&self) -> kglite::param::JsonQueryParameterErrorKind
+impl core::cmp::Eq for kglite::param::JsonQueryParameterErrorKind
+impl core::cmp::PartialEq for kglite::param::JsonQueryParameterErrorKind
+pub fn kglite::param::JsonQueryParameterErrorKind::eq(&self, other: &kglite::param::JsonQueryParameterErrorKind) -> bool
+impl core::fmt::Debug for kglite::param::JsonQueryParameterErrorKind
+pub fn kglite::param::JsonQueryParameterErrorKind::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for kglite::param::JsonQueryParameterErrorKind
+impl core::marker::StructuralPartialEq for kglite::param::JsonQueryParameterErrorKind
+pub struct kglite::param::JsonQueryParameterError
+impl kglite::param::JsonQueryParameterError
+pub fn kglite::param::JsonQueryParameterError::kind(&self) -> kglite::param::JsonQueryParameterErrorKind
+pub fn kglite::param::JsonQueryParameterError::path(&self) -> &str
+impl core::clone::Clone for kglite::param::JsonQueryParameterError
+pub fn kglite::param::JsonQueryParameterError::clone(&self) -> kglite::param::JsonQueryParameterError
+impl core::cmp::Eq for kglite::param::JsonQueryParameterError
+impl core::cmp::PartialEq for kglite::param::JsonQueryParameterError
+pub fn kglite::param::JsonQueryParameterError::eq(&self, other: &kglite::param::JsonQueryParameterError) -> bool
+impl core::error::Error for kglite::param::JsonQueryParameterError
+impl core::fmt::Debug for kglite::param::JsonQueryParameterError
+pub fn kglite::param::JsonQueryParameterError::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for kglite::param::JsonQueryParameterError
+pub fn kglite::param::JsonQueryParameterError::fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for kglite::param::JsonQueryParameterError
+pub fn kglite::param::json_object_to_query_value_map(map: &serde_json::map::Map<alloc::string::String, serde_json::value::Value>) -> core::result::Result<std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>, kglite::param::JsonQueryParameterError>
 pub fn kglite::param::json_object_to_value_map(map: &serde_json::map::Map<alloc::string::String, serde_json::value::Value>) -> std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>
 pub fn kglite::param::json_value_to_kglite_value(v: &serde_json::value::Value) -> kglite::datatypes::values::Value
 pub fn kglite::param::kglite_value_to_json(v: &kglite::datatypes::values::Value) -> serde_json::value::Value

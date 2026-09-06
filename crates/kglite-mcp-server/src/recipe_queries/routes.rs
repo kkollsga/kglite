@@ -149,6 +149,34 @@ mod tests {
         )
     }
 
+    fn numeric_catalog() -> Arc<RecipeCatalog> {
+        Arc::new(
+            RecipeCatalog::from_manifest_value(Some(
+                &serde_json::from_str(
+                    r#"{
+                        "review": {
+                            "description": "Review operations.",
+                            "queries": {
+                                "echo": {
+                                    "description": "Echo a number.",
+                                    "parameters": {
+                                        "type": "object",
+                                        "properties": {"value": {"type": "number"}},
+                                        "required": ["value"],
+                                        "additionalProperties": false
+                                    },
+                                    "cypher": "RETURN $value AS value"
+                                }
+                            }
+                        }
+                    }"#,
+                )
+                .unwrap(),
+            ))
+            .expect("valid numeric catalog"),
+        )
+    }
+
     fn assert_safe_contract(tool: &Tool) {
         let annotations = tool.annotations.as_ref().expect("annotations");
         assert_eq!(annotations.read_only_hint, Some(true));
@@ -361,6 +389,39 @@ mod tests {
         assert_eq!(value["result"]["columns"], json!(["value"]));
         assert_eq!(value["result"]["rows"], json!([]));
         assert_eq!(value["result"]["row_count"], 0);
+
+        client.cancel().await.expect("stop MCP client");
+        server_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn registered_recipe_route_rejects_unrepresentable_integer_variables() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state = GraphState::default();
+        state
+            .create_in_mode(&temp.path().join("empty.kgl"), StorageMode::Memory)
+            .expect("create active graph");
+        let mut server = McpServer::new(Default::default());
+        register_recipe_query_routes(&mut server, state, numeric_catalog()).unwrap();
+
+        let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
+        let server_handle = tokio::spawn(async move { server.serve(server_transport).await });
+        let client = ().serve(client_transport).await.expect("start MCP client");
+        let arguments: Value = serde_json::from_str(
+            r#"{"recipe":"review","query":"echo","variables":{"value":1267650600228229401496703205376}}"#,
+        )
+        .unwrap();
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new(RUN_RECIPE_QUERY_TOOL)
+                    .with_arguments(arguments.as_object().unwrap().clone()),
+            )
+            .await
+            .expect("overflow is a structured tool error");
+        assert_eq!(result.is_error, Some(true));
+        let structured = structured_json(&result);
+        assert_eq!(structured["code"], "invalid_variables");
+        assert_eq!(structured["details"]["issues"][0]["path"], "$.value");
 
         client.cancel().await.expect("stop MCP client");
         server_handle.abort();

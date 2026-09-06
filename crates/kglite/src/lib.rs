@@ -203,12 +203,16 @@ pub mod api {
     /// Parameter-shape helpers for bindings — wire-shaped values
     /// (JSON / protobuf-map / etc.) ↔ `kglite::api::Value`. The
     /// canonical converters both ways, so no binding re-implements the
-    /// JSON dispatch: `json_value_to_kglite_value` (inbound params) and
-    /// `kglite_value_to_json` (outbound result cells, in natural
-    /// untagged JSON).
+    /// JSON dispatch. `json_object_to_query_value_map` is the checked Cypher
+    /// parameter path: integer tokens must fit `i64`, decimal/exponent tokens
+    /// must fit finite `f64`, and errors retain their nested path.
+    /// `json_value_to_kglite_value` remains the tolerant property/ingestion
+    /// converter. `kglite_value_to_json` renders outbound result cells in
+    /// natural untagged JSON.
     pub mod param {
         pub use crate::param::{
-            json_object_to_value_map, json_value_to_kglite_value, kglite_value_to_json,
+            json_object_to_query_value_map, json_object_to_value_map, json_value_to_kglite_value,
+            kglite_value_to_json, JsonQueryParameterError, JsonQueryParameterErrorKind,
         };
     }
 

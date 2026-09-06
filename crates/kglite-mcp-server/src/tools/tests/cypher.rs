@@ -414,7 +414,7 @@ fn json_params(pairs: &[(&str, serde_json::Value)]) -> serde_json::Map<String, s
 #[test]
 fn the_read_tool_binds_its_params_argument() {
     let active = active_with_vessel();
-    let params = params_from_json(Some(&json_params(&[("id", serde_json::json!(1))])));
+    let params = params_from_json(Some(&json_params(&[("id", serde_json::json!(1))]))).unwrap();
     let body = run_cypher_tool(
         &active,
         "MATCH (v:Vessel {id: $id}) RETURN v.id AS id",
@@ -425,7 +425,7 @@ fn the_read_tool_binds_its_params_argument() {
     .expect("bound query answers");
     assert!(body.contains("1 row"), "{body}");
 
-    let params = params_from_json(Some(&json_params(&[("id", serde_json::json!(1))])));
+    let params = params_from_json(Some(&json_params(&[("id", serde_json::json!(1))]))).unwrap();
     let body = run_cypher_tool(
         &active,
         "MATCH (v:Vessel) WHERE v.id = $id RETURN v.id AS id",
@@ -451,7 +451,7 @@ fn the_write_tool_binds_its_params_argument_on_both_branches() {
     let read = run_cypher_write(
         &mut active,
         "MATCH (v:Vessel {id: $id}) RETURN v.id AS id",
-        params_from_json(Some(&json_params(&[("id", serde_json::json!(1))]))),
+        params_from_json(Some(&json_params(&[("id", serde_json::json!(1))]))).unwrap(),
         authz,
         ExecPolicy::default(),
         CSV_OFF,
@@ -465,7 +465,8 @@ fn the_write_tool_binds_its_params_argument_on_both_branches() {
         params_from_json(Some(&json_params(&[
             ("id", serde_json::json!(1)),
             ("flag", serde_json::json!("NO")),
-        ]))),
+        ])))
+        .unwrap(),
         authz,
         ExecPolicy::default(),
         CSV_OFF,
@@ -507,13 +508,30 @@ fn params_from_json_converts_the_json_value_types() {
         ("b", serde_json::json!(true)),
         ("n", serde_json::json!(null)),
         ("l", serde_json::json!([1, 2])),
-    ])));
+    ])))
+    .unwrap();
     assert_eq!(converted.len(), 6);
     assert!(matches!(converted["s"], Value::String(_)));
     assert!(matches!(converted["i"], Value::Int64(3)));
     assert!(matches!(converted["b"], Value::Boolean(true)));
     assert!(matches!(converted["n"], Value::Null));
-    assert!(params_from_json(None).is_empty());
+    assert!(params_from_json(None).unwrap().is_empty());
+}
+
+#[test]
+fn query_routes_reject_unrepresentable_json_numbers_with_paths() {
+    let value: serde_json::Value =
+        serde_json::from_str(r#"{"outer":[{"value":1267650600228229401496703205376}]}"#).unwrap();
+    let params = value.as_object().unwrap();
+    let error = params_from_json(Some(params)).unwrap_err();
+    assert!(error.contains("$.outer[0].value"), "{error}");
+
+    let active = active_with_vessel();
+    let state = state_with_active(active);
+    let error = state
+        .run_cypher_template("RETURN $outer", params, CSV_OFF)
+        .unwrap_err();
+    assert!(error.contains("$.outer[0].value"), "{error}");
 }
 
 /// The arguments deserialize from the wire shape a client actually sends:

@@ -1215,11 +1215,11 @@ fn fallible_exports_clear_all_outputs_before_validation() {
         };
         assert_eq!(rc, expected);
         assert!(result.is_null());
-        if expected == KgliteStatusCode::CypherSyntax {
+        if expected == KgliteStatusCode::InvalidUtf8 {
+            assert!(error.is_null());
+        } else {
             assert!(!error.is_null());
             unsafe { kglite_free_string(error) };
-        } else {
-            assert!(error.is_null());
         }
     }
     unsafe { kglite_session_free(owned_session) };

@@ -4,13 +4,11 @@
 //! sibling modules so this file remains the small orchestration seam that the
 //! MCP routes will call.
 
-use std::collections::HashMap;
-
 use kglite::api::cypher::CypherResult;
-use kglite::api::Value as KgliteValue;
 use serde_json::Value;
 
 use super::errors::RecipeErrorEnvelope;
+use super::validation::query_conversion_error;
 use super::wire::{
     ListRecipeQueriesArgs, ListRecipeQueriesOutput, ListRecipeQueriesSuccess, RecipeQueryResult,
     RecipeQuerySummary, RecipeSummary, RunRecipeQueryArgs, RunRecipeQueryOutput,
@@ -77,16 +75,16 @@ pub(crate) fn run_recipe_query(
         ));
     }
 
-    let params: HashMap<String, KgliteValue> = args
-        .variables
-        .iter()
-        .map(|(name, value)| {
-            (
-                name.clone(),
-                kglite::api::param::json_value_to_kglite_value(value),
-            )
-        })
-        .collect();
+    let params = match kglite::api::param::json_object_to_query_value_map(&args.variables) {
+        Ok(params) => params,
+        Err(error) => {
+            return RunRecipeQueryOutput::Error(RecipeErrorEnvelope::invalid_variables(
+                &args,
+                query,
+                query_conversion_error(error),
+            ));
+        }
+    };
     match state.execute_cypher_read_strict(&query.cypher, params) {
         Ok(outcome) => serialize_success(&args, query, &outcome.result),
         Err(StrictCypherReadError::StaleGraph(failure)) => {
