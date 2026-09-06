@@ -12,7 +12,7 @@ def test_parse_json_keeps_out_of_range_float_null():
 
 def test_blueprint_keeps_out_of_range_number_refusal(tmp_path: Path):
     path = tmp_path / "blueprint.json"
-    path.write_text('{"settings":{"unknown_number":1e400},"nodes":{}}')
+    path.write_text('{"settings":{"unknown_number":1e400},"nodes":{}}', encoding="utf-8")
     with pytest.raises(ValueError, match="Invalid blueprint JSON: number out of range"):
         kglite.from_blueprint(str(path), save=False)
 
