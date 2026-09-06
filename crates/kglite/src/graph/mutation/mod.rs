@@ -7,6 +7,7 @@
 
 pub mod add_properties;
 pub mod batch;
+mod batch_title_admission;
 mod delete_state;
 mod edge_props;
 mod endpoints;

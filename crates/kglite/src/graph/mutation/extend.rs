@@ -133,6 +133,28 @@ impl EdgeGroup {
     }
 }
 
+fn snapshot_node_row(
+    source: &DirGraph,
+    mut title: Value,
+    mut properties: HashMap<String, Value>,
+) -> (Value, HashMap<String, Value>) {
+    crate::graph::session::snapshot_property_values(
+        &source.graph,
+        std::iter::once(&mut title).chain(properties.values_mut()),
+    );
+    properties.remove("id");
+    properties.remove("title");
+    (title, properties)
+}
+
+fn snapshot_edge_properties(
+    source: &DirGraph,
+    mut properties: HashMap<String, Value>,
+) -> HashMap<String, Value> {
+    crate::graph::session::snapshot_property_values(&source.graph, properties.values_mut());
+    properties
+}
+
 /// Merge `source` into `target` in place. See module docs for full
 /// semantics. `source` is read-only.
 ///
@@ -168,20 +190,14 @@ pub fn extend_graph(
         };
         let node_type = node.node_type_str(&source.interner).to_string();
         let id = node.id().into_owned();
-        let mut title = node.title().into_owned();
-        let mut props = node.properties_cloned(&source.interner);
-        crate::graph::session::snapshot_property_values(
-            &source.graph,
-            std::iter::once(&mut title).chain(props.values_mut()),
-        );
+        let props = node.properties_cloned(&source.interner);
+        let (title, props) = snapshot_node_row(source, node.title().into_owned(), props);
 
         let group = node_groups
             .entry(node_type.clone())
             .or_insert_with(NodeGroup::new);
         for k in props.keys() {
-            if k != "id" && k != "title" {
-                group.note_column(k);
-            }
+            group.note_column(k);
         }
         group.rows.push((id.clone(), title, props));
 
@@ -324,8 +340,7 @@ pub fn extend_graph(
         let target_type = tgt_node.node_type_str(&source.interner).to_string();
         let src_id = src_node.id().into_owned();
         let tgt_id = tgt_node.id().into_owned();
-        let mut props = edge.properties_cloned(&source.interner);
-        crate::graph::session::snapshot_property_values(&source.graph, props.values_mut());
+        let props = snapshot_edge_properties(source, edge.properties_cloned(&source.interner));
 
         let group = edge_groups
             .entry((conn_type.clone(), source_type.clone(), target_type.clone()))

@@ -31,6 +31,44 @@ pub struct ScanStats {
     pub scan_duration_secs: f64,
 }
 
+fn push_snapshotted_property(
+    source: &DirGraph,
+    row: &mut crate::graph::mutation::subgraph_streaming_writer::RowVisitor<'_>,
+    key: InternedKey,
+    borrowed: BorrowedValue<'_>,
+) -> std::io::Result<()> {
+    let needs_snapshot = match borrowed {
+        BorrowedValue::List(items) => items
+            .iter()
+            .any(crate::graph::session::property_value_needs_snapshot),
+        BorrowedValue::Map(entries) => entries
+            .values()
+            .any(crate::graph::session::property_value_needs_snapshot),
+        _ => false,
+    };
+    if !needs_snapshot {
+        return row.push_property(key, borrowed);
+    }
+    let mut value = borrowed.to_value();
+    crate::graph::session::snapshot_property_values(&source.graph, std::iter::once(&mut value));
+    match &value {
+        Value::List(items) => row.push_property(key, BorrowedValue::List(items)),
+        Value::Map(entries) => row.push_property(key, BorrowedValue::Map(entries)),
+        _ => unreachable!("container snapshot changed the outer type"),
+    }
+}
+
+fn snapshot_edge_properties(
+    source: &DirGraph,
+    mut properties: Vec<(InternedKey, Value)>,
+) -> Vec<(InternedKey, Value)> {
+    crate::graph::session::snapshot_property_values(
+        &source.graph,
+        properties.iter_mut().map(|(_, value)| value),
+    );
+    properties
+}
+
 /// Compact bitset over node ids. `Vec<u64>` blocks; one bit per source
 /// node id. [`RankIndex`] adds a popcount prefix array for O(1)
 /// old→new id translation.
@@ -460,7 +498,6 @@ pub fn save_subset_streaming_disk(
         }
     };
     let phase_start = Instant::now();
-
     let path_str = out_path.to_str().ok_or_else(|| {
         format!(
             "save_subset_streaming_disk: out_path is not valid UTF-8: {}",
@@ -672,34 +709,8 @@ pub fn save_subset_streaming_disk(
                     } else {
                         None
                     };
-                    let r = src_store.try_for_each_property_borrowed(slot.row_id, |key, bv| {
-                        let needs_snapshot = match bv {
-                            BorrowedValue::List(items) => items
-                                .iter()
-                                .any(crate::graph::session::property_value_needs_snapshot),
-                            BorrowedValue::Map(entries) => entries
-                                .values()
-                                .any(crate::graph::session::property_value_needs_snapshot),
-                            _ => false,
-                        };
-                        if needs_snapshot {
-                            let mut value = bv.to_value();
-                            crate::graph::session::snapshot_property_values(
-                                &source.graph,
-                                std::iter::once(&mut value),
-                            );
-                            match &value {
-                                Value::List(items) => {
-                                    row.push_property(key, BorrowedValue::List(items))
-                                }
-                                Value::Map(entries) => {
-                                    row.push_property(key, BorrowedValue::Map(entries))
-                                }
-                                _ => unreachable!("container snapshot changed the outer type"),
-                            }
-                        } else {
-                            row.push_property(key, bv)
-                        }
+                    let r = src_store.try_for_each_property_borrowed(slot.row_id, |key, value| {
+                        push_snapshotted_property(source, row, key, value)
                     });
                     if let Some(t) = t1b {
                         t_read_props += t.elapsed();
@@ -849,14 +860,11 @@ pub fn save_subset_streaming_disk(
                 None => continue,
             };
             let conn_type = InternedKey::from_u64(ep.connection_type);
-            let mut props = sdg
+            let props = sdg
                 .edge_properties_at(edge_idx as u32)
                 .map(|cow| cow.into_owned())
                 .unwrap_or_default();
-            crate::graph::session::snapshot_property_values(
-                &source.graph,
-                props.iter_mut().map(|(_, value)| value),
-            );
+            let props = snapshot_edge_properties(source, props);
             let edge_data = EdgeData::new_interned(conn_type, props);
             let GraphBackend::Disk(ref mut dest_disk) = dest.graph else {
                 unreachable!("streaming subset destination is always disk-backed")
@@ -890,11 +898,7 @@ pub fn save_subset_streaming_disk(
                     Some(x) => NodeIndex::new(x as usize),
                     None => continue,
                 };
-                let mut properties = w.properties.clone();
-                crate::graph::session::snapshot_property_values(
-                    &source.graph,
-                    properties.iter_mut().map(|(_, value)| value),
-                );
+                let properties = snapshot_edge_properties(source, w.properties.clone());
                 let edge_data = EdgeData::new_interned(w.connection_type, properties);
                 let GraphBackend::Disk(ref mut dest_disk) = dest.graph else {
                     unreachable!("streaming subset destination is always disk-backed")
