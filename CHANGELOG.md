@@ -49,6 +49,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Make disk SET/REMOVE items visible to later reads and index maintenance;
+  preserve cleared and newly added saved properties across snapshots and saves,
+  and make sparse string predicates follow the same stored-value rules.
+
 - Durable replay preserves equal parallel relationships and selected member
   updates/deletions. Known-ambiguous legacy parallel-edge actions and duplicate
   logical identities at durable adoption are refused instead of silently

@@ -1449,6 +1449,14 @@ fn execute_property_set_item<'a>(
     Ok(PropSetFlow::Applied)
 }
 
+/// Index bookkeeping and following items must read the completed disk write.
+/// Gate before backend dispatch so memory/mapped need no uniqueness check.
+pub(super) fn flush_disk_item_writes(graph: &mut DirGraph) {
+    if graph.graph.is_disk() {
+        GraphWrite::flush_pending_writes(&mut graph.graph);
+    }
+}
+
 fn execute_set(
     graph: &mut DirGraph,
     set: &SetClause,
@@ -1577,6 +1585,7 @@ fn execute_set(
                     variable, label, ..
                 } => set_node_label(graph, row, (variable, label), stats, &mut nodes_to_stamp)?,
             }
+            flush_disk_item_writes(graph);
         }
     }
 
@@ -1880,6 +1889,7 @@ fn execute_remove(
                     // Relationship property REMOVE is its own path, for the
                     // same reasons the SET counterpart is.
                     if remove_edge_property(graph, row, variable, property, stats)? {
+                        flush_disk_item_writes(graph);
                         continue;
                     }
 
@@ -1994,6 +2004,8 @@ fn execute_remove(
                         None
                     };
 
+                    // Composite maintenance reads the current tuple from disk columns.
+                    flush_disk_item_writes(graph);
                     if let Some(old_val) = removed_value {
                         stats.properties_removed += 1;
                         graph.update_property_indices_for_remove(
@@ -2036,6 +2048,7 @@ fn execute_remove(
                     }
                 }
             }
+            flush_disk_item_writes(graph);
         }
     }
 

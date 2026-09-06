@@ -684,8 +684,10 @@ impl GraphWrite for ForkedGraph {
         let previous = GraphRead::get_node_property(self, idx, key);
         self.capture_property_pre_image(idx, ColumnarWrite::Cell(key));
         if let Some((type_key, row_id)) = self.columnar_row_of(idx) {
-            if let Some(store) = self.column_stores.get_mut(&type_key) {
-                Arc::make_mut(store).set(row_id, key, &Value::Null, None);
+            if previous.is_some() {
+                if let Some(store) = self.column_stores.get_mut(&type_key) {
+                    Arc::make_mut(store).set(row_id, key, &Value::Null, None);
+                }
             }
             return previous;
         }

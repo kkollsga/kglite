@@ -10,6 +10,9 @@
 //! [`typed_column`]; the store around it is here.
 
 mod exact_values;
+#[cfg(test)]
+mod null_overlay_tests;
+mod overlay;
 mod typed_column;
 pub(crate) use exact_values::ExactValueColumns;
 
@@ -28,7 +31,7 @@ use crate::graph::storage::packed_codec::{
     INT64_DELTA_TAG,
 };
 use crate::graph::storage::StrField;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -57,6 +60,8 @@ pub struct ColumnStore {
     /// clone helper when a new row needs growth room. Store-level cloning
     /// shares these handles; deep copies stay limited to mutated columns.
     columns: Vec<Arc<TypedColumn>>,
+    /// Explicit clears over immutable bases; padded NULL cells are not writes.
+    null_overrides: Option<Arc<HashSet<(u32, u16)>>>,
     row_count: u32,
     /// Tombstone bitmap: true = row deleted
     tombstones: Vec<bool>,
@@ -82,8 +87,7 @@ pub struct ColumnStore {
     /// heap, because `MmapOrVec`/`MmapBytes` clone into their `Heap` variant.
     overflow_offsets: Option<Arc<MmapOrVec<u64>>>,
     overflow_data: Option<Arc<MmapBytes>>,
-    /// Optional mmap-backed store for disk mode. When present, get/get_id/get_title
-    /// delegate to this instead of the TypedColumn arrays above.
+    /// Immutable mmap base, consulted only after local values and explicit clears.
     mmap_store: Option<Arc<crate::graph::storage::mapped::column_store::MmapColumnStore>>,
     /// Scratch slot→value-index buffer reused by [`Self::push_row`]. Never
     /// carries state between calls; a field only so the allocation is not paid
@@ -177,6 +181,7 @@ impl Clone for ColumnStore {
         ColumnStore {
             schema: self.schema.clone(),
             columns: self.columns.clone(),
+            null_overrides: self.null_overrides.clone(),
             row_count: self.row_count,
             tombstones: self.tombstones.clone(),
             mmap_store: self.mmap_store.clone(),
@@ -216,6 +221,7 @@ impl ColumnStore {
         ColumnStore {
             schema,
             columns,
+            null_overrides: None,
             row_count: 0,
             tombstones: Vec::new(),
             id_column: None,
@@ -238,6 +244,7 @@ impl ColumnStore {
         ColumnStore {
             schema,
             columns,
+            null_overrides: None,
             row_count: 0,
             tombstones: Vec::new(),
             id_column: None,
@@ -259,6 +266,7 @@ impl ColumnStore {
         ColumnStore {
             schema: Arc::new(TypeSchema::new()),
             columns: Vec::new(),
+            null_overrides: None,
             row_count: rc,
             tombstones: Vec::new(),
             id_column: None,
@@ -444,6 +452,14 @@ impl ColumnStore {
     /// Borrowed view of the title column. See [`Self::id_borrowed`].
     #[inline]
     pub fn title_borrowed(&self, row_id: u32) -> Option<&str> {
+        if let Some(column) = self.title_column.as_ref() {
+            return column
+                .get_str(row_id)
+                .or_else(|| match column.get_ref(row_id) {
+                    Some(Value::String(value)) => Some(value.as_str()),
+                    _ => None,
+                });
+        }
         self.mmap_store.as_ref()?.title_borrowed(row_id)
     }
 
@@ -472,7 +488,6 @@ impl ColumnStore {
             if let Some(ref ms) = self.mmap_store {
                 return ms.try_for_each_property_borrowed(row_id, f);
             }
-            return Ok(());
         }
         let owned = self.row_properties(row_id);
         for (key, val) in owned.iter() {
@@ -704,7 +719,7 @@ impl ColumnStore {
     }
 
     /// Get a property value, falling back to the overflow bag when the key
-    /// isn't in the schema or the dense column value is null.
+    /// isn't locally present and has not been explicitly cleared.
     pub fn get(&self, row_id: u32, key: InternedKey) -> Option<Value> {
         self.get_cow(row_id, key).map(std::borrow::Cow::into_owned)
     }
@@ -749,6 +764,9 @@ impl ColumnStore {
                 }
             }
         }
+        if self.is_null_override(row_id, key) {
+            return None;
+        }
         if let Some(ref ms) = self.mmap_store {
             return ms.get(row_id, key).map(std::borrow::Cow::Owned);
         }
@@ -785,6 +803,9 @@ impl ColumnStore {
                 }
             }
         }
+        if self.is_null_override(row_id, key) {
+            return None;
+        }
         if let Some(ref ms) = self.mmap_store {
             return ms.str_prop_eq(row_id, key, target);
         }
@@ -795,10 +816,7 @@ impl ColumnStore {
     /// Borrowed string read for (row_id, key) — the allocation-free form of
     /// [`Self::get`] for callers that only ever test the string.
     ///
-    /// Resolution order mirrors `get` exactly, including its fall-through
-    /// (a slot that holds nothing for this row defers to the mmap base and
-    /// then the overflow bag), so the two can never disagree about which
-    /// value a field resolves to.
+    /// Resolution mirrors `get`: local value, explicit clear, then immutable base.
     pub fn str_field(&self, row_id: u32, key: InternedKey) -> StrField<'_> {
         if row_id >= self.row_count
             || self
@@ -817,6 +835,9 @@ impl ColumnStore {
                     resolved => return resolved,
                 }
             }
+        }
+        if self.is_null_override(row_id, key) {
+            return StrField::Absent;
         }
         if let Some(ref ms) = self.mmap_store {
             return ms.str_field(row_id, key);
@@ -847,6 +868,9 @@ impl ColumnStore {
                     return true;
                 }
             }
+        }
+        if self.is_null_override(row_id, key) {
+            return false;
         }
         if let Some(ref ms) = self.mmap_store {
             return ms.get(row_id, key).is_some();
@@ -914,6 +938,7 @@ impl ColumnStore {
             "a schema-growth undo can only shrink the column vector"
         );
         self.columns.truncate(column_count);
+        self.prune_null_overrides(self.row_count, column_count);
         self.schema = schema;
     }
 
@@ -1007,6 +1032,7 @@ impl ColumnStore {
                 let _ = col.set(row_id, value);
             }
         }
+        self.record_null_override(row_id, slot, value);
         true
     }
 
@@ -1069,6 +1095,7 @@ impl ColumnStore {
             col.truncate_rows(len);
         }
         self.tombstones.truncate(len);
+        self.prune_null_overrides(row_count, self.columns.len());
         self.row_count = row_count;
     }
 
@@ -1102,37 +1129,20 @@ impl ColumnStore {
         {
             return;
         }
-        // Overlay first, then the mmap-backed row minus what the overlay
-        // already answered, so `keys(node)` and friends see Cypher-SET
-        // properties on mmap-backed stores. Pre-0.9.4 the mmap branch
-        // short-circuited and SET-introduced keys never appeared.
         for (slot, ik) in self.schema.iter() {
             if let Some(val) = self.columns.get(slot as usize).and_then(|c| c.get(row_id)) {
                 result.push((ik, val));
             }
         }
-        if let Some(ref ms) = self.mmap_store {
-            // The `seen` set exists only to keep the mmap row from
-            // re-reporting a key the overlay already answered, so it is built
-            // here rather than in the scan loop above: on a non-mmap store
-            // (every in-memory/saved graph) nothing consumes it, and this is
-            // the per-node allocation on every columnar row enumeration —
-            // `describe`, export, `keys(n)`, projection completion.
-            let seen: std::collections::HashSet<InternedKey> =
-                result.iter().map(|(ik, _)| *ik).collect();
-            for (ik, val) in ms.row_properties(row_id) {
-                if !seen.contains(&ik) {
-                    result.push((ik, val));
-                }
-            }
-            return;
-        }
-        // Do not reinstate the second dense pass that used to run here: its
-        // predicate was identical to the first loop's on the same `&self`, so
-        // it could never emit anything. Pinned by
-        // `row_properties_matches_forced_second_pass` in the module's tests.
-        let overflow = self.overflow_row_properties(row_id);
-        result.extend(overflow);
+        // Only base-backed rows need merging; fresh dense rows allocate no seen set.
+        let base = match self.mmap_store.as_ref() {
+            Some(ms) => ms.row_properties(row_id),
+            None => self.overflow_row_properties(row_id),
+        };
+        result.extend(
+            base.into_iter()
+                .filter(|(key, _)| !self.overrides_base(row_id, *key)),
+        );
     }
 
     /// The keys [`Self::row_properties`] would yield, without building a single
@@ -1169,19 +1179,17 @@ impl ColumnStore {
                 result.push(ik);
             }
         }
-        if let Some(ref ms) = self.mmap_store {
-            let seen: std::collections::HashSet<InternedKey> = result.iter().copied().collect();
-            for ik in ms.row_property_keys(row_id) {
-                if !seen.contains(&ik) {
-                    result.push(ik);
-                }
-            }
-            return result;
-        }
-        result.extend(
-            self.overflow_row_properties(row_id)
+        let base = match self.mmap_store.as_ref() {
+            Some(ms) => ms.row_property_keys(row_id),
+            None => self
+                .overflow_row_properties(row_id)
                 .into_iter()
-                .map(|(k, _)| k),
+                .map(|(key, _)| key)
+                .collect(),
+        };
+        result.extend(
+            base.into_iter()
+                .filter(|key| !self.overrides_base(row_id, *key)),
         );
         result
     }
@@ -1316,7 +1324,12 @@ impl ColumnStore {
         let title_bytes = self.title_column.as_ref().map_or(0, |c| c.heap_bytes());
         let overflow_bytes = self.overflow_offsets.as_ref().map_or(0, |o| o.heap_bytes())
             + self.overflow_data.as_ref().map_or(0, |d| d.heap_bytes());
-        col_bytes + id_bytes + title_bytes + overflow_bytes + self.tombstones.len()
+        col_bytes
+            + id_bytes
+            + title_bytes
+            + overflow_bytes
+            + self.tombstones.len()
+            + self.null_override_heap_bytes()
     }
 
     /// The subset of [`Self::heap_bytes`] that [`Self::materialize_to_files`]
@@ -1328,8 +1341,8 @@ impl ColumnStore {
     ///
     /// * the tombstone `Vec<bool>` — one byte per row, heap by construction and
     ///   never written to a file;
-    /// * the overflow bag — `materialize_to_files` writes columns and the
-    ///   id/title sidecars only, so its offsets/data stay resident.
+    /// * the overflow bag and explicit-NULL overrides — `materialize_to_files`
+    ///   writes columns and identity sidecars, so this metadata stays resident.
     ///
     /// `heap_bytes` keeps reporting all of it: it is the observability reading
     /// (`graph_info()['columnar_heap_bytes']`) and the thing
@@ -1437,6 +1450,7 @@ impl ColumnStore {
     /// `Vec<TypedColumn>` must have exactly `self.schema().len()` entries
     /// in slot order; the caller is responsible for the correspondence.
     pub fn replace_columns(&mut self, columns: Vec<TypedColumn>) {
+        self.reconcile_replacement_nulls(&columns);
         self.spillable_growth = true;
         self.columns = columns.into_iter().map(Arc::new).collect();
     }
@@ -1469,6 +1483,9 @@ impl ColumnStore {
     /// authoritative row count is the merged total; without this the
     /// fresh shell reports 0 rows even though the columns hold data.
     pub fn set_row_count(&mut self, n: u32) {
+        if n < self.row_count {
+            self.prune_null_overrides(n, self.columns.len());
+        }
         self.row_count = n;
     }
 
@@ -1524,16 +1541,13 @@ impl ColumnStore {
         }
 
         let mut buf: Vec<u8> = Vec::new();
+        let overflow = self.effective_overflow_bytes();
 
         // Write ALL schema columns (including empty ones) to preserve metadata round-trip.
         // Empty columns are cheap — just type tag + zero-length data blob.
         let extra = self.id_column.is_some() as u32
             + self.title_column.is_some() as u32
-            + if self.overflow_offsets.is_some() {
-                2
-            } else {
-                0
-            };
+            + if overflow.is_some() { 2 } else { 0 };
         let num_cols = self.columns.len() as u32 + extra;
         buf.extend_from_slice(&num_cols.to_le_bytes());
 
@@ -1570,125 +1584,7 @@ impl ColumnStore {
             Self::write_packed_column(&mut buf, "__title__", &padded, codec, int_encoding)?;
         }
 
-        // Write overflow bag as two pseudo-columns
-        if let (Some(ref offsets), Some(ref data)) = (&self.overflow_offsets, &self.overflow_data) {
-            {
-                let name = b"__overflow_offsets__";
-                buf.extend_from_slice(&(name.len() as u16).to_le_bytes());
-                buf.extend_from_slice(name);
-                let tag = b"raw";
-                buf.extend_from_slice(&(tag.len() as u16).to_le_bytes());
-                buf.extend_from_slice(tag);
-                let raw = offsets.as_raw_bytes();
-                buf.extend_from_slice(&(raw.len() as u64).to_le_bytes());
-                buf.extend_from_slice(raw);
-            }
-            {
-                let name = b"__overflow_data__";
-                buf.extend_from_slice(&(name.len() as u16).to_le_bytes());
-                buf.extend_from_slice(name);
-                let tag = b"raw";
-                buf.extend_from_slice(&(tag.len() as u16).to_le_bytes());
-                buf.extend_from_slice(tag);
-                let raw = data.as_raw_bytes();
-                buf.extend_from_slice(&(raw.len() as u64).to_le_bytes());
-                buf.extend_from_slice(raw);
-            }
-        }
-
-        Ok(buf)
-    }
-
-    /// Serialize an mmap-backed store: its rows are materialized into `Mixed`
-    /// columns first. Reached when a disk graph is loaded and then re-saved.
-    fn write_packed_from_mmap(
-        &self,
-        mmap_store: &crate::graph::storage::mapped::column_store::MmapColumnStore,
-        interner: &StringInterner,
-        codec: crate::serde_codec::CodecVersion,
-    ) -> io::Result<Vec<u8>> {
-        let rc = mmap_store.row_count();
-        let mut buf: Vec<u8> = Vec::new();
-
-        // Read via `self.*` accessors, NOT `mmap_store.*` directly, so any
-        // in-memory write overlay wins over the mmap-backed originals. On an
-        // mmap-backed store a `SET n.title` / property `SET` / `add_nodes(update)`
-        // lands in `self.title_column` / `self.columns` (see `set_title`, `set`),
-        // and `self.get_title` / `self.get` read overlay-first; reading straight
-        // from `mmap_store` here would drop those overrides on re-save. `self.get_*`
-        // falls through to the mmap when no overlay exists, so untouched stores
-        // serialize byte-identically.
-        let id_col = TypedColumn::Mixed {
-            data: (0..rc)
-                .map(|r| self.get_id(r).unwrap_or(Value::Null))
-                .collect(),
-        };
-
-        let title_col = TypedColumn::Mixed {
-            data: (0..rc)
-                .map(|r| self.get_title(r).unwrap_or(Value::Null))
-                .collect(),
-        };
-
-        let mut prop_columns: Vec<(String, TypedColumn)> = Vec::new();
-        for &key in mmap_store.col_map.keys() {
-            let col_name = interner.resolve(key).to_string();
-            let col = TypedColumn::Mixed {
-                data: (0..rc)
-                    .map(|r| self.get(r, key).unwrap_or(Value::Null))
-                    .collect(),
-            };
-            prop_columns.push((col_name, col));
-        }
-
-        let has_overflow = mmap_store.has_overflow && mmap_store.overflow_offsets.len > 0;
-        let mut num_cols = prop_columns.len() as u32 + 2; // +2 for id + title
-        if has_overflow {
-            num_cols += 2;
-        }
-        buf.extend_from_slice(&num_cols.to_le_bytes());
-
-        // Everything materialized out of an mmap-backed store above is
-        // `Mixed`, so the integer-encoding choice cannot apply here.
-        for (name, col) in &prop_columns {
-            Self::write_packed_column(&mut buf, name, col, codec, IntColumnEncoding::Raw)?;
-        }
-
-        Self::write_packed_column(&mut buf, "__id__", &id_col, codec, IntColumnEncoding::Raw)?;
-        Self::write_packed_column(
-            &mut buf,
-            "__title__",
-            &title_col,
-            codec,
-            IntColumnEncoding::Raw,
-        )?;
-
-        if has_overflow {
-            let off_r = &mmap_store.overflow_offsets;
-            let dat_r = &mmap_store.overflow_data;
-            {
-                let name = b"__overflow_offsets__";
-                buf.extend_from_slice(&(name.len() as u16).to_le_bytes());
-                buf.extend_from_slice(name);
-                let tag = b"raw";
-                buf.extend_from_slice(&(tag.len() as u16).to_le_bytes());
-                buf.extend_from_slice(tag);
-                let raw = &mmap_store.mmap[off_r.offset..off_r.offset + off_r.len];
-                buf.extend_from_slice(&(raw.len() as u64).to_le_bytes());
-                buf.extend_from_slice(raw);
-            }
-            {
-                let name = b"__overflow_data__";
-                buf.extend_from_slice(&(name.len() as u16).to_le_bytes());
-                buf.extend_from_slice(name);
-                let tag = b"raw";
-                buf.extend_from_slice(&(tag.len() as u16).to_le_bytes());
-                buf.extend_from_slice(tag);
-                let raw = &mmap_store.mmap[dat_r.offset..dat_r.offset + dat_r.len];
-                buf.extend_from_slice(&(raw.len() as u64).to_le_bytes());
-                buf.extend_from_slice(raw);
-            }
-        }
+        Self::write_overflow_columns(&mut buf, overflow.as_ref());
 
         Ok(buf)
     }

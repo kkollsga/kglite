@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use super::columnar_write::{set_via_column_master, ColumnMasterWrite};
 use super::identity_fields::IdentityAliases;
-use super::write::set_node_property_direct;
+use super::write::{flush_disk_item_writes, set_node_property_direct};
 use super::write_scope::enforce_write_scope;
 use crate::datatypes::values::Value;
 use crate::graph::languages::cypher::result::MutationStats;
@@ -329,6 +329,8 @@ pub(super) fn apply_node_property_set<'a>(
         }
     }
 
+    // Index maintenance reads back the landed value and composite tuple.
+    flush_disk_item_writes(graph);
     finish_node_property_write(
         graph,
         LandedPropertyWrite {
@@ -485,3 +487,7 @@ fn row_bookkeeping<'a>(
         key,
     }
 }
+
+#[cfg(test)]
+#[path = "set_row_index_visibility_tests.rs"]
+mod index_visibility_tests;

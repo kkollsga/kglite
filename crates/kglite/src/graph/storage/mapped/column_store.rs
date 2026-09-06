@@ -323,43 +323,14 @@ impl MmapColumnStore {
         ))
     }
 
-    /// Zero-allocation equality check for a string property.
-    ///
-    /// Returns:
-    /// - `None` — property is missing / null for this row (matcher should fail)
-    /// - `Some(true)` — stored value matches `target` byte-for-byte
-    /// - `Some(false)` — stored value is present but differs
-    ///
-    /// Fast path: for a dense string column we compare mmap bytes directly,
-    /// never allocating a `String`. Falls back to the normal `get()` for
-    /// overflow-bag or non-string columns (numeric values are cheap to
-    /// allocate, so it's fine to reuse the general path).
+    /// String equality with the same dense/overflow resolution as `get`.
+    /// Dense strings remain borrowed; absent values return None and nonstrings false.
     pub fn str_prop_eq(&self, row_id: u32, key: InternedKey, target: &str) -> Option<bool> {
-        if row_id >= self.row_count {
-            return None;
+        match self.str_field(row_id, key) {
+            StrField::Absent => None,
+            StrField::NotString => Some(false),
+            StrField::Str(value) => Some(str_values_equal(&value, target)),
         }
-        let row = row_id as usize;
-        if let Some(col_ref) = self.col_map.get(&key) {
-            match col_ref {
-                ColRef::Str(idx) => {
-                    let sc = &self.str_cols[*idx];
-                    if self.read_null(&sc.nulls, row) {
-                        return None;
-                    }
-                    return Some(str_values_equal(
-                        self.read_str(&sc.data, &sc.offsets, row),
-                        target,
-                    ));
-                }
-                ColRef::Fixed(_) => {
-                    // Fixed-width column — definitely not a string match
-                    return Some(false);
-                }
-            }
-        }
-        // Overflow bag or unknown key: fall back to the allocating path.
-        self.get_overflow_property(row_id, key)
-            .map(|v| matches!(v, Value::String(ref s) if str_values_equal(s, target)))
     }
 
     /// Read a property value by (row_id, interned key).

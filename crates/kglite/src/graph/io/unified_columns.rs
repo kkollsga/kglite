@@ -287,15 +287,13 @@ pub fn write_unified_columns(
 
         // ── overflow bag ─────────────────────────────────────────
         let (overflow_offsets, overflow_data, has_overflow) =
-            if let (Some(off_bytes), Some(data_bytes)) =
-                (store.overflow_offsets_bytes(), store.overflow_data_bytes())
-            {
+            if let Some((off_bytes, data_bytes)) = store.effective_overflow_bytes() {
                 let (off_r, c) = plan_region(cursor, &off_bytes);
                 cursor = c;
-                sources.push((off_r.offset, off_bytes));
+                sources.push((off_r.offset, off_bytes.into_owned()));
                 let (data_r, c) = plan_region(cursor, &data_bytes);
                 cursor = c;
-                sources.push((data_r.offset, data_bytes));
+                sources.push((data_r.offset, data_bytes.into_owned()));
                 (off_r, data_r, true)
             } else {
                 (
@@ -474,6 +472,9 @@ fn pack_str_column(
 }
 
 fn store_needs_sidecar(store: &ColumnStore) -> bool {
+    if store.has_mmap_base() {
+        return true;
+    }
     if store
         .columns_ref()
         .any(|c| matches!(c, TypedColumn::Mixed { .. }))

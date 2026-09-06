@@ -1643,7 +1643,14 @@ impl GraphWrite for DiskGraph {
     fn clear_node_property(&mut self, idx: NodeIndex, key: InternedKey) -> Option<Value> {
         let nd = GraphWrite::node_weight_mut(self, idx)?;
         let prior = nd.properties.remove(key);
-        nd.properties.insert(key, Value::Null);
+        // The staging Map contains only pending writes, not committed columns.
+        let prior = prior.or_else(|| self.get_node_property(idx, key));
+        // A missing key needs no tombstone or new schema column.
+        if prior.is_some() {
+            GraphWrite::node_weight_mut(self, idx)?
+                .properties
+                .insert(key, Value::Null);
+        }
         prior
     }
 

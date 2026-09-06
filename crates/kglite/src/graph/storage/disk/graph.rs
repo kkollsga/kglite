@@ -1346,23 +1346,16 @@ impl DiskGraph {
                         return true;
                     }
                 }
-                // Only a title differing from the store counts — see the
-                // `Str::set` offset-corruption note at the write below.
-                if !matches!(nd.title, Value::Null) {
-                    let current = current_arc.get_title(slot.row_id);
-                    return match (current, &nd.title) {
-                        (Some(a), b) => a != *b,
-                        (None, _) => true,
-                    };
-                }
-                false
+                // Map scratch holds a real title, including an explicit clear.
+                // Columnar scratch may instead carry the unwritten Null sentinel.
+                (matches!(nd.properties, PropertyStorage::Map(_))
+                    || !matches!(nd.title, Value::Null))
+                    && current_arc.get_title(slot.row_id).unwrap_or(Value::Null) != nd.title
             });
             if !any_writes_needed {
                 continue;
             }
-            // One explicit deep clone — the clone has refcount 1 so
-            // `ColumnStore::set` / `set_title` / `tombstone` operate
-            // in place with no further Arc work.
+            // Copy the store's handles once; only touched columns privatize.
             let mut new_store: crate::graph::storage::column_store::ColumnStore =
                 (**current_arc).clone();
             for (i, nd) in updates {
@@ -1374,20 +1367,12 @@ impl DiskGraph {
                     new_store.tombstone(row_id);
                     continue;
                 }
-                // Title is in its own column, written only when the cached
-                // value differs from the stored one: `TypedColumn::Str::set`
-                // updates just offsets[idx]/offsets[idx+1] instead of shifting
-                // the tail, so a same-row overwrite corrupts every following
-                // row's title on reload.
-                if !matches!(nd.title, Value::Null) {
-                    let current = new_store.get_title(row_id);
-                    let differs = match (&current, &nd.title) {
-                        (Some(a), b) => a != b,
-                        (None, _) => true,
-                    };
-                    if differs {
-                        let _ = new_store.set_title(row_id, &nd.title);
-                    }
+                // Avoid redundant title writes while preserving explicit Map clears.
+                if (matches!(nd.properties, PropertyStorage::Map(_))
+                    || !matches!(nd.title, Value::Null))
+                    && new_store.get_title(row_id).unwrap_or(Value::Null) != nd.title
+                {
+                    let _ = new_store.set_title(row_id, &nd.title);
                 }
                 if let PropertyStorage::Map(map) = &nd.properties {
                     for (key, value) in map {
@@ -1395,8 +1380,7 @@ impl DiskGraph {
                     }
                 }
             }
-            // Replace the Arc wholesale. This map is the only owner, so every
-            // later reader sees the flushed store without a mirror step.
+            // Publish to this backend; retained snapshots keep their old Arc.
             self.column_stores
                 .insert(type_key, std::sync::Arc::new(new_store));
         }

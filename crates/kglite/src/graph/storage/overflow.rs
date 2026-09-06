@@ -575,6 +575,32 @@ fn for_each_raw<R>(
     None
 }
 
+/// Append a row while retaining selected entries byte-for-byte, including future tags.
+pub(crate) fn append_filtered_blob(
+    blob: &[u8],
+    output: &mut Vec<u8>,
+    mut keep: impl FnMut(InternedKey) -> bool,
+) {
+    if blob.is_empty() {
+        return;
+    }
+    let header = output.len();
+    output.extend_from_slice(&0u16.to_le_bytes());
+    let mut count = 0u16;
+    for_each_raw(blob, |key, tag, bytes, pos| {
+        let start = *pos - 9;
+        if !skip_value(bytes, pos, tag) {
+            return Some(());
+        }
+        if keep(InternedKey::from_u64(key)) {
+            output.extend_from_slice(&bytes[start..*pos]);
+            count += 1;
+        }
+        None
+    });
+    output[header..header + 2].copy_from_slice(&count.to_le_bytes());
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -817,6 +843,39 @@ mod tests {
         })
         .unwrap();
         assert_eq!(seen, owned);
+    }
+
+    #[test]
+    fn filtered_rows_preserve_retained_encoded_entries() {
+        let retained = [
+            (key(1), Value::String("Grüße\nkept".into())),
+            (key(3), Value::List(vec![Value::Int64(9007199254740993)])),
+        ];
+        let mut blob = blob_of(&[
+            retained[0].clone(),
+            (key(2), Value::String("removed".into())),
+            retained[1].clone(),
+        ]);
+        // A length-prefixed future entry follows the existing forward-compatible format.
+        blob[..2].copy_from_slice(&4u16.to_le_bytes());
+        let mut future = key(4).as_u64().to_le_bytes().to_vec();
+        future.push(MAX_KNOWN_TAG + 1);
+        future.extend_from_slice(&3u32.to_le_bytes());
+        future.extend_from_slice(b"new");
+        blob.extend_from_slice(&future);
+        let mut output = Vec::new();
+        append_filtered_blob(&blob, &mut output, |candidate| candidate != key(2));
+        let mut expected = blob_of(&retained);
+        expected[..2].copy_from_slice(&3u16.to_le_bytes());
+        expected.extend_from_slice(&future);
+        assert_eq!(output, expected);
+        assert_eq!(decode_blob(&output), retained);
+        let mut unchanged = Vec::new();
+        append_filtered_blob(&blob, &mut unchanged, |_| true);
+        assert_eq!(unchanged, blob);
+        let mut empty = Vec::new();
+        append_filtered_blob(&blob, &mut empty, |_| false);
+        assert_eq!(empty, 0u16.to_le_bytes());
     }
 
     #[test]
