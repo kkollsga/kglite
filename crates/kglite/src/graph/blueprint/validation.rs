@@ -1426,15 +1426,17 @@ mod accepted_key_tests {
         let blueprint: Value = object("blueprint");
         let mut blueprint = blueprint;
         blueprint["settings"] = object("settings");
-        let mut files = json!({
+        let files = json!({
             "in": object("file"),
             "delim": object("file_delimited"),
             "rows": object("file_frame"),
         });
         #[cfg(feature = "xlsx")]
-        {
+        let files = {
+            let mut files = files;
             files["sheet"] = object("file_xlsx");
-        }
+            files
+        };
         blueprint["files"] = files;
         let mut node = object("node");
         node["connections"] = json!({
