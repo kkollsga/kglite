@@ -7,6 +7,15 @@ pub(super) fn presentation_keys<K: Ord>(
     entries: Vec<(String, K)>,
     metadata: &[&str],
 ) -> Vec<String> {
+    let mut distinct = HashSet::with_capacity(entries.len() + metadata.len());
+    distinct.extend(metadata.iter().copied());
+    if entries
+        .iter()
+        .all(|(label, _)| distinct.insert(label.as_str()))
+    {
+        return entries.into_iter().map(|(label, _)| label).collect();
+    }
+
     let reserved: HashSet<&str> = entries
         .iter()
         .map(|(label, _)| label.as_str())
@@ -39,6 +48,12 @@ pub(super) fn presentation_keys<K: Ord>(
 #[cfg(test)]
 mod tests {
     use super::presentation_keys;
+
+    #[test]
+    fn keeps_unique_labels_in_input_order() {
+        let input = vec![("B".into(), 2), ("A".into(), 1), ("C".into(), 3)];
+        assert_eq!(presentation_keys(input, &["parent_id"]), ["B", "A", "C"]);
+    }
 
     #[test]
     fn reserves_real_suffixes_independent_of_input_order() {
