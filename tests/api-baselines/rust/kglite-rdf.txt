@@ -2162,6 +2162,7 @@ pub fn kglite::api::session::Transaction::working_mut(&mut self) -> core::result
 pub const kglite::api::session::QUERY_THREAD_STACK_SIZE: usize
 pub fn kglite::api::session::execute_mut(graph: &mut kglite::api::DirGraph, query: &str, opts: &kglite::api::session::ExecuteOptions<'_>) -> core::result::Result<kglite::api::session::ExecuteOutcome, kglite::error::KgError>
 pub fn kglite::api::session::execute_read(graph: &kglite::api::DirGraph, query: &str, opts: &kglite::api::session::ExecuteOptions<'_>) -> core::result::Result<kglite::api::session::ExecuteOutcome, kglite::error::KgError>
+pub fn kglite::api::session::resolve_noderef_value<'v>(graph: &kglite::api::storage::GraphBackend, value: &'v kglite::datatypes::values::Value) -> alloc::borrow::Cow<'v, kglite::datatypes::values::Value>
 pub fn kglite::api::session::resolve_noderefs(graph: &kglite::api::storage::GraphBackend, rows: &mut [alloc::vec::Vec<kglite::datatypes::values::Value>])
 pub mod kglite::api::storage
 pub enum kglite::api::storage::GraphBackend

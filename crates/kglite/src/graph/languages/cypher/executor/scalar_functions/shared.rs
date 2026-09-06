@@ -112,12 +112,12 @@ impl ParsedIsoDateTime {
     }
 }
 
-/// Parse an ISO-8601 datetime string at second precision.
+/// Parse an ISO-8601 datetime string, retaining fractional seconds.
 ///
 /// Accepts, in order: an offset-bearing RFC 3339 stamp (`…Z`, `…+02:00`),
 /// a zone-less `YYYY-MM-DDTHH:MM:SS` with optional fractional seconds, a
 /// zone-less `YYYY-MM-DDTHH:MM`, and finally a bare date (midnight).
-/// Sub-second precision is truncated — `Value::Timestamp` is second-precision.
+/// The returned Timestamp retains the precision represented by Chrono.
 ///
 /// **The bare-date fallback only fires for a string with no time part.** It
 /// used to be reached by splitting any input on `'T'` and re-parsing the date
@@ -128,14 +128,11 @@ impl ParsedIsoDateTime {
 /// which the callers surface as `Null`, matching their documented
 /// Null-on-unparseable contract.
 pub(super) fn parse_iso_datetime(s: &str) -> Option<ParsedIsoDateTime> {
-    use chrono::Timelike;
-
     let trimmed = s.trim();
-    let truncate = |dt: chrono::NaiveDateTime| dt.with_nanosecond(0).unwrap_or(dt);
 
     if let Ok(zoned) = chrono::DateTime::parse_from_rfc3339(trimmed) {
         return Some(ParsedIsoDateTime {
-            local: truncate(zoned.naive_local()),
+            local: zoned.naive_local(),
             offset: Some(*zoned.offset()),
         });
     }
@@ -155,7 +152,7 @@ pub(super) fn parse_iso_datetime(s: &str) -> Option<ParsedIsoDateTime> {
         for format in ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%dT%H:%M"] {
             if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(candidate, format) {
                 return Some(ParsedIsoDateTime {
-                    local: truncate(naive),
+                    local: naive,
                     offset: None,
                 });
             }
@@ -174,8 +171,8 @@ pub(super) fn parse_iso_datetime(s: &str) -> Option<ParsedIsoDateTime> {
 }
 
 /// Which wall-clock "now" shape a `local*`/`time` function produces.
-/// KGLite has no time-of-day Value variant, so these emit ISO-8601
-/// strings (see the `localdatetime`/`localtime`/`time` arms).
+/// DateTime emits a Timestamp; time-only forms emit strings because
+/// KGLite has no standalone time-of-day Value variant.
 #[derive(Clone, Copy)]
 pub(super) enum LocalTemporalKind {
     /// `localdatetime()` → `YYYY-MM-DDTHH:MM:SS` (no offset).

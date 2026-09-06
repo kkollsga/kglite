@@ -21,6 +21,7 @@
 //! | `List(items)`                           | `List(items.map(to_bolt))`    | Recursive                                          |
 //! | `Map(entries)`                          | `Dict(entries.map(...))`      | `BoltDict = HashMap<String, BoltValue>`            |
 //! | `DateTime(NaiveDate)`                   | `Date(BoltDate { days })`     | Days since Unix epoch (1970-01-01)                 |
+//! | `Timestamp(NaiveDateTime)`             | `LocalDateTime`               | Epoch seconds and fractional nanoseconds preserved |
 //! | `Duration { months, days, seconds }`    | `Duration(BoltDuration {..})` | All i64; kglite has second precision (`nanoseconds: 0`) |
 //! | `Point { lat, lon }`                    | `Point2D(BoltPoint2D { .. })` | srid=4326 for WGS84; Bolt convention x=lon, y=lat  |
 //! | `Node { id, labels, properties }`       | `Node(BoltNode { id, labels, properties, element_id })` | `element_id = id.to_string()` |
@@ -86,15 +87,17 @@ pub fn to_bolt(value: &Value) -> Result<BoltValue, BoltError> {
             }))
         }
         Value::Timestamp(dt) => {
-            // kglite Timestamp is a naive (zoneless) date+time at second
-            // precision → Bolt LocalDateTime (seconds since epoch + nanos).
-            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
-                .expect("1970-01-01 is a valid date")
-                .and_hms_opt(0, 0, 0)
-                .expect("00:00:00 is a valid time");
+            // Floor seconds plus a nonnegative fraction also preserves instants
+            // before the epoch; Duration::num_seconds would truncate toward zero.
+            let utc = dt.and_utc();
+            if utc.timestamp_subsec_nanos() >= 1_000_000_000 {
+                return Err(BoltError::Backend(
+                    "Timestamp leap seconds cannot be represented as Bolt LocalDateTime".into(),
+                ));
+            }
             Ok(BoltValue::LocalDateTime(BoltLocalDateTime {
-                seconds: dt.signed_duration_since(epoch).num_seconds(),
-                nanoseconds: 0,
+                seconds: utc.timestamp(),
+                nanoseconds: i64::from(utc.timestamp_subsec_nanos()),
             }))
         }
         Value::Point { lat, lon } => Ok(BoltValue::Point2D(BoltPoint2D {
@@ -342,16 +345,18 @@ pub fn from_bolt(value: &BoltValue) -> Result<Value, BoltError> {
         BoltValue::Bytes(_) => Err(BoltError::Protocol(
             "Bolt Bytes parameter not supported — kglite has no byte-string Value variant".into(),
         )),
-        // LocalDateTime (zoneless) maps cleanly to Value::Timestamp
-        // (second precision; sub-second nanos are dropped).
         BoltValue::LocalDateTime(dt) => {
-            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
-                .expect("1970-01-01 is a valid date")
-                .and_hms_opt(0, 0, 0)
-                .expect("00:00:00 is a valid time");
-            Ok(Value::Timestamp(
-                epoch + chrono::Duration::seconds(dt.seconds),
-            ))
+            let stamp = u32::try_from(dt.nanoseconds)
+                .ok()
+                .filter(|nanos| *nanos < 1_000_000_000)
+                .and_then(|nanos| chrono::DateTime::from_timestamp(dt.seconds, nanos))
+                .ok_or_else(|| {
+                    BoltError::Protocol(format!(
+                        "Bolt LocalDateTime out of range: seconds={}, nanoseconds={}",
+                        dt.seconds, dt.nanoseconds
+                    ))
+                })?;
+            Ok(Value::Timestamp(stamp.naive_utc()))
         }
         BoltValue::Time(_)
         | BoltValue::LocalTime(_)
@@ -440,5 +445,58 @@ mod tests {
         let error =
             path_to_bolt_path(&path).expect_err("invalid node/relationship count must fail");
         assert!(error.to_string().contains("invariant violated"));
+    }
+}
+
+#[cfg(test)]
+mod fractional_timestamp_contract_tests {
+    use super::*;
+    #[test]
+    fn local_datetime_roundtrip_preserves_fraction_and_negative_epoch_floor() {
+        for (text, seconds, nanos) in [
+            ("1970-01-01T00:00:00", 0, 0),
+            ("1970-01-01T00:00:00.123456789", 0, 123456789),
+            ("1969-12-31T23:59:59.500", -1, 500000000),
+        ] {
+            let value = Value::Timestamp(
+                chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S%.f").unwrap(),
+            );
+            let bolt = BoltValue::LocalDateTime(BoltLocalDateTime {
+                seconds,
+                nanoseconds: nanos,
+            });
+            assert_eq!(to_bolt(&value).unwrap(), bolt);
+            assert_eq!(from_bolt(&bolt).unwrap(), value);
+            let nested = Value::List(vec![value]);
+            assert_eq!(from_bolt(&to_bolt(&nested).unwrap()).unwrap(), nested);
+        }
+    }
+}
+
+#[cfg(test)]
+mod timestamp_representability_tests {
+    use super::*;
+    #[test]
+    fn chrono_leap_second_is_refused_without_silent_normalization() {
+        let leap = chrono::NaiveDate::from_ymd_opt(2016, 12, 31)
+            .unwrap()
+            .and_hms_nano_opt(23, 59, 59, 1_500_000_000)
+            .unwrap();
+        let value = Value::Timestamp(leap);
+        assert!(
+            matches!(to_bolt(&value), Err(BoltError::Backend(message)) if message.contains("leap seconds"))
+        );
+        assert!(matches!(
+            to_bolt(&Value::List(vec![value])),
+            Err(BoltError::Backend(_))
+        ));
+        let incompatible = BoltValue::LocalDateTime(BoltLocalDateTime {
+            seconds: leap.and_utc().timestamp(),
+            nanoseconds: 1_500_000_000,
+        });
+        assert!(matches!(
+            from_bolt(&incompatible),
+            Err(BoltError::Protocol(_))
+        ));
     }
 }

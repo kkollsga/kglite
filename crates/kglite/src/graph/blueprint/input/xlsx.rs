@@ -292,7 +292,7 @@ fn datetime_text(dt: &calamine::ExcelDateTime) -> String {
         // only the time part tells them apart, and printing `T00:00:00` on
         // every date would make none of them parse as the blueprint's `date`.
         Some(ndt) if ndt.time() == chrono::NaiveTime::MIN => ndt.format("%Y-%m-%d").to_string(),
-        Some(ndt) => ndt.format("%Y-%m-%dT%H:%M:%S").to_string(),
+        Some(ndt) => ndt.format("%Y-%m-%dT%H:%M:%S%.f").to_string(),
         None => float_text(dt.as_f64()),
     }
 }
@@ -1425,5 +1425,24 @@ mod xlsx_tests {
         };
         assert_eq!(ctx.cell_ref(0, 0), "C4");
         assert_eq!(ctx.cell_ref(2, 1), "D6");
+    }
+}
+
+#[cfg(test)]
+mod fractional_timestamp_contract_tests {
+    use super::*;
+    #[test]
+    fn excel_timestamp_keeps_fraction_supported_by_the_cell() {
+        let cell = calamine::ExcelDateTime::new(
+            45352.5 + 0.5 / 86400.0,
+            calamine::ExcelDateTimeType::DateTime,
+            false,
+        );
+        let native = cell.as_datetime().unwrap();
+        assert_eq!(native.and_utc().timestamp_subsec_millis(), 500);
+        assert_eq!(datetime_text(&cell), "2024-03-01T12:00:00.500");
+        let date =
+            calamine::ExcelDateTime::new(45352.0, calamine::ExcelDateTimeType::DateTime, false);
+        assert_eq!(datetime_text(&date), "2024-03-01");
     }
 }

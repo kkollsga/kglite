@@ -103,7 +103,7 @@ pub enum Value {
     /// serializes with `BTreeMap`'s exact map framing (see
     /// [`crate::datatypes::prop_map`]).
     Map(PropMap),
-    /// A date *and* time-of-day, second precision (`NaiveDateTime`).
+    /// A date *and* time-of-day, including fractional nanoseconds (`NaiveDateTime`).
     ///
     /// Complements [`Value::DateTime`] (date-only `NaiveDate`): use
     /// `Timestamp` when the wall-clock time matters (event logs,
@@ -940,7 +940,7 @@ impl DataFrame {
             Value::Timestamp(v) => (
                 ColumnType::String,
                 ColumnData::String(vec![
-                    Some(v.format("%Y-%m-%dT%H:%M:%S").to_string());
+                    Some(v.format("%Y-%m-%dT%H:%M:%S%.f").to_string());
                     num_rows
                 ]),
             ),
@@ -1119,10 +1119,10 @@ fn value_to_text(val: Value) -> Option<String> {
         Value::Boolean(v) => Some(v.to_string()),
         Value::DateTime(v) => Some(v.format("%Y-%m-%d").to_string()),
         // ISO 8601 — round-trips as text.
-        Value::Timestamp(v) => Some(v.format("%Y-%m-%dT%H:%M:%S").to_string()),
+        Value::Timestamp(v) => Some(v.format("%Y-%m-%dT%H:%M:%S%.f").to_string()),
         // WKT, matching add_constant_column's Point form.
         Value::Point { lat, lon } => Some(format!("POINT({} {})", lon, lat)),
-        other => Some(format_value(&other)),
+        other => Some(format_value_precise_timestamps(&other)),
     }
 }
 
@@ -1196,8 +1196,7 @@ impl std::fmt::Display for DataFrame {
 /// (quoted strings, `NULL` for null, `%.2f` for floats).
 ///
 /// `Null` → empty string. The collection / graph-entity variants delegate
-/// to [`format_value`] (their multi-line shapes are the same in both
-/// contexts).
+/// to the same display grammar, retaining fractional timestamps in nested values.
 pub fn raw_string(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
@@ -1219,11 +1218,21 @@ pub fn raw_string(value: &Value) -> String {
         | Value::Map(_)
         | Value::Node(_)
         | Value::Relationship(_)
-        | Value::Path(_) => format_value(value),
+        | Value::Path(_) => format_value_precise_timestamps(value),
     }
 }
 
 pub fn format_value(value: &Value) -> String {
+    format_value_with_timestamp(value, "%Y-%m-%dT%H:%M:%S")
+}
+
+/// Keep the display grammar used by semantic collection string conversion,
+/// while preserving Timestamp fractions that the human display omits.
+pub(crate) fn format_value_precise_timestamps(value: &Value) -> String {
+    format_value_with_timestamp(value, "%Y-%m-%dT%H:%M:%S%.f")
+}
+
+fn format_value_with_timestamp(value: &Value, timestamp_format: &str) -> String {
     match value {
         Value::UniqueId(v) => format!("{}", v),
         Value::Int64(v) => format!("{}", v),
@@ -1237,7 +1246,7 @@ pub fn format_value(value: &Value) -> String {
         Value::String(v) => format!("\"{}\"", v),
         Value::Boolean(v) => format!("{}", v),
         Value::DateTime(v) => format!("\"{}\"", v.format("%Y-%m-%d")),
-        Value::Timestamp(v) => format!("\"{}\"", v.format("%Y-%m-%dT%H:%M:%S")),
+        Value::Timestamp(v) => format!("\"{}\"", v.format(timestamp_format)),
         Value::Point { lat, lon } => format!("point({}, {})", lat, lon),
         Value::Null => "NULL".to_string(),
         Value::NodeRef(idx) => format!("node#{}", idx),
@@ -1250,16 +1259,25 @@ pub fn format_value(value: &Value) -> String {
             months, days, seconds
         ),
         // Cypher-ish surface syntax for the collection / graph-entity
-        // variants. Not round-trip-parseable; this fn is for display /
-        // debug, not serialisation.
+        // variants. This grammar is not round-trip-parseable; semantic
+        // callers select fractional timestamp precision without changing it.
         Value::List(items) => {
-            let inner: Vec<String> = items.iter().map(format_value).collect();
+            let inner: Vec<String> = items
+                .iter()
+                .map(|value| format_value_with_timestamp(value, timestamp_format))
+                .collect();
             format!("[{}]", inner.join(", "))
         }
         Value::Map(entries) => {
             let inner: Vec<String> = entries
                 .iter()
-                .map(|(k, v)| format!("{}: {}", k, format_value(v)))
+                .map(|(k, v)| {
+                    format!(
+                        "{}: {}",
+                        k,
+                        format_value_with_timestamp(v, timestamp_format)
+                    )
+                })
                 .collect();
             format!("{{{}}}", inner.join(", "))
         }
@@ -1820,3 +1838,72 @@ mod tests {
 #[cfg(test)]
 #[path = "value_shape_tests.rs"]
 mod value_shape_tests;
+
+#[cfg(test)]
+mod fractional_timestamp_contract_tests {
+    use super::*;
+    fn stamp(text: &str) -> Value {
+        Value::Timestamp(
+            chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S%.f").unwrap(),
+        )
+    }
+    #[test]
+    fn string_and_constant_columns_preserve_timestamp_fractions() {
+        for text in [
+            "2025-01-02T03:04:05",
+            "2025-01-02T03:04:05.123456789",
+            "1969-12-31T23:59:59.500",
+        ] {
+            let value = stamp(text);
+            assert_eq!(value_to_text(value.clone()), Some(text.into()));
+            let mut frame = DataFrame::from_cypher_rows(
+                vec!["v".into()],
+                vec![vec![value.clone()], vec![Value::String("ordinary".into())]],
+            )
+            .unwrap();
+            assert_eq!(frame.get_value(0, "v"), Some(Value::String(text.into())));
+            assert_eq!(
+                frame.get_value(1, "v"),
+                Some(Value::String("ordinary".into()))
+            );
+            frame.add_constant_column("constant".into(), value).unwrap();
+            for row in 0..2 {
+                assert_eq!(
+                    frame.get_value(row, "constant"),
+                    Some(Value::String(text.into()))
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod nested_timestamp_column_tests {
+    use super::*;
+    #[test]
+    fn nested_string_column_and_raw_text_keep_timestamp_fractions() {
+        let stamp = Value::Timestamp(
+            chrono::NaiveDateTime::parse_from_str(
+                "2025-01-02T03:04:05.123456789",
+                "%Y-%m-%dT%H:%M:%S%.f",
+            )
+            .unwrap(),
+        );
+        let value = Value::List(vec![stamp]);
+        let expected = "[\"2025-01-02T03:04:05.123456789\"]";
+        assert_eq!(raw_string(&value), expected);
+        assert_eq!(value_to_text(value.clone()), Some(expected.into()));
+        // List mixtures deliberately retain List columns; Map plus String
+        // selects the text fallback that must use semantic timestamp output.
+        let map = Value::Map(PropMap::from_pairs(vec![("items".into(), value)]));
+        let frame = DataFrame::from_cypher_rows(
+            vec!["v".into()],
+            vec![vec![map], vec![Value::String("ordinary".into())]],
+        )
+        .unwrap();
+        assert_eq!(
+            frame.get_value(0, "v"),
+            Some(Value::String(format!("{{items: {expected}}}")))
+        );
+    }
+}

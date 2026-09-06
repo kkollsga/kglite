@@ -402,7 +402,7 @@ pub(crate) fn push_value_repr(out: &mut String, val: &Value) {
             let _ = write!(out, "{u}");
         }
         Value::DateTime(d) => out.push_str(&d.format("%Y-%m-%d").to_string()),
-        Value::Timestamp(dt) => out.push_str(&dt.format("%Y-%m-%dT%H:%M:%S").to_string()),
+        Value::Timestamp(dt) => out.push_str(&dt.format("%Y-%m-%dT%H:%M:%S%.f").to_string()),
         Value::Point { lat, lon } => {
             let _ = write!(out, "POINT({lon} {lat})");
         }
@@ -431,6 +431,28 @@ pub(crate) fn push_value_repr(out: &mut String, val: &Value) {
                 "{}",
                 serde_json::to_string(val).unwrap_or_else(|_| "?".to_string())
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod fractional_timestamp_contract_tests {
+    use super::*;
+    fn stamp(text: &str) -> Value {
+        Value::Timestamp(
+            chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S%.f").unwrap(),
+        )
+    }
+    #[test]
+    fn fractional_timestamp_text_keeps_exact_value_and_whole_second_spelling() {
+        for text in [
+            "2025-01-02T03:04:05",
+            "2025-01-02T03:04:05.123456789",
+            "1969-12-31T23:59:59.500",
+        ] {
+            let mut actual = String::new();
+            push_value_repr(&mut actual, &stamp(text));
+            assert_eq!(actual, text);
         }
     }
 }

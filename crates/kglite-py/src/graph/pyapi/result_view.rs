@@ -218,7 +218,7 @@ impl ResultView {
         let limit = top_k.unwrap_or(results.len());
         let columns = vec!["type".into(), "title".into(), "id".into(), "score".into()];
 
-        let rows: Vec<Vec<Value>> = results
+        let mut rows: Vec<Vec<Value>> = results
             .into_iter()
             .take(limit)
             .filter_map(|r| {
@@ -232,6 +232,8 @@ impl ResultView {
                 })
             })
             .collect();
+
+        kglite_core::api::session::resolve_noderefs(&graph.graph, &mut rows);
 
         ResultView {
             columns,
@@ -311,7 +313,7 @@ impl ResultView {
         let mut columns = vec!["type".into(), "title".into(), "id".into()];
         columns.extend(prop_keys.iter().cloned());
 
-        let rows: Vec<Vec<Value>> = nodes_vec
+        let mut rows: Vec<Vec<Value>> = nodes_vec
             .iter()
             .map(|node| {
                 let mut row = vec![
@@ -329,6 +331,8 @@ impl ResultView {
                 row
             })
             .collect();
+
+        kglite_core::api::session::resolve_noderefs(&graph.graph, &mut rows);
 
         ResultView {
             columns,

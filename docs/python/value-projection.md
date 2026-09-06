@@ -21,10 +21,10 @@ Defined at `crates/kglite/src/datatypes/values.rs`. Sixteen variants today:
 | `UniqueId(u32)` | node-id-style integer | INT (cast to i64) |
 | `String(String)` | UTF-8 | STRING (sized) |
 | `DateTime(NaiveDate)` | calendar date | Struct `0x44` (Date) |
-| `Timestamp(NaiveDateTime)` | date + time-of-day, second precision | local date-time structure |
+| `Timestamp(NaiveDateTime)` | date + time-of-day, including fractional nanoseconds | local date-time structure |
 | `Point { lat, lon }` | 2D geographical point | Struct `0x58` (Point2D, srid=4326) |
 | `Duration { months, days, seconds }` | Neo4j-shape calendar duration | Struct `0x45` (Duration) |
-| **`NodeRef(u32)`** | **transient internal handle (see below)** | — never crosses the boundary |
+| **`NodeRef(u32)`** | **internal reference (see below)** | — never crosses the boundary |
 | **`Node(Box<NodeValue>)`** | materialised node `(id, labels, properties)` | Struct `0x4E` (Node) |
 | **`Relationship(Box<RelValue>)`** | materialised rel `(id, start, end, type, properties)` | Struct `0x52` (Relationship) |
 | **`Path(Box<PathValue>)`** | materialised path `{nodes, relationships}` | Struct `0x50` (Path) |
@@ -35,15 +35,32 @@ Persistence uses the explicitly versioned RGF v6/Postcard container. The
 current reader accepts v6 and v5; it rejects v4/bincode and older containers
 with a clear migration/rebuild error.
 
-## `NodeRef` vs `Node` — transient vs materialised
+Timestamp JSON, query CSV, SQL export, and semantic string conversion preserve
+fractional seconds, omitting the fractional suffix for whole-second values.
+Bolt LocalDateTime preserves epoch seconds and nanoseconds; Chrono leap-second
+values outside its 0–999,999,999 nanosecond field are rejected with a typed error. Python's native
+`datetime` supports microseconds; its conversion cannot represent finer digits.
+`datetime()` normalises offset-bearing input to UTC; `localdatetime()` keeps
+its local wall time. Neither parsed constructor drops fractional seconds.
+
+## `NodeRef` vs `Node` — reference vs materialised
 
 `Value::NodeRef(u32)` and `Value::Node(Box<NodeValue>)` look similar
 but serve different roles in the executor:
 
-- **`NodeRef(idx)`** — a transient internal handle carrying the
-  petgraph `NodeIndex`. Used by intermediate stages (`WITH`,
-  `UNWIND`, `collect()` inputs) to preserve node identity without
-  cloning property data. Never user-visible; never persisted.
+- **`NodeRef(idx)`** — an internal reference carrying the petgraph `NodeIndex`.
+  Endpoint functions `startNode()` and `endNode()` produce it. It can also be
+  stored in a property by `SET`, including inside lists and maps. Public query
+  output and Python graph projections resolve it to the referenced node's title
+  against the executing view. This includes fluent `collect()`/`to_df()`,
+  `sample()`, `node()`, grouped nodes, property values, connection properties and
+  diagnostic value samples. Nested graph-entity properties are resolved too;
+  missing references and cyclic title references become NULL.
+  Resolution changes output values, not stored properties, structural IDs,
+  predicate identity, grouping keys or distinct-value counts. Two distinct
+  references with equal titles can therefore appear as duplicate output titles.
+  Raw executor and graph-data consumers use `api::session::resolve_noderefs`
+  or the borrowed single-value `resolve_noderef_value` helper themselves.
 - **`Node(Box<NodeValue>)`** — a materialised graph value with the
   full `(id, labels, properties)` triple. Built at *projection
   time* when the executor needs to hand a node value to a consumer:
@@ -214,7 +231,8 @@ Bolt PackStream analogue. For other targets:
   | `DateTime` / `Timestamp` | ISO-8601 strings (`"2024-03-09"`, `"2024-03-09T14:30:05"`) |
   | `Point` | `{"latitude", "longitude"}` |
   | `Duration` | `{"months", "days", "seconds"}` |
-  | `UniqueId` / `NodeRef` | number |
+  | `UniqueId` | number |
+  | raw `NodeRef` (before graph-aware output resolution) | number |
 
   Before 0.16.1 those variants had no arm at all and fell through to
   their Rust `Debug` rendering, so `RETURN n` reached a JSON consumer

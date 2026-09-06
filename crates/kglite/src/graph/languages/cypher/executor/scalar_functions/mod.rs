@@ -51,12 +51,7 @@ impl<'a> CypherExecutor<'a> {
         if args.is_empty() {
             let now = chrono::Local::now();
             return match kind {
-                // localdatetime() → full date+time at second precision.
-                LocalTemporalKind::DateTime => Ok(Value::Timestamp(
-                    now.naive_local()
-                        .with_nanosecond(0)
-                        .unwrap_or(now.naive_local()),
-                )),
+                LocalTemporalKind::DateTime => Ok(Value::Timestamp(now.naive_local())),
                 // localtime() stays a string — there is no time-of-day Value variant.
                 LocalTemporalKind::Time => Ok(Value::String(now.format("%H:%M:%S").to_string())),
             };
@@ -73,7 +68,7 @@ impl<'a> CypherExecutor<'a> {
         match kind {
             LocalTemporalKind::DateTime => {
                 // Accept full ISO datetime, or a bare date (midnight).
-                // Returns a Value::Timestamp (date + time, second precision).
+                // Returns a Value::Timestamp, including fractional seconds.
                 // `local` rather than `utc`: this function names the *local*
                 // reading, so an offset-bearing input keeps its wall clock and
                 // only loses the zone label — the opposite of `datetime()`,

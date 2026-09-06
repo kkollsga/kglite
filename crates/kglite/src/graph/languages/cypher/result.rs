@@ -391,7 +391,7 @@ fn materialise_lazy_row_inner(
     return_items: &[super::ast::ReturnItem],
     graph: &crate::graph::dir_graph::DirGraph,
 ) -> Vec<Value> {
-    return_items
+    let mut row: Vec<Value> = return_items
         .iter()
         .map(|item| match &item.expression {
             super::ast::Expression::PropertyAccess { variable, property } => {
@@ -428,7 +428,9 @@ fn materialise_lazy_row_inner(
             }
             _ => Value::Null,
         })
-        .collect()
+        .collect();
+    crate::graph::session::resolve_noderefs(&graph.graph, std::slice::from_mut(&mut row));
+    row
 }
 
 /// Materialise every row in a lazy descriptor against `graph`.
@@ -563,7 +565,7 @@ fn csv_value(buf: &mut String, val: &Value) {
             let _ = write!(buf, "{}", u);
         }
         Value::DateTime(d) => buf.push_str(&d.format("%Y-%m-%d").to_string()),
-        Value::Timestamp(d) => buf.push_str(&d.format("%Y-%m-%dT%H:%M:%S").to_string()),
+        Value::Timestamp(d) => buf.push_str(&d.format("%Y-%m-%dT%H:%M:%S%.f").to_string()),
         Value::Point { lat, lon } => {
             use std::fmt::Write;
             let _ = write!(buf, "POINT({} {})", lon, lat);
@@ -581,14 +583,14 @@ fn csv_value(buf: &mut String, val: &Value) {
             let _ = write!(buf, "{}", idx);
         }
         // Collection / graph-entity variants are CSV-
-        // serialised as JSON-ish strings (delegate to format_value
+        // serialised as JSON-ish strings (retain nested timestamp fractions
         // and quote-escape via csv_field).
         Value::List(_)
         | Value::Map(_)
         | Value::Node(_)
         | Value::Relationship(_)
         | Value::Path(_) => {
-            let s = crate::datatypes::values::format_value(val);
+            let s = crate::datatypes::values::format_value_precise_timestamps(val);
             csv_field(buf, &s);
         }
     }
@@ -780,5 +782,45 @@ mod lazy_materialisation_tests {
         barrier.wait();
         materializer.join().expect("materializer thread");
         querier.join().expect("query thread");
+    }
+}
+
+#[cfg(test)]
+mod fractional_timestamp_contract_tests {
+    use super::*;
+    fn stamp(text: &str) -> Value {
+        Value::Timestamp(
+            chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S%.f").unwrap(),
+        )
+    }
+    #[test]
+    fn fractional_timestamp_text_keeps_exact_value_and_whole_second_spelling() {
+        for text in [
+            "2025-01-02T03:04:05",
+            "2025-01-02T03:04:05.123456789",
+            "1969-12-31T23:59:59.500",
+        ] {
+            let mut actual = String::new();
+            csv_value(&mut actual, &stamp(text));
+            assert_eq!(actual, text);
+        }
+    }
+}
+
+#[cfg(test)]
+mod nested_timestamp_csv_tests {
+    use super::*;
+    #[test]
+    fn nested_csv_retains_fraction_and_existing_field_escaping() {
+        let stamp = Value::Timestamp(
+            chrono::NaiveDateTime::parse_from_str(
+                "2025-01-02T03:04:05.123456789",
+                "%Y-%m-%dT%H:%M:%S%.f",
+            )
+            .unwrap(),
+        );
+        let mut actual = String::new();
+        csv_value(&mut actual, &Value::List(vec![stamp]));
+        assert_eq!(actual, "\"[\"\"2025-01-02T03:04:05.123456789\"\"]\"");
     }
 }

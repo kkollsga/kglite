@@ -52,14 +52,14 @@
     {
       "path": "crates/kglite-py/src/datatypes/py_out.rs",
       "qualified_name": "crate::level_connections_to_pydict",
-      "lines": 169,
-      "branches": 103,
-      "nesting": 6
+      "lines": 154,
+      "branches": 79,
+      "nesting": 5
     },
     {
       "path": "crates/kglite-py/src/graph/pyapi/kg_core.rs",
       "qualified_name": "crate::KnowledgeGraph::cypher",
-      "lines": 207,
+      "lines": 203,
       "branches": 25,
       "nesting": 3
     },
@@ -234,7 +234,7 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/scalar_functions/temporal.rs",
       "qualified_name": "crate::CypherExecutor<'a>::eval_temporal_fn",
-      "lines": 270,
+      "lines": 266,
       "branches": 102,
       "nesting": 5
     },

@@ -135,9 +135,9 @@ pub fn kglite_value_to_json(v: &Value) -> serde_json::Value {
         // it matches what the Python binding falls back to.
         Value::NodeRef(idx) => J::Number((*idx).into()),
         // ISO-8601, the only date spelling JSON consumers parse without a
-        // convention agreement. Second precision matches `Value::Timestamp`.
+        // convention agreement. Fractional seconds retain the Timestamp value's precision.
         Value::DateTime(d) => J::String(d.format("%Y-%m-%d").to_string()),
-        Value::Timestamp(dt) => J::String(dt.format("%Y-%m-%dT%H:%M:%S").to_string()),
+        Value::Timestamp(dt) => J::String(dt.format("%Y-%m-%dT%H:%M:%S%.f").to_string()),
         Value::Point { lat, lon } => J::Object(
             [
                 ("latitude".to_string(), json_number(*lat)),
@@ -517,6 +517,92 @@ mod tests {
                     "{value:?} leaked a Debug rendering: {rendered}"
                 );
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod fractional_timestamp_contract_tests {
+    use super::*;
+    fn stamp(text: &str) -> Value {
+        Value::Timestamp(
+            chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S%.f").unwrap(),
+        )
+    }
+    #[test]
+    fn canonical_json_keeps_fractional_timestamps_recursively() {
+        for text in [
+            "2025-01-02T03:04:05",
+            "2025-01-02T03:04:05.123456789",
+            "1969-12-31T23:59:59.500",
+        ] {
+            let value = stamp(text);
+            assert_eq!(kglite_value_to_json(&value), serde_json::json!(text));
+            let nested = Value::Map(crate::datatypes::PropMap::from_pairs(vec![(
+                "items".into(),
+                Value::List(vec![value]),
+            )]));
+            assert_eq!(
+                kglite_value_to_json(&nested),
+                serde_json::json!({"items":[text]})
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod temporal_constructor_contract_tests {
+    use super::*;
+    #[test]
+    fn parsed_datetime_keeps_fraction_and_utc_versus_local_policy() {
+        let graph = crate::graph::dir_graph::DirGraph::new();
+        let params = std::collections::HashMap::new();
+        let options = crate::api::session::ExecuteOptions::eager(&params);
+        for (query, expected) in [
+            (
+                "RETURN datetime('2025-01-02T00:04:05.123456789+02:00') AS t",
+                "2025-01-01T22:04:05.123456789",
+            ),
+            (
+                "RETURN localdatetime('2025-01-02T00:04:05.123456789+02:00') AS t",
+                "2025-01-02T00:04:05.123456789",
+            ),
+            (
+                "RETURN datetime('2025-01-02T03:04:05') AS t",
+                "2025-01-02T03:04:05",
+            ),
+            (
+                "RETURN localdatetime('2025-01-02T03:04:05.123456789') AS t",
+                "2025-01-02T03:04:05.123456789",
+            ),
+        ] {
+            let result = crate::api::session::execute_read(&graph, query, &options).unwrap();
+            let native =
+                chrono::NaiveDateTime::parse_from_str(expected, "%Y-%m-%dT%H:%M:%S%.f").unwrap();
+            assert_eq!(result.result.rows, vec![vec![Value::Timestamp(native)]]);
+        }
+    }
+}
+
+#[cfg(test)]
+mod temporal_now_contract_tests {
+    use super::*;
+    #[test]
+    fn now_constructors_return_values_within_the_observed_clock_interval() {
+        let graph = crate::graph::dir_graph::DirGraph::new();
+        let params = std::collections::HashMap::new();
+        let options = crate::api::session::ExecuteOptions::eager(&params);
+        for query in ["RETURN datetime() AS t", "RETURN localdatetime() AS t"] {
+            let before = chrono::Local::now().naive_local();
+            let result = crate::api::session::execute_read(&graph, query, &options).unwrap();
+            let after = chrono::Local::now().naive_local();
+            let Value::Timestamp(actual) = result.result.rows[0][0] else {
+                panic!("expected Timestamp")
+            };
+            assert!(
+                actual >= before && actual <= after,
+                "{actual} is outside {before}..={after}"
+            );
         }
     }
 }

@@ -606,6 +606,7 @@ impl KnowledgeGraph {
         Python::attach(|py| {
             py_out::level_connections_to_pydict(
                 py,
+                &self.inner.graph,
                 &connections,
                 parent_info,
                 flatten_single_parent,
@@ -630,7 +631,12 @@ impl KnowledgeGraph {
             limit,
         );
         Python::attach(|py| {
-            py_out::level_single_values_to_pydict(py, &values, flatten_single_parent)
+            py_out::level_single_values_to_pydict(
+                py,
+                &self.inner.graph,
+                &values,
+                flatten_single_parent,
+            )
         })
     }
 
@@ -693,7 +699,9 @@ impl KnowledgeGraph {
             indices.as_deref(),
             limit,
         );
-        Python::attach(|py| py_out::level_values_to_pydict(py, &values, flatten_single_parent))
+        Python::attach(|py| {
+            py_out::level_values_to_pydict(py, &self.inner.graph, &values, flatten_single_parent)
+        })
     }
 
     /// Get unique values of a property, optionally storing results.
@@ -747,7 +755,7 @@ impl KnowledgeGraph {
             // whose every later write was unlogged.
             Ok(slf.into_pyobject(py)?.into_any().unbind())
         } else {
-            py_out::level_unique_values_to_pydict(py, &values)
+            py_out::level_unique_values_to_pydict(py, &slf.inner.graph, &values)
         }
     }
 

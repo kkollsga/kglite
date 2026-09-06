@@ -3,24 +3,33 @@ use super::values::Value;
 use kglite_core::api::fluent::PropertyStats;
 use kglite_core::api::fluent::StatResult;
 use kglite_core::api::fluent::{LevelConnections, LevelNodes, LevelValues, UniqueValues};
+use kglite_core::api::storage::GraphBackend;
 use kglite_core::api::NodeInfo;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 use pyo3::IntoPyObjectExt;
 use std::collections::HashMap;
 
-pub fn nodeinfo_to_pydict(py: Python, node: &NodeInfo) -> PyResult<Py<PyAny>> {
+pub fn nodeinfo_to_pydict(
+    py: Python,
+    graph: &GraphBackend,
+    node: &NodeInfo,
+) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
     dict.set_item("type", &node.node_type)?;
-    dict.set_item("title", value_to_py(py, &node.title)?)?;
+    dict.set_item("title", graph_value_to_py(py, graph, &node.title)?)?;
     dict.set_item("id", value_to_py(py, &node.id)?)?;
 
-    // Always merge properties directly into the main dictionary
     for (k, v) in &node.properties {
-        dict.set_item(k, value_to_py(py, v)?)?;
+        dict.set_item(k, graph_value_to_py(py, graph, v)?)?;
     }
 
     Ok(dict.into())
+}
+
+pub fn graph_value_to_py(py: Python, graph: &GraphBackend, value: &Value) -> PyResult<Py<PyAny>> {
+    let value = kglite_core::api::session::resolve_noderef_value(graph, value);
+    value_to_py(py, &value)
 }
 
 pub fn value_to_py(py: Python, value: &Value) -> PyResult<Py<PyAny>> {
@@ -135,14 +144,14 @@ fn rel_to_py<'py>(
     Ok(dict)
 }
 
-/// Convert a HashMap<String, Value> to a Python dict
 pub fn hashmap_to_pydict<'py>(
     py: Python<'py>,
+    graph: &GraphBackend,
     map: &HashMap<String, Value>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let dict = PyDict::new(py);
     for (k, v) in map {
-        dict.set_item(k, value_to_py(py, v)?)?;
+        dict.set_item(k, graph_value_to_py(py, graph, v)?)?;
     }
     Ok(dict)
 }
@@ -235,6 +244,7 @@ pub fn convert_stats_for_python(stats: Vec<PropertyStats>) -> PyResult<Py<PyAny>
 
 pub fn level_nodes_to_pydict(
     py: Python,
+    graph: &GraphBackend,
     level_nodes: &[LevelNodes],
     parent_key: Option<&str>,
     parent_info: Option<bool>,
@@ -262,7 +272,7 @@ pub fn level_nodes_to_pydict(
             let nodes: Vec<Py<PyAny>> = group
                 .nodes
                 .iter()
-                .map(|node| nodeinfo_to_pydict(py, node))
+                .map(|node| nodeinfo_to_pydict(py, graph, node))
                 .collect::<PyResult<_>>()?;
             parent_dict.set_item("nodes", nodes)?;
 
@@ -272,7 +282,7 @@ pub fn level_nodes_to_pydict(
             let nodes: Vec<Py<PyAny>> = group
                 .nodes
                 .iter()
-                .map(|node| nodeinfo_to_pydict(py, node))
+                .map(|node| nodeinfo_to_pydict(py, graph, node))
                 .collect::<PyResult<_>>()?;
             return Ok(PyList::new(py, nodes)?.into());
         }
@@ -338,7 +348,7 @@ pub fn level_nodes_to_pydict(
             let nodes: Vec<Py<PyAny>> = group
                 .nodes
                 .iter()
-                .map(|node| nodeinfo_to_pydict(py, node))
+                .map(|node| nodeinfo_to_pydict(py, graph, node))
                 .collect::<PyResult<_>>()?;
             parent_dict.set_item("children", nodes)?;
 
@@ -347,7 +357,7 @@ pub fn level_nodes_to_pydict(
             let nodes: Vec<Py<PyAny>> = group
                 .nodes
                 .iter()
-                .map(|node| nodeinfo_to_pydict(py, node))
+                .map(|node| nodeinfo_to_pydict(py, graph, node))
                 .collect::<PyResult<_>>()?;
             PyList::new(py, nodes)?.into()
         };
@@ -360,6 +370,7 @@ pub fn level_nodes_to_pydict(
 
 pub fn level_values_to_pydict(
     py: Python,
+    graph: &GraphBackend,
     level_values: &[LevelValues],
     flatten_single_parent: Option<bool>,
 ) -> PyResult<Py<PyAny>> {
@@ -374,7 +385,7 @@ pub fn level_values_to_pydict(
             .map(|vec_values| {
                 let tuple_values: Vec<Py<PyAny>> = vec_values
                     .iter()
-                    .map(|v| value_to_py(py, v))
+                    .map(|v| graph_value_to_py(py, graph, v))
                     .collect::<PyResult<_>>()?;
                 Ok(PyTuple::new(py, &tuple_values)?.into())
             })
@@ -391,7 +402,7 @@ pub fn level_values_to_pydict(
             .map(|vec_values| {
                 let tuple_values: Vec<Py<PyAny>> = vec_values
                     .iter()
-                    .map(|v| value_to_py(py, v))
+                    .map(|v| graph_value_to_py(py, graph, v))
                     .collect::<PyResult<_>>()?;
                 Ok(PyTuple::new(py, &tuple_values)?.into())
             })
@@ -405,6 +416,7 @@ pub fn level_values_to_pydict(
 
 pub fn level_single_values_to_pydict(
     py: Python,
+    graph: &GraphBackend,
     level_values: &[LevelValues],
     flatten_single_parent: Option<bool>,
 ) -> PyResult<Py<PyAny>> {
@@ -416,7 +428,7 @@ pub fn level_single_values_to_pydict(
         let values: Vec<Py<PyAny>> = group
             .values
             .iter()
-            .map(|vec_values| value_to_py(py, &vec_values[0]))
+            .map(|vec_values| graph_value_to_py(py, graph, &vec_values[0]))
             .collect::<PyResult<_>>()?;
         return Ok(PyList::new(py, values)?.into());
     }
@@ -427,7 +439,7 @@ pub fn level_single_values_to_pydict(
         let values: Vec<Py<PyAny>> = group
             .values
             .iter()
-            .map(|vec_values| value_to_py(py, &vec_values[0]))
+            .map(|vec_values| graph_value_to_py(py, graph, &vec_values[0]))
             .collect::<PyResult<_>>()?;
 
         result.set_item(&group.parent_title, values)?;
@@ -436,8 +448,28 @@ pub fn level_single_values_to_pydict(
     Ok(result.into())
 }
 
+fn connection_node_to_pydict<'py>(
+    py: Python<'py>,
+    graph: &GraphBackend,
+    id: &Value,
+    connection_properties: &HashMap<String, Value>,
+    node_properties: Option<&HashMap<String, Value>>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let node_info = PyDict::new(py);
+    node_info.set_item("node_id", value_to_py(py, id)?)?;
+    node_info.set_item(
+        "connection_properties",
+        hashmap_to_pydict(py, graph, connection_properties)?,
+    )?;
+    if let Some(properties) = node_properties {
+        node_info.set_item("node_properties", hashmap_to_pydict(py, graph, properties)?)?;
+    }
+    Ok(node_info)
+}
+
 pub fn level_connections_to_pydict(
     py: Python,
+    graph: &GraphBackend,
     connections: &[LevelConnections],
     parent_info: Option<bool>,
     flatten_single_parent: Option<bool>,
@@ -480,12 +512,8 @@ pub fn level_connections_to_pydict(
                 let conn_type_any = conn_type_item.unwrap();
                 let conn_type_dict = conn_type_any.cast::<PyDict>()?;
 
-                let node_info = PyDict::new(py);
-                node_info.set_item("node_id", value_to_py(py, id)?)?;
-                node_info.set_item("connection_properties", hashmap_to_pydict(py, conn_props)?)?;
-                if let Some(props) = node_props {
-                    node_info.set_item("node_properties", hashmap_to_pydict(py, props)?)?;
-                }
+                let node_info =
+                    connection_node_to_pydict(py, graph, id, conn_props, node_props.as_ref())?;
 
                 match title {
                     Value::String(t) => conn_type_dict.set_item(t, node_info)?,
@@ -504,12 +532,8 @@ pub fn level_connections_to_pydict(
                 let conn_type_any = conn_type_item.unwrap();
                 let conn_type_dict = conn_type_any.cast::<PyDict>()?;
 
-                let node_info = PyDict::new(py);
-                node_info.set_item("node_id", value_to_py(py, id)?)?;
-                node_info.set_item("connection_properties", hashmap_to_pydict(py, conn_props)?)?;
-                if let Some(props) = node_props {
-                    node_info.set_item("node_properties", hashmap_to_pydict(py, props)?)?;
-                }
+                let node_info =
+                    connection_node_to_pydict(py, graph, id, conn_props, node_props.as_ref())?;
 
                 match title {
                     Value::String(t) => conn_type_dict.set_item(t, node_info)?,
@@ -558,12 +582,8 @@ pub fn level_connections_to_pydict(
                 let conn_type_any = conn_type_item.unwrap();
                 let conn_type_dict = conn_type_any.cast::<PyDict>()?;
 
-                let node_info = PyDict::new(py);
-                node_info.set_item("node_id", value_to_py(py, id)?)?;
-                node_info.set_item("connection_properties", hashmap_to_pydict(py, conn_props)?)?;
-                if let Some(props) = node_props {
-                    node_info.set_item("node_properties", hashmap_to_pydict(py, props)?)?;
-                }
+                let node_info =
+                    connection_node_to_pydict(py, graph, id, conn_props, node_props.as_ref())?;
 
                 match title {
                     Value::String(t) => conn_type_dict.set_item(t, node_info)?,
@@ -582,12 +602,8 @@ pub fn level_connections_to_pydict(
                 let conn_type_any = conn_type_item.unwrap();
                 let conn_type_dict = conn_type_any.cast::<PyDict>()?;
 
-                let node_info = PyDict::new(py);
-                node_info.set_item("node_id", value_to_py(py, id)?)?;
-                node_info.set_item("connection_properties", hashmap_to_pydict(py, conn_props)?)?;
-                if let Some(props) = node_props {
-                    node_info.set_item("node_properties", hashmap_to_pydict(py, props)?)?;
-                }
+                let node_info =
+                    connection_node_to_pydict(py, graph, id, conn_props, node_props.as_ref())?;
 
                 match title {
                     Value::String(t) => conn_type_dict.set_item(t, node_info)?,
@@ -606,13 +622,17 @@ pub fn level_connections_to_pydict(
     Ok(result.into())
 }
 
-pub fn level_unique_values_to_pydict(py: Python, values: &[UniqueValues]) -> PyResult<Py<PyAny>> {
+pub fn level_unique_values_to_pydict(
+    py: Python,
+    graph: &GraphBackend,
+    values: &[UniqueValues],
+) -> PyResult<Py<PyAny>> {
     let result = PyDict::new(py);
     for unique_values in values {
         let py_values: PyResult<Vec<Py<PyAny>>> = unique_values
             .values
             .iter()
-            .map(|v| value_to_py(py, v))
+            .map(|v| graph_value_to_py(py, graph, v))
             .collect();
         result.set_item(&unique_values.parent_title, PyList::new(py, py_values?)?)?;
     }

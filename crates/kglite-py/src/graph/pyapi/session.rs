@@ -51,7 +51,7 @@ use crate::error::KgError;
 use crate::graph::languages::cypher;
 use crate::graph::pyapi::frozen::FrozenGraph;
 use crate::graph::pyapi::result_view::ResultView;
-use crate::graph::{resolve_noderefs, DirGraph};
+use crate::graph::DirGraph;
 use crate::util::EnterKg;
 use kglite_core::api::session::{
     execute_mut, execute_read, CsvImportPolicy, ExecuteOptions, Session as CoreSession,
@@ -191,9 +191,7 @@ impl Session {
                 csv_import: CsvImportPolicy::LocalFilesystem,
             };
             let outcome = execute_read(&inner, &query_owned, &opts)?;
-            let mut result = outcome.result;
-            resolve_noderefs(&inner.graph, &mut result.rows);
-            Ok(result)
+            Ok(outcome.result)
         })?;
         marshal_result(py, result, qopts.to_df, qopts.output_csv)
     }
@@ -277,11 +275,7 @@ impl Session {
                 csv_import: CsvImportPolicy::LocalFilesystem,
             };
             let outcome = execute_mut(&mut graph, &query_owned, &opts)?;
-            let mut result = outcome.result;
-            // Resolve NodeRefs against the working graph before commit
-            // consumes the transaction.
-            resolve_noderefs(&graph.graph, &mut result.rows);
-            Ok(result)
+            Ok(outcome.result)
         })?;
         marshal_result(py, result, qopts.to_df, qopts.output_csv)
     }

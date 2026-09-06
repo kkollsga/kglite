@@ -201,7 +201,7 @@ fn sql_literal(value: &Value) -> String {
         Value::Float64(number) => float_literal(*number),
         Value::String(text) => quote_text(text),
         Value::DateTime(date) => quote_text(&date.to_string()),
-        Value::Timestamp(stamp) => quote_text(&stamp.format("%Y-%m-%dT%H:%M:%S").to_string()),
+        Value::Timestamp(stamp) => quote_text(&stamp.format("%Y-%m-%dT%H:%M:%S%.f").to_string()),
         Value::Point { lat, lon } => quote_text(&format!("{{\"lat\":{lat},\"lon\":{lon}}}")),
         Value::Duration {
             months,
@@ -641,5 +641,25 @@ mod tests {
         node_tables.insert("Person".to_string());
         assert_eq!(link_table_name("KNOWS", &node_tables), "KNOWS");
         assert_eq!(link_table_name("Person", &node_tables), "Person_edge");
+    }
+}
+
+#[cfg(test)]
+mod fractional_timestamp_contract_tests {
+    use super::*;
+    fn stamp(text: &str) -> Value {
+        Value::Timestamp(
+            chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S%.f").unwrap(),
+        )
+    }
+    #[test]
+    fn fractional_timestamp_text_keeps_exact_value_and_whole_second_spelling() {
+        for text in [
+            "2025-01-02T03:04:05",
+            "2025-01-02T03:04:05.123456789",
+            "1969-12-31T23:59:59.500",
+        ] {
+            assert_eq!(sql_literal(&stamp(text)), format!("'{text}'"));
+        }
     }
 }

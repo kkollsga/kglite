@@ -33,15 +33,11 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
             "datetime" => {
-                // Full date + time at second precision (Value::Timestamp).
-                // 0-arg form returns local "now"; a bare date parses to
-                // midnight. 0.12 Cluster 1 (was date-only via DateTime).
+                // The no-argument form keeps local wall time; offset-bearing
+                // input below is normalised to UTC. Both retain fractions.
                 if args.is_empty() {
-                    use chrono::Timelike;
                     let now = chrono::Local::now().naive_local();
-                    return Ok(Some(Value::Timestamp(
-                        now.with_nanosecond(0).unwrap_or(now),
-                    )));
+                    return Ok(Some(Value::Timestamp(now)));
                 }
                 if args.len() != 1 {
                     return Err(

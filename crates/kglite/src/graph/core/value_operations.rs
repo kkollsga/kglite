@@ -475,7 +475,7 @@ pub fn format_value_compact(val: &Value) -> String {
         Value::String(v) => v.clone(),
         Value::Boolean(v) => v.to_string(),
         Value::DateTime(v) => v.format("%Y-%m-%d").to_string(),
-        Value::Timestamp(v) => v.format("%Y-%m-%dT%H:%M:%S").to_string(),
+        Value::Timestamp(v) => v.format("%Y-%m-%dT%H:%M:%S%.f").to_string(),
         Value::Point { lat, lon } => format!("point({}, {})", lat, lon),
         Value::Duration {
             months,
@@ -484,13 +484,12 @@ pub fn format_value_compact(val: &Value) -> String {
         } => format!("duration(M={}, D={}, S={})", months, days, seconds),
         Value::Null => "null".to_string(),
         Value::NodeRef(idx) => format!("node#{}", idx),
-        // Delegate to format_value (which handles
-        // List/Map/Node/Relationship/Path with Cypher-ish syntax).
+        // Keep the existing collection grammar while retaining timestamp fractions.
         Value::List(_)
         | Value::Map(_)
         | Value::Node(_)
         | Value::Relationship(_)
-        | Value::Path(_) => crate::datatypes::values::format_value(val),
+        | Value::Path(_) => crate::datatypes::values::format_value_precise_timestamps(val),
     }
 }
 
@@ -523,7 +522,7 @@ pub fn format_value_compact_into(buf: &mut String, val: &Value) {
         Value::String(v) => buf.push_str(v),
         Value::Boolean(v) => write!(buf, "{}", v).unwrap(),
         Value::DateTime(v) => write!(buf, "{}", v.format("%Y-%m-%d")).unwrap(),
-        Value::Timestamp(v) => write!(buf, "{}", v.format("%Y-%m-%dT%H:%M:%S")).unwrap(),
+        Value::Timestamp(v) => write!(buf, "{}", v.format("%Y-%m-%dT%H:%M:%S%.f")).unwrap(),
         Value::Point { lat, lon } => write!(buf, "point({}, {})", lat, lon).unwrap(),
         Value::Duration {
             months,
@@ -532,12 +531,14 @@ pub fn format_value_compact_into(buf: &mut String, val: &Value) {
         } => write!(buf, "duration(M={}, D={}, S={})", months, days, seconds).unwrap(),
         Value::Null => buf.push_str("null"),
         Value::NodeRef(idx) => write!(buf, "node#{}", idx).unwrap(),
-        // Delegate to format_value for the collection / graph-entity variants.
+        // Same collection grammar as the allocating compact formatter.
         Value::List(_)
         | Value::Map(_)
         | Value::Node(_)
         | Value::Relationship(_)
-        | Value::Path(_) => buf.push_str(&crate::datatypes::values::format_value(val)),
+        | Value::Path(_) => buf.push_str(
+            &crate::datatypes::values::format_value_precise_timestamps(val),
+        ),
     }
 }
 
@@ -980,6 +981,63 @@ mod tests {
             let formatted = format_value_compact(&v);
             let parsed = parse_value_string(&formatted);
             assert_eq!(v, parsed, "Roundtrip failed for {:?}", v);
+        }
+    }
+}
+
+#[cfg(test)]
+mod fractional_timestamp_contract_tests {
+    use super::*;
+    fn stamp(text: &str) -> Value {
+        Value::Timestamp(
+            chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S%.f").unwrap(),
+        )
+    }
+    #[test]
+    fn fractional_timestamp_text_keeps_exact_value_and_whole_second_spelling() {
+        for text in [
+            "2025-01-02T03:04:05",
+            "2025-01-02T03:04:05.123456789",
+            "1969-12-31T23:59:59.500",
+        ] {
+            let value = stamp(text);
+            assert_eq!(format_value_compact(&value), text);
+            let mut actual = String::from("prefix:");
+            format_value_compact_into(&mut actual, &value);
+            assert_eq!(actual, format!("prefix:{text}"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod nested_timestamp_string_tests {
+    use super::*;
+    #[test]
+    fn nested_semantic_strings_keep_precision_without_changing_human_display() {
+        for (text, human) in [
+            ("2025-01-02T03:04:05.123456789", "2025-01-02T03:04:05"),
+            ("2025-01-02T03:04:05", "2025-01-02T03:04:05"),
+        ] {
+            let stamp = Value::Timestamp(
+                chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S%.f").unwrap(),
+            );
+            let list = Value::List(vec![
+                Value::Map(crate::datatypes::PropMap::from_pairs(vec![(
+                    "t".into(),
+                    stamp,
+                )])),
+                Value::Float64(1.234),
+                Value::String("name".into()),
+            ]);
+            let expected = format!("[{{t: \"{text}\"}}, 1.23, \"name\"]");
+            assert_eq!(format_value_compact(&list), expected);
+            let mut buffer = String::new();
+            format_value_compact_into(&mut buffer, &list);
+            assert_eq!(buffer, expected);
+            assert_eq!(
+                crate::datatypes::values::format_value(&list),
+                format!("[{{t: \"{human}\"}}, 1.23, \"name\"]")
+            );
         }
     }
 }

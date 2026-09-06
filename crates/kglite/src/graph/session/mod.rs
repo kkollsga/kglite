@@ -51,6 +51,7 @@
 //!   See [`durable`] for the orderings that are correctness.
 
 pub use self::execute::{execute_mut, execute_read, ExecuteOptions, ExecuteOutcome};
+pub use self::noderefs::{resolve_noderef_value, resolve_noderefs};
 pub use self::transaction::{CommitOutcome, Session, Transaction};
 
 #[cfg(test)]
@@ -58,7 +59,10 @@ mod append_capacity_tests;
 #[cfg(test)]
 mod compaction_tests;
 pub(crate) mod durable;
+#[cfg(test)]
+mod endpoint_contract_tests;
 pub(crate) mod execute;
+mod noderefs;
 #[cfg(test)]
 mod param_presence_tests;
 #[cfg(test)]
@@ -70,12 +74,6 @@ mod row_limit_tests;
 #[cfg(test)]
 mod strict_reads_tests;
 pub(crate) mod transaction;
-
-use crate::datatypes::Value;
-use crate::graph::schema::GraphBackend;
-// `node_weight` is on the GraphRead trait; the wheel's import path
-// did `pub use kglite_core::graph::*` glob which brought it in.
-use crate::graph::storage::GraphRead;
 
 /// Stack size a thread must have to run [`execute_read`] / [`execute_mut`]
 /// safely — servers that dispatch queries onto their own threads should
@@ -94,32 +92,3 @@ use crate::graph::storage::GraphRead;
 /// 8 MiB matches the main-thread default that the CLI and the Python wheel
 /// already get for free, so every frontend has the same headroom.
 pub const QUERY_THREAD_STACK_SIZE: usize = 8 * 1024 * 1024;
-
-/// Resolve any `Value::NodeRef` entries in Cypher result rows to the
-/// referenced node's `title` value. Called by bindings just before
-/// emitting rows to their consumer (`PyDict`/`PyList` for the wheel,
-/// `RecordMessage` for bolt-server, JSON for mcp-server). `NodeRef`
-/// is an internal sentinel used by `collect()` / `WITH` to preserve
-/// node identity through the planner — it should never appear in
-/// output.
-///
-/// Lives here so every binding can call the same post-execute cleanup
-/// instead of re-implementing it.
-pub fn resolve_noderefs(graph: &GraphBackend, rows: &mut [Vec<Value>]) {
-    // Arena guard: node_weight materializes on the disk backend (arena
-    // protocol in disk/graph.rs, enforced by a debug assert); no-op on
-    // memory/mapped backends.
-    let _arena_guard = graph.begin_query();
-    for row in rows.iter_mut() {
-        for val in row.iter_mut() {
-            if let Value::NodeRef(idx) = val {
-                let node_idx = petgraph::graph::NodeIndex::new(*idx as usize);
-                if let Some(node) = graph.node_view(node_idx) {
-                    *val = node.title().into_owned();
-                } else {
-                    *val = Value::Null;
-                }
-            }
-        }
-    }
-}

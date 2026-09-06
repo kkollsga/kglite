@@ -824,7 +824,7 @@ impl KnowledgeGraph {
                     dict.set_item("ambiguous", true)?;
                     let match_list = PyList::empty(py);
                     for (_, info) in &matches {
-                        let d = py_out::nodeinfo_to_pydict(py, info)?;
+                        let d = py_out::nodeinfo_to_pydict(py, &self.inner.graph, info)?;
                         match_list.append(d)?;
                     }
                     dict.set_item("matches", match_list)?;

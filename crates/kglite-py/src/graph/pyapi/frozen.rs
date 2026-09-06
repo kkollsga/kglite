@@ -23,7 +23,7 @@ use super::query_defaults::QueryDefaults;
 use crate::datatypes::py_in;
 use crate::graph::languages::cypher;
 use crate::graph::pyapi::result_view::ResultView;
-use crate::graph::{resolve_noderefs, DirGraph};
+use crate::graph::DirGraph;
 use crate::util::EnterKg;
 use kglite_core::api::session::CsvImportPolicy;
 use kglite_core::api::session::{execute_read, ExecuteOptions};
@@ -129,9 +129,7 @@ impl FrozenGraph {
                     csv_import: CsvImportPolicy::LocalFilesystem,
                 };
                 let outcome = execute_read(&inner, &query_owned, &opts)?;
-                let mut result = outcome.result;
-                resolve_noderefs(&inner.graph, &mut result.rows);
-                Ok(result)
+                Ok(outcome.result)
             },
         )?;
 

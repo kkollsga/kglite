@@ -189,7 +189,7 @@ fn canonical_text(v: &Value) -> String {
         Value::Boolean(b) => b.to_string(),
         Value::String(s) => s.clone(),
         Value::DateTime(d) => d.format("%Y-%m-%d").to_string(),
-        Value::Timestamp(t) => t.format("%Y-%m-%dT%H:%M:%S").to_string(),
+        Value::Timestamp(t) => t.format("%Y-%m-%dT%H:%M:%S%.f").to_string(),
         // Compact JSON, nested values included — the same spelling
         // `typing::parse_list_cell` reads back.
         other => {
@@ -522,5 +522,25 @@ mod frame_source_tests {
         assert_eq!(src.size_hint(), None);
         assert!(src.can_chunk());
         assert_eq!(src.display_name(), "frame 't'");
+    }
+}
+
+#[cfg(test)]
+mod fractional_timestamp_contract_tests {
+    use super::*;
+    fn stamp(text: &str) -> Value {
+        Value::Timestamp(
+            chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S%.f").unwrap(),
+        )
+    }
+    #[test]
+    fn fractional_timestamp_text_keeps_exact_value_and_whole_second_spelling() {
+        for text in [
+            "2025-01-02T03:04:05",
+            "2025-01-02T03:04:05.123456789",
+            "1969-12-31T23:59:59.500",
+        ] {
+            assert_eq!(canonical_text(&stamp(text)), text);
+        }
     }
 }

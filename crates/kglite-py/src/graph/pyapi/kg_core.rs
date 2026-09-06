@@ -7,7 +7,7 @@
 use crate::datatypes::{py_in, py_out};
 use crate::graph::languages::cypher;
 use crate::graph::pyapi::transaction::Transaction;
-use crate::graph::{get_graph_mut, resolve_noderefs, KnowledgeGraph};
+use crate::graph::{get_graph_mut, KnowledgeGraph};
 use crate::util::EnterKg;
 use kglite_core::api::introspection;
 use kglite_core::api::io;
@@ -339,7 +339,7 @@ impl KnowledgeGraph {
                 if let Some(ref vals) = prop.values {
                     let py_vals = PyList::empty(py);
                     for v in vals {
-                        py_vals.append(py_out::value_to_py(py, v)?)?;
+                        py_vals.append(py_out::graph_value_to_py(py, &self.inner.graph, v)?)?;
                     }
                     prop_dict.set_item("values", py_vals)?;
                 }
@@ -1434,7 +1434,7 @@ impl KnowledgeGraph {
             entry.set_item("properties", violation.properties.clone())?;
             let sample = PyList::empty(py);
             for value in violation.sample_values() {
-                sample.append(py_out::value_to_py(py, value)?)?;
+                sample.append(py_out::graph_value_to_py(py, &self.inner.graph, value)?)?;
             }
             entry.set_item("sample", sample)?;
             let duplicate_tuples = violation.duplicate_tuple_count();
@@ -1731,7 +1731,7 @@ impl KnowledgeGraph {
 
             let outcome = kglite_core::api::session::execute_mut(graph, query, &opts)
                 .map_err(crate::error_py::kg_to_pyerr)?;
-            let mut result = outcome.result;
+            let result = outcome.result;
             // Announce before the output shape is chosen — a CSV string and a
             // DataFrame cannot carry diagnostics, so this is their only channel.
             crate::warning_policy::announce(py, result.diagnostics.as_ref())?;
@@ -1744,8 +1744,6 @@ impl KnowledgeGraph {
 
             this.after_mutation(result.stats.as_ref())?;
 
-            resolve_noderefs(&this.inner.graph, &mut result.rows);
-
             return if output_csv {
                 result.to_csv().into_py_any(py)
             } else if to_df {
@@ -1757,7 +1755,7 @@ impl KnowledgeGraph {
         }
 
         // Read path: an Arc snapshot with the pyclass borrow released, so
-        // parse / optimize / execute / resolve_noderefs all run inside
+        // Query execution and output materialisation both run inside
         // py.detach with the GIL free.
         let inner = {
             let this = slf.try_borrow().map_err(|_| concurrent_access_pyerr())?;
@@ -1797,9 +1795,7 @@ impl KnowledgeGraph {
                     opts.cancel = cancel;
                     let outcome =
                         kglite_core::api::session::execute_read(&inner_for_detach, query, &opts)?;
-                    let mut result = outcome.result;
-                    resolve_noderefs(&inner_for_detach.graph, &mut result.rows);
-                    Ok(result)
+                    Ok(outcome.result)
                 },
             )?
         };
@@ -2049,7 +2045,7 @@ fn marshal_read_result(
     let columns = result.columns;
     let stats = result.stats;
     let profile = result.profile;
-    // resolve_noderefs already happened inside the py.detach block above.
+    // Endpoint references were resolved by the shared execution boundary.
     let rows = result.rows;
     if output_csv {
         // CSV consumes every cell, so a lazy descriptor has to be materialised

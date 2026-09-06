@@ -391,6 +391,7 @@ pub fn execute_read(
     // path) materialize later and aren't covered — the configured consumer
     // (mcp-server) runs eager.
     cypher::value_codec::apply_encode(&mut result, &encode_plan);
+    super::resolve_noderefs(&graph.graph, &mut result.rows);
     attach_diagnostics(&mut result, &warnings, started, opts);
 
     Ok(ExecuteOutcome {
@@ -588,6 +589,7 @@ pub fn execute_mut(
     // Encode codec'd-property result columns (e.g. `CREATE (...) RETURN n.id`
     // reads back `'Q42'`). Eager path only; see execute_read.
     cypher::value_codec::apply_encode(&mut result, &encode_plan);
+    super::resolve_noderefs(&graph.graph, &mut result.rows);
     attach_diagnostics(&mut result, &warnings, started, opts);
 
     Ok(ExecuteOutcome {

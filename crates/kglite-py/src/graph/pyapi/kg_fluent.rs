@@ -734,6 +734,7 @@ impl KnowledgeGraph {
         Python::attach(|py| {
             py_out::level_nodes_to_pydict(
                 py,
+                &self.inner.graph,
                 &nodes,
                 Some(group_by),
                 parent_info,
@@ -826,7 +827,11 @@ impl KnowledgeGraph {
             prop_keys.iter().map(|_| PyList::empty(py)).collect();
 
         for (node_type, node) in &nodes_data {
-            title_col.append(py_out::value_to_py(py, &node.title())?)?;
+            title_col.append(py_out::graph_value_to_py(
+                py,
+                &self.inner.graph,
+                &node.title(),
+            )?)?;
             if let Some(ref tc) = type_col {
                 tc.append(*node_type)?;
             }
@@ -836,7 +841,7 @@ impl KnowledgeGraph {
             for (j, key) in prop_keys.iter().enumerate() {
                 let val = node.get_property(key);
                 let val_ref = val.as_deref().unwrap_or(&Value::Null);
-                prop_cols[j].append(py_out::value_to_py(py, val_ref)?)?;
+                prop_cols[j].append(py_out::graph_value_to_py(py, &self.inner.graph, val_ref)?)?;
             }
         }
 
@@ -1181,7 +1186,7 @@ impl KnowledgeGraph {
 
         let node_info = node.to_node_info(&self.inner.interner);
         Python::attach(|py| {
-            let dict = py_out::nodeinfo_to_pydict(py, &node_info)?;
+            let dict = py_out::nodeinfo_to_pydict(py, &self.inner.graph, &node_info)?;
             Ok(Some(dict))
         })
     }
@@ -1258,7 +1263,7 @@ impl KnowledgeGraph {
         Python::attach(|py| {
             let list = PyList::empty(py);
             for node_info in &results {
-                let dict = py_out::nodeinfo_to_pydict(py, node_info)?;
+                let dict = py_out::nodeinfo_to_pydict(py, &self.inner.graph, node_info)?;
                 list.append(dict)?;
             }
             Ok(list.into_any().unbind())
@@ -1349,21 +1354,28 @@ impl KnowledgeGraph {
                     result.set_item("ambiguous", true)?;
                     let match_list = PyList::empty(py);
                     for info in &matches {
-                        match_list.append(py_out::nodeinfo_to_pydict(py, info)?)?;
+                        match_list.append(py_out::nodeinfo_to_pydict(
+                            py,
+                            &self.inner.graph,
+                            info,
+                        )?)?;
                     }
                     result.set_item("matches", match_list)?;
                     return Ok(result.into_any().unbind());
                 }
                 kglite_core::api::code_entities::CodeContextLookup::Found(context) => context,
             };
-            result.set_item("node", py_out::nodeinfo_to_pydict(py, &context.node)?)?;
+            result.set_item(
+                "node",
+                py_out::nodeinfo_to_pydict(py, &self.inner.graph, &context.node)?,
+            )?;
             if let Some(path) = &context.defined_in {
                 result.set_item("defined_in", path)?;
             }
             for (edge_type, nodes) in &context.outgoing {
                 let list = PyList::empty(py);
                 for info in nodes {
-                    list.append(py_out::nodeinfo_to_pydict(py, info)?)?;
+                    list.append(py_out::nodeinfo_to_pydict(py, &self.inner.graph, info)?)?;
                 }
                 result.set_item(edge_type.as_str(), list)?;
             }
@@ -1383,7 +1395,7 @@ impl KnowledgeGraph {
                 };
                 let list = PyList::empty(py);
                 for info in nodes {
-                    list.append(py_out::nodeinfo_to_pydict(py, info)?)?;
+                    list.append(py_out::nodeinfo_to_pydict(py, &self.inner.graph, info)?)?;
                 }
                 result.set_item(key.as_str(), list)?;
             }

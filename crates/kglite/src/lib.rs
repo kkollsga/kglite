@@ -777,8 +777,8 @@ pub mod api {
         /// callers get; see `ExecuteOptions::csv_import`.
         pub use crate::graph::languages::cypher::executor::load_csv::CsvImportPolicy;
         pub use crate::graph::session::{
-            execute_mut, execute_read, resolve_noderefs, CommitOutcome, ExecuteOptions,
-            ExecuteOutcome, Session, Transaction, QUERY_THREAD_STACK_SIZE,
+            execute_mut, execute_read, resolve_noderef_value, resolve_noderefs, CommitOutcome,
+            ExecuteOptions, ExecuteOutcome, Session, Transaction, QUERY_THREAD_STACK_SIZE,
         };
     }
 }

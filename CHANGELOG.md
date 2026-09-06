@@ -30,6 +30,14 @@ before upgrading.
   properties and nested query parameters; explicit date inputs keep their local
   calendar date.
 
+- Endpoint values now resolve consistently in eager and lazy query results,
+  nested containers and direct Python graph outputs, using the executing graph
+  view while preserving structural node and relationship IDs.
+- Timestamp constructors and text/protocol outputs retain supported fractional
+  seconds. Whole-second spelling stays compatible; Python datetime output keeps
+  its microsecond precision. Bolt rejects timestamps it cannot represent instead
+  of emitting an invalid nanosecond field.
+
 ### Changed
 
 - Python snapshots, sessions, cursors and transactions capture query defaults
