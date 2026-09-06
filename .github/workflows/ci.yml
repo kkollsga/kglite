@@ -782,6 +782,7 @@ jobs:
             --output .bench-provenance.json
 
       - name: Compare candidate (retry once on a regression verdict)
+        id: perf_compare
         # Single-run benchmark captures on shared runners flake: 0.14.3's main
         # push failed at +21.6% on a 20% threshold minutes after the identical
         # SHA passed on the PR. A genuine regression reproduces on an
@@ -830,6 +831,15 @@ jobs:
           )
           compare .bench-candidate-retry.json
 
+      - name: Diagnose grouped-count plans after measurement
+        if: ${{ always() && steps.perf_compare.outcome != 'skipped' }}
+        run: |
+          .venv/bin/python scripts/diagnose_grouped_count.py \
+            --reference-python "$REFERENCE_PY" \
+            --candidate-python .venv/bin/python \
+            --harness "$HARNESS_DIR/test_bench_core.py" \
+            --output .bench-grouped-diagnostic.json
+
       - name: Upload benchmark evidence
         if: always()
         uses: actions/upload-artifact@v7
@@ -840,6 +850,7 @@ jobs:
             .bench-candidate.json
             .bench-candidate-retry.json
             .bench-provenance.json
+            .bench-grouped-diagnostic.json
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7

@@ -401,7 +401,7 @@ clean:
 ## KEPT — it is the found-counterexample regression corpus, not a cache.
 ## Wired into the release skill; safe to run any time.
 prune-dev: prune-target
-	rm -f .bench-current.json
+	rm -f .bench-current.json .bench-grouped-diagnostic.json
 	rm -rf docs/_build .mypy_cache .ruff_cache .pytest_cache .uv-cache
 	find kglite -maxdepth 1 -name "kglite.*.so" ! -name "kglite.abi3.so" -delete
 	rm -rf tests/conformance/js/node_modules tests/conformance/java/target tests/conformance/java/.m2
