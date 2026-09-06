@@ -253,12 +253,15 @@ impl DirGraph {
     /// Persists CSR files, node data, edge properties, column stores, and metadata.
     pub fn save_disk(&mut self, path: &str) -> Result<(), String> {
         let root = std::path::PathBuf::from(path);
+        if let Some(disk) = self.graph.as_disk_mut() {
+            disk.detach_ended_lineage();
+        }
         let writer_lock = match &mut self.graph {
             GraphBackend::Disk(disk)
                 if disk
                     .writer_lock
                     .as_ref()
-                    .is_some_and(|lock| lock.root == root) =>
+                    .is_some_and(|lock| lock.root == root && lock.is_active()) =>
             {
                 disk.writer_lock.as_ref().unwrap().clone()
             }
@@ -275,6 +278,9 @@ impl DirGraph {
             disk.prepare_mutation()
                 .map_err(|e| format!("Failed to prepare disk workspace: {e}"))?;
         }
+        let publication = writer_lock
+            .publication_permit()
+            .map_err(|e| format!("Failed to retain disk publication authority: {e}"))?;
         let generation = crate::graph::storage::disk::generation::GenerationTxn::begin(&root)
             .map_err(|e| format!("Failed to begin disk generation: {e}"))?;
         self.write_disk_snapshot(generation.stage_dir())?;
@@ -290,6 +296,7 @@ impl DirGraph {
         // graph's own reference, so dropping it here is what actually releases
         // the directory — unless a live transaction fork cloned the lease, in
         // which case the lock outlives this save by design.
+        drop(publication);
         drop(writer_lock);
         Ok(())
     }

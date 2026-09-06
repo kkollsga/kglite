@@ -25,8 +25,7 @@ impl DirGraph {
     /// the core primitive for binding-level explicit copy operations; snapshots
     /// and transactions must continue to use `Clone` so they preserve lineage.
     pub fn independent_copy(&self) -> Self {
-        let mut copy = self.clone();
-        copy.graph_id = next_graph_id();
+        let mut copy = self.independent_data_copy();
         // A change stream is addressed by `(epoch, seq)`, so an independent
         // lineage needs an independent epoch: the copy's events describe
         // *its* writes, and a cursor from the original must be refused rather
@@ -42,6 +41,13 @@ impl DirGraph {
                 capacity, enrichment,
             )))
         });
+        copy
+    }
+
+    /// Separate data-derived identity and caches while retaining observation lineage.
+    pub(super) fn independent_data_copy(&self) -> Self {
+        let mut copy = self.clone();
+        copy.graph_id = next_graph_id();
         copy.wkt_cache = copy_cache(&self.wkt_cache);
         // The two edge-derived caches need nothing here: they are
         // `ForkPrivateCache`, so `self.clone()` above already gave the copy its

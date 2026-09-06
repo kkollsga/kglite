@@ -3271,6 +3271,10 @@ pub fn kglite::api::DirGraph::dematerialize_ontology(&mut self) -> usize
 pub fn kglite::api::DirGraph::materialize_ontology(&mut self, adopt: bool) -> core::result::Result<alloc::vec::Vec<kglite::api::MaterializedLabel>, alloc::string::String>
 pub fn kglite::api::DirGraph::ontology_label_diff(&self) -> alloc::vec::Vec<(alloc::string::String, kglite::api::ManagedLabelState, usize, usize)>
 impl kglite::api::DirGraph
+pub fn kglite::api::DirGraph::detached_persistence_snapshot(&self) -> Self
+pub fn kglite::api::DirGraph::end_persistence_authority(&self)
+pub fn kglite::api::DirGraph::owns_wal_capture(&self) -> bool
+impl kglite::api::DirGraph
 pub fn kglite::api::DirGraph::drop_unique_constraints_for_type(&mut self, node_type: &str) -> usize
 pub fn kglite::api::DirGraph::has_unique_constraint(&self, node_type: &str, properties: &[alloc::string::String]) -> bool
 pub fn kglite::api::DirGraph::list_unique_constraints(&self) -> alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<alloc::string::String>)>

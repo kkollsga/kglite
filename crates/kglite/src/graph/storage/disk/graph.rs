@@ -248,10 +248,18 @@ use std::sync::{Arc, Mutex, Weak};
 /// The lease slot shared by one writer lineage. Weak by construction: a slot
 /// never keeps a lock alive, it only lets a lineage sibling find the lease
 /// another sibling is holding.
-pub(super) type LeaseCell = Arc<Mutex<Weak<super::generation::GraphDirectoryLock>>>;
+pub(super) struct WriterLineage {
+    pub(super) lease: Weak<super::generation::GraphDirectoryLock>,
+    pub(super) ended: bool,
+}
+
+pub(super) type LeaseCell = Arc<Mutex<WriterLineage>>;
 
 pub(super) fn new_lease_cell() -> LeaseCell {
-    Arc::new(Mutex::new(Weak::new()))
+    Arc::new(Mutex::new(WriterLineage {
+        lease: Weak::new(),
+        ended: false,
+    }))
 }
 
 // SAFETY — DiskGraph interior-mutability model:
@@ -1816,6 +1824,10 @@ impl DiskGraph {
             return Ok(0);
         }
 
+        if self.detach_ended_lineage() {
+            self.prepare_mutation()?;
+        }
+
         let verbose = std::env::var("KGLITE_BUILD_DEBUG").is_ok();
         if verbose {
             eprintln!(
@@ -2048,7 +2060,14 @@ impl Clone for DiskGraph {
             // A fresh slot, deliberately not the parent's: a generic clone has
             // no writer authority, so it must not re-join the parent's lease
             // either. `adopt_writer_lineage` is what shares the slot.
-            lease_cell: new_lease_cell(),
+            lease_cell: Arc::new(Mutex::new(WriterLineage {
+                lease: Weak::new(),
+                ended: self
+                    .lease_cell
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .ended,
+            })),
             mutation_workspace: None,
             parent_workspaces: self.parent_workspaces.clone(),
             independent_root: self.independent_root.clone(),
@@ -2081,6 +2100,42 @@ impl Clone for DiskGraph {
 }
 
 impl DiskGraph {
+    /// End publication authority without dropping the mappings/workspaces a
+    /// retained immutable reader still needs. Never wait while holding lineage.
+    pub(crate) fn end_writer_authority(&self) {
+        let lease = {
+            let mut lineage = self.lease_cell.lock().unwrap_or_else(|p| p.into_inner());
+            lineage.ended = true;
+            lineage.lease.upgrade()
+        };
+        if let Some(lease) = lease {
+            lease.end();
+        }
+    }
+
+    /// A retained mutable child of an ended owner can stage only in a fresh
+    /// private root. Its old workspace remains alive for lazy base/index reads.
+    pub(crate) fn detach_ended_lineage(&mut self) -> bool {
+        let ended = self
+            .lease_cell
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .ended;
+        if !ended {
+            return false;
+        }
+        if let Some(workspace) = self.mutation_workspace.take() {
+            self.parent_workspaces.push(workspace);
+        }
+        let ancestors = self.independent_root.iter().cloned().collect();
+        let root = Arc::new(super::generation::IndependentGraphRoot::new(ancestors));
+        self.logical_root = root.path().to_path_buf();
+        self.writer_lock = None;
+        self.lease_cell = new_lease_cell();
+        self.independent_root = Some(root);
+        true
+    }
+
     /// Detach a user-requested copy from the source graph's writer lease.
     /// Immutable mapped arrays remain shared, while the first subsequent
     /// write materialises a private root and workspace.
@@ -2093,6 +2148,7 @@ impl DiskGraph {
         let root = Arc::new(super::generation::IndependentGraphRoot::new(ancestors));
         self.logical_root = root.path().to_path_buf();
         self.writer_lock = None;
+        self.lease_cell = new_lease_cell();
         self.mutation_workspace = None;
         self.independent_root = Some(root);
     }
@@ -2123,6 +2179,7 @@ impl DiskGraph {
     /// generations are immutable, so the build stages into a workspace and
     /// `finalize_disk_graph` publishes it as a new generation instead.
     pub(crate) fn prepare_bulk_load_workspace(&mut self) -> std::io::Result<()> {
+        self.detach_ended_lineage();
         if !self.builds_in_its_own_directory() {
             self.prepare_mutation()?;
         }

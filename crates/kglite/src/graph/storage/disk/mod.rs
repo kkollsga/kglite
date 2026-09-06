@@ -53,3 +53,6 @@ pub(crate) fn remove_scratch_dir(path: &std::path::Path) -> std::io::Result<()> 
         Err(error) => Err(error),
     }
 }
+
+#[cfg(test)]
+mod lifecycle_tests;

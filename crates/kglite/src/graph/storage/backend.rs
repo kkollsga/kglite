@@ -293,6 +293,12 @@ impl GraphBackend {
         *self = inner;
     }
 
+    pub(crate) fn release_wal_ownership(&mut self) {
+        if let GraphBackend::Recording(recording) = self {
+            recording.release_wal_ownership();
+        }
+    }
+
     /// Whether this backend's capture layer is owned by a write-ahead log
     /// (as opposed to being installed for change data capture alone, or
     /// absent). See [`RecordingGraph::is_wal_owner`].
@@ -536,7 +542,7 @@ impl GraphBackend {
     /// the parent's runtime identity (transaction or Arc copy-on-write view).
     /// Generic `Clone` never transfers that authority on its own.
     pub(crate) fn adopt_shared_writer_lineage(&mut self, parent: &Self) {
-        if let (GraphBackend::Disk(child), GraphBackend::Disk(parent)) = (self, parent) {
+        if let (Some(child), Some(parent)) = (self.as_disk_mut(), parent.as_disk()) {
             child.adopt_writer_lineage(parent);
         }
     }
@@ -545,7 +551,7 @@ impl GraphBackend {
     /// mutation-workspace files needed to reproduce the parent's current
     /// logical state.
     pub(crate) fn detach_independent_copy(&mut self, parent: &Self) {
-        if let (GraphBackend::Disk(child), GraphBackend::Disk(parent)) = (self, parent) {
+        if let (Some(child), Some(parent)) = (self.as_disk_mut(), parent.as_disk()) {
             child.detach_for_independent_copy(parent);
         }
     }

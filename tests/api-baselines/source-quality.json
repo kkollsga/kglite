@@ -59,8 +59,8 @@
     {
       "path": "crates/kglite-py/src/graph/pyapi/kg_core.rs",
       "qualified_name": "crate::KnowledgeGraph::cypher",
-      "lines": 215,
-      "branches": 28,
+      "lines": 207,
+      "branches": 25,
       "nesting": 3
     },
     {

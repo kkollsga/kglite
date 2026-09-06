@@ -112,7 +112,7 @@ impl ProgressSink for PyProgressSink {
 /// PyO3/GIL concern, so a non-Python binding never raises it. Raised as a
 /// `RuntimeError` so existing `except RuntimeError` handlers still catch
 /// it (`PyBorrowError` is itself a `RuntimeError`).
-fn concurrent_access_pyerr() -> PyErr {
+pub(crate) fn concurrent_access_pyerr() -> PyErr {
     PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
         "KnowledgeGraph accessed concurrently from another thread while it was being \
          used elsewhere. A KnowledgeGraph is single-owner: it is not safe to share one \
@@ -817,9 +817,10 @@ impl KnowledgeGraph {
     /// graph cheaply, freeze it, serve concurrent readers, and swap in a new
     /// `freeze()` when the data changes.
     fn freeze(&self) -> crate::graph::pyapi::frozen::FrozenGraph {
-        crate::graph::pyapi::frozen::FrozenGraph::new(
+        crate::graph::pyapi::frozen::FrozenGraph::with_defaults(
             std::sync::Arc::clone(&self.inner),
             self.embedder.clone(),
+            self.query_defaults(),
         )
     }
 
@@ -838,28 +839,20 @@ impl KnowledgeGraph {
     /// load with a `KnowledgeGraph`, then `.session()` and serve every thread
     /// through the `Session`" — don't keep mutating the original graph after.
     fn session(&self) -> crate::graph::pyapi::session::Session {
-        crate::graph::pyapi::session::Session::from_arc(
+        crate::graph::pyapi::session::Session::with_defaults(
             std::sync::Arc::clone(&self.inner),
             self.embedder.clone(),
+            self.query_defaults(),
+            self.lifecycle.durable_authority(),
         )
     }
 
-    /// Persist the graph to its remembered origin path; the graph itself stays
-    /// usable afterwards. No-op if the graph has no associated path (built in
-    /// memory, never opened/saved to a file) — there is
-    /// nowhere to write, and silently doing nothing is friendlier than
-    /// raising on a best-effort cleanup call. Pair with `save(path)` if you
-    /// need an explicit target.
-    /// Also releases the cross-process writer lease taken by
-    /// [`kglite.open`], after the final checkpoint is on disk — so the next
-    /// writer never observes a half-saved graph. A failed save keeps the
-    /// lease, because the graph still holds unsaved work destined for that
-    /// path and the caller may retry.
+    /// Save to the remembered path and end persistence ownership, retaining detached usable data.
     fn close(&mut self, py: Python<'_>) -> PyResult<()> {
         if self.lifecycle.source_path.is_some() {
             self.save(py, None, true)?;
+            self.end_persistence_ownership(py);
         }
-        self.lifecycle.writer_lease = None;
         Ok(())
     }
 
@@ -869,21 +862,7 @@ impl KnowledgeGraph {
         slf
     }
 
-    /// Context-manager exit. On a **clean** exit (no exception) of a graph
-    /// that remembers an origin path, snapshot to that path — the
-    /// auto-save-on-close that gives `open()` its embedded-database feel. On
-    /// an exception, the save is skipped so the on-disk file keeps its last
-    /// good state. Never suppresses the exception (returns `False`).
-    ///
-    /// This is a *clean-exit* checkpoint, not crash safety: a hard crash
-    /// (`kill -9`, power loss) mid-block writes nothing. Durable-on-commit is
-    /// a separate capability.
-    ///
-    /// Exiting the block also ends the graph's write ownership: the
-    /// cross-process writer lease taken by [`kglite.open`] is released here,
-    /// which is what makes two sequential `with kglite.open(path)` blocks in
-    /// one process work. On the exception path the lease is released too —
-    /// the save was skipped, so nothing further will be written.
+    /// End persistence ownership, checkpointing only on clean exit without undoing committed WAL writes.
     #[pyo3(signature = (exc_type, _exc_value, _traceback))]
     fn __exit__(
         &mut self,
@@ -892,10 +871,12 @@ impl KnowledgeGraph {
         _exc_value: &Bound<'_, pyo3::PyAny>,
         _traceback: &Bound<'_, pyo3::PyAny>,
     ) -> PyResult<bool> {
-        if exc_type.is_none() && self.lifecycle.source_path.is_some() {
-            self.save(py, None, true)?;
+        if self.lifecycle.source_path.is_some() {
+            if exc_type.is_none() {
+                self.save(py, None, true)?;
+            }
+            self.end_persistence_ownership(py);
         }
-        self.lifecycle.writer_lease = None;
         Ok(false)
     }
 
@@ -1272,6 +1253,7 @@ impl KnowledgeGraph {
 
     /// Remove the declared semantic layer entirely.
     fn clear_ontology(&mut self) -> PyResult<()> {
+        self.check_durable_owner()?;
         get_graph_mut(&mut self.inner).clear_ontology();
         self.commit_wal()
     }
@@ -1279,6 +1261,7 @@ impl KnowledgeGraph {
     /// Materialize declared supertypes as real secondary labels.
     #[pyo3(signature = (adopt=false))]
     fn materialize_ontology(&mut self, py: Python<'_>, adopt: bool) -> PyResult<Py<PyAny>> {
+        self.check_durable_owner()?;
         let report = get_graph_mut(&mut self.inner)
             .materialize_ontology(adopt)
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
@@ -1296,6 +1279,7 @@ impl KnowledgeGraph {
 
     /// Withdraw every materialized label; returns how many were removed.
     fn dematerialize_ontology(&mut self) -> PyResult<usize> {
+        self.check_durable_owner()?;
         let removed = get_graph_mut(&mut self.inner).dematerialize_ontology();
         self.commit_wal()?;
         Ok(removed)
@@ -1656,17 +1640,13 @@ impl KnowledgeGraph {
         let write_scope_set: Option<std::collections::HashSet<String>> =
             write_scope.map(|v| v.into_iter().collect());
         let self_ref = slf.try_borrow().map_err(|_| concurrent_access_pyerr())?;
-        let effective_timeout = timeout_ms
-            .or(self_ref.default_timeout_ms)
-            .or_else(|| backend_default_timeout_ms(&self_ref.inner));
-        let effective_max_work_units = max_work_units.or(self_ref.default_max_work_units);
-        let effective_row_limit = row_limit.or(self_ref.default_row_limit);
+        let effective = self_ref
+            .query_defaults()
+            .resolve(timeout_ms, max_work_units, row_limit);
         drop(self_ref);
-        // timeout_ms == 0 is the documented escape hatch for "no deadline".
-        let deadline = match effective_timeout {
-            Some(0) | None => None,
-            Some(ms) => Some(std::time::Instant::now() + std::time::Duration::from_millis(ms)),
-        };
+        let effective_max_work_units = effective.max_work_units;
+        let effective_row_limit = effective.row_limit;
+        let deadline = effective.deadline;
 
         let param_map = if let Some(params_dict) = params {
             let mut map = std::collections::HashMap::new();
@@ -1718,6 +1698,7 @@ impl KnowledgeGraph {
             let mut this = slf
                 .try_borrow_mut()
                 .map_err(|_| concurrent_access_pyerr())?;
+            this.check_durable_owner()?;
             let graph = get_graph_mut(&mut this.inner);
 
             let embedder_for_opts: Option<std::sync::Arc<dyn crate::graph::embedder::Embedder>> =
@@ -1837,18 +1818,13 @@ impl KnowledgeGraph {
             return Py::new(py, view).map(|v| v.into_any());
         }
 
-        // The `Some(0)` escape hatch again, reported as "no deadline".
-        let reported_timeout_ms = match effective_timeout {
-            Some(0) | None => None,
-            other => other,
-        };
         // The engine populates diagnostics (including the schema "did you
         // mean?" warnings, on plan-cache hits too); this boundary only
         // refines the two fields core cannot know — the wall-clock span the
         // wheel measured, and the caller's configured timeout.
         let mut diagnostics = result.diagnostics.take().unwrap_or_default();
         diagnostics.elapsed_ms = elapsed_ms;
-        diagnostics.timeout_ms = reported_timeout_ms;
+        diagnostics.timeout_ms = effective.timeout_ms;
         marshal_read_result(py, result, &inner, diagnostics, output_csv, to_df)
     }
 
@@ -1918,15 +1894,18 @@ impl KnowledgeGraph {
             // The throwaway Session is dropped immediately; the Transaction
             // owns its snapshot Arc + base version. The CoW/OCC state machine
             // lives in core.
-            Ok::<_, PyErr>(
+            Ok::<_, PyErr>((
                 kglite_core::api::session::Session::from_arc(Arc::clone(&kg.inner)).begin(),
-            )
+                kg.query_defaults(),
+                kg.lifecycle.epoch(),
+            ))
         })?;
-        let deadline =
-            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+        let deadline = super::query_defaults::deadline_from(timeout_ms);
         Ok(Transaction {
             owner: slf,
-            inner: Some(core_tx),
+            inner: Some(core_tx.0),
+            defaults: core_tx.1,
+            ownership_epoch: core_tx.2,
             deadline,
         })
     }
@@ -1953,15 +1932,18 @@ impl KnowledgeGraph {
             // `try_borrow` for the same reason as `begin` — a concurrent
             // mutation must raise, not panic.
             let kg = slf.try_borrow(py).map_err(|_| concurrent_access_pyerr())?;
-            Ok::<_, PyErr>(
+            Ok::<_, PyErr>((
                 kglite_core::api::session::Session::from_arc(Arc::clone(&kg.inner)).begin_read(),
-            )
+                kg.query_defaults(),
+                kg.lifecycle.epoch(),
+            ))
         })?;
-        let deadline =
-            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+        let deadline = super::query_defaults::deadline_from(timeout_ms);
         Ok(Transaction {
             owner: slf,
-            inner: Some(core_tx),
+            inner: Some(core_tx.0),
+            defaults: core_tx.1,
+            ownership_epoch: core_tx.2,
             deadline,
         })
     }
@@ -2185,16 +2167,4 @@ fn build_disabled_passes(
         }
     }
     Ok(set)
-}
-
-/// Default Cypher query deadline (milliseconds), applied when no per-call
-/// `timeout_ms` and no `set_default_timeout()` are set — the same value for
-/// every backend. A 3-minute ceiling is loose enough that legitimate cold
-/// queries on large mapped/disk graphs complete, while still guaranteeing that
-/// pathological scans (e.g. unanchored patterns on a 100M+ node graph) error
-/// out instead of wedging the host process or an MCP server. Users override
-/// per-call with `timeout_ms=N` (or `0` to disable), or globally via
-/// `set_default_timeout(ms)`.
-pub(crate) fn backend_default_timeout_ms(_graph: &kglite_core::api::DirGraph) -> Option<u64> {
-    Some(180_000)
 }

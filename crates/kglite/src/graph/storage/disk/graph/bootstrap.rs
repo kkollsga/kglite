@@ -8,7 +8,12 @@ impl DiskGraph {
     }
 
     pub(crate) fn prepare_mutation(&mut self) -> std::io::Result<()> {
-        if self.writer_lock.is_none() {
+        self.detach_ended_lineage();
+        if !self
+            .writer_lock
+            .as_ref()
+            .is_some_and(|lease| lease.is_active())
+        {
             let root = self.logical_root.clone();
             self.writer_lock = Some(self.take_lease(&root)?);
         }
@@ -50,13 +55,19 @@ impl DiskGraph {
             .lease_cell
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(lease) = slot.upgrade() {
-            if lease.root == root {
+        if slot.ended {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "disk writer ownership has ended",
+            ));
+        }
+        if let Some(lease) = slot.lease.upgrade() {
+            if lease.root == root && lease.is_active() {
                 return Ok(lease);
             }
         }
         let lease = Arc::new(super::generation::GraphDirectoryLock::try_acquire(root)?);
-        *slot = Arc::downgrade(&lease);
+        slot.lease = Arc::downgrade(&lease);
         Ok(lease)
     }
 
@@ -125,7 +136,8 @@ impl DiskGraph {
         // A generation stage is always a distinct directory, so `save_to_dir`
         // took the rewrite path and seg_000 holds the complete graph — see
         // `save_disposition`, which documents that stages never seal.
-        let published = super::graph_persist::SegmentCsr::load_from(&self.data_dir, &self.data_dir)?;
+        let published =
+            super::graph_persist::SegmentCsr::load_from(&self.data_dir, &self.data_dir)?;
         self.node_slots = published.node_slots;
         self.out_offsets = published.out_offsets;
         self.out_edges = published.out_edges;

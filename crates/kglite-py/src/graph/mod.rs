@@ -194,7 +194,7 @@ pub struct KnowledgeGraph {
     /// libpython dep transitively.
     pub(crate) embedder: Option<Arc<dyn embedder::Embedder>>,
     /// Default per-query timeout in milliseconds. Applied to cypher() when
-    /// timeout_ms is not explicitly passed. None = no timeout (default).
+    /// timeout_ms is not explicitly passed. None uses the Python 180s default.
     pub(crate) default_timeout_ms: Option<u64>,
     /// Default per-query work budget — intermediate rows, retained collection
     /// items and scan work, not a result-row cap. Applied to cypher() when
@@ -219,6 +219,8 @@ pub struct KnowledgeGraph {
 /// every clone/derived view, and `source_path` is the graph's save identity
 /// (preserved by a true `Clone`, reset on `copy()` / derived views).
 pub(crate) struct GraphLifecycle {
+    /// Persistence-owner lifetime, independent of data versions and CDC epochs.
+    pub(crate) ownership_epoch: Arc<std::sync::atomic::AtomicU64>,
     /// Path this graph was opened from / last associated with, if any. Set by
     /// `kglite.open(path)` / `kglite.load(path)`; lets `save()` default to the
     /// origin file and powers the context-manager auto-save-on-close lifecycle.
@@ -245,6 +247,8 @@ pub(crate) struct GraphLifecycle {
     /// deliberately *not* set by `copy()` / `to_subgraph()` / `from_blueprint`,
     /// which build an independent graph rather than a view of this one.
     pub(crate) orphaned_from_durable: bool,
+    /// Shared views observe CDC but cannot publish independent data into its stream.
+    pub(crate) orphaned_from_cdc: bool,
     /// Cross-process single-writer guard for `source_path`, held for as long
     /// as this graph can still write back to it. `Some` only on a graph from
     /// `kglite.open(path)` (the write-back entry point); `None` for
@@ -263,9 +267,11 @@ impl GraphLifecycle {
     /// lease. Used by in-memory constructors, `copy()`, and every derived view.
     pub(crate) fn detached() -> Self {
         GraphLifecycle {
+            ownership_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             source_path: None,
             durable: None,
             orphaned_from_durable: false,
+            orphaned_from_cdc: false,
             writer_lease: None,
         }
     }
@@ -273,14 +279,16 @@ impl GraphLifecycle {
     /// A detached lifecycle for a handle that shares `parent`'s `DirGraph`.
     ///
     /// Same as [`detached`](Self::detached) except that it carries the
-    /// durability lineage forward, so a handle spun off a durable graph is
-    /// fenced rather than silently unlogged. Use this — not `detached()` —
+    /// capture lineage forward, so independent writes cannot enter the source
+    /// WAL or CDC stream. Use this — not `detached()` —
     /// whenever the new handle's `inner` is a clone of an existing handle's.
-    pub(crate) fn detached_from(parent: &GraphLifecycle) -> Self {
+    pub(crate) fn detached_from(parent: &GraphLifecycle, cdc_shared: bool) -> Self {
         GraphLifecycle {
+            ownership_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             source_path: None,
             durable: None,
             orphaned_from_durable: parent.in_durable_lineage(),
+            orphaned_from_cdc: parent.orphaned_from_cdc || cdc_shared,
             writer_lease: None,
         }
     }
@@ -479,13 +487,9 @@ impl KnowledgeGraph {
     /// are checkpoint-only by construction and calling this would be a no-op.
     #[inline]
     pub(crate) fn commit_wal(&mut self) -> PyResult<()> {
-        // Every logged-class write funnels through here, which makes it the one
-        // place that can tell a write on the log's owner from a write on a
-        // handle that merely descends from it. The mutation has already been
-        // applied to this handle's (already forked) `DirGraph` when we get
-        // here, but that graph is exactly the one the caller is about to
-        // discard — the error propagates out of the fluent method, so the
-        // derived handle is never returned.
+        // Mutation entries reject missing capture ownership before changing data.
+        // Keep the commit guard as well: no caller may drain a source stream
+        // or append a source WAL for an independently mutated derived handle.
         self.check_durable_owner()?;
         self.flush_wal()
             .map_err(|e| crate::error_py::kg_to_pyerr(crate::error::KgError::FileIo(e)))
@@ -588,11 +592,21 @@ impl KnowledgeGraph {
     }
 
     /// Refuse an operation that would write through a handle *derived* from a
-    /// durable graph — the [`WAL_ORPHAN_MSG`] fence.
+    /// durable graph or sharing a Session source CDC stream without its data.
     ///
     /// Called by `commit_wal` (so it covers every logged-class mutation) and by
     /// `save()` / `sync()`, which reach the disk without going through it.
     pub(crate) fn check_durable_owner(&self) -> PyResult<()> {
+        if self.lifecycle.orphaned_from_cdc {
+            return Err(crate::error_py::kg_to_pyerr(
+                crate::error::KgError::Argument(
+                    "A derived graph cannot publish writes while sharing the source graph's \
+                 change-data capture stream. Write through the source graph, or use copy() \
+                 for independent data and an independent change stream."
+                        .to_string(),
+                ),
+            ));
+        }
         if self.lifecycle.orphaned_from_durable {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 WAL_ORPHAN_MSG,
@@ -640,9 +654,11 @@ impl Clone for KnowledgeGraph {
             // graph, so the writes it cannot log are refused rather than
             // silently dropped. See `orphaned_from_durable`.
             lifecycle: GraphLifecycle {
+                ownership_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 source_path: self.lifecycle.source_path.clone(),
                 durable: None,
                 orphaned_from_durable: self.lifecycle.in_durable_lineage(),
+                orphaned_from_cdc: self.lifecycle.orphaned_from_cdc || self.inner.cdc_enabled(),
                 writer_lease: None,
             },
         }

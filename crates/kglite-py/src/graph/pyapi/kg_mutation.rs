@@ -340,6 +340,7 @@ fn write_connections(
     modified_by: Option<String>,
     on_invalid: &str,
 ) -> PyResult<Py<PyAny>> {
+    kg.check_durable_owner()?;
     let on_invalid = OnInvalid::parse(on_invalid)?;
     let has_data = data.as_ref().map(|d| !d.is_none()).unwrap_or(false);
     validate_connection_input_mode(
@@ -1198,6 +1199,7 @@ impl KnowledgeGraph {
         modified_by: Option<String>,
         on_invalid: &str,
     ) -> PyResult<Py<PyAny>> {
+        self.check_durable_owner()?;
         let py = data.py();
         let on_invalid = OnInvalid::parse(on_invalid)?;
         // Managed-reload guard: a managed reload (research rebuilding from
@@ -1343,6 +1345,7 @@ impl KnowledgeGraph {
         other: &Bound<'_, KnowledgeGraph>,
         conflict_handling: Option<String>,
     ) -> PyResult<Py<PyAny>> {
+        self.check_durable_owner()?;
         let py = other.py();
 
         // Clone the source's Arc<DirGraph> up front and release the
@@ -1617,6 +1620,7 @@ impl KnowledgeGraph {
         ids: &Bound<'_, PyList>,
         label: &str,
     ) -> PyResult<Py<PyAny>> {
+        self.check_durable_owner()?;
         validate_interner_names(&self.inner, [label])?;
         let g = get_graph_mut(&mut self.inner);
         if !g.type_indices.contains_key(node_type) {
@@ -1671,6 +1675,7 @@ impl KnowledgeGraph {
         ids: &Bound<'_, PyList>,
         label: &str,
     ) -> PyResult<Py<PyAny>> {
+        self.check_durable_owner()?;
         validate_interner_names(&self.inner, [label])?;
         let g = get_graph_mut(&mut self.inner);
         if !g.type_indices.contains_key(node_type) {
@@ -1740,6 +1745,7 @@ impl KnowledgeGraph {
         git_sha: Option<String>,
         modified_by: Option<String>,
     ) -> PyResult<Py<PyAny>> {
+        self.check_durable_owner()?;
         let result_dict = PyDict::new(py);
 
         for item in nodes.iter() {
@@ -1911,6 +1917,7 @@ impl KnowledgeGraph {
         git_sha: Option<&str>,
         modified_by: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
+        self.check_durable_owner()?;
         let result_dict = PyDict::new(py);
         let loaded_types: std::collections::HashSet<String> = if filter_to_loaded {
             self.inner.get_node_types().into_iter().collect()

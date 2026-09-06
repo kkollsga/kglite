@@ -18,8 +18,17 @@ accepts writes between restarts.
 | `kglite.load(path)` | Load an existing `.kgl` file (or disk-mode directory). Raises `kglite.FileError` if missing, `kglite.FileFormatError` if corrupt (see below). |
 | `g.save(path=None, *, fsync=True)` | Write a full checkpoint, **atomically and durably**. With no `path`, saves back to the remembered path. |
 | `g.to_bytes()` / `kglite.from_bytes(data)` | Serialize/deserialize the graph to/from a `.kgl` **byte buffer** — own the write (object storage, a pipe, a checksum) instead of a filesystem path. |
-| `g.close()` | Persist to the remembered path. The graph stays usable afterwards. |
-| `with kglite.open(...) as g:` | Auto-saves on clean block exit; **skips** the save if the block raises, preserving the last good file. |
+| `g.close()` | Checkpoint, release persistence ownership, and retain a detached mutable graph. A failed checkpoint keeps ownership for retry. |
+| `with kglite.open(...) as g:` | Checkpoint on clean exit; skip checkpoint on exception. Both detach the retained graph. Already committed WAL writes remain recoverable. |
+
+After `close()` or context exit, the retained graph keeps its data, query
+configuration and CDC stream, but no remembered path, WAL writer or writer lease.
+It remains queryable and mutable; those later writes are private. `save()` without
+a path refuses, while `save(path)` explicitly persists the detached snapshot using
+the existing unlocked snapshot-save contract. Held read snapshots remain readable
+without blocking the next writer. Transactions begun under the ended owner cannot
+commit their writes back into it; use a new transaction on the detached graph or
+reopen the database for further durable work.
 
 **Every `save()` is atomic and torn-proof**, even in non-durable mode: it writes
 to a sibling temp file and atomically renames it over the target, so a crash
@@ -282,8 +291,12 @@ only through that session — reachable by neither the log nor the owning graph'
 than applying a mutation nothing can persist; reads are unaffected. For a
 durable app, keep writes on the durable `KnowledgeGraph` itself (there they are
 serialized and `fsync`'d) and use `freeze()` snapshots for concurrent reads.
-Reach for `Session` writes with `durable=False`, when you need shared concurrent
-writes but **not** durability. See {doc}`/concepts/concurrency` for the full
+After the source ends ownership, a retained Session without CDC may write to its
+private state; those writes are not logged to the former source path. Sessions
+sharing a CDC stream remain read-only because their independent mutations must
+not appear as changes to the unchanged source graph. Use the source KnowledgeGraph
+for captured writes. Reach for Session writes without WAL/CDC when you need shared
+concurrent writes but not persistence or capture authority. See {doc}`/concepts/concurrency` for the full
 model.
 
 ## Cost and tuning
@@ -367,3 +380,7 @@ model.
   snapshot isolation, and how the Bolt server consumes the same surface.
 - {doc}`/python/core-concepts` — the memory / mapped / disk storage modes.
 - {doc}`data-loading` — bulk-loading the seed data an app starts from.
+
+A failed close retains ownership and its save target for retry. Durable checkpoint
+preparation can still invalidate an already-open transaction through normal
+conflict detection; retry that work in a fresh transaction.

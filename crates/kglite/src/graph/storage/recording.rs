@@ -317,6 +317,10 @@ impl<G: GraphRead> RecordingGraph<G> {
         self.wal_owner = true;
     }
 
+    pub(crate) fn release_wal_ownership(&mut self) {
+        self.wal_owner = false;
+    }
+
     /// Whether a write-ahead log owns this wrapper's buffer. See the field
     /// docs for the three decisions that read it.
     #[inline]

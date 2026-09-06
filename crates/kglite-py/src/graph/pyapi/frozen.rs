@@ -19,6 +19,7 @@ use pyo3::types::PyDict;
 use pyo3::IntoPyObjectExt;
 use std::sync::Arc;
 
+use super::query_defaults::QueryDefaults;
 use crate::datatypes::py_in;
 use crate::graph::languages::cypher;
 use crate::graph::pyapi::result_view::ResultView;
@@ -31,18 +32,22 @@ use kglite_core::api::GraphRead;
 /// Immutable, `Send`-able read snapshot of a graph. See module docs.
 #[pyclass(module = "kglite", frozen)]
 pub struct FrozenGraph {
+    defaults: QueryDefaults,
     pub(crate) inner: Arc<DirGraph>,
     pub(crate) embedder: Option<Arc<dyn crate::graph::embedder::Embedder>>,
 }
 
 impl FrozenGraph {
-    /// Construct from a shared graph snapshot + optional embedder. O(1) —
-    /// the `Arc` is cloned by the caller (`KnowledgeGraph::freeze`).
-    pub(crate) fn new(
+    pub(crate) fn with_defaults(
         inner: Arc<DirGraph>,
         embedder: Option<Arc<dyn crate::graph::embedder::Embedder>>,
+        defaults: QueryDefaults,
     ) -> Self {
-        FrozenGraph { inner, embedder }
+        FrozenGraph {
+            inner,
+            embedder,
+            defaults,
+        }
     }
 }
 
@@ -94,11 +99,10 @@ impl FrozenGraph {
         } else {
             std::collections::HashMap::new()
         };
-        // timeout_ms == 0 is the documented "no deadline" escape hatch.
-        let deadline = match timeout_ms {
-            Some(0) | None => None,
-            Some(ms) => Some(std::time::Instant::now() + std::time::Duration::from_millis(ms)),
-        };
+        let effective = self.defaults.resolve(timeout_ms, max_work_units, row_limit);
+        let deadline = effective.deadline;
+        let max_work_units = effective.max_work_units;
+        let row_limit = effective.row_limit;
 
         let inner = Arc::clone(&self.inner);
         let embedder = self.embedder.clone();

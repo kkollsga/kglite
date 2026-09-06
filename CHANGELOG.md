@@ -9,6 +9,28 @@ before upgrading.
 
 ## [Unreleased]
 
+### Fixed
+
+- Closing or exiting a persisted Python graph now ends its writer authority,
+  including stale WAL access and disk leases retained by snapshots. Retained
+  graph data stays readable and privately mutable; transactions begun before
+  close cannot commit writes into the ended owner. Failed checkpoints retain
+  ownership for retry.
+- Independently derived handles can no longer publish their mutations into the
+  source graph's change stream. Write through the owning graph or use `copy()`
+  for independent data and capture.
+
+### Changed
+
+- Python snapshots, sessions, cursors and transactions capture query defaults
+  when created. Omitted options inherit those defaults, including the built-in
+  180-second query timeout; explicit `timeout_ms=0` disables the query deadline.
+  Transaction lifetime zero now means unlimited, while a positive lifetime
+  still bounds each query.
+- After close or context exit, `save()` needs an explicit path. `save(path)`
+  retains the existing unlocked snapshot-save behavior. A graph context manager
+  checkpoints on clean exit; it does not roll back WAL commits on exceptions.
+
 ## [0.16.24] - 2026-09-06
 
 ### Added

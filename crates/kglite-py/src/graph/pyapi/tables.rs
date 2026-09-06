@@ -75,6 +75,7 @@ impl KnowledgeGraph {
         property: &str,
         data: &Bound<'_, PyAny>,
     ) -> PyResult<usize> {
+        self.check_durable_owner()?;
         require_plain_identifier("node_type", node_type)?;
         require_plain_identifier("property", property)?;
         let columns: Vec<String> = data

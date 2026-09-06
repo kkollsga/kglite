@@ -593,6 +593,7 @@ impl KnowledgeGraph {
         properties: &Bound<'_, PyDict>,
         keep_selection: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
+        self.check_durable_owner()?;
         let current_index = self.cursor.selection.get_level_count().saturating_sub(1);
         let level = self
             .cursor
@@ -623,7 +624,6 @@ impl KnowledgeGraph {
             parsed_properties.push((property_name, property_value));
         }
 
-        // Now mutate the graph — no ? operators from here to Arc creation
         let graph = get_graph_mut(&mut self.inner);
 
         let mut total_updated = 0;
@@ -673,7 +673,7 @@ impl KnowledgeGraph {
             default_timeout_ms: self.default_timeout_ms,
             default_max_work_units: self.default_max_work_units,
             default_row_limit: self.default_row_limit,
-            lifecycle: crate::graph::GraphLifecycle::detached_from(&self.lifecycle),
+            lifecycle: self.detached_view_lifecycle(),
         };
 
         let report = kglite_core::api::mutation::NodeOperationReport {

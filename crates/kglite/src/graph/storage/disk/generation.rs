@@ -91,7 +91,8 @@ pub(crate) fn resolve_snapshot(root: &Path) -> io::Result<ResolvedSnapshot> {
 /// `CURRENT` once and keep their immutable mmap generation alive.
 #[derive(Debug)]
 pub(crate) struct GraphDirectoryLock {
-    _file: File,
+    file: std::sync::Mutex<Option<File>>,
+    active: std::sync::atomic::AtomicBool,
     pub(crate) root: PathBuf,
 }
 
@@ -156,6 +157,30 @@ impl Drop for MutationWorkspace {
 }
 
 impl GraphDirectoryLock {
+    pub(crate) fn is_active(&self) -> bool {
+        self.active.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// A publish that already owns this permit finishes before authority ends.
+    /// No caller may acquire a graph lock while holding this control lock.
+    pub(crate) fn publication_permit(&self) -> io::Result<std::sync::MutexGuard<'_, Option<File>>> {
+        let guard = self.file.lock().unwrap_or_else(|p| p.into_inner());
+        if guard.is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "disk writer ownership has ended",
+            ));
+        }
+        Ok(guard)
+    }
+
+    pub(crate) fn end(&self) {
+        let mut guard = self.file.lock().unwrap_or_else(|p| p.into_inner());
+        self.active
+            .store(false, std::sync::atomic::Ordering::Release);
+        guard.take();
+    }
+
     pub(crate) fn try_acquire(root: &Path) -> io::Result<Self> {
         fs::create_dir_all(root)?;
         let lock_path = root.join(".kglite.lock");
@@ -185,7 +210,8 @@ impl GraphDirectoryLock {
         writeln!(file, "pid={}", std::process::id())?;
         file.sync_all()?;
         Ok(Self {
-            _file: file,
+            file: std::sync::Mutex::new(Some(file)),
+            active: std::sync::atomic::AtomicBool::new(true),
             root: root.to_path_buf(),
         })
     }

@@ -44,6 +44,7 @@ use pyo3::IntoPyObjectExt;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use super::query_defaults::QueryDefaults;
 use crate::datatypes::py_in;
 use crate::datatypes::values::Value;
 use crate::error::KgError;
@@ -64,6 +65,8 @@ use kglite_core::api::GraphRead;
 /// lock-free; `execute()` writes serialise behind the Session's writer lock.
 #[pyclass(module = "kglite", frozen)]
 pub struct Session {
+    defaults: QueryDefaults,
+    source_authority: Option<super::lifecycle::SourceAuthority>,
     pub(crate) inner: CoreSession,
     pub(crate) embedder: Option<Arc<dyn crate::graph::embedder::Embedder>>,
     /// Serialises writers. Held across the whole `begin → mutate → commit` so
@@ -85,14 +88,6 @@ fn decode_params(params: Option<&Bound<'_, PyDict>>) -> PyResult<HashMap<String,
     Ok(map)
 }
 
-/// `timeout_ms == 0` is the documented "no deadline" escape hatch.
-fn deadline_from(timeout_ms: Option<u64>) -> Option<std::time::Instant> {
-    match timeout_ms {
-        Some(0) | None => None,
-        Some(ms) => Some(std::time::Instant::now() + std::time::Duration::from_millis(ms)),
-    }
-}
-
 /// Decoded per-call query options shared by the read and write paths.
 struct QueryOpts {
     to_df: bool,
@@ -110,6 +105,7 @@ impl QueryOpts {
     // The Python boundary mirrors the public query-option surface.
     #[allow(clippy::too_many_arguments)]
     fn from_parts(
+        defaults: QueryDefaults,
         to_df: bool,
         timeout_ms: Option<u64>,
         max_work_units: Option<usize>,
@@ -119,11 +115,12 @@ impl QueryOpts {
         git_sha: Option<String>,
         modified_by: Option<String>,
     ) -> Self {
+        let effective = defaults.resolve(timeout_ms, max_work_units, row_limit);
         QueryOpts {
             to_df,
-            deadline: deadline_from(timeout_ms),
-            max_work_units,
-            row_limit,
+            deadline: effective.deadline,
+            max_work_units: effective.max_work_units,
+            row_limit: effective.row_limit,
             output_csv: csv,
             write_scope,
             git_sha,
@@ -140,7 +137,18 @@ impl Session {
         inner: Arc<DirGraph>,
         embedder: Option<Arc<dyn crate::graph::embedder::Embedder>>,
     ) -> Self {
+        Self::with_defaults(inner, embedder, QueryDefaults::default(), None)
+    }
+
+    pub(crate) fn with_defaults(
+        inner: Arc<DirGraph>,
+        embedder: Option<Arc<dyn crate::graph::embedder::Embedder>>,
+        defaults: QueryDefaults,
+        source_authority: Option<super::lifecycle::SourceAuthority>,
+    ) -> Self {
         Session {
+            defaults,
+            source_authority,
             inner: CoreSession::from_arc(inner),
             embedder,
             write_lock: Mutex::new(()),
@@ -203,6 +211,7 @@ impl Session {
         qopts: QueryOpts,
     ) -> PyResult<Py<PyAny>> {
         let core = &self.inner;
+        let source_authority = self.source_authority.clone();
         let write_lock = &self.write_lock;
         let query_owned = query.to_string();
         let deadline = qopts.deadline;
@@ -223,17 +232,25 @@ impl Session {
             // atomically, so a prior writer's panic doesn't cascade.
             let _wguard = write_lock.lock().unwrap_or_else(|p| p.into_inner());
             let mut graph = core.write();
-            // A `Session` carries no durability state: `KnowledgeGraph::session`
-            // hands over an `Arc<DirGraph>`, while the WAL handle and its
-            // log-sequence number stay behind on the `KnowledgeGraph`. A write
-            // here would still be *captured* — the graph is wrapped — but
-            // nothing can ever drain that buffer, and the first copy-on-write
-            // fork resets it. The mutation would apply and then vanish on a
-            // crash, with no error. Refuse instead of losing it silently.
-            if matches!(
-                graph.graph,
-                kglite_core::api::storage::GraphBackend::Recording(_)
-            ) {
+            // Independent Session data cannot publish into the source's CDC
+            // stream. It also has no WAL handle to commit captured writes.
+            if graph.cdc_enabled() {
+                return Err(KgError::Argument(
+                    "A Session cannot execute write queries while change-data capture (CDC) \
+                     is enabled: its independent data shares the source graph's change stream. \
+                     Run the mutation on the graph itself or in its transaction. \
+                     Sessions remain available for reads."
+                        .to_string(),
+                ));
+            }
+            if graph.owns_wal_capture()
+                && source_authority
+                    .as_ref()
+                    .is_some_and(|source| source.ended())
+            {
+                *graph = graph.detached_persistence_snapshot();
+            }
+            if graph.owns_wal_capture() {
                 return Err(KgError::Argument(
                     "A Session cannot execute write queries against a graph opened with \
                      durable=True: session writes are not recorded in the write-ahead log, \
@@ -328,6 +345,7 @@ impl Session {
         let param_map = decode_params(params)?;
         let output_csv = pre_parsed.output_format == cypher::OutputFormat::Csv;
         let qopts = QueryOpts::from_parts(
+            self.defaults,
             to_df,
             timeout_ms,
             max_work_units,
@@ -397,6 +415,7 @@ impl Session {
         let output_csv = pre_parsed.output_format == cypher::OutputFormat::Csv;
         let scope_set = write_scope.map(|v| v.into_iter().collect());
         let qopts = QueryOpts::from_parts(
+            self.defaults,
             to_df,
             timeout_ms,
             max_work_units,
@@ -420,7 +439,7 @@ impl Session {
     /// Use this to hold a consistent multi-query view, or to hand a fixed
     /// read snapshot to a pool of readers.
     fn snapshot(&self) -> FrozenGraph {
-        FrozenGraph::new(self.inner.snapshot(), self.embedder.clone())
+        FrozenGraph::with_defaults(self.inner.snapshot(), self.embedder.clone(), self.defaults)
     }
 
     /// Spawn a per-thread **query cursor**: a `KnowledgeGraph` bound to a
@@ -440,6 +459,19 @@ impl Session {
     /// writes, take a fresh `cursor()`.
     fn cursor(&self) -> crate::graph::KnowledgeGraph {
         let mut kg = crate::graph::KnowledgeGraph::from_arc(self.inner.snapshot());
+        self.defaults.apply_to(&mut kg);
+        kg.lifecycle.orphaned_from_cdc = kg.inner.cdc_enabled();
+        if kg.inner.owns_wal_capture() {
+            if self
+                .source_authority
+                .as_ref()
+                .is_some_and(|source| source.ended())
+            {
+                kg.inner = Arc::new(kg.inner.detached_persistence_snapshot());
+            } else {
+                kg.lifecycle.orphaned_from_durable = true;
+            }
+        }
         if let Some(e) = &self.embedder {
             kg.set_embedder_native(e.clone());
         }

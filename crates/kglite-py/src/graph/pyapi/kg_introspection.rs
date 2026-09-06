@@ -302,6 +302,7 @@ impl KnowledgeGraph {
     ///         - ``nodes_purged``: provisional stub nodes deleted
     ///         - ``edges_removed``: incident edges removed with them
     fn purge_provisional(&mut self) -> PyResult<Py<PyAny>> {
+        self.check_durable_owner()?;
         let graph = get_graph_mut(&mut self.inner);
         let (nodes_purged, edges_removed) =
             kglite_core::api::mutation::purge_provisional_nodes(graph);
@@ -724,6 +725,7 @@ impl KnowledgeGraph {
             let nodes =
                 kglite_core::api::fluent::format_unique_values_for_storage(&values, max_length);
 
+            slf.check_durable_owner()?;
             let graph = get_graph_mut(&mut slf.inner);
 
             kglite_core::api::mutation::update_node_properties(graph, &nodes, target_property)
@@ -1098,6 +1100,7 @@ impl KnowledgeGraph {
             )?;
         }
 
+        self.check_durable_owner()?;
         let graph = get_graph_mut(&mut self.inner);
 
         let result = kglite_core::api::mutation::create_connections(
@@ -1130,7 +1133,7 @@ impl KnowledgeGraph {
             default_timeout_ms: self.default_timeout_ms,
             default_max_work_units: self.default_max_work_units,
             default_row_limit: self.default_row_limit,
-            lifecycle: crate::graph::GraphLifecycle::detached_from(&self.lifecycle),
+            lifecycle: self.detached_view_lifecycle(),
         };
 
         new_kg.add_report(OperationReport::ConnectionOperation(result));
@@ -1182,6 +1185,7 @@ impl KnowledgeGraph {
             }
         }
 
+        self.check_durable_owner()?;
         let graph = get_graph_mut(&mut self.inner);
         let result = core_add_properties(graph, &self.cursor.selection, spec_map).map_err(
             |e: String| -> PyErr {
@@ -1206,7 +1210,7 @@ impl KnowledgeGraph {
             default_timeout_ms: self.default_timeout_ms,
             default_max_work_units: self.default_max_work_units,
             default_row_limit: self.default_row_limit,
-            lifecycle: crate::graph::GraphLifecycle::detached_from(&self.lifecycle),
+            lifecycle: self.detached_view_lifecycle(),
         };
 
         new_kg.cursor.selection.add_plan_step(
@@ -1305,6 +1309,7 @@ impl KnowledgeGraph {
 
         let nodes = kglite_core::api::fluent::format_for_storage(&property_groups, max_length);
 
+        self.check_durable_owner()?;
         let graph = get_graph_mut(&mut self.inner);
 
         let result =
@@ -1334,7 +1339,7 @@ impl KnowledgeGraph {
             default_timeout_ms: self.default_timeout_ms,
             default_max_work_units: self.default_max_work_units,
             default_row_limit: self.default_row_limit,
-            lifecycle: crate::graph::GraphLifecycle::detached_from(&self.lifecycle),
+            lifecycle: self.detached_view_lifecycle(),
         };
 
         new_kg.add_report(OperationReport::NodeOperation(result));
@@ -1403,6 +1408,7 @@ impl KnowledgeGraph {
         aggregate_connections: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
         if let Some(target_property) = store_as {
+            self.check_durable_owner()?;
             let graph = get_graph_mut(&mut self.inner);
 
             // Pure-Rust evaluation + store — run off-GIL.
@@ -1439,7 +1445,7 @@ impl KnowledgeGraph {
                         default_timeout_ms: self.default_timeout_ms,
                         default_max_work_units: self.default_max_work_units,
                         default_row_limit: self.default_row_limit,
-                        lifecycle: crate::graph::GraphLifecycle::detached_from(&self.lifecycle),
+                        lifecycle: self.detached_view_lifecycle(),
                     };
 
                     new_kg.add_report(OperationReport::CalculationOperation(report));
@@ -1579,6 +1585,7 @@ impl KnowledgeGraph {
         let use_grouping = group_by_parent.unwrap_or(has_multiple_levels);
 
         if let Some(target_property) = store_as {
+            self.check_durable_owner()?;
             let graph = get_graph_mut(&mut self.inner);
 
             let result = match kglite_core::api::fluent::store_count_results(
@@ -1612,7 +1619,7 @@ impl KnowledgeGraph {
                 default_timeout_ms: self.default_timeout_ms,
                 default_max_work_units: self.default_max_work_units,
                 default_row_limit: self.default_row_limit,
-                lifecycle: crate::graph::GraphLifecycle::detached_from(&self.lifecycle),
+                lifecycle: self.detached_view_lifecycle(),
             };
 
             new_kg.add_report(OperationReport::CalculationOperation(result));

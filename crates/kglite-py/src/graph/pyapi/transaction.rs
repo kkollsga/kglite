@@ -59,6 +59,8 @@ use std::sync::Arc;
 /// `inner` is `None` after `commit()` / `rollback()` — any further use errors.
 #[pyclass(module = "kglite")]
 pub struct Transaction {
+    pub(crate) defaults: super::query_defaults::QueryDefaults,
+    pub(crate) ownership_epoch: u64,
     /// Back-reference to the owning KnowledgeGraph (for commit).
     pub(crate) owner: Py<KnowledgeGraph>,
     /// The engine transaction holding the snapshot/working/CoW/OCC state.
@@ -149,17 +151,10 @@ impl Transaction {
         // Merge per-query timeout with transaction deadline (use the earlier one).
         // timeout_ms == 0 is the documented escape hatch: "no per-query deadline"
         // (the transaction-level deadline still applies if set).
-        let effective_timeout_ms = match timeout_ms {
-            Some(0) => None,
-            Some(ms) => Some(ms),
-            None => {
-                // Fall through to the graph's backend-aware default.
-                let graph = self.inner.as_ref().and_then(CoreTransaction::current);
-                graph.and_then(super::kg_core::backend_default_timeout_ms)
-            }
-        };
-        let query_deadline = effective_timeout_ms
-            .map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+        let effective = self.defaults.resolve(timeout_ms, max_work_units, row_limit);
+        let max_work_units = effective.max_work_units;
+        let row_limit = effective.row_limit;
+        let query_deadline = effective.deadline;
         let deadline = match (self.deadline, query_deadline) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (Some(a), None) => Some(a),
@@ -304,18 +299,29 @@ impl Transaction {
         // Optimistic concurrency control: the owner graph must not have moved
         // since begin(). (The OCC check stays here because the commit target
         // is the owner KnowledgeGraph's Arc, not a core Session's.)
-        let current_version = Python::attach(|py| self.owner.borrow(py).inner.version);
-        if current_version != base_version {
-            return Err(crate::error_py::kg_to_pyerr(
-                crate::error::KgError::TransactionConflict {
-                    base_version,
-                    current_version,
-                },
-            ));
-        }
-
         Python::attach(|py| {
-            let mut kg = self.owner.borrow_mut(py);
+            let mut kg = self
+                .owner
+                .try_borrow_mut(py)
+                .map_err(|_| super::kg_core::concurrent_access_pyerr())?;
+            if kg.lifecycle.epoch() != self.ownership_epoch {
+                return Err(crate::error_py::kg_to_pyerr(
+                    crate::error::KgError::Argument(
+                        "Transaction cannot commit: its graph's persistence ownership has ended"
+                            .to_string(),
+                    ),
+                ));
+            }
+            kg.check_durable_owner()?;
+            let current_version = kg.inner.version;
+            if current_version != base_version {
+                return Err(crate::error_py::kg_to_pyerr(
+                    crate::error::KgError::TransactionConflict {
+                        base_version,
+                        current_version,
+                    },
+                ));
+            }
             working.set_version(current_version + 1);
             kg.inner = Arc::new(working);
             kg.cursor.selection = CowSelection::new();

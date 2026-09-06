@@ -72,3 +72,33 @@ explicit begin/commit handle.
 - [Error handling](error-handling.md) — typed exceptions and stable codes.
 - [Durable apps](guides/durable-apps.md) — WAL-backed in-memory persistence.
 - [Rust session abstraction](../rust/session.md) — binding-level execution contract.
+
+## Captured query defaults and ownership
+
+`freeze()`, `session()`, `begin()` and `begin_read()` capture the source graph's
+query timeout, work budget and row cap. Session snapshots/cursors inherit that
+captured policy. Changing the original graph's defaults affects newly created
+handles, not existing snapshots or transactions.
+
+| Option | Omitted or `None` | Explicit zero |
+|---|---|---|
+| Query `timeout_ms` | captured default, then180000ms | no per-query deadline |
+| Query `max_work_units` | captured budget, then engine backstop | literal zero budget |
+| Query `row_limit` | captured row cap, then no cap | retain no result rows |
+| `begin(timeout_ms=...)` | no transaction lifetime deadline | no transaction lifetime deadline |
+
+An explicit per-call value overrides the captured value. A positive transaction
+lifetime still bounds every query; per-query zero cannot bypass it. Clear a graph
+default with its setter before deriving a handle when no inherited row/work limit
+is wanted; passing `None` to a query means inherit.
+
+Closing a persisted graph ends its write-back authority. Its retained data stays
+mutable as a detached graph, but an earlier transaction with writes cannot commit
+into that ended owner. Read-only snapshots and rollback remain available. This is
+separate from optimistic data-version conflicts. A with-block around `open()` is
+not a multi-statement transaction; see {doc}`guides/durable-apps`.
+
+Fluent views of a CDC-owning graph and Session cursors sharing change-data
+capture (CDC) are read-only for captured mutations. Their descendants inherit
+that restriction. Use `cursor.copy()`
+for an independent graph and change stream, or write through the original owner.

@@ -4487,6 +4487,10 @@ class KnowledgeGraph:
         copy-on-writes a fresh copy, leaving the frozen view on the original
         data — the "build → freeze → share → swap" model for serving concurrent
         readers while a new snapshot is built in the background.
+
+        Query timeout, work-budget and row-limit defaults are captured now. Later
+        changes to the source defaults do not affect this snapshot. Per-call options
+        override the captured defaults.
         """
         ...
 
@@ -4505,14 +4509,27 @@ class KnowledgeGraph:
         intended model is "build / load with a ``KnowledgeGraph``, then
         ``.session()`` and serve every thread through the ``Session``" — don't
         keep mutating the original graph after handing out a ``Session``.
+
+        The Session captures the three query defaults at creation, independently of
+        later source changes. It acquires no source persistence authority. Sessions
+        from active durable owners or graphs with change data capture support reads;
+        use the owning KnowledgeGraph for captured writes.
         """
         ...
 
     def close(self) -> None:
-        """Persist the graph to its remembered origin path (the file it was
-        opened from via :func:`kglite.open` / :func:`kglite.load`, or last
-        saved to). No-op if the graph has no associated path. The graph stays
-        usable after ``close()``.
+        """Checkpoint the remembered path, then detach this graph from persistence.
+
+        The graph's data, cursor, query defaults and change-data-capture stream remain
+        usable. Later mutations are private and do not append to the old write-ahead
+        log. A bare ``save()`` now needs a path; ``save(path)`` explicitly opts back
+        into persistence with the existing unlocked snapshot-save contract.
+
+        A failed checkpoint leaves ownership and the save target intact for retry.
+        Durable checkpoint preparation can still invalidate an older transaction
+        through ordinary conflict detection; begin a fresh transaction to retry.
+        Closing a graph without an associated path is a no-op. Held read snapshots
+        remain readable after ownership ends.
         """
         ...
 
@@ -4521,12 +4538,14 @@ class KnowledgeGraph:
         ...
 
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> bool:
-        """Context-manager exit. On a clean exit, auto-saves to the remembered
-        origin path (see :func:`kglite.open`); on an exception, skips the save
-        to preserve the last good file. Does not suppress exceptions.
+        """On clean exit, checkpoint and end persistence ownership; on an exception,
+        skip the checkpoint and retain the current data as a detached mutable graph.
+        Never suppresses the application exception.
 
-        This is a clean-exit checkpoint, not crash safety — a hard crash
-        mid-block writes nothing.
+        A with-block is not a transaction: WAL commits already accepted remain
+        recoverable, even when the block raises. Use ``begin()`` for multi-statement
+        rollback. Retained graph mutations after exit are private; use an explicit
+        ``save(path)`` to persist that detached data.
         """
         ...
 
@@ -7668,6 +7687,11 @@ class KnowledgeGraph:
                 tx.cypher("CREATE (n:Person {name: 'Alice', age: 30})")
                 tx.cypher("CREATE (n:Person {name: 'Bob', age: 25})")
                 # auto-commits on success, auto-rollbacks on exception
+
+        Query defaults are captured at begin. ``timeout_ms=0`` gives no transaction
+        lifetime deadline; per-query timeouts cannot extend a positive lifetime.
+        Closing/exiting the owning persisted graph revokes this transaction's right
+        to commit writes. Its data remains readable and rollback remains available.
         """
         ...
 
@@ -7688,6 +7712,9 @@ class KnowledgeGraph:
             with graph.begin_read() as tx:
                 result = tx.cypher("MATCH (n:Person) RETURN n.name")
                 # auto-closes on exit (no commit needed)
+
+        Query defaults are captured at begin. ``timeout_ms=0`` gives no transaction
+        lifetime deadline. Read snapshots remain valid after the source closes.
         """
         ...
 
@@ -7734,6 +7761,10 @@ class Session:
         row_limit)``. Truncation is never silent: it warns, and
         :attr:`ResultView.diagnostics` carries ``row_limit`` plus the exact
         pre-truncation ``total_rows``.
+
+        Omitted/None options inherit the defaults captured when the Session was
+        created. The built-in Python timeout is 180_000ms; ``timeout_ms=0`` disables
+        the per-query deadline. A zero row cap retains no rows, not unlimited rows.
         """
         ...
 
@@ -7781,6 +7812,12 @@ class Session:
         pre-truncation ``total_rows``. It bounds a mutation's ``RETURN`` rows the
         same way, and never the writes themselves — every write still happens
         and is still counted.
+
+        Omitted/None options inherit this Session's captured defaults. Session writes
+        are refused while a source WAL owns capture, and while an active CDC stream
+        would receive mutations to this independent graph. Use the source graph for
+        captured writes. A retained Session without CDC may write privately after its
+        source ends persistence ownership.
         """
         ...
 
@@ -7790,6 +7827,8 @@ class Session:
         An O(1) ``Arc`` clone that stays stable even if the ``Session`` is
         later written to (copy-on-write forks the writer). Use it to hold a
         consistent multi-query view or hand a fixed read snapshot to readers.
+
+        The snapshot inherits this Session's captured query defaults.
         """
         ...
 
@@ -7808,6 +7847,15 @@ class Session:
         The cursor observes the graph as of call time; mutating it is isolated
         via copy-on-write (it does not write back to the ``Session``). Take a
         fresh ``cursor()`` to pick up later session writes.
+
+        The cursor inherits this Session's captured query defaults. A cursor from an
+        active durable source cannot perform unlogged writes; after that source ends
+        ownership, newly created cursors are detached from its write-ahead log.
+
+        Fluent views of a CDC-owning graph and cursors sharing CDC remain readable
+        but cannot publish independent writes
+        into the source stream. Use ``cursor.copy()`` for an independent graph and
+        change stream, or mutate the original owning graph.
         """
         ...
 
@@ -7864,6 +7912,9 @@ class FrozenGraph:
         row_limit)``. Truncation is never silent: it warns, and
         :attr:`ResultView.diagnostics` carries ``row_limit`` plus the exact
         pre-truncation ``total_rows``.
+
+        Omitted/None options inherit the snapshot's captured defaults. The built-in
+        Python timeout is 180_000ms; ``timeout_ms=0`` disables that query deadline.
         """
         ...
 
@@ -7932,6 +7983,10 @@ class Transaction:
             max_work_units: Work budget for the statement — intermediate rows,
                 retained collection items and scan work, not a result-row cap.
                 Exceeding it raises an error and rolls back the statement.
+
+        Omitted/None query options inherit the defaults captured at begin. An
+        explicit per-query timeout is bounded by any transaction lifetime deadline;
+        query ``timeout_ms=0`` disables only the per-query part.
         """
         ...
 
@@ -7943,6 +7998,9 @@ class Transaction:
 
         Raises:
             KgError: If the graph was modified since ``begin()`` (OCC conflict).
+
+        A transaction with writes cannot commit after its persisted owner closed or
+        exited. This ownership check is independent of data-version conflict checking.
         """
         ...
 
