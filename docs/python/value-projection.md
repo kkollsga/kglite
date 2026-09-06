@@ -158,11 +158,11 @@ see:
 `RETURN n` and `labels(n)` expose native structured values. Bindings should not
 infer types by parsing JSON-looking strings.
 
-The lazy `ResultView` path is preserved: when the planner flags a
-terminal `RETURN` as `lazy_eligible`, per-cell materialisation runs
-on Python access (cached via `Mutex<Vec<Option<Vec<PreProcessedValue>>>>`).
-Node projections materialise one `Box<NodeValue>` per accessed cell; release
-performance baselines cover this path.
+When the planner flags a terminal `RETURN` as `lazy_eligible`, small results
+may be materialised eagerly. Otherwise, first access to a row evaluates that
+row's `RETURN` items; bulk access can materialise row ranges. The Rust values
+are cached via `Mutex<Vec<Option<Vec<Value>>>>`, with one optional entry per
+row. Accessors convert those values to Python objects when returning data.
 
 ## In `.kgl` files
 
@@ -170,16 +170,18 @@ The current `.kgl` format is an RGF v6 binary container:
 
 ```
 [0..4]    Magic: b"RGF\x06"
-[4]       codec tag: Postcard
-[...]     core_data_version (currently 3)
-[8..12]   metadata_length: u32 LE
-[12..N]   JSON metadata (column schemas, section sizes, all config)
+[4]       codec tag: 2 (Postcard)
+[5..9]    core_data_version: u32 LE (currently 3)
+[9..13]   metadata_length: u32 LE
+[13..N]   JSON metadata (column schemas, section sizes, persisted graph config)
 [section] topology.zst — graph structure without node properties
 [section] columns_<Type>.zst — packed property columns per type
 [section] embeddings.zst (optional)
 [section] timeseries.zst (optional)
 [section] secondary labels / vector-index metadata (optional)
 ```
+
+Byte ranges are half-open; `N = 13 + metadata_length`.
 
 `Value` serialises via `serde` with a discriminant tagged by
 variant position. The order in `crates/kglite/src/datatypes/values.rs` is

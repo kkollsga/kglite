@@ -1,6 +1,7 @@
 """Execute selected published promises, rather than only rendering their prose."""
 
 import ast
+import json
 from pathlib import Path
 import re
 
@@ -109,3 +110,37 @@ def test_documented_value_discriminants_match_serde_enum_order():
     stable = re.search(r"first (\d+) variants", section)
     assert stable is not None
     assert int(stable.group(1)) == positions["Duration"] + 1
+
+
+def test_documented_kgl_metadata_offsets_read_the_actual_container():
+    document = (ROOT / "docs/python/value-projection.md").read_text(encoding="utf-8")
+    section = document.split("## In `.kgl` files", 1)[1].split("\n## ", 1)[0]
+    length = re.search(r"\[(\d+)\.\.(\d+)\]\s+metadata_length: u32 LE", section)
+    metadata = re.search(r"\[(\d+)\.\.N\]\s+JSON metadata", section)
+    assert length is not None and metadata is not None
+    length_start, length_end = map(int, length.groups())
+    metadata_start = int(metadata.group(1))
+    assert length_end - length_start == 4 and metadata_start == length_end
+    graph = kglite.KnowledgeGraph()
+    graph.cypher("CREATE (:N {id:1,title:'Ångström',v:7})")
+    blob = graph.to_bytes()
+    size = int.from_bytes(blob[length_start:length_end], "little")
+    end = metadata_start + size
+    assert 0 < size and end < len(blob), "documented metadata offsets must fit the actual container"
+    decoded = json.loads(blob[metadata_start:end])
+    assert decoded["topology_compressed_size"] > 0
+    assert decoded["column_sections"]
+    core = re.search(r"\[(\d+)\.\.(\d+)\]\s+core_data_version: u32 LE \(currently (\d+)\)", section)
+    assert core is not None
+    core_start, core_end, core_version = map(int, core.groups())
+    assert core_end == length_start and core_end - core_start == 4
+    assert int.from_bytes(blob[core_start:core_end], "little") == core_version
+
+
+def test_documented_lazy_cache_type_matches_the_current_row_cache():
+    source = (ROOT / "crates/kglite-py/src/graph/pyapi/result_view.rs").read_text(encoding="utf-8")
+    source_type = re.findall(r"cache:\s*(Mutex<[^\n]+>),", source)
+    document = (ROOT / "docs/python/value-projection.md").read_text(encoding="utf-8")
+    documented_type = re.findall(r"cached via `(Mutex<[^`]+>)`", document)
+    assert len(source_type) == len(documented_type) == 1
+    assert documented_type == source_type

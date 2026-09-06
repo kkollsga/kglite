@@ -57,13 +57,6 @@
       "nesting": 5
     },
     {
-      "path": "crates/kglite-py/src/graph/pyapi/kg_core.rs",
-      "qualified_name": "crate::KnowledgeGraph::cypher",
-      "lines": 203,
-      "branches": 25,
-      "nesting": 3
-    },
-    {
       "path": "crates/kglite/src/graph/algorithms/centrality.rs",
       "qualified_name": "crate::betweenness_centrality",
       "lines": 270,

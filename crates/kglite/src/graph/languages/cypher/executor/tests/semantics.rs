@@ -3,9 +3,9 @@
 //! Each group here pins a case where the engine answered with a wrong value or
 //! a `null` instead of reporting that it could not answer. The pre-fix result
 //! is written next to every assertion, so the file doubles as the record of
-//! what changed — and each of these was observed red against the shipped
-//! 0.15.9 extension before the fix was written (R1: a verification must be able
-//! to fail, and these were seen failing).
+//! what changed. The original groups were observed red against the shipped
+//! 0.15.9 extension; fractional timestamp expectations additionally pin the
+//! current precision contract after the output-consistency repair.
 //!
 //! The differential corpus is deliberately *not* the gate for any of this:
 //! these are executor/parser semantics with one right answer, not planner
@@ -144,11 +144,24 @@ fn datetime_preserves_time_and_normalises_the_zone_to_utc() {
             "RETURN datetime('2024-01-15T01:30:00-05:00') AS d",
             timestamp(2024, 1, 15, 6, 30, 0),
         ),
-        // Sub-second precision truncates (Value::Timestamp is second-precision)
-        // without taking the time with it.
+        // Fractions survive both UTC parsing and offset normalization.
         (
             "RETURN datetime('2024-01-15T10:30:00.500Z') AS d",
-            timestamp(2024, 1, 15, 10, 30, 0),
+            Value::Timestamp(
+                chrono::NaiveDate::from_ymd_opt(2024, 1, 15)
+                    .unwrap()
+                    .and_hms_milli_opt(10, 30, 0, 500)
+                    .unwrap(),
+            ),
+        ),
+        (
+            "RETURN datetime('2024-01-15T10:30:00.123456789+02:00') AS d",
+            Value::Timestamp(
+                chrono::NaiveDate::from_ymd_opt(2024, 1, 15)
+                    .unwrap()
+                    .and_hms_nano_opt(8, 30, 0, 123_456_789)
+                    .unwrap(),
+            ),
         ),
         // Minute precision.
         (
@@ -194,6 +207,18 @@ fn localdatetime_keeps_the_wall_clock_reading() {
     assert_eq!(
         one_cell(&graph, "RETURN localdatetime('2024-01-15T10:30:00Z') AS d"),
         timestamp(2024, 1, 15, 10, 30, 0)
+    );
+    assert_eq!(
+        one_cell(
+            &graph,
+            "RETURN localdatetime('2024-01-15T10:30:00.123456789+02:00') AS d"
+        ),
+        Value::Timestamp(
+            chrono::NaiveDate::from_ymd_opt(2024, 1, 15)
+                .unwrap()
+                .and_hms_nano_opt(10, 30, 0, 123_456_789)
+                .unwrap(),
+        )
     );
     assert_eq!(
         one_cell(&graph, "RETURN localdatetime('2024-01-15') AS d"),
